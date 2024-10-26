@@ -1,0 +1,6 @@
+[submodule "ext/xdrzcc"]
+	path = ext/xdrzcc
+	url = https://github.com/chimera-nas/xdrzcc.git
+[submodule "ext/libevpl"]
+	path = ext/libevpl
+	url = https://github.com/chimera-nas/libevpl.git
