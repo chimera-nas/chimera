@@ -1,13 +1,13 @@
 /* NFS V3 definitions */
 
 
-#define NFS3_FHSIZE 64
-#define NFS3_COOKIEVERFSIZE 8
-#define NFS3_CREATEVERFSIZE 8
-#define NFS3_WRITEVERFSIZE 8
+const NFS3_FHSIZE = 64;
+const NFS3_COOKIEVERFSIZE = 8;
+const NFS3_CREATEVERFSIZE = 8;
+const NFS3_WRITEVERFSIZE = 8;
 
-typedef unsigned hyper nfs3_uint64;
-typedef hyper nfs3_int64;
+typedef uint64_t nfs3_uint64;
+typedef int64_t nfs3_int64;
 typedef unsigned int nfs3_uint32;
 typedef int nfs3_int32;
 typedef string filename3<>;

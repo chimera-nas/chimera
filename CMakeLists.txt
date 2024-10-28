@@ -22,5 +22,7 @@ endif()
 
 add_definitions(-g -Wall -Werror)
 
-add_subdirectory(src)
 add_subdirectory(ext)
+
+include_directories(ext/libevpl/src)
+add_subdirectory(src)
