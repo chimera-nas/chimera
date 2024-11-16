@@ -9,9 +9,19 @@
                         "settings": {},
                         // Add the IDs of extensions you want installed when the container is created.
                         "extensions": [
+                                "ms-vscode.cpptools-extension-pack",
+                                "ms-vscode.cmake-tools",
+                                "fredericbonnet.cmake-test-adapter",
+                                "ms-azuretools.vscode-docker",
+                                "zachflower.uncrustify"
                         ]
                 }
         },
+        "mounts": [
+                "source=chimera-build,target=/build,type=volume"
+        ],
+        "appPort": [],
+        "forwardPorts": [],
         "workspaceMount": "source=${localWorkspaceFolder},target=/chimera,type=bind",
         "workspaceFolder": "/chimera"
 }

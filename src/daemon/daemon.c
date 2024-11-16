@@ -23,7 +23,7 @@ int main(int argc, char **argv)
         sleep(1);
     }
 
-    chimera_destroy(server);
+    chimera_server_destroy(server);
 
     return 0;
 }

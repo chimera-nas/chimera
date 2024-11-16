@@ -1,0 +1,6 @@
+!build/src/nfs/nfs4_xdr.c
+!build/src/nfs/nfs4_xdr.h
+!build/src/nfs/nfs3_xdr.c
+!build/src/nfs/nfs3_xdr.h
+!build/ext/libevpl/src/rpc2/rpc2_xdr.c
+!build/ext/libevpl/src/rpc2/rpc2_xdr.h

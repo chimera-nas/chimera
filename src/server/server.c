@@ -81,7 +81,7 @@ chimera_server_init(const char *cfgfile)
     return server;
 }
 
-void chimera_destroy(struct chimera_server *server)
+void chimera_server_destroy(struct chimera_server *server)
 {
     int i;
 
