@@ -31,6 +31,8 @@ set_source_files_properties(
     ${NFS3_XDR_C} ${NFS4_XDR_C} PROPERTIES COMPILE_OPTIONS -Wno-switch
 )
 
+add_definitions(-DXDR_CUSTOM_IOVEC=${CMAKE_SOURCE_DIR}/ext/libevpl/src/rpc2/xdr_iovec.h)
+
 # Create libraries for NFSv3 and NFSv4
 add_library(chimera_nfs SHARED nfs.c ${NFS3_XDR_C} ${NFS3_XDR_H} ${NFS4_XDR_C} ${NFS4_XDR_H})
 

@@ -22,6 +22,10 @@
         ],
         "appPort": [],
         "forwardPorts": [],
+        "runArgs": [
+                "--cap-add=NET_ADMIN",
+                "--cap-add=NET_RAW"
+        ],
         "workspaceMount": "source=${localWorkspaceFolder},target=/chimera,type=bind",
         "workspaceFolder": "/chimera"
 }
