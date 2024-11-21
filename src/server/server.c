@@ -5,10 +5,12 @@
 #include "core/evpl.h"
 #include "thread/thread.h"
 #include "server.h"
-#include "vfs/protocol.h"
+#include "protocol.h"
 #include "nfs/nfs.h"
+#include "vfs/vfs.h"
 
 struct chimera_server {
+    struct chimera_vfs             *vfs;
     struct evpl_threadpool         *pool;
     struct chimera_server_protocol *protocols[2];
     void                           *protocol_private[2];
@@ -68,10 +70,12 @@ chimera_server_init(const char *cfgfile)
 
     server = calloc(1, sizeof(*server));
 
+    server->vfs = chimera_vfs_init();
+
     server->protocols[server->num_protocols++] = &nfs_protocol;
 
     for (i = 0; i < server->num_protocols; i++) {
-        server->protocol_private[i] = server->protocols[i]->init();
+        server->protocol_private[i] = server->protocols[i]->init(server->vfs);
     }
 
     server->pool = evpl_threadpool_create(1, chimera_server_thread_init, NULL,
@@ -91,5 +95,8 @@ chimera_server_destroy(struct chimera_server *server)
     }
 
     evpl_threadpool_destroy(server->pool);
+
+    chimera_vfs_destroy(server->vfs);
+
     free(server);
 } /* chimera_server_destroy */

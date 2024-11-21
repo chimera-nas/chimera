@@ -5,6 +5,8 @@
 cmake_minimum_required(VERSION 3.22)
 project(chimera LANGUAGES C)
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 enable_testing()
 
 include_directories(3rdparty)

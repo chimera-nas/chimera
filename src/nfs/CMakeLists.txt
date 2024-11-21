@@ -34,9 +34,10 @@ set_source_files_properties(
 add_definitions(-DXDR_CUSTOM_IOVEC=${CMAKE_SOURCE_DIR}/ext/libevpl/src/rpc2/xdr_iovec.h)
 
 # Create libraries for NFSv3 and NFSv4
-add_library(chimera_nfs SHARED nfs.c ${NFS3_XDR_C} ${NFS3_XDR_H} ${NFS4_XDR_C} ${NFS4_XDR_H})
+add_library(chimera_nfs SHARED nfs.c nfs4_procs.c nfs4_session.c
+            ${NFS3_XDR_C} ${NFS3_XDR_H} ${NFS4_XDR_C} ${NFS4_XDR_H})
 
-target_link_libraries(chimera_nfs evpl evpl_rpc2)
+target_link_libraries(chimera_nfs chimera_common evpl evpl_rpc2 pthread uuid)
 
 # Ensure xdrzcc is built before these libraries
 add_dependencies(chimera_nfs xdrzcc)

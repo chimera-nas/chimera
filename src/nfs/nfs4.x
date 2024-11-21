@@ -2003,7 +2003,7 @@ struct READ4args {
 
 struct READ4resok {
         bool            eof;
-        opaque          data<>;
+        zcopaque          data<>;
 };
 
 union READ4res switch (nfsstat4 status) {
@@ -2216,7 +2216,7 @@ struct WRITE4args {
         stateid4        stateid;
         offset4         offset;
         stable_how4     stable;
-        opaque          data<>;
+        zcopaque          data<>;
 };
 
 struct WRITE4resok {
