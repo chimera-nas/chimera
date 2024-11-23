@@ -5,9 +5,11 @@
 #include "core/evpl.h"
 #include "thread/thread.h"
 #include "server.h"
+#include "server_internal.h"
 #include "protocol.h"
 #include "nfs/nfs.h"
 #include "vfs/vfs.h"
+#include "vfs/memfs/memfs.h"
 
 struct chimera_server {
     struct chimera_vfs             *vfs;
@@ -18,8 +20,9 @@ struct chimera_server {
 };
 
 struct chimera_thread {
-    struct chimera_server *server;
-    void                  *protocol_private[2];
+    struct chimera_server     *server;
+    struct chimera_vfs_thread *vfs_thread;
+    void                      *protocol_private[2];
 };
 
 static void *
@@ -41,8 +44,21 @@ chimera_server_thread_init(
                                                                         [i]);
     }
 
+    thread->vfs_thread = chimera_vfs_thread_init(evpl, server->vfs);
+
     return thread;
 } /* chimera_server_thread_init */
+
+int
+chimera_server_create_share(
+    struct chimera_server *server,
+    const char            *module_name,
+    const char            *share_path,
+    const char            *module_path)
+{
+    return chimera_vfs_create_share(server->vfs, module_name, share_path,
+                                    module_path);
+} /* chimera_server_create_share */
 
 static void
 chimera_server_thread_destroy(
@@ -57,6 +73,7 @@ chimera_server_thread_destroy(
         server->protocols[i]->thread_destroy(evpl, thread->protocol_private[i]);
     }
 
+    chimera_vfs_thread_destroy(thread->vfs_thread);
     free(thread);
 } /* chimera_server_thread_destroy */
 
@@ -71,6 +88,8 @@ chimera_server_init(const char *cfgfile)
     server = calloc(1, sizeof(*server));
 
     server->vfs = chimera_vfs_init();
+
+    chimera_vfs_register(server->vfs, &vfs_memvfs);
 
     server->protocols[server->num_protocols++] = &nfs_protocol;
 

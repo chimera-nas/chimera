@@ -28,7 +28,7 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 # Suppress warnings for the generated source files
 set_source_files_properties(
-    ${NFS3_XDR_C} ${NFS4_XDR_C} PROPERTIES COMPILE_OPTIONS -Wno-switch
+    ${NFS3_XDR_C} ${NFS4_XDR_C} PROPERTIES COMPILE_OPTIONS "-Wno-unused;-Wno-switch"
 )
 
 add_definitions(-DXDR_CUSTOM_IOVEC=${CMAKE_SOURCE_DIR}/ext/libevpl/src/rpc2/xdr_iovec.h)

@@ -2,6 +2,9 @@
   "cmake.buildDirectory": "/build/${buildType}",
   "cmake.saveBeforeBuild": true,
   "cmake.generator": "Ninja",
+  "cmake.configureSettings": {
+    "CMAKE_C_COMPILER": "clang"
+  },
   "cmake.options.statusBarVisibility": "compact",
   "cmake.options.advanced.launch.statusBarVisibility": "hidden",
   "cmake.options.advanced.ctest.statusBarVisibility": "hidden",

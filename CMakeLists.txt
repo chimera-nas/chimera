@@ -22,7 +22,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_definitions(-O3)
 endif()
 
-add_definitions(-g -Wall -Werror)
+add_definitions(-g -Wall -Werror -Wassign-enum)
 
 add_subdirectory(ext)
 

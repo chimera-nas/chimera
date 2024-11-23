@@ -32,6 +32,7 @@ struct chimera_server_nfs_shared {
 
 struct chimera_server_nfs_thread {
     struct chimera_server_nfs_shared *shared;
+    struct chimera_vfs_thread        *vfs;
     struct evpl                      *evpl;
     struct evpl_rpc2_agent           *rpc2_agent;
     struct evpl_rpc2_server          *server;

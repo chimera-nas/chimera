@@ -7,6 +7,7 @@
 #include "nfs_common.h"
 
 #include "common/logging.h"
+#include "uthash/utlist.h"
 
 static void *
 nfs_server_init(struct chimera_vfs *vfs)
@@ -57,6 +58,8 @@ nfs_server_thread_init(
     thread->shared     = data;
     thread->rpc2_agent = evpl_rpc2_init(evpl);
 
+    thread->vfs = chimera_vfs_thread_init(evpl, shared->vfs);
+
     thread->endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 2049);
 
     thread->server = evpl_rpc2_listen(thread->rpc2_agent,
@@ -74,8 +77,19 @@ nfs_server_thread_destroy(
     void        *data)
 {
     struct chimera_server_nfs_thread *thread = data;
+    struct nfs4_request              *req;
 
+    chimera_vfs_thread_destroy(thread->vfs);
+
+    evpl_rpc2_server_destroy(thread->rpc2_agent, thread->server);
     evpl_rpc2_destroy(thread->rpc2_agent);
+
+    while (thread->free_requests) {
+        req = thread->free_requests;
+        LL_DELETE(thread->free_requests, req);
+        free(req);
+    }
+
     free(thread);
 } /* nfs_server_thread_destroy */
 

@@ -2,6 +2,9 @@
 #include <stdint.h>
 #include <sys/time.h>
 #include "vfs_dump.h"
+#include "vfs_error.h"
+
+struct evpl;
 
 #define CHIMERA_VFS_FH_SIZE          128
 
@@ -88,7 +91,7 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OPEN_RDWR      (1U << 3)
 
 typedef void (*chimera_vfs_complete_callback_t)(
-    void);
+    struct chimera_vfs_request *request);
 
 typedef int (*chimera_vfs_readdir_callback_t)(
     uint64_t                        cookie,
@@ -97,29 +100,38 @@ typedef int (*chimera_vfs_readdir_callback_t)(
     void                           *arg);
 
 struct chimera_vfs_request {
-    uint32_t opcode;
-    uint32_t status;
+    struct chimera_vfs_thread      *thread;
+    uint32_t                        opcode;
+    enum chimera_vfs_error          status;
+    chimera_vfs_complete_callback_t complete;
+    void                           *proto_callback;
+    void                           *proto_private_data;
+    struct chimera_vfs_request     *prev;
+    struct chimera_vfs_request     *next;
 
     union {
         struct {
             const char *path;
-            uint8_t    *r_fh;
-            uint32_t   *r_fh_len;
+            uint32_t    pathlen;
+            uint8_t     r_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t    r_fh_len;
         } lookup_path;
 
         struct {
             const void *fh;
             uint32_t    fh_len;
             const char *component;
-            void       *r_fh;
-            uint32_t   *r_fh_len;
+            uint32_t    component_len;
+            uint8_t     r_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t    r_fh_len;
         } lookup;
 
         struct {
-            const void               *fh;
-            uint32_t                  fh_len;
-            uint64_t                  attr_mask;
-            struct chimera_vfs_attrs *r_attr;
+            const void              *fh;
+            uint32_t                 fh_len;
+            uint64_t                 attr_mask;
+            struct chimera_vfs_attrs r_attr;
+            uint64_t                 r_attr_mask;
         } getattr;
 
         struct {
@@ -191,37 +203,10 @@ struct chimera_vfs_request {
         } remove;
 
     };
-
-    chimera_vfs_complete_callback_t complete_cb;
-    void                           *private_data;
 };
 
 
 
-/* Called once at startup, returns opaque global private data */
-typedef void * (*chimera_vfs_init_callback_t)(
-    void);
-
-/* Called once at shutdown, destroys private data allowed above */
-typedef void (*chimera_vfs_destroy_callback_t)(
-    void *private_data);
-
-/* Called once per thread to allocate thread-specific private data,
- * given pointer the global private data allocated above
- */
-typedef void * (*chimera_vfs_thread_init_callback_t)(
-    void *private_data);
-
-/* Called once at shutdown to destroy thread-specific private data */
-typedef void (*chimera_vfs_thread_destroy_callback_t)(
-    void *arg);
-
-/* Called to submit a request for processing,
- * recipient should call chimera_vfs_complete(status, req) when complete.
- */
-typedef void (*chimera_vfs_dispatch_callback_t)(
-    struct chimera_vfs         *vfs,
-    struct chimera_vfs_request *request);
 
 /* Each module must have a unique FH_MAGIC value
  * that can never be changed.  They can be reserved
@@ -234,31 +219,53 @@ typedef void (*chimera_vfs_dispatch_callback_t)(
  */
 
 enum CHIMERA_FS_FH_MAGIC {
-    CHIMERA_VFS_FH_MAGIC_RESERVED = 0,
-    CHIMERA_VFS_FH_MAGIC_LINUX    = 1,
+    /* Reserved for internal use by chimera */
+    CHIMERA_VFS_FH_MAGIC_ROOT  = 0,
+    CHIMERA_VFS_FH_MAGIC_MEMFS = 1,
+    CHIMERA_VFS_FH_MAGIC_LINUX = 2,
+    CHIMERA_VFS_FH_MAGIC_MAX   = 3
 };
 
 struct chimera_vfs_module {
-    const char                           *name;
-    uint8_t                               fh_magic;
-    chimera_vfs_init_callback_t           init_cb;
-    chimera_vfs_destroy_callback_t        destroy_cb;
-    chimera_vfs_thread_init_callback_t    thread_init_cb;
-    chimera_vfs_thread_destroy_callback_t thread_destroy_cb;
-    chimera_vfs_dispatch_callback_t       dispatch_cb;
+    const char *name;
+    uint8_t     fh_magic;
+
+    void      * (*init)(
+        void);
+
+    void        (*destroy)(
+        void *);
+
+    void      * (*thread_init)(
+        struct evpl *evpl,
+        void        *private_data);
+
+    void        (*thread_destroy)(
+        void *);
+
+    void        (*dispatch)(
+        struct chimera_vfs_request *request,
+        void                       *private_data);
 };
 
 struct chimera_vfs_share {
-    struct chimera_vfs_module *vfs;
-    const char                *name;
-    const char                *path;
+    struct chimera_vfs_module *module;
+    char                      *name;
+    char                      *path;
+    struct chimera_vfs_share  *prev;
+    struct chimera_vfs_share  *next;
 };
 
 struct chimera_vfs {
-    struct chimera_vfs_module *modules;
+    struct chimera_vfs_module *modules[CHIMERA_VFS_FH_MAGIC_MAX];
+    void                      *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
     struct chimera_vfs_share  *shares;
-    int                        nmodules;
-    int                        nshares;
+};
+
+struct chimera_vfs_thread {
+    struct chimera_vfs         *vfs;
+    void                       *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
+    struct chimera_vfs_request *free_requests;
 };
 
 struct chimera_vfs *
@@ -269,23 +276,60 @@ void
 chimera_vfs_destroy(
     struct chimera_vfs *vfs);
 
+struct chimera_vfs_thread *
+chimera_vfs_thread_init(
+    struct evpl        *evpl,
+    struct chimera_vfs *vfs);
+
+void
+chimera_vfs_thread_destroy(
+    struct chimera_vfs_thread *thread);
+
+void
+chimera_vfs_register(
+    struct chimera_vfs        *vfs,
+    struct chimera_vfs_module *module);
+
+int
+chimera_vfs_create_share(
+    struct chimera_vfs *vfs,
+    const char         *module_name,
+    const char         *share_path,
+    const char         *module_path);
+
 void
 chimera_vfs_getrootfh(
-    struct chimera_vfs *vfs,
-    void               *fh,
-    int                *fh_len);
+    struct chimera_vfs_thread *thread,
+    void                      *fh,
+    int                       *fh_len);
 
 typedef void (*chimera_vfs_lookup_callback_t)(
-    int         error_code,
-    const void *fh,
-    int         fh_len,
-    void       *private_data);
+    enum chimera_vfs_error error_code,
+    const void            *fh,
+    int                    fh_len,
+    void                  *private_data);
 
 void
 chimera_vfs_lookup(
-    struct chimera_vfs           *vfs,
+    struct chimera_vfs_thread    *vfs,
     const void                   *fh,
     int                           fhlen,
     const char                   *name,
+    uint32_t                      namelen,
     chimera_vfs_lookup_callback_t callback,
     void                         *private_data);
+
+typedef void (*chimera_vfs_getattr_callback_t)(
+    enum chimera_vfs_error    error_code,
+    uint64_t                  attr_mask,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data);
+
+void
+chimera_vfs_getattr(
+    struct chimera_vfs_thread     *thread,
+    const void                    *fh,
+    int                            fhlen,
+    uint64_t                       attr_mask,
+    chimera_vfs_getattr_callback_t callback,
+    void                          *private_data);

@@ -12,8 +12,9 @@ main(
 {
     struct chimera_server *server;
     struct nfs_context    *nfs;
-    struct nfsdir         *dir;
-    struct nfsdirent      *entry;
+
+    //struct nfsdir         *dir;
+    //struct nfsdirent      *entry;
 
     server = chimera_server_init(NULL);
 
@@ -36,6 +37,7 @@ main(
 
     printf("Mounted NFS share\n");
 
+#if 0
     if (nfs_opendir(nfs, "/", &dir) < 0) {
         fprintf(stderr, "Failed to open root directory: %s\n", nfs_get_error(nfs
                                                                              ));
@@ -48,14 +50,15 @@ main(
     while ((entry = nfs_readdir(nfs, dir)) != NULL) {
         printf(" - %s\n", entry->name);
     }
+    #endif /* if 0 */
 
     // Check if the loop ended due to an error
-    if (nfs_get_error(nfs)) {
-        fprintf(stderr, "Error reading directory: %s\n", nfs_get_error(nfs));
-    }
+    //if (nfs_get_error(nfs)) {
+    //    fprintf(stderr, "Error reading directory: %s\n", nfs_get_error(nfs));
+    //}
 
     // Close directory and unmount the share
-    nfs_closedir(nfs, dir);
+    //nfs_closedir(nfs, dir);
     nfs_umount(nfs);
     nfs_destroy_context(nfs);
 
