@@ -73,43 +73,6 @@ chimera_nfs4_putfh(
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_putfh */
 
-static inline void
-chimera_nfs4_attr_append_uint32(
-    void   **attrs,
-    uint32_t value)
-{
-    *(uint32_t *) *attrs = chimera_nfs_hton32(value);
-    *attrs              += sizeof(uint32_t);
-} /* chimera_nfs4_attr_append_uint32 */
-
-static void
-chimera_nfs4_attr_append_uint64(
-    void   **attrs,
-    uint64_t value)
-{
-    *(uint64_t *) *attrs = chimera_nfs_hton64(value);
-    *attrs              += sizeof(uint64_t);
-} /* chimera_nfs4_attr_append_uint64 */
-
-static void
-chimera_nfs4_attr_append_utf8str(
-    void      **attrs,
-    const char *value,
-    int         len)
-{
-    int pad;
-
-    chimera_nfs4_attr_append_uint32(attrs, len);
-    memcpy(*attrs, value, len);
-
-    pad = (4 - (len % 4)) % 4;
-
-    if (pad ) {
-        memset(*attrs + len, 0, pad);
-    }
-    *attrs += len + pad;
-} /* chimera_nfs4_attr_append_utf8str */
-
 static void
 chimera_nfs4_getattr_complete(
     enum chimera_vfs_error    error_code,
@@ -122,11 +85,6 @@ chimera_nfs4_getattr_complete(
         opgetattr;
     GETATTR4res         *res = &req->res.resarray[req->index].opgetattr
     ;
-    uint32_t            *req_mask     = args->attr_request;
-    int                  num_req_mask = args->num_attr_request;
-    uint32_t            *rsp_mask;
-    int                  num_rsp_mask = 0;
-    void                *attrs, *attrsbase;
 
     res->status = NFS4_OK;
 
@@ -139,194 +97,14 @@ chimera_nfs4_getattr_complete(
                           4096,
                           req->msg->dbuf);
 
-    rsp_mask = res->resok4.obj_attributes.attrmask;
-
-    memset(rsp_mask, 0, sizeof(uint32_t) * 3);
-
-    attrs     = res->resok4.obj_attributes.attr_vals.data;
-    attrsbase = attrs;
-
-    if (num_req_mask >= 1) {
-        chimera_nfs_debug("getattr request mask %08x", req_mask[0]);
-        if (req_mask[0] & (1 << FATTR4_SUPPORTED_ATTRS)) {
-            rsp_mask[0] |= (1 << FATTR4_SUPPORTED_ATTRS);
-            num_rsp_mask = 1;
-
-            chimera_nfs4_attr_append_uint32(&attrs, 1);
-            chimera_nfs4_attr_append_uint32(&attrs,
-                                            FATTR4_SUPPORTED_ATTRS |
-                                            FATTR4_TYPE |
-                                            FATTR4_FH_EXPIRE_TYPE |
-                                            FATTR4_CHANGE |
-                                            FATTR4_SIZE |
-                                            FATTR4_LINK_SUPPORT |
-                                            FATTR4_SYMLINK_SUPPORT |
-                                            FATTR4_NAMED_ATTR |
-                                            FATTR4_FSID |
-                                            FATTR4_UNIQUE_HANDLES |
-                                            FATTR4_LEASE_TIME |
-                                            FATTR4_RDATTR_ERROR |
-                                            FATTR4_FILEHANDLE |
-                                            FATTR4_FILEID |
-                                            FATTR4_MODE |
-                                            FATTR4_NUMLINKS |
-                                            FATTR4_OWNER |
-                                            FATTR4_OWNER_GROUP |
-                                            FATTR4_SPACE_USED |
-                                            FATTR4_TIME_ACCESS |
-                                            FATTR4_TIME_MODIFY |
-                                            FATTR4_TIME_METADATA);
-        }
-
-        if (req_mask[0] & (1 << FATTR4_TYPE)) {
-            rsp_mask[0] |= (1 << FATTR4_TYPE);
-            num_rsp_mask = 1;
-
-            if (S_ISREG(attr->va_mode)) {
-                chimera_nfs4_attr_append_uint32(&attrs, NF4REG);
-            } else if (S_ISDIR(attr->va_mode)) {
-                chimera_nfs4_attr_append_uint32(&attrs, NF4DIR);
-            } else if (S_ISCHR(attr->va_mode)) {
-                chimera_nfs4_attr_append_uint32(&attrs, NF4CHR);
-            } else if (S_ISBLK(attr->va_mode)) {
-                chimera_nfs4_attr_append_uint32(&attrs, NF4BLK);
-            } else if (S_ISFIFO(attr->va_mode)) {
-                chimera_nfs4_attr_append_uint32(&attrs, NF4FIFO);
-            } else if (S_ISSOCK(attr->va_mode)) {
-                chimera_nfs4_attr_append_uint32(&attrs, NF4SOCK);
-            } else if (S_ISLNK(attr->va_mode)) {
-                chimera_nfs4_attr_append_uint32(&attrs, NF4LNK);
-            } else {
-                chimera_nfs4_attr_append_uint32(&attrs, NF4REG);
-            }
-        }
-
-        if (req_mask[0] & (1 << FATTR4_FH_EXPIRE_TYPE)) {
-            rsp_mask[0] |= (1 << FATTR4_FH_EXPIRE_TYPE);
-            num_rsp_mask = 1;
-
-            chimera_nfs4_attr_append_uint32(&attrs, 1);
-        }
-
-        if (req_mask[0] & (1 << FATTR4_CHANGE)) {
-            rsp_mask[0] |= (1 << FATTR4_CHANGE);
-            num_rsp_mask = 1;
-
-            chimera_nfs4_attr_append_uint32(&attrs, 0);
-        }
-
-        if (req_mask[0] & (1 << FATTR4_SIZE)) {
-            rsp_mask[0] |= (1 << FATTR4_SIZE);
-            num_rsp_mask = 1;
-
-            chimera_nfs4_attr_append_uint64(&attrs, attr->va_size);
-        }
-
-        if (req_mask[0] & (1 << FATTR4_LINK_SUPPORT)) {
-            rsp_mask[0] |= (1 << FATTR4_LINK_SUPPORT);
-            num_rsp_mask = 1;
-
-            chimera_nfs4_attr_append_uint32(&attrs, 0);
-        }
-
-        if (req_mask[0] & (1 << FATTR4_SYMLINK_SUPPORT)) {
-            rsp_mask[0] |= (1 << FATTR4_SYMLINK_SUPPORT);
-            num_rsp_mask = 1;
-
-            chimera_nfs4_attr_append_uint32(&attrs, 0);
-        }
-
-        if (req_mask[0] & (1 << FATTR4_NAMED_ATTR)) {
-            rsp_mask[0] |= (1 << FATTR4_NAMED_ATTR);
-            num_rsp_mask = 1;
-
-            chimera_nfs4_attr_append_uint32(&attrs, 0);
-        }
-
-        if (req_mask[0] & (1 << FATTR4_FSID)) {
-            rsp_mask[0] |= (1 << FATTR4_FSID);
-            num_rsp_mask = 1;
-
-            chimera_nfs4_attr_append_uint64(&attrs, 42);
-            chimera_nfs4_attr_append_uint64(&attrs, 42);
-
-        }
-
-        if (req_mask[0] & (1 << FATTR4_FILEID)) {
-            rsp_mask[0] |= (1 << FATTR4_FILEID);
-            num_rsp_mask = 1;
-
-            chimera_nfs4_attr_append_uint64(&attrs, attr->va_ino);
-        }
-    }
-
-    if (num_req_mask >= 2) {
-        if (req_mask[1] & (1 << (FATTR4_MODE - 32))) {
-            rsp_mask[1] |= (1 << (FATTR4_MODE - 32));
-            num_rsp_mask = 2;
-
-            chimera_nfs4_attr_append_uint32(&attrs, attr->va_mode & ~S_IFMT);
-        }
-
-        if (req_mask[1] & (1 << (FATTR4_NUMLINKS - 32))) {
-            rsp_mask[1] |= (1 << (FATTR4_NUMLINKS - 32));
-            num_rsp_mask = 2;
-
-            chimera_nfs4_attr_append_uint32(&attrs, attr->va_nlink);
-        }
-
-        if (req_mask[1] & (1 << (FATTR4_OWNER - 32))) {
-            rsp_mask[1] |= (1 << (FATTR4_OWNER - 32));
-            num_rsp_mask = 2;
-
-            chimera_nfs4_attr_append_utf8str(&attrs, "root", 4);
-        }
-
-        if (req_mask[1] & (1 << (FATTR4_OWNER_GROUP - 32))) {
-            rsp_mask[1] |= (1 << (FATTR4_OWNER_GROUP - 32));
-            num_rsp_mask = 2;
-
-            chimera_nfs4_attr_append_utf8str(&attrs, "root", 4);
-        }
-
-        if (req_mask[1] & (1 << (FATTR4_SPACE_USED - 32))) {
-            rsp_mask[1] |= (1 << (FATTR4_SPACE_USED - 32));
-            num_rsp_mask = 2;
-
-            chimera_nfs4_attr_append_uint64(&attrs, attr->va_size);
-        }
-
-        if (req_mask[1] & (1 << (FATTR4_TIME_ACCESS - 32))) {
-            rsp_mask[1] |= (1 << (FATTR4_TIME_ACCESS - 32));
-            num_rsp_mask = 2;
-
-            chimera_nfs4_attr_append_uint64(&attrs, attr->va_atime.tv_sec);
-            chimera_nfs4_attr_append_uint32(&attrs, attr->va_atime.tv_nsec);
-        }
-
-        if (req_mask[1] & (1 << (FATTR4_TIME_MODIFY - 32))) {
-            rsp_mask[1] |= (1 << (FATTR4_TIME_MODIFY - 32));
-            num_rsp_mask = 2;
-
-            chimera_nfs4_attr_append_uint64(&attrs, attr->va_mtime.tv_sec);
-            chimera_nfs4_attr_append_uint32(&attrs, attr->va_mtime.tv_nsec);
-        }
-
-        if (req_mask[1] & (1 << (FATTR4_TIME_METADATA - 32))) {
-            rsp_mask[1] |= (1 << (FATTR4_TIME_METADATA - 32));
-            num_rsp_mask = 2;
-
-            chimera_nfs4_attr_append_uint64(&attrs, attr->va_ctime.tv_sec);
-            chimera_nfs4_attr_append_uint32(&attrs, attr->va_ctime.tv_nsec);
-        }
-    }
-
-    chimera_nfs_debug("sending getattr repply with %d words and %d bytes",
-                      num_rsp_mask,
-                      attrs - attrsbase);
-
-    res->resok4.obj_attributes.num_attrmask  = num_rsp_mask;
-    res->resok4.obj_attributes.attr_vals.len = attrs - attrsbase;
+    chimera_nfs4_marshall_attrs(attr,
+                                args->num_attr_request,
+                                args->attr_request,
+                                &res->resok4.obj_attributes.num_attrmask,
+                                res->resok4.obj_attributes.attrmask,
+                                3,
+                                res->resok4.obj_attributes.attr_vals.data,
+                                &res->resok4.obj_attributes.attr_vals.len);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_getattr_complete */
@@ -399,8 +177,8 @@ chimera_nfs4_readdir_callback(
 {
     struct nfs4_request *req = arg;
     struct entry4       *entry, *prev_entry;
-
-    READDIR4resok       *res = &req->res.resarray[req->index].opreaddir.resok4;
+    READDIR4args        *args = &req->args->argarray[req->index].opreaddir;
+    READDIR4resok       *res  = &req->res.resarray[req->index].opreaddir.resok4;
 
     chimera_nfs_debug("readdir callback: cookie %llu, name %.*s, attrs %p",
                       cookie,
@@ -410,28 +188,35 @@ chimera_nfs4_readdir_callback(
 
     prev_entry = res->reply.entries;
 
-    xdr_dbuf_reserve(&res->reply,
-                     entries,
-                     1,
-                     req->msg->dbuf);
-
-    res->reply.num_entries = 1;
+    xdr_dbuf_reserve_ll(&res->reply,
+                        entries,
+                        req->msg->dbuf);
 
     entry = res->reply.entries;
 
-    entry->cookie              = cookie;
-    entry->attrs.num_attrmask  = 0;
-    entry->attrs.attr_vals.len = 0;
-    entry->num_nextentry       = 0;
-    xdr_dbuf_opaque_copy(&entry->name, name, namelen, req->msg->dbuf);
+    entry->cookie = cookie;
 
-    if (prev_entry) {
-        entry->nextentry     = prev_entry;
-        entry->num_nextentry = 1;
-    } else {
-        entry->nextentry     = NULL;
-        entry->num_nextentry = 0;
-    }
+    xdr_dbuf_reserve(&entry->attrs,
+                     attrmask,
+                     args->num_attr_request,
+                     req->msg->dbuf);
+
+    xdr_dbuf_alloc_opaque(&entry->attrs.attr_vals,
+                          4096,
+                          req->msg->dbuf);
+
+    chimera_nfs4_marshall_attrs(attrs,
+                                args->num_attr_request,
+                                args->attr_request,
+                                &entry->attrs.num_attrmask,
+                                entry->attrs.attrmask,
+                                3,
+                                entry->attrs.attr_vals.data,
+                                &entry->attrs.attr_vals.len);
+
+    entry->nextentry = prev_entry;
+
+    xdr_dbuf_opaque_copy(&entry->name, name, namelen, req->msg->dbuf);
 
     return 0;
 } /* chimera_nfs4_readdir_callback */
@@ -470,8 +255,7 @@ chimera_nfs4_readdir(
     READDIR4args *args = &argop->opreaddir;
     READDIR4res  *res  = &resop->opreaddir;
 
-    res->resok4.reply.entries     = NULL;
-    res->resok4.reply.num_entries = 0;
+    res->resok4.reply.entries = NULL;
 
     chimera_vfs_readdir(thread->vfs,
                         req->fh,

@@ -146,6 +146,7 @@ chimera_vfs_root_readdir(
     struct chimera_vfs_thread *thread = request->thread;
     struct chimera_vfs        *vfs    = thread->vfs;
     struct chimera_vfs_share  *share;
+    struct chimera_vfs_attrs   attr;
     int                        i      = 0;
     uint64_t                   cookie = request->readdir.cookie;
 
@@ -156,11 +157,26 @@ chimera_vfs_root_readdir(
             continue;
         }
 
+        /* Set dummy values for a directory */
+        memset(&attr, 0, sizeof(attr));
+        attr.va_mode          = S_IFDIR | 0755; /* directory with rwxr-xr-x permissions */
+        attr.va_nlink         = 2;      /* . and .. minimum for directory */
+        attr.va_uid           = 0;      /* root user */
+        attr.va_gid           = 0;      /* root group */
+        attr.va_size          = 4096;   /* typical directory size */
+        attr.va_atime.tv_sec  = time(NULL);
+        attr.va_atime.tv_nsec = 0;
+        attr.va_mtime         = attr.va_atime; /* same as access time */
+        attr.va_ctime         = attr.va_atime; /* same as access time */
+        attr.va_ino           = 2;      /* root directory inode */
+        attr.va_dev           = 0;      /* device ID */
+        attr.va_rdev          = 0;      /* not a device file */
+
         request->readdir.callback(
             i,
             share->name,
             strlen(share->name),
-            NULL,
+            &attr,
             request->proto_private_data);
 
         i++;

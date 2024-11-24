@@ -5,6 +5,7 @@
 #include "nfs4_session.h"
 
 struct chimera_server_nfs_thread;
+
 struct nfs4_request {
     struct chimera_server_nfs_thread *thread;
     struct nfs4_session              *session;
