@@ -1,5 +1,5 @@
 
-add_library(chimera_vfs vfs.c)
+add_library(chimera_vfs vfs.c vfs_root.c vfs_procs.c)
 
 add_subdirectory(memfs)
 

@@ -4,157 +4,19 @@
 #include "nfs.h"
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
+#include "nfs4_status.h"
 #include "nfs_internal.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_procs.h"
+#include "nfs4_attr.h"
 
 #include "uthash/utlist.h"
-
-static inline nfsstat4
-chimera_nfs4_errno_to_nfsstat4(int err)
-{
-    switch (err) {
-        case 0:
-            return NFS4_OK;
-        case EPERM:
-            return NFS4ERR_PERM;
-        case ENOENT:
-            return NFS4ERR_NOENT;
-        case EIO:
-            return NFS4ERR_IO;
-        case ENXIO:
-            return NFS4ERR_NXIO;
-        case EACCES:
-            return NFS4ERR_ACCESS;
-        case EEXIST:
-            return NFS4ERR_EXIST;
-        case EXDEV:
-            return NFS4ERR_XDEV;
-        case ENOTDIR:
-            return NFS4ERR_NOTDIR;
-        case EISDIR:
-            return NFS4ERR_ISDIR;
-        case EINVAL:
-            return NFS4ERR_INVAL;
-        case EFBIG:
-            return NFS4ERR_FBIG;
-        case ENOSPC:
-            return NFS4ERR_NOSPC;
-        case EROFS:
-            return NFS4ERR_ROFS;
-        case EMLINK:
-            return NFS4ERR_MLINK;
-        case ENAMETOOLONG:
-            return NFS4ERR_NAMETOOLONG;
-        case ENOTEMPTY:
-            return NFS4ERR_NOTEMPTY;
-        case EDQUOT:
-            return NFS4ERR_DQUOT;
-        case ESTALE:
-            return NFS4ERR_STALE;
-        case EBADF:
-            return NFS4ERR_BADHANDLE;
-        case ENOTSUP:
-            return NFS4ERR_NOTSUPP;
-        case EOVERFLOW:
-            return NFS4ERR_TOOSMALL;
-        case EFAULT:
-            return NFS4ERR_SERVERFAULT;
-        default:
-            chimera_nfs_error("Unknown errno value in translation: %d", err);
-            return NFS4ERR_IO;
-    } /* switch */
-} /* chimera_nfs4_errno_to_nfsstat4 */
-
-static inline uint64_t
-chimera_nfs4_getattr2mask(
-    uint32_t *words,
-    int       num_words)
-{
-    uint64_t attr_mask = 0;
-
-    for (int i = 0; i < num_words; i++) {
-        uint32_t word = words[i];
-        for (int bit = 0; bit < 32; bit++) {
-            if (word & (1 << bit)) {
-                switch (i * 32 + bit) {
-                    case FATTR4_SUPPORTED_ATTRS:
-                        attr_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
-                        break;
-                    case FATTR4_TYPE:
-                        attr_mask |= CHIMERA_VFS_ATTR_MODE;
-                        break;
-                    case FATTR4_FH_EXPIRE_TYPE:
-                        attr_mask |= CHIMERA_VFS_ATTR_FH;
-                        break;
-                    case FATTR4_CHANGE:
-                        attr_mask |= CHIMERA_VFS_ATTR_CTIME;
-                        break;
-                    case FATTR4_SIZE:
-                        attr_mask |= CHIMERA_VFS_ATTR_SIZE;
-                        break;
-                    case FATTR4_LINK_SUPPORT:
-                        attr_mask |= CHIMERA_VFS_ATTR_NLINK;
-                        break;
-                    case FATTR4_SYMLINK_SUPPORT:
-                        attr_mask |= CHIMERA_VFS_ATTR_MODE;
-                        break;
-                    case FATTR4_NAMED_ATTR:
-                        attr_mask |= CHIMERA_VFS_ATTR_MODE;
-                        break;
-                    case FATTR4_FSID:
-                        attr_mask |= CHIMERA_VFS_ATTR_DEV;
-                        break;
-                    case FATTR4_UNIQUE_HANDLES:
-                        attr_mask |= CHIMERA_VFS_ATTR_INUM;
-                        break;
-                    case FATTR4_LEASE_TIME:
-                        attr_mask |= CHIMERA_VFS_ATTR_ATIME;
-                        break;
-                    case FATTR4_RDATTR_ERROR:
-                        attr_mask |= CHIMERA_VFS_ATTR_MODE;
-                        break;
-                    case FATTR4_FILEHANDLE:
-                        attr_mask |= CHIMERA_VFS_ATTR_FH;
-                        break;
-                    // Add more cases as needed for other attributes
-                    default:
-                        break;
-                } /* switch */
-            }
-        }
-    }
-
-    return attr_mask;
-} /* chimera_nfs4_getattr2mask */
-
-static void
-chimera_nfs4_compound_process(
-    struct nfs4_request *req,
-    nfsstat4             status);
 
 static inline void
 chimera_nfs4_compound_complete(
     struct nfs4_request *req,
-    nfsstat4             status)
-{
-    struct chimera_server_nfs_thread *thread = req->thread;
+    nfsstat4             status);
 
-    if (status != NFS4_OK) {
-        req->res.status = status;
-        chimera_nfs_info("nfs4 compound operation %d/%d: error %d",
-                         req->index,
-                         req->res.num_resarray,
-                         status);
-        req->index = req->res.num_resarray;
-    }
-
-    if (thread->active) {
-        thread->again = 1;
-    } else {
-        chimera_nfs4_compound_process(req, status);
-    }
-
-} /* chimera_nfs4_compound_complete */
 
 static void
 chimera_nfs4_getfh(
@@ -192,6 +54,24 @@ chimera_nfs4_putrootfh(
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_putrootfh */
+
+static void
+chimera_nfs4_putfh(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs4_request              *req,
+    nfs_argop4                       *argop,
+    nfs_resop4                       *resop)
+{
+    PUTFH4args *args = &argop->opputfh;
+    PUTFH4res  *res  = &resop->opputfh;
+
+    res->status = NFS4_OK;
+
+    memcpy(req->fh, args->object.data, args->object.len);
+    req->fhlen = args->object.len;
+
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_putfh */
 
 static inline void
 chimera_nfs4_attr_append_uint32(
@@ -509,6 +389,111 @@ chimera_nfs4_lookup(
                        req);
 } /* chimera_nfs4_lookup */
 
+static int
+chimera_nfs4_readdir_callback(
+    uint64_t                        cookie,
+    const char                     *name,
+    int                             namelen,
+    const struct chimera_vfs_attrs *attrs,
+    void                           *arg)
+{
+    struct nfs4_request *req = arg;
+    struct entry4       *entry, *prev_entry;
+
+    READDIR4resok       *res = &req->res.resarray[req->index].opreaddir.resok4;
+
+    chimera_nfs_debug("readdir callback: cookie %llu, name %.*s, attrs %p",
+                      cookie,
+                      namelen,
+                      name,
+                      attrs);
+
+    prev_entry = res->reply.entries;
+
+    xdr_dbuf_reserve(&res->reply,
+                     entries,
+                     1,
+                     req->msg->dbuf);
+
+    res->reply.num_entries = 1;
+
+    entry = res->reply.entries;
+
+    entry->cookie              = cookie;
+    entry->attrs.num_attrmask  = 0;
+    entry->attrs.attr_vals.len = 0;
+    entry->num_nextentry       = 0;
+    xdr_dbuf_opaque_copy(&entry->name, name, namelen, req->msg->dbuf);
+
+    if (prev_entry) {
+        entry->nextentry     = prev_entry;
+        entry->num_nextentry = 1;
+    } else {
+        entry->nextentry     = NULL;
+        entry->num_nextentry = 0;
+    }
+
+    return 0;
+} /* chimera_nfs4_readdir_callback */
+
+static void
+chimera_nfs4_readdir_complete(
+    enum chimera_vfs_error error_code,
+    uint64_t               cookie,
+    uint32_t               eof,
+    void                  *private_data)
+{
+    struct nfs4_request *req    = private_data;
+    READDIR4res         *res    = &req->res.resarray[req->index].opreaddir;
+    nfsstat4             status = chimera_nfs4_errno_to_nfsstat4(error_code);
+
+    res->status = status;
+
+    memcpy(res->resok4.cookieverf, &cookie, sizeof(res->resok4.cookieverf));
+
+    res->resok4.reply.eof = eof;
+
+    chimera_nfs_debug("readdir complete: cookie %llu, error %d",
+                      cookie,
+                      error_code);
+
+    chimera_nfs4_compound_complete(req, status);
+} /* chimera_nfs4_readdir_complete */
+
+static void
+chimera_nfs4_readdir(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs4_request              *req,
+    nfs_argop4                       *argop,
+    nfs_resop4                       *resop)
+{
+    READDIR4args *args = &argop->opreaddir;
+    READDIR4res  *res  = &resop->opreaddir;
+
+    res->resok4.reply.entries     = NULL;
+    res->resok4.reply.num_entries = 0;
+
+    chimera_vfs_readdir(thread->vfs,
+                        req->fh,
+                        req->fhlen,
+                        args->cookie,
+                        chimera_nfs4_readdir_callback,
+                        chimera_nfs4_readdir_complete,
+                        req);
+} /* chimera_nfs4_readdir */
+
+static void
+chimera_nfs4_close(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs4_request              *req,
+    nfs_argop4                       *argop,
+    nfs_resop4                       *resop)
+{
+    CLOSE4args *args = &argop->opclose;
+
+    chimera_nfs_debug("close: seqid %u", args->seqid);
+} /* chimera_nfs4_close */
+
 static void
 chimera_nfs4_setclientid(
     struct chimera_server_nfs_thread *thread,
@@ -657,6 +642,15 @@ chimera_nfs4_compound_process(
         case OP_LOOKUP:
             chimera_nfs4_lookup(thread, req, argop, resop);
             break;
+        case OP_PUTFH:
+            chimera_nfs4_putfh(thread, req, argop, resop);
+            break;
+        case OP_READDIR:
+            chimera_nfs4_readdir(thread, req, argop, resop);
+            break;
+        case OP_CLOSE:
+            chimera_nfs4_close(thread, req, argop, resop);
+            break;
         case OP_SETCLIENTID:
             chimera_nfs4_setclientid(thread, req, argop, resop);
             break;
@@ -677,6 +671,30 @@ chimera_nfs4_compound_process(
         goto again;
     }
 } /* chimera_nfs4_compound_process */
+
+static inline void
+chimera_nfs4_compound_complete(
+    struct nfs4_request *req,
+    nfsstat4             status)
+{
+    struct chimera_server_nfs_thread *thread = req->thread;
+
+    if (status != NFS4_OK) {
+        req->res.status = status;
+        chimera_nfs_info("nfs4 compound operation %d/%d: error %d",
+                         req->index,
+                         req->res.num_resarray,
+                         status);
+        req->index = req->res.num_resarray;
+    }
+
+    if (thread->active) {
+        thread->again = 1;
+    } else {
+        chimera_nfs4_compound_process(req, status);
+    }
+
+} /* chimera_nfs4_compound_complete */
 
 void
 chimera_nfs4_compound(

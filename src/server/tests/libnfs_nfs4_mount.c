@@ -22,10 +22,8 @@ main(
         return EXIT_FAILURE;
     }
 
-    // Set NFS version to 3
     nfs_set_version(nfs, NFS_V4);
 
-    // Mount the NFS export
     if (nfs_mount(nfs, "127.0.0.1", "/share") < 0) {
         fprintf(stderr, "Failed to mount NFS share: %s\n", nfs_get_error(nfs));
         nfs_destroy_context(nfs);
