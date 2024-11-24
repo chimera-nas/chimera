@@ -21,5 +21,9 @@
   "cmake.ctest.testExplorerIntegrationEnabled": false,
   "cmakeExplorer.parallelJobs": 1,
   "editor.tabSize": 4,
-  "editor.formatOnSave": true
+  "editor.formatOnSave": true,
+  "files.associations": {
+    "nfs_mount.h": "c",
+    "logging.h": "c"
+  }
 }
