@@ -229,25 +229,88 @@ enum CHIMERA_FS_FH_MAGIC {
 };
 
 struct chimera_vfs_module {
+    /* Required
+     * Short name for the module to be used in creating shares
+     */
+
     const char *name;
+
+    /* Required
+     * Set to CHIMERA_FS_FH_MAGIC value reserved above
+     */
+
     uint8_t     fh_magic;
+
+    /* Required
+     * See dispatch function description below
+     */
+
+    uint8_t     blocking;
+
+    /* Optional
+     * Called once at initialization to setup global state
+     * Return a pointer to global state structure
+     */
 
     void      * (*init)(
         void);
 
+    /* Optional
+     * Called once at destruction to clean up global state
+     * returned from the init function
+     */
+
     void        (*destroy)(
         void *);
+
+    /* Optional
+     * Called once per thread at initialization to setup per-thread state
+     * Receives global state pointer as an argument
+     * Return a pointer to per-thread state structure
+     */
 
     void      * (*thread_init)(
         struct evpl *evpl,
         void        *private_data);
 
+    /* Optional
+     * Called once per thread at destruction to clean up per-thread state
+     * Receives per-thread state pointer as an argument
+     */
+
     void        (*thread_destroy)(
         void *);
 
-    void        (*dispatch)(
+    /* Required
+     * Called to dispatch a request to the module
+     * Receives request and per-thread state pointer as an argument
+     *
+     * Module shuold call request->complete(request) when the
+     * request processing is completed.
+     *
+     * If dispatch logic is blocking, set the blocking flag to 1 above.
+     *
+     * If blocking flag is unset, requests will be dispatched from
+     * chimera's main threadpool, ie the same threadpool that is
+     * pumping network traffic.  In this case the dispatch function is
+     * expected to quickly complete and then asynchronously make the
+     * complete callback later after any underlying slow operations
+     * such as I/O have been asynchronously completed.
+     *
+     * If blocking flag is set, requests will be dispatched from a
+     * separate dedicated pool of threads which will expect to process
+     * only one request at a time.  The thread handoff adds overhead,
+     * but nonetheless this scheme avoids stalling the main network
+     * threads due to blocking inside VFS modules.
+     *
+     * Implementing VFS modules in a non-blocking manner is recommended
+     * where feasible.
+     */
+
+    void (*dispatch)(
         struct chimera_vfs_request *request,
         void                       *private_data);
+
 };
 
 struct chimera_vfs_share {
@@ -262,6 +325,7 @@ struct chimera_vfs {
     struct chimera_vfs_module *modules[CHIMERA_VFS_FH_MAGIC_MAX];
     void                      *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
     struct chimera_vfs_share  *shares;
+    struct evpl_threadpool    *syncthreads;
 };
 
 struct chimera_vfs_thread {

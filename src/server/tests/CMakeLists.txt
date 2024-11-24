@@ -6,5 +6,9 @@ target_link_libraries(libnfs_nfs4_mount nfs chimera_server)
 add_executable(libnfs_nfs4_readdir_shares libnfs_nfs4_readdir_shares.c)
 target_link_libraries(libnfs_nfs4_readdir_shares nfs chimera_server)
 
+add_executable(libnfs_nfs4_linux_readdir libnfs_nfs4_linux_readdir.c)
+target_link_libraries(libnfs_nfs4_linux_readdir nfs chimera_server)
+
 add_test(NAME chimera/server/libnfs_nfs4_mount COMMAND ${CMAKE_CURRENT_BINARY_DIR}/libnfs_nfs4_mount)
 add_test(NAME chimera/server/libnfs_nfs4_readdir_shares COMMAND ${CMAKE_CURRENT_BINARY_DIR}/libnfs_nfs4_readdir_shares)
+add_test(NAME chimera/server/libnfs_nfs4_linux_readdir COMMAND ${CMAKE_CURRENT_BINARY_DIR}/libnfs_nfs4_linux_readdir)

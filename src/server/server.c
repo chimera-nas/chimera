@@ -9,7 +9,6 @@
 #include "protocol.h"
 #include "nfs/nfs.h"
 #include "vfs/vfs.h"
-#include "vfs/memfs/memfs.h"
 
 struct chimera_server {
     struct chimera_vfs             *vfs;
@@ -88,8 +87,6 @@ chimera_server_init(const char *cfgfile)
     server = calloc(1, sizeof(*server));
 
     server->vfs = chimera_vfs_init();
-
-    chimera_vfs_register(server->vfs, &vfs_memvfs);
 
     server->protocols[server->num_protocols++] = &nfs_protocol;
 

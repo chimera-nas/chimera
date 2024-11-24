@@ -117,9 +117,8 @@ chimera_nfs4_marshall_attrs(
     memset(rsp_mask, 0, sizeof(uint32_t) * max_rsp_mask);
     *num_rsp_mask = 0;
 
-
     if (num_req_mask >= 1) {
-        chimera_nfs_debug("getattr request mask %08x", req_mask[0]);
+
         if (req_mask[0] & (1 << FATTR4_SUPPORTED_ATTRS)) {
             rsp_mask[0]  |= (1 << FATTR4_SUPPORTED_ATTRS);
             *num_rsp_mask = 1;
@@ -292,10 +291,6 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, attr->va_ctime.tv_nsec);
         }
     }
-
-    chimera_nfs_debug("sending getattr repply with %d words and %d bytes",
-                      num_rsp_mask,
-                      attrs - attrbase);
 
     *attrvals_len = attrs - attrbase;
 

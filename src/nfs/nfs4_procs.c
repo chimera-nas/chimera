@@ -122,8 +122,6 @@ chimera_nfs4_getattr(
     attr_mask = chimera_nfs4_getattr2mask(args->attr_request,
                                           args->num_attr_request);
 
-    chimera_nfs_debug("getattr to mask %08x", attr_mask);
-
     chimera_vfs_getattr(thread->vfs,
                         req->fh,
                         req->fhlen,
@@ -144,6 +142,11 @@ chimera_nfs4_lookup_complete(
     LOOKUP4res          *res    = &req->res.resarray[req->index].oplookup;
 
     res->status = status;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        memcpy(req->fh, fh, fhlen);
+        req->fhlen = fhlen;
+    }
 
     chimera_nfs4_compound_complete(req, status);
 

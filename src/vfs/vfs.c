@@ -7,8 +7,34 @@
 #include "vfs.h"
 #include "vfs_internal.h"
 #include "vfs_root.h"
+#include "vfs/memfs/memfs.h"
+#include "vfs/linux/linux.h"
+
 #include "common/misc.h"
 #include "uthash/utlist.h"
+#include "thread/thread.h"
+
+static void *
+chimera_vfs_syncthread_init(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    return NULL;
+} /* chimera_vfs_syncthread_init */
+
+static void
+chimera_vfs_syncthread_wake(
+    struct evpl *evpl,
+    void        *private_data)
+{
+} /* chimera_vfs_syncthread_wake */
+
+static void
+chimera_vfs_syncthread_destroy(
+    struct evpl *evpl,
+    void        *private_data)
+{
+} /* chimera_vfs_sync_destroy */
 
 struct chimera_vfs *
 chimera_vfs_init(void)
@@ -18,6 +44,14 @@ chimera_vfs_init(void)
     vfs = calloc(1, sizeof(*vfs));
 
     chimera_vfs_register(vfs, &vfs_root);
+    chimera_vfs_register(vfs, &vfs_memvfs);
+    chimera_vfs_register(vfs, &vfs_linux);
+
+    vfs->syncthreads = evpl_threadpool_create(16,
+                                              chimera_vfs_syncthread_init,
+                                              chimera_vfs_syncthread_wake,
+                                              chimera_vfs_syncthread_destroy,
+                                              vfs);
 
     return vfs;
 } /* chimera_vfs_init */
@@ -28,6 +62,8 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     struct chimera_vfs_module *module;
     struct chimera_vfs_share  *share;
     int                        i;
+
+    evpl_threadpool_destroy(vfs->syncthreads);
 
     while (vfs->shares) {
         share = vfs->shares;

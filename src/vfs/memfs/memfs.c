@@ -6,14 +6,29 @@
 #include "memfs.h"
 #include "common/logging.h"
 
-#define chimera_memfs_debug(...) chimera_debug("memfs", __VA_ARGS__)
-#define chimera_memfs_info(...)  chimera_info("memfs", __VA_ARGS__)
-#define chimera_memfs_error(...) chimera_error("memfs", __VA_ARGS__)
-#define chimera_memfs_fatal(...) chimera_fatal("memfs", __VA_ARGS__)
-#define chimera_memfs_abort(...) chimera_abort("core", __VA_ARGS__)
+#define chimera_memfs_debug(...) chimera_debug("memfs", \
+                                               __FILE__, \
+                                               __LINE__, \
+                                               __VA_ARGS__)
+#define chimera_memfs_info(...)  chimera_info("memfs", \
+                                              __FILE__, \
+                                              __LINE__, \
+                                              __VA_ARGS__)
+#define chimera_memfs_error(...) chimera_error("memfs", \
+                                               __FILE__, \
+                                               __LINE__, \
+                                               __VA_ARGS__)
+#define chimera_memfs_fatal(...) chimera_fatal("memfs", \
+                                               __FILE__, \
+                                               __LINE__, \
+                                               __VA_ARGS__)
+#define chimera_memfs_abort(...) chimera_abort("memfs", \
+                                               __FILE__, \
+                                               __LINE__, \
+                                               __VA_ARGS__)
 
 #define chimera_memfs_fatal_if(cond, ...) \
-        chimera_fatal_if(cond, "memfs", __VA_ARGS__)
+        chimera_fatal_if(cond, "memfs", __FILE__, __LINE__, __VA_ARGS__)
 
 static void *
 memfs_init(void)
@@ -107,6 +122,7 @@ memfs_dispatch(
 struct chimera_vfs_module vfs_memvfs = {
     .name           = "memfs",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_MEMFS,
+    .blocking       = 0,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

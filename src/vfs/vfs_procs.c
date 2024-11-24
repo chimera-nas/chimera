@@ -2,6 +2,35 @@
 #include "vfs_internal.h"
 #include "common/format.h"
 #include "common/misc.h"
+
+static inline struct chimera_vfs_module *
+chimera_vfs_get_module(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen)
+{
+    struct chimera_vfs *vfs = thread->vfs;
+
+    uint8_t             fh_magic;
+
+    if (fhlen < 1) {
+        return NULL;
+    }
+
+    fh_magic = *(uint8_t *) fh;
+
+    return vfs->modules[fh_magic];
+} /* chimera_vfs_get_module */
+
+static inline void
+chimera_vfs_dispatch(
+    struct chimera_vfs_thread  *thread,
+    struct chimera_vfs_module  *module,
+    struct chimera_vfs_request *request)
+{
+    module->dispatch(request, thread->module_private[module->fh_magic]);
+} /* chimera_vfs_dispatch */
+
 void
 chimera_vfs_getrootfh(
     struct chimera_vfs_thread *thread,
@@ -20,6 +49,12 @@ chimera_vfs_lookup_complete(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread    *thread   = request->thread;
     chimera_vfs_lookup_callback_t callback = request->proto_callback;
+    char                          fhstr[80];
+
+    format_hex(fhstr, sizeof(fhstr), request->lookup.r_fh, request->lookup.
+               r_fh_len);
+
+    chimera_vfs_debug("lookup_complete: fh=%s", fhstr);
 
     callback(request->status,
              request->lookup.r_fh,
@@ -42,20 +77,13 @@ chimera_vfs_lookup(
 {
     struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
-    uint8_t                     fh_magic;
     char                        fhstr[80];
 
     format_hex(fhstr, sizeof(fhstr), fh, fhlen);
     chimera_vfs_debug("chimera_vfs_lookup: fh=%s name=%s",
                       fhstr, name);
 
-    if (unlikely(fhlen < 1)) {
-        callback(CHIMERA_VFS_ENOENT, NULL, 0, private_data);
-        return;
-    }
-
-    fh_magic = *(uint8_t *) fh;
-    module   = thread->vfs->modules[fh_magic];
+    module = chimera_vfs_get_module(thread, fh, fhlen);
 
     request                       = chimera_vfs_request_alloc(thread);
     request->opcode               = CHIMERA_VFS_OP_LOOKUP;
@@ -67,7 +95,7 @@ chimera_vfs_lookup(
     request->proto_callback       = callback;
     request->proto_private_data   = private_data;
 
-    module->dispatch(request, thread->module_private[fh_magic]);
+    chimera_vfs_dispatch(thread, module, request);
 } /* chimera_vfs_lookup */
 
 static void
@@ -95,16 +123,8 @@ chimera_vfs_getattr(
 {
     struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
-    uint8_t                     fh_magic;
 
-    if (unlikely(fhlen < 1)) {
-        callback(CHIMERA_VFS_ENOENT, 0, NULL, private_data);
-        return;
-    }
-
-    fh_magic = *(uint8_t *) fh;
-
-    module = thread->vfs->modules[fh_magic];
+    module = chimera_vfs_get_module(thread, fh, fhlen);
 
     request = chimera_vfs_request_alloc(thread);
 
@@ -116,8 +136,7 @@ chimera_vfs_getattr(
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 
-    module->dispatch(request, thread->module_private[fh_magic]);
-
+    chimera_vfs_dispatch(thread, module, request);
 } /* chimera_vfs_getattr */
 
 static void
@@ -145,16 +164,8 @@ chimera_vfs_readdir(
 {
     struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
-    uint8_t                     fh_magic;
 
-    if (unlikely(fhlen < 1)) {
-        complete(CHIMERA_VFS_ENOENT, 0, 1, private_data);
-        return;
-    }
-
-    fh_magic = *(uint8_t *) fh;
-
-    module = thread->vfs->modules[fh_magic];
+    module = chimera_vfs_get_module(thread, fh, fhlen);
 
     request = chimera_vfs_request_alloc(thread);
 
@@ -167,5 +178,5 @@ chimera_vfs_readdir(
     request->proto_callback     = complete;
     request->proto_private_data = private_data;
 
-    module->dispatch(request, thread->module_private[fh_magic]);
+    chimera_vfs_dispatch(thread, module, request);
 } /* chimera_vfs_readdir */

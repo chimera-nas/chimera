@@ -5,14 +5,32 @@
 #include "common/logging.h"
 #include "uthash/utlist.h"
 
-#define chimera_vfs_debug(...) chimera_debug("vfs", __VA_ARGS__)
-#define chimera_vfs_info(...)  chimera_info("vfs", __VA_ARGS__)
-#define chimera_vfs_error(...) chimera_error("vfs", __VA_ARGS__)
-#define chimera_vfs_fatal(...) chimera_fatal("vfs", __VA_ARGS__)
-#define chimera_vfs_abort(...) chimera_abort("core", __VA_ARGS__)
+#define chimera_vfs_debug(...) chimera_debug("vfs", \
+                                             __FILE__, \
+                                             __LINE__, \
+                                             __VA_ARGS__)
+#define chimera_vfs_info(...)  chimera_info("vfs", \
+                                            __FILE__, \
+                                            __LINE__, \
+                                            __VA_ARGS__)
+#define chimera_vfs_error(...) chimera_error("vfs", \
+                                             __FILE__, \
+                                             __LINE__, \
+                                             __VA_ARGS__)
+#define chimera_vfs_fatal(...) chimera_fatal("vfs", \
+                                             __FILE__, \
+                                             __LINE__, \
+                                             __VA_ARGS__)
+#define chimera_vfs_abort(...) chimera_abort("vfs", \
+                                             __FILE__, \
+                                             __LINE__, \
+                                             __VA_ARGS__)
 
 #define chimera_vfs_fatal_if(cond, ...) \
-        chimera_fatal_if(cond, "vfs", __VA_ARGS__)
+        chimera_fatal_if(cond, "vfs", \
+                         __FILE__, \
+                         __LINE__, \
+                         __VA_ARGS__)
 
 static inline struct chimera_vfs_request *
 chimera_vfs_request_alloc(struct chimera_vfs_thread *thread)

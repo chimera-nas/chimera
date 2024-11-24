@@ -6,14 +6,32 @@
 #include "common/logging.h"
 #include "vfs/vfs_internal.h"
 
-#define chimera_vfs_root_debug(...) chimera_debug("vfs_root", __VA_ARGS__)
-#define chimera_vfs_root_info(...)  chimera_info("vfs_root", __VA_ARGS__)
-#define chimera_vfs_root_error(...) chimera_error("vfs_root", __VA_ARGS__)
-#define chimera_vfs_root_fatal(...) chimera_fatal("vfs_root", __VA_ARGS__)
-#define chimera_vfs_root_abort(...) chimera_abort("core", __VA_ARGS__)
+#define chimera_vfs_root_debug(...) chimera_debug("vfs_root", \
+                                                  __FILE__, \
+                                                  __LINE__, \
+                                                  __VA_ARGS__)
+#define chimera_vfs_root_info(...)  chimera_info("vfs_root", \
+                                                 __FILE__, \
+                                                 __LINE__, \
+                                                 __VA_ARGS__)
+#define chimera_vfs_root_error(...) chimera_error("vfs_root", \
+                                                  __FILE__, \
+                                                  __LINE__, \
+                                                  __VA_ARGS__)
+#define chimera_vfs_root_fatal(...) chimera_fatal("vfs_root", \
+                                                  __FILE__, \
+                                                  __LINE__, \
+                                                  __VA_ARGS__)
+#define chimera_vfs_root_abort(...) chimera_abort("vfs_root", \
+                                                  __FILE__, \
+                                                  __LINE__, \
+                                                  __VA_ARGS__)
 
 #define chimera_vfs_root_fatal_if(cond, ...) \
-        chimera_fatal_if(cond, "vfs_root", __VA_ARGS__)
+        chimera_fatal_if(cond, "vfs_root", \
+                         __FILE__, \
+                         __LINE__, \
+                         __VA_ARGS__)
 
 static void *
 chimera_vfs_root_init(void)
@@ -80,11 +98,11 @@ chimera_vfs_root_lookup_path_complete(struct chimera_vfs_request *subrequest)
     request->status = subrequest->status;
 
     memcpy(
-        request->lookup_path.r_fh,
+        request->lookup.r_fh,
         subrequest->lookup_path.r_fh,
         subrequest->lookup_path.r_fh_len);
 
-    request->lookup_path.r_fh_len = subrequest->lookup_path.r_fh_len;
+    request->lookup.r_fh_len = subrequest->lookup_path.r_fh_len;
 
     request->complete(request);
 
@@ -219,6 +237,7 @@ chimera_vfs_root_dispatch(
 struct chimera_vfs_module vfs_root = {
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_ROOT,
     .name           = "root",
+    .blocking       = 0,
     .init           = chimera_vfs_root_init,
     .destroy        = chimera_vfs_root_destroy,
     .thread_init    = chimera_vfs_root_thread_init,

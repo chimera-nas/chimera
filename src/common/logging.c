@@ -22,6 +22,8 @@ void
 chimera_vlog(
     int         level,
     const char *mod,
+    const char *file,
+    int         line,
     const char *fmt,
     va_list     argp)
 {
@@ -45,8 +47,8 @@ chimera_vlog(
 
     bp += vsnprintf(bp, (buf + sizeof(buf)) - bp, fmt, argp);
     bp += snprintf(bp, (buf + sizeof(buf)) - bp,
-                   "\" process=%lu thread=%lu level=%s module=%s\n",
-                   pid, tid, level_string[level], mod);
+                   "\" process=%lu thread=%lu level=%s module=%s source=\"%s:%d\"\n",
+                   pid, tid, level_string[level], mod, file, line);
     fprintf(stderr, "%s", buf);
 } /* chimera_vlog */
 
@@ -54,52 +56,60 @@ chimera_vlog(
 void
 chimera_debug(
     const char *mod,
+    const char *file,
+    int         line,
     const char *fmt,
     ...)
 {
     va_list argp;
 
     va_start(argp, fmt);
-    chimera_vlog(CHIMERA_LOG_DEBUG, mod, fmt, argp);
+    chimera_vlog(CHIMERA_LOG_DEBUG, mod, file, line, fmt, argp);
     va_end(argp);
 } /* chimera_debug */
 
 void
 chimera_info(
     const char *mod,
+    const char *file,
+    int         line,
     const char *fmt,
     ...)
 {
     va_list argp;
 
     va_start(argp, fmt);
-    chimera_vlog(CHIMERA_LOG_INFO, mod, fmt, argp);
+    chimera_vlog(CHIMERA_LOG_INFO, mod, file, line, fmt, argp);
     va_end(argp);
 } /* chimera_info */
 
 void
 chimera_error(
     const char *mod,
+    const char *file,
+    int         line,
     const char *fmt,
     ...)
 {
     va_list argp;
 
     va_start(argp, fmt);
-    chimera_vlog(CHIMERA_LOG_ERROR, mod, fmt, argp);
+    chimera_vlog(CHIMERA_LOG_ERROR, mod, file, line, fmt, argp);
     va_end(argp);
 } /* chimera_error */
 
 void
 chimera_fatal(
     const char *mod,
+    const char *file,
+    int         line,
     const char *fmt,
     ...)
 {
     va_list argp;
 
     va_start(argp, fmt);
-    chimera_vlog(CHIMERA_LOG_FATAL, mod, fmt, argp);
+    chimera_vlog(CHIMERA_LOG_FATAL, mod, file, line, fmt, argp);
     va_end(argp);
 
     exit(1);
@@ -108,13 +118,15 @@ chimera_fatal(
 void
 chimera_abort(
     const char *mod,
+    const char *file,
+    int         line,
     const char *fmt,
     ...)
 {
     va_list argp;
 
     va_start(argp, fmt);
-    chimera_vlog(CHIMERA_LOG_FATAL, mod, fmt, argp);
+    chimera_vlog(CHIMERA_LOG_FATAL, mod, file, line, fmt, argp);
     va_end(argp);
 
     abort();
