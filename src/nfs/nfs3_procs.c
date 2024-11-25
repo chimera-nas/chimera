@@ -19,30 +19,6 @@
             CHIMERA_VFS_ATTR_MTIME | \
             CHIMERA_VFS_ATTR_CTIME)
 
-static struct nfs3_request *
-nfs3_request_alloc(struct chimera_server_nfs_thread *thread)
-{
-    struct nfs3_request *req;
-
-    if (thread->free_nfs3_requests) {
-        req = thread->free_nfs3_requests;
-        LL_DELETE(thread->free_nfs3_requests, req);
-    } else {
-        req         = calloc(1, sizeof(*req));
-        req->thread = thread;
-    }
-
-    return req;
-} /* nfs3_request_alloc */
-
-static void
-nfs3_request_free(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs3_request              *req)
-{
-    LL_PREPEND(thread->free_nfs3_requests, req);
-} /* nfs3_request_free */
-
 void
 chimera_nfs3_null(
     struct evpl           *evpl,
@@ -63,7 +39,7 @@ chimera_nfs3_getattr_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct nfs3_request              *req    = private_data;
+    struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
@@ -76,7 +52,7 @@ chimera_nfs3_getattr_complete(
 
     shared->nfs_v3.send_reply_NFSPROC3_GETATTR(evpl, &res, msg);
 
-    nfs3_request_free(thread, req);
+    nfs_request_free(thread, req);
 } /* chimera_nfs3_getattr_complete */
 
 void
@@ -88,9 +64,9 @@ chimera_nfs3_getattr(
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
-    struct nfs3_request              *req;
+    struct nfs_request               *req;
 
-    req               = nfs3_request_alloc(thread);
+    req               = nfs_request_alloc(thread);
     req->args_getattr = args;
     req->conn         = conn;
     req->msg          = msg;
@@ -121,7 +97,7 @@ chimera_nfs3_lookup_complete(
     int                    fhlen,
     void                  *private_data)
 {
-    struct nfs3_request              *req    = private_data;
+    struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
@@ -135,7 +111,7 @@ chimera_nfs3_lookup_complete(
 
     shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, &res, msg);
 
-    nfs3_request_free(thread, req);
+    nfs_request_free(thread, req);
 } /* chimera_nfs3_lookup_complete */
 
 void
@@ -147,9 +123,9 @@ chimera_nfs3_lookup(
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
-    struct nfs3_request              *req;
+    struct nfs_request               *req;
 
-    req              = nfs3_request_alloc(thread);
+    req              = nfs_request_alloc(thread);
     req->args_lookup = args;
     req->conn        = conn;
     req->msg         = msg;
@@ -318,7 +294,7 @@ chimera_nfs3_readdir_callback(
     const struct chimera_vfs_attrs *attrs,
     void                           *arg)
 {
-    struct nfs3_request    *req = arg;
+    struct nfs_request     *req = arg;
     struct evpl_rpc2_msg   *msg = req->msg;
     struct READDIRPLUS3res *res = &req->res_readdirplus;
     struct entryplus3      *entry, *preventry;
@@ -351,7 +327,7 @@ chimera_nfs3_readdirplus_complete(
     uint32_t               eof,
     void                  *private_data)
 {
-    struct nfs3_request              *req    = private_data;
+    struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_shared *shared = req->thread->shared;
     struct evpl                      *evpl   = req->thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
@@ -363,7 +339,7 @@ chimera_nfs3_readdirplus_complete(
 
     shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, res, msg);
 
-    nfs3_request_free(req->thread, req);
+    nfs_request_free(req->thread, req);
 } /* chimera_nfs3_readdirplus_complete */
 
 void
@@ -375,10 +351,10 @@ chimera_nfs3_readdirplus(
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
-    struct nfs3_request              *req;
+    struct nfs_request               *req;
     struct READDIRPLUS3res           *res;
 
-    req                   = nfs3_request_alloc(thread);
+    req                   = nfs_request_alloc(thread);
     req->args_readdirplus = args;
     req->conn             = conn;
     req->msg              = msg;
@@ -414,7 +390,7 @@ chimera_nfs3_fsinfo_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct nfs3_request              *req    = private_data;
+    struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
@@ -436,7 +412,7 @@ chimera_nfs3_fsinfo_complete(
 
     shared->nfs_v3.send_reply_NFSPROC3_FSINFO(evpl, &res, msg);
 
-    nfs3_request_free(thread, req);
+    nfs_request_free(thread, req);
 } /* chimera_nfs3_fsinfo_complete */
 
 void
@@ -448,7 +424,7 @@ chimera_nfs3_fsinfo(
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
-    struct nfs3_request              *req;
+    struct nfs_request               *req;
     char                              fhstr[80];
 
     format_hex(fhstr, sizeof(fhstr), args->fsroot.data.data, args->fsroot.data.
@@ -456,7 +432,7 @@ chimera_nfs3_fsinfo(
 
     chimera_nfs_debug("fsinfo fh %s", fhstr);
 
-    req              = nfs3_request_alloc(thread);
+    req              = nfs_request_alloc(thread);
     req->args_fsinfo = args;
     req->conn        = conn;
     req->msg         = msg;

@@ -5,45 +5,32 @@
 #include "nfs3_xdr.h"
 #include "nfs4_xdr.h"
 #include "nfs4_session.h"
-
+#include "uthash/utlist.h"
 struct chimera_server_nfs_thread;
 
-struct mount_request {
-    struct chimera_server_nfs_thread *thread;
-    struct mountargs3                *args;
-    struct evpl_rpc2_conn            *conn;
-    struct evpl_rpc2_msg             *msg;
-    struct mount_request             *next;
-};
-
-struct nfs3_request {
-    struct chimera_server_nfs_thread *thread;
-    union {
-        struct LOOKUP3args      *args_lookup;
-        struct GETATTR3args     *args_getattr;
-        struct READDIR3args     *args_readdir;
-        struct READDIRPLUS3args *args_readdirplus;
-        struct FSINFO3args      *args_fsinfo;
-    };
-    union {
-        struct READDIRPLUS3res res_readdirplus;
-    };
-    struct evpl_rpc2_conn            *conn;
-    struct evpl_rpc2_msg             *msg;
-    struct nfs3_request              *next;
-};
-
-struct nfs4_request {
+struct nfs_request {
     struct chimera_server_nfs_thread *thread;
     struct nfs4_session              *session;
     uint8_t                           fh[NFS4_FHSIZE];
     int                               fhlen;
     int                               index;
-    COMPOUND4args                    *args;
-    COMPOUND4res                      res;
     struct evpl_rpc2_conn            *conn;
     struct evpl_rpc2_msg             *msg;
-    struct nfs4_request              *next;
+    struct nfs_request               *next;
+    union {
+        struct mountargs3       *args_mount;
+        struct LOOKUP3args      *args_lookup;
+        struct GETATTR3args     *args_getattr;
+        struct READDIR3args     *args_readdir;
+        struct READDIRPLUS3args *args_readdirplus;
+        struct FSINFO3args      *args_fsinfo;
+        COMPOUND4args           *args_compound;
+
+    };
+    union {
+        struct READDIRPLUS3res res_readdirplus;
+        COMPOUND4res           res_compound;
+    };
 };
 
 struct chimera_server_nfs_shared {
@@ -73,7 +60,29 @@ struct chimera_server_nfs_thread {
     struct evpl_endpoint             *portmap_endpoint;
     int                               active;
     int                               again;
-    struct nfs3_request              *free_nfs3_requests;
-    struct nfs4_request              *free_nfs4_requests;
-    struct mount_request             *free_mount_requests;
+    struct nfs_request               *free_requests;
 };
+
+static inline struct nfs_request *
+nfs_request_alloc(struct chimera_server_nfs_thread *thread)
+{
+    struct nfs_request *req;
+
+    if (thread->free_requests) {
+        req = thread->free_requests;
+        LL_DELETE(thread->free_requests, req);
+    } else {
+        req         = calloc(1, sizeof(*req));
+        req->thread = thread;
+    }
+
+    return req;
+} /* nfs_request_alloc */
+
+static inline void
+nfs_request_free(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req)
+{
+    LL_PREPEND(thread->free_requests, req);
+} /* nfs_request_free */

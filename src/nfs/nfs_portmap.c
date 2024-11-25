@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include "nfs_portmap.h"
 #include "nfs_internal.h"
+#include "nfs_common.h"
+
 void
 chimera_portmap_null(
     struct evpl           *evpl,

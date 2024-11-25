@@ -4,29 +4,6 @@
 #include "nfs_mount.h"
 #include "vfs/vfs_procs.h"
 #include "uthash/utlist.h"
-static struct mount_request *
-mount_request_alloc(struct chimera_server_nfs_thread *thread)
-{
-    struct mount_request *req;
-
-    if (thread->free_mount_requests) {
-        req = thread->free_mount_requests;
-        LL_DELETE(thread->free_mount_requests, req);
-    } else {
-        req         = calloc(1, sizeof(*req));
-        req->thread = thread;
-    }
-
-    return req;
-} /* mount_request_alloc */
-
-static void
-mount_request_free(
-    struct chimera_server_nfs_thread *thread,
-    struct mount_request             *req)
-{
-    LL_PREPEND(thread->free_mount_requests, req);
-} /* mount_request_free */
 
 void
 chimera_nfs_mount_null(
@@ -48,7 +25,7 @@ chimera_nfs_mount_lookup_complete(
     int                    fhlen,
     void                  *private_data)
 {
-    struct mount_request             *req    = private_data;
+    struct nfs_request               *req    = private_data;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct evpl                      *evpl   = thread->evpl;
@@ -72,7 +49,7 @@ chimera_nfs_mount_lookup_complete(
 
     shared->mount_v3.send_reply_MOUNTPROC3_MNT(evpl, &res, msg);
 
-    mount_request_free(thread, req);
+    nfs_request_free(thread, req);
 } /* chimera_nfs_mount_lookup_complete */
 
 void
@@ -84,9 +61,9 @@ chimera_nfs_mount_mnt(
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
-    struct mount_request             *req;
+    struct nfs_request               *req;
 
-    req = mount_request_alloc(thread);
+    req = nfs_request_alloc(thread);
 
     req->msg = msg;
 

@@ -1,6 +1,7 @@
 #pragma once
 
-#include "nfs_common.h"
+#include "rpc2/rpc2.h"
+#include "portmap_xdr.h"
 
 void chimera_portmap_null(
     struct evpl           *evpl,
