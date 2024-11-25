@@ -97,14 +97,16 @@ memfs_dispatch(
     switch (request->opcode) {
         case CHIMERA_VFS_OP_LOOKUP_PATH:
             request->status               = CHIMERA_VFS_OK;
-            request->lookup_path.r_fh[0]  = 42;
-            request->lookup_path.r_fh_len = 1;
+            request->lookup_path.r_fh[0]  = CHIMERA_VFS_FH_MAGIC_MEMFS;
+            request->lookup_path.r_fh[1]  = 42;
+            request->lookup_path.r_fh_len = 2;
             request->complete(request);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             request->status          = CHIMERA_VFS_OK;
-            request->lookup.r_fh[0]  = 42;
-            request->lookup.r_fh_len = 1;
+            request->lookup.r_fh[0]  = CHIMERA_VFS_FH_MAGIC_MEMFS;
+            request->lookup.r_fh[1]  = 42;
+            request->lookup.r_fh_len = 2;
             request->complete(request);
             break;
         case CHIMERA_VFS_OP_GETATTR:

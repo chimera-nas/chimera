@@ -347,9 +347,9 @@ nfs4_request_alloc(struct chimera_server_nfs_thread *thread)
 {
     struct nfs4_request *req;
 
-    if (thread->free_requests) {
-        req = thread->free_requests;
-        LL_DELETE(thread->free_requests, req);
+    if (thread->free_nfs4_requests) {
+        req = thread->free_nfs4_requests;
+        LL_DELETE(thread->free_nfs4_requests, req);
     } else {
         req         = calloc(1, sizeof(*req));
         req->thread = thread;
@@ -363,7 +363,7 @@ nfs4_request_free(
     struct chimera_server_nfs_thread *thread,
     struct nfs4_request              *req)
 {
-    LL_PREPEND(thread->free_requests, req);
+    LL_PREPEND(thread->free_nfs4_requests, req);
 } /* nfs4_request_free */
 
 static void

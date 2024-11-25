@@ -8,6 +8,31 @@
 
 struct chimera_server_nfs_thread;
 
+struct mount_request {
+    struct chimera_server_nfs_thread *thread;
+    struct mountargs3                *args;
+    struct evpl_rpc2_conn            *conn;
+    struct evpl_rpc2_msg             *msg;
+    struct mount_request             *next;
+};
+
+struct nfs3_request {
+    struct chimera_server_nfs_thread *thread;
+    union {
+        struct LOOKUP3args      *args_lookup;
+        struct GETATTR3args     *args_getattr;
+        struct READDIR3args     *args_readdir;
+        struct READDIRPLUS3args *args_readdirplus;
+        struct FSINFO3args      *args_fsinfo;
+    };
+    union {
+        struct READDIRPLUS3res res_readdirplus;
+    };
+    struct evpl_rpc2_conn            *conn;
+    struct evpl_rpc2_msg             *msg;
+    struct nfs3_request              *next;
+};
+
 struct nfs4_request {
     struct chimera_server_nfs_thread *thread;
     struct nfs4_session              *session;
@@ -48,5 +73,7 @@ struct chimera_server_nfs_thread {
     struct evpl_endpoint             *portmap_endpoint;
     int                               active;
     int                               again;
-    struct nfs4_request              *free_requests;
+    struct nfs3_request              *free_nfs3_requests;
+    struct nfs4_request              *free_nfs4_requests;
+    struct mount_request             *free_mount_requests;
 };

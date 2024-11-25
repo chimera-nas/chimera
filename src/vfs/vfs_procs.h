@@ -23,6 +23,14 @@ chimera_vfs_lookup(
     chimera_vfs_lookup_callback_t callback,
     void                         *private_data);
 
+void
+chimera_vfs_lookup_path(
+    struct chimera_vfs_thread    *vfs,
+    const char                   *path,
+    int                           pathlen,
+    chimera_vfs_lookup_callback_t callback,
+    void                         *private_data);
+
 typedef void (*chimera_vfs_getattr_callback_t)(
     enum chimera_vfs_error    error_code,
     uint64_t                  attr_mask,

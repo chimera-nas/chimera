@@ -136,7 +136,9 @@ nfs_server_thread_destroy(
     void        *data)
 {
     struct chimera_server_nfs_thread *thread = data;
-    struct nfs4_request              *req;
+    struct nfs3_request              *nfs3_req;
+    struct nfs4_request              *nfs4_req;
+    struct mount_request             *mount_req;
 
     chimera_vfs_thread_destroy(thread->vfs);
 
@@ -145,10 +147,22 @@ nfs_server_thread_destroy(
     evpl_rpc2_server_destroy(thread->rpc2_agent, thread->portmap_server);
     evpl_rpc2_destroy(thread->rpc2_agent);
 
-    while (thread->free_requests) {
-        req = thread->free_requests;
-        LL_DELETE(thread->free_requests, req);
-        free(req);
+    while (thread->free_nfs3_requests) {
+        nfs3_req = thread->free_nfs3_requests;
+        LL_DELETE(thread->free_nfs3_requests, nfs3_req);
+        free(nfs3_req);
+    }
+
+    while (thread->free_nfs4_requests) {
+        nfs4_req = thread->free_nfs4_requests;
+        LL_DELETE(thread->free_nfs4_requests, nfs4_req);
+        free(nfs4_req);
+    }
+
+    while (thread->free_mount_requests) {
+        mount_req = thread->free_mount_requests;
+        LL_DELETE(thread->free_mount_requests, mount_req);
+        free(mount_req);
     }
 
     free(thread);

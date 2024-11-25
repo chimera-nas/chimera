@@ -2,6 +2,31 @@
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "nfs_mount.h"
+#include "vfs/vfs_procs.h"
+#include "uthash/utlist.h"
+static struct mount_request *
+mount_request_alloc(struct chimera_server_nfs_thread *thread)
+{
+    struct mount_request *req;
+
+    if (thread->free_mount_requests) {
+        req = thread->free_mount_requests;
+        LL_DELETE(thread->free_mount_requests, req);
+    } else {
+        req         = calloc(1, sizeof(*req));
+        req->thread = thread;
+    }
+
+    return req;
+} /* mount_request_alloc */
+
+static void
+mount_request_free(
+    struct chimera_server_nfs_thread *thread,
+    struct mount_request             *req)
+{
+    LL_PREPEND(thread->free_mount_requests, req);
+} /* mount_request_free */
 
 void
 chimera_nfs_mount_null(
@@ -16,6 +41,40 @@ chimera_nfs_mount_null(
     shared->mount_v3.send_reply_MOUNTPROC3_NULL(evpl, msg);
 } /* chimera_nfs_mount_null */
 
+static void
+chimera_nfs_mount_lookup_complete(
+    enum chimera_vfs_error error_code,
+    const void            *fh,
+    int                    fhlen,
+    void                  *private_data)
+{
+    struct mount_request             *req    = private_data;
+    struct evpl_rpc2_msg             *msg    = req->msg;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct evpl                      *evpl   = thread->evpl;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+
+    struct mountres3                  res;
+
+    xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle, fhlen, msg->dbuf);
+    memcpy(res.mountinfo.fhandle.data, fh, fhlen);
+
+    chimera_nfs_debug("mount lookup complete error %u fhlen %u",
+                      error_code, fhlen);
+
+    if (error_code == CHIMERA_VFS_OK) {
+        res.fhs_status = MNT3_OK;
+        xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle, fhlen, msg->dbuf);
+        memcpy(res.mountinfo.fhandle.data, fh, fhlen);
+    } else {
+        res.fhs_status = MNT3ERR_NOENT;
+    }
+
+    shared->mount_v3.send_reply_MOUNTPROC3_MNT(evpl, &res, msg);
+
+    mount_request_free(thread, req);
+} /* chimera_nfs_mount_lookup_complete */
+
 void
 chimera_nfs_mount_mnt(
     struct evpl           *evpl,
@@ -25,20 +84,18 @@ chimera_nfs_mount_mnt(
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct mountres3                  res;
+    struct mount_request             *req;
 
-    chimera_nfs_debug("mount request for '%.*s'", args->path.len, args->path.str
-                      );
+    req = mount_request_alloc(thread);
 
-    res.fhs_status = MNT3_OK;
+    req->msg = msg;
 
-    xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle, 1, msg->dbuf);
-    memcpy(res.mountinfo.fhandle.data, "1", 1);
+    chimera_vfs_lookup_path(thread->vfs,
+                            args->path.str,
+                            args->path.len,
+                            chimera_nfs_mount_lookup_complete,
+                            req);
 
-    res.mountinfo.num_auth_flavors = 0;
-
-    shared->mount_v3.send_reply_MOUNTPROC3_MNT(evpl, &res, msg);
 } /* chimera_nfs_mount_mnt */
 
 void
@@ -58,7 +115,10 @@ chimera_nfs_mount_umnt(
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
+    struct chimera_server_nfs_thread *thread = private_data;
+    struct chimera_server_nfs_shared *shared = thread->shared;
 
+    shared->mount_v3.send_reply_MOUNTPROC3_UMNT(evpl, msg);
 } /* chimera_nfs_mount_umnt */
 
 void
