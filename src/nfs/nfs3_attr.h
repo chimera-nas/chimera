@@ -5,13 +5,26 @@
 #include "nfs3_xdr.h"
 #include "vfs/vfs.h"
 
+#define CHIMERA_NFS3_ATTR_MASK ( \
+            CHIMERA_VFS_ATTR_DEV | \
+            CHIMERA_VFS_ATTR_INUM | \
+            CHIMERA_VFS_ATTR_MODE | \
+            CHIMERA_VFS_ATTR_NLINK | \
+            CHIMERA_VFS_ATTR_UID | \
+            CHIMERA_VFS_ATTR_GID | \
+            CHIMERA_VFS_ATTR_RDEV | \
+            CHIMERA_VFS_ATTR_SIZE | \
+            CHIMERA_VFS_ATTR_ATIME | \
+            CHIMERA_VFS_ATTR_MTIME | \
+            CHIMERA_VFS_ATTR_CTIME)
+
 static ftype3
 chimera_nfs3_type_from_vfs(uint16_t mode)
 {
     return (mode & S_IFMT) == S_IFDIR ? NF3DIR : NF3REG;
 } /* chimera_nfs3_type_from_vfs */
 
-static void
+static inline void
 chimera_nfs3_marshall_attrs(
     const struct chimera_vfs_attrs *attr,
     struct fattr3                  *fattr)
