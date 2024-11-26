@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include "rpc2/rpc2.h"
 #include "nfs.h"
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
@@ -17,6 +18,24 @@ chimera_nfs4_compound_complete(
     struct nfs_request *req,
     nfsstat4            status);
 
+
+static void
+chimera_nfs4_access(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    nfs_argop4                       *argop,
+    nfs_resop4                       *resop)
+{
+    ACCESS4args *args = &argop->opaccess;
+    ACCESS4res  *res  = &resop->opaccess;
+
+    res->status = NFS4_OK;
+
+    res->resok4.supported = args->access;
+    res->resok4.access    = args->access;
+
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_access */
 
 static void
 chimera_nfs4_getfh(
@@ -171,6 +190,105 @@ chimera_nfs4_lookup(
                        req);
 } /* chimera_nfs4_lookup */
 
+static void
+chimera_nfs4_open_complete(
+    enum chimera_vfs_error          error_code,
+    const void                     *fh,
+    int                             fhlen,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request  *req     = private_data;
+    struct nfs4_session *session = req->session;
+    OPEN4res            *res     = &req->res_compound.resarray[req->index].
+        opopen;
+    struct nfs4_state   *state;
+
+    state = nfs4_session_alloc_slot(session);
+
+    state->nfs4_state_handle = *handle;
+
+    chimera_nfs_debug("open complete: seqid %u private %lu handle %p",
+                      state->nfs4_state_id.seqid,
+                      handle->vfs_private);
+
+    res->status                            = NFS4_OK;
+    res->resok4.stateid                    = state->nfs4_state_id;
+    res->resok4.cinfo.atomic               = 0;
+    res->resok4.cinfo.before               = 0;
+    res->resok4.cinfo.after                = 0;
+    res->resok4.rflags                     = 0;
+    res->resok4.num_attrset                = 0;
+    res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_open_complete */
+
+static void
+chimera_nfs4_open(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    nfs_argop4                       *argop,
+    nfs_resop4                       *resop)
+{
+    unsigned int flags = 0;
+
+    OPEN4args   *args = &argop->opopen;
+
+    if (args->openhow.opentype == OPEN4_CREATE) {
+        flags |= CHIMERA_VFS_OPEN_CREATE;
+    }
+
+    switch (args->share_access) {
+        case OPEN4_SHARE_ACCESS_READ:
+            flags |= CHIMERA_VFS_OPEN_RDONLY;
+            break;
+        case OPEN4_SHARE_ACCESS_WRITE:
+            flags |= CHIMERA_VFS_OPEN_WRONLY;
+            break;
+        case OPEN4_SHARE_ACCESS_BOTH:
+            flags |= CHIMERA_VFS_OPEN_RDWR;
+            break;
+    } /* switch */
+
+    switch (args->claim.claim) {
+        case CLAIM_NULL:
+            chimera_vfs_open_at(thread->vfs,
+                                req->fh,
+                                req->fhlen,
+                                args->claim.file.data,
+                                args->claim.file.len,
+                                flags,
+                                0,
+                                chimera_nfs4_open_complete,
+                                req);
+            break;
+        default:
+            abort();
+    } /* switch */
+} /* chimera_nfs4_open */
+
+static void
+chimera_nfs4_create(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    nfs_argop4                       *argop,
+    nfs_resop4                       *resop)
+{
+    #if 0
+    CREATE4args *args = &argop->opcreate;
+
+    chimera_vfs_open(thread->vfs,
+
+                     args->objname.data,
+                     args->objname.len,
+                     args->dir_fh,
+                     args->dir_fh_len,
+                     chimera_nfs4_create_complete,
+                     req);
+                     #endif /* if 0 */
+} /* chimera_nfs4_create */
+
 static int
 chimera_nfs4_readdir_callback(
     uint64_t                        cookie,
@@ -274,15 +392,38 @@ chimera_nfs4_readdir(
 } /* chimera_nfs4_readdir */
 
 static void
+chimera_nfs4_close_complete(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct nfs_request *req = private_data;
+    CLOSE4res          *res = &req->res_compound.resarray[req->index].opclose;
+
+    res->status = NFS4_OK;
+
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_close_complete */
+
+static void
 chimera_nfs4_close(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
     nfs_argop4                       *argop,
     nfs_resop4                       *resop)
 {
-    CLOSE4args *args = &argop->opclose;
+    CLOSE4args          *args    = &argop->opclose;
+    struct nfs4_session *session = req->session;
+    struct nfs4_state   *state;
+    unsigned int         seqid = args->open_stateid.seqid;
 
-    chimera_nfs_debug("close: seqid %u", args->seqid);
+    state = &session->nfs4_session_state[seqid];
+
+    chimera_nfs_debug("close: seqid %u", seqid);
+
+    chimera_vfs_close(thread->vfs,
+                      &state->nfs4_state_handle,
+                      chimera_nfs4_close_complete,
+                      req);
 } /* chimera_nfs4_close */
 
 static void
@@ -294,6 +435,7 @@ chimera_nfs4_setclientid(
 {
     SETCLIENTID4args                 *args   = &argop->opsetclientid;
     struct chimera_server_nfs_shared *shared = thread->shared;
+    struct evpl_rpc2_conn            *conn   = req->conn;
     struct nfs4_session              *session;
 
     resop->opsetclientid.resok4.clientid = nfs4_client_register(
@@ -305,8 +447,6 @@ chimera_nfs4_setclientid(
         NULL, NULL);
 
 
-    //conn->nfs4_clientid = sci->sci_r_clientid;
-
     session = nfs4_create_session(
         &shared->nfs4_shared_clients,
         resop->opsetclientid.resok4.clientid,
@@ -314,6 +454,8 @@ chimera_nfs4_setclientid(
         NULL,
         NULL);
 
+    conn->private_data = session;
+    req->session       = session;
 
     resop->opsetclientid.status = NFS4_OK;
 
@@ -397,6 +539,9 @@ chimera_nfs4_compound_process(
     thread->active = 1;
 
     switch (argop->argop) {
+        case OP_ACCESS:
+            chimera_nfs4_access(thread, req, argop, resop);
+            break;
         case OP_GETFH:
             chimera_nfs4_getfh(thread, req, argop, resop);
             break;
@@ -406,11 +551,17 @@ chimera_nfs4_compound_process(
         case OP_GETATTR:
             chimera_nfs4_getattr(thread, req, argop, resop);
             break;
+        case OP_CREATE:
+            chimera_nfs4_create(thread, req, argop, resop);
+            break;
         case OP_LOOKUP:
             chimera_nfs4_lookup(thread, req, argop, resop);
             break;
         case OP_PUTFH:
             chimera_nfs4_putfh(thread, req, argop, resop);
+            break;
+        case OP_OPEN:
+            chimera_nfs4_open(thread, req, argop, resop);
             break;
         case OP_READDIR:
             chimera_nfs4_readdir(thread, req, argop, resop);
@@ -479,6 +630,7 @@ chimera_nfs4_compound(
     req = nfs_request_alloc(thread);
 
     req->conn                 = conn;
+    req->session              = conn->private_data;
     req->msg                  = msg;
     req->args_compound        = args;
     req->res_compound.status  = NFS4_OK;

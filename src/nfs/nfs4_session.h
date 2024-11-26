@@ -3,14 +3,15 @@
 #include "nfs3_xdr.h"
 #include "nfs4_xdr.h"
 #include "uthash/uthash.h"
+#include "vfs/vfs.h"
 
 #define NFS4_SESSION_MAX_STATE 64
 
 struct nfs4_state {
-    struct stateid4 nfs4_state_id;
-    uint32_t        nfs4_state_type;
-    uint32_t        nfs4_state_active;
-    uint64_t        nfs4_state_vfs_private;
+    struct stateid4                nfs4_state_id;
+    uint32_t                       nfs4_state_type;
+    uint32_t                       nfs4_state_active;
+    struct chimera_vfs_open_handle nfs4_state_handle;
 };
 
 struct nfs4_client {
@@ -71,3 +72,36 @@ nfs4_create_session(
     uint32_t                     implicit,
     const struct channel_attrs4 *fore_attrs,
     const struct channel_attrs4 *back_attrs);
+
+void
+nfs4_destroy_session(
+    struct nfs4_client_table *table,
+    const void               *session_id);
+
+static inline struct nfs4_state *
+nfs4_session_alloc_slot(struct nfs4_session *session)
+{
+    uint32_t           slot  = ++session->nfs4_session_max_slot;
+    struct nfs4_state *state = &session->nfs4_session_state[slot];
+
+    state->nfs4_state_id.seqid = slot;
+    state->nfs4_state_active   = 1;
+
+    return state;
+} /* nfs4_session_alloc_slot */
+
+static inline void
+nfs4_session_free_slot(
+    struct nfs4_session *session,
+    uint32_t             slot)
+{
+
+    session->nfs4_session_state[slot].nfs4_state_active = 0;
+
+    while (session->nfs4_session_max_slot >= 0 &&
+           session->nfs4_session_state[session->nfs4_session_max_slot].
+           nfs4_state_active) {
+        --session->nfs4_session_max_slot;
+    }
+
+} /* nfs4_session_free_slot */

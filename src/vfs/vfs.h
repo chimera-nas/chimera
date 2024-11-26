@@ -100,6 +100,11 @@ typedef int (*chimera_vfs_readdir_callback_t)(
     const struct chimera_vfs_attrs *attrs,
     void                           *arg);
 
+struct chimera_vfs_open_handle {
+    struct chimera_vfs_module *vfs_module;
+    uint64_t                   vfs_private;
+};
+
 struct chimera_vfs_request {
     struct chimera_vfs_thread      *thread;
     uint32_t                        opcode;
@@ -163,22 +168,23 @@ struct chimera_vfs_request {
             const void *fh;
             uint32_t    fh_len;
             uint32_t    flags;
-            uint64_t   *vfs_private;
+            uint64_t    vfs_private;
         } open;
 
         struct {
-            const void *parent_fh;
-            uint32_t    parent_fh_len;
-            void       *fh;
-            uint32_t   *fh_len;
-            const char *name;
-            uint32_t    flags;
-            uint32_t    mode;
-            uint64_t   *vfs_private;
+            const void                    *parent_fh;
+            uint32_t                       parent_fh_len;
+            uint8_t                        fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t                       fh_len;
+            const char                    *name;
+            int                            namelen;
+            uint32_t                       flags;
+            uint32_t                       mode;
+            struct chimera_vfs_open_handle handle;
         } open_at;
 
         struct {
-            uint64_t vfs_private;
+            struct chimera_vfs_open_handle *handle;
         } close;
 
         struct {

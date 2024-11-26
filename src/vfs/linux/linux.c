@@ -541,6 +541,90 @@ chimera_linux_readdir(
 } /* linux_readdir */
 
 static void
+chimera_linux_open_at(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_linux_thread *thread = private_data;
+    int                          parent_fd;
+    int                          flags;
+    int                          fd;
+    int                          rc;
+
+    parent_fd = linux_open_by_handle(thread,
+                                     request->open_at.parent_fh,
+                                     request->open_at.parent_fh_len,
+                                     O_RDONLY | O_DIRECTORY);
+
+    if (parent_fd < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+    flags = 0;
+
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_RDONLY) {
+        flags |= O_RDONLY;
+    }
+
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_WRONLY) {
+        flags |= O_WRONLY;
+    }
+
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_RDWR) {
+        flags |= O_RDWR;
+    }
+
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) {
+        flags |= O_CREAT;
+    }
+
+    fd = openat(parent_fd,
+                request->open_at.name,
+                flags,
+                S_IRWXU /*XXX*/);
+
+    if (fd < 0) {
+        close(parent_fd);
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    rc = linux_get_fh(fd, "", 0, AT_EMPTY_PATH,
+                      request->open_at.fh,
+                      &request->open_at.fh_len);
+
+    if (rc) {
+        close(parent_fd);
+        close(fd);
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    request->open_at.handle.vfs_private = fd;
+
+    close(parent_fd);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* linux_open_at */
+
+static void
+chimera_linux_close(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int fd = request->close.handle->vfs_private;
+
+    close(fd);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_linux_close */
+
+static void
 chimera_linux_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -556,6 +640,12 @@ chimera_linux_dispatch(
             break;
         case CHIMERA_VFS_OP_GETATTR:
             chimera_linux_getattr(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_OPEN_AT:
+            chimera_linux_open_at(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_CLOSE:
+            chimera_linux_close(request, private_data);
             break;
         case CHIMERA_VFS_OP_READDIR:
             chimera_linux_readdir(request, private_data);

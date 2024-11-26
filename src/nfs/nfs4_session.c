@@ -228,32 +228,3 @@ nfs4_destroy_session(
     }
 
 } /* nfs4_destroy_session */
-
-struct nfs4_state *
-nfs4_session_alloc_slot(struct nfs4_session *session)
-{
-    uint32_t           slot  = ++session->nfs4_session_max_slot;
-    struct nfs4_state *state = &session->nfs4_session_state[slot];
-
-    memcpy(state->nfs4_state_id.other, &slot, sizeof(slot));
-    state->nfs4_state_id.seqid++;
-    state->nfs4_state_active = 1;
-
-    return state;
-} /* nfs4_session_alloc_slot */
-
-void
-nfs4_session_free_slot(
-    struct nfs4_session *session,
-    uint32_t             slot)
-{
-
-    session->nfs4_session_state[slot].nfs4_state_active = 0;
-
-    while (session->nfs4_session_max_slot >= 0 &&
-           session->nfs4_session_state[session->nfs4_session_max_slot].
-           nfs4_state_active) {
-        --session->nfs4_session_max_slot;
-    }
-
-} /* nfs4_session_free_slot */
