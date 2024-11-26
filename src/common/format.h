@@ -1,6 +1,6 @@
 #pragma once
 
-static int
+static inline int
 format_hex(
     char       *out,
     int         maxoutlen,

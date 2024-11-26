@@ -56,3 +56,31 @@ chimera_vfs_request_free(
 {
     DL_PREPEND(thread->free_requests, request);
 } /* chimera_vfs_request_free */
+
+static inline struct chimera_vfs_module *
+chimera_vfs_get_module(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen)
+{
+    struct chimera_vfs *vfs = thread->vfs;
+
+    uint8_t             fh_magic;
+
+    if (fhlen < 1) {
+        return NULL;
+    }
+
+    fh_magic = *(uint8_t *) fh;
+
+    return vfs->modules[fh_magic];
+} /* chimera_vfs_get_module */
+
+static inline void
+chimera_vfs_dispatch(
+    struct chimera_vfs_thread  *thread,
+    struct chimera_vfs_module  *module,
+    struct chimera_vfs_request *request)
+{
+    module->dispatch(request, thread->module_private[module->fh_magic]);
+} /* chimera_vfs_dispatch */

@@ -6,7 +6,7 @@
 #include "common/format.h"
 #include "uthash/utlist.h"
 #include "vfs/vfs_procs.h"
-
+#include "nfs3_status.h"
 
 #define CHIMERA_NFS3_ATTR_MASK ( \
             CHIMERA_VFS_ATTR_DEV | \
@@ -48,9 +48,11 @@ chimera_nfs3_getattr_complete(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct GETATTR3res                res;
 
-    res.status = NFS3_OK;
+    res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
-    chimera_nfs3_marshall_attrs(attr, &res.resok.obj_attributes);
+    if (res.status == NFS3_OK) {
+        chimera_nfs3_marshall_attrs(attr, &res.resok.obj_attributes);
+    }
 
     shared->nfs_v3.send_reply_NFSPROC3_GETATTR(evpl, &res, msg);
 
@@ -106,10 +108,13 @@ chimera_nfs3_lookup_complete(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct LOOKUP3res                 res;
 
-    res.status = NFS3_OK;
-    xdr_dbuf_opaque_copy(&res.resok.object.data, fh, fhlen, msg->dbuf);
-    res.resok.dir_attributes.attributes_follow = 0;
-    res.resok.obj_attributes.attributes_follow = 0;
+    res.status = chimera_vfs_error_to_nfsstat3(error_code);
+
+    if (res.status == NFS3_OK) {
+        xdr_dbuf_opaque_copy(&res.resok.object.data, fh, fhlen, msg->dbuf);
+        res.resok.dir_attributes.attributes_follow = 0;
+        res.resok.obj_attributes.attributes_follow = 0;
+    }
 
     shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, &res, msg);
 
@@ -204,12 +209,13 @@ chimera_nfs3_create_complete(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct CREATE3res                 res;
 
-    res.status = NFS3_OK;
+    res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
-    res.resok.obj.handle_follows = 1;
-    xdr_dbuf_opaque_copy(&res.resok.obj.handle.data, fh, fhlen, msg->dbuf);
-
-    res.resok.obj_attributes.attributes_follow = 0;
+    if (res.status == NFS3_OK) {
+        res.resok.obj.handle_follows = 1;
+        xdr_dbuf_opaque_copy(&res.resok.obj.handle.data, fh, fhlen, msg->dbuf);
+        res.resok.obj_attributes.attributes_follow = 0;
+    }
 
     shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, &res, msg);
 
@@ -240,6 +246,33 @@ chimera_nfs3_create(
                         req);
 } /* chimera_nfs3_create */
 
+static void
+chimera_nfs3_mkdir_complete(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct nfs_request               *req    = private_data;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct evpl                      *evpl   = thread->evpl;
+    struct evpl_rpc2_msg             *msg    = req->msg;
+    struct MKDIR3res                  res;
+
+    res.status = chimera_vfs_error_to_nfsstat3(
+        error_code);
+
+    if (res.status == NFS3_OK) {
+        res.resok.obj.handle_follows               = 0;
+        res.resok.obj_attributes.attributes_follow = 0;
+        res.resok.dir_wcc.before.attributes_follow = 0;
+        res.resok.dir_wcc.after.attributes_follow  = 0;
+    }
+
+    shared->nfs_v3.send_reply_NFSPROC3_MKDIR(evpl, &res, msg);
+
+    nfs_request_free(thread, req);
+} /* chimera_nfs3_mkdir_complete */
+
 void
 chimera_nfs3_mkdir(
     struct evpl           *evpl,
@@ -248,7 +281,26 @@ chimera_nfs3_mkdir(
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
-    // TODO: Implement NFSPROC3_MKDIR
+    struct chimera_server_nfs_thread *thread = private_data;
+    struct nfs_request               *req;
+    unsigned int                      mode;
+
+    if (args->attributes.mode.set_it) {
+        mode = args->attributes.mode.mode;
+    } else {
+        mode = S_IRWXU;
+    }
+
+    req = nfs_request_alloc(thread);
+
+    chimera_vfs_mkdir(thread->vfs,
+                      args->where.dir.data.data,
+                      args->where.dir.data.len,
+                      args->where.name.str,
+                      args->where.name.len,
+                      mode,
+                      chimera_nfs3_mkdir_complete,
+                      req);
 } /* chimera_nfs3_mkdir */
 
 void
@@ -375,9 +427,12 @@ chimera_nfs3_readdirplus_complete(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct READDIRPLUS3res           *res    = &req->res_readdirplus;
 
-    res->status                                 = NFS3_OK;
-    res->resok.dir_attributes.attributes_follow = 0;
-    res->resok.reply.eof                        = !!eof;
+    res->status = chimera_vfs_error_to_nfsstat3(error_code);
+
+    if (res->status == NFS3_OK) {
+        res->resok.dir_attributes.attributes_follow = 0;
+        res->resok.reply.eof                        = !!eof;
+    }
 
     shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, res, msg);
 
@@ -422,7 +477,7 @@ chimera_nfs3_fsstat(
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
-    // TODO: Implement NFSPROC3_FSSTAT
+
 } /* chimera_nfs3_fsstat */
 
 static void
@@ -439,18 +494,21 @@ chimera_nfs3_fsinfo_complete(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct FSINFO3res                 res;
 
-    res.status                    = NFS3_OK;
-    res.resok.maxfilesize         = UINT64_MAX;
-    res.resok.time_delta.seconds  = 0;
-    res.resok.time_delta.nseconds = 1;
-    res.resok.rtmax               = 1024 * 1024;
-    res.resok.rtpref              = 1024 * 1024;
-    res.resok.rtmult              = 4096;
-    res.resok.wtmax               = 1024 * 1024;
-    res.resok.wtpref              = 1024 * 1024;
-    res.resok.dtpref              = 1024 * 1024;
-    res.resok.wtmult              = 4096;
-    res.resok.properties          = 0;
+    res.status = chimera_vfs_error_to_nfsstat3(error_code);
+
+    if (res.status == NFS3_OK) {
+        res.resok.maxfilesize         = UINT64_MAX;
+        res.resok.time_delta.seconds  = 0;
+        res.resok.time_delta.nseconds = 1;
+        res.resok.rtmax               = 1024 * 1024;
+        res.resok.rtpref              = 1024 * 1024;
+        res.resok.rtmult              = 4096;
+        res.resok.wtmax               = 1024 * 1024;
+        res.resok.wtpref              = 1024 * 1024;
+        res.resok.wtmult              = 4096;
+        res.resok.dtpref              = 64 * 1024;
+        res.resok.properties          = 0;
+    }
 
     shared->nfs_v3.send_reply_NFSPROC3_FSINFO(evpl, &res, msg);
 

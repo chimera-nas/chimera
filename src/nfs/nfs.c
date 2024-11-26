@@ -46,6 +46,7 @@ nfs_server_init(struct chimera_vfs *vfs)
     shared->nfs_v3.recv_call_NFSPROC3_READLINK    = chimera_nfs3_readlink;
     shared->nfs_v3.recv_call_NFSPROC3_READ        = chimera_nfs3_read;
     shared->nfs_v3.recv_call_NFSPROC3_WRITE       = chimera_nfs3_write;
+    shared->nfs_v3.recv_call_NFSPROC3_MKDIR       = chimera_nfs3_mkdir;
     shared->nfs_v3.recv_call_NFSPROC3_CREATE      = chimera_nfs3_create;
     shared->nfs_v3.recv_call_NFSPROC3_REMOVE      = chimera_nfs3_remove;
     shared->nfs_v3.recv_call_NFSPROC3_RENAME      = chimera_nfs3_rename;

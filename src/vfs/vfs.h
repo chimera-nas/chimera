@@ -157,11 +157,13 @@ struct chimera_vfs_request {
         } readlink;
 
         struct {
-            const void *fh;
-            uint32_t    fh_len;
-            const char *name;
-            void       *r_fh;
-            uint32_t   *r_fh_len;
+            const void  *fh;
+            uint32_t     fh_len;
+            const char  *name;
+            uint32_t     name_len;
+            unsigned int mode;
+            uint8_t      r_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t     r_fh_len;
         } mkdir;
 
         struct {

@@ -625,6 +625,54 @@ chimera_linux_close(
 } /* chimera_linux_close */
 
 static void
+chimera_linux_mkdir(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_linux_thread *thread = private_data;
+    int                          fd, rc;
+    char                         fullname[NAME_MAX];
+
+    memcpy(fullname, request->mkdir.name, request->mkdir.name_len);
+    fullname[request->mkdir.name_len] = '\0';
+
+    fd = linux_open_by_handle(thread,
+                              request->mkdir.fh,
+                              request->mkdir.fh_len,
+                              O_PATH | O_RDONLY | O_NOFOLLOW);
+
+    if (fd < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    rc = mkdirat(fd, fullname, request->mkdir.mode);
+
+    if (rc < 0) {
+        close(fd);
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    rc = linux_get_fh(fd, "", 0, AT_EMPTY_PATH,
+                      request->mkdir.r_fh,
+                      &request->mkdir.r_fh_len);
+
+    close(fd);
+
+    if (rc < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_linux_mkdir */
+
+static void
 chimera_linux_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -646,6 +694,9 @@ chimera_linux_dispatch(
             break;
         case CHIMERA_VFS_OP_CLOSE:
             chimera_linux_close(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_MKDIR:
+            chimera_linux_mkdir(request, private_data);
             break;
         case CHIMERA_VFS_OP_READDIR:
             chimera_linux_readdir(request, private_data);

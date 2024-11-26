@@ -23,13 +23,19 @@ chimera_vfs_lookup(
     chimera_vfs_lookup_callback_t callback,
     void                         *private_data);
 
+typedef void (*chimera_vfs_lookup_path_callback_t)(
+    enum chimera_vfs_error error_code,
+    const void            *fh,
+    int                    fh_len,
+    void                  *private_data);
+
 void
 chimera_vfs_lookup_path(
-    struct chimera_vfs_thread    *vfs,
-    const char                   *path,
-    int                           pathlen,
-    chimera_vfs_lookup_callback_t callback,
-    void                         *private_data);
+    struct chimera_vfs_thread         *vfs,
+    const char                        *path,
+    int                                pathlen,
+    chimera_vfs_lookup_path_callback_t callback,
+    void                              *private_data);
 
 typedef void (*chimera_vfs_getattr_callback_t)(
     enum chimera_vfs_error    error_code,
@@ -91,3 +97,18 @@ chimera_vfs_close(
     struct chimera_vfs_open_handle *handle,
     chimera_vfs_close_callback_t    callback,
     void                           *private_data);
+
+typedef void (*chimera_vfs_mkdir_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_mkdir(
+    struct chimera_vfs_thread   *thread,
+    const void                  *fh,
+    int                          fhlen,
+    const char                  *name,
+    int                          namelen,
+    unsigned int                 mode,
+    chimera_vfs_mkdir_callback_t callback,
+    void                        *private_data);
