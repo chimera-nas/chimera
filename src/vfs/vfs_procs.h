@@ -1,6 +1,8 @@
 #pragma once
 
 #include "vfs.h"
+struct evpl_iovec;
+
 void
 chimera_vfs_getrootfh(
     struct chimera_vfs_thread *thread,
@@ -126,3 +128,33 @@ chimera_vfs_remove(
     int                           namelen,
     chimera_vfs_remove_callback_t callback,
     void                         *private_data);
+
+typedef void (*chimera_vfs_read_callback_t)(
+    enum chimera_vfs_error error_code,
+    uint32_t               count,
+    uint32_t               eof,
+    void                  *private_data);
+
+void
+chimera_vfs_read(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        count,
+    chimera_vfs_read_callback_t     callback,
+    void                           *private_data);
+
+typedef void (*chimera_vfs_write_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_write(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        count,
+    struct evpl_iovec              *iov,
+    int                             niov,
+    chimera_vfs_write_callback_t    callback,
+    void                           *private_data);
