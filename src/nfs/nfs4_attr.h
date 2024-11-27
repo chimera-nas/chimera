@@ -1,5 +1,8 @@
 #pragma once
 
+/* XXX */
+#include <sys/stat.h>
+
 #include "vfs/vfs.h"
 
 static inline uint64_t

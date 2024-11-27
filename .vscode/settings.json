@@ -24,6 +24,7 @@
   "editor.formatOnSave": true,
   "files.associations": {
     "misc.h": "c",
-    "vfs_procs.h": "c"
+    "vfs_procs.h": "c",
+    "utlist.h": "c"
   }
 }

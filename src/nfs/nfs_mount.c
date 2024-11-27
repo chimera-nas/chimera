@@ -36,9 +36,6 @@ chimera_nfs_mount_lookup_complete(
     xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle, fhlen, msg->dbuf);
     memcpy(res.mountinfo.fhandle.data, fh, fhlen);
 
-    chimera_nfs_debug("mount lookup complete error %u fhlen %u",
-                      error_code, fhlen);
-
     if (error_code == CHIMERA_VFS_OK) {
         res.fhs_status = MNT3_OK;
         xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle, fhlen, msg->dbuf);
