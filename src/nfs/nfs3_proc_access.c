@@ -4,7 +4,7 @@ void
 chimera_nfs3_access(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    ACCESS3args           *args,
+    struct ACCESS3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {

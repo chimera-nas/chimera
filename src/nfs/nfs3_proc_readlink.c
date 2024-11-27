@@ -4,7 +4,7 @@ void
 chimera_nfs3_readlink(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    READLINK3args         *args,
+    struct READLINK3args  *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {

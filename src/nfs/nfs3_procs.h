@@ -11,147 +11,147 @@ void chimera_nfs3_null(
 void chimera_nfs3_getattr(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    GETATTR3args          *args,
+    struct GETATTR3args   *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_setattr(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    SETATTR3args          *args,
+    struct SETATTR3args   *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_lookup(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    LOOKUP3args           *args,
+    struct LOOKUP3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_access(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    ACCESS3args           *args,
+    struct ACCESS3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_readlink(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    READLINK3args         *args,
+    struct READLINK3args  *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_read(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    READ3args             *args,
+    struct READ3args      *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_write(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    WRITE3args            *args,
+    struct WRITE3args     *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_create(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    CREATE3args           *args,
+    struct CREATE3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_mkdir(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    MKDIR3args            *args,
+    struct MKDIR3args     *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_symlink(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    SYMLINK3args          *args,
+    struct SYMLINK3args   *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_mknod(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    MKNOD3args            *args,
+    struct MKNOD3args     *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_remove(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    REMOVE3args           *args,
+    struct REMOVE3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_rmdir(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    RMDIR3args            *args,
+    struct RMDIR3args     *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_rename(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    RENAME3args           *args,
+    struct RENAME3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_link(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    LINK3args             *args,
+    struct LINK3args      *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_readdir(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    READDIR3args          *args,
+    struct READDIR3args   *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_readdirplus(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    READDIRPLUS3args      *args,
-    struct evpl_rpc2_msg  *msg,
-    void                  *private_data);
+    struct evpl             *evpl,
+    struct evpl_rpc2_conn   *conn,
+    struct READDIRPLUS3args *args,
+    struct evpl_rpc2_msg    *msg,
+    void                    *private_data);
 
 void chimera_nfs3_fsstat(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    FSSTAT3args           *args,
+    struct FSSTAT3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_fsinfo(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    FSINFO3args           *args,
+    struct FSINFO3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_pathconf(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    PATHCONF3args         *args,
+    struct PATHCONF3args  *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
 void chimera_nfs3_commit(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    COMMIT3args           *args,
+    struct COMMIT3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 

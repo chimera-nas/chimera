@@ -24,12 +24,12 @@ struct nfs_request {
         struct READDIR3args     *args_readdir;
         struct READDIRPLUS3args *args_readdirplus;
         struct FSINFO3args      *args_fsinfo;
-        COMPOUND4args           *args_compound;
+        struct COMPOUND4args    *args_compound;
 
     };
     union {
         struct READDIRPLUS3res res_readdirplus;
-        COMPOUND4res           res_compound;
+        struct COMPOUND4res    res_compound;
     };
 };
 
@@ -64,7 +64,10 @@ struct chimera_server_nfs_thread {
 };
 
 static inline struct nfs_request *
-nfs_request_alloc(struct chimera_server_nfs_thread *thread)
+nfs_request_alloc(
+    struct chimera_server_nfs_thread *thread,
+    struct evpl_rpc2_conn            *conn,
+    struct evpl_rpc2_msg             *msg)
 {
     struct nfs_request *req;
 
@@ -75,6 +78,10 @@ nfs_request_alloc(struct chimera_server_nfs_thread *thread)
         req         = calloc(1, sizeof(*req));
         req->thread = thread;
     }
+
+
+    req->conn = conn;
+    req->msg  = msg;
 
     return req;
 } /* nfs_request_alloc */

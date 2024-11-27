@@ -35,7 +35,7 @@ void
 chimera_nfs3_mkdir(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    MKDIR3args            *args,
+    struct MKDIR3args     *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
@@ -49,7 +49,7 @@ chimera_nfs3_mkdir(
         mode = S_IRWXU;
     }
 
-    req = nfs_request_alloc(thread);
+    req = nfs_request_alloc(thread, conn, msg);
 
     chimera_vfs_mkdir(thread->vfs,
                       args->where.dir.data.data,

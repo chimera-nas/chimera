@@ -6,6 +6,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
 #include "nfs4_status.h"
+#include "nfs4_xdr.h"
 #include "nfs_internal.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
@@ -23,11 +24,11 @@ static void
 chimera_nfs4_access(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
-    ACCESS4args *args = &argop->opaccess;
-    ACCESS4res  *res  = &resop->opaccess;
+    struct ACCESS4args *args = &argop->opaccess;
+    struct ACCESS4res  *res  = &resop->opaccess;
 
     res->status = NFS4_OK;
 
@@ -41,10 +42,10 @@ static void
 chimera_nfs4_getfh(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
-    GETFH4res *res = &resop->opgetfh;
+    struct GETFH4res *res = &resop->opgetfh;
 
     xdr_dbuf_opaque_copy(&res->resok4.object,
                          req->fh,
@@ -60,10 +61,10 @@ static void
 chimera_nfs4_putrootfh(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
-    PUTROOTFH4res *res = &resop->opputrootfh;
+    struct PUTROOTFH4res *res = &resop->opputrootfh;
 
     chimera_vfs_getrootfh(thread->vfs,
                           req->fh,
@@ -78,11 +79,11 @@ static void
 chimera_nfs4_putfh(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
-    PUTFH4args *args = &argop->opputfh;
-    PUTFH4res  *res  = &resop->opputfh;
+    struct PUTFH4args *args = &argop->opputfh;
+    struct  PUTFH4res *res  = &resop->opputfh;
 
     res->status = NFS4_OK;
 
@@ -99,10 +100,10 @@ chimera_nfs4_getattr_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct nfs_request *req  = private_data;
-    GETATTR4args       *args = &req->args_compound->argarray[req->index].
+    struct nfs_request  *req  = private_data;
+    struct GETATTR4args *args = &req->args_compound->argarray[req->index].
         opgetattr;
-    GETATTR4res        *res = &req->res_compound.resarray[req->index].opgetattr
+    struct GETATTR4res  *res = &req->res_compound.resarray[req->index].opgetattr
     ;
 
     res->status = NFS4_OK;
@@ -132,11 +133,11 @@ static void
 chimera_nfs4_getattr(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
-    uint64_t      attr_mask = 0;
-    GETATTR4args *args      = &argop->opgetattr;
+    uint64_t             attr_mask = 0;
+    struct GETATTR4args *args      = &argop->opgetattr;
 
     attr_mask = chimera_nfs4_getattr2mask(args->attr_request,
                                           args->num_attr_request);
@@ -158,7 +159,7 @@ chimera_nfs4_lookup_complete(
 {
     struct nfs_request *req    = private_data;
     nfsstat4            status = chimera_nfs4_errno_to_nfsstat4(error_code);
-    LOOKUP4res         *res    = &req->res_compound.resarray[req->index].
+    struct LOOKUP4res  *res    = &req->res_compound.resarray[req->index].
         oplookup;
 
     res->status = status;
@@ -176,10 +177,10 @@ static void
 chimera_nfs4_lookup(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
-    LOOKUP4args *args = &argop->oplookup;
+    struct LOOKUP4args *args = &argop->oplookup;
 
     chimera_vfs_lookup(thread->vfs,
                        req->fh,
@@ -200,7 +201,7 @@ chimera_nfs4_open_complete(
 {
     struct nfs_request  *req     = private_data;
     struct nfs4_session *session = req->session;
-    OPEN4res            *res     = &req->res_compound.resarray[req->index].
+    struct OPEN4res     *res     = &req->res_compound.resarray[req->index].
         opopen;
     struct nfs4_state   *state;
 
@@ -228,12 +229,12 @@ static void
 chimera_nfs4_open(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
-    unsigned int flags = 0;
+    unsigned int      flags = 0;
 
-    OPEN4args   *args = &argop->opopen;
+    struct OPEN4args *args = &argop->opopen;
 
     if (args->openhow.opentype == OPEN4_CREATE) {
         flags |= CHIMERA_VFS_OPEN_CREATE;
@@ -272,8 +273,8 @@ static void
 chimera_nfs4_create(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
     #if 0
     CREATE4args *args = &argop->opcreate;
@@ -297,11 +298,12 @@ chimera_nfs4_readdir_callback(
     const struct chimera_vfs_attrs *attrs,
     void                           *arg)
 {
-    struct nfs_request *req = arg;
-    struct entry4      *entry, *prev_entry;
-    READDIR4args       *args = &req->args_compound->argarray[req->index].
+    struct nfs_request   *req = arg;
+    struct entry4        *entry, *prev_entry;
+    struct READDIR4args  *args = &req->args_compound->argarray[req->index].
         opreaddir;
-    READDIR4resok      *res = &req->res_compound.resarray[req->index].opreaddir
+    struct READDIR4resok *res = &req->res_compound.resarray[req->index].
+        opreaddir
         .resok4;
 
     chimera_nfs_debug("readdir callback: cookie %llu, name %.*s, attrs %p",
@@ -353,7 +355,7 @@ chimera_nfs4_readdir_complete(
     void                  *private_data)
 {
     struct nfs_request *req = private_data;
-    READDIR4res        *res = &req->res_compound.resarray[req->index].
+    struct READDIR4res *res = &req->res_compound.resarray[req->index].
         opreaddir;
     nfsstat4            status = chimera_nfs4_errno_to_nfsstat4(error_code);
 
@@ -374,11 +376,11 @@ static void
 chimera_nfs4_readdir(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
-    READDIR4args *args = &argop->opreaddir;
-    READDIR4res  *res  = &resop->opreaddir;
+    struct READDIR4args *args = &argop->opreaddir;
+    struct READDIR4res  *res  = &resop->opreaddir;
 
     res->resok4.reply.entries = NULL;
 
@@ -397,7 +399,7 @@ chimera_nfs4_close_complete(
     void                  *private_data)
 {
     struct nfs_request *req = private_data;
-    CLOSE4res          *res = &req->res_compound.resarray[req->index].opclose;
+    struct  CLOSE4res  *res = &req->res_compound.resarray[req->index].opclose;
 
     res->status = NFS4_OK;
 
@@ -408,10 +410,10 @@ static void
 chimera_nfs4_close(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
-    CLOSE4args          *args    = &argop->opclose;
+    struct CLOSE4args   *args    = &argop->opclose;
     struct nfs4_session *session = req->session;
     struct nfs4_state   *state;
     unsigned int         seqid = args->open_stateid.seqid;
@@ -430,10 +432,10 @@ static void
 chimera_nfs4_setclientid(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
-    SETCLIENTID4args                 *args   = &argop->opsetclientid;
+    struct SETCLIENTID4args          *args   = &argop->opsetclientid;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl_rpc2_conn            *conn   = req->conn;
     struct nfs4_session              *session;
@@ -470,8 +472,8 @@ static void
 chimera_nfs4_setclientid_confirm(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    nfs_argop4                       *argop,
-    nfs_resop4                       *resop)
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
 {
     //SETCLIENTID_CONFIRM4args *args = &argop->opsetclientid_confirm;
 
@@ -495,8 +497,8 @@ chimera_nfs4_compound_process(
 {
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
-    nfs_argop4                       *argop;
-    nfs_resop4                       *resop;
+    struct nfs_argop4                *argop;
+    struct nfs_resop4                *resop;
 
  again:
 
@@ -516,6 +518,8 @@ chimera_nfs4_compound_process(
 
     if (req->index >= req->res_compound.num_resarray) {
         chimera_nfs_info("nfs4 compound operation complete");
+
+        dump_COMPOUND4res("res", &req->res_compound);
 
         shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
             thread->evpl,
@@ -625,13 +629,11 @@ chimera_nfs4_compound(
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    chimera_nfs_info("nfs4 compound call entry");
+    dump_COMPOUND4args("args", args);
 
-    req = nfs_request_alloc(thread);
+    req = nfs_request_alloc(thread, conn, msg);
 
-    req->conn                 = conn;
     req->session              = conn->private_data;
-    req->msg                  = msg;
     req->args_compound        = args;
     req->res_compound.status  = NFS4_OK;
     req->res_compound.tag.len = 0;

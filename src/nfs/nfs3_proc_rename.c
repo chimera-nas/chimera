@@ -4,7 +4,7 @@ void
 chimera_nfs3_rename(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    RENAME3args           *args,
+    struct RENAME3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {

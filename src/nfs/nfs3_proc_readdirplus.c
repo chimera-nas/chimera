@@ -65,20 +65,18 @@ chimera_nfs3_readdirplus_complete(
 
 void
 chimera_nfs3_readdirplus(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    READDIRPLUS3args      *args,
-    struct evpl_rpc2_msg  *msg,
-    void                  *private_data)
+    struct evpl             *evpl,
+    struct evpl_rpc2_conn   *conn,
+    struct READDIRPLUS3args *args,
+    struct evpl_rpc2_msg    *msg,
+    void                    *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
     struct READDIRPLUS3res           *res;
 
-    req                   = nfs_request_alloc(thread);
+    req                   = nfs_request_alloc(thread, conn, msg);
     req->args_readdirplus = args;
-    req->conn             = conn;
-    req->msg              = msg;
 
     res = &req->res_readdirplus;
 

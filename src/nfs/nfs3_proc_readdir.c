@@ -4,7 +4,7 @@ void
 chimera_nfs3_readdir(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    READDIR3args          *args,
+    struct READDIR3args   *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {

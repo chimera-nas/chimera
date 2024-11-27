@@ -36,14 +36,14 @@ void
 chimera_nfs3_create(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    CREATE3args           *args,
+    struct CREATE3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req = nfs_request_alloc(thread);
+    req = nfs_request_alloc(thread, conn, msg);
 
     chimera_vfs_open_at(thread->vfs,
                         args->where.dir.data.data,

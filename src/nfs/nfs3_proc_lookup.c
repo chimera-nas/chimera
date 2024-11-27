@@ -34,17 +34,15 @@ void
 chimera_nfs3_lookup(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    LOOKUP3args           *args,
+    struct LOOKUP3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req              = nfs_request_alloc(thread);
+    req              = nfs_request_alloc(thread, conn, msg);
     req->args_lookup = args;
-    req->conn        = conn;
-    req->msg         = msg;
 
     chimera_nfs_debug("lookup: name %.*s",
                       args->what.name.len, args->what.name.str);

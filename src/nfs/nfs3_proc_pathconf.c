@@ -4,7 +4,7 @@ void
 chimera_nfs3_pathconf(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    PATHCONF3args         *args,
+    struct PATHCONF3args  *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {

@@ -63,9 +63,7 @@ chimera_nfs_mount_mnt(
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req = nfs_request_alloc(thread);
-
-    req->msg = msg;
+    req = nfs_request_alloc(thread, conn, msg);
 
     chimera_vfs_lookup_path(thread->vfs,
                             args->path.str,

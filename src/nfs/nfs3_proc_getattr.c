@@ -32,17 +32,15 @@ void
 chimera_nfs3_getattr(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
-    GETATTR3args          *args,
+    struct GETATTR3args   *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req               = nfs_request_alloc(thread);
+    req               = nfs_request_alloc(thread, conn, msg);
     req->args_getattr = args;
-    req->conn         = conn;
-    req->msg          = msg;
 
     chimera_vfs_getattr(thread->vfs,
                         args->object.data.data,
