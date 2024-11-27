@@ -229,6 +229,15 @@ chimera_nfs4_marshall_attrs(
 
             chimera_nfs4_attr_append_uint64(&attrs, attr->va_ino);
         }
+
+        if (req_mask[0] & (1 << FATTR4_FILEHANDLE)) {
+            rsp_mask[0]  |= (1 << FATTR4_FILEHANDLE);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint32(&attrs, attr->va_fh_len);
+            memcpy(attrs, attr->va_fh, attr->va_fh_len);
+            attrs += attr->va_fh_len;
+        }
     }
 
     if (num_req_mask >= 2) {

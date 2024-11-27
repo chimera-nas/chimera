@@ -68,7 +68,7 @@ struct chimera_vfs_attrs {
     uint64_t        va_space_total;
     uint64_t        va_space_used;
 
-    uint8_t         va_fh[128];
+    uint8_t         va_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t        va_fh_len;
 };
 
@@ -137,12 +137,12 @@ struct chimera_vfs_request {
             uint32_t                 fh_len;
             uint64_t                 attr_mask;
             struct chimera_vfs_attrs r_attr;
-            uint64_t                 r_attr_mask;
         } getattr;
 
         struct {
             const void                    *fh;
             uint32_t                       fh_len;
+            uint64_t                       attrmask;
             uint64_t                       cookie;
             uint64_t                       r_cookie;
             uint32_t                       r_eof;
@@ -210,6 +210,7 @@ struct chimera_vfs_request {
             const void *fh;
             uint32_t    fh_len;
             const char *name;
+            int         namelen;
         } remove;
 
     };

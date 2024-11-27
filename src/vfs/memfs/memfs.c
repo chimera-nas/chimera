@@ -66,9 +66,10 @@ memfs_getattr(
 
     request->status = CHIMERA_VFS_OK;
 
-    request->getattr.r_attr_mask = attr_mask;
-
     memset(attr, 0, sizeof(*attr));
+
+
+    attr->va_mask = attr_mask;
 
     /* Set dummy values for a directory */
     attr->va_mode          = S_IFDIR | 0755; /* directory with rwxr-xr-x permissions */

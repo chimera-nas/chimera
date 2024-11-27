@@ -6,7 +6,6 @@
 static void
 chimera_nfs3_fsinfo_complete(
     enum chimera_vfs_error    error_code,
-    uint64_t                  attr_mask,
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {

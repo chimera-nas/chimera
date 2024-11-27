@@ -10,6 +10,12 @@ target_link_libraries(libnfs_nfs3_linux_create nfs chimera_server)
 add_executable(libnfs_nfs3_linux_mkdir libnfs_nfs3_linux_mkdir.c)
 target_link_libraries(libnfs_nfs3_linux_mkdir nfs chimera_server)
 
+add_executable(libnfs_nfs3_linux_remove libnfs_nfs3_linux_remove.c)
+target_link_libraries(libnfs_nfs3_linux_remove nfs chimera_server)
+
+add_executable(libnfs_nfs3_linux_rmdir libnfs_nfs3_linux_rmdir.c)
+target_link_libraries(libnfs_nfs3_linux_rmdir nfs chimera_server)
+
 add_executable(libnfs_nfs4_mount libnfs_nfs4_mount.c)
 target_link_libraries(libnfs_nfs4_mount nfs chimera_server)
 
@@ -26,6 +32,9 @@ add_test(NAME chimera/server/libnfs_nfs3_mount COMMAND ${CMAKE_CURRENT_BINARY_DI
 add_test(NAME chimera/server/libnfs_nfs3_linux_readdir COMMAND ${CMAKE_CURRENT_BINARY_DIR}/libnfs_nfs3_linux_readdir)
 add_test(NAME chimera/server/libnfs_nfs3_linux_create COMMAND ${CMAKE_CURRENT_BINARY_DIR}/libnfs_nfs3_linux_create)
 add_test(NAME chimera/server/libnfs_nfs3_linux_mkdir COMMAND ${CMAKE_CURRENT_BINARY_DIR}/libnfs_nfs3_linux_mkdir)
+add_test(NAME chimera/server/libnfs_nfs3_linux_remove COMMAND ${CMAKE_CURRENT_BINARY_DIR}/libnfs_nfs3_linux_remove)
+add_test(NAME chimera/server/libnfs_nfs3_linux_rmdir COMMAND ${CMAKE_CURRENT_BINARY_DIR}/libnfs_nfs3_linux_rmdir)
+
 add_test(NAME chimera/server/libnfs_nfs4_mount COMMAND ${CMAKE_CURRENT_BINARY_DIR}/libnfs_nfs4_mount)
 add_test(NAME chimera/server/libnfs_nfs4_readdir_shares COMMAND ${CMAKE_CURRENT_BINARY_DIR}/libnfs_nfs4_readdir_shares)
 add_test(NAME chimera/server/libnfs_nfs4_linux_readdir COMMAND ${CMAKE_CURRENT_BINARY_DIR}/libnfs_nfs4_linux_readdir)

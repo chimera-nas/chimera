@@ -14,8 +14,7 @@ main(
 {
     struct chimera_server *server;
     struct nfs_context    *nfs;
-    struct nfsfh          *fh;
-    int                    rc;
+    int                    rc, fd;
 
     server = chimera_server_init(NULL);
 
@@ -35,19 +34,19 @@ main(
         return EXIT_FAILURE;
     }
 
-    printf("Creating a file in the share\n");
+    printf("Removing a file in the share\n");
 
     (void) unlink("/build/testfile");
+    fd = open("/build/testfile", O_CREAT | O_WRONLY, 0);
+    close(fd);
 
-    rc = nfs_create(nfs, "/testfile", O_CREAT | O_WRONLY, 0, &fh);
+    rc = nfs_unlink(nfs, "/testfile");
 
     if (rc < 0) {
-        fprintf(stderr, "Failed to create file: %s\n", nfs_get_error(nfs));
+        fprintf(stderr, "Failed to unlink file: %s\n", nfs_get_error(nfs));
         nfs_destroy_context(nfs);
         return EXIT_FAILURE;
     }
-
-    nfs_close(nfs, fh);
 
     nfs_umount(nfs);
 

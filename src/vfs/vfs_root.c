@@ -66,11 +66,11 @@ chimera_vfs_root_getattr(
 {
     struct chimera_vfs_attrs *attr;
 
-    request->getattr.r_attr_mask = request->getattr.attr_mask;
-
     attr = &request->getattr.r_attr;
 
     memset(attr, 0, sizeof(*attr));
+
+    attr->va_mask = request->getattr.attr_mask;
 
     /* Set dummy values for a directory */
     attr->va_mode          = S_IFDIR | 0755; /* directory with rwxr-xr-x permissions */

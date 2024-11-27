@@ -96,7 +96,6 @@ chimera_nfs4_putfh(
 static void
 chimera_nfs4_getattr_complete(
     enum chimera_vfs_error    error_code,
-    uint64_t                  attr_mask,
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
@@ -381,12 +380,17 @@ chimera_nfs4_readdir(
 {
     struct READDIR4args *args = &argop->opreaddir;
     struct READDIR4res  *res  = &resop->opreaddir;
+    uint64_t             attrmask;
 
     res->resok4.reply.entries = NULL;
+
+    attrmask = chimera_nfs4_getattr2mask(args->attr_request,
+                                         args->num_attr_request);
 
     chimera_vfs_readdir(thread->vfs,
                         req->fh,
                         req->fhlen,
+                        attrmask,
                         args->cookie,
                         chimera_nfs4_readdir_callback,
                         chimera_nfs4_readdir_complete,

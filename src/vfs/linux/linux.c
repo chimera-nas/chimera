@@ -449,12 +449,6 @@ chimera_linux_readdir(
     DIR                         *dir;
     struct dirent               *dirent;
     struct chimera_vfs_attrs     vattr;
-    char                         fhstr[80];
-
-    format_hex(fhstr, sizeof(fhstr), request->readdir.fh, request->readdir.
-               fh_len);
-
-    chimera_linux_debug("linux_readdir: fh=%s", fhstr);
 
     fd = linux_open_by_handle(thread,
                               request->readdir.fh,
@@ -492,34 +486,42 @@ chimera_linux_readdir(
             continue;
         }
 
-        child_fd = openat(dirfd(dir), dirent->d_name, O_RDONLY | O_PATH |
-                          O_NOFOLLOW);
+        if (request->readdir.attrmask & (CHIMERA_VFS_ATTR_FH |
+                                         CHIMERA_VFS_ATTR_MASK_STAT)) {
 
-        if (child_fd < 0) {
-            continue;
-        }
+            child_fd = openat(dirfd(dir), dirent->d_name, O_RDONLY | O_PATH |
+                              O_NOFOLLOW);
 
-        rc = fstat(child_fd, &st);
+            if (child_fd < 0) {
+                continue;
+            }
 
-        if (rc) {
+            if (request->readdir.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
+                rc = fstat(child_fd, &st);
+
+                if (rc) {
+                    close(child_fd);
+                    continue;
+                }
+
+                chimera_linux_stat_to_attr(&vattr, &st);
+            }
+
+            if (request->readdir.attrmask & CHIMERA_VFS_ATTR_FH) {
+                rc = linux_get_fh(child_fd,
+                                  "",
+                                  0,
+                                  AT_EMPTY_PATH,
+                                  vattr.va_fh,
+                                  &vattr.va_fh_len);
+
+                if (rc) {
+                    vattr.va_fh_len = 0;
+                }
+            }
+
             close(child_fd);
-            continue;
         }
-
-        rc = linux_get_fh(child_fd,
-                          "",
-                          0,
-                          AT_EMPTY_PATH,
-                          vattr.va_fh,
-                          &vattr.va_fh_len);
-
-        if (rc) {
-            vattr.va_fh_len = 0;
-        }
-
-        close(child_fd);
-
-        chimera_linux_stat_to_attr(&vattr, &st);
 
         rc = request->readdir.callback(
             dirent->d_off,
@@ -673,6 +675,44 @@ chimera_linux_mkdir(
 } /* chimera_linux_mkdir */
 
 static void
+chimera_linux_remove(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_linux_thread *thread = private_data;
+    int                          fd, rc;
+
+    fd = linux_open_by_handle(thread,
+                              request->remove.fh,
+                              request->remove.fh_len,
+                              O_PATH | O_RDONLY | O_NOFOLLOW);
+
+    if (fd < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    rc = unlinkat(fd, request->remove.name, 0);
+
+    if (rc == -1 && errno == EISDIR) {
+        /* XXX maybe flag in the filehandle to know this is a dir
+         * beforehand?
+         */
+        rc = unlinkat(fd, request->remove.name, AT_REMOVEDIR);
+    }
+
+    if (rc) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_linux_remove */
+
+static void
 chimera_linux_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -700,6 +740,9 @@ chimera_linux_dispatch(
             break;
         case CHIMERA_VFS_OP_READDIR:
             chimera_linux_readdir(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_REMOVE:
+            chimera_linux_remove(request, private_data);
             break;
         default:
             chimera_linux_error("linux_dispatch: unknown operation %d",

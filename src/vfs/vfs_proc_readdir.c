@@ -21,6 +21,7 @@ chimera_vfs_readdir(
     struct chimera_vfs_thread     *thread,
     const void                    *fh,
     int                            fhlen,
+    uint64_t                       attrmask,
     uint64_t                       cookie,
     chimera_vfs_readdir_callback_t callback,
     chimera_vfs_readdir_complete_t complete,
@@ -37,6 +38,7 @@ chimera_vfs_readdir(
     request->complete           = chimera_vfs_readdir_complete;
     request->readdir.fh         = fh;
     request->readdir.fh_len     = fhlen;
+    request->readdir.attrmask   = attrmask;
     request->readdir.cookie     = cookie;
     request->readdir.callback   = callback;
     request->proto_callback     = complete;

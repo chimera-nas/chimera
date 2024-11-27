@@ -44,9 +44,6 @@ chimera_nfs3_lookup(
     req              = nfs_request_alloc(thread, conn, msg);
     req->args_lookup = args;
 
-    chimera_nfs_debug("lookup: name %.*s",
-                      args->what.name.len, args->what.name.str);
-
     chimera_vfs_lookup(thread->vfs,
                        args->what.dir.data.data,
                        args->what.dir.data.len,

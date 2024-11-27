@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <nfsc/libnfs.h>
 #include <nfsc/libnfs-raw-nfs.h>
@@ -14,7 +15,6 @@ main(
 {
     struct chimera_server *server;
     struct nfs_context    *nfs;
-    struct nfsfh          *fh;
     int                    rc;
 
     server = chimera_server_init(NULL);
@@ -35,19 +35,18 @@ main(
         return EXIT_FAILURE;
     }
 
-    printf("Creating a file in the share\n");
+    printf("Removing a directory in the share\n");
 
-    (void) unlink("/build/testfile");
+    (void) unlink("/build/testdir");
+    mkdir("/build/testdir", 0755);
 
-    rc = nfs_create(nfs, "/testfile", O_CREAT | O_WRONLY, 0, &fh);
+    rc = nfs_rmdir(nfs, "/testdir");
 
     if (rc < 0) {
-        fprintf(stderr, "Failed to create file: %s\n", nfs_get_error(nfs));
+        fprintf(stderr, "Failed to unlink file: %s\n", nfs_get_error(nfs));
         nfs_destroy_context(nfs);
         return EXIT_FAILURE;
     }
-
-    nfs_close(nfs, fh);
 
     nfs_umount(nfs);
 

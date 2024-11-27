@@ -21,5 +21,9 @@
   "cmake.ctest.testExplorerIntegrationEnabled": false,
   "cmakeExplorer.parallelJobs": 1,
   "editor.tabSize": 4,
-  "editor.formatOnSave": true
+  "editor.formatOnSave": true,
+  "files.associations": {
+    "misc.h": "c",
+    "vfs_procs.h": "c"
+  }
 }
