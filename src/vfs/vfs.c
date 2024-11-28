@@ -30,9 +30,7 @@ chimera_vfs_syncthread_wake(
 } /* chimera_vfs_syncthread_wake */
 
 static void
-chimera_vfs_syncthread_destroy(
-    struct evpl *evpl,
-    void        *private_data)
+chimera_vfs_syncthread_destroy(void *private_data)
 {
 } /* chimera_vfs_sync_destroy */
 

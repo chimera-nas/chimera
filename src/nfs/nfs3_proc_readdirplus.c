@@ -38,9 +38,12 @@ chimera_nfs3_readdirplus_callback(
 
     if (attrs->va_mask & CHIMERA_VFS_ATTR_FH) {
         entry->name_handle.handle_follows = 1;
-        memcpy(entry->name_handle.handle.data.data,
-               attrs->va_fh, attrs->va_fh_len);
-        entry->name_handle.handle.data.len = attrs->va_fh_len;
+
+        xdr_dbuf_opaque_copy(&entry->name_handle.handle.data,
+                             attrs->va_fh,
+                             attrs->va_fh_len,
+                             msg->dbuf);
+
     } else {
         entry->name_handle.handle_follows = 0;
     }

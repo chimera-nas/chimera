@@ -134,9 +134,7 @@ nfs_server_thread_init(
 } /* nfs_server_thread_init */
 
 static void
-nfs_server_thread_destroy(
-    struct evpl *evpl,
-    void        *data)
+nfs_server_thread_destroy(void *data)
 {
     struct chimera_server_nfs_thread *thread = data;
     struct nfs_request               *req;

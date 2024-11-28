@@ -13,6 +13,5 @@ struct chimera_server_protocol {
         struct evpl *,
         void *data);
     void  (*thread_destroy)(
-        struct evpl *,
         void *data);
 };
