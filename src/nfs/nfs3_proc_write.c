@@ -31,6 +31,41 @@ chimera_nfs3_write_complete(
     nfs_request_free(thread, req);
 } /* chimera_nfs3_write_complete */
 
+static void
+chimera_nfs3_write_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request               *req    = private_data;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct evpl                      *evpl   = thread->evpl;
+    struct evpl_rpc2_msg             *msg    = req->msg;
+    struct WRITE3args                *args   = req->args_write;
+    struct WRITE3res                  res;
+
+    if (error_code == CHIMERA_VFS_OK) {
+
+        nfs3_open_cache_insert(&shared->nfs3_open_cache,
+                               args->file.data.data,
+                               args->file.data.len,
+                               handle);
+
+        chimera_vfs_write(thread->vfs,
+                          handle,
+                          args->offset,
+                          args->count,
+                          args->data.iov,
+                          args->data.niov,
+                          chimera_nfs3_write_complete,
+                          req);
+    } else {
+        res.status = chimera_vfs_error_to_nfsstat3(error_code);
+        shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, &res, msg);
+        nfs_request_free(thread, req);
+    }
+} /* chimera_nfs3_read_open_callback */
 void
 chimera_nfs3_write(
     struct evpl           *evpl,
@@ -48,10 +83,19 @@ chimera_nfs3_write(
                                     args->file.data.data,
                                     args->file.data.len);
 
-    chimera_nfs_abort_if(!handle,
-                         "unhandled nfs3 op on unopened file");
-
     req = nfs_request_alloc(thread, conn, msg);
+
+    req->args_write = args;
+
+    if (!handle) {
+        chimera_vfs_open(thread->vfs,
+                         args->file.data.data,
+                         args->file.data.len,
+                         CHIMERA_VFS_OPEN_RDWR,
+                         chimera_nfs3_write_open_callback,
+                         req);
+        return;
+    }
 
     chimera_vfs_write(thread->vfs,
                       handle,

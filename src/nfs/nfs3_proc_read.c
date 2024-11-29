@@ -19,7 +19,6 @@ chimera_nfs3_read_complete(
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct READ3res                   res;
-    struct evpl_iovec                *iov_copy;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
@@ -29,15 +28,9 @@ chimera_nfs3_read_complete(
 
         res.resok.file_attributes.attributes_follow = 0;
 
-        iov_copy         = msg->dbuf->buffer + msg->dbuf->used;
-        msg->dbuf->used += niov * sizeof(*iov);
-        memcpy(iov_copy, iov, niov * sizeof(*iov));
-
         res.resok.data.length = count;
-        res.resok.data.iov    = iov_copy;
+        res.resok.data.iov    = iov;
         res.resok.data.niov   = niov;
-
-        chimera_nfs_debug("read %d bytes into %d iovs", count, niov);
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, &res, msg);
@@ -56,17 +49,20 @@ chimera_nfs3_read_open_callback(
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
+    struct READ3args                 *args   = req->args_read;
     struct READ3res                   res;
 
     if (error_code == CHIMERA_VFS_OK) {
-        chimera_nfs_debug("opened for read module %s fd %d",
-                          handle->vfs_module->name,
-                          (int) handle->vfs_private);
+
+        nfs3_open_cache_insert(&shared->nfs3_open_cache,
+                               args->file.data.data,
+                               args->file.data.len,
+                               handle);
 
         chimera_vfs_read(thread->vfs,
                          handle,
-                         req->args_read->offset,
-                         req->args_read->count,
+                         args->offset,
+                         args->count,
                          chimera_nfs3_read_complete,
                          req);
     } else {
@@ -98,11 +94,10 @@ chimera_nfs3_read(
                                     args->file.data.len);
 
     if (!handle) {
-        chimera_nfs_debug("opening file for read");
         chimera_vfs_open(thread->vfs,
                          args->file.data.data,
                          args->file.data.len,
-                         CHIMERA_VFS_OPEN_RDONLY,
+                         CHIMERA_VFS_OPEN_RDWR,
                          chimera_nfs3_read_open_callback,
                          req);
         return;

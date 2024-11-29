@@ -46,11 +46,12 @@ chimera_nfs3_create(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
-    uint32_t                          open_flags = CHIMERA_VFS_OPEN_CREATE;
+    uint32_t                          open_flags;
 
-    /* XXX */
+    open_flags  = CHIMERA_VFS_OPEN_CREATE;
     open_flags |= CHIMERA_VFS_OPEN_RDWR;
-    req         = nfs_request_alloc(thread, conn, msg);
+
+    req = nfs_request_alloc(thread, conn, msg);
 
     chimera_vfs_open_at(thread->vfs,
                         args->where.dir.data.data,

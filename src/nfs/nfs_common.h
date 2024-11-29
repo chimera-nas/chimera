@@ -27,6 +27,7 @@ struct nfs_request {
         struct READDIR3args     *args_readdir;
         struct READDIRPLUS3args *args_readdirplus;
         struct FSINFO3args      *args_fsinfo;
+        struct WRITE3args       *args_write;
         struct COMPOUND4args    *args_compound;
 
     };
