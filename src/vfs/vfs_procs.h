@@ -201,3 +201,19 @@ chimera_vfs_commit(
     uint32_t                        count,
     chimera_vfs_commit_callback_t   callback,
     void                           *private_data);
+
+typedef void (*chimera_vfs_symlink_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_symlink(
+    struct chimera_vfs_thread     *thread,
+    const void                    *fh,
+    int                            fhlen,
+    const char                    *name,
+    int                            namelen,
+    const char                    *target,
+    int                            targetlen,
+    chimera_vfs_symlink_callback_t callback,
+    void                          *private_data);
