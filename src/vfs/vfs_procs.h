@@ -9,6 +9,19 @@ chimera_vfs_getrootfh(
     void                      *fh,
     int                       *fh_len);
 
+typedef void (*chimera_vfs_access_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_access(
+    struct chimera_vfs_thread    *vfs,
+    const void                   *fh,
+    int                           fhlen,
+    uint32_t                      access,
+    chimera_vfs_access_callback_t callback,
+    void                         *private_data);
+
 typedef void (*chimera_vfs_lookup_callback_t)(
     enum chimera_vfs_error error_code,
     const void            *fh,
@@ -72,6 +85,20 @@ chimera_vfs_readdir(
 
 typedef void (*chimera_vfs_open_callback_t)(
     enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data);
+
+void
+chimera_vfs_open(
+    struct chimera_vfs_thread  *thread,
+    const void                 *fh,
+    int                         fhlen,
+    unsigned int                flags,
+    chimera_vfs_open_callback_t callback,
+    void                       *private_data);
+
+typedef void (*chimera_vfs_open_at_callback_t)(
+    enum chimera_vfs_error          error_code,
     const void                     *fh,
     int                             fhlen,
     struct chimera_vfs_open_handle *oh,
@@ -79,15 +106,15 @@ typedef void (*chimera_vfs_open_callback_t)(
 
 void
 chimera_vfs_open_at(
-    struct chimera_vfs_thread  *thread,
-    const void                 *fh,
-    int                         fhlen,
-    const char                 *name,
-    int                         namelen,
-    unsigned int                flags,
-    unsigned int                mode,
-    chimera_vfs_open_callback_t callback,
-    void                       *private_data);
+    struct chimera_vfs_thread     *thread,
+    const void                    *fh,
+    int                            fhlen,
+    const char                    *name,
+    int                            namelen,
+    unsigned int                   flags,
+    unsigned int                   mode,
+    chimera_vfs_open_at_callback_t callback,
+    void                          *private_data);
 
 typedef void (*chimera_vfs_close_callback_t)(
     enum chimera_vfs_error error_code,
@@ -133,6 +160,8 @@ typedef void (*chimera_vfs_read_callback_t)(
     enum chimera_vfs_error error_code,
     uint32_t               count,
     uint32_t               eof,
+    struct evpl_iovec     *iov,
+    int                    niov,
     void                  *private_data);
 
 void
@@ -146,6 +175,7 @@ chimera_vfs_read(
 
 typedef void (*chimera_vfs_write_callback_t)(
     enum chimera_vfs_error error_code,
+    uint32_t               length,
     void                  *private_data);
 
 void
@@ -154,7 +184,20 @@ chimera_vfs_write(
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
     uint32_t                        count,
-    struct evpl_iovec              *iov,
+    const struct evpl_iovec        *iov,
     int                             niov,
     chimera_vfs_write_callback_t    callback,
+    void                           *private_data);
+
+typedef void (*chimera_vfs_commit_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_commit(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        count,
+    chimera_vfs_commit_callback_t   callback,
     void                           *private_data);

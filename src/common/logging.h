@@ -36,3 +36,15 @@ void chimera_abort(
     int         line,
     const char *fmt,
     ...);
+
+#define chimera_fatal_if(cond, ...) \
+        if (cond)                    \
+        {                            \
+            chimera_fatal(__VA_ARGS__); \
+        }
+
+#define chimera_abort_if(cond, ...) \
+        if (cond)                    \
+        {                            \
+            chimera_abort(__VA_ARGS__); \
+        }

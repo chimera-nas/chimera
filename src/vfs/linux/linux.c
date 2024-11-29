@@ -7,10 +7,13 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/statvfs.h>
+#include <sys/uio.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <errno.h>
 #include "vfs/vfs_error.h"
+
+#include "core/evpl.h"
 
 #include "linux.h"
 #include "common/logging.h"
@@ -546,6 +549,45 @@ chimera_linux_readdir(
 } /* linux_readdir */
 
 static void
+chimera_linux_open(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_linux_thread *thread = private_data;
+    int                          flags  = 0;
+    int                          fd;
+
+    if (request->open.flags & CHIMERA_VFS_OPEN_RDONLY) {
+        flags |= O_RDONLY;
+    }
+
+    if (request->open.flags & CHIMERA_VFS_OPEN_WRONLY) {
+        flags |= O_WRONLY;
+    }
+
+    if (request->open.flags & CHIMERA_VFS_OPEN_RDWR) {
+        flags |= O_RDWR;
+    }
+
+    fd = linux_open_by_handle(thread,
+                              request->open.fh,
+                              request->open.fh_len,
+                              flags);
+
+    if (fd < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    chimera_linux_debug("linux_open: fd %d", fd);
+    request->open.handle.vfs_private = fd;
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* linux_open */
+
+static void
 chimera_linux_open_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -718,6 +760,178 @@ chimera_linux_remove(
 } /* chimera_linux_remove */
 
 static void
+chimera_linux_access(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_linux_thread *thread = private_data;
+    int                          fd, rc;
+    int                          access_mask;
+
+    fd = linux_open_by_handle(thread,
+                              request->access.fh,
+                              request->access.fh_len,
+                              O_PATH | O_RDONLY | O_NOFOLLOW);
+
+    if (fd < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    access_mask = 0;
+
+    if (request->access.access & CHIMERA_VFS_ACCESS_READ) {
+        access_mask |= R_OK;
+    }
+
+    if (request->access.access & CHIMERA_VFS_ACCESS_WRITE) {
+        access_mask |= W_OK;
+    }
+
+    if (request->access.access & CHIMERA_VFS_ACCESS_EXECUTE) {
+        access_mask |= X_OK;
+    }
+
+    rc = faccessat(fd, "", access_mask, AT_EMPTY_PATH);
+
+    if (rc < 0) {
+        close(fd);
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    close(fd);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_linux_mkdir */
+
+static void
+chimera_linux_read(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int           fd, i;
+    ssize_t       len, left = request->read.length;
+    struct iovec *iov;
+
+    iov = alloca(request->read.niov * sizeof(*iov));
+
+    for (i = 0; left && i < request->read.niov; i++) {
+
+        iov[i].iov_base = request->read.iov[i].data;
+        iov[i].iov_len  = request->read.iov[i].length;
+
+        if (iov[i].iov_len > left) {
+            iov[i].iov_len = left;
+        }
+
+        chimera_linux_debug("linux read: iov[%d] base %p len %zu",
+                            i,
+                            iov[i].iov_base,
+                            iov[i].iov_len);
+
+        left -= iov[i].iov_len;
+    }
+
+    fd = (int) request->read.handle->vfs_private;
+
+    chimera_linux_debug("linux read: fd %d offset %ld length %u",
+                        fd,
+                        request->read.offset,
+                        request->read.length);
+
+    len = preadv(fd,
+                 iov,
+                 request->read.niov,
+                 request->read.offset);
+
+    chimera_linux_debug("linux read: return %ld, errno %d",
+                        len,
+                        errno);
+    if (len < 0) {
+        request->status             = chimera_linux_errno_to_status(errno);
+        request->read.result_length = 0;
+        request->read.result_eof    = (len < request->read.length);
+        request->complete(request);
+        return;
+    }
+
+    request->read.result_length = len;
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+
+} /* chimera_linux_read */
+
+static void
+chimera_linux_write(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int           fd, i, niov = 0;
+    uint32_t      left, chunk;
+    ssize_t       len;
+    struct iovec *iov;
+
+    iov = alloca(request->write.niov * sizeof(*iov));
+
+    left = request->write.length;
+    for (i = 0; left && i < request->write.niov; i++) {
+        if (request->write.iov[i].length <= left) {
+            chunk = request->write.iov[i].length;
+        } else {
+            chunk = left;
+        }
+        iov[i].iov_base = request->write.iov[i].data;
+        iov[i].iov_len  = chunk;
+        left           -= chunk;
+        niov++;
+    }
+
+    fd = (int) request->write.handle->vfs_private;
+
+    chimera_linux_debug("linux write: fd %d", fd);
+
+    len = pwritev(fd,
+                  iov,
+                  niov,
+                  request->write.offset);
+
+    chimera_linux_debug("linux write: return %ld, errno %d",
+                        len,
+                        errno);
+    if (len < 0) {
+        request->status              = chimera_linux_errno_to_status(errno);
+        request->write.result_length = 0;
+        request->complete(request);
+        return;
+    }
+
+    request->write.result_length = len;
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+
+} /* chimera_linux_write */
+
+static void
+chimera_linux_commit(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int fd = (int) request->commit.handle->vfs_private;
+
+    fsync(fd);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+
+} /* chimera_linux_commit */
+
+static void
 chimera_linux_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -731,6 +945,9 @@ chimera_linux_dispatch(
             break;
         case CHIMERA_VFS_OP_GETATTR:
             chimera_linux_getattr(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_OPEN:
+            chimera_linux_open(request, private_data);
             break;
         case CHIMERA_VFS_OP_OPEN_AT:
             chimera_linux_open_at(request, private_data);
@@ -746,6 +963,18 @@ chimera_linux_dispatch(
             break;
         case CHIMERA_VFS_OP_REMOVE:
             chimera_linux_remove(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_ACCESS:
+            chimera_linux_access(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_READ:
+            chimera_linux_read(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_WRITE:
+            chimera_linux_write(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_COMMIT:
+            chimera_linux_commit(request, private_data);
             break;
         default:
             chimera_linux_error("linux_dispatch: unknown operation %d",

@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <nfsc/libnfs.h>
@@ -15,7 +16,8 @@ main(
     struct chimera_server *server;
     struct nfs_context    *nfs;
     struct nfsfh          *fh;
-    int                    rc;
+    int                    rc, fd;
+    char                   buf[13];
 
     server = chimera_server_init(NULL);
 
@@ -39,15 +41,24 @@ main(
 
     (void) unlink("/build/testfile");
 
-    rc = nfs_create(nfs, "/testfile", O_CREAT | O_WRONLY, 0, &fh);
+    fd = open("/build/testfile", O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR);
+    write(fd, "Hello, world!", 13);
+    close(fd);
+
+    rc = nfs_open(nfs, "/testfile", O_RDONLY, &fh);
 
     if (rc < 0) {
-        fprintf(stderr, "Failed to create file: %s\n", nfs_get_error(nfs));
+        fprintf(stderr, "Failed to open file: %s\n", nfs_get_error(nfs));
         nfs_destroy_context(nfs);
         return EXIT_FAILURE;
     }
 
-    nfs_write(nfs, fh, 13, "Hello, world!");
+    nfs_read(nfs, fh, 13, buf);
+
+    if (memcmp(buf, "Hello, world!", 13) != 0) {
+        fprintf(stderr, "Read failed\n");
+        return EXIT_FAILURE;
+    }
 
     nfs_close(nfs, fh);
 

@@ -22,6 +22,10 @@ chimera_nfs3_create_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
+
+        nfs3_open_cache_insert(&shared->nfs3_open_cache,
+                               fh, fhlen, handle);
+
         res.resok.obj.handle_follows = 1;
         xdr_dbuf_opaque_copy(&res.resok.obj.handle.data, fh, fhlen, msg->dbuf);
         res.resok.obj_attributes.attributes_follow = 0;
@@ -42,15 +46,18 @@ chimera_nfs3_create(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
+    uint32_t                          open_flags = CHIMERA_VFS_OPEN_CREATE;
 
-    req = nfs_request_alloc(thread, conn, msg);
+    /* XXX */
+    open_flags |= CHIMERA_VFS_OPEN_RDWR;
+    req         = nfs_request_alloc(thread, conn, msg);
 
     chimera_vfs_open_at(thread->vfs,
                         args->where.dir.data.data,
                         args->where.dir.data.len,
                         args->where.name.str,
                         args->where.name.len,
-                        O_CREAT | O_WRONLY,
+                        open_flags,
                         S_IWUSR | S_IRUSR,
                         chimera_nfs3_create_complete,
                         req);

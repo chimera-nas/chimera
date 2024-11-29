@@ -6,5 +6,7 @@ ARG USER_GID=$USER_UID
 
 RUN apt-get -y update && \
     apt-get -y upgrade && \
+    apt-get -y install unminimize && \
+    echo y | unminimize && \
     apt-get -y install clang cmake ninja-build git flex bison lldb gdb less libnfs-dev vim psmisc uncrustify \
-    net-tools tshark tcpdump uuid-dev iproute2
+    net-tools tshark tcpdump uuid-dev iproute2 man-db

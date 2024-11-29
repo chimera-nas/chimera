@@ -115,11 +115,11 @@ chimera_server_destroy(struct chimera_server *server)
 {
     int i;
 
+    evpl_threadpool_destroy(server->pool);
+
     for (i = 0; i < server->num_protocols; i++) {
         server->protocols[i]->destroy(server->protocol_private[i]);
     }
-
-    evpl_threadpool_destroy(server->pool);
 
     chimera_vfs_destroy(server->vfs);
 

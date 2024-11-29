@@ -2,6 +2,7 @@
 
 #include "portmap_xdr.h"
 #include "nfs_mount_xdr.h"
+#include "nfs3_open_cache.h"
 #include "nfs3_xdr.h"
 #include "nfs4_xdr.h"
 #include "nfs4_session.h"
@@ -19,8 +20,10 @@ struct nfs_request {
     struct nfs_request               *next;
     union {
         struct mountargs3       *args_mount;
+        struct ACCESS3args      *args_access;
         struct LOOKUP3args      *args_lookup;
         struct GETATTR3args     *args_getattr;
+        struct READ3args        *args_read;
         struct READDIR3args     *args_readdir;
         struct READDIRPLUS3args *args_readdirplus;
         struct FSINFO3args      *args_fsinfo;
@@ -45,6 +48,8 @@ struct chimera_server_nfs_shared {
     struct NFS_V4_CB         nfs_v4_cb;
 
     struct nfs4_client_table nfs4_shared_clients;
+
+    struct nfs3_open_cache   nfs3_open_cache;
 
 };
 

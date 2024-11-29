@@ -3,6 +3,7 @@
 #include <sys/time.h>
 #include "vfs_dump.h"
 #include "vfs_error.h"
+#include "core/evpl.h"
 
 struct evpl;
 
@@ -84,6 +85,8 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OP_WRITE       10
 #define CHIMERA_VFS_OP_REMOVE      11
 #define CHIMERA_VFS_OP_MKDIR       12
+#define CHIMERA_VFS_OP_COMMIT      13
+#define CHIMERA_VFS_OP_ACCESS      14
 
 #define CHIMERA_VFS_OPEN_CREATE    (1U << 0)
 #define CHIMERA_VFS_OPEN_RDONLY    (1U << 1)
@@ -104,6 +107,10 @@ struct chimera_vfs_open_handle {
     struct chimera_vfs_module *vfs_module;
     uint64_t                   vfs_private;
 };
+
+#define CHIMERA_VFS_ACCESS_READ    0x01
+#define CHIMERA_VFS_ACCESS_WRITE   0x02
+#define CHIMERA_VFS_ACCESS_EXECUTE 0x04
 
 struct chimera_vfs_request {
     struct chimera_vfs_thread      *thread;
@@ -131,6 +138,12 @@ struct chimera_vfs_request {
             uint8_t     r_fh[CHIMERA_VFS_FH_SIZE];
             uint32_t    r_fh_len;
         } lookup;
+
+        struct {
+            const void *fh;
+            uint32_t    fh_len;
+            uint32_t    access;
+        } access;
 
         struct {
             const void              *fh;
@@ -167,10 +180,10 @@ struct chimera_vfs_request {
         } mkdir;
 
         struct {
-            const void *fh;
-            uint32_t    fh_len;
-            uint32_t    flags;
-            uint64_t    vfs_private;
+            const void                    *fh;
+            uint32_t                       fh_len;
+            uint32_t                       flags;
+            struct chimera_vfs_open_handle handle;
         } open;
 
         struct {
@@ -190,21 +203,29 @@ struct chimera_vfs_request {
         } close;
 
         struct {
-            uint64_t  vfs_private;
-            void     *buffer;
-            uint64_t  offset;
-            uint32_t  length;
-            uint32_t *result_length;
-            uint32_t *result_eof;
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        length;
+            struct evpl_iovec               iov[2];
+            int                             niov;
+            uint32_t                        result_length;
+            uint32_t                        result_eof;
         } read;
 
         struct {
-            uint64_t    vfs_private;
-            const void *buffer;
-            uint64_t    offset;
-            uint32_t    length;
-            uint32_t   *result_length;
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        length;
+            const struct evpl_iovec        *iov;
+            int                             niov;
+            uint32_t                        result_length;
         } write;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        length;
+        } commit;
 
         struct {
             const void *fh;
@@ -338,6 +359,7 @@ struct chimera_vfs {
 };
 
 struct chimera_vfs_thread {
+    struct evpl                *evpl;
     struct chimera_vfs         *vfs;
     void                       *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
     struct chimera_vfs_request *free_requests;

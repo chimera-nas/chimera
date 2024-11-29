@@ -68,3 +68,9 @@ chimera_nfs_ntoh64(uint64_t value)
                          __FILE__, \
                          __LINE__, \
                          __VA_ARGS__)
+
+#define chimera_nfs_abort_if(cond, ...) \
+        chimera_abort_if(cond, "nfs", \
+                         __FILE__, \
+                         __LINE__, \
+                         __VA_ARGS__)

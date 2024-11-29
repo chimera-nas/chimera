@@ -93,8 +93,9 @@ chimera_vfs_thread_init(
     struct chimera_vfs_module *module;
     int                        i;
 
-    thread      = calloc(1, sizeof(*thread));
-    thread->vfs = vfs;
+    thread       = calloc(1, sizeof(*thread));
+    thread->evpl = evpl;
+    thread->vfs  = vfs;
 
     for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
         module = vfs->modules[i];
