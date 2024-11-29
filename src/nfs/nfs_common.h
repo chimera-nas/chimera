@@ -32,6 +32,7 @@ struct nfs_request {
 
     };
     union {
+        struct READLINK3res    res_readlink;
         struct READDIR3res     res_readdir;
         struct READDIRPLUS3res res_readdirplus;
         struct COMPOUND4res    res_compound;

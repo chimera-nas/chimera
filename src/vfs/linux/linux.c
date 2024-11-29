@@ -979,6 +979,40 @@ chimera_linux_symlink(
 } /* chimera_linux_symlink */
 
 static void
+chimera_linux_readlink(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_linux_thread *thread = private_data;
+    int                          fd, rc;
+
+    fd = linux_open_by_handle(thread,
+                              request->read_link.fh,
+                              request->read_link.fh_len,
+                              O_PATH | O_RDONLY | O_NOFOLLOW);
+
+    if (fd < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    rc = readlinkat(fd, "", request->read_link.target,
+                    request->read_link.target_maxlength);
+
+    if (rc < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    request->read_link.target_length = rc;
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_linux_readlink */
+
+static void
 chimera_linux_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -1025,6 +1059,9 @@ chimera_linux_dispatch(
             break;
         case CHIMERA_VFS_OP_SYMLINK:
             chimera_linux_symlink(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_READLINK:
+            chimera_linux_readlink(request, private_data);
             break;
         default:
             chimera_linux_error("linux_dispatch: unknown operation %d",

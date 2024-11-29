@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <nfsc/libnfs.h>
@@ -15,6 +16,7 @@ main(
     struct chimera_server *server;
     struct nfs_context    *nfs;
     int                    rc;
+    char                   buffer[80];
 
     server = chimera_server_init(NULL);
 
@@ -36,13 +38,20 @@ main(
 
     printf("Creating a symlink in the share\n");
 
-    (void) unlink("/testsymlink");
+    (void) unlink("/build/testsymlink");
 
     rc = nfs_symlink(nfs, "/testtarget", "/testsymlink");
 
     if (rc < 0) {
         fprintf(stderr, "Failed to create symlink: %s\n", nfs_get_error(nfs));
         nfs_destroy_context(nfs);
+        return EXIT_FAILURE;
+    }
+
+    rc = nfs_readlink(nfs, "/testsymlink", buffer, sizeof(buffer));
+
+    if (memcmp(buffer, "/testtarget", rc) != 0) {
+        fprintf(stderr, "Failed to read symlink: %s\n", nfs_get_error(nfs));
         return EXIT_FAILURE;
     }
 

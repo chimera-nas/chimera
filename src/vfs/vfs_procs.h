@@ -217,3 +217,18 @@ chimera_vfs_symlink(
     int                            targetlen,
     chimera_vfs_symlink_callback_t callback,
     void                          *private_data);
+
+typedef void (*chimera_vfs_readlink_callback_t)(
+    enum chimera_vfs_error error_code,
+    int                    targetlen,
+    void                  *private_data);
+
+void
+chimera_vfs_readlink(
+    struct chimera_vfs_thread      *thread,
+    const void                     *fh,
+    int                             fhlen,
+    void                           *target,
+    uint32_t                        target_maxlength,
+    chimera_vfs_readlink_callback_t callback,
+    void                           *private_data);

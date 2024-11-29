@@ -245,6 +245,14 @@ struct chimera_vfs_request {
             uint8_t     r_fh[CHIMERA_VFS_FH_SIZE];
             uint32_t    r_fh_len;
         } symlink;
+
+        struct {
+            const void *fh;
+            uint32_t    fh_len;
+            uint32_t    target_maxlength;
+            void       *target;
+            uint32_t    target_length;
+        } read_link;
     };
 };
 
