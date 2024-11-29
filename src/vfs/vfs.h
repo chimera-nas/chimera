@@ -88,7 +88,7 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OP_COMMIT      13
 #define CHIMERA_VFS_OP_ACCESS      14
 #define CHIMERA_VFS_OP_SYMLINK     15
-
+#define CHIMERA_VFS_OP_RENAME      16
 #define CHIMERA_VFS_OPEN_CREATE    (1U << 0)
 #define CHIMERA_VFS_OPEN_RDONLY    (1U << 1)
 #define CHIMERA_VFS_OPEN_WRONLY    (1U << 2)
@@ -253,6 +253,17 @@ struct chimera_vfs_request {
             void       *target;
             uint32_t    target_length;
         } read_link;
+
+        struct {
+            const void *fh;
+            uint32_t    fh_len;
+            const char *name;
+            int         namelen;
+            const void *new_fh;
+            int         new_fhlen;
+            const char *new_name;
+            int         new_namelen;
+        } rename;
     };
 };
 

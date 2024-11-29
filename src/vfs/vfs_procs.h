@@ -232,3 +232,21 @@ chimera_vfs_readlink(
     uint32_t                        target_maxlength,
     chimera_vfs_readlink_callback_t callback,
     void                           *private_data);
+
+typedef void (*chimera_vfs_rename_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_rename(
+    struct chimera_vfs_thread    *thread,
+    const void                   *fh,
+    int                           fhlen,
+    const char                   *name,
+    int                           namelen,
+    const void                   *new_fh,
+    int                           new_fhlen,
+    const char                   *new_name,
+    int                           new_namelen,
+    chimera_vfs_rename_callback_t callback,
+    void                         *private_data);
