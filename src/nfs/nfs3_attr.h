@@ -28,6 +28,55 @@ chimera_nfs3_type_from_vfs(uint16_t mode)
 } /* chimera_nfs3_type_from_vfs */
 
 static inline void
+chimera_nfs3_sattr3_to_va(
+    struct chimera_vfs_attrs *attr,
+    struct sattr3            *sattr)
+{
+    attr->va_mask = 0;
+
+    if (sattr->mode.set_it) {
+        attr->va_mask |= CHIMERA_VFS_ATTR_MODE;
+        attr->va_mode  = sattr->mode.mode;
+    }
+
+    if (sattr->uid.set_it) {
+        attr->va_mask |= CHIMERA_VFS_ATTR_UID;
+        attr->va_uid   = sattr->uid.uid;
+    }
+
+    if (sattr->gid.set_it) {
+        attr->va_mask |= CHIMERA_VFS_ATTR_GID;
+        attr->va_gid   = sattr->gid.gid;
+    }
+
+    if (sattr->size.set_it) {
+        attr->va_mask |= CHIMERA_VFS_ATTR_SIZE;
+        attr->va_size  = sattr->size.size;
+    }
+
+    if (sattr->atime.set_it == SET_TO_CLIENT_TIME) {
+        attr->va_mask         |= CHIMERA_VFS_ATTR_ATIME;
+        attr->va_atime.tv_sec  = sattr->atime.atime.seconds;
+        attr->va_atime.tv_nsec = sattr->atime.atime.nseconds;
+    } else if (sattr->atime.set_it == SET_TO_SERVER_TIME) {
+        attr->va_mask         |= CHIMERA_VFS_ATTR_ATIME;
+        attr->va_atime.tv_sec  = 0;
+        attr->va_atime.tv_nsec = CHIMERA_VFS_TIME_NOW;
+    }
+
+    if (sattr->mtime.set_it == SET_TO_CLIENT_TIME) {
+        attr->va_mask         |= CHIMERA_VFS_ATTR_MTIME;
+        attr->va_mtime.tv_sec  = sattr->mtime.mtime.seconds;
+        attr->va_mtime.tv_nsec = sattr->mtime.mtime.nseconds;
+    } else if (sattr->mtime.set_it == SET_TO_SERVER_TIME) {
+        attr->va_mask         |= CHIMERA_VFS_ATTR_MTIME;
+        attr->va_mtime.tv_sec  = 0;
+        attr->va_mtime.tv_nsec = CHIMERA_VFS_TIME_NOW;
+    }
+
+} /* chimera_nfs3_sattr3_to_va */
+
+static inline void
 chimera_nfs3_marshall_attrs(
     const struct chimera_vfs_attrs *attr,
     struct fattr3                  *fattr)

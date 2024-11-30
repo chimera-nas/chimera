@@ -55,6 +55,8 @@ struct chimera_vfs;
             CHIMERA_VFS_ATTR_FILES_FREE | \
             CHIMERA_VFS_ATTR_FILES_USED)
 
+#define CHIMERA_VFS_TIME_NOW         ((1l << 30) - 3l)
+
 struct chimera_vfs_attrs {
     uint64_t        va_mask;
 
@@ -98,6 +100,8 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OP_ACCESS      14
 #define CHIMERA_VFS_OP_SYMLINK     15
 #define CHIMERA_VFS_OP_RENAME      16
+#define CHIMERA_VFS_OP_SETATTR     17
+
 #define CHIMERA_VFS_OPEN_CREATE    (1U << 0)
 #define CHIMERA_VFS_OPEN_RDONLY    (1U << 1)
 #define CHIMERA_VFS_OPEN_WRONLY    (1U << 2)
@@ -161,6 +165,12 @@ struct chimera_vfs_request {
             uint64_t                 attr_mask;
             struct chimera_vfs_attrs r_attr;
         } getattr;
+
+        struct {
+            const void              *fh;
+            uint32_t                 fh_len;
+            struct chimera_vfs_attrs attr;
+        } setattr;
 
         struct {
             const void                    *fh;

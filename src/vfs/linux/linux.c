@@ -367,6 +367,119 @@ chimera_linux_getattr(
 } /* linux_getattr */
 
 static void
+chimera_linux_setattr(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_linux_thread *thread = private_data;
+    struct chimera_vfs_attrs    *attr   = &request->setattr.attr;
+    int                          fd, rc;
+
+    request->getattr.r_attr.va_mask = 0;
+
+    fd = linux_open_by_handle(thread,
+                              request->getattr.fh,
+                              request->getattr.fh_len,
+                              O_PATH | O_RDONLY);
+
+    if (fd < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    if (attr->va_mask & CHIMERA_VFS_ATTR_MODE) {
+        rc = fchmod(fd, attr->va_mode);
+
+        if (rc) {
+            request->status = chimera_linux_errno_to_status(errno);
+            request->complete(request);
+            return;
+        }
+    }
+
+    if ((attr->va_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) ==
+        (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+
+        rc = fchown(fd, attr->va_uid, attr->va_gid);
+
+        if (rc) {
+            request->status = chimera_linux_errno_to_status(errno);
+            request->complete(request);
+            return;
+        }
+
+    } else if (attr->va_mask & CHIMERA_VFS_ATTR_UID) {
+
+        rc = fchown(fd, attr->va_uid, -1);
+
+        if (rc) {
+            request->status = chimera_linux_errno_to_status(errno);
+            request->complete(request);
+            return;
+        }
+
+    } else if (attr->va_mask & CHIMERA_VFS_ATTR_GID) {
+
+        rc = fchown(fd, -1, attr->va_gid);
+
+        if (rc) {
+            request->status = chimera_linux_errno_to_status(errno);
+            request->complete(request);
+            return;
+        }
+    }
+
+    if (attr->va_mask & CHIMERA_VFS_ATTR_SIZE) {
+        rc = ftruncate(fd, attr->va_size);
+
+        if (rc) {
+            request->status = chimera_linux_errno_to_status(errno);
+            request->complete(request);
+            return;
+        }
+    }
+
+    if (attr->va_mask & (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME)) {
+        struct timespec times[2];
+
+        if (attr->va_mask & CHIMERA_VFS_ATTR_ATIME) {
+            if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+                times[0].tv_nsec = UTIME_NOW;
+            } else {
+                times[0] = attr->va_atime;
+            }
+        } else {
+            times[0].tv_nsec = UTIME_OMIT;
+        }
+
+        if (attr->va_mask & CHIMERA_VFS_ATTR_MTIME) {
+            if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+                times[1].tv_nsec = UTIME_NOW;
+            } else {
+                times[1] = attr->va_mtime;
+            }
+        } else {
+            times[1].tv_nsec = UTIME_OMIT;
+        }
+
+        rc = futimens(fd, times);
+
+        if (rc) {
+            request->status = chimera_linux_errno_to_status(errno);
+            request->complete(request);
+            close(fd);
+            return;
+        }
+    }
+
+    close(fd);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* linux_setattr */
+
+static void
 chimera_linux_lookup_path(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -1122,6 +1235,9 @@ chimera_linux_dispatch(
             break;
         case CHIMERA_VFS_OP_RENAME:
             chimera_linux_rename(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_SETATTR:
+            chimera_linux_setattr(request, private_data);
             break;
         default:
             chimera_linux_error("linux_dispatch: unknown operation %d",
