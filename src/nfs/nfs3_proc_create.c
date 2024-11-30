@@ -29,6 +29,9 @@ chimera_nfs3_create_complete(
         res.resok.obj.handle_follows = 1;
         xdr_dbuf_opaque_copy(&res.resok.obj.handle.data, fh, fhlen, msg->dbuf);
         res.resok.obj_attributes.attributes_follow = 0;
+
+        res.resok.dir_wcc.before.attributes_follow = 0;
+        res.resok.dir_wcc.after.attributes_follow  = 0;
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, &res, msg);

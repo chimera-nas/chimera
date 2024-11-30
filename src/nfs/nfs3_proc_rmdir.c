@@ -17,6 +17,11 @@ chimera_nfs3_rmdir_complete(
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
+    if (res.status == NFS3_OK) {
+        res.resok.dir_wcc.before.attributes_follow = 0;
+        res.resok.dir_wcc.after.attributes_follow  = 0;
+    }
+
     shared->nfs_v3.send_reply_NFSPROC3_RMDIR(evpl, &res, msg);
 
     nfs_request_free(thread, req);

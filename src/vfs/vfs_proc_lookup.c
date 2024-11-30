@@ -9,12 +9,8 @@ chimera_vfs_lookup_complete(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread    *thread   = request->thread;
     chimera_vfs_lookup_callback_t callback = request->proto_callback;
-    char                          fhstr[80];
 
-    format_hex(fhstr, sizeof(fhstr), request->lookup.r_fh, request->lookup.
-               r_fh_len);
-
-    chimera_vfs_debug("lookup_complete: fh=%s", fhstr);
+    chimera_vfs_complete(request);
 
     callback(request->status,
              request->lookup.r_fh,

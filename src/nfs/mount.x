@@ -30,6 +30,10 @@ struct exportnode {
  exportnode *ex_next;
 };
 
+struct exportres {
+  exportnode *exports;
+};
+
 struct mountbody {
  string ml_hostname<MNTNAMLEN>;
  string ml_directory<MNTPATHLEN>;
@@ -59,6 +63,6 @@ program NFS_MOUNT {
   mountbody* MOUNTPROC3_DUMP(void)    = 2;
   void      MOUNTPROC3_UMNT(mountarg3) = 3;
   void      MOUNTPROC3_UMNTALL(void) = 4;
-  exportnode* MOUNTPROC3_EXPORT(void)  = 5;
+  exportres MOUNTPROC3_EXPORT(void)  = 5;
  } = 3;
 } = 100005;

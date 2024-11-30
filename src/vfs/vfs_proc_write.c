@@ -6,9 +6,8 @@ chimera_vfs_write_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_write_callback_t callback = request->proto_callback;
 
-    chimera_vfs_debug("write complete: %d, %d",
-                      request->status,
-                      request->write.result_length);
+    chimera_vfs_complete(request);
+
     callback(request->status,
              request->write.result_length,
              request->proto_private_data);

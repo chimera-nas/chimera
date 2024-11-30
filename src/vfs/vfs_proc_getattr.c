@@ -9,6 +9,8 @@ chimera_vfs_getattr_complete(struct chimera_vfs_request *request)
     struct chimera_vfs_thread     *thread   = request->thread;
     chimera_vfs_getattr_callback_t callback = request->proto_callback;
 
+    chimera_vfs_complete(request);
+
     callback(request->status,
              &request->getattr.r_attr,
              request->proto_private_data);

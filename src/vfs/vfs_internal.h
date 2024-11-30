@@ -1,9 +1,13 @@
 #pragma once
 
 #include <stdlib.h>
+#include <time.h>
 
 #include "common/logging.h"
+#include "common/misc.h"
 #include "uthash/utlist.h"
+
+#include "vfs/vfs_dump.h"
 
 #define chimera_vfs_debug(...) chimera_debug("vfs", \
                                              __FILE__, \
@@ -46,8 +50,22 @@ chimera_vfs_request_alloc(struct chimera_vfs_thread *thread)
         request->status = CHIMERA_VFS_UNSET;
     }
 
+    clock_gettime(CLOCK_MONOTONIC, &request->start_time);
+
     return request;
 } /* chimera_vfs_request_alloc */
+
+static inline void
+chimera_vfs_complete(struct chimera_vfs_request *request)
+{
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    request->elapsed_ns = chimera_get_elapsed_ns(&now, &request->start_time);
+
+    chimera_vfs_dump_reply(request);
+} /* chimera_vfs_complete */
 
 static inline void
 chimera_vfs_request_free(
@@ -82,5 +100,6 @@ chimera_vfs_dispatch(
     struct chimera_vfs_module  *module,
     struct chimera_vfs_request *request)
 {
+    chimera_vfs_dump_request(request);
     module->dispatch(request, thread->module_private[module->fh_magic]);
 } /* chimera_vfs_dispatch */

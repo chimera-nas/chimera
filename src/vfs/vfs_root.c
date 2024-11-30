@@ -120,10 +120,6 @@ chimera_vfs_root_lookup(
     struct chimera_vfs_share   *share;
     struct chimera_vfs_request *subrequest;
 
-    chimera_vfs_root_debug(
-        "chimera_vfs_root_lookup: name=%.*s",
-        request->lookup.component_len, request->lookup.component);
-
     DL_FOREACH(vfs->shares, share)
     {
         if (strncmp(share->name,
@@ -212,8 +208,6 @@ chimera_vfs_root_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    chimera_vfs_root_debug("chimera_vfs_root_dispatch: request=%p", request);
-
     switch (request->opcode) {
         case CHIMERA_VFS_OP_LOOKUP:
             chimera_vfs_root_lookup(request, private_data);

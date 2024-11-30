@@ -132,6 +132,8 @@ struct chimera_vfs_request {
     uint32_t                        opcode;
     enum chimera_vfs_error          status;
     chimera_vfs_complete_callback_t complete;
+    struct timespec                 start_time;
+    uint64_t                        elapsed_ns;
     void                           *proto_callback;
     void                           *proto_private_data;
     struct chimera_vfs_request     *prev;

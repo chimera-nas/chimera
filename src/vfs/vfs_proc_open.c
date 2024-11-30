@@ -8,6 +8,8 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_open_callback_t callback = request->proto_callback;
 
+    chimera_vfs_complete(request);
+
     callback(request->status,
              &request->open.handle,
              request->proto_private_data);

@@ -8,6 +8,8 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_open_at_callback_t callback = request->proto_callback;
 
+    chimera_vfs_complete(request);
+
     callback(request->status,
              request->open_at.fh,
              request->open_at.fh_len,

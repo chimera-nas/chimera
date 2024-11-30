@@ -9,6 +9,8 @@ chimera_vfs_lookup_path_complete(struct chimera_vfs_request *request)
     struct chimera_vfs_thread    *thread   = request->thread;
     chimera_vfs_lookup_callback_t callback = request->proto_callback;
 
+    chimera_vfs_complete(request);
+
     callback(request->status,
              request->lookup.r_fh,
              request->lookup.r_fh_len,

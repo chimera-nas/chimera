@@ -30,14 +30,18 @@ chimera_nfs_mount_lookup_complete(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct evpl                      *evpl   = thread->evpl;
     struct chimera_server_nfs_shared *shared = thread->shared;
-
+    int32_t                           auth_flavors[2];
     struct mountres3                  res;
 
     xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle, fhlen, msg->dbuf);
     memcpy(res.mountinfo.fhandle.data, fh, fhlen);
 
     if (error_code == CHIMERA_VFS_OK) {
-        res.fhs_status = MNT3_OK;
+        res.fhs_status                 = MNT3_OK;
+        res.mountinfo.num_auth_flavors = 2;
+        res.mountinfo.auth_flavors     = auth_flavors;
+        auth_flavors[0]                = AUTH_NONE;
+        auth_flavors[1]                = AUTH_SYS;
         xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle, fhlen, msg->dbuf);
         memcpy(res.mountinfo.fhandle.data, fh, fhlen);
     } else {
@@ -111,7 +115,9 @@ chimera_nfs_mount_export(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
-    struct exportnode                 export;
+    struct exportres                  export;
+
+    export.exports = NULL;
 
     shared->mount_v3.send_reply_MOUNTPROC3_EXPORT(evpl, &export, msg);
 } /* chimera_nfs_mount_export */

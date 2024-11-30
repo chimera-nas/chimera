@@ -19,6 +19,9 @@ chimera_nfs3_fsinfo_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
+
+        res.resok.obj_attributes.attributes_follow = 0;
+
         res.resok.maxfilesize         = UINT64_MAX;
         res.resok.time_delta.seconds  = 0;
         res.resok.time_delta.nseconds = 1;

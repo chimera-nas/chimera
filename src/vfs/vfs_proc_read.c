@@ -8,10 +8,7 @@ chimera_vfs_read_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_read_callback_t callback = request->proto_callback;
 
-    chimera_vfs_debug("read complete: %d, %d, %d",
-                      request->status,
-                      request->read.result_length,
-                      request->read.result_eof);
+    chimera_vfs_complete(request);
 
     callback(request->status,
              request->read.result_length,

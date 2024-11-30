@@ -25,6 +25,8 @@
   "files.associations": {
     "misc.h": "c",
     "vfs_procs.h": "c",
-    "utlist.h": "c"
+    "utlist.h": "c",
+    "vfs_internal.h": "c",
+    "format.h": "c"
   }
 }

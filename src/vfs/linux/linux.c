@@ -179,7 +179,6 @@ open_mount_path_by_id(int mount_id)
         nread = sscanf(linep, "%d %*d %*s %*s %s", &mi_mount_id, mount_path);
 
         if (nread != 2) {
-            fprintf(stderr, "Bad sscanf()\n");
             exit(EXIT_FAILURE);
         }
 
@@ -254,18 +253,11 @@ linux_open_by_handle(
     HASH_FIND_INT(thread->mounts, &mount_id, mount);
 
     if (!mount) {
-        chimera_linux_error("linux_open_by_handle: mount not found for id %d",
-                            mount_id);
-
         mount           = calloc(1, sizeof(*mount));
         mount->mount_id = mount_id;
         mount->mount_fd = open_mount_path_by_id(mount_id);
 
         if (mount->mount_fd < 0) {
-            chimera_linux_error(
-                "linux_open_by_handle: open_mount_path_by_id(%d) failed: %s",
-                mount_id,
-                strerror(errno));
             free(mount);
             return -1;
         }
@@ -687,7 +679,6 @@ chimera_linux_open(
         return;
     }
 
-    chimera_linux_debug("linux_open: fd %d", fd);
     request->open.handle.vfs_private = fd;
 
     request->status = CHIMERA_VFS_OK;
@@ -935,29 +926,16 @@ chimera_linux_read(
             iov[i].iov_len = left;
         }
 
-        chimera_linux_debug("linux read: iov[%d] base %p len %zu",
-                            i,
-                            iov[i].iov_base,
-                            iov[i].iov_len);
-
         left -= iov[i].iov_len;
     }
 
     fd = (int) request->read.handle->vfs_private;
-
-    chimera_linux_debug("linux read: fd %d offset %ld length %u",
-                        fd,
-                        request->read.offset,
-                        request->read.length);
 
     len = preadv(fd,
                  iov,
                  request->read.niov,
                  request->read.offset);
 
-    chimera_linux_debug("linux read: return %ld, errno %d",
-                        len,
-                        errno);
     if (len < 0) {
         request->status             = chimera_linux_errno_to_status(errno);
         request->read.result_length = 0;
@@ -1000,16 +978,11 @@ chimera_linux_write(
 
     fd = (int) request->write.handle->vfs_private;
 
-    chimera_linux_debug("linux write: fd %d", fd);
-
     len = pwritev(fd,
                   iov,
                   niov,
                   request->write.offset);
 
-    chimera_linux_debug("linux write: return %ld, errno %d",
-                        len,
-                        errno);
     if (len < 0) {
         request->status              = chimera_linux_errno_to_status(errno);
         request->write.result_length = 0;

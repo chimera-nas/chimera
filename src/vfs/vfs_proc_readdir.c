@@ -8,6 +8,8 @@ chimera_vfs_readdir_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_readdir_complete_t complete = request->proto_callback;
 
+    chimera_vfs_complete(request);
+
     complete(request->status,
              request->readdir.r_cookie,
              request->readdir.r_eof,
