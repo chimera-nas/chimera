@@ -5,8 +5,10 @@ ARG USER_UID=1000
 ARG USER_GID=$USER_UID
 
 RUN apt-get -y update && \
-    apt-get -y upgrade && \
-    apt-get -y install unminimize && \
+    apt-get -y --no-install-recommends upgrade && \
+    apt-get -y --no-install-recommends install unminimize && \
     echo y | unminimize && \
-    apt-get -y install clang cmake ninja-build git flex bison lldb gdb less libnfs-dev vim psmisc uncrustify \
-    net-tools tshark tcpdump uuid-dev iproute2 man-db
+    apt-get -y --no-install-recommends install clang cmake ninja-build git flex bison lldb gdb less libnfs-dev vim psmisc uncrustify \
+    net-tools tshark tcpdump uuid-dev iproute2 man-db ca-certificates ssh && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*

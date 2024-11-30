@@ -72,6 +72,8 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs_mount.c nfs_portmap.c
 
 target_link_libraries(chimera_nfs chimera_common evpl evpl_rpc2 pthread uuid)
 
+install(TARGETS chimera_nfs DESTINATION lib)
+
 # Ensure xdrzcc is built before these libraries
 add_dependencies(chimera_nfs xdrzcc)
 
