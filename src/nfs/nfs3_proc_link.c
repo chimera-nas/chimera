@@ -1,4 +1,32 @@
 #include "nfs3_procs.h"
+#include "nfs3_status.h"
+#include "vfs/vfs_procs.h"
+
+static void
+chimera_nfs3_link_complete(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct nfs_request               *req    = private_data;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct evpl                      *evpl   = thread->evpl;
+    struct evpl_rpc2_msg             *msg    = req->msg;
+    struct LINK3res                   res;
+
+    res.status = chimera_vfs_error_to_nfsstat3(
+        error_code);
+
+    if (res.status == NFS3_OK) {
+        res.resok.file_attributes.attributes_follow    = 0;
+        res.resok.linkdir_wcc.before.attributes_follow = 0;
+        res.resok.linkdir_wcc.after.attributes_follow  = 0;
+    }
+
+    shared->nfs_v3.send_reply_NFSPROC3_LINK(evpl, &res, msg);
+
+    nfs_request_free(thread, req);
+} /* chimera_nfs3_mkdir_complete */
 
 void
 chimera_nfs3_link(
@@ -8,5 +36,18 @@ chimera_nfs3_link(
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
-    // TODO: Implement NFSPROC3_LINK
+    struct chimera_server_nfs_thread *thread = private_data;
+    struct nfs_request               *req;
+
+    req = nfs_request_alloc(thread, conn, msg);
+
+    chimera_vfs_link(thread->vfs,
+                     args->file.data.data,
+                     args->file.data.len,
+                     args->link.dir.data.data,
+                     args->link.dir.data.len,
+                     args->link.name.str,
+                     args->link.name.len,
+                     chimera_nfs3_link_complete,
+                     req);
 } /* chimera_nfs3_link */

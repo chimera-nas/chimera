@@ -375,12 +375,10 @@ chimera_linux_setattr(
     struct chimera_vfs_attrs    *attr   = &request->setattr.attr;
     int                          fd, rc;
 
-    request->getattr.r_attr.va_mask = 0;
-
     fd = linux_open_by_handle(thread,
-                              request->getattr.fh,
-                              request->getattr.fh_len,
-                              O_PATH | O_RDONLY);
+                              request->setattr.fh,
+                              request->setattr.fh_len,
+                              O_WRONLY);
 
     if (fd < 0) {
         request->status = chimera_linux_errno_to_status(errno);
@@ -490,14 +488,9 @@ chimera_linux_lookup_path(
              request->lookup_path.path,
              request->lookup_path.pathlen);
 
-    chimera_linux_debug("linux_lookup_path: path=%s", fullpath);
-
     mount_fd = open(fullpath, O_DIRECTORY | O_RDONLY);
 
     if (mount_fd < 0) {
-        chimera_linux_error("linux_lookup_path: open(%s) failed: %s",
-                            fullpath,
-                            strerror(errno));
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -511,9 +504,6 @@ chimera_linux_lookup_path(
                       &request->lookup_path.r_fh_len);
 
     if (rc < 0) {
-        chimera_linux_error("linux_lookup_path: get_fh(%s) failed: %s",
-                            request->lookup_path.path,
-                            strerror(errno));
         request->status = chimera_linux_errno_to_status(errno);
     } else {
         request->status = CHIMERA_VFS_OK;
@@ -1183,6 +1173,56 @@ chimera_linux_rename(
 } /* chimera_linux_rename */
 
 static void
+chimera_linux_link(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_linux_thread *thread = private_data;
+    int                          fd, dir_fd, rc;
+
+    TERM_STR(fullname, request->link.name, request->link.namelen);
+
+    fd = linux_open_by_handle(thread,
+                              request->link.fh,
+                              request->link.fh_len,
+                              O_PATH | O_RDONLY | O_NOFOLLOW);
+
+    if (fd < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    dir_fd = linux_open_by_handle(thread,
+                                  request->link.dir_fh,
+                                  request->link.dir_fhlen,
+                                  O_PATH | O_RDONLY | O_NOFOLLOW);
+
+    if (dir_fd < 0) {
+        close(fd);
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    rc = linkat(fd, "", dir_fd, fullname, AT_EMPTY_PATH);
+
+    if (rc < 0) {
+        close(fd);
+        close(dir_fd);
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    close(fd);
+    close(dir_fd);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+
+} /* chimera_linux_link */
+static void
 chimera_linux_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -1235,6 +1275,9 @@ chimera_linux_dispatch(
             break;
         case CHIMERA_VFS_OP_RENAME:
             chimera_linux_rename(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_LINK:
+            chimera_linux_link(request, private_data);
             break;
         case CHIMERA_VFS_OP_SETATTR:
             chimera_linux_setattr(request, private_data);

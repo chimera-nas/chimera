@@ -263,3 +263,19 @@ chimera_vfs_rename(
     int                           new_namelen,
     chimera_vfs_rename_callback_t callback,
     void                         *private_data);
+
+typedef void (*chimera_vfs_link_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_link(
+    struct chimera_vfs_thread  *thread,
+    const void                 *fh,
+    int                         fhlen,
+    const void                 *dir_fh,
+    int                         dir_fhlen,
+    const char                 *name,
+    int                         namelen,
+    chimera_vfs_link_callback_t callback,
+    void                       *private_data);
