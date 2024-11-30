@@ -8,5 +8,12 @@ chimera_nfs3_mknod(
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
-    // TODO: Implement NFSPROC3_MKNOD
+    struct chimera_server_nfs_thread *thread = private_data;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct MKNOD3res                  res;
+
+    /* XXX fill this in at some point */
+    res.status = NFS3ERR_NOTSUPP;
+
+    shared->nfs_v3.send_reply_NFSPROC3_MKNOD(evpl, &res, msg);
 } /* chimera_nfs3_mknod */
