@@ -21,6 +21,10 @@ chimera_nfs3_commit_complete(
     if (res.status == NFS3_OK) {
         res.resok.file_wcc.before.attributes_follow = 0;
         res.resok.file_wcc.after.attributes_follow  = 0;
+
+        memcpy(res.resok.verf,
+               &shared->nfs_verifier,
+               sizeof(res.resok.verf));
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_COMMIT(evpl, &res, msg);

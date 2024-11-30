@@ -241,6 +241,7 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        offset;
             uint32_t                        length;
+            uint32_t                        sync;
             const struct evpl_iovec        *iov;
             int                             niov;
             uint32_t                        result_length;

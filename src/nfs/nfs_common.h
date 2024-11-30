@@ -50,6 +50,8 @@ struct chimera_server_nfs_shared {
     struct NFS_V4            nfs_v4;
     struct NFS_V4_CB         nfs_v4_cb;
 
+    uint64_t                 nfs_verifier;
+
     struct nfs4_client_table nfs4_shared_clients;
 
     struct nfs3_open_cache   nfs3_open_cache;

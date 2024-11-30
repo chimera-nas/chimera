@@ -21,6 +21,7 @@ chimera_vfs_write(
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
     uint32_t                        count,
+    uint32_t                        sync,
     const struct evpl_iovec        *iov,
     int                             niov,
     chimera_vfs_write_callback_t    callback,
@@ -38,6 +39,7 @@ chimera_vfs_write(
     request->write.handle       = handle;
     request->write.offset       = offset;
     request->write.length       = count;
+    request->write.sync         = sync;
     request->write.iov          = iov;
     request->write.niov         = niov;
     request->proto_callback     = callback;

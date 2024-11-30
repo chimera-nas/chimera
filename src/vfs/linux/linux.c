@@ -994,6 +994,10 @@ chimera_linux_write(
 
     request->write.result_length = len;
 
+    if (request->write.sync) {
+        fsync(fd);
+    }
+
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 

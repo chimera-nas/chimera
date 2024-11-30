@@ -15,13 +15,23 @@ chimera_nfs3_write_complete(
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
+    struct WRITE3args                *args   = req->args_write;
     struct WRITE3res                  res;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-        res.resok.count                             = length;
-        res.resok.committed                         = 0;
+        res.resok.count = length;
+
+        if (args->stable != UNSTABLE) {
+            res.resok.committed = FILE_SYNC;
+        } else {
+            res.resok.committed = UNSTABLE;
+        }
+
+        memcpy(res.resok.verf,
+               &shared->nfs_verifier,
+               sizeof(res.resok.verf));
         res.resok.file_wcc.before.attributes_follow = 0;
         res.resok.file_wcc.after.attributes_follow  = 0;
     }
@@ -53,6 +63,7 @@ chimera_nfs3_write_open_callback(
                           handle,
                           args->offset,
                           args->count,
+                          (args->stable != UNSTABLE),
                           args->data.iov,
                           args->data.niov,
                           chimera_nfs3_write_complete,
@@ -99,6 +110,7 @@ chimera_nfs3_write(
                       handle,
                       args->offset,
                       args->count,
+                      (args->stable != UNSTABLE),
                       args->data.iov,
                       args->data.niov,
                       chimera_nfs3_write_complete,

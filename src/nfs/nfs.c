@@ -23,6 +23,11 @@ nfs_server_init(struct chimera_vfs *vfs)
 
     shared->vfs = vfs;
 
+    shared->nfs_verifier = rand();
+
+    chimera_nfs_abort_if(sizeof(shared->nfs_verifier) != NFS3_WRITEVERFSIZE,
+                         "nfs_verifier size mismatch");
+
     NFS_PORTMAP_V2_init(&shared->portmap_v2);
     NFS_MOUNT_V3_init(&shared->mount_v3);
     NFS_V3_init(&shared->nfs_v3);
