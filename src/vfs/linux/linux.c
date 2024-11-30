@@ -142,6 +142,10 @@ chimera_linux_statvfs_to_attr(
     attr->va_space_free  = stvfs->f_bavail * stvfs->f_bsize;
     attr->va_space_avail = attr->va_space_free;
     attr->va_space_used  = attr->va_space_total - attr->va_space_free;
+
+    attr->va_files_used  = stvfs->f_files;
+    attr->va_files_free  = stvfs->f_ffree;
+    attr->va_files_total = attr->va_files_used + attr->va_files_free;
 } /* linux_statvfs_to_chimera_attr */
 
 static int

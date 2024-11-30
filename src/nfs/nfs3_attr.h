@@ -5,7 +5,7 @@
 #include "nfs3_xdr.h"
 #include "vfs/vfs.h"
 
-#define CHIMERA_NFS3_ATTR_MASK ( \
+#define CHIMERA_NFS3_ATTR_MASK   ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \
             CHIMERA_VFS_ATTR_MODE | \
@@ -17,6 +17,9 @@
             CHIMERA_VFS_ATTR_ATIME | \
             CHIMERA_VFS_ATTR_MTIME | \
             CHIMERA_VFS_ATTR_CTIME)
+
+#define CHIMERA_NFS3_FSSTAT_MASK ( \
+            CHIMERA_VFS_ATTR_MASK_STATFS)
 
 static ftype3
 chimera_nfs3_type_from_vfs(uint16_t mode)

@@ -23,6 +23,7 @@ struct nfs_request {
         struct ACCESS3args      *args_access;
         struct LOOKUP3args      *args_lookup;
         struct GETATTR3args     *args_getattr;
+        struct FSSTAT3args      *args_fsstat;
         struct READ3args        *args_read;
         struct READDIR3args     *args_readdir;
         struct READDIRPLUS3args *args_readdirplus;

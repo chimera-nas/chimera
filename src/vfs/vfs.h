@@ -27,8 +27,11 @@ struct chimera_vfs;
 #define CHIMERA_VFS_ATTR_SPACE_FREE  (1UL << 12)
 #define CHIMERA_VFS_ATTR_SPACE_TOTAL (1UL << 13)
 #define CHIMERA_VFS_ATTR_SPACE_USED  (1UL << 14)
+#define CHIMERA_VFS_ATTR_FILES_TOTAL (1UL << 15)
+#define CHIMERA_VFS_ATTR_FILES_FREE  (1UL << 16)
+#define CHIMERA_VFS_ATTR_FILES_USED  (1UL << 17)
 
-#define CHIMERA_VFS_ATTR_FH          (1UL << 15)
+#define CHIMERA_VFS_ATTR_FH          (1UL << 18)
 
 #define CHIMERA_VFS_ATTR_MASK_STAT   ( \
             CHIMERA_VFS_ATTR_DEV | \
@@ -47,7 +50,10 @@ struct chimera_vfs;
             CHIMERA_VFS_ATTR_SPACE_AVAIL | \
             CHIMERA_VFS_ATTR_SPACE_FREE | \
             CHIMERA_VFS_ATTR_SPACE_TOTAL | \
-            CHIMERA_VFS_ATTR_SPACE_USED)
+            CHIMERA_VFS_ATTR_SPACE_USED | \
+            CHIMERA_VFS_ATTR_FILES_TOTAL | \
+            CHIMERA_VFS_ATTR_FILES_FREE | \
+            CHIMERA_VFS_ATTR_FILES_USED)
 
 struct chimera_vfs_attrs {
     uint64_t        va_mask;
@@ -68,6 +74,9 @@ struct chimera_vfs_attrs {
     uint64_t        va_space_free;
     uint64_t        va_space_total;
     uint64_t        va_space_used;
+    uint64_t        va_files_total;
+    uint64_t        va_files_free;
+    uint64_t        va_files_used;
 
     uint8_t         va_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t        va_fh_len;
