@@ -91,8 +91,10 @@ chimera_server_init(const char *cfgfile)
 
     pthread_mutex_init(&server->lock, NULL);
 
+    chimera_server_info("Initializing VFS...");
     server->vfs = chimera_vfs_init();
 
+    chimera_server_info("Initializing NFS protocol...");
     server->protocols[server->num_protocols++] = &nfs_protocol;
 
     for (i = 0; i < server->num_protocols; i++) {
@@ -103,10 +105,12 @@ chimera_server_init(const char *cfgfile)
                                           chimera_server_thread_destroy, server)
     ;
 
+    chimera_server_info("Waiting for threads to start...");
     while (server->threads_online < 1) {
         usleep(100);
     }
 
+    chimera_server_info("Server is ready.");
     return server;
 } /* chimera_server_init */
 

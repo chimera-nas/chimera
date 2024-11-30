@@ -194,21 +194,26 @@ chimera_vfs_dump_reply(struct chimera_vfs_request *req)
     char argstr[80];
     char fhstr[80];
 
+    argstr[0] = '\0';
+
     switch (req->opcode) {
         case CHIMERA_VFS_OP_LOOKUP:
-            format_hex(fhstr, sizeof(fhstr), req->lookup.r_fh, req->lookup.
-                       r_fh_len)
-            ;
-            snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
+            if (req->status == CHIMERA_VFS_OK) {
+                format_hex(fhstr, sizeof(fhstr),
+                           req->lookup.r_fh,
+                           req->lookup.r_fh_len);
+                snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
+            }
             break;
         case CHIMERA_VFS_OP_OPEN_AT:
-            format_hex(fhstr, sizeof(fhstr), req->open_at.fh, req->open_at.
-                       fh_len)
-            ;
-            snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
+            if (req->status == CHIMERA_VFS_OK) {
+                format_hex(fhstr, sizeof(fhstr),
+                           req->open_at.fh,
+                           req->open_at.fh_len);
+                snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
+            }
             break;
         default:
-            argstr[0] = '\0';
             break;
     } /* switch */
 

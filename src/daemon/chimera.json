@@ -1,0 +1,12 @@
+{
+    "shares": {
+        "memfs": {
+            "module": "memfs",
+            "path": "/"
+        },
+        "linux": {
+            "module": "linux",
+            "path": "/share"
+        }
+    }
+}

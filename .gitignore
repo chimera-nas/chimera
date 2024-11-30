@@ -1,5 +1,8 @@
 orig
+core
+core.*
 build
+publish.sh
 cap
 *.cap
 Testing

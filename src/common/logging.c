@@ -38,10 +38,12 @@ chimera_log_thread(void *arg)
 
             pthread_mutex_lock(&ChimeraLogBufLock);
             memcpy(tmp, ChimeraLogBuf, ChimeraLogBufPtr - ChimeraLogBuf);
+            tmp[ChimeraLogBufPtr - ChimeraLogBuf] = '\0';
             ChimeraLogBufPtr = ChimeraLogBuf;
             pthread_mutex_unlock(&ChimeraLogBufLock);
 
-            fprintf(stderr, "%s", tmp);
+            fprintf(stdout, "%s", tmp);
+            fflush(stdout);
         }
         usleep(1000);
     }
@@ -96,6 +98,7 @@ chimera_vlog(
                    pid, tid, level_string[level], mod, file, line);
 
     pthread_once(&ChimeraLogOnce, chimera_log_thread_init);
+
     pthread_mutex_lock(&ChimeraLogBufLock);
     memcpy(ChimeraLogBufPtr, buf, bp - buf);
     ChimeraLogBufPtr += (bp - buf);

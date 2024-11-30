@@ -41,10 +41,16 @@ chimera_vfs_init(void)
 
     vfs = calloc(1, sizeof(*vfs));
 
+    chimera_vfs_info("Initializing VFS root module...");
     chimera_vfs_register(vfs, &vfs_root);
+
+    chimera_vfs_info("Initializing VFS memfs module...");
     chimera_vfs_register(vfs, &vfs_memvfs);
+
+    chimera_vfs_info("Initializing VFS linux module...");
     chimera_vfs_register(vfs, &vfs_linux);
 
+    chimera_vfs_info("Creating sync threads...");
     vfs->syncthreads = evpl_threadpool_create(16,
                                               chimera_vfs_syncthread_init,
                                               chimera_vfs_syncthread_wake,

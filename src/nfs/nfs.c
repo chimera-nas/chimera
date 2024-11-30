@@ -173,6 +173,7 @@ nfs_server_thread_init(
 
     thread->vfs = chimera_vfs_thread_init(evpl, shared->vfs);
 
+    chimera_nfs_info("Listening for NFS on port 2049...");
     thread->nfs_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 2049);
 
     thread->nfs_server = evpl_rpc2_listen(thread->rpc2_agent,
@@ -184,6 +185,8 @@ nfs_server_thread_init(
 
     programs[0] = &shared->mount_v3.rpc2;
 
+    chimera_nfs_info("Listening for RPC NFS mount on port 20048...");
+
     thread->mount_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 20048);
 
     thread->mount_server = evpl_rpc2_listen(thread->rpc2_agent,
@@ -194,6 +197,8 @@ nfs_server_thread_init(
                                             thread);
 
     programs[0] = &shared->portmap_v2.rpc2;
+
+    chimera_nfs_info("Listening for RPC portmap on port 111...");
 
     thread->portmap_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 111);
 

@@ -23,6 +23,9 @@ chimera_nfs3_lookup_complete(
         xdr_dbuf_opaque_copy(&res.resok.object.data, fh, fhlen, msg->dbuf);
         res.resok.dir_attributes.attributes_follow = 0;
         res.resok.obj_attributes.attributes_follow = 0;
+    } else {
+        res.resfail.dir_attributes.attributes_follow = 0;
+
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, &res, msg);
