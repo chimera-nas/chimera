@@ -4,8 +4,6 @@
 static void
 chimera_nfs4_open_complete(
     enum chimera_vfs_error          error_code,
-    const void                     *fh,
-    int                             fhlen,
     struct chimera_vfs_open_handle *handle,
     void                           *private_data)
 {

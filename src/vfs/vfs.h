@@ -120,6 +120,8 @@ typedef int (*chimera_vfs_readdir_callback_t)(
 
 struct chimera_vfs_open_handle {
     struct chimera_vfs_module *vfs_module;
+    uint8_t                    fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                   fh_len;
     uint64_t                   vfs_private;
 };
 

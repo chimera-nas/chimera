@@ -54,10 +54,7 @@ chimera_nfs3_read_open_callback(
 
     if (error_code == CHIMERA_VFS_OK) {
 
-        nfs3_open_cache_insert(&shared->nfs3_open_cache,
-                               args->file.data.data,
-                               args->file.data.len,
-                               handle);
+        nfs3_open_cache_insert(&shared->nfs3_open_cache, handle);
 
         chimera_vfs_read(thread->vfs,
                          handle,

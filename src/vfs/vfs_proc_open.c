@@ -8,6 +8,9 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_open_callback_t callback = request->proto_callback;
 
+    memcpy(request->open.handle.fh, request->open.fh, request->open.fh_len);
+    request->open.handle.fh_len = request->open.fh_len;
+
     chimera_vfs_complete(request);
 
     callback(request->status,

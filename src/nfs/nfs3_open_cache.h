@@ -5,6 +5,7 @@
 #include "nfs_internal.h"
 #include "vfs/vfs.h"
 #include "uthash/uthash.h"
+#include "common/format.h"
 
 struct nfs3_open_file {
     uint8_t                        fh[CHIMERA_VFS_FH_SIZE];
@@ -36,20 +37,20 @@ nfs3_open_cache_destroy(struct nfs3_open_cache *cache)
 static inline void
 nfs3_open_cache_insert(
     struct nfs3_open_cache         *cache,
-    const uint8_t                  *fh,
-    uint32_t                        fhlen,
     struct chimera_vfs_open_handle *handle)
 {
     struct nfs3_open_file *file;
 
     file = calloc(1, sizeof(*file));
 
-    memcpy(file->fh, fh, fhlen);
-    file->fhlen  = fhlen;
     file->handle = *handle;
 
     pthread_mutex_lock(&cache->lock);
-    HASH_ADD_KEYPTR(hh, cache->open_files, file->fh, file->fhlen, file);
+    HASH_ADD_KEYPTR(hh,
+                    cache->open_files,
+                    file->handle.fh,
+                    file->handle.fh_len,
+                    file);
     pthread_mutex_unlock(&cache->lock);
 
 } /* nfs3_open_cache_insert */

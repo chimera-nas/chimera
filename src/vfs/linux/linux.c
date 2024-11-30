@@ -18,6 +18,7 @@
 #include "linux.h"
 #include "common/logging.h"
 #include "common/format.h"
+#include "common/misc.h"
 #include "uthash/uthash.h"
 
 #define chimera_linux_debug(...) chimera_debug("linux", \
@@ -335,6 +336,7 @@ chimera_linux_getattr(
     }
 
     if (request->getattr.attr_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+
         rc = fstat(fd, &st);
 
         if (rc == 0) {

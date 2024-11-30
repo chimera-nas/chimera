@@ -33,11 +33,6 @@ chimera_vfs_lookup(
 {
     struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
-    char                        fhstr[80];
-
-    format_hex(fhstr, sizeof(fhstr), fh, fhlen);
-    chimera_vfs_debug("chimera_vfs_lookup: fh=%s name=%s",
-                      fhstr, name);
 
     module = chimera_vfs_get_module(thread, fh, fhlen);
 

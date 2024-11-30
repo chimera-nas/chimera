@@ -47,10 +47,7 @@ chimera_nfs3_write_open_callback(
 
     if (error_code == CHIMERA_VFS_OK) {
 
-        nfs3_open_cache_insert(&shared->nfs3_open_cache,
-                               args->file.data.data,
-                               args->file.data.len,
-                               handle);
+        nfs3_open_cache_insert(&shared->nfs3_open_cache, handle);
 
         chimera_vfs_write(thread->vfs,
                           handle,
@@ -88,6 +85,7 @@ chimera_nfs3_write(
     req->args_write = args;
 
     if (!handle) {
+        fprintf(stderr, "Opening file for write\n");
         chimera_vfs_open(thread->vfs,
                          args->file.data.data,
                          args->file.data.len,

@@ -112,8 +112,6 @@ chimera_vfs_open(
 
 typedef void (*chimera_vfs_open_at_callback_t)(
     enum chimera_vfs_error          error_code,
-    const void                     *fh,
-    int                             fhlen,
     struct chimera_vfs_open_handle *oh,
     void                           *private_data);
 

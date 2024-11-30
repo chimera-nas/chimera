@@ -84,25 +84,37 @@ chimera_vfs_dump_request(struct chimera_vfs_request *req)
             snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
             break;
         case CHIMERA_VFS_OP_OPEN_AT:
-            format_hex(fhstr, sizeof(fhstr), req->open_at.fh, req->open_at.
-                       fh_len);
+            format_hex(fhstr, sizeof(fhstr), req->open_at.parent_fh, req->
+                       open_at.
+                       parent_fh_len);
             snprintf(argstr, sizeof(argstr), "fh %s name %.*s",
                      fhstr,
                      req->open_at.namelen,
                      req->open_at.name);
             break;
         case CHIMERA_VFS_OP_CLOSE:
-            snprintf(argstr, sizeof(argstr), "hdl %016lx", req->close.handle->
-                     vfs_private);
+            format_hex(fhstr, sizeof(fhstr), req->close.handle->fh, req->close.
+                       handle->fh_len);
+            snprintf(argstr, sizeof(argstr), "fh %s hdl %lx",
+                     fhstr,
+                     req->close.handle->vfs_private);
             break;
         case CHIMERA_VFS_OP_READ:
-            snprintf(argstr, sizeof(argstr), "hdl %016lx offset %lu len %u",
+            format_hex(fhstr, sizeof(fhstr), req->read.handle->fh, req->read.
+                       handle->fh_len);
+            snprintf(argstr, sizeof(argstr),
+                     "fh %s hdl %lx offset %lu len %u",
+                     fhstr,
                      req->read.handle->vfs_private,
                      req->read.offset,
                      req->read.length);
             break;
         case CHIMERA_VFS_OP_WRITE:
-            snprintf(argstr, sizeof(argstr), "hdl %016lx offset %lu len %u",
+            format_hex(fhstr, sizeof(fhstr), req->write.handle->fh, req->write.
+                       handle->fh_len);
+            snprintf(argstr, sizeof(argstr),
+                     "fh %s hdl %lx offset %lu len %u",
+                     fhstr,
                      req->write.handle->vfs_private,
                      req->write.offset,
                      req->write.length);
@@ -120,8 +132,12 @@ chimera_vfs_dump_request(struct chimera_vfs_request *req)
                      req->mkdir.name);
             break;
         case CHIMERA_VFS_OP_COMMIT:
-            snprintf(argstr, sizeof(argstr), "hdl %016lx", req->commit.handle->
-                     vfs_private);
+            format_hex(fhstr, sizeof(fhstr), req->commit.handle->fh, req->commit
+                       .
+                       handle->fh_len);
+            snprintf(argstr, sizeof(argstr), "fh %s hdl %lx",
+                     fhstr,
+                     req->commit.handle->vfs_private);
             break;
         case CHIMERA_VFS_OP_ACCESS:
             format_hex(fhstr, sizeof(fhstr), req->access.fh, req->access.fh_len)
@@ -175,9 +191,31 @@ chimera_vfs_dump_request(struct chimera_vfs_request *req)
 void
 chimera_vfs_dump_reply(struct chimera_vfs_request *req)
 {
-    chimera_vfs_debug("VFS Reply   %p: %s status %d (%s) elapsed %lu ns",
+    char argstr[80];
+    char fhstr[80];
+
+    switch (req->opcode) {
+        case CHIMERA_VFS_OP_LOOKUP:
+            format_hex(fhstr, sizeof(fhstr), req->lookup.r_fh, req->lookup.
+                       r_fh_len)
+            ;
+            snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
+            break;
+        case CHIMERA_VFS_OP_OPEN_AT:
+            format_hex(fhstr, sizeof(fhstr), req->open_at.fh, req->open_at.
+                       fh_len)
+            ;
+            snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
+            break;
+        default:
+            argstr[0] = '\0';
+            break;
+    } /* switch */
+
+    chimera_vfs_debug("VFS Reply   %p: %s %s status %d (%s) elapsed %lu ns",
                       req,
                       chimera_vfs_op_name(req->opcode),
+                      argstr,
                       req->status,
                       req->status ? strerror(req->status) : "OK",
                       req->elapsed_ns);

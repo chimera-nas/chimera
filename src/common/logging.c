@@ -4,8 +4,10 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include "logging.h"
 
@@ -17,6 +19,49 @@ static const char *level_string[] = {
     "fatal"
 };
 
+#define CHIMERA_LOG_BUF_SIZE 1024 * 1024
+char               ChimeraLogBuf[CHIMERA_LOG_BUF_SIZE];
+char              *ChimeraLogBufPtr  = ChimeraLogBuf;
+int                ChimeraLogRun     = 1;
+pthread_mutex_t    ChimeraLogBufLock = PTHREAD_MUTEX_INITIALIZER;
+pthread_t          ChimeraLogThread;
+pthread_once_t     ChimeraLogOnce = PTHREAD_ONCE_INIT;
+
+static void *
+chimera_log_thread(void *arg)
+{
+    char tmp[CHIMERA_LOG_BUF_SIZE];
+
+    while (ChimeraLogRun || ChimeraLogBufPtr > ChimeraLogBuf) {
+
+        if (ChimeraLogBufPtr > ChimeraLogBuf) {
+
+            pthread_mutex_lock(&ChimeraLogBufLock);
+            memcpy(tmp, ChimeraLogBuf, ChimeraLogBufPtr - ChimeraLogBuf);
+            ChimeraLogBufPtr = ChimeraLogBuf;
+            pthread_mutex_unlock(&ChimeraLogBufLock);
+
+            fprintf(stderr, "%s", tmp);
+        }
+        usleep(1000);
+    }
+
+    return NULL;
+} /* chimera_log_thread */
+
+static void
+chimera_log_thread_exit(void)
+{
+    ChimeraLogRun = 0;
+    pthread_join(ChimeraLogThread, NULL);
+} /* chimera_log_thread_exit */
+
+static void
+chimera_log_thread_init(void)
+{
+    pthread_create(&ChimeraLogThread, NULL, chimera_log_thread, NULL);
+    atexit(chimera_log_thread_exit);
+} /* chimera_log_thread_init */
 
 void
 chimera_vlog(
@@ -49,8 +94,15 @@ chimera_vlog(
     bp += snprintf(bp, (buf + sizeof(buf)) - bp,
                    "\" process=%lu thread=%lu level=%s module=%s source=\"%s:%d\"\n",
                    pid, tid, level_string[level], mod, file, line);
-    fprintf(stderr, "%s", buf);
+
+    pthread_once(&ChimeraLogOnce, chimera_log_thread_init);
+    pthread_mutex_lock(&ChimeraLogBufLock);
+    memcpy(ChimeraLogBufPtr, buf, bp - buf);
+    ChimeraLogBufPtr += (bp - buf);
+    pthread_mutex_unlock(&ChimeraLogBufLock);
 } /* chimera_vlog */
+
+
 
 
 void

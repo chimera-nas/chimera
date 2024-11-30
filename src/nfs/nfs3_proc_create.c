@@ -7,8 +7,6 @@
 static void
 chimera_nfs3_create_complete(
     enum chimera_vfs_error          error_code,
-    const void                     *fh,
-    int                             fhlen,
     struct chimera_vfs_open_handle *handle,
     void                           *private_data)
 {
@@ -23,11 +21,13 @@ chimera_nfs3_create_complete(
 
     if (res.status == NFS3_OK) {
 
-        nfs3_open_cache_insert(&shared->nfs3_open_cache,
-                               fh, fhlen, handle);
+        nfs3_open_cache_insert(&shared->nfs3_open_cache, handle);
 
         res.resok.obj.handle_follows = 1;
-        xdr_dbuf_opaque_copy(&res.resok.obj.handle.data, fh, fhlen, msg->dbuf);
+        xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
+                             handle->fh,
+                             handle->fh_len,
+                             msg->dbuf);
         res.resok.obj_attributes.attributes_follow = 0;
 
         res.resok.dir_wcc.before.attributes_follow = 0;

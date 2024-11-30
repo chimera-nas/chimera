@@ -27,6 +27,7 @@
     "vfs_procs.h": "c",
     "utlist.h": "c",
     "vfs_internal.h": "c",
-    "format.h": "c"
+    "format.h": "c",
+    "uthash.h": "c"
   }
 }

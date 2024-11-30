@@ -29,6 +29,10 @@ main(
 
     nfs_set_version(nfs, NFS_V3);
 
+    (void) unlink("/build/testfile");
+
+    fprintf(stderr, "Mounting NFS share\n");
+
     if (nfs_mount(nfs, "127.0.0.1", "/share") < 0) {
         fprintf(stderr, "Failed to mount NFS share: %s\n", nfs_get_error(nfs));
         nfs_destroy_context(nfs);
@@ -36,8 +40,6 @@ main(
     }
 
     printf("Creating a file in the share\n");
-
-    (void) unlink("/build/testfile");
 
     rc = nfs_create(nfs, "/testfile", O_CREAT | O_WRONLY, 0, &fh);
 
@@ -47,9 +49,13 @@ main(
         return EXIT_FAILURE;
     }
 
+    printf("Writing to the file\n");
     nfs_write(nfs, fh, 13, "Hello, world!");
 
+    printf("Closing the file\n");
     nfs_close(nfs, fh);
+
+    printf("Unmounting the share\n");
 
     nfs_umount(nfs);
 
