@@ -4,7 +4,7 @@ ARG BUILD_TYPE=Release
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install clang cmake ninja-build git flex bison uuid-dev \
-    librdmacm-dev libjansson-dev libclang-rt-18-dev llvm && \
+    librdmacm-dev libjansson-dev libclang-rt-18-dev llvm libxxhash-dev && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
