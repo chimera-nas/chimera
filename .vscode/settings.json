@@ -28,6 +28,7 @@
     "utlist.h": "c",
     "vfs_internal.h": "c",
     "format.h": "c",
-    "uthash.h": "c"
+    "uthash.h": "c",
+    "test_common.h": "c"
   }
 }

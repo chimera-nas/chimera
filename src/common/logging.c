@@ -20,9 +20,13 @@ static const char *level_string[] = {
 };
 
 #define CHIMERA_LOG_BUF_SIZE 1024 * 1024
-char               ChimeraLogBuf[CHIMERA_LOG_BUF_SIZE];
-char              *ChimeraLogBufPtr  = ChimeraLogBuf;
+
+char              *ChimeraLogBuffers[2];
+int                ChimeraLogIndex   = 0;
+char              *ChimeraLogBuf     = NULL;
+char              *ChimeraLogBufPtr  = NULL;
 int                ChimeraLogRun     = 1;
+int                ChimeraLogLevel   = CHIMERA_LOG_INFO;
 pthread_mutex_t    ChimeraLogBufLock = PTHREAD_MUTEX_INITIALIZER;
 pthread_t          ChimeraLogThread;
 pthread_once_t     ChimeraLogOnce = PTHREAD_ONCE_INIT;
@@ -30,15 +34,17 @@ pthread_once_t     ChimeraLogOnce = PTHREAD_ONCE_INIT;
 static void *
 chimera_log_thread(void *arg)
 {
-    char tmp[CHIMERA_LOG_BUF_SIZE];
+    int   i;
+    char *tmp;
 
     while (ChimeraLogRun || ChimeraLogBufPtr > ChimeraLogBuf) {
 
         if (ChimeraLogBufPtr > ChimeraLogBuf) {
 
             pthread_mutex_lock(&ChimeraLogBufLock);
-            memcpy(tmp, ChimeraLogBuf, ChimeraLogBufPtr - ChimeraLogBuf);
-            tmp[ChimeraLogBufPtr - ChimeraLogBuf] = '\0';
+            tmp              = ChimeraLogBuf;
+            ChimeraLogIndex  = !ChimeraLogIndex;
+            ChimeraLogBuf    = ChimeraLogBuffers[ChimeraLogIndex];
             ChimeraLogBufPtr = ChimeraLogBuf;
             pthread_mutex_unlock(&ChimeraLogBufLock);
 
@@ -46,6 +52,10 @@ chimera_log_thread(void *arg)
             fflush(stdout);
         }
         usleep(1000);
+    }
+
+    for (i = 0; i < 2; ++i) {
+        free(ChimeraLogBuffers[i]);
     }
 
     return NULL;
@@ -61,11 +71,26 @@ chimera_log_thread_exit(void)
 static void
 chimera_log_thread_init(void)
 {
+    int i;
+
+    for (i = 0; i < 2; ++i) {
+        ChimeraLogBuffers[i] = calloc(CHIMERA_LOG_BUF_SIZE, sizeof(char));
+    }
+
+    ChimeraLogBuf    = ChimeraLogBuffers[ChimeraLogIndex];
+    ChimeraLogBufPtr = ChimeraLogBuf;
+
     pthread_create(&ChimeraLogThread, NULL, chimera_log_thread, NULL);
     atexit(chimera_log_thread_exit);
 } /* chimera_log_thread_init */
 
 void
+chimera_log_init(void)
+{
+    pthread_once(&ChimeraLogOnce, chimera_log_thread_init);
+} /* chimera_log_init */
+
+static inline void
 chimera_vlog(
     int         level,
     const char *mod,
@@ -76,7 +101,6 @@ chimera_vlog(
 {
     struct timespec ts;
     struct tm       tm_info;
-    char            buf[256], *bp = buf;
     uint64_t        pid, tid;
 
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -84,24 +108,33 @@ chimera_vlog(
     gmtime_r(&ts.tv_sec, &tm_info);
 
     pid = getpid();
-
     tid = gettid();
 
-    bp += snprintf(bp, sizeof(buf),
-                   "time=%04d-%02d-%02dT%02d:%02d:%02d.%09ldZ message=\"",
-                   tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
-                   tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec, ts.tv_nsec);
-
-    bp += vsnprintf(bp, (buf + sizeof(buf)) - bp, fmt, argp);
-    bp += snprintf(bp, (buf + sizeof(buf)) - bp,
-                   "\" process=%lu thread=%lu level=%s module=%s source=\"%s:%d\"\n",
-                   pid, tid, level_string[level], mod, file, line);
-
-    pthread_once(&ChimeraLogOnce, chimera_log_thread_init);
-
     pthread_mutex_lock(&ChimeraLogBufLock);
-    memcpy(ChimeraLogBufPtr, buf, bp - buf);
-    ChimeraLogBufPtr += (bp - buf);
+
+    while ((ChimeraLogBufPtr + 4096) > (ChimeraLogBuf + CHIMERA_LOG_BUF_SIZE)) {
+        pthread_mutex_unlock(&ChimeraLogBufLock);
+        usleep(1);
+        pthread_mutex_lock(&ChimeraLogBufLock);
+    }
+
+    ChimeraLogBufPtr += snprintf(ChimeraLogBufPtr,
+                                 1024,
+                                 "time=%04d-%02d-%02dT%02d:%02d:%02d.%09ldZ message=\"",
+                                 tm_info.tm_year + 1900, tm_info.tm_mon + 1,
+                                 tm_info.tm_mday, tm_info.tm_hour,
+                                 tm_info.tm_min, tm_info.tm_sec, ts.tv_nsec);
+
+    ChimeraLogBufPtr += vsnprintf(ChimeraLogBufPtr,
+                                  1024,
+                                  fmt, argp);
+
+    ChimeraLogBufPtr += snprintf(ChimeraLogBufPtr,
+                                 1024,
+                                 "\" process=%lu thread=%lu level=%s module=%s source=\"%s:%d\"\n",
+                                 pid, tid, level_string[level], mod, file,
+                                 line);
+
     pthread_mutex_unlock(&ChimeraLogBufLock);
 } /* chimera_vlog */
 
@@ -109,7 +142,7 @@ chimera_vlog(
 
 
 void
-chimera_debug(
+__chimera_debug(
     const char *mod,
     const char *file,
     int         line,
@@ -124,7 +157,7 @@ chimera_debug(
 } /* chimera_debug */
 
 void
-chimera_info(
+__chimera_info(
     const char *mod,
     const char *file,
     int         line,
@@ -139,7 +172,7 @@ chimera_info(
 } /* chimera_info */
 
 void
-chimera_error(
+__chimera_error(
     const char *mod,
     const char *file,
     int         line,
@@ -154,7 +187,7 @@ chimera_error(
 } /* chimera_error */
 
 void
-chimera_fatal(
+__chimera_fatal(
     const char *mod,
     const char *file,
     int         line,
@@ -171,7 +204,7 @@ chimera_fatal(
 } /* chimera_fatal */
 
 void
-chimera_abort(
+__chimera_abort(
     const char *mod,
     const char *file,
     int         line,

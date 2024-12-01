@@ -1,50 +1,85 @@
 #pragma once
 
-#define CHIMERA_LOG_NONE  0
-#define CHIMERA_LOG_DEBUG 1
-#define CHIMERA_LOG_INFO  2
-#define CHIMERA_LOG_ERROR 3
-#define CHIMERA_LOG_FATAL 4
+extern int ChimeraLogLevel;
 
-void chimera_debug(
-    const char *mod,
-    const char *file,
-    int         line,
-    const char *fmt,
-    ...);
-void chimera_info(
-    const char *mod,
-    const char *file,
-    int         line,
-    const char *fmt,
-    ...);
-void chimera_error(
-    const char *mod,
-    const char *file,
-    int         line,
-    const char *fmt,
-    ...);
-void chimera_fatal(
-    const char *mod,
-    const char *file,
-    int         line,
-    const char *fmt,
-    ...);
-void chimera_abort(
+#define CHIMERA_LOG_FATAL 1
+#define CHIMERA_LOG_ERROR 2
+#define CHIMERA_LOG_INFO  3
+#define CHIMERA_LOG_DEBUG 4
+
+void chimera_log_init(
+    void);
+
+void __chimera_debug(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
 
-#define chimera_fatal_if(cond, ...) \
-        if (cond)                    \
-        {                            \
-            chimera_fatal(__VA_ARGS__); \
+void __chimera_info(
+    const char *mod,
+    const char *file,
+    int         line,
+    const char *fmt,
+    ...);
+void __chimera_error(
+    const char *mod,
+    const char *file,
+    int         line,
+    const char *fmt,
+    ...);
+void __chimera_fatal(
+    const char *mod,
+    const char *file,
+    int         line,
+    const char *fmt,
+    ...);
+void __chimera_abort(
+    const char *mod,
+    const char *file,
+    int         line,
+    const char *fmt,
+    ...);
+
+#define chimera_debug(mod, file, line, ...) { \
+            if (ChimeraLogLevel >= CHIMERA_LOG_DEBUG) { \
+                __chimera_debug(mod, file, line, __VA_ARGS__); \
+            } \
+}
+
+#define chimera_info(mod, file, line, ...)  { \
+            if (ChimeraLogLevel >= CHIMERA_LOG_INFO) { \
+                __chimera_info(mod, file, line, __VA_ARGS__); \
+            } \
+}
+
+#define chimera_error(mod, file, line, ...) { \
+            if (ChimeraLogLevel >= CHIMERA_LOG_ERROR) { \
+                __chimera_error(mod, file, line, __VA_ARGS__); \
+            } \
+}
+
+#define chimera_fatal(mod, file, line, ...) { \
+            if (ChimeraLogLevel >= CHIMERA_LOG_FATAL) { \
+                __chimera_fatal(mod, file, line, __VA_ARGS__); \
+            } \
+}
+
+#define chimera_abort(mod, file, line, ...) { \
+            if (ChimeraLogLevel >= CHIMERA_LOG_FATAL) { \
+                __chimera_abort(mod, file, line, __VA_ARGS__); \
+            } \
+}
+
+#define chimera_fatal_if(cond, mod, file, line, ...) \
+        if (cond)                                    \
+        {                                           \
+            chimera_fatal(mod, file, line, __VA_ARGS__); \
         }
 
-#define chimera_abort_if(cond, ...) \
-        if (cond)                    \
-        {                            \
-            chimera_abort(__VA_ARGS__); \
+#define chimera_abort_if(cond, mod, file, line, ...) \
+        if (cond)                                  \
+        {                                         \
+            chimera_abort(mod, file, line, __VA_ARGS__); \
         }

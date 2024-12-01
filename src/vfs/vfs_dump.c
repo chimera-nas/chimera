@@ -19,7 +19,7 @@
 #define CHIMERA_VFS_OP_READ        9
 #define CHIMERA_VFS_OP_WRITE       10
 
-static const char *
+const char *
 chimera_vfs_op_name(unsigned int opcode)
 {
     switch (opcode) {
@@ -47,7 +47,7 @@ chimera_vfs_op_name(unsigned int opcode)
 } /* chimera_vfs_op_name */
 
 void
-chimera_vfs_dump_request(struct chimera_vfs_request *req)
+__chimera_vfs_dump_request(struct chimera_vfs_request *req)
 {
     char argstr[80];
     char fhstr[80], fhstr2[80];
@@ -189,7 +189,7 @@ chimera_vfs_dump_request(struct chimera_vfs_request *req)
 } /* chimera_vfs_dump_request */
 
 void
-chimera_vfs_dump_reply(struct chimera_vfs_request *req)
+__chimera_vfs_dump_reply(struct chimera_vfs_request *req)
 {
     char argstr[80];
     char fhstr[80];

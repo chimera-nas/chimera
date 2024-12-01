@@ -46,11 +46,7 @@ nfs3_open_cache_insert(
     file->handle = *handle;
 
     pthread_mutex_lock(&cache->lock);
-    HASH_ADD_KEYPTR(hh,
-                    cache->open_files,
-                    file->handle.fh,
-                    file->handle.fh_len,
-                    file);
+    HASH_ADD(hh, cache->open_files, fh, file->handle.fh_len, file);
     pthread_mutex_unlock(&cache->lock);
 
 } /* nfs3_open_cache_insert */

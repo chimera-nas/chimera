@@ -47,9 +47,9 @@ chimera_vfs_request_alloc(struct chimera_vfs_thread *thread)
     } else {
         request         = calloc(1, sizeof(struct chimera_vfs_request));
         request->thread = thread;
-        request->status = CHIMERA_VFS_UNSET;
     }
 
+    request->status = CHIMERA_VFS_UNSET;
     clock_gettime(CLOCK_MONOTONIC, &request->start_time);
 
     return request;
@@ -58,11 +58,26 @@ chimera_vfs_request_alloc(struct chimera_vfs_thread *thread)
 static inline void
 chimera_vfs_complete(struct chimera_vfs_request *request)
 {
-    struct timespec now;
+    struct chimera_vfs_thread *thread = request->thread;
+
+    struct timespec            now;
 
     clock_gettime(CLOCK_MONOTONIC, &now);
 
     request->elapsed_ns = chimera_get_elapsed_ns(&now, &request->start_time);
+
+    thread->metrics[request->opcode].num_requests++;
+
+    thread->metrics[request->opcode].total_latency += request->elapsed_ns;
+
+    if (request->elapsed_ns > thread->metrics[request->opcode].max_latency) {
+        thread->metrics[request->opcode].max_latency = request->elapsed_ns;
+    }
+
+    if (request->elapsed_ns < thread->metrics[request->opcode].min_latency ||
+        thread->metrics[request->opcode].min_latency == 0) {
+        thread->metrics[request->opcode].min_latency = request->elapsed_ns;
+    }
 
     chimera_vfs_dump_reply(request);
 } /* chimera_vfs_complete */

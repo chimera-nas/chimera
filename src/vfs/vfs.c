@@ -7,6 +7,7 @@
 #include "vfs.h"
 #include "vfs_internal.h"
 #include "vfs_root.h"
+#include "vfs_dump.h"
 #include "vfs/memfs/memfs.h"
 #include "vfs/linux/linux.h"
 
@@ -67,6 +68,18 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     struct chimera_vfs_share  *share;
     int                        i;
 
+    for (i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
+        if (vfs->metrics[i].num_requests > 0) {
+            chimera_vfs_info(
+                "VFS metrics for %10s: %8d requests, %8lldns avg latency, %8lldns min latency, %8lldns max latency",
+                chimera_vfs_op_name(i),
+                vfs->metrics[i].num_requests,
+                vfs->metrics[i].total_latency / vfs->metrics[i].num_requests,
+                vfs->metrics[i].min_latency,
+                vfs->metrics[i].max_latency);
+        }
+    }
+
     evpl_threadpool_destroy(vfs->syncthreads);
 
     while (vfs->shares) {
@@ -120,9 +133,29 @@ chimera_vfs_thread_init(
 void
 chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
 {
+    struct chimera_vfs         *vfs = thread->vfs;
     struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
     int                         i;
+
+    for (i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
+        if (thread->metrics[i].num_requests == 0) {
+            continue;
+        }
+
+        vfs->metrics[i].num_requests += thread->metrics[i].num_requests;
+
+        vfs->metrics[i].total_latency += thread->metrics[i].total_latency;
+
+        if (thread->metrics[i].max_latency > vfs->metrics[i].max_latency) {
+            vfs->metrics[i].max_latency = thread->metrics[i].max_latency;
+        }
+
+        if (thread->metrics[i].min_latency < vfs->metrics[i].min_latency ||
+            vfs->metrics[i].min_latency == 0) {
+            vfs->metrics[i].min_latency = thread->metrics[i].min_latency;
+        }
+    }
 
     for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
         module = thread->vfs->modules[i];

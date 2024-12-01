@@ -102,11 +102,19 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OP_RENAME      16
 #define CHIMERA_VFS_OP_SETATTR     17
 #define CHIMERA_VFS_OP_LINK        18
+#define CHIMERA_VFS_OP_NUM         19
 
 #define CHIMERA_VFS_OPEN_CREATE    (1U << 0)
 #define CHIMERA_VFS_OPEN_RDONLY    (1U << 1)
 #define CHIMERA_VFS_OPEN_WRONLY    (1U << 2)
 #define CHIMERA_VFS_OPEN_RDWR      (1U << 3)
+
+struct chimera_vfs_metric {
+    uint64_t num_requests;
+    uint64_t min_latency;
+    uint64_t max_latency;
+    uint64_t total_latency;
+};
 
 typedef void (*chimera_vfs_complete_callback_t)(
     struct chimera_vfs_request *request);
@@ -420,6 +428,7 @@ struct chimera_vfs {
     void                      *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
     struct chimera_vfs_share  *shares;
     struct evpl_threadpool    *syncthreads;
+    struct chimera_vfs_metric  metrics[CHIMERA_VFS_OP_NUM];
 };
 
 struct chimera_vfs_thread {
@@ -427,6 +436,7 @@ struct chimera_vfs_thread {
     struct chimera_vfs         *vfs;
     void                       *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
     struct chimera_vfs_request *free_requests;
+    struct chimera_vfs_metric   metrics[CHIMERA_VFS_OP_NUM];
 };
 
 struct chimera_vfs *

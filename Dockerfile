@@ -1,8 +1,10 @@
 FROM ubuntu:24.04 AS build
+ARG BUILD_TYPE=Release
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
-    apt-get -y --no-install-recommends install clang cmake ninja-build git flex bison uuid-dev librdmacm-dev libjansson-dev && \
+    apt-get -y --no-install-recommends install clang cmake ninja-build git flex bison uuid-dev \
+    librdmacm-dev libjansson-dev libclang-rt-18-dev llvm && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -11,15 +13,18 @@ COPY / /chimera
 RUN mkdir -p /build
 WORKDIR /build
 
-RUN cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DDISABLE_TESTS=ON /chimera && \
+RUN cmake -G Ninja -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DDISABLE_TESTS=ON /chimera && \
     ninja && \
     ninja install
 
 FROM ubuntu:24.04
-
+ARG BUILD_TYPE=Release
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install libuuid1 librdmacm1 libjansson4 && \
+    if [ "${BUILD_TYPE}" = "Debug" ]; then \
+    apt-get -y --no-install-recommends install llvm gdb ; \
+    fi && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

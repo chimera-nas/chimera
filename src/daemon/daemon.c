@@ -5,6 +5,8 @@
 
 #include "server/server.h"
 #include "server/server_internal.h"
+#include "common/logging.h"
+
 int SigInt = 0;
 
 void
@@ -27,11 +29,15 @@ main(
     json_t      *config, *shares, *share;
     json_error_t error;
 
+    chimera_log_init();
 
-    while ((opt = getopt(argc, argv, "c:v")) != -1) {
+    while ((opt = getopt(argc, argv, "c:dv")) != -1) {
         switch (opt) {
             case 'c':
                 config_path = optarg;
+                break;
+            case 'd':
+                ChimeraLogLevel = CHIMERA_LOG_DEBUG;
                 break;
             case 'v':
                 printf("Version: %s\n", CHIMERA_VERSION);

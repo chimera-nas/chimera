@@ -6,7 +6,7 @@
 #include <nfsc/libnfs-raw-nfs.h>
 #include <nfsc/libnfs-raw-nfs4.h>
 #include "server/server.h"
-
+#include "test_common.h"
 int
 main(
     int    argc,
@@ -16,7 +16,7 @@ main(
     struct nfs_context    *nfs;
     int                    rc, fd;
 
-    server = chimera_server_init(NULL);
+    server = test_server_init(argv, argc);
 
     chimera_server_create_share(server, "linux", "share", "/build");
 

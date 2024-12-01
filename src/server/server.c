@@ -87,6 +87,8 @@ chimera_server_init(const char *cfgfile)
     struct chimera_server *server;
     int                    i;
 
+    chimera_log_init();
+
     server = calloc(1, sizeof(*server));
 
     pthread_mutex_init(&server->lock, NULL);
