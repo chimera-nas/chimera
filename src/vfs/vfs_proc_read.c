@@ -11,10 +11,10 @@ chimera_vfs_read_complete(struct chimera_vfs_request *request)
     chimera_vfs_complete(request);
 
     callback(request->status,
-             request->read.result_length,
-             request->read.result_eof,
-             request->read.iov,
-             request->read.niov,
+             request->read.r_length,
+             request->read.r_eof,
+             request->read.r_iov,
+             request->read.r_niov,
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
@@ -35,9 +35,6 @@ chimera_vfs_read(
     module = handle->vfs_module;
 
     request = chimera_vfs_request_alloc(thread);
-
-    request->read.niov = evpl_iovec_alloc(
-        thread->evpl, count, 4096, 2, request->read.iov);
 
     request->opcode             = CHIMERA_VFS_OP_READ;
     request->complete           = chimera_vfs_read_complete;

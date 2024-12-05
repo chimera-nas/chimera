@@ -28,7 +28,17 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_definitions(-O3)
 endif()
 
-add_definitions(-g -Wall -Werror -Wassign-enum)
+add_definitions(-g -Wall -Werror -Wassign-enum -Wno-unused-function)
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm.*|ARM.*|aarch64.*)")
+    add_definitions(-march=armv8-a)
+endif()
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)")
+    add_definitions(-march=x86-64-v3)
+endif()
+
+
 
 add_subdirectory(ext)
 

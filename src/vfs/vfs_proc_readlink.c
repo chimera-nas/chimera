@@ -12,7 +12,7 @@ chimera_vfs_readlink_complete(struct chimera_vfs_request *request)
     chimera_vfs_complete(request);
 
     callback(request->status,
-             request->read_link.target_length,
+             request->readlink.r_target_length,
              request->proto_private_data);
 
     chimera_vfs_request_free(thread, request);
@@ -35,14 +35,14 @@ chimera_vfs_readlink(
 
     request = chimera_vfs_request_alloc(thread);
 
-    request->opcode                     = CHIMERA_VFS_OP_READLINK;
-    request->complete                   = chimera_vfs_readlink_complete;
-    request->read_link.fh               = fh;
-    request->read_link.fh_len           = fhlen;
-    request->read_link.target           = target;
-    request->read_link.target_maxlength = target_maxlength;
-    request->proto_callback             = callback;
-    request->proto_private_data         = private_data;
+    request->opcode                    = CHIMERA_VFS_OP_READLINK;
+    request->complete                  = chimera_vfs_readlink_complete;
+    request->readlink.fh               = fh;
+    request->readlink.fh_len           = fhlen;
+    request->readlink.r_target         = target;
+    request->readlink.target_maxlength = target_maxlength;
+    request->proto_callback            = callback;
+    request->proto_private_data        = private_data;
 
     chimera_vfs_dispatch(thread, module, request);
 

@@ -45,6 +45,9 @@ chimera_nfs3_commit(
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
     struct chimera_vfs_open_handle   *handle;
+    char                              fhstr[80];
+
+    format_hex(fhstr, sizeof(fhstr), args->file.data.data, args->file.data.len);
 
     handle = nfs3_open_cache_lookup(&shared->nfs3_open_cache,
                                     args->file.data.data,

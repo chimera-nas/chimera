@@ -29,6 +29,7 @@
     "vfs_internal.h": "c",
     "format.h": "c",
     "uthash.h": "c",
-    "test_common.h": "c"
+    "test_common.h": "c",
+    "unistd.h": "c"
   }
 }

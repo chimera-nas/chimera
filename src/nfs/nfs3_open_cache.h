@@ -43,7 +43,10 @@ nfs3_open_cache_insert(
 
     file = calloc(1, sizeof(*file));
 
-    file->handle = *handle;
+    file->handle.vfs_module  = handle->vfs_module;
+    file->handle.vfs_private = handle->vfs_private;
+    file->handle.fh_len      = handle->fh_len;
+    memcpy(file->fh, handle->fh, file->handle.fh_len);
 
     pthread_mutex_lock(&cache->lock);
     HASH_ADD(hh, cache->open_files, fh, file->handle.fh_len, file);

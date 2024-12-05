@@ -187,6 +187,7 @@ chimera_vfs_read(
 typedef void (*chimera_vfs_write_callback_t)(
     enum chimera_vfs_error error_code,
     uint32_t               length,
+    uint32_t               sync,
     void                  *private_data);
 
 void

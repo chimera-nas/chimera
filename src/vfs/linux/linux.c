@@ -52,6 +52,7 @@ struct chimera_linux_mount {
 };
 
 struct chimera_linux_thread {
+    struct evpl                *evpl;
     struct chimera_linux_mount *mounts;
 };
 
@@ -292,6 +293,8 @@ chimera_linux_thread_init(
 {
     struct chimera_linux_thread *thread =
         (struct chimera_linux_thread *) calloc(1, sizeof(*thread));
+
+    thread->evpl = evpl;
 
     return thread;
 } /* linux_thread_init */
@@ -913,16 +916,26 @@ chimera_linux_read(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int           fd, i;
-    ssize_t       len, left = request->read.length;
-    struct iovec *iov;
+    struct chimera_linux_thread *thread = private_data;
+    struct evpl                 *evpl   = thread->evpl;
+    int                          fd, i;
+    ssize_t                      len, left = request->read.length;
+    struct iovec                *iov;
 
-    iov = alloca(request->read.niov * sizeof(*iov));
+    request->read.r_iov = alloca(sizeof(struct evpl_iovec) * 2);
 
-    for (i = 0; left && i < request->read.niov; i++) {
+    request->read.r_niov = evpl_iovec_alloc(evpl,
+                                            request->read.length,
+                                            4096,
+                                            2,
+                                            request->read.r_iov);
 
-        iov[i].iov_base = request->read.iov[i].data;
-        iov[i].iov_len  = request->read.iov[i].length;
+    iov = alloca(request->read.r_niov * sizeof(*iov));
+
+    for (i = 0; left && i < request->read.r_niov; i++) {
+
+        iov[i].iov_base = request->read.r_iov[i].data;
+        iov[i].iov_len  = request->read.r_iov[i].length;
 
         if (iov[i].iov_len > left) {
             iov[i].iov_len = left;
@@ -935,18 +948,25 @@ chimera_linux_read(
 
     len = preadv(fd,
                  iov,
-                 request->read.niov,
+                 request->read.r_niov,
                  request->read.offset);
 
     if (len < 0) {
-        request->status             = chimera_linux_errno_to_status(errno);
-        request->read.result_length = 0;
-        request->read.result_eof    = (len < request->read.length);
+        request->status = chimera_linux_errno_to_status(errno);
+
+        for (i = 0; i < request->read.r_niov; i++) {
+            evpl_iovec_release(&request->read.r_iov[i]);
+        }
+
+        request->read.r_niov   = 0;
+        request->read.r_length = 0;
+        request->read.r_eof    = 0;
         request->complete(request);
         return;
     }
 
-    request->read.result_length = len;
+    request->read.r_length = len;
+    request->read.r_eof    = (len < request->read.length);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -962,6 +982,9 @@ chimera_linux_write(
     uint32_t      left, chunk;
     ssize_t       len;
     struct iovec *iov;
+
+    request->write.r_sync = request->write.sync;
+
 
     iov = alloca(request->write.niov * sizeof(*iov));
 
@@ -986,13 +1009,13 @@ chimera_linux_write(
                   request->write.offset);
 
     if (len < 0) {
-        request->status              = chimera_linux_errno_to_status(errno);
-        request->write.result_length = 0;
+        request->status         = chimera_linux_errno_to_status(errno);
+        request->write.r_length = 0;
         request->complete(request);
         return;
     }
 
-    request->write.result_length = len;
+    request->write.r_length = len;
 
     if (request->write.sync) {
         fsync(fd);
@@ -1073,8 +1096,8 @@ chimera_linux_readlink(
     int                          fd, rc;
 
     fd = linux_open_by_handle(thread,
-                              request->read_link.fh,
-                              request->read_link.fh_len,
+                              request->readlink.fh,
+                              request->readlink.fh_len,
                               O_PATH | O_RDONLY | O_NOFOLLOW);
 
     if (fd < 0) {
@@ -1083,8 +1106,8 @@ chimera_linux_readlink(
         return;
     }
 
-    rc = readlinkat(fd, "", request->read_link.target,
-                    request->read_link.target_maxlength);
+    rc = readlinkat(fd, "", request->readlink.r_target,
+                    request->readlink.target_maxlength);
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
@@ -1092,7 +1115,7 @@ chimera_linux_readlink(
         return;
     }
 
-    request->read_link.target_length = rc;
+    request->readlink.r_target_length = rc;
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);

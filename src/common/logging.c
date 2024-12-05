@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -69,6 +70,13 @@ chimera_log_thread_exit(void)
 } /* chimera_log_thread_exit */
 
 static void
+chimera_log_flush(int signum)
+{
+    ChimeraLogRun = 0;
+    pthread_join(ChimeraLogThread, NULL);
+} /* chimera_log_flush */
+
+static void
 chimera_log_thread_init(void)
 {
     int i;
@@ -79,6 +87,12 @@ chimera_log_thread_init(void)
 
     ChimeraLogBuf    = ChimeraLogBuffers[ChimeraLogIndex];
     ChimeraLogBufPtr = ChimeraLogBuf;
+
+    struct sigaction sa;
+    sa.sa_handler = chimera_log_flush;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGABRT, &sa, NULL);
 
     pthread_create(&ChimeraLogThread, NULL, chimera_log_thread, NULL);
     atexit(chimera_log_thread_exit);

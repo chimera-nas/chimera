@@ -8,6 +8,7 @@ static void
 chimera_nfs3_write_complete(
     enum chimera_vfs_error error_code,
     uint32_t               length,
+    uint32_t               sync,
     void                  *private_data)
 {
     struct nfs_request               *req    = private_data;
@@ -15,7 +16,6 @@ chimera_nfs3_write_complete(
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
-    struct WRITE3args                *args   = req->args_write;
     struct WRITE3res                  res;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
@@ -23,7 +23,7 @@ chimera_nfs3_write_complete(
     if (res.status == NFS3_OK) {
         res.resok.count = length;
 
-        if (args->stable != UNSTABLE) {
+        if (sync) {
             res.resok.committed = FILE_SYNC;
         } else {
             res.resok.committed = UNSTABLE;
@@ -96,7 +96,6 @@ chimera_nfs3_write(
     req->args_write = args;
 
     if (!handle) {
-        fprintf(stderr, "Opening file for write\n");
         chimera_vfs_open(thread->vfs,
                          args->file.data.data,
                          args->file.data.len,

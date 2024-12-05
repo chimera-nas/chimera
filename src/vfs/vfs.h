@@ -196,13 +196,6 @@ struct chimera_vfs_request {
         } readdir;
 
         struct {
-            const void *fh;
-            uint32_t    fh_len;
-            void       *linkdata;
-            uint32_t   *linkdata_length;
-        } readlink;
-
-        struct {
             const void  *fh;
             uint32_t     fh_len;
             const char  *name;
@@ -239,10 +232,10 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        offset;
             uint32_t                        length;
-            struct evpl_iovec               iov[2];
-            int                             niov;
-            uint32_t                        result_length;
-            uint32_t                        result_eof;
+            struct evpl_iovec              *r_iov;
+            int                             r_niov;
+            uint32_t                        r_length;
+            uint32_t                        r_eof;
         } read;
 
         struct {
@@ -252,7 +245,8 @@ struct chimera_vfs_request {
             uint32_t                        sync;
             const struct evpl_iovec        *iov;
             int                             niov;
-            uint32_t                        result_length;
+            uint32_t                        r_sync;
+            uint32_t                        r_length;
         } write;
 
         struct {
@@ -283,9 +277,9 @@ struct chimera_vfs_request {
             const void *fh;
             uint32_t    fh_len;
             uint32_t    target_maxlength;
-            void       *target;
-            uint32_t    target_length;
-        } read_link;
+            uint32_t    r_target_length;
+            void       *r_target;
+        } readlink;
 
         struct {
             const void *fh;
