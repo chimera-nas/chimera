@@ -30,6 +30,8 @@
     "format.h": "c",
     "uthash.h": "c",
     "test_common.h": "c",
-    "unistd.h": "c"
+    "unistd.h": "c",
+    "cstdint": "c",
+    "string.h": "c"
   }
 }
