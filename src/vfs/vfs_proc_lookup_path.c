@@ -12,8 +12,6 @@ chimera_vfs_lookup_path_complete(struct chimera_vfs_request *request)
     chimera_vfs_complete(request);
 
     callback(request->status,
-             request->lookup_path.r_fh,
-             request->lookup_path.r_fh_len,
              &request->lookup_path.r_attr,
              &request->lookup_path.r_dir_attr,
              request->proto_private_data);

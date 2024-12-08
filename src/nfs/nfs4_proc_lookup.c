@@ -5,8 +5,6 @@
 static void
 chimera_nfs4_lookup_complete(
     enum chimera_vfs_error    error_code,
-    const void               *fh,
-    int                       fhlen,
     struct chimera_vfs_attrs *attr,
     struct chimera_vfs_attrs *dir_attr,
     void                     *private_data)
@@ -19,8 +17,11 @@ chimera_nfs4_lookup_complete(
     res->status = status;
 
     if (error_code == CHIMERA_VFS_OK) {
-        memcpy(req->fh, fh, fhlen);
-        req->fhlen = fhlen;
+        chimera_nfs_abort_if(!(attr->va_mask & CHIMERA_VFS_ATTR_FH),
+                             "NFS4 lookup: no file handle was returned");
+
+        memcpy(req->fh, attr->va_fh, attr->va_fh_len);
+        req->fhlen = attr->va_fh_len;
     }
 
     chimera_nfs4_compound_complete(req, status);
@@ -41,7 +42,7 @@ chimera_nfs4_lookup(
                        req->fhlen,
                        args->objname.data,
                        args->objname.len,
-                       0,
+                       CHIMERA_VFS_ATTR_FH,
                        chimera_nfs4_lookup_complete,
                        req);
 } /* chimera_nfs4_lookup */

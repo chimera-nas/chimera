@@ -102,15 +102,8 @@ chimera_vfs_root_lookup_complete(struct chimera_vfs_request *subrequest)
 
     request->status = subrequest->status;
 
-    memcpy(
-        request->lookup.r_fh,
-        subrequest->lookup_path.r_fh,
-        subrequest->lookup_path.r_fh_len);
-
-    request->lookup.r_fh_len = subrequest->lookup_path.r_fh_len;
-
-    request->lookup.r_attr.va_mask     = 0;
-    request->lookup.r_dir_attr.va_mask = 0;
+    request->lookup.r_attr     = subrequest->lookup_path.r_attr;
+    request->lookup.r_dir_attr = subrequest->lookup_path.r_dir_attr;
 
     request->complete(request);
 
@@ -157,7 +150,7 @@ chimera_vfs_root_lookup(
 
     chimera_vfs_dispatch(thread, module, subrequest);
 
-} /* chimera_vfs_root_lookup_path */
+} /* chimera_vfs_root_lookup */
 
 
 static void
@@ -168,15 +161,8 @@ chimera_vfs_root_lookup_path_complete(struct chimera_vfs_request *subrequest)
 
     request->status = subrequest->status;
 
-    memcpy(
-        request->lookup_path.r_fh,
-        subrequest->lookup_path.r_fh,
-        subrequest->lookup_path.r_fh_len);
-
-    request->lookup_path.r_fh_len = subrequest->lookup_path.r_fh_len;
-
-    request->lookup_path.r_attr.va_mask     = 0;
-    request->lookup_path.r_dir_attr.va_mask = 0;
+    request->lookup_path.r_attr     = subrequest->lookup_path.r_attr;
+    request->lookup_path.r_dir_attr = subrequest->lookup_path.r_dir_attr;
 
     request->complete(request);
 

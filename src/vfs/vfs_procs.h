@@ -27,8 +27,6 @@ chimera_vfs_access(
 
 typedef void (*chimera_vfs_lookup_callback_t)(
     enum chimera_vfs_error    error_code,
-    const void               *fh,
-    int                       fh_len,
     struct chimera_vfs_attrs *attr,
     struct chimera_vfs_attrs *dir_attr,
     void                     *private_data);
@@ -46,8 +44,6 @@ chimera_vfs_lookup(
 
 typedef void (*chimera_vfs_lookup_path_callback_t)(
     enum chimera_vfs_error    error_code,
-    const void               *fh,
-    int                       fh_len,
     struct chimera_vfs_attrs *attr,
     struct chimera_vfs_attrs *dir_attr,
     void                     *private_data);

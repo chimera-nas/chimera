@@ -227,8 +227,8 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
         case CHIMERA_VFS_OP_LOOKUP:
             if (req->status == CHIMERA_VFS_OK) {
                 format_hex(fhstr, sizeof(fhstr),
-                           req->lookup.r_fh,
-                           req->lookup.r_fh_len);
+                           req->lookup.r_attr.va_fh,
+                           req->lookup.r_attr.va_fh_len);
                 snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
             }
             break;

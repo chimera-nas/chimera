@@ -21,8 +21,6 @@ chimera_nfs_mount_null(
 static void
 chimera_nfs_mount_lookup_complete(
     enum chimera_vfs_error    error_code,
-    const void               *fh,
-    int                       fhlen,
     struct chimera_vfs_attrs *attr,
     struct chimera_vfs_attrs *dir_attr,
     void                     *private_data)
@@ -35,17 +33,22 @@ chimera_nfs_mount_lookup_complete(
     int32_t                           auth_flavors[2];
     struct mountres3                  res;
 
-    xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle, fhlen, msg->dbuf);
-    memcpy(res.mountinfo.fhandle.data, fh, fhlen);
-
     if (error_code == CHIMERA_VFS_OK) {
         res.fhs_status                 = MNT3_OK;
         res.mountinfo.num_auth_flavors = 2;
         res.mountinfo.auth_flavors     = auth_flavors;
         auth_flavors[0]                = AUTH_NONE;
         auth_flavors[1]                = AUTH_SYS;
-        xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle, fhlen, msg->dbuf);
-        memcpy(res.mountinfo.fhandle.data, fh, fhlen);
+
+        chimera_nfs_abort_if(!(attr->va_mask & CHIMERA_VFS_ATTR_FH),
+                             "NFS mount: no file handle was returned");
+
+        xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle,
+                              attr->va_fh_len,
+                              msg->dbuf);
+        memcpy(res.mountinfo.fhandle.data,
+               attr->va_fh,
+               attr->va_fh_len);
     } else {
         res.fhs_status = MNT3ERR_NOENT;
     }

@@ -7,8 +7,6 @@
 static void
 chimera_nfs3_lookup_complete(
     enum chimera_vfs_error    error_code,
-    const void               *fh,
-    int                       fhlen,
     struct chimera_vfs_attrs *attr,
     struct chimera_vfs_attrs *dir_attr,
     void                     *private_data)
@@ -23,7 +21,14 @@ chimera_nfs3_lookup_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-        xdr_dbuf_opaque_copy(&res.resok.object.data, fh, fhlen, msg->dbuf);
+
+        chimera_nfs_abort_if(!(attr->va_mask & CHIMERA_VFS_ATTR_FH),
+                             "NFS3 lookup: no file handle was returned");
+
+        xdr_dbuf_opaque_copy(&res.resok.object.data,
+                             attr->va_fh,
+                             attr->va_fh_len,
+                             msg->dbuf);
 
         if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK)
         {
@@ -70,7 +75,7 @@ chimera_nfs3_lookup(
                        args->what.dir.data.len,
                        args->what.name.str,
                        args->what.name.len,
-                       CHIMERA_NFS3_ATTR_MASK,
+                       CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
                        chimera_nfs3_lookup_complete,
                        req);
 } /* chimera_nfs3_lookup */

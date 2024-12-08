@@ -714,8 +714,10 @@ memfs_lookup_path(
     void                       *private_data)
 {
     request->status = CHIMERA_VFS_OK;
-    memcpy(request->lookup_path.r_fh, shared->root_fh, shared->root_fhlen);
-    request->lookup_path.r_fh_len = shared->root_fhlen;
+    memcpy(request->lookup_path.r_attr.va_fh, shared->root_fh, shared->
+           root_fhlen);
+    request->lookup_path.r_attr.va_fh_len = shared->root_fhlen;
+    request->lookup_path.r_attr.va_mask  |= CHIMERA_VFS_ATTR_FH;
     request->complete(request);
 } /* memfs_lookup_path */
 
@@ -755,24 +757,16 @@ memfs_lookup(
         return;
     }
 
-
-    request->lookup.r_fh_len = memfs_inum_to_fh(request->lookup.r_fh,
-                                                dirent->inum, dirent->gen);
-
     if (request->lookup.attrmask) {
-        if (request->lookup.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
-            memfs_map_attrs(&request->lookup.r_dir_attr,
-                            request->lookup.attrmask,
-                            inode);
-        }
+        memfs_map_attrs(&request->lookup.r_dir_attr,
+                        request->lookup.attrmask,
+                        inode);
 
         child = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
-        if (request->lookup.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
-            memfs_map_attrs(&request->lookup.r_attr,
-                            request->lookup.attrmask,
-                            child);
-        }
+        memfs_map_attrs(&request->lookup.r_attr,
+                        request->lookup.attrmask,
+                        child);
 
         pthread_mutex_unlock(&child->lock);
     }
