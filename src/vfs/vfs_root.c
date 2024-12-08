@@ -66,6 +66,10 @@ chimera_vfs_root_getattr(
     void                       *private_data)
 {
     struct chimera_vfs_attrs *attr;
+    struct chimera_vfs_share *share;
+    int                       num_shares;
+
+    DL_COUNT(request->thread->vfs->shares, share, num_shares);
 
     attr = &request->getattr.r_attr;
 
@@ -73,19 +77,18 @@ chimera_vfs_root_getattr(
 
     attr->va_mask = request->getattr.attr_mask;
 
-    /* Set dummy values for a directory */
-    attr->va_mode          = S_IFDIR | 0755; /* directory with rwxr-xr-x permissions */
-    attr->va_nlink         = 2;      /* . and .. minimum for directory */
-    attr->va_uid           = 0;      /* root user */
-    attr->va_gid           = 0;      /* root group */
-    attr->va_size          = 4096;   /* typical directory size */
-    attr->va_atime.tv_sec  = time(NULL);
-    attr->va_atime.tv_nsec = 0;
-    attr->va_mtime         = attr->va_atime; /* same as access time */
-    attr->va_ctime         = attr->va_atime; /* same as access time */
-    attr->va_ino           = 2;      /* root directory inode */
-    attr->va_dev           = 0;      /* device ID */
-    attr->va_rdev          = 0;      /* not a device file */
+    /* Synthetic root directory attribute */
+    attr->va_mode  = S_IFDIR | 0755;
+    attr->va_nlink = 2 + num_shares;
+    attr->va_uid   = 0;
+    attr->va_gid   = 0;
+    attr->va_size  = 4096;
+    clock_gettime(CLOCK_REALTIME, &attr->va_atime);
+    attr->va_mtime = attr->va_atime;
+    attr->va_ctime = attr->va_atime;
+    attr->va_ino   = 2;
+    attr->va_dev   = 0;
+    attr->va_rdev  = 0;
 
     request->complete(request);
 } /* chimera_vfs_getattr_root */
@@ -258,6 +261,8 @@ chimera_vfs_root_readdir(
     int                        i      = 0;
     uint64_t                   cookie = request->readdir.cookie;
 
+    attr.va_mask = 0;
+
     DL_FOREACH(vfs->shares, share)
     {
 
@@ -265,23 +270,14 @@ chimera_vfs_root_readdir(
             continue;
         }
 
-        /* Set dummy values for a directory */
-        memset(&attr, 0, sizeof(attr));
-        attr.va_mode          = S_IFDIR | 0755; /* directory with rwxr-xr-x permissions */
-        attr.va_nlink         = 2;      /* . and .. minimum for directory */
-        attr.va_uid           = 0;      /* root user */
-        attr.va_gid           = 0;      /* root group */
-        attr.va_size          = 4096;   /* typical directory size */
-        attr.va_atime.tv_sec  = time(NULL);
-        attr.va_atime.tv_nsec = 0;
-        attr.va_mtime         = attr.va_atime; /* same as access time */
-        attr.va_ctime         = attr.va_atime; /* same as access time */
-        attr.va_ino           = 2;      /* root directory inode */
-        attr.va_dev           = 0;      /* device ID */
-        attr.va_rdev          = 0;      /* not a device file */
+        /* XXX We are not going to get the attributes of the share path,
+         * we could but it would be a bit fussy.  Consequently the
+         * inum we are reeturning for the dirent will not match the actual
+         * share root inode number.
+         */
 
         request->readdir.callback(
-            2,
+            i,
             i,
             share->name,
             strlen(share->name),

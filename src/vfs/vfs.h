@@ -221,8 +221,6 @@ struct chimera_vfs_request {
             uint32_t                 name_len;
             unsigned int             mode;
             uint64_t                 attrmask;
-            uint8_t                  r_fh[CHIMERA_VFS_FH_SIZE];
-            uint32_t                 r_fh_len;
             struct chimera_vfs_attrs r_attr;
             struct chimera_vfs_attrs r_dir_attr;
         } mkdir;
@@ -299,8 +297,6 @@ struct chimera_vfs_request {
             const char              *target;
             int                      targetlen;
             uint64_t                 attrmask;
-            uint8_t                  r_fh[CHIMERA_VFS_FH_SIZE];
-            uint32_t                 r_fh_len;
             struct chimera_vfs_attrs r_attr;
             struct chimera_vfs_attrs r_dir_attr;
         } symlink;
