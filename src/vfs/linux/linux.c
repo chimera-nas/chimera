@@ -400,9 +400,9 @@ chimera_linux_setattr(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_linux_thread *thread = private_data;
-    struct chimera_vfs_attrs    *attr   = &request->setattr.attr;
-    int                          fd, rc;
+    struct chimera_linux_thread    *thread = private_data;
+    const struct chimera_vfs_attrs *attr   = request->setattr.attr;
+    int                             fd, rc;
 
     fd = linux_open_by_handle(thread,
                               request->setattr.fh,

@@ -192,11 +192,11 @@ struct chimera_vfs_request {
         } getattr;
 
         struct {
-            const void              *fh;
-            uint32_t                 fh_len;
-            uint64_t                 attr_mask;
-            struct chimera_vfs_attrs attr;
-            struct chimera_vfs_attrs r_attr;
+            const void                     *fh;
+            uint32_t                        fh_len;
+            uint64_t                        attr_mask;
+            const struct chimera_vfs_attrs *attr;
+            struct chimera_vfs_attrs        r_attr;
         } setattr;
 
         struct {

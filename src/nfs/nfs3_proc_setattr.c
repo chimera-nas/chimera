@@ -49,17 +49,19 @@ chimera_nfs3_setattr(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
-    struct chimera_vfs_attrs          attr;
+    struct chimera_vfs_attrs         *attr;
 
     req = nfs_request_alloc(thread, conn, msg);
 
-    chimera_nfs3_sattr3_to_va(&attr, &args->new_attributes);
+    attr = &req->setattr;
+
+    chimera_nfs3_sattr3_to_va(attr, &args->new_attributes);
 
     chimera_vfs_setattr(thread->vfs,
                         args->object.data.data,
                         args->object.data.len,
                         CHIMERA_NFS3_ATTR_MASK,
-                        &attr,
+                        attr,
                         chimera_nfs3_setattr_complete,
                         req);
 } /* chimera_nfs3_setattr */

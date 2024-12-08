@@ -78,13 +78,13 @@ typedef void (*chimera_vfs_setattr_callback_t)(
 
 void
 chimera_vfs_setattr(
-    struct chimera_vfs_thread     *thread,
-    const void                    *fh,
-    int                            fhlen,
-    uint64_t                       attr_mask_ret,
-    struct chimera_vfs_attrs      *attr,
-    chimera_vfs_setattr_callback_t callback,
-    void                          *private_data);
+    struct chimera_vfs_thread      *thread,
+    const void                     *fh,
+    int                             fhlen,
+    uint64_t                        attr_mask_ret,
+    const struct chimera_vfs_attrs *attr,
+    chimera_vfs_setattr_callback_t  callback,
+    void                           *private_data);
 
 typedef void (*chimera_vfs_readdir_complete_t)(
     enum chimera_vfs_error    error_code,

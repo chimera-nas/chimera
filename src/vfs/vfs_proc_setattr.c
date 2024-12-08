@@ -20,13 +20,13 @@ chimera_vfs_setattr_complete(struct chimera_vfs_request *request)
 
 void
 chimera_vfs_setattr(
-    struct chimera_vfs_thread     *thread,
-    const void                    *fh,
-    int                            fhlen,
-    uint64_t                       attr_mask_ret,
-    struct chimera_vfs_attrs      *attr,
-    chimera_vfs_setattr_callback_t callback,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    const void                     *fh,
+    int                             fhlen,
+    uint64_t                        attr_mask_ret,
+    const struct chimera_vfs_attrs *attr,
+    chimera_vfs_setattr_callback_t  callback,
+    void                           *private_data)
 {
     struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
@@ -41,7 +41,7 @@ chimera_vfs_setattr(
     request->complete           = chimera_vfs_setattr_complete;
     request->setattr.fh         = fh;
     request->setattr.fh_len     = fhlen;
-    request->setattr.attr       = *attr;
+    request->setattr.attr       = attr;
     request->setattr.attr_mask  = attr_mask_ret;
     request->proto_callback     = callback;
     request->proto_private_data = private_data;

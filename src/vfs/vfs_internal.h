@@ -118,3 +118,37 @@ chimera_vfs_dispatch(
     chimera_vfs_dump_request(request);
     module->dispatch(request, thread->module_private[module->fh_magic]);
 } /* chimera_vfs_dispatch */
+
+static inline void
+chimera_vfs_copy_attr(
+    struct chimera_vfs_attrs       *dest,
+    const struct chimera_vfs_attrs *src)
+{
+    dest->va_mask = src->va_mask;
+
+    if (src->va_mask & CHIMERA_VFS_ATTR_FH) {
+        memcpy(dest->va_fh, src->va_fh, src->va_fh_len);
+        dest->va_fh_len = src->va_fh_len;
+    }
+
+    if (src->va_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+        dest->va_dev   = src->va_dev;
+        dest->va_ino   = src->va_ino;
+        dest->va_mode  = src->va_mode;
+        dest->va_nlink = src->va_nlink;
+        dest->va_uid   = src->va_uid;
+        dest->va_gid   = src->va_gid;
+        dest->va_rdev  = src->va_rdev;
+        dest->va_size  = src->va_size;
+        dest->va_atime = src->va_atime;
+        dest->va_mtime = src->va_mtime;
+        dest->va_ctime = src->va_ctime;
+    }
+
+    if (src->va_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+        dest->va_space_avail = src->va_space_avail;
+        dest->va_space_free  = src->va_space_free;
+        dest->va_space_total = src->va_space_total;
+        dest->va_space_used  = src->va_space_used;
+    }
+} /* chimera_vfs_copy_attr */
