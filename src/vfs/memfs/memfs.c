@@ -423,7 +423,7 @@ memfs_init(void)
 
         inode_list->id         = i;
         inode_list->num_blocks = 1;
-        inode_list->max_blocks = 4096;
+        inode_list->max_blocks = 65536;
 
         pthread_mutex_init(&inode_list->lock, NULL);
 
@@ -1385,7 +1385,7 @@ memfs_write(
 
         if (block_offset || block_len < CHIMERA_MEMFS_BLOCK_SIZE) {
 
-            block->niov = evpl_iovec_alloc(evpl, block_len, 4096,
+            block->niov = evpl_iovec_alloc(evpl, 4096, 4096,
                                            CHIMERA_MEMFS_BLOCK_MAX_IOV,
                                            block->iov);
             if (old_block) {
