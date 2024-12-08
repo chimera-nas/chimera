@@ -32,7 +32,8 @@ chimera_nfs3_fsinfo_complete(
         res.resok.wtpref              = 128 * 1024;
         res.resok.wtmult              = 4096;
         res.resok.dtpref              = 64 * 1024;
-        res.resok.properties          = 0;
+        res.resok.properties          = FSF3_LINK | FSF3_SYMLINK |
+            FSF3_HOMOGENEOUS | FSF3_CANSETTIME;
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_FSINFO(evpl, &res, msg);
