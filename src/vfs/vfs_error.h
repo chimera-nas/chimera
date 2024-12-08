@@ -20,6 +20,7 @@ enum chimera_vfs_error {
     CHIMERA_VFS_EMLINK       = 31,     /* Too many links */
     CHIMERA_VFS_ENAMETOOLONG = 36,     /* File name too long */
     CHIMERA_VFS_ENOTEMPTY    = 39,     /* Directory not empty */
+    CHIMERA_VFS_ELOOP        = 40,    /* Too many levels of symbolic links */
     CHIMERA_VFS_EOVERFLOW    = 75,         /* Value too large for defined data type */
     CHIMERA_VFS_EBADF        = 77,     /* Bad file descriptor */
     CHIMERA_VFS_ENOTSUP      = 95,     /* Operation not supported */

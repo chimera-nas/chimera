@@ -5,6 +5,7 @@ static void
 chimera_nfs4_open_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *attr,
     void                           *private_data)
 {
     struct nfs_request  *req     = private_data;
@@ -15,7 +16,7 @@ chimera_nfs4_open_complete(
 
     state = nfs4_session_alloc_slot(session);
 
-    state->nfs4_state_handle = *handle;
+    state->nfs4_state_handle = handle;
 
     chimera_nfs_debug("open complete: seqid %u private %lu handle %p",
                       state->nfs4_state_id.seqid,
@@ -68,6 +69,7 @@ chimera_nfs4_open(
                                 args->claim.file.data,
                                 args->claim.file.len,
                                 flags,
+                                0,
                                 0,
                                 chimera_nfs4_open_complete,
                                 req);

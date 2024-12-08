@@ -1,6 +1,6 @@
 #include "vfs/vfs_procs.h"
 #include "vfs_internal.h"
-
+#include "vfs_open_cache.h"
 static void
 chimera_vfs_commit_complete(struct chimera_vfs_request *request)
 {

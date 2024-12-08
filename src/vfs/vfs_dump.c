@@ -7,6 +7,7 @@
 #include "vfs.h"
 #include "vfs_internal.h"
 #include "common/format.h"
+#include "vfs_open_cache.h"
 
 #define CHIMERA_VFS_OP_LOOKUP_PATH 1
 #define CHIMERA_VFS_OP_LOOKUP      2
@@ -69,10 +70,21 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                        fh_len);
             snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
             break;
+        case CHIMERA_VFS_OP_SETATTR:
+            format_hex(fhstr, sizeof(fhstr), req->setattr.fh, req->setattr.
+                       fh_len)
+            ;
+            snprintf(argstr, sizeof(argstr), "fh %s attrmask %lx",
+                     fhstr,
+                     req->setattr.attr_mask);
+            break;
         case CHIMERA_VFS_OP_READDIR:
-            format_hex(fhstr, sizeof(fhstr), req->readdir.fh, req->readdir.
-                       fh_len);
-            snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
+            format_hex(fhstr, sizeof(fhstr),
+                       req->readdir.fh, req->readdir.fh_len);
+            snprintf(argstr, sizeof(argstr), "fh %s cookie %lu attrmask %lx",
+                     fhstr,
+                     req->readdir.cookie,
+                     req->readdir.attrmask);
             break;
         case CHIMERA_VFS_OP_READLINK:
             format_hex(fhstr, sizeof(fhstr), req->readlink.fh, req->readlink.
@@ -142,7 +154,12 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
         case CHIMERA_VFS_OP_ACCESS:
             format_hex(fhstr, sizeof(fhstr), req->access.fh, req->access.fh_len)
             ;
-            snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
+            snprintf(argstr, sizeof(argstr),
+                     "fh %s read %u write %u execute %u",
+                     fhstr,
+                     !!(req->access.access & CHIMERA_VFS_ACCESS_READ),
+                     !!(req->access.access & CHIMERA_VFS_ACCESS_WRITE),
+                     !!(req->access.access & CHIMERA_VFS_ACCESS_EXECUTE));
             break;
         case CHIMERA_VFS_OP_SYMLINK:
             format_hex(fhstr, sizeof(fhstr), req->symlink.fh, req->symlink.
@@ -197,6 +214,16 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
     argstr[0] = '\0';
 
     switch (req->opcode) {
+        case CHIMERA_VFS_OP_ACCESS:
+            format_hex(fhstr, sizeof(fhstr), req->access.fh, req->access.fh_len)
+            ;
+            snprintf(argstr, sizeof(argstr),
+                     "fh %s read %u write %u execute %u",
+                     fhstr,
+                     !!(req->access.r_access & CHIMERA_VFS_ACCESS_READ),
+                     !!(req->access.r_access & CHIMERA_VFS_ACCESS_WRITE),
+                     !!(req->access.r_access & CHIMERA_VFS_ACCESS_EXECUTE));
+            break;
         case CHIMERA_VFS_OP_LOOKUP:
             if (req->status == CHIMERA_VFS_OK) {
                 format_hex(fhstr, sizeof(fhstr),
@@ -211,6 +238,13 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
                            req->open_at.fh,
                            req->open_at.fh_len);
                 snprintf(argstr, sizeof(argstr), "fh %s", fhstr);
+            }
+            break;
+        case CHIMERA_VFS_OP_READDIR:
+            if (req->status == CHIMERA_VFS_OK) {
+                snprintf(argstr, sizeof(argstr), "cookie %lu eof %u",
+                         req->readdir.r_cookie,
+                         req->readdir.r_eof);
             }
             break;
         default:

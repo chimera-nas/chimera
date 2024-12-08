@@ -6,52 +6,78 @@
 
 static int
 chimera_nfs3_readdir_callback(
+    uint64_t                        inum,
     uint64_t                        cookie,
     const char                     *name,
     int                             namelen,
     const struct chimera_vfs_attrs *attrs,
     void                           *arg)
 {
-    struct nfs_request   *req = arg;
-    struct evpl_rpc2_msg *msg = req->msg;
-    struct READDIR3res   *res = &req->res_readdir;
-    struct entry3        *entry, *preventry;
+    struct nfs_request             *req  = arg;
+    struct evpl_rpc2_msg           *msg  = req->msg;
+    struct READDIR3args            *args = req->args_readdir;
+    struct entry3                  *entry;
+    struct nfs_nfs3_readdir_cursor *cursor;
+
+    cursor = &req->readdir3_cursor;
+
+    if (cursor->count >= args->count) {
+        return -1;
+    }
 
     chimera_nfs_debug("readdir callback: cookie %lu name %.*s",
                       cookie, namelen, name);
 
-    preventry = res->resok.reply.entries;
 
-    xdr_dbuf_reserve_ll(&res->resok.reply, entries, msg->dbuf);
+    xdr_dbuf_alloc_space(entry, sizeof(*entry), msg->dbuf);
 
-    entry = res->resok.reply.entries;
+    entry->fileid    = inum;
+    entry->cookie    = cookie;
+    entry->nextentry = NULL;
 
-    entry->cookie = cookie;
     xdr_dbuf_strncpy(entry, name, name, namelen, msg->dbuf);
 
-    entry->nextentry = preventry;
+    if (cursor->entries) {
+        cursor->last->nextentry = entry;
+        cursor->last            = entry;
+    } else {
+        cursor->entries = entry;
+        cursor->last    = entry;
+    }
+
+    cursor->count++;
 
     return 0;
 } /* chimera_nfs3_readdir_callback */
 
 static void
 chimera_nfs3_readdir_complete(
-    enum chimera_vfs_error error_code,
-    uint64_t               cookie,
-    uint32_t               eof,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    uint64_t                  cookie,
+    uint32_t                  eof,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_shared *shared = req->thread->shared;
     struct evpl                      *evpl   = req->thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct READDIR3res               *res    = &req->res_readdir;
+    struct nfs_nfs3_readdir_cursor   *cursor = &req->readdir3_cursor;
 
     res->status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res->status == NFS3_OK) {
-        res->resok.dir_attributes.attributes_follow = 0;
-        res->resok.reply.eof                        = !!eof;
+        if ((dir_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) ==
+            CHIMERA_NFS3_ATTR_MASK) {
+            res->resok.dir_attributes.attributes_follow = 1;
+            chimera_nfs3_marshall_attrs(dir_attr,
+                                        &res->resok.dir_attributes.attributes);
+        } else {
+            res->resok.dir_attributes.attributes_follow = 0;
+        }
+        res->resok.reply.eof     = !!eof;
+        res->resok.reply.entries = cursor->entries;
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_READDIR(evpl, res, msg);
@@ -70,11 +96,17 @@ chimera_nfs3_readdir(
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
     struct READDIR3res               *res;
+    struct nfs_nfs3_readdir_cursor   *cursor;
 
     req               = nfs_request_alloc(thread, conn, msg);
     req->args_readdir = args;
 
-    res = &req->res_readdir;
+    res    = &req->res_readdir;
+    cursor = &req->readdir3_cursor;
+
+    cursor->count   = 0;
+    cursor->entries = NULL;
+    cursor->last    = NULL;
 
     res->resok.reply.entries = NULL;
 

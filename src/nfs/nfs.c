@@ -72,88 +72,16 @@ nfs_server_init(struct chimera_vfs *vfs)
 
     nfs4_client_table_init(&shared->nfs4_shared_clients);
 
-    nfs3_open_cache_init(&shared->nfs3_open_cache);
     return shared;
 } /* nfs_server_init */
-
-struct nfs_close_ctx {
-    struct chimera_vfs_thread *vfs_thread;
-    struct nfs3_open_cache    *cache;
-    struct nfs3_open_file     *file;
-};
-
-static void
-nfs_server_close_callback(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
-{
-    struct nfs_close_ctx *ctx = private_data;
-
-    nfs3_open_cache_remove(ctx->cache, ctx->file);
-
-    free(ctx);
-
-} /* nfs_server_close_callback */
-
-static void
-nfs_server_close_file(
-    struct nfs3_open_cache *cache,
-    struct nfs3_open_file  *file,
-    void                   *private_data)
-{
-    struct chimera_vfs_thread *vfs_thread = private_data;
-    struct nfs_close_ctx      *ctx;
-
-    ctx             = calloc(1, sizeof(*ctx));
-    ctx->vfs_thread = vfs_thread;
-    ctx->cache      = cache;
-    ctx->file       = file;
-
-    chimera_vfs_close(vfs_thread,
-                      &file->handle,
-                      nfs_server_close_callback,
-                      ctx);
-} /* nfs_server_close_file */
 
 static void
 nfs_server_destroy(void *data)
 {
     struct chimera_server_nfs_shared *shared = data;
-    struct evpl                      *evpl;
-    struct chimera_vfs_thread        *vfs_thread;
-
-    /*
-     * We need our own evpl & vfs thread context temporarily so we
-     * can close any open files left lying around
-     */
-
-    evpl       = evpl_create();
-    vfs_thread = chimera_vfs_thread_init(evpl, shared->vfs);
 
     /* Close out all the nfs4 session state */
     nfs4_client_table_free(&shared->nfs4_shared_clients);
-
-    /* Close all the files left in the nfs3 open cache
-     * These will be completed asynchronously
-     */
-    nfs3_open_cache_iterate(&shared->nfs3_open_cache,
-                            nfs_server_close_file,
-                            vfs_thread);
-
-    /* Wait until the open cache has nothing in it
-     * ie all the previously dispatched close operations
-     * have finished
-     */
-
-    while (shared->nfs3_open_cache.open_files) {
-        evpl_wait(evpl, 1000);
-    }
-
-    /* Now we can destroy our temporary context */
-    chimera_vfs_thread_destroy(vfs_thread);
-    evpl_destroy(evpl);
-
-    nfs3_open_cache_destroy(&shared->nfs3_open_cache);
 
     free(shared);
 } /* nfs_server_destroy */

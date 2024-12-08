@@ -1,11 +1,14 @@
 #include "nfs3_procs.h"
 #include "nfs3_status.h"
+#include "nfs3_attr.h"
 #include "vfs/vfs_procs.h"
 
 static void
 chimera_nfs3_symlink_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *r_attr,
+    struct chimera_vfs_attrs *r_dir_attr,
+    void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
@@ -18,10 +21,35 @@ chimera_nfs3_symlink_complete(
         error_code);
 
     if (res.status == NFS3_OK) {
-        res.resok.obj.handle_follows               = 0;
-        res.resok.obj_attributes.attributes_follow = 0;
+        if (r_attr->va_mask & CHIMERA_VFS_ATTR_FH) {
+            res.resok.obj.handle_follows = 1;
+            xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
+                                 r_attr->va_fh,
+                                 r_attr->va_fh_len,
+                                 msg->dbuf);
+        } else {
+            res.resok.obj.handle_follows = 0;
+        }
+
+        if ((r_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK
+            ) {
+            res.resok.obj_attributes.attributes_follow = 1;
+            chimera_nfs3_marshall_attrs(r_attr,
+                                        &res.resok.obj_attributes.attributes);
+        } else {
+            res.resok.obj_attributes.attributes_follow = 0;
+        }
+
         res.resok.dir_wcc.before.attributes_follow = 0;
-        res.resok.dir_wcc.after.attributes_follow  = 0;
+
+        if ((r_dir_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) ==
+            CHIMERA_NFS3_ATTR_MASK) {
+            res.resok.dir_wcc.after.attributes_follow = 1;
+            chimera_nfs3_marshall_attrs(r_dir_attr,
+                                        &res.resok.dir_wcc.after.attributes);
+        } else {
+            res.resok.dir_wcc.after.attributes_follow = 0;
+        }
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_SYMLINK(evpl, &res, msg);
@@ -48,6 +76,7 @@ chimera_nfs3_symlink(
                         args->where.name.len,
                         args->symlink.symlink_data.str,
                         args->symlink.symlink_data.len,
+                        CHIMERA_NFS3_ATTR_MASK,
                         chimera_nfs3_symlink_complete,
                         req);
 } /* chimera_nfs3_symlink */

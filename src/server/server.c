@@ -104,8 +104,10 @@ chimera_server_init(const char *cfgfile)
     }
 
     server->pool = evpl_threadpool_create(1, chimera_server_thread_init, NULL,
-                                          chimera_server_thread_destroy, server)
-    ;
+                                          NULL,
+                                          chimera_server_thread_destroy,
+                                          -1,
+                                          server);
 
     chimera_server_info("Waiting for threads to start...");
     while (server->threads_online < 1) {

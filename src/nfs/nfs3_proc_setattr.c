@@ -5,8 +5,9 @@
 
 static void
 chimera_nfs3_setattr_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
@@ -19,7 +20,18 @@ chimera_nfs3_setattr_complete(
 
     if (res.status == NFS3_OK) {
         res.resok.obj_wcc.before.attributes_follow = 0;
-        res.resok.obj_wcc.after.attributes_follow  = 0;
+
+        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK)
+        {
+            res.resok.obj_wcc.after.attributes_follow = 1;
+            chimera_nfs3_marshall_attrs(attr,
+                                        &res.resok.obj_wcc.after.attributes);
+        } else {
+            res.resok.obj_wcc.after.attributes_follow = 0;
+        }
+    } else {
+        res.resfail.obj_wcc.before.attributes_follow = 0;
+        res.resfail.obj_wcc.after.attributes_follow  = 0;
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, &res, msg);
@@ -46,6 +58,7 @@ chimera_nfs3_setattr(
     chimera_vfs_setattr(thread->vfs,
                         args->object.data.data,
                         args->object.data.len,
+                        CHIMERA_NFS3_ATTR_MASK,
                         &attr,
                         chimera_nfs3_setattr_complete,
                         req);

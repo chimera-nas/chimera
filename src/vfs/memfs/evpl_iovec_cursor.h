@@ -95,7 +95,7 @@ evpl_iovec_cursor_move(
     int chunk, left = length, niov = 0;
 
     while (left && cursor->niov && niov < maxiov) {
-        chunk = iov->length - cursor->offset;
+        chunk = cursor->iov->length - cursor->offset;
 
         if (left < chunk) {
             chunk = left;
@@ -108,11 +108,15 @@ evpl_iovec_cursor_move(
         evpl_iovec_addref(&iov[niov]);
 
         niov++;
-
         left -= chunk;
-        cursor->iov++;
-        cursor->niov--;
-        cursor->offset = 0;
+
+        cursor->offset += chunk;
+
+        if (cursor->offset == cursor->iov->length) {
+            cursor->iov++;
+            cursor->niov--;
+            cursor->offset = 0;
+        }
     }
 
     return niov;

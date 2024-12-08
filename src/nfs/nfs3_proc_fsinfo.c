@@ -25,11 +25,11 @@ chimera_nfs3_fsinfo_complete(
         res.resok.maxfilesize         = UINT64_MAX;
         res.resok.time_delta.seconds  = 0;
         res.resok.time_delta.nseconds = 1;
-        res.resok.rtmax               = 1024 * 1024;
-        res.resok.rtpref              = 1024 * 1024;
+        res.resok.rtmax               = 128 * 1024;
+        res.resok.rtpref              = 128 * 1024;
         res.resok.rtmult              = 4096;
-        res.resok.wtmax               = 1024 * 1024;
-        res.resok.wtpref              = 1024 * 1024;
+        res.resok.wtmax               = 128 * 1024;
+        res.resok.wtpref              = 128 * 1024;
         res.resok.wtmult              = 4096;
         res.resok.dtpref              = 64 * 1024;
         res.resok.properties          = 0;

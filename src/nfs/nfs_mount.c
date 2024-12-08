@@ -20,10 +20,12 @@ chimera_nfs_mount_null(
 
 static void
 chimera_nfs_mount_lookup_complete(
-    enum chimera_vfs_error error_code,
-    const void            *fh,
-    int                    fhlen,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    const void               *fh,
+    int                       fhlen,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
     struct evpl_rpc2_msg             *msg    = req->msg;
@@ -69,6 +71,7 @@ chimera_nfs_mount_mnt(
     chimera_vfs_lookup_path(thread->vfs,
                             args->path.str,
                             args->path.len,
+                            0,
                             chimera_nfs_mount_lookup_complete,
                             req);
 

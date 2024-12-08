@@ -6,6 +6,7 @@
 
 #include "vfs.h"
 #include "vfs_internal.h"
+#include "vfs_open_cache.h"
 #include "vfs_root.h"
 #include "vfs_dump.h"
 #include "vfs/memfs/memfs.h"
@@ -35,12 +36,116 @@ chimera_vfs_syncthread_destroy(void *private_data)
 {
 } /* chimera_vfs_sync_destroy */
 
+static void *
+chimera_vfs_close_thread_init(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct chimera_vfs_close_thread *close_thread = private_data;
+
+    close_thread->evpl       = evpl;
+    close_thread->vfs_thread = chimera_vfs_thread_init(evpl, close_thread->vfs);
+
+    return private_data;
+} /* chimera_vfs_close_thread_init */
+
+static void
+chimera_vfs_close_complete(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_close_thread *close_thread = request->proto_private_data;
+    uint64_t                         open_cache_size;
+
+    chimera_vfs_complete(request);
+
+    free(request->close.handle);
+
+    close_thread->num_pending--;
+
+    if (close_thread->num_pending == 0 && close_thread->shutdown) {
+        open_cache_size = chimera_vfs_open_cache_size(close_thread->vfs->
+                                                      vfs_open_cache);
+
+        if (open_cache_size == 0) {
+            pthread_cond_signal(&close_thread->cond);
+        }
+    }
+
+    chimera_vfs_request_free(request->thread, request);
+} /* chimera_vfs_close_complete */
+
+static void
+chimera_vfs_close_thread_wake(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct chimera_vfs_close_thread *close_thread = private_data;
+    struct chimera_vfs_thread       *thread       = close_thread->vfs_thread;
+    struct timespec                  now;
+    uint64_t                         min_age;
+    struct chimera_vfs_open_handle  *handles, *handle;
+    struct chimera_vfs_module       *module;
+    struct chimera_vfs_request      *request;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    if (close_thread->shutdown) {
+        min_age = 0;
+    } else {
+        min_age = 100000000UL;
+    }
+
+    handles = chimera_vfs_open_cache_defer_close(
+        close_thread->vfs->vfs_open_cache, &now, min_age);
+
+    if (handles == NULL && close_thread->shutdown
+        && close_thread->num_pending == 0) {
+        pthread_cond_signal(&close_thread->cond);
+        return;
+    }
+
+    while (handles) {
+        handle = handles;
+        LL_DELETE(handles, handle);
+
+        module = handle->vfs_module;
+
+        request = chimera_vfs_request_alloc(thread);
+
+        request->opcode             = CHIMERA_VFS_OP_CLOSE;
+        request->complete           = chimera_vfs_close_complete;
+        request->close.handle       = handle;
+        request->proto_callback     = NULL;
+        request->proto_private_data = close_thread;
+
+        close_thread->num_pending++;
+
+        chimera_vfs_dispatch(thread, module, request);
+
+    }
+
+} /* chimera_vfs_close_thread_wake */
+
+static void
+chimera_vfs_close_thread_shutdown(void *private_data)
+{
+    struct chimera_vfs_close_thread *close_thread = private_data;
+
+    chimera_vfs_thread_destroy(close_thread->vfs_thread);
+} /* chimera_vfs_close_thread_shutdown */
+
+static void
+chimera_vfs_close_thread_destroy(void *private_data)
+{
+} /* chimera_vfs_close_thread_destroy */
+
 struct chimera_vfs *
 chimera_vfs_init(void)
 {
     struct chimera_vfs *vfs;
 
     vfs = calloc(1, sizeof(*vfs));
+
+    vfs->vfs_open_cache = chimera_vfs_open_cache_init();
 
     chimera_vfs_info("Initializing VFS root module...");
     chimera_vfs_register(vfs, &vfs_root);
@@ -51,12 +156,26 @@ chimera_vfs_init(void)
     chimera_vfs_info("Initializing VFS linux module...");
     chimera_vfs_register(vfs, &vfs_linux);
 
-    chimera_vfs_info("Creating sync threads...");
     vfs->syncthreads = evpl_threadpool_create(16,
                                               chimera_vfs_syncthread_init,
                                               chimera_vfs_syncthread_wake,
+                                              NULL,
                                               chimera_vfs_syncthread_destroy,
+                                              -1,
                                               vfs);
+
+    pthread_mutex_init(&vfs->close_thread.lock, NULL);
+    pthread_cond_init(&vfs->close_thread.cond, NULL);
+    vfs->close_thread.vfs      = vfs;
+    vfs->close_thread.shutdown = 0;
+
+    vfs->close_thread.evpl_thread = evpl_thread_create(
+        chimera_vfs_close_thread_init,
+        chimera_vfs_close_thread_wake,
+        chimera_vfs_close_thread_shutdown,
+        chimera_vfs_close_thread_destroy,
+        10,
+        &vfs->close_thread);
 
     return vfs;
 } /* chimera_vfs_init */
@@ -82,6 +201,14 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
 
     evpl_threadpool_destroy(vfs->syncthreads);
 
+    pthread_mutex_lock(&vfs->close_thread.lock);
+    vfs->close_thread.shutdown = 1;
+    evpl_thread_wake(vfs->close_thread.evpl_thread);
+    pthread_cond_wait(&vfs->close_thread.cond, &vfs->close_thread.lock);
+    pthread_mutex_unlock(&vfs->close_thread.lock);
+
+    evpl_thread_destroy(vfs->close_thread.evpl_thread);
+
     while (vfs->shares) {
         share = vfs->shares;
         DL_DELETE(vfs->shares, share);
@@ -99,6 +226,8 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
 
         module->destroy(vfs->module_private[i]);
     }
+
+    chimera_vfs_open_cache_destroy(vfs->vfs_open_cache);
 
     free(vfs);
 } /* chimera_vfs_destroy */

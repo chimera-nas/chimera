@@ -12,8 +12,10 @@ chimera_vfs_lookup_path_complete(struct chimera_vfs_request *request)
     chimera_vfs_complete(request);
 
     callback(request->status,
-             request->lookup.r_fh,
-             request->lookup.r_fh_len,
+             request->lookup_path.r_fh,
+             request->lookup_path.r_fh_len,
+             &request->lookup_path.r_attr,
+             &request->lookup_path.r_dir_attr,
              request->proto_private_data);
 
     chimera_vfs_request_free(thread, request);
@@ -25,6 +27,7 @@ chimera_vfs_lookup_path(
     struct chimera_vfs_thread         *thread,
     const char                        *path,
     int                                pathlen,
+    uint64_t                           attrmask,
     chimera_vfs_lookup_path_callback_t callback,
     void                              *private_data)
 {
@@ -45,13 +48,16 @@ chimera_vfs_lookup_path(
         chimera_vfs_error("handle slash case");
         abort();
     } else {
-        request                       = chimera_vfs_request_alloc(thread);
-        request->opcode               = CHIMERA_VFS_OP_LOOKUP;
+        request = chimera_vfs_request_alloc(thread);
+
+        request->lookup_path.r_attr.va_mask     = 0;
+        request->lookup_path.r_dir_attr.va_mask = 0;
+
+        request->opcode               = CHIMERA_VFS_OP_LOOKUP_PATH;
         request->complete             = chimera_vfs_lookup_path_complete;
-        request->lookup.fh            = &module->fh_magic;
-        request->lookup.fh_len        = 1;
-        request->lookup.component     = path;
-        request->lookup.component_len = pathlen;
+        request->lookup_path.path     = path;
+        request->lookup_path.pathlen  = pathlen;
+        request->lookup_path.attrmask = attrmask;
         request->proto_callback       = callback;
         request->proto_private_data   = private_data;
 

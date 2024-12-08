@@ -8,10 +8,10 @@
 #define NFS4_SESSION_MAX_STATE 64
 
 struct nfs4_state {
-    struct stateid4                nfs4_state_id;
-    uint32_t                       nfs4_state_type;
-    uint32_t                       nfs4_state_active;
-    struct chimera_vfs_open_handle nfs4_state_handle;
+    struct stateid4                 nfs4_state_id;
+    uint32_t                        nfs4_state_type;
+    uint32_t                        nfs4_state_active;
+    struct chimera_vfs_open_handle *nfs4_state_handle;
 };
 
 struct nfs4_client {

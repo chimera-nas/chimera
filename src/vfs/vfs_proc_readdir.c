@@ -13,6 +13,7 @@ chimera_vfs_readdir_complete(struct chimera_vfs_request *request)
     complete(request->status,
              request->readdir.r_cookie,
              request->readdir.r_eof,
+             &request->readdir.r_dir_attr,
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
@@ -35,6 +36,8 @@ chimera_vfs_readdir(
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
     request = chimera_vfs_request_alloc(thread);
+
+    request->readdir.r_dir_attr.va_mask = 0;
 
     request->opcode             = CHIMERA_VFS_OP_READDIR;
     request->complete           = chimera_vfs_readdir_complete;

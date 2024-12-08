@@ -9,6 +9,8 @@ chimera_vfs_access_complete(struct chimera_vfs_request *request)
     chimera_vfs_complete(request);
 
     callback(request->status,
+             request->access.r_access,
+             &request->access.r_attr,
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
@@ -20,6 +22,7 @@ chimera_vfs_access(
     const void                   *fh,
     int                           fhlen,
     uint32_t                      access,
+    uint64_t                      attrmask,
     chimera_vfs_access_callback_t callback,
     void                         *private_data)
 {
@@ -31,11 +34,14 @@ chimera_vfs_access(
 
     request = chimera_vfs_request_alloc(thread);
 
+    request->access.r_attr.va_mask = 0;
+
     request->opcode             = CHIMERA_VFS_OP_ACCESS;
     request->complete           = chimera_vfs_access_complete;
     request->access.fh          = fh;
     request->access.fh_len      = fhlen;
     request->access.access      = access;
+    request->access.attrmask    = attrmask;
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 

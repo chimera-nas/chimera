@@ -32,6 +32,12 @@ main(
         libnfs_test_fail(&env);
     }
 
+    rc = nfs_chown(env.nfs, "/testsymlink", 1, 1);
+
+    if (rc < 0) {
+        fprintf(stderr, "Failed to chmod file: %s\n", nfs_get_error(env.nfs));
+        libnfs_test_fail(&env);
+    }
     nfs_umount(env.nfs);
 
     libnfs_test_success(&env);

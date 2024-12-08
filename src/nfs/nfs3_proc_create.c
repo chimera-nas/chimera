@@ -2,12 +2,14 @@
 
 #include "nfs3_procs.h"
 #include "nfs3_status.h"
+#include "nfs3_attr.h"
 #include "vfs/vfs_procs.h"
 
 static void
 chimera_nfs3_create_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *attr,
     void                           *private_data)
 {
     struct nfs_request               *req    = private_data;
@@ -21,17 +23,25 @@ chimera_nfs3_create_complete(
 
     if (res.status == NFS3_OK) {
 
-        nfs3_open_cache_insert(&shared->nfs3_open_cache, handle);
-
         res.resok.obj.handle_follows = 1;
         xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
                              handle->fh,
                              handle->fh_len,
                              msg->dbuf);
-        res.resok.obj_attributes.attributes_follow = 0;
+
+        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK)
+        {
+            res.resok.obj_attributes.attributes_follow = 1;
+            chimera_nfs3_marshall_attrs(attr,
+                                        &res.resok.obj_attributes.attributes);
+        } else {
+            res.resok.obj_attributes.attributes_follow = 0;
+        }
 
         res.resok.dir_wcc.before.attributes_follow = 0;
         res.resok.dir_wcc.after.attributes_follow  = 0;
+
+        chimera_vfs_close(thread->vfs, handle);
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, &res, msg);
@@ -63,6 +73,7 @@ chimera_nfs3_create(
                         args->where.name.len,
                         open_flags,
                         S_IWUSR | S_IRUSR,
+                        CHIMERA_NFS3_ATTR_MASK,
                         chimera_nfs3_create_complete,
                         req);
 } /* chimera_nfs3_create */

@@ -15,6 +15,8 @@ chimera_vfs_lookup_complete(struct chimera_vfs_request *request)
     callback(request->status,
              request->lookup.r_fh,
              request->lookup.r_fh_len,
+             &request->lookup.r_attr,
+             &request->lookup.r_dir_attr,
              request->proto_private_data);
 
     chimera_vfs_request_free(thread, request);
@@ -28,6 +30,7 @@ chimera_vfs_lookup(
     int                           fhlen,
     const char                   *name,
     uint32_t                      namelen,
+    uint64_t                      attrmask,
     chimera_vfs_lookup_callback_t callback,
     void                         *private_data)
 {
@@ -36,13 +39,18 @@ chimera_vfs_lookup(
 
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
-    request                       = chimera_vfs_request_alloc(thread);
+    request = chimera_vfs_request_alloc(thread);
+
+    request->lookup.r_attr.va_mask     = 0;
+    request->lookup.r_dir_attr.va_mask = 0;
+
     request->opcode               = CHIMERA_VFS_OP_LOOKUP;
     request->complete             = chimera_vfs_lookup_complete;
     request->lookup.fh            = fh;
     request->lookup.fh_len        = fhlen;
     request->lookup.component     = name;
     request->lookup.component_len = namelen;
+    request->lookup.attrmask      = attrmask;
     request->proto_callback       = callback;
     request->proto_private_data   = private_data;
 
