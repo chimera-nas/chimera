@@ -1388,6 +1388,9 @@ memfs_write(
             block->niov = evpl_iovec_alloc(evpl, 4096, 4096,
                                            CHIMERA_MEMFS_BLOCK_MAX_IOV,
                                            block->iov);
+
+            chimera_memfs_abort_if(block->niov < 0,
+                                   "evpl_iovec_alloc failed");
             if (old_block) {
 
                 evpl_iovec_cursor_init(&old_block_cursor,
