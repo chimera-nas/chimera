@@ -3,7 +3,7 @@
 #include <time.h>
 #include <sys/stat.h>
 
-#include "vfs/vfs_root.h"
+#include "vfs_root.h"
 #include "common/logging.h"
 #include "vfs/vfs_internal.h"
 

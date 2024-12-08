@@ -7,7 +7,7 @@
 #include "vfs.h"
 #include "vfs_internal.h"
 #include "vfs_open_cache.h"
-#include "vfs_root.h"
+#include "root/vfs_root.h"
 #include "vfs_dump.h"
 #include "vfs/memfs/memfs.h"
 #include "vfs/linux/linux.h"
