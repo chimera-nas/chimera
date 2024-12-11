@@ -46,7 +46,7 @@ chimera_nfs3_read_complete(
 
     shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, &res, msg);
 
-    chimera_vfs_close(thread->vfs, req->handle);
+    chimera_vfs_release(thread->vfs, req->handle);
 
     nfs_request_free(thread, req);
 } /* chimera_nfs3_read_complete */

@@ -41,7 +41,7 @@ chimera_nfs3_create_complete(
         res.resok.dir_wcc.before.attributes_follow = 0;
         res.resok.dir_wcc.after.attributes_follow  = 0;
 
-        chimera_vfs_close(thread->vfs, handle);
+        chimera_vfs_release(thread->vfs, handle);
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, &res, msg);

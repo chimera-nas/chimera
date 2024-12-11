@@ -103,7 +103,7 @@ chimera_server_init(const char *cfgfile)
         server->protocol_private[i] = server->protocols[i]->init(server->vfs);
     }
 
-    server->pool = evpl_threadpool_create(1, chimera_server_thread_init, NULL,
+    server->pool = evpl_threadpool_create(16, chimera_server_thread_init, NULL,
                                           NULL,
                                           chimera_server_thread_destroy,
                                           -1,

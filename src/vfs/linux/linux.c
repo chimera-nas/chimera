@@ -868,7 +868,7 @@ chimera_linux_close(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int fd = request->close.handle->vfs_private;
+    int fd = request->close.vfs_private;
 
     close(fd);
 

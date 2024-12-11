@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <pthread.h>
+
 #include "nfs.h"
 #include "server/protocol.h"
 #include "vfs/vfs.h"
@@ -13,6 +15,13 @@
 
 #include "common/logging.h"
 #include "uthash/utlist.h"
+
+#define NFS_PROGIDX_PORTMAP_V2 0
+#define NFS_PROGIDX_MOUNT_V3   1
+#define NFS_PROGIDX_V3         2
+#define NFS_PROGIDX_V4         3
+#define NFS_PROGIDX_V4_CB      4
+#define NFS_PROGIDX_MAX        5
 
 static void *
 nfs_server_init(struct chimera_vfs *vfs)
@@ -33,6 +42,23 @@ nfs_server_init(struct chimera_vfs *vfs)
     NFS_V3_init(&shared->nfs_v3);
     NFS_V4_init(&shared->nfs_v4);
     NFS_V4_CB_init(&shared->nfs_v4_cb);
+
+    shared->portmap_v2.rpc2.metrics = calloc(shared->portmap_v2.rpc2.maxproc,
+                                             sizeof(struct evpl_rpc2_metric));
+    shared->mount_v3.rpc2.metrics = calloc(shared->mount_v3.rpc2.maxproc,
+                                           sizeof(struct evpl_rpc2_metric));
+    shared->nfs_v3.rpc2.metrics = calloc(shared->nfs_v3.rpc2.maxproc,
+                                         sizeof(struct evpl_rpc2_metric));
+    shared->nfs_v4.rpc2.metrics = calloc(shared->nfs_v4.rpc2.maxproc,
+                                         sizeof(struct evpl_rpc2_metric));
+    shared->nfs_v4_cb.rpc2.metrics = calloc(shared->nfs_v4_cb.rpc2.maxproc,
+                                            sizeof(struct evpl_rpc2_metric));
+
+    pthread_mutex_init(&shared->portmap_v2.rpc2.metrics_lock, NULL);
+    pthread_mutex_init(&shared->mount_v3.rpc2.metrics_lock, NULL);
+    pthread_mutex_init(&shared->nfs_v3.rpc2.metrics_lock, NULL);
+    pthread_mutex_init(&shared->nfs_v4.rpc2.metrics_lock, NULL);
+    pthread_mutex_init(&shared->nfs_v4_cb.rpc2.metrics_lock, NULL);
 
     shared->mount_v3.recv_call_MOUNTPROC3_NULL    = chimera_nfs_mount_null;
     shared->mount_v3.recv_call_MOUNTPROC3_MNT     = chimera_nfs_mount_mnt;
@@ -76,12 +102,48 @@ nfs_server_init(struct chimera_vfs *vfs)
 } /* nfs_server_init */
 
 static void
+nfs_server_dump_metrics(struct evpl_rpc2_program *program)
+{
+    struct evpl_rpc2_metric *metric;
+    int                      i;
+
+    for (i = 0; i < program->maxproc; i++) {
+        metric = &program->metrics[i];
+
+        if (metric->total_calls == 0) {
+            continue;
+        }
+
+        chimera_nfs_debug(
+            "RPC2 metrics for %18s: %8d requests, %8lldns avg latency, %8lldns min latency, %8lldns max latency",
+            program->procs[i],
+            metric->total_calls,
+            metric->total_latency / metric->total_calls,
+            metric->min_latency,
+            metric->max_latency);
+    }
+} /* nfs_server_dump_metrics */
+
+static void
 nfs_server_destroy(void *data)
 {
     struct chimera_server_nfs_shared *shared = data;
 
     /* Close out all the nfs4 session state */
     nfs4_client_table_free(&shared->nfs4_shared_clients);
+
+    nfs_server_dump_metrics(&shared->portmap_v2.rpc2);
+    nfs_server_dump_metrics(&shared->mount_v3.rpc2);
+    nfs_server_dump_metrics(&shared->nfs_v3.rpc2);
+    nfs_server_dump_metrics(&shared->nfs_v4.rpc2);
+    nfs_server_dump_metrics(&shared->nfs_v4_cb.rpc2);
+
+    free(shared->portmap_v2.rpc2.metrics);
+    free(shared->mount_v3.rpc2.metrics);
+    free(shared->nfs_v3.rpc2.metrics);
+    free(shared->nfs_v4.rpc2.metrics);
+    free(shared->nfs_v4_cb.rpc2.metrics);
+
 
     free(shared);
 } /* nfs_server_destroy */
@@ -106,7 +168,6 @@ nfs_server_thread_init(
 
     thread->vfs = chimera_vfs_thread_init(evpl, shared->vfs);
 
-    chimera_nfs_info("Listening for NFS on port 2049...");
     thread->nfs_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 2049);
 
     thread->nfs_server = evpl_rpc2_listen(thread->rpc2_agent,
@@ -118,8 +179,6 @@ nfs_server_thread_init(
 
     programs[0] = &shared->mount_v3.rpc2;
 
-    chimera_nfs_info("Listening for RPC NFS mount on port 20048...");
-
     thread->mount_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 20048);
 
     thread->mount_server = evpl_rpc2_listen(thread->rpc2_agent,
@@ -130,8 +189,6 @@ nfs_server_thread_init(
                                             thread);
 
     programs[0] = &shared->portmap_v2.rpc2;
-
-    chimera_nfs_info("Listening for RPC portmap on port 111...");
 
     thread->portmap_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 111);
 

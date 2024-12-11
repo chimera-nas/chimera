@@ -50,30 +50,6 @@ chimera_vfs_close_thread_init(
 } /* chimera_vfs_close_thread_init */
 
 static void
-chimera_vfs_close_complete(struct chimera_vfs_request *request)
-{
-    struct chimera_vfs_close_thread *close_thread = request->proto_private_data;
-    uint64_t                         open_cache_size;
-
-    chimera_vfs_complete(request);
-
-    free(request->close.handle);
-
-    close_thread->num_pending--;
-
-    if (close_thread->num_pending == 0 && close_thread->shutdown) {
-        open_cache_size = chimera_vfs_open_cache_size(close_thread->vfs->
-                                                      vfs_open_cache);
-
-        if (open_cache_size == 0) {
-            pthread_cond_signal(&close_thread->cond);
-        }
-    }
-
-    chimera_vfs_request_free(request->thread, request);
-} /* chimera_vfs_close_complete */
-
-static void
 chimera_vfs_close_thread_wake(
     struct evpl *evpl,
     void        *private_data)
@@ -83,8 +59,6 @@ chimera_vfs_close_thread_wake(
     struct timespec                  now;
     uint64_t                         min_age;
     struct chimera_vfs_open_handle  *handles, *handle;
-    struct chimera_vfs_module       *module;
-    struct chimera_vfs_request      *request;
 
     clock_gettime(CLOCK_MONOTONIC, &now);
 
@@ -107,21 +81,13 @@ chimera_vfs_close_thread_wake(
         handle = handles;
         LL_DELETE(handles, handle);
 
-        module = handle->vfs_module;
+        chimera_vfs_close(thread, handle->vfs_module,
+                          handle->fh, handle->fh_len,
+                          handle->vfs_private);
 
-        request = chimera_vfs_request_alloc(thread);
-
-        request->opcode             = CHIMERA_VFS_OP_CLOSE;
-        request->complete           = chimera_vfs_close_complete;
-        request->close.handle       = handle;
-        request->proto_callback     = NULL;
-        request->proto_private_data = close_thread;
-
-        close_thread->num_pending++;
-
-        chimera_vfs_dispatch(thread, module, request);
-
+        free(handle);
     }
+
 
 } /* chimera_vfs_close_thread_wake */
 

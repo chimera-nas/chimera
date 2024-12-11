@@ -8,18 +8,22 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread      *thread   = request->thread;
     chimera_vfs_open_callback_t     callback = request->proto_callback;
-    struct chimera_vfs_open_handle *handle   = request->open.handle;
+    struct chimera_vfs_module      *module;
+    struct chimera_vfs_open_handle *handle =  NULL;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_open_cache_ready(
+
+        module = chimera_vfs_get_module(thread,
+                                        request->open.fh,
+                                        request->open.fh_len);
+
+        handle = chimera_vfs_open_cache_insert(
+            thread,
             thread->vfs->vfs_open_cache,
-            handle,
+            module,
+            request->open.fh,
+            request->open.fh_len,
             request->open.r_vfs_private);
-    } else {
-        chimera_vfs_open_cache_release(
-            thread->vfs->vfs_open_cache,
-            handle);
-        handle = NULL;
     }
 
     chimera_vfs_complete(request);
@@ -44,25 +48,18 @@ chimera_vfs_open(
     struct chimera_vfs_module      *module;
     struct chimera_vfs_request     *request;
     struct chimera_vfs_open_handle *handle;
-    int                             is_new;
 
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
-    is_new = chimera_vfs_open_cache_acquire(
-        &handle,
+    handle = chimera_vfs_open_cache_lookup(
         vfs->vfs_open_cache,
         module,
         fh,
         fhlen);
 
-    if (!is_new) {
-        if (handle->pending) {
-            chimera_vfs_abort("handle open race");
-        } else {
-            /* XXX O_EXCL */
-            callback(CHIMERA_VFS_OK, handle, private_data);
-            return;
-        }
+    if (handle) {
+        callback(CHIMERA_VFS_OK, handle, private_data);
+        return;
     }
 
     request = chimera_vfs_request_alloc(thread);
@@ -72,7 +69,6 @@ chimera_vfs_open(
     request->open.fh            = fh;
     request->open.fh_len        = fhlen;
     request->open.flags         = flags;
-    request->open.handle        = handle;
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 

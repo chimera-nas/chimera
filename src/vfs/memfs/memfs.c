@@ -251,6 +251,12 @@ memfs_block_free(
     struct memfs_thread *thread,
     struct memfs_block  *block)
 {
+    int i;
+
+    for (i = 0; i < block->niov; i++) {
+        evpl_iovec_release(&block->iov[i]);
+    }
+
     LL_PREPEND(thread->free_block, block);
 } /* memfs_block_free */
 
@@ -336,7 +342,7 @@ memfs_inode_free(
 {
     struct memfs_shared     *shared = thread->shared;
     struct memfs_inode_list *inode_list;
-    int                      i, j;
+    int                      i;
     struct memfs_block      *block;
     uint32_t                 list_id = thread->thread_id &
         CHIMERA_MEMFS_INODE_LIST_MASK;
@@ -348,9 +354,6 @@ memfs_inode_free(
             for (i = 0; i < inode->file.num_blocks; i++) {
                 block = inode->file.blocks[i];
                 if (block) {
-                    for (j = 0; j < block->niov; j++) {
-                        evpl_iovec_release(&block->iov[j]);
-                    }
                     memfs_block_free(thread, block);
                     inode->file.blocks[i] = NULL;
                 }
@@ -1200,7 +1203,7 @@ memfs_close(
 {
     struct memfs_inode *inode;
 
-    inode = (struct memfs_inode *) request->close.handle->vfs_private;
+    inode = (struct memfs_inode *) request->close.vfs_private;
 
     pthread_mutex_lock(&inode->lock);
 
@@ -1373,10 +1376,10 @@ memfs_write(
 
     for (bi = first_block; bi <= last_block; bi++) {
 
-        if (left < CHIMERA_MEMFS_BLOCK_SIZE - block_offset) {
+        block_len = CHIMERA_MEMFS_BLOCK_SIZE - block_offset;
+
+        if (left < block_len) {
             block_len = left;
-        } else {
-            block_len = CHIMERA_MEMFS_BLOCK_SIZE - block_offset;
         }
 
         old_block = inode->file.blocks[bi];
@@ -1408,6 +1411,7 @@ memfs_write(
                                        CHIMERA_MEMFS_BLOCK_SIZE - block_len -
                                        block_offset);
 
+                memfs_block_free(thread, old_block);
             } else {
                 memset(block->iov[0].data, 0, block_offset);
 
@@ -1425,10 +1429,6 @@ memfs_write(
                                                  block->iov,
                                                  4,
                                                  block_len);
-        }
-
-        if (old_block) {
-            memfs_block_free(thread, old_block);
         }
 
         inode->file.blocks[bi] = block;

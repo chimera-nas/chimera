@@ -46,7 +46,7 @@ chimera_nfs3_write_complete(
             res.resok.file_wcc.after.attributes_follow = 0;
         }
 
-        chimera_vfs_close(thread->vfs, req->handle);
+        chimera_vfs_release(thread->vfs, req->handle);
     } else {
         res.resfail.file_wcc.before.attributes_follow = 0;
         res.resfail.file_wcc.after.attributes_follow  = 0;

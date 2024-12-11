@@ -17,7 +17,7 @@ chimera_nfs4_close(
 
     state = &session->nfs4_session_state[seqid];
 
-    chimera_vfs_close(thread->vfs, state->nfs4_state_handle);
+    chimera_vfs_release(thread->vfs, state->nfs4_state_handle);
 
     res->status = NFS4_OK;
 

@@ -105,11 +105,10 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                      req->open_at.name);
             break;
         case CHIMERA_VFS_OP_CLOSE:
-            format_hex(fhstr, sizeof(fhstr), req->close.handle->fh, req->close.
-                       handle->fh_len);
+            format_hex(fhstr, sizeof(fhstr), req->close.fh, req->close.fh_len);
             snprintf(argstr, sizeof(argstr), "fh %s hdl %lx",
                      fhstr,
-                     req->close.handle->vfs_private);
+                     req->close.vfs_private);
             break;
         case CHIMERA_VFS_OP_READ:
             format_hex(fhstr, sizeof(fhstr), req->read.handle->fh, req->read.

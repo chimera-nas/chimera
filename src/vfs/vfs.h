@@ -121,7 +121,6 @@ struct chimera_vfs_open_handle {
     struct chimera_vfs_module      *vfs_module;
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
     uint8_t                         fh_len;
-    uint8_t                         pending;
     uint32_t                        opencnt;
     uint64_t                        vfs_private;
     struct timespec                 timestamp;
@@ -222,11 +221,10 @@ struct chimera_vfs_request {
         } mkdir;
 
         struct {
-            const void                     *fh;
-            uint32_t                        fh_len;
-            uint32_t                        flags;
-            struct chimera_vfs_open_handle *handle;
-            uint64_t                        r_vfs_private;
+            const void *fh;
+            uint32_t    fh_len;
+            uint32_t    flags;
+            uint64_t    r_vfs_private;
         } open;
 
         struct {
@@ -244,7 +242,9 @@ struct chimera_vfs_request {
         } open_at;
 
         struct {
-            struct chimera_vfs_open_handle *handle;
+            uint8_t  fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t fh_len;
+            uint64_t vfs_private;
         } close;
 
         struct {

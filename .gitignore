@@ -5,5 +5,8 @@ build
 publish.sh
 cap
 *.cap
+*.diff
+*.rej
+*.orig
 Testing
 

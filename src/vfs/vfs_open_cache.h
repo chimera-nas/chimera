@@ -6,6 +6,7 @@
 #include "common/format.h"
 #include "common/misc.h"
 #include "vfs.h"
+#include "vfs_procs.h"
 
 struct vfs_open_cache {
     pthread_mutex_t                 lock;
@@ -66,28 +67,59 @@ chimera_vfs_open_cache_release(
     struct chimera_vfs_open_handle *handle)
 {
     pthread_mutex_lock(&cache->lock);
-
     handle->opencnt--;
+    pthread_mutex_unlock(&cache->lock);
 
-    if (handle->opencnt == 0 && handle->pending) {
-        HASH_DEL(cache->open_files, handle);
-        chimera_vfs_open_cache_free(cache, handle);
+} /* vfs_open_cache_release */
+static inline struct chimera_vfs_open_handle *
+chimera_vfs_open_cache_insert(
+    struct chimera_vfs_thread *thread,
+    struct vfs_open_cache     *cache,
+    struct chimera_vfs_module *module,
+    const void                *fh,
+    uint32_t                   fhlen,
+    uint64_t                   vfs_private)
+{
+    struct chimera_vfs_open_handle *handle;
+
+    pthread_mutex_lock(&cache->lock);
+
+    HASH_FIND(hh, cache->open_files, fh, fhlen, handle);
+
+    if (handle) {
+
+        chimera_vfs_close(thread, module, fh, fhlen, vfs_private);
+
+        handle->opencnt++;
+        handle->timestamp.tv_sec  = 0;
+        handle->timestamp.tv_nsec = 0;
+
+    } else {
+
+        handle              = chimera_vfs_open_cache_alloc(cache);
+        handle->vfs_module  = module;
+        handle->fh_len      = fhlen;
+        handle->opencnt     = 1;
+        handle->vfs_private = vfs_private;
+
+        memcpy(handle->fh, fh, fhlen);
+
+        HASH_ADD(hh, cache->open_files, fh, handle->fh_len, handle);
     }
 
     pthread_mutex_unlock(&cache->lock);
 
-} /* vfs_open_cache_release */
+    return handle;
+} /* chimera_vfs_open_cache_insert */
 
-static inline int
-chimera_vfs_open_cache_acquire(
-    struct chimera_vfs_open_handle **r_handle,
-    struct vfs_open_cache           *cache,
-    struct chimera_vfs_module       *module,
-    const void                      *fh,
-    uint32_t                         fhlen)
+static inline struct chimera_vfs_open_handle *
+chimera_vfs_open_cache_lookup(
+    struct vfs_open_cache     *cache,
+    struct chimera_vfs_module *module,
+    const void                *fh,
+    uint32_t                   fhlen)
 {
     struct chimera_vfs_open_handle *handle;
-    int                             is_new;
 
     pthread_mutex_lock(&cache->lock);
 
@@ -97,27 +129,12 @@ chimera_vfs_open_cache_acquire(
         handle->opencnt++;
         handle->timestamp.tv_sec  = 0;
         handle->timestamp.tv_nsec = 0;
-
-        is_new = 0;
-    } else {
-        handle             = chimera_vfs_open_cache_alloc(cache);
-        handle->vfs_module = module;
-        handle->fh_len     = fhlen;
-        handle->opencnt    = 1;
-        handle->pending    = 1;
-        is_new             = 1;
-
-        memcpy(handle->fh, fh, fhlen);
-
-        HASH_ADD(hh, cache->open_files, fh, handle->fh_len, handle);
     }
 
     pthread_mutex_unlock(&cache->lock);
 
-    *r_handle = handle;
-
-    return is_new;
-} /* chimera_vfs_open_cache_acquire */
+    return handle;
+} /* chimera_vfs_open_cache_lookup */
 
 static inline uint64_t
 chimera_vfs_open_cache_size(struct vfs_open_cache *cache)
@@ -130,19 +147,6 @@ chimera_vfs_open_cache_size(struct vfs_open_cache *cache)
 
     return size;
 } /* chimera_vfs_open_cache_size */
-
-static inline void
-chimera_vfs_open_cache_ready(
-    struct vfs_open_cache          *cache,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        vfs_private)
-{
-    pthread_mutex_lock(&cache->lock);
-    handle->pending     = 0;
-    handle->vfs_private = vfs_private;
-    pthread_mutex_unlock(&cache->lock);
-
-} /* chimera_vfs_open_cache_ready */
 
 static inline struct chimera_vfs_open_handle *
 chimera_vfs_open_cache_defer_close(
