@@ -170,6 +170,33 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
                      !!(req->access.r_access & CHIMERA_VFS_ACCESS_WRITE),
                      !!(req->access.r_access & CHIMERA_VFS_ACCESS_EXECUTE));
             break;
+        case CHIMERA_VFS_OP_LOOKUP_PATH:
+            format_hex(fhstr, sizeof(fhstr), req->lookup_path.r_attr.va_fh, req->lookup_path.r_attr.va_fh_len);
+            if (req->status == CHIMERA_VFS_OK) {
+                snprintf(argstr, sizeof(argstr), "path %.*s r_fh %s",
+                         req->lookup_path.pathlen,
+                         req->lookup_path.path,
+                         fhstr);
+            }
+            break;
+        case CHIMERA_VFS_OP_LOOKUP:
+            format_hex(fhstr, sizeof(fhstr), req->lookup.r_attr.va_fh, req->lookup.r_attr.va_fh_len);
+            if (req->status == CHIMERA_VFS_OK) {
+                snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
+                         req->lookup.component_len,
+                         req->lookup.component,
+                         fhstr);
+            }
+            break;
+        case CHIMERA_VFS_OP_OPEN_AT:
+            format_hex(fhstr, sizeof(fhstr), req->open_at.r_attr.va_fh, req->open_at.r_attr.va_fh_len);
+            if (req->status == CHIMERA_VFS_OK) {
+                snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
+                         req->open_at.namelen,
+                         req->open_at.name,
+                         fhstr);
+            }
+            break;
         case CHIMERA_VFS_OP_READDIR:
             if (req->status == CHIMERA_VFS_OK) {
                 snprintf(argstr, sizeof(argstr), "cookie %lu eof %u",
