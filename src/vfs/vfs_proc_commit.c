@@ -23,12 +23,9 @@ chimera_vfs_commit(
     chimera_vfs_commit_callback_t   callback,
     void                           *private_data)
 {
-    struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
 
-    module = handle->vfs_module;
-
-    request = chimera_vfs_request_alloc(thread);
+    request = chimera_vfs_request_alloc(thread, handle->fh, handle->fh_len);
 
     request->opcode             = CHIMERA_VFS_OP_COMMIT;
     request->complete           = chimera_vfs_commit_complete;
@@ -38,7 +35,7 @@ chimera_vfs_commit(
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 
-    chimera_vfs_dispatch(thread, module, request);
+    chimera_vfs_dispatch(request);
 
 
 } /* chimera_vfs_write */

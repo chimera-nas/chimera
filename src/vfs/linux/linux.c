@@ -372,8 +372,8 @@ chimera_linux_getattr(
     request->getattr.r_attr.va_mask = 0;
 
     fd = linux_open_by_handle(thread,
-                              request->getattr.fh,
-                              request->getattr.fh_len,
+                              request->fh,
+                              request->fh_len,
                               O_PATH | O_RDONLY);
 
     if (fd < 0) {
@@ -385,8 +385,8 @@ chimera_linux_getattr(
     chimera_linux_map_attrs(request->getattr.attr_mask,
                             &request->getattr.r_attr,
                             fd,
-                            request->getattr.fh,
-                            request->getattr.fh_len);
+                            request->fh,
+                            request->fh_len);
 
 
     close(fd);
@@ -405,8 +405,8 @@ chimera_linux_setattr(
     int                             fd, rc;
 
     fd = linux_open_by_handle(thread,
-                              request->setattr.fh,
-                              request->setattr.fh_len,
+                              request->fh,
+                              request->fh_len,
                               O_PATH);
 
     if (fd < 0) {
@@ -512,8 +512,8 @@ chimera_linux_setattr(
     chimera_linux_map_attrs(request->setattr.attr_mask,
                             &request->setattr.r_attr,
                             fd,
-                            request->setattr.fh,
-                            request->setattr.fh_len);
+                            request->fh,
+                            request->fh_len);
 
     close(fd);
 
@@ -574,8 +574,8 @@ chimera_linux_lookup(
     r_attr = &request->lookup.r_attr;
 
     fd = linux_open_by_handle(thread,
-                              request->lookup.fh,
-                              request->lookup.fh_len,
+                              request->fh,
+                              request->fh_len,
                               O_PATH | O_RDONLY);
     if (fd < 0) {
         request->status = chimera_linux_errno_to_status(errno);
@@ -600,8 +600,8 @@ chimera_linux_lookup(
     chimera_linux_map_attrs(request->lookup.attrmask,
                             &request->lookup.r_dir_attr,
                             fd,
-                            request->lookup.fh,
-                            request->lookup.fh_len);
+                            request->fh,
+                            request->fh_len);
 
     close(fd);
 
@@ -642,8 +642,8 @@ chimera_linux_readdir(
     struct chimera_vfs_attrs     vattr;
 
     fd = linux_open_by_handle(thread,
-                              request->readdir.fh,
-                              request->readdir.fh_len,
+                              request->fh,
+                              request->fh_len,
                               O_DIRECTORY | O_RDONLY);
 
     if (fd < 0) {
@@ -758,8 +758,8 @@ chimera_linux_open(
     }
 
     fd = linux_open_by_handle(thread,
-                              request->open.fh,
-                              request->open.fh_len,
+                              request->fh,
+                              request->fh_len,
                               flags);
 
     if (fd < 0) {
@@ -784,12 +784,14 @@ chimera_linux_open_at(
     int                          flags;
     int                          fd;
     int                          rc;
+    uint8_t                      opened_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                     opened_fh_len;
 
     TERM_STR(fullname, request->open_at.name, request->open_at.namelen);
 
     parent_fd = linux_open_by_handle(thread,
-                                     request->open_at.parent_fh,
-                                     request->open_at.parent_fh_len,
+                                     request->fh,
+                                     request->fh_len,
                                      O_RDONLY | O_DIRECTORY);
 
     if (parent_fd < 0) {
@@ -828,8 +830,8 @@ chimera_linux_open_at(
     }
 
     rc = linux_get_fh(fd, "", 0, AT_EMPTY_PATH,
-                      request->open_at.fh,
-                      &request->open_at.fh_len);
+                      opened_fh,
+                      &opened_fh_len);
 
     if (rc) {
         close(parent_fd);
@@ -845,16 +847,16 @@ chimera_linux_open_at(
 
     if (request->open_at.attrmask) {
         fd = linux_open_by_handle(thread,
-                                  request->open_at.fh,
-                                  request->open_at.fh_len,
+                                  opened_fh,
+                                  opened_fh_len,
                                   O_RDONLY);
 
         if (fd >= 0) {
             chimera_linux_map_attrs(request->open_at.attrmask,
                                     &request->open_at.r_attr,
                                     fd,
-                                    request->open_at.fh,
-                                    request->open_at.fh_len);
+                                    opened_fh,
+                                    opened_fh_len);
             close(fd);
         }
     }
@@ -889,8 +891,8 @@ chimera_linux_mkdir(
     TERM_STR(fullname, request->mkdir.name, request->mkdir.name_len);
 
     fd = linux_open_by_handle(thread,
-                              request->mkdir.fh,
-                              request->mkdir.fh_len,
+                              request->fh,
+                              request->fh_len,
                               O_PATH | O_RDONLY | O_NOFOLLOW);
 
     if (fd < 0) {
@@ -915,8 +917,8 @@ chimera_linux_mkdir(
     chimera_linux_map_attrs(request->mkdir.attrmask,
                             &request->mkdir.r_dir_attr,
                             fd,
-                            request->mkdir.fh,
-                            request->mkdir.fh_len);
+                            request->fh,
+                            request->fh_len);
 
     close(fd);
 
@@ -958,8 +960,8 @@ chimera_linux_remove(
     TERM_STR(fullname, request->remove.name, request->remove.namelen);
 
     fd = linux_open_by_handle(thread,
-                              request->remove.fh,
-                              request->remove.fh_len,
+                              request->fh,
+                              request->fh_len,
                               O_PATH | O_RDONLY | O_NOFOLLOW);
 
     if (fd < 0) {
@@ -998,8 +1000,8 @@ chimera_linux_access(
     int                          access_mask;
 
     fd = linux_open_by_handle(thread,
-                              request->access.fh,
-                              request->access.fh_len,
+                              request->fh,
+                              request->fh_len,
                               O_PATH | O_RDONLY | O_NOFOLLOW);
 
     if (fd < 0) {
@@ -1197,8 +1199,8 @@ chimera_linux_symlink(
     TERM_STR(target, request->symlink.target, request->symlink.targetlen);
 
     fd = linux_open_by_handle(thread,
-                              request->symlink.fh,
-                              request->symlink.fh_len,
+                              request->fh,
+                              request->fh_len,
                               O_PATH);
 
     if (fd < 0) {
@@ -1226,8 +1228,8 @@ chimera_linux_symlink(
     chimera_linux_map_attrs(request->symlink.attrmask,
                             &request->symlink.r_dir_attr,
                             fd,
-                            request->symlink.fh,
-                            request->symlink.fh_len);
+                            request->fh,
+                            request->fh_len);
     close(fd);
 
     if (rc < 0) {
@@ -1265,8 +1267,8 @@ chimera_linux_readlink(
     int                          fd, rc;
 
     fd = linux_open_by_handle(thread,
-                              request->readlink.fh,
-                              request->readlink.fh_len,
+                              request->fh,
+                              request->fh_len,
                               O_PATH | O_RDONLY | O_NOFOLLOW);
 
     if (fd < 0) {
@@ -1303,8 +1305,8 @@ chimera_linux_rename(
              );
 
     old_fd = linux_open_by_handle(thread,
-                                  request->rename.fh,
-                                  request->rename.fh_len,
+                                  request->fh,
+                                  request->fh_len,
                                   O_PATH | O_RDONLY | O_NOFOLLOW);
 
     if (old_fd < 0) {
@@ -1354,8 +1356,8 @@ chimera_linux_link(
     TERM_STR(fullname, request->link.name, request->link.namelen);
 
     fd = linux_open_by_handle(thread,
-                              request->link.fh,
-                              request->link.fh_len,
+                              request->fh,
+                              request->fh_len,
                               O_PATH | O_RDONLY | O_NOFOLLOW);
 
     if (fd < 0) {

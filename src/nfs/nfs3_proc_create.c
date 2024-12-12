@@ -29,8 +29,7 @@ chimera_nfs3_create_complete(
                              handle->fh_len,
                              msg->dbuf);
 
-        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK)
-        {
+        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
             res.resok.obj_attributes.attributes_follow = 1;
             chimera_nfs3_marshall_attrs(attr,
                                         &res.resok.obj_attributes.attributes);
@@ -73,7 +72,7 @@ chimera_nfs3_create(
                         args->where.name.len,
                         open_flags,
                         S_IWUSR | S_IRUSR,
-                        CHIMERA_NFS3_ATTR_MASK,
+                        CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
                         chimera_nfs3_create_complete,
                         req);
 } /* chimera_nfs3_create */

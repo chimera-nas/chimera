@@ -9,19 +9,14 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread      *thread   = request->thread;
     chimera_vfs_open_at_callback_t  callback = request->proto_callback;
-    struct chimera_vfs_module      *module;
     struct chimera_vfs_open_handle *handle;
-
-    module = chimera_vfs_get_module(thread,
-                                    request->open_at.parent_fh,
-                                    request->open_at.parent_fh_len);
 
     handle = chimera_vfs_open_cache_insert(
         thread,
         thread->vfs->vfs_open_cache,
-        module,
-        request->open_at.fh,
-        request->open_at.fh_len,
+        request->module,
+        request->open_at.r_attr.va_fh,
+        request->open_at.r_attr.va_fh_len,
         request->open_at.r_vfs_private);
 
     chimera_vfs_complete(request);
@@ -47,26 +42,21 @@ chimera_vfs_open_at(
     chimera_vfs_open_at_callback_t callback,
     void                          *private_data)
 {
-    struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
 
-    module = chimera_vfs_get_module(thread, fh, fhlen);
-
-    request = chimera_vfs_request_alloc(thread);
+    request = chimera_vfs_request_alloc(thread, fh, fhlen);
 
     request->open_at.r_attr.va_mask = 0;
 
-    request->opcode                = CHIMERA_VFS_OP_OPEN_AT;
-    request->complete              = chimera_vfs_open_complete;
-    request->open_at.parent_fh     = fh;
-    request->open_at.parent_fh_len = fhlen;
-    request->open_at.name          = name;
-    request->open_at.namelen       = namelen;
-    request->open_at.flags         = flags;
-    request->open_at.mode          = mode;
-    request->open_at.attrmask      = attrmask;
-    request->proto_callback        = callback;
-    request->proto_private_data    = private_data;
+    request->opcode             = CHIMERA_VFS_OP_OPEN_AT;
+    request->complete           = chimera_vfs_open_complete;
+    request->open_at.name       = name;
+    request->open_at.namelen    = namelen;
+    request->open_at.flags      = flags;
+    request->open_at.mode       = mode;
+    request->open_at.attrmask   = attrmask;
+    request->proto_callback     = callback;
+    request->proto_private_data = private_data;
 
-    chimera_vfs_dispatch(thread, module, request);
+    chimera_vfs_dispatch(request);
 } /* chimera_vfs_open */

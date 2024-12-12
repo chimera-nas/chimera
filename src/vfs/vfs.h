@@ -150,10 +150,14 @@ struct chimera_vfs_request {
     chimera_vfs_complete_callback_t complete;
     struct timespec                 start_time;
     uint64_t                        elapsed_ns;
+    struct chimera_vfs_module      *module;
     void                           *proto_callback;
     void                           *proto_private_data;
     struct chimera_vfs_request     *prev;
     struct chimera_vfs_request     *next;
+
+    const void                     *fh;
+    uint32_t                        fh_len;
 
     union {
         struct {
@@ -165,8 +169,6 @@ struct chimera_vfs_request {
         } lookup_path;
 
         struct {
-            const void              *fh;
-            uint32_t                 fh_len;
             const char              *component;
             uint32_t                 component_len;
             uint64_t                 attrmask;
@@ -175,8 +177,6 @@ struct chimera_vfs_request {
         } lookup;
 
         struct {
-            const void              *fh;
-            uint32_t                 fh_len;
             uint32_t                 access;
             uint64_t                 attrmask;
             uint32_t                 r_access;
@@ -184,23 +184,17 @@ struct chimera_vfs_request {
         } access;
 
         struct {
-            const void              *fh;
-            uint32_t                 fh_len;
             uint64_t                 attr_mask;
             struct chimera_vfs_attrs r_attr;
         } getattr;
 
         struct {
-            const void                     *fh;
-            uint32_t                        fh_len;
             uint64_t                        attr_mask;
             const struct chimera_vfs_attrs *attr;
             struct chimera_vfs_attrs        r_attr;
         } setattr;
 
         struct {
-            const void                    *fh;
-            uint32_t                       fh_len;
             uint64_t                       attrmask;
             uint64_t                       cookie;
             uint64_t                       r_cookie;
@@ -210,8 +204,6 @@ struct chimera_vfs_request {
         } readdir;
 
         struct {
-            const void              *fh;
-            uint32_t                 fh_len;
             const char              *name;
             uint32_t                 name_len;
             unsigned int             mode;
@@ -221,17 +213,11 @@ struct chimera_vfs_request {
         } mkdir;
 
         struct {
-            const void *fh;
-            uint32_t    fh_len;
-            uint32_t    flags;
-            uint64_t    r_vfs_private;
+            uint32_t flags;
+            uint64_t r_vfs_private;
         } open;
 
         struct {
-            const void              *parent_fh;
-            uint32_t                 parent_fh_len;
-            uint8_t                  fh[CHIMERA_VFS_FH_SIZE];
-            uint32_t                 fh_len;
             const char              *name;
             int                      namelen;
             uint32_t                 flags;
@@ -242,8 +228,6 @@ struct chimera_vfs_request {
         } open_at;
 
         struct {
-            uint8_t  fh[CHIMERA_VFS_FH_SIZE];
-            uint32_t fh_len;
             uint64_t vfs_private;
         } close;
 
@@ -279,15 +263,11 @@ struct chimera_vfs_request {
         } commit;
 
         struct {
-            const void *fh;
-            uint32_t    fh_len;
             const char *name;
             int         namelen;
         } remove;
 
         struct {
-            const void              *fh;
-            uint32_t                 fh_len;
             const char              *name;
             int                      namelen;
             const char              *target;
@@ -298,16 +278,12 @@ struct chimera_vfs_request {
         } symlink;
 
         struct {
-            const void *fh;
-            uint32_t    fh_len;
-            uint32_t    target_maxlength;
-            uint32_t    r_target_length;
-            void       *r_target;
+            uint32_t target_maxlength;
+            uint32_t r_target_length;
+            void    *r_target;
         } readlink;
 
         struct {
-            const void *fh;
-            uint32_t    fh_len;
             const char *name;
             int         namelen;
             const void *new_fh;
@@ -317,8 +293,6 @@ struct chimera_vfs_request {
         } rename;
 
         struct {
-            const void *fh;
-            uint32_t    fh_len;
             const void *dir_fh;
             int         dir_fhlen;
             const char *name;

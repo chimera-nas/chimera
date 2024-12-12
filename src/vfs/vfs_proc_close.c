@@ -21,14 +21,12 @@ chimera_vfs_close(
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread);
+    request = chimera_vfs_request_alloc(thread, fh, fhlen);
 
-    request->opcode   = CHIMERA_VFS_OP_CLOSE;
-    request->complete = chimera_vfs_close_complete;
-    memcpy(request->close.fh, fh, fhlen);
-    request->close.fh_len      = fhlen;
+    request->opcode            = CHIMERA_VFS_OP_CLOSE;
+    request->complete          = chimera_vfs_close_complete;
     request->close.vfs_private = vfs_private;
 
-    chimera_vfs_dispatch(thread, module, request);
+    chimera_vfs_dispatch(request);
 
 } /* chimera_vfs_close */

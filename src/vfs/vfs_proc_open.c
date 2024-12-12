@@ -14,15 +14,15 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
     if (request->status == CHIMERA_VFS_OK) {
 
         module = chimera_vfs_get_module(thread,
-                                        request->open.fh,
-                                        request->open.fh_len);
+                                        request->fh,
+                                        request->fh_len);
 
         handle = chimera_vfs_open_cache_insert(
             thread,
             thread->vfs->vfs_open_cache,
             module,
-            request->open.fh,
-            request->open.fh_len,
+            request->fh,
+            request->fh_len,
             request->open.r_vfs_private);
     }
 
@@ -62,15 +62,13 @@ chimera_vfs_open(
         return;
     }
 
-    request = chimera_vfs_request_alloc(thread);
+    request = chimera_vfs_request_alloc(thread, fh, fhlen);
 
     request->opcode             = CHIMERA_VFS_OP_OPEN;
     request->complete           = chimera_vfs_open_complete;
-    request->open.fh            = fh;
-    request->open.fh_len        = fhlen;
     request->open.flags         = flags;
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 
-    chimera_vfs_dispatch(thread, module, request);
+    chimera_vfs_dispatch(request);
 } /* chimera_vfs_open */

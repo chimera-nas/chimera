@@ -27,23 +27,18 @@ chimera_vfs_access(
     void                         *private_data)
 {
     struct chimera_vfs_thread  *thread = vfs;
-    struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
 
-    module = chimera_vfs_get_module(thread, fh, fhlen);
-
-    request = chimera_vfs_request_alloc(thread);
+    request = chimera_vfs_request_alloc(thread, fh, fhlen);
 
     request->access.r_attr.va_mask = 0;
 
     request->opcode             = CHIMERA_VFS_OP_ACCESS;
     request->complete           = chimera_vfs_access_complete;
-    request->access.fh          = fh;
-    request->access.fh_len      = fhlen;
     request->access.access      = access;
     request->access.attrmask    = attrmask;
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 
-    chimera_vfs_dispatch(thread, module, request);
+    chimera_vfs_dispatch(request);
 } /* chimera_vfs_access */

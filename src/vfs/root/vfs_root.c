@@ -138,7 +138,7 @@ chimera_vfs_root_lookup(
 
     module = share->module;
 
-    subrequest = chimera_vfs_request_alloc(thread);
+    subrequest = chimera_vfs_request_alloc(thread, &module->fh_magic, sizeof(module->fh_magic));
 
     subrequest->opcode               = CHIMERA_VFS_OP_LOOKUP_PATH;
     subrequest->complete             = chimera_vfs_root_lookup_complete;
@@ -148,7 +148,7 @@ chimera_vfs_root_lookup(
     subrequest->proto_callback       = NULL;
     subrequest->proto_private_data   = request;
 
-    chimera_vfs_dispatch(thread, module, subrequest);
+    chimera_vfs_dispatch(subrequest);
 
 } /* chimera_vfs_root_lookup */
 
@@ -221,7 +221,7 @@ chimera_vfs_root_lookup_path(
 
     module = share->module;
 
-    subrequest = chimera_vfs_request_alloc(thread);
+    subrequest = chimera_vfs_request_alloc(thread, &module->fh_magic, sizeof(module->fh_magic));
 
     subrequest->opcode               = CHIMERA_VFS_OP_LOOKUP_PATH;
     subrequest->complete             = chimera_vfs_root_lookup_path_complete;
@@ -231,7 +231,7 @@ chimera_vfs_root_lookup_path(
     subrequest->proto_callback       = NULL;
     subrequest->proto_private_data   = request;
 
-    chimera_vfs_dispatch(thread, module, subrequest);
+    chimera_vfs_dispatch(subrequest);
 
 } /* chimera_vfs_root_lookup_path */
 

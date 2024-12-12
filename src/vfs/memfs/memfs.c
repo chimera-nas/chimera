@@ -283,15 +283,16 @@ memfs_symlink_target_free(
 {
     LL_PREPEND(thread->free_symlink_target, target);
 } /* memfs_symlink_target_free */
+
+
 static inline struct memfs_inode *
-memfs_inode_alloc(struct memfs_thread *thread)
+memfs_inode_alloc(
+    struct memfs_shared *shared,
+    uint32_t             list_id)
 {
-    struct memfs_shared     *shared = thread->shared;
     struct memfs_inode_list *inode_list;
     struct memfs_inode      *inodes, *inode, *last;
-    uint32_t                 bi, i, base_id;
-    uint32_t                 list_id = thread->thread_id &
-        CHIMERA_MEMFS_INODE_LIST_MASK;
+    uint32_t                 bi, i, base_id, old_max_blocks;
 
     inode_list = &shared->inode_list[list_id];
 
@@ -301,9 +302,32 @@ memfs_inode_alloc(struct memfs_thread *thread)
 
     if (!inode) {
 
-        inodes = calloc(CHIMERA_MEMFS_INODE_BLOCK, sizeof(*inode));
-
         bi = inode_list->num_blocks++;
+
+        if (bi >= inode_list->max_blocks) {
+
+            if (inode_list->max_blocks == 0) {
+                inode_list->max_blocks = 1024;
+
+                inode_list->inode = calloc(inode_list->max_blocks,
+                                           sizeof(*inode_list->inode));
+            } else {
+                old_max_blocks = inode_list->max_blocks;
+                while (inode_list->max_blocks < bi) {
+                    inode_list->max_blocks *= 2;
+                }
+
+                inode_list->inode = realloc(inode_list->inode,
+                                            inode_list->max_blocks *
+                                            sizeof(*inode_list->inode));
+
+                memset(inode_list->inode + old_max_blocks, 0,
+                       (inode_list->max_blocks - old_max_blocks) *
+                       sizeof(*inode_list->inode));
+            }
+        }
+
+        inodes = malloc(CHIMERA_MEMFS_INODE_BLOCK * sizeof(*inodes));
 
         base_id = bi << CHIMERA_MEMFS_INODE_BLOCK_SHIFT;
 
@@ -315,8 +339,12 @@ memfs_inode_alloc(struct memfs_thread *thread)
             inode       = &inodes[i];
             inode->inum = (base_id + i) << 8 | list_id;
             pthread_mutex_init(&inode->lock, NULL);
-            inode->next = last;
-            last        = inode;
+
+            if (inode->inum) {
+                /* Toss inode 0, we want non-zero inums */
+                inode->next = last;
+                last        = inode;
+            }
         }
         inode_list->free_inode = last;
 
@@ -333,6 +361,16 @@ memfs_inode_alloc(struct memfs_thread *thread)
 
     return inode;
 
+} /* memfs_inode_alloc */
+
+static inline struct memfs_inode *
+memfs_inode_alloc_thread(struct memfs_thread *thread)
+{
+    struct memfs_shared *shared  = thread->shared;
+    uint32_t             list_id = thread->thread_id &
+        CHIMERA_MEMFS_INODE_LIST_MASK;
+
+    return memfs_inode_alloc(shared, list_id);
 } /* memfs_inode_alloc */
 
 static inline void
@@ -411,8 +449,11 @@ memfs_init(void)
 {
     struct memfs_shared     *shared = calloc(1, sizeof(*shared));
     struct memfs_inode_list *inode_list;
-    struct memfs_inode      *inode, *last;
-    int                      i, j;
+    struct memfs_inode      *inode;
+    int                      i;
+    struct timespec          now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     pthread_mutex_init(&shared->lock, NULL);
 
@@ -425,37 +466,15 @@ memfs_init(void)
         inode_list = &shared->inode_list[i];
 
         inode_list->id         = i;
-        inode_list->num_blocks = 1;
-        inode_list->max_blocks = 65536;
+        inode_list->num_blocks = 0;
+        inode_list->max_blocks = 0;
 
         pthread_mutex_init(&inode_list->lock, NULL);
-
-        inode_list->inode = calloc(inode_list->max_blocks,
-                                   sizeof(*inode_list->inode));
-
-        inode_list->inode[0] = calloc(CHIMERA_MEMFS_INODE_BLOCK,
-                                      sizeof(**inode_list->inode));
-
-        last = NULL;
-        for (j = 0; j < CHIMERA_MEMFS_INODE_BLOCK; j++) {
-            inode       = &inode_list->inode[0][j];
-            inode->inum = (j << 8) | i;
-            pthread_mutex_init(&inode->lock, NULL);
-            inode->next = last;
-            last        = inode;
-        }
-        inode_list->free_inode = last;
     }
 
     inode_list = &shared->inode_list[0];
 
-    /* Throw away inode 0 so all our inums are non-zero */
-    inode = inode_list->free_inode;
-    LL_DELETE(inode_list->free_inode, inode);
-
-    /* Setup root inode */
-    inode = inode_list->free_inode;
-    LL_DELETE(inode_list->free_inode, inode);
+    inode = memfs_inode_alloc(shared, 0);
 
     inode->size       = 4096;
     inode->space_used = 4096;
@@ -465,9 +484,9 @@ memfs_init(void)
     inode->gid        = 0;
     inode->nlink      = 2;
     inode->mode       = S_IFDIR | 0755;
-    clock_gettime(CLOCK_REALTIME, &inode->atime);
-    clock_gettime(CLOCK_REALTIME, &inode->mtime);
-    clock_gettime(CLOCK_REALTIME, &inode->ctime);
+    inode->atime      = now;
+    inode->mtime      = now;
+    inode->ctime      = now;
 
     shared->root_fhlen = memfs_inum_to_fh(shared->root_fh, inode->inum,
                                           inode->gen);
@@ -622,8 +641,7 @@ memfs_getattr(
     struct chimera_vfs_attrs *attr      = &request->getattr.r_attr;
     struct memfs_inode       *inode;
 
-    inode = memfs_inode_get_fh(shared, request->getattr.fh,
-                               request->getattr.fh_len);
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (!inode) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -658,8 +676,7 @@ memfs_setattr(
     const struct chimera_vfs_attrs *attr   = request->setattr.attr;
     struct chimera_vfs_attrs       *r_attr = &request->setattr.r_attr;
 
-    inode = memfs_inode_get_fh(shared, request->setattr.fh, request->setattr.
-                               fh_len);
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -734,8 +751,7 @@ memfs_lookup(
     struct memfs_inode  *inode, *child;
     struct memfs_dirent *dirent;
 
-    inode = memfs_inode_get_fh(shared, request->lookup.fh,
-                               request->lookup.fh_len);
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -793,7 +809,7 @@ memfs_mkdir(
     struct chimera_vfs_attrs *r_dir_attr = &request->mkdir.r_dir_attr;
 
     /* Optimistically allocate an inode */
-    inode = memfs_inode_alloc(thread);
+    inode = memfs_inode_alloc_thread(thread);
 
     inode->size        = 4096;
     inode->space_used  = 4096;
@@ -815,9 +831,7 @@ memfs_mkdir(
                                 request->mkdir.name,
                                 request->mkdir.name_len);
 
-    parent_inode = memfs_inode_get_fh(shared,
-                                      request->mkdir.fh,
-                                      request->mkdir.fh_len);
+    parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (!parent_inode) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -873,8 +887,7 @@ memfs_access(
     struct memfs_inode *inode;
 
     if (request->access.attrmask) {
-        inode = memfs_inode_get_fh(shared, request->access.fh,
-                                   request->access.fh_len);
+        inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
         if (inode) {
             memfs_map_attrs(&request->access.r_attr, request->access.attrmask,
@@ -899,9 +912,7 @@ memfs_remove(
     struct memfs_inode  *parent_inode, *inode;
     struct memfs_dirent *dirent;
 
-    parent_inode = memfs_inode_get_fh(shared,
-                                      request->remove.fh,
-                                      request->remove.fh_len);
+    parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (!parent_inode) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -990,8 +1001,7 @@ memfs_readdir(
         found_cookie = 1;
     }
 
-    inode = memfs_inode_get_fh(shared, request->lookup.fh,
-                               request->lookup.fh_len);
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (!inode) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1079,9 +1089,7 @@ memfs_open(
 {
     struct memfs_inode *inode;
 
-    inode = memfs_inode_get_fh(shared,
-                               request->open.fh,
-                               request->open.fh_len);
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (!inode) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1110,8 +1118,7 @@ memfs_open_at(
     unsigned int              flags  = request->open_at.flags;
     struct chimera_vfs_attrs *r_attr = &request->open_at.r_attr;
 
-    parent_inode = memfs_inode_get_fh(shared, request->open_at.parent_fh,
-                                      request->open_at.parent_fh_len);
+    parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (!parent_inode) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1137,7 +1144,7 @@ memfs_open_at(
             return;
         }
 
-        inode = memfs_inode_alloc(thread);
+        inode = memfs_inode_alloc_thread(thread);
 
         pthread_mutex_lock(&inode->lock);
 
@@ -1182,10 +1189,6 @@ memfs_open_at(
     memfs_map_attrs(r_attr, request->open_at.attrmask, inode);
 
     pthread_mutex_unlock(&inode->lock);
-
-    request->open_at.fh_len = memfs_inum_to_fh(request->open_at.fh,
-                                               inode->inum,
-                                               inode->gen);
 
     request->open_at.r_vfs_private = (uint64_t) inode;
 
@@ -1467,7 +1470,7 @@ memfs_symlink(
     struct chimera_vfs_attrs *r_dir_attr = &request->symlink.r_dir_attr;
 
     /* Optimistically allocate an inode */
-    inode = memfs_inode_alloc(thread);
+    inode = memfs_inode_alloc_thread(thread);
 
     inode->size       = request->symlink.targetlen;
     inode->space_used = request->symlink.targetlen;
@@ -1495,9 +1498,7 @@ memfs_symlink(
                                 request->symlink.name,
                                 request->symlink.namelen);
 
-    parent_inode = memfs_inode_get_fh(shared,
-                                      request->symlink.fh,
-                                      request->symlink.fh_len);
+    parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (!parent_inode) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1552,9 +1553,7 @@ memfs_readlink(
 {
     struct memfs_inode *inode;
 
-    inode = memfs_inode_get_fh(shared,
-                               request->readlink.fh,
-                               request->readlink.fh_len);
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (!inode) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1598,15 +1597,15 @@ memfs_rename(
     struct memfs_dirent *dirent, *old_dirent;
     int                  cmp;
 
-    cmp = memfs_fh_compare(request->rename.fh,
-                           request->rename.fh_len,
+    cmp = memfs_fh_compare(request->fh,
+                           request->fh_len,
                            request->rename.new_fh,
                            request->rename.new_fhlen);
 
     if (cmp == 0) {
         old_parent_inode = memfs_inode_get_fh(shared,
-                                              request->rename.fh,
-                                              request->rename.fh_len);
+                                              request->fh,
+                                              request->fh_len);
 
         if (!old_parent_inode) {
             request->status = CHIMERA_VFS_ENOENT;
@@ -1625,8 +1624,8 @@ memfs_rename(
     } else {
         if (cmp < 0) {
             old_parent_inode = memfs_inode_get_fh(shared,
-                                                  request->rename.fh,
-                                                  request->rename.fh_len);
+                                                  request->fh,
+                                                  request->fh_len);
 
             new_parent_inode = memfs_inode_get_fh(shared,
                                                   request->rename.new_fh,
@@ -1636,8 +1635,8 @@ memfs_rename(
                                                   request->rename.new_fh,
                                                   request->rename.new_fhlen);
             old_parent_inode = memfs_inode_get_fh(shared,
-                                                  request->rename.fh,
-                                                  request->rename.fh_len);
+                                                  request->fh,
+                                                  request->fh_len);
         }
 
         if (!old_parent_inode) {
@@ -1745,9 +1744,7 @@ memfs_link(
         return;
     }
 
-    inode = memfs_inode_get_fh(shared,
-                               request->link.fh,
-                               request->link.fh_len);
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (!inode) {
         pthread_mutex_unlock(&parent_inode->lock);

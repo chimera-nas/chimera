@@ -30,12 +30,9 @@ chimera_vfs_write(
     chimera_vfs_write_callback_t    callback,
     void                           *private_data)
 {
-    struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
 
-    module = handle->vfs_module;
-
-    request = chimera_vfs_request_alloc(thread);
+    request = chimera_vfs_request_alloc(thread, handle->fh, handle->fh_len);
 
     request->write.r_attr.va_mask = 0;
 
@@ -51,7 +48,7 @@ chimera_vfs_write(
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 
-    chimera_vfs_dispatch(thread, module, request);
+    chimera_vfs_dispatch(request);
 
 
 } /* chimera_vfs_write */

@@ -28,22 +28,17 @@ chimera_vfs_readlink(
     chimera_vfs_readlink_callback_t callback,
     void                           *private_data)
 {
-    struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
 
-    module = chimera_vfs_get_module(thread, fh, fhlen);
-
-    request = chimera_vfs_request_alloc(thread);
+    request = chimera_vfs_request_alloc(thread, fh, fhlen);
 
     request->opcode                    = CHIMERA_VFS_OP_READLINK;
     request->complete                  = chimera_vfs_readlink_complete;
-    request->readlink.fh               = fh;
-    request->readlink.fh_len           = fhlen;
     request->readlink.r_target         = target;
     request->readlink.target_maxlength = target_maxlength;
     request->proto_callback            = callback;
     request->proto_private_data        = private_data;
 
-    chimera_vfs_dispatch(thread, module, request);
+    chimera_vfs_dispatch(request);
 
 } /* chimera_vfs_readlink */

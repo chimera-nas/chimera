@@ -43,6 +43,17 @@ add_libnfs_test(libnfs_nfs3_linux_readdir_shares libnfs_readdir_shares -v 3 -b l
 add_libnfs_test(libnfs_nfs4_linux_mount libnfs_mount -v 4 -b linux)
 add_libnfs_test(libnfs_nfs4_linux_readdir libnfs_readdir -v 4 -b linux)
 add_libnfs_test(libnfs_nfs4_linux_readdir_shares libnfs_readdir_shares -v 4 -b linux)
+# add_libnfs_test(libnfs_nfs4_linux_create libnfs_create -v 4 -b linux)
+# add_libnfs_test(libnfs_nfs4_linux_link libnfs_link -v 4 -b linux)
+ #add_libnfs_test(libnfs_nfs4_linux_mkdir libnfs_mkdir -v 4 -b linux)
+# add_libnfs_test(libnfs_nfs4_linux_read libnfs_read -v 4 -b linux)
+# add_libnfs_test(libnfs_nfs4_linux_remove libnfs_remove -v 4 -b linux)
+# add_libnfs_test(libnfs_nfs4_linux_rename libnfs_rename -v 4 -b linux)
+# add_libnfs_test(libnfs_nfs4_linux_rmdir libnfs_rmdir -v 4 -b linux)
+# add_libnfs_test(libnfs_nfs4_linux_setattr libnfs_setattr -v 4 -b linux)
+# add_libnfs_test(libnfs_nfs4_linux_statvfs libnfs_statvfs -v 4 -b linux)
+# add_libnfs_test(libnfs_nfs4_linux_symlink libnfs_symlink -v 4 -b linux)
+
 
 add_libnfs_test(libnfs_nfs3_memfs_mount libnfs_mount -v 3 -b memfs)
 add_libnfs_test(libnfs_nfs3_memfs_create libnfs_create -v 3 -b memfs)
@@ -56,5 +67,21 @@ add_libnfs_test(libnfs_nfs3_memfs_rename libnfs_rename -v 3 -b memfs)
 add_libnfs_test(libnfs_nfs3_memfs_rmdir libnfs_rmdir -v 3 -b memfs)
 add_libnfs_test(libnfs_nfs3_memfs_setattr libnfs_setattr -v 3 -b memfs)
 add_libnfs_test(libnfs_nfs3_memfs_symlink libnfs_symlink -v 3 -b memfs)
+
+add_libnfs_test(libnfs_nfs4_memfs_mount libnfs_mount -v 4 -b memfs)
+add_libnfs_test(libnfs_nfs4_memfs_readdir libnfs_readdir -v 4 -b memfs)
+add_libnfs_test(libnfs_nfs4_memfs_readdir_shares libnfs_readdir_shares -v 4 -b memfs)
+#add_libnfs_test(libnfs_nfs4_memfs_create libnfs_create -v 4 -b memfs)
+#add_libnfs_test(libnfs_nfs4_memfs_link libnfs_link -v 4 -b memfs)
+#add_libnfs_test(libnfs_nfs4_memfs_mkdir libnfs_mkdir -v 4 -b memfs)
+#add_libnfs_test(libnfs_nfs4_memfs_read libnfs_read -v 4 -b memfs)
+#add_libnfs_test(libnfs_nfs4_memfs_remove libnfs_remove -v 4 -b memfs)
+#add_libnfs_test(libnfs_nfs4_memfs_rename libnfs_rename -v 4 -b memfs)
+#add_libnfs_test(libnfs_nfs4_memfs_rmdir libnfs_rmdir -v 4 -b memfs)
+#add_libnfs_test(libnfs_nfs4_memfs_setattr libnfs_setattr -v 4 -b memfs)
+#add_libnfs_test(libnfs_nfs4_memfs_statvfs libnfs_statvfs -v 4 -b memfs)
+#add_libnfs_test(libnfs_nfs4_memfs_symlink libnfs_symlink -v 4 -b memfs)
+
+
 
 

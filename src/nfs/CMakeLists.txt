@@ -66,7 +66,7 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs_mount.c nfs_portmap.c
             nfs4_proc_getfh.c nfs4_proc_access.c nfs4_proc_putrootfh.c nfs4_proc_putfh.c
             nfs4_proc_getattr.c nfs4_proc_lookup.c nfs4_proc_compound.c nfs4_proc_null.c
             nfs4_proc_readdir.c nfs4_proc_close.c nfs4_proc_create.c  nfs4_proc_open.c
-            nfs4_proc_setclientid.c nfs4_proc_setclientid_confirm.c
+            nfs4_proc_setclientid.c nfs4_proc_setclientid_confirm.c 
 
             ${NFS3_XDR_C} ${NFS3_XDR_H} ${NFS4_XDR_C} ${NFS4_XDR_H} ${NFS_MOUNT_XDR_C} ${NFS_MOUNT_XDR_H} ${PORTMAP_XDR_C} ${PORTMAP_XDR_H})
 
