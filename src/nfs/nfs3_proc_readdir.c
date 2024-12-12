@@ -25,10 +25,6 @@ chimera_nfs3_readdir_callback(
         return -1;
     }
 
-    chimera_nfs_debug("readdir callback: cookie %lu name %.*s",
-                      cookie, namelen, name);
-
-
     xdr_dbuf_alloc_space(entry, sizeof(*entry), msg->dbuf);
 
     entry->fileid    = inum;

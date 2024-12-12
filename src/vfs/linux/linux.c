@@ -578,64 +578,49 @@ chimera_linux_lookup(
     void                       *private_data)
 {
     struct chimera_linux_thread *thread = private_data;
-    struct chimera_vfs_attrs    *r_attr;
-    int                          fd, rc;
+    int                          parent_fd, fd;
 
-    r_attr = &request->lookup.r_attr;
+    TERM_STR(fullname, request->lookup.component, request->lookup.component_len);
 
-    fd = linux_open_by_handle(thread,
-                              request->fh,
-                              request->fh_len,
-                              O_PATH | O_RDONLY);
+
+    parent_fd = linux_open_by_handle(thread,
+                                     request->fh,
+                                     request->fh_len,
+                                     O_PATH | O_RDONLY);
+    if (parent_fd < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    chimera_linux_map_attrs(request->lookup.attrmask,
+                            &request->lookup.r_dir_attr,
+                            parent_fd,
+                            request->fh,
+                            request->fh_len);
+
+
+    fd = openat(parent_fd,
+                fullname,
+                O_RDONLY | O_PATH | O_NOFOLLOW);
+
     if (fd < 0) {
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
 
-    rc = linux_get_fh(fd,
-                      request->lookup.component,
-                      request->lookup.component_len,
-                      0,
-                      r_attr->va_fh,
-                      &r_attr->va_fh_len);
-
-    if (rc < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-    }
-
-    r_attr->va_mask |= CHIMERA_VFS_ATTR_FH;
+    close(parent_fd);
 
     chimera_linux_map_attrs(request->lookup.attrmask,
-                            &request->lookup.r_dir_attr,
+                            &request->lookup.r_attr,
                             fd,
-                            request->fh,
-                            request->fh_len);
+                            NULL,
+                            0);
 
     close(fd);
 
-    if (request->lookup.attrmask) {
-        fd = linux_open_by_handle(thread,
-                                  r_attr->va_fh,
-                                  r_attr->va_fh_len,
-                                  O_PATH | O_RDONLY);
-
-        if (fd >= 0) {
-            chimera_linux_map_attrs(CHIMERA_VFS_ATTR_MASK_STAT,
-                                    &request->lookup.r_attr,
-                                    fd,
-                                    NULL,
-                                    0);
-            close(fd);
-        }
-    }
-
-    if (rc < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-    } else {
-        request->status = CHIMERA_VFS_OK;
-    }
+    request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* linux_lookup */
 

@@ -30,8 +30,7 @@ chimera_nfs3_lookup_complete(
                              attr->va_fh_len,
                              msg->dbuf);
 
-        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK)
-        {
+        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
             res.resok.obj_attributes.attributes_follow = 1;
             chimera_nfs3_marshall_attrs(attr,
                                         &res.resok.obj_attributes.attributes);
