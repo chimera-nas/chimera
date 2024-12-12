@@ -157,45 +157,6 @@ chimera_linux_statvfs_to_attr(
     attr->va_files_total = attr->va_files_used + attr->va_files_free;
 } /* linux_statvfs_to_chimera_attr */
 
-static inline void
-chimera_linux_map_attrs(
-    uint64_t                  attrmask,
-    struct chimera_vfs_attrs *attr,
-    int                       fd,
-    const void               *fh,
-    int                       fhlen)
-{
-    int            rc;
-    struct stat    st;
-    struct statvfs stvfs;
-
-    if ((attrmask & CHIMERA_VFS_ATTR_FH) && fhlen) {
-        attr->va_mask |= CHIMERA_VFS_ATTR_FH;
-        memcpy(attr->va_fh, fh, fhlen);
-        attr->va_fh_len = fhlen;
-    }
-
-    if (attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
-
-        rc = fstat(fd, &st);
-
-        if (rc == 0) {
-            attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
-            chimera_linux_stat_to_attr(attr, &st);
-        }
-    }
-
-    if (attrmask & CHIMERA_VFS_ATTR_MASK_STATFS) {
-        rc = fstatvfs(fd, &stvfs);
-
-        if (rc == 0) {
-            attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STATFS;
-            chimera_linux_statvfs_to_attr(attr, &stvfs);
-        }
-    }
-
-} /* chimera_linux_map_attrs */
-
 static int
 open_mount_path_by_id(int mount_id)
 {
@@ -319,6 +280,55 @@ linux_open_by_handle(
 
     return open_by_handle_at(mount->mount_fd, handle, flags);
 } /* linux_open_by_handle */
+
+static inline void
+chimera_linux_map_attrs(
+    uint64_t                  attrmask,
+    struct chimera_vfs_attrs *attr,
+    int                       fd,
+    const void               *fh,
+    int                       fhlen)
+{
+    int            rc;
+    struct stat    st;
+    struct statvfs stvfs;
+
+    if (attrmask & CHIMERA_VFS_ATTR_FH) {
+        if (fh) {
+            attr->va_mask |= CHIMERA_VFS_ATTR_FH;
+            memcpy(attr->va_fh, fh, fhlen);
+            attr->va_fh_len = fhlen;
+        } else {
+            rc = linux_get_fh(fd, "", 0, AT_EMPTY_PATH,
+                              attr->va_fh,
+                              &attr->va_fh_len);
+
+            if (rc  == 0) {
+                attr->va_mask |= CHIMERA_VFS_ATTR_FH;
+            }
+        }
+    }
+
+    if (attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
+
+        rc = fstat(fd, &st);
+
+        if (rc == 0) {
+            attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
+            chimera_linux_stat_to_attr(attr, &st);
+        }
+    }
+
+    if (attrmask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+        rc = fstatvfs(fd, &stvfs);
+
+        if (rc == 0) {
+            attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STATFS;
+            chimera_linux_statvfs_to_attr(attr, &stvfs);
+        }
+    }
+
+} /* chimera_linux_map_attrs */
 
 static void *
 chimera_linux_init(void)
@@ -783,9 +793,6 @@ chimera_linux_open_at(
     int                          parent_fd;
     int                          flags;
     int                          fd;
-    int                          rc;
-    uint8_t                      opened_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                     opened_fh_len;
 
     TERM_STR(fullname, request->open_at.name, request->open_at.namelen);
 
@@ -829,37 +836,15 @@ chimera_linux_open_at(
         return;
     }
 
-    rc = linux_get_fh(fd, "", 0, AT_EMPTY_PATH,
-                      opened_fh,
-                      &opened_fh_len);
-
-    if (rc) {
-        close(parent_fd);
-        close(fd);
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
-
     request->open_at.r_vfs_private = fd;
 
     close(parent_fd);
 
-    if (request->open_at.attrmask) {
-        fd = linux_open_by_handle(thread,
-                                  opened_fh,
-                                  opened_fh_len,
-                                  O_RDONLY);
-
-        if (fd >= 0) {
-            chimera_linux_map_attrs(request->open_at.attrmask,
-                                    &request->open_at.r_attr,
-                                    fd,
-                                    opened_fh,
-                                    opened_fh_len);
-            close(fd);
-        }
-    }
+    chimera_linux_map_attrs(request->open_at.attrmask,
+                            &request->open_at.r_attr,
+                            fd,
+                            NULL,
+                            0);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
