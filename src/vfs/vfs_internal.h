@@ -36,6 +36,12 @@
                          __LINE__, \
                          __VA_ARGS__)
 
+#define chimera_vfs_abort_if(cond, ...) \
+        chimera_abort_if(cond, "vfs", \
+                         __FILE__, \
+                         __LINE__, \
+                         __VA_ARGS__)
+
 static inline struct chimera_vfs_module *
 chimera_vfs_get_module(
     struct chimera_vfs_thread *thread,

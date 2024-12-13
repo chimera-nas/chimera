@@ -11,13 +11,20 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
     chimera_vfs_open_at_callback_t  callback = request->proto_callback;
     struct chimera_vfs_open_handle *handle;
 
-    handle = chimera_vfs_open_cache_insert(
-        thread,
-        thread->vfs->vfs_open_cache,
-        request->module,
-        request->open_at.r_attr.va_fh,
-        request->open_at.r_attr.va_fh_len,
-        request->open_at.r_vfs_private);
+    if (request->status == CHIMERA_VFS_OK) {
+        chimera_vfs_abort_if(!(request->open_at.r_attr.va_mask & CHIMERA_VFS_ATTR_FH),
+                             "open_at: no fh returned from vfs module");
+
+        handle = chimera_vfs_open_cache_insert(
+            thread,
+            thread->vfs->vfs_open_cache,
+            request->module,
+            request->open_at.r_attr.va_fh,
+            request->open_at.r_attr.va_fh_len,
+            request->open_at.r_vfs_private);
+    } else {
+        handle = NULL;
+    }
 
     chimera_vfs_complete(request);
 
