@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vfs/vfs_error.h"
+#include "nfs/nfs_internal.h"
 
 static inline nfsstat3
 chimera_vfs_error_to_nfsstat3(enum chimera_vfs_error err)
@@ -52,7 +53,10 @@ chimera_vfs_error_to_nfsstat3(enum chimera_vfs_error err)
             return NFS3ERR_SERVERFAULT;
         case CHIMERA_VFS_EOVERFLOW:
             return NFS3ERR_TOOSMALL;
+        case CHIMERA_VFS_EMFILE:
+            chimera_nfs_abort("Too many open files");
+            return NFS3ERR_SERVERFAULT;
         default:
             return NFS3ERR_SERVERFAULT;
-    }
-}
+    } /* switch */
+} /* chimera_vfs_error_to_nfsstat3 */

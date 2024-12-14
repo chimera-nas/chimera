@@ -204,6 +204,15 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
                          req->readdir.r_eof);
             }
             break;
+        case CHIMERA_VFS_OP_READ:
+            snprintf(argstr, sizeof(argstr), "r_len %u r_eof %u",
+                     req->read.r_length,
+                     req->read.r_eof);
+            break;
+        case CHIMERA_VFS_OP_WRITE:
+            snprintf(argstr, sizeof(argstr), "r_len %u",
+                     req->write.r_length);
+            break;
         default:
             break;
     } /* switch */

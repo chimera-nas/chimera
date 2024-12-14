@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/resource.h>
 
 #include "core/evpl.h"
 #include "thread/thread.h"
@@ -86,8 +87,15 @@ chimera_server_init(const char *cfgfile)
 {
     struct chimera_server *server;
     int                    i;
+    struct rlimit          rl;
 
     chimera_log_init();
+
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        chimera_server_info("Effective file descriptor limit: %ld", rl.rlim_cur);
+    } else {
+        chimera_server_error("Failed to get file descriptor limit");
+    }
 
     server = calloc(1, sizeof(*server));
 

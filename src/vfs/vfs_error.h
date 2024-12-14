@@ -14,6 +14,7 @@ enum chimera_vfs_error {
     CHIMERA_VFS_ENOTDIR      = 20,     /* Not a directory */
     CHIMERA_VFS_EISDIR       = 21,     /* Is a directory */
     CHIMERA_VFS_EINVAL       = 22,     /* Invalid argument */
+    CHIMERA_VFS_EMFILE       = 24,     /* Too many open files */
     CHIMERA_VFS_EFBIG        = 27,     /* File too large */
     CHIMERA_VFS_ENOSPC       = 28,     /* No space left on device */
     CHIMERA_VFS_EROFS        = 30,     /* Read-only file system */

@@ -8,7 +8,6 @@ static void
 chimera_vfs_read_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_read_callback_t callback = request->proto_callback;
-    int                         i;
 
     chimera_vfs_complete(request);
 
@@ -19,15 +18,6 @@ chimera_vfs_read_complete(struct chimera_vfs_request *request)
              request->read.r_niov,
              &request->read.r_attr,
              request->proto_private_data);
-
-    /* XXX
-     * Serialization will have taken a new reference so we need
-     * to drop ours, maybe arrange for it to steal ours instead?
-     */
-
-    for (i = 0; i < request->read.r_niov; i++) {
-        evpl_iovec_release(&request->read.r_iov[i]);
-    }
 
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_read_complete */
