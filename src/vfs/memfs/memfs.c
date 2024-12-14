@@ -313,7 +313,7 @@ memfs_inode_alloc(
                                            sizeof(*inode_list->inode));
             } else {
                 old_max_blocks = inode_list->max_blocks;
-                while (inode_list->max_blocks < bi) {
+                while (inode_list->max_blocks <= bi) {
                     inode_list->max_blocks *= 2;
                 }
 

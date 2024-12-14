@@ -689,7 +689,7 @@ chimera_linux_readdir(
     }
 
     if (request->readdir.cookie) {
-        seekdir(dir, request->readdir.cookie + 1);
+        seekdir(dir, request->readdir.cookie);
     }
 
     while ((dirent = readdir(dir))) {

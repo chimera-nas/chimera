@@ -18,12 +18,9 @@ chimera_nfs3_readdirplus_callback(
     struct READDIRPLUS3args            *args = req->args_readdirplus;
     struct entryplus3                  *entry;
     struct nfs_nfs3_readdirplus_cursor *cursor;
+    int                                 dbuf_before = msg->dbuf->used, dbuf_cur;
 
     cursor = &req->readdirplus3_cursor;
-
-    if (cursor->count >= args->dircount) {
-        return -1;
-    }
 
     xdr_dbuf_alloc_space(entry, sizeof(*entry), msg->dbuf);
 
@@ -52,6 +49,14 @@ chimera_nfs3_readdirplus_callback(
         entry->name_handle.handle_follows = 0;
     }
 
+    dbuf_cur = msg->dbuf->used - dbuf_before;
+
+    if (cursor->count + dbuf_cur > args->maxcount) {
+        return -1;
+    }
+
+    cursor->count += dbuf_cur;
+
     if (cursor->entries) {
         cursor->last->nextentry = entry;
         cursor->last            = entry;
@@ -59,8 +64,6 @@ chimera_nfs3_readdirplus_callback(
         cursor->entries = entry;
         cursor->last    = entry;
     }
-
-    cursor->count++;
 
     return 0;
 } /* chimera_nfs3_readdir_callback */
@@ -126,7 +129,7 @@ chimera_nfs3_readdirplus(
 
     cursor = &req->readdirplus3_cursor;
 
-    cursor->count   = 0;
+    cursor->count   = 256; /* reserve some space for non-entry serialization */
     cursor->entries = NULL;
     cursor->last    = NULL;
 
