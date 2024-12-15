@@ -53,6 +53,14 @@ chimera_server_config_init(void)
 } /* chimera_server_config_init */
 
 void
+chimera_server_config_set_core_threads(
+    struct chimera_server_config *config,
+    int                           threads)
+{
+    config->core_threads = threads;
+} /* chimera_server_config_set_core_threads */
+
+void
 chimera_server_config_set_nfs_rdma(
     struct chimera_server_config *config,
     int                           enable)
