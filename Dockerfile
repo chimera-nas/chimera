@@ -21,7 +21,7 @@ FROM ubuntu:24.04
 ARG BUILD_TYPE=Release
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
-    apt-get -y --no-install-recommends install libuuid1 librdmacm1 libjansson4 liburcu8t64 && \
+    apt-get -y --no-install-recommends install libuuid1 librdmacm1 libjansson4 liburcu8t64 ibverbs-providers && \
     if [ "${BUILD_TYPE}" = "Debug" ]; then \
     apt-get -y --no-install-recommends install llvm gdb ; \
     fi && \

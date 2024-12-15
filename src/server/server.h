@@ -11,9 +11,9 @@ struct chimera_server * chimera_server_init(
 
 void chimera_server_config_set_rdma(
     struct chimera_server_config *config,
-    int                           enable);
+    const char                   *hostname);
 
-int
+const char *
 chimera_server_config_get_rdma(
     const struct chimera_server_config *config);
 

@@ -161,9 +161,9 @@ nfs_server_thread_init(
     struct chimera_server_nfs_shared *shared = data;
     struct chimera_server_nfs_thread *thread;
     struct evpl_rpc2_program         *programs[3];
-    int                               rdma;
+    const char                       *rdma_hostname;
 
-    rdma = chimera_server_config_get_rdma(shared->config);
+    rdma_hostname = chimera_server_config_get_rdma(shared->config);
 
     thread             = calloc(1, sizeof(*thread));
     thread->evpl       = evpl;
@@ -185,9 +185,9 @@ nfs_server_thread_init(
                                           3,
                                           thread);
 
-    if (rdma) {
+    if (rdma_hostname) {
 
-        thread->nfs_rdma_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 20049);
+        thread->nfs_rdma_endpoint = evpl_endpoint_create(evpl, rdma_hostname, 20049);
         thread->nfs_rdma_server   = evpl_rpc2_listen(thread->rpc2_agent,
 
                                                      EVPL_DATAGRAM_RDMACM_RC,
@@ -219,10 +219,6 @@ nfs_server_thread_init(
                                               1,
                                               thread);
 
-
-    if (rdma) {
-
-    }
     return thread;
 } /* nfs_server_thread_init */
 

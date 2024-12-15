@@ -62,8 +62,10 @@ main(
 
     server_config = chimera_server_config_init();
 
-    if (json_is_true(json_object_get(server_params, "rdma"))) {
-        chimera_server_config_set_rdma(server_config, 1);
+    json_t *rdma_value = json_object_get(server_params, "rdma");
+    if (rdma_value && json_is_string(rdma_value)) {
+        const char *rdma_str = json_string_value(rdma_value);
+        chimera_server_config_set_rdma(server_config, rdma_str);
     }
 
     server = chimera_server_init(server_config);

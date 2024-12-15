@@ -13,8 +13,9 @@
 #include "vfs/vfs.h"
 
 struct chimera_server_config {
-    int rdma;
-    int core_threads;
+    int  rdma;
+    char rdma_hostname[256];
+    int  core_threads;
 };
 
 struct chimera_server {
@@ -49,15 +50,20 @@ chimera_server_config_init(void)
 void
 chimera_server_config_set_rdma(
     struct chimera_server_config *config,
-    int                           enable)
+    const char                   *hostname)
 {
-    config->rdma = enable;
+    config->rdma = 1;
+    strncpy(config->rdma_hostname, hostname, sizeof(config->rdma_hostname));
 } /* chimera_server_config_set_rdma */
 
-int
+const char *
 chimera_server_config_get_rdma(const struct chimera_server_config *config)
 {
-    return config->rdma;
+    if (!config->rdma) {
+        return NULL;
+    }
+
+    return config->rdma_hostname;
 } /* chimera_server_config_get_rdma */
 
 static void *
