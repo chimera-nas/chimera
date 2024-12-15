@@ -12,14 +12,20 @@
 #include "nfs/nfs.h"
 #include "vfs/vfs.h"
 
+struct chimera_server_config {
+    int rdma;
+    int core_threads;
+};
+
 struct chimera_server {
-    struct chimera_vfs             *vfs;
-    struct evpl_threadpool         *pool;
-    struct chimera_server_protocol *protocols[2];
-    void                           *protocol_private[2];
-    int                             num_protocols;
-    int                             threads_online;
-    pthread_mutex_t                 lock;
+    const struct chimera_server_config *config;
+    struct chimera_vfs                 *vfs;
+    struct evpl_threadpool             *pool;
+    struct chimera_server_protocol     *protocols[2];
+    void                               *protocol_private[2];
+    int                                 num_protocols;
+    int                                 threads_online;
+    pthread_mutex_t                     lock;
 };
 
 struct chimera_thread {
@@ -27,6 +33,32 @@ struct chimera_thread {
     struct chimera_vfs_thread *vfs_thread;
     void                      *protocol_private[2];
 };
+
+struct chimera_server_config *
+chimera_server_config_init(void)
+{
+    struct chimera_server_config *config;
+
+    config = calloc(1, sizeof(struct chimera_server_config));
+
+    config->core_threads = 16;
+
+    return config;
+} /* chimera_server_config_init */
+
+void
+chimera_server_config_set_rdma(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->rdma = enable;
+} /* chimera_server_config_set_rdma */
+
+int
+chimera_server_config_get_rdma(const struct chimera_server_config *config)
+{
+    return config->rdma;
+} /* chimera_server_config_get_rdma */
 
 static void *
 chimera_server_thread_init(
@@ -40,14 +72,14 @@ chimera_server_thread_init(
 
     thread->server = server;
 
+    thread->vfs_thread = chimera_vfs_thread_init(evpl, server->vfs);
+
     for (int i = 0; i < server->num_protocols; i++) {
         thread->protocol_private[i] = server->protocols[i]->thread_init(evpl,
                                                                         server->
                                                                         protocol_private
                                                                         [i]);
     }
-
-    thread->vfs_thread = chimera_vfs_thread_init(evpl, server->vfs);
 
     pthread_mutex_lock(&server->lock);
     server->threads_online++;
@@ -83,11 +115,15 @@ chimera_server_thread_destroy(void *data)
 } /* chimera_server_thread_destroy */
 
 struct chimera_server *
-chimera_server_init(const char *cfgfile)
+chimera_server_init(const struct chimera_server_config *config)
 {
     struct chimera_server *server;
     int                    i;
     struct rlimit          rl;
+
+    if (!config) {
+        config = chimera_server_config_init();
+    }
 
     chimera_log_init();
 
@@ -99,6 +135,8 @@ chimera_server_init(const char *cfgfile)
 
     server = calloc(1, sizeof(*server));
 
+    server->config = config;
+
     pthread_mutex_init(&server->lock, NULL);
 
     chimera_server_info("Initializing VFS...");
@@ -108,17 +146,18 @@ chimera_server_init(const char *cfgfile)
     server->protocols[server->num_protocols++] = &nfs_protocol;
 
     for (i = 0; i < server->num_protocols; i++) {
-        server->protocol_private[i] = server->protocols[i]->init(server->vfs);
+        server->protocol_private[i] = server->protocols[i]->init(config, server->vfs);
     }
 
-    server->pool = evpl_threadpool_create(16, chimera_server_thread_init, NULL,
+    server->pool = evpl_threadpool_create(config->core_threads,
+                                          chimera_server_thread_init, NULL,
                                           NULL,
                                           chimera_server_thread_destroy,
                                           -1,
                                           server);
 
     chimera_server_info("Waiting for threads to start...");
-    while (server->threads_online < 1) {
+    while (server->threads_online < config->core_threads) {
         usleep(100);
     }
 
@@ -139,5 +178,6 @@ chimera_server_destroy(struct chimera_server *server)
 
     chimera_vfs_destroy(server->vfs);
 
+    free((void *) server->config);
     free(server);
 } /* chimera_server_destroy */

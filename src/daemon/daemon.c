@@ -20,14 +20,16 @@ main(
     int    argc,
     char **argv)
 {
-    const char  *config_path = "/usr/local/etc/chimera.json";
-    extern char *optarg;
-    int          opt;
-    const char  *share_name;
-    const char  *share_module;
-    const char  *share_path;
-    json_t      *config, *shares, *share;
-    json_error_t error;
+    const char                   *config_path = "/usr/local/etc/chimera.json";
+    extern char                  *optarg;
+    int                           opt;
+    const char                   *share_name;
+    const char                   *share_module;
+    const char                   *share_path;
+    json_t                       *config, *shares, *share, *server_params;
+    json_error_t                  error;
+    struct chimera_server        *server;
+    struct chimera_server_config *server_config;
 
     chimera_log_init();
 
@@ -52,13 +54,19 @@ main(
         return 1;
     }
 
-    struct chimera_server *server;
-
     signal(SIGINT, signal_handler);
 
     chimera_server_info("Initializing server...");
 
-    server = chimera_server_init(NULL);
+    server_params = json_object_get(config, "server");
+
+    server_config = chimera_server_config_init();
+
+    if (json_is_true(json_object_get(server_params, "rdma"))) {
+        chimera_server_config_set_rdma(server_config, 1);
+    }
+
+    server = chimera_server_init(server_config);
 
     shares = json_object_get(config, "shares");
 

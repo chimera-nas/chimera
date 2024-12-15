@@ -1,9 +1,21 @@
 #pragma once
 
 struct chimera_server;
+struct chimera_server_config;
+
+struct chimera_server_config * chimera_server_config_init(
+    void);
 
 struct chimera_server * chimera_server_init(
-    const char *cfgfile);
+    const struct chimera_server_config *config);
+
+void chimera_server_config_set_rdma(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_rdma(
+    const struct chimera_server_config *config);
 
 int
 chimera_server_create_share(

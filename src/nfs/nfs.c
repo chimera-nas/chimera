@@ -3,6 +3,7 @@
 
 #include "nfs.h"
 #include "server/protocol.h"
+#include "server/server.h"
 #include "vfs/vfs.h"
 #include "rpc2/rpc2.h"
 #include "nfs3_procs.h"
@@ -24,11 +25,15 @@
 #define NFS_PROGIDX_MAX        5
 
 static void *
-nfs_server_init(struct chimera_vfs *vfs)
+nfs_server_init(
+    const struct chimera_server_config *config,
+    struct chimera_vfs                 *vfs)
 {
     struct chimera_server_nfs_shared *shared;
 
     shared = calloc(1, sizeof(*shared));
+
+    shared->config = config;
 
     shared->vfs = vfs;
 
@@ -156,10 +161,9 @@ nfs_server_thread_init(
     struct chimera_server_nfs_shared *shared = data;
     struct chimera_server_nfs_thread *thread;
     struct evpl_rpc2_program         *programs[3];
+    int                               rdma;
 
-    programs[0] = &shared->nfs_v3.rpc2;
-    programs[1] = &shared->nfs_v4.rpc2;
-    programs[2] = &shared->nfs_v4_cb.rpc2;
+    rdma = chimera_server_config_get_rdma(shared->config);
 
     thread             = calloc(1, sizeof(*thread));
     thread->evpl       = evpl;
@@ -167,6 +171,10 @@ nfs_server_thread_init(
     thread->rpc2_agent = evpl_rpc2_init(evpl);
 
     thread->vfs = chimera_vfs_thread_init(evpl, shared->vfs);
+
+    programs[0] = &shared->nfs_v3.rpc2;
+    programs[1] = &shared->nfs_v4.rpc2;
+    programs[2] = &shared->nfs_v4_cb.rpc2;
 
     thread->nfs_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 2049);
 
@@ -176,6 +184,18 @@ nfs_server_thread_init(
                                           programs,
                                           3,
                                           thread);
+
+    if (rdma) {
+
+        thread->nfs_rdma_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 20049);
+        thread->nfs_rdma_server   = evpl_rpc2_listen(thread->rpc2_agent,
+
+                                                     EVPL_DATAGRAM_RDMACM_RC,
+                                                     thread->nfs_rdma_endpoint,
+                                                     programs,
+                                                     3,
+                                                     thread);
+    }
 
     programs[0] = &shared->mount_v3.rpc2;
 
@@ -199,6 +219,10 @@ nfs_server_thread_init(
                                               1,
                                               thread);
 
+
+    if (rdma) {
+
+    }
     return thread;
 } /* nfs_server_thread_init */
 
@@ -209,6 +233,10 @@ nfs_server_thread_destroy(void *data)
     struct nfs_request               *req;
 
     chimera_vfs_thread_destroy(thread->vfs);
+
+    if (thread->nfs_rdma_server) {
+        evpl_rpc2_server_destroy(thread->rpc2_agent, thread->nfs_rdma_server);
+    }
 
     evpl_rpc2_server_destroy(thread->rpc2_agent, thread->nfs_server);
     evpl_rpc2_server_destroy(thread->rpc2_agent, thread->mount_server);
