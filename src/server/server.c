@@ -13,8 +13,9 @@
 #include "vfs/vfs.h"
 
 struct chimera_server_config {
-    int  rdma;
-    char rdma_hostname[256];
+    int  nfs_rdma;
+    char nfs_rdma_hostname[256];
+    int  nfs_rdma_port;
     int  core_threads;
 };
 
@@ -43,28 +44,60 @@ chimera_server_config_init(void)
     config = calloc(1, sizeof(struct chimera_server_config));
 
     config->core_threads = 16;
+    config->nfs_rdma     = 0;
+
+    strncpy(config->nfs_rdma_hostname, "0.0.0.0", sizeof(config->nfs_rdma_hostname));
+    config->nfs_rdma_port = 20049;
 
     return config;
 } /* chimera_server_config_init */
 
 void
-chimera_server_config_set_rdma(
+chimera_server_config_set_nfs_rdma(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->nfs_rdma = enable;
+} /* chimera_server_config_set_nfs_rdma */
+
+int
+chimera_server_config_get_nfs_rdma(const struct chimera_server_config *config)
+{
+    return config->nfs_rdma;
+} /* chimera_server_config_get_nfs_rdma */
+
+void
+chimera_server_config_set_nfs_rdma_hostname(
     struct chimera_server_config *config,
     const char                   *hostname)
 {
-    config->rdma = 1;
-    strncpy(config->rdma_hostname, hostname, sizeof(config->rdma_hostname));
-} /* chimera_server_config_set_rdma */
+    config->nfs_rdma = 1;
+    strncpy(config->nfs_rdma_hostname, hostname, sizeof(config->nfs_rdma_hostname));
+} /* chimera_server_config_set_nfs_rdma_hostname */
 
 const char *
-chimera_server_config_get_rdma(const struct chimera_server_config *config)
+chimera_server_config_get_nfs_rdma_hostname(const struct chimera_server_config *config)
 {
-    if (!config->rdma) {
+    if (!config->nfs_rdma) {
         return NULL;
     }
 
-    return config->rdma_hostname;
-} /* chimera_server_config_get_rdma */
+    return config->nfs_rdma_hostname;
+} /* chimera_server_config_get_nfs_rdma_hostname */
+
+void
+chimera_server_config_set_nfs_rdma_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->nfs_rdma_port = port;
+} /* chimera_server_config_set_nfs_rdma_port */
+
+int
+chimera_server_config_get_nfs_rdma_port(const struct chimera_server_config *config)
+{
+    return config->nfs_rdma_port;
+} /* chimera_server_config_get_nfs_rdma_port */
 
 static void *
 chimera_server_thread_init(

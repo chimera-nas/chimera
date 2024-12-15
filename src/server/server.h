@@ -9,12 +9,28 @@ struct chimera_server_config * chimera_server_config_init(
 struct chimera_server * chimera_server_init(
     const struct chimera_server_config *config);
 
-void chimera_server_config_set_rdma(
+void chimera_server_config_set_nfs_rdma(
+    struct chimera_server_config *config,
+    int                           enable);
+
+void chimera_server_config_set_nfs_rdma_hostname(
     struct chimera_server_config *config,
     const char                   *hostname);
 
+int
+chimera_server_config_get_nfs_rdma(
+    const struct chimera_server_config *config);
+
 const char *
-chimera_server_config_get_rdma(
+chimera_server_config_get_nfs_rdma_hostname(
+    const struct chimera_server_config *config);
+
+void chimera_server_config_set_nfs_rdma_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_nfs_rdma_port(
     const struct chimera_server_config *config);
 
 int

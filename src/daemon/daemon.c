@@ -63,10 +63,22 @@ main(
     server_config = chimera_server_config_init();
 
     json_t *rdma_value = json_object_get(server_params, "rdma");
-    if (rdma_value && json_is_string(rdma_value)) {
-        const char *rdma_str = json_string_value(rdma_value);
-        chimera_server_config_set_rdma(server_config, rdma_str);
+    if (rdma_value && json_is_true(rdma_value)) {
+        chimera_server_config_set_nfs_rdma(server_config, 1);
     }
+
+    json_t *rdma_hostname_value = json_object_get(server_params, "rdma_hostname");
+    if (rdma_hostname_value && json_is_string(rdma_hostname_value)) {
+        const char *rdma_hostname_str = json_string_value(rdma_hostname_value);
+        chimera_server_config_set_nfs_rdma_hostname(server_config, rdma_hostname_str);
+    }
+
+    json_t *rdma_port_value = json_object_get(server_params, "rdma_port");
+    if (rdma_port_value && json_is_integer(rdma_port_value)) {
+        int rdma_port = json_integer_value(rdma_port_value);
+        chimera_server_config_set_nfs_rdma_port(server_config, rdma_port);
+    }
+
 
     server = chimera_server_init(server_config);
 
