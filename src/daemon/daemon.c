@@ -62,6 +62,12 @@ main(
 
     server_config = chimera_server_config_init();
 
+    json_t *threads_value = json_object_get(server_params, "threads");
+    if (threads_value && json_is_integer(threads_value)) {
+        int threads = json_integer_value(threads_value);
+        chimera_server_config_set_core_threads(server_config, threads);
+    }
+
     json_t *rdma_value = json_object_get(server_params, "rdma");
     if (rdma_value && json_is_true(rdma_value)) {
         chimera_server_config_set_nfs_rdma(server_config, 1);
