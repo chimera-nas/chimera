@@ -6,11 +6,96 @@
 #include <stdint.h>
 #include <string.h>
 #include <signal.h>
+#include <limits.h>
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
 
 #include "logging.h"
+#include "snprintf.h"
+
+#define SECS_PER_HOUR (60 * 60)
+#define SECS_PER_DAY  (SECS_PER_HOUR * 24)
+
+static const unsigned short int __mon_yday[2][13] =
+{
+    /* Normal years.  */
+    { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365 },
+    /* Leap years.  */
+    { 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366 }
+};
+
+#define DIV(a, b)            ((a) / (b) - ((a) % (b) < 0))
+#define LEAPS_THRU_END_OF(y) (DIV(y, 4) - DIV(y, 100) + DIV(y, 400))
+
+static void
+chimera_timet2tmZ(
+    time_t     t,
+    struct tm *tp)
+{
+    int64_t                   days, rem, y;
+    const unsigned short int *ip;
+
+    // Calculate the number of days and remaining seconds from the given time
+    days = t / SECS_PER_DAY;
+    rem  = t % SECS_PER_DAY;
+
+    // Adjust for negative remainder to ensure rem is within a day
+    while (rem < 0) {
+        rem += SECS_PER_DAY;
+        --days;
+    }
+    while (rem >= SECS_PER_DAY) {
+        rem -= SECS_PER_DAY;
+        ++days;
+    }
+
+    // Calculate hours, minutes, and seconds from the remainder
+    tp->tm_hour = rem / SECS_PER_HOUR;
+    rem        %= SECS_PER_HOUR;
+    tp->tm_min  = rem / 60;
+    tp->tm_sec  = rem % 60;
+
+    // Calculate the day of the week, with January 1, 1970 as a Thursday
+    tp->tm_wday = (4 + days) % 7;
+    if (tp->tm_wday < 0) {
+        tp->tm_wday += 7;
+    }
+
+    y = 1970;
+
+    // Adjust the year and days to match the correct year
+    while (days < 0 || days >= (__isleap(y) ? 366 : 365)) {
+        int64_t yg = y + days / 365 - (days % 365 < 0);
+
+        days -= ((yg - y) * 365
+                 + LEAPS_THRU_END_OF(yg - 1)
+                 - LEAPS_THRU_END_OF(y - 1));
+        y = yg;
+    }
+
+    // Set the year in the tm structure, ensuring it is within valid range
+    if ((y - 1900) < INT_MIN) {
+        tp->tm_year = INT_MIN;
+    } else if ((y - 1900) > INT_MAX) {
+        tp->tm_year = INT_MAX;
+    } else {
+        tp->tm_year = y - 1900;
+    }
+
+    // Calculate the day of the year
+    tp->tm_yday = days;
+
+    // Determine the month and day of the month
+    ip = __mon_yday[__isleap(y)];
+    for (y = 11; days < (long int) ip[y]; --y) {
+        continue;
+    }
+    days       -= ip[y];
+    tp->tm_mon  = y;
+    tp->tm_mday = days + 1;
+} /* ot_timet2tmZ */
+
 
 static const char *level_string[] = {
     "none",
@@ -119,7 +204,7 @@ chimera_vlog(
 
     clock_gettime(CLOCK_REALTIME, &ts);
 
-    gmtime_r(&ts.tv_sec, &tm_info);
+    chimera_timet2tmZ(ts.tv_sec, &tm_info);
 
     pid = getpid();
     tid = gettid();
@@ -132,22 +217,22 @@ chimera_vlog(
         pthread_mutex_lock(&ChimeraLogBufLock);
     }
 
-    ChimeraLogBufPtr += snprintf(ChimeraLogBufPtr,
-                                 1024,
-                                 "time=%04d-%02d-%02dT%02d:%02d:%02d.%09ldZ message=\"",
-                                 tm_info.tm_year + 1900, tm_info.tm_mon + 1,
-                                 tm_info.tm_mday, tm_info.tm_hour,
-                                 tm_info.tm_min, tm_info.tm_sec, ts.tv_nsec);
+    ChimeraLogBufPtr += chimera_snprintf(ChimeraLogBufPtr,
+                                         1024,
+                                         "time=%04d-%02d-%02dT%02d:%02d:%02d.%09ldZ message=\"",
+                                         tm_info.tm_year + 1900, tm_info.tm_mon + 1,
+                                         tm_info.tm_mday, tm_info.tm_hour,
+                                         tm_info.tm_min, tm_info.tm_sec, ts.tv_nsec);
 
-    ChimeraLogBufPtr += vsnprintf(ChimeraLogBufPtr,
-                                  1024,
-                                  fmt, argp);
+    ChimeraLogBufPtr += chimera_vsnprintf(ChimeraLogBufPtr,
+                                          1024,
+                                          fmt, argp);
 
-    ChimeraLogBufPtr += snprintf(ChimeraLogBufPtr,
-                                 1024,
-                                 "\" process=%lu thread=%lu level=%s module=%s source=\"%s:%d\"\n",
-                                 pid, tid, level_string[level], mod, file,
-                                 line);
+    ChimeraLogBufPtr += chimera_snprintf(ChimeraLogBufPtr,
+                                         1024,
+                                         "\" process=%lu thread=%lu level=%s module=%s source=\"%s:%d\"\n",
+                                         pid, tid, level_string[level], mod, file,
+                                         line);
 
     pthread_mutex_unlock(&ChimeraLogBufLock);
 } /* chimera_vlog */

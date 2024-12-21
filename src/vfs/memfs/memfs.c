@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "common/varint.h"
 #include "xxhash.h"
 
 #define HASH_FUNCTION(keyptr, keylen, hashv) do { \
@@ -154,10 +155,14 @@ memfs_inum_to_fh(
     uint64_t inum,
     uint32_t gen)
 {
-    fh[0] = CHIMERA_VFS_FH_MAGIC_MEMFS;
-    memcpy(fh + 1, &inum, sizeof(inum));
-    memcpy(fh + 9, &gen, sizeof(gen));
-    return 13;
+    uint8_t *ptr = fh;
+
+    *ptr++ = CHIMERA_VFS_FH_MAGIC_MEMFS;
+
+    ptr += chimera_encode_uint64(inum, ptr);
+    ptr += chimera_encode_uint32(gen, ptr);
+
+    return ptr - fh;
 } /* memfs_inum_to_fh */
 
 static inline void
@@ -167,14 +172,12 @@ memfs_fh_to_inum(
     const uint8_t *fh,
     int            fhlen)
 {
-    if (unlikely(fhlen != 13)) {
-        *inum = UINT64_MAX;
-        *gen  = 0;
-        return;
-    }
+    const uint8_t *ptr = fh;
 
-    *inum = *(uint64_t *) (fh + 1);
-    *gen  = *(uint32_t *) (fh + 9);
+    ptr++;
+
+    ptr += chimera_decode_uint64(ptr, inum);
+    ptr += chimera_decode_uint32(ptr, gen);
 } /* memfs_fh_to_inum */
 
 static inline struct memfs_inode *
