@@ -1248,7 +1248,6 @@ memfs_read(
 
     if (unlikely(length == 0)) {
         request->status        = CHIMERA_VFS_OK;
-        request->read.r_iov    = NULL;
         request->read.r_niov   = 0;
         request->read.r_length = length;
         request->read.r_eof    = eof;
@@ -1273,7 +1272,7 @@ memfs_read(
     num_block = last_block - first_block + 1;
     max_iov   = num_block * CHIMERA_MEMFS_BLOCK_MAX_IOV;
 
-    iov = alloca(max_iov * sizeof(struct evpl_iovec));
+    iov = request->read.iov;
 
     for (bi = first_block; bi <= last_block; bi++) {
 
@@ -1320,7 +1319,6 @@ memfs_read(
     pthread_mutex_unlock(&inode->lock);
 
     request->status        = CHIMERA_VFS_OK;
-    request->read.r_iov    = iov;
     request->read.r_niov   = niov;
     request->read.r_length = length;
     request->read.r_eof    = eof;

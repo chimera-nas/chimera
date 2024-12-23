@@ -28,8 +28,7 @@ chimera_nfs3_read_complete(
         res.resok.count = count;
         res.resok.eof   = eof;
 
-        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK)
-        {
+        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
             res.resok.file_attributes.attributes_follow = 1;
             chimera_nfs3_marshall_attrs(attr,
                                         &res.resok.file_attributes.attributes);
@@ -64,14 +63,19 @@ chimera_nfs3_read_open_callback(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct READ3args                 *args   = req->args_read;
     struct READ3res                   res;
+    struct evpl_iovec                *iov;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
+
+        xdr_dbuf_alloc_space(iov, sizeof(*iov) * 64, msg->dbuf);
 
         chimera_vfs_read(thread->vfs,
                          handle,
                          args->offset,
                          args->count,
+                         iov,
+                         64,
                          CHIMERA_NFS3_ATTR_MASK,
                          chimera_nfs3_read_complete,
                          req);

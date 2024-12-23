@@ -236,7 +236,8 @@ struct chimera_vfs_request {
             uint64_t                        offset;
             uint32_t                        length;
             uint64_t                        attrmask;
-            struct evpl_iovec              *r_iov;
+            struct evpl_iovec              *iov;
+            int                             niov;
             int                             r_niov;
             uint32_t                        r_length;
             uint32_t                        r_eof;

@@ -201,6 +201,8 @@ chimera_vfs_read(
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
     uint32_t                        count,
+    struct evpl_iovec              *iov,
+    int                             niov,
     uint64_t                        attrmask,
     chimera_vfs_read_callback_t     callback,
     void                           *private_data);

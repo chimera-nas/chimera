@@ -1042,20 +1042,18 @@ chimera_linux_read(
     ssize_t                      len, left = request->read.length;
     struct iovec                *iov;
 
-    request->read.r_iov = alloca(sizeof(struct evpl_iovec) * 8);
-
     request->read.r_niov = evpl_iovec_alloc(evpl,
                                             request->read.length,
                                             4096,
                                             8,
-                                            request->read.r_iov);
+                                            request->read.iov);
 
     iov = alloca(request->read.r_niov * sizeof(*iov));
 
     for (i = 0; left && i < request->read.r_niov; i++) {
 
-        iov[i].iov_base = request->read.r_iov[i].data;
-        iov[i].iov_len  = request->read.r_iov[i].length;
+        iov[i].iov_base = request->read.iov[i].data;
+        iov[i].iov_len  = request->read.iov[i].length;
 
         if (iov[i].iov_len > left) {
             iov[i].iov_len = left;
@@ -1075,7 +1073,7 @@ chimera_linux_read(
         request->status = chimera_linux_errno_to_status(errno);
 
         for (i = 0; i < request->read.r_niov; i++) {
-            evpl_iovec_release(&request->read.r_iov[i]);
+            evpl_iovec_release(&request->read.iov[i]);
         }
 
         request->read.r_niov   = 0;
