@@ -34,6 +34,8 @@ chimera_nfs4_readdir_callback(
     xdr_dbuf_alloc_space(entry, sizeof(*entry), req->msg->dbuf);
 
 
+    xdr_dbuf_opaque_copy(&entry->name, name, namelen, req->msg->dbuf);
+
     entry->cookie    = cookie;
     entry->nextentry = NULL;
 
