@@ -1085,6 +1085,12 @@ chimera_linux_read(
         return;
     }
 
+    chimera_linux_map_attrs(request->read.attrmask,
+                            &request->read.r_attr,
+                            fd,
+                            NULL,
+                            0);
+
     request->read.r_length = len;
     request->read.r_eof    = (len < request->read.length);
 
