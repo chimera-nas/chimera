@@ -17,6 +17,7 @@
 
 #include "core/evpl.h"
 #include "core/event.h"
+#include "core/deferral.h"
 
 #include "io_uring.h"
 #include "common/logging.h"
@@ -24,26 +25,32 @@
 #include "common/misc.h"
 #include "uthash/uthash.h"
 
-#define chimera_io_uring_debug(...) chimera_debug("io_uring", \
-                                                  __FILE__, \
-                                                  __LINE__, \
-                                                  __VA_ARGS__)
-#define chimera_io_uring_info(...)  chimera_info("io_uring", \
-                                                 __FILE__, \
-                                                 __LINE__, \
-                                                 __VA_ARGS__)
-#define chimera_io_uring_error(...) chimera_error("io_uring", \
-                                                  __FILE__, \
-                                                  __LINE__, \
-                                                  __VA_ARGS__)
-#define chimera_io_uring_fatal(...) chimera_fatal("io_uring", \
-                                                  __FILE__, \
-                                                  __LINE__, \
-                                                  __VA_ARGS__)
-#define chimera_io_uring_abort(...) chimera_abort("io_uring", \
-                                                  __FILE__, \
-                                                  __LINE__, \
-                                                  __VA_ARGS__)
+#ifndef container_of
+#define container_of(ptr, type, member) ({            \
+        typeof(((type *) 0)->member) * __mptr = (ptr); \
+        (type *) ((char *) __mptr - offsetof(type, member)); })
+#endif // ifndef container_of
+
+#define chimera_io_uring_debug(...)     chimera_debug("io_uring", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
+#define chimera_io_uring_info(...)      chimera_info("io_uring", \
+                                                     __FILE__, \
+                                                     __LINE__, \
+                                                     __VA_ARGS__)
+#define chimera_io_uring_error(...)     chimera_error("io_uring", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
+#define chimera_io_uring_fatal(...)     chimera_fatal("io_uring", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
+#define chimera_io_uring_abort(...)     chimera_abort("io_uring", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
 
 #define chimera_io_uring_fatal_if(cond, ...) \
         chimera_fatal_if(cond, "io_uring", __FILE__, __LINE__, __VA_ARGS__)
@@ -61,6 +68,7 @@ struct chimera_io_uring_thread {
     struct evpl                   *evpl;
     int                            eventfd;
     struct evpl_event              event;
+    struct evpl_deferral           deferral;
     struct io_uring                ring;
     struct chimera_io_uring_mount *mounts;
 };
@@ -355,8 +363,62 @@ chimera_io_uring_complete(
     struct evpl       *evpl,
     struct evpl_event *event)
 {
+    struct chimera_io_uring_thread *thread;
+    uint64_t                        value;
+    struct io_uring_cqe            *cqe;
+    int                             rc;
+    struct chimera_vfs_request     *request;
 
+    thread = container_of(event, struct chimera_io_uring_thread, event);
+
+    rc = read(thread->eventfd, &value, sizeof(value));
+
+    if (rc != sizeof(value)) {
+        evpl_event_mark_unreadable(&thread->event);
+        return;
+    }
+
+    while (io_uring_peek_cqe(&thread->ring, &cqe) == 0) {
+        chimera_io_uring_debug("io_uring_complete: event=%p", event);
+
+        request = (struct chimera_vfs_request *) cqe->user_data;
+
+        request->status = chimera_io_uring_errno_to_status(cqe->res);
+
+        request->complete(request);
+
+        io_uring_cqe_seen(&thread->ring, cqe);
+    }
 } /* chimera_io_uring_complete */
+
+static void
+chimera_io_uring_flush(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             rc;
+
+    rc = io_uring_submit(&thread->ring);
+
+    chimera_io_uring_abort_if(rc < 0, "io_uring_submit");
+} /* chimera_io_uring_flush */
+
+static inline struct io_uring_sqe *
+chimera_io_uring_get_sqe(
+    struct chimera_io_uring_thread *thread,
+    struct chimera_vfs_request     *request)
+{
+    struct io_uring_sqe *sge;
+
+    sge = io_uring_get_sqe(&thread->ring);
+
+    chimera_io_uring_abort_if(!sge, "io_uring_get_sqe");
+
+    sge->user_data = (uint64_t) request;
+
+    return sge;
+} /* chimera_io_uring_get_sqe */
 
 static void *
 chimera_io_uring_thread_init(
@@ -389,6 +451,10 @@ chimera_io_uring_thread_init(
     evpl_add_event(evpl, &thread->event);
 
     evpl_event_read_interest(evpl, &thread->event);
+
+    evpl_deferral_init(&thread->deferral,
+                       chimera_io_uring_flush,
+                       thread);
 
     return thread;
 } /* io_uring_thread_init */
@@ -1204,12 +1270,16 @@ chimera_io_uring_commit(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int fd = (int) request->commit.handle->vfs_private;
+    struct chimera_io_uring_thread *thread = private_data;
 
-    fsync(fd);
+    int                             fd = (int) request->commit.handle->vfs_private;
+    struct io_uring_sqe            *sge;
 
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    sge = chimera_io_uring_get_sqe(thread, request);
+
+    io_uring_prep_fsync(sge, fd, 0);
+
+    evpl_defer(thread->evpl, &thread->deferral);
 
 } /* chimera_io_uring_commit */
 
