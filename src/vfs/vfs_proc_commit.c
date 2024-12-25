@@ -25,7 +25,7 @@ chimera_vfs_commit(
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread, handle->fh, handle->fh_len);
+    request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
     request->opcode             = CHIMERA_VFS_OP_COMMIT;
     request->complete           = chimera_vfs_commit_complete;

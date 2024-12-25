@@ -281,6 +281,25 @@ chimera_vfs_root_readdir(
 } /* chimera_vfs_root_readdir */
 
 static void
+chimera_vfs_root_open(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    request->open.r_vfs_private = 0;
+    request->status             = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_vfs_root_open */
+
+static void
+chimera_vfs_root_close(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_vfs_root_close */
+
+static void
 chimera_vfs_root_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -291,6 +310,12 @@ chimera_vfs_root_dispatch(
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             chimera_vfs_root_lookup(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_OPEN:
+            chimera_vfs_root_open(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_CLOSE:
+            chimera_vfs_root_close(request, private_data);
             break;
         case CHIMERA_VFS_OP_GETATTR:
             chimera_vfs_root_getattr(request, private_data);

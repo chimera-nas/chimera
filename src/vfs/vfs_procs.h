@@ -33,14 +33,13 @@ typedef void (*chimera_vfs_lookup_callback_t)(
 
 void
 chimera_vfs_lookup(
-    struct chimera_vfs_thread    *vfs,
-    const void                   *fh,
-    int                           fhlen,
-    const char                   *name,
-    uint32_t                      namelen,
-    uint64_t                      attrmask,
-    chimera_vfs_lookup_callback_t callback,
-    void                         *private_data);
+    struct chimera_vfs_thread      *vfs,
+    struct chimera_vfs_open_handle *handle,
+    const char                     *name,
+    uint32_t                        namelen,
+    uint64_t                        attrmask,
+    chimera_vfs_lookup_callback_t   callback,
+    void                           *private_data);
 
 typedef void (*chimera_vfs_lookup_path_callback_t)(
     enum chimera_vfs_error    error_code,

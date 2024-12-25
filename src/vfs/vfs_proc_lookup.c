@@ -23,24 +23,24 @@ chimera_vfs_lookup_complete(struct chimera_vfs_request *request)
 
 void
 chimera_vfs_lookup(
-    struct chimera_vfs_thread    *thread,
-    const void                   *fh,
-    int                           fhlen,
-    const char                   *name,
-    uint32_t                      namelen,
-    uint64_t                      attrmask,
-    chimera_vfs_lookup_callback_t callback,
-    void                         *private_data)
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    const char                     *name,
+    uint32_t                        namelen,
+    uint64_t                        attrmask,
+    chimera_vfs_lookup_callback_t   callback,
+    void                           *private_data)
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
     request->lookup.r_attr.va_mask     = 0;
     request->lookup.r_dir_attr.va_mask = 0;
 
     request->opcode               = CHIMERA_VFS_OP_LOOKUP;
     request->complete             = chimera_vfs_lookup_complete;
+    request->lookup.handle        = handle;
     request->lookup.component     = name;
     request->lookup.component_len = namelen;
     request->lookup.attrmask      = attrmask;

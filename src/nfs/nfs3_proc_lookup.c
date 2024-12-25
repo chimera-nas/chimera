@@ -50,10 +50,47 @@ chimera_nfs3_lookup_complete(
         res.resfail.dir_attributes.attributes_follow = 0;
     }
 
+    chimera_vfs_release(thread->vfs, req->handle);
+
     shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, &res, msg);
+
 
     nfs_request_free(thread, req);
 } /* chimera_nfs3_lookup_complete */
+
+static void
+chimera_nfs3_lookup_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request               *req    = private_data;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct evpl                      *evpl   = thread->evpl;
+    struct evpl_rpc2_msg             *msg    = req->msg;
+    struct LOOKUP3args               *args   = req->args_lookup;
+    struct LOOKUP3res                 res;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        req->handle = handle;
+
+        chimera_vfs_lookup(thread->vfs,
+                           handle,
+                           args->what.name.str,
+                           args->what.name.len,
+                           CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
+                           chimera_nfs3_lookup_complete,
+                           req);
+    } else {
+        res.status =
+            chimera_vfs_error_to_nfsstat3(error_code);
+        res.resfail.dir_attributes.attributes_follow = 0;
+        shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, &res, msg);
+        nfs_request_free(thread, req);
+    }
+} /* chimera_nfs3_lookup_open_callback */
+
 
 void
 chimera_nfs3_lookup(
@@ -66,15 +103,15 @@ chimera_nfs3_lookup(
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req              = nfs_request_alloc(thread, conn, msg);
+    req = nfs_request_alloc(thread, conn, msg);
+
     req->args_lookup = args;
 
-    chimera_vfs_lookup(thread->vfs,
-                       args->what.dir.data.data,
-                       args->what.dir.data.len,
-                       args->what.name.str,
-                       args->what.name.len,
-                       CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
-                       chimera_nfs3_lookup_complete,
-                       req);
+    chimera_vfs_open(thread->vfs,
+                     args->what.dir.data.data,
+                     args->what.dir.data.len,
+                     CHIMERA_VFS_OPEN_RDONLY,
+                     chimera_nfs3_lookup_open_callback,
+                     req);
+
 } /* chimera_nfs3_lookup */

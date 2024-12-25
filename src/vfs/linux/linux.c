@@ -603,21 +603,11 @@ chimera_linux_lookup(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_linux_thread *thread = private_data;
-    int                          parent_fd, fd;
+    int parent_fd, fd;
+
+    parent_fd = (int) request->lookup.handle->vfs_private;
 
     TERM_STR(fullname, request->lookup.component, request->lookup.component_len);
-
-
-    parent_fd = linux_open_by_handle(thread,
-                                     request->fh,
-                                     request->fh_len,
-                                     O_PATH | O_RDONLY);
-    if (parent_fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
 
     chimera_linux_map_attrs(request->lookup.attrmask,
                             &request->lookup.r_dir_attr,
@@ -636,8 +626,6 @@ chimera_linux_lookup(
         request->complete(request);
         return;
     }
-
-    close(parent_fd);
 
     chimera_linux_map_attrs(request->lookup.attrmask,
                             &request->lookup.r_attr,

@@ -48,7 +48,6 @@ struct nfs_request {
         struct WRITE3args       *args_write;
         struct COMMIT3args      *args_commit;
         struct COMPOUND4args    *args_compound;
-
     };
     union {
         struct READLINK3res    res_readlink;

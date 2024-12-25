@@ -754,13 +754,7 @@ memfs_lookup(
     struct memfs_inode  *inode, *child;
     struct memfs_dirent *dirent;
 
-    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
-
-    if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
-    }
+    inode = (struct memfs_inode *) request->lookup.handle->vfs_private;
 
     if (unlikely(!S_ISDIR(inode->mode))) {
         pthread_mutex_unlock(&inode->lock);

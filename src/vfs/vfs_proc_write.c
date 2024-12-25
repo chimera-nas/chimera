@@ -32,7 +32,7 @@ chimera_vfs_write(
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread, handle->fh, handle->fh_len);
+    request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
     request->write.r_attr.va_mask = 0;
 

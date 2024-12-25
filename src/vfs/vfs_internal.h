@@ -114,6 +114,14 @@ chimera_vfs_request_alloc(
     return chimera_vfs_request_alloc_by_hash(thread, fh, fhlen, fh_hash);
 } /* chimera_vfs_request_alloc */
 
+static inline struct chimera_vfs_request *
+chimera_vfs_request_alloc_by_handle(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle)
+{
+    return chimera_vfs_request_alloc_by_hash(thread, handle->fh, handle->fh_len, handle->fh_hash);
+} /* chimera_vfs_request_alloc_by_handle */
+
 static inline void
 chimera_vfs_complete(struct chimera_vfs_request *request)
 {

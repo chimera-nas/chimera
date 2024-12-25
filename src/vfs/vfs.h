@@ -193,11 +193,12 @@ struct chimera_vfs_request {
         } lookup_path;
 
         struct {
-            const char              *component;
-            uint32_t                 component_len;
-            uint64_t                 attrmask;
-            struct chimera_vfs_attrs r_attr;
-            struct chimera_vfs_attrs r_dir_attr;
+            struct chimera_vfs_open_handle *handle;
+            const char                     *component;
+            uint32_t                        component_len;
+            uint64_t                        attrmask;
+            struct chimera_vfs_attrs        r_attr;
+            struct chimera_vfs_attrs        r_dir_attr;
         } lookup;
 
         struct {

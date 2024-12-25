@@ -412,6 +412,25 @@ chimera_io_uring_complete(
         chimera_io_uring_debug("completed request %p handler slot %d", request, handle->slot);
 
         switch (request->opcode) {
+            case CHIMERA_VFS_OP_LOOKUP:
+                if (cqe->res >= 0) {
+                    request->status = CHIMERA_VFS_OK;
+
+                    rc = io_uring_get_fh(cqe->res, "", AT_EMPTY_PATH,
+                                         request->lookup.r_attr.va_fh,
+                                         &request->lookup.r_attr.va_fh_len);
+
+                    if (rc  == 0) {
+                        request->lookup.r_attr.va_mask |= CHIMERA_VFS_ATTR_FH;
+                    } else {
+                        request->status = chimera_io_uring_errno_to_status(errno);
+                    }
+
+                    close(cqe->res);
+                } else {
+                    request->status = chimera_io_uring_errno_to_status(-cqe->res);
+                }
+                break;
             case CHIMERA_VFS_OP_READ:
                 if (handle->slot == 0) {
                     if (cqe->res >= 0) {
@@ -790,52 +809,19 @@ chimera_io_uring_lookup(
     void                       *private_data)
 {
     struct chimera_io_uring_thread *thread = private_data;
-    int                             parent_fd, fd;
+    struct io_uring_sqe            *sqe;
+    int                             parent_fd;
     char                           *scratch = (char *) request->plugin_data;
+
+    parent_fd = (int) request->lookup.handle->vfs_private;
 
     TERM_STR(fullname, request->lookup.component, request->lookup.component_len, scratch);
 
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    parent_fd = io_uring_open_by_handle(thread,
-                                        request->fh,
-                                        request->fh_len,
-                                        O_PATH | O_RDONLY);
-    if (parent_fd < 0) {
-        request->status = chimera_io_uring_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    io_uring_prep_openat(sqe, parent_fd, fullname, O_RDONLY | O_PATH | O_NOFOLLOW, 0);
 
-    chimera_io_uring_map_attrs(request->lookup.attrmask,
-                               &request->lookup.r_dir_attr,
-                               parent_fd,
-                               request->fh,
-                               request->fh_len);
-
-
-    fd = openat(parent_fd,
-                fullname,
-                O_RDONLY | O_PATH | O_NOFOLLOW);
-
-    if (fd < 0) {
-        close(parent_fd);
-        request->status = chimera_io_uring_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
-
-    close(parent_fd);
-
-    chimera_io_uring_map_attrs(request->lookup.attrmask,
-                               &request->lookup.r_attr,
-                               fd,
-                               NULL,
-                               0);
-
-    close(fd);
-
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_lookup */
 
 static void

@@ -11,8 +11,7 @@ chimera_nfs4_lookup_complete(
 {
     struct nfs_request *req    = private_data;
     nfsstat4            status = chimera_nfs4_errno_to_nfsstat4(error_code);
-    struct LOOKUP4res  *res    = &req->res_compound.resarray[req->index].
-        oplookup;
+    struct LOOKUP4res  *res    = &req->res_compound.resarray[req->index].oplookup;
 
     res->status = status;
 
@@ -24,9 +23,36 @@ chimera_nfs4_lookup_complete(
         req->fhlen = attr->va_fh_len;
     }
 
+    chimera_vfs_release(req->thread->vfs, req->handle);
     chimera_nfs4_compound_complete(req, status);
-
 } /* chimera_nfs4_lookup_complete */
+
+static void
+chimera_nfs4_lookup_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req    = private_data;
+    struct LOOKUP4args *args   = &req->args_compound->argarray[req->index].oplookup;
+    nfsstat4            status = chimera_nfs4_errno_to_nfsstat4(error_code);
+    struct LOOKUP4res  *res    = &req->res_compound.resarray[req->index].oplookup;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        req->handle = handle;
+
+        chimera_vfs_lookup(req->thread->vfs,
+                           handle,
+                           args->objname.data,
+                           args->objname.len,
+                           CHIMERA_VFS_ATTR_FH,
+                           chimera_nfs4_lookup_complete,
+                           req);
+    } else {
+        res->status = status;
+        chimera_nfs4_compound_complete(req, status);
+    }
+} /* chimera_nfs4_lookup_open_callback */
 
 void
 chimera_nfs4_lookup(
@@ -35,14 +61,10 @@ chimera_nfs4_lookup(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct LOOKUP4args *args = &argop->oplookup;
-
-    chimera_vfs_lookup(thread->vfs,
-                       req->fh,
-                       req->fhlen,
-                       args->objname.data,
-                       args->objname.len,
-                       CHIMERA_VFS_ATTR_FH,
-                       chimera_nfs4_lookup_complete,
-                       req);
+    chimera_vfs_open(thread->vfs,
+                     req->fh,
+                     req->fhlen,
+                     CHIMERA_VFS_OPEN_RDONLY,
+                     chimera_nfs4_lookup_open_callback,
+                     req);
 } /* chimera_nfs4_lookup */
