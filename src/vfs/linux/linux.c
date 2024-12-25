@@ -793,6 +793,8 @@ chimera_linux_open_at(
                                      O_RDONLY | O_DIRECTORY);
 
     if (parent_fd < 0) {
+        chimera_linux_error("linux_open_at: open_by_handle() failed: %s",
+                            strerror(errno));
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -821,6 +823,8 @@ chimera_linux_open_at(
                 S_IRWXU /*XXX*/);
 
     if (fd < 0) {
+        chimera_linux_error("linux_open_at: openat() failed: %s",
+                            strerror(errno));
         close(parent_fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
