@@ -88,7 +88,7 @@ chimera_vfs_open_cache_insert(
 
     if (handle) {
 
-        chimera_vfs_close(thread, module, fh, fhlen, vfs_private);
+        chimera_vfs_close(thread, module, fh, fhlen, vfs_private, NULL, NULL);
 
         handle->opencnt++;
         handle->timestamp.tv_sec  = 0;
@@ -152,14 +152,18 @@ static inline struct chimera_vfs_open_handle *
 chimera_vfs_open_cache_defer_close(
     struct vfs_open_cache *cache,
     struct timespec       *timestamp,
-    uint64_t               min_age)
+    uint64_t               min_age,
+    uint64_t              *r_count)
 {
     struct chimera_vfs_open_handle *handle, *tmp, *closed = NULL;
-    uint64_t                        elapsed;
+    uint64_t                        elapsed, count = 0;
 
     pthread_mutex_lock(&cache->lock);
     HASH_ITER(hh, cache->open_files, handle, tmp)
     {
+
+        count++;
+
         if (handle->opencnt) {
             continue;
         }
@@ -177,5 +181,6 @@ chimera_vfs_open_cache_defer_close(
     }
     pthread_mutex_unlock(&cache->lock);
 
+    *r_count = count;
     return closed;
 } /* vfs_open_cache_defer_close */

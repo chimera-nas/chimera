@@ -43,9 +43,9 @@ chimera_nfs3_read_complete(
         res.resfail.file_attributes.attributes_follow = 0;
     }
 
-    shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, &res, msg);
-
     chimera_vfs_release(thread->vfs, req->handle);
+
+    shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, &res, msg);
 
     nfs_request_free(thread, req);
 } /* chimera_nfs3_read_complete */

@@ -111,6 +111,7 @@ chimera_nfs4_compound_complete(
     if (thread->active) {
         thread->again = 1;
     } else {
+        req->index++;
         chimera_nfs4_compound_process(req, status);
     }
 

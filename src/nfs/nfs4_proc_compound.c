@@ -30,7 +30,7 @@ chimera_nfs4_compound_process(
     if (req->index >= req->res_compound.num_resarray) {
         chimera_nfs_info("nfs4 compound operation complete");
 
-        dump_COMPOUND4res("res", &req->res_compound);
+        //dump_COMPOUND4res("res", &req->res_compound);
 
         shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
             thread->evpl,
@@ -116,7 +116,7 @@ chimera_nfs4_compound(
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    dump_COMPOUND4args("args", args);
+    //dump_COMPOUND4args("args", args);
 
     req = nfs_request_alloc(thread, conn, msg);
 

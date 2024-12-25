@@ -1,10 +1,14 @@
 #pragma once
 #include <stdint.h>
 #include <sys/time.h>
+#include <sys/eventfd.h>
 #include "vfs_dump.h"
 #include "vfs_error.h"
 #include "core/evpl.h"
+#include "core/event.h"
+#include "thread/thread.h"
 #include "uthash/uthash.h"
+
 
 #define CHIMERA_VFS_FH_SIZE          32
 
@@ -123,6 +127,7 @@ struct chimera_vfs_open_handle {
     uint8_t                         fh_len;
     uint32_t                        opencnt;
     uint64_t                        vfs_private;
+    void                           *close_private;
     struct timespec                 timestamp;
     struct UT_hash_handle           hh;
     struct chimera_vfs_open_handle *next;
@@ -148,6 +153,7 @@ struct chimera_vfs_request {
     uint32_t                        opcode;
     enum chimera_vfs_error          status;
     chimera_vfs_complete_callback_t complete;
+    chimera_vfs_complete_callback_t complete_delegate;
     struct timespec                 start_time;
     uint64_t                        elapsed_ns;
     struct chimera_vfs_module      *module;
@@ -160,6 +166,7 @@ struct chimera_vfs_request {
 
     const void                     *fh;
     uint32_t                        fh_len;
+    uint64_t                        fh_hash;
 
     union {
         struct {
@@ -419,11 +426,12 @@ struct chimera_vfs_share {
 };
 
 struct chimera_vfs_delegation_thread {
-    struct evpl               *evpl;
-    struct chimera_vfs        *vfs;
-    struct evpl_thread        *evpl_thread;
-    struct chimera_vfs_thread *vfs_thread;
-    pthread_mutex_t            lock;
+    struct evpl                *evpl;
+    struct chimera_vfs         *vfs;
+    struct evpl_thread         *evpl_thread;
+    struct chimera_vfs_thread  *vfs_thread;
+    struct chimera_vfs_request *requests;
+    pthread_mutex_t             lock;
 };
 
 struct chimera_vfs_close_thread {
@@ -433,6 +441,7 @@ struct chimera_vfs_close_thread {
     struct chimera_vfs_thread *vfs_thread;
     int                        num_pending;
     int                        shutdown;
+    int                        signaled;
     pthread_mutex_t            lock;
     pthread_cond_t             cond;
 };
@@ -453,6 +462,13 @@ struct chimera_vfs_thread {
     struct chimera_vfs         *vfs;
     void                       *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
     struct chimera_vfs_request *free_requests;
+    uint64_t                    active_requests;
+
+    struct chimera_vfs_request *pending_complete_requests;
+    int                         eventfd;
+    struct evpl_event           pending_complete_event;
+    pthread_mutex_t             lock;
+
     struct chimera_vfs_metric   metrics[CHIMERA_VFS_OP_NUM];
 };
 

@@ -29,9 +29,10 @@ chimera_vfs_lookup_path(
     chimera_vfs_lookup_path_callback_t callback,
     void                              *private_data)
 {
+    struct chimera_vfs         *vfs = thread->vfs;
     struct chimera_vfs_request *request;
     const char                 *slash;
-    uint8_t                     fh_magic = CHIMERA_VFS_FH_MAGIC_ROOT;
+    struct chimera_vfs_module  *module = vfs->modules[CHIMERA_VFS_FH_MAGIC_ROOT];
 
     while (*path == '/') {
         path++;
@@ -44,7 +45,7 @@ chimera_vfs_lookup_path(
         chimera_vfs_error("handle slash case");
         abort();
     } else {
-        request = chimera_vfs_request_alloc(thread, &fh_magic, 1);
+        request = chimera_vfs_request_alloc(thread, &module->fh_magic, 1);
 
         request->lookup_path.r_attr.va_mask     = 0;
         request->lookup_path.r_dir_attr.va_mask = 0;

@@ -2,33 +2,43 @@
 
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <xxhash.h>
 
+#include "vfs/vfs.h"
 #include "common/logging.h"
 #include "common/misc.h"
 #include "uthash/utlist.h"
 
 #include "vfs/vfs_dump.h"
 
-#define chimera_vfs_debug(...) chimera_debug("vfs", \
-                                             __FILE__, \
-                                             __LINE__, \
-                                             __VA_ARGS__)
-#define chimera_vfs_info(...)  chimera_info("vfs", \
-                                            __FILE__, \
-                                            __LINE__, \
-                                            __VA_ARGS__)
-#define chimera_vfs_error(...) chimera_error("vfs", \
-                                             __FILE__, \
-                                             __LINE__, \
-                                             __VA_ARGS__)
-#define chimera_vfs_fatal(...) chimera_fatal("vfs", \
-                                             __FILE__, \
-                                             __LINE__, \
-                                             __VA_ARGS__)
-#define chimera_vfs_abort(...) chimera_abort("vfs", \
-                                             __FILE__, \
-                                             __LINE__, \
-                                             __VA_ARGS__)
+#ifndef container_of
+#define container_of(ptr, type, member) ({            \
+        typeof(((type *) 0)->member) * __mptr = (ptr); \
+        (type *) ((char *) __mptr - offsetof(type, member)); })
+#endif // ifndef container_of
+
+#define chimera_vfs_debug(...)          chimera_debug("vfs", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
+#define chimera_vfs_info(...)           chimera_info("vfs", \
+                                                     __FILE__, \
+                                                     __LINE__, \
+                                                     __VA_ARGS__)
+#define chimera_vfs_error(...)          chimera_error("vfs", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
+#define chimera_vfs_fatal(...)          chimera_fatal("vfs", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
+#define chimera_vfs_abort(...)          chimera_abort("vfs", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
 
 #define chimera_vfs_fatal_if(cond, ...) \
         chimera_fatal_if(cond, "vfs", \
@@ -86,6 +96,8 @@ chimera_vfs_request_alloc(
 
     clock_gettime(CLOCK_MONOTONIC, &request->start_time);
 
+    thread->active_requests++;
+
     return request;
 } /* chimera_vfs_request_alloc */
 
@@ -121,18 +133,54 @@ chimera_vfs_request_free(
     struct chimera_vfs_thread  *thread,
     struct chimera_vfs_request *request)
 {
+    thread->active_requests--;
+
     DL_PREPEND(thread->free_requests, request);
 } /* chimera_vfs_request_free */
 
+static inline void
+chimera_vfs_complete_delegate(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_thread *thread = request->thread;
+    uint64_t                   one    = 1;
+
+    pthread_mutex_lock(&thread->lock);
+    DL_APPEND(thread->pending_complete_requests, request);
+    pthread_mutex_unlock(&thread->lock);
+
+    write(thread->eventfd, &one, sizeof(one));
+
+} /* chimera_vfs_complete_delegate */
 
 static inline void
 chimera_vfs_dispatch(struct chimera_vfs_request *request)
 {
-    struct chimera_vfs_thread *thread = request->thread;
-    struct chimera_vfs_module *module = request->module;
+    struct chimera_vfs_thread            *thread = request->thread;
+    struct chimera_vfs                   *vfs    = thread->vfs;
+    struct chimera_vfs_module            *module = request->module;
+    struct chimera_vfs_delegation_thread *delegation_thread;
+    int                                   thread_id;
+
+    request->fh_hash = XXH3_64bits(request->fh, request->fh_len);
 
     chimera_vfs_dump_request(request);
-    module->dispatch(request, thread->module_private[module->fh_magic]);
+
+    if (module->blocking) {
+        thread_id = request->fh_hash % vfs->num_delegation_threads;
+
+        request->complete_delegate = request->complete;
+        request->complete          = chimera_vfs_complete_delegate;
+
+        delegation_thread = &vfs->delegation_threads[thread_id];
+
+        pthread_mutex_lock(&delegation_thread->lock);
+        DL_APPEND(delegation_thread->requests, request);
+        pthread_mutex_unlock(&delegation_thread->lock);
+
+        evpl_thread_wake(delegation_thread->evpl_thread);
+    } else {
+        module->dispatch(request, thread->module_private[module->fh_magic]);
+    }
 } /* chimera_vfs_dispatch */
 
 static inline void

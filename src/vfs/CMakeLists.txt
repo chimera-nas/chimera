@@ -8,10 +8,16 @@ add_library(chimera_vfs SHARED vfs.c
             vfs_proc_readlink.c vfs_proc_rename.c vfs_proc_setattr.c
             vfs_proc_link.c vfs_dump.c vfs_proc_release.c)
 
+target_compile_definitions(chimera_vfs PRIVATE
+    -DXXH_INLINE_ALL
+    $<$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>:-DXXH_VECTOR=XXH_NEON>
+    $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>>:-DXXH_VECTOR=XXH_AVX2>
+)
+
 install(TARGETS chimera_vfs DESTINATION lib)
 
 add_subdirectory(root)
 add_subdirectory(memfs)
 add_subdirectory(linux)
 
-target_link_libraries(chimera_vfs PRIVATE chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux)
+target_link_libraries(chimera_vfs PRIVATE chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux xxhash)
