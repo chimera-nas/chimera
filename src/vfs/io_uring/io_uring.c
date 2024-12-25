@@ -73,8 +73,9 @@ struct chimera_io_uring_thread {
     struct chimera_io_uring_mount *mounts;
 };
 
-#define TERM_STR(name, str, len) \
-        char *(name) = alloca((len) + 1); \
+#define TERM_STR(name, str, len, scratch) \
+        char *(name) = scratch; \
+        scratch     += (len) + 1; \
         memcpy((name), (str), (len)); \
         (name)[(len)] = '\0';
 
@@ -228,7 +229,6 @@ static inline int
 io_uring_get_fh(
     int          fd,
     const char  *path,
-    int          pathlen,
     unsigned int flags,
     void        *fh,
     uint32_t    *fh_len)
@@ -239,13 +239,11 @@ io_uring_get_fh(
     int                  rc;
     int                  mount_id;
 
-    TERM_STR(fullpath, path, pathlen);
-
     handle->handle_bytes = 128;
 
     rc = name_to_handle_at(
         fd,
-        fullpath,
+        path,
         handle,
         &mount_id,
         flags);
@@ -315,7 +313,7 @@ chimera_io_uring_map_attrs(
             memcpy(attr->va_fh, fh, fhlen);
             attr->va_fh_len = fhlen;
         } else {
-            rc = io_uring_get_fh(fd, "", 0, AT_EMPTY_PATH,
+            rc = io_uring_get_fh(fd, "", AT_EMPTY_PATH,
                                  attr->va_fh,
                                  &attr->va_fh_len);
 
@@ -697,12 +695,14 @@ chimera_io_uring_lookup_path(
 {
     int                       mount_fd, rc;
     struct chimera_vfs_attrs *r_attr;
+    char                     *scratch = (char *) request->plugin_data;
 
     r_attr = &request->lookup_path.r_attr;
 
     TERM_STR(fullpath,
              request->lookup_path.path,
-             request->lookup_path.pathlen);
+             request->lookup_path.pathlen,
+             scratch);
 
     mount_fd = open(fullpath, O_DIRECTORY | O_RDONLY);
 
@@ -713,8 +713,7 @@ chimera_io_uring_lookup_path(
     }
 
     rc = io_uring_get_fh(mount_fd,
-                         request->lookup_path.path,
-                         request->lookup_path.pathlen,
+                         fullpath,
                          0,
                          r_attr->va_fh,
                          &r_attr->va_fh_len);
@@ -738,8 +737,9 @@ chimera_io_uring_lookup(
 {
     struct chimera_io_uring_thread *thread = private_data;
     int                             parent_fd, fd;
+    char                           *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->lookup.component, request->lookup.component_len);
+    TERM_STR(fullname, request->lookup.component, request->lookup.component_len, scratch);
 
 
     parent_fd = io_uring_open_by_handle(thread,
@@ -917,8 +917,9 @@ chimera_io_uring_open_at(
     int                             parent_fd;
     int                             flags;
     int                             fd;
+    char                           *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->open_at.name, request->open_at.namelen);
+    TERM_STR(fullname, request->open_at.name, request->open_at.namelen, scratch);
 
     parent_fd = io_uring_open_by_handle(thread,
                                         request->fh,
@@ -1001,8 +1002,9 @@ chimera_io_uring_mkdir(
 {
     struct chimera_io_uring_thread *thread = private_data;
     int                             fd, rc;
+    char                           *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->mkdir.name, request->mkdir.name_len);
+    TERM_STR(fullname, request->mkdir.name, request->mkdir.name_len, scratch);
 
     fd = io_uring_open_by_handle(thread,
                                  request->fh,
@@ -1031,7 +1033,7 @@ chimera_io_uring_mkdir(
                                request->fh_len);
 
 
-    rc = io_uring_get_fh(fd, fullname, request->mkdir.name_len, 0,
+    rc = io_uring_get_fh(fd, fullname, 0,
                          request->mkdir.r_attr.va_fh,
                          &request->mkdir.r_attr.va_fh_len);
 
@@ -1075,8 +1077,9 @@ chimera_io_uring_remove(
 {
     struct chimera_io_uring_thread *thread = private_data;
     int                             fd, rc;
+    char                           *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->remove.name, request->remove.namelen);
+    TERM_STR(fullname, request->remove.name, request->remove.namelen, scratch);
 
     fd = io_uring_open_by_handle(thread,
                                  request->fh,
@@ -1280,9 +1283,10 @@ chimera_io_uring_symlink(
 {
     struct chimera_io_uring_thread *thread = private_data;
     int                             fd, rc;
+    char                           *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->symlink.name, request->symlink.namelen);
-    TERM_STR(target, request->symlink.target, request->symlink.targetlen);
+    TERM_STR(fullname, request->symlink.name, request->symlink.namelen, scratch);
+    TERM_STR(target, request->symlink.target, request->symlink.targetlen, scratch);
 
     fd = io_uring_open_by_handle(thread,
                                  request->fh,
@@ -1311,8 +1315,7 @@ chimera_io_uring_symlink(
                                request->fh_len);
 
     rc = io_uring_get_fh(fd,
-                         request->symlink.name,
-                         request->symlink.namelen,
+                         fullname,
                          0,
                          request->symlink.r_attr.va_fh,
                          &request->symlink.r_attr.va_fh_len);
@@ -1389,10 +1392,10 @@ chimera_io_uring_rename(
 {
     struct chimera_io_uring_thread *thread = private_data;
     int                             old_fd, new_fd, rc;
+    char                           *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->rename.name, request->rename.namelen);
-    TERM_STR(full_newname, request->rename.new_name, request->rename.new_namelen
-             );
+    TERM_STR(fullname, request->rename.name, request->rename.namelen, scratch);
+    TERM_STR(full_newname, request->rename.new_name, request->rename.new_namelen, scratch);
 
     old_fd = io_uring_open_by_handle(thread,
                                      request->fh,
@@ -1438,8 +1441,9 @@ chimera_io_uring_link(
 {
     struct chimera_io_uring_thread *thread = private_data;
     int                             fd, dir_fd, rc;
+    char                           *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->link.name, request->link.namelen);
+    TERM_STR(fullname, request->link.name, request->link.namelen, scratch);
 
     fd = io_uring_open_by_handle(thread,
                                  request->fh,
