@@ -17,24 +17,37 @@
 #include "thread/thread.h"
 
 static void *
-chimera_vfs_syncthread_init(
+chimera_vfs_delegation_thread_init(
     struct evpl *evpl,
     void        *private_data)
 {
-    return NULL;
-} /* chimera_vfs_syncthread_init */
+    struct chimera_vfs_delegation_thread *delegation_thread = private_data;
+
+    delegation_thread->evpl       = evpl;
+    delegation_thread->vfs_thread = chimera_vfs_thread_init(evpl, delegation_thread->vfs);
+
+    return private_data;
+} /* chimera_vfs_delegation_thread_init */
 
 static void
-chimera_vfs_syncthread_wake(
+chimera_vfs_delegation_thread_wake(
     struct evpl *evpl,
     void        *private_data)
 {
-} /* chimera_vfs_syncthread_wake */
+} /* chimera_vfs_delegation_thread_wake */
 
 static void
-chimera_vfs_syncthread_destroy(void *private_data)
+chimera_vfs_delegation_thread_shutdown(void *private_data)
 {
-} /* chimera_vfs_sync_destroy */
+    struct chimera_vfs_delegation_thread *delegation_thread = private_data;
+
+    chimera_vfs_thread_destroy(delegation_thread->vfs_thread);
+} /* chimera_vfs_delegation_thread_shutdown */
+
+static void
+chimera_vfs_delegation_thread_destroy(void *private_data)
+{
+} /* chimera_vfs_delegation_thread_destroy */
 
 static void *
 chimera_vfs_close_thread_init(
@@ -105,7 +118,7 @@ chimera_vfs_close_thread_destroy(void *private_data)
 } /* chimera_vfs_close_thread_destroy */
 
 struct chimera_vfs *
-chimera_vfs_init(void)
+chimera_vfs_init(int num_delegation_threads)
 {
     struct chimera_vfs *vfs;
 
@@ -122,13 +135,21 @@ chimera_vfs_init(void)
     chimera_vfs_info("Initializing VFS linux module...");
     chimera_vfs_register(vfs, &vfs_linux);
 
-    vfs->syncthreads = evpl_threadpool_create(16,
-                                              chimera_vfs_syncthread_init,
-                                              chimera_vfs_syncthread_wake,
-                                              NULL,
-                                              chimera_vfs_syncthread_destroy,
-                                              -1,
-                                              vfs);
+    vfs->num_delegation_threads = num_delegation_threads;
+    vfs->delegation_threads     = calloc(num_delegation_threads, sizeof(struct chimera_vfs_delegation_thread));
+
+    for (int i = 0; i < vfs->num_delegation_threads; i++) {
+        vfs->delegation_threads[i].vfs = vfs;
+        pthread_mutex_init(&vfs->delegation_threads[i].lock, NULL);
+
+        vfs->delegation_threads[i].evpl_thread = evpl_thread_create(
+            chimera_vfs_delegation_thread_init,
+            chimera_vfs_delegation_thread_wake,
+            chimera_vfs_delegation_thread_shutdown,
+            chimera_vfs_delegation_thread_destroy,
+            -1,
+            &vfs->delegation_threads[i]);
+    }
 
     pthread_mutex_init(&vfs->close_thread.lock, NULL);
     pthread_cond_init(&vfs->close_thread.cond, NULL);
@@ -165,7 +186,10 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
         }
     }
 
-    evpl_threadpool_destroy(vfs->syncthreads);
+    for (i = 0; i < vfs->num_delegation_threads; i++) {
+        evpl_thread_destroy(vfs->delegation_threads[i].evpl_thread);
+    }
+    free(vfs->delegation_threads);
 
     pthread_mutex_lock(&vfs->close_thread.lock);
     vfs->close_thread.shutdown = 1;

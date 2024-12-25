@@ -13,6 +13,10 @@ void chimera_server_config_set_core_threads(
     struct chimera_server_config *config,
     int                           threads);
 
+void chimera_server_config_set_delegation_threads(
+    struct chimera_server_config *config,
+    int                           threads);
+
 void chimera_server_config_set_nfs_rdma(
     struct chimera_server_config *config,
     int                           enable);

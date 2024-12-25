@@ -153,6 +153,8 @@ struct chimera_vfs_request {
     struct chimera_vfs_module      *module;
     void                           *proto_callback;
     void                           *proto_private_data;
+
+    /* VFS plugins may use these while processing the request */
     struct chimera_vfs_request     *prev;
     struct chimera_vfs_request     *next;
 
@@ -416,6 +418,14 @@ struct chimera_vfs_share {
     struct chimera_vfs_share  *next;
 };
 
+struct chimera_vfs_delegation_thread {
+    struct evpl               *evpl;
+    struct chimera_vfs        *vfs;
+    struct evpl_thread        *evpl_thread;
+    struct chimera_vfs_thread *vfs_thread;
+    pthread_mutex_t            lock;
+};
+
 struct chimera_vfs_close_thread {
     struct evpl               *evpl;
     struct chimera_vfs        *vfs;
@@ -428,13 +438,14 @@ struct chimera_vfs_close_thread {
 };
 
 struct chimera_vfs {
-    struct chimera_vfs_module      *modules[CHIMERA_VFS_FH_MAGIC_MAX];
-    void                           *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
-    struct vfs_open_cache          *vfs_open_cache;
-    struct chimera_vfs_share       *shares;
-    struct evpl_threadpool         *syncthreads;
-    struct chimera_vfs_close_thread close_thread;
-    struct chimera_vfs_metric       metrics[CHIMERA_VFS_OP_NUM];
+    struct chimera_vfs_module            *modules[CHIMERA_VFS_FH_MAGIC_MAX];
+    void                                 *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
+    struct vfs_open_cache                *vfs_open_cache;
+    struct chimera_vfs_share             *shares;
+    int                                   num_delegation_threads;
+    struct chimera_vfs_delegation_thread *delegation_threads;
+    struct chimera_vfs_close_thread       close_thread;
+    struct chimera_vfs_metric             metrics[CHIMERA_VFS_OP_NUM];
 };
 
 struct chimera_vfs_thread {
@@ -447,7 +458,7 @@ struct chimera_vfs_thread {
 
 struct chimera_vfs *
 chimera_vfs_init(
-    void);
+    int num_delegation_threads);
 
 void
 chimera_vfs_destroy(

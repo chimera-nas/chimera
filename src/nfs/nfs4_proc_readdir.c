@@ -45,7 +45,7 @@ chimera_nfs4_readdir_callback(
                      req->msg->dbuf);
 
     xdr_dbuf_alloc_opaque(&entry->attrs.attr_vals,
-                          4096,
+                          256,
                           req->msg->dbuf);
 
     chimera_nfs4_marshall_attrs(attrs,

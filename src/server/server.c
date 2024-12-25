@@ -17,6 +17,7 @@ struct chimera_server_config {
     char nfs_rdma_hostname[256];
     int  nfs_rdma_port;
     int  core_threads;
+    int  delegation_threads;
 };
 
 struct chimera_server {
@@ -43,8 +44,9 @@ chimera_server_config_init(void)
 
     config = calloc(1, sizeof(struct chimera_server_config));
 
-    config->core_threads = 16;
-    config->nfs_rdma     = 0;
+    config->core_threads       = 16;
+    config->delegation_threads = 64;
+    config->nfs_rdma           = 0;
 
     strncpy(config->nfs_rdma_hostname, "0.0.0.0", sizeof(config->nfs_rdma_hostname));
     config->nfs_rdma_port = 20049;
@@ -59,6 +61,14 @@ chimera_server_config_set_core_threads(
 {
     config->core_threads = threads;
 } /* chimera_server_config_set_core_threads */
+
+void
+chimera_server_config_set_delegation_threads(
+    struct chimera_server_config *config,
+    int                           threads)
+{
+    config->delegation_threads = threads;
+} /* chimera_server_config_set_delegation_threads */
 
 void
 chimera_server_config_set_nfs_rdma(
@@ -187,7 +197,7 @@ chimera_server_init(const struct chimera_server_config *config)
     pthread_mutex_init(&server->lock, NULL);
 
     chimera_server_info("Initializing VFS...");
-    server->vfs = chimera_vfs_init();
+    server->vfs = chimera_vfs_init(config->delegation_threads);
 
     chimera_server_info("Initializing NFS protocol...");
     server->protocols[server->num_protocols++] = &nfs_protocol;

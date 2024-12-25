@@ -68,6 +68,12 @@ main(
         chimera_server_config_set_core_threads(server_config, threads);
     }
 
+    json_t *delegation_threads_value = json_object_get(server_params, "delegation_threads");
+    if (delegation_threads_value && json_is_integer(delegation_threads_value)) {
+        int delegation_threads = json_integer_value(delegation_threads_value);
+        chimera_server_config_set_delegation_threads(server_config, delegation_threads);
+    }
+
     json_t *rdma_value = json_object_get(server_params, "rdma");
     if (rdma_value && json_is_true(rdma_value)) {
         chimera_server_config_set_nfs_rdma(server_config, 1);
