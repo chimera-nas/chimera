@@ -145,33 +145,43 @@ typedef int (*chimera_vfs_readdir_callback_t)(
     const struct chimera_vfs_attrs *attrs,
     void                           *arg);
 
-#define CHIMERA_VFS_ACCESS_READ    0x01
-#define CHIMERA_VFS_ACCESS_WRITE   0x02
-#define CHIMERA_VFS_ACCESS_EXECUTE 0x04
+#define CHIMERA_VFS_ACCESS_READ         0x01
+#define CHIMERA_VFS_ACCESS_WRITE        0x02
+#define CHIMERA_VFS_ACCESS_EXECUTE      0x04
+
+struct chimera_vfs_request_handle {
+    uint8_t slot;
+};
+
+#define CHIMERA_VFS_REQUEST_MAX_HANDLES 2
 
 struct chimera_vfs_request {
-    struct chimera_vfs_thread      *thread;
-    uint32_t                        opcode;
-    enum chimera_vfs_error          status;
-    chimera_vfs_complete_callback_t complete;
-    chimera_vfs_complete_callback_t complete_delegate;
-    struct timespec                 start_time;
-    uint64_t                        elapsed_ns;
+    struct chimera_vfs_thread        *thread;
+    uint32_t                          opcode;
+    enum chimera_vfs_error            status;
+    chimera_vfs_complete_callback_t   complete;
+    chimera_vfs_complete_callback_t   complete_delegate;
+    struct timespec                   start_time;
+    uint64_t                          elapsed_ns;
 
     /* Points to one page of memory that the plugin may use as desired */
-    void                           *plugin_data;
+    void                             *plugin_data;
 
-    struct chimera_vfs_module      *module;
-    void                           *proto_callback;
-    void                           *proto_private_data;
+    /* For use by the plugin if desired, see io_uring for example */
+    struct chimera_vfs_request_handle handle[CHIMERA_VFS_REQUEST_MAX_HANDLES];
+    uint8_t                           token_count;
+
+    struct chimera_vfs_module        *module;
+    void                             *proto_callback;
+    void                             *proto_private_data;
 
     /* VFS plugins may use these while processing the request */
-    struct chimera_vfs_request     *prev;
-    struct chimera_vfs_request     *next;
+    struct chimera_vfs_request       *prev;
+    struct chimera_vfs_request       *next;
 
-    const void                     *fh;
-    uint32_t                        fh_len;
-    uint64_t                        fh_hash;
+    const void                       *fh;
+    uint32_t                          fh_len;
+    uint64_t                          fh_hash;
 
     union {
         struct {

@@ -146,6 +146,9 @@ chimera_io_uring_stat_to_attr(
     struct chimera_vfs_attrs *attr,
     struct stat              *st)
 {
+
+    attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
+
     attr->va_dev   = st->st_dev;
     attr->va_ino   = st->st_ino;
     attr->va_mode  = st->st_mode;
@@ -157,6 +160,30 @@ chimera_io_uring_stat_to_attr(
     attr->va_atime = st->st_atim;
     attr->va_mtime = st->st_mtim;
     attr->va_ctime = st->st_ctim;
+} /* io_uring_stat_to_chimera_attr */
+
+static inline void
+chimera_io_uring_statx_to_attr(
+    struct chimera_vfs_attrs *attr,
+    struct statx             *stx)
+{
+
+    attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
+
+    attr->va_dev           = ((uint64_t) stx->stx_dev_major << 32) | stx->stx_dev_minor;
+    attr->va_ino           = stx->stx_ino;
+    attr->va_mode          = stx->stx_mode;
+    attr->va_nlink         = stx->stx_nlink;
+    attr->va_uid           = stx->stx_uid;
+    attr->va_gid           = stx->stx_gid;
+    attr->va_rdev          = ((uint64_t) stx->stx_rdev_major << 32) | stx->stx_rdev_minor;
+    attr->va_size          = stx->stx_size;
+    attr->va_atime.tv_sec  = stx->stx_atime.tv_sec;
+    attr->va_atime.tv_nsec = stx->stx_atime.tv_nsec;
+    attr->va_mtime.tv_sec  = stx->stx_mtime.tv_sec;
+    attr->va_mtime.tv_nsec = stx->stx_mtime.tv_nsec;
+    attr->va_ctime.tv_sec  = stx->stx_ctime.tv_sec;
+    attr->va_ctime.tv_nsec = stx->stx_ctime.tv_nsec;
 } /* io_uring_stat_to_chimera_attr */
 
 static inline void
@@ -328,7 +355,6 @@ chimera_io_uring_map_attrs(
         rc = fstat(fd, &st);
 
         if (rc == 0) {
-            attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
             chimera_io_uring_stat_to_attr(attr, &st);
         }
     }
@@ -361,11 +387,12 @@ chimera_io_uring_complete(
     struct evpl       *evpl,
     struct evpl_event *event)
 {
-    struct chimera_io_uring_thread *thread;
-    uint64_t                        value;
-    struct io_uring_cqe            *cqe;
-    int                             rc, i;
-    struct chimera_vfs_request     *request;
+    struct chimera_io_uring_thread    *thread;
+    uint64_t                           value;
+    struct io_uring_cqe               *cqe;
+    int                                rc, i;
+    struct chimera_vfs_request        *request;
+    struct chimera_vfs_request_handle *handle;
 
     thread = container_of(event, struct chimera_io_uring_thread, event);
 
@@ -378,19 +405,29 @@ chimera_io_uring_complete(
 
     while (io_uring_peek_cqe(&thread->ring, &cqe) == 0) {
 
-        request = (struct chimera_vfs_request *) cqe->user_data;
+        handle = (struct chimera_vfs_request_handle *) cqe->user_data;
+
+        request = container_of(handle, struct chimera_vfs_request, handle[handle->slot]);
+
+        chimera_io_uring_debug("completed request %p handler slot %d", request, handle->slot);
 
         switch (request->opcode) {
             case CHIMERA_VFS_OP_READ:
-                if (cqe->res >= 0) {
-                    request->status        = CHIMERA_VFS_OK;
-                    request->read.r_length = cqe->res;
-                    request->read.r_eof    = (cqe->res < request->read.length);
-                } else {
-                    request->status = chimera_io_uring_errno_to_status(-cqe->res);
+                if (handle->slot == 0) {
+                    if (cqe->res >= 0) {
+                        request->status        = CHIMERA_VFS_OK;
+                        request->read.r_length = cqe->res;
+                        request->read.r_eof    = (cqe->res < request->read.length);
+                    } else {
+                        request->status = chimera_io_uring_errno_to_status(-cqe->res);
 
-                    for (i = 0; i < request->read.r_niov; i++) {
-                        evpl_iovec_release(&request->read.iov[i]);
+                        for (i = 0; i < request->read.r_niov; i++) {
+                            evpl_iovec_release(&request->read.iov[i]);
+                        }
+                    }
+                } else {
+                    if (cqe->res == 0) {
+                        chimera_io_uring_statx_to_attr(&request->read.r_attr, (struct statx *) request->plugin_data);
                     }
                 }
                 break;
@@ -411,7 +448,11 @@ chimera_io_uring_complete(
                 break;
         } /* switch */
 
-        request->complete(request);
+        --request->token_count;
+
+        if (request->token_count == 0) {
+            request->complete(request);
+        }
 
         io_uring_cqe_seen(&thread->ring, cqe);
     }
@@ -433,15 +474,28 @@ chimera_io_uring_flush(
 static inline struct io_uring_sqe *
 chimera_io_uring_get_sqe(
     struct chimera_io_uring_thread *thread,
-    struct chimera_vfs_request     *request)
+    struct chimera_vfs_request     *request,
+    int                             slot,
+    int                             linked)
 {
-    struct io_uring_sqe *sge;
+    struct chimera_vfs_request_handle *handle;
+    struct io_uring_sqe               *sge;
 
     sge = io_uring_get_sqe(&thread->ring);
 
     chimera_io_uring_abort_if(!sge, "io_uring_get_sqe");
 
-    sge->user_data = (uint64_t) request;
+    if (linked) {
+        io_uring_sqe_set_flags(sge, IOSQE_IO_HARDLINK);
+    }
+
+    handle = &request->handle[slot];
+
+    request->handle[slot].slot = slot;
+
+    request->token_count++;
+
+    sge->user_data = (uint64_t) handle;
 
     return sge;
 } /* chimera_io_uring_get_sqe */
@@ -988,7 +1042,7 @@ chimera_io_uring_close(
     struct io_uring_sqe            *sqe;
     int                             fd = request->close.vfs_private;
 
-    sqe = chimera_io_uring_get_sqe(thread, request);
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     io_uring_prep_close(sqe, fd);
 
@@ -1163,7 +1217,6 @@ chimera_io_uring_access(
     }
 
     if (request->access.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
-        request->access.r_attr.va_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
         chimera_io_uring_stat_to_attr(&request->access.r_attr, &st);
     }
 
@@ -1185,8 +1238,10 @@ chimera_io_uring_read(
     int                             fd, i;
     ssize_t                         left = request->read.length;
     struct iovec                   *iov;
+    struct statx                   *stx;
+    void                           *scratch = request->plugin_data;
 
-    sqe = chimera_io_uring_get_sqe(thread, request);
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     request->read.r_niov = evpl_iovec_alloc(evpl,
                                             request->read.length,
@@ -1194,7 +1249,10 @@ chimera_io_uring_read(
                                             8,
                                             request->read.iov);
 
-    iov = request->plugin_data;
+    stx      = (struct statx *) scratch;
+    scratch += sizeof(*stx);
+
+    iov = (struct iovec *) scratch;
 
     for (i = 0; left && i < request->read.r_niov; i++) {
 
@@ -1212,6 +1270,10 @@ chimera_io_uring_read(
 
     io_uring_prep_readv(sqe, fd, iov, request->read.r_niov, request->read.offset);
 
+    sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
+
+    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
+
     evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_read */
 
@@ -1227,7 +1289,7 @@ chimera_io_uring_write(
     struct iovec                   *iov;
     int                             flags = 0;
 
-    sge = chimera_io_uring_get_sqe(thread, request);
+    sge = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     request->write.r_sync = request->write.sync;
 
@@ -1268,7 +1330,7 @@ chimera_io_uring_commit(
     int                             fd = (int) request->commit.handle->vfs_private;
     struct io_uring_sqe            *sge;
 
-    sge = chimera_io_uring_get_sqe(thread, request);
+    sge = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     io_uring_prep_fsync(sge, fd, 0);
 
