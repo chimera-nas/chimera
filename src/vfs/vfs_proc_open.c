@@ -23,6 +23,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
             module,
             request->fh,
             request->fh_len,
+            request->fh_hash,
             request->open.r_vfs_private);
     }
 
@@ -48,6 +49,9 @@ chimera_vfs_open(
     struct chimera_vfs_module      *module;
     struct chimera_vfs_request     *request;
     struct chimera_vfs_open_handle *handle;
+    uint64_t                        fh_hash;
+
+    fh_hash = XXH3_64bits(fh, fhlen);
 
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
@@ -55,14 +59,15 @@ chimera_vfs_open(
         vfs->vfs_open_cache,
         module,
         fh,
-        fhlen);
+        fhlen,
+        fh_hash);
 
     if (handle) {
         callback(CHIMERA_VFS_OK, handle, private_data);
         return;
     }
 
-    request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    request = chimera_vfs_request_alloc_by_hash(thread, fh, fhlen, fh_hash);
 
     request->opcode             = CHIMERA_VFS_OP_OPEN;
     request->complete           = chimera_vfs_open_complete;

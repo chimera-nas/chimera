@@ -72,10 +72,11 @@ chimera_vfs_get_module(
 } /* chimera_vfs_get_module */
 
 static inline struct chimera_vfs_request *
-chimera_vfs_request_alloc(
+chimera_vfs_request_alloc_by_hash(
     struct chimera_vfs_thread *thread,
     const void                *fh,
-    int                        fhlen)
+    int                        fhlen,
+    uint64_t                   fh_hash)
 {
     struct chimera_vfs_request *request;
 
@@ -91,14 +92,25 @@ chimera_vfs_request_alloc(
 
     request->module = chimera_vfs_get_module(thread, fh, fhlen);
 
-    request->fh     = fh;
-    request->fh_len = fhlen;
-
+    request->fh      = fh;
+    request->fh_len  = fhlen;
+    request->fh_hash = fh_hash;
     clock_gettime(CLOCK_MONOTONIC, &request->start_time);
 
     thread->active_requests++;
 
     return request;
+} /* chimera_vfs_request_alloc_by_hash */
+
+static inline struct chimera_vfs_request *
+chimera_vfs_request_alloc(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen)
+{
+    uint64_t fh_hash = XXH3_64bits(fh, fhlen);
+
+    return chimera_vfs_request_alloc_by_hash(thread, fh, fhlen, fh_hash);
 } /* chimera_vfs_request_alloc */
 
 static inline void
@@ -160,8 +172,6 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
     struct chimera_vfs_module            *module = request->module;
     struct chimera_vfs_delegation_thread *delegation_thread;
     int                                   thread_id;
-
-    request->fh_hash = XXH3_64bits(request->fh, request->fh_len);
 
     chimera_vfs_dump_request(request);
 

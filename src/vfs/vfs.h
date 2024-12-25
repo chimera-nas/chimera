@@ -123,6 +123,7 @@ struct chimera_vfs_metric {
 
 struct chimera_vfs_open_handle {
     struct chimera_vfs_module      *vfs_module;
+    uint64_t                        fh_hash;
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
     uint8_t                         fh_len;
     uint32_t                        opencnt;

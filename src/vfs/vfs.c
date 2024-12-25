@@ -163,7 +163,7 @@ chimera_vfs_init(int num_delegation_threads)
 
     vfs = calloc(1, sizeof(*vfs));
 
-    vfs->vfs_open_cache = chimera_vfs_open_cache_init();
+    vfs->vfs_open_cache = chimera_vfs_open_cache_init(10);
 
     chimera_vfs_info("Initializing VFS root module...");
     chimera_vfs_register(vfs, &vfs_root);
