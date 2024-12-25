@@ -327,10 +327,12 @@ struct chimera_vfs_request {
 
 enum CHIMERA_FS_FH_MAGIC {
     /* Reserved for internal use by chimera */
-    CHIMERA_VFS_FH_MAGIC_ROOT  = 0,
-    CHIMERA_VFS_FH_MAGIC_MEMFS = 1,
-    CHIMERA_VFS_FH_MAGIC_LINUX = 2,
-    CHIMERA_VFS_FH_MAGIC_MAX   = 3
+    CHIMERA_VFS_FH_MAGIC_ROOT     = 0,
+    CHIMERA_VFS_FH_MAGIC_MEMFS    = 1,
+    CHIMERA_VFS_FH_MAGIC_LINUX    = 2,
+    CHIMERA_VFS_FH_MAGIC_IO_URING = 3,
+    CHIMERA_VFS_FH_MAGIC_MAX      = 4
+
 };
 
 struct chimera_vfs_module {

@@ -62,6 +62,20 @@ libnfs_test_init(
 
         chimera_server_create_share(env->server, "linux", "share",
                                     env->session_dir);
+
+    } else if (strcmp(backend, "io_uring") == 0) {
+        snprintf(env->session_dir, sizeof(env->session_dir),
+                 "/build/test/session_%d_%lu_%lu",
+                 getpid(), tv.tv_sec, tv.tv_nsec);
+
+        fprintf(stderr, "Creating session directory %s\n", env->session_dir);
+
+        (void) mkdir("/build/test", 0755);
+        (void) mkdir(env->session_dir, 0755);
+
+        chimera_server_create_share(env->server, "io_uring", "share",
+                                    env->session_dir);
+
     } else if (strcmp(backend, "memfs") == 0) {
         chimera_server_create_share(env->server, "memfs", "share", "/");
     } else {

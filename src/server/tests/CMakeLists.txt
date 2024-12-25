@@ -55,6 +55,7 @@ add_libnfs_test(libnfs_nfs4_linux_readdir_shares libnfs_readdir_shares -v 4 -b l
 # add_libnfs_test(libnfs_nfs4_linux_symlink libnfs_symlink -v 4 -b linux)
 
 
+
 add_libnfs_test(libnfs_nfs3_memfs_mount libnfs_mount -v 3 -b memfs)
 add_libnfs_test(libnfs_nfs3_memfs_create libnfs_create -v 3 -b memfs)
 add_libnfs_test(libnfs_nfs3_memfs_readdir libnfs_readdir -v 3 -b memfs)
@@ -81,6 +82,34 @@ add_libnfs_test(libnfs_nfs4_memfs_readdir_shares libnfs_readdir_shares -v 4 -b m
 #add_libnfs_test(libnfs_nfs4_memfs_setattr libnfs_setattr -v 4 -b memfs)
 #add_libnfs_test(libnfs_nfs4_memfs_statvfs libnfs_statvfs -v 4 -b memfs)
 #add_libnfs_test(libnfs_nfs4_memfs_symlink libnfs_symlink -v 4 -b memfs)
+
+add_libnfs_test(libnfs_nfs3_io_uring_create libnfs_create -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_mount libnfs_mount -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_link libnfs_link -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_mkdir libnfs_mkdir -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_read libnfs_read -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_readdir libnfs_readdir -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_remove libnfs_remove -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_rename libnfs_rename -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_rmdir libnfs_rmdir -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_setattr libnfs_setattr -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_statvfs libnfs_statvfs -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_symlink libnfs_symlink -v 3 -b io_uring)
+add_libnfs_test(libnfs_nfs3_io_uring_readdir_shares libnfs_readdir_shares -v 3 -b io_uring)
+
+add_libnfs_test(libnfs_nfs4_io_uring_mount libnfs_mount -v 4 -b io_uring)
+add_libnfs_test(libnfs_nfs4_io_uring_readdir libnfs_readdir -v 4 -b io_uring)
+add_libnfs_test(libnfs_nfs4_io_uring_readdir_shares libnfs_readdir_shares -v 4 -b io_uring)
+# add_libnfs_test(libnfs_nfs4_io_uring_create libnfs_create -v 4 -b io_uring)
+# add_libnfs_test(libnfs_nfs4_io_uring_link libnfs_link -v 4 -b io_uring)
+# add_libnfs_test(libnfs_nfs4_io_uring_mkdir libnfs_mkdir -v 4 -b io_uring)
+# add_libnfs_test(libnfs_nfs4_io_uring_read libnfs_read -v 4 -b io_uring)
+# add_libnfs_test(libnfs_nfs4_io_uring_remove libnfs_remove -v 4 -b io_uring)
+# add_libnfs_test(libnfs_nfs4_io_uring_rename libnfs_rename -v 4 -b io_uring)
+# add_libnfs_test(libnfs_nfs4_io_uring_rmdir libnfs_rmdir -v 4 -b io_uring)
+# add_libnfs_test(libnfs_nfs4_io_uring_setattr libnfs_setattr -v 4 -b io_uring)
+# add_libnfs_test(libnfs_nfs4_io_uring_statvfs libnfs_statvfs -v 4 -b io_uring)
+# add_libnfs_test(libnfs_nfs4_io_uring_symlink libnfs_symlink -v 4 -b io_uring)
 
 
 

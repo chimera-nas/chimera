@@ -11,6 +11,7 @@
 #include "vfs_dump.h"
 #include "vfs/memfs/memfs.h"
 #include "vfs/linux/linux.h"
+#include "vfs/io_uring/io_uring.h"
 
 #include "common/misc.h"
 #include "uthash/utlist.h"
@@ -173,6 +174,9 @@ chimera_vfs_init(int num_delegation_threads)
 
     chimera_vfs_info("Initializing VFS linux module...");
     chimera_vfs_register(vfs, &vfs_linux);
+
+    chimera_vfs_info("Initializing VFS io_uring module...");
+    chimera_vfs_register(vfs, &vfs_io_uring);
 
     vfs->num_delegation_threads = num_delegation_threads;
     vfs->delegation_threads     = calloc(num_delegation_threads, sizeof(struct chimera_vfs_delegation_thread));

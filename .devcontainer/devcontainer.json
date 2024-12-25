@@ -22,11 +22,7 @@
         ],
         "appPort": [],
         "forwardPorts": [],
-        "runArgs": [
-                "--cap-add=NET_ADMIN",
-                "--cap-add=NET_RAW",
-                "--cap-add=CAP_DAC_READ_SEARCH"
-        ],
+        "privileged": true,
         "workspaceMount": "source=${localWorkspaceFolder},target=/chimera,type=bind",
         "workspaceFolder": "/chimera"
 }
