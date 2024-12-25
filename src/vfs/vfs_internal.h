@@ -84,8 +84,9 @@ chimera_vfs_request_alloc_by_hash(
         request = thread->free_requests;
         DL_DELETE(thread->free_requests, request);
     } else {
-        request         = calloc(1, sizeof(struct chimera_vfs_request));
-        request->thread = thread;
+        request              = calloc(1, sizeof(struct chimera_vfs_request));
+        request->thread      = thread;
+        request->plugin_data = malloc(4096);
     }
 
     request->status = CHIMERA_VFS_UNSET;

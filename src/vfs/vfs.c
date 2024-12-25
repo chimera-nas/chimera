@@ -377,6 +377,7 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
     while (thread->free_requests) {
         request = thread->free_requests;
         DL_DELETE(thread->free_requests, request);
+        free(request->plugin_data);
         free(request);
     }
 

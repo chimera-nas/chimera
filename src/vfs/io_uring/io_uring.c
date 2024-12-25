@@ -366,7 +366,7 @@ chimera_io_uring_complete(
     struct chimera_io_uring_thread *thread;
     uint64_t                        value;
     struct io_uring_cqe            *cqe;
-    int                             rc;
+    int                             rc, i;
     struct chimera_vfs_request     *request;
 
     thread = container_of(event, struct chimera_io_uring_thread, event);
@@ -379,11 +379,39 @@ chimera_io_uring_complete(
     }
 
     while (io_uring_peek_cqe(&thread->ring, &cqe) == 0) {
-        chimera_io_uring_debug("io_uring_complete: event=%p", event);
 
         request = (struct chimera_vfs_request *) cqe->user_data;
 
-        request->status = chimera_io_uring_errno_to_status(cqe->res);
+        switch (request->opcode) {
+            case CHIMERA_VFS_OP_READ:
+                if (cqe->res >= 0) {
+                    request->status        = CHIMERA_VFS_OK;
+                    request->read.r_length = cqe->res;
+                    request->read.r_eof    = (cqe->res < request->read.length);
+                } else {
+                    request->status = chimera_io_uring_errno_to_status(-cqe->res);
+
+                    for (i = 0; i < request->read.r_niov; i++) {
+                        evpl_iovec_release(&request->read.iov[i]);
+                    }
+                }
+                break;
+            case CHIMERA_VFS_OP_WRITE:
+                if (cqe->res >= 0) {
+                    request->status         = CHIMERA_VFS_OK;
+                    request->write.r_length = cqe->res;
+                } else {
+                    request->status = chimera_io_uring_errno_to_status(-cqe->res);
+                }
+                break;
+            default:
+                if (cqe->res) {
+                    request->status = chimera_io_uring_errno_to_status(-cqe->res);
+                } else {
+                    request->status = CHIMERA_VFS_OK;
+                }
+                break;
+        } /* switch */
 
         request->complete(request);
 
@@ -955,12 +983,15 @@ chimera_io_uring_close(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int fd = request->close.vfs_private;
+    struct chimera_io_uring_thread *thread = private_data;
+    struct io_uring_sqe            *sqe;
+    int                             fd = request->close.vfs_private;
 
-    close(fd);
+    sqe = chimera_io_uring_get_sqe(thread, request);
 
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    io_uring_prep_close(sqe, fd);
+
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_close */
 
 static void
@@ -1146,10 +1177,13 @@ chimera_io_uring_read(
     void                       *private_data)
 {
     struct chimera_io_uring_thread *thread = private_data;
-    struct evpl                    *evpl   = thread->evpl;
+    struct io_uring_sqe            *sqe;
+    struct evpl                    *evpl = thread->evpl;
     int                             fd, i;
-    ssize_t                         len, left = request->read.length;
+    ssize_t                         left = request->read.length;
     struct iovec                   *iov;
+
+    sqe = chimera_io_uring_get_sqe(thread, request);
 
     request->read.r_niov = evpl_iovec_alloc(evpl,
                                             request->read.length,
@@ -1157,7 +1191,7 @@ chimera_io_uring_read(
                                             8,
                                             request->read.iov);
 
-    iov = alloca(request->read.r_niov * sizeof(*iov));
+    iov = request->plugin_data;
 
     for (i = 0; left && i < request->read.r_niov; i++) {
 
@@ -1173,37 +1207,9 @@ chimera_io_uring_read(
 
     fd = (int) request->read.handle->vfs_private;
 
-    len = preadv(fd,
-                 iov,
-                 request->read.r_niov,
-                 request->read.offset);
+    io_uring_prep_readv(sqe, fd, iov, request->read.r_niov, request->read.offset);
 
-    if (len < 0) {
-        request->status = chimera_io_uring_errno_to_status(errno);
-
-        for (i = 0; i < request->read.r_niov; i++) {
-            evpl_iovec_release(&request->read.iov[i]);
-        }
-
-        request->read.r_niov   = 0;
-        request->read.r_length = 0;
-        request->read.r_eof    = 0;
-        request->complete(request);
-        return;
-    }
-
-    chimera_io_uring_map_attrs(request->read.attrmask,
-                               &request->read.r_attr,
-                               fd,
-                               NULL,
-                               0);
-
-    request->read.r_length = len;
-    request->read.r_eof    = (len < request->read.length);
-
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
-
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_read */
 
 static void
@@ -1211,15 +1217,18 @@ chimera_io_uring_write(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int           fd, i, niov = 0;
-    uint32_t      left, chunk;
-    ssize_t       len;
-    struct iovec *iov;
+    struct chimera_io_uring_thread *thread = private_data;
+    struct io_uring_sqe            *sge;
+    int                             fd, i, niov = 0;
+    uint32_t                        left, chunk;
+    struct iovec                   *iov;
+    int                             flags = 0;
+
+    sge = chimera_io_uring_get_sqe(thread, request);
 
     request->write.r_sync = request->write.sync;
 
-
-    iov = alloca(request->write.niov * sizeof(*iov));
+    iov = (struct iovec *) request->plugin_data;
 
     left = request->write.length;
     for (i = 0; left && i < request->write.niov; i++) {
@@ -1236,32 +1245,13 @@ chimera_io_uring_write(
 
     fd = (int) request->write.handle->vfs_private;
 
-    len = pwritev(fd,
-                  iov,
-                  niov,
-                  request->write.offset);
-
-    if (len < 0) {
-        request->status         = chimera_io_uring_errno_to_status(errno);
-        request->write.r_length = 0;
-        request->complete(request);
-        return;
-    }
-
-    request->write.r_length = len;
-
     if (request->write.sync) {
-        fsync(fd);
+        flags = RWF_SYNC;
     }
 
-    chimera_io_uring_map_attrs(request->write.attrmask,
-                               &request->write.r_attr,
-                               fd,
-                               NULL,
-                               0);
+    io_uring_prep_writev2(sge, fd, iov, niov, request->write.offset, flags);
 
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    evpl_defer(thread->evpl, &thread->deferral);
 
 } /* chimera_io_uring_write */
 

@@ -157,6 +157,10 @@ struct chimera_vfs_request {
     chimera_vfs_complete_callback_t complete_delegate;
     struct timespec                 start_time;
     uint64_t                        elapsed_ns;
+
+    /* Points to one page of memory that the plugin may use as desired */
+    void                           *plugin_data;
+
     struct chimera_vfs_module      *module;
     void                           *proto_callback;
     void                           *proto_private_data;
