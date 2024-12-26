@@ -59,11 +59,11 @@ struct chimera_linux_thread {
     struct chimera_linux_mount *mounts;
 };
 
-#define TERM_STR(name, str, len) \
-        char *(name) = alloca((len) + 1); \
+#define TERM_STR(name, str, len, scratch) \
+        char *(name) = scratch; \
+        scratch     += (len) + 1; \
         memcpy((name), (str), (len)); \
         (name)[(len)] = '\0';
-
 
 static inline enum chimera_vfs_error
 chimera_linux_errno_to_status(int err)
@@ -214,7 +214,6 @@ static inline int
 linux_get_fh(
     int          fd,
     const char  *path,
-    int          pathlen,
     unsigned int flags,
     void        *fh,
     uint32_t    *fh_len)
@@ -225,13 +224,11 @@ linux_get_fh(
     int                  rc;
     int                  mount_id;
 
-    TERM_STR(fullpath, path, pathlen);
-
     handle->handle_bytes = MAX_HANDLE_SZ;
 
     rc = name_to_handle_at(
         fd,
-        fullpath,
+        path,
         handle,
         &mount_id,
         flags);
@@ -299,7 +296,7 @@ chimera_linux_map_attrs(
             memcpy(attr->va_fh, fh, fhlen);
             attr->va_fh_len = fhlen;
         } else {
-            rc = linux_get_fh(fd, "", 0, AT_EMPTY_PATH,
+            rc = linux_get_fh(fd, "", AT_EMPTY_PATH,
                               attr->va_fh,
                               &attr->va_fh_len);
 
@@ -562,12 +559,14 @@ chimera_linux_lookup_path(
 {
     int                       mount_fd, rc;
     struct chimera_vfs_attrs *r_attr;
+    char                     *scratch = (char *) request->plugin_data;
 
     r_attr = &request->lookup_path.r_attr;
 
     TERM_STR(fullpath,
              request->lookup_path.path,
-             request->lookup_path.pathlen);
+             request->lookup_path.pathlen,
+             scratch);
 
     mount_fd = open(fullpath, O_DIRECTORY | O_RDONLY);
 
@@ -578,8 +577,7 @@ chimera_linux_lookup_path(
     }
 
     rc = linux_get_fh(mount_fd,
-                      request->lookup_path.path,
-                      request->lookup_path.pathlen,
+                      fullpath,
                       0,
                       r_attr->va_fh,
                       &r_attr->va_fh_len);
@@ -601,11 +599,12 @@ chimera_linux_lookup(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int parent_fd, fd;
+    int   parent_fd, fd;
+    char *scratch = (char *) request->plugin_data;
 
     parent_fd = (int) request->lookup.handle->vfs_private;
 
-    TERM_STR(fullname, request->lookup.component, request->lookup.component_len);
+    TERM_STR(fullname, request->lookup.component, request->lookup.component_len, scratch);
 
     chimera_linux_map_attrs(request->lookup.attrmask,
                             &request->lookup.r_dir_attr,
@@ -769,8 +768,9 @@ chimera_linux_open_at(
     int                          parent_fd;
     int                          flags;
     int                          fd;
+    char                        *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->open_at.name, request->open_at.namelen);
+    TERM_STR(fullname, request->open_at.name, request->open_at.namelen, scratch);
 
     parent_fd = linux_open_by_handle(thread,
                                      request->fh,
@@ -850,8 +850,9 @@ chimera_linux_mkdir(
 {
     struct chimera_linux_thread *thread = private_data;
     int                          fd, rc;
+    char                        *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->mkdir.name, request->mkdir.name_len);
+    TERM_STR(fullname, request->mkdir.name, request->mkdir.name_len, scratch);
 
     fd = linux_open_by_handle(thread,
                               request->fh,
@@ -880,7 +881,7 @@ chimera_linux_mkdir(
                             request->fh_len);
 
 
-    rc = linux_get_fh(fd, fullname, request->mkdir.name_len, 0,
+    rc = linux_get_fh(fd, fullname, 0,
                       request->mkdir.r_attr.va_fh,
                       &request->mkdir.r_attr.va_fh_len);
 
@@ -924,8 +925,9 @@ chimera_linux_remove(
 {
     struct chimera_linux_thread *thread = private_data;
     int                          fd, rc;
+    char                        *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->remove.name, request->remove.namelen);
+    TERM_STR(fullname, request->remove.name, request->remove.namelen, scratch);
 
     fd = linux_open_by_handle(thread,
                               request->fh,
@@ -1037,7 +1039,7 @@ chimera_linux_read(
                                             8,
                                             request->read.iov);
 
-    iov = alloca(request->read.r_niov * sizeof(*iov));
+    iov = request->plugin_data;
 
     for (i = 0; left && i < request->read.r_niov; i++) {
 
@@ -1091,7 +1093,7 @@ chimera_linux_write(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int           fd, i, niov = 0;
+    int           fd, i, niov = 0, flags = 0;
     uint32_t      left, chunk;
     ssize_t       len;
     struct iovec *iov;
@@ -1099,7 +1101,7 @@ chimera_linux_write(
     request->write.r_sync = request->write.sync;
 
 
-    iov = alloca(request->write.niov * sizeof(*iov));
+    iov = request->plugin_data;
 
     left = request->write.length;
     for (i = 0; left && i < request->write.niov; i++) {
@@ -1116,10 +1118,15 @@ chimera_linux_write(
 
     fd = (int) request->write.handle->vfs_private;
 
-    len = pwritev(fd,
-                  iov,
-                  niov,
-                  request->write.offset);
+    if (request->write.sync) {
+        flags = RWF_SYNC;
+    }
+
+    len = pwritev2(fd,
+                   iov,
+                   niov,
+                   request->write.offset,
+                   flags);
 
     if (len < 0) {
         request->status         = chimera_linux_errno_to_status(errno);
@@ -1129,10 +1136,6 @@ chimera_linux_write(
     }
 
     request->write.r_length = len;
-
-    if (request->write.sync) {
-        fsync(fd);
-    }
 
     chimera_linux_map_attrs(request->write.attrmask,
                             &request->write.r_attr,
@@ -1166,9 +1169,10 @@ chimera_linux_symlink(
 {
     struct chimera_linux_thread *thread = private_data;
     int                          fd, rc;
+    char                        *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->symlink.name, request->symlink.namelen);
-    TERM_STR(target, request->symlink.target, request->symlink.targetlen);
+    TERM_STR(fullname, request->symlink.name, request->symlink.namelen, scratch);
+    TERM_STR(target, request->symlink.target, request->symlink.targetlen, scratch);
 
     fd = linux_open_by_handle(thread,
                               request->fh,
@@ -1197,8 +1201,7 @@ chimera_linux_symlink(
                             request->fh_len);
 
     rc = linux_get_fh(fd,
-                      request->symlink.name,
-                      request->symlink.namelen,
+                      fullname,
                       0,
                       request->symlink.r_attr.va_fh,
                       &request->symlink.r_attr.va_fh_len);
@@ -1275,10 +1278,10 @@ chimera_linux_rename(
 {
     struct chimera_linux_thread *thread = private_data;
     int                          old_fd, new_fd, rc;
+    char                        *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->rename.name, request->rename.namelen);
-    TERM_STR(full_newname, request->rename.new_name, request->rename.new_namelen
-             );
+    TERM_STR(fullname, request->rename.name, request->rename.namelen, scratch);
+    TERM_STR(full_newname, request->rename.new_name, request->rename.new_namelen, scratch);
 
     old_fd = linux_open_by_handle(thread,
                                   request->fh,
@@ -1324,8 +1327,9 @@ chimera_linux_link(
 {
     struct chimera_linux_thread *thread = private_data;
     int                          fd, dir_fd, rc;
+    char                        *scratch = (char *) request->plugin_data;
 
-    TERM_STR(fullname, request->link.name, request->link.namelen);
+    TERM_STR(fullname, request->link.name, request->link.namelen, scratch);
 
     fd = linux_open_by_handle(thread,
                               request->fh,
