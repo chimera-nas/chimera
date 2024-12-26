@@ -260,13 +260,13 @@ io_uring_get_fh(
     void        *fh,
     uint32_t    *fh_len)
 {
-    uint8_t              buf[256];
-    static const uint8_t fh_magic = CHIMERA_VFS_FH_MAGIC_IO_URING;
+    uint8_t              buf[sizeof(struct file_handle) + MAX_HANDLE_SZ];
+    static const uint8_t fh_magic = CHIMERA_VFS_FH_MAGIC_LINUX;
     struct file_handle  *handle   = (struct file_handle *) buf;
     int                  rc;
     int                  mount_id;
 
-    handle->handle_bytes = 128;
+    handle->handle_bytes = MAX_HANDLE_SZ;
 
     rc = name_to_handle_at(
         fd,
@@ -279,11 +279,14 @@ io_uring_get_fh(
         return -1;
     }
 
+    chimera_io_uring_abort_if(13 + handle->handle_bytes > CHIMERA_VFS_FH_SIZE,
+                              "Returned handle exceeds CHIMERA_VFS_FH_SIZE");
+
     memcpy(fh, &fh_magic, 1);
     memcpy(fh + 1, &mount_id, 4);
-    memcpy(fh + 5, handle->f_handle, handle->handle_bytes);
+    memcpy(fh + 5, handle, 8 + handle->handle_bytes);
 
-    *fh_len = 5 + handle->handle_bytes;
+    *fh_len = 13 + handle->handle_bytes;
 
     return 0;
 } /* io_uring_get_fh */
@@ -296,8 +299,7 @@ io_uring_open_by_handle(
     unsigned int                    flags)
 {
     struct chimera_io_uring_mount *mount;
-    uint8_t                        buf[256];
-    struct file_handle            *handle   = (struct file_handle *) buf;
+    struct file_handle            *handle   = (struct file_handle *) (fh + 5);
     int                            mount_id = *(int *) (fh + 1);
 
     HASH_FIND_INT(thread->mounts, &mount_id, mount);
@@ -314,10 +316,6 @@ io_uring_open_by_handle(
 
         HASH_ADD_INT(thread->mounts, mount_id, mount);
     }
-
-    handle->handle_type  = 1;
-    handle->handle_bytes = fh_len - 5;
-    memcpy(handle->f_handle, fh + 5, handle->handle_bytes);
 
     return open_by_handle_at(mount->mount_fd, handle, flags);
 } /* io_uring_open_by_handle */
