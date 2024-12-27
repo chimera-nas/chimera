@@ -37,8 +37,7 @@ chimera_nfs3_write_complete(
 
         res.resok.file_wcc.before.attributes_follow = 0;
 
-        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK)
-        {
+        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
             res.resok.file_wcc.after.attributes_follow = 1;
             chimera_nfs3_marshall_attrs(attr,
                                         &res.resok.file_wcc.after.attributes);
@@ -46,11 +45,12 @@ chimera_nfs3_write_complete(
             res.resok.file_wcc.after.attributes_follow = 0;
         }
 
-        chimera_vfs_release(thread->vfs, req->handle);
     } else {
         res.resfail.file_wcc.before.attributes_follow = 0;
         res.resfail.file_wcc.after.attributes_follow  = 0;
     }
+
+    chimera_vfs_release(thread->vfs, req->handle);
 
     shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, &res, msg);
 

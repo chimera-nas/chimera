@@ -151,6 +151,7 @@ chimera_vfs_open_cache_insert(
         chimera_vfs_close(thread, module, fh, fhlen, vfs_private, NULL, NULL);
         chimera_vfs_open_cache_free(shard, handle);
 
+        handle = existing;
     }
 
     pthread_mutex_unlock(&shard->lock);

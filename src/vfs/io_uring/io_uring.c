@@ -524,13 +524,18 @@ chimera_io_uring_thread_init(
 {
     struct chimera_io_uring_thread *thread;
     int                             rc;
+    struct io_uring_params          params = { 0 };
 
     thread = calloc(1, sizeof(*thread));
 
     thread->evpl = evpl;
 
-    // Initialize io_uring
-    rc = io_uring_queue_init(256, &thread->ring, 0);
+    // Set up single issuer mode
+    params.flags  = IORING_SETUP_SINGLE_ISSUER;
+    params.flags |= IORING_SETUP_COOP_TASKRUN;
+
+    // Initialize io_uring with params
+    rc = io_uring_queue_init_params(256, &thread->ring, &params);
 
     chimera_io_uring_abort_if(rc < 0, "Failed to create io_uring queue: %s", strerror(-rc));
 
