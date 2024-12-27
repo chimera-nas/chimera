@@ -12,6 +12,8 @@ struct vfs_open_cache_shard {
     pthread_mutex_t                 lock;
     struct chimera_vfs_open_handle *open_files;
     struct chimera_vfs_open_handle *free_handles;
+    uint64_t                        num_lookups;
+    uint64_t                        num_inserts;
 };
 
 struct vfs_open_cache {
@@ -43,11 +45,21 @@ chimera_vfs_open_cache_init(int num_shard_bits)
 static inline void
 chimera_vfs_open_cache_destroy(struct vfs_open_cache *cache)
 {
+    struct vfs_open_cache_shard *shard;
+    uint64_t                     total_lookups = 0;
+    uint64_t                     total_inserts = 0;
+
     for (int i = 0; i < cache->num_shards; i++) {
-        pthread_mutex_destroy(&cache->shards[i].lock);
+        shard = &cache->shards[i];
+        pthread_mutex_destroy(&shard->lock);
+        total_lookups += shard->num_lookups;
+        total_inserts += shard->num_inserts;
     }
     free(cache->shards);
     free(cache);
+
+    chimera_vfs_info("open cache total lookups %lu total inserts %lu",
+                     total_lookups, total_inserts);
 } /* vfs_open_cache_destroy */
 
 static inline struct chimera_vfs_open_handle *
@@ -109,16 +121,18 @@ chimera_vfs_open_cache_insert(
 
     pthread_mutex_lock(&shard->lock);
 
+    shard->num_inserts++;
+
     handle              = chimera_vfs_open_cache_alloc(shard);
     handle->vfs_module  = module;
-    handle->fh_hash     = fh_hash;
+    handle->fh_hash     = fh_hash & 0xFFFFFFFF;
     handle->fh_len      = fhlen;
     handle->opencnt     = 1;
     handle->vfs_private = vfs_private;
 
     memcpy(handle->fh, fh, fhlen);
 
-    HASH_REPLACE_BYHASHVALUE(hh, shard->open_files, fh, handle->fh_len, fh_hash, handle, existing);
+    HASH_REPLACE_BYHASHVALUE(hh, shard->open_files, fh, handle->fh_len, handle->fh_hash, handle, existing);
 
     if (unlikely(existing)) {
 
@@ -126,7 +140,7 @@ chimera_vfs_open_cache_insert(
 
         /* Remove the new we just added and put the original one back */
         HASH_DEL(shard->open_files, handle);
-        HASH_ADD_BYHASHVALUE(hh, shard->open_files, fh, handle->fh_len, fh_hash, existing);
+        HASH_ADD_BYHASHVALUE(hh, shard->open_files, fh, handle->fh_len, handle->fh_hash, existing);
 
         /* Add our reference to the existing handle */
         existing->opencnt++;
@@ -154,12 +168,15 @@ chimera_vfs_open_cache_lookup(
 {
     struct vfs_open_cache_shard    *shard;
     struct chimera_vfs_open_handle *handle;
+    uint32_t                        _hash = fh_hash & 0xFFFFFFFF;
 
     shard = &cache->shards[fh_hash & cache->shard_mask];
 
     pthread_mutex_lock(&shard->lock);
 
-    HASH_FIND_BYHASHVALUE(hh, shard->open_files, fh, fhlen, fh_hash, handle);
+    shard->num_lookups++;
+
+    HASH_FIND_BYHASHVALUE(hh, shard->open_files, fh, fhlen, _hash, handle);
 
     if (handle) {
         handle->opencnt++;
