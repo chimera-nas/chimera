@@ -64,6 +64,10 @@ struct chimera_io_uring_mount {
     struct UT_hash_handle hh;
 };
 
+struct chimera_io_uring_shared {
+    struct io_uring ring;
+};
+
 struct chimera_io_uring_thread {
     struct evpl                   *evpl;
     int                            eventfd;
@@ -371,13 +375,28 @@ chimera_io_uring_map_attrs(
 static void *
 chimera_io_uring_init(void)
 {
-    return 0;
+    struct chimera_io_uring_shared *shared;
+    struct io_uring_params          params = { 0 };
+    int                             rc;
+
+    shared = calloc(1, sizeof(*shared));
+
+    // Initialize the shared ring with default parameters
+    rc = io_uring_queue_init_params(256, &shared->ring, &params);
+
+    chimera_io_uring_abort_if(rc < 0,
+                              "Failed to create shared io_uring queue: %s", strerror(-rc));
+
+    return shared;
 } /* io_uring_init */
 
 static void
 chimera_io_uring_destroy(void *private_data)
 {
+    struct chimera_io_uring_shared *shared = private_data;
 
+    io_uring_queue_exit(&shared->ring);
+    free(shared);
 } /* io_uring_destroy */
 
 static void
@@ -522,6 +541,7 @@ chimera_io_uring_thread_init(
     struct evpl *evpl,
     void        *private_data)
 {
+    struct chimera_io_uring_shared *shared = private_data;
     struct chimera_io_uring_thread *thread;
     int                             rc;
     struct io_uring_params          params = { 0 };
@@ -534,8 +554,11 @@ chimera_io_uring_thread_init(
     params.flags  = IORING_SETUP_SINGLE_ISSUER;
     params.flags |= IORING_SETUP_COOP_TASKRUN;
 
+    params.flags |= IORING_SETUP_ATTACH_WQ;
+    params.wq_fd  = shared->ring.ring_fd;
+
     // Initialize io_uring with params
-    rc = io_uring_queue_init_params(256, &thread->ring, &params);
+    rc = io_uring_queue_init_params(1024, &thread->ring, &params);
 
     chimera_io_uring_abort_if(rc < 0, "Failed to create io_uring queue: %s", strerror(-rc));
 
