@@ -463,7 +463,7 @@ chimera_io_uring_complete(
     int                                rc, i, parent_fd;
     struct chimera_vfs_request        *request;
     struct chimera_vfs_request_handle *handle;
-    struct statx                      *stx;
+    struct statx                      *dir_stx, *stx;
     const char                        *name;
     struct io_uring_sqe               *sqe;
 
@@ -515,6 +515,39 @@ chimera_io_uring_complete(
                     chimera_io_uring_statx_to_attr(&request->getattr.r_attr, (struct statx *) request->plugin_data);
                 }
                 break;
+            case CHIMERA_VFS_OP_OPEN_AT:
+                if (handle->slot == 0) {
+                    if (cqe->res >= 0) {
+                        request->status                = CHIMERA_VFS_OK;
+                        request->open_at.r_vfs_private = cqe->res;
+                    } else {
+                        request->status = chimera_io_uring_errno_to_status(-cqe->res);
+                    }
+                } else if (handle->slot == 1) {
+                    if (cqe->res == 0) {
+                        dir_stx = (struct statx *) request->plugin_data;
+                        stx     = (struct statx *) (dir_stx + 1);
+                        name    = (char *) (stx + 1);
+
+                        chimera_io_uring_statx_to_attr(&request->open_at.r_attr, stx);
+
+                        parent_fd = request->mkdir.handle->vfs_private;
+
+                        rc = io_uring_get_fh(parent_fd, name, S_ISDIR(stx->stx_mode),
+                                             request->open_at.r_attr.va_fh,
+                                             &request->open_at.r_attr.va_fh_len);
+
+                        if (rc == 0) {
+                            request->open_at.r_attr.va_mask |= CHIMERA_VFS_ATTR_FH;
+                        }
+                    }
+                } else if (handle->slot == 2) {
+                    if (cqe->res == 0) {
+                        dir_stx = (struct statx *) request->plugin_data;
+                        chimera_io_uring_statx_to_attr(&request->open_at.r_dir_attr, dir_stx);
+                    }
+                }
+                break;
             case CHIMERA_VFS_OP_REMOVE:
                 if (cqe->res == 0) {
                     request->status = CHIMERA_VFS_OK;
@@ -535,10 +568,13 @@ chimera_io_uring_complete(
                     } else {
                         request->status = chimera_io_uring_errno_to_status(-cqe->res);
                     }
-                } else {
+                } else if (handle->slot == 1) {
                     if (cqe->res == 0) {
+                        dir_stx = (struct statx *) request->plugin_data;
+                        stx     = (struct statx *) (dir_stx + 1);
+                        name    = (char *) (stx + 1);
 
-                        stx = (struct statx *) request->plugin_data;
+                        chimera_io_uring_statx_to_attr(&request->mkdir.r_attr, dir_stx);
 
                         name = (char *) (stx + 1);
                         chimera_io_uring_statx_to_attr(&request->mkdir.r_attr, stx);
@@ -552,6 +588,11 @@ chimera_io_uring_complete(
                         if (rc == 0) {
                             request->mkdir.r_attr.va_mask |= CHIMERA_VFS_ATTR_FH;
                         }
+                    }
+                } else if (handle->slot == 2) {
+                    if (cqe->res == 0) {
+                        dir_stx = (struct statx *) request->plugin_data;
+                        chimera_io_uring_statx_to_attr(&request->mkdir.r_dir_attr, dir_stx);
                     }
                 }
                 break;
@@ -605,7 +646,7 @@ chimera_io_uring_complete(
 
         io_uring_cqe_seen(&thread->ring, cqe);
 
-        while (thread->pending_requests && thread->inflight + 3 < thread->max_inflight) {
+        while (thread->pending_requests && thread->inflight + CHIMERA_VFS_REQUEST_MAX_HANDLES < thread->max_inflight) {
             request = thread->pending_requests;
             DL_DELETE(thread->pending_requests, request);
             chimera_io_uring_dispatch(request, thread);
@@ -1083,23 +1124,20 @@ chimera_io_uring_open_at(
     struct chimera_io_uring_thread *thread = private_data;
     int                             parent_fd;
     int                             flags;
-    int                             fd;
+    struct statx                   *dir_stx, *stx;
     char                           *scratch = (char *) request->plugin_data;
+    struct io_uring_sqe            *sqe;
+
+    dir_stx  = (struct statx *) scratch;
+    scratch += sizeof(*dir_stx);
+
+    stx      = (struct statx *) scratch;
+    scratch += sizeof(*stx);
 
     TERM_STR(fullname, request->open_at.name, request->open_at.namelen, scratch);
 
-    parent_fd = io_uring_open_by_handle(thread,
-                                        request->fh,
-                                        request->fh_len,
-                                        O_RDONLY | O_DIRECTORY);
+    parent_fd = request->open_at.handle->vfs_private;
 
-    if (parent_fd < 0) {
-        chimera_io_uring_error("io_uring_open_at: open_by_handle() failed: %s",
-                               strerror(errno));
-        request->status = chimera_io_uring_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
     flags = 0;
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_RDONLY) {
@@ -1118,32 +1156,19 @@ chimera_io_uring_open_at(
         flags |= O_CREAT;
     }
 
-    fd = openat(parent_fd,
-                fullname,
-                flags,
-                S_IRWXU /*XXX*/);
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 1);
 
-    if (fd < 0) {
-        chimera_io_uring_error("io_uring_open_at: openat() failed: %s",
-                               strerror(errno));
-        close(parent_fd);
-        request->status = chimera_io_uring_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    io_uring_prep_openat(sqe, parent_fd, fullname, flags, S_IRWXU);
 
-    request->open_at.r_vfs_private = fd;
+    sqe = chimera_io_uring_get_sqe(thread, request, 1, 1);
 
-    close(parent_fd);
+    io_uring_prep_statx(sqe, parent_fd, fullname, 0, AT_STATX_SYNC_AS_STAT, stx);
 
-    chimera_io_uring_map_attrs(request->open_at.attrmask,
-                               &request->open_at.r_attr,
-                               fd,
-                               NULL,
-                               0);
+    sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
 
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, dir_stx);
+
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_open_at */
 
 static void
@@ -1171,7 +1196,10 @@ chimera_io_uring_mkdir(
     int                             fd;
     char                           *scratch = (char *) request->plugin_data;
     struct io_uring_sqe            *sqe;
-    struct statx                   *stx;
+    struct statx                   *dir_stx, *stx;
+
+    dir_stx  = (struct statx *) scratch;
+    scratch += sizeof(*dir_stx);
 
     stx      = (struct statx *) scratch;
     scratch += sizeof(*stx);
@@ -1184,9 +1212,13 @@ chimera_io_uring_mkdir(
 
     io_uring_prep_mkdirat(sqe, fd, fullname, request->mkdir.mode);
 
-    sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
+    sqe = chimera_io_uring_get_sqe(thread, request, 1, 1);
 
     io_uring_prep_statx(sqe, fd, fullname, 0, AT_STATX_SYNC_AS_STAT, stx);
+
+    sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
+
+    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, dir_stx);
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_mkdir */
@@ -1605,7 +1637,7 @@ chimera_io_uring_dispatch(
 {
     struct chimera_io_uring_thread *thread = private_data;
 
-    if (thread->inflight + 3 > thread->max_inflight) {
+    if (thread->inflight + CHIMERA_VFS_REQUEST_MAX_HANDLES > thread->max_inflight) {
         /* We have given the ring too much work already, wait for completions */
         DL_APPEND(thread->pending_requests, request);
         return;

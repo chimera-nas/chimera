@@ -1109,13 +1109,9 @@ memfs_open_at(
     unsigned int              flags  = request->open_at.flags;
     struct chimera_vfs_attrs *r_attr = &request->open_at.r_attr;
 
-    parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
+    parent_inode = (struct memfs_inode *) request->open_at.handle->vfs_private;
 
-    if (!parent_inode) {
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
-    }
+    pthread_mutex_lock(&parent_inode->lock);
 
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);

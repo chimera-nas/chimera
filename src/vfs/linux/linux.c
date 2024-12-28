@@ -768,26 +768,15 @@ chimera_linux_open_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_linux_thread *thread = private_data;
-    int                          parent_fd;
-    int                          flags;
-    int                          fd;
-    char                        *scratch = (char *) request->plugin_data;
+    int   parent_fd;
+    int   flags;
+    int   fd;
+    char *scratch = (char *) request->plugin_data;
 
     TERM_STR(fullname, request->open_at.name, request->open_at.namelen, scratch);
 
-    parent_fd = linux_open_by_handle(thread,
-                                     request->fh,
-                                     request->fh_len,
-                                     O_RDONLY | O_DIRECTORY);
+    parent_fd = request->open_at.handle->vfs_private;
 
-    if (parent_fd < 0) {
-        chimera_linux_error("linux_open_at: open_by_handle() failed: %s",
-                            strerror(errno));
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
     flags = 0;
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_RDONLY) {
@@ -814,15 +803,12 @@ chimera_linux_open_at(
     if (fd < 0) {
         chimera_linux_error("linux_open_at: openat() failed: %s",
                             strerror(errno));
-        close(parent_fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
 
     request->open_at.r_vfs_private = fd;
-
-    close(parent_fd);
 
     chimera_linux_map_attrs(request->open_at.attrmask,
                             &request->open_at.r_attr,

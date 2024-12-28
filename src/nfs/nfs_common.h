@@ -39,6 +39,7 @@ struct nfs_request {
         struct mountargs3       *args_mount;
         struct ACCESS3args      *args_access;
         struct LOOKUP3args      *args_lookup;
+        struct CREATE3args      *args_create;
         struct GETATTR3args     *args_getattr;
         struct FSSTAT3args      *args_fsstat;
         struct READ3args        *args_read;

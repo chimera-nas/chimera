@@ -153,7 +153,7 @@ struct chimera_vfs_request_handle {
     uint8_t slot;
 };
 
-#define CHIMERA_VFS_REQUEST_MAX_HANDLES 2
+#define CHIMERA_VFS_REQUEST_MAX_HANDLES 3
 
 struct chimera_vfs_request {
     struct chimera_vfs_thread        *thread;
@@ -245,13 +245,15 @@ struct chimera_vfs_request {
         } open;
 
         struct {
-            const char              *name;
-            int                      namelen;
-            uint32_t                 flags;
-            uint32_t                 mode;
-            uint64_t                 attrmask;
-            struct chimera_vfs_attrs r_attr;
-            uint64_t                 r_vfs_private;
+            struct chimera_vfs_open_handle *handle;
+            const char                     *name;
+            int                             namelen;
+            uint32_t                        flags;
+            uint32_t                        mode;
+            uint64_t                        attrmask;
+            struct chimera_vfs_attrs        r_attr;
+            struct chimera_vfs_attrs        r_dir_attr;
+            uint64_t                        r_vfs_private;
         } open_at;
 
         struct {
