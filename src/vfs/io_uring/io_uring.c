@@ -286,7 +286,7 @@ io_uring_get_fh(
         return -1;
     }
 
-    chimera_io_uring_abort_if(13 + handle->handle_bytes > CHIMERA_VFS_FH_SIZE,
+    chimera_io_uring_abort_if(14 + handle->handle_bytes > CHIMERA_VFS_FH_SIZE,
                               "Returned handle exceeds CHIMERA_VFS_FH_SIZE");
 
     memcpy(fh, &fh_magic, 1);

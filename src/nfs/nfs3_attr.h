@@ -24,7 +24,16 @@
 static ftype3
 chimera_nfs3_type_from_vfs(uint16_t mode)
 {
-    return (mode & S_IFMT) == S_IFDIR ? NF3DIR : NF3REG;
+    switch (mode & S_IFMT) {
+        case S_IFREG:  return NF3REG;
+        case S_IFDIR:  return NF3DIR;
+        case S_IFBLK:  return NF3BLK;
+        case S_IFCHR:  return NF3CHR;
+        case S_IFLNK:  return NF3LNK;
+        case S_IFSOCK: return NF3SOCK;
+        case S_IFIFO:  return NF3FIFO;
+        default:       return NF3REG;
+    } /* switch */
 } /* chimera_nfs3_type_from_vfs */
 
 static inline void
