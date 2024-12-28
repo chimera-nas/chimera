@@ -32,6 +32,8 @@
     "test_common.h": "c",
     "unistd.h": "c",
     "cstdint": "c",
-    "string.h": "c"
+    "string.h": "c",
+    "evpl.h": "c",
+    "io_uring.h": "c"
   }
 }

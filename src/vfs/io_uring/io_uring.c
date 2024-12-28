@@ -13,6 +13,8 @@
 #include <errno.h>
 #include <liburing.h>
 
+#include "uthash/utlist.h"
+
 #include "vfs/vfs_error.h"
 
 #include "core/evpl.h"
@@ -24,6 +26,11 @@
 #include "common/format.h"
 #include "common/misc.h"
 #include "uthash/uthash.h"
+
+static void
+chimera_io_uring_dispatch(
+    struct chimera_vfs_request *request,
+    void                       *private_data);
 
 #ifndef container_of
 #define container_of(ptr, type, member) ({            \
@@ -74,6 +81,9 @@ struct chimera_io_uring_thread {
     struct evpl_event              event;
     struct evpl_deferral           deferral;
     struct io_uring                ring;
+    uint64_t                       inflight;
+    uint64_t                       max_inflight;
+    struct chimera_vfs_request    *pending_requests;
     struct chimera_io_uring_mount *mounts;
 };
 
@@ -425,6 +435,8 @@ chimera_io_uring_get_sqe(
 
     chimera_io_uring_abort_if(!sge, "io_uring_get_sqe");
 
+    thread->inflight++;
+
     if (linked) {
         io_uring_sqe_set_flags(sge, IOSQE_IO_HARDLINK);
     }
@@ -465,6 +477,8 @@ chimera_io_uring_complete(
     }
 
     while (io_uring_peek_cqe(&thread->ring, &cqe) == 0) {
+
+        thread->inflight--;
 
         handle = (struct chimera_vfs_request_handle *) cqe->user_data;
 
@@ -590,6 +604,12 @@ chimera_io_uring_complete(
         }
 
         io_uring_cqe_seen(&thread->ring, cqe);
+
+        while (thread->pending_requests && thread->inflight + 3 < thread->max_inflight) {
+            request = thread->pending_requests;
+            DL_DELETE(thread->pending_requests, request);
+            chimera_io_uring_dispatch(request, thread);
+        }
     } /* chimera_io_uring_complete */
 } /* chimera_io_uring_complete */
 
@@ -627,8 +647,10 @@ chimera_io_uring_thread_init(
     params.flags |= IORING_SETUP_ATTACH_WQ;
     params.wq_fd  = shared->ring.ring_fd;
 
+    thread->max_inflight = 1024;
+
     // Initialize io_uring with params
-    rc = io_uring_queue_init_params(1024, &thread->ring, &params);
+    rc = io_uring_queue_init_params(thread->max_inflight, &thread->ring, &params);
 
     chimera_io_uring_abort_if(rc < 0, "Failed to create io_uring queue: %s", strerror(-rc));
 
@@ -1581,6 +1603,14 @@ chimera_io_uring_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
+    struct chimera_io_uring_thread *thread = private_data;
+
+    if (thread->inflight + 3 > thread->max_inflight) {
+        /* We have given the ring too much work already, wait for completions */
+        DL_APPEND(thread->pending_requests, request);
+        return;
+    }
+
     switch (request->opcode) {
         case CHIMERA_VFS_OP_LOOKUP_PATH:
             chimera_io_uring_lookup_path(request, private_data);
