@@ -15,20 +15,20 @@ chimera_vfs_remove_complete(struct chimera_vfs_request *request)
 
 void
 chimera_vfs_remove(
-    struct chimera_vfs_thread    *thread,
-    const void                   *fh,
-    int                           fhlen,
-    const char                   *name,
-    int                           namelen,
-    chimera_vfs_remove_callback_t callback,
-    void                         *private_data)
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    const char                     *name,
+    int                             namelen,
+    chimera_vfs_remove_callback_t   callback,
+    void                           *private_data)
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
     request->opcode             = CHIMERA_VFS_OP_REMOVE;
     request->complete           = chimera_vfs_remove_complete;
+    request->remove.handle      = handle;
     request->remove.name        = name;
     request->remove.namelen     = namelen;
     request->proto_callback     = callback;

@@ -209,8 +209,9 @@ struct chimera_vfs_request {
         } access;
 
         struct {
-            uint64_t                 attr_mask;
-            struct chimera_vfs_attrs r_attr;
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        attr_mask;
+            struct chimera_vfs_attrs        r_attr;
         } getattr;
 
         struct {
@@ -229,12 +230,13 @@ struct chimera_vfs_request {
         } readdir;
 
         struct {
-            const char              *name;
-            uint32_t                 name_len;
-            unsigned int             mode;
-            uint64_t                 attrmask;
-            struct chimera_vfs_attrs r_attr;
-            struct chimera_vfs_attrs r_dir_attr;
+            struct chimera_vfs_open_handle *handle;
+            const char                     *name;
+            uint32_t                        name_len;
+            unsigned int                    mode;
+            uint64_t                        attrmask;
+            struct chimera_vfs_attrs        r_attr;
+            struct chimera_vfs_attrs        r_dir_attr;
         } mkdir;
 
         struct {
@@ -289,8 +291,9 @@ struct chimera_vfs_request {
         } commit;
 
         struct {
-            const char *name;
-            int         namelen;
+            struct chimera_vfs_open_handle *handle;
+            const char                     *name;
+            int                             namelen;
         } remove;
 
         struct {

@@ -20,25 +20,25 @@ chimera_vfs_mkdir_complete(struct chimera_vfs_request *request)
 
 void
 chimera_vfs_mkdir(
-    struct chimera_vfs_thread   *thread,
-    const void                  *fh,
-    int                          fhlen,
-    const char                  *name,
-    int                          namelen,
-    unsigned int                 mode,
-    uint64_t                     attrmask,
-    chimera_vfs_mkdir_callback_t callback,
-    void                        *private_data)
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    mode,
+    uint64_t                        attrmask,
+    chimera_vfs_mkdir_callback_t    callback,
+    void                           *private_data)
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
     request->mkdir.r_attr.va_mask     = 0;
     request->mkdir.r_dir_attr.va_mask = 0;
 
     request->opcode             = CHIMERA_VFS_OP_MKDIR;
     request->complete           = chimera_vfs_mkdir_complete;
+    request->mkdir.handle       = handle;
     request->mkdir.name         = name;
     request->mkdir.name_len     = namelen;
     request->mkdir.mode         = mode;

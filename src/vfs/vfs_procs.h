@@ -63,12 +63,11 @@ typedef void (*chimera_vfs_getattr_callback_t)(
 
 void
 chimera_vfs_getattr(
-    struct chimera_vfs_thread     *thread,
-    const void                    *fh,
-    int                            fhlen,
-    uint64_t                       attr_mask,
-    chimera_vfs_getattr_callback_t callback,
-    void                          *private_data);
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        attr_mask,
+    chimera_vfs_getattr_callback_t  callback,
+    void                           *private_data);
 
 typedef void (*chimera_vfs_setattr_callback_t)(
     enum chimera_vfs_error    error_code,
@@ -163,15 +162,14 @@ typedef void (*chimera_vfs_mkdir_callback_t)(
 
 void
 chimera_vfs_mkdir(
-    struct chimera_vfs_thread   *thread,
-    const void                  *fh,
-    int                          fhlen,
-    const char                  *name,
-    int                          namelen,
-    unsigned int                 mode,
-    uint64_t                     attrmask,
-    chimera_vfs_mkdir_callback_t callback,
-    void                        *private_data);
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    mode,
+    uint64_t                        attrmask,
+    chimera_vfs_mkdir_callback_t    callback,
+    void                           *private_data);
 
 typedef void (*chimera_vfs_remove_callback_t)(
     enum chimera_vfs_error error_code,
@@ -179,13 +177,12 @@ typedef void (*chimera_vfs_remove_callback_t)(
 
 void
 chimera_vfs_remove(
-    struct chimera_vfs_thread    *thread,
-    const void                   *fh,
-    int                           fhlen,
-    const char                   *name,
-    int                           namelen,
-    chimera_vfs_remove_callback_t callback,
-    void                         *private_data);
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    const char                     *name,
+    int                             namelen,
+    chimera_vfs_remove_callback_t   callback,
+    void                           *private_data);
 
 typedef void (*chimera_vfs_read_callback_t)(
     enum chimera_vfs_error    error_code,

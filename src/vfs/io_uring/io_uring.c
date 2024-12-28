@@ -78,8 +78,8 @@ struct chimera_io_uring_thread {
 };
 
 #define TERM_STR(name, str, len, scratch) \
-        char *(name) = scratch; \
-        scratch     += (len) + 1; \
+        char *(name) = (scratch); \
+        (scratch)   += (len) + 1; \
         memcpy((name), (str), (len)); \
         (name)[(len)] = '\0';
 
@@ -195,6 +195,9 @@ chimera_io_uring_statvfs_to_attr(
     struct chimera_vfs_attrs *attr,
     struct statvfs           *stvfs)
 {
+
+    attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STATFS;
+
     attr->va_space_total = stvfs->f_blocks * stvfs->f_bsize;
     attr->va_space_free  = stvfs->f_bavail * stvfs->f_bsize;
     attr->va_space_avail = attr->va_space_free;
@@ -260,7 +263,7 @@ static inline int
 io_uring_get_fh(
     int          fd,
     const char  *path,
-    unsigned int flags,
+    unsigned int isdir,
     void        *fh,
     uint32_t    *fh_len)
 {
@@ -277,7 +280,7 @@ io_uring_get_fh(
         path,
         handle,
         &mount_id,
-        flags);
+        *path ? 0 : AT_EMPTY_PATH);
 
     if (rc < 0) {
         return -1;
@@ -288,9 +291,10 @@ io_uring_get_fh(
 
     memcpy(fh, &fh_magic, 1);
     memcpy(fh + 1, &mount_id, 4);
-    memcpy(fh + 5, handle, 8 + handle->handle_bytes);
+    memcpy(fh + 5, &isdir, 1);
+    memcpy(fh + 6, handle, 8 + handle->handle_bytes);
 
-    *fh_len = 13 + handle->handle_bytes;
+    *fh_len = 14 + handle->handle_bytes;
 
     return 0;
 } /* io_uring_get_fh */
@@ -303,7 +307,7 @@ io_uring_open_by_handle(
     unsigned int                    flags)
 {
     struct chimera_io_uring_mount *mount;
-    struct file_handle            *handle   = (struct file_handle *) (fh + 5);
+    struct file_handle            *handle   = (struct file_handle *) (fh + 6);
     int                            mount_id = *(int *) (fh + 1);
 
     HASH_FIND_INT(thread->mounts, &mount_id, mount);
@@ -336,13 +340,24 @@ chimera_io_uring_map_attrs(
     struct stat    st;
     struct statvfs stvfs;
 
+    if (attrmask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH)) {
+
+        rc = fstat(fd, &st);
+
+        if (rc) {
+            return;
+        }
+
+        chimera_io_uring_stat_to_attr(attr, &st);
+    }
+
     if (attrmask & CHIMERA_VFS_ATTR_FH) {
         if (fh) {
             attr->va_mask |= CHIMERA_VFS_ATTR_FH;
             memcpy(attr->va_fh, fh, fhlen);
             attr->va_fh_len = fhlen;
         } else {
-            rc = io_uring_get_fh(fd, "", AT_EMPTY_PATH,
+            rc = io_uring_get_fh(fd, "", S_ISDIR(st.st_mode),
                                  attr->va_fh,
                                  &attr->va_fh_len);
 
@@ -352,20 +367,10 @@ chimera_io_uring_map_attrs(
         }
     }
 
-    if (attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
-
-        rc = fstat(fd, &st);
-
-        if (rc == 0) {
-            chimera_io_uring_stat_to_attr(attr, &st);
-        }
-    }
-
     if (attrmask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         rc = fstatvfs(fd, &stvfs);
 
         if (rc == 0) {
-            attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STATFS;
             chimera_io_uring_statvfs_to_attr(attr, &stvfs);
         }
     }
@@ -407,9 +412,11 @@ chimera_io_uring_complete(
     struct chimera_io_uring_thread    *thread;
     uint64_t                           value;
     struct io_uring_cqe               *cqe;
-    int                                rc, i;
+    int                                rc, i, parent_fd;
     struct chimera_vfs_request        *request;
     struct chimera_vfs_request_handle *handle;
+    struct statx                      *stx;
+    const char                        *name;
 
     thread = container_of(event, struct chimera_io_uring_thread, event);
 
@@ -433,7 +440,14 @@ chimera_io_uring_complete(
                 if (cqe->res >= 0) {
                     request->status = CHIMERA_VFS_OK;
 
-                    rc = io_uring_get_fh(cqe->res, "", AT_EMPTY_PATH,
+                    stx = (struct statx *) request->plugin_data;
+
+                    name = (char *) (stx + 1);
+                    chimera_io_uring_statx_to_attr(&request->lookup.r_attr, stx);
+
+                    parent_fd = request->lookup.handle->vfs_private;
+
+                    rc = io_uring_get_fh(parent_fd, name, S_ISDIR(stx->stx_mode),
                                          request->lookup.r_attr.va_fh,
                                          &request->lookup.r_attr.va_fh_len);
 
@@ -442,10 +456,27 @@ chimera_io_uring_complete(
                     } else {
                         request->status = chimera_io_uring_errno_to_status(errno);
                     }
-
-                    close(cqe->res);
                 } else {
                     request->status = chimera_io_uring_errno_to_status(-cqe->res);
+                }
+                break;
+            case CHIMERA_VFS_OP_GETATTR:
+                if (cqe->res == 0) {
+                    request->status = CHIMERA_VFS_OK;
+                    chimera_io_uring_statx_to_attr(&request->getattr.r_attr, (struct statx *) request->plugin_data);
+                }
+                break;
+            case CHIMERA_VFS_OP_MKDIR:
+                if (handle->slot == 0) {
+                    if (cqe->res == 0) {
+                        request->status = CHIMERA_VFS_OK;
+                    } else {
+                        request->status = chimera_io_uring_errno_to_status(-cqe->res);
+                    }
+                } else {
+                    if (cqe->res == 0) {
+                        chimera_io_uring_statx_to_attr(&request->mkdir.r_attr, (struct statx *) request->plugin_data);
+                    }
                 }
                 break;
             case CHIMERA_VFS_OP_READ:
@@ -468,11 +499,17 @@ chimera_io_uring_complete(
                 }
                 break;
             case CHIMERA_VFS_OP_WRITE:
-                if (cqe->res >= 0) {
-                    request->status         = CHIMERA_VFS_OK;
-                    request->write.r_length = cqe->res;
+                if (handle->slot == 0) {
+                    if (cqe->res >= 0) {
+                        request->status         = CHIMERA_VFS_OK;
+                        request->write.r_length = cqe->res;
+                    } else {
+                        request->status = chimera_io_uring_errno_to_status(-cqe->res);
+                    }
                 } else {
-                    request->status = chimera_io_uring_errno_to_status(-cqe->res);
+                    if (cqe->res == 0) {
+                        chimera_io_uring_statx_to_attr(&request->write.r_attr, (struct statx *) request->plugin_data);
+                    }
                 }
                 break;
             default:
@@ -491,7 +528,7 @@ chimera_io_uring_complete(
         }
 
         io_uring_cqe_seen(&thread->ring, cqe);
-    }
+    } /* chimera_io_uring_complete */
 } /* chimera_io_uring_complete */
 
 static void
@@ -609,32 +646,31 @@ chimera_io_uring_getattr(
     void                       *private_data)
 {
     struct chimera_io_uring_thread *thread = private_data;
-    int                             fd;
+    int                             fd, rc;
+    struct io_uring_sqe            *sqe;
+    struct statx                   *stx;
+    struct statvfs                  stv;
+    char                           *scratch = (char *) request->plugin_data;
 
     request->getattr.r_attr.va_mask = 0;
 
-    fd = io_uring_open_by_handle(thread,
-                                 request->fh,
-                                 request->fh_len,
-                                 O_PATH | O_RDONLY);
+    fd = (int) request->getattr.handle->vfs_private;
 
-    if (fd < 0) {
-        request->status = chimera_io_uring_errno_to_status(errno);
-        request->complete(request);
-        return;
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
+
+    stx = (struct statx *) scratch;
+
+    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
+
+    if (request->getattr.attr_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+        rc = fstatvfs(fd, &stv);
+
+        if (rc == 0) {
+            chimera_io_uring_statvfs_to_attr(&request->getattr.r_attr, &stv);
+        }
     }
 
-    chimera_io_uring_map_attrs(request->getattr.attr_mask,
-                               &request->getattr.r_attr,
-                               fd,
-                               request->fh,
-                               request->fh_len);
-
-
-    close(fd);
-
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_getattr */
 
 static void
@@ -813,7 +849,7 @@ chimera_io_uring_lookup_path(
 
     rc = io_uring_get_fh(mount_fd,
                          fullpath,
-                         0,
+                         1,
                          r_attr->va_fh,
                          &r_attr->va_fh_len);
 
@@ -838,14 +874,19 @@ chimera_io_uring_lookup(
     struct io_uring_sqe            *sqe;
     int                             parent_fd;
     char                           *scratch = (char *) request->plugin_data;
+    struct statx                   *stx;
 
     parent_fd = (int) request->lookup.handle->vfs_private;
+
+    stx = (struct statx *) scratch;
+
+    scratch += sizeof(*stx);
 
     TERM_STR(fullname, request->lookup.component, request->lookup.component_len, scratch);
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    io_uring_prep_openat(sqe, parent_fd, fullname, O_RDONLY | O_PATH | O_NOFOLLOW, 0);
+    io_uring_prep_statx(sqe, parent_fd, fullname, 0, AT_STATX_SYNC_AS_STAT, stx);
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_lookup */
@@ -1067,73 +1108,27 @@ chimera_io_uring_mkdir(
     void                       *private_data)
 {
     struct chimera_io_uring_thread *thread = private_data;
-    int                             fd, rc;
+    int                             fd;
     char                           *scratch = (char *) request->plugin_data;
+    struct io_uring_sqe            *sqe;
+    struct statx                   *stx;
+
+    stx      = (struct statx *) scratch;
+    scratch += sizeof(*stx);
 
     TERM_STR(fullname, request->mkdir.name, request->mkdir.name_len, scratch);
 
-    fd = io_uring_open_by_handle(thread,
-                                 request->fh,
-                                 request->fh_len,
-                                 O_PATH | O_RDONLY | O_NOFOLLOW);
+    fd = request->mkdir.handle->vfs_private;
 
-    if (fd < 0) {
-        request->status = chimera_io_uring_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 1);
 
-    rc = mkdirat(fd, fullname, request->mkdir.mode);
+    io_uring_prep_mkdirat(sqe, fd, fullname, request->mkdir.mode);
 
-    if (rc < 0) {
-        close(fd);
-        request->status = chimera_io_uring_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
 
-    chimera_io_uring_map_attrs(request->mkdir.attrmask,
-                               &request->mkdir.r_dir_attr,
-                               fd,
-                               request->fh,
-                               request->fh_len);
+    io_uring_prep_statx(sqe, fd, fullname, 0, AT_STATX_SYNC_AS_STAT, stx);
 
-
-    rc = io_uring_get_fh(fd, fullname, 0,
-                         request->mkdir.r_attr.va_fh,
-                         &request->mkdir.r_attr.va_fh_len);
-
-    if (rc < 0) {
-        close(fd);
-        request->status = chimera_io_uring_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
-
-    request->mkdir.r_attr.va_mask |= CHIMERA_VFS_ATTR_FH;
-
-    close(fd);
-
-
-    if (request->mkdir.attrmask) {
-
-        fd = io_uring_open_by_handle(thread,
-                                     request->mkdir.r_attr.va_fh,
-                                     request->mkdir.r_attr.va_fh_len,
-                                     O_RDONLY);
-
-        if (fd >= 0) {
-            chimera_io_uring_map_attrs(request->mkdir.attrmask & ~CHIMERA_VFS_ATTR_FH,
-                                       &request->mkdir.r_attr,
-                                       fd,
-                                       request->mkdir.r_attr.va_fh,
-                                       request->mkdir.r_attr.va_fh_len);
-            close(fd);
-        }
-    }
-
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_mkdir */
 
 static void
@@ -1142,40 +1137,19 @@ chimera_io_uring_remove(
     void                       *private_data)
 {
     struct chimera_io_uring_thread *thread = private_data;
-    int                             fd, rc;
+    int                             fd;
     char                           *scratch = (char *) request->plugin_data;
+    struct io_uring_sqe            *sqe;
 
     TERM_STR(fullname, request->remove.name, request->remove.namelen, scratch);
 
-    fd = io_uring_open_by_handle(thread,
-                                 request->fh,
-                                 request->fh_len,
-                                 O_PATH | O_RDONLY | O_NOFOLLOW);
+    fd = request->remove.handle->vfs_private;
 
-    if (fd < 0) {
-        request->status = chimera_io_uring_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    rc = unlinkat(fd, fullname, 0);
+    io_uring_prep_unlinkat(sqe, fd, fullname, 0);
 
-    if (rc == -1 && errno == EISDIR) {
-        /* XXX maybe flag in the filehandle to know this is a dir
-         * beforehand?
-         */
-        rc = unlinkat(fd, fullname, AT_REMOVEDIR);
-    }
-
-    close(fd);
-
-    if (rc) {
-        request->status = chimera_io_uring_errno_to_status(errno);
-    } else {
-        request->status = CHIMERA_VFS_OK;
-    }
-
-    request->complete(request);
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_remove */
 
 static void
@@ -1300,8 +1274,12 @@ chimera_io_uring_write(
     uint32_t                        left, chunk;
     struct iovec                   *iov;
     int                             flags = 0;
+    struct statx                   *stx;
+    void                           *scratch = request->plugin_data;
 
-    sge = chimera_io_uring_get_sqe(thread, request, 0, 0);
+    stx = (struct statx *) scratch;
+
+    sge = chimera_io_uring_get_sqe(thread, request, 0, 1);
 
     request->write.r_sync = request->write.sync;
 
@@ -1327,6 +1305,10 @@ chimera_io_uring_write(
     }
 
     io_uring_prep_writev2(sge, fd, iov, niov, request->write.offset, flags);
+
+    sge = chimera_io_uring_get_sqe(thread, request, 1, 0);
+
+    io_uring_prep_statx(sge, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
 
     evpl_defer(thread->evpl, &thread->deferral);
 

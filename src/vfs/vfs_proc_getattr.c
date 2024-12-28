@@ -20,19 +20,19 @@ chimera_vfs_getattr_complete(struct chimera_vfs_request *request)
 
 void
 chimera_vfs_getattr(
-    struct chimera_vfs_thread     *thread,
-    const void                    *fh,
-    int                            fhlen,
-    uint64_t                       req_attr_mask,
-    chimera_vfs_getattr_callback_t callback,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        req_attr_mask,
+    chimera_vfs_getattr_callback_t  callback,
+    void                           *private_data)
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
     request->opcode             = CHIMERA_VFS_OP_GETATTR;
     request->complete           = chimera_vfs_getattr_complete;
+    request->getattr.handle     = handle;
     request->getattr.attr_mask  = req_attr_mask;
     request->proto_callback     = callback;
     request->proto_private_data = private_data;

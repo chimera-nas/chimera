@@ -131,6 +131,9 @@ chimera_linux_stat_to_attr(
     struct chimera_vfs_attrs *attr,
     struct stat              *st)
 {
+
+    attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
+
     attr->va_dev   = st->st_dev;
     attr->va_ino   = st->st_ino;
     attr->va_mode  = st->st_mode;
@@ -212,11 +215,11 @@ open_mount_path_by_id(int mount_id)
 
 static inline int
 linux_get_fh(
-    int          fd,
-    const char  *path,
-    unsigned int flags,
-    void        *fh,
-    uint32_t    *fh_len)
+    int         fd,
+    const char *path,
+    uint8_t     isdir,
+    void       *fh,
+    uint32_t   *fh_len)
 {
     uint8_t              buf[sizeof(struct file_handle) + MAX_HANDLE_SZ];
     static const uint8_t fh_magic = CHIMERA_VFS_FH_MAGIC_LINUX;
@@ -231,7 +234,7 @@ linux_get_fh(
         path,
         handle,
         &mount_id,
-        flags);
+        *path ? 0 : AT_EMPTY_PATH);
 
     if (rc < 0) {
         return -1;
@@ -242,12 +245,19 @@ linux_get_fh(
 
     memcpy(fh, &fh_magic, 1);
     memcpy(fh + 1, &mount_id, 4);
-    memcpy(fh + 5, handle, 8 + handle->handle_bytes);
+    memcpy(fh + 5, &isdir, 1);
+    memcpy(fh + 6, handle, 8 + handle->handle_bytes);
 
-    *fh_len = 13 + handle->handle_bytes;
+    *fh_len = 14 + handle->handle_bytes;
 
     return 0;
 } /* linux_get_fh */
+
+static inline int
+linux_fh_is_dir(const void *fh)
+{
+    return *(uint8_t *) (fh + 5);
+} /* linux_fh_is_dir */
 
 static inline int
 linux_open_by_handle(
@@ -257,7 +267,7 @@ linux_open_by_handle(
     unsigned int                 flags)
 {
     struct chimera_linux_mount *mount;
-    struct file_handle         *handle   = (struct file_handle *) (fh + 5);
+    struct file_handle         *handle   = (struct file_handle *) (fh + 6);
     int                         mount_id = *(int *) (fh + 1);
 
     HASH_FIND_INT(thread->mounts, &mount_id, mount);
@@ -290,29 +300,30 @@ chimera_linux_map_attrs(
     struct stat    st;
     struct statvfs stvfs;
 
+    if (attrmask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH)) {
+
+        rc = fstat(fd, &st);
+
+        if (rc) {
+            return;
+        }
+
+        chimera_linux_stat_to_attr(attr, &st);
+    }
+
     if (attrmask & CHIMERA_VFS_ATTR_FH) {
         if (fh) {
             attr->va_mask |= CHIMERA_VFS_ATTR_FH;
             memcpy(attr->va_fh, fh, fhlen);
             attr->va_fh_len = fhlen;
         } else {
-            rc = linux_get_fh(fd, "", AT_EMPTY_PATH,
+            rc = linux_get_fh(fd, "", S_ISDIR(st.st_mode),
                               attr->va_fh,
                               &attr->va_fh_len);
 
             if (rc  == 0) {
                 attr->va_mask |= CHIMERA_VFS_ATTR_FH;
             }
-        }
-    }
-
-    if (attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
-
-        rc = fstat(fd, &st);
-
-        if (rc == 0) {
-            attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
-            chimera_linux_stat_to_attr(attr, &st);
         }
     }
 
@@ -373,21 +384,11 @@ chimera_linux_getattr(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_linux_thread *thread = private_data;
-    int                          fd;
+    int fd;
 
     request->getattr.r_attr.va_mask = 0;
 
-    fd = linux_open_by_handle(thread,
-                              request->fh,
-                              request->fh_len,
-                              O_PATH | O_RDONLY);
-
-    if (fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    fd = (int) request->getattr.handle->vfs_private;
 
     chimera_linux_map_attrs(request->getattr.attr_mask,
                             &request->getattr.r_attr,
@@ -395,8 +396,6 @@ chimera_linux_getattr(
                             request->fh,
                             request->fh_len);
 
-
-    close(fd);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -578,7 +577,7 @@ chimera_linux_lookup_path(
 
     rc = linux_get_fh(mount_fd,
                       fullpath,
-                      0,
+                      1,
                       r_attr->va_fh,
                       &r_attr->va_fh_len);
 
@@ -729,6 +728,7 @@ chimera_linux_open(
     struct chimera_linux_thread *thread = private_data;
     int                          flags  = 0;
     int                          fd;
+    int                          isdir = linux_fh_is_dir(request->fh);
 
     if (request->open.flags & CHIMERA_VFS_OPEN_RDONLY) {
         flags |= O_RDONLY;
@@ -739,7 +739,11 @@ chimera_linux_open(
     }
 
     if (request->open.flags & CHIMERA_VFS_OPEN_RDWR) {
-        flags |= O_RDWR;
+        if (isdir) {
+            flags |= O_RDONLY;
+        } else {
+            flags |= O_RDWR;
+        }
     }
 
     fd = linux_open_by_handle(thread,
@@ -854,21 +858,11 @@ chimera_linux_mkdir(
 
     TERM_STR(fullname, request->mkdir.name, request->mkdir.name_len, scratch);
 
-    fd = linux_open_by_handle(thread,
-                              request->fh,
-                              request->fh_len,
-                              O_PATH | O_RDONLY | O_NOFOLLOW);
-
-    if (fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    fd = request->mkdir.handle->vfs_private;
 
     rc = mkdirat(fd, fullname, request->mkdir.mode);
 
     if (rc < 0) {
-        close(fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -881,21 +875,17 @@ chimera_linux_mkdir(
                             request->fh_len);
 
 
-    rc = linux_get_fh(fd, fullname, 0,
+    rc = linux_get_fh(fd, fullname, 1,
                       request->mkdir.r_attr.va_fh,
                       &request->mkdir.r_attr.va_fh_len);
 
     if (rc < 0) {
-        close(fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
 
     request->mkdir.r_attr.va_mask |= CHIMERA_VFS_ATTR_FH;
-
-    close(fd);
-
 
     if (request->mkdir.attrmask) {
 
@@ -923,33 +913,18 @@ chimera_linux_remove(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_linux_thread *thread = private_data;
-    int                          fd, rc;
-    char                        *scratch = (char *) request->plugin_data;
+    int   fd, rc;
+    char *scratch = (char *) request->plugin_data;
 
     TERM_STR(fullname, request->remove.name, request->remove.namelen, scratch);
 
-    fd = linux_open_by_handle(thread,
-                              request->fh,
-                              request->fh_len,
-                              O_PATH | O_RDONLY | O_NOFOLLOW);
-
-    if (fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    fd = request->remove.handle->vfs_private;
 
     rc = unlinkat(fd, fullname, 0);
 
     if (rc == -1 && errno == EISDIR) {
-        /* XXX maybe flag in the filehandle to know this is a dir
-         * beforehand?
-         */
         rc = unlinkat(fd, fullname, AT_REMOVEDIR);
     }
-
-    close(fd);
 
     if (rc) {
         request->status = chimera_linux_errno_to_status(errno);

@@ -10,10 +10,8 @@ chimera_nfs4_getattr_complete(
     void                     *private_data)
 {
     struct nfs_request  *req  = private_data;
-    struct GETATTR4args *args = &req->args_compound->argarray[req->index].
-        opgetattr;
-    struct GETATTR4res  *res = &req->res_compound.resarray[req->index].opgetattr
-    ;
+    struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
+    struct GETATTR4res  *res  = &req->res_compound.resarray[req->index].opgetattr;
 
     res->status = NFS4_OK;
 
@@ -35,8 +33,35 @@ chimera_nfs4_getattr_complete(
                                 res->resok4.obj_attributes.attr_vals.data,
                                 &res->resok4.obj_attributes.attr_vals.len);
 
+    chimera_vfs_release(req->thread->vfs, req->handle);
+
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_getattr_complete */
+
+static void
+chimera_nfs4_getattr_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request  *req  = private_data;
+    struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        req->handle = handle;
+
+        uint64_t attr_mask = chimera_nfs4_getattr2mask(args->attr_request,
+                                                       args->num_attr_request);
+
+        chimera_vfs_getattr(req->thread->vfs,
+                            handle,
+                            attr_mask,
+                            chimera_nfs4_getattr_complete,
+                            req);
+    } else {
+        chimera_nfs4_compound_complete(req, chimera_nfs4_errno_to_nfsstat4(error_code));
+    }
+} /* chimera_nfs4_getattr_open_callback */
 
 void
 chimera_nfs4_getattr(
@@ -45,16 +70,10 @@ chimera_nfs4_getattr(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    uint64_t             attr_mask = 0;
-    struct GETATTR4args *args      = &argop->opgetattr;
-
-    attr_mask = chimera_nfs4_getattr2mask(args->attr_request,
-                                          args->num_attr_request);
-
-    chimera_vfs_getattr(thread->vfs,
-                        req->fh,
-                        req->fhlen,
-                        attr_mask,
-                        chimera_nfs4_getattr_complete,
-                        req);
+    chimera_vfs_open(thread->vfs,
+                     req->fh,
+                     req->fhlen,
+                     CHIMERA_VFS_OPEN_RDWR,
+                     chimera_nfs4_getattr_open_callback,
+                     req);
 } /* chimera_nfs4_getattr */

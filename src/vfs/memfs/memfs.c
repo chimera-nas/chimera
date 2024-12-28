@@ -644,15 +644,9 @@ memfs_getattr(
     struct chimera_vfs_attrs *attr      = &request->getattr.r_attr;
     struct memfs_inode       *inode;
 
-    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
+    inode = (struct memfs_inode *) request->getattr.handle->vfs_private;
 
-    if (!inode) {
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
-    }
-
-    request->status = CHIMERA_VFS_OK;
+    pthread_mutex_lock(&inode->lock);
 
     attr->va_mask = attr_mask;
 
@@ -665,6 +659,7 @@ memfs_getattr(
 
     pthread_mutex_unlock(&inode->lock);
 
+    request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* memfs_getattr */
 
@@ -756,6 +751,7 @@ memfs_lookup(
 
     inode = (struct memfs_inode *) request->lookup.handle->vfs_private;
 
+    pthread_mutex_lock(&inode->lock);
     if (unlikely(!S_ISDIR(inode->mode))) {
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_ENOENT;
@@ -828,7 +824,9 @@ memfs_mkdir(
                                 request->mkdir.name,
                                 request->mkdir.name_len);
 
-    parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
+    parent_inode = (struct memfs_inode *) request->mkdir.handle->vfs_private;
+
+    pthread_mutex_lock(&parent_inode->lock);
 
     if (!parent_inode) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -909,13 +907,9 @@ memfs_remove(
     struct memfs_inode  *parent_inode, *inode;
     struct memfs_dirent *dirent;
 
-    parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
+    parent_inode = (struct memfs_inode *) request->remove.handle->vfs_private;
 
-    if (!parent_inode) {
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
-    }
+    pthread_mutex_lock(&parent_inode->lock);
 
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -1749,7 +1743,7 @@ memfs_link(
     }
 
     HASH_FIND(hh, parent_inode->dir.dirents,
-              request->mkdir.name, request->mkdir.name_len,
+              request->link.name, request->link.namelen,
               existing_dirent);
 
     if (existing_dirent) {
