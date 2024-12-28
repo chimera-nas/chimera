@@ -531,7 +531,7 @@ chimera_io_uring_complete(
 
                         chimera_io_uring_statx_to_attr(&request->open_at.r_attr, stx);
 
-                        parent_fd = request->mkdir.handle->vfs_private;
+                        parent_fd = request->open_at.handle->vfs_private;
 
                         rc = io_uring_get_fh(parent_fd, name, S_ISDIR(stx->stx_mode),
                                              request->open_at.r_attr.va_fh,

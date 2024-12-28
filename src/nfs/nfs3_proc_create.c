@@ -24,11 +24,17 @@ chimera_nfs3_create_open_at_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-        res.resok.obj.handle_follows = 1;
-        xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
-                             handle->fh,
-                             handle->fh_len,
-                             msg->dbuf);
+
+        if (attr->va_mask & CHIMERA_VFS_ATTR_FH) {
+            res.resok.obj.handle_follows = 1;
+            xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
+                                 handle->fh,
+                                 handle->fh_len,
+                                 msg->dbuf);
+
+        } else {
+            res.resok.obj.handle_follows = 0;
+        }
 
         if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
             res.resok.obj_attributes.attributes_follow = 1;
