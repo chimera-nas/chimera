@@ -523,7 +523,21 @@ chimera_io_uring_complete(
                     }
                 } else {
                     if (cqe->res == 0) {
-                        chimera_io_uring_statx_to_attr(&request->mkdir.r_attr, (struct statx *) request->plugin_data);
+
+                        stx = (struct statx *) request->plugin_data;
+
+                        name = (char *) (stx + 1);
+                        chimera_io_uring_statx_to_attr(&request->mkdir.r_attr, stx);
+
+                        parent_fd = request->mkdir.handle->vfs_private;
+
+                        rc = io_uring_get_fh(parent_fd, name, S_ISDIR(stx->stx_mode),
+                                             request->mkdir.r_attr.va_fh,
+                                             &request->mkdir.r_attr.va_fh_len);
+
+                        if (rc == 0) {
+                            request->mkdir.r_attr.va_mask |= CHIMERA_VFS_ATTR_FH;
+                        }
                     }
                 }
                 break;
