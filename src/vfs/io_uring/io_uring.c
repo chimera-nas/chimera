@@ -316,6 +316,7 @@ io_uring_open_by_handle(
     struct file_handle            *handle   = (struct file_handle *) (fh + 6);
     int                            mount_id = *(int *) (fh + 1);
 
+
     HASH_FIND_INT(thread->mounts, &mount_id, mount);
 
     if (!mount) {
