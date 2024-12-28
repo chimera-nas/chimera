@@ -520,6 +520,23 @@ chimera_io_uring_complete(
                     if (cqe->res >= 0) {
                         request->status                = CHIMERA_VFS_OK;
                         request->open_at.r_vfs_private = cqe->res;
+
+                        dir_stx = (struct statx *) request->plugin_data;
+                        stx     = (struct statx *) (dir_stx + 1);
+                        name    = (char *) (stx + 1);
+
+                        parent_fd = request->open_at.handle->vfs_private;
+
+                        sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
+
+                        io_uring_prep_statx(sqe, parent_fd, name, 0, AT_STATX_SYNC_AS_STAT, stx);
+
+                        sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
+
+                        io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, dir_stx);
+
+                        evpl_defer(thread->evpl, &thread->deferral);
+
                     } else {
                         request->status = chimera_io_uring_errno_to_status(-cqe->res);
                     }
@@ -1124,15 +1141,10 @@ chimera_io_uring_open_at(
     struct chimera_io_uring_thread *thread = private_data;
     int                             parent_fd;
     int                             flags;
-    struct statx                   *dir_stx, *stx;
     char                           *scratch = (char *) request->plugin_data;
     struct io_uring_sqe            *sqe;
 
-    dir_stx  = (struct statx *) scratch;
-    scratch += sizeof(*dir_stx);
-
-    stx      = (struct statx *) scratch;
-    scratch += sizeof(*stx);
+    scratch += 2 * sizeof(struct statx);
 
     TERM_STR(fullname, request->open_at.name, request->open_at.namelen, scratch);
 
@@ -1156,17 +1168,9 @@ chimera_io_uring_open_at(
         flags |= O_CREAT;
     }
 
-    sqe = chimera_io_uring_get_sqe(thread, request, 0, 1);
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     io_uring_prep_openat(sqe, parent_fd, fullname, flags, S_IRWXU);
-
-    sqe = chimera_io_uring_get_sqe(thread, request, 1, 1);
-
-    io_uring_prep_statx(sqe, parent_fd, fullname, 0, AT_STATX_SYNC_AS_STAT, stx);
-
-    sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
-
-    io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, dir_stx);
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_open_at */
