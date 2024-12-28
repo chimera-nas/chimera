@@ -857,7 +857,7 @@ chimera_io_uring_lookup_path(
              request->lookup_path.pathlen,
              scratch);
 
-    mount_fd = open(fullpath, O_DIRECTORY | O_RDONLY);
+    mount_fd = open(fullpath, O_DIRECTORY | O_RDONLY | O_NOFOLLOW);
 
     if (mount_fd < 0) {
         request->status = chimera_io_uring_errno_to_status(errno);
