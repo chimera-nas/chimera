@@ -142,7 +142,6 @@ typedef void (*chimera_vfs_close_callback_t)(
 void
 chimera_vfs_close(
     struct chimera_vfs_thread   *thread,
-    struct chimera_vfs_module   *module,
     const void                  *fh,
     uint32_t                     fhlen,
     uint64_t                     vfs_private,

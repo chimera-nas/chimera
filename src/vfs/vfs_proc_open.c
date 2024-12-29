@@ -3,29 +3,14 @@
 #include "vfs_internal.h"
 #include "common/misc.h"
 #include "vfs_open_cache.h"
+
 static void
-chimera_vfs_open_complete(struct chimera_vfs_request *request)
+chimera_vfs_open_hdl_callback(
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
 {
-    struct chimera_vfs_thread      *thread   = request->thread;
-    chimera_vfs_open_callback_t     callback = request->proto_callback;
-    struct chimera_vfs_module      *module;
-    struct chimera_vfs_open_handle *handle =  NULL;
-
-    if (request->status == CHIMERA_VFS_OK) {
-
-        module = chimera_vfs_get_module(thread,
-                                        request->fh,
-                                        request->fh_len);
-
-        handle = chimera_vfs_open_cache_insert(
-            thread,
-            thread->vfs->vfs_open_cache,
-            module,
-            request->fh,
-            request->fh_len,
-            request->fh_hash,
-            request->open.r_vfs_private);
-    }
+    struct chimera_vfs_request *request  = private_data;
+    chimera_vfs_open_callback_t callback = request->proto_callback;
 
     chimera_vfs_complete(request);
 
@@ -34,6 +19,35 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
+
+} /* chimera_vfs_open_hdl_callback */
+
+static void
+chimera_vfs_open_complete(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_thread *thread = request->thread;
+    struct chimera_vfs_module *module;
+
+    if (request->status == CHIMERA_VFS_OK) {
+
+        module = chimera_vfs_get_module(thread,
+                                        request->fh,
+                                        request->fh_len);
+
+        chimera_vfs_open_cache_insert(
+            thread,
+            thread->vfs->vfs_open_cache,
+            module,
+            request->fh,
+            request->fh_len,
+            request->fh_hash,
+            request->open.r_vfs_private,
+            chimera_vfs_open_hdl_callback,
+            request);
+    } else {
+        chimera_vfs_open_hdl_callback(NULL, request);
+    }
+
 } /* chimera_vfs_open_complete */
 
 void

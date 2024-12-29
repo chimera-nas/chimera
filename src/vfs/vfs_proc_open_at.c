@@ -5,31 +5,12 @@
 #include "vfs_open_cache.h"
 
 static void
-chimera_vfs_open_complete(struct chimera_vfs_request *request)
+chimera_vfs_open_at_hdl_callback(
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
 {
-    struct chimera_vfs_thread      *thread   = request->thread;
-    chimera_vfs_open_at_callback_t  callback = request->proto_callback;
-    struct chimera_vfs_open_handle *handle;
-    uint64_t                        fh_hash;
-
-    if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_abort_if(!(request->open_at.r_attr.va_mask & CHIMERA_VFS_ATTR_FH),
-                             "open_at: no fh returned from vfs module");
-
-        fh_hash = XXH3_64bits(request->open_at.r_attr.va_fh,
-                              request->open_at.r_attr.va_fh_len);
-
-        handle = chimera_vfs_open_cache_insert(
-            thread,
-            thread->vfs->vfs_open_cache,
-            request->module,
-            request->open_at.r_attr.va_fh,
-            request->open_at.r_attr.va_fh_len,
-            fh_hash,
-            request->open_at.r_vfs_private);
-    } else {
-        handle = NULL;
-    }
+    struct chimera_vfs_request    *request  = private_data;
+    chimera_vfs_open_at_callback_t callback = request->proto_callback;
 
     chimera_vfs_complete(request);
 
@@ -40,6 +21,35 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
+} /* chimera_vfs_open_at_hdl_callback */
+
+static void
+chimera_vfs_open_complete(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_thread *thread = request->thread;
+    uint64_t                   fh_hash;
+
+    if (request->status == CHIMERA_VFS_OK) {
+        chimera_vfs_abort_if(!(request->open_at.r_attr.va_mask & CHIMERA_VFS_ATTR_FH),
+                             "open_at: no fh returned from vfs module");
+
+        fh_hash = XXH3_64bits(request->open_at.r_attr.va_fh,
+                              request->open_at.r_attr.va_fh_len);
+
+        chimera_vfs_open_cache_insert(
+            thread,
+            thread->vfs->vfs_open_cache,
+            request->module,
+            request->open_at.r_attr.va_fh,
+            request->open_at.r_attr.va_fh_len,
+            fh_hash,
+            request->open_at.r_vfs_private,
+            chimera_vfs_open_at_hdl_callback,
+            request);
+
+    } else {
+        chimera_vfs_open_at_hdl_callback(NULL, request);
+    }
 } /* chimera_vfs_open_complete */
 
 void

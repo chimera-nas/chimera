@@ -128,9 +128,13 @@ struct chimera_vfs_open_handle {
     uint8_t                         fh_len;
     uint32_t                        opencnt;
     uint64_t                        vfs_private;
+    void                            ( *close_callback )(
+        struct chimera_vfs_open_handle *handle,
+        void                           *private_data);
     void                           *close_private;
     struct timespec                 timestamp;
     struct UT_hash_handle           hh;
+    struct chimera_vfs_open_handle *prev;
     struct chimera_vfs_open_handle *next;
 };
 
