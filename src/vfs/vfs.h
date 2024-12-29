@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <sys/time.h>
 #include <sys/eventfd.h>
+#include <stdatomic.h>
 #include "vfs_dump.h"
 #include "vfs_error.h"
 #include "core/evpl.h"
@@ -126,7 +127,7 @@ struct chimera_vfs_open_handle {
     uint32_t                        fh_hash;
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
     uint8_t                         fh_len;
-    uint32_t                        opencnt;
+    atomic_uint                     opencnt;
     uint64_t                        vfs_private;
     void                           *close_private;
     struct timespec                 timestamp;

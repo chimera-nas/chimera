@@ -101,7 +101,7 @@ chimera_vfs_close_thread_wake(
     struct chimera_vfs_thread       *thread       = close_thread->vfs_thread;
     struct timespec                  now;
     uint64_t                         min_age;
-    uint64_t                         count;
+    uint64_t                         count, count_highwater = 0;
     struct chimera_vfs_open_handle  *handles, *handle;
 
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -125,6 +125,11 @@ chimera_vfs_close_thread_wake(
     }
 
     pthread_mutex_unlock(&close_thread->lock);
+
+    if (count > count_highwater) {
+        count_highwater = count;
+        chimera_vfs_info("VFS hit new high waterm   %llu open handles", count);
+    }
 
     while (handles) {
 

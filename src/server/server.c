@@ -175,6 +175,7 @@ struct chimera_server *
 chimera_server_init(const struct chimera_server_config *config)
 {
     struct chimera_server *server;
+    struct evpl_config    *evpl_config;
     int                    i;
     struct rlimit          rl;
 
@@ -189,6 +190,10 @@ chimera_server_init(const struct chimera_server_config *config)
     } else {
         chimera_server_error("Failed to get file descriptor limit");
     }
+
+    evpl_config = evpl_config_init();
+
+    evpl_init_auto(evpl_config);
 
     server = calloc(1, sizeof(*server));
 

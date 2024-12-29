@@ -1,6 +1,7 @@
 #pragma once
 
 #include <pthread.h>
+#include <stdatomic.h>
 
 #include "uthash/uthash.h"
 #include "common/format.h"
@@ -9,7 +10,7 @@
 #include "vfs_procs.h"
 
 struct vfs_open_cache_shard {
-    pthread_mutex_t                 lock;
+    pthread_rwlock_t                lock;
     struct chimera_vfs_open_handle *open_files;
     struct chimera_vfs_open_handle *free_handles;
     uint64_t                        num_lookups;
@@ -34,7 +35,7 @@ chimera_vfs_open_cache_init(int num_shard_bits)
     cache->shards = calloc(cache->num_shards, sizeof(*cache->shards));
 
     for (int i = 0; i < cache->num_shards; i++) {
-        pthread_mutex_init(&cache->shards[i].lock, NULL);
+        pthread_rwlock_init(&cache->shards[i].lock, NULL);
         cache->shards[i].open_files   = NULL;
         cache->shards[i].free_handles = NULL;
     }
@@ -51,7 +52,7 @@ chimera_vfs_open_cache_destroy(struct vfs_open_cache *cache)
 
     for (int i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
-        pthread_mutex_destroy(&shard->lock);
+        pthread_rwlock_destroy(&shard->lock);
         total_lookups += shard->num_lookups;
         total_inserts += shard->num_inserts;
     }
@@ -95,15 +96,9 @@ chimera_vfs_open_cache_release(
     struct vfs_open_cache          *cache,
     struct chimera_vfs_open_handle *handle)
 {
-    struct vfs_open_cache_shard *shard;
+    atomic_fetch_sub_explicit(&handle->opencnt, 1, memory_order_release);
+} /* chimera_vfs_open_cache_release */
 
-    shard = &cache->shards[handle->fh_hash & cache->shard_mask];
-
-    pthread_mutex_lock(&shard->lock);
-    handle->opencnt--;
-    pthread_mutex_unlock(&shard->lock);
-
-} /* vfs_open_cache_release */
 static inline struct chimera_vfs_open_handle *
 chimera_vfs_open_cache_insert(
     struct chimera_vfs_thread *thread,
@@ -119,15 +114,15 @@ chimera_vfs_open_cache_insert(
 
     shard = &cache->shards[fh_hash & cache->shard_mask];
 
-    pthread_mutex_lock(&shard->lock);
+    pthread_rwlock_wrlock(&shard->lock);
 
     shard->num_inserts++;
 
-    handle              = chimera_vfs_open_cache_alloc(shard);
-    handle->vfs_module  = module;
-    handle->fh_hash     = fh_hash & 0xFFFFFFFF;
-    handle->fh_len      = fhlen;
-    handle->opencnt     = 1;
+    handle             = chimera_vfs_open_cache_alloc(shard);
+    handle->vfs_module = module;
+    handle->fh_hash    = fh_hash & 0xFFFFFFFF;
+    handle->fh_len     = fhlen;
+    atomic_store_explicit(&handle->opencnt, 1, memory_order_relaxed);
     handle->vfs_private = vfs_private;
 
     memcpy(handle->fh, fh, fhlen);
@@ -143,7 +138,7 @@ chimera_vfs_open_cache_insert(
         HASH_ADD_BYHASHVALUE(hh, shard->open_files, fh, handle->fh_len, handle->fh_hash, existing);
 
         /* Add our reference to the existing handle */
-        existing->opencnt++;
+        atomic_fetch_add_explicit(&existing->opencnt, 1, memory_order_release);
         existing->timestamp.tv_sec  = 0;
         existing->timestamp.tv_nsec = 0;
 
@@ -154,7 +149,7 @@ chimera_vfs_open_cache_insert(
         handle = existing;
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    pthread_rwlock_unlock(&shard->lock);
 
     return handle;
 } /* chimera_vfs_open_cache_insert */
@@ -173,19 +168,18 @@ chimera_vfs_open_cache_lookup(
 
     shard = &cache->shards[fh_hash & cache->shard_mask];
 
-    pthread_mutex_lock(&shard->lock);
+    pthread_rwlock_rdlock(&shard->lock);
 
     shard->num_lookups++;
 
     HASH_FIND_BYHASHVALUE(hh, shard->open_files, fh, fhlen, _hash, handle);
 
     if (handle) {
-        handle->opencnt++;
-        handle->timestamp.tv_sec  = 0;
-        handle->timestamp.tv_nsec = 0;
+        atomic_fetch_add_explicit(&handle->opencnt, 1, memory_order_release);
+        handle->timestamp.tv_sec = 0;
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    pthread_rwlock_unlock(&shard->lock);
 
     return handle;
 } /* chimera_vfs_open_cache_lookup */
@@ -198,9 +192,9 @@ chimera_vfs_open_cache_size(struct vfs_open_cache *cache)
 
     for (int i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
-        pthread_mutex_lock(&shard->lock);
+        pthread_rwlock_rdlock(&shard->lock);
         size += HASH_COUNT(shard->open_files);
-        pthread_mutex_unlock(&shard->lock);
+        pthread_rwlock_unlock(&shard->lock);
     }
 
     return size;
@@ -220,7 +214,7 @@ chimera_vfs_open_cache_defer_close(
     for (int i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
 
-        pthread_mutex_lock(&shard->lock);
+        pthread_rwlock_wrlock(&shard->lock);
 
         HASH_ITER(hh, shard->open_files, handle, tmp)
         {
@@ -233,16 +227,16 @@ chimera_vfs_open_cache_defer_close(
 
             if (handle->timestamp.tv_sec == 0) {
                 handle->timestamp = *timestamp;
-            }
+            } else {
+                elapsed = chimera_get_elapsed_ns(timestamp, &handle->timestamp);
 
-            elapsed = chimera_get_elapsed_ns(timestamp, &handle->timestamp);
-
-            if (elapsed > min_age) {
-                LL_PREPEND(closed, handle);
-                HASH_DEL(shard->open_files, handle);
+                if (elapsed > min_age) {
+                    LL_PREPEND(closed, handle);
+                    HASH_DEL(shard->open_files, handle);
+                }
             }
         }
-        pthread_mutex_unlock(&shard->lock);
+        pthread_rwlock_unlock(&shard->lock);
     }
     *r_count = count;
     return closed;
