@@ -58,11 +58,10 @@ chimera_nfs3_create_open_at_complete(
         } else {
             res.resok.dir_wcc.after.attributes_follow = 0;
         }
-
+        chimera_vfs_release(thread->vfs_thread, handle);
     }
 
     chimera_vfs_release(thread->vfs_thread, parent_handle);
-    chimera_vfs_release(thread->vfs_thread, handle);
 
     shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, &res, msg);
     nfs_request_free(thread, req);
@@ -77,7 +76,6 @@ chimera_nfs3_create_open_at_parent_complete(
     struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct CREATE3args               *args   = req->args_create;
-    uint32_t                          open_flags;
 
     if (error_code != CHIMERA_VFS_OK) {
         struct CREATE3res res;
@@ -89,13 +87,11 @@ chimera_nfs3_create_open_at_parent_complete(
 
     req->handle = parent_handle;
 
-    open_flags = CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_RDWR;
-
     chimera_vfs_open_at(thread->vfs_thread,
                         parent_handle,
                         args->where.name.str,
                         args->where.name.len,
-                        open_flags,
+                        CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_INFERRED,
                         S_IWUSR | S_IRUSR,
                         CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
                         chimera_nfs3_create_open_at_complete,
@@ -122,7 +118,7 @@ chimera_nfs3_create(
     chimera_vfs_open(thread->vfs_thread,
                      args->where.dir.data.data,
                      args->where.dir.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_RDONLY,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                      chimera_nfs3_create_open_at_parent_complete,
                      req);
 } /* chimera_nfs3_create */

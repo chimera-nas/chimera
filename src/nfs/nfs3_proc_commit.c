@@ -92,7 +92,7 @@ chimera_nfs3_commit(
     chimera_vfs_open(thread->vfs_thread,
                      args->file.data.data,
                      args->file.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_RDWR,
+                     CHIMERA_VFS_OPEN_INFERRED,
                      chimera_nfs3_commit_open_callback,
                      req);
 

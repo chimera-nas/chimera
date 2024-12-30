@@ -110,11 +110,9 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OP_NUM            19
 
 #define CHIMERA_VFS_OPEN_CREATE       (1U << 0)
-#define CHIMERA_VFS_OPEN_RDONLY       (1U << 1)
-#define CHIMERA_VFS_OPEN_WRONLY       (1U << 2)
-#define CHIMERA_VFS_OPEN_RDWR         (1U << 3)
-#define CHIMERA_VFS_OPEN_PATH         (1U << 4)
-#define CHIMERA_VFS_OPEN_INFERRED     (1U << 5)
+#define CHIMERA_VFS_OPEN_PATH         (1U << 1)
+#define CHIMERA_VFS_OPEN_INFERRED     (1U << 2)
+#define CHIMERA_VFS_OPEN_DIRECTORY    (1U << 3)
 
 #define CHIMERA_VFS_OPEN_ID_SYNTHETIC 0
 #define CHIMERA_VFS_OPEN_ID_PATH      1

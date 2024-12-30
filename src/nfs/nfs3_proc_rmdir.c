@@ -82,7 +82,7 @@ chimera_nfs3_rmdir(
     chimera_vfs_open(thread->vfs_thread,
                      args->object.dir.data.data,
                      args->object.dir.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_RDONLY,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                      chimera_nfs3_rmdir_open_callback,
                      req);
 } /* chimera_nfs3_rmdir */

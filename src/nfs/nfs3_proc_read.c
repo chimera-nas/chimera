@@ -109,7 +109,7 @@ chimera_nfs3_read(
     chimera_vfs_open(thread->vfs_thread,
                      args->file.data.data,
                      args->file.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_RDWR,
+                     CHIMERA_VFS_OPEN_INFERRED,
                      chimera_nfs3_read_open_callback,
                      req);
 } /* chimera_nfs3_read */

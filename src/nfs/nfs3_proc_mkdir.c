@@ -122,7 +122,7 @@ chimera_nfs3_mkdir(
     chimera_vfs_open(thread->vfs_thread,
                      args->where.dir.data.data,
                      args->where.dir.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_RDONLY,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                      chimera_nfs3_mkdir_open_callback,
                      req);
 } /* chimera_nfs3_mkdir */

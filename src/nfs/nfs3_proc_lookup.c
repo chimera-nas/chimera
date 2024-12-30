@@ -113,7 +113,7 @@ chimera_nfs3_lookup(
     chimera_vfs_open(thread->vfs_thread,
                      args->what.dir.data.data,
                      args->what.dir.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_RDONLY,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                      chimera_nfs3_lookup_open_callback,
                      req);
 

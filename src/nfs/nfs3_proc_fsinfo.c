@@ -98,7 +98,7 @@ chimera_nfs3_fsinfo(
     chimera_vfs_open(thread->vfs_thread,
                      args->fsroot.data.data,
                      args->fsroot.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_RDONLY,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                      chimera_nfs3_fsinfo_open_callback,
                      req);
 } /* chimera_nfs3_fsinfo */

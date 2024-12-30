@@ -64,7 +64,7 @@ chimera_nfs4_lookup(
     chimera_vfs_open(thread->vfs_thread,
                      req->fh,
                      req->fhlen,
-                     CHIMERA_VFS_OPEN_RDONLY,
+                     CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                      chimera_nfs4_lookup_open_callback,
                      req);
 } /* chimera_nfs4_lookup */

@@ -68,18 +68,6 @@ chimera_nfs4_open_parent_complete(
         flags |= CHIMERA_VFS_OPEN_CREATE;
     }
 
-    switch (args->share_access) {
-        case OPEN4_SHARE_ACCESS_READ:
-            flags |= CHIMERA_VFS_OPEN_RDONLY;
-            break;
-        case OPEN4_SHARE_ACCESS_WRITE:
-            flags |= CHIMERA_VFS_OPEN_WRONLY;
-            break;
-        case OPEN4_SHARE_ACCESS_BOTH:
-            flags |= CHIMERA_VFS_OPEN_RDWR;
-            break;
-    } /* switch */
-
     switch (args->claim.claim) {
         case CLAIM_NULL:
             chimera_vfs_open_at(req->thread->vfs_thread,
@@ -108,7 +96,7 @@ chimera_nfs4_open(
     chimera_vfs_open(thread->vfs_thread,
                      req->fh,
                      req->fhlen,
-                     CHIMERA_VFS_OPEN_RDONLY,
+                     CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                      chimera_nfs4_open_parent_complete,
                      req);
 } /* chimera_nfs4_open */
