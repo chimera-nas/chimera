@@ -7,6 +7,7 @@
 #include "common/misc.h"
 #include "vfs.h"
 #include "vfs_procs.h"
+#include "vfs_internal.h"
 
 struct vfs_open_cache_shard {
     pthread_mutex_t                 lock;

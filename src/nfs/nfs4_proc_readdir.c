@@ -123,7 +123,7 @@ chimera_nfs4_readdir(
     attrmask = chimera_nfs4_getattr2mask(args->attr_request,
                                          args->num_attr_request);
 
-    chimera_vfs_readdir(thread->vfs,
+    chimera_vfs_readdir(thread->vfs_thread,
                         req->fh,
                         req->fhlen,
                         attrmask,

@@ -72,7 +72,7 @@ chimera_nfs3_symlink(
 
     nfs3_dump_symlink(req, args);
 
-    chimera_vfs_symlink(thread->vfs,
+    chimera_vfs_symlink(thread->vfs_thread,
                         args->where.dir.data.data,
                         args->where.dir.data.len,
                         args->where.name.str,

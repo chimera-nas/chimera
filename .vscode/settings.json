@@ -36,6 +36,9 @@
     "evpl.h": "c",
     "io_uring.h": "c",
     "nfs4_status.h": "c",
-    "nfs3_dump.h": "c"
+    "nfs3_dump.h": "c",
+    "vfs_open_cache.h": "c",
+    "vfs.h": "c",
+    "nfs3_attr.h": "c"
   }
 }

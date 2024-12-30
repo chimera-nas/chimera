@@ -1712,12 +1712,14 @@ chimera_io_uring_dispatch(
 } /* io_uring_dispatch */
 
 struct chimera_vfs_module vfs_io_uring = {
-    .name           = "io_uring",
-    .fh_magic       = CHIMERA_VFS_FH_MAGIC_IO_URING,
-    .blocking       = 0,
-    .init           = chimera_io_uring_init,
-    .destroy        = chimera_io_uring_destroy,
-    .thread_init    = chimera_io_uring_thread_init,
-    .thread_destroy = chimera_io_uring_thread_destroy,
-    .dispatch       = chimera_io_uring_dispatch,
+    .name               = "io_uring",
+    .fh_magic           = CHIMERA_VFS_FH_MAGIC_IO_URING,
+    .blocking           = 0,
+    .path_open_required = 1,
+    .file_open_required = 1,
+    .init               = chimera_io_uring_init,
+    .destroy            = chimera_io_uring_destroy,
+    .thread_init        = chimera_io_uring_thread_init,
+    .thread_destroy     = chimera_io_uring_thread_destroy,
+    .dispatch           = chimera_io_uring_dispatch,
 };

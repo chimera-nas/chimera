@@ -4,6 +4,7 @@
 #include "nfs3_status.h"
 #include "nfs3_attr.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_open_cache.h"
 #include "nfs3_dump.h"
 static void
 chimera_nfs3_create_open_at_complete(
@@ -60,8 +61,8 @@ chimera_nfs3_create_open_at_complete(
 
     }
 
-    chimera_vfs_release(thread->vfs, parent_handle);
-    chimera_vfs_release(thread->vfs, handle);
+    chimera_vfs_open_cache_release(thread->vfs->vfs_open_file_cache, parent_handle);
+    chimera_vfs_open_cache_release(thread->vfs->vfs_open_file_cache, handle);
 
     shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, &res, msg);
     nfs_request_free(thread, req);
@@ -90,7 +91,7 @@ chimera_nfs3_create_open_at_parent_complete(
 
     open_flags = CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_RDWR;
 
-    chimera_vfs_open_at(thread->vfs,
+    chimera_vfs_open_at(thread->vfs_thread,
                         parent_handle,
                         args->where.name.str,
                         args->where.name.len,
@@ -118,7 +119,7 @@ chimera_nfs3_create(
 
     req->args_create = args;
 
-    chimera_vfs_open(thread->vfs,
+    chimera_vfs_open(thread->vfs_thread,
                      args->where.dir.data.data,
                      args->where.dir.data.len,
                      CHIMERA_VFS_OPEN_RDONLY,

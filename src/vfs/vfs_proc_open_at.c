@@ -39,7 +39,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
 
         chimera_vfs_open_cache_insert(
             thread,
-            thread->vfs->vfs_open_cache,
+            thread->vfs->vfs_open_file_cache,
             request->module,
             request->open_at.r_attr.va_fh,
             request->open_at.r_attr.va_fh_len,

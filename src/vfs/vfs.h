@@ -113,6 +113,7 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OPEN_RDONLY    (1U << 1)
 #define CHIMERA_VFS_OPEN_WRONLY    (1U << 2)
 #define CHIMERA_VFS_OPEN_RDWR      (1U << 3)
+#define CHIMERA_VFS_OPEN_PATH      (1U << 4)
 
 struct chimera_vfs_metric {
     uint64_t num_requests;
@@ -379,6 +380,25 @@ struct chimera_vfs_module {
 
     uint8_t     blocking;
 
+    /* Required
+     * Set to 1 if this module requires open handles for path operations
+     * such as mkdir, remove, open_at, etc.  Equivalent to POSIX open
+     * with O_PATH flag.
+     * If set, module will receive open() calls for such operations
+     * and will receive the returned private handle.
+     */
+
+    uint8_t     path_open_required;
+
+    /* Required
+     * Set to 1 if this module requires open handles for file operations
+     * and for setattr on directories.
+     * Set to zero if read/write can be performed with only a file handle identifier
+     * Affects only NFS3.   Other protocols will call open() regardless as they need
+     * a guarantee that unlink will not remove a file that a client has open.
+     */
+    uint8_t     file_open_required;
+
     /* Optional
      * Called once at initialization to setup global state
      * Return a pointer to global state structure
@@ -477,7 +497,8 @@ struct chimera_vfs_close_thread {
 struct chimera_vfs {
     struct chimera_vfs_module            *modules[CHIMERA_VFS_FH_MAGIC_MAX];
     void                                 *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
-    struct vfs_open_cache                *vfs_open_cache;
+    struct vfs_open_cache                *vfs_open_path_cache;
+    struct vfs_open_cache                *vfs_open_file_cache;
     struct chimera_vfs_share             *shares;
     int                                   num_delegation_threads;
     struct chimera_vfs_delegation_thread *delegation_threads;

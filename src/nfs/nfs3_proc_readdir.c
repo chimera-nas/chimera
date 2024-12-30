@@ -110,7 +110,7 @@ chimera_nfs3_readdir(
     res->resok.reply.entries = NULL;
 
 
-    chimera_vfs_readdir(thread->vfs,
+    chimera_vfs_readdir(thread->vfs_thread,
                         args->dir.data.data,
                         args->dir.data.len,
                         0,

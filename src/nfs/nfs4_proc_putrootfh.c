@@ -10,7 +10,7 @@ chimera_nfs4_putrootfh(
 {
     struct PUTROOTFH4res *res = &resop->opputrootfh;
 
-    chimera_vfs_getrootfh(thread->vfs,
+    chimera_vfs_getrootfh(thread->vfs_thread,
                           req->fh,
                           &req->fhlen);
 

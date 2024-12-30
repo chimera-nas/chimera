@@ -3,6 +3,7 @@
 #include "nfs3_attr.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_open_cache.h"
 #include "nfs3_dump.h"
 static void
 chimera_nfs3_lookup_complete(
@@ -50,7 +51,7 @@ chimera_nfs3_lookup_complete(
         res.resfail.dir_attributes.attributes_follow = 0;
     }
 
-    chimera_vfs_release(thread->vfs, req->handle);
+    chimera_vfs_open_cache_release(thread->vfs->vfs_open_file_cache, req->handle);
 
     shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, &res, msg);
 
@@ -75,7 +76,7 @@ chimera_nfs3_lookup_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        chimera_vfs_lookup(thread->vfs,
+        chimera_vfs_lookup(thread->vfs_thread,
                            handle,
                            args->what.name.str,
                            args->what.name.len,
@@ -109,7 +110,7 @@ chimera_nfs3_lookup(
 
     req->args_lookup = args;
 
-    chimera_vfs_open(thread->vfs,
+    chimera_vfs_open(thread->vfs_thread,
                      args->what.dir.data.data,
                      args->what.dir.data.len,
                      CHIMERA_VFS_OPEN_RDONLY,

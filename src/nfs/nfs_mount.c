@@ -71,7 +71,7 @@ chimera_nfs_mount_mnt(
 
     req = nfs_request_alloc(thread, conn, msg);
 
-    chimera_vfs_lookup_path(thread->vfs,
+    chimera_vfs_lookup_path(thread->vfs_thread,
                             args->path.str,
                             args->path.len,
                             0,

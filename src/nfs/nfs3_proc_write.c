@@ -4,7 +4,9 @@
 #include "nfs_internal.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_open_cache.h"
 #include "nfs3_dump.h"
+
 static void
 chimera_nfs3_write_complete(
     enum chimera_vfs_error    error_code,
@@ -50,7 +52,7 @@ chimera_nfs3_write_complete(
         res.resfail.file_wcc.after.attributes_follow  = 0;
     }
 
-    chimera_vfs_release(thread->vfs, req->handle);
+    chimera_vfs_open_cache_release(thread->vfs->vfs_open_file_cache, req->handle);
 
     shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, &res, msg);
 
@@ -74,7 +76,7 @@ chimera_nfs3_write_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
 
         req->handle = handle;
-        chimera_vfs_write(thread->vfs,
+        chimera_vfs_write(thread->vfs_thread,
                           handle,
                           args->offset,
                           args->count,
@@ -111,7 +113,7 @@ chimera_nfs3_write(
 
     req->args_write = args;
 
-    chimera_vfs_open(thread->vfs,
+    chimera_vfs_open(thread->vfs_thread,
                      args->file.data.data,
                      args->file.data.len,
                      CHIMERA_VFS_OPEN_RDWR,

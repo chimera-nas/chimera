@@ -158,7 +158,7 @@ _nfs3_dump_symlink(
                       args->where.name.len,
                       args->where.name.str,
                       args->symlink.symlink_data.len,
-                      args->symlink.symlink_data);
+                      args->symlink.symlink_data.str);
 } /* nfs3_dump_symlink */
 
 void

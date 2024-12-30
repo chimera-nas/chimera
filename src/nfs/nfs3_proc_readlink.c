@@ -52,7 +52,7 @@ chimera_nfs3_readlink(
 
     xdr_dbuf_reserve_str(&res->resok, data, 4096, msg->dbuf);
 
-    chimera_vfs_readlink(thread->vfs,
+    chimera_vfs_readlink(thread->vfs_thread,
                          args->symlink.data.data,
                          args->symlink.data.len,
                          res->resok.data.str,

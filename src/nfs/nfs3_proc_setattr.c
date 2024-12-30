@@ -58,7 +58,7 @@ chimera_nfs3_setattr(
 
     chimera_nfs3_sattr3_to_va(attr, &args->new_attributes);
 
-    chimera_vfs_setattr(thread->vfs,
+    chimera_vfs_setattr(thread->vfs_thread,
                         args->object.data.data,
                         args->object.data.len,
                         CHIMERA_NFS3_ATTR_MASK,

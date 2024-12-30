@@ -36,7 +36,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
 
         chimera_vfs_open_cache_insert(
             thread,
-            thread->vfs->vfs_open_cache,
+            thread->vfs->vfs_open_file_cache,
             module,
             request->fh,
             request->fh_len,
@@ -70,7 +70,7 @@ chimera_vfs_open(
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
     handle = chimera_vfs_open_cache_lookup(
-        vfs->vfs_open_cache,
+        vfs->vfs_open_file_cache,
         module,
         fh,
         fhlen,

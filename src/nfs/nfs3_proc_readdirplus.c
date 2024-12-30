@@ -138,7 +138,7 @@ chimera_nfs3_readdirplus(
 
     attrmask = CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH;
 
-    chimera_vfs_readdir(thread->vfs,
+    chimera_vfs_readdir(thread->vfs_thread,
                         args->dir.data.data,
                         args->dir.data.len,
                         attrmask,

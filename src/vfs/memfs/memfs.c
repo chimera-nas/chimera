@@ -1846,12 +1846,14 @@ memfs_dispatch(
 } /* memfs_dispatch */
 
 struct chimera_vfs_module vfs_memvfs = {
-    .name           = "memfs",
-    .fh_magic       = CHIMERA_VFS_FH_MAGIC_MEMFS,
-    .blocking       = 0,
-    .init           = memfs_init,
-    .destroy        = memfs_destroy,
-    .thread_init    = memfs_thread_init,
-    .thread_destroy = memfs_thread_destroy,
-    .dispatch       = memfs_dispatch,
+    .name               = "memfs",
+    .fh_magic           = CHIMERA_VFS_FH_MAGIC_MEMFS,
+    .blocking           = 0,
+    .path_open_required = 0,
+    .file_open_required = 0,
+    .init               = memfs_init,
+    .destroy            = memfs_destroy,
+    .thread_init        = memfs_thread_init,
+    .thread_destroy     = memfs_thread_destroy,
+    .dispatch           = memfs_dispatch,
 };

@@ -1,6 +1,8 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_open_cache.h"
+
 static void
 chimera_nfs4_open_at_complete(
     enum chimera_vfs_error          error_code,
@@ -38,7 +40,7 @@ chimera_nfs4_open_at_complete(
         res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
     }
 
-    chimera_vfs_release(req->thread->vfs, parent_handle);
+    chimera_vfs_open_cache_release(req->thread->vfs->vfs_open_file_cache, parent_handle);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_at_complete */
@@ -80,7 +82,7 @@ chimera_nfs4_open_parent_complete(
 
     switch (args->claim.claim) {
         case CLAIM_NULL:
-            chimera_vfs_open_at(req->thread->vfs,
+            chimera_vfs_open_at(req->thread->vfs_thread,
                                 parent_handle,
                                 args->claim.file.data,
                                 args->claim.file.len,
@@ -103,7 +105,7 @@ chimera_nfs4_open(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs,
+    chimera_vfs_open(thread->vfs_thread,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_RDONLY,

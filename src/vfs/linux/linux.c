@@ -1399,12 +1399,14 @@ chimera_linux_dispatch(
 } /* linux_dispatch */
 
 struct chimera_vfs_module vfs_linux = {
-    .name           = "linux",
-    .fh_magic       = CHIMERA_VFS_FH_MAGIC_LINUX,
-    .blocking       = 1,
-    .init           = chimera_linux_init,
-    .destroy        = chimera_linux_destroy,
-    .thread_init    = chimera_linux_thread_init,
-    .thread_destroy = chimera_linux_thread_destroy,
-    .dispatch       = chimera_linux_dispatch,
+    .name               = "linux",
+    .fh_magic           = CHIMERA_VFS_FH_MAGIC_LINUX,
+    .blocking           = 1,
+    .path_open_required = 1,
+    .file_open_required = 1,
+    .init               = chimera_linux_init,
+    .destroy            = chimera_linux_destroy,
+    .thread_init        = chimera_linux_thread_init,
+    .thread_destroy     = chimera_linux_thread_destroy,
+    .dispatch           = chimera_linux_dispatch,
 };

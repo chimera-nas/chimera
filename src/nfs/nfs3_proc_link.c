@@ -43,7 +43,7 @@ chimera_nfs3_link(
 
     nfs3_dump_link(req, args);
 
-    chimera_vfs_link(thread->vfs,
+    chimera_vfs_link(thread->vfs_thread,
                      args->file.data.data,
                      args->file.data.len,
                      args->link.dir.data.data,
