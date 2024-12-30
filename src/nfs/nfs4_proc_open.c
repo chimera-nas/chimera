@@ -6,7 +6,8 @@ chimera_nfs4_open_at_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
     struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
     void                           *private_data)
 {
     struct nfs_request             *req           = private_data;

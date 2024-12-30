@@ -120,7 +120,8 @@ typedef void (*chimera_vfs_open_at_callback_t)(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *oh,
     struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
     void                           *private_data);
 
 void

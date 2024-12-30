@@ -256,7 +256,8 @@ struct chimera_vfs_request {
             uint32_t                        mode;
             uint64_t                        attrmask;
             struct chimera_vfs_attrs        r_attr;
-            struct chimera_vfs_attrs        r_dir_attr;
+            struct chimera_vfs_attrs        r_dir_pre_attr;
+            struct chimera_vfs_attrs        r_dir_post_attr;
             uint64_t                        r_vfs_private;
         } open_at;
 

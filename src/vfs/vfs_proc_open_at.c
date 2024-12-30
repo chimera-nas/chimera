@@ -17,7 +17,8 @@ chimera_vfs_open_at_hdl_callback(
     callback(request->status,
              handle,
              &request->open_at.r_attr,
-             &request->open_at.r_dir_attr,
+             &request->open_at.r_dir_pre_attr,
+             &request->open_at.r_dir_post_attr,
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
@@ -68,8 +69,9 @@ chimera_vfs_open_at(
 
     request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
-    request->open_at.r_attr.va_mask     = 0;
-    request->open_at.r_dir_attr.va_mask = 0;
+    request->open_at.r_attr.va_mask          = 0;
+    request->open_at.r_dir_pre_attr.va_mask  = 0;
+    request->open_at.r_dir_post_attr.va_mask = 0;
 
     request->opcode             = CHIMERA_VFS_OP_OPEN_AT;
     request->complete           = chimera_vfs_open_complete;

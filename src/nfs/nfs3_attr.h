@@ -108,3 +108,15 @@ chimera_nfs3_marshall_attrs(
     fattr->ctime.seconds  = attr->va_ctime.tv_sec;
     fattr->ctime.nseconds = attr->va_ctime.tv_nsec;
 } /* chimera_nfs4_marshall_attrs */
+
+static inline void
+chimera_nfs3_marshall_wcc_attrs(
+    const struct chimera_vfs_attrs *attr,
+    struct wcc_attr                *wcc)
+{
+    wcc->size           = attr->va_size;
+    wcc->mtime.seconds  = attr->va_mtime.tv_sec;
+    wcc->mtime.nseconds = attr->va_mtime.tv_nsec;
+    wcc->ctime.seconds  = attr->va_ctime.tv_sec;
+    wcc->ctime.nseconds = attr->va_ctime.tv_nsec;
+} /* chimera_nfs3_marshall_wcc_attrs */
