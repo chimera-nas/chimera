@@ -1,4 +1,7 @@
 #pragma once
+
+#include "common/varint.h"
+
 #define chimera_linux_debug(...) chimera_debug("linux", \
                                                __FILE__, \
                                                __LINE__, \
@@ -224,6 +227,7 @@ linux_get_fh(
     struct file_handle  *handle   = (struct file_handle *) buf;
     int                  rc;
     int                  mount_id;
+    uint8_t             *fhp = (uint8_t *) fh;
 
     handle->handle_bytes = MAX_HANDLE_SZ;
 
@@ -241,21 +245,18 @@ linux_get_fh(
     chimera_linux_abort_if(13 + handle->handle_bytes > CHIMERA_VFS_FH_SIZE,
                            "Returned handle exceeds CHIMERA_VFS_FH_SIZE");
 
-    memcpy(fh, &fh_magic, 1);
-    memcpy(fh + 1, &mount_id, 4);
-    memcpy(fh + 5, &isdir, 1);
-    memcpy(fh + 6, handle, 8 + handle->handle_bytes);
+    *fhp = fh_magic;
+    fhp++;
 
-    *fh_len = 14 + handle->handle_bytes;
+    fhp += chimera_encode_uint32(mount_id, fhp);
+    fhp += chimera_encode_uint32(handle->handle_type, fhp);
+    memcpy(fhp, &handle->f_handle, handle->handle_bytes);
+    fhp += handle->handle_bytes;
+
+    *fh_len = fhp - (uint8_t *) fh;
 
     return 0;
 } /* linux_get_fh */
-
-static inline int
-linux_fh_is_dir(const void *fh)
-{
-    return *(uint8_t *) (fh + 5);
-} /* linux_fh_is_dir */
 
 static void
 linux_mount_table_destroy(struct chimera_linux_mount_table *mount_table)
@@ -278,8 +279,17 @@ linux_open_by_handle(
     unsigned int                      flags)
 {
     struct chimera_linux_mount *mount;
-    struct file_handle         *handle   = (struct file_handle *) (fh + 6);
-    int                         mount_id = *(int *) (fh + 1);
+    uint32_t                    mount_id;
+    uint32_t                    handle_type;
+    uint8_t                     buf[sizeof(struct file_handle) + MAX_HANDLE_SZ];
+    struct file_handle         *handle = (struct file_handle *) buf;
+    uint8_t                    *fhp    = (uint8_t *) fh + 1;
+
+    fhp                 += chimera_decode_uint32(fhp, &mount_id);
+    fhp                 += chimera_decode_uint32(fhp, &handle_type);
+    handle->handle_type  = handle_type;
+    handle->handle_bytes = fh_len - (fhp - (uint8_t *) fh);
+    memcpy(&handle->f_handle, fhp, handle->handle_bytes);
 
     HASH_FIND_INT(mount_table->mounts, &mount_id, mount);
 
