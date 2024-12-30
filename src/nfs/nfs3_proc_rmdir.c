@@ -1,6 +1,6 @@
 #include "nfs3_procs.h"
 #include "nfs3_status.h"
-
+#include "nfs3_dump.h"
 #include "vfs/vfs_procs.h"
 
 static void
@@ -73,6 +73,8 @@ chimera_nfs3_rmdir(
     struct nfs_request               *req;
 
     req = nfs_request_alloc(thread, conn, msg);
+
+    nfs3_dump_rmdir(req, args);
 
     req->args_rmdir = args;
 

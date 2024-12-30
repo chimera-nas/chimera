@@ -1,7 +1,7 @@
 #include "nfs3_procs.h"
 #include "nfs3_status.h"
 #include "vfs/vfs_procs.h"
-
+#include "nfs3_dump.h"
 static void
 chimera_nfs3_rename_complete(
     enum chimera_vfs_error error_code,
@@ -41,6 +41,8 @@ chimera_nfs3_rename(
     struct nfs_request               *req;
 
     req = nfs_request_alloc(thread, conn, msg);
+
+    nfs3_dump_rename(req, args);
 
     chimera_vfs_rename(thread->vfs,
                        args->from.dir.data.data,

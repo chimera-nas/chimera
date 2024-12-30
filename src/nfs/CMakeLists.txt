@@ -54,7 +54,7 @@ add_definitions(-DXDR_CUSTOM_IOVEC=${CMAKE_SOURCE_DIR}/ext/libevpl/src/rpc2/xdr_
 add_definitions(-DXDR_CUSTOM_DUMP=1)
 
 # Create libraries for NFSv3 and NFSv4
-add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs_mount.c nfs_portmap.c
+add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs_mount.c nfs_portmap.c nfs3_dump.c nfs4_dump.c
 
             nfs3_proc_null.c nfs3_proc_getattr.c nfs3_proc_setattr.c nfs3_proc_lookup.c
             nfs3_proc_access.c nfs3_proc_readlink.c nfs3_proc_read.c nfs3_proc_write.c

@@ -1,7 +1,7 @@
 #include "nfs3_procs.h"
 #include "nfs3_status.h"
 #include "vfs/vfs_procs.h"
-
+#include "nfs3_dump.h"
 static void
 chimera_nfs3_link_complete(
     enum chimera_vfs_error error_code,
@@ -40,6 +40,8 @@ chimera_nfs3_link(
     struct nfs_request               *req;
 
     req = nfs_request_alloc(thread, conn, msg);
+
+    nfs3_dump_link(req, args);
 
     chimera_vfs_link(thread->vfs,
                      args->file.data.data,

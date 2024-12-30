@@ -146,7 +146,7 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
 
     format_hex(fhstr, sizeof(fhstr), req->fh, req->fh_len);
 
-    chimera_vfs_debug("VFS Request %p: %s %s%s%s",
+    chimera_vfs_debug("VFS  Request %p: %s %s%s%s",
                       req,
                       chimera_vfs_op_name(req->opcode),
                       fhstr,
@@ -219,7 +219,7 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
 
     format_hex(fhstr, sizeof(fhstr), req->fh, req->fh_len);
 
-    chimera_vfs_debug("VFS Reply   %p: %s %s%s%s status %d (%s) elapsed %lu ns",
+    chimera_vfs_debug("VFS  Reply   %p: %s %s%s%s status %d (%s) elapsed %lu ns",
                       req,
                       chimera_vfs_op_name(req->opcode),
                       fhstr,

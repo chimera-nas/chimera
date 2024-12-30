@@ -5,6 +5,7 @@
 #include "nfs3_attr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs.h"
+#include "nfs3_dump.h"
 
 static void
 chimera_nfs3_mkdir_complete(
@@ -112,6 +113,8 @@ chimera_nfs3_mkdir(
     struct nfs_request               *req;
 
     req = nfs_request_alloc(thread, conn, msg);
+
+    nfs3_dump_mkdir(req, args);
 
     req->args_mkdir = args;
 

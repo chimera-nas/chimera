@@ -3,6 +3,7 @@
 #include "nfs3_status.h"
 #include "nfs3_attr.h"
 #include "vfs/vfs_procs.h"
+#include "nfs3_dump.h"
 
 static void
 chimera_nfs3_readlink_complete(
@@ -45,6 +46,8 @@ chimera_nfs3_readlink(
     struct READLINK3res              *res;
 
     req = nfs_request_alloc(thread, conn, msg);
+
+    nfs3_dump_readlink(req, args);
     res = &req->res_readlink;
 
     xdr_dbuf_reserve_str(&res->resok, data, 4096, msg->dbuf);

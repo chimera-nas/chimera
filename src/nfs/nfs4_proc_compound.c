@@ -1,6 +1,6 @@
 #include "nfs4_procs.h"
 #include "rpc2/rpc2.h"
-
+#include "nfs4_dump.h"
 void
 chimera_nfs4_compound_process(
     struct nfs_request *req,
@@ -13,22 +13,12 @@ chimera_nfs4_compound_process(
 
  again:
 
-    chimera_nfs_info("nfs4 compound operation %d/%d: entry status %d",
-                     req->index,
-                     req->res_compound.num_resarray,
-                     status);
-
     if (status != NFS4_OK) {
         req->res_compound.status = status;
-        chimera_nfs_info("nfs4 compound operation %d/%d: error %d",
-                         req->index,
-                         req->res_compound.num_resarray,
-                         status);
-        req->index = req->res_compound.num_resarray;
+        req->index               = req->res_compound.num_resarray;
     }
 
     if (req->index >= req->res_compound.num_resarray) {
-        chimera_nfs_info("nfs4 compound operation complete");
 
         //dump_COMPOUND4res("res", &req->res_compound);
 
@@ -43,11 +33,6 @@ chimera_nfs4_compound_process(
 
     argop = &req->args_compound->argarray[req->index];
     resop = &req->res_compound.resarray[req->index];
-
-    chimera_nfs_info("nfs4 compound operation %d/%d: %d",
-                     req->index,
-                     req->res_compound.num_resarray,
-                     argop->argop);
 
     resop->resop = argop->argop;
 
@@ -116,9 +101,9 @@ chimera_nfs4_compound(
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    //dump_COMPOUND4args("args", args);
-
     req = nfs_request_alloc(thread, conn, msg);
+
+    nfs4_dump_compound(req, args);
 
     req->session              = conn->private_data;
     req->args_compound        = args;

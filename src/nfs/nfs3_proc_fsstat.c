@@ -2,7 +2,7 @@
 #include "nfs3_status.h"
 #include "nfs3_attr.h"
 #include "vfs/vfs_procs.h"
-
+#include "nfs3_dump.h"
 static void
 chimera_nfs3_fsstat_complete(
     enum chimera_vfs_error    error_code,
@@ -80,7 +80,10 @@ chimera_nfs3_fsstat(
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req              = nfs_request_alloc(thread, conn, msg);
+    req = nfs_request_alloc(thread, conn, msg);
+
+    nfs3_dump_fsstat(req, args);
+
     req->args_fsstat = args;
 
     chimera_vfs_open(thread->vfs,

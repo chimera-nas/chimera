@@ -2,7 +2,7 @@
 #include "nfs3_status.h"
 #include "nfs3_attr.h"
 #include "vfs/vfs_procs.h"
-
+#include "nfs3_dump.h"
 static void
 chimera_nfs3_setattr_complete(
     enum chimera_vfs_error    error_code,
@@ -21,8 +21,7 @@ chimera_nfs3_setattr_complete(
     if (res.status == NFS3_OK) {
         res.resok.obj_wcc.before.attributes_follow = 0;
 
-        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK)
-        {
+        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
             res.resok.obj_wcc.after.attributes_follow = 1;
             chimera_nfs3_marshall_attrs(attr,
                                         &res.resok.obj_wcc.after.attributes);
@@ -52,6 +51,8 @@ chimera_nfs3_setattr(
     struct chimera_vfs_attrs         *attr;
 
     req = nfs_request_alloc(thread, conn, msg);
+
+    nfs3_dump_setattr(req, args);
 
     attr = &req->setattr;
 

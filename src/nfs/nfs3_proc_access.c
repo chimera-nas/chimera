@@ -2,6 +2,7 @@
 #include "nfs3_status.h"
 #include "nfs3_attr.h"
 #include "vfs/vfs_procs.h"
+#include "nfs3_dump.h"
 
 static void
 chimera_nfs3_access_complete(
@@ -105,7 +106,10 @@ chimera_nfs3_access(
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req              = nfs_request_alloc(thread, conn, msg);
+    req = nfs_request_alloc(thread, conn, msg);
+
+    nfs3_dump_access(req, args);
+
     req->args_access = args;
 
     chimera_vfs_open(thread->vfs,

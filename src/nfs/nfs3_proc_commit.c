@@ -3,7 +3,7 @@
 #include "nfs_internal.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
-
+#include "nfs3_dump.h"
 static void
 chimera_nfs3_commit_complete(
     enum chimera_vfs_error error_code,
@@ -83,6 +83,8 @@ chimera_nfs3_commit(
     struct nfs_request               *req;
 
     req = nfs_request_alloc(thread, conn, msg);
+
+    nfs3_dump_commit(req, args);
 
     req->args_commit = args;
 

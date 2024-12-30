@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "nfs3_procs.h"
+#include "nfs3_dump.h"
 
 void
 chimera_nfs3_pathconf(
@@ -12,6 +13,8 @@ chimera_nfs3_pathconf(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct PATHCONF3res               res;
+
+    nfs3_dump_pathconf(NULL, args);
 
     res.status = NFS3_OK;
 

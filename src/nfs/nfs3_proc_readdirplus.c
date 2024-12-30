@@ -3,7 +3,7 @@
 #include "nfs3_attr.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_procs.h"
-
+#include "nfs3_dump.h"
 static int
 chimera_nfs3_readdirplus_callback(
     uint64_t                        inum,
@@ -120,7 +120,10 @@ chimera_nfs3_readdirplus(
     struct nfs_nfs3_readdirplus_cursor *cursor;
     uint64_t                            attrmask;
 
-    req                   = nfs_request_alloc(thread, conn, msg);
+    req = nfs_request_alloc(thread, conn, msg);
+
+    nfs3_dump_readdirplus(req, args);
+
     req->args_readdirplus = args;
 
     res = &req->res_readdirplus;

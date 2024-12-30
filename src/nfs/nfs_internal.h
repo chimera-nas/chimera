@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 #include "common/logging.h"
 
 static inline uint32_t
