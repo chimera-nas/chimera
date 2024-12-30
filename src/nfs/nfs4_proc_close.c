@@ -1,7 +1,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_open_cache.h"
+#include "vfs/vfs_release.h"
 void
 chimera_nfs4_close(
     struct chimera_server_nfs_thread *thread,
@@ -17,7 +17,7 @@ chimera_nfs4_close(
 
     state = &session->nfs4_session_state[seqid];
 
-    chimera_vfs_open_cache_release(thread->vfs->vfs_open_file_cache, state->nfs4_state_handle);
+    chimera_vfs_release(thread->vfs_thread, state->nfs4_state_handle);
 
     res->status = NFS4_OK;
 

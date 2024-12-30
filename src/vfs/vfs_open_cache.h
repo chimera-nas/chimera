@@ -14,6 +14,7 @@ struct vfs_open_cache_shard {
     struct chimera_vfs_open_handle *open_files;
     struct chimera_vfs_open_handle *pending_close;
     struct chimera_vfs_open_handle *free_handles;
+    uint8_t                         cache_id;
     uint32_t                        max_open_files;
     uint32_t                        open_handles;
     uint64_t                        num_lookups;
@@ -28,8 +29,9 @@ struct vfs_open_cache {
 
 static inline struct vfs_open_cache *
 chimera_vfs_open_cache_init(
-    int num_shard_bits,
-    int max_open_files)
+    uint8_t cache_id,
+    int     num_shard_bits,
+    int     max_open_files)
 {
     struct vfs_open_cache *cache;
     int                    max_per_shard;
@@ -47,6 +49,7 @@ chimera_vfs_open_cache_init(
         cache->shards[i].open_files     = NULL;
         cache->shards[i].free_handles   = NULL;
         cache->shards[i].max_open_files = max_per_shard;
+        cache->shards[i].cache_id       = cache_id;
     }
 
     return cache;
@@ -81,7 +84,8 @@ chimera_vfs_open_cache_alloc(struct vfs_open_cache_shard *shard)
     if (handle) {
         LL_DELETE(shard->free_handles, handle);
     } else {
-        handle = calloc(1, sizeof(*handle));
+        handle           = calloc(1, sizeof(*handle));
+        handle->cache_id = shard->cache_id;
     }
 
     return handle;
@@ -103,6 +107,8 @@ chimera_vfs_open_cache_release(
     struct vfs_open_cache_shard *shard;
 
     shard = &cache->shards[handle->fh_hash & cache->shard_mask];
+
+    chimera_vfs_abort_if(handle->cache_id != shard->cache_id, "handle released by wrong cache");
 
     pthread_mutex_lock(&shard->lock);
 

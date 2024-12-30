@@ -2,7 +2,7 @@
 #include "nfs3_status.h"
 #include "nfs3_attr.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_open_cache.h"
+#include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 
 static void
@@ -24,7 +24,7 @@ chimera_nfs3_getattr_complete(
         chimera_nfs3_marshall_attrs(attr, &res.resok.obj_attributes);
     }
 
-    chimera_vfs_open_cache_release(thread->vfs_thread->vfs->vfs_open_file_cache, req->handle);
+    chimera_vfs_release(thread->vfs_thread, req->handle);
 
     shared->nfs_v3.send_reply_NFSPROC3_GETATTR(evpl, &res, msg);
 
@@ -79,7 +79,7 @@ chimera_nfs3_getattr(
     chimera_vfs_open(thread->vfs_thread,
                      args->object.data.data,
                      args->object.data.len,
-                     CHIMERA_VFS_OPEN_RDWR,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_RDONLY,
                      chimera_nfs3_getattr_open_callback,
                      req);
 } /* chimera_nfs3_getattr */

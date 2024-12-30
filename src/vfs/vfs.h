@@ -89,31 +89,36 @@ struct chimera_vfs_attrs {
     uint32_t        va_fh_len;
 };
 
-#define CHIMERA_VFS_OP_LOOKUP_PATH 1
-#define CHIMERA_VFS_OP_LOOKUP      2
-#define CHIMERA_VFS_OP_GETATTR     3
-#define CHIMERA_VFS_OP_READDIR     4
-#define CHIMERA_VFS_OP_READLINK    5
-#define CHIMERA_VFS_OP_OPEN        6
-#define CHIMERA_VFS_OP_OPEN_AT     7
-#define CHIMERA_VFS_OP_CLOSE       8
-#define CHIMERA_VFS_OP_READ        9
-#define CHIMERA_VFS_OP_WRITE       10
-#define CHIMERA_VFS_OP_REMOVE      11
-#define CHIMERA_VFS_OP_MKDIR       12
-#define CHIMERA_VFS_OP_COMMIT      13
-#define CHIMERA_VFS_OP_ACCESS      14
-#define CHIMERA_VFS_OP_SYMLINK     15
-#define CHIMERA_VFS_OP_RENAME      16
-#define CHIMERA_VFS_OP_SETATTR     17
-#define CHIMERA_VFS_OP_LINK        18
-#define CHIMERA_VFS_OP_NUM         19
+#define CHIMERA_VFS_OP_LOOKUP_PATH    1
+#define CHIMERA_VFS_OP_LOOKUP         2
+#define CHIMERA_VFS_OP_GETATTR        3
+#define CHIMERA_VFS_OP_READDIR        4
+#define CHIMERA_VFS_OP_READLINK       5
+#define CHIMERA_VFS_OP_OPEN           6
+#define CHIMERA_VFS_OP_OPEN_AT        7
+#define CHIMERA_VFS_OP_CLOSE          8
+#define CHIMERA_VFS_OP_READ           9
+#define CHIMERA_VFS_OP_WRITE          10
+#define CHIMERA_VFS_OP_REMOVE         11
+#define CHIMERA_VFS_OP_MKDIR          12
+#define CHIMERA_VFS_OP_COMMIT         13
+#define CHIMERA_VFS_OP_ACCESS         14
+#define CHIMERA_VFS_OP_SYMLINK        15
+#define CHIMERA_VFS_OP_RENAME         16
+#define CHIMERA_VFS_OP_SETATTR        17
+#define CHIMERA_VFS_OP_LINK           18
+#define CHIMERA_VFS_OP_NUM            19
 
-#define CHIMERA_VFS_OPEN_CREATE    (1U << 0)
-#define CHIMERA_VFS_OPEN_RDONLY    (1U << 1)
-#define CHIMERA_VFS_OPEN_WRONLY    (1U << 2)
-#define CHIMERA_VFS_OPEN_RDWR      (1U << 3)
-#define CHIMERA_VFS_OPEN_PATH      (1U << 4)
+#define CHIMERA_VFS_OPEN_CREATE       (1U << 0)
+#define CHIMERA_VFS_OPEN_RDONLY       (1U << 1)
+#define CHIMERA_VFS_OPEN_WRONLY       (1U << 2)
+#define CHIMERA_VFS_OPEN_RDWR         (1U << 3)
+#define CHIMERA_VFS_OPEN_PATH         (1U << 4)
+#define CHIMERA_VFS_OPEN_INFERRED     (1U << 5)
+
+#define CHIMERA_VFS_OPEN_ID_SYNTHETIC 0
+#define CHIMERA_VFS_OPEN_ID_PATH      1
+#define CHIMERA_VFS_OPEN_ID_FILE      2
 
 struct chimera_vfs_metric {
     uint64_t num_requests;
@@ -127,6 +132,7 @@ struct chimera_vfs_open_handle {
     uint32_t                        fh_hash;
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
     uint8_t                         fh_len;
+    uint8_t                         cache_id;
     uint32_t                        opencnt;
     uint64_t                        vfs_private;
     void                            ( *close_callback )(
@@ -507,18 +513,19 @@ struct chimera_vfs {
 };
 
 struct chimera_vfs_thread {
-    struct evpl                *evpl;
-    struct chimera_vfs         *vfs;
-    void                       *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
-    struct chimera_vfs_request *free_requests;
-    uint64_t                    active_requests;
+    struct evpl                    *evpl;
+    struct chimera_vfs             *vfs;
+    void                           *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
+    struct chimera_vfs_request     *free_requests;
+    uint64_t                        active_requests;
+    struct chimera_vfs_open_handle *free_synth_handles;
 
-    struct chimera_vfs_request *pending_complete_requests;
-    int                         eventfd;
-    struct evpl_event           pending_complete_event;
-    pthread_mutex_t             lock;
+    struct chimera_vfs_request     *pending_complete_requests;
+    int                             eventfd;
+    struct evpl_event               pending_complete_event;
+    pthread_mutex_t                 lock;
 
-    struct chimera_vfs_metric   metrics[CHIMERA_VFS_OP_NUM];
+    struct chimera_vfs_metric       metrics[CHIMERA_VFS_OP_NUM];
 };
 
 struct chimera_vfs *

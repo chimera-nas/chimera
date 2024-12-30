@@ -1,7 +1,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_open_cache.h"
+#include "vfs/vfs_release.h"
 static void
 chimera_nfs4_lookup_complete(
     enum chimera_vfs_error    error_code,
@@ -23,7 +23,7 @@ chimera_nfs4_lookup_complete(
         req->fhlen = attr->va_fh_len;
     }
 
-    chimera_vfs_open_cache_release(req->thread->vfs->vfs_open_file_cache, req->handle);
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_lookup_complete */
 

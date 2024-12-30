@@ -2,7 +2,7 @@
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_open_cache.h"
+#include "vfs/vfs_release.h"
 static void
 chimera_nfs4_getattr_complete(
     enum chimera_vfs_error    error_code,
@@ -33,7 +33,7 @@ chimera_nfs4_getattr_complete(
                                 res->resok4.obj_attributes.attr_vals.data,
                                 &res->resok4.obj_attributes.attr_vals.len);
 
-    chimera_vfs_open_cache_release(req->thread->vfs->vfs_open_file_cache, req->handle);
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_getattr_complete */

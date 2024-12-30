@@ -12,7 +12,6 @@
 #include "uthash/utlist.h"
 
 #include "vfs/vfs_dump.h"
-
 #ifndef container_of
 #define container_of(ptr, type, member) ({            \
         typeof(((type *) 0)->member) * __mptr = (ptr); \
@@ -82,7 +81,7 @@ chimera_vfs_request_alloc_by_hash(
 
     if (thread->free_requests) {
         request = thread->free_requests;
-        DL_DELETE(thread->free_requests, request);
+        LL_DELETE(thread->free_requests, request);
     } else {
         request              = calloc(1, sizeof(struct chimera_vfs_request));
         request->thread      = thread;
@@ -122,6 +121,31 @@ chimera_vfs_request_alloc_by_handle(
     return chimera_vfs_request_alloc_by_hash(thread, handle->fh, handle->fh_len, handle->fh_hash);
 } /* chimera_vfs_request_alloc_by_handle */
 
+static inline struct chimera_vfs_open_handle *
+chimera_vfs_synth_handle_alloc(struct chimera_vfs_thread *thread)
+{
+    struct chimera_vfs_open_handle *handle;
+
+    if (thread->free_synth_handles) {
+        handle = thread->free_synth_handles;
+        LL_DELETE(thread->free_synth_handles, handle);
+    } else {
+        handle           = calloc(1, sizeof(struct chimera_vfs_open_handle));
+        handle->cache_id = CHIMERA_VFS_OPEN_ID_SYNTHETIC;
+    }
+
+    return handle;
+} /* chimera_vfs_synth_handle_alloc */
+
+static inline void
+chimera_vfs_synth_handle_free(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle)
+{
+    chimera_vfs_abort_if(handle->cache_id != CHIMERA_VFS_OPEN_ID_SYNTHETIC, "real handle freed by synthetic procedure");
+    LL_PREPEND(thread->free_synth_handles, handle);
+} /* chimera_vfs_synth_handle_free */
+
 static inline void
 chimera_vfs_complete(struct chimera_vfs_request *request)
 {
@@ -156,7 +180,7 @@ chimera_vfs_request_free(
 {
     thread->active_requests--;
 
-    DL_PREPEND(thread->free_requests, request);
+    LL_PREPEND(thread->free_requests, request);
 } /* chimera_vfs_request_free */
 
 static inline void

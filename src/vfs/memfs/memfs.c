@@ -644,9 +644,13 @@ memfs_getattr(
     struct chimera_vfs_attrs *attr      = &request->getattr.r_attr;
     struct memfs_inode       *inode;
 
-    inode = (struct memfs_inode *) request->getattr.handle->vfs_private;
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
-    pthread_mutex_lock(&inode->lock);
+    if (unlikely(!inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
 
     attr->va_mask = attr_mask;
 
@@ -749,9 +753,14 @@ memfs_lookup(
     struct memfs_inode  *inode, *child;
     struct memfs_dirent *dirent;
 
-    inode = (struct memfs_inode *) request->lookup.handle->vfs_private;
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
-    pthread_mutex_lock(&inode->lock);
+    if (unlikely(!inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
     if (unlikely(!S_ISDIR(inode->mode))) {
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_ENOENT;
@@ -824,11 +833,9 @@ memfs_mkdir(
                                 request->mkdir.name,
                                 request->mkdir.name_len);
 
-    parent_inode = (struct memfs_inode *) request->mkdir.handle->vfs_private;
+    parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
-    pthread_mutex_lock(&parent_inode->lock);
-
-    if (!parent_inode) {
+    if (unlikely(!parent_inode)) {
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         memfs_inode_free(thread, inode);
@@ -907,9 +914,13 @@ memfs_remove(
     struct memfs_inode  *parent_inode, *inode;
     struct memfs_dirent *dirent;
 
-    parent_inode = (struct memfs_inode *) request->remove.handle->vfs_private;
+    parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
-    pthread_mutex_lock(&parent_inode->lock);
+    if (unlikely(!parent_inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
 
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -1109,9 +1120,13 @@ memfs_open_at(
     unsigned int              flags  = request->open_at.flags;
     struct chimera_vfs_attrs *r_attr = &request->open_at.r_attr;
 
-    parent_inode = (struct memfs_inode *) request->open_at.handle->vfs_private;
+    parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
-    pthread_mutex_lock(&parent_inode->lock);
+    if (unlikely(!parent_inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
 
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -1169,15 +1184,23 @@ memfs_open_at(
         }
     }
 
-    inode->refcnt++;
+    if (flags & CHIMERA_VFS_OPEN_INFERRED) {
+        /* If this is an inferred open (ie an NFS3 create)
+         * then we aren't returning a handle so we don't need
+         * to increment the refcnt */
+
+        request->open_at.r_vfs_private = 0xdeadbeefUL;
+
+    } else {
+        inode->refcnt++;
+        request->open_at.r_vfs_private = (uint64_t) inode;
+    }
 
     pthread_mutex_unlock(&parent_inode->lock);
 
     memfs_map_attrs(r_attr, request->open_at.attrmask, inode);
 
     pthread_mutex_unlock(&inode->lock);
-
-    request->open_at.r_vfs_private = (uint64_t) inode;
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -1239,9 +1262,13 @@ memfs_read(
         return;
     }
 
-    inode = (struct memfs_inode *) request->read.handle->vfs_private;
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
-    pthread_mutex_lock(&inode->lock);
+    if (unlikely(!inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
 
     if (offset + length > inode->size) {
         length = inode->size > offset ? inode->size - offset : 0;
@@ -1333,9 +1360,13 @@ memfs_write(
         CHIMERA_MEMFS_BLOCK_SHIFT;
     left = request->write.length;
 
-    inode = (struct memfs_inode *) request->write.handle->vfs_private;
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
-    pthread_mutex_lock(&inode->lock);
+    if (unlikely(!inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
 
     if (inode->file.max_blocks <= last_block) {
 

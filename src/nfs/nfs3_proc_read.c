@@ -4,7 +4,7 @@
 #include "nfs_internal.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_open_cache.h"
+#include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 static void
 chimera_nfs3_read_complete(
@@ -44,7 +44,7 @@ chimera_nfs3_read_complete(
         res.resfail.file_attributes.attributes_follow = 0;
     }
 
-    chimera_vfs_open_cache_release(thread->vfs->vfs_open_file_cache, req->handle);
+    chimera_vfs_release(thread->vfs_thread, req->handle);
 
     shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, &res, msg);
 
@@ -109,7 +109,7 @@ chimera_nfs3_read(
     chimera_vfs_open(thread->vfs_thread,
                      args->file.data.data,
                      args->file.data.len,
-                     CHIMERA_VFS_OPEN_RDWR,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_RDWR,
                      chimera_nfs3_read_open_callback,
                      req);
 } /* chimera_nfs3_read */

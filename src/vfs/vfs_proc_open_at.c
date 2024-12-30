@@ -27,8 +27,16 @@ chimera_vfs_open_at_hdl_callback(
 static void
 chimera_vfs_open_complete(struct chimera_vfs_request *request)
 {
-    struct chimera_vfs_thread *thread = request->thread;
-    uint64_t                   fh_hash;
+    struct chimera_vfs_thread      *thread = request->thread;
+    uint64_t                        fh_hash;
+    struct vfs_open_cache          *cache;
+    struct chimera_vfs_open_handle *handle;
+
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_PATH) {
+        cache = thread->vfs->vfs_open_path_cache;
+    } else {
+        cache = thread->vfs->vfs_open_file_cache;
+    }
 
     if (request->status == CHIMERA_VFS_OK) {
         chimera_vfs_abort_if(!(request->open_at.r_attr.va_mask & CHIMERA_VFS_ATTR_FH),
@@ -37,16 +45,35 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
         fh_hash = XXH3_64bits(request->open_at.r_attr.va_fh,
                               request->open_at.r_attr.va_fh_len);
 
-        chimera_vfs_open_cache_insert(
-            thread,
-            thread->vfs->vfs_open_file_cache,
-            request->module,
-            request->open_at.r_attr.va_fh,
-            request->open_at.r_attr.va_fh_len,
-            fh_hash,
-            request->open_at.r_vfs_private,
-            chimera_vfs_open_at_hdl_callback,
-            request);
+        if (request->module->file_open_required || !(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
+            chimera_vfs_open_cache_insert(
+                thread,
+                cache,
+                request->module,
+                request->open_at.r_attr.va_fh,
+                request->open_at.r_attr.va_fh_len,
+                fh_hash,
+                request->open_at.r_vfs_private,
+                chimera_vfs_open_at_hdl_callback,
+                request);
+        } else {
+
+            /* This is an inferred open from the likes of NFS3 create
+             * where caller does not need to hold a reference count
+             * and our module does not need open handles, so
+             * we can synthesize a handle and return it immediately.
+             */
+
+            handle = chimera_vfs_synth_handle_alloc(thread);
+
+            memcpy(handle->fh, request->open_at.r_attr.va_fh, request->open_at.r_attr.va_fh_len);
+            handle->fh_len      = request->open_at.r_attr.va_fh_len;
+            handle->fh_hash     = fh_hash;
+            handle->vfs_private =  0xdeadbeefUL;
+
+            chimera_vfs_open_at_hdl_callback(handle, request);
+
+        }
 
     } else {
         chimera_vfs_open_at_hdl_callback(NULL, request);

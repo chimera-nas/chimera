@@ -178,8 +178,8 @@ chimera_vfs_init(int num_delegation_threads)
 
     vfs = calloc(1, sizeof(*vfs));
 
-    vfs->vfs_open_path_cache = chimera_vfs_open_cache_init(10, 128 * 1024);
-    vfs->vfs_open_file_cache = chimera_vfs_open_cache_init(10, 128 * 1024);
+    vfs->vfs_open_path_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_PATH, 10, 128 * 1024);
+    vfs->vfs_open_file_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_FILE, 10, 128 * 1024);
 
     chimera_vfs_info("Initializing VFS root module...");
     chimera_vfs_register(vfs, &vfs_root);
@@ -354,10 +354,11 @@ chimera_vfs_thread_init(
 void
 chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
 {
-    struct chimera_vfs         *vfs = thread->vfs;
-    struct chimera_vfs_module  *module;
-    struct chimera_vfs_request *request;
-    int                         i;
+    struct chimera_vfs             *vfs = thread->vfs;
+    struct chimera_vfs_module      *module;
+    struct chimera_vfs_request     *request;
+    struct chimera_vfs_open_handle *handle;
+    int                             i;
 
     close(thread->eventfd);
 
@@ -390,9 +391,15 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
         module->thread_destroy(thread->module_private[i]);
     }
 
+    while (thread->free_synth_handles) {
+        handle = thread->free_synth_handles;
+        LL_DELETE(thread->free_synth_handles, handle);
+        free(handle);
+    }
+
     while (thread->free_requests) {
         request = thread->free_requests;
-        DL_DELETE(thread->free_requests, request);
+        LL_DELETE(thread->free_requests, request);
         free(request->plugin_data);
         free(request);
     }

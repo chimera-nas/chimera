@@ -334,12 +334,14 @@ chimera_vfs_root_dispatch(
 } /* vfs_root_dispatch */
 
 struct chimera_vfs_module vfs_root = {
-    .fh_magic       = CHIMERA_VFS_FH_MAGIC_ROOT,
-    .name           = "root",
-    .blocking       = 0,
-    .init           = chimera_vfs_root_init,
-    .destroy        = chimera_vfs_root_destroy,
-    .thread_init    = chimera_vfs_root_thread_init,
-    .thread_destroy = chimera_vfs_root_thread_destroy,
-    .dispatch       = chimera_vfs_root_dispatch,
+    .fh_magic           = CHIMERA_VFS_FH_MAGIC_ROOT,
+    .name               = "root",
+    .blocking           = 0,
+    .path_open_required = 0,
+    .file_open_required = 0,
+    .init               = chimera_vfs_root_init,
+    .destroy            = chimera_vfs_root_destroy,
+    .thread_init        = chimera_vfs_root_thread_init,
+    .thread_destroy     = chimera_vfs_root_thread_destroy,
+    .dispatch           = chimera_vfs_root_dispatch,
 };

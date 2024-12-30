@@ -5,7 +5,7 @@
 #include "nfs3_attr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_open_cache.h"
+#include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 
 static void
@@ -54,7 +54,7 @@ chimera_nfs3_mkdir_complete(
         }
     }
 
-    chimera_vfs_open_cache_release(thread->vfs->vfs_open_file_cache, req->handle);
+    chimera_vfs_release(thread->vfs_thread, req->handle);
 
     shared->nfs_v3.send_reply_NFSPROC3_MKDIR(evpl, &res, msg);
 
@@ -122,7 +122,7 @@ chimera_nfs3_mkdir(
     chimera_vfs_open(thread->vfs_thread,
                      args->where.dir.data.data,
                      args->where.dir.data.len,
-                     CHIMERA_VFS_OPEN_RDONLY,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_RDONLY,
                      chimera_nfs3_mkdir_open_callback,
                      req);
 } /* chimera_nfs3_mkdir */

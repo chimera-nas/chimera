@@ -2,7 +2,7 @@
 #include "nfs3_status.h"
 #include "nfs3_attr.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_open_cache.h"
+#include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 static void
 chimera_nfs3_fsstat_complete(
@@ -35,7 +35,7 @@ chimera_nfs3_fsstat_complete(
         res.resok.invarsec = 0;
     }
 
-    chimera_vfs_open_cache_release(thread->vfs_thread->vfs->vfs_open_file_cache, req->handle);
+    chimera_vfs_release(thread->vfs_thread, req->handle);
 
     shared->nfs_v3.send_reply_NFSPROC3_FSSTAT(evpl, &res, msg);
 
@@ -90,7 +90,7 @@ chimera_nfs3_fsstat(
     chimera_vfs_open(thread->vfs_thread,
                      args->fsroot.data.data,
                      args->fsroot.data.len,
-                     CHIMERA_VFS_OPEN_RDWR,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_RDONLY,
                      chimera_nfs3_fsstat_open_callback,
                      req);
 } /* chimera_nfs3_fsstat */

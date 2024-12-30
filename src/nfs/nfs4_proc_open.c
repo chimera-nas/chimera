@@ -1,7 +1,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_open_cache.h"
+#include "vfs/vfs_release.h"
 
 static void
 chimera_nfs4_open_at_complete(
@@ -40,7 +40,7 @@ chimera_nfs4_open_at_complete(
         res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
     }
 
-    chimera_vfs_open_cache_release(req->thread->vfs->vfs_open_file_cache, parent_handle);
+    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_at_complete */
