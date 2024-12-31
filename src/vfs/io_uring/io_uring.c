@@ -180,7 +180,8 @@ chimera_io_uring_complete(
 
                     parent_fd = request->lookup.handle->vfs_private;
 
-                    rc = linux_get_fh(parent_fd, name, S_ISDIR(stx->stx_mode),
+                    rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                                      parent_fd, name, S_ISDIR(stx->stx_mode),
                                       request->lookup.r_attr.va_fh,
                                       &request->lookup.r_attr.va_fh_len);
 
@@ -234,7 +235,8 @@ chimera_io_uring_complete(
 
                         parent_fd = request->open_at.handle->vfs_private;
 
-                        rc = linux_get_fh(parent_fd, name, S_ISDIR(stx->stx_mode),
+                        rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                                          parent_fd, name, S_ISDIR(stx->stx_mode),
                                           request->open_at.r_attr.va_fh,
                                           &request->open_at.r_attr.va_fh_len);
 
@@ -282,7 +284,8 @@ chimera_io_uring_complete(
 
                         parent_fd = request->mkdir.handle->vfs_private;
 
-                        rc = linux_get_fh(parent_fd, name, S_ISDIR(stx->stx_mode),
+                        rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                                          parent_fd, name, S_ISDIR(stx->stx_mode),
                                           request->mkdir.r_attr.va_fh,
                                           &request->mkdir.r_attr.va_fh_len);
 
@@ -457,6 +460,9 @@ chimera_io_uring_getattr(
     if (request->getattr.attr_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         rc = fstatvfs(fd, &stv);
 
+        chimera_linux_debug("fstatvfs on fd %d returned %d errno %d",
+                            fd, rc, errno);
+
         if (rc == 0) {
             chimera_linux_statvfs_to_attr(&request->getattr.r_attr, &stv);
         }
@@ -603,7 +609,8 @@ chimera_io_uring_setattr(
         }
     }
 
-    chimera_linux_map_attrs(request->setattr.attr_mask,
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            request->setattr.attr_mask,
                             &request->setattr.r_attr,
                             fd,
                             request->fh,
@@ -639,7 +646,8 @@ chimera_io_uring_lookup_path(
         return;
     }
 
-    rc = linux_get_fh(mount_fd,
+    rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                      mount_fd,
                       fullpath,
                       1,
                       r_attr->va_fh,
@@ -731,7 +739,8 @@ chimera_io_uring_readdir(
         if (request->readdir.attrmask & (CHIMERA_VFS_ATTR_FH |
                                          CHIMERA_VFS_ATTR_MASK_STAT)) {
 
-            chimera_linux_map_child_attrs(request,
+            chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                                          request,
                                           request->readdir.attrmask,
                                           &vattr,
                                           fd,
@@ -1127,13 +1136,15 @@ chimera_io_uring_symlink(
         return;
     }
 
-    chimera_linux_map_attrs(request->symlink.attrmask,
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            request->symlink.attrmask,
                             &request->symlink.r_dir_attr,
                             fd,
                             request->fh,
                             request->fh_len);
 
-    rc = linux_get_fh(fd,
+    rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                      fd,
                       fullname,
                       0,
                       request->symlink.r_attr.va_fh,
@@ -1156,7 +1167,8 @@ chimera_io_uring_symlink(
                                   O_PATH);
 
         if (fd >= 0) {
-            chimera_linux_map_attrs(request->symlink.attrmask & ~CHIMERA_VFS_ATTR_FH,
+            chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                                    request->symlink.attrmask & ~CHIMERA_VFS_ATTR_FH,
                                     &request->symlink.r_attr,
                                     fd,
                                     request->symlink.r_attr.va_fh,

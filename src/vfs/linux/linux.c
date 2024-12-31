@@ -74,7 +74,8 @@ chimera_linux_getattr(
 
     fd = (int) request->getattr.handle->vfs_private;
 
-    chimera_linux_map_attrs(request->getattr.attr_mask,
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            request->getattr.attr_mask,
                             &request->getattr.r_attr,
                             fd,
                             request->fh,
@@ -223,7 +224,8 @@ chimera_linux_setattr(
         }
     }
 
-    chimera_linux_map_attrs(request->setattr.attr_mask,
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            request->setattr.attr_mask,
                             &request->setattr.r_attr,
                             fd,
                             request->fh,
@@ -259,7 +261,8 @@ chimera_linux_lookup_path(
         return;
     }
 
-    rc = linux_get_fh(mount_fd,
+    rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
+                      mount_fd,
                       fullpath,
                       1,
                       r_attr->va_fh,
@@ -289,13 +292,15 @@ chimera_linux_lookup(
 
     TERM_STR(fullname, request->lookup.component, request->lookup.component_len, scratch);
 
-    chimera_linux_map_child_attrs(request,
+    chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                                  request,
                                   request->lookup.attrmask,
                                   &request->lookup.r_attr,
                                   parent_fd,
                                   fullname);
 
-    chimera_linux_map_attrs(request->lookup.attrmask,
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            request->lookup.attrmask,
                             &request->lookup.r_dir_attr,
                             parent_fd,
                             request->fh,
@@ -354,7 +359,8 @@ chimera_linux_readdir(
                                          CHIMERA_VFS_ATTR_MASK_STAT)) {
 
 
-            chimera_linux_map_child_attrs(request,
+            chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                                          request,
                                           request->readdir.attrmask,
                                           &vattr,
                                           fd,
@@ -470,7 +476,8 @@ chimera_linux_open_at(
 
     request->open_at.r_vfs_private = fd;
 
-    chimera_linux_map_attrs(request->open_at.attrmask,
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            request->open_at.attrmask,
                             &request->open_at.r_attr,
                             fd,
                             NULL,
@@ -514,14 +521,16 @@ chimera_linux_mkdir(
         return;
     }
 
-    chimera_linux_map_attrs(request->mkdir.attrmask,
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            request->mkdir.attrmask,
                             &request->mkdir.r_dir_attr,
                             fd,
                             request->fh,
                             request->fh_len);
 
 
-    rc = linux_get_fh(fd, fullname, 1,
+    rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
+                      fd, fullname, 1,
                       request->mkdir.r_attr.va_fh,
                       &request->mkdir.r_attr.va_fh_len);
 
@@ -541,7 +550,8 @@ chimera_linux_mkdir(
                                   O_RDONLY);
 
         if (fd >= 0) {
-            chimera_linux_map_attrs(request->mkdir.attrmask & ~CHIMERA_VFS_ATTR_FH,
+            chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                                    request->mkdir.attrmask & ~CHIMERA_VFS_ATTR_FH,
                                     &request->mkdir.r_attr,
                                     fd,
                                     request->mkdir.r_attr.va_fh,
@@ -695,7 +705,8 @@ chimera_linux_read(
         return;
     }
 
-    chimera_linux_map_attrs(request->read.attrmask,
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            request->read.attrmask,
                             &request->read.r_attr,
                             fd,
                             NULL,
@@ -758,7 +769,8 @@ chimera_linux_write(
 
     request->write.r_length = len;
 
-    chimera_linux_map_attrs(request->write.attrmask,
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            request->write.attrmask,
                             &request->write.r_attr,
                             fd,
                             NULL,
@@ -815,13 +827,15 @@ chimera_linux_symlink(
         return;
     }
 
-    chimera_linux_map_attrs(request->symlink.attrmask,
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            request->symlink.attrmask,
                             &request->symlink.r_dir_attr,
                             fd,
                             request->fh,
                             request->fh_len);
 
-    rc = linux_get_fh(fd,
+    rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
+                      fd,
                       fullname,
                       0,
                       request->symlink.r_attr.va_fh,
@@ -844,7 +858,8 @@ chimera_linux_symlink(
                                   O_PATH);
 
         if (fd >= 0) {
-            chimera_linux_map_attrs(request->symlink.attrmask & ~CHIMERA_VFS_ATTR_FH,
+            chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                                    request->symlink.attrmask & ~CHIMERA_VFS_ATTR_FH,
                                     &request->symlink.r_attr,
                                     fd,
                                     request->symlink.r_attr.va_fh,

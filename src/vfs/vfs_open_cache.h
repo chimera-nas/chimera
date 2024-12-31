@@ -186,20 +186,25 @@ chimera_vfs_open_cache_populate(
     uint64_t                        vfs_private_data)
 {
     struct vfs_open_cache_shard *shard;
-    struct chimera_vfs_request  *requests;
+    struct chimera_vfs_request  *requests = NULL;
 
     shard = &cache->shards[handle->fh_hash & cache->shard_mask];
 
     pthread_mutex_lock(&shard->lock);
 
-    handle->vfs_private      = vfs_private_data;
-    handle->pending          = 0;
-    requests                 = handle->blocked_requests;
-    handle->blocked_requests = NULL;
+    handle->vfs_private = vfs_private_data;
+    handle->pending     = 0;
+
+    if (!handle->exclusive) {
+        requests                 = handle->blocked_requests;
+        handle->blocked_requests = NULL;
+    }
 
     pthread_mutex_unlock(&shard->lock);
 
-    chimera_vfs_open_cache_release_blocked(thread, requests);
+    if (requests) {
+        chimera_vfs_open_cache_release_blocked(thread, requests);
+    }
 
 } /* chimera_vfs_open_cache_populate */
 

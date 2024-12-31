@@ -153,6 +153,8 @@ chimera_linux_statvfs_to_attr(
     struct chimera_vfs_attrs *attr,
     struct statvfs           *stvfs)
 {
+
+    attr->va_mask       |= CHIMERA_VFS_ATTR_MASK_STATFS;
     attr->va_space_total = stvfs->f_blocks * stvfs->f_bsize;
     attr->va_space_free  = stvfs->f_bavail * stvfs->f_bsize;
     attr->va_space_avail = attr->va_space_free;
@@ -216,18 +218,18 @@ open_mount_path_by_id(int mount_id)
 
 static inline int
 linux_get_fh(
+    uint8_t     fh_magic,
     int         fd,
     const char *path,
     uint8_t     isdir,
     void       *fh,
     uint32_t   *fh_len)
 {
-    uint8_t              buf[sizeof(struct file_handle) + MAX_HANDLE_SZ];
-    static const uint8_t fh_magic = CHIMERA_VFS_FH_MAGIC_LINUX;
-    struct file_handle  *handle   = (struct file_handle *) buf;
-    int                  rc;
-    int                  mount_id;
-    uint8_t             *fhp = (uint8_t *) fh;
+    uint8_t             buf[sizeof(struct file_handle) + MAX_HANDLE_SZ];
+    struct file_handle *handle = (struct file_handle *) buf;
+    int                 rc;
+    int                 mount_id;
+    uint8_t            *fhp = (uint8_t *) fh;
 
     handle->handle_bytes = MAX_HANDLE_SZ;
 
@@ -311,6 +313,7 @@ linux_open_by_handle(
 
 static inline void
 chimera_linux_map_attrs(
+    uint8_t                   fh_magic,
     uint64_t                  attrmask,
     struct chimera_vfs_attrs *attr,
     int                       fd,
@@ -338,7 +341,7 @@ chimera_linux_map_attrs(
             memcpy(attr->va_fh, fh, fhlen);
             attr->va_fh_len = fhlen;
         } else {
-            rc = linux_get_fh(fd, "", S_ISDIR(st.st_mode),
+            rc = linux_get_fh(fh_magic, fd, "", S_ISDIR(st.st_mode),
                               attr->va_fh,
                               &attr->va_fh_len);
 
@@ -352,7 +355,6 @@ chimera_linux_map_attrs(
         rc = fstatvfs(fd, &stvfs);
 
         if (rc == 0) {
-            attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STATFS;
             chimera_linux_statvfs_to_attr(attr, &stvfs);
         }
     }
@@ -361,6 +363,7 @@ chimera_linux_map_attrs(
 
 static inline void
 chimera_linux_map_child_attrs(
+    uint8_t                     fh_magic,
     struct chimera_vfs_request *request,
     uint64_t                    attrmask,
     struct chimera_vfs_attrs   *attr,
@@ -385,7 +388,7 @@ chimera_linux_map_child_attrs(
     }
 
     if (attrmask & CHIMERA_VFS_ATTR_FH) {
-        rc = linux_get_fh(dirfd, name, S_ISDIR(st.st_mode),
+        rc = linux_get_fh(fh_magic, dirfd, name, S_ISDIR(st.st_mode),
                           attr->va_fh,
                           &attr->va_fh_len);
 
