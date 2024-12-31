@@ -1,5 +1,5 @@
 add_library(chimera_server SHARED server.c)
-target_link_libraries(chimera_server chimera_nfs chimera_vfs evpl)
+target_link_libraries(chimera_server chimera_nfs chimera_vfs evpl unwind)
 
 install(TARGETS chimera_server DESTINATION lib)
 

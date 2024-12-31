@@ -33,6 +33,8 @@ main(
 
     chimera_log_init();
 
+    chimera_enable_crash_handler();
+
     while ((opt = getopt(argc, argv, "c:dv")) != -1) {
         switch (opt) {
             case 'c':

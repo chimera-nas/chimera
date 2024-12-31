@@ -10,6 +10,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <execinfo.h>
+
+ #define UNW_LOCAL_ONLY
+#include <libunwind.h>
 
 #include "logging.h"
 #include "snprintf.h"
@@ -27,6 +31,10 @@ static const unsigned short int __mon_yday[2][13] =
 
 #define DIV(a, b)            ((a) / (b) - ((a) % (b) < 0))
 #define LEAPS_THRU_END_OF(y) (DIV(y, 4) - DIV(y, 100) + DIV(y, 400))
+
+static void
+chimera_crash_handler(
+    int signum);
 
 static void
 chimera_timet2tmZ(
@@ -316,5 +324,58 @@ __chimera_abort(
     chimera_vlog(CHIMERA_LOG_FATAL, mod, file, line, fmt, argp);
     va_end(argp);
 
+    chimera_crash_handler(SIGABRT);
     abort();
 } /* chimera_abort */
+
+#define BACKTRACE_SIZE 64
+
+static void
+chimera_crash_handler(int signum)
+{
+    unw_cursor_t  cursor;
+    unw_context_t context;
+    unw_word_t    ip, sp, off;
+    char          symbol[256];
+
+    chimera_error("core", __FILE__, __LINE__, "Received signal %d.", signum);
+
+    unw_getcontext(&context);
+    unw_init_local(&cursor, &context);
+
+    while (unw_step(&cursor) > 0) {
+        unw_get_reg(&cursor, UNW_REG_IP, &ip);
+        unw_get_reg(&cursor, UNW_REG_SP, &sp);
+
+        if (unw_get_proc_name(&cursor, symbol, sizeof(symbol), &off) == 0) {
+            chimera_error("core", __FILE__, __LINE__, "ip = %lx, sp = %lx (%s+0x%lx)",
+                          (long) ip, (long) sp, symbol, (long) off);
+        } else {
+            chimera_error("core", __FILE__, __LINE__, "ip = %lx, sp = %lx (unknown)",
+                          (long) ip, (long) sp);
+        }
+    }
+
+    sleep(1);
+    chimera_log_flush(signum);
+
+    signal(signum, SIG_DFL);
+    raise(signum);
+} /* chimera_crash_handler */
+
+void
+chimera_enable_crash_handler(void)
+{
+    struct sigaction sa;
+
+    sa.sa_handler = chimera_crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESETHAND; // Reset to default handler after first signal
+
+    fprintf(stderr, "Enabling crash handler\n");
+
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+} /* chimera_enable_crash_handler */

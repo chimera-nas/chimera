@@ -31,7 +31,9 @@ libnfs_test_init(
     const char     *backend = "linux";
     struct timespec tv;
 
-    clock_gettime(CLOCK_MONOTONIC, &tv);
+    clock_gettime(
+        CLOCK_MONOTONIC,
+        &tv);
 
     env->session_dir[0] = '\0';
 
@@ -47,6 +49,8 @@ libnfs_test_init(
     }
 
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
+
+    chimera_enable_crash_handler();
 
     env->server = chimera_server_init(NULL);
 

@@ -10,6 +10,10 @@ extern int ChimeraLogLevel;
 void chimera_log_init(
     void);
 
+void chimera_enable_crash_handler(
+    void);
+
+
 void __chimera_debug(
     const char *mod,
     const char *file,
