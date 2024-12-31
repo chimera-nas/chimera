@@ -264,7 +264,6 @@ chimera_linux_lookup_path(
     rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
                       mount_fd,
                       fullpath,
-                      1,
                       r_attr->va_fh,
                       &r_attr->va_fh_len);
 
@@ -536,7 +535,7 @@ chimera_linux_mkdir(
 
 
     rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
-                      fd, fullname, 1,
+                      fd, fullname,
                       request->mkdir.r_attr.va_fh,
                       &request->mkdir.r_attr.va_fh_len);
 
@@ -843,7 +842,6 @@ chimera_linux_symlink(
     rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
                       fd,
                       fullname,
-                      0,
                       request->symlink.r_attr.va_fh,
                       &request->symlink.r_attr.va_fh_len);
 

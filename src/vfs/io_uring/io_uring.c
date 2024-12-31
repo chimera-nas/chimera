@@ -181,7 +181,7 @@ chimera_io_uring_complete(
                     parent_fd = request->lookup.handle->vfs_private;
 
                     rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
-                                      parent_fd, name, S_ISDIR(stx->stx_mode),
+                                      parent_fd, name,
                                       request->lookup.r_attr.va_fh,
                                       &request->lookup.r_attr.va_fh_len);
 
@@ -236,7 +236,7 @@ chimera_io_uring_complete(
                         parent_fd = request->open_at.handle->vfs_private;
 
                         rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
-                                          parent_fd, name, S_ISDIR(stx->stx_mode),
+                                          parent_fd, name,
                                           request->open_at.r_attr.va_fh,
                                           &request->open_at.r_attr.va_fh_len);
 
@@ -285,7 +285,7 @@ chimera_io_uring_complete(
                         parent_fd = request->mkdir.handle->vfs_private;
 
                         rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
-                                          parent_fd, name, S_ISDIR(stx->stx_mode),
+                                          parent_fd, name,
                                           request->mkdir.r_attr.va_fh,
                                           &request->mkdir.r_attr.va_fh_len);
 
@@ -351,12 +351,13 @@ chimera_io_uring_complete(
 
         io_uring_cqe_seen(&thread->ring, cqe);
 
-        while (thread->pending_requests && thread->inflight < thread->max_inflight) {
-            request = thread->pending_requests;
-            DL_DELETE(thread->pending_requests, request);
-            chimera_io_uring_dispatch(request, thread);
-        }
     } /* chimera_io_uring_complete */
+
+    while (thread->pending_requests && thread->inflight < thread->max_inflight) {
+        request = thread->pending_requests;
+        DL_DELETE(thread->pending_requests, request);
+        chimera_io_uring_dispatch(request, thread);
+    }
 } /* chimera_io_uring_complete */
 
 static void
@@ -649,7 +650,6 @@ chimera_io_uring_lookup_path(
     rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
                       mount_fd,
                       fullpath,
-                      1,
                       r_attr->va_fh,
                       &r_attr->va_fh_len);
 
@@ -1146,7 +1146,6 @@ chimera_io_uring_symlink(
     rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
                       fd,
                       fullname,
-                      0,
                       request->symlink.r_attr.va_fh,
                       &request->symlink.r_attr.va_fh_len);
 

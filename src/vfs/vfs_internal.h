@@ -96,7 +96,8 @@ chimera_vfs_request_alloc_by_hash(
     request->fh_hash = fh_hash;
     clock_gettime(CLOCK_MONOTONIC, &request->start_time);
 
-    thread->active_requests++;
+    thread->num_active_requests++;
+    DL_APPEND2(thread->active_requests, request, active_prev, active_next);
 
     return request;
 } /* chimera_vfs_request_alloc_by_hash */
@@ -176,8 +177,9 @@ chimera_vfs_request_free(
     struct chimera_vfs_thread  *thread,
     struct chimera_vfs_request *request)
 {
+    DL_DELETE2(thread->active_requests, request, active_prev, active_next);
 
-    thread->active_requests--;
+    thread->num_active_requests--;
 
     LL_PREPEND(thread->free_requests, request);
 } /* chimera_vfs_request_free */

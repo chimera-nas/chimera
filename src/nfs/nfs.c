@@ -155,8 +155,9 @@ nfs_server_destroy(void *data)
 
 static void *
 nfs_server_thread_init(
-    struct evpl *evpl,
-    void        *data)
+    struct evpl               *evpl,
+    struct chimera_vfs_thread *vfs_thread,
+    void                      *data)
 {
     struct chimera_server_nfs_shared *shared = data;
     struct chimera_server_nfs_thread *thread;
@@ -175,7 +176,7 @@ nfs_server_thread_init(
     thread->rpc2_agent = evpl_rpc2_init(evpl);
 
     thread->vfs        = shared->vfs;
-    thread->vfs_thread = chimera_vfs_thread_init(evpl, shared->vfs);
+    thread->vfs_thread = vfs_thread;
 
     programs[0] = &shared->nfs_v3.rpc2;
     programs[1] = &shared->nfs_v4.rpc2;
@@ -232,8 +233,6 @@ nfs_server_thread_destroy(void *data)
 {
     struct chimera_server_nfs_thread *thread = data;
     struct nfs_request               *req;
-
-    chimera_vfs_thread_destroy(thread->vfs_thread);
 
     if (thread->nfs_rdma_server) {
         evpl_rpc2_server_destroy(thread->rpc2_agent, thread->nfs_rdma_server);

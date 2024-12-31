@@ -372,8 +372,6 @@ chimera_enable_crash_handler(void)
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESETHAND; // Reset to default handler after first signal
 
-    fprintf(stderr, "Enabling crash handler\n");
-
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);

@@ -319,6 +319,30 @@ chimera_vfs_process_completion(
 
 } /* chimera_vfs_process_completion */
 
+void
+chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
+{
+    struct chimera_vfs_request *request;
+    struct timespec             now;
+    uint64_t                    elapsed;
+
+    request = thread->active_requests;
+
+    if (!request) {
+        return;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    elapsed = chimera_get_elapsed_ns(&now, &request->start_time);
+
+    if (elapsed > 10000000000UL) {
+        chimera_vfs_debug("oldest request has been active for %lu ns", elapsed);
+        chimera_vfs_dump_request(request);
+    }
+
+} /* chimera_vfs_watchdog_callback */
+
 struct chimera_vfs_thread *
 chimera_vfs_thread_init(
     struct evpl        *evpl,
@@ -331,6 +355,7 @@ chimera_vfs_thread_init(
     thread       = calloc(1, sizeof(*thread));
     thread->evpl = evpl;
     thread->vfs  = vfs;
+
 
     pthread_mutex_init(&thread->lock, NULL);
 

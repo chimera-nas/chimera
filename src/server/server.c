@@ -117,6 +117,16 @@ chimera_server_config_get_nfs_rdma_port(const struct chimera_server_config *conf
     return config->nfs_rdma_port;
 } /* chimera_server_config_get_nfs_rdma_port */
 
+static void
+chimera_server_thread_wake(
+    struct evpl *evpl,
+    void        *data)
+{
+    struct chimera_thread *thread = data;
+
+    chimera_vfs_watchdog(thread->vfs_thread);
+} /* chimera_server_thread_wake */
+
 static void *
 chimera_server_thread_init(
     struct evpl *evpl,
@@ -133,6 +143,7 @@ chimera_server_thread_init(
 
     for (int i = 0; i < server->num_protocols; i++) {
         thread->protocol_private[i] = server->protocols[i]->thread_init(evpl,
+                                                                        thread->vfs_thread,
                                                                         server->
                                                                         protocol_private
                                                                         [i]);
@@ -207,10 +218,11 @@ chimera_server_init(const struct chimera_server_config *config)
     }
 
     server->pool = evpl_threadpool_create(config->core_threads,
-                                          chimera_server_thread_init, NULL,
+                                          chimera_server_thread_init,
+                                          chimera_server_thread_wake,
                                           NULL,
                                           chimera_server_thread_destroy,
-                                          -1,
+                                          1000,
                                           server);
 
     chimera_server_info("Waiting for threads to start...");

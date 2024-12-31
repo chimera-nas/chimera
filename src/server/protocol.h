@@ -4,6 +4,7 @@
 
 struct chimera_server_config;
 struct chimera_vfs;
+struct chimera_vfs_thread;
 
 struct chimera_server_protocol {
     void *(*init)(
@@ -13,7 +14,8 @@ struct chimera_server_protocol {
         void *data);
     void *(*thread_init)(
         struct evpl *,
-        void *data);
+        struct chimera_vfs_thread *vfs_thread,
+        void                      *data);
     void  (*thread_destroy)(
         void *data);
 };

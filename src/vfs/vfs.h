@@ -192,6 +192,10 @@ struct chimera_vfs_request {
     struct chimera_vfs_request       *prev;
     struct chimera_vfs_request       *next;
 
+    /* For use by vfs core only */
+    struct chimera_vfs_request       *active_prev;
+    struct chimera_vfs_request       *active_next;
+
     const void                       *fh;
     uint32_t                          fh_len;
     uint64_t                          fh_hash;
@@ -527,7 +531,8 @@ struct chimera_vfs_thread {
     struct chimera_vfs             *vfs;
     void                           *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
     struct chimera_vfs_request     *free_requests;
-    uint64_t                        active_requests;
+    struct chimera_vfs_request     *active_requests;
+    uint64_t                        num_active_requests;
     struct chimera_vfs_open_handle *free_synth_handles;
 
     struct chimera_vfs_request     *pending_complete_requests;
@@ -567,3 +572,7 @@ chimera_vfs_create_share(
     const char         *module_name,
     const char         *share_path,
     const char         *module_path);
+
+void
+chimera_vfs_watchdog(
+    struct chimera_vfs_thread *thread);

@@ -221,7 +221,6 @@ linux_get_fh(
     uint8_t     fh_magic,
     int         fd,
     const char *path,
-    uint8_t     isdir,
     void       *fh,
     uint32_t   *fh_len)
 {
@@ -341,7 +340,7 @@ chimera_linux_map_attrs(
             memcpy(attr->va_fh, fh, fhlen);
             attr->va_fh_len = fhlen;
         } else {
-            rc = linux_get_fh(fh_magic, fd, "", S_ISDIR(st.st_mode),
+            rc = linux_get_fh(fh_magic, fd, "",
                               attr->va_fh,
                               &attr->va_fh_len);
 
@@ -386,7 +385,7 @@ chimera_linux_map_child_attrs(
     }
 
     if (attrmask & CHIMERA_VFS_ATTR_FH) {
-        rc = linux_get_fh(fh_magic, dirfd, name, S_ISDIR(st.st_mode),
+        rc = linux_get_fh(fh_magic, dirfd, name,
                           attr->va_fh,
                           &attr->va_fh_len);
 
