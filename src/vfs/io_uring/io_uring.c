@@ -123,8 +123,6 @@ chimera_io_uring_get_sqe(
 
     chimera_io_uring_abort_if(!sge, "io_uring_get_sqe");
 
-    thread->inflight++;
-
     if (linked) {
         io_uring_sqe_set_flags(sge, IOSQE_IO_HARDLINK);
     }
@@ -165,8 +163,6 @@ chimera_io_uring_complete(
     }
 
     while (io_uring_peek_cqe(&thread->ring, &cqe) == 0) {
-
-        thread->inflight--;
 
         handle = (struct chimera_vfs_request_handle *) cqe->user_data;
 
@@ -346,12 +342,13 @@ chimera_io_uring_complete(
         --request->token_count;
 
         if (request->token_count == 0) {
+            thread->inflight--;
             request->complete(request);
         }
 
         io_uring_cqe_seen(&thread->ring, cqe);
 
-        while (thread->pending_requests && thread->inflight + CHIMERA_VFS_REQUEST_MAX_HANDLES < thread->max_inflight) {
+        while (thread->pending_requests && thread->inflight < thread->max_inflight) {
             request = thread->pending_requests;
             DL_DELETE(thread->pending_requests, request);
             chimera_io_uring_dispatch(request, thread);
@@ -396,7 +393,7 @@ chimera_io_uring_thread_init(
     thread->max_inflight = 1024;
 
     // Initialize io_uring with params
-    rc = io_uring_queue_init_params(thread->max_inflight, &thread->ring, &params);
+    rc = io_uring_queue_init_params(4 * thread->max_inflight, &thread->ring, &params);
 
     chimera_io_uring_abort_if(rc < 0, "Failed to create io_uring queue: %s", strerror(-rc));
 
@@ -1311,11 +1308,13 @@ chimera_io_uring_dispatch(
 {
     struct chimera_io_uring_thread *thread = private_data;
 
-    if (thread->inflight + CHIMERA_VFS_REQUEST_MAX_HANDLES > thread->max_inflight) {
+    if (thread->inflight >= thread->max_inflight) {
         /* We have given the ring too much work already, wait for completions */
         DL_APPEND(thread->pending_requests, request);
         return;
     }
+
+    thread->inflight++;
 
     switch (request->opcode) {
         case CHIMERA_VFS_OP_LOOKUP_PATH:
