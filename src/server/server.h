@@ -48,6 +48,9 @@ chimera_server_create_share(
     const char            *share_path,
     const char            *module_path);
 
+void chimera_server_start(
+    struct chimera_server *server);
+
 void chimera_server_destroy(
     struct chimera_server *server);
 

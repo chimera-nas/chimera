@@ -87,6 +87,8 @@ libnfs_test_init(
         exit(EXIT_FAILURE);
     }
 
+    chimera_server_start(env->server);
+
     env->nfs = nfs_init_context();
 
     if (!env->nfs) {

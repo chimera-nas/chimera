@@ -217,7 +217,13 @@ chimera_server_init(const struct chimera_server_config *config)
         server->protocol_private[i] = server->protocols[i]->init(config, server->vfs);
     }
 
-    server->pool = evpl_threadpool_create(config->core_threads,
+    return server;
+} /* chimera_server_init */
+
+void
+chimera_server_start(struct chimera_server *server)
+{
+    server->pool = evpl_threadpool_create(server->config->core_threads,
                                           chimera_server_thread_init,
                                           chimera_server_thread_wake,
                                           NULL,
@@ -226,13 +232,12 @@ chimera_server_init(const struct chimera_server_config *config)
                                           server);
 
     chimera_server_info("Waiting for threads to start...");
-    while (server->threads_online < config->core_threads) {
+    while (server->threads_online < server->config->core_threads) {
         usleep(100);
     }
 
     chimera_server_info("Server is ready.");
-    return server;
-} /* chimera_server_init */
+} /* chimera_server_start */
 
 void
 chimera_server_destroy(struct chimera_server *server)

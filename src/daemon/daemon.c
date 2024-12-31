@@ -112,6 +112,8 @@ main(
         }
     }
 
+    chimera_server_start(server);
+
     while (!SigInt) {
         sleep(1);
     }
