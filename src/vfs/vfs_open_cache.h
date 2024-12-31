@@ -114,7 +114,6 @@ chimera_vfs_open_cache_release_blocked(
 
         request = requests;
 
-        chimera_vfs_debug("open cache releasing blocked request %p", request);
         LL_DELETE(requests, request);
 
         if (failed) {
@@ -125,7 +124,7 @@ chimera_vfs_open_cache_release_blocked(
 
         if (request_thread == thread) {
             /* This is a request from the same thread, so we can dispatch it immediately */
-            chimera_vfs_dispatch(request);
+            request->unblock_callback(request, request->pending_handle);
         } else {
             /* This is a request from a different thread, so we need to send it home */
             pthread_mutex_lock(&request_thread->lock);

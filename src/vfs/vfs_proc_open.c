@@ -36,6 +36,8 @@ chimera_vfs_open_hdl_callback(
 {
     chimera_vfs_open_callback_t callback = request->proto_callback;
 
+
+
     if (!handle) {
         /* Someone was already in process opening the file when we tried
          * and they failed, so we fail too.
