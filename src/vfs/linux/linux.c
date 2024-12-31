@@ -285,19 +285,25 @@ chimera_linux_lookup(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int   parent_fd;
+    int   parent_fd, rc;
     char *scratch = (char *) request->plugin_data;
 
     parent_fd = (int) request->lookup.handle->vfs_private;
 
     TERM_STR(fullname, request->lookup.component, request->lookup.component_len, scratch);
 
-    chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
-                                  request,
-                                  request->lookup.attrmask,
-                                  &request->lookup.r_attr,
-                                  parent_fd,
-                                  fullname);
+    rc = chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                                       request,
+                                       request->lookup.attrmask,
+                                       &request->lookup.r_attr,
+                                       parent_fd,
+                                       fullname);
+
+    if (rc) {
+        request->status = rc;
+        request->complete(request);
+        return;
+    }
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                             request->lookup.attrmask,
@@ -306,7 +312,7 @@ chimera_linux_lookup(
                             request->fh,
                             request->fh_len);
 
-
+    request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* linux_lookup */
 

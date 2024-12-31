@@ -361,7 +361,7 @@ chimera_linux_map_attrs(
 
 } /* chimera_linux_map_attrs */
 
-static inline void
+static inline int
 chimera_linux_map_child_attrs(
     uint8_t                     fh_magic,
     struct chimera_vfs_request *request,
@@ -379,9 +379,7 @@ chimera_linux_map_child_attrs(
         rc = fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW);
 
         if (rc) {
-            request->status = chimera_linux_errno_to_status(errno);
-            request->complete(request);
-            return;
+            return chimera_linux_errno_to_status(errno);
         }
 
         chimera_linux_stat_to_attr(attr, &st);
@@ -393,9 +391,7 @@ chimera_linux_map_child_attrs(
                           &attr->va_fh_len);
 
         if (rc) {
-            request->status = chimera_linux_errno_to_status(errno);
-            request->complete(request);
-            return;
+            return chimera_linux_errno_to_status(errno);
         }
 
         attr->va_mask |= CHIMERA_VFS_ATTR_FH;
@@ -410,6 +406,6 @@ chimera_linux_map_child_attrs(
         }
     }
 
-    request->status = CHIMERA_VFS_OK;
+    return CHIMERA_VFS_OK;
 } /* chimera_linux_map_child_attrs */
 
