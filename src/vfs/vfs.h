@@ -131,11 +131,15 @@ struct chimera_vfs_open_handle {
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
     uint8_t                         fh_len;
     uint8_t                         cache_id;
+    uint8_t                         exclusive;
+    uint8_t                         pending;
     uint32_t                        opencnt;
+    struct chimera_vfs_request     *blocked_requests;
     uint64_t                        vfs_private;
-    void                            ( *close_callback )(
-        struct chimera_vfs_open_handle *handle,
-        void                           *private_data);
+    void                            ( *callback )(
+        struct chimera_vfs_request     *request,
+        struct chimera_vfs_open_handle *handle);
+    struct chimera_vfs_request     *request;
     void                           *close_private;
     struct timespec                 timestamp;
     struct UT_hash_handle           hh;
@@ -191,6 +195,8 @@ struct chimera_vfs_request {
     const void                       *fh;
     uint32_t                          fh_len;
     uint64_t                          fh_hash;
+
+    struct chimera_vfs_open_handle   *pending_handle;
 
     union {
         struct {
@@ -519,6 +525,7 @@ struct chimera_vfs_thread {
     struct chimera_vfs_open_handle *free_synth_handles;
 
     struct chimera_vfs_request     *pending_complete_requests;
+    struct chimera_vfs_request     *unblocked_requests;
     int                             eventfd;
     struct evpl_event               pending_complete_event;
     pthread_mutex_t                 lock;

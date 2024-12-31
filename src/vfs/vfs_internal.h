@@ -87,7 +87,6 @@ chimera_vfs_request_alloc_by_hash(
         request->thread      = thread;
         request->plugin_data = malloc(4096);
     }
-
     request->status = CHIMERA_VFS_UNSET;
 
     request->module = chimera_vfs_get_module(thread, fh, fhlen);
@@ -133,7 +132,6 @@ chimera_vfs_synth_handle_alloc(struct chimera_vfs_thread *thread)
         handle           = calloc(1, sizeof(struct chimera_vfs_open_handle));
         handle->cache_id = CHIMERA_VFS_OPEN_ID_SYNTHETIC;
     }
-
     return handle;
 } /* chimera_vfs_synth_handle_alloc */
 
@@ -178,6 +176,7 @@ chimera_vfs_request_free(
     struct chimera_vfs_thread  *thread,
     struct chimera_vfs_request *request)
 {
+
     thread->active_requests--;
 
     LL_PREPEND(thread->free_requests, request);

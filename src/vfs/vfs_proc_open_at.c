@@ -6,10 +6,9 @@
 
 static void
 chimera_vfs_open_at_hdl_callback(
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+    struct chimera_vfs_request     *request,
+    struct chimera_vfs_open_handle *handle)
 {
-    struct chimera_vfs_request    *request  = private_data;
     chimera_vfs_open_at_callback_t callback = request->proto_callback;
 
     chimera_vfs_complete(request);
@@ -46,16 +45,17 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
                               request->open_at.r_attr.va_fh_len);
 
         if (request->module->file_open_required || !(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
-            chimera_vfs_open_cache_insert(
+            chimera_vfs_open_cache_acquire(
                 thread,
                 cache,
                 request->module,
+                request,
                 request->open_at.r_attr.va_fh,
                 request->open_at.r_attr.va_fh_len,
                 fh_hash,
                 request->open_at.r_vfs_private,
-                chimera_vfs_open_at_hdl_callback,
-                request);
+                0,
+                chimera_vfs_open_at_hdl_callback);
         } else {
 
             /* This is an inferred open from the likes of NFS3 create
@@ -71,12 +71,12 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
             handle->fh_hash     = fh_hash;
             handle->vfs_private =  0xdeadbeefUL;
 
-            chimera_vfs_open_at_hdl_callback(handle, request);
+            chimera_vfs_open_at_hdl_callback(request, handle);
 
         }
 
     } else {
-        chimera_vfs_open_at_hdl_callback(NULL, request);
+        chimera_vfs_open_at_hdl_callback(request, NULL);
     }
 } /* chimera_vfs_open_complete */
 
@@ -95,6 +95,8 @@ chimera_vfs_open_at(
     struct chimera_vfs_request *request;
 
     request = chimera_vfs_request_alloc_by_handle(thread, handle);
+
+
 
     request->open_at.r_attr.va_mask          = 0;
     request->open_at.r_dir_pre_attr.va_mask  = 0;

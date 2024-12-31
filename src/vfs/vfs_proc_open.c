@@ -3,14 +3,21 @@
 #include "vfs_internal.h"
 #include "common/misc.h"
 #include "vfs_open_cache.h"
+#include "vfs_release.h"
 
 static void
-chimera_vfs_open_hdl_callback(
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_vfs_open_complete(struct chimera_vfs_request *request)
 {
-    struct chimera_vfs_request *request  = private_data;
-    chimera_vfs_open_callback_t callback = request->proto_callback;
+    struct chimera_vfs_thread      *thread   = request->thread;
+    struct chimera_vfs_open_handle *handle   = request->pending_handle;
+    chimera_vfs_open_callback_t     callback = request->proto_callback;
+
+    if (request->status == CHIMERA_VFS_OK) {
+        chimera_vfs_populate_handle(thread, handle, request->open.r_vfs_private);
+    } else {
+        chimera_vfs_release(thread, handle);
+        handle = NULL;
+    }
 
     chimera_vfs_complete(request);
 
@@ -20,42 +27,25 @@ chimera_vfs_open_hdl_callback(
 
     chimera_vfs_request_free(request->thread, request);
 
-} /* chimera_vfs_open_hdl_callback */
+} /* chimera_vfs_open_complete */
 
 static void
-chimera_vfs_open_complete(struct chimera_vfs_request *request)
+chimera_vfs_open_hdl_callback(
+    struct chimera_vfs_request     *request,
+    struct chimera_vfs_open_handle *handle)
 {
-    struct chimera_vfs_thread *thread = request->thread;
-    struct chimera_vfs_module *module;
-    struct vfs_open_cache     *cache;
+    chimera_vfs_open_callback_t callback = request->proto_callback;
 
-    if (request->open.flags & CHIMERA_VFS_OPEN_PATH) {
-        cache = thread->vfs->vfs_open_path_cache;
+    if (handle->pending) {
+        /* Miss on the open cache so we need to dispatch the request */
+        request->pending_handle = handle;
+        chimera_vfs_dispatch(request);
     } else {
-        cache = thread->vfs->vfs_open_file_cache;
+        /* File was already open in the cache so we're done */
+        callback(CHIMERA_VFS_OK, handle, request->proto_private_data);
+        chimera_vfs_request_free(request->thread, request);
     }
-
-    if (request->status == CHIMERA_VFS_OK) {
-
-        module = chimera_vfs_get_module(thread,
-                                        request->fh,
-                                        request->fh_len);
-
-        chimera_vfs_open_cache_insert(
-            thread,
-            cache,
-            module,
-            request->fh,
-            request->fh_len,
-            request->fh_hash,
-            request->open.r_vfs_private,
-            chimera_vfs_open_hdl_callback,
-            request);
-    } else {
-        chimera_vfs_open_hdl_callback(NULL, request);
-    }
-
-} /* chimera_vfs_open_complete */
+} /* chimera_vfs_open_hdl_callback */
 
 void
 chimera_vfs_open(
@@ -85,17 +75,6 @@ chimera_vfs_open(
     if (module->file_open_required || !(flags & CHIMERA_VFS_OPEN_INFERRED)) {
 
         /* We really need to open the file */
-        handle = chimera_vfs_open_cache_lookup(
-            cache,
-            module,
-            fh,
-            fhlen,
-            fh_hash);
-
-        if (handle) {
-            callback(CHIMERA_VFS_OK, handle, private_data);
-            return;
-        }
 
         request = chimera_vfs_request_alloc_by_hash(thread, fh, fhlen, fh_hash);
 
@@ -105,7 +84,17 @@ chimera_vfs_open(
         request->proto_callback     = callback;
         request->proto_private_data = private_data;
 
-        chimera_vfs_dispatch(request);
+        chimera_vfs_open_cache_acquire(
+            thread,
+            cache,
+            module,
+            request,
+            fh,
+            fhlen,
+            fh_hash,
+            UINT64_MAX,
+            0,
+            chimera_vfs_open_hdl_callback);
 
     } else {
 

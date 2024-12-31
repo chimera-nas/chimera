@@ -17,8 +17,8 @@ struct vfs_open_cache_shard {
     uint8_t                         cache_id;
     uint32_t                        max_open_files;
     uint32_t                        open_handles;
-    uint64_t                        num_lookups;
-    uint64_t                        num_inserts;
+    uint64_t                        num_acquire;
+    uint64_t                        num_insert;
 };
 
 struct vfs_open_cache {
@@ -59,20 +59,20 @@ static inline void
 chimera_vfs_open_cache_destroy(struct vfs_open_cache *cache)
 {
     struct vfs_open_cache_shard *shard;
-    uint64_t                     total_lookups = 0;
-    uint64_t                     total_inserts = 0;
+    uint64_t                     total_acquires = 0;
+    uint64_t                     total_inserts  = 0;
 
     for (int i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
         pthread_mutex_destroy(&shard->lock);
-        total_lookups += shard->num_lookups;
-        total_inserts += shard->num_inserts;
+        total_acquires += shard->num_acquire;
+        total_inserts  += shard->num_insert;
     }
     free(cache->shards);
     free(cache);
 
-    chimera_vfs_info("open cache total lookups %lu total inserts %lu",
-                     total_lookups, total_inserts);
+    chimera_vfs_info("open cache total acquires %lu total inserts %lu",
+                     total_acquires, total_inserts);
 } /* vfs_open_cache_destroy */
 
 static inline struct chimera_vfs_open_handle *
@@ -100,11 +100,48 @@ chimera_vfs_open_cache_free(
 } /* chimera_vfs_open_cache_free */
 
 static inline void
+chimera_vfs_open_cache_release_blocked(
+    struct chimera_vfs_thread  *thread,
+    struct chimera_vfs_request *requests)
+{
+    struct chimera_vfs_thread  *request_thread;
+    struct chimera_vfs_request *request;
+    uint64_t                    one = 1;
+
+
+    while (requests) {
+
+        request = requests;
+
+        chimera_vfs_debug("open cache releasing blocked request %p", request);
+        LL_DELETE(requests, request);
+
+        request_thread = request->thread;
+
+        if (request_thread == thread) {
+            /* This is a request from the same thread, so we can dispatch it immediately */
+            chimera_vfs_dispatch(request);
+        } else {
+            /* This is a request from a different thread, so we need to send it home */
+            pthread_mutex_lock(&request_thread->lock);
+            LL_PREPEND(request_thread->unblocked_requests, request);
+            pthread_mutex_unlock(&request_thread->lock);
+
+            /* Wake up the thread */
+            write(request_thread->eventfd, &one, sizeof(one));
+        }
+    }
+
+} /* chimera_vfs_open_cache_release_blocked */
+
+static inline void
 chimera_vfs_open_cache_release(
+    struct chimera_vfs_thread      *thread,
     struct vfs_open_cache          *cache,
     struct chimera_vfs_open_handle *handle)
 {
     struct vfs_open_cache_shard *shard;
+    struct chimera_vfs_request  *requests;
 
     shard = &cache->shards[handle->fh_hash & cache->shard_mask];
 
@@ -113,18 +150,24 @@ chimera_vfs_open_cache_release(
     pthread_mutex_lock(&shard->lock);
 
     handle->opencnt--;
+    handle->exclusive = 0;
 
     if (handle->opencnt == 0) {
         clock_gettime(CLOCK_MONOTONIC, &handle->timestamp);
         DL_APPEND(shard->pending_close, handle);
     }
 
+    requests                 = handle->blocked_requests;
+    handle->blocked_requests = NULL;
+
     pthread_mutex_unlock(&shard->lock);
+
+    chimera_vfs_open_cache_release_blocked(thread, requests);
 
 } /* vfs_open_cache_release */
 
 static void
-chimera_vfs_open_cache_insert_callback(
+chimera_vfs_open_cache_close_callback(
     enum chimera_vfs_error error_code,
     void                  *private_data)
 {
@@ -132,66 +175,103 @@ chimera_vfs_open_cache_insert_callback(
 
     chimera_vfs_abort_if(error_code, "open cache failed to close existing handle");
 
-    handle->close_callback(handle, handle->close_private);
+    handle->callback(handle->request, handle);
 } /* chimera_vfs_open_cache_insert_callback */
 
 static inline void
-chimera_vfs_open_cache_insert(
+chimera_vfs_open_cache_populate(
+    struct chimera_vfs_thread      *thread,
+    struct vfs_open_cache          *cache,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        vfs_private_data)
+{
+    struct vfs_open_cache_shard *shard;
+    struct chimera_vfs_request  *requests;
+
+    shard = &cache->shards[handle->fh_hash & cache->shard_mask];
+
+    pthread_mutex_lock(&shard->lock);
+
+    handle->vfs_private      = vfs_private_data;
+    handle->pending          = 0;
+    requests                 = handle->blocked_requests;
+    handle->blocked_requests = NULL;
+
+    pthread_mutex_unlock(&shard->lock);
+
+    chimera_vfs_open_cache_release_blocked(thread, requests);
+
+} /* chimera_vfs_open_cache_populate */
+
+static inline void
+chimera_vfs_open_cache_acquire(
     struct chimera_vfs_thread *thread,
     struct vfs_open_cache *cache,
     struct chimera_vfs_module *module,
+    struct chimera_vfs_request *request,
     const void *fh,
     uint32_t fhlen,
     uint64_t fh_hash,
-    uint64_t vfs_private,
-    void ( *callback )(struct chimera_vfs_open_handle *handle, void *private_data),
-    void *private_data)
+    uint64_t vfs_private_data,
+    int exclusive,
+    void ( *callback )(struct chimera_vfs_request *request, struct chimera_vfs_open_handle *handle))
 {
     struct vfs_open_cache_shard    *shard;
     struct chimera_vfs_open_handle *handle, *existing;
-    int                             done = 1;
+    uint32_t                        _hash = fh_hash & 0xFFFFFFFF;
+    int                             done  = 0;
 
     shard = &cache->shards[fh_hash & cache->shard_mask];
 
     pthread_mutex_lock(&shard->lock);
 
-    shard->num_inserts++;
+    shard->num_acquire++;
 
-    handle              = chimera_vfs_open_cache_alloc(shard);
-    handle->vfs_module  = module;
-    handle->fh_hash     = fh_hash & 0xFFFFFFFF;
-    handle->fh_len      = fhlen;
-    handle->opencnt     = 1;
-    handle->vfs_private = vfs_private;
+    HASH_FIND_BYHASHVALUE(hh, shard->open_files, fh, fhlen, _hash, handle);
 
-    memcpy(handle->fh, fh, fhlen);
+    if (handle) {
 
-    HASH_REPLACE_BYHASHVALUE(hh, shard->open_files, fh, handle->fh_len, handle->fh_hash, handle, existing);
+        if (handle->exclusive || handle->pending) {
+            chimera_vfs_info("open cache blocked on exclusive or pending handle");
+            LL_PREPEND(handle->blocked_requests, request);
+            done = 0;
+        } else {
 
-    if (unlikely(existing)) {
+            if (handle->opencnt == 0) {
+                DL_DELETE(shard->pending_close, handle);
+            }
 
-        /* We lost a race to open this file handle */
+            handle->opencnt++;
+            done = 1;
+        }
+    } else {
 
-        /* Remove the new we just added and put the original one back */
-        HASH_DEL(shard->open_files, handle);
-        HASH_ADD_BYHASHVALUE(hh, shard->open_files, fh, handle->fh_len, handle->fh_hash, existing);
+        shard->num_insert++;
 
-        if (existing->opencnt == 0) {
-            DL_DELETE(shard->pending_close, existing);
+        handle                   = chimera_vfs_open_cache_alloc(shard);
+        handle->vfs_module       = module;
+        handle->fh_hash          = fh_hash & 0xFFFFFFFF;
+        handle->fh_len           = fhlen;
+        handle->opencnt          = 1;
+        handle->exclusive        = exclusive;
+        handle->callback         = callback;
+        handle->request          = request;
+        handle->vfs_private      = vfs_private_data;
+        handle->blocked_requests = NULL;
+
+        if (handle->vfs_private == UINT64_MAX) {
+            handle->pending = 1;
+        } else {
+            handle->pending = 0;
         }
 
-        /* Add our reference to the existing handle */
-        existing->opencnt++;
+        memcpy(handle->fh, fh, fhlen);
 
-        /* Close our own duplicate handle */
-        chimera_vfs_close(thread, fh, fhlen, vfs_private, NULL, NULL);
-        chimera_vfs_open_cache_free(shard, handle);
-
-        handle = existing;
-    } else {
+        HASH_ADD_BYHASHVALUE(hh, shard->open_files, fh, handle->fh_len, handle->fh_hash, handle);
 
         if (shard->open_handles < shard->max_open_files) {
             shard->open_handles++;
+            done = 1;
         } else {
             chimera_vfs_abort_if(!shard->pending_close, "open cache exhausted with referenced handles");
 
@@ -200,58 +280,22 @@ chimera_vfs_open_cache_insert(
             DL_DELETE(shard->pending_close, existing);
             HASH_DEL(shard->open_files, existing);
 
-            handle->close_callback = callback;
-            handle->close_private  = private_data;
-
             chimera_vfs_close(thread, existing->fh, existing->fh_len, existing->vfs_private,
-                              chimera_vfs_open_cache_insert_callback, handle);
+                              chimera_vfs_open_cache_close_callback, handle);
 
             chimera_vfs_open_cache_free(shard, existing);
 
             done = 0;
         }
+
     }
 
     pthread_mutex_unlock(&shard->lock);
 
     if (done) {
-        callback(handle, private_data);
+        callback(request, handle);
     }
-} /* chimera_vfs_open_cache_insert */
-
-static inline struct chimera_vfs_open_handle *
-chimera_vfs_open_cache_lookup(
-    struct vfs_open_cache     *cache,
-    struct chimera_vfs_module *module,
-    const void                *fh,
-    uint32_t                   fhlen,
-    uint64_t                   fh_hash)
-{
-    struct vfs_open_cache_shard    *shard;
-    struct chimera_vfs_open_handle *handle;
-    uint32_t                        _hash = fh_hash & 0xFFFFFFFF;
-
-    shard = &cache->shards[fh_hash & cache->shard_mask];
-
-    pthread_mutex_lock(&shard->lock);
-
-    shard->num_lookups++;
-
-    HASH_FIND_BYHASHVALUE(hh, shard->open_files, fh, fhlen, _hash, handle);
-
-    if (handle) {
-
-        if (handle->opencnt == 0) {
-            DL_DELETE(shard->pending_close, handle);
-        }
-
-        handle->opencnt++;
-    }
-
-    pthread_mutex_unlock(&shard->lock);
-
-    return handle;
-} /* chimera_vfs_open_cache_lookup */
+} /* chimera_vfs_open_cache_acquire */
 
 static inline struct chimera_vfs_open_handle *
 chimera_vfs_open_cache_defer_close(

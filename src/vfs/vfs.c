@@ -287,7 +287,7 @@ chimera_vfs_process_completion(
     struct evpl_event *event)
 {
     struct chimera_vfs_thread  *thread = container_of(event, struct chimera_vfs_thread, pending_complete_event);
-    struct chimera_vfs_request *requests, *request;
+    struct chimera_vfs_request *complete_requests, *unblocked_requests, *request;
     uint64_t                    value;
     ssize_t                     rc;
 
@@ -299,14 +299,22 @@ chimera_vfs_process_completion(
     }
 
     pthread_mutex_lock(&thread->lock);
-    requests                          = thread->pending_complete_requests;
+    complete_requests                 = thread->pending_complete_requests;
+    unblocked_requests                = thread->unblocked_requests;
     thread->pending_complete_requests = NULL;
+    thread->unblocked_requests        = NULL;
     pthread_mutex_unlock(&thread->lock);
 
-    while (requests) {
-        request = requests;
-        LL_DELETE(requests, request);
+    while (complete_requests) {
+        request = complete_requests;
+        LL_DELETE(complete_requests, request);
         request->complete_delegate(request);
+    }
+
+    while (unblocked_requests) {
+        request = unblocked_requests;
+        LL_DELETE(unblocked_requests, request);
+        chimera_vfs_dispatch(request);
     }
 
 } /* chimera_vfs_process_completion */
