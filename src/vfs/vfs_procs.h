@@ -153,7 +153,8 @@ chimera_vfs_close(
 typedef void (*chimera_vfs_mkdir_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr,
     void                     *private_data);
 
 void
@@ -205,7 +206,8 @@ typedef void (*chimera_vfs_write_callback_t)(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
     uint32_t                  sync,
-    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
     void                     *private_data);
 
 void

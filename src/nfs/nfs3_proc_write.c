@@ -12,7 +12,8 @@ chimera_nfs3_write_complete(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
     uint32_t                  sync,
-    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
@@ -37,11 +38,17 @@ chimera_nfs3_write_complete(
                &shared->nfs_verifier,
                sizeof(res.resok.verf));
 
-        res.resok.file_wcc.before.attributes_follow = 0;
+        if ((pre_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
+            res.resok.file_wcc.before.attributes_follow = 1;
+            chimera_nfs3_marshall_wcc_attrs(pre_attr,
+                                            &res.resok.file_wcc.before.attributes);
+        } else {
+            res.resok.file_wcc.before.attributes_follow = 0;
+        }
 
-        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
+        if ((post_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
             res.resok.file_wcc.after.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(attr,
+            chimera_nfs3_marshall_attrs(post_attr,
                                         &res.resok.file_wcc.after.attributes);
         } else {
             res.resok.file_wcc.after.attributes_follow = 0;

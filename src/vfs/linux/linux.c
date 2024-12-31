@@ -529,7 +529,7 @@ chimera_linux_mkdir(
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                             request->mkdir.attrmask,
-                            &request->mkdir.r_dir_attr,
+                            &request->mkdir.r_dir_post_attr,
                             fd,
                             request->fh,
                             request->fh_len);
@@ -777,7 +777,7 @@ chimera_linux_write(
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                             request->write.attrmask,
-                            &request->write.r_attr,
+                            &request->write.r_post_attr,
                             fd,
                             NULL,
                             0);

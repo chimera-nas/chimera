@@ -807,8 +807,9 @@ memfs_mkdir(
 {
     struct memfs_inode       *parent_inode, *inode;
     struct memfs_dirent      *dirent, *existing_dirent;
-    struct chimera_vfs_attrs *r_attr     = &request->mkdir.r_attr;
-    struct chimera_vfs_attrs *r_dir_attr = &request->mkdir.r_dir_attr;
+    struct chimera_vfs_attrs *r_attr          = &request->mkdir.r_attr;
+    struct chimera_vfs_attrs *r_dir_pre_attr  = &request->mkdir.r_dir_pre_attr;
+    struct chimera_vfs_attrs *r_dir_post_attr = &request->mkdir.r_dir_post_attr;
 
     /* Optimistically allocate an inode */
     inode = memfs_inode_alloc_thread(thread);
@@ -852,6 +853,8 @@ memfs_mkdir(
         return;
     }
 
+    memfs_map_attrs(r_dir_pre_attr, request->mkdir.attrmask, parent_inode);
+
     HASH_FIND(hh, parent_inode->dir.dirents,
               request->mkdir.name, request->mkdir.name_len,
               existing_dirent);
@@ -871,7 +874,7 @@ memfs_mkdir(
 
     parent_inode->mtime = request->start_time;
 
-    memfs_map_attrs(r_dir_attr, request->mkdir.attrmask, parent_inode);
+    memfs_map_attrs(r_dir_post_attr, request->mkdir.attrmask, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
 
@@ -1117,8 +1120,10 @@ memfs_open_at(
 {
     struct memfs_inode       *parent_inode, *inode = NULL;
     struct memfs_dirent      *dirent;
-    unsigned int              flags  = request->open_at.flags;
-    struct chimera_vfs_attrs *r_attr = &request->open_at.r_attr;
+    unsigned int              flags           = request->open_at.flags;
+    struct chimera_vfs_attrs *r_attr          = &request->open_at.r_attr;
+    struct chimera_vfs_attrs *r_dir_pre_attr  = &request->open_at.r_dir_pre_attr;
+    struct chimera_vfs_attrs *r_dir_post_attr = &request->open_at.r_dir_post_attr;
 
     parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1134,6 +1139,8 @@ memfs_open_at(
         request->complete(request);
         return;
     }
+
+    memfs_map_attrs(r_dir_pre_attr, request->open_at.attrmask, parent_inode);
 
     HASH_FIND(hh, parent_inode->dir.dirents, request->open_at.name,
               request->open_at.namelen, dirent);
@@ -1195,6 +1202,8 @@ memfs_open_at(
         inode->refcnt++;
         request->open_at.r_vfs_private = (uint64_t) inode;
     }
+
+    memfs_map_attrs(r_dir_post_attr, request->open_at.attrmask, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
 
@@ -1344,8 +1353,9 @@ memfs_write(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct evpl              *evpl   = thread->evpl;
-    struct chimera_vfs_attrs *r_attr = &request->write.r_attr;
+    struct evpl              *evpl        = thread->evpl;
+    struct chimera_vfs_attrs *r_pre_attr  = &request->write.r_pre_attr;
+    struct chimera_vfs_attrs *r_post_attr = &request->write.r_post_attr;
     struct memfs_inode       *inode;
     struct memfs_block      **blocks, *block, *old_block;
     struct evpl_iovec_cursor  cursor, old_block_cursor;
@@ -1367,6 +1377,8 @@ memfs_write(
         request->complete(request);
         return;
     }
+
+    memfs_map_attrs(r_pre_attr, request->write.attrmask, inode);
 
     if (inode->file.max_blocks <= last_block) {
 
@@ -1462,7 +1474,7 @@ memfs_write(
 
     inode->mtime = request->start_time;
 
-    memfs_map_attrs(r_attr, request->write.attrmask, inode);
+    memfs_map_attrs(r_post_attr, request->write.attrmask, inode);
 
     pthread_mutex_unlock(&inode->lock);
 

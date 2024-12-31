@@ -255,7 +255,8 @@ struct chimera_vfs_request {
             unsigned int                    mode;
             uint64_t                        attrmask;
             struct chimera_vfs_attrs        r_attr;
-            struct chimera_vfs_attrs        r_dir_attr;
+            struct chimera_vfs_attrs        r_dir_pre_attr;
+            struct chimera_vfs_attrs        r_dir_post_attr;
         } mkdir;
 
         struct {
@@ -303,7 +304,8 @@ struct chimera_vfs_request {
             int                             niov;
             uint32_t                        r_sync;
             uint32_t                        r_length;
-            struct chimera_vfs_attrs        r_attr;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
         } write;
 
         struct {

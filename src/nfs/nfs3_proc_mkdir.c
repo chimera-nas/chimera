@@ -12,7 +12,8 @@ static void
 chimera_nfs3_mkdir_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *r_attr,
-    struct chimera_vfs_attrs *r_dir_attr,
+    struct chimera_vfs_attrs *r_dir_pre_attr,
+    struct chimera_vfs_attrs *r_dir_post_attr,
     void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
@@ -43,11 +44,17 @@ chimera_nfs3_mkdir_complete(
             res.resok.obj_attributes.attributes_follow = 0;
         }
 
-        res.resok.dir_wcc.before.attributes_follow = 0;
+        if ((r_dir_pre_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
+            res.resok.dir_wcc.before.attributes_follow = 1;
+            chimera_nfs3_marshall_wcc_attrs(r_dir_pre_attr,
+                                            &res.resok.dir_wcc.before.attributes);
+        } else {
+            res.resok.dir_wcc.before.attributes_follow = 0;
+        }
 
-        if ((r_dir_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
+        if ((r_dir_post_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
             res.resok.dir_wcc.after.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(r_dir_attr,
+            chimera_nfs3_marshall_attrs(r_dir_post_attr,
                                         &res.resok.dir_wcc.after.attributes);
         } else {
             res.resok.dir_wcc.after.attributes_follow = 0;

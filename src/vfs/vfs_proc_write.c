@@ -11,7 +11,8 @@ chimera_vfs_write_complete(struct chimera_vfs_request *request)
     callback(request->status,
              request->write.r_length,
              request->write.r_sync,
-             &request->write.r_attr,
+             &request->write.r_pre_attr,
+             &request->write.r_post_attr,
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
@@ -34,7 +35,8 @@ chimera_vfs_write(
 
     request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
-    request->write.r_attr.va_mask = 0;
+    request->write.r_pre_attr.va_mask  = 0;
+    request->write.r_post_attr.va_mask = 0;
 
     request->opcode             = CHIMERA_VFS_OP_WRITE;
     request->complete           = chimera_vfs_write_complete;

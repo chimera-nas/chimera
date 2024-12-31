@@ -296,7 +296,7 @@ chimera_io_uring_complete(
                 } else if (handle->slot == 2) {
                     if (cqe->res == 0) {
                         dir_stx = (struct statx *) request->plugin_data;
-                        chimera_linux_statx_to_attr(&request->mkdir.r_dir_attr, dir_stx);
+                        chimera_linux_statx_to_attr(&request->mkdir.r_dir_post_attr, dir_stx);
                     }
                 }
                 break;
@@ -329,7 +329,7 @@ chimera_io_uring_complete(
                     }
                 } else {
                     if (cqe->res == 0) {
-                        chimera_linux_statx_to_attr(&request->write.r_attr, (struct statx *) request->plugin_data);
+                        chimera_linux_statx_to_attr(&request->write.r_post_attr, (struct statx *) request->plugin_data);
                     }
                 }
                 break;

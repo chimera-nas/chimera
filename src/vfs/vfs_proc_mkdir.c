@@ -12,7 +12,8 @@ chimera_vfs_mkdir_complete(struct chimera_vfs_request *request)
 
     callback(request->status,
              &request->mkdir.r_attr,
-             &request->mkdir.r_dir_attr,
+             &request->mkdir.r_dir_pre_attr,
+             &request->mkdir.r_dir_post_attr,
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
@@ -33,8 +34,9 @@ chimera_vfs_mkdir(
 
     request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
-    request->mkdir.r_attr.va_mask     = 0;
-    request->mkdir.r_dir_attr.va_mask = 0;
+    request->mkdir.r_attr.va_mask          = 0;
+    request->mkdir.r_dir_pre_attr.va_mask  = 0;
+    request->mkdir.r_dir_post_attr.va_mask = 0;
 
     request->opcode             = CHIMERA_VFS_OP_MKDIR;
     request->complete           = chimera_vfs_mkdir_complete;
