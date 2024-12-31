@@ -102,7 +102,8 @@ chimera_vfs_open_cache_free(
 static inline void
 chimera_vfs_open_cache_release_blocked(
     struct chimera_vfs_thread  *thread,
-    struct chimera_vfs_request *requests)
+    struct chimera_vfs_request *requests,
+    int                         failed)
 {
     struct chimera_vfs_thread  *request_thread;
     struct chimera_vfs_request *request;
@@ -115,6 +116,10 @@ chimera_vfs_open_cache_release_blocked(
 
         chimera_vfs_debug("open cache releasing blocked request %p", request);
         LL_DELETE(requests, request);
+
+        if (failed) {
+            request->pending_handle = NULL;
+        }
 
         request_thread = request->thread;
 
@@ -142,6 +147,7 @@ chimera_vfs_open_cache_release(
 {
     struct vfs_open_cache_shard *shard;
     struct chimera_vfs_request  *requests;
+    int                          failed;
 
     shard = &cache->shards[handle->fh_hash & cache->shard_mask];
 
@@ -149,20 +155,39 @@ chimera_vfs_open_cache_release(
 
     pthread_mutex_lock(&shard->lock);
 
-    handle->opencnt--;
     handle->exclusive = 0;
 
-    if (handle->opencnt == 0) {
-        clock_gettime(CLOCK_MONOTONIC, &handle->timestamp);
-        DL_APPEND(shard->pending_close, handle);
-    }
+    /* If we are releasing a handle that is still in pending state
+     * then we failed to do the open
+     */
+
+    failed = handle->pending;
 
     requests                 = handle->blocked_requests;
     handle->blocked_requests = NULL;
 
+    if (failed) {
+        /* We failed to open the file, so we need to remove it from the cache
+         * and we'll give everyone else NULL callbaks so they'll never
+         * release themselves.  Therefore we can free the handle now
+         */
+        handle->opencnt = 0;
+        HASH_DEL(shard->open_files, handle);
+        chimera_vfs_open_cache_free(shard, handle);
+
+    } else {
+
+        handle->opencnt--;
+
+        if (handle->opencnt == 0) {
+            clock_gettime(CLOCK_MONOTONIC, &handle->timestamp);
+            DL_APPEND(shard->pending_close, handle);
+        }
+    }
+
     pthread_mutex_unlock(&shard->lock);
 
-    chimera_vfs_open_cache_release_blocked(thread, requests);
+    chimera_vfs_open_cache_release_blocked(thread, requests, failed);
 
 } /* vfs_open_cache_release */
 
@@ -203,7 +228,7 @@ chimera_vfs_open_cache_populate(
     pthread_mutex_unlock(&shard->lock);
 
     if (requests) {
-        chimera_vfs_open_cache_release_blocked(thread, requests);
+        chimera_vfs_open_cache_release_blocked(thread, requests, 0);
     }
 
 } /* chimera_vfs_open_cache_populate */

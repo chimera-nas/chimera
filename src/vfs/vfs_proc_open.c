@@ -36,8 +36,16 @@ chimera_vfs_open_hdl_callback(
 {
     chimera_vfs_open_callback_t callback = request->proto_callback;
 
-    if (handle->pending) {
-        /* Miss on the open cache so we need to dispatch the request */
+    if (!handle) {
+        /* Someone was already in process opening the file when we tried
+         * and they failed, so we fail too.
+         */
+        callback(CHIMERA_VFS_OK, NULL, request->proto_private_data);
+        chimera_vfs_request_free(request->thread, request);
+    } else if (handle->pending) {
+        /* Miss on the open cache so we need to dispatch the request
+         * and open it ourselves
+         */
         request->pending_handle = handle;
         chimera_vfs_dispatch(request);
     } else {
