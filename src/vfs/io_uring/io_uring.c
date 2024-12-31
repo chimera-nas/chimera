@@ -481,6 +481,8 @@ chimera_io_uring_setattr(
     const struct chimera_vfs_attrs *attr   = request->setattr.attr;
     int                             fd, rc;
 
+    --thread->inflight;
+
     fd = linux_open_by_handle(&thread->mount_table,
                               request->fh,
                               request->fh_len,
@@ -628,9 +630,13 @@ chimera_io_uring_lookup_path(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int                       mount_fd, rc;
-    struct chimera_vfs_attrs *r_attr;
-    char                     *scratch = (char *) request->plugin_data;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             mount_fd, rc;
+    struct chimera_vfs_attrs       *r_attr;
+    char                           *scratch = (char *) request->plugin_data;
+
+    --thread->inflight;
+
 
     r_attr = &request->lookup_path.r_attr;
 
@@ -702,6 +708,9 @@ chimera_io_uring_readdir(
     struct dirent                  *dirent;
     struct chimera_vfs_attrs        vattr;
     int                             eof = 1;
+
+    --thread->inflight;
+
 
     fd = linux_open_by_handle(&thread->mount_table,
                               request->fh,
@@ -779,6 +788,9 @@ chimera_io_uring_open(
     struct chimera_io_uring_thread *thread = private_data;
     int                             flags  = 0;
     int                             fd;
+
+    --thread->inflight;
+
 
     if (request->open.flags & CHIMERA_VFS_OPEN_PATH) {
         flags |= O_PATH;
@@ -933,6 +945,9 @@ chimera_io_uring_access(
     int                             fd, rc;
     struct stat                     st;
     int                             access_mask;
+
+    --thread->inflight;
+
 
     fd = linux_open_by_handle(&thread->mount_table,
                               request->fh,
@@ -1113,6 +1128,9 @@ chimera_io_uring_symlink(
     int                             fd, rc;
     char                           *scratch = (char *) request->plugin_data;
 
+    --thread->inflight;
+
+
     TERM_STR(fullname, request->symlink.name, request->symlink.namelen, scratch);
     TERM_STR(target, request->symlink.target, request->symlink.targetlen, scratch);
 
@@ -1188,6 +1206,9 @@ chimera_io_uring_readlink(
     struct chimera_io_uring_thread *thread = private_data;
     int                             fd, rc;
 
+    --thread->inflight;
+
+
     fd = linux_open_by_handle(&thread->mount_table,
                               request->fh,
                               request->fh_len,
@@ -1223,6 +1244,9 @@ chimera_io_uring_rename(
     struct chimera_io_uring_thread *thread = private_data;
     int                             old_fd, new_fd, rc;
     char                           *scratch = (char *) request->plugin_data;
+
+    --thread->inflight;
+
 
     TERM_STR(fullname, request->rename.name, request->rename.namelen, scratch);
     TERM_STR(full_newname, request->rename.new_name, request->rename.new_namelen, scratch);
@@ -1273,6 +1297,8 @@ chimera_io_uring_link(
     int                             fd, dir_fd, rc;
     char                           *scratch = (char *) request->plugin_data;
 
+    --thread->inflight;
+
     TERM_STR(fullname, request->link.name, request->link.namelen, scratch);
 
     fd = linux_open_by_handle(&thread->mount_table,
@@ -1312,6 +1338,7 @@ chimera_io_uring_link(
     request->complete(request);
 
 } /* chimera_io_uring_link */
+
 static void
 chimera_io_uring_dispatch(
     struct chimera_vfs_request *request,
@@ -1385,6 +1412,7 @@ chimera_io_uring_dispatch(
         default:
             chimera_io_uring_error("io_uring_dispatch: unknown operation %d",
                                    request->opcode);
+            --thread->inflight;
             request->status = CHIMERA_VFS_ENOTSUP;
             request->complete(request);
             break;
