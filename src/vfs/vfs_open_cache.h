@@ -225,23 +225,25 @@ chimera_vfs_open_cache_acquire(
 
     pthread_mutex_lock(&shard->lock);
 
-    shard->num_acquire++;
-
     HASH_FIND_BYHASHVALUE(hh, shard->open_files, fh, fhlen, _hash, handle);
 
     if (handle) {
 
+        chimera_vfs_abort_if(handle->pending && vfs_private_data != UINT64_MAX,
+                             "open cache pending handle with vfs private data");
+
+        if (handle->opencnt == 0) {
+            DL_DELETE(shard->pending_close, handle);
+        }
+
+        handle->opencnt++;
+
         if (handle->exclusive || handle->pending) {
-            chimera_vfs_info("open cache blocked on exclusive or pending handle");
+            request->unblock_callback = callback;
+            request->pending_handle   = handle;
             LL_PREPEND(handle->blocked_requests, request);
             done = 0;
         } else {
-
-            if (handle->opencnt == 0) {
-                DL_DELETE(shard->pending_close, handle);
-            }
-
-            handle->opencnt++;
             done = 1;
         }
     } else {
@@ -289,6 +291,8 @@ chimera_vfs_open_cache_acquire(
         }
 
     }
+
+    shard->num_acquire++;
 
     pthread_mutex_unlock(&shard->lock);
 

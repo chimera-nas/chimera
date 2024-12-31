@@ -198,6 +198,10 @@ struct chimera_vfs_request {
 
     struct chimera_vfs_open_handle   *pending_handle;
 
+    void                              ( *unblock_callback )(
+        struct chimera_vfs_request     *request,
+        struct chimera_vfs_open_handle *handle);
+
     union {
         struct {
             const char              *path;

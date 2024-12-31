@@ -307,14 +307,14 @@ chimera_vfs_process_completion(
 
     while (complete_requests) {
         request = complete_requests;
-        LL_DELETE(complete_requests, request);
+        DL_DELETE(complete_requests, request);
         request->complete_delegate(request);
     }
 
     while (unblocked_requests) {
         request = unblocked_requests;
         LL_DELETE(unblocked_requests, request);
-        chimera_vfs_dispatch(request);
+        request->unblock_callback(request, request->pending_handle);
     }
 
 } /* chimera_vfs_process_completion */
