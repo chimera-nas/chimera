@@ -205,10 +205,9 @@ chimera_io_uring_complete(
                     if (cqe->res >= 0) {
                         request->status                = CHIMERA_VFS_OK;
                         request->open_at.r_vfs_private = cqe->res;
-
-                        dir_stx = (struct statx *) request->plugin_data;
-                        stx     = (struct statx *) (dir_stx + 1);
-                        name    = (char *) (stx + 1);
+                        dir_stx                        = (struct statx *) request->plugin_data;
+                        stx                            = (struct statx *) (dir_stx + 1);
+                        name                           = (char *) (stx + 1);
 
                         parent_fd = request->open_at.handle->vfs_private;
 
@@ -614,7 +613,7 @@ chimera_io_uring_setattr(
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
                             request->setattr.attr_mask,
-                            &request->setattr.r_attr,
+                            &request->setattr.r_post_attr,
                             fd,
                             request->fh,
                             request->fh_len);

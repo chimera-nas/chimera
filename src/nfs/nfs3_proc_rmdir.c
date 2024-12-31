@@ -1,13 +1,16 @@
 #include "nfs3_procs.h"
 #include "nfs3_status.h"
+#include "nfs3_attr.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "vfs/vfs_procs.h"
 
 static void
 chimera_nfs3_rmdir_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
@@ -19,8 +22,24 @@ chimera_nfs3_rmdir_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-        res.resok.dir_wcc.before.attributes_follow = 0;
-        res.resok.dir_wcc.after.attributes_follow  = 0;
+        if (pre_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) {
+            res.resok.dir_wcc.before.attributes_follow = 1;
+            chimera_nfs3_marshall_wcc_attrs(pre_attr,
+                                            &res.resok.dir_wcc.before.attributes);
+        } else {
+            res.resok.dir_wcc.before.attributes_follow = 0;
+        }
+
+        if (post_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) {
+            res.resok.dir_wcc.after.attributes_follow = 1;
+            chimera_nfs3_marshall_attrs(post_attr,
+                                        &res.resok.dir_wcc.after.attributes);
+        } else {
+            res.resok.dir_wcc.after.attributes_follow = 0;
+        }
+    } else {
+        res.resfail.dir_wcc.before.attributes_follow = 0;
+        res.resfail.dir_wcc.after.attributes_follow  = 0;
     }
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
@@ -51,6 +70,7 @@ chimera_nfs3_rmdir_open_callback(
                            handle,
                            args->object.name.str,
                            args->object.name.len,
+                           CHIMERA_NFS3_ATTR_MASK,
                            chimera_nfs3_rmdir_complete,
                            req);
     } else {

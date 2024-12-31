@@ -240,7 +240,8 @@ struct chimera_vfs_request {
         struct {
             uint64_t                        attr_mask;
             const struct chimera_vfs_attrs *attr;
-            struct chimera_vfs_attrs        r_attr;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
         } setattr;
 
         struct {
@@ -322,6 +323,9 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
             int                             namelen;
+            uint64_t                        attr_mask;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
         } remove;
 
         struct {

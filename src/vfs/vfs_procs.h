@@ -72,7 +72,8 @@ chimera_vfs_getattr(
 
 typedef void (*chimera_vfs_setattr_callback_t)(
     enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
     void                     *private_data);
 
 void
@@ -169,8 +170,10 @@ chimera_vfs_mkdir(
     void                           *private_data);
 
 typedef void (*chimera_vfs_remove_callback_t)(
-    enum chimera_vfs_error error_code,
-    void                  *private_data);
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data);
 
 void
 chimera_vfs_remove(
@@ -178,6 +181,7 @@ chimera_vfs_remove(
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
+    uint64_t                        attr_mask,
     chimera_vfs_remove_callback_t   callback,
     void                           *private_data);
 

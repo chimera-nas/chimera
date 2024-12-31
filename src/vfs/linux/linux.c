@@ -226,7 +226,7 @@ chimera_linux_setattr(
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                             request->setattr.attr_mask,
-                            &request->setattr.r_attr,
+                            &request->setattr.r_post_attr,
                             fd,
                             request->fh,
                             request->fh_len);

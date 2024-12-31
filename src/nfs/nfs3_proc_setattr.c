@@ -6,7 +6,8 @@
 static void
 chimera_nfs3_setattr_complete(
     enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
@@ -19,11 +20,17 @@ chimera_nfs3_setattr_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-        res.resok.obj_wcc.before.attributes_follow = 0;
+        if (pre_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) {
+            res.resok.obj_wcc.before.attributes_follow = 1;
+            chimera_nfs3_marshall_wcc_attrs(pre_attr,
+                                            &res.resok.obj_wcc.before.attributes);
+        } else {
+            res.resok.obj_wcc.before.attributes_follow = 0;
+        }
 
-        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
+        if ((post_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
             res.resok.obj_wcc.after.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(attr,
+            chimera_nfs3_marshall_attrs(post_attr,
                                         &res.resok.obj_wcc.after.attributes);
         } else {
             res.resok.obj_wcc.after.attributes_follow = 0;

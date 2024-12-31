@@ -675,8 +675,9 @@ memfs_setattr(
     void                       *private_data)
 {
     struct memfs_inode             *inode;
-    const struct chimera_vfs_attrs *attr   = request->setattr.attr;
-    struct chimera_vfs_attrs       *r_attr = &request->setattr.r_attr;
+    const struct chimera_vfs_attrs *attr        = request->setattr.attr;
+    struct chimera_vfs_attrs       *r_pre_attr  = &request->setattr.r_pre_attr;
+    struct chimera_vfs_attrs       *r_post_attr = &request->setattr.r_post_attr;
 
     inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -685,6 +686,7 @@ memfs_setattr(
         request->complete(request);
         return;
     }
+    memfs_map_attrs(r_pre_attr, request->setattr.attr_mask, inode);
 
     if (attr->va_mask & CHIMERA_VFS_ATTR_MODE) {
         inode->mode = (inode->mode & S_IFMT) | (attr->va_mode & ~S_IFMT);
@@ -720,7 +722,7 @@ memfs_setattr(
 
     inode->ctime = request->start_time;
 
-    memfs_map_attrs(r_attr, request->setattr.attr_mask, inode);
+    memfs_map_attrs(r_post_attr, request->setattr.attr_mask, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
@@ -914,8 +916,10 @@ memfs_remove(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct memfs_inode  *parent_inode, *inode;
-    struct memfs_dirent *dirent;
+    struct memfs_inode       *parent_inode, *inode;
+    struct memfs_dirent      *dirent;
+    struct chimera_vfs_attrs *r_pre_attr  = &request->remove.r_pre_attr;
+    struct chimera_vfs_attrs *r_post_attr = &request->remove.r_post_attr;
 
     parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -924,6 +928,8 @@ memfs_remove(
         request->complete(request);
         return;
     }
+
+    memfs_map_attrs(r_pre_attr, request->remove.attr_mask, parent_inode);
 
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -977,6 +983,7 @@ memfs_remove(
             memfs_inode_free(thread, inode);
         }
     }
+    memfs_map_attrs(r_post_attr, request->remove.attr_mask, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
     pthread_mutex_unlock(&inode->lock);

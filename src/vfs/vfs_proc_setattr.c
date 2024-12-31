@@ -12,7 +12,8 @@ chimera_vfs_setattr_complete(struct chimera_vfs_request *request)
     chimera_vfs_complete(request);
 
     callback(request->status,
-             &request->setattr.r_attr,
+             &request->setattr.r_pre_attr,
+             &request->setattr.r_post_attr,
              request->proto_private_data);
 
     chimera_vfs_request_free(thread, request);
@@ -32,7 +33,8 @@ chimera_vfs_setattr(
 
     request = chimera_vfs_request_alloc(thread, fh, fhlen);
 
-    request->setattr.r_attr.va_mask = 0;
+    request->setattr.r_pre_attr.va_mask  = 0;
+    request->setattr.r_post_attr.va_mask = 0;
 
     request->opcode             = CHIMERA_VFS_OP_SETATTR;
     request->complete           = chimera_vfs_setattr_complete;
