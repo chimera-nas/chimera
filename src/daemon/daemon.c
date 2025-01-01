@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <jansson.h>
 
+#include "core/evpl.h"
+
 #include "server/server.h"
 #include "server/server_internal.h"
 #include "common/logging.h"
@@ -30,10 +32,17 @@ main(
     json_error_t                  error;
     struct chimera_server        *server;
     struct chimera_server_config *server_config;
+    struct evpl_config           *evpl_config;
 
     chimera_log_init();
 
     chimera_enable_crash_handler();
+
+    evpl_config = evpl_config_init();
+    evpl_config_set_rdmacm_datagram_size_override(evpl_config, 4096 * 1024);
+
+    evpl_init_auto(evpl_config);
+
 
     while ((opt = getopt(argc, argv, "c:dv")) != -1) {
         switch (opt) {
