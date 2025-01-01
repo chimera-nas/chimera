@@ -56,8 +56,8 @@ const char *cairn_cf_names[] = { "default", "inode", "dirent", "symlink", "exten
         chimera_abort_if(cond, "cairn", __FILE__, __LINE__, __VA_ARGS__)
 
 struct cairn_dirent_key {
-    uint64_t      inum;
-    XXH128_hash_t hash;
+    uint64_t inum;
+    uint64_t hash;
 };
 
 struct cairn_dirent_value {
@@ -193,6 +193,42 @@ cairn_dirent_get(
 
     return 0;
 } /* cairn_dirent_get */
+
+static inline int
+cairn_dirent_scan(
+    struct cairn_thread *thread,
+    rocksdb_transaction_t *txn,
+    uint64_t inum,
+    uint64_t start_hash,
+    int ( *callback )(struct cairn_dirent_key *key, struct cairn_dirent_value *dirent, void *private_data),
+    void *private_data)
+{
+    struct cairn_shared       *shared = thread->shared;
+    rocksdb_iterator_t        *iter;
+    struct cairn_dirent_key    start_key, *dirent_key;
+    struct cairn_dirent_value *dirent_value;
+    size_t                     len;
+
+    start_key.inum = inum;
+    start_key.hash = start_hash;
+
+    iter = rocksdb_transaction_create_iterator_cf(txn, shared->read_options, shared->cf_handles[CAIRN_CF_DIRENT]);
+
+    rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+
+    while (rocksdb_iter_valid(iter)) {
+        dirent_key   = (struct cairn_dirent_key *) rocksdb_iter_key(iter, &len);
+        dirent_value = (struct cairn_dirent_value *) rocksdb_iter_value(iter, &len);
+
+        if (callback(dirent_key, dirent_value, private_data)) {
+            break;
+        }
+    }
+
+    rocksdb_iter_destroy(iter);
+
+    return 0;
+} /* cairn_dirent_scan */
 
 static inline int
 cairn_inode_get_inum(
@@ -700,7 +736,7 @@ cairn_lookup(
     }
 
     dirent_key.inum = inode->inum;
-    dirent_key.hash = XXH3_128bits(request->lookup.component, request->lookup.component_len);
+    dirent_key.hash = XXH3_64bits(request->lookup.component, request->lookup.component_len);
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
@@ -781,7 +817,7 @@ cairn_mkdir(
     }
 
     dirent_key.inum = parent_inode->inum;
-    dirent_key.hash = XXH3_128bits(request->mkdir.name, request->mkdir.name_len);
+    dirent_key.hash = XXH3_64bits(request->mkdir.name, request->mkdir.name_len);
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
@@ -894,7 +930,7 @@ cairn_remove(
     }
 
     dirent_key.inum = parent_inode->inum;
-    dirent_key.hash = XXH3_128bits(request->remove.name, request->remove.namelen);
+    dirent_key.hash = XXH3_64bits(request->remove.name, request->remove.namelen);
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
@@ -971,74 +1007,69 @@ cairn_readdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    #if 0
-    struct cairn_inode      *inode, *dirent_inode;
-    struct cairn_dirent     *dirent, *tmp;
-    uint64_t                 cookie       = request->readdir.cookie;
-    uint64_t                 next_cookie  = 0;
-    int                      found_cookie = 0;
-    int                      rc, eof = 1;
-    struct chimera_vfs_attrs attr;
+    rocksdb_transaction_t     *txn;
+    struct cairn_inode_handle  ih, dirent_ih;
+    struct cairn_inode        *inode, *dirent_inode;
+    uint64_t                   next_cookie = request->readdir.cookie;
+    int                        rc, eof = 1;
+    struct chimera_vfs_attrs   attr;
+    rocksdb_iterator_t        *iter;
+    struct cairn_dirent_key    start_key, *dirent_key;
+    struct cairn_dirent_value *dirent_value;
+    size_t                     len;
 
-    if (cookie == 0) {
-        found_cookie = 1;
-    }
+    txn = cairn_get_transaction(thread);
 
-    inode = cairn_inode_get_fh(shared, request->fh, request->fh_len);
+    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, &ih);
 
-    if (!inode) {
+    if (rc) {
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
+
+    inode = ih.inode;
 
     if (!S_ISDIR(inode->mode)) {
-        pthread_mutex_unlock(&inode->lock);
+        cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
 
-    HASH_ITER(hh, inode->dir.dirents, dirent, tmp)
-    {
-        if (dirent->inum == cookie) {
-            found_cookie = 1;
-        }
+    start_key.inum = inode->inum;
+    start_key.hash = request->readdir.cookie;
 
-        if (!found_cookie) {
+    iter = rocksdb_transaction_create_iterator_cf(txn, shared->read_options, shared->cf_handles[CAIRN_CF_DIRENT]);
+
+    rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+
+    while (rocksdb_iter_valid(iter)) {
+
+        dirent_key   = (struct cairn_dirent_key *) rocksdb_iter_key(iter, &len);
+        dirent_value = (struct cairn_dirent_value *) rocksdb_iter_value(iter, &len);
+
+        rc = cairn_inode_get_inum(thread, txn, dirent_value->inum, &dirent_ih);
+
+        if (rc) {
             continue;
         }
+
+        dirent_inode = dirent_ih.inode;
 
         attr.va_mask   = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT;
-        attr.va_fh_len = cairn_inum_to_fh(attr.va_fh, dirent->inum,
-                                          dirent->gen);
+        attr.va_fh_len = cairn_inum_to_fh(attr.va_fh, dirent_inode->inum,
+                                          dirent_inode->gen);
 
-        dirent_inode = cairn_inode_get_inum(shared, dirent->inum, dirent->gen);
+        cairn_map_attrs(&attr, request->readdir.attrmask, dirent_inode);
 
-        if (!dirent_inode) {
-            continue;
-        }
-
-        attr.va_mode       = dirent_inode->mode;
-        attr.va_nlink      = dirent_inode->nlink;
-        attr.va_uid        = dirent_inode->uid;
-        attr.va_gid        = dirent_inode->gid;
-        attr.va_size       = dirent_inode->size;
-        attr.va_space_used = dirent_inode->space_used;
-        attr.va_atime      = dirent_inode->atime;
-        attr.va_mtime      = dirent_inode->mtime;
-        attr.va_ctime      = dirent_inode->ctime;
-        attr.va_ino        = dirent_inode->inum;
-        attr.va_dev        = (42UL << 32) | 42;
-        attr.va_rdev       = (42UL << 32) | 42;
-
-        pthread_mutex_unlock(&dirent_inode->lock);
+        cairn_inode_handle_release(&dirent_ih);
 
         rc = request->readdir.callback(
-            dirent->inum,
-            dirent->inum,
-            dirent->name,
-            dirent->name_len,
+            dirent_value->inum,
+            dirent_key->hash,
+            dirent_value->name,
+            dirent_value->name_len,
             &attr,
             request->proto_private_data);
 
@@ -1047,21 +1078,26 @@ cairn_readdir(
             break;
         }
 
-        next_cookie = dirent->inum;
-    }
+        next_cookie = dirent_key->hash;
+    } /* cairn_readdir */
+
+    rocksdb_iter_destroy(iter);
+
 
     if (request->readdir.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
         cairn_map_attrs(&request->readdir.r_dir_attr, request->readdir.attrmask,
                         inode);
     }
 
-    pthread_mutex_unlock(&inode->lock);
+    cairn_inode_handle_release(&ih);
+
+    evpl_defer(thread->evpl, &thread->commit);
 
     request->status           = CHIMERA_VFS_OK;
     request->readdir.r_cookie = next_cookie;
     request->readdir.r_eof    = eof;
+
     request->complete(request);
-    #endif /* if 0 */
 } /* cairn_readdir */
 
 static void
@@ -1133,7 +1169,7 @@ cairn_open_at(
     cairn_map_attrs(r_dir_pre_attr, request->open_at.attrmask, parent_inode);
 
     dirent_key.inum = parent_inode->inum;
-    dirent_key.hash = XXH3_128bits(request->open_at.name, request->open_at.namelen);
+    dirent_key.hash = XXH3_64bits(request->open_at.name, request->open_at.namelen);
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
