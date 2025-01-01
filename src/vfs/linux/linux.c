@@ -29,7 +29,7 @@ struct chimera_linux_thread {
 };
 
 static void *
-chimera_linux_init(void)
+chimera_linux_init(const char *cfgfile)
 {
     return 0;
 } /* linux_init */

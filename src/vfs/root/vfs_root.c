@@ -35,7 +35,7 @@
                          __VA_ARGS__)
 
 static void *
-chimera_vfs_root_init(void)
+chimera_vfs_root_init(const char *cfgfile)
 {
     return 0;
 } /* vfs_root_init */

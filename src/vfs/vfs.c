@@ -12,7 +12,7 @@
 #include "vfs/memfs/memfs.h"
 #include "vfs/linux/linux.h"
 #include "vfs/io_uring/io_uring.h"
-
+#include "vfs/cairn/cairn.h"
 #include "common/misc.h"
 #include "uthash/utlist.h"
 #include "thread/thread.h"
@@ -172,7 +172,9 @@ chimera_vfs_close_thread_destroy(void *private_data)
 } /* chimera_vfs_close_thread_destroy */
 
 struct chimera_vfs *
-chimera_vfs_init(int num_delegation_threads)
+chimera_vfs_init(
+    int         num_delegation_threads,
+    const char *cairn_cfgfile)
 {
     struct chimera_vfs *vfs;
 
@@ -182,16 +184,21 @@ chimera_vfs_init(int num_delegation_threads)
     vfs->vfs_open_file_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_FILE, 10, 128 * 1024);
 
     chimera_vfs_info("Initializing VFS root module...");
-    chimera_vfs_register(vfs, &vfs_root);
+    chimera_vfs_register(vfs, &vfs_root, NULL);
 
     chimera_vfs_info("Initializing VFS memfs module...");
-    chimera_vfs_register(vfs, &vfs_memvfs);
+    chimera_vfs_register(vfs, &vfs_memvfs, NULL);
 
     chimera_vfs_info("Initializing VFS linux module...");
-    chimera_vfs_register(vfs, &vfs_linux);
+    chimera_vfs_register(vfs, &vfs_linux, NULL);
 
     chimera_vfs_info("Initializing VFS io_uring module...");
-    chimera_vfs_register(vfs, &vfs_io_uring);
+    chimera_vfs_register(vfs, &vfs_io_uring, NULL);
+
+    if (cairn_cfgfile) {
+        chimera_vfs_info("Initializing VFS cairn module...");
+        chimera_vfs_register(vfs, &vfs_cairn, cairn_cfgfile);
+    }
 
     vfs->num_delegation_threads = num_delegation_threads;
     vfs->delegation_threads     = calloc(num_delegation_threads, sizeof(struct chimera_vfs_delegation_thread));
@@ -443,11 +450,12 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
 void
 chimera_vfs_register(
     struct chimera_vfs        *vfs,
-    struct chimera_vfs_module *module)
+    struct chimera_vfs_module *module,
+    const char                *cfgfile)
 {
     vfs->modules[module->fh_magic] = module;
 
-    vfs->module_private[module->fh_magic] = module->init();
+    vfs->module_private[module->fh_magic] = module->init(cfgfile);
 } /* chimera_vfs_register */
 
 int

@@ -10,6 +10,7 @@
 #include <nfsc/libnfs.h>
 #include <nfsc/libnfs-raw-nfs.h>
 #include <nfsc/libnfs-raw-nfs4.h>
+#include <jansson.h>
 #include "server/server.h"
 #include "common/logging.h"
 
@@ -25,11 +26,12 @@ libnfs_test_init(
     char           **argv,
     int              argc)
 {
-    int             opt;
-    extern char    *optarg;
-    int             nfsvers = 3;
-    const char     *backend = "linux";
-    struct timespec tv;
+    int                           opt;
+    extern char                  *optarg;
+    int                           nfsvers = 3;
+    const char                   *backend = "linux";
+    struct chimera_server_config *config;
+    struct timespec               tv;
 
     clock_gettime(
         CLOCK_MONOTONIC,
@@ -50,38 +52,52 @@ libnfs_test_init(
 
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 
+    snprintf(env->session_dir, sizeof(env->session_dir),
+             "/build/test/session_%d_%lu_%lu",
+             getpid(), tv.tv_sec, tv.tv_nsec);
+
+    fprintf(stderr, "Creating session directory %s\n", env->session_dir);
+
+
+    (void) mkdir("/build/test", 0755);
+    (void) mkdir(env->session_dir, 0755);
+
     chimera_enable_crash_handler();
 
-    env->server = chimera_server_init(NULL);
+    config = chimera_server_config_init();
+
+    if (strcmp(backend, "cairn") == 0) {
+        char    cairn_cfgfile[256];
+        json_t *cfg;
+
+        snprintf(cairn_cfgfile, sizeof(cairn_cfgfile),
+                 "%s/cairn.cfg", env->session_dir);
+
+        cfg = json_object();
+        json_object_set_new(cfg, "initialize", json_true());
+        json_object_set_new(cfg, "path", json_string(env->session_dir));
+        json_dump_file(cfg, cairn_cfgfile, 0);
+        json_decref(cfg);
+
+        fprintf(stderr, "Using Cairn config file %s\n", cairn_cfgfile);
+
+        chimera_server_config_set_cairn_cfgfile(config, cairn_cfgfile);
+    }
+
+    env->server = chimera_server_init(config);
 
     if (strcmp(backend, "linux") == 0) {
-        snprintf(env->session_dir, sizeof(env->session_dir),
-                 "/build/test/session_%d_%lu_%lu",
-                 getpid(), tv.tv_sec, tv.tv_nsec);
-
-        fprintf(stderr, "Creating session directory %s\n", env->session_dir);
-
-        (void) mkdir("/build/test", 0755);
-        (void) mkdir(env->session_dir, 0755);
-
         chimera_server_create_share(env->server, "linux", "share",
                                     env->session_dir);
 
     } else if (strcmp(backend, "io_uring") == 0) {
-        snprintf(env->session_dir, sizeof(env->session_dir),
-                 "/build/test/session_%d_%lu_%lu",
-                 getpid(), tv.tv_sec, tv.tv_nsec);
-
-        fprintf(stderr, "Creating session directory %s\n", env->session_dir);
-
-        (void) mkdir("/build/test", 0755);
-        (void) mkdir(env->session_dir, 0755);
-
         chimera_server_create_share(env->server, "io_uring", "share",
                                     env->session_dir);
 
     } else if (strcmp(backend, "memfs") == 0) {
         chimera_server_create_share(env->server, "memfs", "share", "/");
+    } else if (strcmp(backend, "cairn") == 0) {
+        chimera_server_create_share(env->server, "cairn", "share", "/");
     } else {
         fprintf(stderr, "Unknown backend: %s\n", backend);
         exit(EXIT_FAILURE);
