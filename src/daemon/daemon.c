@@ -39,7 +39,7 @@ main(
     chimera_enable_crash_handler();
 
     evpl_config = evpl_config_init();
-    evpl_config_set_rdmacm_datagram_size_override(evpl_config, 4096 * 1024);
+    evpl_config_set_rdmacm_datagram_size_override(evpl_config, 4096);
 
     evpl_init_auto(evpl_config);
 
