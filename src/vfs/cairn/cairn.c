@@ -115,6 +115,7 @@ struct cairn_shared {
     uint8_t                          root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                         root_fhlen;
     pthread_mutex_t                  lock;
+    int                              noatime;  // New field
 };
 
 struct cairn_thread {
@@ -465,7 +466,8 @@ cairn_init(const char *cfgfile)
     size_t                 meta_cache_mb = 64;
     size_t                 data_cache_mb = 64;
     rocksdb_cache_t       *meta_cache, *data_cache;
-    int                    compression = 1; // Default to enabled
+    int                    compression  = 1; // Default to enabled
+    int                    bloom_filter = 1; // Default to enabled
 
     cfg = json_load_file(cfgfile, 0, &json_error);
 
@@ -473,7 +475,7 @@ cairn_init(const char *cfgfile)
 
     db_path = json_string_value(json_object_get(cfg, "path"));
 
-    // Get cache sizes and compression setting from config
+    // Get cache sizes, compression and bloom filter settings from config
     json_t *meta_cache_obj = json_object_get(cfg, "meta_cache");
     if (meta_cache_obj && json_is_integer(meta_cache_obj)) {
         meta_cache_mb = json_integer_value(meta_cache_obj);
@@ -489,11 +491,36 @@ cairn_init(const char *cfgfile)
         compression = json_boolean_value(compression_obj);
     }
 
-    // Create LRU caches
-    chimera_cairn_info("Creating LRU caches: meta_cache_mb=%zu data_cache_mb=%zu compression=%d",
-                       meta_cache_mb, data_cache_mb, compression);
+    json_t *bloom_filter_obj = json_object_get(cfg, "bloom_filter");
+    if (bloom_filter_obj && json_is_boolean(bloom_filter_obj)) {
+        bloom_filter = json_boolean_value(bloom_filter_obj);
+    }
+
+    // Get noatime setting from config
+    json_t *noatime_obj = json_object_get(cfg, "noatime");
+    if (noatime_obj && json_is_boolean(noatime_obj)) {
+        shared->noatime = json_boolean_value(noatime_obj);
+    } else {
+        shared->noatime = 0; // Default to false
+    }
+
+    chimera_cairn_info(
+        "Creating LRU caches: meta_cache_mb=%zu data_cache_mb=%zu compression=%d bloom_filter=%d noatime=%d",
+        meta_cache_mb, data_cache_mb, compression, bloom_filter, shared->noatime);
+
     meta_cache = rocksdb_cache_create_lru(meta_cache_mb * 1024 * 1024);
     data_cache = rocksdb_cache_create_lru(data_cache_mb * 1024 * 1024);
+
+    rocksdb_block_based_table_options_t *meta_table_options = rocksdb_block_based_options_create();
+    rocksdb_block_based_table_options_t *data_table_options = rocksdb_block_based_options_create();
+
+    rocksdb_block_based_options_set_block_cache(meta_table_options, meta_cache);
+    rocksdb_block_based_options_set_block_cache(data_table_options, data_cache);
+
+    if (bloom_filter) {
+        rocksdb_block_based_options_set_filter_policy(meta_table_options,
+                                                      rocksdb_filterpolicy_create_bloom(10.0));
+    }
 
     shared->options = rocksdb_options_create();
 
@@ -511,16 +538,6 @@ cairn_init(const char *cfgfile)
     shared->write_options = rocksdb_writeoptions_create();
     shared->read_options  = rocksdb_readoptions_create();
     shared->txn_options   = rocksdb_transaction_options_create();
-
-    // Create table options for each column family
-    rocksdb_block_based_table_options_t *meta_table_options = rocksdb_block_based_options_create();
-    rocksdb_block_based_table_options_t *data_table_options = rocksdb_block_based_options_create();
-
-    // Configure meta cache for all column families except extent
-    rocksdb_block_based_options_set_block_cache(meta_table_options, meta_cache);
-
-    // Configure data cache for extent column family
-    rocksdb_block_based_options_set_block_cache(data_table_options, data_cache);
 
     for (i = 0; i < CAIRN_NUM_CF; i++) {
         shared->cf_options[i] = rocksdb_options_create();
@@ -769,7 +786,7 @@ cairn_getattr(
 
     evpl_defer(thread->evpl, &thread->commit);
 
-    request->complete(request);
+    DL_APPEND(thread->txn_requests, request);
 } /* cairn_getattr */
 
 static void
@@ -937,7 +954,7 @@ cairn_lookup(
     evpl_defer(thread->evpl, &thread->commit);
 
     request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    DL_APPEND(thread->txn_requests, request);
 } /* cairn_lookup */
 
 static void
@@ -1171,7 +1188,7 @@ cairn_remove(
     evpl_defer(thread->evpl, &thread->commit);
 
     request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    DL_APPEND(thread->txn_requests, request);
 } /* cairn_remove */
 
 static void
@@ -1279,7 +1296,7 @@ cairn_readdir(
     request->readdir.r_cookie = next_cookie;
     request->readdir.r_eof    = eof;
 
-    request->complete(request);
+    DL_APPEND(thread->txn_requests, request);
 } /* cairn_readdir */
 
 static void
@@ -1439,7 +1456,7 @@ cairn_open_at(
     evpl_defer(thread->evpl, &thread->commit);
 
     request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    DL_APPEND(thread->txn_requests, request);
 } /* cairn_open_at */
 
 static void
@@ -1502,8 +1519,10 @@ cairn_read(
     uint32_t                  eof = 0;
     size_t                    klen, vlen;
     int                       rc;
+    int                       need_atime = !shared->noatime;
 
     offset = request->read.offset;
+
     length = request->read.length;
 
     if (unlikely(length == 0)) {
@@ -1517,7 +1536,7 @@ cairn_read(
 
     txn = cairn_get_transaction(thread);
 
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 0, &ih);
+    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, need_atime, &ih);
 
     if (rc) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1610,13 +1629,15 @@ cairn_read(
 
     rocksdb_iter_destroy(iter);
 
-    inode->atime = request->start_time;
+    if (need_atime) {
+        inode->atime = request->start_time;
+        cairn_put_inode(thread, txn, inode);
+    }
 
     if (request->read.attrmask) {
         cairn_map_attrs(&request->read.r_attr, request->read.attrmask, inode);
     }
 
-    cairn_put_inode(thread, txn, inode);
     cairn_inode_handle_release(&ih);
 
     evpl_defer(thread->evpl, &thread->commit);
@@ -1627,7 +1648,7 @@ cairn_read(
     request->read.iov      = iov;
     iov[0].length          = length;
 
-    request->complete(request);
+    DL_APPEND(thread->txn_requests, request);
 } /* cairn_read */
 
 static inline void
@@ -1951,7 +1972,7 @@ cairn_readlink(
     evpl_defer(thread->evpl, &thread->commit);
 
     request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    DL_APPEND(thread->txn_requests, request);
 } /* cairn_readlink */
 
 static inline int
