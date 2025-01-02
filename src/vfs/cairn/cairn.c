@@ -362,6 +362,94 @@ cairn_remove_inode(
     chimera_cairn_abort_if(err, "Error deleting inode: %s\n", err);
 } /* cairn_remove_inode */
 
+static inline void
+cairn_remove_symlink_target(
+    struct cairn_thread   *thread,
+    rocksdb_transaction_t *txn,
+    uint64_t               inum)
+{
+    struct cairn_shared *shared = thread->shared;
+    char                *err    = NULL;
+
+    rocksdb_transaction_delete_cf(txn, shared->cf_handles[CAIRN_CF_SYMLINK],
+                                  (const char *) &inum, sizeof(inum),
+                                  &err);
+
+    chimera_cairn_abort_if(err, "Error deleting symlink target: %s\n", err);
+} /* cairn_remove_symlink_target */
+
+static inline void
+cairn_remove_directory_contents(
+    struct cairn_thread   *thread,
+    rocksdb_transaction_t *txn,
+    uint64_t               dir_inum)
+{
+    struct cairn_shared    *shared = thread->shared;
+    rocksdb_iterator_t     *iter;
+    struct cairn_dirent_key start_key, *dirent_key;
+    size_t                  klen;
+
+    start_key.inum = dir_inum;
+    start_key.hash = 0;
+
+    iter = rocksdb_transaction_create_iterator_cf(txn, shared->read_options,
+                                                  shared->cf_handles[CAIRN_CF_DIRENT]);
+
+    rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+
+    while (rocksdb_iter_valid(iter)) {
+        dirent_key = (struct cairn_dirent_key *) rocksdb_iter_key(iter, &klen);
+
+        if (dirent_key->inum != dir_inum) {
+            break;
+        }
+
+        cairn_remove_dirent(thread, txn, dirent_key);
+        rocksdb_iter_next(iter);
+    }
+
+    rocksdb_iter_destroy(iter);
+} /* cairn_remove_directory_contents */
+
+static inline void
+cairn_remove_file_extents(
+    struct cairn_thread   *thread,
+    rocksdb_transaction_t *txn,
+    uint64_t               file_inum)
+{
+    struct cairn_shared    *shared = thread->shared;
+    rocksdb_iterator_t     *iter;
+    struct cairn_extent_key start_key, *extent_key;
+    char                   *err = NULL;
+    size_t                  klen;
+
+    start_key.inum   = file_inum;
+    start_key.offset = 0;
+
+    iter = rocksdb_transaction_create_iterator_cf(txn, shared->read_options,
+                                                  shared->cf_handles[CAIRN_CF_EXTENT]);
+
+    rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+
+    while (rocksdb_iter_valid(iter)) {
+        extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
+
+        if (extent_key->inum != file_inum) {
+            break;
+        }
+
+        rocksdb_transaction_delete_cf(txn, shared->cf_handles[CAIRN_CF_EXTENT],
+                                      (const char *) extent_key, sizeof(*extent_key),
+                                      &err);
+
+        chimera_cairn_abort_if(err, "Error deleting extent: %s\n", err);
+
+        rocksdb_iter_next(iter);
+    }
+
+    rocksdb_iter_destroy(iter);
+} /* cairn_remove_file_extents */
+
 static void *
 cairn_init(const char *cfgfile)
 {
@@ -558,7 +646,7 @@ cairn_thread_init(
     thread->thread_id = shared->num_active_threads++;
     pthread_mutex_unlock(&shared->lock);
 
-    thread->next_inum = 0;
+    thread->next_inum = 3;
 
     return thread;
 } /* cairn_thread_init */
@@ -1030,6 +1118,10 @@ cairn_remove(
     if (S_ISDIR(inode->mode)) {
         inode->nlink = 0;
         parent_inode->nlink--;
+
+        // Remove all directory entries
+        cairn_remove_directory_contents(thread, txn, inode->inum);
+
     } else {
         inode->nlink--;
     }
@@ -1038,6 +1130,13 @@ cairn_remove(
         --inode->refcnt;
 
         if (inode->refcnt == 0) {
+            // Remove type-specific data before removing inode
+            if (S_ISREG(inode->mode)) {
+                cairn_remove_file_extents(thread, txn, inode->inum);
+            } else if (S_ISLNK(inode->mode)) {
+                cairn_remove_symlink_target(thread, txn, inode->inum);
+            }
+
             cairn_remove_inode(thread, txn, inode);
         } else {
             cairn_put_inode(thread, txn, inode);
@@ -1047,6 +1146,7 @@ cairn_remove(
     cairn_map_attrs(r_post_attr, request->remove.attr_mask, parent_inode);
 
     cairn_remove_dirent(thread, txn, &dirent_key);
+
     cairn_put_inode(thread, txn, parent_inode);
 
     cairn_inode_handle_release(&parent_ih);
@@ -1105,7 +1205,12 @@ cairn_readdir(
 
     while (rocksdb_iter_valid(iter)) {
 
-        dirent_key   = (struct cairn_dirent_key *) rocksdb_iter_key(iter, &len);
+        dirent_key = (struct cairn_dirent_key *) rocksdb_iter_key(iter, &len);
+
+        if (dirent_key->inum != inode->inum) {
+            break;
+        }
+
         dirent_value = (struct cairn_dirent_value *) rocksdb_iter_value(iter, &len);
 
         rc = cairn_inode_get_inum(thread, txn, dirent_value->inum, 0, &dirent_ih);
