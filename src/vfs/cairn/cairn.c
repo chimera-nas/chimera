@@ -465,6 +465,7 @@ cairn_init(const char *cfgfile)
     size_t                 meta_cache_mb = 64;
     size_t                 data_cache_mb = 64;
     rocksdb_cache_t       *meta_cache, *data_cache;
+    int                    compression = 1; // Default to enabled
 
     cfg = json_load_file(cfgfile, 0, &json_error);
 
@@ -472,7 +473,7 @@ cairn_init(const char *cfgfile)
 
     db_path = json_string_value(json_object_get(cfg, "path"));
 
-    // Get cache sizes from config, use defaults if not specified
+    // Get cache sizes and compression setting from config
     json_t *meta_cache_obj = json_object_get(cfg, "meta_cache");
     if (meta_cache_obj && json_is_integer(meta_cache_obj)) {
         meta_cache_mb = json_integer_value(meta_cache_obj);
@@ -483,9 +484,14 @@ cairn_init(const char *cfgfile)
         data_cache_mb = json_integer_value(data_cache_obj);
     }
 
-    // Create LRU caches
+    json_t *compression_obj = json_object_get(cfg, "compression");
+    if (compression_obj && json_is_boolean(compression_obj)) {
+        compression = json_boolean_value(compression_obj);
+    }
 
-    chimera_cairn_info("Creating LRU caches: meta_cache_mb=%zu data_cache_mb=%zu", meta_cache_mb, data_cache_mb);
+    // Create LRU caches
+    chimera_cairn_info("Creating LRU caches: meta_cache_mb=%zu data_cache_mb=%zu compression=%d",
+                       meta_cache_mb, data_cache_mb, compression);
     meta_cache = rocksdb_cache_create_lru(meta_cache_mb * 1024 * 1024);
     data_cache = rocksdb_cache_create_lru(data_cache_mb * 1024 * 1024);
 
@@ -521,8 +527,17 @@ cairn_init(const char *cfgfile)
 
         if (i == CAIRN_CF_EXTENT) {
             rocksdb_options_set_block_based_table_factory(shared->cf_options[i], data_table_options);
+
+            if (compression) {
+                rocksdb_options_set_compression(shared->cf_options[i], rocksdb_lz4_compression);
+            } else {
+                rocksdb_options_set_compression(shared->cf_options[i], rocksdb_no_compression);
+            }
+
         } else {
             rocksdb_options_set_block_based_table_factory(shared->cf_options[i], meta_table_options);
+            rocksdb_options_set_compression(shared->cf_options[i], rocksdb_no_compression);
+
         }
     }
 
