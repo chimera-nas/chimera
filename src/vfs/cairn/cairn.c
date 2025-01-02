@@ -1025,11 +1025,11 @@ cairn_remove(
 
     cairn_map_attrs(r_pre_attr, request->remove.attr_mask, parent_inode);
 
-    parent_inode->nlink--;
     parent_inode->mtime = request->start_time;
 
     if (S_ISDIR(inode->mode)) {
         inode->nlink = 0;
+        parent_inode->nlink--;
     } else {
         inode->nlink--;
     }
@@ -1138,6 +1138,8 @@ cairn_readdir(
             eof = 0;
             break;
         }
+
+        rocksdb_iter_next(iter);
 
     } /* cairn_readdir */
 
@@ -1268,7 +1270,6 @@ cairn_open_at(
 
         cairn_put_dirent(thread, txn, &dirent_key, &new_dirent_value);
 
-        parent_inode->nlink++;
         parent_inode->mtime = request->start_time;
 
         inode = &new_inode;
@@ -1746,7 +1747,6 @@ cairn_symlink(
     dirent_value.name_len = request->symlink.namelen;
     memcpy(dirent_value.name, request->symlink.name, request->symlink.namelen);
 
-    parent_inode->nlink++;
     parent_inode->mtime = request->start_time;
 
     cairn_map_attrs(r_attr, request->symlink.attrmask, &new_inode);
@@ -2007,6 +2007,7 @@ cairn_rename(
     new_parent_inode->mtime = request->start_time;
 
     if (cmp != 0) {
+        /* XXX only if dir */
         old_parent_inode->nlink--;
         new_parent_inode->nlink++;
     }
@@ -2103,7 +2104,6 @@ cairn_link(
     memcpy(dirent_value.name, request->link.name, request->link.namelen);
 
     target_inode->nlink++;
-    parent_inode->nlink++;
     target_inode->ctime = request->start_time;
     parent_inode->mtime = request->start_time;
 
