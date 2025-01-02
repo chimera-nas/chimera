@@ -373,8 +373,10 @@ cairn_init(const char *cfgfile)
     rocksdb_transaction_t *txn;
     int                    initialize, i;
     struct timespec        now;
-    char                  *err = NULL;
-
+    char                  *err           = NULL;
+    size_t                 meta_cache_mb = 64;
+    size_t                 data_cache_mb = 64;
+    rocksdb_cache_t       *meta_cache, *data_cache;
 
     cfg = json_load_file(cfgfile, 0, &json_error);
 
@@ -382,12 +384,28 @@ cairn_init(const char *cfgfile)
 
     db_path = json_string_value(json_object_get(cfg, "path"));
 
+    // Get cache sizes from config, use defaults if not specified
+    json_t *meta_cache_obj = json_object_get(cfg, "meta_cache");
+    if (meta_cache_obj && json_is_integer(meta_cache_obj)) {
+        meta_cache_mb = json_integer_value(meta_cache_obj);
+    }
+
+    json_t *data_cache_obj = json_object_get(cfg, "data_cache");
+    if (data_cache_obj && json_is_integer(data_cache_obj)) {
+        data_cache_mb = json_integer_value(data_cache_obj);
+    }
+
+    // Create LRU caches
+
+    chimera_cairn_info("Creating LRU caches: meta_cache_mb=%zu data_cache_mb=%zu", meta_cache_mb, data_cache_mb);
+    meta_cache = rocksdb_cache_create_lru(meta_cache_mb * 1024 * 1024);
+    data_cache = rocksdb_cache_create_lru(data_cache_mb * 1024 * 1024);
+
     shared->options = rocksdb_options_create();
 
     initialize = json_boolean_value(json_object_get(cfg, "initialize"));
 
     if (initialize) {
-
         rocksdb_destroy_db(shared->options, db_path, &err);
         chimera_cairn_abort_if(err, "Failed to destroy database: %s\n", err);
 
@@ -400,8 +418,24 @@ cairn_init(const char *cfgfile)
     shared->read_options  = rocksdb_readoptions_create();
     shared->txn_options   = rocksdb_transaction_options_create();
 
+    // Create table options for each column family
+    rocksdb_block_based_table_options_t *meta_table_options = rocksdb_block_based_options_create();
+    rocksdb_block_based_table_options_t *data_table_options = rocksdb_block_based_options_create();
+
+    // Configure meta cache for all column families except extent
+    rocksdb_block_based_options_set_block_cache(meta_table_options, meta_cache);
+
+    // Configure data cache for extent column family
+    rocksdb_block_based_options_set_block_cache(data_table_options, data_cache);
+
     for (i = 0; i < CAIRN_NUM_CF; i++) {
         shared->cf_options[i] = rocksdb_options_create();
+
+        if (i == CAIRN_CF_EXTENT) {
+            rocksdb_options_set_block_based_table_factory(shared->cf_options[i], data_table_options);
+        } else {
+            rocksdb_options_set_block_based_table_factory(shared->cf_options[i], meta_table_options);
+        }
     }
 
     shared->db_txn = rocksdb_transactiondb_open_column_families(shared->options, shared->txndb_options, db_path,
@@ -409,6 +443,14 @@ cairn_init(const char *cfgfile)
                                                                 (const rocksdb_options_t * const *) shared->cf_options,
                                                                 shared->cf_handles, &err);
     chimera_cairn_abort_if(err, "Failed to open database: %s\n", err);
+
+    // Clean up table options
+    rocksdb_block_based_options_destroy(meta_table_options);
+    rocksdb_block_based_options_destroy(data_table_options);
+
+    // Cache objects will be cleaned up when the DB is closed
+    rocksdb_cache_destroy(meta_cache);
+    rocksdb_cache_destroy(data_cache);
 
     json_decref(cfg);
 
@@ -1488,8 +1530,6 @@ cairn_punch_hole(
     start_key.inum   = inode->inum;
     start_key.offset = offset;
 
-    chimera_cairn_debug("Start at inode %llu at offset %llu length %llu\n", inode->inum, offset, length);
-
     iter = rocksdb_transaction_create_iterator_cf(txn, shared->read_options,
                                                   shared->cf_handles[CAIRN_CF_EXTENT]);
 
@@ -1500,9 +1540,6 @@ cairn_punch_hole(
         extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
         uint64_t extent_length;
         void    *extent_data = (void *) rocksdb_iter_value(iter, &extent_length);
-
-        chimera_cairn_debug("Extent inum %llu offset %llu length %llu\n", extent_key->inum, extent_key->offset,
-                            extent_length);
 
         // Stop if we've moved past this inode
         if (extent_key->inum != inode->inum) {

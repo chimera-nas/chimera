@@ -195,7 +195,7 @@ chimera_vfs_init(
     chimera_vfs_info("Initializing VFS io_uring module...");
     chimera_vfs_register(vfs, &vfs_io_uring, NULL);
 
-    if (cairn_cfgfile) {
+    if (strlen(cairn_cfgfile) > 0) {
         chimera_vfs_info("Initializing VFS cairn module...");
         chimera_vfs_register(vfs, &vfs_cairn, cairn_cfgfile);
     }
