@@ -47,8 +47,9 @@ main(
         libnfs_test_fail(&env);
     }
 
-    if (memcmp(buf, buf2, 16384) != 0) {
-        fprintf(stderr, "Read returned bad data\n");
+    rc = memcmp(buf, buf2, 16384);
+    if (rc != 0) {
+        fprintf(stderr, "Read returned bad data: rc %d\n", rc);
         libnfs_test_fail(&env);
     }
 
