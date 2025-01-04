@@ -6,7 +6,6 @@
 
 #include "core/evpl.h"
 #include "thread/thread.h"
-#include "server.h"
 #include "server_internal.h"
 #include "protocol.h"
 #include "nfs/nfs.h"
@@ -15,14 +14,6 @@
 #define CHIMERA_SERVER_MAX_MODULES 64
 
 struct chimera_server_config {
-<<<<<<< HEAD
-    int  nfs_rdma;
-    char nfs_rdma_hostname[256];
-    int  nfs_rdma_port;
-    int  core_threads;
-    int  delegation_threads;
-    char cairn_cfgfile[256];
-=======
     int                           nfs_rdma;
     char                          nfs_rdma_hostname[256];
     int                           nfs_rdma_port;
@@ -30,7 +21,6 @@ struct chimera_server_config {
     int                           delegation_threads;
     struct chimera_vfs_module_cfg modules[CHIMERA_SERVER_MAX_MODULES];
     int                           num_modules;
->>>>>>> origin/main
 };
 
 struct chimera_server {
@@ -64,9 +54,6 @@ chimera_server_config_init(void)
     strncpy(config->nfs_rdma_hostname, "0.0.0.0", sizeof(config->nfs_rdma_hostname));
     config->nfs_rdma_port = 20049;
 
-<<<<<<< HEAD
-    config->cairn_cfgfile[0] = '\0';
-=======
     strncpy(config->modules[0].module_name, "root", sizeof(config->modules[0].module_name));
     config->modules[0].config_path[0] = '\0';
     config->modules[0].module_path[0] = '\0';
@@ -83,7 +70,6 @@ chimera_server_config_init(void)
     config->modules[3].config_path[0] = '\0';
     config->modules[3].module_path[0] = '\0';
     config->num_modules               = 4;
->>>>>>> origin/main
 
     return config;
 } /* chimera_server_config_init */
@@ -152,14 +138,6 @@ chimera_server_config_get_nfs_rdma_port(const struct chimera_server_config *conf
 } /* chimera_server_config_get_nfs_rdma_port */
 
 void
-<<<<<<< HEAD
-chimera_server_config_set_cairn_cfgfile(
-    struct chimera_server_config *config,
-    const char                   *cfgfile)
-{
-    strncpy(config->cairn_cfgfile, cfgfile, sizeof(config->cairn_cfgfile));
-} /* chimera_server_config_set_cairn_cfgfile */
-=======
 chimera_server_config_add_module(
     struct chimera_server_config *config,
     const char                   *module_name,
@@ -176,7 +154,6 @@ chimera_server_config_add_module(
 
     config->num_modules++;
 } /* chimera_server_config_add_module */
->>>>>>> origin/main
 
 static void
 chimera_server_thread_wake(
@@ -270,12 +247,8 @@ chimera_server_init(const struct chimera_server_config *config)
 
     chimera_server_info("Initializing VFS...");
     server->vfs = chimera_vfs_init(config->delegation_threads,
-<<<<<<< HEAD
-                                   config->cairn_cfgfile);
-=======
                                    config->modules,
                                    config->num_modules);
->>>>>>> origin/main
 
     chimera_server_info("Initializing NFS protocol...");
     server->protocols[server->num_protocols++] = &nfs_protocol;

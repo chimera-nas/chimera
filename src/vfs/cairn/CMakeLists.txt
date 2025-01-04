@@ -1,4 +1,4 @@
-add_library(chimera_vfs_cairn STATIC
+add_library(chimera_vfs_cairn SHARED
     cairn.c
 )
 

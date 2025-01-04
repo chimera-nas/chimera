@@ -27,11 +27,12 @@ libnfs_test_init(
     char           **argv,
     int              argc)
 {
-    int             opt;
-    extern char    *optarg;
-    int             nfsvers = 3;
-    const char     *backend = "linux";
-    struct timespec tv;
+    int                           opt;
+    extern char                  *optarg;
+    int                           nfsvers = 3;
+    const char                   *backend = "linux";
+    struct chimera_server_config *config;
+    struct timespec               tv;
 
     clock_gettime(
         CLOCK_MONOTONIC,
@@ -110,6 +111,7 @@ libnfs_test_init(
         json_dump_file(cfg, cairn_cfgfile, 0);
         json_decref(cfg);
 
+        chimera_server_config_add_module(config, "cairn", "/build/test/cairn", cairn_cfgfile);
     }
 
     env->server = chimera_server_init(config);

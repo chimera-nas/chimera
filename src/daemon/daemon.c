@@ -102,12 +102,6 @@ main(
         chimera_server_config_set_nfs_rdma_port(server_config, rdma_port);
     }
 
-    json_t *cairn_cfgfile_value = json_object_get(server_params, "cairn_cfgfile");
-    if (cairn_cfgfile_value && json_is_string(cairn_cfgfile_value)) {
-        const char *cairn_cfgfile_str = json_string_value(cairn_cfgfile_value);
-        chimera_server_config_set_cairn_cfgfile(server_config, cairn_cfgfile_str);
-    }
-
     server = chimera_server_init(server_config);
 
     shares = json_object_get(config, "shares");
