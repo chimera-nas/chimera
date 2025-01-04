@@ -17,6 +17,13 @@ chimera_nfs3_fsinfo_complete(
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct FSINFO3res                 res;
+    uint64_t                          max_xfer;
+
+    if (msg->rdma) {
+        max_xfer = 4 * 1024 * 1024;
+    } else {
+        max_xfer = 128 * 1024;
+    }
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
@@ -31,11 +38,11 @@ chimera_nfs3_fsinfo_complete(
         res.resok.maxfilesize         = UINT64_MAX;
         res.resok.time_delta.seconds  = 0;
         res.resok.time_delta.nseconds = 1;
-        res.resok.rtmax               = 128 * 1024;
-        res.resok.rtpref              = 128 * 1024;
+        res.resok.rtmax               = max_xfer;
+        res.resok.rtpref              = max_xfer;
         res.resok.rtmult              = 4096;
-        res.resok.wtmax               = 128 * 1024;
-        res.resok.wtpref              = 128 * 1024;
+        res.resok.wtmax               = max_xfer;
+        res.resok.wtpref              = max_xfer;
         res.resok.wtmult              = 4096;
         res.resok.dtpref              = 64 * 1024;
         res.resok.properties          = FSF3_LINK | FSF3_SYMLINK |
