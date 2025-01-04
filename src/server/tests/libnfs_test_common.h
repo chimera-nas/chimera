@@ -79,7 +79,7 @@ libnfs_test_init(
             device = json_object();
             snprintf(device_path, sizeof(device_path), "%s/device-%d.img", env->session_dir, i);
             json_object_set_new(device, "type", json_string("io_uring"));
-            json_object_set_new(device, "size", json_integer(1024 * 1024 * 1024));
+            json_object_set_new(device, "size", json_integer(1));
             json_object_set_new(device, "path", json_string(device_path));
             json_array_append_new(devices, device);
 

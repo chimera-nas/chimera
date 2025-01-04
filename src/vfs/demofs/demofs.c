@@ -559,7 +559,8 @@ demofs_init(const char *cfgfile)
 
     json_array_foreach(devices_cfg, i, device_cfg)
     {
-        device = &shared->devices[i];
+        device     = &shared->devices[i];
+        device->id = i;
 
         protocol_name = json_string_value(json_object_get(device_cfg, "type"));
         device_path   = json_string_value(json_object_get(device_cfg, "path"));
@@ -571,13 +572,15 @@ demofs_init(const char *cfgfile)
 
         device->bdev = evpl_block_open_device(protocol_id, device_path);
 
-        device->size = json_integer_value(json_object_get(device_cfg, "size"));
+        device->size  = json_integer_value(json_object_get(device_cfg, "size"));
+        device->size *= 1000000000UL;
 
-        free_space         = calloc(1, sizeof(*free_space));
-        free_space->offset = 0;
-        free_space->length = device->size;
-        free_space->next   = NULL;
-        device->free_space = free_space;
+        free_space            = calloc(1, sizeof(*free_space));
+        free_space->device_id = device->id;
+        free_space->offset    = 0;
+        free_space->length    = device->size;
+        free_space->next      = NULL;
+        device->free_space    = free_space;
     }
 
     json_decref(cfg);
