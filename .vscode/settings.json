@@ -40,6 +40,10 @@
     "vfs_open_cache.h": "c",
     "vfs.h": "c",
     "nfs3_attr.h": "c",
-    "vfs_release.h": "c"
+    "vfs_release.h": "c",
+    "xxhash.h": "c",
+    "varint.h": "c",
+    "rbtree.h": "c",
+    "limits": "c"
   }
 }

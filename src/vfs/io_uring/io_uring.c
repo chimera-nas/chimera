@@ -83,7 +83,7 @@ struct chimera_io_uring_thread {
 };
 
 static void *
-chimera_io_uring_init(void)
+chimera_io_uring_init(const char *cfgfile)
 {
     struct chimera_io_uring_shared *shared;
     struct io_uring_params          params = { 0 };

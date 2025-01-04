@@ -7,9 +7,11 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <errno.h>
 #include <nfsc/libnfs.h>
 #include <nfsc/libnfs-raw-nfs.h>
 #include <nfsc/libnfs-raw-nfs4.h>
+#include <jansson.h>
 #include "server/server.h"
 #include "common/logging.h"
 
@@ -25,11 +27,12 @@ libnfs_test_init(
     char           **argv,
     int              argc)
 {
-    int             opt;
-    extern char    *optarg;
-    int             nfsvers = 3;
-    const char     *backend = "linux";
-    struct timespec tv;
+    int                           opt;
+    extern char                  *optarg;
+    int                           nfsvers = 3;
+    const char                   *backend = "linux";
+    struct timespec               tv;
+    struct chimera_server_config *config;
 
     clock_gettime(
         CLOCK_MONOTONIC,
@@ -52,36 +55,68 @@ libnfs_test_init(
 
     chimera_enable_crash_handler();
 
-    env->server = chimera_server_init(NULL);
+    snprintf(env->session_dir, sizeof(env->session_dir),
+             "/build/test/session_%d_%lu_%lu",
+             getpid(), tv.tv_sec, tv.tv_nsec);
+
+    fprintf(stderr, "Creating session directory %s\n", env->session_dir);
+
+    (void) mkdir("/build/test", 0755);
+    (void) mkdir(env->session_dir, 0755);
+
+
+    config = chimera_server_config_init();
+
+    if (strcmp(backend, "demofs") == 0) {
+        char    demofs_cfg[256];
+        char    device_path[256];
+        json_t *cfg, *devices, *device;
+        snprintf(demofs_cfg, sizeof(demofs_cfg), "%s/demofs.json", env->session_dir);
+
+        cfg     = json_object();
+        devices = json_array();
+
+        for (int i = 0; i < 10; ++i) {
+            device = json_object();
+            snprintf(device_path, sizeof(device_path), "%s/device-%d.img", env->session_dir, i);
+            json_object_set_new(device, "type", json_string("io_uring"));
+            json_object_set_new(device, "size", json_integer(1024 * 1024 * 1024));
+            json_object_set_new(device, "path", json_string(device_path));
+            json_array_append_new(devices, device);
+
+            int fd = open(device_path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+            if (fd < 0) {
+                fprintf(stderr, "Failed to create device %s: %s\n", device_path, strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+
+            ftruncate(fd, 1024 * 1024 * 1024);
+            close(fd);
+        }
+
+        json_object_set_new(cfg, "devices", devices);
+        json_dump_file(cfg, demofs_cfg, 0);
+        json_decref(cfg);
+
+        chimera_server_config_add_module(config, "demofs", "/build/test/demofs", demofs_cfg);
+    }
+
+    env->server = chimera_server_init(config);
 
     if (strcmp(backend, "linux") == 0) {
-        snprintf(env->session_dir, sizeof(env->session_dir),
-                 "/build/test/session_%d_%lu_%lu",
-                 getpid(), tv.tv_sec, tv.tv_nsec);
-
-        fprintf(stderr, "Creating session directory %s\n", env->session_dir);
-
-        (void) mkdir("/build/test", 0755);
-        (void) mkdir(env->session_dir, 0755);
-
         chimera_server_create_share(env->server, "linux", "share",
                                     env->session_dir);
 
     } else if (strcmp(backend, "io_uring") == 0) {
-        snprintf(env->session_dir, sizeof(env->session_dir),
-                 "/build/test/session_%d_%lu_%lu",
-                 getpid(), tv.tv_sec, tv.tv_nsec);
-
-        fprintf(stderr, "Creating session directory %s\n", env->session_dir);
-
-        (void) mkdir("/build/test", 0755);
-        (void) mkdir(env->session_dir, 0755);
-
         chimera_server_create_share(env->server, "io_uring", "share",
                                     env->session_dir);
 
     } else if (strcmp(backend, "memfs") == 0) {
         chimera_server_create_share(env->server, "memfs", "share", "/");
+
+    } else if (strcmp(backend, "demofs") == 0) {
+        chimera_server_create_share(env->server, "demofs", "share", "/");
+
     } else {
         fprintf(stderr, "Unknown backend: %s\n", backend);
         exit(EXIT_FAILURE);

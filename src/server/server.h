@@ -41,6 +41,13 @@ int
 chimera_server_config_get_nfs_rdma_port(
     const struct chimera_server_config *config);
 
+void
+chimera_server_config_add_module(
+    struct chimera_server_config *config,
+    const char                   *module_name,
+    const char                   *module_path,
+    const char                   *config_path);
+
 int
 chimera_server_create_share(
     struct chimera_server *server,

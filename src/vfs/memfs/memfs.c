@@ -448,7 +448,7 @@ memfs_dirent_free(
 } /* memfs_dirent_free */
 
 static void *
-memfs_init(void)
+memfs_init(const char *cfgfile)
 {
     struct memfs_shared     *shared = calloc(1, sizeof(*shared));
     struct memfs_inode_list *inode_list;
@@ -1895,7 +1895,7 @@ memfs_dispatch(
     } /* switch */
 } /* memfs_dispatch */
 
-struct chimera_vfs_module vfs_memvfs = {
+struct chimera_vfs_module vfs_memfs = {
     .name               = "memfs",
     .fh_magic           = CHIMERA_VFS_FH_MAGIC_MEMFS,
     .blocking           = 0,

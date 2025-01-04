@@ -20,6 +20,6 @@ add_subdirectory(root)
 add_subdirectory(memfs)
 add_subdirectory(linux)
 add_subdirectory(io_uring)
-
+add_subdirectory(demofs)
 target_link_libraries(chimera_vfs PRIVATE 
-    chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_io_uring xxhash)
+    chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_io_uring chimera_vfs_demofs xxhash dl)
