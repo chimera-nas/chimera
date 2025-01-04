@@ -102,6 +102,22 @@ main(
         chimera_server_config_set_nfs_rdma_port(server_config, rdma_port);
     }
 
+    json_t *vfs_modules = json_object_get(server_params, "vfs");
+    if (vfs_modules && json_is_object(vfs_modules)) {
+        const char *module_name;
+        json_t     *module;
+        json_object_foreach(vfs_modules, module_name, module)
+        {
+            const char *path   = json_string_value(json_object_get(module, "path"));
+            const char *config = json_string_value(json_object_get(module, "config"));
+
+            if (path) {
+                chimera_server_config_add_module(server_config, module_name, path,
+                                                 config ? config : "");
+            }
+        }
+    }
+
     server = chimera_server_init(server_config);
 
     shares = json_object_get(config, "shares");
