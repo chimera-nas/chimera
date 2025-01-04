@@ -19,10 +19,6 @@ struct rb_node {
 struct rb_tree {
     struct rb_node *root;
     struct rb_node  nil;
-    void            (*free_payload)(
-        void *payload,
-        void *private_data);
-    void           *private_data;
 };
 
 static void
@@ -138,20 +134,19 @@ rb_insert_fixup(
 } /* rb_insert_fixup */
 
 static void
-rb_tree_init(
-    struct rb_tree *tree,
-    void (         *free_payload )(void *payload,
-                                   void *private_data),
-    void           *private_data)
+rb_tree_init(struct rb_tree *tree)
 {
-    tree->nil.color    = RB_BLACK;
-    tree->root         = &tree->nil;
-    tree->free_payload = free_payload;
-    tree->private_data = private_data;
+    tree->nil.color = RB_BLACK;
+    tree->root      = &tree->nil;
 } /* rb_tree_init */
 
 static void
-rb_tree_destroy(struct rb_tree *tree)
+rb_tree_destroy(
+    struct rb_tree *tree,
+    void (         *free_payload )(
+        void *payload,
+        void *private_data),
+    void           *private_data)
 {
     struct rb_node *node = tree->root;
     struct rb_node *parent;
@@ -173,12 +168,11 @@ rb_tree_destroy(struct rb_tree *tree)
                 parent->right = &tree->nil;
             }
         }
-        if (tree->free_payload) {
-            tree->free_payload(node->payload, tree->private_data);
+        if (free_payload) {
+            free_payload(node->payload, private_data);
         }
         node = parent;
     }
-
 } /* rb_tree_destroy */
 
 static int
@@ -442,10 +436,6 @@ rb_tree_remove(
         y->left         = z->left;
         y->left->parent = y;
         y->color        = z->color;
-    }
-
-    if (tree->free_payload) {
-        tree->free_payload(z->payload, tree->private_data);
     }
 
     if (y_original_color == RB_BLACK) {

@@ -420,7 +420,7 @@ demofs_inode_free(
     inode_list = &shared->inode_list[list_id];
 
     if (S_ISREG(inode->mode)) {
-        rb_tree_destroy(&inode->file.extents);
+        rb_tree_destroy(&inode->file.extents, demofs_extent_release, thread);
     } else if (S_ISLNK(inode->mode)) {
         demofs_symlink_target_free(thread, inode->symlink.target);
         inode->symlink.target = NULL;
@@ -655,7 +655,7 @@ demofs_destroy(void *private_data)
                 } else if (S_ISLNK(inode->mode)) {
                     free(inode->symlink.target);
                 } else if (S_ISREG(inode->mode)) {
-                    rb_tree_destroy(&inode->file.extents);
+                    rb_tree_destroy(&inode->file.extents, demofs_extent_release, NULL);
                 }
             }
             free(shared->inode_list[i].inode[j]);
@@ -1321,7 +1321,7 @@ demofs_open_at(
         inode->mtime      = request->start_time;
         inode->ctime      = request->start_time;
 
-        rb_tree_init(&inode->file.extents, demofs_extent_release, thread);
+        rb_tree_init(&inode->file.extents);
 
         dirent = demofs_dirent_alloc(thread,
                                      inode->inum,
