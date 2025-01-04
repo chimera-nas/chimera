@@ -1895,7 +1895,7 @@ memfs_dispatch(
     } /* switch */
 } /* memfs_dispatch */
 
-struct chimera_vfs_module vfs_memvfs = {
+struct chimera_vfs_module vfs_memfs = {
     .name               = "memfs",
     .fh_magic           = CHIMERA_VFS_FH_MAGIC_MEMFS,
     .blocking           = 0,

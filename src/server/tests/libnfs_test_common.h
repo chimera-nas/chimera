@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <errno.h>
 #include <nfsc/libnfs.h>
 #include <nfsc/libnfs-raw-nfs.h>
 #include <nfsc/libnfs-raw-nfs4.h>
@@ -26,12 +27,11 @@ libnfs_test_init(
     char           **argv,
     int              argc)
 {
-    int                           opt;
-    extern char                  *optarg;
-    int                           nfsvers = 3;
-    const char                   *backend = "linux";
-    struct chimera_server_config *config;
-    struct timespec               tv;
+    int             opt;
+    extern char    *optarg;
+    int             nfsvers = 3;
+    const char     *backend = "linux";
+    struct timespec tv;
 
     clock_gettime(
         CLOCK_MONOTONIC,
@@ -52,21 +52,52 @@ libnfs_test_init(
 
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 
+    chimera_enable_crash_handler();
+
     snprintf(env->session_dir, sizeof(env->session_dir),
              "/build/test/session_%d_%lu_%lu",
              getpid(), tv.tv_sec, tv.tv_nsec);
 
     fprintf(stderr, "Creating session directory %s\n", env->session_dir);
 
-
     (void) mkdir("/build/test", 0755);
     (void) mkdir(env->session_dir, 0755);
 
-    chimera_enable_crash_handler();
-
     config = chimera_server_config_init();
 
-    if (strcmp(backend, "cairn") == 0) {
+    if (strcmp(backend, "demofs") == 0) {
+        char    demofs_cfg[256];
+        char    device_path[256];
+        json_t *cfg, *devices, *device;
+        snprintf(demofs_cfg, sizeof(demofs_cfg), "%s/demofs.json", env->session_dir);
+
+        cfg     = json_object();
+        devices = json_array();
+
+        for (int i = 0; i < 10; ++i) {
+            device = json_object();
+            snprintf(device_path, sizeof(device_path), "%s/device-%d.img", env->session_dir, i);
+            json_object_set_new(device, "type", json_string("io_uring"));
+            json_object_set_new(device, "size", json_integer(1024 * 1024 * 1024));
+            json_object_set_new(device, "path", json_string(device_path));
+            json_array_append_new(devices, device);
+
+            int fd = open(device_path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+            if (fd < 0) {
+                fprintf(stderr, "Failed to create device %s: %s\n", device_path, strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+
+            ftruncate(fd, 1024 * 1024 * 1024);
+            close(fd);
+        }
+
+        json_object_set_new(cfg, "devices", devices);
+        json_dump_file(cfg, demofs_cfg, 0);
+        json_decref(cfg);
+
+        chimera_server_config_add_module(config, "demofs", "/build/test/demofs", demofs_cfg);
+    } else if (strcmp(backend, "cairn") == 0) {
         char    cairn_cfgfile[256];
         json_t *cfg;
 
@@ -79,9 +110,6 @@ libnfs_test_init(
         json_dump_file(cfg, cairn_cfgfile, 0);
         json_decref(cfg);
 
-        fprintf(stderr, "Using Cairn config file %s\n", cairn_cfgfile);
-
-        chimera_server_config_set_cairn_cfgfile(config, cairn_cfgfile);
     }
 
     env->server = chimera_server_init(config);
@@ -96,6 +124,10 @@ libnfs_test_init(
 
     } else if (strcmp(backend, "memfs") == 0) {
         chimera_server_create_share(env->server, "memfs", "share", "/");
+
+    } else if (strcmp(backend, "demofs") == 0) {
+        chimera_server_create_share(env->server, "demofs", "share", "/");
+
     } else if (strcmp(backend, "cairn") == 0) {
         chimera_server_create_share(env->server, "cairn", "share", "/");
     } else {

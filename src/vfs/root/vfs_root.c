@@ -333,7 +333,7 @@ chimera_vfs_root_dispatch(
     } /* switch */
 } /* vfs_root_dispatch */
 
-struct chimera_vfs_module vfs_root = {
+struct chimera_vfs_module vfs_root __attribute__((visibility("default"))) = {
     .fh_magic           = CHIMERA_VFS_FH_MAGIC_ROOT,
     .name               = "root",
     .blocking           = 0,

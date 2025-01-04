@@ -1,4 +1,4 @@
-add_library(chimera_vfs_io_uring STATIC
+add_library(chimera_vfs_io_uring SHARED
     io_uring.c
 )
 

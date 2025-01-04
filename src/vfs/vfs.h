@@ -382,7 +382,8 @@ enum CHIMERA_FS_FH_MAGIC {
     CHIMERA_VFS_FH_MAGIC_LINUX    = 2,
     CHIMERA_VFS_FH_MAGIC_IO_URING = 3,
     CHIMERA_VFS_FH_MAGIC_CAIRN    = 4,
-    CHIMERA_VFS_FH_MAGIC_MAX      = 5
+    CHIMERA_VFS_FH_MAGIC_DEMOFS   = 5,
+    CHIMERA_VFS_FH_MAGIC_MAX      = 6
 
 };
 
@@ -549,10 +550,17 @@ struct chimera_vfs_thread {
     struct chimera_vfs_metric       metrics[CHIMERA_VFS_OP_NUM];
 };
 
+struct chimera_vfs_module_cfg {
+    char module_name[256];
+    char module_path[256];
+    char config_path[256];
+};
+
 struct chimera_vfs *
 chimera_vfs_init(
-    int         num_delegation_threads,
-    const char *cairn_cfgfile);
+    int                                  num_delegation_threads,
+    const struct chimera_vfs_module_cfg *module_cfgs,
+    int                                  num_modules);
 
 void
 chimera_vfs_destroy(

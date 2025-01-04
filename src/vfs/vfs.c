@@ -1,4 +1,6 @@
+#include <stdio.h>
 #include <sys/stat.h>
+#include <dlfcn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -13,6 +15,7 @@
 #include "vfs/linux/linux.h"
 #include "vfs/io_uring/io_uring.h"
 #include "vfs/cairn/cairn.h"
+#include "vfs/demofs/demofs.h"
 #include "common/misc.h"
 #include "uthash/utlist.h"
 #include "thread/thread.h"
@@ -173,31 +176,26 @@ chimera_vfs_close_thread_destroy(void *private_data)
 
 struct chimera_vfs *
 chimera_vfs_init(
-    int         num_delegation_threads,
-    const char *cairn_cfgfile)
+    int                                  num_delegation_threads,
+    const struct chimera_vfs_module_cfg *module_cfgs,
+    int                                  num_modules)
 {
-    struct chimera_vfs *vfs;
+    struct chimera_vfs        *vfs;
+    struct chimera_vfs_module *module;
+    char                       modsym[80];
 
     vfs = calloc(1, sizeof(*vfs));
 
     vfs->vfs_open_path_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_PATH, 10, 128 * 1024);
     vfs->vfs_open_file_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_FILE, 10, 128 * 1024);
 
-    chimera_vfs_info("Initializing VFS root module...");
-    chimera_vfs_register(vfs, &vfs_root, NULL);
+    for (int i = 0; i < num_modules; i++) {
+        chimera_vfs_info("Initializing VFS module %s...", module_cfgs[i].module_name);
 
-    chimera_vfs_info("Initializing VFS memfs module...");
-    chimera_vfs_register(vfs, &vfs_memvfs, NULL);
-
-    chimera_vfs_info("Initializing VFS linux module...");
-    chimera_vfs_register(vfs, &vfs_linux, NULL);
-
-    chimera_vfs_info("Initializing VFS io_uring module...");
-    chimera_vfs_register(vfs, &vfs_io_uring, NULL);
-
-    if (strlen(cairn_cfgfile) > 0) {
-        chimera_vfs_info("Initializing VFS cairn module...");
-        chimera_vfs_register(vfs, &vfs_cairn, cairn_cfgfile);
+        snprintf(modsym, sizeof(modsym), "vfs_%s", module_cfgs[i].module_name);
+        module = dlsym(RTLD_DEFAULT, modsym);
+        chimera_vfs_abort_if(!module, "module %s symbol %s not found", module_cfgs[i].module_name, modsym);
+        chimera_vfs_register(vfs, module, module_cfgs[i].config_path);
     }
 
     vfs->num_delegation_threads = num_delegation_threads;
