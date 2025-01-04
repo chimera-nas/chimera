@@ -110,19 +110,20 @@ struct cairn_inode_handle {
 };
 
 struct cairn_shared {
-    rocksdb_t                       *db;
-    rocksdb_cache_t                 *cache;
-    rocksdb_transactiondb_t         *db_txn;
-    rocksdb_options_t               *options;
-    rocksdb_transactiondb_options_t *txndb_options;
-    rocksdb_writeoptions_t          *write_options;
-    rocksdb_readoptions_t           *read_options;
-    rocksdb_transaction_options_t   *txn_options;
-    int                              num_active_threads;
-    uint8_t                          root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                         root_fhlen;
-    pthread_mutex_t                  lock;
-    int                              noatime;  // New field
+    rocksdb_t                           *db;
+    rocksdb_cache_t                     *cache;
+    rocksdb_transactiondb_t             *db_txn;
+    rocksdb_options_t                   *options;
+    rocksdb_transactiondb_options_t     *txndb_options;
+    rocksdb_writeoptions_t              *write_options;
+    rocksdb_readoptions_t               *read_options;
+    rocksdb_transaction_options_t       *txn_options;
+    rocksdb_block_based_table_options_t *table_options;
+    int                                  num_active_threads;
+    uint8_t                              root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                             root_fhlen;
+    pthread_mutex_t                      lock;
+    int                                  noatime; // New field
 };
 
 struct cairn_thread {
@@ -539,17 +540,17 @@ cairn_init(const char *cfgfile)
     //rocksdb_options_set_level0_stop_writes_trigger(shared->options, 1000000);
 
     // Create and configure block based table options
-    rocksdb_block_based_table_options_t *table_options = rocksdb_block_based_options_create();
-    rocksdb_block_based_options_set_block_cache(table_options, shared->cache);
+    shared->table_options = rocksdb_block_based_options_create();
+    rocksdb_block_based_options_set_block_cache(shared->table_options, shared->cache);
 
     if (bloom_filter) {
         // Create a bloom filter with 10 bits per key
         rocksdb_filterpolicy_t *bloom = rocksdb_filterpolicy_create_bloom(10);
-        rocksdb_block_based_options_set_filter_policy(table_options, bloom);
+        rocksdb_block_based_options_set_filter_policy(shared->table_options, bloom);
     }
 
-// Attach table options to the main options
-    rocksdb_options_set_block_based_table_factory(shared->options, table_options);
+    // Attach table options to the main options
+    rocksdb_options_set_block_based_table_factory(shared->options, shared->table_options);
 
     initialize = json_boolean_value(json_object_get(cfg, "initialize"));
 
@@ -630,6 +631,7 @@ cairn_destroy(void *private_data)
     rocksdb_transactiondb_options_destroy(shared->txndb_options);
     rocksdb_transaction_options_destroy(shared->txn_options);
     rocksdb_cache_destroy(shared->cache);
+    rocksdb_block_based_options_destroy(shared->table_options);
     free(shared);
 } /* cairn_destroy */
 
@@ -1315,11 +1317,12 @@ cairn_open(
     inode = ih.inode;
     inode->refcnt++;
 
+    request->open.r_vfs_private = (uint64_t) inode->inum;
+
     cairn_put_inode(txn, inode);
     cairn_inode_handle_release(&ih);
 
-    request->open.r_vfs_private = (uint64_t) inode->inum;
-    request->status             = CHIMERA_VFS_OK;
+    request->status = CHIMERA_VFS_OK;
 
     DL_APPEND(thread->txn_requests, request);
 } /* cairn_open */
@@ -1481,8 +1484,7 @@ cairn_close(
 
     cairn_inode_handle_release(&ih);
 
-    request->open.r_vfs_private = (uint64_t) inode->inum;
-    request->status             = CHIMERA_VFS_OK;
+    request->status = CHIMERA_VFS_OK;
 
     DL_APPEND(thread->txn_requests, request);
 } /* cairn_close */

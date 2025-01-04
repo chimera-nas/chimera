@@ -68,8 +68,10 @@
         chimera_abort_if(cond, "demofs", __FILE__, __LINE__, __VA_ARGS__)
 
 struct demofs_request_private {
-    int status;
-    int pending;
+    int               status;
+    int               pending;
+    struct evpl_iovec pad_iov;
+    int               pad_niov;
 };
 
 struct demofs_extent {
@@ -467,14 +469,17 @@ demofs_dirent_free(
 static inline int
 demofs_thread_alloc_space(
     struct demofs_thread *thread,
-    int64_t               size,
+    int64_t               desired_size,
     uint64_t             *r_device_id,
     uint64_t             *r_device_offset)
 {
     struct demofs_shared    *shared = thread->shared;
     struct demofs_device    *device;
     struct demofs_freespace *freespace;
+    uint64_t                 size;
     uint64_t                 rsrv_size;
+
+    size = (desired_size + 4095) & ~4095;
 
  again:
 
@@ -1401,6 +1406,10 @@ demofs_io_callback(
     demofs_private->pending--;
 
     if (demofs_private->pending == 0) {
+
+        if (demofs_private->pad_niov) {
+            evpl_iovec_release(&demofs_private->pad_iov);
+        }
         request->status = demofs_private->status;
         request->complete(request);
     }
@@ -1554,12 +1563,14 @@ demofs_write(
     uint64_t                       write_start = request->write.offset;
     uint64_t                       write_end   = write_start + request->write.length;
     uint64_t                       extent_start, extent_end, device_id, device_offset;
+    const struct evpl_iovec       *iov;
     struct evpl_block_queue       *queue;
     int                            rc;
 
-    demofs_private          = request->plugin_data;
-    demofs_private->status  = 0;
-    demofs_private->pending = 1;
+    demofs_private           = request->plugin_data;
+    demofs_private->status   = 0;
+    demofs_private->pending  = 1;
+    demofs_private->pad_niov = 0;
 
     inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1650,10 +1661,34 @@ demofs_write(
     pthread_mutex_unlock(&inode->lock);
 
     // Submit write
+
+    if (request->write.length & 4095) {
+        const struct evpl_iovec *last_iov = &request->write.iov[request->write.niov - 1];
+        struct evpl_iovec       *copy_iov;
+
+        demofs_private->pad_niov = evpl_iovec_alloc(evpl, 4096, 4096, 1, &demofs_private->pad_iov);
+
+        chimera_demofs_abort_if(demofs_private->pad_niov != 1, "demofs_write: unexpected pad_niov");
+
+        memcpy(demofs_private->pad_iov.data, last_iov->data, last_iov->length);
+        memset(demofs_private->pad_iov.data + last_iov->length,
+               0,
+               4096 - last_iov->length);
+
+        copy_iov = alloca(request->write.niov * sizeof(*copy_iov));
+        memcpy(copy_iov, request->write.iov, (request->write.niov - 1) * sizeof(*copy_iov));
+        copy_iov[request->write.niov - 1] = demofs_private->pad_iov;
+
+        iov = copy_iov;
+
+    } else {
+        iov = request->write.iov;
+    }
+
     queue = thread->queue[device_id];
     evpl_block_write(evpl,
                      queue,
-                     request->write.iov,
+                     iov,
                      request->write.niov,
                      new_extent->device_offset,
                      1,
