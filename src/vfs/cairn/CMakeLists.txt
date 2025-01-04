@@ -9,3 +9,5 @@ target_compile_definitions(chimera_vfs_cairn PRIVATE
     $<$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>:-DXXH_VECTOR=XXH_NEON>
     $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>>:-DXXH_VECTOR=XXH_AVX2>
 )
+
+install(TARGETS chimera_vfs_cairn DESTINATION lib)

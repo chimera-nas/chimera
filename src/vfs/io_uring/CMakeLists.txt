@@ -4,3 +4,4 @@ add_library(chimera_vfs_io_uring SHARED
 
 target_link_libraries(chimera_vfs_io_uring uring)
 
+install(TARGETS chimera_vfs_io_uring DESTINATION lib)
