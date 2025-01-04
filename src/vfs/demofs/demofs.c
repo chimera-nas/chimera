@@ -1567,6 +1567,7 @@ demofs_write(
     uint64_t                       write_end   = write_start + request->write.length;
     uint64_t                       extent_start, extent_end, device_id, device_offset;
     const struct evpl_iovec       *iov;
+    int                            niov;
     struct evpl_block_queue       *queue;
     int                            rc;
 
@@ -1666,33 +1667,29 @@ demofs_write(
     // Submit write
 
     if (request->write.length & 4095) {
-        const struct evpl_iovec *last_iov = &request->write.iov[request->write.niov - 1];
-        struct evpl_iovec       *copy_iov;
+        struct evpl_iovec *copy_iov;
 
-        demofs_private->pad_niov = evpl_iovec_alloc(evpl, 4096, 4096, 1, &demofs_private->pad_iov);
+        niov = request->write.niov + 1;
 
-        chimera_demofs_abort_if(demofs_private->pad_niov != 1, "demofs_write: unexpected pad_niov");
+        copy_iov = alloca(niov * sizeof(*copy_iov));
 
-        memcpy(demofs_private->pad_iov.data, last_iov->data, last_iov->length);
-        memset(demofs_private->pad_iov.data + last_iov->length,
-               0,
-               4096 - last_iov->length);
+        memcpy(copy_iov, request->write.iov, request->write.niov * sizeof(*copy_iov));
 
-        copy_iov = alloca(request->write.niov * sizeof(*copy_iov));
-        memcpy(copy_iov, request->write.iov, (request->write.niov - 1) * sizeof(*copy_iov));
-        copy_iov[request->write.niov - 1] = demofs_private->pad_iov;
+        copy_iov[niov - 1]        = thread->zero;
+        copy_iov[niov - 1].length = 4096 - (request->write.length & 4095);
 
         iov = copy_iov;
 
     } else {
-        iov = request->write.iov;
+        iov  = request->write.iov;
+        niov = request->write.niov;
     }
 
     queue = thread->queue[device_id];
     evpl_block_write(evpl,
                      queue,
                      iov,
-                     request->write.niov,
+                     niov,
                      new_extent->device_offset,
                      1,
                      demofs_io_callback,
