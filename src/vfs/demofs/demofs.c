@@ -68,10 +68,11 @@
         chimera_abort_if(cond, "demofs", __FILE__, __LINE__, __VA_ARGS__)
 
 struct demofs_request_private {
-    int               status;
-    int               pending;
-    struct evpl_iovec pad_iov;
-    int               pad_niov;
+    int      opcode;
+    int      status;
+    int      pending;
+    uint32_t read_prefix;
+    uint32_t read_suffix;
 };
 
 struct demofs_extent {
@@ -1406,13 +1407,17 @@ demofs_io_callback(
         demofs_private->status = status;
     }
 
+    if (demofs_private->opcode == CHIMERA_VFS_OP_READ) {
+        int last = request->read.r_niov - 1;
+        request->read.iov[0].data   += demofs_private->read_prefix;
+        request->read.iov[0].length -= demofs_private->read_prefix;
+
+        request->read.iov[last].length -= demofs_private->read_suffix;
+    }
+
     demofs_private->pending--;
 
     if (demofs_private->pending == 0) {
-
-        if (demofs_private->pad_niov) {
-            evpl_iovec_release(&demofs_private->pad_iov);
-        }
         request->status = demofs_private->status;
         request->complete(request);
     }
@@ -1432,15 +1437,24 @@ demofs_read(
     struct demofs_request_private *demofs_private;
     uint64_t                       offset, length, read_offset;
     uint64_t                       extent_end, overlap_start, overlap_length;
+    uint64_t                       aligned_offset, aligned_length;
     uint32_t                       eof = 0;
     struct evpl_block_queue       *queue;
 
     demofs_private          = request->plugin_data;
+    demofs_private->opcode  = request->opcode;
     demofs_private->status  = 0;
     demofs_private->pending = 0;
 
     offset = request->read.offset;
     length = request->read.length;
+
+    // Calculate 4KB aligned values
+    aligned_offset = offset & ~4095ULL;
+    aligned_length = ((offset + length + 4095ULL) & ~4095ULL) - aligned_offset;
+
+    demofs_private->read_prefix = offset - aligned_offset;
+    demofs_private->read_suffix = aligned_length - length;
 
     if (unlikely(length == 0)) {
         request->status        = CHIMERA_VFS_OK;
@@ -1466,19 +1480,22 @@ demofs_read(
 
     request->read.r_length = length;
     request->read.r_eof    = eof;
-    request->read.r_niov   = evpl_iovec_alloc(evpl, length, 4096, 1, request->read.iov);
 
-    read_offset = offset;
+    // Allocate iovec for full aligned size
+    request->read.r_niov = evpl_iovec_alloc(evpl, aligned_length, 4096, 1,
+                                            request->read.iov);
+
+    read_offset = aligned_offset;
 
     // Find first extent that could contain our offset
-    node = rb_tree_query_floor(&inode->file.extents, offset);
+    node = rb_tree_query_floor(&inode->file.extents, read_offset);
 
-    while (read_offset < offset + length) {
+    while (read_offset < aligned_offset + aligned_length) {
         if (!node) {
             // No more extents - zero fill the rest
-            memset(request->read.iov[0].data + (read_offset - offset),
+            memset(request->read.iov[0].data + (read_offset - aligned_offset),
                    0,
-                   (offset + length) - read_offset);
+                   (aligned_offset + aligned_length) - read_offset);
             break;
         }
 
@@ -1489,11 +1506,11 @@ demofs_read(
             // Gap before extent - zero fill
             overlap_length =  extent->file_offset - read_offset;
 
-            if (overlap_length > (offset + length) - read_offset) {
-                overlap_length = (offset + length) - read_offset;
+            if (overlap_length > (aligned_offset + aligned_length) - read_offset) {
+                overlap_length = (aligned_offset + aligned_length) - read_offset;
             }
 
-            memset(request->read.iov[0].data + (read_offset - offset),
+            memset(request->read.iov[0].data + (read_offset - aligned_offset),
                    0,
                    overlap_length);
 
@@ -1506,18 +1523,16 @@ demofs_read(
         overlap_start  = read_offset - extent->file_offset;
         overlap_length = extent_end - read_offset;
 
-        if (overlap_length > (offset + length) - read_offset) {
-            overlap_length = (offset + length) - read_offset;
+        if (overlap_length > (aligned_offset + aligned_length) - read_offset) {
+            overlap_length = (aligned_offset + aligned_length) - read_offset;
         }
 
         if (overlap_length > 0) {
-
             if (extent->buffer) {
-                memcpy(request->read.iov[0].data + (read_offset - offset),
+                memcpy(request->read.iov[0].data + (read_offset - aligned_offset),
                        extent->buffer + overlap_start,
                        overlap_length);
             } else {
-                // Read overlapping region from device
                 queue = thread->queue[extent->device_id];
                 demofs_private->pending++;
 
@@ -1529,11 +1544,9 @@ demofs_read(
                                 demofs_io_callback,
                                 request);
             }
-
             read_offset += overlap_length;
         }
 
-        // Move to next extent
         node = rb_next(&inode->file.extents, node);
     }
 
@@ -1571,10 +1584,10 @@ demofs_write(
     struct evpl_block_queue       *queue;
     int                            rc;
 
-    demofs_private           = request->plugin_data;
-    demofs_private->status   = 0;
-    demofs_private->pending  = 1;
-    demofs_private->pad_niov = 0;
+    demofs_private          = request->plugin_data;
+    demofs_private->opcode  = request->opcode;
+    demofs_private->status  = 0;
+    demofs_private->pending = 1;
 
     inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
