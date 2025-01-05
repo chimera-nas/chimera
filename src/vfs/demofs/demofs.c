@@ -81,7 +81,7 @@ struct demofs_extent {
 
 struct demofs_freespace {
     uint32_t                 device_id;
-    uint32_t                 length;
+    uint64_t                 length;
     uint64_t                 offset;
     struct demofs_freespace *next;
 };
@@ -921,7 +921,7 @@ demofs_lookup(
 
     if (unlikely(!S_ISDIR(inode->mode))) {
         pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
         return;
     }
@@ -1494,6 +1494,13 @@ demofs_read(
         return;
     }
 
+    if (unlikely(!S_ISREG(inode->mode))) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
     if (offset + length > inode->size) {
         length = inode->size > offset ? inode->size - offset : 0;
         eof    = 1;
@@ -1612,6 +1619,13 @@ demofs_write(
 
     if (unlikely(!inode)) {
         request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    if (unlikely(!S_ISREG(inode->mode))) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
     }
@@ -1835,6 +1849,13 @@ demofs_readlink(
         return;
     }
 
+    if (unlikely(!S_ISLNK(inode->mode))) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
     request->readlink.r_target_length = inode->symlink.target->length;
 
     memcpy(request->readlink.r_target,
@@ -2029,6 +2050,15 @@ demofs_link(
         request->complete(request);
         return;
     }
+
+    if (unlikely(S_ISDIR(inode->mode))) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EPERM;
+        request->complete(request);
+        return;
+    }
+
 
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
 
