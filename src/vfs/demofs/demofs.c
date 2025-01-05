@@ -25,20 +25,14 @@
 #include "common/misc.h"
 #include "evpl_iovec_cursor.h"
 
-#define CHIMERA_demofs_BLOCK_MAX_IOV     4
-
-#define CHIMERA_demofs_BLOCK_SHIFT       12
-#define CHIMERA_demofs_BLOCK_SIZE        (1 << CHIMERA_demofs_BLOCK_SHIFT)
-#define CHIMERA_demofs_BLOCK_MASK        (CHIMERA_demofs_BLOCK_SIZE - 1)
-
-#define CHIMERA_demofs_INODE_LIST_SHIFT  8
-#define CHIMERA_demofs_INODE_NUM_LISTS   (1 << CHIMERA_demofs_INODE_LIST_SHIFT)
-#define CHIMERA_demofs_INODE_LIST_MASK   (CHIMERA_demofs_INODE_NUM_LISTS - 1)
+#define CHIMERA_DEMOFS_INODE_LIST_SHIFT  8
+#define CHIMERA_DEMOFS_INODE_NUM_LISTS   (1 << CHIMERA_DEMOFS_INODE_LIST_SHIFT)
+#define CHIMERA_DEMOFS_INODE_LIST_MASK   (CHIMERA_DEMOFS_INODE_NUM_LISTS - 1)
 
 
-#define CHIMERA_demofs_INODE_BLOCK_SHIFT 10
-#define CHIMERA_demofs_INODE_BLOCK       (1 << CHIMERA_demofs_INODE_BLOCK_SHIFT)
-#define CHIMERA_demofs_INODE_BLOCK_MASK  (CHIMERA_demofs_INODE_BLOCK - 1)
+#define CHIMERA_DEMOFS_INODE_BLOCK_SHIFT 10
+#define CHIMERA_DEMOFS_INODE_BLOCK       (1 << CHIMERA_DEMOFS_INODE_BLOCK_SHIFT)
+#define CHIMERA_DEMOFS_INODE_BLOCK_MASK  (CHIMERA_DEMOFS_INODE_BLOCK - 1)
 
 #define chimera_demofs_debug(...) chimera_debug("demofs", \
                                                 __FILE__, \
@@ -76,19 +70,19 @@ struct demofs_request_private {
 };
 
 struct demofs_extent {
-    uint64_t              device_id;
+    uint32_t              device_id;
+    uint32_t              length;
     uint64_t              device_offset;
     uint64_t              file_offset;
-    uint64_t              length;
     void                 *buffer;
     struct rb_node        node;
     struct demofs_extent *next;
 };
 
 struct demofs_freespace {
-    uint64_t                 device_id;
+    uint32_t                 device_id;
+    uint32_t                 length;
     uint64_t                 offset;
-    uint64_t                 length;
     struct demofs_freespace *next;
 };
 
@@ -100,6 +94,7 @@ struct demofs_device {
     pthread_mutex_t           lock;
     struct demofs_freespace  *free_space;
 };
+
 struct demofs_dirent {
     uint64_t              inum;
     uint32_t              gen;
@@ -220,10 +215,10 @@ demofs_inode_get_inum(
     struct demofs_inode_list *inode_list;
     struct demofs_inode      *inode;
 
-    list_id     = inum & CHIMERA_demofs_INODE_LIST_MASK;
-    inum_block  = inum >> CHIMERA_demofs_INODE_LIST_SHIFT;
-    block_index = inum_block & CHIMERA_demofs_INODE_BLOCK_MASK;
-    block_id    = inum_block >> CHIMERA_demofs_INODE_BLOCK_SHIFT;
+    list_id     = inum & CHIMERA_DEMOFS_INODE_LIST_MASK;
+    inum_block  = inum >> CHIMERA_DEMOFS_INODE_LIST_SHIFT;
+    block_index = inum_block & CHIMERA_DEMOFS_INODE_BLOCK_MASK;
+    block_id    = inum_block >> CHIMERA_DEMOFS_INODE_BLOCK_SHIFT;
 
     if (unlikely(list_id >= shared->num_inode_list)) {
         return NULL;
@@ -362,15 +357,15 @@ demofs_inode_alloc(
             }
         }
 
-        inodes = malloc(CHIMERA_demofs_INODE_BLOCK * sizeof(*inodes));
+        inodes = malloc(CHIMERA_DEMOFS_INODE_BLOCK * sizeof(*inodes));
 
-        base_id = bi << CHIMERA_demofs_INODE_BLOCK_SHIFT;
+        base_id = bi << CHIMERA_DEMOFS_INODE_BLOCK_SHIFT;
 
         inode_list->inode[bi] = inodes;
 
         last = NULL;
 
-        for (i = 0; i < CHIMERA_demofs_INODE_BLOCK; i++) {
+        for (i = 0; i < CHIMERA_DEMOFS_INODE_BLOCK; i++) {
             inode       = &inodes[i];
             inode->inum = (base_id + i) << 8 | list_id;
             pthread_mutex_init(&inode->lock, NULL);
@@ -403,7 +398,7 @@ demofs_inode_alloc_thread(struct demofs_thread *thread)
 {
     struct demofs_shared *shared  = thread->shared;
     uint32_t              list_id = thread->thread_id &
-        CHIMERA_demofs_INODE_LIST_MASK;
+        CHIMERA_DEMOFS_INODE_LIST_MASK;
 
     return demofs_inode_alloc(shared, list_id);
 } /* demofs_inode_alloc */
@@ -416,7 +411,7 @@ demofs_inode_free(
     struct demofs_shared     *shared = thread->shared;
     struct demofs_inode_list *inode_list;
     uint32_t                  list_id = thread->thread_id &
-        CHIMERA_demofs_INODE_LIST_MASK;
+        CHIMERA_DEMOFS_INODE_LIST_MASK;
 
     inode_list = &shared->inode_list[list_id];
 
@@ -640,7 +635,7 @@ demofs_destroy(void *private_data)
 
     for (i = 0; i < shared->num_inode_list; i++) {
         for (j = 0; j < shared->inode_list[i].num_blocks; j++) {
-            for (k = 0; k < CHIMERA_demofs_INODE_BLOCK; k++) {
+            for (k = 0; k < CHIMERA_DEMOFS_INODE_BLOCK; k++) {
                 inode = &shared->inode_list[i].inode[j][k];
 
                 if (inode->gen == 0 || inode->refcnt == 0) {
