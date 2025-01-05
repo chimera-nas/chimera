@@ -907,7 +907,6 @@ demofs_lookup(
 {
     struct demofs_inode  *inode, *child;
     struct demofs_dirent *dirent;
-    struct rb_node       *node;
     uint64_t              hash;
 
     hash = XXH3_64bits(request->lookup.component, request->lookup.component_len);
@@ -927,16 +926,14 @@ demofs_lookup(
         return;
     }
 
-    node = rb_tree_query_exact(&inode->dir.dirents, hash);
+    rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
 
-    if (!node) {
+    if (!dirent) {
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
-
-    dirent = container_of(node, struct demofs_dirent, node);
 
     if (request->lookup.attrmask) {
         demofs_map_attrs(&request->lookup.r_dir_attr,
@@ -966,8 +963,7 @@ demofs_mkdir(
     void                       *private_data)
 {
     struct demofs_inode      *parent_inode, *inode;
-    struct demofs_dirent     *dirent;
-    struct rb_node           *node;
+    struct demofs_dirent     *dirent, *existing_dirent;
     struct chimera_vfs_attrs *r_attr          = &request->mkdir.r_attr;
     struct chimera_vfs_attrs *r_dir_pre_attr  = &request->mkdir.r_dir_pre_attr;
     struct chimera_vfs_attrs *r_dir_post_attr = &request->mkdir.r_dir_post_attr;
@@ -1021,9 +1017,9 @@ demofs_mkdir(
 
     demofs_map_attrs(r_dir_pre_attr, request->mkdir.attrmask, parent_inode);
 
-    node = rb_tree_query_exact(&parent_inode->dir.dirents, hash);
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
 
-    if (node) {
+    if (existing_dirent) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
         request->complete(request);
@@ -1033,7 +1029,7 @@ demofs_mkdir(
     }
 
 
-    rb_tree_insert(&parent_inode->dir.dirents, hash, &dirent->node);
+    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
     parent_inode->nlink++;
 
@@ -1081,7 +1077,6 @@ demofs_remove(
 {
     struct demofs_inode      *parent_inode, *inode;
     struct demofs_dirent     *dirent;
-    struct rb_node           *node;
     uint64_t                  hash;
     struct chimera_vfs_attrs *r_pre_attr  = &request->remove.r_pre_attr;
     struct chimera_vfs_attrs *r_post_attr = &request->remove.r_post_attr;
@@ -1105,16 +1100,14 @@ demofs_remove(
         return;
     }
 
-    node = rb_tree_query_exact(&parent_inode->dir.dirents, hash);
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
 
-    if (!node) {
+    if (!dirent) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
-
-    dirent = container_of(node, struct demofs_dirent, node);
 
     inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
@@ -1171,7 +1164,6 @@ demofs_readdir(
 {
     struct demofs_inode     *inode, *dirent_inode;
     struct demofs_dirent    *dirent;
-    struct rb_node          *node;
     uint64_t                 cookie       = request->readdir.cookie;
     uint64_t                 next_cookie  = 0;
     int                      found_cookie = 0;
@@ -1197,11 +1189,9 @@ demofs_readdir(
         return;
     }
 
-    node = rb_tree_query_ceil(&inode->dir.dirents, cookie);
+    rb_tree_query_ceil(&inode->dir.dirents, cookie, hash, dirent);
 
-    while (node) {
-
-        dirent = container_of(node, struct demofs_dirent, node);
+    while (dirent) {
 
         if (dirent->inum == cookie) {
             found_cookie = 1;
@@ -1251,7 +1241,7 @@ demofs_readdir(
 
         next_cookie = dirent->hash;
 
-        node = rb_tree_next(&inode->dir.dirents, node);
+        dirent = rb_tree_next(&inode->dir.dirents, dirent);
     }
 
     if (request->readdir.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
@@ -1302,7 +1292,6 @@ demofs_open_at(
 {
     struct demofs_inode      *parent_inode, *inode = NULL;
     struct demofs_dirent     *dirent;
-    struct rb_node           *node;
     uint64_t                  hash;
     unsigned int              flags           = request->open_at.flags;
     struct chimera_vfs_attrs *r_attr          = &request->open_at.r_attr;
@@ -1328,9 +1317,9 @@ demofs_open_at(
 
     demofs_map_attrs(r_dir_pre_attr, request->open_at.attrmask, parent_inode);
 
-    node = rb_tree_query_exact(&parent_inode->dir.dirents, hash);
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
 
-    if (!node) {
+    if (!dirent) {
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
             pthread_mutex_unlock(&parent_inode->lock);
             request->status = CHIMERA_VFS_EEXIST;
@@ -1361,14 +1350,12 @@ demofs_open_at(
                                      request->open_at.name,
                                      request->open_at.namelen);
 
-        rb_tree_insert(&parent_inode->dir.dirents, dirent->hash, &dirent->node);
+        rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
         parent_inode->nlink++;
         parent_inode->mtime = request->start_time;
 
     } else {
-
-        dirent = container_of(node, struct demofs_dirent, node);
 
         inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
@@ -1468,7 +1455,6 @@ demofs_read(
     struct evpl                   *evpl = thread->evpl;
     struct demofs_inode           *inode;
     struct demofs_extent          *extent;
-    struct rb_node                *node;
     struct demofs_request_private *demofs_private;
     uint64_t                       offset, length, read_offset;
     uint64_t                       extent_end, overlap_start, overlap_length;
@@ -1523,10 +1509,10 @@ demofs_read(
     read_offset = aligned_offset;
 
     // Find first extent that could contain our offset
-    node = rb_tree_query_floor(&inode->file.extents, read_offset);
+    rb_tree_query_floor(&inode->file.extents, read_offset, file_offset, extent);
 
     while (read_offset < aligned_offset + aligned_length) {
-        if (!node) {
+        if (!extent) {
             // No more extents - zero fill the rest
             memset(request->read.iov[0].data + (read_offset - aligned_offset),
                    0,
@@ -1534,7 +1520,6 @@ demofs_read(
             break;
         }
 
-        extent     = container_of(node, struct demofs_extent, node);
         extent_end = extent->file_offset + extent->length;
 
         if (read_offset < extent->file_offset) {
@@ -1582,7 +1567,7 @@ demofs_read(
             read_offset += overlap_length;
         }
 
-        node = rb_tree_next(&inode->file.extents, node);
+        extent = rb_tree_next(&inode->file.extents, extent);
     }
 
     if (request->read.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
@@ -1609,8 +1594,7 @@ demofs_write(
     struct chimera_vfs_attrs      *r_post_attr = &request->write.r_post_attr;
     struct demofs_request_private *demofs_private;
     struct demofs_inode           *inode;
-    struct demofs_extent          *extent, *new_extent;
-    struct rb_node                *node, *next_node;
+    struct demofs_extent          *extent, *next_extent, *new_extent;
     uint64_t                       write_start = request->write.offset;
     uint64_t                       write_end   = write_start + request->write.length;
     uint64_t                       extent_start, extent_end, device_id, device_offset;
@@ -1645,16 +1629,15 @@ demofs_write(
 
 
     // Find first potentially overlapping extent
-    node = rb_tree_query_floor(&inode->file.extents, write_start);
+    rb_tree_query_floor(&inode->file.extents, write_start, file_offset, extent);
 
     // Handle overlapping extents
-    while (node) {
-        extent       = container_of(node, struct demofs_extent, node);
+    while (extent) {
         extent_start = extent->file_offset;
         extent_end   = extent_start + extent->length;
 
         // Get next node before we potentially modify the tree
-        next_node = rb_tree_next(&inode->file.extents, node);
+        next_extent = rb_tree_next(&inode->file.extents, extent);
 
         if (extent_start >= write_end) {
             break;
@@ -1662,9 +1645,9 @@ demofs_write(
 
         // Remove fully overlapped extent
         if (extent_start >= write_start && extent_end <= write_end) {
-            rb_tree_remove(&inode->file.extents, node);
+            rb_tree_remove(&inode->file.extents, &extent->node);
             demofs_extent_free(thread, extent);
-            node = next_node;
+            extent = next_extent;
             continue;
         }
 
@@ -1684,7 +1667,7 @@ demofs_write(
             }
         }
 
-        node = next_node;
+        extent = next_extent;
     }
 
     // Allocate new extent for write
@@ -1698,7 +1681,7 @@ demofs_write(
     new_extent->buffer        = NULL;
 
     // Insert new extent
-    rb_tree_insert(&inode->file.extents, write_start, &new_extent->node);
+    rb_tree_insert(&inode->file.extents, file_offset, new_extent);
 
     // Update inode metadata
     if (inode->size < write_end) {
@@ -1754,8 +1737,7 @@ demofs_symlink(
     void                       *private_data)
 {
     struct demofs_inode      *parent_inode, *inode;
-    struct demofs_dirent     *dirent;
-    struct rb_node           *node;
+    struct demofs_dirent     *dirent, *existing_dirent;
     struct chimera_vfs_attrs *r_attr     = &request->symlink.r_attr;
     struct chimera_vfs_attrs *r_dir_attr = &request->symlink.r_dir_attr;
     uint64_t                  hash;
@@ -1811,9 +1793,9 @@ demofs_symlink(
         return;
     }
 
-    node = rb_tree_query_exact(&parent_inode->dir.dirents, hash);
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
 
-    if (node) {
+    if (existing_dirent) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
         request->complete(request);
@@ -1822,7 +1804,7 @@ demofs_symlink(
         return;
     }
 
-    rb_tree_insert(&parent_inode->dir.dirents, hash, &dirent->node);
+    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
     parent_inode->nlink++;
 
@@ -1887,7 +1869,6 @@ demofs_rename(
 {
     struct demofs_inode  *old_parent_inode, *new_parent_inode;
     struct demofs_dirent *dirent, *old_dirent;
-    struct rb_node       *node;
     uint64_t              hash, new_hash;
     int                   cmp;
 
@@ -1963,9 +1944,9 @@ demofs_rename(
         }
     }
 
-    node = rb_tree_query_exact(&old_parent_inode->dir.dirents, hash);
+    rb_tree_query_exact(&old_parent_inode->dir.dirents, hash, hash, old_dirent);
 
-    if (!node) {
+    if (!old_dirent) {
         pthread_mutex_unlock(&old_parent_inode->lock);
         pthread_mutex_unlock(&new_parent_inode->lock);
         request->status = CHIMERA_VFS_ENOENT;
@@ -1973,11 +1954,9 @@ demofs_rename(
         return;
     }
 
-    old_dirent = container_of(node, struct demofs_dirent, node);
+    rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, dirent);
 
-    node = rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash);
-
-    if (node) {
+    if (dirent) {
         pthread_mutex_unlock(&old_parent_inode->lock);
         pthread_mutex_unlock(&new_parent_inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
@@ -1992,7 +1971,7 @@ demofs_rename(
                                  request->rename.new_name,
                                  request->rename.new_namelen);
 
-    rb_tree_insert(&new_parent_inode->dir.dirents, new_hash, &dirent->node);
+    rb_tree_insert(&new_parent_inode->dir.dirents, hash, dirent);
 
     old_parent_inode->nlink--;
     new_parent_inode->nlink++;
@@ -2020,7 +1999,6 @@ demofs_link(
     void                       *private_data)
 {
     struct demofs_inode  *parent_inode, *inode;
-    struct rb_node       *node;
     uint64_t              hash;
     struct demofs_dirent *dirent;
 
@@ -2052,9 +2030,9 @@ demofs_link(
         return;
     }
 
-    node = rb_tree_query_exact(&parent_inode->dir.dirents, hash);
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
 
-    if (node) {
+    if (dirent) {
         pthread_mutex_unlock(&parent_inode->lock);
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
@@ -2069,7 +2047,7 @@ demofs_link(
                                  request->link.name,
                                  request->link.namelen);
 
-    rb_tree_insert(&parent_inode->dir.dirents, hash, &dirent->node);
+    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
     inode->nlink++;
     parent_inode->nlink++;

@@ -8,7 +8,6 @@ enum rb_color {
 };
 
 struct rb_node {
-    uint64_t        key;
     struct rb_node *left;
     struct rb_node *right;
     struct rb_node *parent;
@@ -23,10 +22,8 @@ struct rb_tree {
 static void
 rb_node_init(
     struct rb_tree *tree,
-    struct rb_node *node,
-    uint64_t        key)
+    struct rb_node *node)
 {
-    node->key    = key;
     node->left   = &tree->nil;
     node->right  = &tree->nil;
     node->parent = &tree->nil;
@@ -172,110 +169,104 @@ rb_tree_destroy(
     }
 } /* rb_tree_destroy */
 
-static int
-rb_tree_insert(
-    struct rb_tree *tree,
-    uint64_t        key,
-    struct rb_node *node)
-{
-    struct rb_node *z = node;
-    struct rb_node *y = &tree->nil;
-    struct rb_node *x = tree->root;
+#define rb_tree_insert(tree, keyname, element) \
+        do { \
+            struct rb_node *z = &(element)->node; \
+            struct rb_node *y = &(tree)->nil; \
+            struct rb_node *x = (tree)->root; \
+    \
+            rb_node_init((tree), z); \
+    \
+            while (x != &(tree)->nil) { \
+                y = x; \
+                if ((element)->keyname < container_of(x, typeof(*(element)), node)->keyname) { \
+                    x = x->left; \
+                } else if ((element)->keyname > container_of(x, typeof(*(element)), node)->keyname) { \
+                    x = x->right; \
+                } else { \
+                    break; /* Duplicate key */ \
+                } \
+            } \
+    \
+            z->parent = y; \
+            if (y == &(tree)->nil) { \
+                (tree)->root = z; \
+            } else if ((element)->keyname < container_of(y, typeof(*(element)), node)->keyname) { \
+                y->left = z; \
+            } else if ((element)->keyname > container_of(y, typeof(*(element)), node)->keyname) { \
+                y->right = z; \
+            } \
+    \
+            rb_insert_fixup((tree), z); \
+        } while (0)
 
-    rb_node_init(tree, z, key);
+#define rb_tree_query_floor(tree, key, keyname, element) \
+        do { \
+            struct rb_node *node  = (tree)->root; \
+            struct rb_node *floor = NULL; \
+            (element) = NULL; \
+    \
+            while (node != &(tree)->nil) { \
+                if (container_of(node, typeof(*(element)), node)->keyname == (key)) { \
+                    (element) = container_of(node, typeof(*(element)), node); \
+                    break; \
+                } \
+        \
+                if (container_of(node, typeof(*(element)), node)->keyname > (key)) { \
+                    node = node->left; \
+                } else { \
+                    floor = node; \
+                    node  = node->right; \
+                } \
+            } \
+    \
+            if ((element) == NULL && floor != NULL) { \
+                (element) = container_of(floor, typeof(*(element)), node); \
+            } \
+        } while (0)
 
-    while (x != &tree->nil) {
-        y = x;
-        if (z->key < x->key) {
-            x = x->left;
-        } else if (z->key > x->key) {
-            x = x->right;
-        } else {
-            return -1;  // Duplicate key
-        }
-    }
+#define rb_tree_query_exact(tree, key, keyname, element) \
+        do { \
+            struct rb_node *node = (tree)->root; \
+            (element) = NULL; \
+    \
+            while (node != &(tree)->nil) { \
+                if ((key) == container_of(node, typeof(*(element)), node)->keyname) { \
+                    (element) = container_of(node, typeof(*(element)), node); \
+                    break; \
+                } \
+                if ((key) < container_of(node, typeof(*(element)), node)->keyname) { \
+                    node = node->left; \
+                } else { \
+                    node = node->right; \
+                } \
+            } \
+        } while (0)
 
-    z->parent = y;
-    if (y == &tree->nil) {
-        tree->root = z;
-    } else if (z->key < y->key) {
-        y->left = z;
-    } else {
-        y->right = z;
-    }
-
-    rb_insert_fixup(tree, z);
-    return 0;
-} /* rb_tree_insert */
-
-static struct rb_node *
-rb_tree_query_floor(
-    struct rb_tree *tree,
-    uint64_t        key)
-{
-    struct rb_node *node  = tree->root;
-    struct rb_node *floor = NULL;
-
-    while (node != &tree->nil) {
-        if (node->key == key) {
-            return node;
-        }
-
-        if (node->key > key) {
-            node = node->left;
-        } else {
-            floor = node;
-            node  = node->right;
-        }
-    }
-
-    return floor;
-} /* rb_tree_floor */
-
-static struct rb_node *
-rb_tree_query_exact(
-    struct rb_tree *tree,
-    uint64_t        key)
-{
-    struct rb_node *node = tree->root;
-
-    while (node != &tree->nil) {
-        if (key == node->key) {
-            return node;
-        }
-        if (key < node->key) {
-            node = node->left;
-        } else {
-            node = node->right;
-        }
-    }
-
-    return NULL;
-} /* rb_tree_query_exact */
-
-static struct rb_node *
-rb_tree_query_ceil(
-    struct rb_tree *tree,
-    uint64_t        key)
-{
-    struct rb_node *node = tree->root;
-    struct rb_node *ceil = NULL;
-
-    while (node != &tree->nil) {
-        if (node->key == key) {
-            return node;
-        }
-
-        if (node->key < key) {
-            node = node->right;
-        } else {
-            ceil = node;
-            node = node->left;
-        }
-    }
-
-    return ceil;
-} /* rb_tree_query_ceil */
+#define rb_tree_query_ceil(tree, key, keyname, element) \
+        do { \
+            struct rb_node *node = (tree)->root; \
+            struct rb_node *ceil = NULL; \
+            (element) = NULL; \
+    \
+            while (node != &(tree)->nil) { \
+                if (container_of(node, typeof(*(element)), node)->keyname == (key)) { \
+                    (element) = container_of(node, typeof(*(element)), node); \
+                    break; \
+                } \
+        \
+                if (container_of(node, typeof(*(element)), node)->keyname < (key)) { \
+                    node = node->right; \
+                } else { \
+                    ceil = node; \
+                    node = node->left; \
+                } \
+            } \
+    \
+            if ((element) == NULL && ceil != NULL) { \
+                (element) = container_of(ceil, typeof(*(element)), node); \
+            } \
+        } while (0)
 
 static inline struct rb_node *
 rb_tree_first(struct rb_tree *tree)
@@ -288,26 +279,28 @@ rb_tree_first(struct rb_tree *tree)
     return node;
 } /* rb_tree_first */
 
-static inline struct rb_node *
-rb_tree_next(
-    struct rb_tree *tree,
-    struct rb_node *node)
-{
-    if (node->right != &tree->nil) {
-        node = node->right;
-        while (node->left != &tree->nil) {
-            node = node->left;
-        }
-        return node;
-    }
-
-    struct rb_node *parent = node->parent;
-    while (parent != &tree->nil && node == parent->right) {
-        node   = parent;
-        parent = parent->parent;
-    }
-    return parent == &tree->nil ? NULL : parent;
-} /* rb_next */
+#define rb_tree_next(tree, element) \
+        ({ \
+        struct rb_node *node = &(element)->node; \
+        typeof(element) next = NULL; \
+    \
+        if (node->right != &(tree)->nil) { \
+            node = node->right; \
+            while (node->left != &(tree)->nil) { \
+                node = node->left; \
+            } \
+            next = container_of(node, typeof(*(element)), node); \
+        } else { \
+            struct rb_node *parent = node->parent; \
+            while (parent != &(tree)->nil && node == parent->right) { \
+                node = parent; \
+                parent = parent->parent; \
+            } \
+            next = parent == &(tree)->nil ? NULL : \
+                container_of(parent, typeof(*(element)), node); \
+        } \
+        next; \
+    })
 
 static void
 rb_transplant(
