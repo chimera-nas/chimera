@@ -11,6 +11,8 @@
 #include "common/varint.h"
 #include "common/rbtree.h"
 
+#include "slab_allocator.h"
+
 #include "core/evpl.h"
 
 #include "uthash/utlist.h"
@@ -404,6 +406,16 @@ demofs_inode_alloc_thread(struct demofs_thread *thread)
     return demofs_inode_alloc(shared, list_id);
 } /* demofs_inode_alloc */
 
+static void
+demofs_dirent_release(
+    struct rb_node *node,
+    void           *private_data)
+{
+    struct demofs_dirent *dirent = container_of(node, struct demofs_dirent, node);
+
+    free(dirent);
+} /* demofs_dirent_release */
+
 static inline void
 demofs_inode_free(
     struct demofs_thread *thread,
@@ -418,6 +430,8 @@ demofs_inode_free(
 
     if (S_ISREG(inode->mode)) {
         rb_tree_destroy(&inode->file.extents, demofs_extent_release, thread);
+    } else if (S_ISDIR(inode->mode)) {
+        rb_tree_destroy(&inode->dir.dirents, demofs_dirent_release, thread);
     } else if (S_ISLNK(inode->mode)) {
         demofs_symlink_target_free(thread, inode->symlink.target);
         inode->symlink.target = NULL;
@@ -464,16 +478,6 @@ demofs_dirent_free(
 {
     LL_PREPEND(thread->free_dirent, dirent);
 } /* demofs_dirent_free */
-
-static void
-demofs_dirent_release(
-    struct rb_node *node,
-    void           *private_data)
-{
-    struct demofs_dirent *dirent = container_of(node, struct demofs_dirent, node);
-
-    free(dirent);
-} /* demofs_dirent_release */
 
 static inline int
 demofs_thread_alloc_space(
@@ -1126,7 +1130,10 @@ demofs_remove(
         return;
     }
 
-    parent_inode->nlink--;
+    if (S_ISDIR(inode->mode)) {
+        parent_inode->nlink--;
+    }
+
     parent_inode->mtime = request->start_time;
 
     rb_tree_remove(&parent_inode->dir.dirents, &dirent->node);
@@ -1339,7 +1346,6 @@ demofs_open_at(
 
         rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
-        parent_inode->nlink++;
         parent_inode->mtime = request->start_time;
 
     } else {
@@ -1807,8 +1813,6 @@ demofs_symlink(
 
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
-    parent_inode->nlink++;
-
     parent_inode->mtime = request->start_time;
 
     demofs_map_attrs(r_dir_attr, request->symlink.attrmask, parent_inode);
@@ -1875,7 +1879,7 @@ demofs_rename(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct demofs_inode  *old_parent_inode, *new_parent_inode;
+    struct demofs_inode  *old_parent_inode, *new_parent_inode, *child_inode;
     struct demofs_dirent *dirent, *old_dirent;
     uint64_t              hash, new_hash;
     int                   cmp;
@@ -1972,6 +1976,16 @@ demofs_rename(
         return;
     }
 
+    child_inode = demofs_inode_get_inum(shared, old_dirent->inum, old_dirent->gen);
+
+    if (!child_inode) {
+        pthread_mutex_unlock(&old_parent_inode->lock);
+        pthread_mutex_unlock(&new_parent_inode->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
     dirent = demofs_dirent_alloc(thread,
                                  old_dirent->inum,
                                  old_dirent->gen,
@@ -1981,8 +1995,10 @@ demofs_rename(
 
     rb_tree_insert(&new_parent_inode->dir.dirents, hash, dirent);
 
-    old_parent_inode->nlink--;
-    new_parent_inode->nlink++;
+    if (S_ISDIR(child_inode->mode)) {
+        old_parent_inode->nlink--;
+        new_parent_inode->nlink++;
+    }
 
     old_parent_inode->ctime = request->start_time;
     new_parent_inode->mtime = request->start_time;
@@ -1993,6 +2009,8 @@ demofs_rename(
     } else {
         pthread_mutex_unlock(&old_parent_inode->lock);
     }
+
+    pthread_mutex_unlock(&child_inode->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -2067,7 +2085,6 @@ demofs_link(
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
     inode->nlink++;
-    parent_inode->nlink++;
 
     inode->ctime        = request->start_time;
     parent_inode->mtime = request->start_time;
