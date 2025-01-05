@@ -81,7 +81,7 @@ struct demofs_extent {
 
 struct demofs_freespace {
     uint32_t                 device_id;
-    uint32_t                 length;
+    uint64_t                 length;
     uint64_t                 offset;
     struct demofs_freespace *next;
 };
@@ -989,7 +989,7 @@ demofs_mkdir(
         return;
     }
 
-    if (unlikely(!S_ISDIR(parent_inode->mode))) {
+    if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
