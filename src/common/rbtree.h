@@ -9,7 +9,6 @@ enum rb_color {
 
 struct rb_node {
     uint64_t        key;
-    void           *payload;
     struct rb_node *left;
     struct rb_node *right;
     struct rb_node *parent;
@@ -25,15 +24,13 @@ static void
 rb_node_init(
     struct rb_tree *tree,
     struct rb_node *node,
-    uint64_t        key,
-    void           *payload)
+    uint64_t        key)
 {
-    node->key     = key;
-    node->payload = payload;
-    node->left    = &tree->nil;
-    node->right   = &tree->nil;
-    node->parent  = &tree->nil;
-    node->color   = RB_RED;
+    node->key    = key;
+    node->left   = &tree->nil;
+    node->right  = &tree->nil;
+    node->parent = &tree->nil;
+    node->color  = RB_RED;
 } /* rb_node_init */
 
 static void
@@ -144,8 +141,8 @@ static void
 rb_tree_destroy(
     struct rb_tree *tree,
     void (         *free_payload )(
-        void *payload,
-        void *private_data),
+        struct rb_node *node,
+        void           *private_data),
     void           *private_data)
 {
     struct rb_node *node = tree->root;
@@ -169,7 +166,7 @@ rb_tree_destroy(
             }
         }
         if (free_payload) {
-            free_payload(node->payload, private_data);
+            free_payload(node, private_data);
         }
         node = parent;
     }
@@ -179,14 +176,13 @@ static int
 rb_tree_insert(
     struct rb_tree *tree,
     uint64_t        key,
-    void           *payload,
     struct rb_node *node)
 {
     struct rb_node *z = node;
     struct rb_node *y = &tree->nil;
     struct rb_node *x = tree->root;
 
-    rb_node_init(tree, z, key, payload);
+    rb_node_init(tree, z, key);
 
     while (x != &tree->nil) {
         y = x;
@@ -282,7 +278,18 @@ rb_tree_query_ceil(
 } /* rb_tree_query_ceil */
 
 static inline struct rb_node *
-rb_next(
+rb_tree_first(struct rb_tree *tree)
+{
+    struct rb_node *node = tree->root;
+
+    while (node->left != &tree->nil) {
+        node = node->left;
+    }
+    return node;
+} /* rb_tree_first */
+
+static inline struct rb_node *
+rb_tree_next(
     struct rb_tree *tree,
     struct rb_node *node)
 {

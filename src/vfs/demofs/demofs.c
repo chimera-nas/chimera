@@ -5,25 +5,25 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <limits.h>
 #include <jansson.h>
+#include <xxhash.h>
 #include "common/varint.h"
 #include "common/rbtree.h"
-#include "xxhash.h"
 
 #include "core/evpl.h"
 
-#define HASH_FUNCTION(keyptr, keylen, hashv) do { \
-            hashv = XXH3_64bits(keyptr, keylen); \
-} while (0)
-#define HASH_KEY(keyptr, keylen)             keyptr, keylen
-
 #include "uthash/utlist.h"
-#include "uthash/uthash.h"
 #include "vfs/vfs.h"
 #include "demofs.h"
 #include "common/logging.h"
 #include "common/misc.h"
 #include "evpl_iovec_cursor.h"
+
+#ifndef container_of
+#define container_of(ptr, type, member) \
+        ((type *) ((char *) (ptr) - offsetof(type, member)))
+#endif /* ifndef container_of */
 
 #define CHIMERA_DEMOFS_INODE_LIST_SHIFT  8
 #define CHIMERA_DEMOFS_INODE_NUM_LISTS   (1 << CHIMERA_DEMOFS_INODE_LIST_SHIFT)
@@ -99,7 +99,8 @@ struct demofs_dirent {
     uint64_t              inum;
     uint32_t              gen;
     uint32_t              name_len;
-    UT_hash_handle        hh;
+    uint64_t              hash;
+    struct rb_node        node;
     struct demofs_dirent *next;
     char                  name[256];
 };
@@ -129,7 +130,7 @@ struct demofs_inode {
 
     union {
         struct {
-            struct demofs_dirent *dirents;
+            struct rb_tree dirents;
         } dir;
         struct {
             struct rb_tree extents;
@@ -282,10 +283,10 @@ demofs_extent_free(
 
 static inline void
 demofs_extent_release(
-    void *payload,
-    void *private_data)
+    struct rb_node *node,
+    void           *private_data)
 {
-    struct demofs_extent *extent = payload;
+    struct demofs_extent *extent = container_of(node, struct demofs_extent, node);
 
     free(extent);
 } /* demofs_extent_free */
@@ -432,6 +433,7 @@ demofs_dirent_alloc(
     struct demofs_thread *thread,
     uint64_t              inum,
     uint32_t              gen,
+    uint64_t              hash,
     const char           *name,
     int                   name_len)
 {
@@ -447,6 +449,7 @@ demofs_dirent_alloc(
 
     dirent->inum     = inum;
     dirent->gen      = gen;
+    dirent->hash     = hash;
     dirent->name_len = name_len;
     memcpy(dirent->name, name, name_len);
 
@@ -461,6 +464,16 @@ demofs_dirent_free(
 {
     LL_PREPEND(thread->free_dirent, dirent);
 } /* demofs_dirent_free */
+
+static void
+demofs_dirent_release(
+    struct rb_node *node,
+    void           *private_data)
+{
+    struct demofs_dirent *dirent = container_of(node, struct demofs_dirent, node);
+
+    free(dirent);
+} /* demofs_dirent_release */
 
 static inline int
 demofs_thread_alloc_space(
@@ -617,6 +630,8 @@ demofs_init(const char *cfgfile)
     inode->mtime      = now;
     inode->ctime      = now;
 
+    rb_tree_init(&inode->dir.dirents);
+
     shared->root_fhlen = demofs_inum_to_fh(shared->root_fh, inode->inum,
                                            inode->gen);
 
@@ -628,7 +643,6 @@ demofs_destroy(void *private_data)
 {
     struct demofs_shared    *shared = private_data;
     struct demofs_inode     *inode;
-    struct demofs_dirent    *dirent;
     struct demofs_device    *device;
     struct demofs_freespace *freespace;
     int                      i, j, k;
@@ -643,11 +657,7 @@ demofs_destroy(void *private_data)
                 }
 
                 if (S_ISDIR(inode->mode)) {
-                    while (inode->dir.dirents) {
-                        dirent = inode->dir.dirents;
-                        HASH_DELETE(hh, inode->dir.dirents, dirent);
-                        free(dirent);
-                    }
+                    rb_tree_destroy(&inode->dir.dirents, demofs_dirent_release, NULL);
                 } else if (S_ISLNK(inode->mode)) {
                     free(inode->symlink.target);
                 } else if (S_ISREG(inode->mode)) {
@@ -897,6 +907,10 @@ demofs_lookup(
 {
     struct demofs_inode  *inode, *child;
     struct demofs_dirent *dirent;
+    struct rb_node       *node;
+    uint64_t              hash;
+
+    hash = XXH3_64bits(request->lookup.component, request->lookup.component_len);
 
     inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -913,15 +927,16 @@ demofs_lookup(
         return;
     }
 
-    HASH_FIND(hh, inode->dir.dirents, request->lookup.component,
-              request->lookup.component_len, dirent);
+    node = rb_tree_query_exact(&inode->dir.dirents, hash);
 
-    if (!dirent) {
+    if (!node) {
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
+
+    dirent = container_of(node, struct demofs_dirent, node);
 
     if (request->lookup.attrmask) {
         demofs_map_attrs(&request->lookup.r_dir_attr,
@@ -951,24 +966,29 @@ demofs_mkdir(
     void                       *private_data)
 {
     struct demofs_inode      *parent_inode, *inode;
-    struct demofs_dirent     *dirent, *existing_dirent;
+    struct demofs_dirent     *dirent;
+    struct rb_node           *node;
     struct chimera_vfs_attrs *r_attr          = &request->mkdir.r_attr;
     struct chimera_vfs_attrs *r_dir_pre_attr  = &request->mkdir.r_dir_pre_attr;
     struct chimera_vfs_attrs *r_dir_post_attr = &request->mkdir.r_dir_post_attr;
+    uint64_t                  hash;
+
+    hash = XXH3_64bits(request->mkdir.name, request->mkdir.name_len);
 
     /* Optimistically allocate an inode */
     inode = demofs_inode_alloc_thread(thread);
 
-    inode->size        = 4096;
-    inode->space_used  = 4096;
-    inode->uid         = 0;
-    inode->gid         = 0;
-    inode->nlink       = 2;
-    inode->mode        = S_IFDIR | 0755;
-    inode->atime       = request->start_time;
-    inode->mtime       = request->start_time;
-    inode->ctime       = request->start_time;
-    inode->dir.dirents = NULL;
+    inode->size       = 4096;
+    inode->space_used = 4096;
+    inode->uid        = 0;
+    inode->gid        = 0;
+    inode->nlink      = 2;
+    inode->mode       = S_IFDIR | 0755;
+    inode->atime      = request->start_time;
+    inode->mtime      = request->start_time;
+    inode->ctime      = request->start_time;
+
+    rb_tree_init(&inode->dir.dirents);
 
     demofs_map_attrs(r_attr, request->mkdir.attrmask, inode);
 
@@ -976,6 +996,7 @@ demofs_mkdir(
     dirent = demofs_dirent_alloc(thread,
                                  inode->inum,
                                  inode->gen,
+                                 hash,
                                  request->mkdir.name,
                                  request->mkdir.name_len);
 
@@ -1000,11 +1021,9 @@ demofs_mkdir(
 
     demofs_map_attrs(r_dir_pre_attr, request->mkdir.attrmask, parent_inode);
 
-    HASH_FIND(hh, parent_inode->dir.dirents,
-              request->mkdir.name, request->mkdir.name_len,
-              existing_dirent);
+    node = rb_tree_query_exact(&parent_inode->dir.dirents, hash);
 
-    if (existing_dirent) {
+    if (node) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
         request->complete(request);
@@ -1013,7 +1032,8 @@ demofs_mkdir(
         return;
     }
 
-    HASH_ADD(hh, parent_inode->dir.dirents, name, dirent->name_len, dirent);
+
+    rb_tree_insert(&parent_inode->dir.dirents, hash, &dirent->node);
 
     parent_inode->nlink++;
 
@@ -1061,8 +1081,12 @@ demofs_remove(
 {
     struct demofs_inode      *parent_inode, *inode;
     struct demofs_dirent     *dirent;
+    struct rb_node           *node;
+    uint64_t                  hash;
     struct chimera_vfs_attrs *r_pre_attr  = &request->remove.r_pre_attr;
     struct chimera_vfs_attrs *r_post_attr = &request->remove.r_post_attr;
+
+    hash = XXH3_64bits(request->remove.name, request->remove.namelen);
 
     parent_inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1081,16 +1105,16 @@ demofs_remove(
         return;
     }
 
-    HASH_FIND(hh, parent_inode->dir.dirents,
-              request->remove.name, request->remove.namelen,
-              dirent);
+    node = rb_tree_query_exact(&parent_inode->dir.dirents, hash);
 
-    if (!dirent) {
+    if (!node) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
+
+    dirent = container_of(node, struct demofs_dirent, node);
 
     inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
@@ -1111,7 +1135,8 @@ demofs_remove(
 
     parent_inode->nlink--;
     parent_inode->mtime = request->start_time;
-    HASH_DEL(parent_inode->dir.dirents, dirent);
+
+    rb_tree_remove(&parent_inode->dir.dirents, &dirent->node);
 
     if (S_ISDIR(inode->mode)) {
         inode->nlink = 0;
@@ -1145,7 +1170,8 @@ demofs_readdir(
     void                       *private_data)
 {
     struct demofs_inode     *inode, *dirent_inode;
-    struct demofs_dirent    *dirent, *tmp;
+    struct demofs_dirent    *dirent;
+    struct rb_node          *node;
     uint64_t                 cookie       = request->readdir.cookie;
     uint64_t                 next_cookie  = 0;
     int                      found_cookie = 0;
@@ -1171,8 +1197,12 @@ demofs_readdir(
         return;
     }
 
-    HASH_ITER(hh, inode->dir.dirents, dirent, tmp)
-    {
+    node = rb_tree_query_ceil(&inode->dir.dirents, cookie);
+
+    while (node) {
+
+        dirent = container_of(node, struct demofs_dirent, node);
+
         if (dirent->inum == cookie) {
             found_cookie = 1;
         }
@@ -1208,7 +1238,7 @@ demofs_readdir(
 
         rc = request->readdir.callback(
             dirent->inum,
-            dirent->inum,
+            dirent->hash,
             dirent->name,
             dirent->name_len,
             &attr,
@@ -1219,7 +1249,9 @@ demofs_readdir(
             break;
         }
 
-        next_cookie = dirent->inum;
+        next_cookie = dirent->hash;
+
+        node = rb_tree_next(&inode->dir.dirents, node);
     }
 
     if (request->readdir.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
@@ -1270,10 +1302,14 @@ demofs_open_at(
 {
     struct demofs_inode      *parent_inode, *inode = NULL;
     struct demofs_dirent     *dirent;
+    struct rb_node           *node;
+    uint64_t                  hash;
     unsigned int              flags           = request->open_at.flags;
     struct chimera_vfs_attrs *r_attr          = &request->open_at.r_attr;
     struct chimera_vfs_attrs *r_dir_pre_attr  = &request->open_at.r_dir_pre_attr;
     struct chimera_vfs_attrs *r_dir_post_attr = &request->open_at.r_dir_post_attr;
+
+    hash = XXH3_64bits(request->open_at.name, request->open_at.namelen);
 
     parent_inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1292,10 +1328,9 @@ demofs_open_at(
 
     demofs_map_attrs(r_dir_pre_attr, request->open_at.attrmask, parent_inode);
 
-    HASH_FIND(hh, parent_inode->dir.dirents, request->open_at.name,
-              request->open_at.namelen, dirent);
+    node = rb_tree_query_exact(&parent_inode->dir.dirents, hash);
 
-    if (!dirent) {
+    if (!node) {
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
             pthread_mutex_unlock(&parent_inode->lock);
             request->status = CHIMERA_VFS_EEXIST;
@@ -1322,14 +1357,19 @@ demofs_open_at(
         dirent = demofs_dirent_alloc(thread,
                                      inode->inum,
                                      inode->gen,
+                                     hash,
                                      request->open_at.name,
                                      request->open_at.namelen);
 
-        HASH_ADD(hh, parent_inode->dir.dirents, name, dirent->name_len, dirent);
+        rb_tree_insert(&parent_inode->dir.dirents, dirent->hash, &dirent->node);
 
         parent_inode->nlink++;
         parent_inode->mtime = request->start_time;
+
     } else {
+
+        dirent = container_of(node, struct demofs_dirent, node);
+
         inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
         if (!inode) {
@@ -1494,7 +1534,7 @@ demofs_read(
             break;
         }
 
-        extent     = node->payload;
+        extent     = container_of(node, struct demofs_extent, node);
         extent_end = extent->file_offset + extent->length;
 
         if (read_offset < extent->file_offset) {
@@ -1542,7 +1582,7 @@ demofs_read(
             read_offset += overlap_length;
         }
 
-        node = rb_next(&inode->file.extents, node);
+        node = rb_tree_next(&inode->file.extents, node);
     }
 
     if (request->read.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
@@ -1609,12 +1649,12 @@ demofs_write(
 
     // Handle overlapping extents
     while (node) {
-        extent       = node->payload;
+        extent       = container_of(node, struct demofs_extent, node);
         extent_start = extent->file_offset;
         extent_end   = extent_start + extent->length;
 
         // Get next node before we potentially modify the tree
-        next_node = rb_next(&inode->file.extents, node);
+        next_node = rb_tree_next(&inode->file.extents, node);
 
         if (extent_start >= write_end) {
             break;
@@ -1658,8 +1698,7 @@ demofs_write(
     new_extent->buffer        = NULL;
 
     // Insert new extent
-    rb_tree_insert(&inode->file.extents, write_start, new_extent,
-                   &new_extent->node);
+    rb_tree_insert(&inode->file.extents, write_start, &new_extent->node);
 
     // Update inode metadata
     if (inode->size < write_end) {
@@ -1715,9 +1754,13 @@ demofs_symlink(
     void                       *private_data)
 {
     struct demofs_inode      *parent_inode, *inode;
-    struct demofs_dirent     *dirent, *existing_dirent;
+    struct demofs_dirent     *dirent;
+    struct rb_node           *node;
     struct chimera_vfs_attrs *r_attr     = &request->symlink.r_attr;
     struct chimera_vfs_attrs *r_dir_attr = &request->symlink.r_dir_attr;
+    uint64_t                  hash;
+
+    hash = XXH3_64bits(request->symlink.name, request->symlink.namelen);
 
     /* Optimistically allocate an inode */
     inode = demofs_inode_alloc_thread(thread);
@@ -1745,6 +1788,7 @@ demofs_symlink(
     dirent = demofs_dirent_alloc(thread,
                                  inode->inum,
                                  inode->gen,
+                                 hash,
                                  request->symlink.name,
                                  request->symlink.namelen);
 
@@ -1767,11 +1811,9 @@ demofs_symlink(
         return;
     }
 
-    HASH_FIND(hh, parent_inode->dir.dirents,
-              request->symlink.name, request->symlink.namelen,
-              existing_dirent);
+    node = rb_tree_query_exact(&parent_inode->dir.dirents, hash);
 
-    if (existing_dirent) {
+    if (node) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
         request->complete(request);
@@ -1780,7 +1822,7 @@ demofs_symlink(
         return;
     }
 
-    HASH_ADD(hh, parent_inode->dir.dirents, name, dirent->name_len, dirent);
+    rb_tree_insert(&parent_inode->dir.dirents, hash, &dirent->node);
 
     parent_inode->nlink++;
 
@@ -1845,7 +1887,12 @@ demofs_rename(
 {
     struct demofs_inode  *old_parent_inode, *new_parent_inode;
     struct demofs_dirent *dirent, *old_dirent;
+    struct rb_node       *node;
+    uint64_t              hash, new_hash;
     int                   cmp;
+
+    hash     = XXH3_64bits(request->rename.name, request->rename.namelen);
+    new_hash = XXH3_64bits(request->rename.new_name, request->rename.new_namelen);
 
     cmp = demofs_fh_compare(request->fh,
                             request->fh_len,
@@ -1916,11 +1963,9 @@ demofs_rename(
         }
     }
 
-    HASH_FIND(hh, old_parent_inode->dir.dirents,
-              request->rename.name, request->rename.namelen,
-              old_dirent);
+    node = rb_tree_query_exact(&old_parent_inode->dir.dirents, hash);
 
-    if (!old_dirent) {
+    if (!node) {
         pthread_mutex_unlock(&old_parent_inode->lock);
         pthread_mutex_unlock(&new_parent_inode->lock);
         request->status = CHIMERA_VFS_ENOENT;
@@ -1928,11 +1973,11 @@ demofs_rename(
         return;
     }
 
-    HASH_FIND(hh, new_parent_inode->dir.dirents,
-              request->rename.new_name, request->rename.new_namelen,
-              dirent);
+    old_dirent = container_of(node, struct demofs_dirent, node);
 
-    if (dirent) {
+    node = rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash);
+
+    if (node) {
         pthread_mutex_unlock(&old_parent_inode->lock);
         pthread_mutex_unlock(&new_parent_inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
@@ -1943,10 +1988,11 @@ demofs_rename(
     dirent = demofs_dirent_alloc(thread,
                                  old_dirent->inum,
                                  old_dirent->gen,
+                                 new_hash,
                                  request->rename.new_name,
                                  request->rename.new_namelen);
 
-    HASH_ADD(hh, new_parent_inode->dir.dirents, name, dirent->name_len, dirent);
+    rb_tree_insert(&new_parent_inode->dir.dirents, new_hash, &dirent->node);
 
     old_parent_inode->nlink--;
     new_parent_inode->nlink++;
@@ -1974,8 +2020,11 @@ demofs_link(
     void                       *private_data)
 {
     struct demofs_inode  *parent_inode, *inode;
-    struct demofs_dirent *dirent, *existing_dirent;
+    struct rb_node       *node;
+    uint64_t              hash;
+    struct demofs_dirent *dirent;
 
+    hash = XXH3_64bits(request->link.name, request->link.namelen);
 
     parent_inode = demofs_inode_get_fh(shared,
                                        request->link.dir_fh,
@@ -2003,11 +2052,9 @@ demofs_link(
         return;
     }
 
-    HASH_FIND(hh, parent_inode->dir.dirents,
-              request->link.name, request->link.namelen,
-              existing_dirent);
+    node = rb_tree_query_exact(&parent_inode->dir.dirents, hash);
 
-    if (existing_dirent) {
+    if (node) {
         pthread_mutex_unlock(&parent_inode->lock);
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
@@ -2018,10 +2065,11 @@ demofs_link(
     dirent = demofs_dirent_alloc(thread,
                                  inode->inum,
                                  inode->gen,
+                                 hash,
                                  request->link.name,
                                  request->link.namelen);
 
-    HASH_ADD(hh, parent_inode->dir.dirents, name, dirent->name_len, dirent);
+    rb_tree_insert(&parent_inode->dir.dirents, hash, &dirent->node);
 
     inode->nlink++;
     parent_inode->nlink++;
