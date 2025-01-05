@@ -908,7 +908,7 @@ demofs_lookup(
 
     if (unlikely(!S_ISDIR(inode->mode))) {
         pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
         return;
     }
@@ -989,7 +989,7 @@ demofs_mkdir(
         return;
     }
 
-    if (!S_ISDIR(parent_inode->mode)) {
+    if (unlikely(!S_ISDIR(parent_inode->mode))) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
@@ -1468,6 +1468,13 @@ demofs_read(
         return;
     }
 
+    if (unlikely(!S_ISREG(inode->mode))) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
     if (offset + length > inode->size) {
         length = inode->size > offset ? inode->size - offset : 0;
         eof    = 1;
@@ -1588,6 +1595,13 @@ demofs_write(
 
     if (unlikely(!inode)) {
         request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    if (unlikely(!S_ISREG(inode->mode))) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
     }
@@ -1811,6 +1825,13 @@ demofs_readlink(
         return;
     }
 
+    if (unlikely(!S_ISLNK(inode->mode))) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
     request->readlink.r_target_length = inode->symlink.target->length;
 
     memcpy(request->readlink.r_target,
@@ -1999,6 +2020,14 @@ demofs_link(
     if (!inode) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    if (unlikely(S_ISDIR(inode->mode))) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EPERM;
         request->complete(request);
         return;
     }
