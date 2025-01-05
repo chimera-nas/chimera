@@ -149,6 +149,8 @@ struct demofs_inode_list {
     uint32_t              max_blocks;
     struct demofs_inode **inode;
     struct demofs_inode  *free_inode;
+    uint64_t              num_inodes;
+    uint64_t              total_inodes;
     pthread_mutex_t       lock;
 };
 
@@ -161,6 +163,7 @@ struct demofs_shared {
     int                       num_active_threads;
     uint8_t                   root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                  root_fhlen;
+    uint64_t                  total_bytes;
     pthread_mutex_t           lock;
 };
 
@@ -368,6 +371,8 @@ demofs_inode_alloc(
 
         last = NULL;
 
+        inode_list->total_inodes += CHIMERA_DEMOFS_INODE_BLOCK;
+
         for (i = 0; i < CHIMERA_DEMOFS_INODE_BLOCK; i++) {
             inode       = &inodes[i];
             inode->inum = (base_id + i) << 8 | list_id;
@@ -385,6 +390,8 @@ demofs_inode_alloc(
     }
 
     LL_DELETE(inode_list->free_inode, inode);
+
+    inode_list->num_inodes++;
 
     pthread_mutex_unlock(&inode_list->lock);
 
@@ -439,6 +446,7 @@ demofs_inode_free(
 
     pthread_mutex_lock(&inode_list->lock);
     LL_PREPEND(inode_list->free_inode, inode);
+    inode_list->num_inodes--;
     pthread_mutex_unlock(&inode_list->lock);
 } /* demofs_inode_free */
 
@@ -539,6 +547,8 @@ demofs_thread_alloc_space(
 
     device->free_space->length -= rsrv_size;
     device->free_space->offset += rsrv_size;
+
+    shared->total_bytes += rsrv_size;
 
     pthread_mutex_unlock(&shared->lock);
 
@@ -799,6 +809,7 @@ demofs_getattr(
 {
     uint32_t                  attr_mask = request->getattr.attr_mask;
     struct chimera_vfs_attrs *attr      = &request->getattr.r_attr;
+    struct demofs_device     *device;
     struct demofs_inode      *inode;
 
     inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
@@ -814,6 +825,40 @@ demofs_getattr(
     if (attr_mask & CHIMERA_VFS_ATTR_FH) {
         attr->va_fh_len = demofs_inum_to_fh(attr->va_fh, inode->inum,
                                             inode->gen);
+    }
+
+    if (attr_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+        attr->va_mask       |= CHIMERA_VFS_ATTR_MASK_STATFS;
+        attr->va_space_total = 0;
+        attr->va_space_used  = 0;
+        attr->va_space_avail = 0;
+        attr->va_space_free  = 0;
+        attr->va_files_total = 0;
+        attr->va_files_used  = 0;
+        attr->va_files_free  = 0;
+
+        pthread_mutex_lock(&shared->lock);
+
+        for (int i = 0; i < shared->num_devices; i++) {
+            device                = &shared->devices[i];
+            attr->va_space_total += device->size;
+        }
+
+        attr->va_space_used  = shared->total_bytes;
+        attr->va_space_free  = attr->va_space_total - attr->va_space_used;
+        attr->va_space_avail = attr->va_space_free;
+
+        pthread_mutex_unlock(&shared->lock);
+
+        for (int i = 0; i < shared->num_inode_list; i++) {
+            pthread_mutex_lock(&shared->inode_list[i].lock);
+            attr->va_files_total += shared->inode_list[i].total_inodes;
+            attr->va_files_used  += shared->inode_list[i].total_inodes;
+            pthread_mutex_unlock(&shared->inode_list[i].lock);
+        }
+
+        attr->va_files_free = attr->va_files_total - attr->va_files_used;
+
     }
 
     demofs_map_attrs(attr, request->getattr.attr_mask, inode);
