@@ -1164,15 +1164,10 @@ demofs_readdir(
 {
     struct demofs_inode     *inode, *dirent_inode;
     struct demofs_dirent    *dirent;
-    uint64_t                 cookie       = request->readdir.cookie;
-    uint64_t                 next_cookie  = 0;
-    int                      found_cookie = 0;
+    uint64_t                 cookie      = request->readdir.cookie;
+    uint64_t                 next_cookie = 0;
     int                      rc, eof = 1;
     struct chimera_vfs_attrs attr;
-
-    if (cookie == 0) {
-        found_cookie = 1;
-    }
 
     inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1193,38 +1188,30 @@ demofs_readdir(
 
     while (dirent) {
 
-        if (dirent->inum == cookie) {
-            found_cookie = 1;
-        }
-
-        if (!found_cookie) {
-            continue;
-        }
-
-        attr.va_mask   = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT;
+        attr.va_mask   = CHIMERA_VFS_ATTR_FH;
         attr.va_fh_len = demofs_inum_to_fh(attr.va_fh, dirent->inum,
                                            dirent->gen);
 
         dirent_inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
-        if (!dirent_inode) {
-            continue;
+        if (dirent_inode) {
+
+            attr.va_mask      |= CHIMERA_VFS_ATTR_MASK_STAT;
+            attr.va_mode       = dirent_inode->mode;
+            attr.va_nlink      = dirent_inode->nlink;
+            attr.va_uid        = dirent_inode->uid;
+            attr.va_gid        = dirent_inode->gid;
+            attr.va_size       = dirent_inode->size;
+            attr.va_space_used = dirent_inode->space_used;
+            attr.va_atime      = dirent_inode->atime;
+            attr.va_mtime      = dirent_inode->mtime;
+            attr.va_ctime      = dirent_inode->ctime;
+            attr.va_ino        = dirent_inode->inum;
+            attr.va_dev        = (42UL << 32) | 42;
+            attr.va_rdev       = (42UL << 32) | 42;
+
+            pthread_mutex_unlock(&dirent_inode->lock);
         }
-
-        attr.va_mode       = dirent_inode->mode;
-        attr.va_nlink      = dirent_inode->nlink;
-        attr.va_uid        = dirent_inode->uid;
-        attr.va_gid        = dirent_inode->gid;
-        attr.va_size       = dirent_inode->size;
-        attr.va_space_used = dirent_inode->space_used;
-        attr.va_atime      = dirent_inode->atime;
-        attr.va_mtime      = dirent_inode->mtime;
-        attr.va_ctime      = dirent_inode->ctime;
-        attr.va_ino        = dirent_inode->inum;
-        attr.va_dev        = (42UL << 32) | 42;
-        attr.va_rdev       = (42UL << 32) | 42;
-
-        pthread_mutex_unlock(&dirent_inode->lock);
 
         rc = request->readdir.callback(
             dirent->inum,
@@ -1239,10 +1226,10 @@ demofs_readdir(
             break;
         }
 
-        next_cookie = dirent->hash;
+        next_cookie = dirent->hash + 1;
 
         dirent = rb_tree_next(&inode->dir.dirents, dirent);
-    }
+    } /* demofs_readdir */
 
     if (request->readdir.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
         demofs_map_attrs(&request->readdir.r_dir_attr, request->readdir.attrmask,
