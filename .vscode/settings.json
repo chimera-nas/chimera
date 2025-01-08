@@ -52,6 +52,7 @@
     "cmath": "c",
     "utility": "c",
     "buffer.h": "c",
-    "deferral.h": "c"
+    "deferral.h": "c",
+    "internal.h": "c"
   }
 }

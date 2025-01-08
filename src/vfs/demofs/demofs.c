@@ -589,6 +589,8 @@ demofs_init(const char *cfgfile)
         device_path   = json_string_value(json_object_get(device_cfg, "path"));
         if (strcmp(protocol_name, "io_uring") == 0) {
             protocol_id = EVPL_BLOCK_PROTOCOL_IO_URING;
+        } else if (strcmp(protocol_name, "vfio") == 0) {
+            protocol_id = EVPL_BLOCK_PROTOCOL_VFIO;
         } else {
             chimera_demofs_abort("Unsupported protocol: %s\n", protocol_name);
         }
