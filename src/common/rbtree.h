@@ -277,16 +277,18 @@ rb_tree_destroy(
             } \
         } while (0)
 
-static inline struct rb_node *
-rb_tree_first(struct rb_tree *tree)
-{
-    struct rb_node *node = tree->root;
-
-    while (node->left != &tree->nil) {
-        node = node->left;
-    }
-    return node;
-} /* rb_tree_first */
+#define rb_tree_first(tree, element) \
+        do { \
+            struct rb_node *node = (tree)->root; \
+            (element) = NULL; \
+            \
+            if (node != &(tree)->nil) { \
+                while (node->left != &(tree)->nil) { \
+                    node = node->left; \
+                } \
+                (element) = container_of(node, typeof(*(element)), node); \
+            } \
+        } while (0)
 
 #define rb_tree_next(tree, element) \
         ({ \

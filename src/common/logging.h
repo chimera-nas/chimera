@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdarg.h>
+
 extern int ChimeraLogLevel;
 
 #define CHIMERA_LOG_FATAL 1
@@ -13,6 +15,14 @@ void chimera_log_init(
 void chimera_enable_crash_handler(
     void);
 
+void
+chimera_vlog(
+    const char *level,
+    const char *mod,
+    const char *file,
+    int         line,
+    const char *fmt,
+    va_list     argp);
 
 void __chimera_debug(
     const char *mod,

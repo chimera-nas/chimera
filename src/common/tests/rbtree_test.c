@@ -17,7 +17,7 @@ verify_inorder(
     struct test_node *element;
     int               i = 0;
 
-    element = container_of(rb_tree_first(tree), struct test_node, node);
+    rb_tree_first(tree, element);
 
     while (element && i < count) {
         assert(element->key == expected[i]);

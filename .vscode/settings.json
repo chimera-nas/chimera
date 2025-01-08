@@ -44,6 +44,14 @@
     "xxhash.h": "c",
     "varint.h": "c",
     "rbtree.h": "c",
-    "limits": "c"
+    "limits": "c",
+    "nvme.h": "c",
+    "bit": "c",
+    "compare": "c",
+    "type_traits": "c",
+    "cmath": "c",
+    "utility": "c",
+    "buffer.h": "c",
+    "deferral.h": "c"
   }
 }

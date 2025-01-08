@@ -197,9 +197,9 @@ chimera_log_init(void)
     pthread_once(&ChimeraLogOnce, chimera_log_thread_init);
 } /* chimera_log_init */
 
-static inline void
+void
 chimera_vlog(
-    int         level,
+    const char *level,
     const char *mod,
     const char *file,
     int         line,
@@ -239,8 +239,7 @@ chimera_vlog(
     ChimeraLogBufPtr += chimera_snprintf(ChimeraLogBufPtr,
                                          1024,
                                          "\" process=%lu thread=%lu level=%s module=%s source=\"%s:%d\"\n",
-                                         pid, tid, level_string[level], mod, file,
-                                         line);
+                                         pid, tid, level, mod, file, line);
 
     pthread_mutex_unlock(&ChimeraLogBufLock);
 } /* chimera_vlog */
@@ -259,7 +258,7 @@ __chimera_debug(
     va_list argp;
 
     va_start(argp, fmt);
-    chimera_vlog(CHIMERA_LOG_DEBUG, mod, file, line, fmt, argp);
+    chimera_vlog(level_string[CHIMERA_LOG_DEBUG], mod, file, line, fmt, argp);
     va_end(argp);
 } /* chimera_debug */
 
@@ -274,7 +273,7 @@ __chimera_info(
     va_list argp;
 
     va_start(argp, fmt);
-    chimera_vlog(CHIMERA_LOG_INFO, mod, file, line, fmt, argp);
+    chimera_vlog(level_string[CHIMERA_LOG_INFO], mod, file, line, fmt, argp);
     va_end(argp);
 } /* chimera_info */
 
@@ -289,7 +288,7 @@ __chimera_error(
     va_list argp;
 
     va_start(argp, fmt);
-    chimera_vlog(CHIMERA_LOG_ERROR, mod, file, line, fmt, argp);
+    chimera_vlog(level_string[CHIMERA_LOG_ERROR], mod, file, line, fmt, argp);
     va_end(argp);
 } /* chimera_error */
 
@@ -304,7 +303,7 @@ __chimera_fatal(
     va_list argp;
 
     va_start(argp, fmt);
-    chimera_vlog(CHIMERA_LOG_FATAL, mod, file, line, fmt, argp);
+    chimera_vlog(level_string[CHIMERA_LOG_FATAL], mod, file, line, fmt, argp);
     va_end(argp);
 
     exit(1);
@@ -321,7 +320,7 @@ __chimera_abort(
     va_list argp;
 
     va_start(argp, fmt);
-    chimera_vlog(CHIMERA_LOG_FATAL, mod, file, line, fmt, argp);
+    chimera_vlog(level_string[CHIMERA_LOG_FATAL], mod, file, line, fmt, argp);
     va_end(argp);
 
     chimera_crash_handler(SIGABRT);

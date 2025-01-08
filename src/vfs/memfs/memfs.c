@@ -1030,8 +1030,9 @@ memfs_readdir(
 
     HASH_ITER(hh, inode->dir.dirents, dirent, tmp)
     {
-        if (dirent->inum == cookie) {
+        if (!found_cookie && dirent->inum == cookie) {
             found_cookie = 1;
+            continue;
         }
 
         if (!found_cookie) {

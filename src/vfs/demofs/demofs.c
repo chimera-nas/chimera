@@ -595,8 +595,7 @@ demofs_init(const char *cfgfile)
 
         device->bdev = evpl_block_open_device(protocol_id, device_path);
 
-        device->size  = json_integer_value(json_object_get(device_cfg, "size"));
-        device->size *= 1000000000UL;
+        device->size = evpl_block_size(device->bdev);
 
         free_space            = calloc(1, sizeof(*free_space));
         free_space->device_id = device->id;
@@ -1236,7 +1235,11 @@ demofs_readdir(
         return;
     }
 
-    rb_tree_query_ceil(&inode->dir.dirents, cookie, hash, dirent);
+    if (cookie) {
+        rb_tree_query_ceil(&inode->dir.dirents, cookie + 1, hash, dirent);
+    } else {
+        rb_tree_first(&inode->dir.dirents, dirent);
+    }
 
     while (dirent) {
 
@@ -1278,7 +1281,7 @@ demofs_readdir(
             break;
         }
 
-        next_cookie = dirent->hash + 1;
+        next_cookie = dirent->hash;
 
         dirent = rb_tree_next(&inode->dir.dirents, dirent);
     } /* demofs_readdir */

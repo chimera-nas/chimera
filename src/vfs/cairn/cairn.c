@@ -1230,6 +1230,10 @@ cairn_readdir(
 
     rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
 
+    if (rocksdb_iter_valid(iter) && request->readdir.cookie) {
+        rocksdb_iter_next(iter);
+    }
+
     while (rocksdb_iter_valid(iter)) {
 
         dirent_key = (struct cairn_dirent_key *) rocksdb_iter_key(iter, &len);
@@ -1256,8 +1260,6 @@ cairn_readdir(
 
         cairn_inode_handle_release(&dirent_ih);
 
-        next_cookie = dirent_key->hash;
-
         rc = request->readdir.callback(
             dirent_value->inum,
             dirent_key->hash,
@@ -1270,6 +1272,8 @@ cairn_readdir(
             eof = 0;
             break;
         }
+
+        next_cookie = dirent_key->hash;
 
         rocksdb_iter_next(iter);
 

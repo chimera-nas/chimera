@@ -38,6 +38,8 @@ main(
 
     chimera_enable_crash_handler();
 
+    evpl_set_log_fn(chimera_vlog);
+
     evpl_config = evpl_config_init();
     evpl_config_set_rdmacm_datagram_size_override(evpl_config, 4096);
 
