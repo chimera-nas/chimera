@@ -1751,7 +1751,6 @@ demofs_read(
                        overlap_length);
             } else {
                 queue = thread->queue[extent->device_id];
-                demofs_private->pending++;
 
                 demofs_submit_reads(thread->evpl,
                                     queue,
