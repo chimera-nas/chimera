@@ -64,11 +64,13 @@
         chimera_abort_if(cond, "demofs", __FILE__, __LINE__, __VA_ARGS__)
 
 struct demofs_request_private {
-    int      opcode;
-    int      status;
-    int      pending;
-    uint32_t read_prefix;
-    uint32_t read_suffix;
+    int               opcode;
+    int               status;
+    int               pending;
+    int               niov;
+    uint32_t          read_prefix;
+    uint32_t          read_suffix;
+    struct evpl_iovec iov[64];
 };
 
 struct demofs_extent {
@@ -92,6 +94,7 @@ struct demofs_device {
     struct evpl_block_device *bdev;
     uint64_t                  id;
     uint64_t                  size;
+    uint64_t                  max_request_size;
     char                      name[256];
     pthread_mutex_t           lock;
     struct demofs_freespace  *free_space;
@@ -597,7 +600,8 @@ demofs_init(const char *cfgfile)
 
         device->bdev = evpl_block_open_device(protocol_id, device_path);
 
-        device->size = evpl_block_size(device->bdev);
+        device->size             = evpl_block_size(device->bdev);
+        device->max_request_size = evpl_block_max_request_size(device->bdev);
 
         free_space            = calloc(1, sizeof(*free_space));
         free_space->device_id = device->id;
@@ -1487,6 +1491,148 @@ demofs_io_callback(
         request->complete(request);
     }
 } /* demofs_read_callback */
+static void
+demofs_submit_reads(
+    struct evpl                *evpl,
+    struct evpl_block_queue    *queue,
+    struct evpl_iovec          *iov,
+    int                         niov,
+    uint64_t                    device_offset,
+    uint64_t                    request_length,
+    uint64_t                    max_request_size,
+    struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *demofs_private = request->plugin_data;
+    uint64_t                       total_length   = request_length;
+    uint64_t                       current_offset = device_offset;
+    int                            iov_index      = 0;
+    uint64_t                       iov_offset     = 0;
+    struct evpl_iovec             *iovin, *iovout;
+
+    iovin  = iov;
+    iovout = &demofs_private->iov[demofs_private->niov];
+
+
+    // If total length exceeds max request size, split into multiple requests
+    while (total_length > 0) {
+        uint64_t chunk_size      = 0;
+        int      chunk_iov_count = 0;
+
+        // Build up chunk of iovs that fit within max_request_size
+        while (iov_index < niov && chunk_size + (iovin->length - iov_offset) <= max_request_size) {
+            uint64_t len = iovin->length - iov_offset;
+            iovout->data    = iovin->data + iov_offset;
+            iovout->length  = len;
+            iovout->private = iovin->private;
+            chunk_size     += len;
+            chunk_iov_count++;
+            demofs_private->niov++;
+            iov_index++;
+            iov_offset = 0;
+            iovin++;
+            iovout++;
+        }
+
+        // Handle partial iov that exceeds max_request_size
+        if (iov_index < niov && chunk_size < max_request_size) {
+            uint64_t remaining = max_request_size - chunk_size;
+            iovout->data    = iovin->data + iov_offset;
+            iovout->length  = remaining;
+            iovout->private = iovin->private;
+            chunk_size     += remaining;
+            chunk_iov_count++;
+            demofs_private->niov++;
+            iov_offset += remaining;
+            iovout++;
+        }
+
+        demofs_private->pending++;
+
+        evpl_block_read(evpl,
+                        queue,
+                        &demofs_private->iov[demofs_private->niov - chunk_iov_count],
+                        chunk_iov_count,
+                        current_offset,
+                        demofs_io_callback,
+                        request);
+
+        total_length   -= chunk_size;
+        current_offset += chunk_size;
+    }
+} /* demofs_submit_reads */
+
+static void
+demofs_submit_writes(
+    struct evpl                *evpl,
+    struct evpl_block_queue    *queue,
+    const struct evpl_iovec    *iov,
+    int                         niov,
+    uint64_t                    device_offset,
+    uint64_t                    request_length,
+    uint64_t                    max_request_size,
+    int                         sync,
+    struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *demofs_private = request->plugin_data;
+    uint64_t                       total_length   = request_length;
+    uint64_t                       current_offset = device_offset;
+    int                            iov_index      = 0;
+    uint64_t                       iov_offset     = 0;
+    const struct evpl_iovec       *iovin;
+    struct evpl_iovec             *iovout;
+
+    iovin  = iov;
+    iovout = &demofs_private->iov[demofs_private->niov];
+
+    // If total length exceeds max request size, split into multiple requests
+    while (total_length > 0) {
+        uint64_t chunk_size      = 0;
+        int      chunk_iov_count = 0;
+
+        // Build up chunk of iovs that fit within max_request_size
+        while (iov_index < niov && chunk_size + (iovin->length - iov_offset) <= max_request_size) {
+
+            uint64_t len = iovin->length - iov_offset;
+            iovout->data    = iovin->data + iov_offset;
+            iovout->length  = len;
+            iovout->private = iovin->private;
+            chunk_size     += len;
+            chunk_iov_count++;
+            demofs_private->niov++;
+            iov_index++;
+            iovin++;
+            iovout++;
+            iov_offset = 0;
+        }
+
+        // Handle partial iov that exceeds max_request_size
+        if (iov_index < niov && chunk_size < max_request_size) {
+            uint64_t remaining = max_request_size - chunk_size;
+            iovout->data    = iovin->data + iov_offset;
+            iovout->length  = remaining;
+            iovout->private = iovin->private;
+            chunk_size     += remaining;
+            chunk_iov_count++;
+            demofs_private->niov++;
+            iov_offset += remaining;
+            iovout++;
+        }
+
+        demofs_private->pending++;
+
+        evpl_block_write(evpl,
+                         queue,
+                         &demofs_private->iov[demofs_private->niov - chunk_iov_count],
+                         chunk_iov_count,
+                         current_offset,
+                         sync,
+                         demofs_io_callback,
+                         request);
+
+        total_length   -= chunk_size;
+        current_offset += chunk_size;
+    }
+} /* demofs_submit_writes */
 
 static void
 demofs_read(
@@ -1509,6 +1655,7 @@ demofs_read(
     demofs_private->opcode  = request->opcode;
     demofs_private->status  = 0;
     demofs_private->pending = 0;
+    demofs_private->niov    = 0;
 
     offset = request->read.offset;
     length = request->read.length;
@@ -1606,13 +1753,14 @@ demofs_read(
                 queue = thread->queue[extent->device_id];
                 demofs_private->pending++;
 
-                evpl_block_read(thread->evpl,
-                                queue,
-                                request->read.iov,
-                                request->read.r_niov,
-                                extent->device_offset + overlap_start,
-                                demofs_io_callback,
-                                request);
+                demofs_submit_reads(thread->evpl,
+                                    queue,
+                                    request->read.iov,
+                                    request->read.r_niov,
+                                    extent->device_offset + overlap_start,
+                                    overlap_length,
+                                    shared->devices[extent->device_id].max_request_size,
+                                    request);
             }
             read_offset += overlap_length;
         }
@@ -1656,7 +1804,8 @@ demofs_write(
     demofs_private          = request->plugin_data;
     demofs_private->opcode  = request->opcode;
     demofs_private->status  = 0;
-    demofs_private->pending = 1;
+    demofs_private->pending = 0;
+    demofs_private->niov    = 0;
 
     inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1773,14 +1922,16 @@ demofs_write(
     }
 
     queue = thread->queue[device_id];
-    evpl_block_write(evpl,
-                     queue,
-                     iov,
-                     niov,
-                     new_extent->device_offset,
-                     1,
-                     demofs_io_callback,
-                     request);
+
+    demofs_submit_writes(evpl,
+                         queue,
+                         iov,
+                         niov,
+                         new_extent->device_offset,
+                         request->write.length,
+                         shared->devices[device_id].max_request_size,
+                         1,
+                         request);
 
     request->write.r_length = request->write.length;
     request->write.r_sync   = 1;
