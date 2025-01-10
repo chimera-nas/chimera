@@ -32,7 +32,7 @@
 #define CHIMERA_DEMOFS_INODE_LIST_MASK   (CHIMERA_DEMOFS_INODE_NUM_LISTS - 1)
 
 
-#define CHIMERA_DEMOFS_INODE_BLOCK_SHIFT 10
+#define CHIMERA_DEMOFS_INODE_BLOCK_SHIFT 16
 #define CHIMERA_DEMOFS_INODE_BLOCK       (1 << CHIMERA_DEMOFS_INODE_BLOCK_SHIFT)
 #define CHIMERA_DEMOFS_INODE_BLOCK_MASK  (CHIMERA_DEMOFS_INODE_BLOCK - 1)
 
@@ -107,12 +107,12 @@ struct demofs_dirent {
     uint64_t              hash;
     struct rb_node        node;
     struct demofs_dirent *next;
-    char                  name[256];
+    char                 *name;
 };
 
 struct demofs_symlink_target {
     int                           length;
-    char                          data[PATH_MAX];
+    char                         *data;
     struct demofs_symlink_target *next;
 };
 
@@ -126,9 +126,12 @@ struct demofs_inode {
     uint32_t             nlink;
     uint32_t             uid;
     uint32_t             gid;
-    struct timespec      atime;
-    struct timespec      mtime;
-    struct timespec      ctime;
+    uint64_t             atime_sec;
+    uint64_t             ctime_sec;
+    uint64_t             mtime_sec;
+    uint32_t             atime_nsec;
+    uint32_t             ctime_nsec;
+    uint32_t             mtime_nsec;
     struct demofs_inode *next;
 
     pthread_mutex_t      lock;
@@ -171,15 +174,14 @@ struct demofs_shared {
 };
 
 struct demofs_thread {
-    struct evpl                  *evpl;
-    struct demofs_shared         *shared;
-    struct evpl_block_queue     **queue;
-    struct evpl_iovec             zero;
-    int                           thread_id;
-    struct demofs_dirent         *free_dirent;
-    struct demofs_symlink_target *free_symlink_target;
-    struct demofs_extent         *free_extent;
-    struct demofs_freespace      *freespace;
+    struct evpl              *evpl;
+    struct demofs_shared     *shared;
+    struct evpl_block_queue **queue;
+    struct evpl_iovec         zero;
+    struct evpl_iovec         pad;
+    int                       thread_id;
+    struct slab_allocator    *allocator;
+    struct demofs_freespace  *freespace;
 };
 
 static inline uint32_t
@@ -268,17 +270,7 @@ demofs_inode_get_fh(
 static inline struct demofs_extent *
 demofs_extent_alloc(struct demofs_thread *thread)
 {
-    struct demofs_extent *extent;
-
-    extent = thread->free_extent;
-
-    if (extent) {
-        LL_DELETE(thread->free_extent, extent);
-    } else {
-        extent = malloc(sizeof(*extent));
-    }
-
-    return extent;
+    return slab_allocator_alloc(thread->allocator, sizeof(struct demofs_extent));
 } /* demofs_extent_alloc */
 
 static inline void
@@ -286,7 +278,7 @@ demofs_extent_free(
     struct demofs_thread *thread,
     struct demofs_extent *extent)
 {
-    LL_PREPEND(thread->free_extent, extent);
+    slab_allocator_free(thread->allocator, extent, sizeof(*extent));
 } /* demofs_extent_free */
 
 static inline void
@@ -294,23 +286,29 @@ demofs_extent_release(
     struct rb_node *node,
     void           *private_data)
 {
+    struct demofs_thread *thread = private_data;
     struct demofs_extent *extent = container_of(node, struct demofs_extent, node);
 
-    free(extent);
+    if (thread) {
+        slab_allocator_free(thread->allocator, extent, sizeof(*extent));
+    }
 } /* demofs_extent_free */
 
 static inline struct demofs_symlink_target *
-demofs_symlink_target_alloc(struct demofs_thread *thread)
+demofs_symlink_target_alloc(
+    struct demofs_thread *thread,
+    const char           *data,
+    int                   length)
 {
     struct demofs_symlink_target *target;
 
-    target = thread->free_symlink_target;
+    target = slab_allocator_alloc(thread->allocator, sizeof(struct demofs_symlink_target));
 
-    if (target) {
-        LL_DELETE(thread->free_symlink_target, target);
-    } else {
-        target = malloc(sizeof(*target));
-    }
+    target->data = slab_allocator_alloc(thread->allocator, length);
+
+    target->length = length;
+
+    memcpy(target->data, data, length);
 
     return target;
 } /* demofs_symlink_target_alloc */
@@ -320,18 +318,20 @@ demofs_symlink_target_free(
     struct demofs_thread         *thread,
     struct demofs_symlink_target *target)
 {
-    LL_PREPEND(thread->free_symlink_target, target);
+    slab_allocator_free(thread->allocator, target->data, target->length);
+    slab_allocator_free(thread->allocator, target, sizeof(*target));
 } /* demofs_symlink_target_free */
 
 
 static inline struct demofs_inode *
 demofs_inode_alloc(
-    struct demofs_shared *shared,
+    struct demofs_thread *thread,
     uint32_t              list_id)
 {
+    struct demofs_shared     *shared = thread->shared;
     struct demofs_inode_list *inode_list;
     struct demofs_inode      *inodes, *inode, *last;
-    uint32_t                  bi, i, base_id, old_max_blocks;
+    uint32_t                  bi, i, base_id;
 
     inode_list = &shared->inode_list[list_id];
 
@@ -343,32 +343,17 @@ demofs_inode_alloc(
 
         bi = inode_list->num_blocks++;
 
-        if (bi >= inode_list->max_blocks) {
+        chimera_demofs_abort_if(bi >= inode_list->max_blocks, "max inode blocks exceeded");
 
-            if (inode_list->max_blocks == 0) {
-                inode_list->max_blocks = 1024;
-
-                inode_list->inode = calloc(inode_list->max_blocks,
-                                           sizeof(*inode_list->inode));
-            } else {
-                old_max_blocks = inode_list->max_blocks;
-                while (inode_list->max_blocks <= bi) {
-                    inode_list->max_blocks *= 2;
-                }
-
-                inode_list->inode = realloc(inode_list->inode,
-                                            inode_list->max_blocks *
-                                            sizeof(*inode_list->inode));
-
-                memset(inode_list->inode + old_max_blocks, 0,
-                       (inode_list->max_blocks - old_max_blocks) *
-                       sizeof(*inode_list->inode));
-            }
-        }
-
-        inodes = malloc(CHIMERA_DEMOFS_INODE_BLOCK * sizeof(*inodes));
+        inodes = slab_allocator_alloc_perm(thread->allocator, CHIMERA_DEMOFS_INODE_BLOCK * sizeof(*inodes));
 
         base_id = bi << CHIMERA_DEMOFS_INODE_BLOCK_SHIFT;
+
+        if (unlikely(!inode_list->inode)) {
+            inode_list->inode = slab_allocator_alloc_perm(thread->allocator,
+                                                          inode_list->max_blocks *
+                                                          sizeof(*inode_list->inode));
+        }
 
         inode_list->inode[bi] = inodes;
 
@@ -409,11 +394,10 @@ demofs_inode_alloc(
 static inline struct demofs_inode *
 demofs_inode_alloc_thread(struct demofs_thread *thread)
 {
-    struct demofs_shared *shared  = thread->shared;
-    uint32_t              list_id = thread->thread_id &
+    uint32_t list_id = thread->thread_id &
         CHIMERA_DEMOFS_INODE_LIST_MASK;
 
-    return demofs_inode_alloc(shared, list_id);
+    return demofs_inode_alloc(thread, list_id);
 } /* demofs_inode_alloc */
 
 static void
@@ -421,9 +405,12 @@ demofs_dirent_release(
     struct rb_node *node,
     void           *private_data)
 {
+    struct demofs_thread *thread = private_data;
     struct demofs_dirent *dirent = container_of(node, struct demofs_dirent, node);
 
-    free(dirent);
+    if (thread) {
+        slab_allocator_free(thread->allocator, dirent, sizeof(*dirent));
+    }
 } /* demofs_dirent_release */
 
 static inline void
@@ -462,20 +449,14 @@ demofs_dirent_alloc(
     const char           *name,
     int                   name_len)
 {
-    struct demofs_dirent *dirent;
-
-    dirent = thread->free_dirent;
-
-    if (dirent) {
-        LL_DELETE(thread->free_dirent, dirent);
-    } else {
-        dirent = malloc(sizeof(*dirent));
-    }
+    struct demofs_dirent *dirent = slab_allocator_alloc(thread->allocator, sizeof(struct demofs_dirent));
 
     dirent->inum     = inum;
     dirent->gen      = gen;
     dirent->hash     = hash;
     dirent->name_len = name_len;
+
+    dirent->name = slab_allocator_alloc(thread->allocator, name_len);
     memcpy(dirent->name, name, name_len);
 
     return dirent;
@@ -487,7 +468,8 @@ demofs_dirent_free(
     struct demofs_thread *thread,
     struct demofs_dirent *dirent)
 {
-    LL_PREPEND(thread->free_dirent, dirent);
+    slab_allocator_free(thread->allocator, dirent->name, dirent->name_len);
+    slab_allocator_free(thread->allocator, dirent, sizeof(*dirent));
 } /* demofs_dirent_free */
 
 static inline int
@@ -563,13 +545,11 @@ demofs_init(const char *cfgfile)
 {
     struct demofs_shared       *shared = calloc(1, sizeof(*shared));
     struct demofs_inode_list   *inode_list;
-    struct demofs_inode        *inode;
     struct demofs_device       *device;
     struct demofs_freespace    *free_space;
     enum evpl_block_protocol_id protocol_id;
     const char                 *protocol_name, *device_path;
     int                         i;
-    struct timespec             now;
     json_t                     *cfg, *devices_cfg, *device_cfg;
     json_error_t                json_error;
 
@@ -614,8 +594,6 @@ demofs_init(const char *cfgfile)
     json_decref(cfg);
 
 
-    clock_gettime(CLOCK_REALTIME, &now);
-
     pthread_mutex_init(&shared->lock, NULL);
 
     shared->num_inode_list = 255;
@@ -631,11 +609,23 @@ demofs_init(const char *cfgfile)
         inode_list->max_blocks = 0;
 
         pthread_mutex_init(&inode_list->lock, NULL);
+
+        inode_list->max_blocks = 1024 * 1024;
     }
 
-    inode_list = &shared->inode_list[0];
+    return shared;
+} /* demofs_init */
 
-    inode = demofs_inode_alloc(shared, 0);
+static void
+demofs_bootstrap(struct demofs_thread *thread)
+{
+    struct demofs_shared *shared = thread->shared;
+    struct timespec       now;
+    struct demofs_inode  *inode;
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    inode = demofs_inode_alloc(thread, 0);
 
     inode->size       = 4096;
     inode->space_used = 4096;
@@ -645,17 +635,18 @@ demofs_init(const char *cfgfile)
     inode->gid        = 0;
     inode->nlink      = 2;
     inode->mode       = S_IFDIR | 0755;
-    inode->atime      = now;
-    inode->mtime      = now;
-    inode->ctime      = now;
+    inode->atime_sec  = now.tv_sec;
+    inode->atime_nsec = now.tv_nsec;
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
 
     rb_tree_init(&inode->dir.dirents);
 
     shared->root_fhlen = demofs_inum_to_fh(shared->root_fh, inode->inum,
                                            inode->gen);
-
-    return shared;
-} /* demofs_init */
+} /* demofs_bootstrap */
 
 static void
 demofs_destroy(void *private_data)
@@ -678,14 +669,12 @@ demofs_destroy(void *private_data)
                 if (S_ISDIR(inode->mode)) {
                     rb_tree_destroy(&inode->dir.dirents, demofs_dirent_release, NULL);
                 } else if (S_ISLNK(inode->mode)) {
-                    free(inode->symlink.target);
+                    /* do nothing */
                 } else if (S_ISREG(inode->mode)) {
                     rb_tree_destroy(&inode->file.extents, demofs_extent_release, NULL);
                 }
             }
-            free(shared->inode_list[i].inode[j]);
         }
-        free(shared->inode_list[i].inode);
     }
 
     for (int i = 0; i < shared->num_devices; i++) {
@@ -713,7 +702,11 @@ demofs_thread_init(
     struct demofs_shared *shared = private_data;
     struct demofs_thread *thread = calloc(1, sizeof(*thread));
 
+
+    thread->allocator = slab_allocator_create(4096, 1024 * 1024 * 1024);
+
     evpl_iovec_alloc(evpl, 4096, 4096, 1, &thread->zero);
+    evpl_iovec_alloc(evpl, 4096, 4096, 1, &thread->pad);
 
     thread->queue = calloc(shared->num_devices, sizeof(*thread->queue));
 
@@ -733,32 +726,13 @@ demofs_thread_init(
 static void
 demofs_thread_destroy(void *private_data)
 {
-    struct demofs_thread         *thread = private_data;
-    struct demofs_shared         *shared = thread->shared;
-    struct demofs_dirent         *dirent;
-    struct demofs_symlink_target *target;
-    struct demofs_extent         *extent;
+    struct demofs_thread *thread = private_data;
+    struct demofs_shared *shared = thread->shared;
 
     evpl_iovec_release(&thread->zero);
+    evpl_iovec_release(&thread->pad);
 
-    while (thread->free_dirent) {
-        dirent = thread->free_dirent;
-
-        LL_DELETE(thread->free_dirent, dirent);
-        free(dirent);
-    }
-
-    while (thread->free_symlink_target) {
-        target = thread->free_symlink_target;
-        LL_DELETE(thread->free_symlink_target, target);
-        free(target);
-    }
-
-    while (thread->free_extent) {
-        extent = thread->free_extent;
-        LL_DELETE(thread->free_extent, extent);
-        free(extent);
-    }
+    slab_allocator_destroy(thread->allocator);
 
     for (int i = 0; i < shared->num_devices; i++) {
         evpl_block_close_queue(thread->evpl, thread->queue[i]);
@@ -788,19 +762,22 @@ demofs_map_attrs(
     }
 
     if (mask & CHIMERA_VFS_ATTR_MASK_STAT) {
-        attr->va_mask      |= CHIMERA_VFS_ATTR_MASK_STAT;
-        attr->va_mode       = inode->mode;
-        attr->va_nlink      = inode->nlink;
-        attr->va_uid        = inode->uid;
-        attr->va_gid        = inode->gid;
-        attr->va_size       = inode->size;
-        attr->va_space_used = inode->space_used;
-        attr->va_atime      = inode->atime;
-        attr->va_mtime      = inode->mtime;
-        attr->va_ctime      = inode->ctime;
-        attr->va_ino        = inode->inum;
-        attr->va_dev        = (42UL << 32) | 42;
-        attr->va_rdev       = (42UL << 32) | 42;
+        attr->va_mask         |= CHIMERA_VFS_ATTR_MASK_STAT;
+        attr->va_mode          = inode->mode;
+        attr->va_nlink         = inode->nlink;
+        attr->va_uid           = inode->uid;
+        attr->va_gid           = inode->gid;
+        attr->va_size          = inode->size;
+        attr->va_space_used    = inode->space_used;
+        attr->va_atime.tv_sec  = inode->atime_sec;
+        attr->va_atime.tv_nsec = inode->atime_nsec;
+        attr->va_mtime.tv_sec  = inode->mtime_sec;
+        attr->va_mtime.tv_nsec = inode->mtime_nsec;
+        attr->va_ctime.tv_sec  = inode->ctime_sec;
+        attr->va_ctime.tv_nsec = inode->ctime_nsec;
+        attr->va_ino           = inode->inum;
+        attr->va_dev           = (42UL << 32) | 42;
+        attr->va_rdev          = (42UL << 32) | 42;
     }
 
 } /* demofs_map_attrs */
@@ -913,21 +890,26 @@ demofs_setattr(
 
     if (attr->va_mask & CHIMERA_VFS_ATTR_ATIME) {
         if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
-            inode->atime = request->start_time;
+            inode->atime_sec  = request->start_time.tv_sec;
+            inode->atime_nsec = request->start_time.tv_nsec;
         } else {
-            inode->atime = attr->va_atime;
+            inode->atime_sec  = attr->va_atime.tv_sec;
+            inode->atime_nsec = attr->va_atime.tv_nsec;
         }
     }
 
     if (attr->va_mask & CHIMERA_VFS_ATTR_MTIME) {
         if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
-            inode->mtime = request->start_time;
+            inode->mtime_sec  = request->start_time.tv_sec;
+            inode->mtime_nsec = request->start_time.tv_nsec;
         } else {
-            inode->mtime = attr->va_mtime;
+            inode->mtime_sec  = attr->va_mtime.tv_sec;
+            inode->mtime_nsec = attr->va_mtime.tv_nsec;
         }
     }
 
-    inode->ctime = request->start_time;
+    inode->ctime_sec  = request->start_time.tv_sec;
+    inode->ctime_nsec = request->start_time.tv_nsec;
 
     demofs_map_attrs(r_post_attr, request->setattr.attr_mask, inode);
 
@@ -1034,9 +1016,12 @@ demofs_mkdir(
     inode->gid        = 0;
     inode->nlink      = 2;
     inode->mode       = S_IFDIR | 0755;
-    inode->atime      = request->start_time;
-    inode->mtime      = request->start_time;
-    inode->ctime      = request->start_time;
+    inode->atime_sec  = request->start_time.tv_sec;
+    inode->atime_nsec = request->start_time.tv_nsec;
+    inode->mtime_sec  = request->start_time.tv_sec;
+    inode->mtime_nsec = request->start_time.tv_nsec;
+    inode->ctime_sec  = request->start_time.tv_sec;
+    inode->ctime_nsec = request->start_time.tv_nsec;
 
     rb_tree_init(&inode->dir.dirents);
 
@@ -1087,7 +1072,8 @@ demofs_mkdir(
 
     parent_inode->nlink++;
 
-    parent_inode->mtime = request->start_time;
+    parent_inode->mtime_sec  = request->start_time.tv_sec;
+    parent_inode->mtime_nsec = request->start_time.tv_nsec;
 
     demofs_map_attrs(r_dir_post_attr, request->mkdir.attrmask, parent_inode);
 
@@ -1184,7 +1170,8 @@ demofs_remove(
         parent_inode->nlink--;
     }
 
-    parent_inode->mtime = request->start_time;
+    parent_inode->mtime_sec  = request->start_time.tv_sec;
+    parent_inode->mtime_nsec = request->start_time.tv_nsec;
 
     rb_tree_remove(&parent_inode->dir.dirents, &dirent->node);
 
@@ -1257,19 +1244,22 @@ demofs_readdir(
 
         if (dirent_inode) {
 
-            attr.va_mask      |= CHIMERA_VFS_ATTR_MASK_STAT;
-            attr.va_mode       = dirent_inode->mode;
-            attr.va_nlink      = dirent_inode->nlink;
-            attr.va_uid        = dirent_inode->uid;
-            attr.va_gid        = dirent_inode->gid;
-            attr.va_size       = dirent_inode->size;
-            attr.va_space_used = dirent_inode->space_used;
-            attr.va_atime      = dirent_inode->atime;
-            attr.va_mtime      = dirent_inode->mtime;
-            attr.va_ctime      = dirent_inode->ctime;
-            attr.va_ino        = dirent_inode->inum;
-            attr.va_dev        = (42UL << 32) | 42;
-            attr.va_rdev       = (42UL << 32) | 42;
+            attr.va_mask         |= CHIMERA_VFS_ATTR_MASK_STAT;
+            attr.va_mode          = dirent_inode->mode;
+            attr.va_nlink         = dirent_inode->nlink;
+            attr.va_uid           = dirent_inode->uid;
+            attr.va_gid           = dirent_inode->gid;
+            attr.va_size          = dirent_inode->size;
+            attr.va_space_used    = dirent_inode->space_used;
+            attr.va_atime.tv_sec  = dirent_inode->atime_sec;
+            attr.va_atime.tv_nsec = dirent_inode->atime_nsec;
+            attr.va_mtime.tv_sec  = dirent_inode->mtime_sec;
+            attr.va_mtime.tv_nsec = dirent_inode->mtime_nsec;
+            attr.va_ctime.tv_sec  = dirent_inode->ctime_sec;
+            attr.va_ctime.tv_nsec = dirent_inode->ctime_nsec;
+            attr.va_ino           = dirent_inode->inum;
+            attr.va_dev           = (42UL << 32) | 42;
+            attr.va_rdev          = (42UL << 32) | 42;
 
             pthread_mutex_unlock(&dirent_inode->lock);
         }
@@ -1290,7 +1280,7 @@ demofs_readdir(
         next_cookie = dirent->hash;
 
         dirent = rb_tree_next(&inode->dir.dirents, dirent);
-    } /* demofs_readdir */
+    }
 
     if (request->readdir.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
         demofs_map_attrs(&request->readdir.r_dir_attr, request->readdir.attrmask,
@@ -1385,9 +1375,12 @@ demofs_open_at(
         inode->gid        = 0;
         inode->nlink      = 1;
         inode->mode       = S_IFREG |  0644;
-        inode->atime      = request->start_time;
-        inode->mtime      = request->start_time;
-        inode->ctime      = request->start_time;
+        inode->atime_sec  = request->start_time.tv_sec;
+        inode->atime_nsec = request->start_time.tv_nsec;
+        inode->mtime_sec  = request->start_time.tv_sec;
+        inode->mtime_nsec = request->start_time.tv_nsec;
+        inode->ctime_sec  = request->start_time.tv_sec;
+        inode->ctime_nsec = request->start_time.tv_nsec;
 
         rb_tree_init(&inode->file.extents);
 
@@ -1400,7 +1393,8 @@ demofs_open_at(
 
         rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
-        parent_inode->mtime = request->start_time;
+        parent_inode->mtime_sec  = request->start_time.tv_sec;
+        parent_inode->mtime_nsec = request->start_time.tv_nsec;
 
     } else {
 
@@ -1491,163 +1485,6 @@ demofs_io_callback(
         request->complete(request);
     }
 } /* demofs_read_callback */
-static void
-demofs_submit_reads(
-    struct evpl                *evpl,
-    struct evpl_block_queue    *queue,
-    struct evpl_iovec          *iov,
-    int                         niov,
-    uint64_t                    device_offset,
-    uint64_t                    request_length,
-    uint64_t                    max_request_size,
-    struct chimera_vfs_request *request)
-{
-    struct demofs_request_private *demofs_private = request->plugin_data;
-    uint64_t                       total_length   = request_length;
-    uint64_t                       current_offset = device_offset;
-
-    if (total_length <= max_request_size) {
-        demofs_private->pending++;
-        evpl_block_read(evpl,
-                        queue,
-                        iov,
-                        niov,
-                        current_offset,
-                        demofs_io_callback,
-                        request);
-        return;
-    }
-
-    int      i          = 0;
-    uint64_t iov_offset = 0;
-
-    while (total_length > 0 && i < niov) {
-        uint64_t chunk_size      = 0;
-        int      chunk_iov_count = 0;
-        int      chunk_start     = demofs_private->niov;
-
-        while (i < niov && chunk_size < max_request_size && total_length > 0) {
-            uint64_t remain_in_iov = iov[i].length - iov_offset;
-            if (!remain_in_iov) {
-                iov_offset = 0;
-                i++;
-                continue;
-            }
-            uint64_t needed  = max_request_size - chunk_size;
-            uint64_t to_copy = remain_in_iov < needed ? remain_in_iov : needed;
-            if (to_copy > total_length) {
-                to_copy = total_length;
-            }
-
-            demofs_private->iov[demofs_private->niov].data    = iov[i].data + iov_offset;
-            demofs_private->iov[demofs_private->niov].length  = to_copy;
-            demofs_private->iov[demofs_private->niov].private = iov[i].private;
-            demofs_private->niov++;
-            chunk_iov_count++;
-            chunk_size   += to_copy;
-            total_length -= to_copy;
-            iov_offset   += to_copy;
-
-            if (chunk_size >= max_request_size) {
-                break;
-            }
-        }
-
-        if (chunk_iov_count > 0) {
-            demofs_private->pending++;
-            evpl_block_read(evpl,
-                            queue,
-                            &demofs_private->iov[chunk_start],
-                            chunk_iov_count,
-                            current_offset,
-                            demofs_io_callback,
-                            request);
-            current_offset += chunk_size;
-        } else {
-            break;
-        }
-    }
-} /* demofs_submit_reads */
-
-static void
-demofs_submit_writes(
-    struct evpl                *evpl,
-    struct evpl_block_queue    *queue,
-    const struct evpl_iovec    *iov,
-    int                         niov,
-    uint64_t                    device_offset,
-    uint64_t                    request_length,
-    uint64_t                    max_request_size,
-    int                         sync,
-    struct chimera_vfs_request *request)
-{
-    struct demofs_request_private *demofs_private = request->plugin_data;
-    uint64_t                       total_length   = request_length;
-    uint64_t                       current_offset = device_offset;
-    int                            iov_index      = 0;
-    uint64_t                       iov_offset     = 0;
-
-    if (total_length <= max_request_size) {
-        demofs_private->pending++;
-        evpl_block_write(evpl,
-                         queue,
-                         iov,
-                         niov,
-                         current_offset,
-                         sync,
-                         demofs_io_callback,
-                         request);
-        return;
-    }
-
-    while (total_length > 0 && iov_index < niov) {
-        uint64_t chunk_size      = 0;
-        int      chunk_iov_count = 0;
-        int      chunk_start     = demofs_private->niov;
-
-        while (iov_index < niov && chunk_size < max_request_size && total_length > 0) {
-            uint64_t remain_in_iov = iov[iov_index].length - iov_offset;
-            if (!remain_in_iov) {
-                iov_offset = 0;
-                iov_index++;
-                continue;
-            }
-            uint64_t needed  = max_request_size - chunk_size;
-            uint64_t to_copy = (remain_in_iov < needed) ? remain_in_iov : needed;
-            if (to_copy > total_length) {
-                to_copy = total_length;
-            }
-
-            demofs_private->iov[demofs_private->niov].data    = iov[iov_index].data + iov_offset;
-            demofs_private->iov[demofs_private->niov].length  = to_copy;
-            demofs_private->iov[demofs_private->niov].private = iov[iov_index].private;
-            demofs_private->niov++;
-            chunk_iov_count++;
-            chunk_size   += to_copy;
-            total_length -= to_copy;
-            iov_offset   += to_copy;
-
-            if (chunk_size >= max_request_size) {
-                break;
-            }
-        }
-
-        if (chunk_iov_count > 0) {
-            demofs_private->pending++;
-            evpl_block_write(evpl,
-                             queue,
-                             &demofs_private->iov[chunk_start],
-                             chunk_iov_count,
-                             current_offset,
-                             sync,
-                             demofs_io_callback,
-                             request);
-            current_offset += chunk_size;
-        } else {
-            break;
-        }
-    }
-} /* demofs_submit_writes */
 
 static void
 demofs_read(
@@ -1660,11 +1497,12 @@ demofs_read(
     struct demofs_inode           *inode;
     struct demofs_extent          *extent;
     struct demofs_request_private *demofs_private;
-    uint64_t                       offset, length, read_offset;
+    uint64_t                       offset, length, read_offset, read_left;
     uint64_t                       extent_end, overlap_start, overlap_length;
-    uint64_t                       aligned_offset, aligned_length;
-    uint32_t                       eof = 0;
-    struct evpl_block_queue       *queue;
+    uint64_t                       aligned_offset, aligned_length, chunk;
+    uint32_t                       eof = 0, chunk_niov;
+    struct evpl_iovec             *chunk_iov;
+    struct evpl_iovec_cursor       cursor;
 
     demofs_private          = request->plugin_data;
     demofs_private->opcode  = request->opcode;
@@ -1672,20 +1510,10 @@ demofs_read(
     demofs_private->pending = 0;
     demofs_private->niov    = 0;
 
-    offset = request->read.offset;
-    length = request->read.length;
-
-    // Calculate 4KB aligned values
-    aligned_offset = offset & ~4095ULL;
-    aligned_length = ((offset + length + 4095ULL) & ~4095ULL) - aligned_offset;
-
-    demofs_private->read_prefix = offset - aligned_offset;
-    demofs_private->read_suffix = aligned_length - length;
-
-    if (unlikely(length == 0)) {
+    if (unlikely(request->read.length == 0)) {
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;
-        request->read.r_length = length;
+        request->read.r_length = 0;
         request->read.r_eof    = eof;
         request->complete(request);
         return;
@@ -1706,10 +1534,19 @@ demofs_read(
         return;
     }
 
+    offset = request->read.offset;
+    length = request->read.length;
+
     if (offset + length > inode->size) {
         length = inode->size > offset ? inode->size - offset : 0;
         eof    = 1;
     }
+
+    aligned_offset = offset & ~4095ULL;
+    aligned_length = ((offset + length + 4095ULL) & ~4095ULL) - aligned_offset;
+
+    demofs_private->read_prefix = offset - aligned_offset;
+    demofs_private->read_suffix = aligned_length - length;
 
     request->read.r_length = length;
     request->read.r_eof    = eof;
@@ -1719,67 +1556,79 @@ demofs_read(
                                             request->read.iov);
 
     read_offset = aligned_offset;
+    read_left   = aligned_length;
+
+    evpl_iovec_cursor_init(&cursor, request->read.iov, request->read.r_niov);
 
     // Find first extent that could contain our offset
     rb_tree_query_floor(&inode->file.extents, read_offset, file_offset, extent);
 
-    while (read_offset < aligned_offset + aligned_length) {
-        if (!extent) {
-            // No more extents - zero fill the rest
-            memset(request->read.iov[0].data + (read_offset - aligned_offset),
-                   0,
-                   (aligned_offset + aligned_length) - read_offset);
-            break;
-        }
+    if (extent && extent->file_offset + extent->length <= read_offset) {
+        extent = rb_tree_next(&inode->file.extents, extent);
+    }
 
-        extent_end = extent->file_offset + extent->length;
+    while (read_left && extent && extent->file_offset < aligned_offset + aligned_length) {
 
         if (read_offset < extent->file_offset) {
-            // Gap before extent - zero fill
-            overlap_length =  extent->file_offset - read_offset;
-
-            if (overlap_length > (aligned_offset + aligned_length) - read_offset) {
-                overlap_length = (aligned_offset + aligned_length) - read_offset;
-            }
-
-            memset(request->read.iov[0].data + (read_offset - aligned_offset),
-                   0,
-                   overlap_length);
-
-            read_offset += overlap_length;
-
-            continue;
+            chunk = extent->file_offset - read_offset;
+            evpl_iovec_cursor_zero(&cursor, chunk);
+            read_offset += chunk;
+            read_left   -= chunk;
         }
+
+
+        extent_end = extent->file_offset + extent->length;
 
         // Calculate overlap with current extent
         overlap_start  = read_offset - extent->file_offset;
         overlap_length = extent_end - read_offset;
 
-        if (overlap_length > (aligned_offset + aligned_length) - read_offset) {
-            overlap_length = (aligned_offset + aligned_length) - read_offset;
+        if (overlap_length > read_left) {
+            overlap_length = read_left;
         }
 
-        if (overlap_length > 0) {
-            if (extent->buffer) {
-                memcpy(request->read.iov[0].data + (read_offset - aligned_offset),
-                       extent->buffer + overlap_start,
-                       overlap_length);
-            } else {
-                queue = thread->queue[extent->device_id];
+        while (overlap_length) {
 
-                demofs_submit_reads(thread->evpl,
-                                    queue,
-                                    request->read.iov,
-                                    request->read.r_niov,
-                                    extent->device_offset + overlap_start,
-                                    overlap_length,
-                                    shared->devices[extent->device_id].max_request_size,
-                                    request);
+            if (overlap_length > shared->devices[extent->device_id].max_request_size) {
+                chunk = shared->devices[extent->device_id].max_request_size;
+            } else {
+                chunk = overlap_length;
             }
-            read_offset += overlap_length;
+
+            chunk_iov = &demofs_private->iov[demofs_private->niov];
+
+            chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 32, chunk);
+
+            if (chunk & 4095) {
+                chunk_iov[chunk_niov]        = thread->pad;
+                chunk_iov[chunk_niov].length = 4096 - (chunk & 4095);
+                chunk_niov++;
+            }
+
+            demofs_private->niov += chunk_niov;
+
+            demofs_private->pending++;
+
+            evpl_block_read(evpl,
+                            thread->queue[extent->device_id],
+                            chunk_iov,
+                            chunk_niov,
+                            extent->device_offset + overlap_start,
+                            demofs_io_callback,
+                            request);
+
+            overlap_length -= chunk;
+            overlap_start  += chunk;
+
+            read_offset += chunk;
+            read_left   -= chunk;
         }
 
         extent = rb_tree_next(&inode->file.extents, extent);
+    }
+
+    if (read_left) {
+        evpl_iovec_cursor_zero(&cursor, read_left);
     }
 
     if (request->read.attrmask & CHIMERA_VFS_ATTR_MASK_STAT) {
@@ -1810,10 +1659,13 @@ demofs_write(
     uint64_t                       write_start = request->write.offset;
     uint64_t                       write_end   = write_start + request->write.length;
     uint64_t                       extent_start, extent_end, device_id, device_offset;
+    uint64_t                       offset, chunk;
+    uint32_t                       left;
     const struct evpl_iovec       *iov;
-    int                            niov;
-    struct evpl_block_queue       *queue;
+    struct evpl_iovec             *chunk_iov;
+    int                            niov, chunk_niov;
     int                            rc;
+    struct evpl_iovec_cursor       cursor;
 
     demofs_private          = request->plugin_data;
     demofs_private->opcode  = request->opcode;
@@ -1908,7 +1760,9 @@ demofs_write(
         inode->size       = write_end;
         inode->space_used = (inode->size + 4095) & ~4095;
     }
-    inode->mtime = request->start_time;
+
+    inode->mtime_sec  = request->start_time.tv_sec;
+    inode->mtime_nsec = request->start_time.tv_nsec;
 
     demofs_map_attrs(r_post_attr, request->write.attrmask, inode);
 
@@ -1935,17 +1789,38 @@ demofs_write(
         niov = request->write.niov;
     }
 
-    queue = thread->queue[device_id];
+    evpl_iovec_cursor_init(&cursor, iov, niov);
 
-    demofs_submit_writes(evpl,
-                         queue,
-                         iov,
-                         niov,
-                         new_extent->device_offset,
-                         request->write.length,
-                         shared->devices[device_id].max_request_size,
+    offset = 0;
+    left   = (request->write.length + 4095) & ~4095;
+
+    while (left) {
+        chunk = shared->devices[device_id].max_request_size;
+
+        if (left < chunk) {
+            chunk = left;
+        }
+
+        chunk_iov = &demofs_private->iov[demofs_private->niov];
+
+        chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 32, chunk);
+
+        demofs_private->niov += chunk_niov;
+
+        demofs_private->pending++;
+
+        evpl_block_write(evpl,
+                         thread->queue[new_extent->device_id],
+                         chunk_iov,
+                         chunk_niov,
+                         new_extent->device_offset + offset,
                          1,
+                         demofs_io_callback,
                          request);
+
+        offset += chunk;
+        left   -= chunk;
+    }
 
     request->write.r_length = request->write.length;
     request->write.r_sync   = 1;
@@ -1975,16 +1850,16 @@ demofs_symlink(
     inode->gid        = 0;
     inode->nlink      = 1;
     inode->mode       = S_IFLNK | 0755;
-    inode->atime      = request->start_time;
-    inode->mtime      = request->start_time;
-    inode->ctime      = request->start_time;
+    inode->atime_sec  = request->start_time.tv_sec;
+    inode->atime_nsec = request->start_time.tv_nsec;
+    inode->mtime_sec  = request->start_time.tv_sec;
+    inode->mtime_nsec = request->start_time.tv_nsec;
+    inode->ctime_sec  = request->start_time.tv_sec;
+    inode->ctime_nsec = request->start_time.tv_nsec;
 
-    inode->symlink.target = demofs_symlink_target_alloc(thread);
-
-    inode->symlink.target->length = request->symlink.targetlen;
-    memcpy(inode->symlink.target->data,
-           request->symlink.target,
-           request->symlink.targetlen);
+    inode->symlink.target = demofs_symlink_target_alloc(thread,
+                                                        request->symlink.target,
+                                                        request->symlink.targetlen);
 
     demofs_map_attrs(r_attr, request->symlink.attrmask, inode);
 
@@ -2028,7 +1903,8 @@ demofs_symlink(
 
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
-    parent_inode->mtime = request->start_time;
+    parent_inode->mtime_sec  = request->start_time.tv_sec;
+    parent_inode->mtime_nsec = request->start_time.tv_nsec;
 
     demofs_map_attrs(r_dir_attr, request->symlink.attrmask, parent_inode);
 
@@ -2215,8 +2091,10 @@ demofs_rename(
         new_parent_inode->nlink++;
     }
 
-    old_parent_inode->ctime = request->start_time;
-    new_parent_inode->mtime = request->start_time;
+    old_parent_inode->ctime_sec  = request->start_time.tv_sec;
+    old_parent_inode->ctime_nsec = request->start_time.tv_nsec;
+    new_parent_inode->mtime_sec  = request->start_time.tv_sec;
+    new_parent_inode->mtime_nsec = request->start_time.tv_nsec;
 
     if (cmp != 0) {
         pthread_mutex_unlock(&old_parent_inode->lock);
@@ -2301,8 +2179,10 @@ demofs_link(
 
     inode->nlink++;
 
-    inode->ctime        = request->start_time;
-    parent_inode->mtime = request->start_time;
+    inode->ctime_sec         = request->start_time.tv_sec;
+    inode->ctime_nsec        = request->start_time.tv_nsec;
+    parent_inode->mtime_sec  = request->start_time.tv_sec;
+    parent_inode->mtime_nsec = request->start_time.tv_nsec;
 
     pthread_mutex_unlock(&parent_inode->lock);
     pthread_mutex_unlock(&inode->lock);
@@ -2319,6 +2199,10 @@ demofs_dispatch(
 {
     struct demofs_thread *thread = private_data;
     struct demofs_shared *shared = thread->shared;
+
+    if (unlikely(shared->root_fhlen == 0)) {
+        demofs_bootstrap(thread);
+    }
 
     switch (request->opcode) {
         case CHIMERA_VFS_OP_LOOKUP_PATH:

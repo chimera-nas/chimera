@@ -3,18 +3,19 @@
 #include <sys/mman.h>
 #include "uthash/utlist.h"
 
+#include "core/evpl.h"
+
 struct demofs_slab {
     void               *buffer;
     uint64_t            size;
     uint64_t            used;
-    uint32_t            is_mmap;
     struct demofs_slab *next;
 };
 
 struct demofs_element {
     void                  *buffer;
     struct demofs_element *next;
-};
+} __attribute__((aligned(8)));
 
 struct demofs_bucket {
     struct demofs_element *elements;
@@ -26,13 +27,11 @@ struct slab_allocator {
     struct demofs_element *free_elements;
     uint64_t               slab_size;
     uint64_t               max_element_size;
-    uint64_t               max_memory;
 };
 
 
 static struct slab_allocator *
 slab_allocator_create(
-    uint64_t max_memory,
     uint64_t max_element_size,
     uint64_t slab_size)
 {
@@ -45,7 +44,6 @@ slab_allocator_create(
 
     allocator->slab_size        = slab_size;
     allocator->max_element_size = max_element_size;
-    allocator->max_memory       = max_memory;
 
     max_bucket_id = ((max_element_size + 7) & ~7) >> 3;
 
@@ -63,11 +61,6 @@ slab_allocator_destroy(struct slab_allocator *allocator)
     while (allocator->slabs) {
         slab = allocator->slabs;
         LL_DELETE(allocator->slabs, slab);
-        if (slab->is_mmap) {
-            munmap(slab->buffer, slab->size);
-        } else {
-            free(slab->buffer);
-        }
         free(slab);
     }
 
@@ -93,21 +86,7 @@ slab_allocator_alloc_new_chunk(
     if (!slab) {
         slab = calloc(1, sizeof(*slab));
 
-        slab->buffer = mmap(NULL, allocator->slab_size,
-                            PROT_READ | PROT_WRITE,
-                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB,
-                            -1, 0);
-
-        if (slab->buffer == MAP_FAILED) {
-            slab->buffer = malloc(allocator->slab_size);
-            if (!slab->buffer) {
-                free(slab);
-                return NULL;
-            }
-            slab->is_mmap = 0;
-        } else {
-            slab->is_mmap = 1;
-        }
+        slab->buffer = evpl_slab_alloc();
 
         slab->size = allocator->slab_size;
         slab->used = 0;
@@ -125,7 +104,8 @@ slab_allocator_alloc(
     struct slab_allocator *allocator,
     uint64_t               size)
 {
-    uint64_t               bucket_id = ((size + 7) & ~7) >> 3;
+    uint64_t               asize     = (size + 7) & ~7;
+    uint64_t               bucket_id = asize >> 3;
     struct demofs_bucket  *bucket    = &allocator->buckets[bucket_id];
     struct demofs_element *element;
     void                  *ptr;
@@ -140,10 +120,47 @@ slab_allocator_alloc(
         return ptr;
     }
 
-    return slab_allocator_alloc_new_chunk(allocator, size);
+    return slab_allocator_alloc_new_chunk(allocator, asize);
 } /* slab_allocator_alloc */
 
-void
+static void *
+slab_allocator_alloc_perm(
+    struct slab_allocator *allocator,
+    uint64_t               size)
+{
+    struct demofs_slab *slab = NULL;
+    void               *ptr;
+    uint64_t            pad;
+
+    if (allocator->slabs) {
+        slab = allocator->slabs;
+
+        pad = 64 - (slab->used & 63);
+
+        if (slab->used + size + pad > slab->size) {
+            slab = NULL;
+        }
+    }
+
+    if (!slab) {
+        slab = calloc(1, sizeof(*slab));
+
+        slab->buffer = evpl_slab_alloc();
+
+        slab->size = allocator->slab_size;
+        slab->used = 0;
+        LL_PREPEND(allocator->slabs, slab);
+
+        pad = 0;
+    }
+
+    ptr         = slab->buffer + slab->used + pad;
+    slab->used += size + pad;
+
+    return ptr;
+} /* slab_allocator_alloc_perm */
+
+static void
 slab_allocator_free(
     struct slab_allocator *allocator,
     void                  *ptr,

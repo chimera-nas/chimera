@@ -84,9 +84,41 @@ evpl_iovec_cursor_skip(
     }
 } /* evpl_iovec_cursor_skip */
 
+static void
+evpl_iovec_cursor_zero(
+    struct evpl_iovec_cursor *cursor,
+    int                       length)
+{
+    int chunk, left = length;
+
+    while (left && cursor->niov) {
+
+        chunk = cursor->iov->length - cursor->offset;
+
+        if (left < chunk) {
+            chunk = left;
+        }
+
+        memset(cursor->iov->data + cursor->offset, 0, chunk);
+
+        left -= chunk;
+
+        cursor->offset += chunk;
+
+        if (cursor->offset == cursor->iov->length) {
+            cursor->iov++;
+            cursor->niov--;
+            cursor->offset = 0;
+        }
+    }
+
+    if (left) {
+        abort();
+    }
+} /* evpl_iovec_cursor_zero */
+
 static int
 evpl_iovec_cursor_move(
-    struct evpl              *evpl,
     struct evpl_iovec_cursor *cursor,
     struct evpl_iovec        *iov,
     int                       maxiov,
@@ -104,8 +136,6 @@ evpl_iovec_cursor_move(
         iov[niov].data    = cursor->iov->data + cursor->offset;
         iov[niov].length  = chunk;
         iov[niov].private = cursor->iov->private;
-
-        evpl_iovec_addref(&iov[niov]);
 
         niov++;
         left -= chunk;
