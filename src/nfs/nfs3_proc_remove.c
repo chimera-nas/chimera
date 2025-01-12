@@ -22,24 +22,9 @@ chimera_nfs3_remove_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-        if (pre_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.dir_wcc.before.attributes_follow = 1;
-            chimera_nfs3_marshall_wcc_attrs(pre_attr,
-                                            &res.resok.dir_wcc.before.attributes);
-        } else {
-            res.resok.dir_wcc.before.attributes_follow = 0;
-        }
-
-        if (post_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.dir_wcc.after.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(post_attr,
-                                        &res.resok.dir_wcc.after.attributes);
-        } else {
-            res.resok.dir_wcc.after.attributes_follow = 0;
-        }
+        chimera_nfs3_set_wcc_data(&res.resok.dir_wcc, pre_attr, post_attr);
     } else {
-        res.resfail.dir_wcc.before.attributes_follow = 0;
-        res.resfail.dir_wcc.after.attributes_follow  = 0;
+        chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, pre_attr, post_attr);
     }
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
@@ -70,13 +55,13 @@ chimera_nfs3_remove_open_callback(
                            handle,
                            args->object.name.str,
                            args->object.name.len,
+                           CHIMERA_NFS3_ATTR_WCC_MASK,
                            CHIMERA_NFS3_ATTR_MASK,
                            chimera_nfs3_remove_complete,
                            req);
     } else {
-        res.status                                   = chimera_vfs_error_to_nfsstat3(error_code);
-        res.resfail.dir_wcc.before.attributes_follow = 0;
-        res.resfail.dir_wcc.after.attributes_follow  = 0;
+        res.status = chimera_vfs_error_to_nfsstat3(error_code);
+        chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
         shared->nfs_v3.send_reply_NFSPROC3_REMOVE(evpl, &res, msg);
         nfs_request_free(thread, req);
     }

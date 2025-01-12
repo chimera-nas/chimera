@@ -25,7 +25,8 @@ chimera_vfs_write(
     uint64_t                        offset,
     uint32_t                        count,
     uint32_t                        sync,
-    uint64_t                        attrmask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
     const struct evpl_iovec        *iov,
     int                             niov,
     chimera_vfs_write_callback_t    callback,
@@ -35,20 +36,20 @@ chimera_vfs_write(
 
     request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
-    request->write.r_pre_attr.va_mask  = 0;
-    request->write.r_post_attr.va_mask = 0;
-
-    request->opcode             = CHIMERA_VFS_OP_WRITE;
-    request->complete           = chimera_vfs_write_complete;
-    request->write.handle       = handle;
-    request->write.offset       = offset;
-    request->write.length       = count;
-    request->write.sync         = sync;
-    request->write.attrmask     = attrmask;
-    request->write.iov          = iov;
-    request->write.niov         = niov;
-    request->proto_callback     = callback;
-    request->proto_private_data = private_data;
+    request->opcode                        = CHIMERA_VFS_OP_WRITE;
+    request->complete                      = chimera_vfs_write_complete;
+    request->write.handle                  = handle;
+    request->write.offset                  = offset;
+    request->write.length                  = count;
+    request->write.sync                    = sync;
+    request->write.r_pre_attr.va_req_mask  = pre_attr_mask;
+    request->write.r_pre_attr.va_set_mask  = 0;
+    request->write.r_post_attr.va_req_mask = post_attr_mask;
+    request->write.r_post_attr.va_set_mask = 0;
+    request->write.iov                     = iov;
+    request->write.niov                    = niov;
+    request->proto_callback                = callback;
+    request->proto_private_data            = private_data;
 
     chimera_vfs_dispatch(request);
 

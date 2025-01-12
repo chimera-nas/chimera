@@ -27,7 +27,7 @@ chimera_nfs3_create_open_at_complete(
 
     if (res.status == NFS3_OK) {
 
-        if (attr->va_mask & CHIMERA_VFS_ATTR_FH) {
+        if (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
             res.resok.obj.handle_follows = 1;
             xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
                                  handle->fh,
@@ -38,26 +38,9 @@ chimera_nfs3_create_open_at_complete(
             res.resok.obj.handle_follows = 0;
         }
 
-        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.obj_attributes.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(attr, &res.resok.obj_attributes.attributes);
-        } else {
-            res.resok.obj_attributes.attributes_follow = 0;
-        }
+        chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
+        chimera_nfs3_set_wcc_data(&res.resok.dir_wcc, dir_pre_attr, dir_post_attr);
 
-        if ((dir_pre_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.dir_wcc.before.attributes_follow = 1;
-            chimera_nfs3_marshall_wcc_attrs(dir_pre_attr, &res.resok.dir_wcc.before.attributes);
-        } else {
-            res.resok.dir_wcc.before.attributes_follow = 0;
-        }
-
-        if ((dir_post_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.dir_wcc.after.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(dir_post_attr, &res.resok.dir_wcc.after.attributes);
-        } else {
-            res.resok.dir_wcc.after.attributes_follow = 0;
-        }
         chimera_vfs_release(thread->vfs_thread, handle);
     }
 
@@ -80,6 +63,7 @@ chimera_nfs3_create_open_at_parent_complete(
     if (error_code != CHIMERA_VFS_OK) {
         struct CREATE3res res;
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
+        chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
         thread->shared->nfs_v3.send_reply_NFSPROC3_CREATE(thread->evpl, &res, req->msg);
         nfs_request_free(thread, req);
         return;
@@ -94,6 +78,8 @@ chimera_nfs3_create_open_at_parent_complete(
                         CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_INFERRED,
                         S_IWUSR | S_IRUSR,
                         CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
+                        CHIMERA_NFS3_ATTR_WCC_MASK,
+                        CHIMERA_NFS3_ATTR_MASK,
                         chimera_nfs3_create_open_at_complete,
                         req);
 } /* chimera_nfs3_create_open_complete */

@@ -6,6 +6,7 @@
 #include "vfs_root.h"
 #include "common/logging.h"
 #include "vfs/vfs_internal.h"
+#include "vfs/vfs_procs.h"
 
 #define chimera_vfs_root_debug(...) chimera_debug("vfs_root", \
                                                   __FILE__, \
@@ -75,7 +76,7 @@ chimera_vfs_root_getattr(
 
     memset(attr, 0, sizeof(*attr));
 
-    attr->va_mask = request->getattr.attr_mask;
+    attr->va_set_mask = CHIMERA_VFS_ATTR_MASK_STAT;
 
     /* Synthetic root directory attribute */
     attr->va_mode  = S_IFDIR | 0755;
@@ -95,19 +96,20 @@ chimera_vfs_root_getattr(
 
 
 static void
-chimera_vfs_root_lookup_complete(struct chimera_vfs_request *subrequest)
+chimera_vfs_root_lookup_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
 {
-    struct chimera_vfs_thread  *thread  = subrequest->thread;
-    struct chimera_vfs_request *request = subrequest->proto_private_data;
+    struct chimera_vfs_request *request = private_data;
 
-    request->status = subrequest->status;
-
-    request->lookup.r_attr     = subrequest->lookup_path.r_attr;
-    request->lookup.r_dir_attr = subrequest->lookup_path.r_dir_attr;
+    request->status            = error_code;
+    request->lookup.r_attr     = *attr;
+    request->lookup.r_dir_attr = *dir_attr;
 
     request->complete(request);
 
-    chimera_vfs_request_free(thread, subrequest);
 } /* chimera_vfs_root_lookup_complete */
 
 static void
@@ -115,13 +117,11 @@ chimera_vfs_root_lookup(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_vfs_thread  *thread = request->thread;
-    struct chimera_vfs         *vfs    = thread->vfs;
-    struct chimera_vfs_module  *module;
-    struct chimera_vfs_share   *share;
-    struct chimera_vfs_request *subrequest;
-    const char                 *path    = request->lookup.component;
-    int                         pathlen = request->lookup.component_len;
+    struct chimera_vfs_thread *thread = request->thread;
+    struct chimera_vfs        *vfs    = thread->vfs;
+    struct chimera_vfs_share  *share;
+    const char                *path    = request->lookup.component;
+    int                        pathlen = request->lookup.component_len;
 
     DL_FOREACH(vfs->shares, share)
     {
@@ -136,37 +136,35 @@ chimera_vfs_root_lookup(
         return;
     }
 
-    module = share->module;
-
-    subrequest = chimera_vfs_request_alloc(thread, &module->fh_magic, sizeof(module->fh_magic));
-
-    subrequest->opcode               = CHIMERA_VFS_OP_LOOKUP_PATH;
-    subrequest->complete             = chimera_vfs_root_lookup_complete;
-    subrequest->lookup_path.path     = share->path;
-    subrequest->lookup_path.pathlen  = strlen(share->path);
-    subrequest->lookup_path.attrmask = 0;
-    subrequest->proto_callback       = NULL;
-    subrequest->proto_private_data   = request;
-
-    chimera_vfs_dispatch(subrequest);
+    chimera_vfs_lookup_path(
+        thread,
+        &share->module->fh_magic,
+        sizeof(share->module->fh_magic),
+        share->path,
+        strlen(share->path),
+        request->lookup.r_attr.va_req_mask,
+        request->lookup.r_dir_attr.va_req_mask,
+        chimera_vfs_root_lookup_complete,
+        request);
 
 } /* chimera_vfs_root_lookup */
 
 
 static void
-chimera_vfs_root_lookup_path_complete(struct chimera_vfs_request *subrequest)
+chimera_vfs_root_lookup_path_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
 {
-    struct chimera_vfs_thread  *thread  = subrequest->thread;
-    struct chimera_vfs_request *request = subrequest->proto_private_data;
+    struct chimera_vfs_request *request = private_data;
 
-    request->status = subrequest->status;
-
-    request->lookup_path.r_attr     = subrequest->lookup_path.r_attr;
-    request->lookup_path.r_dir_attr = subrequest->lookup_path.r_dir_attr;
+    request->status                 = error_code;
+    request->lookup_path.r_attr     = *attr;
+    request->lookup_path.r_dir_attr = *dir_attr;
 
     request->complete(request);
 
-    chimera_vfs_request_free(thread, subrequest);
 } /* chimera_vfs_root_lookup_path_complete */
 
 static void
@@ -174,16 +172,14 @@ chimera_vfs_root_lookup_path(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_vfs_thread  *thread = request->thread;
-    struct chimera_vfs         *vfs    = thread->vfs;
-    struct chimera_vfs_module  *module;
-    struct chimera_vfs_share   *share;
-    struct chimera_vfs_request *subrequest;
-    const char                 *path = request->lookup_path.path;
-    const char                 *slash;
-    char                       *sharepath;
-    int                         pathlen = request->lookup_path.pathlen;
-    int                         complen, sharepathlen;
+    struct chimera_vfs_thread *thread = request->thread;
+    struct chimera_vfs        *vfs    = thread->vfs;
+    struct chimera_vfs_share  *share;
+    const char                *path = request->lookup_path.path;
+    const char                *slash;
+    char                      *sharepath;
+    int                        pathlen = request->lookup_path.pathlen;
+    int                        complen, sharepathlen;
 
     while (*path == '/') {
         path++;
@@ -219,20 +215,16 @@ chimera_vfs_root_lookup_path(
         sharepathlen = strlen(share->path);
     }
 
-    module = share->module;
-
-    subrequest = chimera_vfs_request_alloc(thread, &module->fh_magic, sizeof(module->fh_magic));
-
-    subrequest->opcode               = CHIMERA_VFS_OP_LOOKUP_PATH;
-    subrequest->complete             = chimera_vfs_root_lookup_path_complete;
-    subrequest->lookup_path.path     = sharepath;
-    subrequest->lookup_path.pathlen  = sharepathlen;
-    subrequest->lookup_path.attrmask = 0;
-    subrequest->proto_callback       = NULL;
-    subrequest->proto_private_data   = request;
-
-    chimera_vfs_dispatch(subrequest);
-
+    chimera_vfs_lookup_path(
+        thread,
+        &share->module->fh_magic,
+        sizeof(share->module->fh_magic),
+        sharepath,
+        sharepathlen,
+        request->lookup_path.r_attr.va_req_mask,
+        request->lookup_path.r_dir_attr.va_req_mask,
+        chimera_vfs_root_lookup_path_complete,
+        request);
 } /* chimera_vfs_root_lookup_path */
 
 static void
@@ -247,7 +239,7 @@ chimera_vfs_root_readdir(
     int                        i      = 0;
     uint64_t                   cookie = request->readdir.cookie;
 
-    attr.va_mask = 0;
+    attr.va_set_mask = 0;
 
     DL_FOREACH(vfs->shares, share)
     {

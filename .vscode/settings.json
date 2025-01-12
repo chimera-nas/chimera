@@ -53,6 +53,8 @@
     "utility": "c",
     "buffer.h": "c",
     "deferral.h": "c",
-    "internal.h": "c"
+    "internal.h": "c",
+    "nfs4_attr.h": "c",
+    "nfs3_status.h": "c"
   }
 }

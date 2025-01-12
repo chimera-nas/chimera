@@ -37,6 +37,7 @@ struct chimera_vfs;
 #define CHIMERA_VFS_ATTR_FILES_USED  (1UL << 17)
 
 #define CHIMERA_VFS_ATTR_FH          (1UL << 18)
+#define CHIMERA_VFS_ATTR_ATOMIC      (1UL << 19)
 
 #define CHIMERA_VFS_ATTR_MASK_STAT   ( \
             CHIMERA_VFS_ATTR_DEV | \
@@ -63,7 +64,8 @@ struct chimera_vfs;
 #define CHIMERA_VFS_TIME_NOW         ((1l << 30) - 3l)
 
 struct chimera_vfs_attrs {
-    uint64_t        va_mask;
+    uint64_t        va_req_mask;
+    uint64_t        va_set_mask;
 
     uint64_t        va_dev;
     uint64_t        va_ino;
@@ -102,12 +104,11 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OP_REMOVE         11
 #define CHIMERA_VFS_OP_MKDIR          12
 #define CHIMERA_VFS_OP_COMMIT         13
-#define CHIMERA_VFS_OP_ACCESS         14
-#define CHIMERA_VFS_OP_SYMLINK        15
-#define CHIMERA_VFS_OP_RENAME         16
-#define CHIMERA_VFS_OP_SETATTR        17
-#define CHIMERA_VFS_OP_LINK           18
-#define CHIMERA_VFS_OP_NUM            19
+#define CHIMERA_VFS_OP_SYMLINK        14
+#define CHIMERA_VFS_OP_RENAME         15
+#define CHIMERA_VFS_OP_SETATTR        16
+#define CHIMERA_VFS_OP_LINK           17
+#define CHIMERA_VFS_OP_NUM            18
 
 #define CHIMERA_VFS_OPEN_CREATE       (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH         (1U << 1)
@@ -210,7 +211,6 @@ struct chimera_vfs_request {
         struct {
             const char              *path;
             uint32_t                 pathlen;
-            uint64_t                 attrmask;
             struct chimera_vfs_attrs r_attr;
             struct chimera_vfs_attrs r_dir_attr;
         } lookup_path;
@@ -219,34 +219,24 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             const char                     *component;
             uint32_t                        component_len;
-            uint64_t                        attrmask;
             struct chimera_vfs_attrs        r_attr;
             struct chimera_vfs_attrs        r_dir_attr;
         } lookup;
 
         struct {
-            uint32_t                 access;
-            uint64_t                 attrmask;
-            uint32_t                 r_access;
-            struct chimera_vfs_attrs r_attr;
-        } access;
-
-        struct {
             struct chimera_vfs_open_handle *handle;
-            uint64_t                        attr_mask;
             struct chimera_vfs_attrs        r_attr;
         } getattr;
 
         struct {
-            uint64_t                        attr_mask;
-            const struct chimera_vfs_attrs *attr;
-            struct chimera_vfs_attrs        r_pre_attr;
-            struct chimera_vfs_attrs        r_post_attr;
+            struct chimera_vfs_attrs *set_attr;
+            struct chimera_vfs_attrs  r_pre_attr;
+            struct chimera_vfs_attrs  r_post_attr;
         } setattr;
 
         struct {
-            uint64_t                       attrmask;
             uint64_t                       cookie;
+            uint64_t                       attr_mask;
             uint64_t                       r_cookie;
             uint32_t                       r_eof;
             struct chimera_vfs_attrs       r_dir_attr;
@@ -257,8 +247,7 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
             uint32_t                        name_len;
-            unsigned int                    mode;
-            uint64_t                        attrmask;
+            struct chimera_vfs_attrs       *set_attr;
             struct chimera_vfs_attrs        r_attr;
             struct chimera_vfs_attrs        r_dir_pre_attr;
             struct chimera_vfs_attrs        r_dir_post_attr;
@@ -275,7 +264,6 @@ struct chimera_vfs_request {
             int                             namelen;
             uint32_t                        flags;
             uint32_t                        mode;
-            uint64_t                        attrmask;
             struct chimera_vfs_attrs        r_attr;
             struct chimera_vfs_attrs        r_dir_pre_attr;
             struct chimera_vfs_attrs        r_dir_post_attr;
@@ -304,7 +292,6 @@ struct chimera_vfs_request {
             uint64_t                        offset;
             uint32_t                        length;
             uint32_t                        sync;
-            uint64_t                        attrmask;
             const struct evpl_iovec        *iov;
             int                             niov;
             uint32_t                        r_sync;
@@ -317,15 +304,16 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        offset;
             uint32_t                        length;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
         } commit;
 
         struct {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
             int                             namelen;
-            uint64_t                        attr_mask;
-            struct chimera_vfs_attrs        r_pre_attr;
-            struct chimera_vfs_attrs        r_post_attr;
+            struct chimera_vfs_attrs        r_dir_pre_attr;
+            struct chimera_vfs_attrs        r_dir_post_attr;
         } remove;
 
         struct {
@@ -333,9 +321,9 @@ struct chimera_vfs_request {
             int                      namelen;
             const char              *target;
             int                      targetlen;
-            uint64_t                 attrmask;
             struct chimera_vfs_attrs r_attr;
-            struct chimera_vfs_attrs r_dir_attr;
+            struct chimera_vfs_attrs r_dir_pre_attr;
+            struct chimera_vfs_attrs r_dir_post_attr;
         } symlink;
 
         struct {

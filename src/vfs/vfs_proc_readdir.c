@@ -24,7 +24,8 @@ chimera_vfs_readdir(
     struct chimera_vfs_thread     *thread,
     const void                    *fh,
     int                            fhlen,
-    uint64_t                       attrmask,
+    uint64_t                       attr_mask,
+    uint64_t                       dir_attr_mask,
     uint64_t                       cookie,
     chimera_vfs_readdir_callback_t callback,
     chimera_vfs_readdir_complete_t complete,
@@ -34,15 +35,15 @@ chimera_vfs_readdir(
 
     request = chimera_vfs_request_alloc(thread, fh, fhlen);
 
-    request->readdir.r_dir_attr.va_mask = 0;
-
-    request->opcode             = CHIMERA_VFS_OP_READDIR;
-    request->complete           = chimera_vfs_readdir_complete;
-    request->readdir.attrmask   = attrmask;
-    request->readdir.cookie     = cookie;
-    request->readdir.callback   = callback;
-    request->proto_callback     = complete;
-    request->proto_private_data = private_data;
+    request->opcode                         = CHIMERA_VFS_OP_READDIR;
+    request->complete                       = chimera_vfs_readdir_complete;
+    request->readdir.attr_mask              = attr_mask;
+    request->readdir.cookie                 = cookie;
+    request->readdir.callback               = callback;
+    request->readdir.r_dir_attr.va_req_mask = dir_attr_mask;
+    request->readdir.r_dir_attr.va_set_mask = 0;
+    request->proto_callback                 = complete;
+    request->proto_private_data             = private_data;
 
     chimera_vfs_dispatch(request);
 } /* chimera_vfs_readdir */

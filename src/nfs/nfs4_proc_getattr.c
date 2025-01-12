@@ -50,8 +50,8 @@ chimera_nfs4_getattr_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        uint64_t attr_mask = chimera_nfs4_getattr2mask(args->attr_request,
-                                                       args->num_attr_request);
+        uint64_t attr_mask = chimera_nfs4_attr2mask(args->attr_request,
+                                                    args->num_attr_request);
 
         chimera_vfs_getattr(req->thread->vfs_thread,
                             handle,

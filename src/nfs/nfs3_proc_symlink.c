@@ -8,7 +8,8 @@ static void
 chimera_nfs3_symlink_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *r_attr,
-    struct chimera_vfs_attrs *r_dir_attr,
+    struct chimera_vfs_attrs *r_dir_pre_attr,
+    struct chimera_vfs_attrs *r_dir_post_attr,
     void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
@@ -22,7 +23,7 @@ chimera_nfs3_symlink_complete(
         error_code);
 
     if (res.status == NFS3_OK) {
-        if (r_attr->va_mask & CHIMERA_VFS_ATTR_FH) {
+        if (r_attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
             res.resok.obj.handle_follows = 1;
             xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
                                  r_attr->va_fh,
@@ -32,25 +33,10 @@ chimera_nfs3_symlink_complete(
             res.resok.obj.handle_follows = 0;
         }
 
-        if ((r_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK
-            ) {
-            res.resok.obj_attributes.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(r_attr,
-                                        &res.resok.obj_attributes.attributes);
-        } else {
-            res.resok.obj_attributes.attributes_follow = 0;
-        }
-
-        res.resok.dir_wcc.before.attributes_follow = 0;
-
-        if ((r_dir_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) ==
-            CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.dir_wcc.after.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(r_dir_attr,
-                                        &res.resok.dir_wcc.after.attributes);
-        } else {
-            res.resok.dir_wcc.after.attributes_follow = 0;
-        }
+        chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, r_attr);
+        chimera_nfs3_set_wcc_data(&res.resok.dir_wcc, r_dir_pre_attr, r_dir_post_attr);
+    } else {
+        chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, r_dir_pre_attr, r_dir_post_attr);
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_SYMLINK(evpl, &res, msg);
@@ -80,6 +66,8 @@ chimera_nfs3_symlink(
                         args->symlink.symlink_data.str,
                         args->symlink.symlink_data.len,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
+                        CHIMERA_NFS3_ATTR_WCC_MASK,
+                        CHIMERA_NFS3_ATTR_MASK,
                         chimera_nfs3_symlink_complete,
                         req);
 } /* chimera_nfs3_symlink */

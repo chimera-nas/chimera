@@ -64,14 +64,7 @@ chimera_nfs3_readdir_complete(
     res->status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res->status == NFS3_OK) {
-        if ((dir_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) ==
-            CHIMERA_NFS3_ATTR_MASK) {
-            res->resok.dir_attributes.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(dir_attr,
-                                        &res->resok.dir_attributes.attributes);
-        } else {
-            res->resok.dir_attributes.attributes_follow = 0;
-        }
+        chimera_nfs3_set_post_op_attr(&res->resok.dir_attributes, dir_attr);
         res->resok.reply.eof     = !!eof;
         res->resok.reply.entries = cursor->entries;
     }
@@ -114,6 +107,7 @@ chimera_nfs3_readdir(
                         args->dir.data.data,
                         args->dir.data.len,
                         0,
+                        CHIMERA_NFS3_ATTR_MASK,
                         args->cookie,
                         chimera_nfs3_readdir_callback,
                         chimera_nfs3_readdir_complete,

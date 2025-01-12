@@ -26,22 +26,17 @@ chimera_nfs3_read_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-        res.resok.count = count;
-        res.resok.eof   = eof;
-
-        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.file_attributes.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(attr,
-                                        &res.resok.file_attributes.attributes);
-        } else {
-            res.resok.file_attributes.attributes_follow = 0;
-        }
-
+        res.resok.count       = count;
+        res.resok.eof         = eof;
         res.resok.data.length = count;
         res.resok.data.iov    = iov;
         res.resok.data.niov   = niov;
+
+        chimera_nfs3_set_post_op_attr(&res.resok.file_attributes, attr);
+
+
     } else {
-        res.resfail.file_attributes.attributes_follow = 0;
+        chimera_nfs3_set_post_op_attr(&res.resfail.file_attributes, attr);
     }
 
     chimera_vfs_release(thread->vfs_thread, req->handle);

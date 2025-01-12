@@ -30,7 +30,7 @@ chimera_vfs_read(
     uint32_t                        count,
     struct evpl_iovec              *iov,
     int                             niov,
-    uint64_t                        attrmask,
+    uint64_t                        attr_mask,
     chimera_vfs_read_callback_t     callback,
     void                           *private_data)
 {
@@ -38,18 +38,17 @@ chimera_vfs_read(
 
     request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
-    request->read.r_attr.va_mask = 0;
-
-    request->opcode             = CHIMERA_VFS_OP_READ;
-    request->complete           = chimera_vfs_read_complete;
-    request->read.handle        = handle;
-    request->read.offset        = offset;
-    request->read.length        = count;
-    request->read.iov           = iov;
-    request->read.niov          = niov;
-    request->read.attrmask      = attrmask;
-    request->proto_callback     = callback;
-    request->proto_private_data = private_data;
+    request->opcode                  = CHIMERA_VFS_OP_READ;
+    request->complete                = chimera_vfs_read_complete;
+    request->read.handle             = handle;
+    request->read.offset             = offset;
+    request->read.length             = count;
+    request->read.iov                = iov;
+    request->read.niov               = niov;
+    request->read.r_attr.va_req_mask = attr_mask;
+    request->read.r_attr.va_set_mask = 0;
+    request->proto_callback          = callback;
+    request->proto_private_data      = private_data;
 
     chimera_vfs_dispatch(request);
 

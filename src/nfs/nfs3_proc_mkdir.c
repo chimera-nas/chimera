@@ -26,7 +26,7 @@ chimera_nfs3_mkdir_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-        if (r_attr->va_mask & CHIMERA_VFS_ATTR_FH) {
+        if (r_attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
             res.resok.obj.handle_follows = 1;
             xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
                                  r_attr->va_fh,
@@ -36,29 +36,10 @@ chimera_nfs3_mkdir_complete(
             res.resok.obj.handle_follows = 0;
         }
 
-        if ((r_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.obj_attributes.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(r_attr,
-                                        &res.resok.obj_attributes.attributes);
-        } else {
-            res.resok.obj_attributes.attributes_follow = 0;
-        }
-
-        if ((r_dir_pre_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.dir_wcc.before.attributes_follow = 1;
-            chimera_nfs3_marshall_wcc_attrs(r_dir_pre_attr,
-                                            &res.resok.dir_wcc.before.attributes);
-        } else {
-            res.resok.dir_wcc.before.attributes_follow = 0;
-        }
-
-        if ((r_dir_post_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.dir_wcc.after.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(r_dir_post_attr,
-                                        &res.resok.dir_wcc.after.attributes);
-        } else {
-            res.resok.dir_wcc.after.attributes_follow = 0;
-        }
+        chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, r_attr);
+        chimera_nfs3_set_wcc_data(&res.resok.dir_wcc, r_dir_pre_attr, r_dir_post_attr);
+    } else {
+        chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, r_dir_pre_attr, r_dir_post_attr);
     }
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
@@ -81,29 +62,28 @@ chimera_nfs3_mkdir_open_callback(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct MKDIR3args                *args   = req->args_mkdir;
     struct MKDIR3res                  res;
-    unsigned int                      mode;
+    struct chimera_vfs_attrs         *attr;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        if (args->attributes.mode.set_it) {
-            mode = args->attributes.mode.mode;
-        } else {
-            mode = S_IRWXU;
-        }
+        xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
+
+        chimera_nfs3_sattr3_to_va(attr, &args->attributes);
 
         chimera_vfs_mkdir(thread->vfs_thread,
                           handle,
                           args->where.name.str,
                           args->where.name.len,
-                          mode,
+                          attr,
                           CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
+                          CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_ATOMIC,
+                          CHIMERA_NFS3_ATTR_MASK,
                           chimera_nfs3_mkdir_complete,
                           req);
     } else {
-        res.status                                   = chimera_vfs_error_to_nfsstat3(error_code);
-        res.resfail.dir_wcc.before.attributes_follow = 0;
-        res.resfail.dir_wcc.after.attributes_follow  = 0;
+        res.status = chimera_vfs_error_to_nfsstat3(error_code);
+        chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
         shared->nfs_v3.send_reply_NFSPROC3_MKDIR(evpl, &res, msg);
         nfs_request_free(thread, req);
     }

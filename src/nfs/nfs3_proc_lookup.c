@@ -23,7 +23,7 @@ chimera_nfs3_lookup_complete(
 
     if (res.status == NFS3_OK) {
 
-        chimera_nfs_abort_if(!(attr->va_mask & CHIMERA_VFS_ATTR_FH),
+        chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
                              "NFS3 lookup: no file handle was returned");
 
         xdr_dbuf_opaque_copy(&res.resok.object.data,
@@ -31,24 +31,10 @@ chimera_nfs3_lookup_complete(
                              attr->va_fh_len,
                              msg->dbuf);
 
-        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.obj_attributes.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(attr,
-                                        &res.resok.obj_attributes.attributes);
-        } else {
-            res.resok.obj_attributes.attributes_follow = 0;
-        }
-
-        if ((dir_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) ==
-            CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.dir_attributes.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(dir_attr,
-                                        &res.resok.dir_attributes.attributes);
-        } else {
-            res.resok.dir_attributes.attributes_follow = 0;
-        }
+        chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
+        chimera_nfs3_set_post_op_attr(&res.resok.dir_attributes, dir_attr);
     } else {
-        res.resfail.dir_attributes.attributes_follow = 0;
+        chimera_nfs3_set_post_op_attr(&res.resfail.dir_attributes, dir_attr);
     }
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
@@ -81,6 +67,7 @@ chimera_nfs3_lookup_open_callback(
                            args->what.name.str,
                            args->what.name.len,
                            CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
+                           CHIMERA_NFS3_ATTR_MASK,
                            chimera_nfs3_lookup_complete,
                            req);
     } else {

@@ -13,7 +13,8 @@ chimera_vfs_symlink_complete(struct chimera_vfs_request *request)
 
     callback(request->status,
              &request->symlink.r_attr,
-             &request->symlink.r_dir_attr,
+             &request->symlink.r_dir_pre_attr,
+             &request->symlink.r_dir_post_attr,
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
@@ -28,7 +29,9 @@ chimera_vfs_symlink(
     int                            namelen,
     const char                    *target,
     int                            targetlen,
-    uint64_t                       attrmask,
+    uint64_t                       attr_mask,
+    uint64_t                       pre_attr_mask,
+    uint64_t                       post_attr_mask,
     chimera_vfs_symlink_callback_t callback,
     void                          *private_data)
 {
@@ -36,18 +39,20 @@ chimera_vfs_symlink(
 
     request = chimera_vfs_request_alloc(thread, fh, fhlen);
 
-    request->symlink.r_attr.va_mask     = 0;
-    request->symlink.r_dir_attr.va_mask = 0;
-
-    request->opcode             = CHIMERA_VFS_OP_SYMLINK;
-    request->complete           = chimera_vfs_symlink_complete;
-    request->symlink.name       = name;
-    request->symlink.namelen    = namelen;
-    request->symlink.target     = target;
-    request->symlink.targetlen  = targetlen;
-    request->symlink.attrmask   = attrmask;
-    request->proto_callback     = callback;
-    request->proto_private_data = private_data;
+    request->opcode                              = CHIMERA_VFS_OP_SYMLINK;
+    request->complete                            = chimera_vfs_symlink_complete;
+    request->symlink.name                        = name;
+    request->symlink.namelen                     = namelen;
+    request->symlink.target                      = target;
+    request->symlink.targetlen                   = targetlen;
+    request->symlink.r_attr.va_req_mask          = attr_mask;
+    request->symlink.r_attr.va_set_mask          = 0;
+    request->symlink.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
+    request->symlink.r_dir_pre_attr.va_set_mask  = 0;
+    request->symlink.r_dir_post_attr.va_req_mask = post_attr_mask;
+    request->symlink.r_dir_post_attr.va_set_mask = 0;
+    request->proto_callback                      = callback;
+    request->proto_private_data                  = private_data;
 
     chimera_vfs_dispatch(request);
 } /* chimera_vfs_symlink */

@@ -120,13 +120,14 @@ chimera_nfs4_readdir(
 
     res->resok4.reply.entries = NULL;
 
-    attrmask = chimera_nfs4_getattr2mask(args->attr_request,
-                                         args->num_attr_request);
+    attrmask = chimera_nfs4_attr2mask(args->attr_request,
+                                      args->num_attr_request);
 
     chimera_vfs_readdir(thread->vfs_thread,
                         req->fh,
                         req->fhlen,
                         attrmask,
+                        0,
                         args->cookie,
                         chimera_nfs4_readdir_callback,
                         chimera_nfs4_readdir_complete,

@@ -11,6 +11,7 @@ chimera_vfs_getrootfh(
 {
     uint8_t *fh8 = fh;
 
+    /* The root file handle is always a single zero byte */
     fh8[0]  = 0;
     *fh_len = 1;
 

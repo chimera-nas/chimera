@@ -20,24 +20,9 @@ chimera_nfs3_setattr_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-        if (pre_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.obj_wcc.before.attributes_follow = 1;
-            chimera_nfs3_marshall_wcc_attrs(pre_attr,
-                                            &res.resok.obj_wcc.before.attributes);
-        } else {
-            res.resok.obj_wcc.before.attributes_follow = 0;
-        }
-
-        if ((post_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.obj_wcc.after.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(post_attr,
-                                        &res.resok.obj_wcc.after.attributes);
-        } else {
-            res.resok.obj_wcc.after.attributes_follow = 0;
-        }
+        chimera_nfs3_set_wcc_data(&res.resok.obj_wcc, pre_attr, post_attr);
     } else {
-        res.resfail.obj_wcc.before.attributes_follow = 0;
-        res.resfail.obj_wcc.after.attributes_follow  = 0;
+        chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, pre_attr, post_attr);
     }
 
     shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, &res, msg);
@@ -61,15 +46,16 @@ chimera_nfs3_setattr(
 
     nfs3_dump_setattr(req, args);
 
-    attr = &req->setattr;
+    xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
 
     chimera_nfs3_sattr3_to_va(attr, &args->new_attributes);
 
     chimera_vfs_setattr(thread->vfs_thread,
                         args->object.data.data,
                         args->object.data.len,
-                        CHIMERA_NFS3_ATTR_MASK,
                         attr,
+                        CHIMERA_NFS3_ATTR_WCC_MASK,
+                        CHIMERA_NFS3_ATTR_MASK,
                         chimera_nfs3_setattr_complete,
                         req);
 } /* chimera_nfs3_setattr */

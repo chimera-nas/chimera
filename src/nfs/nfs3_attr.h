@@ -5,7 +5,7 @@
 #include "nfs3_xdr.h"
 #include "vfs/vfs.h"
 
-#define CHIMERA_NFS3_ATTR_MASK   ( \
+#define CHIMERA_NFS3_ATTR_MASK     ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \
             CHIMERA_VFS_ATTR_MODE | \
@@ -18,7 +18,12 @@
             CHIMERA_VFS_ATTR_MTIME | \
             CHIMERA_VFS_ATTR_CTIME)
 
-#define CHIMERA_NFS3_FSSTAT_MASK ( \
+#define CHIMERA_NFS3_ATTR_WCC_MASK ( \
+            CHIMERA_VFS_ATTR_SIZE | \
+            CHIMERA_VFS_ATTR_MTIME | \
+            CHIMERA_VFS_ATTR_CTIME)
+
+#define CHIMERA_NFS3_FSSTAT_MASK   ( \
             CHIMERA_VFS_ATTR_MASK_STATFS)
 
 static ftype3
@@ -41,44 +46,44 @@ chimera_nfs3_sattr3_to_va(
     struct chimera_vfs_attrs *attr,
     struct sattr3            *sattr)
 {
-    attr->va_mask = 0;
+    attr->va_req_mask = 0;
 
     if (sattr->mode.set_it) {
-        attr->va_mask |= CHIMERA_VFS_ATTR_MODE;
-        attr->va_mode  = sattr->mode.mode;
+        attr->va_req_mask |= CHIMERA_VFS_ATTR_MODE;
+        attr->va_mode      = sattr->mode.mode;
     }
 
     if (sattr->uid.set_it) {
-        attr->va_mask |= CHIMERA_VFS_ATTR_UID;
-        attr->va_uid   = sattr->uid.uid;
+        attr->va_req_mask |= CHIMERA_VFS_ATTR_UID;
+        attr->va_uid       = sattr->uid.uid;
     }
 
     if (sattr->gid.set_it) {
-        attr->va_mask |= CHIMERA_VFS_ATTR_GID;
-        attr->va_gid   = sattr->gid.gid;
+        attr->va_req_mask |= CHIMERA_VFS_ATTR_GID;
+        attr->va_gid       = sattr->gid.gid;
     }
 
     if (sattr->size.set_it) {
-        attr->va_mask |= CHIMERA_VFS_ATTR_SIZE;
-        attr->va_size  = sattr->size.size;
+        attr->va_req_mask |= CHIMERA_VFS_ATTR_SIZE;
+        attr->va_size      = sattr->size.size;
     }
 
     if (sattr->atime.set_it == SET_TO_CLIENT_TIME) {
-        attr->va_mask         |= CHIMERA_VFS_ATTR_ATIME;
+        attr->va_req_mask     |= CHIMERA_VFS_ATTR_ATIME;
         attr->va_atime.tv_sec  = sattr->atime.atime.seconds;
         attr->va_atime.tv_nsec = sattr->atime.atime.nseconds;
     } else if (sattr->atime.set_it == SET_TO_SERVER_TIME) {
-        attr->va_mask         |= CHIMERA_VFS_ATTR_ATIME;
+        attr->va_req_mask     |= CHIMERA_VFS_ATTR_ATIME;
         attr->va_atime.tv_sec  = 0;
         attr->va_atime.tv_nsec = CHIMERA_VFS_TIME_NOW;
     }
 
     if (sattr->mtime.set_it == SET_TO_CLIENT_TIME) {
-        attr->va_mask         |= CHIMERA_VFS_ATTR_MTIME;
+        attr->va_req_mask     |= CHIMERA_VFS_ATTR_MTIME;
         attr->va_mtime.tv_sec  = sattr->mtime.mtime.seconds;
         attr->va_mtime.tv_nsec = sattr->mtime.mtime.nseconds;
     } else if (sattr->mtime.set_it == SET_TO_SERVER_TIME) {
-        attr->va_mask         |= CHIMERA_VFS_ATTR_MTIME;
+        attr->va_req_mask     |= CHIMERA_VFS_ATTR_MTIME;
         attr->va_mtime.tv_sec  = 0;
         attr->va_mtime.tv_nsec = CHIMERA_VFS_TIME_NOW;
     }
@@ -120,3 +125,41 @@ chimera_nfs3_marshall_wcc_attrs(
     wcc->ctime.seconds  = attr->va_ctime.tv_sec;
     wcc->ctime.nseconds = attr->va_ctime.tv_nsec;
 } /* chimera_nfs3_marshall_wcc_attrs */
+
+static inline void
+chimera_nfs3_set_post_op_attr(
+    struct post_op_attr            *post_op_attr,
+    const struct chimera_vfs_attrs *attr)
+{
+    if (attr && (attr->va_set_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
+        post_op_attr->attributes_follow = 1;
+        chimera_nfs3_marshall_attrs(attr, &post_op_attr->attributes);
+    } else {
+        post_op_attr->attributes_follow = 0;
+    }
+} /* chimera_nfs3_set_post_op_attr */
+
+static inline void
+chimera_nfs3_set_pre_op_attr(
+    struct pre_op_attr             *pre_op_attr,
+    const struct chimera_vfs_attrs *attr)
+{
+
+    if (attr && (attr->va_set_mask & CHIMERA_NFS3_ATTR_WCC_MASK) == CHIMERA_NFS3_ATTR_WCC_MASK) {
+        pre_op_attr->attributes_follow = 1;
+        chimera_nfs3_marshall_wcc_attrs(attr, &pre_op_attr->attributes);
+    } else {
+        pre_op_attr->attributes_follow = 0;
+    }
+} /* chimera_nfs3_set_pre_op_attr */
+
+static inline void
+chimera_nfs3_set_wcc_data(
+    struct wcc_data                *wcc,
+    const struct chimera_vfs_attrs *pre_attr,
+    const struct chimera_vfs_attrs *post_attr)
+{
+    chimera_nfs3_set_pre_op_attr(&wcc->before, pre_attr);
+    chimera_nfs3_set_post_op_attr(&wcc->after, post_attr);
+} /* chimera_nfs3_set_wcc_data */
+

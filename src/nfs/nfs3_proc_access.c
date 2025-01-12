@@ -22,12 +22,7 @@ chimera_nfs3_access_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-        if ((attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.obj_attributes.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(attr, &res.resok.obj_attributes.attributes);
-        } else {
-            res.resok.obj_attributes.attributes_follow = 0;
-        }
+        chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
 
         res.resok.access = 0;
 
@@ -59,6 +54,8 @@ chimera_nfs3_access_complete(
                 res.resok.access |= ACCESS3_LOOKUP;
             }
         }
+    } else {
+        chimera_nfs3_set_post_op_attr(&res.resfail.obj_attributes, attr);
     }
 
     chimera_vfs_release(thread->vfs_thread, req->handle);

@@ -38,25 +38,9 @@ chimera_nfs3_write_complete(
                &shared->nfs_verifier,
                sizeof(res.resok.verf));
 
-        if ((pre_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.file_wcc.before.attributes_follow = 1;
-            chimera_nfs3_marshall_wcc_attrs(pre_attr,
-                                            &res.resok.file_wcc.before.attributes);
-        } else {
-            res.resok.file_wcc.before.attributes_follow = 0;
-        }
-
-        if ((post_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) == CHIMERA_NFS3_ATTR_MASK) {
-            res.resok.file_wcc.after.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(post_attr,
-                                        &res.resok.file_wcc.after.attributes);
-        } else {
-            res.resok.file_wcc.after.attributes_follow = 0;
-        }
-
+        chimera_nfs3_set_wcc_data(&res.resok.file_wcc, pre_attr, post_attr);
     } else {
-        res.resfail.file_wcc.before.attributes_follow = 0;
-        res.resfail.file_wcc.after.attributes_follow  = 0;
+        chimera_nfs3_set_wcc_data(&res.resfail.file_wcc, pre_attr, post_attr);
     }
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
@@ -88,6 +72,7 @@ chimera_nfs3_write_open_callback(
                           args->offset,
                           args->count,
                           (args->stable != UNSTABLE),
+                          CHIMERA_NFS3_ATTR_WCC_MASK,
                           CHIMERA_NFS3_ATTR_MASK,
                           args->data.iov,
                           args->data.niov,
@@ -96,8 +81,7 @@ chimera_nfs3_write_open_callback(
     } else {
         res.status =
             chimera_vfs_error_to_nfsstat3(error_code);
-        res.resfail.file_wcc.before.attributes_follow = 0;
-        res.resfail.file_wcc.after.attributes_follow  = 0;
+        chimera_nfs3_set_wcc_data(&res.resfail.file_wcc, NULL, NULL);
         shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, &res, msg);
         nfs_request_free(thread, req);
     }

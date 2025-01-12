@@ -19,12 +19,12 @@ chimera_nfs3_fsstat_complete(
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
-    if ((attr->va_mask & CHIMERA_NFS3_FSSTAT_MASK) != CHIMERA_NFS3_FSSTAT_MASK) {
+    if ((attr->va_set_mask & CHIMERA_NFS3_FSSTAT_MASK) != CHIMERA_NFS3_FSSTAT_MASK) {
         res.status = NFS3ERR_NOTSUPP;
     }
 
     if (res.status == NFS3_OK) {
-        res.resok.obj_attributes.attributes_follow = 0;
+        chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
 
         res.resok.tbytes   = attr->va_space_total;
         res.resok.fbytes   = attr->va_space_free;
@@ -33,6 +33,8 @@ chimera_nfs3_fsstat_complete(
         res.resok.ffiles   = attr->va_files_free;
         res.resok.afiles   = attr->va_files_used;
         res.resok.invarsec = 0;
+    } else {
+        chimera_nfs3_set_post_op_attr(&res.resfail.obj_attributes, attr);
     }
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
@@ -65,6 +67,7 @@ chimera_nfs3_fsstat_open_callback(
                             req);
     } else {
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
+        chimera_nfs3_set_post_op_attr(&res.resfail.obj_attributes, NULL);
         shared->nfs_v3.send_reply_NFSPROC3_FSSTAT(evpl, &res, msg);
         nfs_request_free(thread, req);
     }

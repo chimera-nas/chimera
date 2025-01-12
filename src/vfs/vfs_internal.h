@@ -232,14 +232,15 @@ chimera_vfs_copy_attr(
     struct chimera_vfs_attrs       *dest,
     const struct chimera_vfs_attrs *src)
 {
-    dest->va_mask = src->va_mask;
+    dest->va_req_mask = src->va_req_mask;
+    dest->va_set_mask = src->va_set_mask;
 
-    if (src->va_mask & CHIMERA_VFS_ATTR_FH) {
+    if (src->va_req_mask & CHIMERA_VFS_ATTR_FH) {
         memcpy(dest->va_fh, src->va_fh, src->va_fh_len);
         dest->va_fh_len = src->va_fh_len;
     }
 
-    if (src->va_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+    if (src->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
         dest->va_dev   = src->va_dev;
         dest->va_ino   = src->va_ino;
         dest->va_mode  = src->va_mode;
@@ -253,7 +254,7 @@ chimera_vfs_copy_attr(
         dest->va_ctime = src->va_ctime;
     }
 
-    if (src->va_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+    if (src->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         dest->va_space_avail = src->va_space_avail;
         dest->va_space_free  = src->va_space_free;
         dest->va_space_total = src->va_space_total;

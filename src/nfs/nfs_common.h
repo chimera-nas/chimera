@@ -64,7 +64,6 @@ struct nfs_request {
         struct nfs_nfs3_readdirplus_cursor readdirplus3_cursor;
         struct nfs_nfs4_readdir_cursor     readdir4_cursor;
         struct chimera_vfs_open_handle    *handle;
-        struct chimera_vfs_attrs           setattr;
     };
 };
 

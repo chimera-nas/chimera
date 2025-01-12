@@ -16,7 +16,7 @@ chimera_nfs4_lookup_complete(
     res->status = status;
 
     if (error_code == CHIMERA_VFS_OK) {
-        chimera_nfs_abort_if(!(attr->va_mask & CHIMERA_VFS_ATTR_FH),
+        chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
                              "NFS4 lookup: no file handle was returned");
 
         memcpy(req->fh, attr->va_fh, attr->va_fh_len);
@@ -46,6 +46,7 @@ chimera_nfs4_lookup_open_callback(
                            args->objname.data,
                            args->objname.len,
                            CHIMERA_VFS_ATTR_FH,
+                           0,
                            chimera_nfs4_lookup_complete,
                            req);
     } else {
@@ -64,7 +65,7 @@ chimera_nfs4_lookup(
     chimera_vfs_open(thread->vfs_thread,
                      req->fh,
                      req->fhlen,
-                     CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                      chimera_nfs4_lookup_open_callback,
                      req);
 } /* chimera_nfs4_lookup */

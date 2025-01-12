@@ -109,7 +109,7 @@ chimera_linux_stat_to_attr(
     struct stat              *st)
 {
 
-    attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
 
     attr->va_dev   = st->st_dev;
     attr->va_ino   = st->st_ino;
@@ -130,7 +130,7 @@ chimera_linux_statx_to_attr(
     struct statx             *stx)
 {
 
-    attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
 
     attr->va_dev           = ((uint64_t) stx->stx_dev_major << 32) | stx->stx_dev_minor;
     attr->va_ino           = stx->stx_ino;
@@ -154,7 +154,7 @@ chimera_linux_statvfs_to_attr(
     struct statvfs           *stvfs)
 {
 
-    attr->va_mask       |= CHIMERA_VFS_ATTR_MASK_STATFS;
+    attr->va_set_mask   |= CHIMERA_VFS_ATTR_MASK_STATFS;
     attr->va_space_total = stvfs->f_blocks * stvfs->f_bsize;
     attr->va_space_free  = stvfs->f_bavail * stvfs->f_bsize;
     attr->va_space_avail = attr->va_space_free;
@@ -313,17 +313,16 @@ linux_open_by_handle(
 static inline void
 chimera_linux_map_attrs(
     uint8_t                   fh_magic,
-    uint64_t                  attrmask,
     struct chimera_vfs_attrs *attr,
-    int                       fd,
-    const void               *fh,
-    int                       fhlen)
+    int                       fd)
 {
     int            rc;
     struct stat    st;
     struct statvfs stvfs;
 
-    if (attrmask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH)) {
+    attr->va_set_mask = 0;
+
+    if (attr->va_req_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH)) {
 
         rc = fstat(fd, &st);
 
@@ -334,23 +333,33 @@ chimera_linux_map_attrs(
         chimera_linux_stat_to_attr(attr, &st);
     }
 
-    if (attrmask & CHIMERA_VFS_ATTR_FH) {
-        if (fh) {
-            attr->va_mask |= CHIMERA_VFS_ATTR_FH;
-            memcpy(attr->va_fh, fh, fhlen);
-            attr->va_fh_len = fhlen;
-        } else {
-            rc = linux_get_fh(fh_magic, fd, "",
-                              attr->va_fh,
-                              &attr->va_fh_len);
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+        rc = fstatvfs(fd, &stvfs);
 
-            if (rc  == 0) {
-                attr->va_mask |= CHIMERA_VFS_ATTR_FH;
-            }
+        if (rc == 0) {
+            chimera_linux_statvfs_to_attr(attr, &stvfs);
         }
     }
 
-    if (attrmask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+} /* chimera_linux_map_attrs */
+
+static inline void
+chimera_linux_map_attrs_statx(
+    uint8_t                   fh_magic,
+    struct chimera_vfs_attrs *attr,
+    int                       fd,
+    struct statx             *stx)
+{
+    int            rc;
+    struct statvfs stvfs;
+
+    attr->va_set_mask = 0;
+
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+        chimera_linux_statx_to_attr(attr, stx);
+    }
+
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         rc = fstatvfs(fd, &stvfs);
 
         if (rc == 0) {
@@ -364,7 +373,6 @@ static inline int
 chimera_linux_map_child_attrs(
     uint8_t                     fh_magic,
     struct chimera_vfs_request *request,
-    uint64_t                    attrmask,
     struct chimera_vfs_attrs   *attr,
     int                         dirfd,
     const char                 *name)
@@ -373,7 +381,7 @@ chimera_linux_map_child_attrs(
     struct stat    st;
     struct statvfs stvfs;
 
-    if (attrmask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH)) {
+    if (attr->va_req_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH)) {
 
         rc = fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW);
 
@@ -384,7 +392,7 @@ chimera_linux_map_child_attrs(
         chimera_linux_stat_to_attr(attr, &st);
     }
 
-    if (attrmask & CHIMERA_VFS_ATTR_FH) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_FH) {
         rc = linux_get_fh(fh_magic, dirfd, name,
                           attr->va_fh,
                           &attr->va_fh_len);
@@ -393,14 +401,53 @@ chimera_linux_map_child_attrs(
             return chimera_linux_errno_to_status(errno);
         }
 
-        attr->va_mask |= CHIMERA_VFS_ATTR_FH;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
     }
 
-    if (attrmask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         rc = fstatvfs(dirfd, &stvfs);
 
         if (rc == 0) {
-            attr->va_mask |= CHIMERA_VFS_ATTR_MASK_STATFS;
+            chimera_linux_statvfs_to_attr(attr, &stvfs);
+        }
+    }
+
+    return CHIMERA_VFS_OK;
+} /* chimera_linux_map_child_attrs */
+
+static inline int
+chimera_linux_map_child_attrs_statx(
+    uint8_t                     fh_magic,
+    struct chimera_vfs_request *request,
+    struct chimera_vfs_attrs   *attr,
+    int                         dirfd,
+    const char                 *name,
+    struct statx               *stx)
+{
+    int            rc;
+    struct statvfs stvfs;
+
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+
+        chimera_linux_statx_to_attr(attr, stx);
+    }
+
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_FH) {
+        rc = linux_get_fh(fh_magic, dirfd, name,
+                          attr->va_fh,
+                          &attr->va_fh_len);
+
+        if (rc) {
+            return chimera_linux_errno_to_status(errno);
+        }
+
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
+    }
+
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+        rc = fstatvfs(dirfd, &stvfs);
+
+        if (rc == 0) {
             chimera_linux_statvfs_to_attr(attr, &stvfs);
         }
     }

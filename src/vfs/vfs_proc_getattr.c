@@ -30,12 +30,13 @@ chimera_vfs_getattr(
 
     request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
-    request->opcode             = CHIMERA_VFS_OP_GETATTR;
-    request->complete           = chimera_vfs_getattr_complete;
-    request->getattr.handle     = handle;
-    request->getattr.attr_mask  = req_attr_mask;
-    request->proto_callback     = callback;
-    request->proto_private_data = private_data;
+    request->opcode                     = CHIMERA_VFS_OP_GETATTR;
+    request->complete                   = chimera_vfs_getattr_complete;
+    request->getattr.handle             = handle;
+    request->getattr.r_attr.va_req_mask = req_attr_mask;
+    request->getattr.r_attr.va_set_mask = 0;
+    request->proto_callback             = callback;
+    request->proto_private_data         = private_data;
 
     chimera_vfs_dispatch(request);
 } /* chimera_vfs_getattr */

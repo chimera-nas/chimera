@@ -25,8 +25,10 @@ chimera_vfs_mkdir(
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
-    unsigned int                    mode,
-    uint64_t                        attrmask,
+    struct chimera_vfs_attrs       *attr,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
     chimera_vfs_mkdir_callback_t    callback,
     void                           *private_data)
 {
@@ -34,19 +36,21 @@ chimera_vfs_mkdir(
 
     request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
-    request->mkdir.r_attr.va_mask          = 0;
-    request->mkdir.r_dir_pre_attr.va_mask  = 0;
-    request->mkdir.r_dir_post_attr.va_mask = 0;
-
-    request->opcode             = CHIMERA_VFS_OP_MKDIR;
-    request->complete           = chimera_vfs_mkdir_complete;
-    request->mkdir.handle       = handle;
-    request->mkdir.name         = name;
-    request->mkdir.name_len     = namelen;
-    request->mkdir.mode         = mode;
-    request->mkdir.attrmask     = attrmask;
-    request->proto_callback     = callback;
-    request->proto_private_data = private_data;
+    request->opcode                            = CHIMERA_VFS_OP_MKDIR;
+    request->complete                          = chimera_vfs_mkdir_complete;
+    request->mkdir.handle                      = handle;
+    request->mkdir.name                        = name;
+    request->mkdir.name_len                    = namelen;
+    request->mkdir.set_attr                    = attr;
+    request->mkdir.set_attr->va_set_mask       = 0;
+    request->mkdir.r_attr.va_req_mask          = attr_mask;
+    request->mkdir.r_attr.va_set_mask          = 0;
+    request->mkdir.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
+    request->mkdir.r_dir_pre_attr.va_set_mask  = 0;
+    request->mkdir.r_dir_post_attr.va_req_mask = post_attr_mask;
+    request->mkdir.r_dir_post_attr.va_set_mask = 0;
+    request->proto_callback                    = callback;
+    request->proto_private_data                = private_data;
 
     chimera_vfs_dispatch(request);
 } /* chimera_vfs_mkdir */

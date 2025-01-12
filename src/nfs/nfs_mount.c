@@ -40,7 +40,7 @@ chimera_nfs_mount_lookup_complete(
         auth_flavors[0]                = AUTH_NONE;
         auth_flavors[1]                = AUTH_SYS;
 
-        chimera_nfs_abort_if(!(attr->va_mask & CHIMERA_VFS_ATTR_FH),
+        chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
                              "NFS mount: no file handle was returned");
 
         xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle,
@@ -68,12 +68,20 @@ chimera_nfs_mount_mnt(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
+    uint8_t                          *fh_magic;
+
+    xdr_dbuf_alloc_space(fh_magic, sizeof(fh_magic), msg->dbuf);
+
+    *fh_magic = CHIMERA_VFS_FH_MAGIC_ROOT;
 
     req = nfs_request_alloc(thread, conn, msg);
 
     chimera_vfs_lookup_path(thread->vfs_thread,
+                            fh_magic,
+                            sizeof(*fh_magic),
                             args->path.str,
                             args->path.len,
+                            CHIMERA_VFS_ATTR_FH,
                             0,
                             chimera_nfs_mount_lookup_complete,
                             req);

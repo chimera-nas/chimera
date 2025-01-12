@@ -30,14 +30,9 @@ chimera_nfs3_readdirplus_callback(
 
     xdr_dbuf_strncpy(entry, name, name, namelen, msg->dbuf);
 
-    if (attrs->va_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
-        entry->name_attributes.attributes_follow = 1;
-        chimera_nfs3_marshall_attrs(attrs, &entry->name_attributes.attributes);
-    } else {
-        entry->name_attributes.attributes_follow = 0;
-    }
+    chimera_nfs3_set_post_op_attr(&entry->name_attributes, attrs);
 
-    if (attrs->va_mask & CHIMERA_VFS_ATTR_FH) {
+    if (attrs->va_set_mask & CHIMERA_VFS_ATTR_FH) {
         entry->name_handle.handle_follows = 1;
 
         xdr_dbuf_opaque_copy(&entry->name_handle.handle.data,
@@ -86,14 +81,7 @@ chimera_nfs3_readdirplus_complete(
     res->status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res->status == NFS3_OK) {
-        if ((dir_attr->va_mask & CHIMERA_NFS3_ATTR_MASK) ==
-            CHIMERA_NFS3_ATTR_MASK) {
-            res->resok.dir_attributes.attributes_follow = 1;
-            chimera_nfs3_marshall_attrs(dir_attr,
-                                        &res->resok.dir_attributes.attributes);
-        } else {
-            res->resok.dir_attributes.attributes_follow = 0;
-        }
+        chimera_nfs3_set_post_op_attr(&res->resok.dir_attributes, dir_attr);
         res->resok.reply.eof     = !!eof;
         res->resok.reply.entries = cursor->entries;
         memcpy(res->resok.cookieverf,
@@ -118,7 +106,6 @@ chimera_nfs3_readdirplus(
     struct nfs_request                 *req;
     struct READDIRPLUS3res             *res;
     struct nfs_nfs3_readdirplus_cursor *cursor;
-    uint64_t                            attrmask;
 
     req = nfs_request_alloc(thread, conn, msg);
 
@@ -136,12 +123,11 @@ chimera_nfs3_readdirplus(
     cursor->entries = NULL;
     cursor->last    = NULL;
 
-    attrmask = CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH;
-
     chimera_vfs_readdir(thread->vfs_thread,
                         args->dir.data.data,
                         args->dir.data.len,
-                        attrmask,
+                        CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
+                        CHIMERA_NFS3_ATTR_MASK,
                         args->cookie,
                         chimera_nfs3_readdirplus_callback,
                         chimera_nfs3_readdirplus_complete,

@@ -38,7 +38,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
     }
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_abort_if(!(request->open_at.r_attr.va_mask & CHIMERA_VFS_ATTR_FH),
+        chimera_vfs_abort_if(!(request->open_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH),
                              "open_at: no fh returned from vfs module");
 
         fh_hash = XXH3_64bits(request->open_at.r_attr.va_fh,
@@ -88,7 +88,9 @@ chimera_vfs_open_at(
     int                             namelen,
     unsigned int                    flags,
     unsigned int                    mode,
-    uint64_t                        attrmask,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
     chimera_vfs_open_at_callback_t  callback,
     void                           *private_data)
 {
@@ -96,22 +98,21 @@ chimera_vfs_open_at(
 
     request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
-
-
-    request->open_at.r_attr.va_mask          = 0;
-    request->open_at.r_dir_pre_attr.va_mask  = 0;
-    request->open_at.r_dir_post_attr.va_mask = 0;
-
-    request->opcode             = CHIMERA_VFS_OP_OPEN_AT;
-    request->complete           = chimera_vfs_open_complete;
-    request->open_at.handle     = handle;
-    request->open_at.name       = name;
-    request->open_at.namelen    = namelen;
-    request->open_at.flags      = flags;
-    request->open_at.mode       = mode;
-    request->open_at.attrmask   = attrmask;
-    request->proto_callback     = callback;
-    request->proto_private_data = private_data;
+    request->opcode                              = CHIMERA_VFS_OP_OPEN_AT;
+    request->complete                            = chimera_vfs_open_complete;
+    request->open_at.handle                      = handle;
+    request->open_at.name                        = name;
+    request->open_at.namelen                     = namelen;
+    request->open_at.flags                       = flags;
+    request->open_at.mode                        = mode;
+    request->open_at.r_attr.va_req_mask          = attr_mask;
+    request->open_at.r_attr.va_set_mask          = 0;
+    request->open_at.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
+    request->open_at.r_dir_pre_attr.va_set_mask  = 0;
+    request->open_at.r_dir_post_attr.va_req_mask = post_attr_mask;
+    request->open_at.r_dir_post_attr.va_set_mask = 0;
+    request->proto_callback                      = callback;
+    request->proto_private_data                  = private_data;
 
     chimera_vfs_dispatch(request);
 } /* chimera_vfs_open */
