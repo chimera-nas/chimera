@@ -77,7 +77,7 @@ chimera_nfs3_mkdir_open_callback(
                           args->where.name.len,
                           attr,
                           CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
-                          CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_ATOMIC,
+                          CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
                           CHIMERA_NFS3_ATTR_MASK,
                           chimera_nfs3_mkdir_complete,
                           req);
