@@ -2,6 +2,7 @@
 
 #include "nfs3_xdr.h"
 #include "nfs4_xdr.h"
+#include "nfs_internal.h"
 #include "uthash/uthash.h"
 #include "vfs/vfs.h"
 
@@ -9,8 +10,8 @@
 
 struct nfs4_state {
     struct stateid4                 nfs4_state_id;
-    uint32_t                        nfs4_state_type;
-    uint32_t                        nfs4_state_active;
+    uint16_t                        nfs4_state_type;
+    uint16_t                        nfs4_state_active;
     struct chimera_vfs_open_handle *nfs4_state_handle;
 };
 
@@ -30,8 +31,9 @@ struct nfs4_client {
 struct nfs4_session {
     uint8_t               nfs4_session_id[NFS4_SESSIONID_SIZE];
     uint64_t              nfs4_session_clientid;
+    uint32_t              num_free_slots;
     struct nfs4_state     nfs4_session_state[NFS4_SESSION_MAX_STATE];
-    int32_t               nfs4_session_max_slot;
+    uint16_t              free_slot[NFS4_SESSION_MAX_STATE];
     uint32_t              nfs4_session_implicit;
     struct nfs4_client   *nfs4_session_client;
     struct channel_attrs4 nfs4_session_fore_attrs;
@@ -81,8 +83,13 @@ nfs4_destroy_session(
 static inline struct nfs4_state *
 nfs4_session_alloc_slot(struct nfs4_session *session)
 {
-    uint32_t           slot  = ++session->nfs4_session_max_slot;
-    struct nfs4_state *state = &session->nfs4_session_state[slot];
+    uint32_t           slot;
+    struct nfs4_state *state;
+
+    chimera_nfs_abort_if(session->num_free_slots == 0, "no free session slots");
+
+    slot  = session->free_slot[--session->num_free_slots];
+    state = &session->nfs4_session_state[slot];
 
     state->nfs4_state_id.seqid = slot;
     state->nfs4_state_active   = 1;
@@ -98,10 +105,6 @@ nfs4_session_free_slot(
 
     session->nfs4_session_state[slot].nfs4_state_active = 0;
 
-    while (session->nfs4_session_max_slot >= 0 &&
-           session->nfs4_session_state[session->nfs4_session_max_slot].
-           nfs4_state_active) {
-        --session->nfs4_session_max_slot;
-    }
+    session->free_slot[session->num_free_slots++] = slot;
 
 } /* nfs4_session_free_slot */

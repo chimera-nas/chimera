@@ -123,7 +123,7 @@ chimera_vfs_open_at(
     const char                     *name,
     int                             namelen,
     unsigned int                    flags,
-    unsigned int                    mode,
+    struct chimera_vfs_attrs       *attr,
     uint64_t                        attr_mask,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,

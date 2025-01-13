@@ -1158,6 +1158,8 @@ memfs_open_at(
         inode->file.max_blocks = 0;
         inode->file.num_blocks = 0;
 
+        memfs_apply_attrs(inode, request->open_at.set_attr, &request->start_time);
+
         dirent = memfs_dirent_alloc(thread,
                                     inode->inum,
                                     inode->gen,
@@ -1259,12 +1261,17 @@ memfs_read(
         return;
     }
 
-    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
+    if (request->read.handle->vfs_private) {
+        inode = (struct memfs_inode *) request->read.handle->vfs_private;
+        pthread_mutex_lock(&inode->lock);
+    } else {
+        inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
-    if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
+        if (unlikely(!inode)) {
+            request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
     }
 
     if (offset + length > inode->size) {
@@ -1354,12 +1361,17 @@ memfs_write(
         CHIMERA_MEMFS_BLOCK_SHIFT;
     left = request->write.length;
 
-    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
+    if (request->write.handle->vfs_private) {
+        inode = (struct memfs_inode *) request->write.handle->vfs_private;
+        pthread_mutex_lock(&inode->lock);
+    } else {
+        inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
-    if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
+        if (unlikely(!inode)) {
+            request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
     }
 
     memfs_map_attrs(&request->write.r_pre_attr, inode);

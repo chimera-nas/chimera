@@ -432,10 +432,9 @@ chimera_linux_open_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int   parent_fd;
-    int   flags;
-    int   fd;
-    char *scratch = (char *) request->plugin_data;
+    int      parent_fd, fd, flags, rc;
+    uint32_t mode;
+    char    *scratch = (char *) request->plugin_data;
 
     TERM_STR(fullname, request->open_at.name, request->open_at.namelen, scratch);
 
@@ -461,14 +460,29 @@ chimera_linux_open_at(
         flags |= O_PATH;
     }
 
+    if (request->open_at.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+        mode                                    = request->open_at.set_attr->va_mode;
+        request->open_at.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+    } else {
+        mode = 0600;
+    }
+
     fd = openat(parent_fd,
                 fullname,
                 flags,
-                S_IRWXU /*XXX*/);
+                mode);
 
     if (fd < 0) {
         chimera_linux_error("linux_open_at: openat() failed: %s",
                             strerror(errno));
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    rc = chimera_linux_set_attrs(fd, request->open_at.set_attr, CHIMERA_VFS_ATTR_MODE);
+
+    if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;

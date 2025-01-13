@@ -1354,6 +1354,8 @@ demofs_open_at(
 
         rb_tree_init(&inode->file.extents);
 
+        demofs_apply_attrs(inode, request->open_at.set_attr, &request->start_time);
+
         dirent = demofs_dirent_alloc(thread,
                                      inode->inum,
                                      inode->gen,

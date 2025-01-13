@@ -263,7 +263,7 @@ struct chimera_vfs_request {
             const char                     *name;
             int                             namelen;
             uint32_t                        flags;
-            uint32_t                        mode;
+            struct chimera_vfs_attrs       *set_attr;
             struct chimera_vfs_attrs        r_attr;
             struct chimera_vfs_attrs        r_dir_pre_attr;
             struct chimera_vfs_attrs        r_dir_post_attr;

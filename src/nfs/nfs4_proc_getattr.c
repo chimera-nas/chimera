@@ -73,7 +73,7 @@ chimera_nfs4_getattr(
     chimera_vfs_open(thread->vfs_thread,
                      req->fh,
                      req->fhlen,
-                     CHIMERA_VFS_OPEN_PATH,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                      chimera_nfs4_getattr_open_callback,
                      req);
 } /* chimera_nfs4_getattr */

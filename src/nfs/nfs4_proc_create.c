@@ -23,6 +23,27 @@ chimera_nfs4_create_complete(
 } /* chimera_nfs4_create_complete */
 
 static void
+chimera_nfs4_create_hdl_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
+    void                           *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct CREATE4res  *res = &req->res_compound.resarray[req->index].opcreate;
+
+    res->status = NFS4_OK;
+
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    chimera_vfs_release(req->thread->vfs_thread, handle);
+
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_create_complete */
+
+
+static void
 chimera_nfs4_create_open_callback(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
@@ -53,8 +74,21 @@ chimera_nfs4_create_open_callback(
 
         switch (args->objtype.type) {
             case NF4REG:
+                chimera_vfs_open_at(
+                    thread->vfs_thread,
+                    handle,
+                    args->objname.data,
+                    args->objname.len,
+                    CHIMERA_VFS_OPEN_CREATE,
+                    attr,
+                    0,
+                    0,
+                    0,
+                    chimera_nfs4_create_hdl_complete,
+                    req);
                 break;
             case NF4DIR:
+                req->handle = handle;
                 chimera_vfs_mkdir(thread->vfs_thread,
                                   handle,
                                   args->objname.data,
@@ -71,6 +105,20 @@ chimera_nfs4_create_open_callback(
             case NF4CHR:
                 break;
             case NF4LNK:
+                req->handle = handle;
+                chimera_vfs_symlink(
+                    thread->vfs_thread,
+                    handle->fh,
+                    handle->fh_len,
+                    args->objname.data,
+                    args->objname.len,
+                    args->objtype.linkdata.data,
+                    args->objtype.linkdata.len,
+                    0,
+                    0,
+                    0,
+                    chimera_nfs4_create_complete,
+                    req);
                 break;
             case NF4SOCK:
                 break;

@@ -22,7 +22,7 @@ main(
         libnfs_test_fail(&env);
     }
 
-    rc = nfs_create(env.nfs, "/testfile", O_CREAT | O_WRONLY, 0, &fh);
+    rc = nfs_create(env.nfs, "/testfile", O_CREAT | O_WRONLY, 0644, &fh);
 
     if (rc < 0) {
         fprintf(stderr, "Failed to create file: %s\n", nfs_get_error(env.nfs));

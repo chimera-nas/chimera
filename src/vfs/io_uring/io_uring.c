@@ -805,6 +805,7 @@ chimera_io_uring_open_at(
     struct chimera_io_uring_thread *thread = private_data;
     int                             parent_fd;
     int                             flags;
+    uint32_t                        mode;
     char                           *scratch = (char *) request->plugin_data;
     struct io_uring_sqe            *sqe;
 
@@ -836,7 +837,15 @@ chimera_io_uring_open_at(
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    io_uring_prep_openat(sqe, parent_fd, fullname, flags, S_IRWXU);
+    if (request->open_at.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+        mode = request->open_at.set_attr->va_mode;
+
+        request->open_at.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+    } else {
+        mode = 0600;
+    }
+
+    io_uring_prep_openat(sqe, parent_fd, fullname, flags, mode);
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_open_at */

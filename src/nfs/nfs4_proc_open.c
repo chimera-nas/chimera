@@ -1,5 +1,6 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
+#include "nfs4_attr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
@@ -26,10 +27,6 @@ chimera_nfs4_open_at_complete(
         state                    = nfs4_session_alloc_slot(session);
         state->nfs4_state_handle = handle;
 
-        chimera_nfs_debug("open complete: seqid %u private %lu handle %p",
-                          state->nfs4_state_id.seqid,
-                          handle->vfs_private);
-
         res->status                            = NFS4_OK;
         res->resok4.stateid                    = state->nfs4_state_id;
         res->resok4.cinfo.atomic               = 0;
@@ -38,6 +35,9 @@ chimera_nfs4_open_at_complete(
         res->resok4.rflags                     = 0;
         res->resok4.num_attrset                = 0;
         res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+
+        memcpy(req->fh, handle->fh, handle->fh_len);
+        req->fhlen = handle->fh_len;
     }
 
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
@@ -51,9 +51,11 @@ chimera_nfs4_open_parent_complete(
     struct chimera_vfs_open_handle *parent_handle,
     void                           *private_data)
 {
-    struct nfs_request *req   = private_data;
-    struct OPEN4args   *args  = &req->args_compound->argarray[req->index].opopen;
-    unsigned int        flags = 0;
+    struct nfs_request       *req   = private_data;
+    struct evpl_rpc2_msg     *msg   = req->msg;
+    struct OPEN4args         *args  = &req->args_compound->argarray[req->index].opopen;
+    unsigned int              flags = 0;
+    struct chimera_vfs_attrs *attr;
 
     req->handle = parent_handle;
 
@@ -64,8 +66,27 @@ chimera_nfs4_open_parent_complete(
         return;
     }
 
+    xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
+
+    attr->va_req_mask = 0;
+
     if (args->openhow.opentype == OPEN4_CREATE) {
         flags |= CHIMERA_VFS_OPEN_CREATE;
+
+        switch (args->openhow.how.mode) {
+            case UNCHECKED4:
+            case GUARDED4:
+                chimera_nfs4_unmarshall_attrs(attr,
+                                              args->openhow.how.createattrs.num_attrmask,
+                                              args->openhow.how.createattrs.attrmask,
+                                              args->openhow.how.createattrs.attr_vals.data,
+                                              args->openhow.how.createattrs.attr_vals.len);
+                break;
+            case EXCLUSIVE4:
+            case EXCLUSIVE4_1:
+                break;
+        } /* switch */
+
     }
 
     switch (args->claim.claim) {
@@ -75,8 +96,8 @@ chimera_nfs4_open_parent_complete(
                                 args->claim.file.data,
                                 args->claim.file.len,
                                 flags,
-                                0,
-                                0,
+                                attr,
+                                CHIMERA_VFS_ATTR_FH,
                                 0,
                                 0,
                                 chimera_nfs4_open_at_complete,
@@ -98,7 +119,7 @@ chimera_nfs4_open(
     chimera_vfs_open(thread->vfs_thread,
                      req->fh,
                      req->fhlen,
-                     CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                      chimera_nfs4_open_parent_complete,
                      req);
 } /* chimera_nfs4_open */

@@ -1,5 +1,6 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
+#include "nfs4_session.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 void
@@ -16,6 +17,8 @@ chimera_nfs4_close(
     unsigned int         seqid = args->open_stateid.seqid;
 
     state = &session->nfs4_session_state[seqid];
+
+    nfs4_session_free_slot(session, seqid);
 
     chimera_vfs_release(thread->vfs_thread, state->nfs4_state_handle);
 

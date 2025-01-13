@@ -140,6 +140,7 @@ nfs4_create_session(
     struct nfs4_client  *client  = NULL;
     struct nfs4_session *session = NULL;
     char                 session_id_str[80];
+    uint32_t             i;
 
     pthread_mutex_lock(&table->nfs4_ct_lock);
 
@@ -153,7 +154,11 @@ nfs4_create_session(
 
         session->nfs4_session_implicit = implicit;
         session->nfs4_session_clientid = client_id;
-        session->nfs4_session_max_slot = -1;
+
+        for (i = 0; i < NFS4_SESSION_MAX_STATE; i++) {
+            session->free_slot[i] = NFS4_SESSION_MAX_STATE - (i + 1);
+        }
+        session->num_free_slots = NFS4_SESSION_MAX_STATE;
 
         if (fore_attrs) {
             session->nfs4_session_fore_attrs = *fore_attrs;

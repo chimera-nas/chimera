@@ -1246,6 +1246,7 @@ cairn_readdir(
         rc = cairn_inode_get_inum(thread, txn, dirent_value->inum, 0, &dirent_ih);
 
         if (rc) {
+            rocksdb_iter_next(iter);
             continue;
         }
 
@@ -1386,6 +1387,8 @@ cairn_open_at(
         new_inode.atime      = request->start_time;
         new_inode.mtime      = request->start_time;
         new_inode.ctime      = request->start_time;
+
+        cairn_apply_attrs(&new_inode, request->open_at.set_attr, &request->start_time);
 
         new_dirent_value.inum     = new_inode.inum;
         new_dirent_value.name_len = request->open_at.namelen;

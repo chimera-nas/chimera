@@ -66,8 +66,23 @@ chimera_nfs4_compound_process(
         case OP_READDIR:
             chimera_nfs4_readdir(thread, req, argop, resop);
             break;
+        case OP_READ:
+            chimera_nfs4_read(thread, req, argop, resop);
+            break;
+        case OP_WRITE:
+            chimera_nfs4_write(thread, req, argop, resop);
+            break;
+        case OP_COMMIT:
+            chimera_nfs4_commit(thread, req, argop, resop);
+            break;
         case OP_CLOSE:
             chimera_nfs4_close(thread, req, argop, resop);
+            break;
+        case OP_REMOVE:
+            chimera_nfs4_remove(thread, req, argop, resop);
+            break;
+        case OP_READLINK:
+            chimera_nfs4_readlink(thread, req, argop, resop);
             break;
         case OP_SETCLIENTID:
             chimera_nfs4_setclientid(thread, req, argop, resop);

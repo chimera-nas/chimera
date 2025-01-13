@@ -57,8 +57,10 @@ chimera_nfs3_create_open_at_parent_complete(
     void                           *private_data)
 {
     struct nfs_request               *req    = private_data;
+    struct evpl_rpc2_msg             *msg    = req->msg;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct CREATE3args               *args   = req->args_create;
+    struct chimera_vfs_attrs         *attr;
 
     if (error_code != CHIMERA_VFS_OK) {
         struct CREATE3res res;
@@ -71,12 +73,16 @@ chimera_nfs3_create_open_at_parent_complete(
 
     req->handle = parent_handle;
 
+    xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
+
+    chimera_nfs3_sattr3_to_va(attr, &args->how.obj_attributes);
+
     chimera_vfs_open_at(thread->vfs_thread,
                         parent_handle,
                         args->where.name.str,
                         args->where.name.len,
                         CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_INFERRED,
-                        S_IWUSR | S_IRUSR,
+                        attr,
                         CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
                         CHIMERA_NFS3_ATTR_WCC_MASK,
                         CHIMERA_NFS3_ATTR_MASK,

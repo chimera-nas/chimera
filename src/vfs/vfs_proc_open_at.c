@@ -87,7 +87,7 @@ chimera_vfs_open_at(
     const char                     *name,
     int                             namelen,
     unsigned int                    flags,
-    unsigned int                    mode,
+    struct chimera_vfs_attrs       *set_attr,
     uint64_t                        attr_mask,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
@@ -95,6 +95,8 @@ chimera_vfs_open_at(
     void                           *private_data)
 {
     struct chimera_vfs_request *request;
+
+    chimera_vfs_abort_if(!set_attr, "no setattr provided");
 
     request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
@@ -104,7 +106,7 @@ chimera_vfs_open_at(
     request->open_at.name                        = name;
     request->open_at.namelen                     = namelen;
     request->open_at.flags                       = flags;
-    request->open_at.mode                        = mode;
+    request->open_at.set_attr                    = set_attr;
     request->open_at.r_attr.va_req_mask          = attr_mask;
     request->open_at.r_attr.va_set_mask          = 0;
     request->open_at.r_dir_pre_attr.va_req_mask  = pre_attr_mask;

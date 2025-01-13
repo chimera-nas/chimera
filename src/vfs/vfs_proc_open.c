@@ -118,7 +118,7 @@ chimera_vfs_open(
         memcpy(handle->fh, fh, fhlen);
         handle->fh_len      = fhlen;
         handle->fh_hash     = fh_hash;
-        handle->vfs_private =  0xdeadbeefUL;
+        handle->vfs_private = 0;
 
         callback(CHIMERA_VFS_OK, handle, private_data);
         return;

@@ -13,10 +13,11 @@ chimera_nfs4_readdir_callback(
     void                           *arg)
 {
     struct nfs_request             *req = arg;
+    struct evpl_rpc2_msg           *msg = req->msg;
+    uint32_t                        dbuf_cur;
+    uint32_t                        dbuf_before = msg->dbuf->used;
     struct entry4                  *entry;
-    struct READDIR4args            *args = &req->args_compound->argarray[req->
-                                                                         index].
-        opreaddir;
+    struct READDIR4args            *args = &req->args_compound->argarray[req->index].opreaddir;
     struct nfs_nfs4_readdir_cursor *cursor;
 
     cursor = &req->readdir4_cursor;
@@ -24,12 +25,6 @@ chimera_nfs4_readdir_callback(
     if (cursor->count >= args->dircount) {
         return -1;
     }
-
-    chimera_nfs_debug("readdir callback: cookie %llu, name %.*s, attrs %p",
-                      cookie,
-                      namelen,
-                      name,
-                      attrs);
 
     xdr_dbuf_alloc_space(entry, sizeof(*entry), req->msg->dbuf);
 
@@ -57,6 +52,14 @@ chimera_nfs4_readdir_callback(
                                 entry->attrs.attr_vals.data,
                                 &entry->attrs.attr_vals.len);
 
+    dbuf_cur = msg->dbuf->used - dbuf_before;
+
+    if (cursor->count + dbuf_cur > args->maxcount) {
+        return -1;
+    }
+
+    cursor->count += dbuf_cur;
+
     if (cursor->entries) {
         cursor->last->nextentry = entry;
         cursor->last            = entry;
@@ -64,8 +67,6 @@ chimera_nfs4_readdir_callback(
         cursor->entries = entry;
         cursor->last    = entry;
     }
-
-    cursor->count++;
 
     return 0;
 } /* chimera_nfs4_readdir_callback */
@@ -93,10 +94,6 @@ chimera_nfs4_readdir_complete(
     res->resok4.reply.eof     = eof;
     res->resok4.reply.entries = cursor->entries;
 
-    chimera_nfs_debug("readdir complete: cookie %llu, error %d",
-                      cookie,
-                      error_code);
-
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_readdir_complete */
 
@@ -114,7 +111,7 @@ chimera_nfs4_readdir(
 
     cursor = &req->readdir4_cursor;
 
-    cursor->count   = 0;
+    cursor->count   = 256;
     cursor->entries = NULL;
     cursor->last    = NULL;
 
