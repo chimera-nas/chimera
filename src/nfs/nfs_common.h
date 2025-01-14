@@ -31,6 +31,8 @@ struct nfs_request {
     struct nfs4_session              *session;
     uint8_t                           fh[NFS4_FHSIZE];
     int                               fhlen;
+    uint8_t                           saved_fh[NFS4_FHSIZE];
+    int                               saved_fhlen;
     int                               index;
     struct evpl_rpc2_conn            *conn;
     struct evpl_rpc2_msg             *msg;

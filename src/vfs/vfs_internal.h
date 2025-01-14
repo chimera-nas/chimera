@@ -259,5 +259,8 @@ chimera_vfs_copy_attr(
         dest->va_space_free  = src->va_space_free;
         dest->va_space_total = src->va_space_total;
         dest->va_space_used  = src->va_space_used;
+        dest->va_files_total = src->va_files_total;
+        dest->va_files_free  = src->va_files_free;
+        dest->va_files_avail = src->va_files_avail;
     }
 } /* chimera_vfs_copy_attr */

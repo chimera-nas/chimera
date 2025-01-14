@@ -160,9 +160,9 @@ chimera_linux_statvfs_to_attr(
     attr->va_space_avail = attr->va_space_free;
     attr->va_space_used  = attr->va_space_total - attr->va_space_free;
 
-    attr->va_files_used  = stvfs->f_files;
+    attr->va_files_avail = stvfs->f_ffree;
     attr->va_files_free  = stvfs->f_ffree;
-    attr->va_files_total = attr->va_files_used + attr->va_files_free;
+    attr->va_files_total = stvfs->f_files;
 } /* linux_statvfs_to_chimera_attr */
 
 static int
@@ -320,9 +320,7 @@ chimera_linux_map_attrs(
     struct stat    st;
     struct statvfs stvfs;
 
-    attr->va_set_mask = 0;
-
-    if (attr->va_req_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH)) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
 
         rc = fstat(fd, &st);
 
@@ -454,4 +452,3 @@ chimera_linux_map_child_attrs_statx(
 
     return CHIMERA_VFS_OK;
 } /* chimera_linux_map_child_attrs */
-

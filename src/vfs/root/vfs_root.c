@@ -99,14 +99,12 @@ static void
 chimera_vfs_root_lookup_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
     void                     *private_data)
 {
     struct chimera_vfs_request *request = private_data;
 
-    request->status            = error_code;
-    request->lookup.r_attr     = *attr;
-    request->lookup.r_dir_attr = *dir_attr;
+    request->status        = error_code;
+    request->lookup.r_attr = *attr;
 
     request->complete(request);
 
@@ -143,7 +141,6 @@ chimera_vfs_root_lookup(
         share->path,
         strlen(share->path),
         request->lookup.r_attr.va_req_mask,
-        request->lookup.r_dir_attr.va_req_mask,
         chimera_vfs_root_lookup_complete,
         request);
 
@@ -154,14 +151,12 @@ static void
 chimera_vfs_root_lookup_path_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
     void                     *private_data)
 {
     struct chimera_vfs_request *request = private_data;
 
-    request->status                 = error_code;
-    request->lookup_path.r_attr     = *attr;
-    request->lookup_path.r_dir_attr = *dir_attr;
+    request->status             = error_code;
+    request->lookup_path.r_attr = *attr;
 
     request->complete(request);
 
@@ -222,24 +217,100 @@ chimera_vfs_root_lookup_path(
         sharepath,
         sharepathlen,
         request->lookup_path.r_attr.va_req_mask,
-        request->lookup_path.r_dir_attr.va_req_mask,
         chimera_vfs_root_lookup_path_complete,
         request);
 } /* chimera_vfs_root_lookup_path */
+
+struct chimera_vfs_root_readdir_entry {
+    uint64_t                    cookie;
+    const char                 *name;
+    struct chimera_vfs_attrs    attr;
+    struct chimera_vfs_request *request;
+};
+
+#define CHIMERA_VFS_ROOT_MAX_READDIR 16
+
+struct chimera_vfs_root_readdir_ctx {
+    uint32_t                              pending;
+    uint32_t                              complete;
+    uint32_t                              num_entries;
+    struct chimera_vfs_root_readdir_entry entries[CHIMERA_VFS_ROOT_MAX_READDIR];
+};
+
+static void
+chimera_vfs_root_readdir_complete(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_root_readdir_ctx   *ctx = request->plugin_data;
+    struct chimera_vfs_root_readdir_entry *entry;
+    int                                    i, rc, eof = 1;
+    uint64_t                               cookie = 0;
+
+
+    for (i = 0; i < ctx->num_entries; i++) {
+        entry = &ctx->entries[i];
+
+        rc = request->readdir.callback(
+            entry->cookie,
+            entry->attr.va_ino,
+            entry->name,
+            strlen(entry->name),
+            &entry->attr,
+            request->proto_private_data);
+
+        if (rc) {
+            eof = 0;
+            break;
+        }
+
+        cookie = entry->cookie;
+    }
+
+    request->status           = CHIMERA_VFS_OK;
+    request->readdir.r_cookie = cookie;
+    request->readdir.r_eof    = eof;
+    request->complete(request);
+} /* chimera_vfs_root_readdir_complete */
+
+static void
+chimera_vfs_root_readdir_lookup_path_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_root_readdir_entry *entry   = private_data;
+    struct chimera_vfs_request            *request = entry->request;
+    struct chimera_vfs_root_readdir_ctx   *ctx     = request->plugin_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        abort();
+    }
+
+    entry->attr = *attr;
+
+    ctx->pending--;
+
+    if (ctx->complete && ctx->pending == 0) {
+        chimera_vfs_root_readdir_complete(request);
+    }
+
+} /* chimera_vfs_root_readdir_lookup_path_complete */
 
 static void
 chimera_vfs_root_readdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_vfs_thread *thread = request->thread;
-    struct chimera_vfs        *vfs    = thread->vfs;
-    struct chimera_vfs_share  *share;
-    struct chimera_vfs_attrs   attr;
-    int                        i      = 0;
-    uint64_t                   cookie = request->readdir.cookie;
+    struct chimera_vfs_thread             *thread = request->thread;
+    struct chimera_vfs                    *vfs    = thread->vfs;
+    struct chimera_vfs_share              *share;
+    int                                    i      = 0;
+    uint64_t                               cookie = request->readdir.cookie;
+    struct chimera_vfs_root_readdir_ctx   *ctx    = request->plugin_data;
+    struct chimera_vfs_root_readdir_entry *entry;
 
-    attr.va_set_mask = 0;
+    ctx->pending     = 0;
+    ctx->complete    = 0;
+    ctx->num_entries = 0;
 
     DL_FOREACH(vfs->shares, share)
     {
@@ -248,28 +319,34 @@ chimera_vfs_root_readdir(
             continue;
         }
 
-        /* XXX We are not going to get the attributes of the share path,
-         * we could but it would be a bit fussy.  Consequently the
-         * inum we are reeturning for the dirent will not match the actual
-         * share root inode number.
-         */
+        entry = &ctx->entries[ctx->num_entries++];
 
-        request->readdir.callback(
-            i,
-            i,
-            share->name,
-            strlen(share->name),
-            &attr,
-            request->proto_private_data);
+        entry->cookie           = i;
+        entry->name             = share->name;
+        entry->attr.va_req_mask = request->readdir.attr_mask;
+        entry->attr.va_set_mask = 0;
+        entry->request          = request;
+        ctx->pending++;
+
+        chimera_vfs_lookup_path(
+            thread,
+            &share->module->fh_magic,
+            sizeof(share->module->fh_magic),
+            share->path,
+            strlen(share->path),
+            request->readdir.attr_mask,
+            chimera_vfs_root_readdir_lookup_path_complete,
+            entry);
 
         i++;
 
-        request->readdir.r_cookie = i;
     } /* DL_FOREACH */
 
-    request->status        = CHIMERA_VFS_OK;
-    request->readdir.r_eof = 1;
-    request->complete(request);
+    ctx->complete = 1;
+
+    if (ctx->pending == 0) {
+        chimera_vfs_root_readdir_complete(request);
+    }
 } /* chimera_vfs_root_readdir */
 
 static void

@@ -22,7 +22,6 @@ static void
 chimera_nfs_mount_lookup_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
     void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
@@ -82,7 +81,6 @@ chimera_nfs_mount_mnt(
                             args->path.str,
                             args->path.len,
                             CHIMERA_VFS_ATTR_FH,
-                            0,
                             chimera_nfs_mount_lookup_complete,
                             req);
 

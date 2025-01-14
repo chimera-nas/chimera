@@ -645,12 +645,20 @@ chimera_io_uring_lookup_path(
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
-    } else {
-        request->status                          = CHIMERA_VFS_OK;
-        request->lookup_path.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
+        close(mount_fd);
+        request->complete(request);
+        return;
     }
 
+    request->lookup_path.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->lookup_path.r_attr,
+                            mount_fd);
+
     close(mount_fd);
+
+    request->status = CHIMERA_VFS_OK;
 
     request->complete(request);
 } /* chimera_io_uring_lookup_path */

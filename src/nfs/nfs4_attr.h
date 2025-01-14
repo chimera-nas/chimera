@@ -46,6 +46,15 @@ chimera_nfs4_attr2mask(
                     case FATTR4_FSID:
                         attr_mask |= CHIMERA_VFS_ATTR_DEV;
                         break;
+                    case FATTR4_FILES_AVAIL:
+                        attr_mask |= CHIMERA_VFS_ATTR_SPACE_AVAIL;
+                        break;
+                    case FATTR4_FILES_FREE:
+                        attr_mask |= CHIMERA_VFS_ATTR_SPACE_FREE;
+                        break;
+                    case FATTR4_FILES_TOTAL:
+                        attr_mask |= CHIMERA_VFS_ATTR_SPACE_TOTAL;
+                        break;
                     case FATTR4_UNIQUE_HANDLES:
                         attr_mask |= CHIMERA_VFS_ATTR_INUM;
                         break;
@@ -58,7 +67,24 @@ chimera_nfs4_attr2mask(
                     case FATTR4_FILEHANDLE:
                         attr_mask |= CHIMERA_VFS_ATTR_FH;
                         break;
-                    // Add more cases as needed for other attributes
+                    case FATTR4_OWNER:
+                        attr_mask |= CHIMERA_VFS_ATTR_UID;
+                        break;
+                    case FATTR4_OWNER_GROUP:
+                        attr_mask |= CHIMERA_VFS_ATTR_GID;
+                        break;
+                    case FATTR4_SPACE_AVAIL:
+                        attr_mask |= CHIMERA_VFS_ATTR_SPACE_AVAIL;
+                        break;
+                    case FATTR4_SPACE_FREE:
+                        attr_mask |= CHIMERA_VFS_ATTR_SPACE_FREE;
+                        break;
+                    case FATTR4_SPACE_TOTAL:
+                        attr_mask |= CHIMERA_VFS_ATTR_SPACE_TOTAL;
+                        break;
+                    case FATTR4_SPACE_USED:
+                        attr_mask |= CHIMERA_VFS_ATTR_SPACE_USED;
+                        break;
                     default:
                         break;
                 } /* switch */
@@ -226,10 +252,18 @@ chimera_nfs4_marshall_attrs(
                                             FATTR4_SPACE_USED |
                                             FATTR4_TIME_ACCESS |
                                             FATTR4_TIME_MODIFY |
-                                            FATTR4_TIME_METADATA);
+                                            FATTR4_TIME_METADATA |
+                                            FATTR4_FILES_AVAIL |
+                                            FATTR4_FILES_FREE |
+                                            FATTR4_FILES_TOTAL |
+                                            FATTR4_MAXNAME |
+                                            FATTR4_SPACE_AVAIL |
+                                            FATTR4_SPACE_FREE |
+                                            FATTR4_SPACE_TOTAL);
         }
 
-        if (req_mask[0] & (1 << FATTR4_TYPE)) {
+        if (req_mask[0] & (1 << FATTR4_TYPE) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
             rsp_mask[0]  |= (1 << FATTR4_TYPE);
             *num_rsp_mask = 1;
 
@@ -266,7 +300,8 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, 0);
         }
 
-        if (req_mask[0] & (1 << FATTR4_SIZE)) {
+        if ((req_mask[0] & (1 << FATTR4_SIZE)) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
             rsp_mask[0]  |= (1 << FATTR4_SIZE);
             *num_rsp_mask = 1;
 
@@ -303,14 +338,40 @@ chimera_nfs4_marshall_attrs(
 
         }
 
-        if (req_mask[0] & (1 << FATTR4_FILEID)) {
+        if (req_mask[0] & (1 << FATTR4_FILEID) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_INUM)) {
             rsp_mask[0]  |= (1 << FATTR4_FILEID);
             *num_rsp_mask = 1;
 
             chimera_nfs4_attr_append_uint64(&attrs, attr->va_ino);
         }
 
-        if (req_mask[0] & (1 << FATTR4_FILEHANDLE)) {
+        if (req_mask[0] & (1 << FATTR4_FILES_AVAIL) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_FILES_FREE)) {
+            rsp_mask[0]  |= (1 << FATTR4_FILES_AVAIL);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint64(&attrs, attr->va_files_free);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_FILES_FREE) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_FILES_FREE)) {
+            rsp_mask[0]  |= (1 << FATTR4_FILES_FREE);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint64(&attrs, attr->va_files_free);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_FILES_TOTAL) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_FILES_TOTAL)) {
+            rsp_mask[0]  |= (1 << FATTR4_FILES_TOTAL);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint64(&attrs, attr->va_files_total);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_FILEHANDLE) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
             rsp_mask[0]  |= (1 << FATTR4_FILEHANDLE);
             *num_rsp_mask = 1;
 
@@ -318,45 +379,82 @@ chimera_nfs4_marshall_attrs(
             memcpy(attrs, attr->va_fh, attr->va_fh_len);
             attrs += attr->va_fh_len;
         }
+
+        if (req_mask[0] & (1 << FATTR4_MAXNAME)) {
+            rsp_mask[0]  |= (1 << FATTR4_MAXNAME);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint32(&attrs, 255);
+        }
     }
 
     if (num_req_mask >= 2) {
-        if (req_mask[1] & (1 << (FATTR4_MODE - 32))) {
+        if ((req_mask[1] & (1 << (FATTR4_MODE - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
             rsp_mask[1]  |= (1 << (FATTR4_MODE - 32));
             *num_rsp_mask = 2;
 
             chimera_nfs4_attr_append_uint32(&attrs, attr->va_mode & ~S_IFMT);
         }
 
-        if (req_mask[1] & (1 << (FATTR4_NUMLINKS - 32))) {
+        if ((req_mask[1] & (1 << (FATTR4_NUMLINKS - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_NLINK)) {
             rsp_mask[1]  |= (1 << (FATTR4_NUMLINKS - 32));
             *num_rsp_mask = 2;
 
             chimera_nfs4_attr_append_uint32(&attrs, attr->va_nlink);
         }
 
-        if (req_mask[1] & (1 << (FATTR4_OWNER - 32))) {
+        if ((req_mask[1] & (1 << (FATTR4_OWNER - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_UID)) {
             rsp_mask[1]  |= (1 << (FATTR4_OWNER - 32));
             *num_rsp_mask = 2;
 
             chimera_nfs4_attr_append_utf8str(&attrs, "root", 4);
         }
 
-        if (req_mask[1] & (1 << (FATTR4_OWNER_GROUP - 32))) {
+        if ((req_mask[1] & (1 <<  (FATTR4_SPACE_AVAIL - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_SPACE_AVAIL)) {
+            rsp_mask[1]  |= (1 <<  (FATTR4_SPACE_AVAIL - 32));
+            *num_rsp_mask = 2;
+
+            chimera_nfs4_attr_append_uint64(&attrs, attr->va_space_avail);
+        }
+
+        if ((req_mask[1] & (1 << (FATTR4_SPACE_FREE - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_SPACE_FREE)) {
+            rsp_mask[1]  |= (1 << (FATTR4_SPACE_FREE - 32));
+            *num_rsp_mask = 2;
+
+            chimera_nfs4_attr_append_uint64(&attrs, attr->va_space_free);
+        }
+
+        if ((req_mask[1] & (1 << (FATTR4_SPACE_TOTAL - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_SPACE_TOTAL)) {
+            rsp_mask[1]  |= (1 << (FATTR4_SPACE_TOTAL - 32));
+            *num_rsp_mask = 2;
+
+            chimera_nfs4_attr_append_uint64(&attrs, attr->va_space_total);
+        }
+
+        if ((req_mask[1] & (1 << (FATTR4_OWNER_GROUP - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_GID)) {
             rsp_mask[1]  |= (1 << (FATTR4_OWNER_GROUP - 32));
             *num_rsp_mask = 2;
 
             chimera_nfs4_attr_append_utf8str(&attrs, "root", 4);
         }
 
-        if (req_mask[1] & (1 << (FATTR4_SPACE_USED - 32))) {
+        if ((req_mask[1] & (1 << (FATTR4_SPACE_USED - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_SPACE_USED)) {
             rsp_mask[1]  |= (1 << (FATTR4_SPACE_USED - 32));
             *num_rsp_mask = 2;
 
             chimera_nfs4_attr_append_uint64(&attrs, attr->va_size);
         }
 
-        if (req_mask[1] & (1 << (FATTR4_TIME_ACCESS - 32))) {
+        if ((req_mask[1] & (1 << (FATTR4_TIME_ACCESS - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME)) {
             rsp_mask[1]  |= (1 << (FATTR4_TIME_ACCESS - 32));
             *num_rsp_mask = 2;
 
@@ -364,7 +462,8 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, attr->va_atime.tv_nsec);
         }
 
-        if (req_mask[1] & (1 << (FATTR4_TIME_MODIFY - 32))) {
+        if ((req_mask[1] & (1 << (FATTR4_TIME_MODIFY - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
             rsp_mask[1]  |= (1 << (FATTR4_TIME_MODIFY - 32));
             *num_rsp_mask = 2;
 
@@ -372,7 +471,8 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, attr->va_mtime.tv_nsec);
         }
 
-        if (req_mask[1] & (1 << (FATTR4_TIME_METADATA - 32))) {
+        if ((req_mask[1] & (1 << (FATTR4_TIME_METADATA - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_CTIME)) {
             rsp_mask[1]  |= (1 << (FATTR4_TIME_METADATA - 32));
             *num_rsp_mask = 2;
 

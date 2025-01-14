@@ -51,6 +51,9 @@ chimera_nfs4_compound_process(
         case OP_GETATTR:
             chimera_nfs4_getattr(thread, req, argop, resop);
             break;
+        case OP_SETATTR:
+            chimera_nfs4_setattr(thread, req, argop, resop);
+            break;
         case OP_CREATE:
             chimera_nfs4_create(thread, req, argop, resop);
             break;
@@ -59,6 +62,15 @@ chimera_nfs4_compound_process(
             break;
         case OP_PUTFH:
             chimera_nfs4_putfh(thread, req, argop, resop);
+            break;
+        case OP_SAVEFH:
+            chimera_nfs4_savefh(thread, req, argop, resop);
+            break;
+        case OP_LINK:
+            chimera_nfs4_link(thread, req, argop, resop);
+            break;
+        case OP_RENAME:
+            chimera_nfs4_rename(thread, req, argop, resop);
             break;
         case OP_OPEN:
             chimera_nfs4_open(thread, req, argop, resop);
@@ -124,6 +136,8 @@ chimera_nfs4_compound(
     req->args_compound        = args;
     req->res_compound.status  = NFS4_OK;
     req->res_compound.tag.len = 0;
+    req->fhlen                = 0;
+    req->saved_fhlen          = 0;
 
     xdr_dbuf_reserve(&req->res_compound,
                      resarray,

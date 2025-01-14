@@ -630,6 +630,17 @@ memfs_map_attrs(
         attr->va_rdev       = (42UL << 32) | 42;
     }
 
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+        attr->va_set_mask   |= CHIMERA_VFS_ATTR_MASK_STATFS;
+        attr->va_space_avail = 0;
+        attr->va_space_free  = 0;
+        attr->va_space_total = 0;
+        attr->va_space_used  = 0;
+        attr->va_files_total = 0;
+        attr->va_files_free  = 0;
+        attr->va_files_avail = 0;
+    }
+
 } /* memfs_map_attrs */
 
 static inline void

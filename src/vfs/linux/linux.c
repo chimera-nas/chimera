@@ -265,7 +265,6 @@ chimera_linux_lookup_path(
         request->complete(request);
         return;
     }
-
     rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
                       mount_fd,
                       fullpath,
@@ -274,10 +273,19 @@ chimera_linux_lookup_path(
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
-    } else {
-        request->status      = CHIMERA_VFS_OK;
-        r_attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
+        close(mount_fd);
+        request->complete(request);
+        return;
     }
+
+    r_attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            r_attr,
+                            mount_fd);
+
+
+    request->status = CHIMERA_VFS_OK;
 
     close(mount_fd);
 

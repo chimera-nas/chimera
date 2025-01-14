@@ -7,6 +7,7 @@ static void
 chimera_nfs3_setattr_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {

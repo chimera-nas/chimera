@@ -790,7 +790,7 @@ demofs_map_attrs(
         attr->va_space_avail = 0;
         attr->va_space_free  = 0;
         attr->va_files_total = 0;
-        attr->va_files_used  = 0;
+        attr->va_files_avail = 0;
         attr->va_files_free  = 0;
 
         pthread_mutex_lock(&shared->lock);
@@ -809,11 +809,11 @@ demofs_map_attrs(
         for (int i = 0; i < shared->num_inode_list; i++) {
             pthread_mutex_lock(&shared->inode_list[i].lock);
             attr->va_files_total += shared->inode_list[i].total_inodes;
-            attr->va_files_used  += shared->inode_list[i].total_inodes;
             pthread_mutex_unlock(&shared->inode_list[i].lock);
         }
 
-        attr->va_files_free = attr->va_files_total - attr->va_files_used;
+        attr->va_files_free  = 0;
+        attr->va_files_avail = 0;
 
     }
 

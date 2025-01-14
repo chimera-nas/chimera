@@ -31,7 +31,7 @@ chimera_nfs3_fsstat_complete(
         res.resok.abytes   = attr->va_space_used;
         res.resok.tfiles   = attr->va_files_total;
         res.resok.ffiles   = attr->va_files_free;
-        res.resok.afiles   = attr->va_files_used;
+        res.resok.afiles   = attr->va_files_avail;
         res.resok.invarsec = 0;
     } else {
         chimera_nfs3_set_post_op_attr(&res.resfail.obj_attributes, attr);

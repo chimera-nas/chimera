@@ -30,7 +30,6 @@ chimera_vfs_lookup(
 typedef void (*chimera_vfs_lookup_path_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
     void                     *private_data);
 
 void
@@ -41,7 +40,6 @@ chimera_vfs_lookup_path(
     const char                        *path,
     int                                pathlen,
     uint64_t                           attr_mask,
-    uint64_t                           dir_attr_mask,
     chimera_vfs_lookup_path_callback_t callback,
     void                              *private_data);
 
@@ -61,6 +59,7 @@ chimera_vfs_getattr(
 typedef void (*chimera_vfs_setattr_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data);
 

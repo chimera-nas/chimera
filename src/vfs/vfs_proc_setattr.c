@@ -13,6 +13,7 @@ chimera_vfs_setattr_complete(struct chimera_vfs_request *request)
 
     callback(request->status,
              &request->setattr.r_pre_attr,
+             request->setattr.set_attr,
              &request->setattr.r_post_attr,
              request->proto_private_data);
 
