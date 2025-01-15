@@ -15,7 +15,17 @@ chimera_nfs4_create_complete(
     struct nfs_request *req = private_data;
     struct CREATE4res  *res = &req->res_compound.resarray[req->index].opcreate;
 
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs4_compound_complete(req,
+                                       chimera_nfs4_errno_to_nfsstat4(error_code));
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        return;
+    }
+
     res->status = NFS4_OK;
+
+    memcpy(req->fh, req->handle->fh, req->handle->fh_len);
+    req->fhlen = req->handle->fh_len;
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 

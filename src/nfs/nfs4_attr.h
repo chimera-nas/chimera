@@ -207,6 +207,19 @@ chimera_nfs4_attr_append_utf8str(
     *attrs += len + pad;
 } /* chimera_nfs4_attr_append_utf8str */
 
+static void
+chimera_nfs4_attr_append_utf8str_from_uint64(
+    void   **attrs,
+    uint64_t value)
+{
+    char str[21];
+    int  len;
+
+    len = snprintf(str, sizeof(str), "%lu", value);
+
+    chimera_nfs4_attr_append_utf8str(attrs, str, len);
+} /* chimera_nfs4_attr_append_utf8str_from_uintt64 */
+
 static int
 chimera_nfs4_marshall_attrs(
     const struct chimera_vfs_attrs *attr,
@@ -485,7 +498,7 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[1]  |= (1 << (FATTR4_OWNER - 32));
             *num_rsp_mask = 2;
 
-            chimera_nfs4_attr_append_utf8str(&attrs, "root", 4);
+            chimera_nfs4_attr_append_utf8str_from_uint64(&attrs, attr->va_uid);
         }
 
         if ((req_mask[1] & (1 << (FATTR4_OWNER_GROUP - 32))) &&
@@ -493,7 +506,7 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[1]  |= (1 << (FATTR4_OWNER_GROUP - 32));
             *num_rsp_mask = 2;
 
-            chimera_nfs4_attr_append_utf8str(&attrs, "root", 4);
+            chimera_nfs4_attr_append_utf8str_from_uint64(&attrs, attr->va_gid);
         }
 
         if ((req_mask[1] & (1 <<  (FATTR4_SPACE_AVAIL - 32))) &&
