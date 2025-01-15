@@ -102,6 +102,9 @@ chimera_nfs4_compound_process(
         case OP_SETCLIENTID_CONFIRM:
             chimera_nfs4_setclientid_confirm(thread, req, argop, resop);
             break;
+        case OP_EXCHANGE_ID:
+            chimera_nfs4_exchange_id(thread, req, argop, resop);
+            break;
         default:
             chimera_nfs_error("Unsupported operation: %d", argop->argop);
             chimera_nfs4_compound_process(req, NFS4ERR_OP_ILLEGAL);
