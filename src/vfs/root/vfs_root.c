@@ -91,6 +91,7 @@ chimera_vfs_root_getattr(
     attr->va_dev   = 0;
     attr->va_rdev  = 0;
 
+    request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_vfs_getattr_root */
 

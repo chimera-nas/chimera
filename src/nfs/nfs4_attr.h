@@ -338,6 +338,13 @@ chimera_nfs4_marshall_attrs(
 
         }
 
+        if (req_mask[0] & (1 << FATTR4_LEASE_TIME)) {
+            rsp_mask[0]  |= (1 << FATTR4_LEASE_TIME);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint32(&attrs, 600);
+        }
+
         if (req_mask[0] & (1 << FATTR4_FILEID) &&
             (attr->va_set_mask & CHIMERA_VFS_ATTR_INUM)) {
             rsp_mask[0]  |= (1 << FATTR4_FILEID);
