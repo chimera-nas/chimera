@@ -155,3 +155,8 @@ void chimera_nfs3_commit(
     struct evpl_rpc2_msg  *msg,
     void                  *private_data);
 
+void chimera_nfs3_secinfo_no_name(
+    struct evpl           *evpl,
+    struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_msg  *msg,
+    void                  *private_data);
