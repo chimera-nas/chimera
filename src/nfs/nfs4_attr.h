@@ -245,12 +245,12 @@ chimera_nfs4_marshall_attrs(
                                             FATTR4_LEASE_TIME |
                                             FATTR4_RDATTR_ERROR |
                                             /* acl */
-                                            /* aclsupport */
-                                            /* archive */
-                                            /* cansettime */
-                                            /* case_insensitive */
-                                            /* case_preserving */
-                                            /* chown_restricted */
+                                            FATTR4_ACLSUPPORT |
+                                            FATTR4_ARCHIVE |
+                                            FATTR4_CANSETTIME |
+                                            FATTR4_CASE_INSENSITIVE |
+                                            FATTR4_CASE_PRESERVING |
+                                            FATTR4_CHOWN_RESTRICTED |
                                             FATTR4_FILEHANDLE |
                                             FATTR4_FILEID |
                                             FATTR4_FILES_AVAIL |
@@ -307,7 +307,7 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[0]  |= (1 << FATTR4_FH_EXPIRE_TYPE);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, 1);
+            chimera_nfs4_attr_append_uint32(&attrs, FH4_PERSISTENT);
         }
 
         if (req_mask[0] & (1 << FATTR4_CHANGE)) {
@@ -330,14 +330,14 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[0]  |= (1 << FATTR4_LINK_SUPPORT);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, 0);
+            chimera_nfs4_attr_append_uint32(&attrs, 1);
         }
 
         if (req_mask[0] & (1 << FATTR4_SYMLINK_SUPPORT)) {
             rsp_mask[0]  |= (1 << FATTR4_SYMLINK_SUPPORT);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, 0);
+            chimera_nfs4_attr_append_uint32(&attrs, 1);
         }
 
         if (req_mask[0] & (1 << FATTR4_NAMED_ATTR)) {
@@ -368,6 +368,48 @@ chimera_nfs4_marshall_attrs(
             *num_rsp_mask = 1;
 
             chimera_nfs4_attr_append_uint32(&attrs, 600);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_ACLSUPPORT)) {
+            rsp_mask[0]  |= (1 << FATTR4_ACLSUPPORT);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint32(&attrs, 0);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_ARCHIVE)) {
+            rsp_mask[0]  |= (1 << FATTR4_ARCHIVE);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint32(&attrs, 0);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_CANSETTIME)) {
+            rsp_mask[0]  |= (1 << FATTR4_CANSETTIME);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint32(&attrs, 1);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_CASE_INSENSITIVE)) {
+            rsp_mask[0]  |= (1 << FATTR4_CASE_INSENSITIVE);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint32(&attrs, 0);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_CASE_PRESERVING)) {
+            rsp_mask[0]  |= (1 << FATTR4_CASE_PRESERVING);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint32(&attrs, 1);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_CHOWN_RESTRICTED)) {
+            rsp_mask[0]  |= (1 << FATTR4_CHOWN_RESTRICTED);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint32(&attrs, 0);
         }
 
         if (req_mask[0] & (1 << FATTR4_FILEHANDLE) &&
