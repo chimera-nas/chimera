@@ -29,11 +29,12 @@ chimera_nfs4_exchange_id(
 
     res->eir_status                           = NFS4_OK;
     res->eir_resok4.eir_clientid              = client_id;
-    res->eir_resok4.eir_sequenceid            = 0;
-    res->eir_resok4.eir_flags                 = 0;
+    res->eir_resok4.eir_sequenceid            = 1;
+    res->eir_resok4.eir_flags                 = EXCHGID4_FLAG_USE_NON_PNFS;
     res->eir_resok4.eir_state_protect.spr_how = SP4_NONE;
     res->eir_resok4.num_eir_server_impl_id    = 1;
 
+    xdr_dbuf_alloc_space(res->eir_resok4.eir_server_impl_id, sizeof(struct nfs_impl_id4), msg->dbuf);
     xdr_dbuf_memcpy(&res->eir_resok4.eir_server_impl_id[0].nii_domain, "chimera.org", sizeof("chimera.org"), msg->dbuf);
     xdr_dbuf_memcpy(&res->eir_resok4.eir_server_impl_id[0].nii_name, "chimera", sizeof("chimera"), msg->dbuf);
 
