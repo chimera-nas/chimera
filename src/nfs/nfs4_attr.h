@@ -232,51 +232,51 @@ chimera_nfs4_marshall_attrs(
 
             chimera_nfs4_attr_append_uint32(&attrs, 2);
             chimera_nfs4_attr_append_uint32(&attrs,
-                                            FATTR4_SUPPORTED_ATTRS |
-                                            FATTR4_TYPE |
-                                            FATTR4_FH_EXPIRE_TYPE |
-                                            FATTR4_CHANGE |
-                                            FATTR4_SIZE |
-                                            FATTR4_LINK_SUPPORT |
-                                            FATTR4_SYMLINK_SUPPORT |
-                                            FATTR4_NAMED_ATTR |
-                                            FATTR4_FSID |
-                                            FATTR4_UNIQUE_HANDLES |
-                                            FATTR4_LEASE_TIME |
-                                            FATTR4_RDATTR_ERROR |
+                                            (1 << FATTR4_SUPPORTED_ATTRS) |
+                                            (1 << FATTR4_TYPE) |
+                                            (1 << FATTR4_FH_EXPIRE_TYPE) |
+                                            (1 << FATTR4_CHANGE) |
+                                            (1 << FATTR4_SIZE) |
+                                            (1 << FATTR4_LINK_SUPPORT) |
+                                            (1 << FATTR4_SYMLINK_SUPPORT) |
+                                            (1 << FATTR4_NAMED_ATTR) |
+                                            (1 << FATTR4_FSID) |
+                                            (1 << FATTR4_UNIQUE_HANDLES) |
+                                            (1 << FATTR4_LEASE_TIME) |
+                                            (1 << FATTR4_RDATTR_ERROR) |
                                             /* acl */
-                                            FATTR4_ACLSUPPORT |
-                                            FATTR4_ARCHIVE |
-                                            FATTR4_CANSETTIME |
-                                            FATTR4_CASE_INSENSITIVE |
-                                            FATTR4_CASE_PRESERVING |
-                                            FATTR4_CHOWN_RESTRICTED |
-                                            FATTR4_FILEHANDLE |
-                                            FATTR4_FILEID |
-                                            FATTR4_FILES_AVAIL |
-                                            FATTR4_FILES_FREE |
-                                            FATTR4_FILES_TOTAL |
+                                            (1 << FATTR4_ACLSUPPORT) |
+                                            (1 << FATTR4_ARCHIVE) |
+                                            (1 << FATTR4_CANSETTIME) |
+                                            (1 << FATTR4_CASE_INSENSITIVE) |
+                                            (1 << FATTR4_CASE_PRESERVING) |
+                                            (1 << FATTR4_CHOWN_RESTRICTED) |
+                                            (1 << FATTR4_FILEHANDLE) |
+                                            (1 << FATTR4_FILEID) |
+                                            (1 << FATTR4_FILES_AVAIL) |
+                                            (1 << FATTR4_FILES_FREE) |
+                                            (1 << FATTR4_FILES_TOTAL) |
                                             /* fs_locations */
                                             /* hidden */
                                             /* homogeneous */
                                             /* maxfilesize */
                                             /* maxlink */
-                                            FATTR4_MAXNAME
+                                            (1 << FATTR4_MAXNAME)
 
                                             /* maxread */
                                             /* maxwrite */);
 
             chimera_nfs4_attr_append_uint32(&attrs,
-                                            (FATTR4_NUMLINKS |
-                                             FATTR4_OWNER |
-                                             FATTR4_OWNER_GROUP |
-                                             FATTR4_SPACE_USED |
-                                             FATTR4_TIME_ACCESS |
-                                             FATTR4_TIME_MODIFY |
-                                             FATTR4_TIME_METADATA |
-                                             FATTR4_SPACE_AVAIL |
-                                             FATTR4_SPACE_FREE |
-                                             FATTR4_SPACE_TOTAL) - 32);
+                                            (1UL << (FATTR4_NUMLINKS - 32)) |
+                                            (1UL << (FATTR4_OWNER - 32)) |
+                                            (1UL << (FATTR4_OWNER_GROUP - 32)) |
+                                            (1UL << (FATTR4_SPACE_USED - 32)) |
+                                            (1UL << (FATTR4_TIME_ACCESS - 32)) |
+                                            (1UL << (FATTR4_TIME_MODIFY - 32)) |
+                                            (1UL << (FATTR4_TIME_METADATA - 32)) |
+                                            (1UL << (FATTR4_SPACE_AVAIL - 32)) |
+                                            (1UL << (FATTR4_SPACE_FREE - 32)) |
+                                            (1UL << (FATTR4_SPACE_TOTAL - 32)));
         }
 
         if (req_mask[0] & (1 << FATTR4_TYPE) &&
