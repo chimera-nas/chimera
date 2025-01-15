@@ -850,6 +850,9 @@ memfs_mkdir(
     struct chimera_vfs_attrs *r_attr          = &request->mkdir.r_attr;
     struct chimera_vfs_attrs *r_dir_pre_attr  = &request->mkdir.r_dir_pre_attr;
     struct chimera_vfs_attrs *r_dir_post_attr = &request->mkdir.r_dir_post_attr;
+    struct timespec           now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     /* Optimistically allocate an inode */
     inode = memfs_inode_alloc_thread(thread);
@@ -860,9 +863,9 @@ memfs_mkdir(
     inode->gid         = 0;
     inode->nlink       = 2;
     inode->mode        = S_IFDIR | 0755;
-    inode->atime       = request->start_time;
-    inode->mtime       = request->start_time;
-    inode->ctime       = request->start_time;
+    inode->atime       = now;
+    inode->mtime       = now;
+    inode->ctime       = now;
     inode->dir.dirents = NULL;
 
     memfs_apply_attrs(inode, request->mkdir.set_attr);
@@ -914,7 +917,7 @@ memfs_mkdir(
 
     parent_inode->nlink++;
 
-    parent_inode->mtime = request->start_time;
+    parent_inode->mtime = now;
 
     memfs_map_attrs(r_dir_post_attr, parent_inode);
 
@@ -933,6 +936,9 @@ memfs_remove(
 {
     struct memfs_inode  *parent_inode, *inode;
     struct memfs_dirent *dirent;
+    struct timespec      now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -980,7 +986,7 @@ memfs_remove(
     }
 
     parent_inode->nlink--;
-    parent_inode->mtime = request->start_time;
+    parent_inode->mtime = now;
     HASH_DEL(parent_inode->dir.dirents, dirent);
 
     if (S_ISDIR(inode->mode)) {
@@ -1126,6 +1132,9 @@ memfs_open_at(
     struct memfs_inode  *parent_inode, *inode = NULL;
     struct memfs_dirent *dirent;
     unsigned int         flags = request->open_at.flags;
+    struct timespec      now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1165,9 +1174,9 @@ memfs_open_at(
         inode->gid             = 0;
         inode->nlink           = 1;
         inode->mode            = S_IFREG |  0644;
-        inode->atime           = request->start_time;
-        inode->mtime           = request->start_time;
-        inode->ctime           = request->start_time;
+        inode->atime           = now;
+        inode->mtime           = now;
+        inode->ctime           = now;
         inode->file.blocks     = NULL;
         inode->file.max_blocks = 0;
         inode->file.num_blocks = 0;
@@ -1183,7 +1192,7 @@ memfs_open_at(
         HASH_ADD(hh, parent_inode->dir.dirents, name, dirent->name_len, dirent);
 
         parent_inode->nlink++;
-        parent_inode->mtime = request->start_time;
+        parent_inode->mtime = now;
     } else {
         inode = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
@@ -1262,6 +1271,9 @@ memfs_read(
     uint32_t                 block_offset, left, block_len;
     struct evpl_iovec       *iov;
     int                      niov = 0;
+    struct timespec          now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     offset = request->read.offset;
     length = request->read.length;
@@ -1339,7 +1351,7 @@ memfs_read(
         left        -= block_len;
     }
 
-    inode->atime = request->start_time;
+    inode->atime = now;
 
     memfs_map_attrs(&request->read.r_attr, inode);
 
@@ -1366,6 +1378,9 @@ memfs_write(
     struct evpl_iovec_cursor cursor, old_block_cursor;
     uint64_t                 first_block, last_block, bi;
     uint32_t                 block_offset, left, block_len;
+    struct timespec          now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     evpl_iovec_cursor_init(&cursor, request->write.iov, request->write.niov);
 
@@ -1482,7 +1497,7 @@ memfs_write(
         inode->space_used = (inode->size + 4095) & ~4095;
     }
 
-    inode->mtime = request->start_time;
+    inode->mtime = now;
 
     memfs_map_attrs(&request->write.r_post_attr, inode);
 
@@ -1504,6 +1519,9 @@ memfs_symlink(
 {
     struct memfs_inode  *parent_inode, *inode;
     struct memfs_dirent *dirent, *existing_dirent;
+    struct timespec      now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     /* Optimistically allocate an inode */
     inode = memfs_inode_alloc_thread(thread);
@@ -1514,9 +1532,9 @@ memfs_symlink(
     inode->gid        = 0;
     inode->nlink      = 1;
     inode->mode       = S_IFLNK | 0755;
-    inode->atime      = request->start_time;
-    inode->mtime      = request->start_time;
-    inode->ctime      = request->start_time;
+    inode->atime      = now;
+    inode->mtime      = now;
+    inode->ctime      = now;
 
     inode->symlink.target = memfs_symlink_target_alloc(thread);
 
@@ -1572,7 +1590,7 @@ memfs_symlink(
 
     parent_inode->nlink++;
 
-    parent_inode->mtime = request->start_time;
+    parent_inode->mtime = now;
 
     memfs_map_attrs(&request->symlink.r_dir_post_attr, parent_inode);
 
@@ -1634,6 +1652,9 @@ memfs_rename(
     struct memfs_inode  *old_parent_inode, *new_parent_inode;
     struct memfs_dirent *dirent, *old_dirent;
     int                  cmp;
+    struct timespec      now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     cmp = memfs_fh_compare(request->fh,
                            request->fh_len,
@@ -1739,8 +1760,8 @@ memfs_rename(
     old_parent_inode->nlink--;
     new_parent_inode->nlink++;
 
-    old_parent_inode->ctime = request->start_time;
-    new_parent_inode->mtime = request->start_time;
+    old_parent_inode->ctime = now;
+    new_parent_inode->mtime = now;
 
     if (cmp != 0) {
         pthread_mutex_unlock(&old_parent_inode->lock);
@@ -1763,7 +1784,9 @@ memfs_link(
 {
     struct memfs_inode  *parent_inode, *inode;
     struct memfs_dirent *dirent, *existing_dirent;
+    struct timespec      now;
 
+    clock_gettime(CLOCK_REALTIME, &now);
 
     parent_inode = memfs_inode_get_fh(shared,
                                       request->link.dir_fh,
@@ -1814,8 +1837,8 @@ memfs_link(
     inode->nlink++;
     parent_inode->nlink++;
 
-    inode->ctime        = request->start_time;
-    parent_inode->mtime = request->start_time;
+    inode->ctime        = now;
+    parent_inode->mtime = now;
 
     pthread_mutex_unlock(&parent_inode->lock);
     pthread_mutex_unlock(&inode->lock);

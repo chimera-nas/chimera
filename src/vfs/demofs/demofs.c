@@ -1307,6 +1307,7 @@ demofs_open_at(
     struct demofs_dirent *dirent;
     uint64_t              hash;
     unsigned int          flags = request->open_at.flags;
+    struct timespec       now;
 
     hash = XXH3_64bits(request->open_at.name, request->open_at.namelen);
 
@@ -1341,18 +1342,20 @@ demofs_open_at(
 
         pthread_mutex_lock(&inode->lock);
 
+        clock_gettime(CLOCK_REALTIME, &now);
+
         inode->size       = 0;
         inode->space_used = 0;
         inode->uid        = 0;
         inode->gid        = 0;
         inode->nlink      = 1;
         inode->mode       = S_IFREG |  0644;
-        inode->atime_sec  = request->start_time.tv_sec;
-        inode->atime_nsec = request->start_time.tv_nsec;
-        inode->mtime_sec  = request->start_time.tv_sec;
-        inode->mtime_nsec = request->start_time.tv_nsec;
-        inode->ctime_sec  = request->start_time.tv_sec;
-        inode->ctime_nsec = request->start_time.tv_nsec;
+        inode->atime_sec  = now.tv_sec;
+        inode->atime_nsec = now.tv_nsec;
+        inode->mtime_sec  = now.tv_sec;
+        inode->mtime_nsec = now.tv_nsec;
+        inode->ctime_sec  = now.tv_sec;
+        inode->ctime_nsec = now.tv_nsec;
 
         rb_tree_init(&inode->file.extents);
 
@@ -1367,8 +1370,8 @@ demofs_open_at(
 
         rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
-        parent_inode->mtime_sec  = request->start_time.tv_sec;
-        parent_inode->mtime_nsec = request->start_time.tv_nsec;
+        parent_inode->mtime_sec  = now.tv_sec;
+        parent_inode->mtime_nsec = now.tv_nsec;
 
     } else {
 
@@ -1636,6 +1639,7 @@ demofs_write(
     int                            niov, chunk_niov;
     int                            rc;
     struct evpl_iovec_cursor       cursor;
+    struct timespec                now;
 
     demofs_private          = request->plugin_data;
     demofs_private->opcode  = request->opcode;
@@ -1731,8 +1735,10 @@ demofs_write(
         inode->space_used = (inode->size + 4095) & ~4095;
     }
 
-    inode->mtime_sec  = request->start_time.tv_sec;
-    inode->mtime_nsec = request->start_time.tv_nsec;
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
 
     demofs_map_attrs(thread, &request->write.r_post_attr, inode);
 
@@ -1806,6 +1812,9 @@ demofs_symlink(
     struct demofs_inode  *parent_inode, *inode;
     struct demofs_dirent *dirent, *existing_dirent;
     uint64_t              hash;
+    struct timespec       now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     hash = XXH3_64bits(request->symlink.name, request->symlink.namelen);
 
@@ -1818,12 +1827,12 @@ demofs_symlink(
     inode->gid        = 0;
     inode->nlink      = 1;
     inode->mode       = S_IFLNK | 0755;
-    inode->atime_sec  = request->start_time.tv_sec;
-    inode->atime_nsec = request->start_time.tv_nsec;
-    inode->mtime_sec  = request->start_time.tv_sec;
-    inode->mtime_nsec = request->start_time.tv_nsec;
-    inode->ctime_sec  = request->start_time.tv_sec;
-    inode->ctime_nsec = request->start_time.tv_nsec;
+    inode->atime_sec  = now.tv_sec;
+    inode->atime_nsec = now.tv_nsec;
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
 
     inode->symlink.target = demofs_symlink_target_alloc(thread,
                                                         request->symlink.target,
@@ -1873,8 +1882,8 @@ demofs_symlink(
 
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
-    parent_inode->mtime_sec  = request->start_time.tv_sec;
-    parent_inode->mtime_nsec = request->start_time.tv_nsec;
+    parent_inode->mtime_sec  = now.tv_sec;
+    parent_inode->mtime_nsec = now.tv_nsec;
 
     demofs_map_attrs(thread, &request->symlink.r_dir_post_attr, parent_inode);
 
@@ -1944,6 +1953,9 @@ demofs_rename(
     struct demofs_dirent *dirent, *old_dirent;
     uint64_t              hash, new_hash;
     int                   cmp;
+    struct timespec       now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     hash     = XXH3_64bits(request->rename.name, request->rename.namelen);
     new_hash = XXH3_64bits(request->rename.new_name, request->rename.new_namelen);
@@ -2061,10 +2073,10 @@ demofs_rename(
         new_parent_inode->nlink++;
     }
 
-    old_parent_inode->ctime_sec  = request->start_time.tv_sec;
-    old_parent_inode->ctime_nsec = request->start_time.tv_nsec;
-    new_parent_inode->mtime_sec  = request->start_time.tv_sec;
-    new_parent_inode->mtime_nsec = request->start_time.tv_nsec;
+    old_parent_inode->ctime_sec  = now.tv_sec;
+    old_parent_inode->ctime_nsec = now.tv_nsec;
+    new_parent_inode->mtime_sec  = now.tv_sec;
+    new_parent_inode->mtime_nsec = now.tv_nsec;
 
     if (cmp != 0) {
         pthread_mutex_unlock(&old_parent_inode->lock);

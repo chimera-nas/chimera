@@ -1008,6 +1008,9 @@ cairn_mkdir(
     struct cairn_dirent_handle dh;
     rocksdb_transaction_t     *txn;
     int                        rc;
+    struct timespec            now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     txn = cairn_get_transaction(thread);
 
@@ -1049,9 +1052,9 @@ cairn_mkdir(
     inode.gid        = 0;
     inode.nlink      = 2;
     inode.mode       = S_IFDIR | 0755;
-    inode.atime      = request->start_time;
-    inode.mtime      = request->start_time;
-    inode.ctime      = request->start_time;
+    inode.atime      = now;
+    inode.mtime      = now;
+    inode.ctime      = now;
 
     cairn_apply_attrs(&inode, request->mkdir.set_attr);
 
@@ -1065,7 +1068,7 @@ cairn_mkdir(
 
     parent_inode->nlink++;
 
-    parent_inode->mtime = request->start_time;
+    parent_inode->mtime = now;
 
     cairn_map_attrs(&request->mkdir.r_dir_post_attr, parent_inode);
 
@@ -1094,7 +1097,9 @@ cairn_remove(
     struct cairn_dirent_handle dh;
     struct cairn_dirent_value *dirent_value;
     int                        rc;
+    struct timespec            now;
 
+    clock_gettime(CLOCK_REALTIME, &now);
     txn = cairn_get_transaction(thread);
 
     rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &parent_ih);
@@ -1152,7 +1157,7 @@ cairn_remove(
 
     cairn_map_attrs(&request->remove.r_dir_pre_attr, parent_inode);
 
-    parent_inode->mtime = request->start_time;
+    parent_inode->mtime = now;
 
     if (S_ISDIR(inode->mode)) {
         inode->nlink = 0;
@@ -1353,6 +1358,9 @@ cairn_open_at(
     struct cairn_dirent_value *dirent_value, new_dirent_value;
     unsigned int               flags = request->open_at.flags;
     int                        rc, is_new_inode = 0;
+    struct timespec            now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     txn = cairn_get_transaction(thread);
 
@@ -1398,9 +1406,9 @@ cairn_open_at(
         new_inode.gid        = 0;
         new_inode.nlink      = 1;
         new_inode.mode       = S_IFREG |  0644;
-        new_inode.atime      = request->start_time;
-        new_inode.mtime      = request->start_time;
-        new_inode.ctime      = request->start_time;
+        new_inode.atime      = now;
+        new_inode.mtime      = now;
+        new_inode.ctime      = now;
 
         cairn_apply_attrs(&new_inode, request->open_at.set_attr);
 
@@ -1410,7 +1418,7 @@ cairn_open_at(
 
         cairn_put_dirent(txn, &dirent_key, &new_dirent_value);
 
-        parent_inode->mtime = request->start_time;
+        parent_inode->mtime = now;
 
         inode = &new_inode;
     } else {
@@ -1518,6 +1526,9 @@ cairn_read(
     size_t                    klen, vlen;
     int                       rc;
     int                       need_atime = !shared->noatime;
+    struct timespec           now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     offset = request->read.offset;
 
@@ -1628,7 +1639,7 @@ cairn_read(
     rocksdb_iter_destroy(iter);
 
     if (need_atime) {
-        inode->atime = request->start_time;
+        inode->atime = now;
         cairn_put_inode(txn, inode);
     }
 
@@ -1761,6 +1772,9 @@ cairn_write(
     uint64_t                  total_space = 0;
     char                     *err         = NULL;
     int                       rc, i;
+    struct timespec           now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     txn = cairn_get_transaction(thread);
 
@@ -1810,7 +1824,7 @@ cairn_write(
 
     // Update space used to track actual extent sizes
     inode->space_used += total_space;
-    inode->mtime       = request->start_time;
+    inode->mtime       = now;
 
     cairn_map_attrs(&request->write.r_post_attr, inode);
 
@@ -1839,7 +1853,9 @@ cairn_symlink(
     struct cairn_symlink_key  target_key;
     char                     *err = NULL;
     int                       rc;
+    struct timespec           now;
 
+    clock_gettime(CLOCK_REALTIME, &now);
     txn = cairn_get_transaction(thread);
 
     rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &parent_ih);
@@ -1872,15 +1888,15 @@ cairn_symlink(
     new_inode.gid        = 0;
     new_inode.nlink      = 1;
     new_inode.mode       = S_IFLNK | 0755;
-    new_inode.atime      = request->start_time;
-    new_inode.mtime      = request->start_time;
-    new_inode.ctime      = request->start_time;
+    new_inode.atime      = now;
+    new_inode.mtime      = now;
+    new_inode.ctime      = now;
 
     dirent_value.inum     = new_inode.inum;
     dirent_value.name_len = request->symlink.namelen;
     memcpy(dirent_value.name, request->symlink.name, request->symlink.namelen);
 
-    parent_inode->mtime = request->start_time;
+    parent_inode->mtime = now;
 
     cairn_map_attrs(&request->symlink.r_attr, &new_inode);
     cairn_map_attrs(&request->symlink.r_dir_post_attr, parent_inode);
@@ -1996,7 +2012,9 @@ cairn_rename(
     struct cairn_inode_handle  target_ih;
     struct cairn_inode        *target_inode;
     int                        cmp, rc;
+    struct timespec            now;
 
+    clock_gettime(CLOCK_REALTIME, &now);
     txn = cairn_get_transaction(thread);
 
     cmp = cairn_fh_compare(request->fh,
@@ -2124,7 +2142,7 @@ cairn_rename(
     rc = cairn_inode_get_inum(thread, txn, old_dirent_value->inum, 1, &target_ih);
     if (rc == 0) {
         target_inode        = target_ih.inode;
-        target_inode->ctime = request->start_time;
+        target_inode->ctime = now;
         cairn_put_inode(txn, target_inode);
         cairn_inode_handle_release(&target_ih);
     }
@@ -2138,8 +2156,8 @@ cairn_rename(
     cairn_remove_dirent(txn, &old_dirent_key);
     cairn_put_dirent(txn, &new_dirent_key, &new_dirent_value);
 
-    old_parent_inode->mtime = request->start_time;
-    new_parent_inode->mtime = request->start_time;
+    old_parent_inode->mtime = now;
+    new_parent_inode->mtime = now;
 
     if (cmp != 0) {
         /* XXX only if dir */
@@ -2179,6 +2197,9 @@ cairn_link(
     struct cairn_dirent_value  dirent_value;
     struct cairn_dirent_handle dh;
     int                        rc;
+    struct timespec            now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     txn = cairn_get_transaction(thread);
 
@@ -2238,8 +2259,8 @@ cairn_link(
     memcpy(dirent_value.name, request->link.name, request->link.namelen);
 
     target_inode->nlink++;
-    target_inode->ctime = request->start_time;
-    parent_inode->mtime = request->start_time;
+    target_inode->ctime = now;
+    parent_inode->mtime = now;
 
     cairn_put_dirent(txn, &dirent_key, &dirent_value);
     cairn_put_inode(txn, parent_inode);
