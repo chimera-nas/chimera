@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdint.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -5,6 +6,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <limits.h>
 #include <jansson.h>
 #include <xxhash.h>
@@ -1022,6 +1024,9 @@ demofs_mkdir(
     struct demofs_inode  *parent_inode, *inode;
     struct demofs_dirent *dirent, *existing_dirent;
     uint64_t              hash;
+    struct timespec       now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     hash = XXH3_64bits(request->mkdir.name, request->mkdir.name_len);
 
@@ -1034,12 +1039,12 @@ demofs_mkdir(
     inode->gid        = 0;
     inode->nlink      = 2;
     inode->mode       = S_IFDIR | 0755;
-    inode->atime_sec  = request->start_time.tv_sec;
-    inode->atime_nsec = request->start_time.tv_nsec;
-    inode->mtime_sec  = request->start_time.tv_sec;
-    inode->mtime_nsec = request->start_time.tv_nsec;
-    inode->ctime_sec  = request->start_time.tv_sec;
-    inode->ctime_nsec = request->start_time.tv_nsec;
+    inode->atime_sec  = now.tv_sec;
+    inode->atime_nsec = now.tv_nsec;
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
 
     rb_tree_init(&inode->dir.dirents);
 
@@ -1092,8 +1097,8 @@ demofs_mkdir(
 
     parent_inode->nlink++;
 
-    parent_inode->mtime_sec  = request->start_time.tv_sec;
-    parent_inode->mtime_nsec = request->start_time.tv_nsec;
+    parent_inode->mtime_sec  = now.tv_sec;
+    parent_inode->mtime_nsec = now.tv_nsec;
 
     demofs_map_attrs(thread, &request->mkdir.r_dir_post_attr, parent_inode);
 
@@ -1113,6 +1118,9 @@ demofs_remove(
     struct demofs_inode  *parent_inode, *inode;
     struct demofs_dirent *dirent;
     uint64_t              hash;
+    struct timespec       now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     hash = XXH3_64bits(request->remove.name, request->remove.namelen);
 
@@ -1163,8 +1171,8 @@ demofs_remove(
         parent_inode->nlink--;
     }
 
-    parent_inode->mtime_sec  = request->start_time.tv_sec;
-    parent_inode->mtime_nsec = request->start_time.tv_nsec;
+    parent_inode->mtime_sec  = now.tv_sec;
+    parent_inode->mtime_nsec = now.tv_nsec;
 
     rb_tree_remove(&parent_inode->dir.dirents, &dirent->node);
 
@@ -2102,6 +2110,9 @@ demofs_link(
     struct demofs_inode  *parent_inode, *inode;
     uint64_t              hash;
     struct demofs_dirent *dirent;
+    struct timespec       now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     hash = XXH3_64bits(request->link.name, request->link.namelen);
 
@@ -2161,10 +2172,10 @@ demofs_link(
 
     inode->nlink++;
 
-    inode->ctime_sec         = request->start_time.tv_sec;
-    inode->ctime_nsec        = request->start_time.tv_nsec;
-    parent_inode->mtime_sec  = request->start_time.tv_sec;
-    parent_inode->mtime_nsec = request->start_time.tv_nsec;
+    inode->ctime_sec         = now.tv_sec;
+    inode->ctime_nsec        = now.tv_nsec;
+    parent_inode->mtime_sec  = now.tv_sec;
+    parent_inode->mtime_nsec = now.tv_nsec;
 
     pthread_mutex_unlock(&parent_inode->lock);
     pthread_mutex_unlock(&inode->lock);
