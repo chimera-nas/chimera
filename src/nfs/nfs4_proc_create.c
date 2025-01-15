@@ -24,8 +24,13 @@ chimera_nfs4_create_complete(
 
     res->status = NFS4_OK;
 
-    memcpy(req->fh, req->handle->fh, req->handle->fh_len);
-    req->fhlen = req->handle->fh_len;
+    chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
+                         "CHIMERA_VFS_ATTR_FH is not set");
+
+    memcpy(req->fh, attr->va_fh, attr->va_fh_len);
+    req->fhlen = attr->va_fh_len;
+
+    chimera_nfs4_set_changeinfo(&res->resok4.cinfo, dir_pre_attr, dir_post_attr);
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
@@ -104,9 +109,9 @@ chimera_nfs4_create_open_callback(
                                   args->objname.data,
                                   args->objname.len,
                                   attr,
-                                  0,
-                                  0,
-                                  0,
+                                  CHIMERA_VFS_ATTR_FH,
+                                  CHIMERA_VFS_ATTR_MTIME,
+                                  CHIMERA_VFS_ATTR_MTIME,
                                   chimera_nfs4_create_complete,
                                   req);
                 break;
@@ -124,9 +129,9 @@ chimera_nfs4_create_open_callback(
                     args->objname.len,
                     args->objtype.linkdata.data,
                     args->objtype.linkdata.len,
-                    0,
-                    0,
-                    0,
+                    CHIMERA_VFS_ATTR_FH,
+                    CHIMERA_VFS_ATTR_MTIME,
+                    CHIMERA_VFS_ATTR_MTIME,
                     chimera_nfs4_create_complete,
                     req);
                 break;

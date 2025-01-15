@@ -38,6 +38,8 @@ chimera_nfs4_open_at_complete(
 
         memcpy(req->fh, handle->fh, handle->fh_len);
         req->fhlen = handle->fh_len;
+
+        chimera_nfs4_set_changeinfo(&res->resok4.cinfo, dir_pre_attr, dir_post_attr);
     }
 
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
@@ -98,8 +100,8 @@ chimera_nfs4_open_parent_complete(
                                 flags,
                                 attr,
                                 CHIMERA_VFS_ATTR_FH,
-                                0,
-                                0,
+                                CHIMERA_VFS_ATTR_MTIME,
+                                CHIMERA_VFS_ATTR_MTIME,
                                 chimera_nfs4_open_at_complete,
                                 req);
             break;

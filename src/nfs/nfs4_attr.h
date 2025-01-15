@@ -653,3 +653,16 @@ chimera_nfs4_unmarshall_attrs(
 
     return (attrs <= attrsend) ? 0 : -1;
 } /* chimera_nfs4_unmarshall_attrs */
+
+static void
+chimera_nfs4_set_changeinfo(
+    struct change_info4      *cinfo,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr)
+{
+    cinfo->atomic = (dir_pre_attr->va_set_mask & CHIMERA_VFS_ATTR_ATOMIC) &&
+        (dir_post_attr->va_set_mask & CHIMERA_VFS_ATTR_ATOMIC);
+    cinfo->before = dir_pre_attr->va_mtime.tv_sec * 1000000000 + dir_pre_attr->va_mtime.tv_nsec;
+    cinfo->after  = dir_post_attr->va_mtime.tv_sec * 1000000000 + dir_post_attr->va_mtime.tv_nsec;
+
+} /* chimera_nfs4_set_changeinfo */
