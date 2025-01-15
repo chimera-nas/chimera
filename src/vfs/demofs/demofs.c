@@ -822,9 +822,11 @@ demofs_map_attrs(
 static inline void
 demofs_apply_attrs(
     struct demofs_inode      *inode,
-    struct chimera_vfs_attrs *attr,
-    struct timespec          *now)
+    struct chimera_vfs_attrs *attr)
 {
+    struct timespec now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
@@ -850,8 +852,8 @@ demofs_apply_attrs(
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_ATIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
         if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
-            inode->atime_sec  = now->tv_sec;
-            inode->atime_nsec = now->tv_nsec;
+            inode->atime_sec  = now.tv_sec;
+            inode->atime_nsec = now.tv_nsec;
         } else {
             inode->atime_sec  = attr->va_atime.tv_sec;
             inode->atime_nsec = attr->va_atime.tv_nsec;
@@ -861,16 +863,16 @@ demofs_apply_attrs(
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
         if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
-            inode->mtime_sec  = now->tv_sec;
-            inode->mtime_nsec = now->tv_nsec;
+            inode->mtime_sec  = now.tv_sec;
+            inode->mtime_nsec = now.tv_nsec;
         } else {
             inode->mtime_sec  = attr->va_mtime.tv_sec;
             inode->mtime_nsec = attr->va_mtime.tv_nsec;
         }
     }
 
-    inode->ctime_sec  = now->tv_sec;
-    inode->ctime_nsec = now->tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
 
 } /* demofs_apply_attrs */
 
@@ -918,7 +920,7 @@ demofs_setattr(
     }
     demofs_map_attrs(thread, &request->setattr.r_pre_attr, inode);
 
-    demofs_apply_attrs(inode, request->setattr.set_attr, &request->start_time);
+    demofs_apply_attrs(inode, request->setattr.set_attr);
 
     demofs_map_attrs(thread, &request->setattr.r_post_attr, inode);
 
@@ -1041,7 +1043,7 @@ demofs_mkdir(
 
     rb_tree_init(&inode->dir.dirents);
 
-    demofs_apply_attrs(inode, request->mkdir.set_attr, &request->start_time);
+    demofs_apply_attrs(inode, request->mkdir.set_attr);
 
     demofs_map_attrs(thread, &request->mkdir.r_attr, inode);
 
@@ -1354,7 +1356,7 @@ demofs_open_at(
 
         rb_tree_init(&inode->file.extents);
 
-        demofs_apply_attrs(inode, request->open_at.set_attr, &request->start_time);
+        demofs_apply_attrs(inode, request->open_at.set_attr);
 
         dirent = demofs_dirent_alloc(thread,
                                      inode->inum,

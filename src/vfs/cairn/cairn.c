@@ -747,9 +747,12 @@ cairn_map_attrs(
 static inline void
 cairn_apply_attrs(
     struct cairn_inode       *inode,
-    struct chimera_vfs_attrs *attr,
-    struct timespec          *now)
+    struct chimera_vfs_attrs *attr)
 {
+    struct timespec now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
@@ -775,7 +778,7 @@ cairn_apply_attrs(
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_ATIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
         if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
-            inode->atime = *now;
+            inode->atime = now;
         } else {
             inode->atime = attr->va_atime;
         }
@@ -784,13 +787,13 @@ cairn_apply_attrs(
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
         if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
-            inode->mtime = *now;
+            inode->mtime = now;
         } else {
             inode->mtime = attr->va_mtime;
         }
     }
 
-    inode->ctime = *now;
+    inode->ctime = now;
 
 } /* cairn_apply_attrs */
 
@@ -866,7 +869,7 @@ cairn_setattr(
 
     cairn_map_attrs(&request->setattr.r_pre_attr, inode);
 
-    cairn_apply_attrs(inode, request->setattr.set_attr, &request->start_time);
+    cairn_apply_attrs(inode, request->setattr.set_attr);
 
     cairn_map_attrs(&request->setattr.r_post_attr, inode);
 
@@ -1050,7 +1053,7 @@ cairn_mkdir(
     inode.mtime      = request->start_time;
     inode.ctime      = request->start_time;
 
-    cairn_apply_attrs(&inode, request->mkdir.set_attr, &request->start_time);
+    cairn_apply_attrs(&inode, request->mkdir.set_attr);
 
     cairn_map_attrs(&request->mkdir.r_attr, &inode);
 
@@ -1399,7 +1402,7 @@ cairn_open_at(
         new_inode.mtime      = request->start_time;
         new_inode.ctime      = request->start_time;
 
-        cairn_apply_attrs(&new_inode, request->open_at.set_attr, &request->start_time);
+        cairn_apply_attrs(&new_inode, request->open_at.set_attr);
 
         new_dirent_value.inum     = new_inode.inum;
         new_dirent_value.name_len = request->open_at.namelen;

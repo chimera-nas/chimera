@@ -25,10 +25,10 @@ chimera_nfs4_sequence(
 
     memcpy(res->sr_resok4.sr_sessionid, session->nfs4_session_id,
            NFS4_SESSIONID_SIZE);
-    res->sr_resok4.sr_sequenceid            = 1;
-    res->sr_resok4.sr_slotid                = 0;
-    res->sr_resok4.sr_highest_slotid        = 0;
-    res->sr_resok4.sr_target_highest_slotid = 0;
+    res->sr_resok4.sr_sequenceid            = args->sa_sequenceid;
+    res->sr_resok4.sr_slotid                = args->sa_slotid;
+    res->sr_resok4.sr_highest_slotid        = NFS4_SESSION_MAX_STATE - 1;
+    res->sr_resok4.sr_target_highest_slotid = NFS4_SESSION_MAX_STATE - 1;
     res->sr_resok4.sr_status_flags          = 0;
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
