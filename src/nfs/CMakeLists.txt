@@ -69,7 +69,8 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs_mount.c nfs_portmap.c nf
             nfs4_proc_setclientid.c nfs4_proc_setclientid_confirm.c nfs4_proc_remove.c
             nfs4_proc_read.c nfs4_proc_write.c nfs4_proc_commit.c nfs4_proc_readlink.c
             nfs4_proc_setattr.c nfs4_proc_link.c nfs4_proc_rename.c nfs4_proc_savefh.c
-            nfs4_proc_exchange_id.c nfs4_proc_create_session.c
+            nfs4_proc_exchange_id.c nfs4_proc_create_session.c nfs4_proc_destroy_session.c
+            nfs4_proc_destroy_clientid.c nfs4_proc_sequence.c nfs4_proc_reclaim_complete.c
             ${NFS3_XDR_C} ${NFS3_XDR_H} ${NFS4_XDR_C} ${NFS4_XDR_H} ${NFS_MOUNT_XDR_C} ${NFS_MOUNT_XDR_H} ${PORTMAP_XDR_C} ${PORTMAP_XDR_H})
 
 target_link_libraries(chimera_nfs chimera_common evpl evpl_rpc2 pthread uuid)

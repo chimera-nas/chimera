@@ -165,6 +165,34 @@ chimera_nfs4_create_session(
     struct nfs_resop4                *resop);
 
 void
+chimera_nfs4_destroy_session(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_destroy_clientid(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_sequence(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_reclaim_complete(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
 chimera_nfs4_compound_process(
     struct nfs_request *req,
     nfsstat4            status);

@@ -220,6 +220,36 @@ _nfs4_dump_compound(
                                   req, i + 1, args->num_argarray);
                 break;
 
+            case OP_EXCHANGE_ID:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d ExchangeID",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_CREATE_SESSION:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d CreateSession",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_DESTROY_SESSION:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d DestroySession",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_DESTROY_CLIENTID:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d DestroyClientID",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_SEQUENCE:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d Sequence",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_RECLAIM_COMPLETE:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d ReclaimComplete",
+                                  req, i + 1, args->num_argarray);
+                break;
+
             default:
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d Unknown op=%d",
                                   req, i + 1, args->num_argarray,

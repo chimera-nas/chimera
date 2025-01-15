@@ -67,6 +67,11 @@ nfs4_client_register(
     const char               *nii_domain,
     const char               *nii_name);
 
+void
+nfs4_client_unregister(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id);
+
 struct nfs4_session *
 nfs4_create_session(
     struct nfs4_client_table    *table,
@@ -74,6 +79,11 @@ nfs4_create_session(
     uint32_t                     implicit,
     const struct channel_attrs4 *fore_attrs,
     const struct channel_attrs4 *back_attrs);
+
+struct nfs4_session *
+nfs4_session_lookup(
+    struct nfs4_client_table *table,
+    const void               *sessionid);
 
 void
 nfs4_destroy_session(

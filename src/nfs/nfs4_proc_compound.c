@@ -108,6 +108,18 @@ chimera_nfs4_compound_process(
         case OP_CREATE_SESSION:
             chimera_nfs4_create_session(thread, req, argop, resop);
             break;
+        case OP_DESTROY_SESSION:
+            chimera_nfs4_destroy_session(thread, req, argop, resop);
+            break;
+        case OP_DESTROY_CLIENTID:
+            chimera_nfs4_destroy_clientid(thread, req, argop, resop);
+            break;
+        case OP_SEQUENCE:
+            chimera_nfs4_sequence(thread, req, argop, resop);
+            break;
+        case OP_RECLAIM_COMPLETE:
+            chimera_nfs4_reclaim_complete(thread, req, argop, resop);
+            break;
         default:
             chimera_nfs_error("Unsupported operation: %d", argop->argop);
             chimera_nfs4_compound_process(req, NFS4ERR_OP_ILLEGAL);
