@@ -267,6 +267,7 @@ chimera_nfs4_marshall_attrs(
                                             /* maxwrite */);
 
             chimera_nfs4_attr_append_uint32(&attrs,
+                                            (1UL << (FATTR4_MODE - 32)) |
                                             (1UL << (FATTR4_NUMLINKS - 32)) |
                                             (1UL << (FATTR4_OWNER - 32)) |
                                             (1UL << (FATTR4_OWNER_GROUP - 32)) |
