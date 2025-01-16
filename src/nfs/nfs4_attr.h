@@ -590,7 +590,7 @@ chimera_nfs4_unmarshall_attrs(
 
         if (req_mask[1] & (1 << (FATTR4_TIME_ACCESS_SET - 32))) {
 
-            if (unlikely(attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
+            if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
                 return -1;
             }
 
@@ -598,6 +598,11 @@ chimera_nfs4_unmarshall_attrs(
             attrs += sizeof(uint32_t);
 
             if (set_it) {
+
+                if (unlikely(attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
+                    return -1;
+                }
+
                 attr->va_atime.tv_sec  = chimera_nfs_ntoh64(*(uint64_t *) attrs);
                 attrs                 += sizeof(uint64_t);
                 attr->va_atime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
@@ -612,7 +617,7 @@ chimera_nfs4_unmarshall_attrs(
 
         if (req_mask[1] & (1 << (FATTR4_TIME_MODIFY_SET - 32))) {
 
-            if (unlikely(attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
+            if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
                 return -1;
             }
 
@@ -620,6 +625,11 @@ chimera_nfs4_unmarshall_attrs(
             attrs += sizeof(uint32_t);
 
             if (set_it) {
+
+                if (unlikely(attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
+                    return -1;
+                }
+
                 attr->va_mtime.tv_sec  = chimera_nfs_ntoh64(*(uint64_t *) attrs);
                 attrs                 += sizeof(uint64_t);
                 attr->va_mtime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
