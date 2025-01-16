@@ -11,6 +11,7 @@ chimera_vfs_mkdir_complete(struct chimera_vfs_request *request)
     chimera_vfs_complete(request);
 
     callback(request->status,
+             request->mkdir.set_attr,
              &request->mkdir.r_attr,
              &request->mkdir.r_dir_pre_attr,
              &request->mkdir.r_dir_post_attr,

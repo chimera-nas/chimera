@@ -26,6 +26,12 @@ chimera_nfs4_create_session(
         &args->csa_fore_chan_attrs,
         &args->csa_back_chan_attrs);
 
+    if (!session) {
+        res->csr_status = NFS4ERR_STALE_CLIENTID;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
     conn->private_data = session;
     req->session       = session;
 

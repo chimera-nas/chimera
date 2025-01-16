@@ -8,12 +8,14 @@ static void
 chimera_nfs4_open_at_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
     struct chimera_vfs_attrs       *attr,
     struct chimera_vfs_attrs       *dir_pre_attr,
     struct chimera_vfs_attrs       *dir_post_attr,
     void                           *private_data)
 {
     struct nfs_request             *req           = private_data;
+    struct evpl_rpc2_msg           *msg           = req->msg;
     struct nfs4_session            *session       = req->session;
     struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
     struct chimera_vfs_open_handle *parent_handle = req->handle;
@@ -35,6 +37,9 @@ chimera_nfs4_open_at_complete(
         res->resok4.rflags                     = 0;
         res->resok4.num_attrset                = 0;
         res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+
+        xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
+        res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr, res->resok4.attrset, 4);
 
         memcpy(req->fh, handle->fh, handle->fh_len);
         req->fhlen = handle->fh_len;

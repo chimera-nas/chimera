@@ -15,6 +15,7 @@ chimera_vfs_open_at_hdl_callback(
 
     callback(request->status,
              handle,
+             request->open_at.set_attr,
              &request->open_at.r_attr,
              &request->open_at.r_dir_pre_attr,
              &request->open_at.r_dir_post_attr,

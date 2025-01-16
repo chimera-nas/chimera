@@ -7,13 +7,15 @@
 static void
 chimera_nfs4_create_complete(
     enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *set_attr,
     struct chimera_vfs_attrs *attr,
     struct chimera_vfs_attrs *dir_pre_attr,
     struct chimera_vfs_attrs *dir_post_attr,
     void                     *private_data)
 {
-    struct nfs_request *req = private_data;
-    struct CREATE4res  *res = &req->res_compound.resarray[req->index].opcreate;
+    struct nfs_request   *req = private_data;
+    struct evpl_rpc2_msg *msg = req->msg;
+    struct CREATE4res    *res = &req->res_compound.resarray[req->index].opcreate;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_nfs4_compound_complete(req,
@@ -23,6 +25,9 @@ chimera_nfs4_create_complete(
     }
 
     res->status = NFS4_OK;
+
+    xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
+    res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr, res->resok4.attrset, 4);
 
     chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
                          "CHIMERA_VFS_ATTR_FH is not set");
@@ -38,25 +43,41 @@ chimera_nfs4_create_complete(
 } /* chimera_nfs4_create_complete */
 
 static void
-chimera_nfs4_create_hdl_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_pre_attr,
-    struct chimera_vfs_attrs       *dir_post_attr,
-    void                           *private_data)
+chimera_nfs4_create_symlink_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr,
+    void                     *private_data)
 {
-    struct nfs_request *req = private_data;
-    struct CREATE4res  *res = &req->res_compound.resarray[req->index].opcreate;
+    struct nfs_request   *req = private_data;
+    struct evpl_rpc2_msg *msg = req->msg;
+    struct CREATE4res    *res = &req->res_compound.resarray[req->index].opcreate;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs4_compound_complete(req,
+                                       chimera_nfs4_errno_to_nfsstat4(error_code));
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        return;
+    }
 
     res->status = NFS4_OK;
 
+    xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
+    res->resok4.num_attrset = chimera_nfs4_mask2attr(attr, res->resok4.attrset, 4);
+
+    chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
+                         "CHIMERA_VFS_ATTR_FH is not set");
+
+    memcpy(req->fh, attr->va_fh, attr->va_fh_len);
+    req->fhlen = attr->va_fh_len;
+
+    chimera_nfs4_set_changeinfo(&res->resok4.cinfo, dir_pre_attr, dir_post_attr);
+
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
-    chimera_vfs_release(req->thread->vfs_thread, handle);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_create_complete */
-
+} /* chimera_nfs4_create_symlink_complete */
 
 static void
 chimera_nfs4_create_open_callback(
@@ -68,11 +89,9 @@ chimera_nfs4_create_open_callback(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct CREATE4args               *args;
-    struct CREATE4res                *res;
     struct chimera_vfs_attrs         *attr;
 
     args = &req->args_compound->argarray[req->index].opcreate;
-    res  = &req->res_compound.resarray[req->index].opcreate;
 
     xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
 
@@ -82,26 +101,9 @@ chimera_nfs4_create_open_callback(
                                   args->createattrs.attr_vals.data,
                                   args->createattrs.attr_vals.len);
 
-    xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
-    res->resok4.num_attrset = chimera_nfs4_mask2attr(attr, res->resok4.attrset, 4);
-
     if (error_code == CHIMERA_VFS_OK) {
 
         switch (args->objtype.type) {
-            case NF4REG:
-                chimera_vfs_open_at(
-                    thread->vfs_thread,
-                    handle,
-                    args->objname.data,
-                    args->objname.len,
-                    CHIMERA_VFS_OPEN_CREATE,
-                    attr,
-                    0,
-                    0,
-                    0,
-                    chimera_nfs4_create_hdl_complete,
-                    req);
-                break;
             case NF4DIR:
                 req->handle = handle;
                 chimera_vfs_mkdir(thread->vfs_thread,
@@ -132,7 +134,7 @@ chimera_nfs4_create_open_callback(
                     CHIMERA_VFS_ATTR_FH,
                     CHIMERA_VFS_ATTR_MTIME,
                     CHIMERA_VFS_ATTR_MTIME,
-                    chimera_nfs4_create_complete,
+                    chimera_nfs4_create_symlink_complete,
                     req);
                 break;
             case NF4SOCK:

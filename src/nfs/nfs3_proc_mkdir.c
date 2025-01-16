@@ -11,6 +11,7 @@
 static void
 chimera_nfs3_mkdir_complete(
     enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *set_attr,
     struct chimera_vfs_attrs *r_attr,
     struct chimera_vfs_attrs *r_dir_pre_attr,
     struct chimera_vfs_attrs *r_dir_post_attr,

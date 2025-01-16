@@ -624,6 +624,18 @@ chimera_nfs4_unmarshall_attrs(
             attr->va_req_mask     |= CHIMERA_VFS_ATTR_ATIME;
         }
 
+        if (req_mask[1] & (1 << (FATTR4_TIME_METADATA - 32))) {
+
+            if (unlikely(attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
+                return -1;
+            }
+
+            attr->va_ctime.tv_sec  = chimera_nfs_ntoh64(*(uint64_t *) attrs);
+            attrs                 += sizeof(uint64_t);
+            attr->va_ctime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
+            attrs                 += sizeof(uint32_t);
+            attr->va_req_mask     |= CHIMERA_VFS_ATTR_CTIME;
+        }
         if (req_mask[1] & (1 << (FATTR4_TIME_MODIFY - 32))) {
 
             if (unlikely(attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
@@ -636,19 +648,8 @@ chimera_nfs4_unmarshall_attrs(
             attrs                 += sizeof(uint32_t);
             attr->va_req_mask     |= CHIMERA_VFS_ATTR_MTIME;
         }
-    }
 
-    if (req_mask[1] & (1 << (FATTR4_TIME_METADATA - 32))) {
 
-        if (unlikely(attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
-            return -1;
-        }
-
-        attr->va_ctime.tv_sec  = chimera_nfs_ntoh64(*(uint64_t *) attrs);
-        attrs                 += sizeof(uint64_t);
-        attr->va_ctime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-        attrs                 += sizeof(uint32_t);
-        attr->va_req_mask     |= CHIMERA_VFS_ATTR_CTIME;
     }
 
     return (attrs <= attrsend) ? 0 : -1;
