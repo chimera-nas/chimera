@@ -38,6 +38,8 @@ struct nfs4_session {
     struct nfs4_client   *nfs4_session_client;
     struct channel_attrs4 nfs4_session_fore_attrs;
     struct channel_attrs4 nfs4_session_back_attrs;
+    uint32_t              nfs4_session_fore_attrs_rdma_ird;
+    uint32_t              nfs4_session_back_attrs_rdma_ird;
     struct UT_hash_handle nfs4_session_hh;
 };
 

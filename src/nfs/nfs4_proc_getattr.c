@@ -13,6 +13,12 @@ chimera_nfs4_getattr_complete(
     struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
     struct GETATTR4res  *res  = &req->res_compound.resarray[req->index].opgetattr;
 
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     res->status = NFS4_OK;
 
     xdr_dbuf_reserve(&res->resok4.obj_attributes,

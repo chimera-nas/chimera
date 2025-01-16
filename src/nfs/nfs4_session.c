@@ -163,10 +163,19 @@ nfs4_create_session(
 
         if (fore_attrs) {
             session->nfs4_session_fore_attrs = *fore_attrs;
+            if (fore_attrs->num_ca_rdma_ird) {
+                session->nfs4_session_fore_attrs_rdma_ird    = fore_attrs->ca_rdma_ird[0];
+                session->nfs4_session_fore_attrs.ca_rdma_ird = &session->nfs4_session_fore_attrs_rdma_ird;
+            }
+
         }
 
         if (back_attrs) {
             session->nfs4_session_back_attrs = *back_attrs;
+            if (back_attrs->num_ca_rdma_ird) {
+                session->nfs4_session_back_attrs_rdma_ird    = back_attrs->ca_rdma_ird[0];
+                session->nfs4_session_back_attrs.ca_rdma_ird = &session->nfs4_session_back_attrs_rdma_ird;
+            }
         }
 
         HASH_ADD(nfs4_session_hh, table->nfs4_ct_sessions,

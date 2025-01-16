@@ -17,11 +17,18 @@ chimera_nfs4_close(
 
     state = nfs4_session_get_state(session, &args->open_stateid);
 
-    nfs4_session_free_slot(session, state);
+    if (state) {
 
-    chimera_vfs_release(thread->vfs_thread, state->nfs4_state_handle);
+        res->open_stateid = state->nfs4_state_id;
 
-    res->status = NFS4_OK;
+        nfs4_session_free_slot(session, state);
+
+        chimera_vfs_release(thread->vfs_thread, state->nfs4_state_handle);
+
+        res->status = NFS4_OK;
+    } else {
+        res->status = NFS4ERR_BAD_STATEID;
+    }
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_close */

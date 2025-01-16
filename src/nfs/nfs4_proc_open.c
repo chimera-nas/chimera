@@ -150,6 +150,7 @@ chimera_nfs4_open_parent_complete(
                                 chimera_nfs4_open_at_complete,
                                 req);
             break;
+        case CLAIM_PREVIOUS:
         case CLAIM_FH:
             chimera_vfs_open(req->thread->vfs_thread,
                              req->fh,
