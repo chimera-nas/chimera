@@ -6,7 +6,7 @@
 #include "uthash/uthash.h"
 #include "vfs/vfs.h"
 
-#define NFS4_SESSION_MAX_STATE 64
+#define NFS4_SESSION_MAX_STATE 1024
 
 struct nfs4_state {
     struct stateid4                 nfs4_state_id;
