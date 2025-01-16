@@ -214,10 +214,16 @@ chimera_nfs4_compound_complete(
     if (status != NFS4_OK) {
         req->res_compound.status = status;
         chimera_nfs_info("nfs4 compound operation %d/%d: error %d",
-                         req->index,
+                         req->index + 1,
                          req->res_compound.num_resarray,
                          status);
-        req->index = req->res_compound.num_resarray;
+
+        req->index++;
+
+        while (req->index < req->res_compound.num_resarray) {
+            req->res_compound.resarray[req->index].opillegal.status = NFS4ERR_NOTSUPP;
+            req->index++;
+        }
     }
 
     if (thread->active) {
