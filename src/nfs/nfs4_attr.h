@@ -218,6 +218,7 @@ chimera_nfs4_attr_append_utf8str_from_uint64(
     len = snprintf(str, sizeof(str), "%lu", value);
 
     chimera_nfs4_attr_append_utf8str(attrs, str, len);
+
 } /* chimera_nfs4_attr_append_utf8str_from_uintt64 */
 
 static int
@@ -434,6 +435,12 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, attr->va_fh_len);
             memcpy(attrs, attr->va_fh, attr->va_fh_len);
             attrs += attr->va_fh_len;
+
+            if (attr->va_fh_len & 0x7) {
+                uint32_t pad = 8 - (attr->va_fh_len & 0x7);
+                memset(attrs, 0, pad);
+                attrs += pad;
+            }
         }
 
         if (req_mask[0] & (1 << FATTR4_FILEID) &&
