@@ -41,7 +41,7 @@ chimera_nfs4_read(
     struct nfs4_state    *state;
     struct evpl_iovec    *iov;
 
-    state = &session->nfs4_session_state[args->stateid.seqid];
+    state = nfs4_session_get_state(session, &args->stateid);
 
     xdr_dbuf_alloc_space(iov, sizeof(*iov) * 64, msg->dbuf);
 

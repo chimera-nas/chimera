@@ -14,11 +14,10 @@ chimera_nfs4_close(
     struct CLOSE4res    *res     = &resop->opclose;
     struct nfs4_session *session = req->session;
     struct nfs4_state   *state;
-    unsigned int         seqid = args->open_stateid.seqid;
 
-    state = &session->nfs4_session_state[seqid];
+    state = nfs4_session_get_state(session, &args->open_stateid);
 
-    nfs4_session_free_slot(session, seqid);
+    nfs4_session_free_slot(session, state);
 
     chimera_vfs_release(thread->vfs_thread, state->nfs4_state_handle);
 

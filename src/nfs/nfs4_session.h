@@ -101,8 +101,11 @@ nfs4_session_alloc_slot(struct nfs4_session *session)
     slot  = session->free_slot[--session->num_free_slots];
     state = &session->nfs4_session_state[slot];
 
-    state->nfs4_state_id.seqid = slot;
-    state->nfs4_state_active   = 1;
+    state->nfs4_state_id.seqid++;
+
+    *(uint64_t *) state->nfs4_state_id.other = slot;
+
+    state->nfs4_state_active = 1;
 
     return state;
 } /* nfs4_session_alloc_slot */
@@ -110,11 +113,22 @@ nfs4_session_alloc_slot(struct nfs4_session *session)
 static inline void
 nfs4_session_free_slot(
     struct nfs4_session *session,
-    uint32_t             slot)
+    struct nfs4_state   *state)
 {
+    uint64_t slot = *(uint64_t *) state->nfs4_state_id.other;
 
-    session->nfs4_session_state[slot].nfs4_state_active = 0;
+    state->nfs4_state_active = 0;
 
     session->free_slot[session->num_free_slots++] = slot;
 
 } /* nfs4_session_free_slot */
+
+static inline struct nfs4_state *
+nfs4_session_get_state(
+    struct nfs4_session   *session,
+    const struct stateid4 *stateid)
+{
+    uint64_t slot = *(uint64_t *) stateid->other;
+
+    return &session->nfs4_session_state[slot];
+} /* nfs4_session_get_state */

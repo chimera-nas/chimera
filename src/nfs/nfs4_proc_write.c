@@ -36,7 +36,7 @@ chimera_nfs4_write(
     struct nfs4_session *session = req->session;
     struct nfs4_state   *state;
 
-    state = &session->nfs4_session_state[args->stateid.seqid];
+    state = nfs4_session_get_state(session, &args->stateid);
 
     chimera_vfs_write(thread->vfs_thread,
                       state->nfs4_state_handle,

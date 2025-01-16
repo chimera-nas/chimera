@@ -158,6 +158,7 @@ nfs4_create_session(
         for (i = 0; i < NFS4_SESSION_MAX_STATE; i++) {
             session->free_slot[i] = NFS4_SESSION_MAX_STATE - (i + 1);
         }
+
         session->num_free_slots = NFS4_SESSION_MAX_STATE;
 
         if (fore_attrs) {

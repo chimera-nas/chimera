@@ -606,7 +606,7 @@ chimera_nfs4_unmarshall_attrs(
                 return -1;
             }
 
-            attr->va_mode     |= chimera_nfs_ntoh32(*(uint32_t *) attrs);
+            attr->va_mode      = chimera_nfs_ntoh32(*(uint32_t *) attrs);
             attrs             += sizeof(uint32_t);
             attr->va_req_mask |= CHIMERA_VFS_ATTR_MODE;
         }
