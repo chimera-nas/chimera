@@ -98,72 +98,46 @@ chimera_nfs4_attr2mask(
 static inline int
 chimera_nfs4_mask2attr(
     struct chimera_vfs_attrs *attr,
-    uint32_t                 *words,
-    int                       max_words)
+    uint32_t                  num_req_mask,
+    uint32_t                 *req_mask,
+    uint32_t                 *rsp_mask)
 {
     int max_word_used = 0;
 
-    memset(words, 0, max_words * sizeof(uint32_t));
+    memset(rsp_mask, 0, sizeof(uint32_t) * num_req_mask);
 
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_MASK_STAT && max_words > 0) {
-        words[0]     |= (1 << FATTR4_SUPPORTED_ATTRS);
+    if (num_req_mask >= 1 &&
+        (req_mask[1] & (1 << (FATTR4_MODE - 32))) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+        rsp_mask[1]  |= (1 << (FATTR4_MODE - 32));
+        max_word_used = 2;
+    }
+
+    if (num_req_mask >= 1 &&
+        (req_mask[0] & (1 << FATTR4_SIZE)) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
+        rsp_mask[0]  |= (1 << FATTR4_SIZE);
         max_word_used = 1;
     }
 
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE && max_words > 0) {
-        words[0] |= (1 << FATTR4_TYPE);
-        words[0] |= (1 << FATTR4_SYMLINK_SUPPORT);
-        words[0] |= (1 << FATTR4_NAMED_ATTR);
-        words[0] |= (1 << FATTR4_RDATTR_ERROR);
-        if (max_words > 1) {
-            words[1]     |= (1 << (FATTR4_MODE - 32));
-            max_word_used = 2;
-        }
+    if (num_req_mask >= 2 &&
+        (req_mask[1] & (1 << (FATTR4_TIME_ACCESS - 32))) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME)) {
+        rsp_mask[1]  |= (1 << (FATTR4_TIME_ACCESS - 32));
+        max_word_used = 2;
     }
 
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_FH && max_words > 0) {
-        words[0]     |= (1 << FATTR4_FILEHANDLE);
-        max_word_used = 1;
+    if (num_req_mask >= 2 &&
+        (req_mask[1] & (1 << (FATTR4_TIME_MODIFY - 32))) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+        rsp_mask[1]  |= (1 << (FATTR4_TIME_MODIFY - 32));
+        max_word_used = 2;
     }
 
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_CTIME && max_words > 0) {
-        words[0] |= (1 << FATTR4_CHANGE);
-        if (max_words > 1) {
-            words[1]     |= (1 << (FATTR4_TIME_METADATA - 32));
-            max_word_used = 2;
-        }
-    }
-
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE && max_words > 0) {
-        words[0] |= (1 << FATTR4_SIZE);
-        if (max_words > 1) {
-            words[1]     |= (1 << (FATTR4_SPACE_USED - 32));
-            max_word_used = 2;
-        }
-    }
-
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_NLINK && max_words > 0) {
-        words[0] |= (1 << FATTR4_LINK_SUPPORT);
-        if (max_words > 1) {
-            words[1]     |= (1 << (FATTR4_NUMLINKS - 32));
-            max_word_used = 2;
-        }
-    }
-
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_DEV && max_words > 0) {
-        words[0]     |= (1 << FATTR4_FSID);
-        max_word_used = 1;
-    }
-
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_INUM && max_words > 0) {
-        words[0]     |= (1 << FATTR4_UNIQUE_HANDLES);
-        words[0]     |= (1 << FATTR4_FILEID);
-        max_word_used = 1;
-    }
-
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME && max_words > 1) {
-        words[0]     |= (1 << FATTR4_LEASE_TIME);
-        words[1]     |= (1 << (FATTR4_TIME_ACCESS - 32));
+    if (num_req_mask >= 2 &&
+        (req_mask[1] & (1 << (FATTR4_TIME_METADATA - 32))) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+        rsp_mask[1]  |= (1 << (FATTR4_TIME_METADATA - 32));
         max_word_used = 2;
     }
 

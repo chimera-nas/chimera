@@ -15,6 +15,7 @@ chimera_nfs4_setattr_complete(
     struct nfs_request               *req    = private_data;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct chimera_server_nfs_thread *thread = req->thread;
+    struct SETATTR4args              *args   = &req->args_compound->argarray[req->index].opsetattr;
     struct SETATTR4res               *res    = &req->res_compound.resarray[req->index].opsetattr;
 
     if (error_code == CHIMERA_VFS_OK) {
@@ -22,7 +23,10 @@ chimera_nfs4_setattr_complete(
 
         xdr_dbuf_alloc_space(res->attrsset, sizeof(uint32_t) * 4, msg->dbuf);
 
-        res->num_attrsset = chimera_nfs4_mask2attr(set_attr, res->attrsset, 4);
+        res->num_attrsset = chimera_nfs4_mask2attr(set_attr,
+                                                   args->obj_attributes.num_attrmask,
+                                                   args->obj_attributes.attrmask,
+                                                   res->attrsset);
     } else {
         res->status       = chimera_nfs4_errno_to_nfsstat4(error_code);
         res->num_attrsset = 0;

@@ -17,6 +17,7 @@ chimera_nfs4_open_at_complete(
     struct nfs_request             *req           = private_data;
     struct evpl_rpc2_msg           *msg           = req->msg;
     struct nfs4_session            *session       = req->session;
+    struct OPEN4args               *args          = &req->args_compound->argarray[req->index].opopen;
     struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
     struct chimera_vfs_open_handle *parent_handle = req->handle;
     struct nfs4_state              *state;
@@ -38,14 +39,23 @@ chimera_nfs4_open_at_complete(
         res->resok4.num_attrset                = 0;
         res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
 
-        xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
-        res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr, res->resok4.attrset, 4);
+        if (args->openhow.opentype == OPEN4_CREATE &&
+            (args->openhow.how.mode == UNCHECKED4 || args->openhow.how.mode == GUARDED4)) {
+            xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
+            xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
+            res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
+                                                             args->openhow.how.createattrs.num_attrmask,
+                                                             args->openhow.how.createattrs.attrmask,
+                                                             res->resok4.attrset);
+        } else {
+            res->resok4.num_attrset = 0;
+        }
 
         memcpy(req->fh, handle->fh, handle->fh_len);
         req->fhlen = handle->fh_len;
 
         chimera_nfs4_set_changeinfo(&res->resok4.cinfo, dir_pre_attr, dir_post_attr);
-    }
+    } /* chimera_nfs4_open_at_complete */
 
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
 

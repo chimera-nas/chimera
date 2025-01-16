@@ -13,9 +13,10 @@ chimera_nfs4_create_complete(
     struct chimera_vfs_attrs *dir_post_attr,
     void                     *private_data)
 {
-    struct nfs_request   *req = private_data;
-    struct evpl_rpc2_msg *msg = req->msg;
-    struct CREATE4res    *res = &req->res_compound.resarray[req->index].opcreate;
+    struct nfs_request   *req  = private_data;
+    struct evpl_rpc2_msg *msg  = req->msg;
+    struct CREATE4args   *args = &req->args_compound->argarray[req->index].opcreate;
+    struct CREATE4res    *res  = &req->res_compound.resarray[req->index].opcreate;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_nfs4_compound_complete(req,
@@ -27,7 +28,10 @@ chimera_nfs4_create_complete(
     res->status = NFS4_OK;
 
     xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
-    res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr, res->resok4.attrset, 4);
+    res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
+                                                     args->createattrs.num_attrmask,
+                                                     args->createattrs.attrmask,
+                                                     res->resok4.attrset);
 
     chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
                          "CHIMERA_VFS_ATTR_FH is not set");
@@ -50,9 +54,10 @@ chimera_nfs4_create_symlink_complete(
     struct chimera_vfs_attrs *dir_post_attr,
     void                     *private_data)
 {
-    struct nfs_request   *req = private_data;
-    struct evpl_rpc2_msg *msg = req->msg;
-    struct CREATE4res    *res = &req->res_compound.resarray[req->index].opcreate;
+    struct nfs_request   *req  = private_data;
+    struct evpl_rpc2_msg *msg  = req->msg;
+    struct CREATE4args   *args = &req->args_compound->argarray[req->index].opcreate;
+    struct CREATE4res    *res  = &req->res_compound.resarray[req->index].opcreate;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_nfs4_compound_complete(req,
@@ -64,7 +69,10 @@ chimera_nfs4_create_symlink_complete(
     res->status = NFS4_OK;
 
     xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
-    res->resok4.num_attrset = chimera_nfs4_mask2attr(attr, res->resok4.attrset, 4);
+    res->resok4.num_attrset = chimera_nfs4_mask2attr(attr,
+                                                     args->createattrs.num_attrmask,
+                                                     args->createattrs.attrmask,
+                                                     res->resok4.attrset);
 
     chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
                          "CHIMERA_VFS_ATTR_FH is not set");
