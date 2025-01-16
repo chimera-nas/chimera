@@ -51,15 +51,15 @@ nfs_server_init(
     NFS_V4_init(&shared->nfs_v4);
     NFS_V4_CB_init(&shared->nfs_v4_cb);
 
-    shared->portmap_v2.rpc2.metrics = calloc(shared->portmap_v2.rpc2.maxproc,
+    shared->portmap_v2.rpc2.metrics = calloc(shared->portmap_v2.rpc2.maxproc + 1,
                                              sizeof(struct evpl_rpc2_metric));
-    shared->mount_v3.rpc2.metrics = calloc(shared->mount_v3.rpc2.maxproc,
+    shared->mount_v3.rpc2.metrics = calloc(shared->mount_v3.rpc2.maxproc + 1,
                                            sizeof(struct evpl_rpc2_metric));
-    shared->nfs_v3.rpc2.metrics = calloc(shared->nfs_v3.rpc2.maxproc,
+    shared->nfs_v3.rpc2.metrics = calloc(shared->nfs_v3.rpc2.maxproc + 1,
                                          sizeof(struct evpl_rpc2_metric));
-    shared->nfs_v4.rpc2.metrics = calloc(shared->nfs_v4.rpc2.maxproc,
+    shared->nfs_v4.rpc2.metrics = calloc(shared->nfs_v4.rpc2.maxproc + 1,
                                          sizeof(struct evpl_rpc2_metric));
-    shared->nfs_v4_cb.rpc2.metrics = calloc(shared->nfs_v4_cb.rpc2.maxproc,
+    shared->nfs_v4_cb.rpc2.metrics = calloc(shared->nfs_v4_cb.rpc2.maxproc + 1,
                                             sizeof(struct evpl_rpc2_metric));
 
     pthread_mutex_init(&shared->portmap_v2.rpc2.metrics_lock, NULL);
@@ -115,7 +115,7 @@ nfs_server_dump_metrics(struct evpl_rpc2_program *program)
     struct evpl_rpc2_metric *metric;
     int                      i;
 
-    for (i = 0; i < program->maxproc; i++) {
+    for (i = 0; i <= program->maxproc; i++) {
         metric = &program->metrics[i];
 
         if (metric->total_calls == 0) {
