@@ -53,6 +53,46 @@ chimera_nfs4_open_at_complete(
 } /* chimera_nfs4_open_at_complete */
 
 static void
+chimera_nfs4_open_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request             *req           = private_data;
+    struct nfs4_session            *session       = req->session;
+    struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
+    struct chimera_vfs_open_handle *parent_handle = req->handle;
+    struct nfs4_state              *state;
+
+    if (error_code != NFS4_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+    } else {
+
+        state                    = nfs4_session_alloc_slot(session);
+        state->nfs4_state_handle = handle;
+
+        res->status                            = NFS4_OK;
+        res->resok4.stateid                    = state->nfs4_state_id;
+        res->resok4.cinfo.atomic               = 0;
+        res->resok4.cinfo.before               = 0;
+        res->resok4.cinfo.after                = 0;
+        res->resok4.rflags                     = 0;
+        res->resok4.num_attrset                = 0;
+        res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+
+        /* XXX Not sure what to do here since there is no directory */
+        res->resok4.cinfo.atomic = 0;
+        res->resok4.cinfo.before = 0;
+        res->resok4.cinfo.after  = 0;
+    }
+
+    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_open_at_complete */
+
+static void
 chimera_nfs4_open_parent_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *parent_handle,
@@ -109,6 +149,14 @@ chimera_nfs4_open_parent_complete(
                                 CHIMERA_VFS_ATTR_MTIME,
                                 chimera_nfs4_open_at_complete,
                                 req);
+            break;
+        case CLAIM_FH:
+            chimera_vfs_open(req->thread->vfs_thread,
+                             req->fh,
+                             req->fhlen,
+                             flags,
+                             chimera_nfs4_open_complete,
+                             req);
             break;
         default:
             abort();

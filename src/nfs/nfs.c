@@ -30,6 +30,9 @@ nfs_server_init(
     struct chimera_vfs                 *vfs)
 {
     struct chimera_server_nfs_shared *shared;
+    struct timespec                   now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
 
     shared = calloc(1, sizeof(*shared));
 
@@ -37,7 +40,7 @@ nfs_server_init(
 
     shared->vfs = vfs;
 
-    shared->nfs_verifier = rand();
+    shared->nfs_verifier = now.tv_sec * 1000000000ULL + now.tv_nsec;
 
     chimera_nfs_abort_if(sizeof(shared->nfs_verifier) != NFS3_WRITEVERFSIZE,
                          "nfs_verifier size mismatch");

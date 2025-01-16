@@ -14,6 +14,10 @@ chimera_nfs4_commit_complete(
 
     if (error_code == CHIMERA_VFS_OK) {
         res->status = NFS4_OK;
+
+        memcpy(res->resok4.writeverf,
+               &req->thread->shared->nfs_verifier,
+               sizeof(res->resok4.writeverf));
     } else {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
     }

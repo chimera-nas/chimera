@@ -18,6 +18,10 @@ chimera_nfs4_write_complete(
         res->status           = NFS4_OK;
         res->resok4.count     = length;
         res->resok4.committed = sync ? FILE_SYNC4 : UNSTABLE4;
+
+        memcpy(res->resok4.writeverf,
+               &req->thread->shared->nfs_verifier,
+               sizeof(res->resok4.writeverf));
     } else {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
     }
