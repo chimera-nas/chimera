@@ -103,7 +103,7 @@ nfs4_session_alloc_slot(struct nfs4_session *session)
     slot  = session->free_slot[--session->num_free_slots];
     state = &session->nfs4_session_state[slot];
 
-    state->nfs4_state_id.seqid++;
+    state->nfs4_state_id.seqid = 1;
 
     *(uint64_t *) state->nfs4_state_id.other = slot;
 

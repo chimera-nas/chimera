@@ -242,10 +242,9 @@ chimera_nfs4_marshall_attrs(
                                             /* homogeneous */
                                             /* maxfilesize */
                                             /* maxlink */
-                                            (1 << FATTR4_MAXNAME)
-
-                                            /* maxread */
-                                            /* maxwrite */);
+                                            (1 << FATTR4_MAXNAME) |
+                                            (1 << FATTR4_MAXREAD) |
+                                            (1 << FATTR4_MAXWRITE));
 
             chimera_nfs4_attr_append_uint32(&attrs,
                                             (1UL << (FATTR4_MODE - 32)) |
@@ -449,6 +448,20 @@ chimera_nfs4_marshall_attrs(
             *num_rsp_mask = 1;
 
             chimera_nfs4_attr_append_uint32(&attrs, 255);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_MAXREAD)) {
+            rsp_mask[0]  |= (1 << FATTR4_MAXREAD);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint64(&attrs, 1024 * 1024);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_MAXWRITE)) {
+            rsp_mask[0]  |= (1 << FATTR4_MAXWRITE);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint64(&attrs, 1024 * 1024);
         }
     }
 
