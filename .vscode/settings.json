@@ -59,6 +59,15 @@
     "nfs4_procs.h": "c",
     "array": "c",
     "string": "c",
-    "string_view": "c"
+    "string_view": "c",
+    "stdio.h": "c",
+    "charconv": "c",
+    "chrono": "c",
+    "optional": "c",
+    "format": "c",
+    "ratio": "c",
+    "system_error": "c",
+    "functional": "c",
+    "tuple": "c"
   }
 }

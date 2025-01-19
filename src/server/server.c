@@ -21,6 +21,7 @@ struct chimera_server_config {
     int                           delegation_threads;
     struct chimera_vfs_module_cfg modules[CHIMERA_SERVER_MAX_MODULES];
     int                           num_modules;
+    int                           metrics_port;
 };
 
 struct chimera_server {
@@ -70,6 +71,8 @@ chimera_server_config_init(void)
     config->modules[3].config_path[0] = '\0';
     config->modules[3].module_path[0] = '\0';
     config->num_modules               = 4;
+
+    config->metrics_port = 0;
 
     return config;
 } /* chimera_server_config_init */
@@ -154,6 +157,14 @@ chimera_server_config_add_module(
 
     config->num_modules++;
 } /* chimera_server_config_add_module */
+
+void
+chimera_server_config_set_metrics_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->metrics_port = port;
+} /* chimera_server_config_set_metrics_port */
 
 static void
 chimera_server_thread_wake(
