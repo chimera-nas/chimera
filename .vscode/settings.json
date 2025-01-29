@@ -68,6 +68,7 @@
     "ratio": "c",
     "system_error": "c",
     "functional": "c",
-    "tuple": "c"
+    "tuple": "c",
+    "enum_xdr.h": "c"
   }
 }

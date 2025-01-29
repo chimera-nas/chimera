@@ -4,8 +4,7 @@
 #include <pthread.h>
 #include <sys/resource.h>
 
-#include "core/evpl.h"
-#include "thread/thread.h"
+#include "evpl/evpl.h"
 #include "server_internal.h"
 #include "protocol.h"
 #include "nfs/nfs.h"

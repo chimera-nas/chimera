@@ -3,7 +3,7 @@
 #include <unistd.h>
 #include <jansson.h>
 
-#include "core/evpl.h"
+#include "evpl/evpl.h"
 
 #include "server/server.h"
 #include "server/server_internal.h"

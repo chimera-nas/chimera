@@ -2,7 +2,6 @@
 #include "vfs/vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_open_cache.h"
-#include "core/evpl.h"
 
 static void
 chimera_vfs_read_complete(struct chimera_vfs_request *request)

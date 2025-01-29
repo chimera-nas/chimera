@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rpc2/rpc2.h"
+#include "evpl/evpl_rpc2.h"
 #include "portmap_xdr.h"
 
 void chimera_portmap_null(

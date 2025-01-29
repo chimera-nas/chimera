@@ -5,7 +5,7 @@
 #include "server/protocol.h"
 #include "server/server.h"
 #include "vfs/vfs.h"
-#include "rpc2/rpc2.h"
+#include "evpl/evpl_rpc2.h"
 #include "nfs3_procs.h"
 #include "nfs4_procs.h"
 #include "nfs_mount.h"

@@ -1,5 +1,5 @@
 #include "nfs4_procs.h"
-#include "rpc2/rpc2.h"
+#include "evpl/evpl_rpc2.h"
 #include "nfs4_dump.h"
 void
 chimera_nfs4_compound_process(

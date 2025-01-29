@@ -16,7 +16,6 @@
 #include "cairn.h"
 #include "common/logging.h"
 #include "common/misc.h"
-#include "core/deferral.h"
 #include "evpl_iovec_cursor.h"
 
 #define CAIRN_KEY_INODE   0

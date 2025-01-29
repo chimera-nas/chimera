@@ -18,7 +18,6 @@
 #include "vfs/demofs/demofs.h"
 #include "common/misc.h"
 #include "uthash/utlist.h"
-#include "thread/thread.h"
 
 static void *
 chimera_vfs_delegation_thread_init(

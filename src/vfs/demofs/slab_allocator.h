@@ -3,7 +3,7 @@
 #include <sys/mman.h>
 #include "uthash/utlist.h"
 
-#include "core/evpl.h"
+#include "evpl/evpl.h"
 
 struct demofs_slab {
     void               *buffer;

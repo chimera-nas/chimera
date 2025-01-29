@@ -42,5 +42,5 @@ endif()
 
 add_subdirectory(ext)
 
-include_directories(ext/libevpl/src)
+include_directories(ext/libevpl/include)
 add_subdirectory(src)

@@ -17,9 +17,7 @@
 
 #include "vfs/vfs_error.h"
 
-#include "core/evpl.h"
-#include "core/event.h"
-#include "core/deferral.h"
+#include "evpl/evpl.h"
 
 #include "io_uring.h"
 #include "../linux/linux_common.h"

@@ -1,5 +1,5 @@
 #include "nfs4_procs.h"
-#include "rpc2/rpc2.h"
+#include "evpl/evpl_rpc2.h"
 
 void
 chimera_nfs4_exchange_id(

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/evpl.h"
+#include "evpl/evpl.h"
 
 struct chimera_server_config;
 struct chimera_vfs;
