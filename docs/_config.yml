@@ -1,0 +1,11 @@
+title: flowbench
+description: flowbench documentation
+theme: just-the-docs
+color_scheme: dark
+
+
+url: https://chimeraproject.io/flowbench
+
+aux_links:
+  GitHub: https://github.com/chimera-nas/flowbench
+
