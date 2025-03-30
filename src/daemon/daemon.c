@@ -32,7 +32,7 @@ main(
     json_error_t                  error;
     struct chimera_server        *server;
     struct chimera_server_config *server_config;
-    struct evpl_config           *evpl_config;
+    struct evpl_global_config    *evpl_global_config;
 
     chimera_log_init();
 
@@ -40,10 +40,11 @@ main(
 
     evpl_set_log_fn(chimera_vlog);
 
-    evpl_config = evpl_config_init();
-    evpl_config_set_rdmacm_datagram_size_override(evpl_config, 4096);
+    evpl_global_config = evpl_global_config_init();
+    evpl_global_config_set_rdmacm_datagram_size_override(evpl_global_config, 4096);
+    evpl_global_config_set_spin_ns(evpl_global_config, 1000000UL);
 
-    evpl_init_auto(evpl_config);
+    evpl_init(evpl_global_config);
 
 
     while ((opt = getopt(argc, argv, "c:dv")) != -1) {

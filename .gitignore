@@ -4,6 +4,8 @@ core.*
 build
 publish.sh
 cap
+.DS_Store
+private
 *.cap
 *.diff
 *.rej

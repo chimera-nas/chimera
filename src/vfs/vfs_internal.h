@@ -188,14 +188,12 @@ static inline void
 chimera_vfs_complete_delegate(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread *thread = request->thread;
-    uint64_t                   one    = 1;
 
     pthread_mutex_lock(&thread->lock);
     DL_APPEND(thread->pending_complete_requests, request);
     pthread_mutex_unlock(&thread->lock);
 
-    write(thread->eventfd, &one, sizeof(one));
-
+    evpl_ring_doorbell(&thread->doorbell);
 } /* chimera_vfs_complete_delegate */
 
 static inline void
@@ -221,7 +219,8 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
         DL_APPEND(delegation_thread->requests, request);
         pthread_mutex_unlock(&delegation_thread->lock);
 
-        evpl_thread_wake(delegation_thread->evpl_thread);
+        evpl_ring_doorbell(&delegation_thread->doorbell);
+
     } else {
         module->dispatch(request, thread->module_private[module->fh_magic]);
     }

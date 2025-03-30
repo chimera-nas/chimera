@@ -9,7 +9,7 @@
 #include "protocol.h"
 #include "nfs/nfs.h"
 #include "vfs/vfs.h"
-
+#include "common/macros.h"
 #define CHIMERA_SERVER_MAX_MODULES 64
 
 struct chimera_server_config {
@@ -38,6 +38,7 @@ struct chimera_thread {
     struct chimera_server     *server;
     struct chimera_vfs_thread *vfs_thread;
     void                      *protocol_private[2];
+    struct evpl_timer          watchdog;
 };
 
 struct chimera_server_config *
@@ -167,10 +168,10 @@ chimera_server_config_set_metrics_port(
 
 static void
 chimera_server_thread_wake(
-    struct evpl *evpl,
-    void        *data)
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
 {
-    struct chimera_thread *thread = data;
+    struct chimera_thread *thread = container_of(timer, struct chimera_thread, watchdog);
 
     chimera_vfs_watchdog(thread->vfs_thread);
 } /* chimera_server_thread_wake */
@@ -184,6 +185,8 @@ chimera_server_thread_init(
     struct chimera_thread *thread;
 
     thread = calloc(1, sizeof(*thread));
+
+    evpl_add_timer(evpl, &thread->watchdog, chimera_server_thread_wake, 1000000);
 
     thread->server = server;
 
@@ -216,7 +219,9 @@ chimera_server_create_share(
 } /* chimera_server_create_share */
 
 static void
-chimera_server_thread_destroy(void *data)
+chimera_server_thread_shutdown(
+    struct evpl *evpl,
+    void        *data)
 {
     struct chimera_thread *thread = data;
     struct chimera_server *server = thread->server;
@@ -226,9 +231,10 @@ chimera_server_thread_destroy(void *data)
         server->protocols[i]->thread_destroy(thread->protocol_private[i]);
     }
 
+    evpl_remove_timer(evpl, &thread->watchdog);
     chimera_vfs_thread_destroy(thread->vfs_thread);
     free(thread);
-} /* chimera_server_thread_destroy */
+} /* chimera_server_create_share */
 
 struct chimera_server *
 chimera_server_init(const struct chimera_server_config *config)
@@ -273,17 +279,21 @@ chimera_server_init(const struct chimera_server_config *config)
 void
 chimera_server_start(struct chimera_server *server)
 {
-    server->pool = evpl_threadpool_create(server->config->core_threads,
+    int i;
+
+    server->pool = evpl_threadpool_create(NULL,
+                                          server->config->core_threads,
                                           chimera_server_thread_init,
-                                          chimera_server_thread_wake,
-                                          NULL,
-                                          chimera_server_thread_destroy,
-                                          1000,
+                                          chimera_server_thread_shutdown,
                                           server);
 
-    chimera_server_info("Waiting for threads to start...");
+    chimera_server_info("Waiting for %d threads to start...", server->config->core_threads);
     while (server->threads_online < server->config->core_threads) {
         usleep(100);
+    }
+
+    for (i = 0; i < server->num_protocols; i++) {
+        server->protocols[i]->start(server->protocol_private[i]);
     }
 
     chimera_server_info("Server is ready.");

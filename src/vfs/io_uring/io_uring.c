@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/statvfs.h>
+#include <sys/eventfd.h>
 #include <sys/uio.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -156,7 +157,7 @@ chimera_io_uring_complete(
     rc = read(thread->eventfd, &value, sizeof(value));
 
     if (rc != sizeof(value)) {
-        evpl_event_mark_unreadable(&thread->event);
+        evpl_event_mark_unreadable(evpl, &thread->event);
         return;
     }
 
@@ -398,10 +399,8 @@ chimera_io_uring_thread_init(
 
     chimera_io_uring_abort_if(rc < 0, "Failed to register eventfd");
 
-    thread->event.fd            = thread->eventfd;
-    thread->event.read_callback = chimera_io_uring_complete;
-
-    evpl_add_event(evpl, &thread->event);
+    evpl_add_event(evpl, &thread->event, thread->eventfd,
+                   chimera_io_uring_complete, NULL, NULL);
 
     evpl_event_read_interest(evpl, &thread->event);
 

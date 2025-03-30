@@ -19,26 +19,16 @@
 #include "common/misc.h"
 #include "uthash/utlist.h"
 
-static void *
-chimera_vfs_delegation_thread_init(
-    struct evpl *evpl,
-    void        *private_data)
-{
-    struct chimera_vfs_delegation_thread *delegation_thread = private_data;
-
-    delegation_thread->evpl       = evpl;
-    delegation_thread->vfs_thread = chimera_vfs_thread_init(evpl, delegation_thread->vfs);
-
-    return private_data;
-} /* chimera_vfs_delegation_thread_init */
 
 static void
 chimera_vfs_delegation_thread_wake(
-    struct evpl *evpl,
-    void        *private_data)
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
 {
-    struct chimera_vfs_delegation_thread *delegation_thread = private_data;
-    struct chimera_vfs_thread            *thread            = delegation_thread->vfs_thread;
+    struct chimera_vfs_delegation_thread *delegation_thread = container_of(doorbell, struct
+                                                                           chimera_vfs_delegation_thread,
+                                                                           doorbell);
+    struct chimera_vfs_thread            *thread = delegation_thread->vfs_thread;
     struct chimera_vfs_request           *requests, *request;
     struct chimera_vfs_module            *module;
 
@@ -56,31 +46,33 @@ chimera_vfs_delegation_thread_wake(
     }
 } /* chimera_vfs_delegation_thread_wake */
 
-static void
-chimera_vfs_delegation_thread_shutdown(void *private_data)
-{
-    struct chimera_vfs_delegation_thread *delegation_thread = private_data;
-
-    chimera_vfs_thread_destroy(delegation_thread->vfs_thread);
-} /* chimera_vfs_delegation_thread_shutdown */
-
-static void
-chimera_vfs_delegation_thread_destroy(void *private_data)
-{
-} /* chimera_vfs_delegation_thread_destroy */
-
 static void *
-chimera_vfs_close_thread_init(
+chimera_vfs_delegation_thread_init(
     struct evpl *evpl,
     void        *private_data)
 {
-    struct chimera_vfs_close_thread *close_thread = private_data;
+    struct chimera_vfs_delegation_thread *delegation_thread = private_data;
 
-    close_thread->evpl       = evpl;
-    close_thread->vfs_thread = chimera_vfs_thread_init(evpl, close_thread->vfs);
+    delegation_thread->evpl       = evpl;
+    delegation_thread->vfs_thread = chimera_vfs_thread_init(evpl, delegation_thread->vfs);
+
+    evpl_add_doorbell(evpl, &delegation_thread->doorbell,
+                      chimera_vfs_delegation_thread_wake);
 
     return private_data;
-} /* chimera_vfs_close_thread_init */
+} /* chimera_vfs_delegation_thread_init */
+
+static void
+chimera_vfs_delegation_thread_shutdown(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct chimera_vfs_delegation_thread *delegation_thread = private_data;
+
+    evpl_remove_doorbell(evpl, &delegation_thread->doorbell);
+
+    chimera_vfs_thread_destroy(delegation_thread->vfs_thread);
+} /* chimera_vfs_delegation_thread_shutdown */
 
 static void
 chimera_vfs_close_thread_callback(
@@ -127,16 +119,15 @@ chimera_vfs_close_thread_sweep(
     }
 
     return count;
-} /* chimera_vfs_close_thread_wake */
+} /* chimera_vfs_close_thread_sweep */
 
 static void
-chimera_vfs_close_thread_wake(
-    struct evpl *evpl,
-    void        *private_data)
+chimera_vfs_close_thread_wake_shutdown(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
 {
-    struct chimera_vfs_close_thread *close_thread = private_data;
-    uint64_t                         min_age;
-    uint64_t                         count;
+    struct chimera_vfs_close_thread *close_thread = container_of(doorbell, struct chimera_vfs_close_thread, doorbell);
+    uint64_t                         min_age, count;
 
     pthread_mutex_lock(&close_thread->lock);
 
@@ -156,22 +147,65 @@ chimera_vfs_close_thread_wake(
         return;
     }
 
+    if (close_thread->shutdown) {
+        evpl_ring_doorbell(doorbell);
+    }
+
     pthread_mutex_unlock(&close_thread->lock);
 
 } /* chimera_vfs_close_thread_wake */
 
 static void
-chimera_vfs_close_thread_shutdown(void *private_data)
+chimera_vfs_close_thread_wake_timer(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_vfs_close_thread *close_thread = container_of(timer, struct chimera_vfs_close_thread, timer);
+    uint64_t                         min_age;
+
+    pthread_mutex_lock(&close_thread->lock);
+
+    min_age = 100000000UL;
+
+    chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_path_cache, min_age);
+    chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_file_cache, min_age);
+
+    pthread_mutex_unlock(&close_thread->lock);
+
+} /* chimera_vfs_close_thread_wake */
+
+static void *
+chimera_vfs_close_thread_init(
+    struct evpl *evpl,
+    void        *private_data)
 {
     struct chimera_vfs_close_thread *close_thread = private_data;
 
-    chimera_vfs_thread_destroy(close_thread->vfs_thread);
-} /* chimera_vfs_close_thread_shutdown */
+    close_thread->evpl       = evpl;
+    close_thread->vfs_thread = chimera_vfs_thread_init(evpl, close_thread->vfs);
+
+    evpl_add_doorbell(evpl, &close_thread->doorbell,
+                      chimera_vfs_close_thread_wake_shutdown);
+
+    evpl_add_timer(evpl, &close_thread->timer,
+                   chimera_vfs_close_thread_wake_timer,
+                   100000UL);
+
+    return private_data;
+} /* chimera_vfs_close_thread_init */
 
 static void
-chimera_vfs_close_thread_destroy(void *private_data)
+chimera_vfs_close_thread_shutdown(
+    struct evpl *evpl,
+    void        *private_data)
 {
-} /* chimera_vfs_close_thread_destroy */
+    struct chimera_vfs_close_thread *close_thread = private_data;
+
+    evpl_remove_doorbell(evpl, &close_thread->doorbell);
+    evpl_remove_timer(evpl, &close_thread->timer);
+
+    chimera_vfs_thread_destroy(close_thread->vfs_thread);
+} /* chimera_vfs_close_thread_shutdown */
 
 struct chimera_vfs *
 chimera_vfs_init(
@@ -205,11 +239,9 @@ chimera_vfs_init(
         pthread_mutex_init(&vfs->delegation_threads[i].lock, NULL);
 
         vfs->delegation_threads[i].evpl_thread = evpl_thread_create(
+            NULL,
             chimera_vfs_delegation_thread_init,
-            chimera_vfs_delegation_thread_wake,
             chimera_vfs_delegation_thread_shutdown,
-            chimera_vfs_delegation_thread_destroy,
-            -1,
             &vfs->delegation_threads[i]);
     }
 
@@ -219,11 +251,9 @@ chimera_vfs_init(
     vfs->close_thread.shutdown = 0;
 
     vfs->close_thread.evpl_thread = evpl_thread_create(
+        NULL,
         chimera_vfs_close_thread_init,
-        chimera_vfs_close_thread_wake,
         chimera_vfs_close_thread_shutdown,
-        chimera_vfs_close_thread_destroy,
-        10,
         &vfs->close_thread);
 
     return vfs;
@@ -250,7 +280,11 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
 
     pthread_mutex_lock(&vfs->close_thread.lock);
     vfs->close_thread.shutdown = 1;
-    evpl_thread_wake(vfs->close_thread.evpl_thread);
+
+    __sync_synchronize();
+
+    evpl_ring_doorbell(&vfs->close_thread.doorbell);
+
     pthread_cond_wait(&vfs->close_thread.cond, &vfs->close_thread.lock);
     pthread_mutex_unlock(&vfs->close_thread.lock);
 
@@ -287,20 +321,11 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
 
 static void
 chimera_vfs_process_completion(
-    struct evpl       *evpl,
-    struct evpl_event *event)
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
 {
-    struct chimera_vfs_thread  *thread = container_of(event, struct chimera_vfs_thread, pending_complete_event);
+    struct chimera_vfs_thread  *thread = container_of(doorbell, struct chimera_vfs_thread, doorbell);
     struct chimera_vfs_request *complete_requests, *unblocked_requests, *request;
-    uint64_t                    value;
-    ssize_t                     rc;
-
-    rc = read(thread->eventfd, &value, sizeof(value));
-
-    if (rc != sizeof(value)) {
-        evpl_event_mark_unreadable(&thread->pending_complete_event);
-        return;
-    }
 
     pthread_mutex_lock(&thread->lock);
     complete_requests                 = thread->pending_complete_requests;
@@ -363,16 +388,7 @@ chimera_vfs_thread_init(
 
     pthread_mutex_init(&thread->lock, NULL);
 
-    thread->eventfd = eventfd(0, EFD_NONBLOCK);
-
-    chimera_vfs_abort_if(thread->eventfd < 0, "failed to create eventfd");
-
-    thread->pending_complete_event.fd            = thread->eventfd;
-    thread->pending_complete_event.read_callback = chimera_vfs_process_completion;
-
-    evpl_add_event(evpl, &thread->pending_complete_event);
-
-    evpl_event_read_interest(evpl, &thread->pending_complete_event);
+    evpl_add_doorbell(evpl, &thread->doorbell, chimera_vfs_process_completion);
 
     for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
         module = vfs->modules[i];
@@ -397,7 +413,7 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
     struct chimera_vfs_open_handle *handle;
     int                             i;
 
-    close(thread->eventfd);
+    evpl_remove_doorbell(thread->evpl, &thread->doorbell);
 
     for (i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
         if (thread->metrics[i].num_requests == 0) {

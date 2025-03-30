@@ -1,11 +1,9 @@
 #pragma once
 #include <stdint.h>
 #include <sys/time.h>
-#include <sys/eventfd.h>
 #include "vfs_dump.h"
 #include "vfs_error.h"
 #include "evpl/evpl.h"
-//#include "core/event.h"
 #include "uthash/uthash.h"
 
 
@@ -492,6 +490,7 @@ struct chimera_vfs_delegation_thread {
     struct chimera_vfs_thread  *vfs_thread;
     struct chimera_vfs_request *requests;
     pthread_mutex_t             lock;
+    struct evpl_doorbell        doorbell;
 };
 
 struct chimera_vfs_close_thread {
@@ -499,9 +498,11 @@ struct chimera_vfs_close_thread {
     struct chimera_vfs        *vfs;
     struct evpl_thread        *evpl_thread;
     struct chimera_vfs_thread *vfs_thread;
-    int                        num_pending;
     int                        shutdown;
+    int                        num_pending;
     int                        signaled;
+    struct evpl_doorbell       doorbell;
+    struct evpl_timer          timer;
     pthread_mutex_t            lock;
     pthread_cond_t             cond;
 };
@@ -529,8 +530,7 @@ struct chimera_vfs_thread {
 
     struct chimera_vfs_request     *pending_complete_requests;
     struct chimera_vfs_request     *unblocked_requests;
-    int                             eventfd;
-    struct evpl_event               pending_complete_event;
+    struct evpl_doorbell            doorbell;
     pthread_mutex_t                 lock;
 
     struct chimera_vfs_metric       metrics[CHIMERA_VFS_OP_NUM];

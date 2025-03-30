@@ -76,7 +76,18 @@ chimera_nfs3_create_open_at_parent_complete(
 
     xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
 
-    chimera_nfs3_sattr3_to_va(attr, &args->how.obj_attributes);
+    attr->va_req_mask = 0;
+
+    switch (args->how.mode) {
+        case UNCHECKED:
+            chimera_nfs3_sattr3_to_va(attr, &args->how.obj_attributes);
+            break;
+        case GUARDED:
+            chimera_nfs3_sattr3_to_va(attr, &args->how.obj_attributes);
+            break;
+        case EXCLUSIVE:
+            break;
+    } /* switch */
 
     chimera_vfs_open_at(thread->vfs_thread,
                         parent_handle,

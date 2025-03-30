@@ -107,7 +107,6 @@ chimera_vfs_open_cache_release_blocked(
 {
     struct chimera_vfs_thread  *request_thread;
     struct chimera_vfs_request *request;
-    uint64_t                    one = 1;
 
 
     while (requests) {
@@ -132,7 +131,7 @@ chimera_vfs_open_cache_release_blocked(
             pthread_mutex_unlock(&request_thread->lock);
 
             /* Wake up the thread */
-            write(request_thread->eventfd, &one, sizeof(one));
+            evpl_ring_doorbell(&request_thread->doorbell);
         }
     }
 

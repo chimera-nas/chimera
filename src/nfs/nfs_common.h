@@ -80,6 +80,16 @@ struct chimera_server_nfs_shared {
     struct NFS_V4                       nfs_v4;
     struct NFS_V4_CB                    nfs_v4_cb;
 
+    struct evpl_endpoint               *nfs_endpoint;
+    struct evpl_endpoint               *mount_endpoint;
+    struct evpl_endpoint               *portmap_endpoint;
+    struct evpl_endpoint               *nfs_rdma_endpoint;
+
+    struct evpl_rpc2_server            *portmap_server;
+    struct evpl_rpc2_server            *mount_server;
+    struct evpl_rpc2_server            *nfs_server;
+    struct evpl_rpc2_server            *nfs_rdma_server;
+
     uint64_t                            nfs_verifier;
 
     struct nfs4_client_table            nfs4_shared_clients;
@@ -91,15 +101,9 @@ struct chimera_server_nfs_thread {
     struct chimera_vfs_thread        *vfs_thread;
     struct chimera_vfs               *vfs;
     struct evpl                      *evpl;
-    struct evpl_rpc2_agent           *rpc2_agent;
-    struct evpl_rpc2_server          *nfs_server;
-    struct evpl_rpc2_server          *mount_server;
-    struct evpl_rpc2_server          *portmap_server;
-    struct evpl_rpc2_server          *nfs_rdma_server;
-    struct evpl_endpoint             *nfs_endpoint;
-    struct evpl_endpoint             *mount_endpoint;
-    struct evpl_endpoint             *portmap_endpoint;
-    struct evpl_endpoint             *nfs_rdma_endpoint;
+    struct evpl_rpc2_thread          *nfs_server_thread;
+    struct evpl_rpc2_thread          *mount_server_thread;
+    struct evpl_rpc2_thread          *portmap_server_thread;
     int                               active;
     int                               again;
     struct nfs_request               *free_requests;

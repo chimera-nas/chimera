@@ -31,6 +31,15 @@ nfs_server_init(
 {
     struct chimera_server_nfs_shared *shared;
     struct timespec                   now;
+    struct evpl_rpc2_program         *programs[3];
+    int                               nfs_rdma;
+    const char                       *nfs_rdma_hostname;
+    int                               nfs_rdma_port;
+
+
+    nfs_rdma          = chimera_server_config_get_nfs_rdma(config);
+    nfs_rdma_hostname = chimera_server_config_get_nfs_rdma_hostname(config);
+    nfs_rdma_port     = chimera_server_config_get_nfs_rdma_port(config);
 
     clock_gettime(CLOCK_REALTIME, &now);
 
@@ -106,8 +115,48 @@ nfs_server_init(
 
     nfs4_client_table_init(&shared->nfs4_shared_clients);
 
+    shared->mount_endpoint   = evpl_endpoint_create("0.0.0.0", 20048);
+    shared->portmap_endpoint = evpl_endpoint_create("0.0.0.0", 111);
+    shared->nfs_endpoint     = evpl_endpoint_create("0.0.0.0", 2049);
+
+    if (nfs_rdma) {
+        shared->nfs_rdma_endpoint = evpl_endpoint_create(nfs_rdma_hostname, nfs_rdma_port);
+    }
+
+    programs[0] = &shared->mount_v3.rpc2;
+
+    shared->mount_server = evpl_rpc2_init(programs, 1);
+
+    programs[0] = &shared->portmap_v2.rpc2;
+
+    shared->portmap_server = evpl_rpc2_init(programs, 1);
+
+    programs[0] = &shared->nfs_v3.rpc2;
+    programs[1] = &shared->nfs_v4.rpc2;
+    programs[2] = &shared->nfs_v4_cb.rpc2;
+
+    shared->nfs_server = evpl_rpc2_init(programs, 3);
+
     return shared;
 } /* nfs_server_init */
+
+void
+nfs_server_start(void *arg)
+{
+    struct chimera_server_nfs_shared *shared = arg;
+
+    evpl_rpc2_start(shared->nfs_server, EVPL_STREAM_SOCKET_TCP, shared->nfs_endpoint);
+
+    if (shared->nfs_rdma_endpoint) {
+        evpl_rpc2_start(shared->nfs_server, EVPL_DATAGRAM_RDMACM_RC, shared->nfs_rdma_endpoint);
+    }
+
+    evpl_rpc2_start(shared->mount_server, EVPL_STREAM_SOCKET_TCP, shared->mount_endpoint);
+
+    evpl_rpc2_start(shared->portmap_server, EVPL_STREAM_SOCKET_TCP, shared->portmap_endpoint);
+
+} /* nfs_server_start */
+
 
 static void
 nfs_server_dump_metrics(struct evpl_rpc2_program *program)
@@ -146,6 +195,10 @@ nfs_server_destroy(void *data)
     nfs_server_dump_metrics(&shared->nfs_v4.rpc2);
     nfs_server_dump_metrics(&shared->nfs_v4_cb.rpc2);
 
+    evpl_rpc2_destroy(shared->mount_server);
+    evpl_rpc2_destroy(shared->portmap_server);
+    evpl_rpc2_destroy(shared->nfs_server);
+
     free(shared->portmap_v2.rpc2.metrics);
     free(shared->mount_v3.rpc2.metrics);
     free(shared->nfs_v3.rpc2.metrics);
@@ -164,69 +217,17 @@ nfs_server_thread_init(
 {
     struct chimera_server_nfs_shared *shared = data;
     struct chimera_server_nfs_thread *thread;
-    struct evpl_rpc2_program         *programs[3];
-    int                               nfs_rdma;
-    const char                       *nfs_rdma_hostname;
-    int                               nfs_rdma_port;
 
-    nfs_rdma          = chimera_server_config_get_nfs_rdma(shared->config);
-    nfs_rdma_hostname = chimera_server_config_get_nfs_rdma_hostname(shared->config);
-    nfs_rdma_port     = chimera_server_config_get_nfs_rdma_port(shared->config);
-
-    thread             = calloc(1, sizeof(*thread));
-    thread->evpl       = evpl;
-    thread->shared     = data;
-    thread->rpc2_agent = evpl_rpc2_init(evpl);
+    thread         = calloc(1, sizeof(*thread));
+    thread->evpl   = evpl;
+    thread->shared = data;
 
     thread->vfs        = shared->vfs;
     thread->vfs_thread = vfs_thread;
 
-    programs[0] = &shared->nfs_v3.rpc2;
-    programs[1] = &shared->nfs_v4.rpc2;
-    programs[2] = &shared->nfs_v4_cb.rpc2;
-
-    thread->nfs_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 2049);
-
-    thread->nfs_server = evpl_rpc2_listen(thread->rpc2_agent,
-                                          EVPL_STREAM_SOCKET_TCP,
-                                          thread->nfs_endpoint,
-                                          programs,
-                                          3,
-                                          thread);
-
-    if (nfs_rdma) {
-
-        thread->nfs_rdma_endpoint = evpl_endpoint_create(evpl, nfs_rdma_hostname, nfs_rdma_port);
-        thread->nfs_rdma_server   = evpl_rpc2_listen(thread->rpc2_agent,
-
-                                                     EVPL_DATAGRAM_RDMACM_RC,
-                                                     thread->nfs_rdma_endpoint,
-                                                     programs,
-                                                     3,
-                                                     thread);
-    }
-
-    programs[0] = &shared->mount_v3.rpc2;
-
-    thread->mount_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 20048);
-
-    thread->mount_server = evpl_rpc2_listen(thread->rpc2_agent,
-                                            EVPL_STREAM_SOCKET_TCP,
-                                            thread->mount_endpoint,
-                                            programs,
-                                            1,
-                                            thread);
-
-    programs[0] = &shared->portmap_v2.rpc2;
-
-    thread->portmap_endpoint = evpl_endpoint_create(evpl, "0.0.0.0", 111);
-
-    thread->portmap_server = evpl_rpc2_listen(thread->rpc2_agent,
-                                              EVPL_STREAM_SOCKET_TCP,
-                                              thread->portmap_endpoint,
-                                              programs,
-                                              1,
-                                              thread);
+    thread->mount_server_thread   = evpl_rpc2_attach(evpl, shared->mount_server, thread);
+    thread->portmap_server_thread = evpl_rpc2_attach(evpl, shared->portmap_server, thread);
+    thread->nfs_server_thread     = evpl_rpc2_attach(evpl, shared->nfs_server, thread);
 
     return thread;
 } /* nfs_server_thread_init */
@@ -237,14 +238,9 @@ nfs_server_thread_destroy(void *data)
     struct chimera_server_nfs_thread *thread = data;
     struct nfs_request               *req;
 
-    if (thread->nfs_rdma_server) {
-        evpl_rpc2_server_destroy(thread->rpc2_agent, thread->nfs_rdma_server);
-    }
-
-    evpl_rpc2_server_destroy(thread->rpc2_agent, thread->nfs_server);
-    evpl_rpc2_server_destroy(thread->rpc2_agent, thread->mount_server);
-    evpl_rpc2_server_destroy(thread->rpc2_agent, thread->portmap_server);
-    evpl_rpc2_destroy(thread->rpc2_agent);
+    evpl_rpc2_detach(thread->nfs_server_thread);
+    evpl_rpc2_detach(thread->mount_server_thread);
+    evpl_rpc2_detach(thread->portmap_server_thread);
 
     while (thread->free_requests) {
         req = thread->free_requests;
@@ -258,6 +254,7 @@ nfs_server_thread_destroy(void *data)
 struct chimera_server_protocol nfs_protocol = {
     .init           = nfs_server_init,
     .destroy        = nfs_server_destroy,
+    .start          = nfs_server_start,
     .thread_init    = nfs_server_thread_init,
     .thread_destroy = nfs_server_thread_destroy,
 };
