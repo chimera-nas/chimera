@@ -1367,9 +1367,7 @@ demofs_open_at(
 
         rb_tree_init(&inode->file.extents);
 
-        chimera_demofs_debug("create setattr in mask %lx", request->open_at.set_attr->va_req_mask);
         demofs_apply_attrs(inode, request->open_at.set_attr);
-        chimera_demofs_debug("create setattr out mask %lx", request->open_at.set_attr->va_set_mask);
 
         dirent = demofs_dirent_alloc(thread,
                                      inode->inum,
