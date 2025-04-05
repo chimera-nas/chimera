@@ -29,6 +29,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 add_definitions(-g -Wall -Werror -Wno-unused-function)
+add_definitions(-fvisibility=hidden)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm.*|ARM.*|aarch64.*)")
     add_definitions(-march=armv8-a)

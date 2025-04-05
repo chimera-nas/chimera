@@ -15,6 +15,7 @@
 #include "vfs/vfs_procs.h"
 
 #include "common/logging.h"
+#include "common/macros.h"
 #include "uthash/utlist.h"
 
 #define NFS_PROGIDX_PORTMAP_V2 0
@@ -251,7 +252,7 @@ nfs_server_thread_destroy(void *data)
     free(thread);
 } /* nfs_server_thread_destroy */
 
-struct chimera_server_protocol nfs_protocol = {
+SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
     .init           = nfs_server_init,
     .destroy        = nfs_server_destroy,
     .start          = nfs_server_start,

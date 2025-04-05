@@ -1,4 +1,4 @@
-add_library(chimera_common STATIC
+add_library(chimera_common SHARED
     logging.c snprintf.c
 )
 

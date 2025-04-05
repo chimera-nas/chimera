@@ -243,9 +243,11 @@ STBSP__PUBLICDEC void STB_SPRINTF_DECORATE(
 #if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(__x86_64__) || \
     defined(__x86_64) || defined(__s390x__)
 #define stbsp__uintptr stbsp__uint64
-#else  /* if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(__x86_64__) || defined(__x86_64) || defined(__s390x__) */
+#else \
+    /* if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(__x86_64__) || defined(__x86_64) || defined(__s390x__) */
 #define stbsp__uintptr stbsp__uint32
-#endif /* if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(__x86_64__) || defined(__x86_64) || defined(__s390x__) */
+#endif \
+    /* if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(__x86_64__) || defined(__x86_64) || defined(__s390x__) */
 #endif /* ifndef stbsp__uintptr */
 
 #ifndef STB_SPRINTF_MSVC_MODE // used for MSVC2013 and earlier (MSVC2015 matches GCC)
@@ -348,7 +350,7 @@ stbsp__strlen_limited(
         }
 
         ++sn;
-        
+
         --limit;
     }
 
@@ -1560,6 +1562,7 @@ STB_SPRINTF_DECORATE(vsnprintf)(char * buf, int count, char const * fmt, va_list
     return c.length;
 }
 
+__attribute__((visibility("default")))
 STBSP__PUBLICDEF int
 STB_SPRINTF_DECORATE(snprintf)(char * buf, int count, char const * fmt, ...)
 {

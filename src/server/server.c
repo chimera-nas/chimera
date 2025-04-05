@@ -42,7 +42,7 @@ struct chimera_thread {
     struct evpl_timer          watchdog;
 };
 
-struct chimera_server_config *
+SYMBOL_EXPORT struct chimera_server_config *
 chimera_server_config_init(void)
 {
     struct chimera_server_config *config;
@@ -78,7 +78,7 @@ chimera_server_config_init(void)
     return config;
 } /* chimera_server_config_init */
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_core_threads(
     struct chimera_server_config *config,
     int                           threads)
@@ -86,7 +86,7 @@ chimera_server_config_set_core_threads(
     config->core_threads = threads;
 } /* chimera_server_config_set_core_threads */
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_delegation_threads(
     struct chimera_server_config *config,
     int                           threads)
@@ -94,7 +94,7 @@ chimera_server_config_set_delegation_threads(
     config->delegation_threads = threads;
 } /* chimera_server_config_set_delegation_threads */
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_rdma(
     struct chimera_server_config *config,
     int                           enable)
@@ -102,13 +102,13 @@ chimera_server_config_set_nfs_rdma(
     config->nfs_rdma = enable;
 } /* chimera_server_config_set_nfs_rdma */
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_rdma(const struct chimera_server_config *config)
 {
     return config->nfs_rdma;
 } /* chimera_server_config_get_nfs_rdma */
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_rdma_hostname(
     struct chimera_server_config *config,
     const char                   *hostname)
@@ -117,7 +117,7 @@ chimera_server_config_set_nfs_rdma_hostname(
     strncpy(config->nfs_rdma_hostname, hostname, sizeof(config->nfs_rdma_hostname) - 1);
 } /* chimera_server_config_set_nfs_rdma_hostname */
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_nfs_rdma_hostname(const struct chimera_server_config *config)
 {
     if (!config->nfs_rdma) {
@@ -127,7 +127,7 @@ chimera_server_config_get_nfs_rdma_hostname(const struct chimera_server_config *
     return config->nfs_rdma_hostname;
 } /* chimera_server_config_get_nfs_rdma_hostname */
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_rdma_port(
     struct chimera_server_config *config,
     int                           port)
@@ -135,13 +135,13 @@ chimera_server_config_set_nfs_rdma_port(
     config->nfs_rdma_port = port;
 } /* chimera_server_config_set_nfs_rdma_port */
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_rdma_port(const struct chimera_server_config *config)
 {
     return config->nfs_rdma_port;
 } /* chimera_server_config_get_nfs_rdma_port */
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_add_module(
     struct chimera_server_config *config,
     const char                   *module_name,
@@ -159,7 +159,7 @@ chimera_server_config_add_module(
     config->num_modules++;
 } /* chimera_server_config_add_module */
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_metrics_port(
     struct chimera_server_config *config,
     int                           port)
@@ -208,7 +208,7 @@ chimera_server_thread_init(
     return thread;
 } /* chimera_server_thread_init */
 
-int
+SYMBOL_EXPORT int
 chimera_server_create_share(
     struct chimera_server *server,
     const char            *module_name,
@@ -237,7 +237,7 @@ chimera_server_thread_shutdown(
     free(thread);
 } /* chimera_server_create_share */
 
-struct chimera_server *
+SYMBOL_EXPORT struct chimera_server *
 chimera_server_init(const struct chimera_server_config *config)
 {
     struct chimera_server *server;
@@ -277,7 +277,7 @@ chimera_server_init(const struct chimera_server_config *config)
     return server;
 } /* chimera_server_init */
 
-void
+SYMBOL_EXPORT void
 chimera_server_start(struct chimera_server *server)
 {
     int i;
@@ -300,7 +300,7 @@ chimera_server_start(struct chimera_server *server)
     chimera_server_info("Server is ready.");
 } /* chimera_server_start */
 
-void
+SYMBOL_EXPORT void
 chimera_server_destroy(struct chimera_server *server)
 {
     int i;

@@ -20,6 +20,7 @@
 #include "common/logging.h"
 #include "common/format.h"
 #include "common/misc.h"
+#include "common/macros.h"
 #include "uthash/uthash.h"
 
 
@@ -981,7 +982,7 @@ chimera_linux_dispatch(
     } /* switch */
 } /* linux_dispatch */
 
-struct chimera_vfs_module vfs_linux = {
+SYMBOL_EXPORT struct chimera_vfs_module vfs_linux = {
     .name               = "linux",
     .fh_magic           = CHIMERA_VFS_FH_MAGIC_LINUX,
     .blocking           = 1,

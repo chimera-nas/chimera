@@ -20,6 +20,7 @@
 #include "memfs.h"
 #include "common/logging.h"
 #include "common/misc.h"
+#include "common/macros.h"
 #include "evpl_iovec_cursor.h"
 
 #define CHIMERA_MEMFS_BLOCK_MAX_IOV     4
@@ -1919,7 +1920,7 @@ memfs_dispatch(
     } /* switch */
 } /* memfs_dispatch */
 
-struct chimera_vfs_module vfs_memfs = {
+SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
     .name               = "memfs",
     .fh_magic           = CHIMERA_VFS_FH_MAGIC_MEMFS,
     .blocking           = 0,

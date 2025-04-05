@@ -5,6 +5,7 @@
 
 #include "vfs_root.h"
 #include "common/logging.h"
+#include "common/macros.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_procs.h"
 
@@ -403,7 +404,7 @@ chimera_vfs_root_dispatch(
     } /* switch */
 } /* vfs_root_dispatch */
 
-struct chimera_vfs_module vfs_root __attribute__((visibility("default"))) = {
+SYMBOL_EXPORT struct chimera_vfs_module vfs_root = {
     .fh_magic           = CHIMERA_VFS_FH_MAGIC_ROOT,
     .name               = "root",
     .blocking           = 0,

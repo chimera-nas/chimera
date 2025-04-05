@@ -2,7 +2,7 @@
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "common/misc.h"
-
+#include "common/macros.h"
 static void
 chimera_vfs_mkdir_complete(struct chimera_vfs_request *request)
 {
@@ -20,7 +20,7 @@ chimera_vfs_mkdir_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_mkdir_complete */
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_mkdir(
     struct chimera_vfs_thread      *thread,
     struct chimera_vfs_open_handle *handle,

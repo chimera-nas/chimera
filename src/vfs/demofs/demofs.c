@@ -2259,7 +2259,7 @@ demofs_dispatch(
     } /* switch */
 } /* demofs_dispatch */
 
-struct chimera_vfs_module vfs_demofs = {
+SYMBOL_EXPORT struct chimera_vfs_module vfs_demofs = {
     .name               = "demofs",
     .fh_magic           = CHIMERA_VFS_FH_MAGIC_DEMOFS,
     .blocking           = 0,

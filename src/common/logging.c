@@ -15,8 +15,9 @@
  #define UNW_LOCAL_ONLY
 #include <libunwind.h>
 
-#include "logging.h"
-#include "snprintf.h"
+#include "common/macros.h"
+#include "common/logging.h"
+#include "common/snprintf.h"
 
 #define SECS_PER_HOUR (60 * 60)
 #define SECS_PER_DAY  (SECS_PER_HOUR * 24)
@@ -120,7 +121,7 @@ int                ChimeraLogIndex   = 0;
 char              *ChimeraLogBuf     = NULL;
 char              *ChimeraLogBufPtr  = NULL;
 int                ChimeraLogRun     = 1;
-int                ChimeraLogLevel   = CHIMERA_LOG_INFO;
+SYMBOL_EXPORT int  ChimeraLogLevel   = CHIMERA_LOG_INFO;
 pthread_mutex_t    ChimeraLogBufLock = PTHREAD_MUTEX_INITIALIZER;
 pthread_t          ChimeraLogThread;
 pthread_once_t     ChimeraLogOnce = PTHREAD_ONCE_INIT;
@@ -191,13 +192,13 @@ chimera_log_thread_init(void)
     atexit(chimera_log_thread_exit);
 } /* chimera_log_thread_init */
 
-void
+SYMBOL_EXPORT void
 chimera_log_init(void)
 {
     pthread_once(&ChimeraLogOnce, chimera_log_thread_init);
 } /* chimera_log_init */
 
-void
+SYMBOL_EXPORT void
 chimera_vlog(
     const char *level,
     const char *mod,
@@ -247,7 +248,7 @@ chimera_vlog(
 
 
 
-void
+SYMBOL_EXPORT void
 __chimera_debug(
     const char *mod,
     const char *file,
@@ -262,7 +263,7 @@ __chimera_debug(
     va_end(argp);
 } /* chimera_debug */
 
-void
+SYMBOL_EXPORT void
 __chimera_info(
     const char *mod,
     const char *file,
@@ -277,7 +278,7 @@ __chimera_info(
     va_end(argp);
 } /* chimera_info */
 
-void
+SYMBOL_EXPORT void
 __chimera_error(
     const char *mod,
     const char *file,
@@ -292,7 +293,7 @@ __chimera_error(
     va_end(argp);
 } /* chimera_error */
 
-void
+SYMBOL_EXPORT void
 __chimera_fatal(
     const char *mod,
     const char *file,
@@ -309,7 +310,7 @@ __chimera_fatal(
     exit(1);
 } /* chimera_fatal */
 
-void
+SYMBOL_EXPORT void
 __chimera_abort(
     const char *mod,
     const char *file,
@@ -363,7 +364,7 @@ chimera_crash_handler(int signum)
     raise(signum);
 } /* chimera_crash_handler */
 
-void
+SYMBOL_EXPORT void
 chimera_enable_crash_handler(void)
 {
     struct sigaction sa;

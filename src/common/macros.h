@@ -1,5 +1,6 @@
-#pragma once 
+#pragma once
 
+#define SYMBOL_EXPORT __attribute__((visibility("default")))
 
 #ifndef offsetof
 #define offsetof(type, member) ((size_t) &((type *) 0)->member)

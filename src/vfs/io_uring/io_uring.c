@@ -25,6 +25,7 @@
 #include "common/logging.h"
 #include "common/format.h"
 #include "common/misc.h"
+#include "common/macros.h"
 #include "uthash/uthash.h"
 
 static void
@@ -1307,7 +1308,7 @@ chimera_io_uring_dispatch(
     } /* switch */
 } /* io_uring_dispatch */
 
-struct chimera_vfs_module vfs_io_uring = {
+SYMBOL_EXPORT struct chimera_vfs_module vfs_io_uring = {
     .name               = "io_uring",
     .fh_magic           = CHIMERA_VFS_FH_MAGIC_IO_URING,
     .blocking           = 0,

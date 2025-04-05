@@ -2,7 +2,7 @@
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "common/misc.h"
-
+#include "common/macros.h"
 static void
 chimera_vfs_getattr_complete(struct chimera_vfs_request *request)
 {
@@ -18,7 +18,7 @@ chimera_vfs_getattr_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(thread, request);
 } /* chimera_vfs_getattr_complete */
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_getattr(
     struct chimera_vfs_thread      *thread,
     struct chimera_vfs_open_handle *handle,

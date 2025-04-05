@@ -16,6 +16,7 @@
 #include "cairn.h"
 #include "common/logging.h"
 #include "common/misc.h"
+#include "common/macros.h"
 #include "evpl_iovec_cursor.h"
 
 #define CAIRN_KEY_INODE   0
@@ -2343,7 +2344,7 @@ cairn_dispatch(
     } /* switch */
 } /* cairn_dispatch */
 
-struct chimera_vfs_module vfs_cairn = {
+SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
     .name               = "cairn",
     .fh_magic           = CHIMERA_VFS_FH_MAGIC_CAIRN,
     .blocking           = 1,

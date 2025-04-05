@@ -2,7 +2,7 @@
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "common/misc.h"
-
+#include "common/macros.h"
 static void
 chimera_vfs_rename_complete(struct chimera_vfs_request *request)
 {
@@ -15,7 +15,7 @@ chimera_vfs_rename_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_rename_complete */
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_rename(
     struct chimera_vfs_thread    *thread,
     const void                   *fh,

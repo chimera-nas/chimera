@@ -2,8 +2,9 @@
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "common/misc.h"
+#include "common/macros.h"
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_getrootfh(
     struct chimera_vfs_thread *thread,
     void                      *fh,

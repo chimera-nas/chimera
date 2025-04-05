@@ -3,6 +3,7 @@
 #include "vfs_internal.h"
 #include "common/misc.h"
 #include "vfs_open_cache.h"
+#include "common/macros.h"
 
 static void
 chimera_vfs_open_at_hdl_callback(
@@ -81,7 +82,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
     }
 } /* chimera_vfs_open_complete */
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_open_at(
     struct chimera_vfs_thread      *thread,
     struct chimera_vfs_open_handle *handle,

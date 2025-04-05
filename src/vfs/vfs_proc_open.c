@@ -4,7 +4,7 @@
 #include "common/misc.h"
 #include "vfs_open_cache.h"
 #include "vfs_release.h"
-
+#include "common/macros.h"
 static void
 chimera_vfs_open_complete(struct chimera_vfs_request *request)
 {
@@ -57,7 +57,7 @@ chimera_vfs_open_hdl_callback(
     }
 } /* chimera_vfs_open_hdl_callback */
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_open(
     struct chimera_vfs_thread  *thread,
     const void                 *fh,

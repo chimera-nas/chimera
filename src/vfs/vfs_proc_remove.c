@@ -1,6 +1,6 @@
 #include "vfs/vfs_procs.h"
 #include "vfs_internal.h"
-
+#include "common/macros.h"
 static void
 chimera_vfs_remove_complete(struct chimera_vfs_request *request)
 {
@@ -16,7 +16,7 @@ chimera_vfs_remove_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_remove_complete */
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_remove(
     struct chimera_vfs_thread      *thread,
     struct chimera_vfs_open_handle *handle,

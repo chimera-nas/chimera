@@ -3,7 +3,7 @@
 #include "vfs_internal.h"
 #include "common/format.h"
 #include "common/misc.h"
-
+#include "common/macros.h"
 static void
 chimera_vfs_lookup_complete(struct chimera_vfs_request *request)
 {
@@ -21,7 +21,7 @@ chimera_vfs_lookup_complete(struct chimera_vfs_request *request)
 
 } /* chimera_vfs_lookup_complete */
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_lookup(
     struct chimera_vfs_thread      *thread,
     struct chimera_vfs_open_handle *handle,

@@ -17,6 +17,7 @@
 #include "vfs/cairn/cairn.h"
 #include "vfs/demofs/demofs.h"
 #include "common/misc.h"
+#include "common/macros.h"
 #include "uthash/utlist.h"
 
 
@@ -207,7 +208,7 @@ chimera_vfs_close_thread_shutdown(
     chimera_vfs_thread_destroy(close_thread->vfs_thread);
 } /* chimera_vfs_close_thread_shutdown */
 
-struct chimera_vfs *
+SYMBOL_EXPORT struct chimera_vfs *
 chimera_vfs_init(
     int                                  num_delegation_threads,
     const struct chimera_vfs_module_cfg *module_cfgs,
@@ -259,7 +260,7 @@ chimera_vfs_init(
     return vfs;
 } /* chimera_vfs_init */
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_destroy(struct chimera_vfs *vfs)
 {
     struct chimera_vfs_module *module;
@@ -348,7 +349,7 @@ chimera_vfs_process_completion(
 
 } /* chimera_vfs_process_completion */
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
 {
     struct chimera_vfs_request *request;
@@ -372,7 +373,7 @@ chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
 
 } /* chimera_vfs_watchdog_callback */
 
-struct chimera_vfs_thread *
+SYMBOL_EXPORT struct chimera_vfs_thread *
 chimera_vfs_thread_init(
     struct evpl        *evpl,
     struct chimera_vfs *vfs)
@@ -404,7 +405,7 @@ chimera_vfs_thread_init(
     return thread;
 } /* chimera_vfs_thread_init */
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
 {
     struct chimera_vfs             *vfs = thread->vfs;
@@ -471,7 +472,7 @@ chimera_vfs_register(
     vfs->module_private[module->fh_magic] = module->init(cfgfile);
 } /* chimera_vfs_register */
 
-int
+SYMBOL_EXPORT int
 chimera_vfs_create_share(
     struct chimera_vfs *vfs,
     const char         *module_name,
