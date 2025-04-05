@@ -336,6 +336,11 @@ chimera_vfs_open_cache_defer_close(
     uint64_t               min_age,
     uint64_t              *r_count)
 {
+
+#ifndef __clang_analyzer__
+
+    /* HASH_DEL blows clangs mind so we disable this block under analyzer */
+
     struct vfs_open_cache_shard    *shard;
     struct chimera_vfs_open_handle *handle, *closed = NULL;
     uint64_t                        elapsed, count = 0;
@@ -366,4 +371,8 @@ chimera_vfs_open_cache_defer_close(
     }
     *r_count = count;
     return closed;
+#else  /* ifndef __clang_analyzer__ */
+    *r_count = 0;
+    return NULL;
+#endif /* ifndef __clang_analyzer__ */
 } /* vfs_open_cache_defer_close */

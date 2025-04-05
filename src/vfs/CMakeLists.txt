@@ -23,5 +23,5 @@ add_subdirectory(io_uring)
 add_subdirectory(demofs)
 add_subdirectory(cairn)
 
-target_link_libraries(chimera_vfs PRIVATE 
+target_link_libraries(chimera_vfs  
     chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_io_uring chimera_vfs_demofs chimera_vfs_cairn xxhash dl)

@@ -765,11 +765,11 @@ chimera_linux_symlink(
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->symlink.r_dir_post_attr, fd);
 
-    rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
-                      fd,
-                      fullname,
-                      request->symlink.r_attr.va_fh,
-                      &request->symlink.r_attr.va_fh_len);
+    linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
+                 fd,
+                 fullname,
+                 request->symlink.r_attr.va_fh,
+                 &request->symlink.r_attr.va_fh_len);
 
     chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                                   request,

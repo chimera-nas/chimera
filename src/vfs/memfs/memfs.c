@@ -177,7 +177,7 @@ memfs_fh_to_inum(
     ptr++;
 
     ptr += chimera_decode_uint64(ptr, inum);
-    ptr += chimera_decode_uint32(ptr, gen);
+    chimera_decode_uint32(ptr, gen);
 } /* memfs_fh_to_inum */
 
 static inline struct memfs_inode *
@@ -475,8 +475,6 @@ memfs_init(const char *cfgfile)
         pthread_mutex_init(&inode_list->lock, NULL);
     }
 
-    inode_list = &shared->inode_list[0];
-
     inode = memfs_inode_alloc(shared, 0);
 
     inode->size       = 4096;
@@ -515,11 +513,14 @@ memfs_destroy(void *private_data)
                 }
 
                 if (S_ISDIR(inode->mode)) {
+#ifndef __clang_analyzer__
+                    /* HASH_DEL blows clangs mind so we disable this block under analyzer */
                     while (inode->dir.dirents) {
                         dirent = inode->dir.dirents;
                         HASH_DELETE(hh, inode->dir.dirents, dirent);
                         free(dirent);
                     }
+#endif /* ifndef __clang_analyzer__ */
                 } else if (S_ISLNK(inode->mode)) {
                     free(inode->symlink.target);
                 } else if (S_ISREG(inode->mode)) {

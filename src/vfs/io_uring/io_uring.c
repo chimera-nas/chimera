@@ -71,8 +71,7 @@ struct chimera_io_uring_shared {
 
 struct chimera_io_uring_thread {
     struct evpl                     *evpl;
-    int                              eventfd;
-    struct evpl_event                event;
+    struct evpl_doorbell             doorbell;
     struct evpl_deferral             deferral;
     struct io_uring                  ring;
     uint64_t                         inflight;
@@ -139,27 +138,19 @@ chimera_io_uring_get_sqe(
 
 static void
 chimera_io_uring_complete(
-    struct evpl       *evpl,
-    struct evpl_event *event)
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
 {
     struct chimera_io_uring_thread    *thread;
-    uint64_t                           value;
     struct io_uring_cqe               *cqe;
-    int                                rc, i, parent_fd;
+    int                                i, parent_fd;
     struct chimera_vfs_request        *request;
     struct chimera_vfs_request_handle *handle;
     struct statx                      *dir_stx, *stx;
     const char                        *name;
     struct io_uring_sqe               *sqe;
 
-    thread = container_of(event, struct chimera_io_uring_thread, event);
-
-    rc = read(thread->eventfd, &value, sizeof(value));
-
-    if (rc != sizeof(value)) {
-        evpl_event_mark_unreadable(evpl, &thread->event);
-        return;
-    }
+    thread = container_of(doorbell, struct chimera_io_uring_thread, doorbell);
 
     while (io_uring_peek_cqe(&thread->ring, &cqe) == 0) {
 
@@ -391,18 +382,11 @@ chimera_io_uring_thread_init(
 
     chimera_io_uring_abort_if(rc < 0, "Failed to create io_uring queue: %s", strerror(-rc));
 
-    thread->eventfd = eventfd(0, EFD_NONBLOCK);
+    evpl_add_doorbell(evpl, &thread->doorbell, chimera_io_uring_complete);
 
-    chimera_io_uring_abort_if(thread->eventfd < 0, "Failed to create eventfd: %s", strerror(errno));
-
-    rc = io_uring_register_eventfd(&thread->ring, thread->eventfd);
+    rc = io_uring_register_eventfd(&thread->ring, evpl_doorbell_fd(&thread->doorbell));
 
     chimera_io_uring_abort_if(rc < 0, "Failed to register eventfd");
-
-    evpl_add_event(evpl, &thread->event, thread->eventfd,
-                   chimera_io_uring_complete, NULL, NULL);
-
-    evpl_event_read_interest(evpl, &thread->event);
 
     evpl_deferral_init(&thread->deferral,
                        chimera_io_uring_flush,
@@ -419,7 +403,7 @@ chimera_io_uring_thread_destroy(void *private_data)
     linux_mount_table_destroy(&thread->mount_table);
 
     io_uring_queue_exit(&thread->ring);
-    close(thread->eventfd);
+    evpl_remove_doorbell(thread->evpl, &thread->doorbell);
 
     free(thread);
 } /* io_uring_thread_destroy */

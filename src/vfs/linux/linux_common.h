@@ -264,12 +264,18 @@ linux_mount_table_destroy(struct chimera_linux_mount_table *mount_table)
 {
     struct chimera_linux_mount *mount;
 
+#ifndef __clang_analyzer__
+
+    /* HASH_DEL blows clangs mind so we disable this block under analyzer */
+
     while (mount_table->mounts) {
         mount = mount_table->mounts;
-        HASH_DEL(mount_table->mounts, mount);
         close(mount->mount_fd);
+        HASH_DEL(mount_table->mounts, mount);
         free(mount);
     }
+#endif /* ifndef __clang_analyzer__ */
+
 } /* linux_mount_table_destroy */
 
 static inline int
@@ -378,6 +384,8 @@ chimera_linux_map_child_attrs(
     int            rc;
     struct stat    st;
     struct statvfs stvfs;
+
+    attr->va_set_mask = 0;
 
     if (attr->va_req_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH)) {
 

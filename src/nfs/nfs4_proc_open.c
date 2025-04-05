@@ -22,7 +22,7 @@ chimera_nfs4_open_at_complete(
     struct chimera_vfs_open_handle *parent_handle = req->handle;
     struct nfs4_state              *state;
 
-    if (error_code != NFS4_OK) {
+    if (error_code != CHIMERA_VFS_OK) {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
     } else {
@@ -74,7 +74,7 @@ chimera_nfs4_open_complete(
     struct chimera_vfs_open_handle *parent_handle = req->handle;
     struct nfs4_state              *state;
 
-    if (error_code != NFS4_OK) {
+    if (error_code != CHIMERA_VFS_OK) {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
     } else {
@@ -116,7 +116,7 @@ chimera_nfs4_open_parent_complete(
 
     req->handle = parent_handle;
 
-    if (error_code != NFS4_OK) {
+    if (error_code != CHIMERA_VFS_OK) {
         struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);

@@ -214,7 +214,7 @@ demofs_fh_to_inum(
     ptr++;
 
     ptr += chimera_decode_uint64(ptr, inum);
-    ptr += chimera_decode_uint32(ptr, gen);
+    chimera_decode_uint32(ptr, gen);
 } /* demofs_fh_to_inum */
 
 static inline struct demofs_inode *

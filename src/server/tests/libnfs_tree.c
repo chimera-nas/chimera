@@ -84,11 +84,11 @@ verify_fs_node(
     const char         *base_path,
     struct fs_node     *node)
 {
-    char               full_path[MAX_PATH_LEN];
+    char               full_path[MAX_PATH_LEN * 2];
     struct nfsfh      *fh;
     struct nfs_stat_64 st;
 
-    snprintf(full_path, MAX_PATH_LEN, "%s/%s", base_path, node->name);
+    snprintf(full_path, sizeof(full_path), "%s/%s", base_path, node->name);
 
     if (nfs_stat64(nfs, full_path, &st) < 0) {
         return 0;

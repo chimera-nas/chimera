@@ -424,7 +424,6 @@ rb_tree_remove(
         }
         y_original_color = y->color;
         x                = y->right;
-        x_parent         = y;
 
         if (y->parent == z) {
             x_parent = y;

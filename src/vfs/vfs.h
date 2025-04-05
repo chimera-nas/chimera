@@ -537,7 +537,7 @@ struct chimera_vfs_thread {
 };
 
 struct chimera_vfs_module_cfg {
-    char module_name[256];
+    char module_name[64];
     char module_path[256];
     char config_path[256];
 };

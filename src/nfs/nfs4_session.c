@@ -18,8 +18,14 @@ nfs4_client_table_init(struct nfs4_client_table *table)
 void
 nfs4_client_table_free(struct nfs4_client_table *table)
 {
+
+#ifndef __clang_analyzer__
+
     struct nfs4_client  *cur, *tmp;
     struct nfs4_session *sess, *sesstmp;
+
+
+    /* HASH_DEL blows clangs mind so we disable this block under analyzer */
 
     HASH_ITER(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, cur, tmp)
     {
@@ -34,6 +40,9 @@ nfs4_client_table_free(struct nfs4_client_table *table)
         HASH_DELETE(nfs4_session_hh, table->nfs4_ct_sessions, sess);
         free(sess);
     }
+
+#endif /* ifndef __clang_analyzer__ */
+
 } /* nfs4_client_table_free */
 
 uint64_t

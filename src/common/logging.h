@@ -43,13 +43,15 @@ void __chimera_error(
     int         line,
     const char *fmt,
     ...);
-void __chimera_fatal(
+
+__attribute__((noreturn)) void __chimera_fatal(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
-void __chimera_abort(
+
+__attribute__((noreturn)) void __chimera_abort(
     const char *mod,
     const char *file,
     int         line,
@@ -75,15 +77,11 @@ void __chimera_abort(
 }
 
 #define chimera_fatal(mod, file, line, ...) { \
-            if (ChimeraLogLevel >= CHIMERA_LOG_FATAL) { \
-                __chimera_fatal(mod, file, line, __VA_ARGS__); \
-            } \
+            __chimera_fatal(mod, file, line, __VA_ARGS__); \
 }
 
 #define chimera_abort(mod, file, line, ...) { \
-            if (ChimeraLogLevel >= CHIMERA_LOG_FATAL) { \
-                __chimera_abort(mod, file, line, __VA_ARGS__); \
-            } \
+            __chimera_abort(mod, file, line, __VA_ARGS__); \
 }
 
 #define chimera_fatal_if(cond, mod, file, line, ...) \

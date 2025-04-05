@@ -95,7 +95,7 @@ chimera_vfs_close_thread_sweep(
 {
     struct chimera_vfs_thread      *thread = close_thread->vfs_thread;
     struct timespec                 now;
-    uint64_t                        count;
+    uint64_t                        count = 0;
     struct chimera_vfs_open_handle *handles, *handle;
 
     clock_gettime(CLOCK_MONOTONIC, &now);

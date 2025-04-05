@@ -67,8 +67,8 @@ libnfs_test_init(
     config = chimera_server_config_init();
 
     if (strcmp(backend, "demofs") == 0) {
-        char    demofs_cfg[256];
-        char    device_path[256];
+        char    demofs_cfg[300];
+        char    device_path[300];
         json_t *cfg, *devices, *device;
         snprintf(demofs_cfg, sizeof(demofs_cfg), "%s/demofs.json", env->session_dir);
 
@@ -99,7 +99,7 @@ libnfs_test_init(
 
         chimera_server_config_add_module(config, "demofs", "/build/test/demofs", demofs_cfg);
     } else if (strcmp(backend, "cairn") == 0) {
-        char    cairn_cfgfile[256];
+        char    cairn_cfgfile[300];
         json_t *cfg;
 
         snprintf(cairn_cfgfile, sizeof(cairn_cfgfile),

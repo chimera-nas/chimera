@@ -10,6 +10,7 @@
 #include "nfs/nfs.h"
 #include "vfs/vfs.h"
 #include "common/macros.h"
+
 #define CHIMERA_SERVER_MAX_MODULES 64
 
 struct chimera_server_config {
@@ -113,7 +114,7 @@ chimera_server_config_set_nfs_rdma_hostname(
     const char                   *hostname)
 {
     config->nfs_rdma = 1;
-    strncpy(config->nfs_rdma_hostname, hostname, sizeof(config->nfs_rdma_hostname));
+    strncpy(config->nfs_rdma_hostname, hostname, sizeof(config->nfs_rdma_hostname) - 1);
 } /* chimera_server_config_set_nfs_rdma_hostname */
 
 const char *

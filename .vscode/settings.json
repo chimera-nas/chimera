@@ -71,6 +71,7 @@
     "tuple": "c",
     "enum_xdr.h": "c",
     "list": "c",
-    "vfs_error.h": "c"
+    "vfs_error.h": "c",
+    "server_internal.h": "c"
   }
 }

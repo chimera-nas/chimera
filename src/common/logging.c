@@ -324,6 +324,7 @@ __chimera_abort(
     va_end(argp);
 
     chimera_crash_handler(SIGABRT);
+
     abort();
 } /* chimera_abort */
 

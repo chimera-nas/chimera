@@ -39,7 +39,7 @@ chimera_nfs4_commit_open_callback(
 
     req->handle = file_handle;
 
-    if (error_code != NFS4_OK) {
+    if (error_code != CHIMERA_VFS_OK) {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
         return;

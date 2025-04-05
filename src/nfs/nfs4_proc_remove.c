@@ -35,7 +35,7 @@ chimera_nfs4_remove_open_callback(
 
     req->handle = parent_handle;
 
-    if (error_code != NFS4_OK) {
+    if (error_code != CHIMERA_VFS_OK) {
         struct REMOVE4res *res = &req->res_compound.resarray[req->index].opremove;
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
