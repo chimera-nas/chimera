@@ -475,12 +475,12 @@ struct chimera_vfs_module {
 
 };
 
-struct chimera_vfs_share {
+struct chimera_vfs_mount {
     struct chimera_vfs_module *module;
     char                      *name;
     char                      *path;
-    struct chimera_vfs_share  *prev;
-    struct chimera_vfs_share  *next;
+    struct chimera_vfs_mount  *prev;
+    struct chimera_vfs_mount  *next;
 };
 
 struct chimera_vfs_delegation_thread {
@@ -512,7 +512,8 @@ struct chimera_vfs {
     void                                 *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
     struct vfs_open_cache                *vfs_open_path_cache;
     struct vfs_open_cache                *vfs_open_file_cache;
-    struct chimera_vfs_share             *shares;
+    struct chimera_vfs_mount             *mounts;
+    pthread_rwlock_t                      mounts_lock;
     int                                   num_delegation_threads;
     struct chimera_vfs_delegation_thread *delegation_threads;
     struct chimera_vfs_close_thread       close_thread;
@@ -568,11 +569,16 @@ chimera_vfs_register(
     const char                *cfgfile);
 
 int
-chimera_vfs_create_share(
+chimera_vfs_mount(
     struct chimera_vfs *vfs,
+    const char         *mount_path,
     const char         *module_name,
-    const char         *share_path,
     const char         *module_path);
+
+int
+chimera_vfs_umount(
+    struct chimera_vfs *vfs,
+    const char         *mount_path);
 
 void
 chimera_vfs_watchdog(

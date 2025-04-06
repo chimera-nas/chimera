@@ -211,12 +211,11 @@ chimera_server_thread_init(
 SYMBOL_EXPORT int
 chimera_server_create_share(
     struct chimera_server *server,
-    const char            *module_name,
     const char            *share_path,
+    const char            *module_name,
     const char            *module_path)
 {
-    return chimera_vfs_create_share(server->vfs, module_name, share_path,
-                                    module_path);
+    return chimera_vfs_mount(server->vfs, share_path, module_name, module_path);
 } /* chimera_server_create_share */
 
 static void

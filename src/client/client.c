@@ -5,8 +5,9 @@
 
 #include "client.h"
 #include "client_internal.h"
+#include "common/macros.h"
 #include "vfs/vfs.h"
-
+#include "vfs/vfs_procs.h"
 #define CHIMERA_CLIENT_MAX_MODULES 64
 
 struct chimera_client_config {
@@ -30,7 +31,7 @@ struct chimera_client_thread {
 };
 
 
-struct chimera_client_config *
+SYMBOL_EXPORT struct chimera_client_config *
 chimera_client_config_init(void)
 {
     struct chimera_client_config *config;
@@ -61,7 +62,7 @@ chimera_client_config_init(void)
 } /* chimera_server_config_init */
 
 
-void *
+static void *
 chimera_client_thread_init(
     struct evpl *evpl,
     void        *data)
@@ -73,10 +74,14 @@ chimera_client_thread_init(
 
     thread->client = client;
 
+    pthread_mutex_lock(&client->lock);
+    client->threads_online++;
+    pthread_mutex_unlock(&client->lock);
+
     return thread;
 } /* chimera_client_thread_init */
 
-void
+static void
 chimera_client_thread_shutdown(
     struct evpl *evpl,
     void        *data)
@@ -86,7 +91,7 @@ chimera_client_thread_shutdown(
     free(thread);
 } /* chimera_client_thread_shutdown */
 
-struct chimera_client *
+SYMBOL_EXPORT struct chimera_client *
 chimera_client_init(const struct chimera_client_config *config)
 {
     struct chimera_client *client;
@@ -128,8 +133,54 @@ chimera_client_init(const struct chimera_client_config *config)
     return client;
 } /* chimera_client_init */
 
-void
+SYMBOL_EXPORT void
 chimera_client_destroy(struct chimera_client *client)
 {
+
+
+    evpl_threadpool_destroy(client->pool);
+
+    chimera_vfs_destroy(client->vfs);
+
+    free((void *) client->config);
+
     free(client);
 } /* chimera_client_destroy */
+
+SYMBOL_EXPORT int
+chimera_client_mount(
+    struct chimera_client *client,
+    const char            *mount_path,
+    const char            *module_name,
+    const char            *module_path)
+{
+    return chimera_vfs_mount(client->vfs, module_name, mount_path, module_path);
+} /* chimera_client_mount */
+
+SYMBOL_EXPORT int
+chimera_client_umount(
+    struct chimera_client *client,
+    const char            *mount_path)
+{
+    return chimera_vfs_umount(client->vfs, mount_path);
+} /* chimera_client_umount */
+
+SYMBOL_EXPORT void
+chimera_client_lookup_path(
+    struct chimera_client                *client,
+    const char                           *path,
+    chimera_client_lookup_path_callback_t callback,
+    void                                 *private_data)
+{
+
+} /* chimera_client_lookup_path */
+
+SYMBOL_EXPORT void
+chimera_client_open_path(
+    struct chimera_client              *client,
+    const char                         *path,
+    unsigned int                        flags,
+    chimera_client_open_path_callback_t callback,
+    void                               *private_data)
+{
+} /* chimera_client_open_path */
