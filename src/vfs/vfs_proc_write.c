@@ -1,12 +1,22 @@
 #include "vfs/vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_open_cache.h"
+#include "vfs_attr_cache.h"
 #include "common/macros.h"
 
 static void
 chimera_vfs_write_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_write_callback_t callback = request->proto_callback;
+
+
+    if (request->status == CHIMERA_VFS_OK) {
+        chimera_vfs_attr_cache_insert(request->thread->vfs->vfs_attr_cache,
+                                      request->write.handle->fh_hash,
+                                      request->write.handle->fh,
+                                      request->write.handle->fh_len,
+                                      &request->write.r_post_attr);
+    }
 
     chimera_vfs_complete(request);
 
@@ -46,7 +56,7 @@ chimera_vfs_write(
     request->write.sync                    = sync;
     request->write.r_pre_attr.va_req_mask  = pre_attr_mask;
     request->write.r_pre_attr.va_set_mask  = 0;
-    request->write.r_post_attr.va_req_mask = post_attr_mask;
+    request->write.r_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->write.r_post_attr.va_set_mask = 0;
     request->write.iov                     = iov;
     request->write.niov                    = niov;

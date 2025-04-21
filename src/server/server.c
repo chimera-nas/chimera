@@ -19,6 +19,7 @@ struct chimera_server_config {
     int                           nfs_rdma_port;
     int                           core_threads;
     int                           delegation_threads;
+    int                           cache_ttl;
     struct chimera_vfs_module_cfg modules[CHIMERA_SERVER_MAX_MODULES];
     int                           num_modules;
     int                           metrics_port;
@@ -52,6 +53,8 @@ chimera_server_config_init(void)
     config->core_threads       = 16;
     config->delegation_threads = 64;
     config->nfs_rdma           = 0;
+
+    config->cache_ttl = 60;
 
     strncpy(config->nfs_rdma_hostname, "0.0.0.0", sizeof(config->nfs_rdma_hostname));
     config->nfs_rdma_port = 20049;
@@ -101,6 +104,20 @@ chimera_server_config_set_nfs_rdma(
 {
     config->nfs_rdma = enable;
 } /* chimera_server_config_set_nfs_rdma */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_cache_ttl(
+    struct chimera_server_config *config,
+    int                           ttl)
+{
+    config->cache_ttl = ttl;
+} /* chimera_server_config_set_cache_ttl */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_cache_ttl(const struct chimera_server_config *config)
+{
+    return config->cache_ttl;
+} /* chimera_server_config_get_cache_ttl */
 
 SYMBOL_EXPORT int
 chimera_server_config_get_nfs_rdma(const struct chimera_server_config *config)
@@ -264,7 +281,8 @@ chimera_server_init(const struct chimera_server_config *config)
     chimera_server_info("Initializing VFS...");
     server->vfs = chimera_vfs_init(config->delegation_threads,
                                    config->modules,
-                                   config->num_modules);
+                                   config->num_modules,
+                                   config->cache_ttl);
 
     chimera_server_info("Initializing NFS protocol...");
     server->protocols[server->num_protocols++] = &nfs_protocol;
@@ -305,12 +323,11 @@ chimera_server_destroy(struct chimera_server *server)
     int i;
 
     evpl_threadpool_destroy(server->pool);
+    chimera_vfs_destroy(server->vfs);
 
     for (i = 0; i < server->num_protocols; i++) {
         server->protocols[i]->destroy(server->protocol_private[i]);
     }
-
-    chimera_vfs_destroy(server->vfs);
 
     free((void *) server->config);
     free(server);

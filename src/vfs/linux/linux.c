@@ -244,7 +244,7 @@ chimera_linux_setattr(
 } /* linux_setattr */
 
 static void
-chimera_linux_lookup_path(
+chimera_linux_getrootfh(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
@@ -252,11 +252,11 @@ chimera_linux_lookup_path(
     struct chimera_vfs_attrs *r_attr;
     char                     *scratch = (char *) request->plugin_data;
 
-    r_attr = &request->lookup_path.r_attr;
+    r_attr = &request->getrootfh.r_attr;
 
     TERM_STR(fullpath,
-             request->lookup_path.path,
-             request->lookup_path.pathlen,
+             request->getrootfh.path,
+             request->getrootfh.pathlen,
              scratch);
 
     mount_fd = open(fullpath, O_DIRECTORY | O_RDONLY);
@@ -584,6 +584,14 @@ chimera_linux_remove(
     TERM_STR(fullname, request->remove.name, request->remove.namelen, scratch);
 
     fd = request->remove.handle->vfs_private;
+
+    request->remove.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
+
+    chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                                  request,
+                                  &request->remove.r_removed_attr,
+                                  fd,
+                                  fullname);
 
     rc = unlinkat(fd, fullname, 0);
 
@@ -922,8 +930,8 @@ chimera_linux_dispatch(
     void                       *private_data)
 {
     switch (request->opcode) {
-        case CHIMERA_VFS_OP_LOOKUP_PATH:
-            chimera_linux_lookup_path(request, private_data);
+        case CHIMERA_VFS_OP_GETROOTFH:
+            chimera_linux_getrootfh(request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             chimera_linux_lookup(request, private_data);
@@ -988,6 +996,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_linux = {
     .blocking           = 1,
     .path_open_required = 1,
     .file_open_required = 1,
+    .fh_all             = 0,
     .init               = chimera_linux_init,
     .destroy            = chimera_linux_destroy,
     .thread_init        = chimera_linux_thread_init,

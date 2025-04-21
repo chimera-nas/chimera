@@ -7,36 +7,38 @@
 #include "uthash/uthash.h"
 
 
-#define CHIMERA_VFS_FH_SIZE          32
+#define CHIMERA_VFS_FH_SIZE             32
 
+#define CHIMERA_VFS_PATH_MAX            4096
+#define CHIMERA_VFS_NAME_MAX            256
 struct evpl;
 
 struct chimera_vfs;
 
-#define CHIMERA_VFS_ATTR_DEV         (1UL << 0)
-#define CHIMERA_VFS_ATTR_INUM        (1UL << 1)
-#define CHIMERA_VFS_ATTR_MODE        (1UL << 2)
-#define CHIMERA_VFS_ATTR_NLINK       (1UL << 3)
-#define CHIMERA_VFS_ATTR_UID         (1UL << 4)
-#define CHIMERA_VFS_ATTR_GID         (1UL << 5)
-#define CHIMERA_VFS_ATTR_RDEV        (1UL << 6)
-#define CHIMERA_VFS_ATTR_SIZE        (1UL << 7)
-#define CHIMERA_VFS_ATTR_ATIME       (1UL << 8)
-#define CHIMERA_VFS_ATTR_MTIME       (1UL << 9)
-#define CHIMERA_VFS_ATTR_CTIME       (1UL << 10)
-#define CHIMERA_VFS_ATTR_SPACE_USED  (1UL << 11)
+#define CHIMERA_VFS_ATTR_DEV            (1UL << 0)
+#define CHIMERA_VFS_ATTR_INUM           (1UL << 1)
+#define CHIMERA_VFS_ATTR_MODE           (1UL << 2)
+#define CHIMERA_VFS_ATTR_NLINK          (1UL << 3)
+#define CHIMERA_VFS_ATTR_UID            (1UL << 4)
+#define CHIMERA_VFS_ATTR_GID            (1UL << 5)
+#define CHIMERA_VFS_ATTR_RDEV           (1UL << 6)
+#define CHIMERA_VFS_ATTR_SIZE           (1UL << 7)
+#define CHIMERA_VFS_ATTR_ATIME          (1UL << 8)
+#define CHIMERA_VFS_ATTR_MTIME          (1UL << 9)
+#define CHIMERA_VFS_ATTR_CTIME          (1UL << 10)
+#define CHIMERA_VFS_ATTR_SPACE_USED     (1UL << 11)
 
-#define CHIMERA_VFS_ATTR_SPACE_AVAIL (1UL << 12)
-#define CHIMERA_VFS_ATTR_SPACE_FREE  (1UL << 13)
-#define CHIMERA_VFS_ATTR_SPACE_TOTAL (1UL << 14)
-#define CHIMERA_VFS_ATTR_FILES_TOTAL (1UL << 15)
-#define CHIMERA_VFS_ATTR_FILES_FREE  (1UL << 16)
-#define CHIMERA_VFS_ATTR_FILES_AVAIL (1UL << 17)
+#define CHIMERA_VFS_ATTR_SPACE_AVAIL    (1UL << 12)
+#define CHIMERA_VFS_ATTR_SPACE_FREE     (1UL << 13)
+#define CHIMERA_VFS_ATTR_SPACE_TOTAL    (1UL << 14)
+#define CHIMERA_VFS_ATTR_FILES_TOTAL    (1UL << 15)
+#define CHIMERA_VFS_ATTR_FILES_FREE     (1UL << 16)
+#define CHIMERA_VFS_ATTR_FILES_AVAIL    (1UL << 17)
 
-#define CHIMERA_VFS_ATTR_FH          (1UL << 18)
-#define CHIMERA_VFS_ATTR_ATOMIC      (1UL << 19)
+#define CHIMERA_VFS_ATTR_FH             (1UL << 18)
+#define CHIMERA_VFS_ATTR_ATOMIC         (1UL << 19)
 
-#define CHIMERA_VFS_ATTR_MASK_STAT   ( \
+#define CHIMERA_VFS_ATTR_MASK_STAT      ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \
             CHIMERA_VFS_ATTR_MODE | \
@@ -50,7 +52,7 @@ struct chimera_vfs;
             CHIMERA_VFS_ATTR_MTIME | \
             CHIMERA_VFS_ATTR_CTIME)
 
-#define CHIMERA_VFS_ATTR_MASK_STATFS ( \
+#define CHIMERA_VFS_ATTR_MASK_STATFS    ( \
             CHIMERA_VFS_ATTR_SPACE_AVAIL | \
             CHIMERA_VFS_ATTR_SPACE_FREE | \
             CHIMERA_VFS_ATTR_SPACE_TOTAL | \
@@ -58,7 +60,10 @@ struct chimera_vfs;
             CHIMERA_VFS_ATTR_FILES_FREE | \
             CHIMERA_VFS_ATTR_FILES_AVAIL)
 
-#define CHIMERA_VFS_TIME_NOW         ((1l << 30) - 3l)
+#define CHIMERA_VFS_ATTR_MASK_CACHEABLE ( \
+            CHIMERA_VFS_ATTR_MASK_STAT)
+
+#define CHIMERA_VFS_TIME_NOW            ((1l << 30) - 3l)
 
 struct chimera_vfs_attrs {
     uint64_t        va_req_mask;
@@ -84,11 +89,13 @@ struct chimera_vfs_attrs {
     uint64_t        va_files_free;
     uint64_t        va_files_avail;
 
-    uint8_t         va_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t        va_fh_len;
+    uint64_t        va_fh_hash;
+    uint8_t         va_fh[CHIMERA_VFS_FH_SIZE];
+
 };
 
-#define CHIMERA_VFS_OP_LOOKUP_PATH    1
+#define CHIMERA_VFS_OP_GETROOTFH      1
 #define CHIMERA_VFS_OP_LOOKUP         2
 #define CHIMERA_VFS_OP_GETATTR        3
 #define CHIMERA_VFS_OP_READDIR        4
@@ -125,8 +132,7 @@ struct chimera_vfs_metric {
 
 struct chimera_vfs_open_handle {
     struct chimera_vfs_module      *vfs_module;
-    uint32_t                        fh_hash;
-    uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
+    uint64_t                        fh_hash;
     uint8_t                         fh_len;
     uint8_t                         cache_id;
     uint8_t                         exclusive;
@@ -143,7 +149,15 @@ struct chimera_vfs_open_handle {
     struct UT_hash_handle           hh;
     struct chimera_vfs_open_handle *prev;
     struct chimera_vfs_open_handle *next;
+    uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
+
 };
+
+
+typedef void (*chimera_vfs_lookup_path_callback_t)(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data);
 
 typedef void (*chimera_vfs_complete_callback_t)(
     struct chimera_vfs_request *request);
@@ -206,18 +220,35 @@ struct chimera_vfs_request {
 
     union {
         struct {
-            const char              *path;
-            uint32_t                 pathlen;
-            struct chimera_vfs_attrs r_attr;
+            char                              *path;
+            char                              *pathc;
+            int                                pathlen;
+            struct chimera_vfs_open_handle    *handle;
+            uint64_t                           attr_mask;
+            chimera_vfs_lookup_path_callback_t callback;
+            void                              *private_data;
         } lookup_path;
 
         struct {
+            uint8_t                  fh_magic;
+            const char              *path;
+            uint32_t                 pathlen;
+            struct chimera_vfs_attrs r_attr;
+        } getrootfh;
+
+        struct {
             struct chimera_vfs_open_handle *handle;
+            uint64_t                        component_hash;
             const char                     *component;
             uint32_t                        component_len;
             struct chimera_vfs_attrs        r_attr;
             struct chimera_vfs_attrs        r_dir_attr;
         } lookup;
+
+        struct {
+            struct chimera_vfs_request *getattr;
+            struct chimera_vfs_request *dir_getattr;
+        } lookup_hit;
 
         struct {
             struct chimera_vfs_open_handle *handle;
@@ -243,6 +274,7 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
             uint32_t                        name_len;
+            uint64_t                        name_hash;
             struct chimera_vfs_attrs       *set_attr;
             struct chimera_vfs_attrs        r_attr;
             struct chimera_vfs_attrs        r_dir_pre_attr;
@@ -257,6 +289,7 @@ struct chimera_vfs_request {
         struct {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
+            uint64_t                        name_hash;
             int                             namelen;
             uint32_t                        flags;
             struct chimera_vfs_attrs       *set_attr;
@@ -308,13 +341,16 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
             int                             namelen;
+            uint64_t                        name_hash;
             struct chimera_vfs_attrs        r_dir_pre_attr;
             struct chimera_vfs_attrs        r_dir_post_attr;
+            struct chimera_vfs_attrs        r_removed_attr;
         } remove;
 
         struct {
             const char              *name;
             int                      namelen;
+            uint64_t                 name_hash;
             const char              *target;
             int                      targetlen;
             struct chimera_vfs_attrs r_attr;
@@ -331,17 +367,25 @@ struct chimera_vfs_request {
         struct {
             const char *name;
             int         namelen;
+            uint64_t    name_hash;
+            uint64_t    new_fh_hash;
             const void *new_fh;
             int         new_fhlen;
+            uint64_t    new_name_hash;
             const char *new_name;
             int         new_namelen;
         } rename;
 
         struct {
-            const void *dir_fh;
-            int         dir_fhlen;
-            const char *name;
-            int         namelen;
+            const void              *dir_fh;
+            int                      dir_fhlen;
+            uint64_t                 dir_fh_hash;
+            const char              *name;
+            int                      namelen;
+            uint64_t                 name_hash;
+            struct chimera_vfs_attrs r_attr;
+            struct chimera_vfs_attrs r_dir_pre_attr;
+            struct chimera_vfs_attrs r_dir_post_attr;
         } link;
     };
 };
@@ -408,6 +452,13 @@ struct chimera_vfs_module {
      * a guarantee that unlink will not remove a file that a client has open.
      */
     uint8_t     file_open_required;
+
+    /* Required
+     * Set to 1 if this module can return a file handle for any valid inode
+     * If set to 0, then getrootfh will be provided with mount root path
+     * and should return fh for that path
+     */
+    uint8_t     fh_all;
 
     /* Optional
      * Called once at initialization to setup global state
@@ -479,6 +530,7 @@ struct chimera_vfs_mount {
     struct chimera_vfs_module *module;
     char                      *name;
     char                      *path;
+    uint32_t                   pathlen;
     struct chimera_vfs_mount  *prev;
     struct chimera_vfs_mount  *next;
 };
@@ -512,6 +564,8 @@ struct chimera_vfs {
     void                                 *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
     struct vfs_open_cache                *vfs_open_path_cache;
     struct vfs_open_cache                *vfs_open_file_cache;
+    struct chimera_vfs_name_cache        *vfs_name_cache;
+    struct chimera_vfs_attr_cache        *vfs_attr_cache;
     struct chimera_vfs_mount             *mounts;
     pthread_rwlock_t                      mounts_lock;
     int                                   num_delegation_threads;
@@ -547,7 +601,8 @@ struct chimera_vfs *
 chimera_vfs_init(
     int                                  num_delegation_threads,
     const struct chimera_vfs_module_cfg *module_cfgs,
-    int                                  num_modules);
+    int                                  num_modules,
+    int                                  cache_ttl);
 
 void
 chimera_vfs_destroy(

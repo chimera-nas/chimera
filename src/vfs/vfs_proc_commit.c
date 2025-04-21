@@ -1,11 +1,20 @@
 #include "vfs/vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_open_cache.h"
+#include "vfs_attr_cache.h"
 #include "common/macros.h"
 static void
 chimera_vfs_commit_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_commit_callback_t callback = request->proto_callback;
+
+    if (request->status == CHIMERA_VFS_OK) {
+        chimera_vfs_attr_cache_insert(request->thread->vfs->vfs_attr_cache,
+                                      request->commit.handle->fh_hash,
+                                      request->commit.handle->fh,
+                                      request->commit.handle->fh_len,
+                                      &request->commit.r_post_attr);
+    }
 
     chimera_vfs_complete(request);
 
@@ -39,7 +48,7 @@ chimera_vfs_commit(
     request->commit.length                  = count;
     request->commit.r_pre_attr.va_req_mask  = pre_attr_mask;
     request->commit.r_pre_attr.va_set_mask  = 0;
-    request->commit.r_post_attr.va_req_mask = post_attr_mask;
+    request->commit.r_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->commit.r_post_attr.va_set_mask = 0;
     request->proto_callback                 = callback;
     request->proto_private_data             = private_data;

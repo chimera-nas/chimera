@@ -29,6 +29,15 @@ chimera_server_config_set_delegation_threads(
     int                           threads);
 
 void
+chimera_server_config_set_cache_ttl(
+    struct chimera_server_config *config,
+    int                           ttl);
+
+int
+chimera_server_config_get_cache_ttl(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_nfs_rdma(
     struct chimera_server_config *config,
     int                           enable);

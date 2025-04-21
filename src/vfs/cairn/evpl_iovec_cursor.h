@@ -101,9 +101,9 @@ evpl_iovec_cursor_move(
             chunk = left;
         }
 
-        iov[niov].data    = cursor->iov->data + cursor->offset;
-        iov[niov].length  = chunk;
-        iov[niov].private = cursor->iov->private;
+        iov[niov].data         = cursor->iov->data + cursor->offset;
+        iov[niov].length       = chunk;
+        iov[niov].private_data = cursor->iov->private_data;
 
         evpl_iovec_addref(&iov[niov]);
 

@@ -387,7 +387,7 @@ chimera_linux_map_child_attrs(
 
     attr->va_set_mask = 0;
 
-    if (attr->va_req_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH)) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
 
         rc = fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW);
 

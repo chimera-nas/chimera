@@ -10,22 +10,11 @@
 #include "vfs_open_cache.h"
 #include "common/snprintf.h"
 
-#define CHIMERA_VFS_OP_LOOKUP_PATH 1
-#define CHIMERA_VFS_OP_LOOKUP      2
-#define CHIMERA_VFS_OP_GETATTR     3
-#define CHIMERA_VFS_OP_READDIR     4
-#define CHIMERA_VFS_OP_READLINK    5
-#define CHIMERA_VFS_OP_OPEN        6
-#define CHIMERA_VFS_OP_OPEN_AT     7
-#define CHIMERA_VFS_OP_CLOSE       8
-#define CHIMERA_VFS_OP_READ        9
-#define CHIMERA_VFS_OP_WRITE       10
-
 const char *
 chimera_vfs_op_name(unsigned int opcode)
 {
     switch (opcode) {
-        case CHIMERA_VFS_OP_LOOKUP_PATH: return "LookupPath";
+        case CHIMERA_VFS_OP_GETROOTFH: return "GetRootFH";
         case CHIMERA_VFS_OP_LOOKUP: return "Lookup";
         case CHIMERA_VFS_OP_GETATTR: return "GetAttr";
         case CHIMERA_VFS_OP_READDIR: return "ReadDir";
@@ -54,13 +43,15 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
     char fhstr[80], fhstr2[80];
 
     switch (req->opcode) {
-        case CHIMERA_VFS_OP_LOOKUP:
-            chimera_snprintf(argstr, sizeof(argstr), "name %.*s",
-                             req->lookup.component_len, req->lookup.component);
+        case CHIMERA_VFS_OP_GETROOTFH:
+            chimera_snprintf(argstr, sizeof(argstr), "attrmask %lx",
+                             req->getrootfh.r_attr.va_req_mask);
             break;
-        case CHIMERA_VFS_OP_LOOKUP_PATH:
-            chimera_snprintf(argstr, sizeof(argstr), "path %.*s",
-                             req->lookup_path.pathlen, req->lookup_path.path);
+        case CHIMERA_VFS_OP_LOOKUP:
+            chimera_snprintf(argstr, sizeof(argstr), "name %.*s attrmask %lx dir_attr_mask %lx",
+                             req->lookup.component_len, req->lookup.component,
+                             req->lookup.r_attr.va_req_mask,
+                             req->lookup.r_dir_attr.va_req_mask);
             break;
         case CHIMERA_VFS_OP_SETATTR:
             chimera_snprintf(argstr, sizeof(argstr), "attrmask %lx",
@@ -155,13 +146,10 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
     argstr[0] = '\0';
 
     switch (req->opcode) {
-        case CHIMERA_VFS_OP_LOOKUP_PATH:
-            format_hex(fhstr, sizeof(fhstr), req->lookup_path.r_attr.va_fh, req->lookup_path.r_attr.va_fh_len);
+        case CHIMERA_VFS_OP_GETROOTFH:
+            format_hex(fhstr, sizeof(fhstr), req->getrootfh.r_attr.va_fh, req->getrootfh.r_attr.va_fh_len);
             if (req->status == CHIMERA_VFS_OK) {
-                chimera_snprintf(argstr, sizeof(argstr), "path %.*s r_fh %s",
-                                 req->lookup_path.pathlen,
-                                 req->lookup_path.path,
-                                 fhstr);
+                chimera_snprintf(argstr, sizeof(argstr), "r_fh %s", fhstr);
             }
             break;
         case CHIMERA_VFS_OP_LOOKUP:

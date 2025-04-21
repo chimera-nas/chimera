@@ -9,7 +9,6 @@
 #include <sys/time.h>
 #include <limits.h>
 #include <jansson.h>
-#include <xxhash.h>
 #include "common/varint.h"
 #include "common/rbtree.h"
 
@@ -933,19 +932,13 @@ demofs_setattr(
 } /* demofs_setattr */
 
 static void
-demofs_lookup_path(
+demofs_getrootfh(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
     struct demofs_inode *inode;
-
-    if (strncmp(request->lookup_path.path, "/", request->lookup_path.pathlen)) {
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
-    }
 
     inode = demofs_inode_get_fh(shared, shared->root_fh, shared->root_fhlen);
 
@@ -955,13 +948,13 @@ demofs_lookup_path(
         return;
     }
 
-    demofs_map_attrs(thread, &request->lookup_path.r_attr, inode);
+    demofs_map_attrs(thread, &request->getrootfh.r_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* demofs_lookup_path */
+} /* demofs_getrootfh */
 
 static void
 demofs_lookup(
@@ -974,7 +967,7 @@ demofs_lookup(
     struct demofs_dirent *dirent;
     uint64_t              hash;
 
-    hash = XXH3_64bits(request->lookup.component, request->lookup.component_len);
+    hash = request->lookup.component_hash;
 
     inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1028,7 +1021,7 @@ demofs_mkdir(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    hash = XXH3_64bits(request->mkdir.name, request->mkdir.name_len);
+    hash = request->mkdir.name_hash;
 
     /* Optimistically allocate an inode */
     inode = demofs_inode_alloc_thread(thread);
@@ -1122,7 +1115,7 @@ demofs_remove(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    hash = XXH3_64bits(request->remove.name, request->remove.namelen);
+    hash = request->remove.name_hash;
 
     parent_inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1181,6 +1174,12 @@ demofs_remove(
     } else {
         inode->nlink--;
     }
+
+    if (inode->nlink == 0) {
+        request->remove.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
+    }
+
+    demofs_map_attrs(thread, &request->remove.r_removed_attr, inode);
 
     if (inode->nlink == 0) {
         --inode->refcnt;
@@ -1317,7 +1316,7 @@ demofs_open_at(
     unsigned int          flags = request->open_at.flags;
     struct timespec       now;
 
-    hash = XXH3_64bits(request->open_at.name, request->open_at.namelen);
+    hash = request->open_at.name_hash;
 
     parent_inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1824,7 +1823,7 @@ demofs_symlink(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    hash = XXH3_64bits(request->symlink.name, request->symlink.namelen);
+    hash = request->symlink.name_hash;
 
     /* Optimistically allocate an inode */
     inode = demofs_inode_alloc_thread(thread);
@@ -1965,8 +1964,8 @@ demofs_rename(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    hash     = XXH3_64bits(request->rename.name, request->rename.namelen);
-    new_hash = XXH3_64bits(request->rename.new_name, request->rename.new_namelen);
+    hash     = request->rename.name_hash;
+    new_hash = request->rename.new_name_hash;
 
     cmp = demofs_fh_compare(request->fh,
                             request->fh_len,
@@ -2114,7 +2113,7 @@ demofs_link(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    hash = XXH3_64bits(request->link.name, request->link.namelen);
+    hash = request->link.name_hash;
 
     parent_inode = demofs_inode_get_fh(shared,
                                        request->link.dir_fh,
@@ -2198,8 +2197,8 @@ demofs_dispatch(
     }
 
     switch (request->opcode) {
-        case CHIMERA_VFS_OP_LOOKUP_PATH:
-            demofs_lookup_path(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_GETROOTFH:
+            demofs_getrootfh(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             demofs_lookup(thread, shared, request, private_data);
@@ -2265,6 +2264,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_demofs = {
     .blocking           = 0,
     .path_open_required = 0,
     .file_open_required = 0,
+    .fh_all             = 1,
     .init               = demofs_init,
     .destroy            = demofs_destroy,
     .thread_init        = demofs_thread_init,

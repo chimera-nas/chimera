@@ -753,19 +753,13 @@ memfs_setattr(
 } /* memfs_setattr */
 
 static void
-memfs_lookup_path(
+memfs_getrootfh(
     struct memfs_thread        *thread,
     struct memfs_shared        *shared,
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
     struct memfs_inode *inode;
-
-    if (strncmp(request->lookup_path.path, "/", request->lookup_path.pathlen)) {
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
-    }
 
     inode = memfs_inode_get_fh(shared, shared->root_fh, shared->root_fhlen);
 
@@ -775,13 +769,13 @@ memfs_lookup_path(
         return;
     }
 
-    memfs_map_attrs(&request->lookup_path.r_attr, inode);
+    memfs_map_attrs(&request->getrootfh.r_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* memfs_lookup_path */
+} /* memfs_getrootfh */
 
 static void
 memfs_lookup(
@@ -996,6 +990,12 @@ memfs_remove(
     } else {
         inode->nlink--;
     }
+
+    if (inode->nlink == 0) {
+        request->remove.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
+    }
+
+    memfs_map_attrs(&request->remove.r_removed_attr, inode);
 
     if (inode->nlink == 0) {
         --inode->refcnt;
@@ -1859,8 +1859,8 @@ memfs_dispatch(
     struct memfs_shared *shared = thread->shared;
 
     switch (request->opcode) {
-        case CHIMERA_VFS_OP_LOOKUP_PATH:
-            memfs_lookup_path(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_GETROOTFH:
+            memfs_getrootfh(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             memfs_lookup(thread, shared, request, private_data);
@@ -1926,6 +1926,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
     .blocking           = 0,
     .path_open_required = 0,
     .file_open_required = 0,
+    .fh_all             = 1,
     .init               = memfs_init,
     .destroy            = memfs_destroy,
     .thread_init        = memfs_thread_init,

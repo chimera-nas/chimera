@@ -9,7 +9,6 @@
 #include <jansson.h>
 #include <limits.h>
 #include "common/varint.h"
-#include "xxhash.h"
 
 #include "uthash/utlist.h"
 #include "vfs/vfs.h"
@@ -882,7 +881,7 @@ cairn_setattr(
 } /* cairn_setattr */
 
 static void
-cairn_lookup_path(
+cairn_getrootfh(
     struct cairn_thread        *thread,
     struct cairn_shared        *shared,
     struct chimera_vfs_request *request,
@@ -892,12 +891,6 @@ cairn_lookup_path(
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
     int                       rc;
-
-    if (strncmp(request->lookup_path.path, "/", request->lookup_path.pathlen)) {
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
-    }
 
     txn = cairn_get_transaction(thread);
 
@@ -911,14 +904,14 @@ cairn_lookup_path(
 
     inode = ih.inode;
 
-    cairn_map_attrs(&request->lookup_path.r_attr, inode);
+    cairn_map_attrs(&request->getrootfh.r_attr, inode);
 
     cairn_inode_handle_release(&ih);
 
     request->status = CHIMERA_VFS_OK;
 
     DL_APPEND(thread->txn_requests, request);
-} /* cairn_lookup_path */
+} /* cairn_getrootfh */
 
 static void
 cairn_lookup(
@@ -956,7 +949,7 @@ cairn_lookup(
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = inode->inum;
-    dirent_key.hash    = XXH3_64bits(request->lookup.component, request->lookup.component_len);
+    dirent_key.hash    = request->lookup.component_hash;
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
@@ -1033,7 +1026,7 @@ cairn_mkdir(
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
-    dirent_key.hash    = XXH3_64bits(request->mkdir.name, request->mkdir.name_len);
+    dirent_key.hash    = request->mkdir.name_hash;
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
@@ -1121,7 +1114,7 @@ cairn_remove(
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
-    dirent_key.hash    = XXH3_64bits(request->remove.name, request->remove.namelen);
+    dirent_key.hash    = request->remove.name_hash;
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
@@ -1169,6 +1162,12 @@ cairn_remove(
     } else {
         inode->nlink--;
     }
+
+    if (inode->nlink == 0) {
+        request->remove.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
+    }
+
+    cairn_map_attrs(&request->remove.r_removed_attr, inode);
 
     if (inode->nlink == 0) {
         --inode->refcnt;
@@ -1385,7 +1384,7 @@ cairn_open_at(
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
-    dirent_key.hash    = XXH3_64bits(request->open_at.name, request->open_at.namelen);
+    dirent_key.hash    = request->open_at.name_hash;
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
@@ -1879,7 +1878,7 @@ cairn_symlink(
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
-    dirent_key.hash    = XXH3_64bits(request->symlink.name, request->symlink.namelen);
+    dirent_key.hash    = request->symlink.name_hash;
 
     cairn_alloc_inum(thread, &new_inode);
     new_inode.size       = request->symlink.targetlen;
@@ -2011,7 +2010,7 @@ cairn_rename(
     struct cairn_dirent_value  new_dirent_value;
     struct cairn_inode_handle  target_ih;
     struct cairn_inode        *target_inode;
-    int                        cmp, rc;
+    int                        cmp, rc, have_new_parent_ih = 0;
     struct timespec            now;
 
     clock_gettime(CLOCK_REALTIME, &now);
@@ -2041,6 +2040,9 @@ cairn_rename(
             return;
         }
     } else {
+
+        have_new_parent_ih = 1;
+
         if (cmp < 0) {
             rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &old_parent_ih);
             if (rc) {
@@ -2095,15 +2097,14 @@ cairn_rename(
 
     old_dirent_key.keytype = CAIRN_KEY_DIRENT;
     old_dirent_key.inum    = old_parent_inode->inum;
-    old_dirent_key.hash    = XXH3_64bits(request->rename.name, request->rename.namelen);
+    old_dirent_key.hash    = request->rename.name_hash;
 
     rc = cairn_dirent_get(thread, txn, &old_dirent_key, &old_dh);
     if (rc) {
-        if (cmp != 0) {
-            cairn_inode_handle_release(&old_parent_ih);
+        cairn_inode_handle_release(&old_parent_ih);
+
+        if (have_new_parent_ih) {
             cairn_inode_handle_release(&new_parent_ih);
-        } else {
-            cairn_inode_handle_release(&old_parent_ih);
         }
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
@@ -2114,7 +2115,7 @@ cairn_rename(
 
     new_dirent_key.keytype = CAIRN_KEY_DIRENT;
     new_dirent_key.inum    = new_parent_inode->inum;
-    new_dirent_key.hash    = XXH3_64bits(request->rename.new_name, request->rename.new_namelen);
+    new_dirent_key.hash    = request->rename.new_name_hash;
 
     rc = cairn_dirent_get(thread, txn, &new_dirent_key, &new_dh);
     if (rc == 0) {
@@ -2172,11 +2173,11 @@ cairn_rename(
 
     // Cleanup
     cairn_dirent_handle_release(&old_dh);
-    if (cmp != 0) {
-        cairn_inode_handle_release(&old_parent_ih);
+
+    cairn_inode_handle_release(&old_parent_ih);
+
+    if (have_new_parent_ih) {
         cairn_inode_handle_release(&new_parent_ih);
-    } else {
-        cairn_inode_handle_release(&old_parent_ih);
     }
 
     request->status = CHIMERA_VFS_OK;
@@ -2241,7 +2242,7 @@ cairn_link(
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
-    dirent_key.hash    = XXH3_64bits(request->link.name, request->link.namelen);
+    dirent_key.hash    = request->link.name_hash;
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
@@ -2283,8 +2284,8 @@ cairn_dispatch(
     struct cairn_shared *shared = thread->shared;
 
     switch (request->opcode) {
-        case CHIMERA_VFS_OP_LOOKUP_PATH:
-            cairn_lookup_path(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_GETROOTFH:
+            cairn_getrootfh(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             cairn_lookup(thread, shared, request, private_data);
@@ -2350,6 +2351,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
     .blocking           = 1,
     .path_open_required = 0,
     .file_open_required = 0,
+    .fh_all             = 1,
     .init               = cairn_init,
     .destroy            = cairn_destroy,
     .thread_init        = cairn_thread_init,

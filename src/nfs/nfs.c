@@ -173,7 +173,7 @@ nfs_server_dump_metrics(struct evpl_rpc2_program *program)
         }
 
         chimera_nfs_info(
-            "RPC2 metrics for %18s: %8d requests, %8lldns avg latency, %8lldns min latency, %8lldns max latency",
+            "RPC2 metrics for %20s: %8d requests, %8lldns avg latency, %8lldns min latency, %8lldns max latency",
             program->procs[i],
             metric->total_calls,
             metric->total_latency / metric->total_calls,

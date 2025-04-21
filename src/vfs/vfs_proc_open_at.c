@@ -3,6 +3,8 @@
 #include "vfs_internal.h"
 #include "common/misc.h"
 #include "vfs_open_cache.h"
+#include "vfs_name_cache.h"
+#include "vfs_attr_cache.h"
 #include "common/macros.h"
 
 static void
@@ -10,7 +12,34 @@ chimera_vfs_open_at_hdl_callback(
     struct chimera_vfs_request     *request,
     struct chimera_vfs_open_handle *handle)
 {
+    struct chimera_vfs_thread     *thread   = request->thread;
+    struct chimera_vfs_name_cache *cache    = thread->vfs->vfs_name_cache;
     chimera_vfs_open_at_callback_t callback = request->proto_callback;
+
+    if (request->status == CHIMERA_VFS_OK) {
+        chimera_vfs_name_cache_insert(cache,
+                                      request->open_at.handle->fh_hash,
+                                      request->open_at.handle->fh,
+                                      request->open_at.handle->fh_len,
+                                      request->open_at.name_hash,
+                                      request->open_at.name,
+                                      request->open_at.namelen,
+                                      request->open_at.r_attr.va_fh,
+                                      request->open_at.r_attr.va_fh_len);
+
+        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+                                      request->open_at.handle->fh_hash,
+                                      request->open_at.handle->fh,
+                                      request->open_at.handle->fh_len,
+                                      &request->open_at.r_dir_post_attr);
+
+        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+                                      chimera_vfs_hash(request->open_at.r_attr.va_fh, request->open_at.r_attr.
+                                                       va_fh_len),
+                                      request->open_at.r_attr.va_fh,
+                                      request->open_at.r_attr.va_fh_len,
+                                      &request->open_at.r_attr);
+    }
 
     chimera_vfs_complete(request);
 
@@ -43,8 +72,8 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
         chimera_vfs_abort_if(!(request->open_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH),
                              "open_at: no fh returned from vfs module");
 
-        fh_hash = XXH3_64bits(request->open_at.r_attr.va_fh,
-                              request->open_at.r_attr.va_fh_len);
+        fh_hash = chimera_vfs_hash(request->open_at.r_attr.va_fh,
+                                   request->open_at.r_attr.va_fh_len);
 
         if (request->module->file_open_required || !(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
             chimera_vfs_open_cache_acquire(
@@ -107,13 +136,14 @@ chimera_vfs_open_at(
     request->open_at.handle                      = handle;
     request->open_at.name                        = name;
     request->open_at.namelen                     = namelen;
+    request->open_at.name_hash                   = chimera_vfs_hash(name, namelen);
     request->open_at.flags                       = flags;
     request->open_at.set_attr                    = set_attr;
-    request->open_at.r_attr.va_req_mask          = attr_mask;
+    request->open_at.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->open_at.r_attr.va_set_mask          = 0;
     request->open_at.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
     request->open_at.r_dir_pre_attr.va_set_mask  = 0;
-    request->open_at.r_dir_post_attr.va_req_mask = post_attr_mask;
+    request->open_at.r_dir_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->open_at.r_dir_post_attr.va_set_mask = 0;
     request->proto_callback                      = callback;
     request->proto_private_data                  = private_data;

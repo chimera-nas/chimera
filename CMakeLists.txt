@@ -3,7 +3,20 @@
 # SPDX-License-Identifier: LGPL
 
 cmake_minimum_required(VERSION 3.22)
-project(chimera LANGUAGES C)
+
+if (EXISTS "/usr/local/cuda")
+    set(CUDA_ENABLED true)
+    set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
+    set(CMAKE_CUDA_ARCHITECTURES 80)
+else()
+    set(CUDA_ENABLED false) 
+endif()
+
+if (CUDA_ENABLED)
+    project(chimera LANGUAGES C CUDA)
+else()
+    project(chimera LANGUAGES C)
+endif()
 
 set(CHIMERA_VERSION "0.1.0")
 
@@ -32,11 +45,22 @@ add_definitions(-g -Wall -Werror -Wno-unused-function)
 add_definitions(-fvisibility=hidden)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm.*|ARM.*|aarch64.*)")
-    add_definitions(-march=armv8-a)
+    set(MARCH_FLAG "-march=armv8-a")
 endif()
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)")
-    add_definitions(-march=x86-64-v3)
+    set(MARCH_FLAG "-march=x86-64-v3")
+endif()
+
+add_definitions(${MARCH_FLAG})
+
+
+if (CUDA_ENABLED)
+    message(STATUS "CUDA enabled")
+    #include_directories(${CUDA_INCLUDE_DIRS})
+    #link_directories(${CUDA_LIBRARIES})
+else()
+    message(STATUS "CUDA disabled")
 endif()
 
 

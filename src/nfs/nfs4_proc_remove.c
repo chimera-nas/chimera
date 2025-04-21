@@ -21,7 +21,7 @@ chimera_nfs4_remove_complete(
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_remove_complete */
 
 static void

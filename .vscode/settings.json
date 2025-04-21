@@ -74,6 +74,7 @@
     "vfs_error.h": "c",
     "server_internal.h": "c",
     "macros.h": "c",
-    "logging.h": "c"
+    "logging.h": "c",
+    "client_internal.h": "c"
   }
 }

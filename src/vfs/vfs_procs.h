@@ -4,11 +4,21 @@
 
 struct evpl_iovec;
 
+
+typedef void (*chimera_vfs_getrootfh_callback_t)(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data);
+
 void
 chimera_vfs_getrootfh(
-    struct chimera_vfs_thread *thread,
-    void                      *fh,
-    int                       *fh_len);
+    struct chimera_vfs_thread       *thread,
+    struct chimera_vfs_module       *module,
+    const char                      *path,
+    uint32_t                         pathlen,
+    uint64_t                         req_attr_mask,
+    chimera_vfs_getrootfh_callback_t callback,
+    void                            *private_data);
 
 typedef void (*chimera_vfs_lookup_callback_t)(
     enum chimera_vfs_error    error_code,
@@ -26,11 +36,6 @@ chimera_vfs_lookup(
     uint64_t                        dir_attr_mask,
     chimera_vfs_lookup_callback_t   callback,
     void                           *private_data);
-
-typedef void (*chimera_vfs_lookup_path_callback_t)(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data);
 
 void
 chimera_vfs_lookup_path(
@@ -309,5 +314,8 @@ chimera_vfs_link(
     int                         dir_fhlen,
     const char                 *name,
     int                         namelen,
+    uint64_t                    attr_mask,
+    uint64_t                    pre_attr_mask,
+    uint64_t                    post_attr_mask,
     chimera_vfs_link_callback_t callback,
     void                       *private_data);

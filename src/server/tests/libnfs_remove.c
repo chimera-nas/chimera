@@ -7,6 +7,7 @@ main(
 {
     struct test_env env;
     struct nfsfh   *fh;
+    struct stat     st;
     int             rc;
 
     libnfs_test_init(&env, argv, argc);
@@ -30,6 +31,20 @@ main(
 
     if (rc < 0) {
         fprintf(stderr, "Failed to unlink file: %s\n", nfs_get_error(env.nfs));
+        libnfs_test_fail(&env);
+    }
+
+    rc = nfs_stat(env.nfs, "/testfile", &st);
+
+    if (rc == NFS3_OK) {
+        fprintf(stderr, "File should not exist but stat succeeded: %s\n", nfs_get_error(env.nfs));
+        libnfs_test_fail(&env);
+    }
+
+    rc = nfs_unlink(env.nfs, "/testfile");
+
+    if (rc == NFS3_OK) {
+        fprintf(stderr, "File should not exist but unlink succeeded: %s\n", nfs_get_error(env.nfs));
         libnfs_test_fail(&env);
     }
 

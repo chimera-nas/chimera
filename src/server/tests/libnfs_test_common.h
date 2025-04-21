@@ -117,21 +117,19 @@ libnfs_test_init(
     env->server = chimera_server_init(config);
 
     if (strcmp(backend, "linux") == 0) {
-        chimera_server_create_share(env->server, "linux", "share",
-                                    env->session_dir);
+        chimera_server_create_share(env->server, "share", "linux", env->session_dir);
 
     } else if (strcmp(backend, "io_uring") == 0) {
-        chimera_server_create_share(env->server, "io_uring", "share",
-                                    env->session_dir);
+        chimera_server_create_share(env->server, "share", "io_uring", env->session_dir);
 
     } else if (strcmp(backend, "memfs") == 0) {
-        chimera_server_create_share(env->server, "memfs", "share", "/");
+        chimera_server_create_share(env->server, "share", "memfs", "/");
 
     } else if (strcmp(backend, "demofs") == 0) {
-        chimera_server_create_share(env->server, "demofs", "share", "/");
+        chimera_server_create_share(env->server, "share", "demofs", "/");
 
     } else if (strcmp(backend, "cairn") == 0) {
-        chimera_server_create_share(env->server, "cairn", "share", "/");
+        chimera_server_create_share(env->server, "share", "cairn", "/");
     } else {
         fprintf(stderr, "Unknown backend: %s\n", backend);
         exit(EXIT_FAILURE);

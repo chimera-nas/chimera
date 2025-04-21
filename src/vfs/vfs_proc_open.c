@@ -78,7 +78,7 @@ chimera_vfs_open(
         cache = thread->vfs->vfs_open_file_cache;
     }
 
-    fh_hash = XXH3_64bits(fh, fhlen);
+    fh_hash = chimera_vfs_hash(fh, fhlen);
 
     module = chimera_vfs_get_module(thread, fh, fhlen);
 

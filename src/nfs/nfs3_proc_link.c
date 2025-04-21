@@ -50,6 +50,9 @@ chimera_nfs3_link(
                      args->link.dir.data.len,
                      args->link.name.str,
                      args->link.name.len,
+                     0,
+                     0,
+                     0,
                      chimera_nfs3_link_complete,
                      req);
 } /* chimera_nfs3_link */

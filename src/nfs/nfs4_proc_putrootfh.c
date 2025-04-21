@@ -10,9 +10,8 @@ chimera_nfs4_putrootfh(
 {
     struct PUTROOTFH4res *res = &resop->opputrootfh;
 
-    chimera_vfs_getrootfh(thread->vfs_thread,
-                          req->fh,
-                          &req->fhlen);
+    req->fh[0] = CHIMERA_VFS_FH_MAGIC_ROOT;
+    req->fhlen = 1;
 
     res->status = NFS4_OK;
 

@@ -1,12 +1,41 @@
 #include <string.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
+#include "vfs_name_cache.h"
+#include "vfs_attr_cache.h"
 #include "common/misc.h"
 #include "common/macros.h"
 static void
 chimera_vfs_mkdir_complete(struct chimera_vfs_request *request)
 {
-    chimera_vfs_mkdir_callback_t callback = request->proto_callback;
+    struct chimera_vfs_thread     *thread   = request->thread;
+    struct chimera_vfs_name_cache *cache    = thread->vfs->vfs_name_cache;
+    chimera_vfs_mkdir_callback_t   callback = request->proto_callback;
+
+    if (request->status == CHIMERA_VFS_OK) {
+        chimera_vfs_name_cache_insert(cache,
+                                      request->mkdir.handle->fh_hash,
+                                      request->mkdir.handle->fh,
+                                      request->mkdir.handle->fh_len,
+                                      request->mkdir.name_hash,
+                                      request->mkdir.name,
+                                      request->mkdir.name_len,
+                                      request->mkdir.r_attr.va_fh,
+                                      request->mkdir.r_attr.va_fh_len);
+
+        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+                                      request->mkdir.handle->fh_hash,
+                                      request->mkdir.handle->fh,
+                                      request->mkdir.handle->fh_len,
+                                      &request->mkdir.r_dir_post_attr);
+
+        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+                                      chimera_vfs_hash(request->mkdir.r_attr.va_fh, request->mkdir.r_attr.va_fh_len)
+                                      ,
+                                      request->mkdir.r_attr.va_fh,
+                                      request->mkdir.r_attr.va_fh_len,
+                                      &request->mkdir.r_attr);
+    }
 
     chimera_vfs_complete(request);
 
@@ -42,9 +71,10 @@ chimera_vfs_mkdir(
     request->mkdir.handle                      = handle;
     request->mkdir.name                        = name;
     request->mkdir.name_len                    = namelen;
+    request->mkdir.name_hash                   = chimera_vfs_hash(name, namelen);
     request->mkdir.set_attr                    = attr;
     request->mkdir.set_attr->va_set_mask       = 0;
-    request->mkdir.r_attr.va_req_mask          = attr_mask;
+    request->mkdir.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_FH;
     request->mkdir.r_attr.va_set_mask          = 0;
     request->mkdir.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
     request->mkdir.r_dir_pre_attr.va_set_mask  = 0;

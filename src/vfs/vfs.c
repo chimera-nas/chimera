@@ -6,11 +6,13 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "vfs.h"
-#include "vfs_internal.h"
-#include "vfs_open_cache.h"
-#include "root/vfs_root.h"
-#include "vfs_dump.h"
+#include "vfs/vfs.h"
+#include "vfs/vfs_internal.h"
+#include "vfs/vfs_open_cache.h"
+#include "vfs/root/vfs_root.h"
+#include "vfs/vfs_dump.h"
+#include "vfs/vfs_name_cache.h"
+#include "vfs/vfs_attr_cache.h"
 #include "vfs/memfs/memfs.h"
 #include "vfs/linux/linux.h"
 #include "vfs/io_uring/io_uring.h"
@@ -212,7 +214,8 @@ SYMBOL_EXPORT struct chimera_vfs *
 chimera_vfs_init(
     int                                  num_delegation_threads,
     const struct chimera_vfs_module_cfg *module_cfgs,
-    int                                  num_modules)
+    int                                  num_modules,
+    int                                  cache_ttl)
 {
     struct chimera_vfs        *vfs;
     struct chimera_vfs_module *module;
@@ -224,6 +227,9 @@ chimera_vfs_init(
 
     vfs->vfs_open_path_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_PATH, 10, 128 * 1024);
     vfs->vfs_open_file_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_FILE, 10, 128 * 1024);
+
+    vfs->vfs_name_cache = chimera_vfs_name_cache_create(8, 8, 2, cache_ttl);
+    vfs->vfs_attr_cache = chimera_vfs_attr_cache_create(8, 8, 2, cache_ttl);
 
     for (int i = 0; i < num_modules; i++) {
         chimera_vfs_info("Initializing VFS module %s...", module_cfgs[i].module_name);
@@ -269,18 +275,6 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     struct chimera_vfs_mount  *mount;
     int                        i;
 
-    for (i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
-        if (vfs->metrics[i].num_requests > 0) {
-            chimera_vfs_info(
-                "VFS metrics for %10s: %8d requests, %8lldns avg latency, %8lldns min latency, %8lldns max latency",
-                chimera_vfs_op_name(i),
-                vfs->metrics[i].num_requests,
-                vfs->metrics[i].total_latency / vfs->metrics[i].num_requests,
-                vfs->metrics[i].min_latency,
-                vfs->metrics[i].max_latency);
-        }
-    }
-
     pthread_mutex_lock(&vfs->close_thread.lock);
     vfs->close_thread.shutdown = 1;
 
@@ -298,6 +292,18 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     }
     free(vfs->delegation_threads);
 
+    for (i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
+        if (vfs->metrics[i].num_requests > 0) {
+            chimera_vfs_info(
+                "VFS metrics for %10s: %8d requests, %8lldns avg latency, %8lldns min latency, %8lldns max latency",
+                chimera_vfs_op_name(i),
+                vfs->metrics[i].num_requests,
+                vfs->metrics[i].total_latency / vfs->metrics[i].num_requests,
+                vfs->metrics[i].min_latency,
+                vfs->metrics[i].max_latency);
+        }
+    }
+
     while (vfs->mounts) {
         mount = vfs->mounts;
         DL_DELETE(vfs->mounts, mount);
@@ -314,6 +320,14 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
         }
 
         module->destroy(vfs->module_private[i]);
+    }
+
+    if (vfs->vfs_name_cache) {
+        chimera_vfs_name_cache_destroy(vfs->vfs_name_cache);
+    }
+
+    if (vfs->vfs_attr_cache) {
+        chimera_vfs_attr_cache_destroy(vfs->vfs_attr_cache);
     }
 
     chimera_vfs_open_cache_destroy(vfs->vfs_open_path_cache);
@@ -388,8 +402,11 @@ chimera_vfs_thread_init(
     thread->evpl = evpl;
     thread->vfs  = vfs;
 
+    urcu_memb_register_thread();
 
-    pthread_mutex_init(&thread->lock, NULL);
+    pthread_mutex_init(
+        &thread->lock,
+        NULL);
 
     evpl_add_doorbell(evpl, &thread->doorbell, chimera_vfs_process_completion);
 
@@ -461,6 +478,8 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
     }
 
     free(thread);
+
+    urcu_memb_unregister_thread();
 } /* chimera_vfs_thread_destroy */
 
 void
@@ -477,15 +496,13 @@ chimera_vfs_register(
 SYMBOL_EXPORT int
 chimera_vfs_mount(
     struct chimera_vfs *vfs,
-    const char         *module_name,
     const char         *mount_path,
+    const char         *module_name,
     const char         *module_path)
 {
     struct chimera_vfs_mount  *mount;
     struct chimera_vfs_module *module;
     int                        i;
-
-    mount = calloc(1, sizeof(*mount));
 
     for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
         module = vfs->modules[i];
@@ -495,19 +512,22 @@ chimera_vfs_mount(
         }
 
         if (strcmp(module->name, module_name) == 0) {
-            mount->module = module;
             break;
         }
     }
 
-    if (!mount->module) {
+    if (i == CHIMERA_VFS_FH_MAGIC_MAX) {
         chimera_vfs_error("chimera_vfs_mount: module %s not found",
                           module_name);
         return -1;
     }
 
-    mount->name = strdup(mount_path);
-    mount->path = strdup(module_path);
+    mount = calloc(1, sizeof(*mount));
+
+    mount->module  = module;
+    mount->name    = strdup(mount_path);
+    mount->path    = strdup(module_path);
+    mount->pathlen = strlen(module_path);
 
     pthread_rwlock_wrlock(&vfs->mounts_lock);
     DL_APPEND(vfs->mounts, mount);

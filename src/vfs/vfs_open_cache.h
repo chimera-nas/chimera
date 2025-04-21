@@ -246,14 +246,13 @@ chimera_vfs_open_cache_acquire(
 {
     struct vfs_open_cache_shard    *shard;
     struct chimera_vfs_open_handle *handle, *existing;
-    uint32_t                        _hash = fh_hash & 0xFFFFFFFF;
-    int                             done  = 0;
+    int                             done = 0;
 
     shard = &cache->shards[fh_hash & cache->shard_mask];
 
     pthread_mutex_lock(&shard->lock);
 
-    HASH_FIND_BYHASHVALUE(hh, shard->open_files, fh, fhlen, _hash, handle);
+    HASH_FIND_BYHASHVALUE(hh, shard->open_files, fh, fhlen, (fh_hash & 0xFFFFFFFF), handle);
 
     if (handle) {
 
@@ -280,7 +279,7 @@ chimera_vfs_open_cache_acquire(
 
         handle                   = chimera_vfs_open_cache_alloc(shard);
         handle->vfs_module       = module;
-        handle->fh_hash          = fh_hash & 0xFFFFFFFF;
+        handle->fh_hash          = fh_hash;
         handle->fh_len           = fhlen;
         handle->opencnt          = 1;
         handle->exclusive        = exclusive;
@@ -297,7 +296,7 @@ chimera_vfs_open_cache_acquire(
 
         memcpy(handle->fh, fh, fhlen);
 
-        HASH_ADD_BYHASHVALUE(hh, shard->open_files, fh, handle->fh_len, handle->fh_hash, handle);
+        HASH_ADD_BYHASHVALUE(hh, shard->open_files, fh, handle->fh_len, (handle->fh_hash & 0xFFFFFFFF), handle);
 
         if (shard->open_handles < shard->max_open_files) {
             shard->open_handles++;

@@ -51,6 +51,15 @@
                          __LINE__, \
                          __VA_ARGS__)
 
+
+static inline uint64_t
+chimera_vfs_hash(
+    const void *data,
+    int         len)
+{
+    return XXH3_64bits(data, len);
+} /* chimera_vfs_hash */
+
 static inline struct chimera_vfs_module *
 chimera_vfs_get_module(
     struct chimera_vfs_thread *thread,
@@ -108,7 +117,7 @@ chimera_vfs_request_alloc(
     const void                *fh,
     int                        fhlen)
 {
-    uint64_t fh_hash = XXH3_64bits(fh, fhlen);
+    uint64_t fh_hash = chimera_vfs_hash(fh, fhlen);
 
     return chimera_vfs_request_alloc_by_hash(thread, fh, fhlen, fh_hash);
 } /* chimera_vfs_request_alloc */

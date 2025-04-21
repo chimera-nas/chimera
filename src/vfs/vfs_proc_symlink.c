@@ -2,12 +2,44 @@
 #include <string.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
+#include "vfs_name_cache.h"
+#include "vfs_attr_cache.h"
 #include "common/misc.h"
 
 static void
 chimera_vfs_symlink_complete(struct chimera_vfs_request *request)
 {
-    chimera_vfs_symlink_callback_t callback = request->proto_callback;
+    struct chimera_vfs_thread     *thread     = request->thread;
+    struct chimera_vfs_name_cache *name_cache = thread->vfs->vfs_name_cache;
+    struct chimera_vfs_attr_cache *attr_cache = thread->vfs->vfs_attr_cache;
+    chimera_vfs_symlink_callback_t callback   = request->proto_callback;
+
+
+    if (request->status == CHIMERA_VFS_OK) {
+        chimera_vfs_name_cache_insert(name_cache,
+                                      request->fh_hash,
+                                      request->fh,
+                                      request->fh_len,
+                                      request->symlink.name_hash,
+                                      request->symlink.name,
+                                      request->symlink.namelen,
+                                      request->symlink.r_attr.va_fh,
+                                      request->symlink.r_attr.va_fh_len);
+
+        chimera_vfs_attr_cache_insert(attr_cache,
+                                      request->fh_hash,
+                                      request->fh,
+                                      request->fh_len,
+                                      &request->symlink.r_dir_post_attr);
+
+        chimera_vfs_attr_cache_insert(attr_cache,
+                                      chimera_vfs_hash(request->symlink.r_attr.va_fh, request->symlink.r_attr.
+                                                       va_fh_len),
+                                      request->symlink.r_attr.va_fh,
+                                      request->symlink.r_attr.va_fh_len,
+                                      &request->symlink.r_attr);
+    }
+
 
     chimera_vfs_complete(request);
 
@@ -43,13 +75,14 @@ chimera_vfs_symlink(
     request->complete                            = chimera_vfs_symlink_complete;
     request->symlink.name                        = name;
     request->symlink.namelen                     = namelen;
+    request->symlink.name_hash                   = chimera_vfs_hash(name, namelen);
     request->symlink.target                      = target;
     request->symlink.targetlen                   = targetlen;
-    request->symlink.r_attr.va_req_mask          = attr_mask;
+    request->symlink.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->symlink.r_attr.va_set_mask          = 0;
     request->symlink.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
     request->symlink.r_dir_pre_attr.va_set_mask  = 0;
-    request->symlink.r_dir_post_attr.va_req_mask = post_attr_mask;
+    request->symlink.r_dir_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->symlink.r_dir_post_attr.va_set_mask = 0;
     request->proto_callback                      = callback;
     request->proto_private_data                  = private_data;

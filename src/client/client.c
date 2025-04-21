@@ -3,33 +3,15 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#include "uthash/utlist.h"
+
 #include "client.h"
 #include "client_internal.h"
 #include "common/macros.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
-#define CHIMERA_CLIENT_MAX_MODULES 64
 
-struct chimera_client_config {
-    int                           core_threads;
-    int                           delegation_threads;
-    struct chimera_vfs_module_cfg modules[CHIMERA_CLIENT_MAX_MODULES];
-    int                           num_modules;
-};
-
-struct chimera_client {
-    const struct chimera_client_config *config;
-    struct chimera_vfs                 *vfs;
-    struct evpl_threadpool             *pool;
-    int                                 threads_online;
-    pthread_mutex_t                     lock;
-};
-
-struct chimera_client_thread {
-    struct chimera_client     *client;
-    struct chimera_vfs_thread *vfs_thread;
-};
-
+const uint8_t root_fh[1] = { CHIMERA_VFS_FH_MAGIC_ROOT };
 
 SYMBOL_EXPORT struct chimera_client_config *
 chimera_client_config_init(void)
@@ -40,6 +22,7 @@ chimera_client_config_init(void)
 
     config->core_threads       = 16;
     config->delegation_threads = 64;
+    config->cache_ttl          = 60;
 
     strncpy(config->modules[0].module_name, "root", sizeof(config->modules[0].module_name));
     config->modules[0].config_path[0] = '\0';
@@ -62,34 +45,40 @@ chimera_client_config_init(void)
 } /* chimera_server_config_init */
 
 
-static void *
+SYMBOL_EXPORT struct chimera_client_thread *
 chimera_client_thread_init(
-    struct evpl *evpl,
-    void        *data)
+    struct evpl           *evpl,
+    struct chimera_client *client)
 {
-    struct chimera_client        *client = data;
     struct chimera_client_thread *thread;
 
     thread = calloc(1, sizeof(struct chimera_client_thread));
 
     thread->client = client;
 
-    pthread_mutex_lock(&client->lock);
-    client->threads_online++;
-    pthread_mutex_unlock(&client->lock);
+    thread->vfs_thread = chimera_vfs_thread_init(evpl, client->vfs);
 
     return thread;
 } /* chimera_client_thread_init */
 
-static void
+SYMBOL_EXPORT void
 chimera_client_thread_shutdown(
-    struct evpl *evpl,
-    void        *data)
+    struct evpl                  *evpl,
+    struct chimera_client_thread *thread)
 {
-    struct chimera_client_thread *thread = data;
+    struct chimera_client_request *request;
+
+    while (thread->free_requests) {
+        request = thread->free_requests;
+        DL_DELETE(thread->free_requests, request);
+        free(request);
+    }
+
+    chimera_vfs_thread_destroy(thread->vfs_thread);
 
     free(thread);
 } /* chimera_client_thread_shutdown */
+
 
 SYMBOL_EXPORT struct chimera_client *
 chimera_client_init(const struct chimera_client_config *config)
@@ -109,37 +98,19 @@ chimera_client_init(const struct chimera_client_config *config)
 
     client->config = config;
 
-    pthread_mutex_init(&client->lock, NULL);
-
     chimera_client_info("Initializing VFS...");
 
     client->vfs = chimera_vfs_init(config->delegation_threads,
                                    config->modules,
-                                   config->num_modules);
+                                   config->num_modules,
+                                   config->cache_ttl);
 
-    client->pool = evpl_threadpool_create(NULL,
-                                          client->config->core_threads,
-                                          chimera_client_thread_init,
-                                          chimera_client_thread_shutdown,
-                                          client);
-
-    chimera_client_info("Waiting for %d threads to start...", client->config->core_threads);
-
-    while (client->threads_online < client->config->core_threads) {
-        usleep(100);
-    }
-
-    chimera_client_info("Client is ready.");
     return client;
 } /* chimera_client_init */
 
 SYMBOL_EXPORT void
 chimera_client_destroy(struct chimera_client *client)
 {
-
-
-    evpl_threadpool_destroy(client->pool);
-
     chimera_vfs_destroy(client->vfs);
 
     free((void *) client->config);
@@ -154,7 +125,7 @@ chimera_client_mount(
     const char            *module_name,
     const char            *module_path)
 {
-    return chimera_vfs_mount(client->vfs, module_name, mount_path, module_path);
+    return chimera_vfs_mount(client->vfs, mount_path, module_name, module_path);
 } /* chimera_client_mount */
 
 SYMBOL_EXPORT int
@@ -164,23 +135,3 @@ chimera_client_umount(
 {
     return chimera_vfs_umount(client->vfs, mount_path);
 } /* chimera_client_umount */
-
-SYMBOL_EXPORT void
-chimera_client_lookup_path(
-    struct chimera_client                *client,
-    const char                           *path,
-    chimera_client_lookup_path_callback_t callback,
-    void                                 *private_data)
-{
-
-} /* chimera_client_lookup_path */
-
-SYMBOL_EXPORT void
-chimera_client_open_path(
-    struct chimera_client              *client,
-    const char                         *path,
-    unsigned int                        flags,
-    chimera_client_open_path_callback_t callback,
-    void                               *private_data)
-{
-} /* chimera_client_open_path */
