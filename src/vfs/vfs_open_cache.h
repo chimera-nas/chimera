@@ -8,30 +8,39 @@
 #include "vfs.h"
 #include "vfs_procs.h"
 #include "vfs_internal.h"
+#include "prometheus-c.h"
 
 struct vfs_open_cache_shard {
-    pthread_mutex_t                 lock;
-    struct chimera_vfs_open_handle *open_files;
-    struct chimera_vfs_open_handle *pending_close;
-    struct chimera_vfs_open_handle *free_handles;
-    uint8_t                         cache_id;
-    uint32_t                        max_open_files;
-    uint32_t                        open_handles;
-    uint64_t                        num_acquire;
-    uint64_t                        num_insert;
+    pthread_mutex_t                     lock;
+    struct chimera_vfs_open_handle     *open_files;
+    struct chimera_vfs_open_handle     *pending_close;
+    struct chimera_vfs_open_handle     *free_handles;
+    uint8_t                             cache_id;
+    uint32_t                            max_open_files;
+    uint32_t                            open_handles;
+    struct prometheus_counter_instance *acquire;
+    struct prometheus_counter_instance *insert;
+    struct prometheus_gauge_instance   *num_handles;
 };
 
 struct vfs_open_cache {
-    unsigned int                 num_shards;
-    unsigned int                 shard_mask;
-    struct vfs_open_cache_shard *shards;
+    unsigned int                      num_shards;
+    unsigned int                      shard_mask;
+    struct vfs_open_cache_shard      *shards;
+    struct prometheus_metrics        *metrics;
+    struct prometheus_counter        *open_cache;
+    struct prometheus_counter_series *open_cache_acquire;
+    struct prometheus_counter_series *open_cache_insert;
 };
+
 
 static inline struct vfs_open_cache *
 chimera_vfs_open_cache_init(
-    uint8_t cache_id,
-    int     num_shard_bits,
-    int     max_open_files)
+    uint8_t                    cache_id,
+    int                        num_shard_bits,
+    int                        max_open_files,
+    struct prometheus_metrics *metrics,
+    const char                *cache_name)
 {
     struct vfs_open_cache *cache;
     int                    max_per_shard;
@@ -44,12 +53,29 @@ chimera_vfs_open_cache_init(
 
     cache->shards = calloc(cache->num_shards, sizeof(*cache->shards));
 
+    if (metrics) {
+        cache->metrics    = metrics;
+        cache->open_cache = prometheus_metrics_create_counter(metrics, "chimera_vfs_open_cache",
+                                                              "Chimera VFS open cache operations");
+        cache->open_cache_insert = prometheus_counter_create_series(cache->open_cache,
+                                                                    (const char *[]) { "name", "op" },
+                                                                    (const char *[]) { cache_name, "insert" }, 2);
+        cache->open_cache_acquire = prometheus_counter_create_series(cache->open_cache,
+                                                                     (const char *[]) { "name", "op" },
+                                                                     (const char *[]) { cache_name, "acquire" }, 2);
+    }
+
     for (int i = 0; i < cache->num_shards; i++) {
         pthread_mutex_init(&cache->shards[i].lock, NULL);
         cache->shards[i].open_files     = NULL;
         cache->shards[i].free_handles   = NULL;
         cache->shards[i].max_open_files = max_per_shard;
         cache->shards[i].cache_id       = cache_id;
+
+        if (metrics) {
+            cache->shards[i].insert  = prometheus_counter_series_create_instance(cache->open_cache_insert);
+            cache->shards[i].acquire = prometheus_counter_series_create_instance(cache->open_cache_acquire);
+        }
     }
 
     return cache;
@@ -59,20 +85,20 @@ static inline void
 chimera_vfs_open_cache_destroy(struct vfs_open_cache *cache)
 {
     struct vfs_open_cache_shard *shard;
-    uint64_t                     total_acquires = 0;
-    uint64_t                     total_inserts  = 0;
 
     for (int i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
         pthread_mutex_destroy(&shard->lock);
-        total_acquires += shard->num_acquire;
-        total_inserts  += shard->num_insert;
     }
+
+    if (cache->metrics) {
+        prometheus_counter_destroy_series(cache->open_cache, cache->open_cache_acquire);
+        prometheus_counter_destroy_series(cache->open_cache, cache->open_cache_insert);
+        prometheus_counter_destroy(cache->metrics, cache->open_cache);
+    }
+
     free(cache->shards);
     free(cache);
-
-    chimera_vfs_info("open cache total acquires %lu total inserts %lu",
-                     total_acquires, total_inserts);
 } /* vfs_open_cache_destroy */
 
 static inline struct chimera_vfs_open_handle *
@@ -275,7 +301,7 @@ chimera_vfs_open_cache_acquire(
         }
     } else {
 
-        shard->num_insert++;
+        prometheus_counter_increment(shard->insert);
 
         handle                   = chimera_vfs_open_cache_alloc(shard);
         handle->vfs_module       = module;
@@ -319,7 +345,7 @@ chimera_vfs_open_cache_acquire(
 
     }
 
-    shard->num_acquire++;
+    prometheus_counter_increment(shard->acquire);
 
     pthread_mutex_unlock(&shard->lock);
 

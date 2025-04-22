@@ -10,7 +10,7 @@
 #include "common/logging.h"
 #include "common/misc.h"
 #include "uthash/utlist.h"
-
+#include "metrics/metrics.h"
 #include "vfs/vfs_dump.h"
 #ifndef container_of
 #define container_of(ptr, type, member) ({            \
@@ -165,17 +165,8 @@ chimera_vfs_complete(struct chimera_vfs_request *request)
 
     request->elapsed_ns = chimera_get_elapsed_ns(&now, &request->start_time);
 
-    thread->metrics[request->opcode].num_requests++;
-
-    thread->metrics[request->opcode].total_latency += request->elapsed_ns;
-
-    if (request->elapsed_ns > thread->metrics[request->opcode].max_latency) {
-        thread->metrics[request->opcode].max_latency = request->elapsed_ns;
-    }
-
-    if (request->elapsed_ns < thread->metrics[request->opcode].min_latency ||
-        thread->metrics[request->opcode].min_latency == 0) {
-        thread->metrics[request->opcode].min_latency = request->elapsed_ns;
+    if (thread->metrics.op_latency_series) {
+        prometheus_histogram_sample(thread->metrics.op_latency_series[request->opcode], request->elapsed_ns);
     }
 
     chimera_vfs_dump_reply(request);

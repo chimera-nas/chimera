@@ -13,6 +13,7 @@
 struct chimera_server_config;
 struct chimera_server;
 struct chimera_thread;
+struct prometheus_metrics;
 
 struct chimera_server_config *
 chimera_server_config_init(
@@ -78,8 +79,8 @@ chimera_server_config_set_metrics_port(
 
 static void
 chimera_server_thread_wake(
-    struct evpl *evpl,
-    void        *data);
+    struct evpl       *evpl,
+    struct evpl_timer *timer);
 
 int
 chimera_server_create_share(
@@ -90,7 +91,8 @@ chimera_server_create_share(
 
 struct chimera_server *
 chimera_server_init(
-    const struct chimera_server_config *config);
+    const struct chimera_server_config *config,
+    struct prometheus_metrics          *metrics);
 
 void
 chimera_server_start(

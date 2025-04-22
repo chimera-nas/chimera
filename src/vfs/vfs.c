@@ -21,6 +21,7 @@
 #include "common/misc.h"
 #include "common/macros.h"
 #include "uthash/utlist.h"
+#include "prometheus-c.h"
 
 
 static void
@@ -215,7 +216,8 @@ chimera_vfs_init(
     int                                  num_delegation_threads,
     const struct chimera_vfs_module_cfg *module_cfgs,
     int                                  num_modules,
-    int                                  cache_ttl)
+    int                                  cache_ttl,
+    struct prometheus_metrics           *metrics)
 {
     struct chimera_vfs        *vfs;
     struct chimera_vfs_module *module;
@@ -225,11 +227,32 @@ chimera_vfs_init(
 
     pthread_rwlock_init(&vfs->mounts_lock, NULL);
 
-    vfs->vfs_open_path_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_PATH, 10, 128 * 1024);
-    vfs->vfs_open_file_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_FILE, 10, 128 * 1024);
+    if (metrics) {
+        vfs->metrics.metrics    = metrics;
+        vfs->metrics.op_latency = prometheus_metrics_create_histogram_exponential(metrics,
+                                                                                  "chimera_vfs_op_latency",
+                                                                                  "The latency of VFS operations",
+                                                                                  24);
 
-    vfs->vfs_name_cache = chimera_vfs_name_cache_create(8, 8, 2, cache_ttl);
-    vfs->vfs_attr_cache = chimera_vfs_attr_cache_create(8, 8, 2, cache_ttl);
+        vfs->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_counter_series *));
+
+        for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
+            vfs->metrics.op_latency_series[i] = prometheus_histogram_create_series(vfs->metrics.op_latency,
+                                                                                   (const char *[]) { "name" },
+                                                                                   (const char *[]) {
+                chimera_vfs_op_name(i)
+            },
+                                                                                   1);
+        }
+    }
+
+    vfs->vfs_open_path_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_PATH, 10, 128 * 1024, metrics,
+                                                           "path_handles");
+    vfs->vfs_open_file_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_FILE, 10, 128 * 1024, metrics,
+                                                           "file_handles");
+
+    vfs->vfs_name_cache = chimera_vfs_name_cache_create(8, 4, 2, cache_ttl, metrics);
+    vfs->vfs_attr_cache = chimera_vfs_attr_cache_create(8, 4, 2, cache_ttl, metrics);
 
     for (int i = 0; i < num_modules; i++) {
         chimera_vfs_info("Initializing VFS module %s...", module_cfgs[i].module_name);
@@ -292,18 +315,6 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     }
     free(vfs->delegation_threads);
 
-    for (i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
-        if (vfs->metrics[i].num_requests > 0) {
-            chimera_vfs_info(
-                "VFS metrics for %10s: %8d requests, %8lldns avg latency, %8lldns min latency, %8lldns max latency",
-                chimera_vfs_op_name(i),
-                vfs->metrics[i].num_requests,
-                vfs->metrics[i].total_latency / vfs->metrics[i].num_requests,
-                vfs->metrics[i].min_latency,
-                vfs->metrics[i].max_latency);
-        }
-    }
-
     while (vfs->mounts) {
         mount = vfs->mounts;
         DL_DELETE(vfs->mounts, mount);
@@ -332,6 +343,14 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
 
     chimera_vfs_open_cache_destroy(vfs->vfs_open_path_cache);
     chimera_vfs_open_cache_destroy(vfs->vfs_open_file_cache);
+
+    if (vfs->metrics.op_latency) {
+        for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
+            prometheus_histogram_destroy_series(vfs->metrics.op_latency, vfs->metrics.op_latency_series[i]);
+        }
+        free(vfs->metrics.op_latency_series);
+        prometheus_histogram_destroy(vfs->metrics.metrics, vfs->metrics.op_latency);
+    }
 
     free(vfs);
 } /* chimera_vfs_destroy */
@@ -402,6 +421,15 @@ chimera_vfs_thread_init(
     thread->evpl = evpl;
     thread->vfs  = vfs;
 
+    if (vfs->metrics.metrics) {
+        thread->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_series *));
+
+        for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
+            thread->metrics.op_latency_series[i] = prometheus_histogram_series_create_instance(vfs->metrics.
+                                                                                               op_latency_series[i]);
+        }
+    }
+
     urcu_memb_register_thread();
 
     pthread_mutex_init(
@@ -427,32 +455,12 @@ chimera_vfs_thread_init(
 SYMBOL_EXPORT void
 chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
 {
-    struct chimera_vfs             *vfs = thread->vfs;
     struct chimera_vfs_module      *module;
     struct chimera_vfs_request     *request;
     struct chimera_vfs_open_handle *handle;
     int                             i;
 
     evpl_remove_doorbell(thread->evpl, &thread->doorbell);
-
-    for (i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
-        if (thread->metrics[i].num_requests == 0) {
-            continue;
-        }
-
-        vfs->metrics[i].num_requests += thread->metrics[i].num_requests;
-
-        vfs->metrics[i].total_latency += thread->metrics[i].total_latency;
-
-        if (thread->metrics[i].max_latency > vfs->metrics[i].max_latency) {
-            vfs->metrics[i].max_latency = thread->metrics[i].max_latency;
-        }
-
-        if (thread->metrics[i].min_latency < vfs->metrics[i].min_latency ||
-            vfs->metrics[i].min_latency == 0) {
-            vfs->metrics[i].min_latency = thread->metrics[i].min_latency;
-        }
-    }
 
     for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
         module = thread->vfs->modules[i];
@@ -475,6 +483,14 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
         LL_DELETE(thread->free_requests, request);
         free(request->plugin_data);
         free(request);
+    }
+
+    if (thread->metrics.op_latency_series) {
+        for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
+            prometheus_histogram_series_destroy_instance(thread->vfs->metrics.op_latency_series[i],
+                                                         thread->metrics.op_latency_series[i]);
+        }
+        free(thread->metrics.op_latency_series);
     }
 
     free(thread);

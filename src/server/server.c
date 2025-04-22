@@ -10,6 +10,7 @@
 #include "nfs/nfs.h"
 #include "vfs/vfs.h"
 #include "common/macros.h"
+#include "server/server.h"
 
 #define CHIMERA_SERVER_MAX_MODULES 64
 
@@ -254,7 +255,9 @@ chimera_server_thread_shutdown(
 } /* chimera_server_create_share */
 
 SYMBOL_EXPORT struct chimera_server *
-chimera_server_init(const struct chimera_server_config *config)
+chimera_server_init(
+    const struct chimera_server_config *config,
+    struct prometheus_metrics          *metrics)
 {
     struct chimera_server *server;
     int                    i;
@@ -282,7 +285,8 @@ chimera_server_init(const struct chimera_server_config *config)
     server->vfs = chimera_vfs_init(config->delegation_threads,
                                    config->modules,
                                    config->num_modules,
-                                   config->cache_ttl);
+                                   config->cache_ttl,
+                                   metrics);
 
     chimera_server_info("Initializing NFS protocol...");
     server->protocols[server->num_protocols++] = &nfs_protocol;

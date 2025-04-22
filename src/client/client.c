@@ -103,7 +103,8 @@ chimera_client_init(const struct chimera_client_config *config)
     client->vfs = chimera_vfs_init(config->delegation_threads,
                                    config->modules,
                                    config->num_modules,
-                                   config->cache_ttl);
+                                   config->cache_ttl,
+                                   NULL);
 
     return client;
 } /* chimera_client_init */

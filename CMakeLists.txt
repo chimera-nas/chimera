@@ -22,6 +22,9 @@ set(CHIMERA_VERSION "0.1.0")
 
 add_definitions(-DCHIMERA_VERSION="${CHIMERA_VERSION}")
 
+include_directories(${CMAKE_SOURCE_DIR}/ext/libevpl/ext/prometheus-c)
+
+
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if (NOT DISABLE_TESTS)

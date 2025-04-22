@@ -14,11 +14,12 @@
 #include <jansson.h>
 #include "server/server.h"
 #include "common/logging.h"
-
+#include "prometheus-c.h"
 struct test_env {
-    struct nfs_context    *nfs;
-    struct chimera_server *server;
-    char                   session_dir[256];
+    struct nfs_context        *nfs;
+    struct chimera_server     *server;
+    char                       session_dir[256];
+    struct prometheus_metrics *metrics;
 };
 
 static inline void
@@ -33,6 +34,8 @@ libnfs_test_init(
     const char                   *backend = "linux";
     struct chimera_server_config *config;
     struct timespec               tv;
+
+    env->metrics = prometheus_metrics_create(NULL, NULL, 0);
 
     clock_gettime(
         CLOCK_MONOTONIC,
@@ -114,7 +117,7 @@ libnfs_test_init(
         chimera_server_config_add_module(config, "cairn", "/build/test/cairn", cairn_cfgfile);
     }
 
-    env->server = chimera_server_init(config);
+    env->server = chimera_server_init(config, env->metrics);
 
     if (strcmp(backend, "linux") == 0) {
         chimera_server_create_share(env->server, "share", "linux", env->session_dir);
@@ -166,6 +169,8 @@ libnfs_test_cleanup(
     nfs_destroy_context(env->nfs);
 
     chimera_server_destroy(env->server);
+
+    prometheus_metrics_destroy(env->metrics);
 } /* libnfs_test_cleanup */
 
 static inline void

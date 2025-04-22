@@ -3,6 +3,7 @@
 #include "vfs/vfs.h"
 #include <urcu.h>
 #include <urcu/urcu-memb.h>
+#include "prometheus-c.h"
 
 struct chimera_vfs_attr_cache_entry {
     uint64_t                 key;
@@ -19,11 +20,11 @@ struct chimera_vfs_attr_cache_entry {
 struct chimera_vfs_attr_cache_shard {
     struct chimera_vfs_attr_cache_entry **entries;
     struct chimera_vfs_attr_cache_entry  *free_entries;
-    uint64_t                              num_lookups;
-    uint64_t                              num_hits;
-    uint64_t                              num_inserts;
     pthread_mutex_t                       entry_lock;
     pthread_mutex_t                       free_lock;
+    struct prometheus_counter_instance   *insert;
+    struct prometheus_counter_instance   *hit;
+    struct prometheus_counter_instance   *miss;
 };
 
 struct chimera_vfs_attr_cache {
@@ -38,14 +39,20 @@ struct chimera_vfs_attr_cache {
     uint32_t                             num_entries_mask;
     uint64_t                             ttl;
     struct chimera_vfs_attr_cache_shard *shards;
+    struct prometheus_metrics           *metrics;
+    struct prometheus_counter           *attr_cache;
+    struct prometheus_counter_series    *insert_series;
+    struct prometheus_counter_series    *hit_series;
+    struct prometheus_counter_series    *miss_series;
 };
 
 static inline struct chimera_vfs_attr_cache *
 chimera_vfs_attr_cache_create(
-    uint8_t  num_shards_bits,
-    uint8_t  num_slots_bits,
-    uint8_t  entries_per_slot_bits,
-    uint64_t ttl)
+    uint8_t                    num_shards_bits,
+    uint8_t                    num_slots_bits,
+    uint8_t                    entries_per_slot_bits,
+    uint64_t                   ttl,
+    struct prometheus_metrics *metrics)
 {
     struct chimera_vfs_attr_cache       *cache;
     struct chimera_vfs_attr_cache_shard *shard;
@@ -69,6 +76,22 @@ chimera_vfs_attr_cache_create(
 
     cache->shards = calloc(cache->num_shards, sizeof(struct chimera_vfs_attr_cache_shard));
 
+    if (metrics) {
+        cache->metrics    = metrics;
+        cache->attr_cache = prometheus_metrics_create_counter(metrics, "chimera_attr_cache",
+                                                              "Operations on the chimera VFS attribute cache");
+
+        cache->insert_series = prometheus_counter_create_series(cache->attr_cache,
+                                                                (const char *[]) { "op" },
+                                                                (const char *[]) { "insert" }, 1);
+        cache->hit_series = prometheus_counter_create_series(cache->attr_cache,
+                                                             (const char *[]) { "op" },
+                                                             (const char *[]) { "hit" }, 1);
+        cache->miss_series = prometheus_counter_create_series(cache->attr_cache,
+                                                              (const char *[]) { "op" },
+                                                              (const char *[]) { "miss" }, 1);
+    }
+
     for (i = 0; i < cache->num_shards; i++) {
 
         shard          = &cache->shards[i];
@@ -81,6 +104,12 @@ chimera_vfs_attr_cache_create(
 
         pthread_mutex_init(&shard->entry_lock, NULL);
         pthread_mutex_init(&shard->free_lock, NULL);
+
+        if (metrics) {
+            shard->insert = prometheus_counter_series_create_instance(cache->insert_series);
+            shard->hit    = prometheus_counter_series_create_instance(cache->hit_series);
+            shard->miss   = prometheus_counter_series_create_instance(cache->miss_series);
+        }
     }
 
     return cache;
@@ -92,14 +121,13 @@ chimera_vfs_attr_cache_destroy(struct chimera_vfs_attr_cache *cache)
     struct chimera_vfs_attr_cache_shard *shard;
     struct chimera_vfs_attr_cache_entry *entry;
     int                                  i, j;
-    uint64_t                             total_lookups = 0, total_hits = 0, total_inserts = 0;
 
     for (i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
 
-        total_lookups += shard->num_lookups;
-        total_hits    += shard->num_hits;
-        total_inserts += shard->num_inserts;
+        prometheus_counter_series_destroy_instance(cache->insert_series, shard->insert);
+        prometheus_counter_series_destroy_instance(cache->hit_series, shard->hit);
+        prometheus_counter_series_destroy_instance(cache->miss_series, shard->miss);
 
         for (j = 0; j < cache->num_slots * cache->num_entries; j++) {
             if (shard->entries[j]) {
@@ -120,13 +148,15 @@ chimera_vfs_attr_cache_destroy(struct chimera_vfs_attr_cache *cache)
         pthread_mutex_destroy(&shard->free_lock);
     }
 
+    if (cache->metrics) {
+        prometheus_counter_destroy_series(cache->attr_cache, cache->insert_series);
+        prometheus_counter_destroy_series(cache->attr_cache, cache->hit_series);
+        prometheus_counter_destroy_series(cache->attr_cache, cache->miss_series);
+        prometheus_counter_destroy(cache->metrics, cache->attr_cache);
+    }
+
     free(cache->shards);
     free(cache);
-
-    chimera_vfs_info("ATTR_CACHE stats: lookups %lu hits %lu inserts %lu",
-                     total_lookups,
-                     total_hits,
-                     total_inserts);
 } /* chimera_vfs_attr_cache_destroy */
 
 static inline int
@@ -173,10 +203,10 @@ chimera_vfs_attr_cache_lookup(
 
     urcu_memb_read_unlock();
 
-    shard->num_lookups++;
-
     if (rc == 0) {
-        shard->num_hits++;
+        prometheus_counter_increment(shard->hit);
+    } else {
+        prometheus_counter_increment(shard->miss);
     }
 
     return rc;
@@ -271,7 +301,7 @@ chimera_vfs_attr_cache_insert(
 
     rcu_assign_pointer(*slot_best, entry);
 
-    shard->num_inserts++;
+    prometheus_counter_increment(shard->insert);
 
     pthread_mutex_unlock(&shard->entry_lock);
 

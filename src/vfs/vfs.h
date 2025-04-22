@@ -14,6 +14,7 @@
 struct evpl;
 
 struct chimera_vfs;
+struct prometheus_metrics;
 
 #define CHIMERA_VFS_ATTR_DEV            (1UL << 0)
 #define CHIMERA_VFS_ATTR_INUM           (1UL << 1)
@@ -122,6 +123,17 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OPEN_ID_SYNTHETIC 0
 #define CHIMERA_VFS_OPEN_ID_PATH      1
 #define CHIMERA_VFS_OPEN_ID_FILE      2
+
+struct chimera_vfs_metrics {
+    struct prometheus_metrics           *metrics;
+    struct prometheus_histogram         *op_latency;
+    struct prometheus_histogram_series **op_latency_series;
+};
+
+struct chimera_vfs_thread_metrics {
+    struct prometheus_histogram_instance **op_latency_series;
+};
+
 
 struct chimera_vfs_metric {
     uint64_t num_requests;
@@ -571,24 +583,24 @@ struct chimera_vfs {
     int                                   num_delegation_threads;
     struct chimera_vfs_delegation_thread *delegation_threads;
     struct chimera_vfs_close_thread       close_thread;
-    struct chimera_vfs_metric             metrics[CHIMERA_VFS_OP_NUM];
+    struct chimera_vfs_metrics            metrics;
 };
 
 struct chimera_vfs_thread {
-    struct evpl                    *evpl;
-    struct chimera_vfs             *vfs;
-    void                           *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
-    struct chimera_vfs_request     *free_requests;
-    struct chimera_vfs_request     *active_requests;
-    uint64_t                        num_active_requests;
-    struct chimera_vfs_open_handle *free_synth_handles;
+    struct evpl                      *evpl;
+    struct chimera_vfs               *vfs;
+    void                             *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
+    struct chimera_vfs_request       *free_requests;
+    struct chimera_vfs_request       *active_requests;
+    uint64_t                          num_active_requests;
+    struct chimera_vfs_open_handle   *free_synth_handles;
 
-    struct chimera_vfs_request     *pending_complete_requests;
-    struct chimera_vfs_request     *unblocked_requests;
-    struct evpl_doorbell            doorbell;
-    pthread_mutex_t                 lock;
+    struct chimera_vfs_request       *pending_complete_requests;
+    struct chimera_vfs_request       *unblocked_requests;
+    struct evpl_doorbell              doorbell;
+    pthread_mutex_t                   lock;
 
-    struct chimera_vfs_metric       metrics[CHIMERA_VFS_OP_NUM];
+    struct chimera_vfs_thread_metrics metrics;
 };
 
 struct chimera_vfs_module_cfg {
@@ -602,7 +614,8 @@ chimera_vfs_init(
     int                                  num_delegation_threads,
     const struct chimera_vfs_module_cfg *module_cfgs,
     int                                  num_modules,
-    int                                  cache_ttl);
+    int                                  cache_ttl,
+    struct prometheus_metrics           *metrics);
 
 void
 chimera_vfs_destroy(

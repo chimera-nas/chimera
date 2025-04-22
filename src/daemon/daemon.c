@@ -8,7 +8,7 @@
 #include "server/server.h"
 #include "server/server_internal.h"
 #include "common/logging.h"
-
+#include "metrics/metrics.h"
 int SigInt = 0;
 
 void
@@ -33,6 +33,7 @@ main(
     struct chimera_server        *server;
     struct chimera_server_config *server_config;
     struct evpl_global_config    *evpl_global_config;
+    struct chimera_metrics       *metrics;
 
     chimera_log_init();
 
@@ -72,6 +73,8 @@ main(
     signal(SIGINT, signal_handler);
 
     chimera_server_info("Initializing server...");
+
+    metrics = chimera_metrics_init(9000);
 
     server_params = json_object_get(config, "server");
 
@@ -122,7 +125,7 @@ main(
         }
     }
 
-    server = chimera_server_init(server_config);
+    server = chimera_server_init(server_config, chimera_metrics_get(metrics));
 
     shares = json_object_get(config, "shares");
 
@@ -149,6 +152,8 @@ main(
     chimera_server_info("Shutting down server...");
 
     chimera_server_destroy(server);
+
+    chimera_metrics_destroy(metrics);
 
     chimera_server_info("Server shutdown complete.");
 
