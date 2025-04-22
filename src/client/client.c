@@ -10,7 +10,7 @@
 #include "common/macros.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
-
+#include "prometheus-c.h"
 const uint8_t root_fh[1] = { CHIMERA_VFS_FH_MAGIC_ROOT };
 
 SYMBOL_EXPORT struct chimera_client_config *
@@ -81,7 +81,9 @@ chimera_client_thread_shutdown(
 
 
 SYMBOL_EXPORT struct chimera_client *
-chimera_client_init(const struct chimera_client_config *config)
+chimera_client_init(
+    const struct chimera_client_config *config,
+    struct prometheus_metrics          *metrics)
 {
     struct chimera_client *client;
     struct rlimit          rl;
@@ -104,7 +106,7 @@ chimera_client_init(const struct chimera_client_config *config)
                                    config->modules,
                                    config->num_modules,
                                    config->cache_ttl,
-                                   NULL);
+                                   metrics);
 
     return client;
 } /* chimera_client_init */

@@ -94,6 +94,8 @@ struct chimera_server_nfs_shared {
 
     struct nfs4_client_table            nfs4_shared_clients;
 
+    struct prometheus_histogram        *op_histogram;
+    struct prometheus_metrics          *metrics;
 };
 
 struct chimera_server_nfs_thread {

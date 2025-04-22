@@ -6,14 +6,15 @@ struct chimera_client;
 struct chimera_client_thread;
 struct chimera_client_config;
 struct chimera_client_fh;
-
+struct prometheus_metrics;
 struct chimera_client_config *
 chimera_client_config_init(
     void);
 
 struct chimera_client *
 chimera_client_init(
-    const struct chimera_client_config *config);
+    const struct chimera_client_config *config,
+    struct prometheus_metrics          *metrics);
 
 struct chimera_client_thread *
 chimera_client_thread_init(

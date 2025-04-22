@@ -75,6 +75,7 @@
     "server_internal.h": "c",
     "macros.h": "c",
     "logging.h": "c",
-    "client_internal.h": "c"
+    "client_internal.h": "c",
+    "prometheus-c.h": "c"
   }
 }

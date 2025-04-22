@@ -2,7 +2,7 @@
 
 #include "client/client.h"
 #include "evpl/evpl.h"
-
+#include "prometheus-c.h"
 static void
 chimera_client_mkdir_complete(
     struct chimera_client_thread *client,
@@ -38,8 +38,11 @@ main(
     struct evpl                    *evpl;
     struct chimera_vfs_open_handle *dir_handle = NULL, *file_handle = NULL;
     int                             complete;
+    struct prometheus_metrics      *metrics;
 
     chimera_log_init();
+
+    metrics = prometheus_metrics_create(NULL, NULL, 0);
 
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 
@@ -47,7 +50,7 @@ main(
 
     config = chimera_client_config_init();
 
-    client = chimera_client_init(config);
+    client = chimera_client_init(config, metrics);
 
     rc = chimera_client_mount(client, "memfs", "memfs", "/");
 
@@ -118,6 +121,8 @@ main(
     chimera_client_thread_shutdown(evpl, thread);
 
     chimera_client_destroy(client);
+
+    prometheus_metrics_destroy(metrics);
 
     evpl_destroy(evpl);
 

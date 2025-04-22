@@ -13,6 +13,7 @@
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_procs.h"
+#include "prometheus-c.h"
 
 #include "common/logging.h"
 #include "common/macros.h"
@@ -25,10 +26,27 @@
 #define NFS_PROGIDX_V4_CB      4
 #define NFS_PROGIDX_MAX        5
 
+static void
+chimera_nfs_init_metrics(
+    struct chimera_server_nfs_shared *shared,
+    struct evpl_rpc2_program         *program)
+{
+    program->metrics = calloc(program->maxproc + 1, sizeof(struct prometheus_histogram_series *));
+
+    for (int i = 0; i <= program->maxproc; i++) {
+        chimera_nfs_debug("Initializing metrics for  %s", program->procs[i]);
+        program->metrics[i] = prometheus_histogram_create_series(shared->op_histogram,
+                                                                 (const char *[]) { "name" },
+                                                                 (const char *[]) { program->procs[i] },
+                                                                 1);
+    }
+} /* chimera_nfs_init_metrics */
+
 static void *
 nfs_server_init(
     const struct chimera_server_config *config,
-    struct chimera_vfs                 *vfs)
+    struct chimera_vfs                 *vfs,
+    struct prometheus_metrics          *metrics)
 {
     struct chimera_server_nfs_shared *shared;
     struct timespec                   now;
@@ -61,22 +79,16 @@ nfs_server_init(
     NFS_V4_init(&shared->nfs_v4);
     NFS_V4_CB_init(&shared->nfs_v4_cb);
 
-    shared->portmap_v2.rpc2.metrics = calloc(shared->portmap_v2.rpc2.maxproc + 1,
-                                             sizeof(struct evpl_rpc2_metric));
-    shared->mount_v3.rpc2.metrics = calloc(shared->mount_v3.rpc2.maxproc + 1,
-                                           sizeof(struct evpl_rpc2_metric));
-    shared->nfs_v3.rpc2.metrics = calloc(shared->nfs_v3.rpc2.maxproc + 1,
-                                         sizeof(struct evpl_rpc2_metric));
-    shared->nfs_v4.rpc2.metrics = calloc(shared->nfs_v4.rpc2.maxproc + 1,
-                                         sizeof(struct evpl_rpc2_metric));
-    shared->nfs_v4_cb.rpc2.metrics = calloc(shared->nfs_v4_cb.rpc2.maxproc + 1,
-                                            sizeof(struct evpl_rpc2_metric));
+    shared->metrics      = metrics;
+    shared->op_histogram = prometheus_metrics_create_histogram_exponential(metrics, "chimera_nfs_op_latency",
+                                                                           "The latency of NFS operations", 24);
 
-    pthread_mutex_init(&shared->portmap_v2.rpc2.metrics_lock, NULL);
-    pthread_mutex_init(&shared->mount_v3.rpc2.metrics_lock, NULL);
-    pthread_mutex_init(&shared->nfs_v3.rpc2.metrics_lock, NULL);
-    pthread_mutex_init(&shared->nfs_v4.rpc2.metrics_lock, NULL);
-    pthread_mutex_init(&shared->nfs_v4_cb.rpc2.metrics_lock, NULL);
+
+    chimera_nfs_init_metrics(shared, &shared->portmap_v2.rpc2);
+    chimera_nfs_init_metrics(shared, &shared->mount_v3.rpc2);
+    chimera_nfs_init_metrics(shared, &shared->nfs_v3.rpc2);
+    chimera_nfs_init_metrics(shared, &shared->nfs_v4.rpc2);
+    chimera_nfs_init_metrics(shared, &shared->nfs_v4_cb.rpc2);
 
     shared->mount_v3.recv_call_MOUNTPROC3_NULL    = chimera_nfs_mount_null;
     shared->mount_v3.recv_call_MOUNTPROC3_MNT     = chimera_nfs_mount_mnt;
@@ -158,30 +170,6 @@ nfs_server_start(void *arg)
 
 } /* nfs_server_start */
 
-
-static void
-nfs_server_dump_metrics(struct evpl_rpc2_program *program)
-{
-    struct evpl_rpc2_metric *metric;
-    int                      i;
-
-    for (i = 0; i <= program->maxproc; i++) {
-        metric = &program->metrics[i];
-
-        if (metric->total_calls == 0) {
-            continue;
-        }
-
-        chimera_nfs_info(
-            "RPC2 metrics for %20s: %8d requests, %8lldns avg latency, %8lldns min latency, %8lldns max latency",
-            program->procs[i],
-            metric->total_calls,
-            metric->total_latency / metric->total_calls,
-            metric->min_latency,
-            metric->max_latency);
-    }
-} /* nfs_server_dump_metrics */
-
 static void
 nfs_server_destroy(void *data)
 {
@@ -190,11 +178,9 @@ nfs_server_destroy(void *data)
     /* Close out all the nfs4 session state */
     nfs4_client_table_free(&shared->nfs4_shared_clients);
 
-    nfs_server_dump_metrics(&shared->portmap_v2.rpc2);
-    nfs_server_dump_metrics(&shared->mount_v3.rpc2);
-    nfs_server_dump_metrics(&shared->nfs_v3.rpc2);
-    nfs_server_dump_metrics(&shared->nfs_v4.rpc2);
-    nfs_server_dump_metrics(&shared->nfs_v4_cb.rpc2);
+    if (shared->op_histogram) {
+        prometheus_histogram_destroy(shared->metrics, shared->op_histogram);
+    }
 
     evpl_rpc2_destroy(shared->mount_server);
     evpl_rpc2_destroy(shared->portmap_server);

@@ -5,12 +5,13 @@
 struct chimera_server_config;
 struct chimera_vfs;
 struct chimera_vfs_thread;
-
+struct prometheus_metrics;
 struct chimera_server_protocol {
 
     void *(*init)(
         const struct chimera_server_config *config,
-        struct chimera_vfs                 *vfs);
+        struct chimera_vfs                 *vfs,
+        struct prometheus_metrics          *metrics);
 
     void  (*destroy)(
         void *data);

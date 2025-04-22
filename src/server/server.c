@@ -292,7 +292,7 @@ chimera_server_init(
     server->protocols[server->num_protocols++] = &nfs_protocol;
 
     for (i = 0; i < server->num_protocols; i++) {
-        server->protocol_private[i] = server->protocols[i]->init(config, server->vfs);
+        server->protocol_private[i] = server->protocols[i]->init(config, server->vfs, metrics);
     }
 
     return server;
