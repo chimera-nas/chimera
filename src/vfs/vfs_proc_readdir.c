@@ -21,22 +21,22 @@ chimera_vfs_readdir_complete(struct chimera_vfs_request *request)
 
 SYMBOL_EXPORT void
 chimera_vfs_readdir(
-    struct chimera_vfs_thread     *thread,
-    const void                    *fh,
-    int                            fhlen,
-    uint64_t                       attr_mask,
-    uint64_t                       dir_attr_mask,
-    uint64_t                       cookie,
-    chimera_vfs_readdir_callback_t callback,
-    chimera_vfs_readdir_complete_t complete,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        attr_mask,
+    uint64_t                        dir_attr_mask,
+    uint64_t                        cookie,
+    chimera_vfs_readdir_callback_t  callback,
+    chimera_vfs_readdir_complete_t  complete,
+    void                           *private_data)
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
     request->opcode                         = CHIMERA_VFS_OP_READDIR;
     request->complete                       = chimera_vfs_readdir_complete;
+    request->readdir.handle                 = handle;
     request->readdir.attr_mask              = attr_mask;
     request->readdir.cookie                 = cookie;
     request->readdir.callback               = callback;

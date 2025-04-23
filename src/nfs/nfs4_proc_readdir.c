@@ -2,7 +2,7 @@
 #include "nfs4_attr.h"
 #include "nfs4_status.h"
 #include "vfs/vfs_procs.h"
-
+#include "vfs/vfs_release.h"
 static int
 chimera_nfs4_readdir_callback(
     uint64_t                        inum,
@@ -89,9 +89,41 @@ chimera_nfs4_readdir_complete(
     res->resok4.reply.eof     = eof;
     res->resok4.reply.entries = cursor->entries;
 
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_readdir_complete */
 
+static void
+chimera_nfs4_readdir_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request               *req    = private_data;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct READDIR4args              *args   = &req->args_compound->argarray[req->index].opreaddir;
+    struct READDIR4res               *res    = &req->res_compound.resarray[req->index].opreaddir;
+    uint64_t                          attrmask;
+
+    req->handle = handle;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+    attrmask = chimera_nfs4_attr2mask(args->attr_request,
+                                      args->num_attr_request);
+    chimera_vfs_readdir(thread->vfs_thread,
+                        handle,
+                        attrmask,
+                        0,
+                        args->cookie,
+                        chimera_nfs4_readdir_callback,
+                        chimera_nfs4_readdir_complete,
+                        req);
+} /* chimera_nfs4_readlink_open_callback */
 void
 chimera_nfs4_readdir(
     struct chimera_server_nfs_thread *thread,
@@ -99,10 +131,8 @@ chimera_nfs4_readdir(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct READDIR4args            *args = &argop->opreaddir;
-    struct READDIR4res             *res  = &resop->opreaddir;
+    struct READDIR4res             *res = &req->res_compound.resarray[req->index].opreaddir;
     struct nfs_nfs4_readdir_cursor *cursor;
-    uint64_t                        attrmask;
 
     cursor = &req->readdir4_cursor;
 
@@ -112,16 +142,11 @@ chimera_nfs4_readdir(
 
     res->resok4.reply.entries = NULL;
 
-    attrmask = chimera_nfs4_attr2mask(args->attr_request,
-                                      args->num_attr_request);
+    chimera_vfs_open(thread->vfs_thread,
+                     req->fh,
+                     req->fhlen,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                     chimera_nfs4_readdir_open_callback,
+                     req);
 
-    chimera_vfs_readdir(thread->vfs_thread,
-                        req->fh,
-                        req->fhlen,
-                        attrmask,
-                        0,
-                        args->cookie,
-                        chimera_nfs4_readdir_callback,
-                        chimera_nfs4_readdir_complete,
-                        req);
 } /* chimera_nfs4_readdir */

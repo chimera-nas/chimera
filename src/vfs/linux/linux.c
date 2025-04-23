@@ -217,27 +217,15 @@ chimera_linux_setattr(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_linux_thread *thread = private_data;
-    int                          fd, rc;
+    int fd, rc;
 
-    fd = linux_open_by_handle(&thread->mount_table,
-                              request->fh,
-                              request->fh_len,
-                              O_PATH);
-
-    if (fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    fd = request->setattr.handle->vfs_private;
 
     rc = chimera_linux_set_attrs(fd, request->setattr.set_attr, 0);
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                             &request->setattr.r_post_attr,
                             fd);
-
-    close(fd);
 
     request->status = chimera_linux_errno_to_status(rc);
     request->complete(request);
@@ -330,33 +318,32 @@ chimera_linux_readdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_linux_thread *thread = private_data;
-    int                          fd, rc;
-    DIR                         *dir;
-    struct dirent               *dirent;
-    struct chimera_vfs_attrs     vattr;
-    int                          eof = 1;
+    int                      fd, dup_fd, rc;
+    DIR                     *dir;
+    struct dirent           *dirent;
+    struct chimera_vfs_attrs vattr;
+    int                      eof = 1;
 
-    fd = linux_open_by_handle(&thread->mount_table,
-                              request->fh,
-                              request->fh_len,
-                              O_DIRECTORY | O_RDONLY);
+    fd = request->readdir.handle->vfs_private;
 
-    if (fd < 0) {
-        chimera_linux_error("linux_readdir: open_by_handle() failed: %s",
+    chimera_linux_debug("linux_readdir: opening %d", fd);
+
+    dup_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY);
+
+    if (dup_fd < 0) {
+        chimera_linux_error("linux_readdir: openat() failed: %s",
                             strerror(errno));
-
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
 
-    dir = fdopendir(fd);
+    dir = fdopendir(dup_fd);
 
     if (!dir) {
         chimera_linux_error("linux_readdir: fdopendir() failed: %s",
                             strerror(errno));
-        close(fd);
+        close(dup_fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -745,28 +732,17 @@ chimera_linux_symlink(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_linux_thread *thread = private_data;
-    int                          fd, rc;
-    char                        *scratch = (char *) request->plugin_data;
+    int   fd, rc;
+    char *scratch = (char *) request->plugin_data;
 
     TERM_STR(fullname, request->symlink.name, request->symlink.namelen, scratch);
     TERM_STR(target, request->symlink.target, request->symlink.targetlen, scratch);
 
-    fd = linux_open_by_handle(&thread->mount_table,
-                              request->fh,
-                              request->fh_len,
-                              O_PATH);
-
-    if (fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    fd = request->symlink.handle->vfs_private;
 
     rc = symlinkat(target, fd, fullname);
 
     if (rc < 0) {
-        close(fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -786,8 +762,6 @@ chimera_linux_symlink(
                                   fd,
                                   fullname);
 
-    close(fd);
-
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_linux_symlink */
@@ -797,25 +771,14 @@ chimera_linux_readlink(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_linux_thread *thread = private_data;
-    int                          fd, rc;
+    int fd, rc;
 
-    fd = linux_open_by_handle(&thread->mount_table,
-                              request->fh,
-                              request->fh_len,
-                              O_PATH | O_RDONLY | O_NOFOLLOW);
-
-    if (fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    fd = request->readlink.handle->vfs_private;
 
     rc = readlinkat(fd, "", request->readlink.r_target,
                     request->readlink.target_maxlength);
 
     if (rc < 0) {
-        close(fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;

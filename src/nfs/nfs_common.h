@@ -33,6 +33,7 @@ struct nfs_request {
     int                               fhlen;
     uint8_t                           saved_fh[NFS4_FHSIZE];
     int                               saved_fhlen;
+    struct chimera_vfs_open_handle   *handle;
     int                               index;
     struct evpl_rpc2_conn            *conn;
     struct evpl_rpc2_msg             *msg;
@@ -54,6 +55,9 @@ struct nfs_request {
         struct RMDIR3args       *args_rmdir;
         struct REMOVE3args      *args_remove;
         struct MKDIR3args       *args_mkdir;
+        struct SYMLINK3args     *args_symlink;
+        struct SETATTR3args     *args_setattr;
+        struct READLINK3args    *args_readlink;
     };
     union {
         struct READLINK3res    res_readlink;
@@ -65,8 +69,8 @@ struct nfs_request {
         struct nfs_nfs3_readdir_cursor     readdir3_cursor;
         struct nfs_nfs3_readdirplus_cursor readdirplus3_cursor;
         struct nfs_nfs4_readdir_cursor     readdir4_cursor;
-        struct chimera_vfs_open_handle    *handle;
     };
+
 };
 
 struct chimera_server_nfs_shared {

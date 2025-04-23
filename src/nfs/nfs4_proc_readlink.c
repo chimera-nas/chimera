@@ -45,8 +45,7 @@ chimera_nfs4_readlink_open_callback(
     res->resok4.link.len = 4096;
 
     chimera_vfs_readlink(req->thread->vfs_thread,
-                         req->fh,
-                         req->fhlen,
+                         handle,
                          res->resok4.link.data,
                          res->resok4.link.len,
                          chimera_nfs4_readlink_complete,

@@ -133,8 +133,7 @@ chimera_nfs4_create_open_callback(
                 req->handle = handle;
                 chimera_vfs_symlink(
                     thread->vfs_thread,
-                    handle->fh,
-                    handle->fh_len,
+                    handle,
                     args->objname.data,
                     args->objname.len,
                     args->objtype.linkdata.data,

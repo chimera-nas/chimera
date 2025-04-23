@@ -21,8 +21,7 @@ chimera_vfs_readlink_complete(struct chimera_vfs_request *request)
 SYMBOL_EXPORT void
 chimera_vfs_readlink(
     struct chimera_vfs_thread      *thread,
-    const void                     *fh,
-    int                             fhlen,
+    struct chimera_vfs_open_handle *handle,
     void                           *target,
     uint32_t                        target_maxlength,
     chimera_vfs_readlink_callback_t callback,
@@ -30,10 +29,11 @@ chimera_vfs_readlink(
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
     request->opcode                    = CHIMERA_VFS_OP_READLINK;
     request->complete                  = chimera_vfs_readlink_complete;
+    request->readlink.handle           = handle;
     request->readlink.r_target         = target;
     request->readlink.target_maxlength = target_maxlength;
     request->proto_callback            = callback;

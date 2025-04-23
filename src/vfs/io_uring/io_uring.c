@@ -441,16 +441,8 @@ chimera_io_uring_setattr(
 
     --thread->inflight;
 
-    fd = linux_open_by_handle(&thread->mount_table,
-                              request->fh,
-                              request->fh_len,
-                              O_PATH);
+    fd = request->setattr.handle->vfs_private;
 
-    if (fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
 
     if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
         rc = fchmodat(fd, "", request->setattr.set_attr->va_mode, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH
@@ -461,7 +453,6 @@ chimera_io_uring_setattr(
                                    request->setattr.set_attr->va_mode,
                                    strerror(errno));
 
-            close(fd);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -481,7 +472,6 @@ chimera_io_uring_setattr(
                                    request->setattr.set_attr->va_gid,
                                    strerror(errno));
 
-            close(fd);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -500,7 +490,6 @@ chimera_io_uring_setattr(
                                    request->setattr.set_attr->va_uid,
                                    strerror(errno));
 
-            close(fd);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -519,7 +508,6 @@ chimera_io_uring_setattr(
                                    request->setattr.set_attr->va_gid,
                                    strerror(errno));
 
-            close(fd);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -536,7 +524,6 @@ chimera_io_uring_setattr(
                                    request->setattr.set_attr->va_size,
                                    strerror(errno));
 
-            close(fd);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -578,7 +565,6 @@ chimera_io_uring_setattr(
             chimera_io_uring_error("io_uring_setattr: utimensat() failed: %s",
                                    strerror(errno));
 
-            close(fd);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -588,8 +574,6 @@ chimera_io_uring_setattr(
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
                             &request->setattr.r_post_attr,
                             fd);
-
-    close(fd);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -677,7 +661,7 @@ chimera_io_uring_readdir(
     void                       *private_data)
 {
     struct chimera_io_uring_thread *thread = private_data;
-    int                             fd, rc;
+    int                             fd, dup_fd, rc;
     DIR                            *dir;
     struct dirent                  *dirent;
     struct chimera_vfs_attrs        vattr;
@@ -686,26 +670,24 @@ chimera_io_uring_readdir(
     --thread->inflight;
 
 
-    fd = linux_open_by_handle(&thread->mount_table,
-                              request->fh,
-                              request->fh_len,
-                              O_DIRECTORY | O_RDONLY);
+    fd = request->readdir.handle->vfs_private;
 
-    if (fd < 0) {
-        chimera_io_uring_error("io_uring_readdir: open_by_handle() failed: %s",
+    dup_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY);
+
+    if (dup_fd < 0) {
+        chimera_io_uring_error("io_uring_readdir: openat() failed: %s",
                                strerror(errno));
-
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
 
-    dir = fdopendir(fd);
+    dir = fdopendir(dup_fd);
 
     if (!dir) {
         chimera_io_uring_error("io_uring_readdir: fdopendir() failed: %s",
                                strerror(errno));
-        close(fd);
+        close(dup_fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -1054,21 +1036,11 @@ chimera_io_uring_symlink(
     TERM_STR(fullname, request->symlink.name, request->symlink.namelen, scratch);
     TERM_STR(target, request->symlink.target, request->symlink.targetlen, scratch);
 
-    fd = linux_open_by_handle(&thread->mount_table,
-                              request->fh,
-                              request->fh_len,
-                              O_PATH);
-
-    if (fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    fd = request->mkdir.handle->vfs_private;
 
     rc = symlinkat(target, fd, fullname);
 
     if (rc < 0) {
-        close(fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -1083,8 +1055,6 @@ chimera_io_uring_symlink(
                                   &request->symlink.r_attr,
                                   fd,
                                   fullname);
-
-    close(fd);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -1101,22 +1071,12 @@ chimera_io_uring_readlink(
     --thread->inflight;
 
 
-    fd = linux_open_by_handle(&thread->mount_table,
-                              request->fh,
-                              request->fh_len,
-                              O_PATH | O_RDONLY | O_NOFOLLOW);
-
-    if (fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
-        request->complete(request);
-        return;
-    }
+    fd = request->readlink.handle->vfs_private;
 
     rc = readlinkat(fd, "", request->readlink.r_target,
                     request->readlink.target_maxlength);
 
     if (rc < 0) {
-        close(fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;

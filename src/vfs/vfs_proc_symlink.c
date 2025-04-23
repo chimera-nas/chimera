@@ -54,25 +54,25 @@ chimera_vfs_symlink_complete(struct chimera_vfs_request *request)
 
 SYMBOL_EXPORT void
 chimera_vfs_symlink(
-    struct chimera_vfs_thread     *thread,
-    const void                    *fh,
-    int                            fhlen,
-    const char                    *name,
-    int                            namelen,
-    const char                    *target,
-    int                            targetlen,
-    uint64_t                       attr_mask,
-    uint64_t                       pre_attr_mask,
-    uint64_t                       post_attr_mask,
-    chimera_vfs_symlink_callback_t callback,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    const char                     *name,
+    int                             namelen,
+    const char                     *target,
+    int                             targetlen,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_symlink_callback_t  callback,
+    void                           *private_data)
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
     request->opcode                              = CHIMERA_VFS_OP_SYMLINK;
     request->complete                            = chimera_vfs_symlink_complete;
+    request->symlink.handle                      = handle;
     request->symlink.name                        = name;
     request->symlink.namelen                     = namelen;
     request->symlink.name_hash                   = chimera_vfs_hash(name, namelen);

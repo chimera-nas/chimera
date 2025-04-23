@@ -73,8 +73,7 @@ chimera_nfs4_setattr_open_callback(
     }
 
     chimera_vfs_setattr(req->thread->vfs_thread,
-                        handle->fh,
-                        handle->fh_len,
+                        handle,
                         attr,
                         0,
                         0,

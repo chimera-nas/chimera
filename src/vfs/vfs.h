@@ -268,18 +268,20 @@ struct chimera_vfs_request {
         } getattr;
 
         struct {
-            struct chimera_vfs_attrs *set_attr;
-            struct chimera_vfs_attrs  r_pre_attr;
-            struct chimera_vfs_attrs  r_post_attr;
+            struct chimera_vfs_open_handle *handle;
+            struct chimera_vfs_attrs       *set_attr;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
         } setattr;
 
         struct {
-            uint64_t                       cookie;
-            uint64_t                       attr_mask;
-            uint64_t                       r_cookie;
-            uint32_t                       r_eof;
-            struct chimera_vfs_attrs       r_dir_attr;
-            chimera_vfs_readdir_callback_t callback;
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        cookie;
+            uint64_t                        attr_mask;
+            uint64_t                        r_cookie;
+            uint32_t                        r_eof;
+            struct chimera_vfs_attrs        r_dir_attr;
+            chimera_vfs_readdir_callback_t  callback;
         } readdir;
 
         struct {
@@ -360,20 +362,22 @@ struct chimera_vfs_request {
         } remove;
 
         struct {
-            const char              *name;
-            int                      namelen;
-            uint64_t                 name_hash;
-            const char              *target;
-            int                      targetlen;
-            struct chimera_vfs_attrs r_attr;
-            struct chimera_vfs_attrs r_dir_pre_attr;
-            struct chimera_vfs_attrs r_dir_post_attr;
+            struct chimera_vfs_open_handle *handle;
+            const char                     *name;
+            int                             namelen;
+            uint64_t                        name_hash;
+            const char                     *target;
+            int                             targetlen;
+            struct chimera_vfs_attrs        r_attr;
+            struct chimera_vfs_attrs        r_dir_pre_attr;
+            struct chimera_vfs_attrs        r_dir_post_attr;
         } symlink;
 
         struct {
-            uint32_t target_maxlength;
-            uint32_t r_target_length;
-            void    *r_target;
+            struct chimera_vfs_open_handle *handle;
+            uint32_t                        target_maxlength;
+            uint32_t                        r_target_length;
+            void                           *r_target;
         } readlink;
 
         struct {

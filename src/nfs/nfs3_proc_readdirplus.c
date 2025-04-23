@@ -3,6 +3,7 @@
 #include "nfs3_attr.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 static int
 chimera_nfs3_readdirplus_callback(
@@ -47,6 +48,8 @@ chimera_nfs3_readdirplus_callback(
     dbuf_cur = msg->dbuf->used - dbuf_before;
 
     if (cursor->count + dbuf_cur > args->maxcount) {
+        chimera_nfs_debug("readdirplus: cursor->count + dbuf_cur > args->maxcount (%d + %d > %d)", cursor->count,
+                          dbuf_cur, args->maxcount);
         return -1;
     }
 
@@ -91,8 +94,43 @@ chimera_nfs3_readdirplus_complete(
 
     shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, res, msg);
 
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+
     nfs_request_free(req->thread, req);
 } /* chimera_nfs3_readdirplus_complete */
+
+static void
+chimera_nfs3_readdirplus_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request               *req    = private_data;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct evpl                      *evpl   = thread->evpl;
+    struct evpl_rpc2_msg             *msg    = req->msg;
+    struct READDIRPLUS3args          *args   = req->args_readdirplus;
+    struct READDIRPLUS3res           *res    = &req->res_readdirplus;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        req->handle = handle;
+
+        chimera_vfs_readdir(thread->vfs_thread,
+                            handle,
+                            CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
+                            CHIMERA_NFS3_ATTR_MASK,
+                            args->cookie,
+                            chimera_nfs3_readdirplus_callback,
+                            chimera_nfs3_readdirplus_complete,
+                            req);
+
+    } else {
+        res->status = chimera_vfs_error_to_nfsstat3(error_code);
+        shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, res, msg);
+        nfs_request_free(thread, req);
+    }
+} /* chimera_nfs3_readdir_open_callback */
 
 void
 chimera_nfs3_readdirplus(
@@ -123,13 +161,10 @@ chimera_nfs3_readdirplus(
     cursor->entries = NULL;
     cursor->last    = NULL;
 
-    chimera_vfs_readdir(thread->vfs_thread,
-                        args->dir.data.data,
-                        args->dir.data.len,
-                        CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
-                        CHIMERA_NFS3_ATTR_MASK,
-                        args->cookie,
-                        chimera_nfs3_readdirplus_callback,
-                        chimera_nfs3_readdirplus_complete,
-                        req);
+    chimera_vfs_open(thread->vfs_thread,
+                     args->dir.data.data,
+                     args->dir.data.len,
+                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                     chimera_nfs3_readdirplus_open_callback,
+                     req);
 } /* chimera_nfs3_readdirplus */
