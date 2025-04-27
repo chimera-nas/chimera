@@ -135,14 +135,6 @@ struct chimera_vfs_thread_metrics {
     struct prometheus_histogram_instance **op_latency_series;
 };
 
-
-struct chimera_vfs_metric {
-    uint64_t num_requests;
-    uint64_t min_latency;
-    uint64_t max_latency;
-    uint64_t total_latency;
-};
-
 struct chimera_vfs_open_handle {
     struct chimera_vfs_module      *vfs_module;
     uint64_t                        fh_hash;
