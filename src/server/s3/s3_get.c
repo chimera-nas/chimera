@@ -57,6 +57,8 @@ chimera_s3_get_send(
     struct chimera_s3_request *request)
 {
     struct chimera_server_s3_thread *thread = request->thread;
+    struct chimera_server_s3_shared *shared = thread->shared;
+    struct chimera_s3_config        *config = shared->config;
     struct chimera_s3_io            *io;
     uint64_t                         left;
 
@@ -73,8 +75,8 @@ chimera_s3_get_send(
         return;
     }
 
-    if (left > 1024 * 1024) {
-        left = 1024 * 1024;
+    if (left > config->io_size) {
+        left = config->io_size;
     }
 
     io = chimera_s3_io_alloc(thread, request);

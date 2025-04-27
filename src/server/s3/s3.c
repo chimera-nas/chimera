@@ -439,7 +439,12 @@ s3_server_init(
 
     shared = calloc(1, sizeof(*shared));
 
-    shared->endpoint = evpl_endpoint_create("0.0.0.0", 5000);
+    shared->config = calloc(1, sizeof(*shared->config));
+
+    shared->config->port    = 5000;
+    shared->config->io_size = 128 * 1024;
+
+    shared->endpoint = evpl_endpoint_create("0.0.0.0", shared->config->port);
 
     shared->listener = evpl_listener_create();
 
@@ -456,6 +461,8 @@ s3_server_destroy(void *data)
     evpl_listener_destroy(shared->listener);
 
     s3_bucket_map_destroy(shared->bucket_map);
+
+    free(shared->config);
 
     free(shared);
 } /* s3_server_destroy */

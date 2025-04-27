@@ -28,6 +28,11 @@ enum chimera_s3_http_state {
 
 struct chimera_server_s3_thread;
 
+struct chimera_s3_config {
+    int      port;
+    uint64_t io_size;
+};
+
 struct chimera_s3_io {
     struct chimera_s3_request *request;
     int                        niov;
@@ -94,9 +99,10 @@ struct chimera_server_s3_thread {
 };
 
 struct chimera_server_s3_shared {
-    struct s3_bucket_map *bucket_map;
-    struct evpl_endpoint *endpoint;
-    struct evpl_listener *listener;
+    struct chimera_s3_config *config;
+    struct s3_bucket_map     *bucket_map;
+    struct evpl_endpoint     *endpoint;
+    struct evpl_listener     *listener;
 };
 
 static inline struct chimera_s3_io *

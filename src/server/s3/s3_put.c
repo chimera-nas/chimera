@@ -109,6 +109,8 @@ chimera_s3_put_recv(
     struct chimera_s3_request *request)
 {
     struct chimera_server_s3_thread *thread = request->thread;
+    struct chimera_server_s3_shared *shared = thread->shared;
+    struct chimera_s3_config        *config = shared->config;
     struct chimera_s3_io            *io;
     uint64_t                         avail;
     int                              final;
@@ -119,12 +121,12 @@ chimera_s3_put_recv(
 
     avail = evpl_http_request_get_data_avail(request->http_request);
 
-    if (avail < 1024 * 1024 && !final) {
+    if (avail < config->io_size && !final) {
         return;
     }
 
-    if (avail > 1024 * 1024) {
-        avail = 1024 * 1024;
+    if (avail > config->io_size) {
+        avail = config->io_size;
     }
 
     if (avail == 0 && final) {
