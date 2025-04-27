@@ -328,7 +328,7 @@ s3_server_dispatch(
         s3_request->bucket_name    = urlp;
         s3_request->bucket_namelen = slash - urlp;
 
-        while (*(slash + 1) == '/') {
+        while (*slash == '/') {
             slash++;
         }
 

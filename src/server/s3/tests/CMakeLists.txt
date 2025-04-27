@@ -16,6 +16,12 @@ add_test(NAME chimera/server/s3/libs3_memfs_head COMMAND libs3_head -b memfs)
 add_test(NAME chimera/server/s3/libs3_memfs_delete COMMAND libs3_delete -b memfs)
 add_test(NAME chimera/server/s3/libs3_memfs_list COMMAND libs3_list -b memfs)
 
+add_test(NAME chimera/server/s3/libs3_memfs_path_put COMMAND libs3_put -p -b memfs)
+add_test(NAME chimera/server/s3/libs3_memfs_path_get COMMAND libs3_get -p -b memfs)
+add_test(NAME chimera/server/s3/libs3_memfs_path_head COMMAND libs3_head -p -b memfs)
+add_test(NAME chimera/server/s3/libs3_memfs_path_delete COMMAND libs3_delete -p -b memfs)
+add_test(NAME chimera/server/s3/libs3_memfs_path_list COMMAND libs3_list -p -b memfs)
+
 add_test(NAME chimera/server/s3/libs3_demofs_put COMMAND libs3_put -b demofs)
 add_test(NAME chimera/server/s3/libs3_demofs_get COMMAND libs3_get -b demofs)
 add_test(NAME chimera/server/s3/libs3_demofs_head COMMAND libs3_head -b demofs)

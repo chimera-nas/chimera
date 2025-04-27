@@ -314,7 +314,7 @@ list_object(
         .hostName        = "localhost:5000",
         .bucketName      = "mybucket",
         .protocol        = S3ProtocolHTTP,
-        .uriStyle        = S3UriStyleVirtualHost,
+        .uriStyle        = env->path_style ? S3UriStylePath : S3UriStyleVirtualHost,
         .accessKeyId     = "myaccessid",
         .secretAccessKey = "mysecretkey",
     };

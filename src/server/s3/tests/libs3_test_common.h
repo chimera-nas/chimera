@@ -16,6 +16,7 @@
 struct test_env {
     struct chimera_server     *server;
     char                       session_dir[256];
+    int                        path_style;
     struct prometheus_metrics *metrics;
 };
 
@@ -46,11 +47,14 @@ libs3_test_init(
         &tv);
 
     env->session_dir[0] = '\0';
-
-    while ((opt = getopt(argc, argv, "b:v:")) != -1) {
+    env->path_style     = 0;
+    while ((opt = getopt(argc, argv, "b:p")) != -1) {
         switch (opt) {
             case 'b':
                 backend = optarg;
+                break;
+            case 'p':
+                env->path_style = 1;
                 break;
         } /* switch */
     }
