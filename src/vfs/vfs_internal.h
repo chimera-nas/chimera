@@ -111,6 +111,39 @@ chimera_vfs_request_alloc_by_hash(
     return request;
 } /* chimera_vfs_request_alloc_by_hash */
 
+
+static inline struct chimera_vfs_request *
+chimera_vfs_request_alloc_anon(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen,
+    uint64_t                   fh_key)
+{
+    struct chimera_vfs_request *request;
+
+    if (thread->free_requests) {
+        request = thread->free_requests;
+        LL_DELETE(thread->free_requests, request);
+    } else {
+        request              = calloc(1, sizeof(struct chimera_vfs_request));
+        request->thread      = thread;
+        request->plugin_data = malloc(4096);
+    }
+    request->status = CHIMERA_VFS_UNSET;
+
+    request->module = chimera_vfs_get_module(thread, fh, fhlen);
+
+    request->fh      = NULL;
+    request->fh_len  = 0;
+    request->fh_hash = chimera_vfs_hash(&fh_key, sizeof(fh_key));
+    clock_gettime(CLOCK_MONOTONIC, &request->start_time);
+
+    thread->num_active_requests++;
+    DL_APPEND2(thread->active_requests, request, active_prev, active_next);
+
+    return request;
+} /* chimera_vfs_request_alloc_by_hash */
+
 static inline struct chimera_vfs_request *
 chimera_vfs_request_alloc(
     struct chimera_vfs_thread *thread,
@@ -207,7 +240,7 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
 
     chimera_vfs_dump_request(request);
 
-    if (module->blocking) {
+    if (module->capabilities & CHIMERA_VFS_CAP_BLOCKING) {
         thread_id = request->fh_hash % vfs->num_delegation_threads;
 
         request->complete_delegate = request->complete;

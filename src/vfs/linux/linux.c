@@ -530,7 +530,20 @@ chimera_linux_mkdir(
 
     rc = mkdirat(fd, fullname, mode);
 
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->mkdir.r_dir_post_attr,
+                            fd);
+
     if (rc < 0) {
+
+        if (errno == EEXIST) {
+            chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                                          request,
+                                          &request->mkdir.r_attr,
+                                          fd,
+                                          fullname);
+        }
+
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -543,11 +556,6 @@ chimera_linux_mkdir(
         request->complete(request);
         return;
     }
-
-    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
-                            &request->mkdir.r_dir_post_attr,
-                            fd);
-
 
     chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                                   request,
@@ -954,15 +962,13 @@ chimera_linux_dispatch(
 } /* linux_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_linux = {
-    .name               = "linux",
-    .fh_magic           = CHIMERA_VFS_FH_MAGIC_LINUX,
-    .blocking           = 1,
-    .path_open_required = 1,
-    .file_open_required = 1,
-    .fh_all             = 0,
-    .init               = chimera_linux_init,
-    .destroy            = chimera_linux_destroy,
-    .thread_init        = chimera_linux_thread_init,
-    .thread_destroy     = chimera_linux_thread_destroy,
-    .dispatch           = chimera_linux_dispatch,
+    .name         = "linux",
+    .fh_magic     = CHIMERA_VFS_FH_MAGIC_LINUX,
+    .capabilities = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED | CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED
+    ,
+    .init           = chimera_linux_init,
+    .destroy        = chimera_linux_destroy,
+    .thread_init    = chimera_linux_thread_init,
+    .thread_destroy = chimera_linux_thread_destroy,
+    .dispatch       = chimera_linux_dispatch,
 };

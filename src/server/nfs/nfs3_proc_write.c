@@ -12,6 +12,8 @@ chimera_nfs3_write_complete(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
     uint32_t                  sync,
+    struct evpl_iovec        *iov,
+    int                       niov,
     struct chimera_vfs_attrs *pre_attr,
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)

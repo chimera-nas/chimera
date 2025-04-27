@@ -7,7 +7,6 @@ add_subdirectory(server)
 add_subdirectory(client)
 add_subdirectory(posix)
 add_subdirectory(daemon)
-add_subdirectory(nfs)
 
 if (CUDA_ENABLED)
     add_subdirectory(cufile)

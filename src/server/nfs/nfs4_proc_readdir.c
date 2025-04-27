@@ -68,11 +68,12 @@ chimera_nfs4_readdir_callback(
 
 static void
 chimera_nfs4_readdir_complete(
-    enum chimera_vfs_error    error_code,
-    uint64_t                  cookie,
-    uint32_t                  eof,
-    struct chimera_vfs_attrs *dir_attr,
-    void                     *private_data)
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        cookie,
+    uint32_t                        eof,
+    struct chimera_vfs_attrs       *dir_attr,
+    void                           *private_data)
 {
     struct nfs_request             *req = private_data;
     struct READDIR4res             *res = &req->res_compound.resarray[req->index

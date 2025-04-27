@@ -91,6 +91,7 @@ chimera_vfs_lookup(
         if (rc == 0) {
 
             if (cached_attr.va_fh_len == 0) {
+
                 callback(CHIMERA_VFS_ENOENT,
                          &cached_attr,
                          &cached_dir_attr,

@@ -359,3 +359,56 @@ chimera_vfs_name_cache_insert(
     }
 
 } /* chimera_vfs_name_cache_insert */
+
+static inline void
+chimera_vfs_name_cache_remove(
+    struct chimera_vfs_name_cache *cache,
+    uint64_t                       fh_hash,
+    const void                    *fh,
+    int                            fh_len,
+    uint64_t                       name_hash,
+    const char                    *name,
+    int                            name_len)
+{
+    struct chimera_vfs_name_cache_entry  *entry, *removed_entry = NULL;
+    struct chimera_vfs_name_cache_shard  *shard;
+    struct chimera_vfs_name_cache_entry **slot, **slot_end;
+    uint64_t                              key = fh_hash ^ name_hash;
+
+    shard = &cache->shards[key & cache->num_shards_mask];
+
+    slot = &shard->entries[(key & cache->num_slots_mask) << cache->num_entries_bits];
+
+    slot_end = slot + cache->num_entries;
+
+    urcu_memb_read_lock();
+
+    pthread_mutex_lock(&shard->entry_lock);
+
+    while (slot < slot_end) {
+
+        entry = *slot;
+
+        if (entry && entry->key == key &&
+            chimera_memequal(entry->parent_fh, entry->parent_fh_len, fh, fh_len) &&
+            chimera_memequal(entry->child_name, entry->name_len, name, name_len)) {
+
+            removed_entry = entry;
+            rcu_assign_pointer(*slot, NULL);
+            break;
+        }
+
+        slot++;
+    }
+
+    //prometheus_counter_increment(shard->remove);
+
+    pthread_mutex_unlock(&shard->entry_lock);
+
+    urcu_memb_read_unlock();
+
+    if (removed_entry) {
+        call_rcu(&removed_entry->rcu, chimera_name_cache_free_entry_rcu);
+    }
+
+} /* chimera_vfs_name_cache_insert */

@@ -62,7 +62,64 @@ chimera_vfs_mkdir(
     chimera_vfs_mkdir_callback_t    callback,
     void                           *private_data)
 {
-    struct chimera_vfs_request *request;
+    struct chimera_vfs_request    *request;
+    uint64_t                       name_hash;
+    struct chimera_vfs_name_cache *name_cache = thread->vfs->vfs_name_cache;
+    struct chimera_vfs_attr_cache *attr_cache = thread->vfs->vfs_attr_cache;
+    struct chimera_vfs_attrs       cached_attr;
+    struct chimera_vfs_attrs       cached_dir_attr;
+    int                            rc;
+
+    name_hash = chimera_vfs_hash(name, namelen);
+
+    if (!(attr_mask & ~(CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE)) &&
+        !(pre_attr_mask & ~(CHIMERA_VFS_ATTR_MASK_CACHEABLE)) &&
+        !(post_attr_mask & ~(CHIMERA_VFS_ATTR_MASK_CACHEABLE))) {
+
+        cached_attr.va_req_mask = 0;
+        cached_attr.va_set_mask = 0;
+
+        rc = chimera_vfs_name_cache_lookup(
+            name_cache,
+            handle->fh_hash,
+            handle->fh,
+            handle->fh_len,
+            name_hash,
+            name,
+            namelen,
+            cached_attr.va_fh,
+            &cached_attr.va_fh_len);
+
+        if (rc == 0 && cached_attr.va_fh_len > 0) {
+
+            rc = chimera_vfs_attr_cache_lookup(
+                attr_cache,
+                handle->fh_hash,
+                handle->fh,
+                handle->fh_len,
+                &cached_dir_attr);
+
+            if (rc == 0) {
+
+                rc = chimera_vfs_attr_cache_lookup(
+                    attr_cache,
+                    chimera_vfs_hash(cached_attr.va_fh, cached_attr.va_fh_len),
+                    cached_attr.va_fh,
+                    cached_attr.va_fh_len,
+                    &cached_attr);
+
+                if (rc == 0) {
+                    callback(CHIMERA_VFS_EEXIST,
+                             &cached_attr,
+                             &cached_attr,
+                             &cached_dir_attr,
+                             &cached_dir_attr,
+                             private_data);
+                    return;
+                }
+            }
+        }
+    }
 
     request = chimera_vfs_request_alloc_by_handle(thread, handle);
 
@@ -71,14 +128,14 @@ chimera_vfs_mkdir(
     request->mkdir.handle                      = handle;
     request->mkdir.name                        = name;
     request->mkdir.name_len                    = namelen;
-    request->mkdir.name_hash                   = chimera_vfs_hash(name, namelen);
+    request->mkdir.name_hash                   = name_hash;
     request->mkdir.set_attr                    = attr;
     request->mkdir.set_attr->va_set_mask       = 0;
-    request->mkdir.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_FH;
+    request->mkdir.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->mkdir.r_attr.va_set_mask          = 0;
-    request->mkdir.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
+    request->mkdir.r_dir_pre_attr.va_req_mask  = pre_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->mkdir.r_dir_pre_attr.va_set_mask  = 0;
-    request->mkdir.r_dir_post_attr.va_req_mask = post_attr_mask;
+    request->mkdir.r_dir_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->mkdir.r_dir_post_attr.va_set_mask = 0;
     request->proto_callback                    = callback;
     request->proto_private_data                = private_data;

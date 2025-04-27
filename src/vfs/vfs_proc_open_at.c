@@ -75,7 +75,8 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
         fh_hash = chimera_vfs_hash(request->open_at.r_attr.va_fh,
                                    request->open_at.r_attr.va_fh_len);
 
-        if (request->module->file_open_required || !(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
+        if ((request->module->capabilities & CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED) ||
+            !(request->open_at.flags &  CHIMERA_VFS_OPEN_INFERRED)) {
             chimera_vfs_open_cache_acquire(
                 thread,
                 cache,
@@ -98,6 +99,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
             handle = chimera_vfs_synth_handle_alloc(thread);
 
             memcpy(handle->fh, request->open_at.r_attr.va_fh, request->open_at.r_attr.va_fh_len);
+            handle->vfs_module  = request->module;
             handle->fh_len      = request->open_at.r_attr.va_fh_len;
             handle->fh_hash     = fh_hash;
             handle->vfs_private =  0xdeadbeefUL;

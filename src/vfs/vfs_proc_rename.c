@@ -31,15 +31,13 @@ chimera_vfs_rename_complete(struct chimera_vfs_request *request)
                                       NULL,
                                       0);
 
-        chimera_vfs_name_cache_insert(name_cache,
+        chimera_vfs_name_cache_remove(name_cache,
                                       request->rename.new_fh_hash,
                                       request->rename.new_fh,
                                       request->rename.new_fhlen,
                                       request->rename.new_name_hash,
                                       request->rename.new_name,
-                                      request->rename.new_namelen,
-                                      NULL,
-                                      0);
+                                      request->rename.new_namelen);
     }
 
     chimera_vfs_complete(request);

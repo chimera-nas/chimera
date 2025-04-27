@@ -34,7 +34,6 @@ chimera_nfs_init_metrics(
     program->metrics = calloc(program->maxproc + 1, sizeof(struct prometheus_histogram_series *));
 
     for (int i = 0; i <= program->maxproc; i++) {
-        chimera_nfs_debug("Initializing metrics for  %s", program->procs[i]);
         program->metrics[i] = prometheus_histogram_create_series(shared->op_histogram,
                                                                  (const char *[]) { "name" },
                                                                  (const char *[]) { program->procs[i] },

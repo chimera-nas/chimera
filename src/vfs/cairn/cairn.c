@@ -994,8 +994,8 @@ cairn_mkdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct cairn_inode_handle  parent_ih;
-    struct cairn_inode        *parent_inode, inode;
+    struct cairn_inode_handle  parent_ih, existing_ih;
+    struct cairn_inode        *parent_inode, *existing_inode, inode;
     struct cairn_dirent_key    dirent_key;
     struct cairn_dirent_value  dirent_value;
     struct cairn_dirent_handle dh;
@@ -1031,6 +1031,16 @@ cairn_mkdir(
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
     if (rc == 0) {
+        cairn_map_attrs(&request->mkdir.r_dir_pre_attr, parent_inode);
+        cairn_map_attrs(&request->mkdir.r_dir_post_attr, parent_inode);
+
+        rc = cairn_inode_get_inum(thread, txn, dh.dirent->inum, 0, &existing_ih);
+
+        if (rc == 0) {
+            existing_inode = existing_ih.inode;
+            cairn_map_attrs(&request->mkdir.r_attr, existing_inode);
+            cairn_inode_handle_release(&existing_ih);
+        }
         cairn_inode_handle_release(&parent_ih);
         cairn_dirent_handle_release(&dh);
         request->status = CHIMERA_VFS_EEXIST;
@@ -2346,15 +2356,12 @@ cairn_dispatch(
 } /* cairn_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
-    .name               = "cairn",
-    .fh_magic           = CHIMERA_VFS_FH_MAGIC_CAIRN,
-    .blocking           = 1,
-    .path_open_required = 0,
-    .file_open_required = 0,
-    .fh_all             = 1,
-    .init               = cairn_init,
-    .destroy            = cairn_destroy,
-    .thread_init        = cairn_thread_init,
-    .thread_destroy     = cairn_thread_destroy,
-    .dispatch           = cairn_dispatch,
+    .name           = "cairn",
+    .fh_magic       = CHIMERA_VFS_FH_MAGIC_CAIRN,
+    .capabilities   = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_HANDLE_ALL,
+    .init           = cairn_init,
+    .destroy        = cairn_destroy,
+    .thread_init    = cairn_thread_init,
+    .thread_destroy = cairn_thread_destroy,
+    .dispatch       = cairn_dispatch,
 };

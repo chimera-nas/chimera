@@ -82,7 +82,7 @@ chimera_vfs_open(
 
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
-    if (module->file_open_required || !(flags & CHIMERA_VFS_OPEN_INFERRED)) {
+    if ((module->capabilities & CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED) || !(flags & CHIMERA_VFS_OPEN_INFERRED)) {
 
         /* We really need to open the file */
 
@@ -116,6 +116,7 @@ chimera_vfs_open(
         handle = chimera_vfs_synth_handle_alloc(thread);
 
         memcpy(handle->fh, fh, fhlen);
+        handle->vfs_module  = module;
         handle->fh_len      = fhlen;
         handle->fh_hash     = fh_hash;
         handle->vfs_private = 0;

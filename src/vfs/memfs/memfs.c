@@ -841,7 +841,7 @@ memfs_mkdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct memfs_inode       *parent_inode, *inode;
+    struct memfs_inode       *parent_inode, *inode, *existing_inode;
     struct memfs_dirent      *dirent, *existing_dirent;
     struct chimera_vfs_attrs *r_attr          = &request->mkdir.r_attr;
     struct chimera_vfs_attrs *r_dir_pre_attr  = &request->mkdir.r_dir_pre_attr;
@@ -901,7 +901,15 @@ memfs_mkdir(
               existing_dirent);
 
     if (existing_dirent) {
+
+        existing_inode = memfs_inode_get_inum(shared, existing_dirent->inum, existing_dirent->gen);
+
+        memfs_map_attrs(r_attr, existing_inode);
+        memfs_map_attrs(r_dir_post_attr, parent_inode);
+
         pthread_mutex_unlock(&parent_inode->lock);
+        pthread_mutex_unlock(&existing_inode->lock);
+
         request->status = CHIMERA_VFS_EEXIST;
         request->complete(request);
         memfs_inode_free(thread, inode);
@@ -1231,6 +1239,48 @@ memfs_open_at(
 
 } /* memfs_open_at */
 
+
+static void
+memfs_create_unlinked(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct memfs_inode *inode = NULL;
+    struct timespec     now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    inode = memfs_inode_alloc_thread(thread);
+
+    inode->size            = 0;
+    inode->space_used      = 0;
+    inode->uid             = 0;
+    inode->gid             = 0;
+    inode->nlink           = 0;
+    inode->mode            = S_IFREG |  0644;
+    inode->atime           = now;
+    inode->mtime           = now;
+    inode->ctime           = now;
+    inode->file.blocks     = NULL;
+    inode->file.max_blocks = 0;
+    inode->file.num_blocks = 0;
+
+    inode->refcnt++;
+
+
+    memfs_apply_attrs(inode, request->create_unlinked.set_attr);
+
+    request->create_unlinked.r_vfs_private = (uint64_t) inode;
+
+    memfs_map_attrs(&request->create_unlinked.r_attr, inode);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+
+} /* memfs_open_at */
+
 static void
 memfs_close(
     struct memfs_thread        *thread,
@@ -1427,6 +1477,8 @@ memfs_write(
                0,
                (inode->file.max_blocks - inode->file.num_blocks) *
                sizeof(struct memfs_block *));
+
+        free(blocks);
     }
 
     inode->file.num_blocks = last_block + 1;
@@ -1800,6 +1852,8 @@ memfs_link(
         return;
     }
 
+    memfs_map_attrs(&request->link.r_dir_pre_attr, parent_inode);
+
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_ENOTDIR;
@@ -1841,6 +1895,9 @@ memfs_link(
 
     inode->ctime        = now;
     parent_inode->mtime = now;
+
+    memfs_map_attrs(&request->link.r_dir_post_attr, parent_inode);
+    memfs_map_attrs(&request->link.r_attr, inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
     pthread_mutex_unlock(&inode->lock);
@@ -1886,6 +1943,9 @@ memfs_dispatch(
         case CHIMERA_VFS_OP_OPEN:
             memfs_open(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_CREATE_UNLINKED:
+            memfs_create_unlinked(thread, shared, request, private_data);
+            break;
         case CHIMERA_VFS_OP_CLOSE:
             memfs_close(thread, shared, request, private_data);
             break;
@@ -1921,15 +1981,12 @@ memfs_dispatch(
 } /* memfs_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
-    .name               = "memfs",
-    .fh_magic           = CHIMERA_VFS_FH_MAGIC_MEMFS,
-    .blocking           = 0,
-    .path_open_required = 0,
-    .file_open_required = 0,
-    .fh_all             = 1,
-    .init               = memfs_init,
-    .destroy            = memfs_destroy,
-    .thread_init        = memfs_thread_init,
-    .thread_destroy     = memfs_thread_destroy,
-    .dispatch           = memfs_dispatch,
+    .name           = "memfs",
+    .fh_magic       = CHIMERA_VFS_FH_MAGIC_MEMFS,
+    .capabilities   = CHIMERA_VFS_CAP_HANDLE_ALL | CHIMERA_VFS_CAP_CREATE_UNLINKED,
+    .init           = memfs_init,
+    .destroy        = memfs_destroy,
+    .thread_init    = memfs_thread_init,
+    .thread_destroy = memfs_thread_destroy,
+    .dispatch       = memfs_dispatch,
 };

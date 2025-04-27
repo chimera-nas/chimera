@@ -48,6 +48,34 @@ chimera_vfs_lookup_path(
     chimera_vfs_lookup_path_callback_t callback,
     void                              *private_data);
 
+
+void
+chimera_vfs_create_path(
+    struct chimera_vfs_thread         *vfs,
+    const void                        *fh,
+    int                                fhlen,
+    const char                        *path,
+    int                                pathlen,
+    struct chimera_vfs_attrs          *set_attr,
+    uint64_t                           attr_mask,
+    chimera_vfs_create_path_callback_t callback,
+    void                              *private_data);
+
+void
+chimera_vfs_find(
+    struct chimera_vfs_thread    *vfs,
+    const void                   *fh,
+    int                           fhlen,
+    const char                   *path_prefix,
+    int                           path_prefix_len,
+    uint64_t                      attr_mask,
+    chimera_vfs_filter_callback_t filter,
+    chimera_vfs_find_callback_t   callback,
+    chimera_vfs_find_complete_t   complete,
+    void                         *private_data);
+
+
+
 typedef void (*chimera_vfs_getattr_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
@@ -79,11 +107,12 @@ chimera_vfs_setattr(
     void                           *private_data);
 
 typedef void (*chimera_vfs_readdir_complete_t)(
-    enum chimera_vfs_error    error_code,
-    uint64_t                  cookie,
-    uint32_t                  eof,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data);
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        cookie,
+    uint32_t                        eof,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data);
 
 void
 chimera_vfs_readdir(
@@ -132,6 +161,24 @@ chimera_vfs_open_at(
     uint64_t                        post_attr_mask,
     chimera_vfs_open_at_callback_t  callback,
     void                           *private_data);
+
+
+typedef void (*chimera_vfs_create_unlinked_callback_t)(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data);
+
+void
+chimera_vfs_create_unlinked(
+    struct chimera_vfs_thread             *thread,
+    const uint8_t                         *fh,
+    int                                    fh_len,
+    struct chimera_vfs_attrs              *attr,
+    uint64_t                               attr_mask,
+    chimera_vfs_create_unlinked_callback_t callback,
+    void                                  *private_data);
 
 typedef void (*chimera_vfs_close_callback_t)(
     enum chimera_vfs_error error_code,
@@ -209,6 +256,8 @@ typedef void (*chimera_vfs_write_callback_t)(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
     uint32_t                  sync,
+    struct evpl_iovec        *iov,
+    int                       niov,
     struct chimera_vfs_attrs *pre_attr,
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data);
@@ -222,7 +271,7 @@ chimera_vfs_write(
     uint32_t                        sync,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
-    const struct evpl_iovec        *iov,
+    struct evpl_iovec              *iov,
     int                             niov,
     chimera_vfs_write_callback_t    callback,
     void                           *private_data);
@@ -310,6 +359,7 @@ chimera_vfs_link(
     int                         dir_fhlen,
     const char                 *name,
     int                         namelen,
+    unsigned int                replace,
     uint64_t                    attr_mask,
     uint64_t                    pre_attr_mask,
     uint64_t                    post_attr_mask,

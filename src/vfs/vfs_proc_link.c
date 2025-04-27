@@ -36,6 +36,14 @@ chimera_vfs_link_complete(struct chimera_vfs_request *request)
                                       request->fh,
                                       request->fh_len,
                                       &request->link.r_attr);
+
+        if (request->link.r_replaced_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
+            chimera_vfs_attr_cache_insert(attr_cache,
+                                          request->link.r_replaced_attr.va_fh_hash,
+                                          request->link.r_replaced_attr.va_fh,
+                                          request->link.r_replaced_attr.va_fh_len,
+                                          &request->link.r_replaced_attr);
+        }
     }
 
     chimera_vfs_complete(request);
@@ -54,6 +62,7 @@ chimera_vfs_link(
     int                         dir_fhlen,
     const char                 *name,
     int                         namelen,
+    unsigned int                replace,
     uint64_t                    attr_mask,
     uint64_t                    pre_attr_mask,
     uint64_t                    post_attr_mask,
@@ -72,11 +81,14 @@ chimera_vfs_link(
     request->link.name                        = name;
     request->link.namelen                     = namelen;
     request->link.name_hash                   = chimera_vfs_hash(name, namelen);
-    request->link.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
+    request->link.replace                     = replace;
+    request->link.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->link.r_attr.va_set_mask          = 0;
+    request->link.r_replaced_attr.va_req_mask = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
+    request->link.r_replaced_attr.va_set_mask = 0;
     request->link.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
     request->link.r_dir_pre_attr.va_set_mask  = 0;
-    request->link.r_dir_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
+    request->link.r_dir_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->link.r_dir_post_attr.va_set_mask = 0;
     request->proto_callback                   = callback;
     request->proto_private_data               = private_data;

@@ -23,6 +23,8 @@ chimera_vfs_write_complete(struct chimera_vfs_request *request)
     callback(request->status,
              request->write.r_length,
              request->write.r_sync,
+             request->write.iov,
+             request->write.niov,
              &request->write.r_pre_attr,
              &request->write.r_post_attr,
              request->proto_private_data);
@@ -39,7 +41,7 @@ chimera_vfs_write(
     uint32_t                        sync,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
-    const struct evpl_iovec        *iov,
+    struct evpl_iovec              *iov,
     int                             niov,
     chimera_vfs_write_callback_t    callback,
     void                           *private_data)

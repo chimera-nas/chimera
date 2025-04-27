@@ -81,3 +81,8 @@ install(TARGETS chimera_nfs DESTINATION lib)
 # Ensure xdrzcc is built before these libraries
 add_dependencies(chimera_nfs xdrzcc)
 
+
+if (NOT DISABLE_TESTS)
+    add_subdirectory(tests)
+endif()
+

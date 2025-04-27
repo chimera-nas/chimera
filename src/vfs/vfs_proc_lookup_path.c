@@ -70,6 +70,7 @@ chimera_vfs_lookup_path_complete(
     struct chimera_vfs_request *lp_request = private_data;
     struct chimera_vfs_thread  *thread     = lp_request->thread;
     int                         final      = (*lp_request->lookup_path.pathc == '\0');
+    unsigned int                flags;
 
     chimera_vfs_release(thread, lp_request->lookup_path.handle);
 
@@ -91,10 +92,16 @@ chimera_vfs_lookup_path_complete(
 
     } else {
 
+        flags = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
+
+        if (!final) {
+            flags |= CHIMERA_VFS_OPEN_DIRECTORY;
+        }
+
         chimera_vfs_open(thread,
                          attr->va_fh,
                          attr->va_fh_len,
-                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
+                         flags,
                          chimera_vfs_lookup_path_open_dispatch,
                          lp_request);
     }

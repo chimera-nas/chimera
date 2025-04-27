@@ -89,6 +89,12 @@ chimera_server_create_share(
     const char            *share_path,
     const char            *module_path);
 
+int
+chimera_server_create_bucket(
+    struct chimera_server *server,
+    const char            *bucket_name,
+    const char            *bucket_path);
+
 struct chimera_server *
 chimera_server_init(
     const struct chimera_server_config *config,

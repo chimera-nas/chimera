@@ -202,7 +202,8 @@ chimera_vfs_root_lookup(
         return;
     }
 
-    if (mount->module->fh_all && (mount->pathlen != 1 || mount->path[0] != '/')) {
+    if ((mount->module->capabilities & CHIMERA_VFS_CAP_HANDLE_ALL) &&
+        (mount->pathlen != 1 || mount->path[0] != '/')) {
 
         ctx        = request->plugin_data;
         ctx->mount = mount;
@@ -353,6 +354,7 @@ chimera_vfs_root_readdir(
     uint64_t                               cookie = request->readdir.cookie;
     struct chimera_vfs_root_readdir_ctx   *ctx    = request->plugin_data;
     struct chimera_vfs_root_readdir_entry *entry;
+    int                                    fh_all;
 
     ctx->pending     = 0;
     ctx->complete    = 0;
@@ -376,12 +378,14 @@ chimera_vfs_root_readdir(
         entry->request          = request;
         ctx->pending++;
 
+        fh_all = (mount->module->capabilities & CHIMERA_VFS_CAP_HANDLE_ALL);
+
 
         chimera_vfs_getrootfh(
             thread,
             mount->module,
-            mount->module->fh_all ? NULL : mount->path,
-            mount->module->fh_all ? 0 : mount->pathlen,
+            fh_all ? NULL : mount->path,
+            fh_all ? 0 : mount->pathlen,
             request->readdir.attr_mask,
             chimera_vfs_root_readdir_lookup_path_complete,
             entry);
@@ -453,15 +457,12 @@ chimera_vfs_root_dispatch(
 } /* vfs_root_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_root = {
-    .fh_magic           = CHIMERA_VFS_FH_MAGIC_ROOT,
-    .name               = "root",
-    .blocking           = 0,
-    .path_open_required = 0,
-    .file_open_required = 0,
-    .fh_all             = 1,
-    .init               = chimera_vfs_root_init,
-    .destroy            = chimera_vfs_root_destroy,
-    .thread_init        = chimera_vfs_root_thread_init,
-    .thread_destroy     = chimera_vfs_root_thread_destroy,
-    .dispatch           = chimera_vfs_root_dispatch,
+    .fh_magic       = CHIMERA_VFS_FH_MAGIC_ROOT,
+    .name           = "root",
+    .capabilities   = CHIMERA_VFS_CAP_HANDLE_ALL,
+    .init           = chimera_vfs_root_init,
+    .destroy        = chimera_vfs_root_destroy,
+    .thread_init    = chimera_vfs_root_thread_init,
+    .thread_destroy = chimera_vfs_root_thread_destroy,
+    .dispatch       = chimera_vfs_root_dispatch,
 };

@@ -11,6 +11,7 @@ chimera_vfs_readdir_complete(struct chimera_vfs_request *request)
     chimera_vfs_complete(request);
 
     complete(request->status,
+             request->readdir.handle,
              request->readdir.r_cookie,
              request->readdir.r_eof,
              &request->readdir.r_dir_attr,

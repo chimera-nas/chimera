@@ -31,6 +31,7 @@ chimera_vfs_op_name(unsigned int opcode)
         case CHIMERA_VFS_OP_RENAME: return "Rename";
         case CHIMERA_VFS_OP_SETATTR: return "SetAttr";
         case CHIMERA_VFS_OP_LINK: return "Link";
+        case CHIMERA_VFS_OP_CREATE_UNLINKED: return "CreateUnlinked";
         default: return "Unknown";
     } /* switch */
 
@@ -167,6 +168,21 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
                 chimera_snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
                                  req->open_at.namelen,
                                  req->open_at.name,
+                                 fhstr);
+            }
+            break;
+        case CHIMERA_VFS_OP_CREATE_UNLINKED:
+            format_hex(fhstr, sizeof(fhstr), req->create_unlinked.r_attr.va_fh, req->create_unlinked.r_attr.va_fh_len);
+            if (req->status == CHIMERA_VFS_OK) {
+                chimera_snprintf(argstr, sizeof(argstr), "r_fh %s", fhstr);
+            }
+            break;
+        case CHIMERA_VFS_OP_MKDIR:
+            format_hex(fhstr, sizeof(fhstr), req->mkdir.r_attr.va_fh, req->mkdir.r_attr.va_fh_len);
+            if (req->status == CHIMERA_VFS_OK || req->status == CHIMERA_VFS_EEXIST) {
+                chimera_snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
+                                 req->mkdir.name_len,
+                                 req->mkdir.name,
                                  fhstr);
             }
             break;

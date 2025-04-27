@@ -24,6 +24,7 @@ struct chimera_metrics {
     struct evpl               *evpl;
     struct evpl_thread        *thread;
     struct evpl_endpoint      *endpoint;
+    struct evpl_listener      *listener;
     struct evpl_http_agent    *agent;
     struct evpl_http_server   *server;
 };
@@ -36,6 +37,7 @@ chimera_metrics_notify(
     enum evpl_http_notify_type  notify_type,
     enum evpl_http_request_type request_type,
     const char                 *uri,
+    void                       *notify_data,
     void                       *private_data)
 {
     struct chimera_metrics *metrics = private_data;
@@ -89,9 +91,11 @@ chimera_metrics_dispatch(
     struct evpl_http_agent      *agent,
     struct evpl_http_request    *request,
     evpl_http_notify_callback_t *notify_callback,
+    void                       **notify_data,
     void                        *private_data)
 {
     *notify_callback = chimera_metrics_notify;
+    *notify_data     = NULL;
 } /* chimera_metrics_dispatch */
 
 static void *
@@ -105,8 +109,14 @@ chimera_metrics_thread_init(
 
     metrics->endpoint = evpl_endpoint_create("0.0.0.0", metrics->port);
 
-    metrics->agent  = evpl_http_init(evpl);
-    metrics->server = evpl_http_listen(metrics->agent, metrics->endpoint, chimera_metrics_dispatch, metrics);
+    metrics->agent = evpl_http_init(evpl);
+
+    metrics->endpoint = evpl_endpoint_create("0.0.0.0", metrics->port);
+    metrics->listener = evpl_listener_create();
+
+    metrics->server = evpl_http_attach(metrics->agent, metrics->listener, chimera_metrics_dispatch, metrics);
+
+    evpl_listen(metrics->listener, EVPL_STREAM_SOCKET_TCP, metrics->endpoint);
 
     chimera_metrics_info("Serving prometheus metrics on http://0.0.0.0:%d/metrics", metrics->port);
 
@@ -121,6 +131,7 @@ chimera_metrics_thread_shutdown(
     struct chimera_metrics *metrics = private_data;
 
     evpl_http_server_destroy(metrics->agent, metrics->server);
+    evpl_listener_destroy(metrics->listener);
     evpl_http_destroy(metrics->agent);
     evpl_endpoint_close(metrics->endpoint);
 } /* chimera_metrics_thread_shutdown */

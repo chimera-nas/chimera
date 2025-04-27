@@ -28,7 +28,9 @@ main(
     const char                   *share_name;
     const char                   *share_module;
     const char                   *share_path;
-    json_t                       *config, *shares, *share, *server_params;
+    const char                   *bucket_name;
+    const char                   *bucket_path;
+    json_t                       *config, *shares, *share, *server_params, *buckets, *bucket;
     json_error_t                  error;
     struct chimera_server        *server;
     struct chimera_server_config *server_config;
@@ -140,6 +142,17 @@ main(
                                 share_module, share_path);
             chimera_server_create_share(server, share_module, share_name,
                                         share_path);
+        }
+    }
+
+    buckets = json_object_get(config, "buckets");
+
+    if (buckets) {
+        json_object_foreach(buckets, bucket_name, bucket)
+        {
+            bucket_path = json_string_value(json_object_get(bucket, "path"));
+
+            chimera_server_create_bucket(server, bucket_name, bucket_path);
         }
     }
 

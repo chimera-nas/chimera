@@ -76,6 +76,10 @@
     "macros.h": "c",
     "logging.h": "c",
     "client_internal.h": "c",
-    "prometheus-c.h": "c"
+    "prometheus-c.h": "c",
+    "typeinfo": "c",
+    "initializer_list": "cpp",
+    "span": "cpp",
+    "s3_etag.h": "c"
   }
 }
