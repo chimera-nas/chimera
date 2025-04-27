@@ -60,6 +60,29 @@ chimera_vfs_hash(
     return XXH3_64bits(data, len);
 } /* chimera_vfs_hash */
 
+static inline struct chimera_vfs_find_result *
+chimera_vfs_find_result_alloc(struct chimera_vfs_thread *thread)
+{
+    struct chimera_vfs_find_result *result;
+
+    if (thread->free_find_results) {
+        result = thread->free_find_results;
+        LL_DELETE(thread->free_find_results, result);
+    } else {
+        result = calloc(1, sizeof(struct chimera_vfs_find_result));
+    }
+
+    return result;
+} /* chimera_vfs_find_result_alloc */
+
+static inline void
+chimera_vfs_find_result_free(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_find_result *result)
+{
+    LL_PREPEND(thread->free_find_results, result);
+} /* chimera_vfs_find_result_free */
+
 static inline struct chimera_vfs_module *
 chimera_vfs_get_module(
     struct chimera_vfs_thread *thread,

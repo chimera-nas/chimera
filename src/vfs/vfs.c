@@ -458,6 +458,7 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
     struct chimera_vfs_module      *module;
     struct chimera_vfs_request     *request;
     struct chimera_vfs_open_handle *handle;
+    struct chimera_vfs_find_result *find_result;
     int                             i;
 
     evpl_remove_doorbell(thread->evpl, &thread->doorbell);
@@ -470,6 +471,12 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
         }
 
         module->thread_destroy(thread->module_private[i]);
+    }
+
+    while (thread->free_find_results) {
+        find_result = thread->free_find_results;
+        LL_DELETE(thread->free_find_results, find_result);
+        free(find_result);
     }
 
     while (thread->free_synth_handles) {

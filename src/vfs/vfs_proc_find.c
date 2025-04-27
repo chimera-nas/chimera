@@ -46,7 +46,7 @@ chimera_vfs_find_drain(
             chimera_vfs_request_free(thread, result->child_request);
         }
 
-        free(result);
+        chimera_vfs_find_result_free(thread, result);
     }
 
     if (!root->find.results && !root->find.complete_called) {
@@ -120,7 +120,7 @@ chimera_vfs_find_readdir_callback(
     struct chimera_vfs_find_result *result;
     int                             filter_result;
 
-    result = malloc(sizeof(*result));
+    result = chimera_vfs_find_result_alloc(thread);
 
     result->attrs         = *attrs;
     result->emitted       = 0;

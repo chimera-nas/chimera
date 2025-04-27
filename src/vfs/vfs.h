@@ -693,6 +693,7 @@ struct chimera_vfs_thread {
     struct evpl                      *evpl;
     struct chimera_vfs               *vfs;
     void                             *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
+    struct chimera_vfs_find_result   *free_find_results;
     struct chimera_vfs_request       *free_requests;
     struct chimera_vfs_request       *active_requests;
     uint64_t                          num_active_requests;
