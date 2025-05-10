@@ -2,7 +2,7 @@
 
 
 static void
-chimera_client_mkdir_at_complete(
+chimera_mkdir_at_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *set_attr,
     struct chimera_vfs_attrs *attr,
@@ -18,10 +18,10 @@ chimera_client_mkdir_at_complete(
 
     chimera_client_request_free(request->thread, request);
 
-} /* chimera_client_mkdir_at_complete */
+} /* chimera_mkdir_at_complete */
 
 static void
-chimera_client_mkdir_parent_complete(
+chimera_mkdir_parent_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *oh,
     void                           *private_data)
@@ -49,13 +49,13 @@ chimera_client_mkdir_parent_complete(
         0,
         0,
         0,
-        chimera_client_mkdir_at_complete,
+        chimera_mkdir_at_complete,
         request);
 
-} /* chimera_client_mkdir_parent_complete */
+} /* chimera_mkdir_parent_complete */
 
 static void
-chimera_client_mkdir_parent_lookup_complete(
+chimera_mkdir_parent_lookup_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
@@ -73,14 +73,14 @@ chimera_client_mkdir_parent_lookup_complete(
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
-        chimera_client_mkdir_parent_complete,
+        chimera_mkdir_parent_complete,
         request);
 
 
-} /* chimera_client_mkdir_parent_lookup_complete */
+} /* chimera_mkdir_parent_lookup_complete */
 
 static inline void
-chimera_client_dispatch_mkdir(
+chimera_dispatch_mkdir(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
@@ -99,17 +99,17 @@ chimera_client_dispatch_mkdir(
         request->mkdir.path,
         request->mkdir.parent_len,
         CHIMERA_VFS_ATTR_FH,
-        chimera_client_mkdir_parent_lookup_complete,
+        chimera_mkdir_parent_lookup_complete,
         request);
-} /* chimera_client_mkdir */
+} /* chimera_mkdir */
 
 SYMBOL_EXPORT void
-chimera_client_mkdir(
-    struct chimera_client_thread   *thread,
-    const char                     *path,
-    int                             path_len,
-    chimera_client_mkdir_callback_t callback,
-    void                           *private_data)
+chimera_mkdir(
+    struct chimera_client_thread *thread,
+    const char                   *path,
+    int                           path_len,
+    chimera_mkdir_callback_t      callback,
+    void                         *private_data)
 {
     struct chimera_client_request *request;
     const char                    *slash;
@@ -132,5 +132,5 @@ chimera_client_mkdir(
 
     memcpy(request->mkdir.path, path, path_len);
 
-    chimera_client_dispatch_mkdir(thread, request);
-} /* chimera_client_mkdir */
+    chimera_dispatch_mkdir(thread, request);
+} /* chimera_mkdir */

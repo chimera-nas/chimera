@@ -5,6 +5,7 @@ add_subdirectory(metrics)
 add_subdirectory(vfs)
 add_subdirectory(server)
 add_subdirectory(client)
+add_subdirectory(fio)
 add_subdirectory(posix)
 add_subdirectory(daemon)
 

@@ -1,7 +1,9 @@
 #define _GNU_SOURCE
 #include <stdint.h>
 #include <stdlib.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <errno.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -550,7 +552,9 @@ demofs_init(const char *cfgfile)
     struct demofs_freespace    *free_space;
     enum evpl_block_protocol_id protocol_id;
     const char                 *protocol_name, *device_path;
-    int                         i;
+    int                         i, fd, rc;
+    struct stat                 st;
+    int64_t                     size;
     json_t                     *cfg, *devices_cfg, *device_cfg;
     json_error_t                json_error;
 
@@ -571,6 +575,8 @@ demofs_init(const char *cfgfile)
 
         protocol_name = json_string_value(json_object_get(device_cfg, "type"));
         device_path   = json_string_value(json_object_get(device_cfg, "path"));
+        size          = json_integer_value(json_object_get(device_cfg, "size"));
+
         if (strcmp(protocol_name, "io_uring") == 0) {
             protocol_id = EVPL_BLOCK_PROTOCOL_IO_URING;
         } else if (strcmp(protocol_name, "vfio") == 0) {
@@ -579,10 +585,26 @@ demofs_init(const char *cfgfile)
             chimera_demofs_abort("Unsupported protocol: %s\n", protocol_name);
         }
 
+        rc = stat(device_path, &st);
+
+        if (rc < 0 && errno == ENOENT) {
+
+            fd = open(device_path, O_CREAT | O_RDWR, 0644);
+
+            chimera_demofs_abort_if(fd < 0, "Failed to open device %s: %s\n", device_path, strerror(errno));
+
+            ftruncate(fd, size);
+
+            close(fd);
+        }
+
         device->bdev = evpl_block_open_device(protocol_id, device_path);
 
         device->size             = evpl_block_size(device->bdev);
         device->max_request_size = evpl_block_max_request_size(device->bdev);
+
+        chimera_demofs_info("Device %s size %lu max_request_size %lu\n",
+                            device_path, device->size, device->max_request_size);
 
         free_space            = calloc(1, sizeof(*free_space));
         free_space->device_id = device->id;
@@ -1490,8 +1512,9 @@ demofs_close(
 
 static inline void
 demofs_io_callback(
-    int   status,
-    void *private_data)
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
 {
     struct chimera_vfs_request    *request        = (struct chimera_vfs_request *) private_data;
     struct demofs_request_private *demofs_private = request->plugin_data;

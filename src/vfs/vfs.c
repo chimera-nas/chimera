@@ -527,6 +527,10 @@ chimera_vfs_mount(
     struct chimera_vfs_module *module;
     int                        i;
 
+    while (mount_path[0] == '/') {
+        mount_path++;
+    }
+
     for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
         module = vfs->modules[i];
 
@@ -587,3 +591,11 @@ chimera_vfs_umount(
     return CHIMERA_VFS_OK;
 
 } /* chimera_vfs_umount */
+
+SYMBOL_EXPORT void
+chimera_vfs_thread_drain(struct chimera_vfs_thread *thread)
+{
+    while (thread->num_active_requests) {
+        evpl_continue(thread->evpl);
+    }
+} /* chimera_vfs_thread_drain */

@@ -1,0 +1,16 @@
+{
+    "modules": [
+        {
+            "module": "demofs",
+            "module_path": "${CMAKE_BINARY_DIR}/src/vfs/demofs/libchimera_vfs_demofs.so",
+            "config_path": "${FIO_TEST_BINARY}/demofs_config.json"
+        }
+    ],
+    "mounts": [
+        {
+            "module": "demofs",
+            "module_path": "/",
+            "mount_point": "/demofs"
+        }
+    ]
+}

@@ -80,6 +80,10 @@
     "typeinfo": "c",
     "initializer_list": "cpp",
     "span": "cpp",
-    "s3_etag.h": "c"
+    "s3_etag.h": "c",
+    "fcntl.h": "c",
+    "protocol.h": "c",
+    "errno.h": "c",
+    "assert.h": "c"
   }
 }

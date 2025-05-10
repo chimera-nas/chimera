@@ -1,0 +1,9 @@
+{
+    "mounts": [
+        {
+            "module": "memfs",
+            "module_path": "/",
+            "mount_point": "/memfs"
+        }
+    ]
+}

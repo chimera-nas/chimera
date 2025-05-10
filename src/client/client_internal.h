@@ -29,6 +29,8 @@ struct chimera_client_fh {
 enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_OPEN,
     CHIMERA_CLIENT_OP_MKDIR,
+    CHIMERA_CLIENT_OP_READ,
+    CHIMERA_CLIENT_OP_WRITE,
 };
 
 struct chimera_client_request {
@@ -40,7 +42,7 @@ struct chimera_client_request {
     union {
         struct {
             struct chimera_vfs_open_handle *parent_handle;
-            chimera_client_open_callback_t  callback;
+            chimera_open_callback_t         callback;
             void                           *private_data;
             unsigned int                    flags;
             int                             path_len;
@@ -51,13 +53,25 @@ struct chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;
-            chimera_client_mkdir_callback_t callback;
+            chimera_mkdir_callback_t        callback;
             void                           *private_data;
             int                             path_len;
             int                             parent_len;
             int                             name_offset;
             char                            path[CHIMERA_VFS_PATH_MAX];
         } mkdir;
+
+        struct {
+            int                     niov;
+            chimera_read_callback_t callback;
+            void                   *private_data;
+            struct evpl_iovec       iov[CHIMERA_CLIENT_IOV_MAX];
+        } read;
+
+        struct {
+            chimera_write_callback_t callback;
+            void                    *private_data;
+        } write;
     };
 };
 

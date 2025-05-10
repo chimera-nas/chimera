@@ -4,7 +4,7 @@
 #include "evpl/evpl.h"
 #include "prometheus-c.h"
 static void
-chimera_client_mkdir_complete(
+chimera_mkdir_complete(
     struct chimera_client_thread *client,
     enum chimera_vfs_error        status,
     void                         *private_data)
@@ -15,7 +15,7 @@ chimera_client_mkdir_complete(
 } /* chimera_client_mkdir_complete */
 
 static void
-chimera_client_open_complete(
+chimera_open_complete(
     struct chimera_client_thread   *client,
     enum chimera_vfs_error          status,
     struct chimera_vfs_open_handle *oh,
@@ -52,7 +52,7 @@ main(
 
     client = chimera_client_init(config, metrics);
 
-    rc = chimera_client_mount(client, "memfs", "memfs", "/");
+    rc = chimera_mount(client, "memfs", "memfs", "/");
 
     if (rc != 0) {
         fprintf(stderr, "Failed to mount test module\n");
@@ -63,17 +63,17 @@ main(
 
     dir_handle = NULL;
 
-    chimera_client_open(thread, "/", 1, 0, chimera_client_open_complete, &dir_handle);
+    chimera_open(thread, "/", 1, 0, chimera_open_complete, &dir_handle);
 
     while (!dir_handle) {
         evpl_continue(evpl);
     }
 
-    chimera_client_close(thread, dir_handle);
+    chimera_close(thread, dir_handle);
 
     dir_handle = NULL;
 
-    chimera_client_open(thread, "/memfs", 6, 0, chimera_client_open_complete, &dir_handle);
+    chimera_open(thread, "/memfs", 6, 0, chimera_open_complete, &dir_handle);
 
     while (!dir_handle) {
         evpl_continue(evpl);
@@ -81,26 +81,26 @@ main(
 
     complete = 0;
 
-    chimera_client_mkdir(thread, "/memfs/test", 11, chimera_client_mkdir_complete, &complete);
+    chimera_mkdir(thread, "/memfs/test", 11, chimera_mkdir_complete, &complete);
 
     while (!complete) {
         evpl_continue(evpl);
     }
 
-    chimera_client_close(thread, dir_handle);
+    chimera_close(thread, dir_handle);
 
     dir_handle = NULL;
 
-    chimera_client_open(thread, "/memfs/test/newfile", 19, CHIMERA_VFS_OPEN_CREATE,
-                        chimera_client_open_complete, &file_handle);
+    chimera_open(thread, "/memfs/test/newfile", 19, CHIMERA_VFS_OPEN_CREATE,
+                 chimera_open_complete, &file_handle);
 
     while (!file_handle) {
         evpl_continue(evpl);
     }
 
-    chimera_client_close(thread, file_handle);
+    chimera_close(thread, file_handle);
 
-    rc = chimera_client_mount(client, "newshare", "memfs", "/test");
+    rc = chimera_mount(client, "newshare", "memfs", "/test");
 
     if (rc != 0) {
         fprintf(stderr, "Failed to mount test module\n");
@@ -109,18 +109,18 @@ main(
 
     file_handle = NULL;
 
-    chimera_client_open(thread, "/newshare/newfile", 17, 0,
-                        chimera_client_open_complete, &file_handle);
+    chimera_open(thread, "/newshare/newfile", 17, 0,
+                 chimera_open_complete, &file_handle);
 
     while (!file_handle) {
         evpl_continue(evpl);
     }
 
-    chimera_client_close(thread, file_handle);
+    chimera_close(thread, file_handle);
 
     chimera_client_thread_shutdown(evpl, thread);
 
-    chimera_client_destroy(client);
+    chimera_destroy(client);
 
     prometheus_metrics_destroy(metrics);
 

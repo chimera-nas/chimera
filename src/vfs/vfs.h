@@ -746,5 +746,9 @@ chimera_vfs_umount(
     const char         *mount_path);
 
 void
+chimera_vfs_thread_drain(
+    struct chimera_vfs_thread *thread);
+
+void
 chimera_vfs_watchdog(
     struct chimera_vfs_thread *thread);

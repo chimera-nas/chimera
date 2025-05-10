@@ -1350,6 +1350,17 @@ memfs_read(
             request->complete(request);
             return;
         }
+
+    }
+
+    if (unlikely(inode->size <= offset)) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status        = CHIMERA_VFS_OK;
+        request->read.r_niov   = 0;
+        request->read.r_length = 0;
+        request->read.r_eof    = 1;
+        request->complete(request);
+        return;
     }
 
     if (offset + length > inode->size) {
@@ -1496,14 +1507,12 @@ memfs_write(
 
         block = memfs_block_alloc(thread);
 
+        block->niov = evpl_iovec_alloc(evpl, 4096, 4096,
+                                       CHIMERA_MEMFS_BLOCK_MAX_IOV,
+                                       block->iov);
+
         if (block_offset || block_len < CHIMERA_MEMFS_BLOCK_SIZE) {
 
-            block->niov = evpl_iovec_alloc(evpl, 4096, 4096,
-                                           CHIMERA_MEMFS_BLOCK_MAX_IOV,
-                                           block->iov);
-
-            chimera_memfs_abort_if(block->niov < 0,
-                                   "evpl_iovec_alloc failed");
             if (old_block) {
 
                 evpl_iovec_cursor_init(&old_block_cursor,
@@ -1528,18 +1537,11 @@ memfs_write(
                 memset(block->iov[0].data + block_offset + block_len, 0,
                        CHIMERA_MEMFS_BLOCK_SIZE - block_offset - block_len);
             }
-
-            evpl_iovec_cursor_copy(&cursor,
-                                   block->iov[0].data + block_offset,
-                                   block_len);
-        } else {
-
-            block->niov = evpl_iovec_cursor_move(evpl,
-                                                 &cursor,
-                                                 block->iov,
-                                                 4,
-                                                 block_len);
         }
+
+        evpl_iovec_cursor_copy(&cursor,
+                               block->iov[0].data + block_offset,
+                               block_len);
 
         inode->file.blocks[bi] = block;
         block_offset           = 0;

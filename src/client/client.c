@@ -45,6 +45,24 @@ chimera_client_config_init(void)
 } /* chimera_server_config_init */
 
 
+SYMBOL_EXPORT void
+chimera_client_config_add_module(
+    struct chimera_client_config *config,
+    const char                   *module_name,
+    const char                   *module_path,
+    const char                   *config_path)
+{
+    struct chimera_vfs_module_cfg *module_cfg;
+
+    module_cfg = &config->modules[config->num_modules];
+
+    strncpy(module_cfg->module_name, module_name, sizeof(module_cfg->module_name));
+    strncpy(module_cfg->module_path, module_path, sizeof(module_cfg->module_path));
+    strncpy(module_cfg->config_path, config_path, sizeof(module_cfg->config_path));
+
+    config->num_modules++;
+} /* chimera_client_config_add_module */
+
 SYMBOL_EXPORT struct chimera_client_thread *
 chimera_client_thread_init(
     struct evpl           *evpl,
@@ -112,7 +130,7 @@ chimera_client_init(
 } /* chimera_client_init */
 
 SYMBOL_EXPORT void
-chimera_client_destroy(struct chimera_client *client)
+chimera_destroy(struct chimera_client *client)
 {
     chimera_vfs_destroy(client->vfs);
 
@@ -122,7 +140,7 @@ chimera_client_destroy(struct chimera_client *client)
 } /* chimera_client_destroy */
 
 SYMBOL_EXPORT int
-chimera_client_mount(
+chimera_mount(
     struct chimera_client *client,
     const char            *mount_path,
     const char            *module_name,
@@ -132,9 +150,15 @@ chimera_client_mount(
 } /* chimera_client_mount */
 
 SYMBOL_EXPORT int
-chimera_client_umount(
+chimera_umount(
     struct chimera_client *client,
     const char            *mount_path)
 {
     return chimera_vfs_umount(client->vfs, mount_path);
-} /* chimera_client_umount */
+} /* chimera_umount */
+
+SYMBOL_EXPORT void
+chimera_drain(struct chimera_client_thread *thread)
+{
+    chimera_vfs_thread_drain(thread->vfs_thread);
+} /* chimera_drain */

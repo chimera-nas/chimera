@@ -1,6 +1,7 @@
 FROM ubuntu:24.04
 ARG ENABLE_XLIO=1
 ARG ENABLE_DOCA=0
+ARG ENABLE_FIO=1
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
@@ -12,6 +13,14 @@ RUN apt-get -y update && \
     libcurl4-openssl-dev build-essential ruby-full autoconf automake make libtool pkg-config libs3-dev && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+RUN if [ "$ENABLE_FIO" = "1" ] ; then \
+    git clone https://github.com/axboe/fio.git /fio && \
+    cd /fio && \
+    ./configure && \
+    make -j8 && \
+    make install ; \
+    fi
 
 RUN if [ "$ENABLE_DOCA" = "1" ] ; then \
     wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa/cuda-keyring_1.1-1_all.deb && \
