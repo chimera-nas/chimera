@@ -1,5 +1,7 @@
 #pragma once
 
+#include <sys/random.h>
+#include "common/logging.h"
 #ifndef likely
 #define likely(x)   __builtin_expect(!!(x), 1)
 #endif /* ifndef likely */
@@ -7,6 +9,34 @@
 #ifndef unlikely
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #endif /* ifndef unlikely */
+
+
+static inline uint64_t
+chimera_rand64(void)
+{
+    uint64_t v;
+    ssize_t  rc;
+
+    rc = getrandom(&v, sizeof v, 0);
+
+    chimera_abort_if(rc != sizeof v, "common", __FILE__, __LINE__, "getrandom failed");
+
+    return v;
+} /* chimera_rand64 */
+
+#define NT_EPOCH_DELTA 11644473600ULL
+
+static inline uint64_t
+chimera_nt_time(const struct timespec *ts)
+{
+    uint64_t nt_now = ts->tv_sec;
+
+    nt_now += NT_EPOCH_DELTA;
+    nt_now *= 10000000ULL;
+    nt_now += ts->tv_nsec / 100ULL;
+
+    return nt_now;
+} /* chimera_nt_time */
 
 static inline uint64_t
 chimera_get_elapsed_ns(

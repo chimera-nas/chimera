@@ -140,8 +140,7 @@ main(
             chimera_server_info("Initializing share %s (%s://%s)...", share_name
                                 ,
                                 share_module, share_path);
-            chimera_server_create_share(server, share_module, share_name,
-                                        share_path);
+            chimera_server_mount(server, share_module, share_name, share_path);
         }
     }
 

@@ -84,6 +84,7 @@
     "fcntl.h": "c",
     "protocol.h": "c",
     "errno.h": "c",
-    "assert.h": "c"
+    "assert.h": "c",
+    "smb_procs.h": "c"
   }
 }

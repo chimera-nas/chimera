@@ -3,4 +3,6 @@ add_subdirectory(libevpl)
 
 set(XDRZCC ${XDRZCC} PARENT_SCOPE)
 
-message(STATUS "XDRZCC: ${XDRZCC}")
+remove_definitions(-fvisibility=hidden)
+
+add_subdirectory(libsmb2)

@@ -120,6 +120,11 @@ chimera_vfs_find_readdir_callback(
     struct chimera_vfs_find_result *result;
     int                             filter_result;
 
+    if ((namelen == 1 && name[0] == '.') ||
+        (namelen == 2 && name[0] == '.' && name[1] == '.')) {
+        return 0;
+    }
+
     result = chimera_vfs_find_result_alloc(thread);
 
     result->attrs         = *attrs;

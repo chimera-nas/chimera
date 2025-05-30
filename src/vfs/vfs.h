@@ -78,17 +78,18 @@ struct chimera_vfs_attrs {
     uint64_t        va_gid;
     uint64_t        va_rdev;
     uint64_t        va_size;
+    uint64_t        va_space_used;
     struct timespec va_atime;
     struct timespec va_mtime;
     struct timespec va_ctime;
 
-    uint64_t        va_space_avail;
-    uint64_t        va_space_free;
-    uint64_t        va_space_total;
-    uint64_t        va_space_used;
-    uint64_t        va_files_total;
-    uint64_t        va_files_free;
-    uint64_t        va_files_avail;
+    uint64_t        va_fs_space_avail;
+    uint64_t        va_fs_space_free;
+    uint64_t        va_fs_space_total;
+    uint64_t        va_fs_space_used;
+    uint64_t        va_fs_files_total;
+    uint64_t        va_fs_files_free;
+    uint64_t        va_fs_files_avail;
 
     uint32_t        va_fh_len;
     uint64_t        va_fh_hash;
@@ -135,13 +136,16 @@ struct chimera_vfs_thread_metrics {
     struct prometheus_histogram_instance **op_latency_series;
 };
 
+#define CHIMERA_VFS_OPEN_HANDLE_EXCLUSIVE 0x1
+#define CHIMERA_VFS_OPEN_HANDLE_PENDING   0x2
+#define CHIMERA_VFS_OPEN_HANDLE_FILE_ID   0x4
+
 struct chimera_vfs_open_handle {
     struct chimera_vfs_module      *vfs_module;
     uint64_t                        fh_hash;
-    uint8_t                         fh_len;
+    uint16_t                        fh_len;
     uint8_t                         cache_id;
-    uint8_t                         exclusive;
-    uint8_t                         pending;
+    uint8_t                         flags;
     uint32_t                        opencnt;
     struct chimera_vfs_request     *blocked_requests;
     uint64_t                        vfs_private;
@@ -151,7 +155,7 @@ struct chimera_vfs_open_handle {
     struct chimera_vfs_request     *request;
     void                           *close_private;
     struct timespec                 timestamp;
-    struct UT_hash_handle           hh;
+    struct UT_hash_handle           hh_by_fh;
     struct chimera_vfs_open_handle *prev;
     struct chimera_vfs_open_handle *next;
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
@@ -180,6 +184,13 @@ typedef int (*chimera_vfs_readdir_callback_t)(
     const struct chimera_vfs_attrs *attrs,
     void                           *arg);
 
+typedef void (*chimera_vfs_readdir_complete_t)(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        cookie,
+    uint32_t                        eof,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data);
 
 
 typedef int (*chimera_vfs_filter_callback_t)(
@@ -336,6 +347,11 @@ struct chimera_vfs_request {
             uint32_t                        r_eof;
             struct chimera_vfs_attrs        r_dir_attr;
             chimera_vfs_readdir_callback_t  callback;
+
+            struct evpl_iovec               bounce_iov;
+            int                             bounce_offset;
+            chimera_vfs_readdir_callback_t  orig_callback;
+            void                           *orig_private_data;
         } readdir;
 
         struct {

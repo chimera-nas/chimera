@@ -30,9 +30,27 @@ chimera_vfs_release(
     if (handle->cache_id == CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
         chimera_vfs_synth_handle_free(thread, handle);
     } else if (handle->cache_id == CHIMERA_VFS_OPEN_ID_PATH) {
-        chimera_vfs_open_cache_release(thread, thread->vfs->vfs_open_path_cache, handle);
+        chimera_vfs_open_cache_release(thread, thread->vfs->vfs_open_path_cache, handle, 0);
     } else if (handle->cache_id == CHIMERA_VFS_OPEN_ID_FILE) {
-        chimera_vfs_open_cache_release(thread, thread->vfs->vfs_open_file_cache, handle);
+        chimera_vfs_open_cache_release(thread, thread->vfs->vfs_open_file_cache, handle, 0);
+    } else {
+        chimera_vfs_abort("invalid cache id");
+    }
+} /* chimera_vfs_release_handle */
+
+
+static inline void
+chimera_vfs_release_failed(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    enum chimera_vfs_error          error_code)
+{
+    if (handle->cache_id == CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
+        chimera_vfs_synth_handle_free(thread, handle);
+    } else if (handle->cache_id == CHIMERA_VFS_OPEN_ID_PATH) {
+        chimera_vfs_open_cache_release(thread, thread->vfs->vfs_open_path_cache, handle, error_code);
+    } else if (handle->cache_id == CHIMERA_VFS_OPEN_ID_FILE) {
+        chimera_vfs_open_cache_release(thread, thread->vfs->vfs_open_file_cache, handle, error_code);
     } else {
         chimera_vfs_abort("invalid cache id");
     }

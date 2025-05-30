@@ -106,14 +106,6 @@ chimera_vfs_setattr(
     chimera_vfs_setattr_callback_t  callback,
     void                           *private_data);
 
-typedef void (*chimera_vfs_readdir_complete_t)(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        cookie,
-    uint32_t                        eof,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data);
-
 void
 chimera_vfs_readdir(
     struct chimera_vfs_thread      *thread,

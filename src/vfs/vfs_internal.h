@@ -12,6 +12,7 @@
 #include "uthash/utlist.h"
 #include "metrics/metrics.h"
 #include "vfs/vfs_dump.h"
+
 #ifndef container_of
 #define container_of(ptr, type, member) ({            \
         typeof(((type *) 0)->member) * __mptr = (ptr); \
@@ -51,6 +52,14 @@
                          __LINE__, \
                          __VA_ARGS__)
 
+/* Structure for readdir entries stored in bounce buffer */
+struct chimera_vfs_readdir_entry {
+    uint64_t                 inum;
+    uint64_t                 cookie;
+    uint32_t                 namelen;
+    struct chimera_vfs_attrs attrs;
+    /* Name follows immediately after this struct */
+};
 
 static inline uint64_t
 chimera_vfs_hash(
@@ -296,26 +305,27 @@ chimera_vfs_copy_attr(
     }
 
     if (src->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
-        dest->va_dev   = src->va_dev;
-        dest->va_ino   = src->va_ino;
-        dest->va_mode  = src->va_mode;
-        dest->va_nlink = src->va_nlink;
-        dest->va_uid   = src->va_uid;
-        dest->va_gid   = src->va_gid;
-        dest->va_rdev  = src->va_rdev;
-        dest->va_size  = src->va_size;
-        dest->va_atime = src->va_atime;
-        dest->va_mtime = src->va_mtime;
-        dest->va_ctime = src->va_ctime;
+        dest->va_dev        = src->va_dev;
+        dest->va_ino        = src->va_ino;
+        dest->va_mode       = src->va_mode;
+        dest->va_nlink      = src->va_nlink;
+        dest->va_uid        = src->va_uid;
+        dest->va_gid        = src->va_gid;
+        dest->va_rdev       = src->va_rdev;
+        dest->va_size       = src->va_size;
+        dest->va_space_used = src->va_space_used;
+        dest->va_atime      = src->va_atime;
+        dest->va_mtime      = src->va_mtime;
+        dest->va_ctime      = src->va_ctime;
     }
 
     if (src->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
-        dest->va_space_avail = src->va_space_avail;
-        dest->va_space_free  = src->va_space_free;
-        dest->va_space_total = src->va_space_total;
-        dest->va_space_used  = src->va_space_used;
-        dest->va_files_total = src->va_files_total;
-        dest->va_files_free  = src->va_files_free;
-        dest->va_files_avail = src->va_files_avail;
+        dest->va_fs_space_avail = src->va_fs_space_avail;
+        dest->va_fs_space_free  = src->va_fs_space_free;
+        dest->va_fs_space_total = src->va_fs_space_total;
+        dest->va_fs_space_used  = src->va_fs_space_used;
+        dest->va_fs_files_total = src->va_fs_files_total;
+        dest->va_fs_files_free  = src->va_fs_files_free;
+        dest->va_fs_files_avail = src->va_fs_files_avail;
     }
 } /* chimera_vfs_copy_attr */

@@ -1,4 +1,7 @@
 #include "libnfs_test_common.h"
+
+#define WRITE_LEN (16  * 1024 * 1024)
+
 int
 main(
     int    argc,
@@ -9,9 +12,9 @@ main(
     int             rc;
     char           *buffer;
 
-    buffer = calloc(1, 4 * 1024 * 1024);
+    buffer = calloc(1, WRITE_LEN);
 
-    memset(buffer, 'a', 4 * 1024 * 1024);
+    memset(buffer, 'a', WRITE_LEN);
 
     libnfs_test_init(&env, argv, argc);
 
@@ -33,7 +36,7 @@ main(
     }
 
     printf("Writing to the file\n");
-    nfs_write(env.nfs, fh, 4 * 1024 * 1024, buffer);
+    nfs_write(env.nfs, fh, WRITE_LEN, buffer);
 
     printf("Closing the file\n");
     nfs_close(env.nfs, fh);

@@ -7,21 +7,20 @@
 #include <sys/stat.h>
 
 #include "common/varint.h"
-#include "xxhash.h"
-
-#define HASH_FUNCTION(keyptr, keylen, hashv) do { \
-            hashv = XXH3_64bits(keyptr, keylen); \
-} while (0)
-#define HASH_KEY(keyptr, keylen)             keyptr, keylen
+#include "common/rbtree.h"
 
 #include "uthash/utlist.h"
-#include "uthash/uthash.h"
 #include "vfs/vfs.h"
 #include "memfs.h"
 #include "common/logging.h"
 #include "common/misc.h"
 #include "common/macros.h"
-#include "evpl_iovec_cursor.h"
+#include "common/evpl_iovec_cursor.h"
+
+#ifndef container_of
+#define container_of(ptr, type, member) \
+        ((type *) ((char *) (ptr) - offsetof(type, member)))
+#endif /* ifndef container_of */
 
 #define CHIMERA_MEMFS_BLOCK_MAX_IOV     4
 
@@ -70,23 +69,22 @@ struct memfs_block {
     uint64_t             key;
     int                  niov;
     struct memfs_block  *next;
-    UT_hash_handle       hh;
     struct evpl_iovec    iov[CHIMERA_MEMFS_BLOCK_MAX_IOV];
-
 };
 
 struct memfs_dirent {
     uint64_t             inum;
     uint32_t             gen;
     uint32_t             name_len;
-    UT_hash_handle       hh;
+    uint64_t             hash;
+    struct rb_node       node;
     struct memfs_dirent *next;
     char                 name[256];
 };
 
 struct memfs_symlink_target {
     int                          length;
-    char                         data[PATH_MAX];
+    char                         data[4096];
     struct memfs_symlink_target *next;
 };
 
@@ -109,7 +107,7 @@ struct memfs_inode {
 
     union {
         struct {
-            struct memfs_dirent *dirents;
+            struct rb_tree dirents;
         } dir;
         struct {
             struct memfs_block **blocks;
@@ -418,6 +416,7 @@ memfs_dirent_alloc(
     struct memfs_thread *thread,
     uint64_t             inum,
     uint32_t             gen,
+    uint64_t             hash,
     const char          *name,
     int                  name_len)
 {
@@ -433,6 +432,7 @@ memfs_dirent_alloc(
 
     dirent->inum     = inum;
     dirent->gen      = gen;
+    dirent->hash     = hash;
     dirent->name_len = name_len;
     memcpy(dirent->name, name, name_len);
 
@@ -447,6 +447,21 @@ memfs_dirent_free(
 {
     LL_PREPEND(thread->free_dirent, dirent);
 } /* memfs_dirent_free */
+
+static void
+memfs_dirent_release(
+    struct rb_node *node,
+    void           *private_data)
+{
+    struct memfs_thread *thread = private_data;
+    struct memfs_dirent *dirent = container_of(node, struct memfs_dirent, node);
+
+    if (thread) {
+        memfs_dirent_free(thread, dirent);
+    } else {
+        free(dirent);
+    }
+} /* memfs_dirent_release */
 
 static void *
 memfs_init(const char *cfgfile)
@@ -490,6 +505,8 @@ memfs_init(const char *cfgfile)
     inode->mtime      = now;
     inode->ctime      = now;
 
+    rb_tree_init(&inode->dir.dirents);
+
     shared->root_fhlen = memfs_inum_to_fh(shared->root_fh, inode->inum,
                                           inode->gen);
 
@@ -501,7 +518,6 @@ memfs_destroy(void *private_data)
 {
     struct memfs_shared *shared = private_data;
     struct memfs_inode  *inode;
-    struct memfs_dirent *dirent;
     int                  i, j, k, bi, iovi;
 
     for (i = 0; i < shared->num_inode_list; i++) {
@@ -514,14 +530,7 @@ memfs_destroy(void *private_data)
                 }
 
                 if (S_ISDIR(inode->mode)) {
-#ifndef __clang_analyzer__
-                    /* HASH_DEL blows clangs mind so we disable this block under analyzer */
-                    while (inode->dir.dirents) {
-                        dirent = inode->dir.dirents;
-                        HASH_DELETE(hh, inode->dir.dirents, dirent);
-                        free(dirent);
-                    }
-#endif /* ifndef __clang_analyzer__ */
+                    rb_tree_destroy(&inode->dir.dirents, memfs_dirent_release, NULL);
                 } else if (S_ISLNK(inode->mode)) {
                     free(inode->symlink.target);
                 } else if (S_ISREG(inode->mode)) {
@@ -633,14 +642,14 @@ memfs_map_attrs(
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
-        attr->va_set_mask   |= CHIMERA_VFS_ATTR_MASK_STATFS;
-        attr->va_space_avail = 0;
-        attr->va_space_free  = 0;
-        attr->va_space_total = 0;
-        attr->va_space_used  = 0;
-        attr->va_files_total = 0;
-        attr->va_files_free  = 0;
-        attr->va_files_avail = 0;
+        attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
+        attr->va_fs_space_avail = 0;
+        attr->va_fs_space_free  = 0;
+        attr->va_fs_space_total = 0;
+        attr->va_fs_space_used  = 0;
+        attr->va_fs_files_total = 0;
+        attr->va_fs_files_free  = 0;
+        attr->va_fs_files_avail = 0;
     }
 
 } /* memfs_map_attrs */
@@ -786,6 +795,9 @@ memfs_lookup(
 {
     struct memfs_inode  *inode, *child;
     struct memfs_dirent *dirent;
+    uint64_t             hash;
+
+    hash = request->lookup.component_hash;
 
     inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -797,13 +809,12 @@ memfs_lookup(
 
     if (unlikely(!S_ISDIR(inode->mode))) {
         pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
         return;
     }
 
-    HASH_FIND(hh, inode->dir.dirents, request->lookup.component,
-              request->lookup.component_len, dirent);
+    rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
 
     if (!dirent) {
         pthread_mutex_unlock(&inode->lock);
@@ -847,22 +858,26 @@ memfs_mkdir(
     struct chimera_vfs_attrs *r_dir_pre_attr  = &request->mkdir.r_dir_pre_attr;
     struct chimera_vfs_attrs *r_dir_post_attr = &request->mkdir.r_dir_post_attr;
     struct timespec           now;
+    uint64_t                  hash;
 
     clock_gettime(CLOCK_REALTIME, &now);
+
+    hash = request->mkdir.name_hash;
 
     /* Optimistically allocate an inode */
     inode = memfs_inode_alloc_thread(thread);
 
-    inode->size        = 4096;
-    inode->space_used  = 4096;
-    inode->uid         = 0;
-    inode->gid         = 0;
-    inode->nlink       = 2;
-    inode->mode        = S_IFDIR | 0755;
-    inode->atime       = now;
-    inode->mtime       = now;
-    inode->ctime       = now;
-    inode->dir.dirents = NULL;
+    inode->size       = 4096;
+    inode->space_used = 4096;
+    inode->uid        = 0;
+    inode->gid        = 0;
+    inode->nlink      = 2;
+    inode->mode       = S_IFDIR | 0755;
+    inode->atime      = now;
+    inode->mtime      = now;
+    inode->ctime      = now;
+
+    rb_tree_init(&inode->dir.dirents);
 
     memfs_apply_attrs(inode, request->mkdir.set_attr);
 
@@ -872,6 +887,7 @@ memfs_mkdir(
     dirent = memfs_dirent_alloc(thread,
                                 inode->inum,
                                 inode->gen,
+                                hash,
                                 request->mkdir.name,
                                 request->mkdir.name_len);
 
@@ -896,9 +912,7 @@ memfs_mkdir(
 
     memfs_map_attrs(r_dir_pre_attr, parent_inode);
 
-    HASH_FIND(hh, parent_inode->dir.dirents,
-              request->mkdir.name, request->mkdir.name_len,
-              existing_dirent);
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
 
     if (existing_dirent) {
 
@@ -917,7 +931,7 @@ memfs_mkdir(
         return;
     }
 
-    HASH_ADD(hh, parent_inode->dir.dirents, name, dirent->name_len, dirent);
+    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
     parent_inode->nlink++;
 
@@ -941,8 +955,11 @@ memfs_remove(
     struct memfs_inode  *parent_inode, *inode;
     struct memfs_dirent *dirent;
     struct timespec      now;
+    uint64_t             hash;
 
     clock_gettime(CLOCK_REALTIME, &now);
+
+    hash = request->remove.name_hash;
 
     parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -961,9 +978,7 @@ memfs_remove(
         return;
     }
 
-    HASH_FIND(hh, parent_inode->dir.dirents,
-              request->remove.name, request->remove.namelen,
-              dirent);
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
 
     if (!dirent) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -989,9 +1004,12 @@ memfs_remove(
         return;
     }
 
-    parent_inode->nlink--;
+    if (S_ISDIR(inode->mode)) {
+        parent_inode->nlink--;
+    }
     parent_inode->mtime = now;
-    HASH_DEL(parent_inode->dir.dirents, dirent);
+
+    rb_tree_remove(&parent_inode->dir.dirents, &dirent->node);
 
     if (S_ISDIR(inode->mode)) {
         inode->nlink = 0;
@@ -1031,16 +1049,11 @@ memfs_readdir(
     void                       *private_data)
 {
     struct memfs_inode      *inode, *dirent_inode;
-    struct memfs_dirent     *dirent, *tmp;
-    uint64_t                 cookie       = request->readdir.cookie;
-    uint64_t                 next_cookie  = 0;
-    int                      found_cookie = 0;
+    struct memfs_dirent     *dirent;
+    uint64_t                 cookie      = request->readdir.cookie;
+    uint64_t                 next_cookie = 0;
     int                      rc, eof = 1;
     struct chimera_vfs_attrs attr;
-
-    if (cookie == 0) {
-        found_cookie = 1;
-    }
 
     inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1059,16 +1072,13 @@ memfs_readdir(
 
     attr.va_req_mask = request->readdir.attr_mask;
 
-    HASH_ITER(hh, inode->dir.dirents, dirent, tmp)
-    {
-        if (!found_cookie && dirent->inum == cookie) {
-            found_cookie = 1;
-            continue;
-        }
+    if (cookie) {
+        rb_tree_query_ceil(&inode->dir.dirents, cookie + 1, hash, dirent);
+    } else {
+        rb_tree_first(&inode->dir.dirents, dirent);
+    }
 
-        if (!found_cookie) {
-            continue;
-        }
+    while (dirent) {
 
         dirent_inode = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
@@ -1082,7 +1092,7 @@ memfs_readdir(
 
         rc = request->readdir.callback(
             dirent->inum,
-            dirent->inum,
+            dirent->hash,
             dirent->name,
             dirent->name_len,
             &attr,
@@ -1093,7 +1103,9 @@ memfs_readdir(
             break;
         }
 
-        next_cookie = dirent->inum;
+        next_cookie = dirent->hash;
+
+        dirent = rb_tree_next(&inode->dir.dirents, dirent);
     }
 
     memfs_map_attrs(&request->readdir.r_dir_attr, inode);
@@ -1143,8 +1155,11 @@ memfs_open_at(
     struct memfs_dirent *dirent;
     unsigned int         flags = request->open_at.flags;
     struct timespec      now;
+    uint64_t             hash;
 
     clock_gettime(CLOCK_REALTIME, &now);
+
+    hash = request->open_at.name_hash;
 
     parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1163,13 +1178,12 @@ memfs_open_at(
 
     memfs_map_attrs(&request->open_at.r_dir_pre_attr, parent_inode);
 
-    HASH_FIND(hh, parent_inode->dir.dirents, request->open_at.name,
-              request->open_at.namelen, dirent);
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
 
     if (!dirent) {
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
             pthread_mutex_unlock(&parent_inode->lock);
-            request->status = CHIMERA_VFS_EEXIST;
+            request->status = CHIMERA_VFS_ENOENT;
             request->complete(request);
             return;
         }
@@ -1196,12 +1210,12 @@ memfs_open_at(
         dirent = memfs_dirent_alloc(thread,
                                     inode->inum,
                                     inode->gen,
+                                    hash,
                                     request->open_at.name,
                                     request->open_at.namelen);
 
-        HASH_ADD(hh, parent_inode->dir.dirents, name, dirent->name_len, dirent);
+        rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
-        parent_inode->nlink++;
         parent_inode->mtime = now;
     } else {
         inode = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
@@ -1313,7 +1327,6 @@ memfs_read(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct evpl             *evpl = thread->evpl;
     struct memfs_inode      *inode;
     struct memfs_block      *block;
     struct evpl_iovec_cursor cursor;
@@ -1403,11 +1416,10 @@ memfs_read(
 
             evpl_iovec_cursor_skip(&cursor, block_offset);
 
-            niov += evpl_iovec_cursor_move(evpl,
-                                           &cursor,
+            niov += evpl_iovec_cursor_move(&cursor,
                                            &iov[niov],
                                            max_iov - niov,
-                                           block_len);
+                                           block_len, 1);
         }
 
         block_offset = 0;
@@ -1576,8 +1588,11 @@ memfs_symlink(
     struct memfs_inode  *parent_inode, *inode;
     struct memfs_dirent *dirent, *existing_dirent;
     struct timespec      now;
+    uint64_t             hash;
 
     clock_gettime(CLOCK_REALTIME, &now);
+
+    hash = request->symlink.name_hash;
 
     /* Optimistically allocate an inode */
     inode = memfs_inode_alloc_thread(thread);
@@ -1605,6 +1620,7 @@ memfs_symlink(
     dirent = memfs_dirent_alloc(thread,
                                 inode->inum,
                                 inode->gen,
+                                hash,
                                 request->symlink.name,
                                 request->symlink.namelen);
 
@@ -1627,9 +1643,7 @@ memfs_symlink(
         return;
     }
 
-    HASH_FIND(hh, parent_inode->dir.dirents,
-              request->symlink.name, request->symlink.namelen,
-              existing_dirent);
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
 
     if (existing_dirent) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -1642,9 +1656,7 @@ memfs_symlink(
 
     memfs_map_attrs(&request->symlink.r_dir_pre_attr, parent_inode);
 
-    HASH_ADD(hh, parent_inode->dir.dirents, name, dirent->name_len, dirent);
-
-    parent_inode->nlink++;
+    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
     parent_inode->mtime = now;
 
@@ -1705,12 +1717,16 @@ memfs_rename(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct memfs_inode  *old_parent_inode, *new_parent_inode;
+    struct memfs_inode  *old_parent_inode, *new_parent_inode, *child_inode;
     struct memfs_dirent *dirent, *old_dirent;
     int                  cmp;
     struct timespec      now;
+    uint64_t             hash, new_hash;
 
     clock_gettime(CLOCK_REALTIME, &now);
+
+    hash     = request->rename.name_hash;
+    new_hash = request->rename.new_name_hash;
 
     cmp = memfs_fh_compare(request->fh,
                            request->fh_len,
@@ -1781,9 +1797,7 @@ memfs_rename(
         }
     }
 
-    HASH_FIND(hh, old_parent_inode->dir.dirents,
-              request->rename.name, request->rename.namelen,
-              old_dirent);
+    rb_tree_query_exact(&old_parent_inode->dir.dirents, hash, hash, old_dirent);
 
     if (!old_dirent) {
         pthread_mutex_unlock(&old_parent_inode->lock);
@@ -1793,9 +1807,7 @@ memfs_rename(
         return;
     }
 
-    HASH_FIND(hh, new_parent_inode->dir.dirents,
-              request->rename.new_name, request->rename.new_namelen,
-              dirent);
+    rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, dirent);
 
     if (dirent) {
         pthread_mutex_unlock(&old_parent_inode->lock);
@@ -1805,19 +1817,36 @@ memfs_rename(
         return;
     }
 
+    child_inode = memfs_inode_get_inum(shared, old_dirent->inum, old_dirent->gen);
+
+    if (!child_inode) {
+        pthread_mutex_unlock(&old_parent_inode->lock);
+        pthread_mutex_unlock(&new_parent_inode->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
     dirent = memfs_dirent_alloc(thread,
                                 old_dirent->inum,
                                 old_dirent->gen,
+                                new_hash,
                                 request->rename.new_name,
                                 request->rename.new_namelen);
 
-    HASH_ADD(hh, new_parent_inode->dir.dirents, name, dirent->name_len, dirent);
+    rb_tree_insert(&new_parent_inode->dir.dirents, hash, dirent);
 
-    old_parent_inode->nlink--;
-    new_parent_inode->nlink++;
+    rb_tree_remove(&old_parent_inode->dir.dirents, &old_dirent->node);
+
+    if (S_ISDIR(child_inode->mode)) {
+        old_parent_inode->nlink--;
+        new_parent_inode->nlink++;
+    }
 
     old_parent_inode->ctime = now;
     new_parent_inode->mtime = now;
+
+    pthread_mutex_unlock(&child_inode->lock);
 
     if (cmp != 0) {
         pthread_mutex_unlock(&old_parent_inode->lock);
@@ -1825,6 +1854,8 @@ memfs_rename(
     } else {
         pthread_mutex_unlock(&old_parent_inode->lock);
     }
+
+    memfs_dirent_free(thread, old_dirent);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -1841,8 +1872,11 @@ memfs_link(
     struct memfs_inode  *parent_inode, *inode;
     struct memfs_dirent *dirent, *existing_dirent;
     struct timespec      now;
+    uint64_t             hash;
 
     clock_gettime(CLOCK_REALTIME, &now);
+
+    hash = request->link.name_hash;
 
     parent_inode = memfs_inode_get_fh(shared,
                                       request->link.dir_fh,
@@ -1872,9 +1906,15 @@ memfs_link(
         return;
     }
 
-    HASH_FIND(hh, parent_inode->dir.dirents,
-              request->link.name, request->link.namelen,
-              existing_dirent);
+    if (unlikely(S_ISDIR(inode->mode))) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EPERM;
+        request->complete(request);
+        return;
+    }
+
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
 
     if (existing_dirent) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -1887,13 +1927,13 @@ memfs_link(
     dirent = memfs_dirent_alloc(thread,
                                 inode->inum,
                                 inode->gen,
+                                hash,
                                 request->link.name,
                                 request->link.namelen);
 
-    HASH_ADD(hh, parent_inode->dir.dirents, name, dirent->name_len, dirent);
+    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
     inode->nlink++;
-    parent_inode->nlink++;
 
     inode->ctime        = now;
     parent_inode->mtime = now;

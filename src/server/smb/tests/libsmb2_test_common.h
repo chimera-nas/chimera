@@ -12,33 +12,43 @@
 #include "server/server.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
+#include "smb2/smb2.h"
+#include "smb2/libsmb2.h"
+
+static void
+auth_fn(
+    const char *server,
+    const char *share,
+    char       *workgroup,
+    int         maxlen_workgroup,
+    char       *username,
+    int         maxlen_username,
+    char       *password,
+    int         maxlen_password)
+{
+    strncpy(workgroup, "", maxlen_workgroup);
+    strncpy(username, "anonymous", maxlen_username);
+    strncpy(password, "", maxlen_password);
+} /* auth_fn */
 
 struct test_env {
+    struct smb2_context       *ctx;
     struct chimera_server     *server;
     char                       session_dir[256];
-    int                        path_style;
     struct prometheus_metrics *metrics;
 };
 
 static inline void
-libs3_test_init(
+libsmb2_test_init(
     struct test_env *env,
     char           **argv,
     int              argc)
 {
     int                           opt;
     extern char                  *optarg;
-    const char                   *backend = "demofs";
+    const char                   *backend = "linux";
     struct chimera_server_config *config;
     struct timespec               tv;
-
-    chimera_log_init();
-
-    ChimeraLogLevel = CHIMERA_LOG_DEBUG;
-
-    chimera_enable_crash_handler();
-
-    evpl_set_log_fn(chimera_vlog);
 
     env->metrics = prometheus_metrics_create(NULL, NULL, 0);
 
@@ -47,17 +57,20 @@ libs3_test_init(
         &tv);
 
     env->session_dir[0] = '\0';
-    env->path_style     = 0;
-    while ((opt = getopt(argc, argv, "b:p")) != -1) {
+
+    while ((opt = getopt(argc, argv, "b:")) != -1) {
         switch (opt) {
             case 'b':
                 backend = optarg;
                 break;
-            case 'p':
-                env->path_style = 1;
-                break;
         } /* switch */
     }
+
+    ChimeraLogLevel = CHIMERA_LOG_DEBUG;
+
+    chimera_enable_crash_handler();
+
+    evpl_set_log_fn(chimera_vlog);
 
     snprintf(env->session_dir, sizeof(env->session_dir),
              "/build/test/session_%d_%lu_%lu",
@@ -139,40 +152,66 @@ libs3_test_init(
         exit(EXIT_FAILURE);
     }
 
-    chimera_server_create_bucket(env->server, "mybucket", "/share");
-
     chimera_server_start(env->server);
-} /* libnfs_test_init */
+
+    chimera_server_create_share(env->server, "share", "/share");
+
+    env->ctx = smb2_init_context();
+
+    if (env->ctx == NULL) {
+        fprintf(stderr, "Failed to init context\n");
+        exit(EXIT_FAILURE);
+    }
+
+    smb2_set_security_mode(env->ctx, SMB2_NEGOTIATE_SIGNING_ENABLED);
+
+    if (smb2_connect_share(env->ctx, "localhost", "share", "anonymous") != 0) {
+        fprintf(stderr, "smb2_connect_share failed. %s\n", smb2_get_error(env->ctx));
+        exit(EXIT_FAILURE);
+    }
+
+
+
+} /* libsmbclient_test_init */
 
 static inline void
-libs3_test_cleanup(
+libsmb2_test_cleanup(
     struct test_env *env,
     int              remove_session)
 {
+    int rc;
+
+    rc = smb2_disconnect_share(env->ctx);
+
+    if (rc < 0) {
+        fprintf(stderr, "Failed to disconnect share: %s\n", smb2_get_error(env->ctx));
+    }
+
+    smb2_destroy_context(env->ctx);
+
+    chimera_server_destroy(env->server);
+
+    prometheus_metrics_destroy(env->metrics);
 
     if (remove_session && env->session_dir[0] != '\0') {
         char cmd[1024];
         snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
         system(cmd);
     }
-
-    chimera_server_destroy(env->server);
-
-    prometheus_metrics_destroy(env->metrics);
-} /* libnfs_test_cleanup */
+} /* libsmbclient_test_cleanup */
 
 static inline void
-libs3_test_fail(struct test_env *env)
+libsmb2_test_fail(struct test_env *env)
 {
     fprintf(stderr, "Test failed\n");
 
-    libs3_test_cleanup(env, 0);
+    libsmb2_test_cleanup(env, 0);
 
     exit(EXIT_FAILURE);
-} /* libnfs_test_fail */
+} /* libsmbclient_test_fail */
 
 static inline void
-libs3_test_success(struct test_env *env)
+libsmb2_test_success(struct test_env *env)
 {
-    libs3_test_cleanup(env, 1);
-} /* libs3_test_cleanup */
+    libsmb2_test_cleanup(env, 1);
+} /* libsmb2_test_cleanup */

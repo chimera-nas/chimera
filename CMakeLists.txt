@@ -71,4 +71,6 @@ endif()
 add_subdirectory(ext)
 
 include_directories(ext/libevpl/include)
+include_directories(ext/libsmb2/include)
+
 add_subdirectory(src)

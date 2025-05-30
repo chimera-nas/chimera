@@ -4,3 +4,6 @@
 [submodule "ext/libevpl"]
 	path = ext/libevpl
 	url = https://github.com/chimera-nas/libevpl.git
+[submodule "ext/libsmb2"]
+	path = ext/libsmb2
+	url = https://github.com/sahlberg/libsmb2.git

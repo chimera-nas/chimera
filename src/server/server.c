@@ -9,6 +9,7 @@
 #include "protocol.h"
 #include "nfs/nfs.h"
 #include "s3/s3.h"
+#include "smb/smb.h"
 #include "vfs/vfs.h"
 #include "common/macros.h"
 #include "server/server.h"
@@ -31,9 +32,10 @@ struct chimera_server {
     const struct chimera_server_config *config;
     struct chimera_vfs                 *vfs;
     struct evpl_threadpool             *pool;
-    struct chimera_server_protocol     *protocols[2];
-    void                               *protocol_private[2];
+    struct chimera_server_protocol     *protocols[3];
+    void                               *protocol_private[3];
     void                               *s3_shared;
+    void                               *smb_shared;
     int                                 num_protocols;
     int                                 threads_online;
     pthread_mutex_t                     lock;
@@ -42,7 +44,7 @@ struct chimera_server {
 struct chimera_thread {
     struct chimera_server     *server;
     struct chimera_vfs_thread *vfs_thread;
-    void                      *protocol_private[2];
+    void                      *protocol_private[3];
     struct evpl_timer          watchdog;
 };
 
@@ -229,7 +231,7 @@ chimera_server_thread_init(
 } /* chimera_server_thread_init */
 
 SYMBOL_EXPORT int
-chimera_server_create_share(
+chimera_server_mount(
     struct chimera_server *server,
     const char            *share_path,
     const char            *module_name,
@@ -252,6 +254,21 @@ chimera_server_create_bucket(
 
     return 0;
 } /* chimera_server_create_bucket */
+
+SYMBOL_EXPORT int
+chimera_server_create_share(
+    struct chimera_server *server,
+    const char            *share_name,
+    const char            *share_path)
+{
+    if (!server->smb_shared) {
+        return -1;
+    }
+
+    chimera_smb_add_share(server->smb_shared, share_name, share_path);
+
+    return 0;
+} /* chimera_server_create_share */
 
 static void
 chimera_server_thread_shutdown(
@@ -307,13 +324,15 @@ chimera_server_init(
 
     chimera_server_info("Initializing protocols...");
     server->protocols[server->num_protocols++] = &nfs_protocol;
+    server->protocols[server->num_protocols++] = &smb_protocol;
     server->protocols[server->num_protocols++] = &s3_protocol;
 
     for (i = 0; i < server->num_protocols; i++) {
         server->protocol_private[i] = server->protocols[i]->init(config, server->vfs, metrics);
     }
 
-    server->s3_shared = server->protocol_private[1];
+    server->s3_shared  = server->protocol_private[2];
+    server->smb_shared = server->protocol_private[1];
 
     return server;
 } /* chimera_server_init */

@@ -83,7 +83,7 @@ chimera_server_thread_wake(
     struct evpl_timer *timer);
 
 int
-chimera_server_create_share(
+chimera_server_mount(
     struct chimera_server *server,
     const char            *module_name,
     const char            *share_path,
@@ -94,6 +94,12 @@ chimera_server_create_bucket(
     struct chimera_server *server,
     const char            *bucket_name,
     const char            *bucket_path);
+
+int
+chimera_server_create_share(
+    struct chimera_server *server,
+    const char            *share_name,
+    const char            *share_path);
 
 struct chimera_server *
 chimera_server_init(

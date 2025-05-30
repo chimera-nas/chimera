@@ -23,7 +23,7 @@
 #include "demofs.h"
 #include "common/logging.h"
 #include "common/misc.h"
-#include "evpl_iovec_cursor.h"
+#include "common/evpl_iovec_cursor.h"
 
 #ifndef container_of
 #define container_of(ptr, type, member) \
@@ -807,36 +807,36 @@ demofs_map_attrs(
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
-        attr->va_set_mask   |= CHIMERA_VFS_ATTR_MASK_STATFS;
-        attr->va_space_total = 0;
-        attr->va_space_used  = 0;
-        attr->va_space_avail = 0;
-        attr->va_space_free  = 0;
-        attr->va_files_total = 0;
-        attr->va_files_avail = 0;
-        attr->va_files_free  = 0;
+        attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
+        attr->va_fs_space_total = 0;
+        attr->va_fs_space_used  = 0;
+        attr->va_fs_space_avail = 0;
+        attr->va_fs_space_free  = 0;
+        attr->va_fs_files_total = 0;
+        attr->va_fs_files_avail = 0;
+        attr->va_fs_files_free  = 0;
 
         pthread_mutex_lock(&shared->lock);
 
         for (int i = 0; i < shared->num_devices; i++) {
-            device                = &shared->devices[i];
-            attr->va_space_total += device->size;
+            device                   = &shared->devices[i];
+            attr->va_fs_space_total += device->size;
         }
 
-        attr->va_space_used  = shared->total_bytes;
-        attr->va_space_free  = attr->va_space_total - attr->va_space_used;
-        attr->va_space_avail = attr->va_space_free;
+        attr->va_fs_space_used  = shared->total_bytes;
+        attr->va_fs_space_free  = attr->va_fs_space_total - attr->va_fs_space_used;
+        attr->va_fs_space_avail = attr->va_fs_space_free;
 
         pthread_mutex_unlock(&shared->lock);
 
         for (int i = 0; i < shared->num_inode_list; i++) {
             pthread_mutex_lock(&shared->inode_list[i].lock);
-            attr->va_files_total += shared->inode_list[i].total_inodes;
+            attr->va_fs_files_total += shared->inode_list[i].total_inodes;
             pthread_mutex_unlock(&shared->inode_list[i].lock);
         }
 
-        attr->va_files_free  = 0;
-        attr->va_files_avail = 0;
+        attr->va_fs_files_free  = 0;
+        attr->va_fs_files_avail = 0;
 
     }
 
@@ -1656,7 +1656,7 @@ demofs_read(
 
             chunk_iov = &demofs_private->iov[demofs_private->niov];
 
-            chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 32, chunk);
+            chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 32, chunk, 0);
 
             if (chunk & 4095) {
                 chunk_iov[chunk_niov]        = thread->pad;
@@ -1847,7 +1847,7 @@ demofs_write(
         niov = request->write.niov;
     }
 
-    evpl_iovec_cursor_init(&cursor, iov, niov);
+    evpl_iovec_cursor_init(&cursor, (struct evpl_iovec *) iov, niov);
 
     offset = 0;
     left   = (request->write.length + 4095) & ~4095;
@@ -1861,7 +1861,7 @@ demofs_write(
 
         chunk_iov = &demofs_private->iov[demofs_private->niov];
 
-        chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 32, chunk);
+        chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 32, chunk, 0);
 
         demofs_private->niov += chunk_niov;
 

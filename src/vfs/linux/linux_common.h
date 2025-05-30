@@ -140,6 +140,7 @@ chimera_linux_statx_to_attr(
     attr->va_gid           = stx->stx_gid;
     attr->va_rdev          = ((uint64_t) stx->stx_rdev_major << 32) | stx->stx_rdev_minor;
     attr->va_size          = stx->stx_size;
+    attr->va_space_used    = stx->stx_blocks * 512;
     attr->va_atime.tv_sec  = stx->stx_atime.tv_sec;
     attr->va_atime.tv_nsec = stx->stx_atime.tv_nsec;
     attr->va_mtime.tv_sec  = stx->stx_mtime.tv_sec;
@@ -154,15 +155,15 @@ chimera_linux_statvfs_to_attr(
     struct statvfs           *stvfs)
 {
 
-    attr->va_set_mask   |= CHIMERA_VFS_ATTR_MASK_STATFS;
-    attr->va_space_total = stvfs->f_blocks * stvfs->f_bsize;
-    attr->va_space_free  = stvfs->f_bavail * stvfs->f_bsize;
-    attr->va_space_avail = attr->va_space_free;
-    attr->va_space_used  = attr->va_space_total - attr->va_space_free;
+    attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
+    attr->va_fs_space_total = stvfs->f_blocks * stvfs->f_bsize;
+    attr->va_fs_space_free  = stvfs->f_bavail * stvfs->f_bsize;
+    attr->va_fs_space_avail = attr->va_fs_space_free;
+    attr->va_fs_space_used  = attr->va_fs_space_total - attr->va_fs_space_free;
 
-    attr->va_files_avail = stvfs->f_ffree;
-    attr->va_files_free  = stvfs->f_ffree;
-    attr->va_files_total = stvfs->f_files;
+    attr->va_fs_files_avail = stvfs->f_ffree;
+    attr->va_fs_files_free  = stvfs->f_ffree;
+    attr->va_fs_files_total = stvfs->f_files;
 } /* linux_statvfs_to_chimera_attr */
 
 static int

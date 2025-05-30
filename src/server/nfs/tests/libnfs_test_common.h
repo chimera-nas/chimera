@@ -54,9 +54,13 @@ libnfs_test_init(
         } /* switch */
     }
 
+    chimera_log_init();
+
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 
     chimera_enable_crash_handler();
+
+    evpl_set_log_fn(chimera_vlog);
 
     snprintf(env->session_dir, sizeof(env->session_dir),
              "/build/test/session_%d_%lu_%lu",
@@ -120,19 +124,19 @@ libnfs_test_init(
     env->server = chimera_server_init(config, env->metrics);
 
     if (strcmp(backend, "linux") == 0) {
-        chimera_server_create_share(env->server, "share", "linux", env->session_dir);
+        chimera_server_mount(env->server, "share", "linux", env->session_dir);
 
     } else if (strcmp(backend, "io_uring") == 0) {
-        chimera_server_create_share(env->server, "share", "io_uring", env->session_dir);
+        chimera_server_mount(env->server, "share", "io_uring", env->session_dir);
 
     } else if (strcmp(backend, "memfs") == 0) {
-        chimera_server_create_share(env->server, "share", "memfs", "/");
+        chimera_server_mount(env->server, "share", "memfs", "/");
 
     } else if (strcmp(backend, "demofs") == 0) {
-        chimera_server_create_share(env->server, "share", "demofs", "/");
+        chimera_server_mount(env->server, "share", "demofs", "/");
 
     } else if (strcmp(backend, "cairn") == 0) {
-        chimera_server_create_share(env->server, "share", "cairn", "/");
+        chimera_server_mount(env->server, "share", "cairn", "/");
     } else {
         fprintf(stderr, "Unknown backend: %s\n", backend);
         exit(EXIT_FAILURE);

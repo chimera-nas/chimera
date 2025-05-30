@@ -722,7 +722,7 @@ cairn_map_attrs(
         attr->va_uid        = inode->uid;
         attr->va_gid        = inode->gid;
         attr->va_size       = inode->size;
-        attr->va_space_used = (inode->space_used + 4095) & ~4095;
+        attr->va_space_used = inode->space_used;
         attr->va_atime      = inode->atime;
         attr->va_mtime      = inode->mtime;
         attr->va_ctime      = inode->ctime;
@@ -732,14 +732,14 @@ cairn_map_attrs(
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
-        attr->va_set_mask   |= CHIMERA_VFS_ATTR_MASK_STATFS;
-        attr->va_space_avail = 0;
-        attr->va_space_free  = 0;
-        attr->va_space_total = 0;
-        attr->va_space_used  = 0;
-        attr->va_files_total = 0;
-        attr->va_files_free  = 0;
-        attr->va_files_avail = 0;
+        attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
+        attr->va_fs_space_avail = 0;
+        attr->va_fs_space_free  = 0;
+        attr->va_fs_space_total = 0;
+        attr->va_fs_space_used  = 0;
+        attr->va_fs_files_total = 0;
+        attr->va_fs_files_free  = 0;
+        attr->va_fs_files_avail = 0;
     }
 } /* cairn_map_attrs */
 

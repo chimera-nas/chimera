@@ -15,7 +15,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
     if (request->status == CHIMERA_VFS_OK) {
         chimera_vfs_populate_handle(thread, handle, request->open.r_vfs_private);
     } else {
-        chimera_vfs_release(thread, handle);
+        chimera_vfs_release_failed(thread, handle, request->status);
         handle = NULL;
     }
 
@@ -42,11 +42,11 @@ chimera_vfs_open_hdl_callback(
         /* Someone was already in process opening the file when we tried
          * and they failed, so we fail too.
          */
-        callback(CHIMERA_VFS_OK, NULL, request->proto_private_data);
+        callback(request->status, NULL, request->proto_private_data);
         chimera_vfs_request_free(request->thread, request);
-    } else if (handle->pending) {
-        /* Miss on the open cache so we need to dispatch the request
-         * and open it ourselves
+    } else if (handle->flags & CHIMERA_VFS_OPEN_HANDLE_PENDING) {
+        /* Miss on the open cache, so a pending open record was inserted
+         * for us and its now our job to actually dispatch the open
          */
         request->pending_handle = handle;
         chimera_vfs_dispatch(request);

@@ -26,12 +26,12 @@ chimera_nfs3_fsstat_complete(
     if (res.status == NFS3_OK) {
         chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
 
-        res.resok.tbytes   = attr->va_space_total;
-        res.resok.fbytes   = attr->va_space_free;
-        res.resok.abytes   = attr->va_space_used;
-        res.resok.tfiles   = attr->va_files_total;
-        res.resok.ffiles   = attr->va_files_free;
-        res.resok.afiles   = attr->va_files_avail;
+        res.resok.tbytes   = attr->va_fs_space_total;
+        res.resok.fbytes   = attr->va_fs_space_free;
+        res.resok.abytes   = attr->va_fs_space_used;
+        res.resok.tfiles   = attr->va_fs_files_total;
+        res.resok.ffiles   = attr->va_fs_files_free;
+        res.resok.afiles   = attr->va_fs_files_avail;
         res.resok.invarsec = 0;
     } else {
         chimera_nfs3_set_post_op_attr(&res.resfail.obj_attributes, attr);
