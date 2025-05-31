@@ -8,12 +8,16 @@ name: Deploy Jekyll site to Pages
 
 on:
   push:
-    branches: ["main"]
+    branches:
+      - main              # publish only from the default branch
+    tags:
+      - "*"               # and when a tag is pushed
+    paths:
+      - "docs/**"         # docs changes trigger the workflow
+  pull_request:            # build-only for PRs
     paths:
       - "docs/**"
-
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
+  workflow_dispatch:       # manual run
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
@@ -51,12 +55,14 @@ jobs:
         env:
           JEKYLL_ENV: production
       - name: Upload artifact
+        if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/_site/
 
   # Deployment job
   deploy:
+    if: github.event_name == 'push'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
