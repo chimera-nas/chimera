@@ -28,7 +28,7 @@ libnfs_test_init(
     char           **argv,
     int              argc)
 {
-    int                           opt;
+    int                           opt, rc;
     extern char                  *optarg;
     int                           nfsvers = 3;
     const char                   *backend = "linux";
@@ -96,7 +96,13 @@ libnfs_test_init(
                 exit(EXIT_FAILURE);
             }
 
-            ftruncate(fd, 1024 * 1024 * 1024);
+            rc = ftruncate(fd, 1024 * 1024 * 1024);
+
+            if (rc < 0) {
+                fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+
             close(fd);
         }
 
