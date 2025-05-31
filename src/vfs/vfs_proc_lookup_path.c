@@ -98,8 +98,9 @@ chimera_vfs_lookup_path_complete(
             flags |= CHIMERA_VFS_OPEN_DIRECTORY;
         }
 
+        memcpy(lp_request->lookup_path.next_fh, attr->va_fh, attr->va_fh_len);
         chimera_vfs_open(thread,
-                         attr->va_fh,
+                         lp_request->lookup_path.next_fh,
                          attr->va_fh_len,
                          flags,
                          chimera_vfs_lookup_path_open_dispatch,
