@@ -64,8 +64,8 @@ jobs:
             -w /workspace \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.tag }} \
             bash -euxc '\
-              mkdir -p build && \
-              cd build && \
-              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} .. && \
+              mkdir -p /build && \
+              cd /build && \
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} /workspace && \
               ninja && \
               ctest --output-on-failure'

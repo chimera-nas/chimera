@@ -646,8 +646,8 @@ chimera_smb_add_share(
     struct chimera_server_smb_shared *shared = smb_shared;
     struct chimera_smb_share         *share  = calloc(1, sizeof(*share));
 
-    strncpy(share->name, name, sizeof(share->name));
-    strncpy(share->path, path, sizeof(share->path));
+    snprintf(share->name, sizeof(share->name), "%s", name);
+    snprintf(share->path, sizeof(share->path), "%s", path);
 
     pthread_mutex_lock(&shared->shares_lock);
     LL_PREPEND(shared->shares, share);

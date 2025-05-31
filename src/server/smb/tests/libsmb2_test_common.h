@@ -202,7 +202,13 @@ libsmb2_test_cleanup(
     if (remove_session && env->session_dir[0] != '\0') {
         char cmd[1024];
         snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-        system(cmd);
+
+        rc = system(cmd);
+
+        if (rc < 0) {
+            fprintf(stderr, "Failed to remove session directory %s: %s\n", env->session_dir, strerror(errno));
+            exit(EXIT_FAILURE);
+        }
     }
 } /* libsmbclient_test_cleanup */
 

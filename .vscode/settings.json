@@ -3,7 +3,7 @@
   "cmake.saveBeforeBuild": true,
   "cmake.generator": "Ninja",
   "cmake.configureSettings": {
-    "CMAKE_C_COMPILER": "clang"
+    "CMAKE_C_COMPILER": "gcc"
   },
   "cmake.options.statusBarVisibility": "compact",
   "cmake.options.advanced.launch.statusBarVisibility": "hidden",
