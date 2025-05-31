@@ -17,7 +17,7 @@ RUN apt-get -y update && \
 RUN if [ "$ENABLE_FIO" = "1" ] ; then \
     git clone https://github.com/axboe/fio.git /fio && \
     cd /fio && \
-    ./configure && \
+    ./configure --disable-libnfs && \
     make -j8 && \
     make install ; \
     fi
