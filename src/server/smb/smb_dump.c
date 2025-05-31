@@ -64,6 +64,18 @@ smb_status_name(uint32_t status)
             return "MoreProcessingRequired";
         case SMB2_STATUS_NO_SUCH_FILE:
             return "NoSuchFile";
+        case SMB2_STATUS_INTERNAL_ERROR:
+            return "InternalError";
+        case SMB2_STATUS_BAD_NETWORK_NAME:
+            return "BadNetworkName";
+        case SMB2_STATUS_INVALID_PARAMETER:
+            return "InvalidParameter";
+        case SMB2_STATUS_NOT_SUPPORTED:
+            return "NotSupported";
+        case SMB2_STATUS_INVALID_HANDLE:
+            return "InvalidHandle";
+        case SMB2_STATUS_REQUEST_ABORTED:
+            return "RequestAborted";
         default:
             return "Unknown";
     } /* switch */
@@ -89,7 +101,7 @@ _smb_dump_request(
     }
 
     if (request->smb2_hdr.sync.tree_id) {
-        hdrp += sprintf(hdrp, " tree_id %x", request->smb2_hdr.sync.tree_id);
+        sprintf(hdrp, " tree_id %x", request->smb2_hdr.sync.tree_id);
     }
 
     switch (request->smb2_hdr.command) {
@@ -178,12 +190,12 @@ _smb_dump_reply(
     }
 
     if (request->tree) {
-        hdrp += sprintf(hdrp, " tree_id %x", request->tree->tree_id);
+        sprintf(hdrp, " tree_id %x", request->tree->tree_id);
     }
 
     chimera_smb_debug("SMB  Reply   %p: %d/%d %s %s%s%s",
                       request, i, n, smb_command_name(request->smb2_hdr.command),
-                      smb_status_name(request->smb2_hdr.status), hdr_args, argstr);
+                      smb_status_name(request->status), hdr_args, argstr);
 } /* _smb_dump_request_reply */
 
 void

@@ -31,6 +31,8 @@ s3_bucket_map_destroy(struct s3_bucket_map *map)
 {
     struct s3_bucket *bucket, *tmp;
 
+#ifndef __clang_analyzer__
+    /* uthash blows clangs mind */
     HASH_ITER(hh, map->buckets, bucket, tmp)
     {
         HASH_DEL(map->buckets, bucket);
@@ -38,6 +40,7 @@ s3_bucket_map_destroy(struct s3_bucket_map *map)
         free(bucket->path);
         free(bucket);
     }
+#endif /* ifndef __clang_analyzer__ */
 
     pthread_rwlock_destroy(&map->rwlock);
 

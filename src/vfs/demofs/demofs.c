@@ -561,7 +561,7 @@ demofs_init(const char *cfgfile)
 
     cfg = json_load_file(cfgfile, 0, &json_error);
 
-    chimera_demofs_abort_if(cfg == NULL, "Error parsing JSON: %s\n", json_error.text);
+    chimera_demofs_abort_if(cfg == NULL, "Error parsing JSON: %s", json_error.text);
 
     devices_cfg = json_object_get(cfg, "devices");
 
@@ -582,7 +582,7 @@ demofs_init(const char *cfgfile)
         } else if (strcmp(protocol_name, "vfio") == 0) {
             protocol_id = EVPL_BLOCK_PROTOCOL_VFIO;
         } else {
-            chimera_demofs_abort("Unsupported protocol: %s\n", protocol_name);
+            chimera_demofs_abort("Unsupported protocol: %s", protocol_name);
         }
 
         rc = stat(device_path, &st);
@@ -591,7 +591,7 @@ demofs_init(const char *cfgfile)
 
             fd = open(device_path, O_CREAT | O_RDWR, 0644);
 
-            chimera_demofs_abort_if(fd < 0, "Failed to open device %s: %s\n", device_path, strerror(errno));
+            chimera_demofs_abort_if(fd < 0, "Failed to open device %s: %s", device_path, strerror(errno));
 
             ftruncate(fd, size);
 
@@ -603,7 +603,7 @@ demofs_init(const char *cfgfile)
         device->size             = evpl_block_size(device->bdev);
         device->max_request_size = evpl_block_max_request_size(device->bdev);
 
-        chimera_demofs_info("Device %s size %lu max_request_size %lu\n",
+        chimera_demofs_info("Device %s size %lu max_request_size %lu",
                             device_path, device->size, device->max_request_size);
 
         free_space            = calloc(1, sizeof(*free_space));

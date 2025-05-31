@@ -1418,6 +1418,7 @@ cairn_open_at(
         new_inode.atime      = now;
         new_inode.mtime      = now;
         new_inode.ctime      = now;
+        new_inode.refcnt     = 1;
 
         cairn_apply_attrs(&new_inode, request->open_at.set_attr);
 

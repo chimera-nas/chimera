@@ -185,7 +185,7 @@ rb_tree_destroy(
                 } else if ((element)->keyname > container_of(x, typeof(*(element)), node)->keyname) { \
                     x = x->right; \
                 } else { \
-                    break; /* Duplicate key */ \
+                    abort(); /* Duplicate key */ \
                 } \
             } \
     \

@@ -66,8 +66,6 @@ chimera_vfs_find(
     struct chimera_vfs_thread    *vfs,
     const void                   *fh,
     int                           fhlen,
-    const char                   *path_prefix,
-    int                           path_prefix_len,
     uint64_t                      attr_mask,
     chimera_vfs_filter_callback_t filter,
     chimera_vfs_find_callback_t   callback,

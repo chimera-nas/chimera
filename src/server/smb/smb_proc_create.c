@@ -285,8 +285,6 @@ chimera_smb_create_open_parent(struct chimera_smb_request *request)
         return;
     }
 
-    chimera_smb_debug("create open parent path '%s'", path);
-
     slash = rindex(path, '\\');
 
     if (slash) {

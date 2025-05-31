@@ -79,11 +79,16 @@ struct chimera_s3_request {
         } put;
 
         struct {
-            char              prefix[256];
             int               prefix_len;
+            int               base_path_len;
+            int               filter_len;
             int               max_keys;
             char             *rp;
             struct evpl_iovec response;
+            uint8_t           root_fh[CHIMERA_VFS_FH_SIZE];
+            char              prefix[256];
+            char              base_path[256];
+            char              filter[256];
         } list;
     };
 };

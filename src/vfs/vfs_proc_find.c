@@ -49,7 +49,9 @@ chimera_vfs_find_drain(
         chimera_vfs_find_result_free(thread, result);
     }
 
-    if (!root->find.results && !root->find.complete_called) {
+    if (!root->find.results &&
+        root->find.is_complete &&
+        !root->find.complete_called) {
         root->find.complete(CHIMERA_VFS_OK, root->find.private_data);
         root->find.complete_called = 1;
         chimera_vfs_request_free(thread, root);
@@ -72,7 +74,6 @@ chimera_vfs_find_dispatch(
     chimera_vfs_find_complete_t     complete,
     void                           *private_data)
 {
-
     struct chimera_vfs_request *find_request;
 
     find_request = chimera_vfs_request_alloc(thread, fh, fhlen);
@@ -98,8 +99,8 @@ chimera_vfs_find_dispatch(
 
     chimera_vfs_open(
         thread,
-        fh,
-        fhlen,
+        find_request->fh,
+        find_request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
         chimera_vfs_find_open_callback,
         find_request);
@@ -149,19 +150,18 @@ chimera_vfs_find_readdir_callback(
                                                   find_request->find.private_data);
 
         if (filter_result == 0) {
-            chimera_vfs_find_dispatch(
-                thread,
-                attrs->va_fh,
-                attrs->va_fh_len,
-                result->path,
-                result->path_len,
-                find_request->find.attr_mask,
-                find_request->find.root,
-                result,
-                find_request->find.filter,
-                find_request->find.callback,
-                find_request->find.complete,
-                find_request->find.private_data);
+            chimera_vfs_find_dispatch(thread,
+                                      attrs->va_fh,
+                                      attrs->va_fh_len,
+                                      result->path,
+                                      result->path_len,
+                                      find_request->find.attr_mask,
+                                      find_request->find.root,
+                                      result,
+                                      find_request->find.filter,
+                                      find_request->find.callback,
+                                      find_request->find.complete,
+                                      find_request->find.private_data);
         }
     }
 
@@ -224,26 +224,15 @@ chimera_vfs_find(
     struct chimera_vfs_thread    *thread,
     const void                   *fh,
     int                           fhlen,
-    const char                   *path_prefix,
-    int                           path_prefix_len,
     uint64_t                      attr_mask,
     chimera_vfs_filter_callback_t filter,
     chimera_vfs_find_callback_t   callback,
     chimera_vfs_find_complete_t   complete,
     void                         *private_data)
 {
-
-    chimera_vfs_find_dispatch(
-        thread,
-        fh,
-        fhlen,
-        path_prefix,
-        path_prefix_len,
-        attr_mask,
-        NULL,
-        NULL,
-        filter,
-        callback,
-        complete,
-        private_data);
+    chimera_vfs_find_dispatch(thread,
+                              fh, fhlen,
+                              "", 0,
+                              attr_mask, NULL, NULL,
+                              filter, callback, complete, private_data);
 } /* chimera_vfs_find */

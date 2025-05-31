@@ -290,8 +290,14 @@ chimera_vfs_name_cache_insert(
     entry->expiration.tv_nsec = now.tv_nsec;
 
     memcpy(entry->parent_fh, fh, fh_len);
-    memcpy(entry->child_fh, child_fh, child_fh_len);
-    memcpy(entry->child_name, name, name_len);
+
+    if (child_fh_len) {
+        memcpy(entry->child_fh, child_fh, child_fh_len);
+    }
+
+    if (name_len) {
+        memcpy(entry->child_name, name, name_len);
+    }
 
     urcu_memb_read_lock();
 

@@ -84,7 +84,20 @@ main(
         fprintf(stderr, "Failed to close file: %s\n", smb2_get_error(env.ctx));
         libsmb2_test_fail(&env);
     }
-    smb2_unlink(env.ctx, TEST_FILE);
+
+    rc = smb2_unlink(env.ctx, TEST_FILE);
+
+    if (rc < 0) {
+        fprintf(stderr, "Failed to unlink file: %s\n", smb2_get_error(env.ctx));
+        libsmb2_test_fail(&env);
+    }
+
+    rc = smb2_unlink(env.ctx, "/no/such/thing");
+
+    if (rc == 0) {
+        fprintf(stderr, "Unlink of non-existent file succeeded\n");
+        libsmb2_test_fail(&env);
+    }
 
     libsmb2_test_success(&env);
 

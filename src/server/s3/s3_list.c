@@ -32,11 +32,11 @@ chimera_s3_list_filter(
     struct chimera_s3_request *request = private_data;
     int                        match, len = pathlen;
 
-    if (request->path_len < len) {
-        len = request->path_len;
+    if (request->list.filter_len < len) {
+        len = request->list.filter_len;
     }
 
-    match = strncmp(path, request->path, len);
+    match = strncmp(path, request->list.filter, len);
 
     return match != 0;
 } /* chimera_s3_list_filter */
@@ -61,11 +61,11 @@ chimera_s3_list_find_callback(
         return 0;
     }
 
-    if (request->path_len < len) {
-        len = request->path_len;
+    if (request->list.filter_len < len) {
+        len = request->list.filter_len;
     }
 
-    match = strncmp(path, request->path, len);
+    match = strncmp(path, request->list.filter, len);
 
     if (match != 0) {
         return 0;
@@ -76,7 +76,14 @@ chimera_s3_list_find_callback(
     chimera_s3_etag_hex(etag, sizeof(etag), attr);
 
     chimera_s3_list_append(&request->list.rp, " <Contents>\n");
-    chimera_s3_list_append(&request->list.rp, "  <Key>%.*s</Key>\n", pathlen, path);
+
+    if (request->list.base_path_len) {
+        chimera_s3_list_append(&request->list.rp, "  <Key>/%.*s%.*s</Key>\n",
+                               request->list.base_path_len, request->list.base_path,
+                               pathlen, path);
+    } else {
+        chimera_s3_list_append(&request->list.rp, "  <Key>%.*s</Key>\n", pathlen, path);
+    }
     chimera_s3_list_append(&request->list.rp, "  <LastModified>%s</LastModified>\n", date);
     chimera_s3_list_append(&request->list.rp, "  <ETag>%s</ETag>\n", etag);
     chimera_s3_list_append(&request->list.rp, "  <Size>%lu</Size>\n", attr->va_size);
@@ -137,25 +144,103 @@ chimera_s3_list_find_complete(
     }
 } /* chimera_s3_list_find_complete */
 
+static void
+chimera_s3_list_lookup_path_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_s3_request       *request = private_data;
+    struct chimera_server_s3_thread *thread  = request->thread;
+    const char                      *slash;
+    const void                      *root_fh;
+    int                              root_fh_len;
+
+    if (error_code || !S_ISDIR(attr->va_mode)) {
+        /* The path prefix was not a valid path, so take the largest
+         * prefix of it that must be a valid path and start the find from there */
+
+        slash = rindex(request->path, '/');
+
+        if (slash) {
+            request->list.base_path_len = slash - request->path;
+            memcpy(request->list.base_path, request->path, request->list.base_path_len);
+
+            request->list.filter_len = request->path_len - request->list.base_path_len;
+            memcpy(request->list.filter, request->path + request->list.base_path_len, request->list.filter_len);
+        } else {
+            request->list.base_path_len = 0;
+            request->list.filter_len    = request->path_len;
+            memcpy(request->list.filter, request->path, request->list.filter_len);
+        }
+
+
+        root_fh     = request->bucket_fh;
+        root_fh_len = request->bucket_fhlen;
+    } else {
+        /* Path prefix turned out to be a valid path, we can start from there */
+        memcpy(request->list.root_fh, attr->va_fh, attr->va_fh_len);
+        root_fh     = request->list.root_fh;
+        root_fh_len = attr->va_fh_len;
+
+        request->list.base_path_len = request->path_len;
+        memcpy(request->list.base_path, request->path, request->list.base_path_len);
+
+        request->list.filter_len = 0;
+    }
+
+    chimera_vfs_find(thread->vfs,
+                     root_fh,
+                     root_fh_len,
+                     CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                     chimera_s3_list_filter,
+                     chimera_s3_list_find_callback,
+                     chimera_s3_list_find_complete,
+                     request);
+
+} /* chimera_s3_list_lookup_path_callback */
+
 void
 chimera_s3_list(
     struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
+    while (*request->path == '/') {
+        request->path++;
+        request->path_len--;
+    }
 
     evpl_iovec_alloc(evpl, 1024 * 1024, 0, 1, &request->list.response);
 
     request->list.rp = evpl_iovec_data(&request->list.response);
 
-    chimera_vfs_find(thread->vfs,
-                     request->bucket_fh,
-                     request->bucket_fhlen,
-                     "",    //request->path,
-                     0,    //request->path_len,
-                     CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                     chimera_s3_list_filter,
-                     chimera_s3_list_find_callback,
-                     chimera_s3_list_find_complete,
-                     request);
-} /* chimera_s3_get */
+    if (request->path_len == 0) {
+
+        request->list.base_path_len = 0;
+        request->list.filter_len    = 0;
+
+        chimera_vfs_find(thread->vfs,
+                         request->bucket_fh,
+                         request->bucket_fhlen,
+                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                         chimera_s3_list_filter,
+                         chimera_s3_list_find_callback,
+                         chimera_s3_list_find_complete,
+                         request);
+    } else {
+
+        /* If we are lucky, the path prefix is a valid path and we can start
+         * the find from that location */
+
+        chimera_vfs_lookup_path(
+            thread->vfs,
+            request->bucket_fh,
+            request->bucket_fhlen,
+            request->path,
+            request->path_len,
+            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+            chimera_s3_list_lookup_path_callback,
+            request);
+    }
+} /* chimera_s3_list */

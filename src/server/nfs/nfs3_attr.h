@@ -159,13 +159,13 @@ chimera_nfs3_set_wcc_data(
     const struct chimera_vfs_attrs *pre_attr,
     const struct chimera_vfs_attrs *post_attr)
 {
-    if (pre_attr->va_set_mask & CHIMERA_VFS_ATTR_ATOMIC) {
+    if (pre_attr && pre_attr->va_set_mask & CHIMERA_VFS_ATTR_ATOMIC) {
         chimera_nfs3_set_pre_op_attr(&wcc->before, pre_attr);
     } else {
         wcc->before.attributes_follow = 0;
     }
 
-    if (post_attr->va_set_mask & CHIMERA_VFS_ATTR_ATOMIC) {
+    if (post_attr && post_attr->va_set_mask & CHIMERA_VFS_ATTR_ATOMIC) {
         chimera_nfs3_set_post_op_attr(&wcc->after, post_attr);
     } else {
         wcc->after.attributes_follow = 0;

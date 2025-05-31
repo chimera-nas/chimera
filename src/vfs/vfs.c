@@ -234,7 +234,7 @@ chimera_vfs_init(
                                                                                   "The latency of VFS operations",
                                                                                   24);
 
-        vfs->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_counter_series *));
+        vfs->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_series *));
 
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
             vfs->metrics.op_latency_series[i] = prometheus_histogram_create_series(vfs->metrics.op_latency,
@@ -422,7 +422,7 @@ chimera_vfs_thread_init(
     thread->vfs  = vfs;
 
     if (vfs->metrics.metrics) {
-        thread->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_series *));
+        thread->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_instance *));
 
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
             thread->metrics.op_latency_series[i] = prometheus_histogram_series_create_instance(vfs->metrics.

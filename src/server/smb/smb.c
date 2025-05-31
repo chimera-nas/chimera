@@ -215,7 +215,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
         chimera_smb_request_free(thread, request);
 
-        evpl_iovec_cursor_zero(&reply_cursor, (8 - evpl_iovec_cursor_consumed(&reply_cursor) & 7) & 7);
+        evpl_iovec_cursor_zero(&reply_cursor, (8 - (evpl_iovec_cursor_consumed(&reply_cursor) & 7)) & 7);
 
     }
 
@@ -229,6 +229,11 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 static inline void
 chimera_smb_compound_abort(struct chimera_smb_compound *compound)
 {
+    if (compound->complete_requests < compound->num_requests) {
+        chimera_smb_complete_request(compound->requests[compound->complete_requests], SMB2_STATUS_REQUEST_ABORTED);
+    } else {
+        chimera_smb_compound_reply(compound);
+    }
 } /* chimera_smb_compound_abort */
 
 void
@@ -368,12 +373,14 @@ chimera_smb_server_handle_compound(
                      request->smb2_hdr.protocol_id[2] != 0x4D ||
                      request->smb2_hdr.protocol_id[3] != 0x42)) {
             chimera_smb_error("Received SMB2 message with invalid protocol header");
+            chimera_smb_request_free(thread, request);
             evpl_close(evpl, conn->bind);
             return;
         }
 
         if (unlikely(request->smb2_hdr.struct_size != 64)) {
             chimera_smb_error("Received SMB2 message with invalid struct size");
+            chimera_smb_request_free(thread, request);
             evpl_close(evpl, conn->bind);
             return;
         }
@@ -392,6 +399,7 @@ chimera_smb_server_handle_compound(
 
                 if (!request->session) {
                     chimera_smb_error("Received SMB2 message with invalid session id");
+                    chimera_smb_request_free(thread, request);
                     evpl_close(evpl, conn->bind);
                     return;
                 }
@@ -405,6 +413,7 @@ chimera_smb_server_handle_compound(
         if (unlikely(!request->session && (request->smb2_hdr.command != SMB2_NEGOTIATE &&
                                            request->smb2_hdr.command != SMB2_SESSION_SETUP))) {
             chimera_smb_error("Received SMB2 message with invalid command and no session");
+            chimera_smb_request_free(thread, request);
             evpl_close(evpl, conn->bind);
             return;
         }
@@ -452,11 +461,13 @@ chimera_smb_server_handle_compound(
                 break;
             default:
                 chimera_smb_error("smb_server_handle_msg: unknown command %u", request->smb2_hdr.command);
-                rc = -1;
+                chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+                rc = 0;
         } /* switch */
 
         if (rc) {
             chimera_smb_error("smb_server_handle_msg: failed to parse command %u", request->smb2_hdr.command);
+            chimera_smb_request_free(thread, request);
             evpl_close(evpl, conn->bind);
             return;
         }
