@@ -1,4 +1,4 @@
-name: Build and Publish Docker Image
+name: Build Docker Image
 
 on:
   push:
@@ -65,7 +65,7 @@ jobs:
           tags: |
             type=raw,value=${{ matrix.tag }}
 
-      - name: Build and push per architecture
+      - name: Build the docker image
         uses: docker/build-push-action@v5
         with:
           context: .
