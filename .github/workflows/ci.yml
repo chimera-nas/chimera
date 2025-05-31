@@ -1,13 +1,80 @@
 name: CI
 
 on:
+  pull_request:
   push:
     branches: ["main"]
-  pull_request:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # Build job
-  build:
+  docker-build:
+    name: Build Docker Images
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        build_type: [Release, Debug]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr,prefix=pr-
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest-debug,enable={{is_default_branch}},suffix={{#if eq '${{ matrix.build_type }}' 'Debug'}}-debug{{/if}}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Generate Docker image info
+        run: |
+          echo "## Docker Build Results - ${{ matrix.build_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Build Type:** ${{ matrix.build_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Platform:** linux/amd64" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event_name }}" == "push" ]; then
+            echo "**Published:** ✅ Yes" >> $GITHUB_STEP_SUMMARY
+            echo "**Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Published:** ❌ No (PR build)" >> $GITHUB_STEP_SUMMARY
+            echo "**Note:** Image built but not pushed for PR preview" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  documentation:
+    name: Build Documentation
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -15,12 +82,96 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.3' # Not needed with a .ruby-version file
-          bundler-cache: true # runs 'bundle install' and caches installed gems automatically
-          cache-version: 0 # Increment this number if you need to re-download cached gems
+          ruby-version: '3.3'
+          bundler-cache: true
+          cache-version: 0
           working-directory: '${{ github.workspace }}/docs'
+
+      - name: Setup Pages (for main branch)
+        if: github.event_name == 'push'
+        id: pages
+        uses: actions/configure-pages@v5
+
       - name: Build with Jekyll
-        run: bundle exec jekyll build
+        run: |
+          if [ "${{ github.event_name }}" == "push" ]; then
+            bundle exec jekyll build --baseurl "${{ steps.pages.outputs.base_path }}"
+          else
+            bundle exec jekyll build --baseurl "/pr-${{ github.event.number }}"
+          fi
+        env:
+          JEKYLL_ENV: ${{ github.event_name == 'push' && 'production' || 'development' }}
+
+      - name: Upload documentation artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-${{ github.event_name == 'push' && 'main' || format('pr-{0}', github.event.number) }}
+          path: docs/_site/
+          retention-days: ${{ github.event_name == 'push' && 90 || 30 }}
+
+      - name: Upload Pages artifact (main branch only)
+        if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_site/
+
+      - name: Generate documentation info
+        run: |
+          echo "## Documentation Build Results" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event_name }}" == "push" ]; then
+            echo "**Environment:** Production" >> $GITHUB_STEP_SUMMARY
+            echo "**Deployment:** Will be deployed to GitHub Pages" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Environment:** Development" >> $GITHUB_STEP_SUMMARY
+            echo "**Base URL:** /pr-${{ github.event.number }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Artifact:** Available for download as 'documentation-pr-${{ github.event.number }}'" >> $GITHUB_STEP_SUMMARY
+            echo "**Note:** Documentation built but not deployed for PR preview" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  deploy-pages:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: documentation
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  summary:
+    name: CI Summary
+    if: always()
+    needs: [docker-build, documentation]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Generate summary
+        run: |
+          echo "# CI Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "## Pull Request Build" >> $GITHUB_STEP_SUMMARY
+            echo "This is a pull request build. Docker images and documentation were built but not published." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Preview Artifacts" >> $GITHUB_STEP_SUMMARY
+            echo "- **Documentation:** Download the 'documentation-pr-${{ github.event.number }}' artifact to preview the docs" >> $GITHUB_STEP_SUMMARY
+            echo "- **Docker Images:** Built successfully but not pushed to registry" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Main Branch Build" >> $GITHUB_STEP_SUMMARY
+            echo "This is a main branch build. Docker images and documentation will be published." >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Job Status" >> $GITHUB_STEP_SUMMARY
+          echo "- Docker Build: ${{ needs.docker-build.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Documentation: ${{ needs.documentation.result }}" >> $GITHUB_STEP_SUMMARY
