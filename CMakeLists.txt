@@ -12,6 +12,12 @@ else()
     set(CUDA_ENABLED false) 
 endif()
 
+if (EXISTS "/fio")
+    set(FIO_ENABLED true)
+else()
+    set(FIO_ENABLED false)
+endif()
+
 if (CUDA_ENABLED)
     project(chimera LANGUAGES C CUDA)
 else()
@@ -66,7 +72,11 @@ else()
     message(STATUS "CUDA disabled")
 endif()
 
-
+if (FIO_ENABLED)
+    message(STATUS "FIO enabled")
+else()
+    message(STATUS "FIO disabled")
+endif()
 
 add_subdirectory(ext)
 
