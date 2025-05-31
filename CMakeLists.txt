@@ -63,6 +63,9 @@ endif()
 
 add_definitions(${MARCH_FLAG})
 
+if(CMAKE_C_COMPILER_ID MATCHES "GNU")
+    add_link_options(-Wl,--no-as-needed)
+endif()
 
 if (CUDA_ENABLED)
     message(STATUS "CUDA enabled")
