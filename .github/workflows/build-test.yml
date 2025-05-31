@@ -14,6 +14,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      BUILD_VOLUME: chimera-build-${{ github.run_id }}-${{ matrix.platform }}-${{ matrix.build_type }}
     strategy:
       matrix:
         include:
@@ -57,15 +59,22 @@ jobs:
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
 
+      - name: Create transient Docker volume for /build
+        run: docker volume create "$BUILD_VOLUME"
+
       - name: Configure, build, and test inside the dev container
         run: |
           docker run --rm \
+            --mount source="$BUILD_VOLUME",target=/build \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.tag }} \
             bash -euxc '\
-              mkdir -p /build && \
               cd /build && \
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} /workspace && \
               ninja && \
               ctest --output-on-failure'
+
+      - name: Remove transient Docker volume
+        if: always()
+        run: docker volume rm -f "$BUILD_VOLUME" || true
