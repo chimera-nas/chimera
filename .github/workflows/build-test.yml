@@ -15,7 +15,7 @@ jobs:
       contents: read
       packages: write
     env:
-      BUILD_VOLUME: chimera-build-${{ github.run_id }}-${{ matrix.platform }}-${{ matrix.build_type }}
+      BUILD_VOLUME: chimera-build-${{ github.run_id }}-${{ replace(matrix.platform, '/', '-') }}-${{ matrix.build_type }}
     strategy:
       matrix:
         include:
@@ -64,7 +64,7 @@ jobs:
 
       - name: Configure, build, and test inside the dev container
         run: |
-          docker run --rm \
+          docker run --rm --privileged\
             --mount source="$BUILD_VOLUME",target=/build \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
