@@ -1,3 +1,4 @@
 # fio intentionally leaks memory that is allocated during options parsing
 leak:parse_options
 leak:log_io_piece
+leak:options_mem_dupe
