@@ -48,7 +48,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          dockerfile: .devcontainer/Dockerfile
+          file: .devcontainer/Dockerfile
           platforms: ${{ matrix.platform }}
           load: true
           cache-from: type=gha
