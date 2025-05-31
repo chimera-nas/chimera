@@ -93,8 +93,11 @@ chimera_io_uring_init(const char *cfgfile)
     // Initialize the shared ring with default parameters
     rc = io_uring_queue_init_params(256, &shared->ring, &params);
 
-    chimera_io_uring_abort_if(rc < 0,
-                              "Failed to create shared io_uring queue: %s", strerror(-rc));
+    if (rc < 0) {
+        chimera_io_uring_error("Failed to create shared io_uring queue, io_uring disabled: %s", strerror(-rc));
+        free(shared);
+        return NULL;
+    }
 
     return shared;
 } /* io_uring_init */
