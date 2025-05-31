@@ -167,14 +167,14 @@ main(
     root = create_node("", 1, NULL);
 
     for (int i = 0; i < NUM_OPERATIONS; i++) {
-        char path[MAX_PATH_LEN];
+        char path[80];
         char content[MAX_CONTENT_SIZE];
         int  op = rand() % 5;
 
         switch (op) {
             case 0: /* Create directory */
             {
-                snprintf(path, MAX_PATH_LEN, "dir_%d", i);
+                snprintf(path, sizeof(path), "dir_%d", i);
                 if (nfs_mkdir(env.nfs, path) == 0) {
                     struct fs_node *node = create_node(path, 1, root);
                     add_child(root, node);
@@ -183,7 +183,7 @@ main(
             }
             case 1: /* Create file */
             {
-                snprintf(path, MAX_PATH_LEN, "file_%d", i);
+                snprintf(path, sizeof(path), "file_%d", i);
                 if (nfs_create(env.nfs, path, O_CREAT | O_RDWR, 0644, &fh) == 0) {
                     int len = rand() % 1024;
                     for (int j = 0; j < len; j++) {

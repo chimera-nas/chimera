@@ -43,7 +43,8 @@ struct chimera_vfs_root_mount_ctx {
 static void *
 chimera_vfs_root_init(const char *cfgfile)
 {
-    return 0;
+    /* We don't need any private data, but we're expected to return something */
+    return (void *) 42;
 } /* vfs_root_init */
 
 static void
@@ -57,7 +58,8 @@ chimera_vfs_root_thread_init(
     struct evpl *evpl,
     void        *private_data)
 {
-    return 0;
+    /* We don't need any private data, but we're expected to return something */
+    return (void *) 42;
 } /* vfs_root_thread_init */
 
 static void

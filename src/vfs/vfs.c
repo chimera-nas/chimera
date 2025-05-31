@@ -330,6 +330,10 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
             continue;
         }
 
+        if (!vfs->module_private[i]) {
+            continue;
+        }
+
         module->destroy(vfs->module_private[i]);
     }
 
@@ -445,6 +449,10 @@ chimera_vfs_thread_init(
             continue;
         }
 
+        if (!vfs->module_private[i]) {
+            continue;
+        }
+
         thread->module_private[i] = module->thread_init(
             evpl, vfs->module_private[i]);
     }
@@ -467,6 +475,10 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
         module = thread->vfs->modules[i];
 
         if (!module) {
+            continue;
+        }
+
+        if (!thread->module_private[i]) {
             continue;
         }
 
@@ -514,6 +526,11 @@ chimera_vfs_register(
     vfs->modules[module->fh_magic] = module;
 
     vfs->module_private[module->fh_magic] = module->init(cfgfile);
+
+    if (vfs->module_private[module->fh_magic] == NULL) {
+        chimera_vfs_error("Failed to initialize module %s", module->name);
+    }
+
 } /* chimera_vfs_register */
 
 SYMBOL_EXPORT int

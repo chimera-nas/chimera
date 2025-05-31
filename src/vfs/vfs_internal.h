@@ -272,6 +272,12 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
 
     chimera_vfs_dump_request(request);
 
+    if (!thread->module_private[module->fh_magic]) {
+        request->status = CHIMERA_VFS_ENOTSUP;
+        request->complete(request);
+        return;
+    }
+
     if (module->capabilities & CHIMERA_VFS_CAP_BLOCKING) {
         thread_id = request->fh_hash % vfs->num_delegation_threads;
 

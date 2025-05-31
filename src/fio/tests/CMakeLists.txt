@@ -13,7 +13,11 @@ add_test(NAME chimera/fio/fio_demofs_basic COMMAND /usr/local/bin/fio ${CMAKE_CU
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 
-    set(ASAN_LIB "/usr/lib/aarch64-linux-gnu/libasan.so.8")
+    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+        set(ASAN_LIB "/usr/lib/aarch64-linux-gnu/libasan.so.8")
+    else()
+        set(ASAN_LIB "/usr/lib/x86_64-linux-gnu/libasan.so.8")
+    endif()
 
     if(NOT EXISTS ${ASAN_LIB})
         message(FATAL_ERROR "ASAN library not found at ${ASAN_LIB}")

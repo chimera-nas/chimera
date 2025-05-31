@@ -26,7 +26,7 @@ libs3_test_init(
     char           **argv,
     int              argc)
 {
-    int                           opt;
+    int                           opt, rc;
     extern char                  *optarg;
     const char                   *backend = "demofs";
     struct chimera_server_config *config;
@@ -93,7 +93,13 @@ libs3_test_init(
                 exit(EXIT_FAILURE);
             }
 
-            ftruncate(fd, 1024 * 1024 * 1024);
+            rc = ftruncate(fd, 1024 * 1024 * 1024);
+
+            if (rc < 0) {
+                fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+
             close(fd);
         }
 
@@ -149,11 +155,18 @@ libs3_test_cleanup(
     struct test_env *env,
     int              remove_session)
 {
+    int rc;
 
     if (remove_session && env->session_dir[0] != '\0') {
         char cmd[1024];
         snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-        system(cmd);
+
+        rc = system(cmd);
+
+        if (rc < 0) {
+            fprintf(stderr, "Failed to remove session directory %s: %s\n", env->session_dir, strerror(errno));
+            exit(EXIT_FAILURE);
+        }
     }
 
     chimera_server_destroy(env->server);

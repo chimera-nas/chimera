@@ -32,7 +32,8 @@ struct chimera_linux_thread {
 static void *
 chimera_linux_init(const char *cfgfile)
 {
-    return 0;
+    /* We don't need any private data, but we're expected to return something */
+    return (void *) 42;
 } /* linux_init */
 
 static void
