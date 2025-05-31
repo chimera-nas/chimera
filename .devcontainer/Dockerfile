@@ -15,7 +15,7 @@ RUN apt-get -y update && \
     rm -rf /var/lib/apt/lists/*
 
 RUN if [ "$ENABLE_FIO" = "1" ] ; then \
-    git clone https://github.com/axboe/fio.git /fio && \
+    git clone --depth 1 --branch fio-3.40 https://github.com/axboe/fio.git /fio && \
     cd /fio && \
     ./configure --disable-libnfs && \
     make -j8 && \
@@ -30,15 +30,14 @@ RUN if [ "$ENABLE_DOCA" = "1" ] ; then \
     fi
 
 RUN if [ "$ENABLE_XLIO" = "1" ] ; then \
-    git clone https://github.com/Mellanox/libdpcp.git /libdpcp && \
+    git clone --depth 1 https://github.com/Mellanox/libdpcp.git /libdpcp && \
     cd /libdpcp && \
     ./autogen.sh && \
     ./configure && \
     make -j8 && \
     make install && \
-    git clone https://github.com/benjarvis/libxlio.git /libxlio && \
+    git clone --depth 1 --branch listen https://github.com/benjarvis/libxlio.git /libxlio && \
     cd /libxlio && \
-    git checkout listen && \
     ./autogen.sh && \
     ./configure --with-dpcp=/usr/local && \
     make -j8 && \
