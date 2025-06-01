@@ -3,8 +3,7 @@ ARG BUILD_TYPE=Release
 
 
 RUN sed -i 's|archive.ubuntu.com|azure.archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources && \
-    sed -i 's|ports.ubuntu.com|azure.ports.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources && \
-    sed -i 's|security.ubuntu.com|azure.security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources
+    sed -i 's|ports.ubuntu.com|azure.ports.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
