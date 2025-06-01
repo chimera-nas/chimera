@@ -67,4 +67,4 @@ jobs:
             bash -euxc '\
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} /workspace && \
               ninja && \
-              ctest --output-on-failure'
+              ctest -j 4 --output-on-failure'

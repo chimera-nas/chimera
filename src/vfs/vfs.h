@@ -295,6 +295,7 @@ struct chimera_vfs_request {
             uint64_t                           attr_mask;
             chimera_vfs_lookup_path_callback_t callback;
             void                              *private_data;
+            uint8_t                            next_fh[CHIMERA_VFS_FH_SIZE];
         } create_path;
 
         struct {
