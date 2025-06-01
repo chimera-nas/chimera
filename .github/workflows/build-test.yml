@@ -68,3 +68,14 @@ jobs:
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} /workspace && \
               ninja && \
               ctest -j 4 --output-on-failure'
+
+      - name: Perform clang static analysis
+        run: |
+          docker run --rm --privileged \
+            -v "${{ github.workspace }}:/workspace" \
+            -v /build \
+            -w /build \
+            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.tag }} \
+            bash -euxc '\
+              scan-build --status-bugs --exclude /workspace/ext/libsmb2 -o /build/ScanReport \
+              sh -c "cmake -D CMAKE_BUILD_TYPE=Debug -B /build -S /workspace -G Ninja && ninja -C /build"'
