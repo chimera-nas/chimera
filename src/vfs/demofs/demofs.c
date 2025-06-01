@@ -593,7 +593,9 @@ demofs_init(const char *cfgfile)
 
             chimera_demofs_abort_if(fd < 0, "Failed to open device %s: %s", device_path, strerror(errno));
 
-            ftruncate(fd, size);
+            rc = ftruncate(fd, size);
+
+            chimera_demofs_abort_if(rc < 0, "Failed to truncate device %s: %s", device_path, strerror(errno));
 
             close(fd);
         }

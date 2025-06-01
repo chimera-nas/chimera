@@ -18,6 +18,19 @@
 #include "common/macros.h"
 
 
+#define chimera_fio_debug(...) chimera_debug("fio", __FILE__, __LINE__, __VA_ARGS__)
+#define chimera_fio_info(...)  chimera_info("fio", __FILE__, __LINE__, __VA_ARGS__)
+#define chimera_fio_error(...) chimera_error("fio", __FILE__, __LINE__, __VA_ARGS__)
+#define chimera_fio_fatal(...) chimera_fatal("fio", __FILE__, __LINE__, __VA_ARGS__)
+#define chimera_fio_abort(...) chimera_abort("fio", __FILE__, __LINE__, __VA_ARGS__)
+
+#define chimera_fio_fatal_if(cond, ...) \
+        chimera_fatal_if(cond, "fio", __FILE__, __LINE__, __VA_ARGS__)
+
+#define chimera_fio_abort_if(cond, ...) \
+        chimera_abort_if(cond, "fio", __FILE__, __LINE__, __VA_ARGS__)
+
+
 pthread_mutex_t               ChimeraClientMutex  = PTHREAD_MUTEX_INITIALIZER;
 int                           ChimeraNumClients   = 0;
 struct prometheus_metrics    *ChimeraMetrics      = NULL;
@@ -75,7 +88,7 @@ fio_chimera_event(
 static inline int
 fio_chimera_num_events(struct chimera_fio_thread *chimera_thread)
 {
-    return (chimera_thread->event_size + chimera_thread->event_head - chimera_thread->event_tail) & chimera_thread->
+    return ((chimera_thread->event_size + chimera_thread->event_head) - chimera_thread->event_tail) & chimera_thread->
            event_mask;
 } /* fio_chimera_num_events */
 
@@ -89,12 +102,12 @@ fio_chimera_getevents(
     struct chimera_fio_thread *chimera_thread = td->io_ops_data;
     int                        n;
 
+ again:
+
     while (chimera_thread->event_tail != chimera_thread->event_head &&
            chimera_thread->events[chimera_thread->event_tail] == NULL) {
         chimera_thread->event_tail = (chimera_thread->event_tail + 1) & chimera_thread->event_mask;
     }
-
- again:
 
     n = fio_chimera_num_events(chimera_thread);
 
@@ -209,6 +222,9 @@ fio_chimera_init(struct thread_data *td)
 
         //ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 
+        evpl_set_log_fn(chimera_vlog);
+
+
         ChimeraMetrics = prometheus_metrics_create(NULL, NULL, 0);
 
         ChimeraClientConfig = chimera_client_config_init();
@@ -303,8 +319,25 @@ fio_chimera_init(struct thread_data *td)
     return 0;
 } /* fio_chimera_file_setup */
 
+static inline void
+fio_chimera_ring_enqueue(
+    struct chimera_fio_thread *chimera_thread,
+    struct io_u               *io_u)
+{
+
+    chimera_fio_abort_if(((chimera_thread->event_head + 1) & chimera_thread->event_mask) == chimera_thread->event_tail,
+                         "RING FULL: head=%u tail=%u\n", chimera_thread->event_head, chimera_thread->event_tail);
+
+    chimera_fio_abort_if(chimera_thread->events[chimera_thread->event_head] != NULL, "event head is not NULL");
+
+    chimera_thread->events[chimera_thread->event_head] = io_u;
+
+    chimera_thread->event_head = (chimera_thread->event_head + 1) & chimera_thread->event_mask;
+
+} /* fio_chimera_ring_enqueue */
+
 static void
-fio_chmera_read_callback(
+fio_chimera_read_callback(
     struct chimera_client_thread *thread,
     enum chimera_vfs_error        status,
     struct evpl_iovec            *iov,
@@ -334,16 +367,14 @@ fio_chmera_read_callback(
         evpl_iovec_release(&iov[i]);
     }
 
-    chimera_thread->events[chimera_thread->event_head] = io_u;
-
-    chimera_thread->event_head = (chimera_thread->event_head + 1) & chimera_thread->event_mask;
+    fio_chimera_ring_enqueue(chimera_thread, io_u);
 
 
 } /* fio_chmera_io_callback */
 
 
 static void
-fio_chmera_write_callback(
+fio_chimera_write_callback(
     struct chimera_client_thread *thread,
     enum chimera_vfs_error        status,
     void                         *private_data)
@@ -352,9 +383,7 @@ fio_chmera_write_callback(
     struct thread_data        *td             = io_u->mmap_data;
     struct chimera_fio_thread *chimera_thread = td->io_ops_data;
 
-    chimera_thread->events[chimera_thread->event_head] = io_u;
-
-    chimera_thread->event_head = (chimera_thread->event_head + 1) & chimera_thread->event_mask;
+    fio_chimera_ring_enqueue(chimera_thread, io_u);
 
 
 } /* fio_chmera_io_callback */
@@ -378,7 +407,7 @@ fio_chimera_queue(
     switch (io_u->ddir) {
         case DDIR_READ:
             chimera_read(chimera_thread->client, fh, io_u->offset, io_u->xfer_buflen,
-                         fio_chmera_read_callback, io_u);
+                         fio_chimera_read_callback, io_u);
             break;
         case DDIR_WRITE:
 
@@ -387,7 +416,7 @@ fio_chimera_queue(
             iov.private_data = chimera_thread->iov.private_data;
 
             chimera_write(chimera_thread->client, fh, io_u->offset, io_u->xfer_buflen, &iov, 1,
-                          fio_chmera_write_callback, io_u);
+                          fio_chimera_write_callback, io_u);
             break;
         default:
             rc = FIO_Q_COMPLETED;

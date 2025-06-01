@@ -102,8 +102,10 @@ chimera_vfs_create_path_complete(
 
     } else {
 
+        memcpy(cp_request->create_path.next_fh, attr->va_fh, attr->va_fh_len);
+
         chimera_vfs_open(thread,
-                         attr->va_fh,
+                         cp_request->create_path.next_fh,
                          attr->va_fh_len,
                          CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
                          chimera_vfs_create_path_open_dispatch,
@@ -148,8 +150,10 @@ chimera_vfs_create_path_mkdir_complete(
 
     } else {
 
+        memcpy(cp_request->create_path.next_fh, attr->va_fh, attr->va_fh_len);
+
         chimera_vfs_open(thread,
-                         attr->va_fh,
+                         cp_request->create_path.next_fh,
                          attr->va_fh_len,
                          CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
                          chimera_vfs_create_path_open_dispatch,

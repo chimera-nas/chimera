@@ -93,7 +93,12 @@ struct chimera_vfs_attrs {
 
     uint32_t        va_fh_len;
     uint64_t        va_fh_hash;
-    uint8_t         va_fh[CHIMERA_VFS_FH_SIZE];
+
+    /* XXH3 uses SIMD memory loads that may read beyond the end
+     * of the actual data, so we need to provide enough padding
+     * to prevent this from causing compiler complaints?
+     */
+    uint8_t         va_fh[CHIMERA_VFS_FH_SIZE + 32];
 
 };
 
@@ -278,6 +283,7 @@ struct chimera_vfs_request {
             uint64_t                           attr_mask;
             chimera_vfs_lookup_path_callback_t callback;
             void                              *private_data;
+            uint8_t                            next_fh[CHIMERA_VFS_FH_SIZE];
         } lookup_path;
 
         struct {
@@ -289,6 +295,7 @@ struct chimera_vfs_request {
             uint64_t                           attr_mask;
             chimera_vfs_lookup_path_callback_t callback;
             void                              *private_data;
+            uint8_t                            next_fh[CHIMERA_VFS_FH_SIZE];
         } create_path;
 
         struct {

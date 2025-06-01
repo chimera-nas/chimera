@@ -12,6 +12,12 @@ else()
     set(CUDA_ENABLED false) 
 endif()
 
+if (EXISTS "/fio")
+    set(FIO_ENABLED true)
+else()
+    set(FIO_ENABLED false)
+endif()
+
 if (CUDA_ENABLED)
     project(chimera LANGUAGES C CUDA)
 else()
@@ -19,6 +25,8 @@ else()
 endif()
 
 set(CHIMERA_VERSION "0.1.0")
+
+execute_process(COMMAND ln -sf ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE_SOURCE_DIR}/compile_commands.json)
 
 add_definitions(-DCHIMERA_VERSION="${CHIMERA_VERSION}")
 
@@ -57,6 +65,9 @@ endif()
 
 add_definitions(${MARCH_FLAG})
 
+if(CMAKE_C_COMPILER_ID MATCHES "GNU")
+    add_link_options(-Wl,--no-as-needed)
+endif()
 
 if (CUDA_ENABLED)
     message(STATUS "CUDA enabled")
@@ -66,7 +77,11 @@ else()
     message(STATUS "CUDA disabled")
 endif()
 
-
+if (FIO_ENABLED)
+    message(STATUS "FIO enabled")
+else()
+    message(STATUS "FIO disabled")
+endif()
 
 add_subdirectory(ext)
 
