@@ -5,10 +5,11 @@ build
 publish.sh
 cap
 .DS_Store
+.cache
 private
 *.cap
 *.diff
 *.rej
 *.orig
 Testing
-
+compile_commands.json

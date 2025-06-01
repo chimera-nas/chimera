@@ -26,6 +26,8 @@ endif()
 
 set(CHIMERA_VERSION "0.1.0")
 
+execute_process(COMMAND ln -sf ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE_SOURCE_DIR}/compile_commands.json)
+
 add_definitions(-DCHIMERA_VERSION="${CHIMERA_VERSION}")
 
 include_directories(${CMAKE_SOURCE_DIR}/ext/libevpl/ext/prometheus-c)

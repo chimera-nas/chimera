@@ -6,7 +6,7 @@ macro(add_libnfs_testprog name)
 endmacro()
 
 macro(add_libnfs_test testname prog)
-    add_test(NAME chimera/server/nfs/${testname} COMMAND ${CMAKE_CURRENT_BINARY_DIR}/${prog} ${ARGN})
+    add_test(NAME chimera/server/nfs/${testname} COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh  ${CMAKE_CURRENT_BINARY_DIR}/${prog} ${ARGN})
     get_target_property(test_file ${prog} TEST_FILE)
     set_tests_properties(chimera/server/nfs/${testname} PROPERTIES 
         ENVIRONMENT "TEST_FILE=${test_file}")

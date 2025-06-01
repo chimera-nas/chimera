@@ -5,6 +5,9 @@
   "cmake.configureSettings": {
     "CMAKE_C_COMPILER": "gcc"
   },
+  "cmake.configureArgs": [
+    "-DCMAKE_EXPORT_COMPILE_COMMANDS=1"
+  ],
   "cmake.options.statusBarVisibility": "compact",
   "cmake.options.advanced.launch.statusBarVisibility": "hidden",
   "cmake.options.advanced.ctest.statusBarVisibility": "hidden",
@@ -12,7 +15,7 @@
   "cmake.options.advanced.kit.statusBarVisibility": "hidden",
   "cmake.options.advanced.workflow.statusBarVisibility": "hidden",
   "uncrustify.configPath.linux": "${workspaceFolder}/etc/uncrustify.cfg",
-  "cmakeExplorer.extraCtestRunArgs": "-V -j 1 --timeout 10",
+  "cmakeExplorer.extraCtestRunArgs": "-V -j 16 --timeout 30",
   "cmakeExplorer.suiteDelimiter": "/",
   "cmakeExplorer.testFileVar": "TEST_FILE",
   "[c]": {
@@ -86,5 +89,6 @@
     "errno.h": "c",
     "assert.h": "c",
     "smb_procs.h": "c"
-  }
+  },
+  "C_Cpp.workspaceSymbols": "All"
 }
