@@ -77,5 +77,5 @@ jobs:
             -w /build \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.tag }} \
             bash -euxc '\
-              scan-build --exclude /workspace/ext/libsmb2 -o /build/ScanReport \
+              scan-build --status-bugs --exclude /workspace/ext/libsmb2 -o /build/ScanReport \
               sh -c "cmake -D CMAKE_BUILD_TYPE=Debug -B /build -S /workspace -G Ninja && ninja -C /build"'
