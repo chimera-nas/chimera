@@ -13,3 +13,4 @@ private
 *.orig
 Testing
 compile_commands.json
+settings.local.json
