@@ -1,6 +1,6 @@
 macro(add_libsmb2_testprog name)
     add_executable(${name} ${name}.c)
-    target_link_libraries(${name} smb2 chimera_server jansson)
+    target_link_libraries(${name} smb2 chimera_server jansson gssapi_krb5)
     set_target_properties(${name} PROPERTIES
     TEST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/${name}.c")
 endmacro()
