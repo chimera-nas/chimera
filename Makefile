@@ -40,4 +40,15 @@ release: build_release test_release
 
 clean:
 	@rm -rf ${CHIMERA_BUILD_DIR}/*
+
+.PHONY: syntax-check
+syntax-check:
+	@find src/ -type f \( -name "*.c" -o -name "*.h" \) -print0 | \
+		xargs -0 -I {} sh -c 'uncrustify -c etc/uncrustify.cfg --check {} >/dev/null 2>&1 || (echo "Formatting issue in: {}" && exit 1)' || exit 1
+
+
+.PHONY: syntax
+syntax:
+	@find src/ -type f \( -name "*.c" -o -name "*.h" \) -print0 | \
+		xargs -0 -I {} sh -c 'uncrustify -c etc/uncrustify.cfg --replace --no-backup {}' >/dev/null 2>&1
 		
