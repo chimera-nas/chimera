@@ -1,9 +1,13 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #pragma once
 
 #include <stdint.h>
 #include <pthread.h>
+#include <uthash.h>
 
-#include "uthash/uthash.h"
 #include "vfs/vfs.h"
 #include "smb2.h"
 

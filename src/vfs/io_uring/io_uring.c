@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,8 +17,8 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <liburing.h>
-
-#include "uthash/utlist.h"
+#include <uthash.h>
+#include <utlist.h>
 
 #include "vfs/vfs_error.h"
 
@@ -26,7 +30,6 @@
 #include "common/format.h"
 #include "common/misc.h"
 #include "common/macros.h"
-#include "uthash/uthash.h"
 
 static void
 chimera_io_uring_dispatch(

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: LGPL-2.1-only
+
 add_executable(posix_basic basic.c)
 target_link_libraries(posix_basic chimera_client)
 

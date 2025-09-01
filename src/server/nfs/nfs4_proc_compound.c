@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #include "nfs4_procs.h"
 #include "evpl/evpl_rpc2.h"
 #include "nfs4_dump.h"

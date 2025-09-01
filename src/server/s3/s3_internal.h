@@ -1,12 +1,16 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #pragma once
 
 #include <time.h>
+#include <utlist.h>
 
 #include "evpl/evpl_http.h"
 #include "common/logging.h"
 #include "s3_status.h"
 #include "vfs/vfs.h"
-#include "uthash/utlist.h"
 
 enum chimera_s3_vfs_state {
     CHIMERA_S3_VFS_STATE_INIT,

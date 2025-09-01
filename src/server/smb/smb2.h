@@ -1,21 +1,9 @@
 #pragma once
 
-/* This header contains SMB2 values and data structures that are directly derived
- * from the SMB specification and ent over the wire.
- *
- * Most of these definitions are adapted from the libsmb2 project,
- *
- * the original code can be found at:
- *
- * https://github.com/sahlberg/libsmb2
- *
- * That project is also licensed under LGPL v2.1
- *
- * The original code has the following copyright:
- *
- * Copyright (C) 2016 by Ronnie Sahlberg <ronniesahlberg@gmail.com>
- *
- */
+// Copyright (C) 2016 by Ronnie Sahlberg <ronniesahlberg@gmail.com>
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
 
 #define SMB_FILENAME_MAX                              255
 

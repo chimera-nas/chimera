@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: LGPL-2.1-only
+
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 add_subdirectory(common)

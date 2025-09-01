@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -8,9 +12,11 @@
 #include <rocksdb/c.h>
 #include <jansson.h>
 #include <limits.h>
+#include <utlist.h>
+
+
 #include "common/varint.h"
 
-#include "uthash/utlist.h"
 #include "vfs/vfs.h"
 #include "cairn.h"
 #include "common/logging.h"

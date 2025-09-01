@@ -1,9 +1,14 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #pragma once
+
+#include <uthash.h>
 
 #include "nfs3_xdr.h"
 #include "nfs4_xdr.h"
 #include "nfs_internal.h"
-#include "uthash/uthash.h"
 #include "vfs/vfs.h"
 
 #define NFS4_SESSION_MAX_STATE 1024

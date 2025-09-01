@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2016 IETF Trust and the persons identified
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
+/*
  * This file was machine generated for [RFC7862].
  *
  * Last updated Sun Mar 13 10:58:40 PDT 2016

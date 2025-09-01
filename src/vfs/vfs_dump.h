@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #ifndef __VFS_DUMP_H__
 #define __VFS_DUMP_H__
 

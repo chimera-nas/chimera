@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: LGPL-2.1-only
+
 macro(add_libs3_testprog name)
     add_executable(${name} ${name}.c)
     target_link_libraries(${name} s3 chimera_server jansson)

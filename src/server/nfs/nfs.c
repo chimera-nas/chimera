@@ -1,5 +1,10 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #include <stdio.h>
 #include <pthread.h>
+#include <utlist.h>
 
 #include "nfs.h"
 #include "server/protocol.h"
@@ -17,7 +22,6 @@
 
 #include "common/logging.h"
 #include "common/macros.h"
-#include "uthash/utlist.h"
 
 #define NFS_PROGIDX_PORTMAP_V2 0
 #define NFS_PROGIDX_MOUNT_V3   1

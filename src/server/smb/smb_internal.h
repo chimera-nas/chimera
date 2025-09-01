@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #pragma once
 
 #include <stdint.h>
@@ -5,12 +9,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <utlist.h>
 //#include <gssapi/gssapi.h>
 #include "evpl/evpl.h"
 #include "common/evpl_iovec_cursor.h"
 #include "common/logging.h"
 #include "common/misc.h"
-#include "uthash/utlist.h"
 #include "smb2.h"
 #include "smb_attr.h"
 #include "smb_session.h"

@@ -1,9 +1,14 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #include <stdio.h>
+#include <utlist.h>
+
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "nfs_mount.h"
 #include "vfs/vfs_procs.h"
-#include "uthash/utlist.h"
 
 void
 chimera_nfs_mount_null(

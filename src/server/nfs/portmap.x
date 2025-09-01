@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: IETF Trust and the persons identified
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
 struct mapping {
     unsigned int prog;
     unsigned int vers;

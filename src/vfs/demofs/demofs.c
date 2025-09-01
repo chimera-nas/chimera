@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #define _GNU_SOURCE
 #include <stdint.h>
 #include <stdlib.h>
@@ -11,6 +15,8 @@
 #include <sys/time.h>
 #include <limits.h>
 #include <jansson.h>
+#include <utlist.h>
+
 #include "common/varint.h"
 #include "common/rbtree.h"
 
@@ -18,7 +24,6 @@
 
 #include "evpl/evpl.h"
 
-#include "uthash/utlist.h"
 #include "vfs/vfs.h"
 #include "demofs.h"
 #include "common/logging.h"

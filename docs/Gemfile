@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: Unlicense
+
 source 'https://rubygems.org'
 
 gem "jekyll", "~> 4.4.1" # installed by `gem jekyll`

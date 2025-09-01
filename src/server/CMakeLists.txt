@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: LGPL-2.1-only
+
 add_library(chimera_server SHARED server.c)
 target_link_libraries(chimera_server chimera_nfs chimera_s3 chimera_smb chimera_vfs evpl unwind)
 

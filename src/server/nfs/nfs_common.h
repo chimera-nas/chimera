@@ -1,11 +1,17 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #pragma once
+
+#include <utlist.h>
 
 #include "portmap_xdr.h"
 #include "nfs_mount_xdr.h"
 #include "nfs3_xdr.h"
 #include "nfs4_xdr.h"
 #include "nfs4_session.h"
-#include "uthash/utlist.h"
+
 struct chimera_server_nfs_thread;
 
 struct nfs_nfs3_readdir_cursor {

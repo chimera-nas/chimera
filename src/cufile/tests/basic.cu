@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2025 Ben Jarvis
+ * SPDX-License-Identifier: Unlicense
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
