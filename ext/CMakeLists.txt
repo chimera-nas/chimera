@@ -1,4 +1,6 @@
 
+set(CHIMERA_EXT_SRC ${CMAKE_CURRENT_SOURCE_DIR} PARENT_SCOPE)
+
 add_subdirectory(libevpl)
 
 set(XDRZCC ${XDRZCC} PARENT_SCOPE)
