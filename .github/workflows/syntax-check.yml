@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: Unlicense
+
+name: Syntax Check
+
+on:
+  pull_request:
+  workflow_dispatch:   # allow manual runs
+
+jobs:
+  syntax-check:
+    name: Check code formatting with uncrustify
+    runs-on: ubuntu-24.04
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y uncrustify make
+      
+      - name: Run syntax check
+        run: make syntax-check
