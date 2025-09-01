@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2025 Ben Jarvis
+
+SPDX-License-Identifier: Unlicense
+-->
+
 ---
 title: Home
 layout: home

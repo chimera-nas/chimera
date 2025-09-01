@@ -1,10 +1,14 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #pragma once
 #include <stdint.h>
 #include <sys/time.h>
+#include <uthash.h>
 #include "vfs_dump.h"
 #include "vfs_error.h"
 #include "evpl/evpl.h"
-#include "uthash/uthash.h"
 
 
 #define CHIMERA_VFS_FH_SIZE             32

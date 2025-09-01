@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: LGPL-2.1-only
 
 add_library(chimera_vfs SHARED vfs.c 
             vfs_proc_mkdir.c vfs_proc_close.c vfs_proc_open.c

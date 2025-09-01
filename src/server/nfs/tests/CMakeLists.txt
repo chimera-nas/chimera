@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: LGPL-2.1-only
+
 macro(add_libnfs_testprog name)
     add_executable(${name} ${name}.c)
     target_link_libraries(${name} nfs chimera_server jansson)

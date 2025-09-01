@@ -1,7 +1,11 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: Unlicense
+
 name: Build and perform build time tests
 
 on:
-  pull_request:        # always build for PRs but don’t publish
+  pull_request:        # always build for PRs but don't publish
   workflow_dispatch:   # allow manual runs
 
 env:

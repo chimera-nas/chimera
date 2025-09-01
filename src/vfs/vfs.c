@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #include <stdio.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
@@ -5,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <utlist.h>
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
@@ -20,7 +25,6 @@
 #include "vfs/demofs/demofs.h"
 #include "common/misc.h"
 #include "common/macros.h"
-#include "uthash/utlist.h"
 #include "prometheus-c.h"
 
 

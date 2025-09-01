@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: LGPL-2.1-only
+
 # Set the paths to the XDR specification files and the output C and header files
 set(NFS3_XDR_X ${CMAKE_CURRENT_SOURCE_DIR}/nfs3.x)
 set(NFS3_XDR_C ${CMAKE_CURRENT_BINARY_DIR}/nfs3_xdr.c)

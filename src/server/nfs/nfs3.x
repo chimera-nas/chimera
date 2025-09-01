@@ -1,4 +1,10 @@
+/*
+ * SPDX-FileCopyrightText: IETF Trust and the persons identified
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
 /* NFS V3 definitions */
+
 
 
 const NFS3_FHSIZE = 64;

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: LGPL-2.1-only
 
 include_directories(/fio)
 add_library(chimera_fio SHARED fio.c)

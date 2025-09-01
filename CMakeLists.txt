@@ -1,6 +1,6 @@
-# SPDX-FileCopyrightText: 2024 Ben Jarvis
+# SPDX-FileCopyrightText: 2024 - 2025 Ben Jarvis
 #
-# SPDX-License-Identifier: LGPL
+# SPDX-License-Identifier: LGPL-2.1-only
 
 cmake_minimum_required(VERSION 3.22)
 

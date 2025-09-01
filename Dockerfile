@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: Unlicense
+
 FROM ubuntu:24.04 AS build
 ARG BUILD_TYPE=Release
 
@@ -7,7 +11,7 @@ RUN sed -i 's|archive.ubuntu.com|azure.archive.ubuntu.com|g' /etc/apt/sources.li
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
-    apt-get -y --no-install-recommends install clang cmake ninja-build git flex bison uuid-dev \
+    apt-get -y --no-install-recommends install clang cmake ninja-build git flex bison uuid-dev uthash-dev \
     librdmacm-dev libjansson-dev libclang-rt-18-dev llvm libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*

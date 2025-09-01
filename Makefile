@@ -1,6 +1,6 @@
-# SPDX-FileCopyrightText: 2024 Ben Jarvis
+# SPDX-FileCopyrightText: 2024 - 2025 Ben Jarvis
 #
-# SPDX-License-Identifier: LGPL
+# SPDX-License-Identifier: Unlicense
 
 # Allow override of build directory (defaults to ./build)
 CHIMERA_BUILD_DIR ?= build

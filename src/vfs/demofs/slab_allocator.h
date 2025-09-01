@@ -1,7 +1,12 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #pragma once
 
+#include <utlist.h>
+
 #include <sys/mman.h>
-#include "uthash/utlist.h"
 
 #include "evpl/evpl.h"
 

@@ -1,9 +1,12 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #include <stdlib.h>
 #include <sys/resource.h>
 #include <pthread.h>
 #include <unistd.h>
-
-#include "uthash/utlist.h"
+#include <utlist.h>
 
 #include "client.h"
 #include "client_internal.h"

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Ben Jarvis
+#
+# SPDX-License-Identifier: Unlicense
+
 !build/src/nfs/nfs4_xdr.c
 !build/src/nfs/nfs4_xdr.h
 !build/src/nfs/nfs3_xdr.c

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #pragma once
 
 #include <stdlib.h>
@@ -5,11 +9,12 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <xxhash.h>
+#include <uthash.h>
+#include <utlist.h>
 
 #include "vfs/vfs.h"
 #include "common/logging.h"
 #include "common/misc.h"
-#include "uthash/utlist.h"
 #include "metrics/metrics.h"
 #include "vfs/vfs_dump.h"
 
@@ -132,9 +137,12 @@ chimera_vfs_request_alloc_by_hash(
 
     request->module = chimera_vfs_get_module(thread, fh, fhlen);
 
-    request->fh      = fh;
-    request->fh_len  = fhlen;
-    request->fh_hash = fh_hash;
+    request->fh          = fh;
+    request->fh_len      = fhlen;
+    request->fh_hash     = fh_hash;
+    request->active_prev = NULL;
+    request->active_next = NULL;
+
     clock_gettime(CLOCK_MONOTONIC, &request->start_time);
 
     thread->num_active_requests++;
@@ -151,29 +159,9 @@ chimera_vfs_request_alloc_anon(
     int                        fhlen,
     uint64_t                   fh_key)
 {
-    struct chimera_vfs_request *request;
+    uint64_t fh_hash = chimera_vfs_hash(&fh_key, sizeof(fh_key));
 
-    if (thread->free_requests) {
-        request = thread->free_requests;
-        LL_DELETE(thread->free_requests, request);
-    } else {
-        request              = calloc(1, sizeof(struct chimera_vfs_request));
-        request->thread      = thread;
-        request->plugin_data = malloc(4096);
-    }
-    request->status = CHIMERA_VFS_UNSET;
-
-    request->module = chimera_vfs_get_module(thread, fh, fhlen);
-
-    request->fh      = NULL;
-    request->fh_len  = 0;
-    request->fh_hash = chimera_vfs_hash(&fh_key, sizeof(fh_key));
-    clock_gettime(CLOCK_MONOTONIC, &request->start_time);
-
-    thread->num_active_requests++;
-    DL_APPEND2(thread->active_requests, request, active_prev, active_next);
-
-    return request;
+    return chimera_vfs_request_alloc_by_hash(thread, fh, fhlen, fh_hash);
 } /* chimera_vfs_request_alloc_by_hash */
 
 static inline struct chimera_vfs_request *
@@ -242,6 +230,12 @@ chimera_vfs_request_free(
     struct chimera_vfs_thread  *thread,
     struct chimera_vfs_request *request)
 {
+
+#ifdef __clang_analyzer__
+    chimera_vfs_abort_if(request->active_prev != request && request->active_next == NULL,
+                         "clang static analysis thinks this can happen");
+#endif /* ifdef __clang_analyzer__ */
+
     DL_DELETE2(thread->active_requests, request, active_prev, active_next);
 
     thread->num_active_requests--;

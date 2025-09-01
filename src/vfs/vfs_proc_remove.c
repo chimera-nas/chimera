@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_name_cache.h"

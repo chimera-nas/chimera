@@ -1,6 +1,11 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <utlist.h>
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
 #include "server/protocol.h"
@@ -14,7 +19,6 @@
 #include "s3.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
-#include "uthash/utlist.h"
 
 const uint8_t root_fh = CHIMERA_VFS_FH_MAGIC_ROOT;
 

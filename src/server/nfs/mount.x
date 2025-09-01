@@ -1,4 +1,9 @@
 
+/*
+ * SPDX-FileCopyrightText: IETF Trust and the persons identified
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+ 
 const MNTPATHLEN = 1024;  /* Maximum bytes in a path name */
 const MNTNAMLEN  = 255;   /* Maximum bytes in a name */
 const FHSIZE3    = 64;
