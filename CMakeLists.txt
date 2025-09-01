@@ -30,7 +30,7 @@ execute_process(COMMAND ln -sf ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE
 
 add_definitions(-DCHIMERA_VERSION="${CHIMERA_VERSION}")
 
-include_directories(${CMAKE_SOURCE_DIR}/ext/libevpl/ext/prometheus-c)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext/libevpl/ext/prometheus-c)
 
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

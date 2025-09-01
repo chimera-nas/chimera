@@ -54,7 +54,7 @@ set_source_files_properties(
     ${NFS3_XDR_C} ${NFS4_XDR_C} ${NFS_MOUNT_XDR_C} ${PORTMAP_XDR_C} PROPERTIES COMPILE_OPTIONS "-Wno-unused;-Wno-switch;-Wno-format-truncation"
 )
 
-add_definitions(-DXDR_CUSTOM_IOVEC=${CMAKE_SOURCE_DIR}/ext/libevpl/src/rpc2/xdr_iovec.h)
+add_definitions(-DXDR_CUSTOM_IOVEC=${CHIMERA_EXT_SRC}/libevpl/src/rpc2/xdr_iovec.h)
 add_definitions(-DXDR_CUSTOM_DUMP=1)
 
 # Create libraries for NFSv3 and NFSv4

@@ -877,13 +877,8 @@ chimera_io_uring_mkdir(
     uint32_t                        mode;
     char                           *scratch = (char *) request->plugin_data;
     struct io_uring_sqe            *sqe;
-    struct statx                   *dir_stx, *stx;
 
-    dir_stx  = (struct statx *) scratch;
-    scratch += sizeof(*dir_stx);
-
-    stx      = (struct statx *) scratch;
-    scratch += sizeof(*stx);
+    scratch += sizeof(struct statx) * 2;
 
     TERM_STR(fullname, request->mkdir.name, request->mkdir.name_len, scratch);
 
