@@ -15,14 +15,14 @@
   "cmake.options.advanced.kit.statusBarVisibility": "hidden",
   "cmake.options.advanced.workflow.statusBarVisibility": "hidden",
   "uncrustify.configPath.linux": "${workspaceFolder}/etc/uncrustify.cfg",
-  "cmakeExplorer.extraCtestRunArgs": "-V -j 16 --timeout 30",
+  "[c]": {
+    "editor.defaultFormatter": "benjarvis.uncrustify"
+  },
+  "cmakeExplorer.extraCtestRunArgs": "-V --timeout 60",
   "cmakeExplorer.suiteDelimiter": "/",
   "cmakeExplorer.testFileVar": "TEST_FILE",
-  "[c]": {
-    "editor.defaultFormatter": "zachflower.uncrustify"
-  },
+  "cmakeExplorer.parallelJobs": 8,
   "cmake.ctest.testExplorerIntegrationEnabled": false,
-  "cmakeExplorer.parallelJobs": 1,
   "editor.tabSize": 4,
   "editor.formatOnSave": true,
   "files.associations": {

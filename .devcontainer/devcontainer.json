@@ -3,22 +3,26 @@
         "build": {
                 "dockerfile": "Dockerfile"
         },
+        "initializeCommand": "mkdir -p \"${localEnv:HOME}${localEnv:USERPROFILE}/.claude\"",
+        "containerEnv": {
+                "CHIMERA_BUILD_DIR": "/build"
+        },
         "customizations": {
                 "vscode": {
-                        // Set *default* container specific settings.json values on container create.
                         "settings": {},
-                        // Add the IDs of extensions you want installed when the container is created.
                         "extensions": [
                                 "anysphere.cpptools",
                                 "ms-vscode.cmake-tools",
                                 "fredericbonnet.cmake-test-adapter",
                                 "ms-azuretools.vscode-docker",
-                                "zachflower.uncrustify"
+                                "anthropic.claude-code",
+                                "benjarvis.uncrustify"
                         ]
                 }
         },
         "mounts": [
-                "source=chimera-build,target=/build,type=volume"
+                "source=chimera-build,target=/build,type=volume",
+                "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude,target=/root/.claude,type=bind,consistency=cached"
         ],
         "appPort": [],
         "forwardPorts": [],
