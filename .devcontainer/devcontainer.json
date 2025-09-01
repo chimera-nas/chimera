@@ -13,8 +13,10 @@
                         "extensions": [
                                 "anysphere.cpptools",
                                 "ms-vscode.cmake-tools",
+                                "fredericbonnet.cmake-test-adapter",
                                 "ms-azuretools.vscode-docker",
-                                "zachflower.uncrustify"
+                                "anthropic.claude-code",
+                                "benjarvis.uncrustify"
                         ]
                 }
         },
