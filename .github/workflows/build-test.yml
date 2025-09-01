@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2025 Ben Jarvis
 #
-# SPDX-License-Identifier: LGPL-2.1-only
+# SPDX-License-Identifier: Unlicense
 
 name: Build and perform build time tests
 
