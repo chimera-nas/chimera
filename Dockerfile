@@ -11,8 +11,8 @@ RUN sed -i 's|archive.ubuntu.com|azure.archive.ubuntu.com|g' /etc/apt/sources.li
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
-    apt-get -y --no-install-recommends install clang cmake ninja-build git flex bison uuid-dev uthash-dev  libssl-dev openssl \
-    librdmacm-dev libjansson-dev libclang-rt-18-dev llvm libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev && \
+    apt-get -y --no-install-recommends install clang cmake ninja-build git flex bison uuid-dev uthash-dev libkrb5-3 libkrb5-dev libgssapi-krb5-2  gss-ntlmssp-dev \
+    librdmacm-dev libjansson-dev libclang-rt-18-dev llvm libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev libssl-dev openssl && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -29,7 +29,7 @@ FROM ubuntu:24.04
 ARG BUILD_TYPE=Release
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
-    apt-get -y --no-install-recommends install libuuid1 librdmacm1 libjansson4 liburcu8t64 ibverbs-providers liburing2 libunwind8 librocksdb8.9 openssl && \
+    apt-get -y --no-install-recommends install libuuid1 librdmacm1 libjansson4 liburcu8t64 ibverbs-providers liburing2 libunwind8 librocksdb8.9 gss-ntlmssp libkrb5-3 libkrb5-dev libgssapi-krb5-2 gss-ntlmssp-dev openssl && \
     if [ "${BUILD_TYPE}" = "Debug" ]; then \
     apt-get -y --no-install-recommends install llvm gdb ; \
     fi && \

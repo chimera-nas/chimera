@@ -44,7 +44,7 @@ include_directories(3rdparty)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     message(STATUS "Enabling AddressSanitizer")
     add_definitions(-fsanitize=address -fno-omit-frame-pointer
-                    -fno-optimize-sibling-calls -fstack-protector-all)
+                    -fno-optimize-sibling-calls -fstack-protector-all -DCHIMERA_SANITIZE=1)
     add_link_options(-fsanitize=address)
 endif()
 
