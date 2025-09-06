@@ -43,7 +43,13 @@ main(
 
     chimera_log_init();
 
+#if CHIMERA_SANITIZE != 1
+    /* If we are not using address sanitizer, add a crash handler to
+     * print stack on signals.   Otherwise, let address sanitizer
+     * handle it.
+     */
     chimera_enable_crash_handler();
+ #endif /* ifndef CHIMERA_SANITIZE */
 
     evpl_set_log_fn(chimera_vlog);
 
@@ -133,7 +139,7 @@ main(
 
     server = chimera_server_init(server_config, chimera_metrics_get(metrics));
 
-    shares = json_object_get(config, "shares");
+    shares = json_object_get(config, "mounts");
 
     if (shares) {
         json_object_foreach(shares, share_name, share)
@@ -141,10 +147,9 @@ main(
             share_module = json_string_value(json_object_get(share, "module"));
             share_path   = json_string_value(json_object_get(share, "path"));
 
-            chimera_server_info("Initializing share %s (%s://%s)...", share_name
-                                ,
-                                share_module, share_path);
-            chimera_server_mount(server, share_module, share_name, share_path);
+            chimera_server_info("Mounting %s://%s to /%s..."
+                                , share_module, share_path, share_name);
+            chimera_server_mount(server, share_name, share_module, share_path);
         }
     }
 

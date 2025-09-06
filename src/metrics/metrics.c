@@ -134,6 +134,8 @@ chimera_metrics_thread_shutdown(
 {
     struct chimera_metrics *metrics = private_data;
 
+    prometheus_metrics_destroy(metrics->metrics);
+
     evpl_http_server_destroy(metrics->agent, metrics->server);
     evpl_listener_destroy(metrics->listener);
     evpl_http_destroy(metrics->agent);
