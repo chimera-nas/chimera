@@ -212,16 +212,16 @@ typedef char *STBSP_SPRINTFCB(const char *buf, void *user, int len);
 #define STB_SPRINTF_DECORATE(name) stbsp_ ## name // define this before including if you want to change the names
 #endif /* ifndef STB_SPRINTF_DECORATE */
 
-STBSP__PUBLICDEC int STB_SPRINTF_DECORATE(
+STBSP__PUBLICDEC int  STB_SPRINTF_DECORATE(
     vsprintf)(char *buf, char const *fmt, va_list va);
-STBSP__PUBLICDEC int STB_SPRINTF_DECORATE(
+STBSP__PUBLICDEC int  STB_SPRINTF_DECORATE(
     vsnprintf)(char *buf, int count, char const *fmt, va_list va);
-STBSP__PUBLICDEC int STB_SPRINTF_DECORATE(
+STBSP__PUBLICDEC int  STB_SPRINTF_DECORATE(
     sprintf)(char *buf, char const *fmt, ...) STBSP__ATTRIBUTE_FORMAT(2, 3);
-STBSP__PUBLICDEC int STB_SPRINTF_DECORATE(
+STBSP__PUBLICDEC int  STB_SPRINTF_DECORATE(
     snprintf)(char *buf, int count, char const *fmt, ...) STBSP__ATTRIBUTE_FORMAT(3, 4);
 
-STBSP__PUBLICDEC int STB_SPRINTF_DECORATE(
+STBSP__PUBLICDEC int  STB_SPRINTF_DECORATE(
     vsprintfcb)(STBSP_SPRINTFCB *callback, void *user, char *buf, char const *fmt, va_list va);
 STBSP__PUBLICDEC void STB_SPRINTF_DECORATE(
     set_separators)(char comma, char period);
