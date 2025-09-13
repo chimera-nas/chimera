@@ -31,7 +31,7 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
 
     request->negotiate.r_dialect           = 0x0210;
     request->negotiate.r_security_mode     = 0;
-    request->negotiate.r_capabilities      = 0;
+    request->negotiate.r_capabilities      = 0x4; /* LARGE MTU */
     request->negotiate.r_max_transact_size = 1048576;
     request->negotiate.r_max_read_size     = 1048576;
     request->negotiate.r_max_write_size    = 1048576;

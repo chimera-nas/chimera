@@ -29,12 +29,15 @@ main(
     const char                   *config_path = "/usr/local/etc/chimera.json";
     extern char                  *optarg;
     int                           opt;
+    const char                   *mount_name;
+    const char                   *mount_module;
+    const char                   *mount_path;
     const char                   *share_name;
-    const char                   *share_module;
     const char                   *share_path;
     const char                   *bucket_name;
     const char                   *bucket_path;
     json_t                       *config, *shares, *share, *server_params, *buckets, *bucket;
+    json_t                       *mounts, *mount;
     json_error_t                  error;
     struct chimera_server        *server;
     struct chimera_server_config *server_config;
@@ -139,17 +142,28 @@ main(
 
     server = chimera_server_init(server_config, chimera_metrics_get(metrics));
 
-    shares = json_object_get(config, "mounts");
+    mounts = json_object_get(config, "mounts");
+
+    if (mounts) {
+        json_object_foreach(mounts, mount_name, mount)
+        {
+            mount_module = json_string_value(json_object_get(mount, "module"));
+            mount_path   = json_string_value(json_object_get(mount, "path"));
+
+            chimera_server_info("Mounting %s://%s to /%s..."
+                                , mount_module, mount_path, mount_name);
+            chimera_server_mount(server, mount_name, mount_module, mount_path);
+        }
+    }
+
+    shares = json_object_get(config, "shares");
 
     if (shares) {
         json_object_foreach(shares, share_name, share)
         {
-            share_module = json_string_value(json_object_get(share, "module"));
-            share_path   = json_string_value(json_object_get(share, "path"));
+            share_path = json_string_value(json_object_get(share, "path"));
 
-            chimera_server_info("Mounting %s://%s to /%s..."
-                                , share_module, share_path, share_name);
-            chimera_server_mount(server, share_name, share_module, share_path);
+            chimera_server_create_share(server, share_name, share_path);
         }
     }
 

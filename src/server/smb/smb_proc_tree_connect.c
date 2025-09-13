@@ -39,6 +39,14 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
         request_pathp++;
     }
 
+    request->tree_connect.is_ipc = strcmp(request_pathp, "IPC$") == 0;
+
+    if (request->tree_connect.is_ipc) {
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        request->tree = NULL;
+        return;
+    }
+
     pthread_mutex_lock(&shared->shares_lock);
 
     LL_FOREACH(shared->shares, cur_share)
@@ -111,11 +119,18 @@ chimera_smb_tree_connect_reply(
 {
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_TREE_CONNECT_REPLY_SIZE);
 
-    /* Share Type 0 = DISK*/
+    /* share type */
+    if (request->tree_connect.is_ipc) {
+        evpl_iovec_cursor_append_uint8(reply_cursor, 0x2);
+    } else {
+        evpl_iovec_cursor_append_uint8(reply_cursor, 0x1);
+    }
+
+    /* reserved */
     evpl_iovec_cursor_append_uint8(reply_cursor, 0);
 
     /* Share Flags*/
-    evpl_iovec_cursor_append_uint8(reply_cursor, 0);
+    evpl_iovec_cursor_append_uint32(reply_cursor, 0);
 
     /* Capabilitiers */
     evpl_iovec_cursor_append_uint32(reply_cursor, 0);

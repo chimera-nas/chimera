@@ -28,8 +28,10 @@ struct chimera_smb_open_file {
     uint32_t                        name_len;
     uint32_t                        flags;
     uint64_t                        position;
+    uint32_t                        parent_fh_len;
     struct chimera_smb_open_file   *next;
-    uint16_t                        name[SMB_FILENAME_MAX];
+    uint8_t                         parent_fh[CHIMERA_VFS_FH_SIZE];
+    char                            name[SMB_FILENAME_MAX];
     uint16_t                        pattern[SMB_FILENAME_MAX];
 };
 

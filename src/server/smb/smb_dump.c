@@ -80,6 +80,8 @@ smb_status_name(uint32_t status)
             return "InvalidHandle";
         case SMB2_STATUS_REQUEST_ABORTED:
             return "RequestAborted";
+        case SMB2_STATUS_END_OF_FILE:
+            return "EndOfFile";
         default:
             return "Unknown";
     } /* switch */
@@ -138,6 +140,17 @@ _smb_dump_request(
             sprintf(argstr, " file_id %lx.%lx offset %lu length %u",
                     request->read.file_id.pid, request->read.file_id.vid,
                     request->read.offset, request->read.length);
+            break;
+        case SMB2_IOCTL:
+            sprintf(argstr, " file_id %lx.%lx ctl_code %u",
+                    request->ioctl.file_id.pid, request->ioctl.file_id.vid,
+                    request->ioctl.ctl_code);
+            break;
+        case SMB2_SET_INFO:
+            sprintf(argstr, " file_id %lx.%lx info_type %u info_class %u addl_info %u",
+                    request->set_info.file_id.pid, request->set_info.file_id.vid,
+                    request->set_info.info_type, request->set_info.info_class,
+                    request->set_info.addl_info);
             break;
         case SMB2_QUERY_INFO:
             sprintf(argstr, " file_id %lx.%lx info_type %u info_class %u addl_info %u flags %u",

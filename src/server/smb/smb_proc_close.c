@@ -78,8 +78,12 @@ chimera_smb_close_reply(
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_CLOSE_REPLY_SIZE);
     evpl_iovec_cursor_append_uint16(reply_cursor, request->close.flags);
-    chimera_smb_append_network_open_info(reply_cursor, &request->close.r_attrs);
 
+    if (request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) {
+        chimera_smb_append_network_open_info(reply_cursor, &request->close.r_attrs);
+    } else {
+        chimera_smb_append_null_network_open_info_null(reply_cursor);
+    }
 
 } /* chimera_smb_close_reply */
 

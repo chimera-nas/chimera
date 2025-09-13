@@ -9,56 +9,109 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_release.h"
 
+static void
+chimera_smb_set_info_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+} /* chimera_smb_set_info_callback */
+
+static void
+chimera_smb_set_info_remove_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    chimera_vfs_release(request->compound->thread->vfs_thread, request->set_info.parent_handle);
+
+    chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+} /* chimera_smb_set_info_remove_callback */
+
+static void
+chimera_smb_set_info_open_unlink_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request   *request   = private_data;
+    struct chimera_smb_open_file *open_file = request->set_info.open_file;
+
+    request->set_info.parent_handle = oh;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        return;
+    }
+
+    chimera_vfs_remove(
+        request->compound->thread->vfs_thread,
+        oh,
+        open_file->name,
+        open_file->name_len,
+        0,
+        0,
+        chimera_smb_set_info_remove_callback,
+        request);
+
+} /* chimera_smb_set_info_open_unlink_callback */
+
 void
 chimera_smb_set_info(struct chimera_smb_request *request)
 {
-    #if 0
-    struct chimera_smb_tree      *tree = request->tree;
     struct chimera_smb_open_file *open_file;
-    uint64_t                      open_file_bucket;
+    struct chimera_vfs_attrs      attrs;
 
-    if (unlikely(request->request_struct_size != SMB2_SET_INFO_REQUEST_SIZE)) {
-        chimera_smb_error("Received SMB2 SET_INFO request with invalid struct size (%u expected %u)",
-                          request->smb2_hdr.struct_size,
-                          SMB2_SET_INFO_REQUEST_SIZE);
-        chimera_smb_complete(evpl, thread, request, SMB2_STATUS_INVALID_PARAMETER);
-        return;
-    }
+    open_file = chimera_smb_open_file_lookup(request, &request->set_info.file_id);
 
-    evpl_iovec_cursor_get_uint8(&request->request_cursor, &request->set_info.info_type);
-    evpl_iovec_cursor_get_uint8(&request->request_cursor, &request->set_info.info_class);
-    evpl_iovec_cursor_get_uint32(&request->request_cursor, &request->set_info.buffer_length);
-    evpl_iovec_cursor_get_uint16(&request->request_cursor, &request->set_info.buffer_offset);
-    evpl_iovec_cursor_skip(&request->request_cursor, 2);
-    evpl_iovec_cursor_get_uint32(&request->request_cursor, &request->set_info.addl_info);
-    evpl_iovec_cursor_get_uint32(&request->request_cursor, &request->set_info.flags);
-    evpl_iovec_cursor_get_uint64(&request->request_cursor, &request->set_info.file_id.pid);
-    evpl_iovec_cursor_get_uint64(&request->request_cursor, &request->close.file_id.vbid);
+    request->set_info.open_file = open_file;
 
-    chimera_smb_debug("set_info request: %u %u %u %u %u %llu %llu", request->set_info.info_type, request->set_info.
-                      info_class, request->set_info.buffer_length, request->set_info.buffer_offset, request->set_info.
-                      addl_info, request->set_info.flags, request->set_info.file_id.pid, request->set_info.file_id.vbid)
-    ;
+    switch (request->set_info.info_type) {
+        case SMB2_INFO_FILE:
+            switch (request->set_info.info_class) {
+                case SMB2_FILE_BASIC_INFO:
 
-    open_file_bucket = request->close.file_id.pid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+                    attrs.va_req_mask = 0;
+                    attrs.va_set_mask = 0;
 
-    pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
+                    chimera_vfs_setattr(
+                        request->compound->thread->vfs_thread,
+                        open_file->handle,
+                        &attrs,
+                        0,
+                        0,
+                        chimera_smb_set_info_callback,
+                        request);
+                    break;
+                case SMB2_FILE_DISPOSITION_INFO:
+                    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) {
+                        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+                    } else {
+                        chimera_vfs_open(
+                            request->compound->thread->vfs_thread,
+                            open_file->parent_fh,
+                            open_file->parent_fh_len,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                            chimera_smb_set_info_open_unlink_callback,
+                            request);
 
-    HASH_FIND(hh, tree->open_files[open_file_bucket], &request->close.file_id, sizeof(struct chimera_smb_file_id),
-              open_file);
-
-    if (unlikely(!open_file)) {
-        chimera_smb_error("Received SMB2 CLOSE request for unknown file id %llu", request->close.file_id.pid);
-        chimera_smb_complete(evpl, thread, request, SMB2_STATUS_FILE_CLOSED);
-        return;
-    }
-
-    HASH_DELETE(hh, tree->open_files[open_file_bucket], open_file);
-
-    pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
-
-    request->set_info.handle = open_file->handle;
-    #endif /* if 0 */
+                    }
+                    break;
+                default:
+                    chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
+            } /* switch */
+            break;
+        default:
+            chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
+    } /* switch */
 } /* chimera_smb_set_info */
 
 void
@@ -66,6 +119,7 @@ chimera_smb_set_info_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request)
 {
+    evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_SET_INFO_REPLY_SIZE);
 } /* chimera_smb_set_info_reply */
 
 int
@@ -73,5 +127,35 @@ chimera_smb_parse_set_info(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request)
 {
+    if (unlikely(request->request_struct_size != SMB2_SET_INFO_REQUEST_SIZE)) {
+        chimera_smb_error("Received SMB2 SET_INFO request with invalid struct size (%u expected %u)",
+                          request->smb2_hdr.struct_size,
+                          SMB2_SET_INFO_REQUEST_SIZE);
+        return -1;
+    }
+
+    evpl_iovec_cursor_get_uint8(request_cursor, &request->set_info.info_type);
+    evpl_iovec_cursor_get_uint8(request_cursor, &request->set_info.info_class);
+    evpl_iovec_cursor_get_uint32(request_cursor, &request->set_info.buffer_length);
+    evpl_iovec_cursor_get_uint16(request_cursor, &request->set_info.buffer_offset);
+    evpl_iovec_cursor_get_uint32(request_cursor, &request->set_info.addl_info);
+    evpl_iovec_cursor_get_uint64(request_cursor, &request->set_info.file_id.pid);
+    evpl_iovec_cursor_get_uint64(request_cursor, &request->set_info.file_id.vid);
+
+    evpl_iovec_cursor_skip(request_cursor,
+                           request->set_info.buffer_offset - evpl_iovec_cursor_consumed(request_cursor));
+
+    request->set_info.r_attrs.smb_attr_mask = 0;
+    switch (request->set_info.info_type) {
+        case SMB2_INFO_FILE:
+            switch (request->set_info.info_class) {
+                case SMB2_FILE_BASIC_INFO:
+                    chimera_smb_parse_basic_info(request_cursor, &request->set_info.r_attrs);
+                    break;
+                case SMB2_FILE_DISPOSITION_INFO:
+                    chimera_smb_parse_disposition_info(request_cursor, &request->set_info.r_attrs);
+                    break;
+            } /* switch */
+    } /* switch */
     return 0;
 } /* chimera_smb_parse_set_info */

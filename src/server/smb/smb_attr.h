@@ -25,6 +25,7 @@
 #define SMB_ATTR_COMPRESSION        (1ULL << 10)
 #define SMB_ATTR_ACCESS_FLAGS       (1ULL << 11)
 #define SMB_ATTR_REPARSE_TAG        (1ULL << 12)
+#define SMB_ATTR_DISPOSITION        (1ULL << 13)
 
 /* Masks for each information class */
 #define SMB_ATTR_MASK_BASIC         ( \
@@ -73,8 +74,18 @@ struct chimera_smb_attrs {
     uint16_t smb_compression_format; /* Compression format */
     uint32_t smb_compression_unit_size; /* Compression unit size */
 
+    uint8_t  smb_disposition; /* Disposition */
+
     /* Bitmap of populated attributes */
     uint64_t smb_attr_mask;
+};
+
+struct chimera_smb_fs_attrs {
+    uint64_t smb_total_allocation_units;
+    uint64_t smb_caller_available_allocation_units;
+    uint64_t smb_actual_available_allocation_units;
+    uint32_t smb_sectors_per_allocation_unit;
+    uint32_t smb_bytes_per_sector;
 };
 
 /* Helper functions for common attribute marshaling operations */
@@ -297,6 +308,58 @@ chimera_smb_marshal_network_open_info(
     smb_attr->smb_attr_mask |= SMB_ATTR_SIZE;
 } /* chimera_smb_marshal_network_open_info */
 
+static inline void
+chimera_smb_marshal_fs_full_size_info(
+    const struct chimera_vfs_attrs *attr,
+    struct chimera_smb_fs_attrs    *smb_attr)
+{
+
+    smb_attr->smb_total_allocation_units            = attr->va_fs_space_total >> 12;
+    smb_attr->smb_caller_available_allocation_units = attr->va_fs_space_avail >> 12;
+    smb_attr->smb_actual_available_allocation_units = attr->va_fs_space_free >> 12;
+    smb_attr->smb_sectors_per_allocation_unit       = 8;
+    smb_attr->smb_bytes_per_sector                  = 512;
+
+} /* chimera_smb_marshal_fs_full_size_info */
+
+static inline void
+chimera_smb_unmarshal_basic_info(
+    const struct chimera_smb_attrs *smb_attrs,
+    struct chimera_vfs_attrs       *attr)
+{
+    attr->va_req_mask = 0;
+    attr->va_set_mask = 0;
+
+    chimera_nt_to_epoch(smb_attrs->smb_atime, &attr->va_atime);
+    chimera_nt_to_epoch(smb_attrs->smb_mtime, &attr->va_mtime);
+    chimera_nt_to_epoch(smb_attrs->smb_ctime, &attr->va_ctime);
+
+    attr->va_req_mask |= SMB_ATTR_ATIME | SMB_ATTR_MTIME | SMB_ATTR_CTIME;
+    attr->va_set_mask |= SMB_ATTR_ATIME | SMB_ATTR_MTIME | SMB_ATTR_CTIME;
+} // chimera_smb_unmarshal_basic_info
+
+static inline void
+chimera_smb_parse_basic_info(
+    struct evpl_iovec_cursor *cursor,
+    struct chimera_smb_attrs *attrs)
+{
+    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_crttime);
+    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_atime);
+    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_mtime);
+    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_ctime);
+    evpl_iovec_cursor_get_uint32(cursor, &attrs->smb_attributes);
+
+    attrs->smb_attr_mask |= SMB_ATTR_CRTTIME | SMB_ATTR_ATIME | SMB_ATTR_MTIME | SMB_ATTR_CTIME | SMB_ATTR_ATTRIBUTES;
+} /* chimera_smb_parse_basic_info */
+
+static inline void
+chimera_smb_parse_disposition_info(
+    struct evpl_iovec_cursor *cursor,
+    struct chimera_smb_attrs *attrs)
+{
+    evpl_iovec_cursor_get_uint8(cursor, &attrs->smb_disposition);
+    attrs->smb_attr_mask |= SMB_ATTR_DISPOSITION;
+} /* chimera_smb_parse_disposition_info */
 /* Append functions for serializing attributes - these enforce required fields */
 
 /* Helper functions to append specific information classes */
@@ -333,7 +396,7 @@ chimera_smb_append_standard_info(
     evpl_iovec_cursor_append_uint64(cursor, attrs->smb_size);
     evpl_iovec_cursor_append_uint32(cursor, attrs->smb_link_count);
     evpl_iovec_cursor_append_uint8(cursor, !!(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE));
-    evpl_iovec_cursor_append_uint8(cursor, !!(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY));
+    evpl_iovec_cursor_append_uint8(cursor, attrs->smb_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY);
     evpl_iovec_cursor_append_uint16(cursor, 0); /* Reserved */
 } /* chimera_smb_append_standard_info */
 
@@ -416,6 +479,19 @@ chimera_smb_append_network_open_info(
     evpl_iovec_cursor_append_uint32(cursor, 0); /* Reserved */
 } /* chimera_smb_append_network_open_info */
 
+static inline void
+chimera_smb_append_null_network_open_info_null(struct evpl_iovec_cursor *cursor)
+{
+    evpl_iovec_cursor_append_uint64(cursor, 0);
+    evpl_iovec_cursor_append_uint64(cursor, 0);
+    evpl_iovec_cursor_append_uint64(cursor, 0);
+    evpl_iovec_cursor_append_uint64(cursor, 0);
+    evpl_iovec_cursor_append_uint64(cursor, 0);
+    evpl_iovec_cursor_append_uint64(cursor, 0);
+    evpl_iovec_cursor_append_uint32(cursor, 0);
+    evpl_iovec_cursor_append_uint32(cursor, 0);     /* Reserved */
+} // chimera_smb_append_null_network_open_info_null
+
 /* Append for FileAllInformation using the other append functions */
 static inline void
 chimera_smb_append_all_info(
@@ -441,5 +517,7 @@ chimera_smb_append_all_info(
     evpl_iovec_cursor_append_uint32(cursor, open_file->name_len);
 
     evpl_iovec_cursor_append_blob(cursor, open_file->name, open_file->name_len);
+
+    evpl_iovec_cursor_append_uint32(cursor, 0); /* padding */
 
 } /* chimera_smb_append_all_info */
