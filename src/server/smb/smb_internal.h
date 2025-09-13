@@ -143,7 +143,9 @@ struct chimera_smb_request {
             struct chimera_vfs_open_handle *parent_handle;
             struct chimera_smb_open_file   *r_open_file;
             struct chimera_smb_attrs        r_attrs;
+            struct chimera_vfs_attrs        set_attr;
             uint16_t                        name[SMB_FILENAME_MAX];
+            char                            name_utf8[SMB_FILENAME_MAX];
         } create;
 
         struct  {
@@ -229,7 +231,7 @@ struct chimera_smb_request {
             uint32_t                      max_output_length;
             struct evpl_iovec             iov;
             struct chimera_smb_open_file *open_file;
-            uint64_t                     *last_file_offset;
+            uint32_t                     *last_file_offset;
             uint16_t                      pattern[SMB_FILENAME_MAX];
         } query_directory;
     };
@@ -462,6 +464,22 @@ chimera_smb_conn_free(
         chimera_smb_session_release(thread->shared, session_handle->session);
 
         chimera_smb_session_handle_free(thread, session_handle);
+    }
+
+    if (conn->ctx) {
+        gss_delete_sec_context(&conn->gss_minor, &conn->ctx, NULL);
+        conn->ctx = NULL;
+    }
+
+    if (conn->srv_cred) {
+        gss_release_cred(&conn->gss_minor, &conn->srv_cred);
+        conn->srv_cred = NULL;
+    }
+
+    if (conn->gss_output.value) {
+        gss_release_buffer(&conn->gss_minor, &conn->gss_output);
+        conn->gss_output.value  = NULL;
+        conn->gss_output.length = 0;
     }
 
     LL_PREPEND(thread->free_conns, conn);

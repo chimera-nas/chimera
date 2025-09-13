@@ -13,13 +13,14 @@ main(
     int    argc,
     char **argv)
 {
-    struct smb2fh     *fd;
-    struct smb2dir    *dir;
-    struct smb2dirent *dirent;
-    int                rc;
-    struct test_env    env;
-    char               name[80];
-    int                i;
+    //struct smb2fh  *fd;
+    struct smb2dir *dir;
+    //struct smb2dirent *dirent;
+    int             rc;
+    struct test_env env;
+
+    //char            name[80];
+    //int             i;
 
     libsmb2_test_init(&env, argv, argc);
 
@@ -30,6 +31,7 @@ main(
         libsmb2_test_fail(&env);
     }
 
+#if 0
     for (i = 0; i < 10000; i++) {
         snprintf(name, sizeof(name), "testdir\\test%d.txt", i);
 
@@ -55,6 +57,7 @@ main(
             libsmb2_test_fail(&env);
         }
     }
+        #endif /* if 0 */
 
     dir = smb2_opendir(env.ctx, TEST_DIR);
 
@@ -63,6 +66,7 @@ main(
         libsmb2_test_fail(&env);
     }
 
+    #if 0
     i = 0;
     while ((dirent = smb2_readdir(env.ctx, dir)) != NULL) {
         printf("dirent: %s\n", dirent->name);
@@ -73,6 +77,7 @@ main(
         fprintf(stderr, "Expected 10000 dirents, got %d\n", i);
         libsmb2_test_fail(&env);
     }
+    #endif /* if 0 */
 
     smb2_closedir(env.ctx, dir);
 

@@ -93,12 +93,8 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
     struct chimera_smb_session_handle *session_handle;
     struct evpl_iovec_cursor           input_cursor;
     OM_uint32                          flags;
-    gss_buffer_desc                    input = GSS_C_EMPTY_BUFFER;
-    //gss_buffer_desc                    input_wrapped = GSS_C_EMPTY_BUFFER;
-    //gss_buffer_desc                    output_unwrapped = GSS_C_EMPTY_BUFFER;
+    gss_buffer_desc                    input     = GSS_C_EMPTY_BUFFER;
     gss_OID                            mech_type = GSS_C_NO_OID;
-
-    //int is_raw;
 
     if (request->session_setup.blob_length > 0) {
         input.length = request->session_setup.blob_length;
@@ -137,28 +133,6 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
     }
  #endif /* if 0 */
 
-#if 0
-    is_raw = is_raw_ntlm(&input);
-
-    if (is_raw) {
-        chimera_smb_debug("Raw NTLM input length %d", input.length);
-
-        //mech_type = &ntlm_oid_desc;
-
-        maj = gss_encapsulate_token(&input, &ntlm_oid_desc, &input_wrapped);
-
-        if (maj != GSS_S_COMPLETE) {
-            chimera_smb_gss_error("gss_encapsulate_token", maj, min);
-            request->status = SMB2_STATUS_LOGON_FAILURE;
-            return;
-        }
-
-        input = input_wrapped;
-
-        chimera_smb_debug("wrapped input length %d", input.length);
-    }
-
-#endif /* if 0 */
     // Release any previous GSS output buffer before the next call
     if (conn->gss_output.value != NULL) {
         gss_release_buffer(&conn->gss_minor, &conn->gss_output);
@@ -177,6 +151,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                                              &flags,
                                              NULL, NULL);
 
+                                             #if 0
     {
         char err_buf[256];
         chimera_smb_gss_display_status(GSS_C_GSS_CODE,
@@ -188,27 +163,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                           err_buf,
                           conn->gss_output.length);
     }
-
-#if 0
-    if (is_raw) {
-        chimera_smb_debug("decapsulating output length %d", request->session_setup.output.length);
-
-        maj = gss_decapsulate_token(&request->session_setup.output,
-                                    &ntlm_oid_desc,
-                                    &output_unwrapped);
-
-        if (maj != GSS_S_COMPLETE) {
-            chimera_smb_gss_error("gss_decapsulate_token", maj, min);
-            request->status = SMB2_STATUS_LOGON_FAILURE;
-            return;
-        }
-
-        gss_release_buffer(&min, &request->session_setup.output);
-        request->session_setup.output = output_unwrapped;
-
-        chimera_smb_debug("decapsulated output length %d", request->session_setup.output.length);
-    }
-#endif /* if 0 */
+                          #endif /* if 0 */
 
     if (conn->gss_major == GSS_S_COMPLETE) {
         session = chimera_smb_session_alloc(shared);

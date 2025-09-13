@@ -474,7 +474,10 @@ chimera_linux_open_at(
                 mode);
 
     if (fd < 0) {
-        chimera_linux_error("linux_open_at: openat() failed: %s",
+        chimera_linux_error("linux_open_at: openat(%d,%s,%d) failed: %s",
+                            parent_fd,
+                            fullname,
+                            flags,
                             strerror(errno));
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);

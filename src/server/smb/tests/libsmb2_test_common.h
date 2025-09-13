@@ -179,7 +179,7 @@ libsmb2_test_init(
 
     chimera_server_start(env->server);
 
-    chimera_server_create_share(env->server, "share", "/share");
+    chimera_server_create_share(env->server, "share", "share");
 
     env->ctx = smb2_init_context();
 
