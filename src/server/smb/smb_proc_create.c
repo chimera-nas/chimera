@@ -65,7 +65,9 @@ chimera_smb_create_gen_open_file(
     open_file = chimera_smb_open_file_alloc(thread);
 
 
-    memcpy(open_file->parent_fh, parent_fh, parent_fh_len);
+    if (parent_fh_len) {
+        memcpy(open_file->parent_fh, parent_fh, parent_fh_len);
+    }
     open_file->parent_fh_len = parent_fh_len;
     open_file->file_id.pid   = ++tree->next_file_id;
     open_file->file_id.vid   = chimera_rand64();
@@ -382,11 +384,11 @@ chimera_smb_create_open_parent(struct chimera_smb_request *request)
     char                              path[CHIMERA_VFS_PATH_MAX];
     int                               rc;
 
-    rc = chimera_smb_utf16le_to_utf8(&thread->iconv_ctx,
-                                     request->create.name,
-                                     request->create.name_len,
-                                     path,
-                                     sizeof(path));
+    chimera_smb_utf16le_to_utf8(&thread->iconv_ctx,
+                                request->create.name,
+                                request->create.name_len,
+                                path,
+                                sizeof(path));
 
     rc = chimera_smb_slash_back_to_forward(path, sizeof(path));
 

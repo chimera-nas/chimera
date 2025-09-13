@@ -52,6 +52,8 @@ chimera_smb_query_directory_readdir_callback(
     struct evpl_iovec_cursor          entry_cursor;
     struct chimera_smb_attrs          smb_attrs;
 
+    smb_attrs.smb_attr_mask = 0;
+
     file_index = (uint32_t) (XXH3_64bits(name, namelen) & 0xffffffff);
 
     namelen_padded = namelen ? namelen * 2 + 1 : 2;
@@ -75,6 +77,9 @@ chimera_smb_query_directory_readdir_callback(
         case SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION:
             expected_length = 76 + namelen_padded;
             break;
+        default:
+            chimera_smb_abort("Unsupported info class %d", request->query_directory.info_class);
+
     } /* switch */
 
     expected_length += (8 - (expected_length & 7)) & 7;
@@ -102,7 +107,7 @@ chimera_smb_query_directory_readdir_callback(
 
     evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
 
-    chimera_smb_marshal_basic_attrs(attrs, &smb_attrs);
+    chimera_smb_marshal_attrs(attrs, &smb_attrs);
 
     switch (request->query_directory.info_class) {
         case SMB2_FILE_DIRECTORY_INFORMATION:

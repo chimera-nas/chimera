@@ -76,7 +76,8 @@ chimera_smb_query_info(struct chimera_smb_request *request)
     uint32_t                          status       = SMB2_STATUS_SUCCESS;
 
 
-    request->query_info.open_file = chimera_smb_open_file_lookup(request, &request->query_info.file_id);
+    request->query_info.open_file             = chimera_smb_open_file_lookup(request, &request->query_info.file_id);
+    request->query_info.r_attrs.smb_attr_mask = 0;
 
     if (unlikely(!request->query_info.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
@@ -128,7 +129,7 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     chimera_smb_error("Unsupported info class %d in reply, defaulting to ALL_INFO size",
                                       request->query_info.info_class);
                     status = SMB2_STATUS_INVALID_PARAMETER;
-                    return;
+                    break;
             } /* switch */
             break;
         case SMB2_INFO_FILESYSTEM:
