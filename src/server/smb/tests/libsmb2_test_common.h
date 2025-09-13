@@ -53,6 +53,8 @@ libsmb2_test_init(
     const char                   *backend = "linux";
     struct chimera_server_config *config;
     struct timespec               tv;
+    char                          ntlm_path[1024];
+    FILE                         *ntlm_pass;
 
     env->metrics = prometheus_metrics_create(NULL, NULL, 0);
 
@@ -81,6 +83,16 @@ libsmb2_test_init(
 
     (void) mkdir("/build/test", 0755);
     (void) mkdir(env->session_dir, 0755);
+
+    snprintf(ntlm_path, sizeof(ntlm_path), "%s/ntlm_pass.txt", env->session_dir);
+
+    ntlm_pass = fopen(ntlm_path, "w");
+
+    fprintf(ntlm_pass, "WORKGROUP:myuser:mypassword\n");
+
+    fclose(ntlm_pass);
+
+    setenv("NTLM_USER_FILE", ntlm_path, 1);
 
     config = chimera_server_config_init();
 
@@ -179,7 +191,11 @@ libsmb2_test_init(
     smb2_set_security_mode(env->ctx, SMB2_NEGOTIATE_SIGNING_ENABLED);
     smb2_set_authentication(env->ctx, SMB2_SEC_NTLMSSP);
 
-    if (smb2_connect_share(env->ctx, "localhost", "share", "anonymous") != 0) {
+    smb2_set_user(env->ctx, "myuser");
+    smb2_set_password(env->ctx, "mypassword");
+    smb2_set_domain(env->ctx, "WORKGROUP");
+
+    if (smb2_connect_share(env->ctx, "localhost", "share", "myuser") != 0) {
         fprintf(stderr, "smb2_connect_share failed. %s\n",
                 smb2_get_error(env->ctx));
         exit(EXIT_FAILURE);
