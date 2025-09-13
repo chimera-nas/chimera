@@ -24,7 +24,13 @@ chimera_smb_read_callback(
     request->read.niov     = niov;
     request->read.r_length = count;
 
-    chimera_smb_complete_request(private_data, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    if (error_code) {
+        chimera_smb_complete_request(private_data, SMB2_STATUS_INTERNAL_ERROR);
+    } else if (eof) {
+        chimera_smb_complete_request(private_data, SMB2_STATUS_SUCCESS);
+    } else {
+        chimera_smb_complete_request(private_data, SMB2_STATUS_SUCCESS);
+    }
 } /* chimera_smb_read_callback */
 
 
@@ -83,6 +89,6 @@ chimera_smb_read_reply(
     evpl_iovec_cursor_append_uint32(reply_cursor, request->read.r_length);
     evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* remaining */
 
-    evpl_iovec_cursor_inject(reply_cursor, request->read.iov, request->read.niov, request->read.length);
+    evpl_iovec_cursor_inject(reply_cursor, request->read.iov, request->read.niov, request->read.r_length);
 
 } /* chimera_smb_write_reply */

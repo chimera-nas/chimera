@@ -434,7 +434,7 @@ struct chimera_vfs_request {
         struct {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        offset;
-            uint32_t                        length;
+            uint64_t                        length;
             struct chimera_vfs_attrs        r_pre_attr;
             struct chimera_vfs_attrs        r_post_attr;
         } commit;

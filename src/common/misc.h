@@ -42,6 +42,15 @@ chimera_nt_time(const struct timespec *ts)
     return nt_now;
 } /* chimera_nt_time */
 
+static inline void
+chimera_nt_to_epoch(
+    uint64_t         nt_now,
+    struct timespec *ts)
+{
+    ts->tv_sec  = (nt_now - NT_EPOCH_DELTA) / 10000000ULL;
+    ts->tv_nsec = (nt_now % 10000000ULL) * 100ULL;
+} /* chimera_nt_to_epoch */
+
 static inline uint64_t
 chimera_get_elapsed_ns(
     struct timespec *end,

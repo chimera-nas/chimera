@@ -65,6 +65,22 @@ void chimera_smb_read_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request);
 
+int chimera_smb_parse_flush(
+    struct evpl_iovec_cursor   *request_cursor,
+    struct chimera_smb_request *request);
+
+void chimera_smb_flush_reply(
+    struct evpl_iovec_cursor   *reply_cursor,
+    struct chimera_smb_request *request);
+
+int chimera_smb_parse_ioctl(
+    struct evpl_iovec_cursor   *request_cursor,
+    struct chimera_smb_request *request);
+
+void chimera_smb_ioctl_reply(
+    struct evpl_iovec_cursor   *reply_cursor,
+    struct chimera_smb_request *request);
+
 int chimera_smb_parse_query_info(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request);
@@ -130,6 +146,12 @@ void chimera_smb_write(
     struct chimera_smb_request *request);
 
 void chimera_smb_read(
+    struct chimera_smb_request *request);
+
+void chimera_smb_flush(
+    struct chimera_smb_request *request);
+
+void chimera_smb_ioctl(
     struct chimera_smb_request *request);
 
 void chimera_smb_query_info(

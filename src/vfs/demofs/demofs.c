@@ -1576,15 +1576,6 @@ demofs_read(
     demofs_private->pending = 0;
     demofs_private->niov    = 0;
 
-    if (unlikely(request->read.length == 0)) {
-        request->status        = CHIMERA_VFS_OK;
-        request->read.r_niov   = 0;
-        request->read.r_length = 0;
-        request->read.r_eof    = eof;
-        request->complete(request);
-        return;
-    }
-
     inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
@@ -1606,6 +1597,16 @@ demofs_read(
     if (offset + length > inode->size) {
         length = inode->size > offset ? inode->size - offset : 0;
         eof    = 1;
+    }
+
+    if (unlikely(length == 0)) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status        = CHIMERA_VFS_OK;
+        request->read.r_niov   = 0;
+        request->read.r_length = 0;
+        request->read.r_eof    = eof;
+        request->complete(request);
+        return;
     }
 
     aligned_offset = offset & ~4095ULL;

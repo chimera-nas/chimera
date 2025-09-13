@@ -281,7 +281,7 @@ chimera_vfs_commit(
     struct chimera_vfs_thread      *thread,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
-    uint32_t                        count,
+    uint64_t                        count,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
     chimera_vfs_commit_callback_t   callback,

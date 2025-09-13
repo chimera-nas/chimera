@@ -27,6 +27,36 @@ chimera_smb_iconv_destroy(struct chimera_smb_iconv_ctx *ctx)
 } /* chimera_smb_iconv_destroy */
 
 static inline int
+chimera_smb_slash_forward_to_back(
+    char  *path,
+    size_t len)
+{
+    char *p;
+
+    for (p = path; *p; p++) {
+        if (*p == '/') {
+            *p = '\\';
+        }
+    }
+    return 0;
+} /* chimera_smb_slash_forward_to_back */
+
+static inline int
+chimera_smb_slash_back_to_forward(
+    char  *path,
+    size_t len)
+{
+    char *p;
+
+    for (p = path; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+    return 0;
+} /* chimera_smb_convert_slashes */
+
+static inline int
 chimera_smb_utf16le_to_utf8(
     struct chimera_smb_iconv_ctx *ctx,
     const uint16_t               *src,

@@ -24,6 +24,42 @@ evpl_iovec_cursor_init(
     cursor->offset   = 0;
 } /* evpl_iovec_cursor_init */
 
+static inline void
+evpl_iovec_cursor_get_blob(
+    struct evpl_iovec_cursor *cursor,
+    void                     *blob,
+    int                       length)
+{
+    int   chunk, left = length;
+    void *ptr = blob;
+
+    while (left && cursor->niov) {
+        chunk = cursor->iov->length - cursor->offset;
+
+        if (left < chunk) {
+            chunk = left;
+        }
+
+        memcpy(ptr, cursor->iov->data + cursor->offset, chunk);
+
+        ptr  += chunk;
+        left -= chunk;
+
+        cursor->offset   += chunk;
+        cursor->consumed += chunk;
+
+        if (cursor->offset == cursor->iov->length) {
+            cursor->iov++;
+            cursor->niov--;
+            cursor->offset = 0;
+        }
+    }
+
+    if (left) {
+        abort();
+    }
+} /* evpl_iovec_cursor_get_blob */
+
 static void
 evpl_iovec_cursor_copy(
     struct evpl_iovec_cursor *cursor,
@@ -216,6 +252,8 @@ evpl_iovec_cursor_append_blob(
     void                     *blob,
     int                       length)
 {
+    evpl_iovec_cursor_skip(cursor, (4 - (cursor->consumed & 3)) & 3);
+
     memcpy(evpl_iovec_cursor_data(cursor), blob, length);
     evpl_iovec_cursor_skip(cursor, length);
 } /* evpl_iovec_cursor_append_blob */

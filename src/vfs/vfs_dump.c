@@ -68,9 +68,10 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                              req->readdir.attr_mask);
             break;
         case CHIMERA_VFS_OP_OPEN_AT:
-            chimera_snprintf(argstr, sizeof(argstr), "name %.*s",
+            chimera_snprintf(argstr, sizeof(argstr), "name %.*s flags %08x",
                              req->open_at.namelen,
-                             req->open_at.name);
+                             req->open_at.name,
+                             req->open_at.flags);
             break;
         case CHIMERA_VFS_OP_CLOSE:
             chimera_snprintf(argstr, sizeof(argstr), "hdl %lx",
@@ -94,6 +95,11 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
             chimera_snprintf(argstr, sizeof(argstr), "name %.*s",
                              req->mkdir.name_len,
                              req->mkdir.name);
+            break;
+        case CHIMERA_VFS_OP_REMOVE:
+            chimera_snprintf(argstr, sizeof(argstr), "name %.*s",
+                             req->remove.namelen,
+                             req->remove.name);
             break;
         case CHIMERA_VFS_OP_COMMIT:
             chimera_snprintf(argstr, sizeof(argstr), "hdl %lx",

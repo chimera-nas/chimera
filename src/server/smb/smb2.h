@@ -614,6 +614,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_TREE_DISCONNECT_REQUEST_SIZE           4
 #define SMB2_TREE_DISCONNECT_REPLY_SIZE             4
 
+#define SMB2_IOCTL_REQUEST_SIZE                     57
+#define SMB2_IOCTL_REPLY_SIZE                       49
+
 #define SMB2_CREATE_REQUEST_SIZE                    57
 #define SMB2_CREATE_REPLY_SIZE                      89
 
@@ -762,6 +765,79 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 
 #define SMB2_QUERY_DIRECTORY_REPLY_SIZE             9
 
+
+#define SMB2_FSCTL_DFS_GET_REFERRALS                0x00060194
+
+#define SMB2_FLUSH_REQUEST_SIZE                     24
+#define SMB2_FLUSH_REPLY_SIZE                       4
+
+#define SMB2_SET_INFO_REQUEST_SIZE                  33
+#define SMB2_SET_INFO_REPLY_SIZE                    2
+
+
+/* SMB2 information classes for FileInformation */
+#define SMB2_FILE_BASIC_INFO                        0x04
+#define SMB2_FILE_STANDARD_INFO                     0x05
+#define SMB2_FILE_INTERNAL_INFO                     0x06
+#define SMB2_FILE_EA_INFO                           0x07
+#define SMB2_FILE_ACCESS_INFO                       0x08
+#define SMB2_FILE_RENAME_INFO                       0x0A
+#define SMB2_FILE_DISPOSITION_INFO                  0x0D
+#define SMB2_FILE_POSITION_INFO                     0x0E
+#define SMB2_FILE_FULL_EA_INFO                      0x0F
+#define SMB2_FILE_MODE_INFO                         0x10
+#define SMB2_FILE_ALIGNMENT_INFO                    0x11
+#define SMB2_FILE_ALL_INFO                          0x12
+#define SMB2_FILE_ALLOCATION_INFO                   0x13
+#define SMB2_FILE_ENDOFFILE_INFO                    0x14
+#define SMB2_FILE_ALTERNATE_NAME_INFO               0x15
+#define SMB2_FILE_STREAM_INFO                       0x16
+#define SMB2_FILE_PIPE_INFO                         0x17
+#define SMB2_FILE_COMPRESSION_INFO                  0x0C
+#define SMB2_FILE_NETWORK_OPEN_INFO                 0x22
+#define SMB2_FILE_ATTRIBUTE_TAG_INFO                0x23
+
+/* SMB2 information types */
+#define SMB2_INFO_FILE                              0x01
+#define SMB2_INFO_FILESYSTEM                        0x02
+#define SMB2_INFO_SECURITY                          0x03
+#define SMB2_INFO_QUOTA                             0x04
+
+/* Fixed sizes for various information classes (per SMB spec) */
+#define SMB2_FILE_BASIC_INFO_SIZE                   40
+#define SMB2_FILE_STANDARD_INFO_SIZE                24
+#define SMB2_FILE_INTERNAL_INFO_SIZE                8
+#define SMB2_FILE_EA_INFO_SIZE                      4
+#define SMB2_FILE_ACCESS_INFO_SIZE                  4
+#define SMB2_FILE_POSITION_INFO_SIZE                8
+#define SMB2_FILE_MODE_INFO_SIZE                    4
+#define SMB2_FILE_ALIGNMENT_INFO_SIZE               4
+#define SMB2_FILE_COMPRESSION_INFO_SIZE             16
+#define SMB2_FILE_NETWORK_OPEN_INFO_SIZE            56
+#define SMB2_FILE_ATTRIBUTE_TAG_INFO_SIZE           8
+
+#define SMB2_FILE_FS_DEVICE_INFO                    4
+#define SMB2_FILE_FS_ATTRIBUTE_INFO                 5
+#define SMB2_FILE_FS_FULL_SIZE_INFO                 7
+
+
+/*
+ * FileAllInformation includes all the following structures:
+ * - Basic (40)
+ * - Standard (24)
+ * - Internal (8)
+ * - EA (4)
+ * - Access (4)
+ * - Position (8)
+ * - Mode (4)
+ * - Alignment (4)
+ * - FileNameInformation (4 bytes for FileNameLength)
+ * The actual FileName string is variable length and follows this fixed portion.
+ * The fixed portion is 100 bytes.
+ */
+#define SMB2_FILE_ALL_INFO_FIXED_SIZE               100
+
+
 struct smb2_file_directory_information {
     uint32_t next_entry_offset;
     uint32_t file_index;
@@ -774,6 +850,6 @@ struct smb2_file_directory_information {
     uint32_t attributes;
     uint32_t name_length;
     uint32_t ea_size;
-    uint32_t reserved;
-    uint64_t file_id;
+    //uint32_t reserved;
+    //uint64_t file_id;
 };

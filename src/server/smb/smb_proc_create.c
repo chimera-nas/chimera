@@ -15,33 +15,66 @@
 const uint8_t root_fh = CHIMERA_VFS_FH_MAGIC_ROOT;
 
 static inline void
-chimera_smb_create_mkdir_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+chimera_smb_create_unlink_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
 {
-    struct chimera_smb_request       *request  = private_data;
+    struct chimera_smb_request *request = private_data;
+
+    /* XXX We will ignore any error because there's nothing sane to do */
+
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_create_unlink_callback */
+
+
+static inline void
+chimera_smb_create_unlink(struct chimera_smb_request *request)
+{
+    struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_open_file *open_file  = request->create.r_open_file;
+
+    chimera_vfs_remove(
+        vfs_thread,
+        request->create.parent_handle,
+        open_file->name,
+        open_file->name_len,
+        0,
+        0,
+        chimera_smb_create_unlink_callback,
+        request);
+} /* chimera_smb_create_unlink */
+
+static inline struct chimera_smb_open_file *
+chimera_smb_create_gen_open_file(
+    struct chimera_smb_request     *request,
+    const void                     *parent_fh,
+    int                             parent_fh_len,
+    const uint16_t                 *name,
+    int                             name_len,
+    int                             delete_on_close,
+    struct chimera_vfs_open_handle *oh)
+{
     struct chimera_smb_compound      *compound = request->compound;
     struct chimera_server_smb_thread *thread   = compound->thread;
     struct chimera_smb_tree          *tree     = request->tree;
     struct chimera_smb_open_file     *open_file;
     uint64_t                          open_file_bucket;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
-        return;
-    }
-
     open_file = chimera_smb_open_file_alloc(thread);
 
-    open_file->file_id.pid = ++tree->next_file_id;
-    open_file->file_id.vid = chimera_rand64();
-    open_file->handle      = oh;
-    open_file->flags       = CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY;
-    open_file->position    = 0;
 
-    memcpy(open_file->name, request->create.name, request->create.name_len * 2);
-    open_file->name_len = request->create.name_len;
+    memcpy(open_file->parent_fh, parent_fh, parent_fh_len);
+    open_file->parent_fh_len = parent_fh_len;
+    open_file->file_id.pid   = ++tree->next_file_id;
+    open_file->file_id.vid   = chimera_rand64();
+    open_file->handle        = oh;
+    open_file->flags         = delete_on_close ? CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE : 0;
+    open_file->position      = 0;
+
+    open_file->name_len = chimera_smb_utf16le_to_utf8(&thread->iconv_ctx,
+                                                      name, name_len, open_file->name, sizeof(open_file->name));
 
     open_file_bucket = open_file->file_id.pid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
@@ -51,11 +84,43 @@ chimera_smb_create_mkdir_open_callback(
 
     pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
 
-    request->create.r_open_file = open_file;
-
     compound->saved_file_id = open_file->file_id;
 
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    return open_file;
+} /* chimera_smb_create_gen_open_file */
+
+static inline void
+chimera_smb_create_mkdir_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request   *request    = private_data;
+    struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_open_file *open_file;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
+        return;
+    }
+
+    open_file = chimera_smb_create_gen_open_file(request,
+                                                 request->create.parent_handle->fh,
+                                                 request->create.parent_handle->fh_len,
+                                                 request->create.name + request->create.name_offset,
+                                                 request->create.name_len - request->create.name_offset,
+                                                 request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE,
+                                                 oh);
+
+    request->create.r_open_file = open_file;
+
+    if (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) {
+        chimera_smb_create_unlink(request);
+    } else {
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    }
+
 } /* chimera_smb_create_open_parent_callback */
 
 static inline void
@@ -72,8 +137,6 @@ chimera_smb_create_mkdir_callback(
     struct chimera_smb_compound      *compound   = request->compound;
     struct chimera_server_smb_thread *thread     = compound->thread;
     struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
-
-    chimera_vfs_release(vfs_thread, request->create.parent_handle);
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
@@ -106,50 +169,92 @@ chimera_smb_create_open_at_callback(
     struct chimera_vfs_attrs       *dir_post_attr,
     void                           *private_data)
 {
-    struct chimera_smb_request       *request    = private_data;
-    struct chimera_smb_compound      *compound   = request->compound;
-    struct chimera_server_smb_thread *thread     = compound->thread;
-    struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
-    struct chimera_smb_tree          *tree       = request->tree;
-    struct chimera_smb_open_file     *open_file;
-    uint64_t                          open_file_bucket;
-
-    chimera_vfs_release(vfs_thread, request->create.parent_handle);
+    struct chimera_smb_request   *request    = private_data;
+    struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_open_file *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
         return;
     }
 
-    open_file = chimera_smb_open_file_alloc(thread);
-
-    open_file->file_id.pid = ++tree->next_file_id;
-    open_file->file_id.vid = chimera_rand64();
-    open_file->handle      = oh;
-    open_file->flags       = 0;
-    open_file->position    = 0;
-
-    memcpy(open_file->name, request->create.name, request->create.name_len * 2);
-    open_file->name_len = request->create.name_len;
-
-    open_file_bucket = open_file->file_id.pid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
-
-    pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
-
-    HASH_ADD(hh, tree->open_files[open_file_bucket], file_id, sizeof(open_file->file_id), open_file);
-
-    pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+    open_file = chimera_smb_create_gen_open_file(request,
+                                                 request->create.parent_handle->fh,
+                                                 request->create.parent_handle->fh_len,
+                                                 request->create.name + request->create.name_offset,
+                                                 request->create.name_len - request->create.name_offset,
+                                                 request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE, oh);
 
     request->create.r_open_file = open_file;
 
-    compound->saved_file_id = open_file->file_id;
+    chimera_smb_marshal_attrs(
+        attr,
+        &request->create.r_attrs);
+
+    if (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) {
+        chimera_smb_create_unlink(request);
+    } else {
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    }
+} /* chimera_smb_create_open_at_callback */
+
+static inline void
+chimera_smb_create_open_getattr_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        /* XXX open file */
+        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
+        return;
+    }
+
 
     chimera_smb_marshal_attrs(
         attr,
         &request->create.r_attrs);
 
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+
+} /* chimera_smb_create_open_getattr_callback */
+
+static inline void
+chimera_smb_create_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request       *request    = private_data;
+    struct chimera_smb_compound      *compound   = request->compound;
+    struct chimera_server_smb_thread *thread     = compound->thread;
+    struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
+    struct chimera_smb_open_file     *open_file;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
+        return;
+    }
+
+    open_file = chimera_smb_create_gen_open_file(request,
+                                                 NULL, 0,
+                                                 request->create.name,
+                                                 request->create.name_len * 2,
+                                                 request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE, oh);
+
+    request->create.r_open_file = open_file;
+
+    chimera_vfs_getattr(vfs_thread,
+                        oh,
+                        CHIMERA_VFS_ATTR_FH,
+                        chimera_smb_create_open_getattr_callback,
+                        request);
+
 } /* chimera_smb_create_open_at_callback */
+
 
 static inline void
 chimera_smb_create_open_parent_callback(
@@ -180,6 +285,7 @@ chimera_smb_create_open_parent_callback(
         name = path;
     }
 
+    request->create.name_offset = name - path;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_error("Open parent error_code %d", error_code);
@@ -192,9 +298,8 @@ chimera_smb_create_open_parent_callback(
     set_attr.va_req_mask = 0;
     set_attr.va_set_mask = 0;
 
-    if ((request->create.file_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY) &&
-        (request->create.create_disposition == SMB2_FILE_CREATE ||
-         request->create.create_disposition == SMB2_FILE_OPEN_IF)) {
+    if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
+        request->create.create_disposition == SMB2_FILE_CREATE) {
 
         chimera_vfs_mkdir(
             vfs_thread,
@@ -283,13 +388,16 @@ chimera_smb_create_open_parent(struct chimera_smb_request *request)
                                      path,
                                      sizeof(path));
 
+    rc = chimera_smb_slash_back_to_forward(path, sizeof(path));
+
     if (unlikely(rc < 0)) {
         chimera_smb_error("Failed to convert create name to UTF-8");
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
         return;
     }
 
-    slash = rindex(path, '\\');
+    slash = rindex(path, '/');
+
 
     if (slash) {
         chimera_vfs_lookup_path(
@@ -333,8 +441,6 @@ chimera_smb_revalidate_tree_callback(
 
     clock_gettime(CLOCK_MONOTONIC, &tree->fh_expiration);
     tree->fh_expiration.tv_sec += 60;
-
-    chimera_smb_create_open_parent(request);
 } /* chimera_smb_revalidate_tree_callback */
 
 static inline void
@@ -359,8 +465,9 @@ chimera_smb_revalidate_tree(
 void
 chimera_smb_create(struct chimera_smb_request *request)
 {
-    //struct chimera_server_smb_shared *shared = thread->shared;
-    struct timespec now;
+    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
+
+    struct timespec            now;
 
     if (unlikely(!request->tree)) {
         chimera_smb_error("Received SMB2 CREATE request for unknown tree id %u", request->smb2_hdr.sync.tree_id);
@@ -372,8 +479,19 @@ chimera_smb_create(struct chimera_smb_request *request)
 
     if (chimera_timespec_cmp(&now, &request->tree->fh_expiration) > 0) {
         chimera_smb_revalidate_tree(request->tree, request);
-    } else {
+    }
+
+    if (request->create.name_len) {
         chimera_smb_create_open_parent(request);
+    } else {
+        chimera_vfs_open(
+            vfs_thread,
+            request->tree->fh,
+            request->tree->fh_len,
+            CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
+            chimera_smb_create_open_callback,
+            request);
+
     }
 } /* chimera_smb_create */
 
