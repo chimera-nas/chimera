@@ -211,6 +211,9 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
                 case SMB2_IOCTL:
                     chimera_smb_ioctl_reply(&reply_cursor, request);
                     break;
+                case SMB2_ECHO:
+                    chimera_smb_echo_reply(&reply_cursor, request);
+                    break;
                 case SMB2_QUERY_INFO:
                     chimera_smb_query_info_reply(&reply_cursor, request);
                     break;
@@ -322,6 +325,9 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
             break;
         case SMB2_IOCTL:
             chimera_smb_ioctl(request);
+            break;
+        case SMB2_ECHO:
+            chimera_smb_echo(request);
             break;
         case SMB2_QUERY_INFO:
             chimera_smb_query_info(request);
@@ -471,6 +477,9 @@ chimera_smb_server_handle_compound(
                 break;
             case SMB2_IOCTL:
                 rc = chimera_smb_parse_ioctl(&request_cursor, request);
+                break;
+            case SMB2_ECHO:
+                rc = chimera_smb_parse_echo(&request_cursor, request);
                 break;
             case SMB2_QUERY_INFO:
                 rc = chimera_smb_parse_query_info(&request_cursor, request);
