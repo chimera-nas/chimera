@@ -574,13 +574,16 @@ chimera_smb_open_file_lookup(
         file_id->vid = request->compound->saved_file_id.vid;
     }
 
-    open_file_bucket = file_id->pid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+    open_file_bucket = file_id->vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
     pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
 
     HASH_FIND(hh, tree->open_files[open_file_bucket], file_id, sizeof(*file_id), open_file);
 
     pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+
+    chimera_smb_abort_if(!open_file, "open request for file id %lx.%lx did not match an open file",
+                         file_id->pid, file_id->vid);
 
     return open_file;
 } /* chimera_smb_open_file_find */
@@ -613,7 +616,7 @@ chimera_smb_open_file_remove(
         file_id->vid = request->compound->saved_file_id.vid;
     }
 
-    open_file_bucket = file_id->pid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+    open_file_bucket = file_id->vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
     pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
 
@@ -627,4 +630,3 @@ chimera_smb_open_file_remove(
 
     return open_file;
 } /* chimera_smb_open_file_find */
-

@@ -157,7 +157,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         reply_hdr->protocol_id[2]          = 0x4D;
         reply_hdr->protocol_id[3]          = 0x42;
         reply_hdr->struct_size             = 64;
-        reply_hdr->credit_charge           = request->smb2_hdr.credit_charge;
+        reply_hdr->credit_charge           = 256;//request->smb2_hdr.credit_charge;
         reply_hdr->status                  = request->status;
         reply_hdr->command                 = request->smb2_hdr.command;
         reply_hdr->credit_request_response = request->smb2_hdr.credit_request_response;
@@ -433,7 +433,8 @@ chimera_smb_server_handle_compound(
         }
 
         if (unlikely(!request->session && (request->smb2_hdr.command != SMB2_NEGOTIATE &&
-                                           request->smb2_hdr.command != SMB2_SESSION_SETUP))) {
+                                           request->smb2_hdr.command != SMB2_SESSION_SETUP &&
+                                           request->smb2_hdr.command != SMB2_ECHO))) {
             chimera_smb_error("Received SMB2 message with invalid command and no session");
             chimera_smb_request_free(thread, request);
             evpl_close(evpl, conn->bind);

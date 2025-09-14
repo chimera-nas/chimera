@@ -81,7 +81,7 @@ chimera_smb_create_gen_open_file(
     open_file->name_len = name_len;
     memcpy(open_file->name, name, open_file->name_len);
 
-    open_file_bucket = open_file->file_id.pid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+    open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
     pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
 
