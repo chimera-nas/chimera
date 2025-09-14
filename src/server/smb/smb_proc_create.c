@@ -105,6 +105,7 @@ chimera_smb_create_mkdir_open_callback(
     struct chimera_smb_open_file *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
         return;
     }
@@ -144,6 +145,7 @@ chimera_smb_create_mkdir_callback(
     struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
         return;
     }
@@ -179,6 +181,7 @@ chimera_smb_create_open_at_callback(
     struct chimera_smb_open_file *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
         return;
     }
