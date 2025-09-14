@@ -65,7 +65,7 @@ chimera_smb_utf16le_to_utf8(
     size_t                        dstmaxlen)
 {
     int    rc;
-    size_t dstlen, srcleft = srclen * 2, dstleft = dstmaxlen;
+    size_t srcleft = srclen, dstleft = dstmaxlen;
     char  *dstleftp = dst;
     char  *srcleftp = (char *) src;
 
@@ -75,11 +75,9 @@ chimera_smb_utf16le_to_utf8(
         return -1;
     }
 
-    dstlen = dstmaxlen - dstleft;
+    *dstleftp = '\0';
 
-    dst[dstlen] = '\0';
-
-    return dstlen;
+    return dstleftp - dst;
 } /* smb_utf16le_to_utf8 */
 
 static inline int

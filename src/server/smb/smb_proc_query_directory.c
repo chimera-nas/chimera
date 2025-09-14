@@ -56,14 +56,9 @@ chimera_smb_query_directory_readdir_callback(
     struct evpl_iovec_cursor          entry_cursor;
     struct chimera_smb_attrs          smb_attrs;
 
-    chimera_smb_info("smb readdir callback output length %d last_file_offset %p", request->query_directory.output_length
-                     , request->query_directory.last_file_offset);
-
     smb_attrs.smb_attr_mask = 0;
 
     file_index = (uint32_t) (XXH3_64bits(name, namelen) & 0xffffffff);
-
-    chimera_smb_info("smb readdir callback file_index %u", file_index);
 
     namelen_padded = namelen ? namelen * 2 : 2;
 
@@ -255,6 +250,7 @@ chimera_smb_parse_query_directory(
     struct chimera_smb_request *request)
 {
     uint16_t name_offset;
+    uint16_t pattern16[SMB_FILENAME_MAX];
 
     if (unlikely(request->request_struct_size != SMB2_QUERY_DIRECTORY_REQUEST_SIZE)) {
         chimera_smb_error("Received SMB2 QUERY_DIRECTORY request with invalid struct size (%u expected %u)",
@@ -282,9 +278,12 @@ chimera_smb_parse_query_directory(
         return -1;
     }
 
-    evpl_iovec_cursor_copy(request_cursor, request->query_directory.pattern, request->query_directory.pattern_length);
-
-    request->query_directory.pattern_length >>= 1;
+    evpl_iovec_cursor_copy(request_cursor, pattern16, request->query_directory.pattern_length);
+    request->query_directory.pattern_length = chimera_smb_utf16le_to_utf8(&request->compound->thread->iconv_ctx,
+                                                                          pattern16,
+                                                                          request->query_directory.pattern_length,
+                                                                          request->query_directory.pattern,
+                                                                          sizeof(request->query_directory.pattern));
 
     return 0;
 } /* chimera_smb_parse_query_directory */

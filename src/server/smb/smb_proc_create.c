@@ -54,7 +54,7 @@ chimera_smb_create_gen_open_file(
     struct chimera_smb_request     *request,
     const void                     *parent_fh,
     int                             parent_fh_len,
-    const uint16_t                 *name,
+    const char                     *name,
     int                             name_len,
     int                             delete_on_close,
     struct chimera_vfs_open_handle *oh)
@@ -78,10 +78,10 @@ chimera_smb_create_gen_open_file(
     open_file->flags         = delete_on_close ? CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE : 0;
     open_file->position      = 0;
 
-    open_file->name_len = chimera_smb_utf16le_to_utf8(&thread->iconv_ctx,
-                                                      name, name_len, open_file->name, sizeof(open_file->name));
+    open_file->name_len = name_len;
+    memcpy(open_file->name, name, open_file->name_len);
 
-    open_file_bucket = open_file->file_id.pid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+    open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
     pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
 
@@ -105,6 +105,7 @@ chimera_smb_create_mkdir_open_callback(
     struct chimera_smb_open_file *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
         return;
     }
@@ -112,8 +113,8 @@ chimera_smb_create_mkdir_open_callback(
     open_file = chimera_smb_create_gen_open_file(request,
                                                  request->create.parent_handle->fh,
                                                  request->create.parent_handle->fh_len,
-                                                 request->create.name + request->create.name_offset,
-                                                 request->create.name_len - request->create.name_offset,
+                                                 request->create.name,
+                                                 request->create.name_len,
                                                  request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE,
                                                  oh);
 
@@ -144,6 +145,7 @@ chimera_smb_create_mkdir_callback(
     struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
         return;
     }
@@ -179,6 +181,7 @@ chimera_smb_create_open_at_callback(
     struct chimera_smb_open_file *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
         return;
     }
@@ -186,8 +189,8 @@ chimera_smb_create_open_at_callback(
     open_file = chimera_smb_create_gen_open_file(request,
                                                  request->create.parent_handle->fh,
                                                  request->create.parent_handle->fh_len,
-                                                 request->create.name + request->create.name_offset,
-                                                 request->create.name_len - request->create.name_offset,
+                                                 request->create.name,
+                                                 request->create.name_len,
                                                  request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE, oh);
 
     request->create.r_open_file = open_file;
@@ -271,24 +274,6 @@ chimera_smb_create_open_parent_callback(
     struct chimera_server_smb_thread *thread     = request->compound->thread;
     struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
     unsigned int                      flags      = 0;
-    const char                       *slash;
-    const char                       *name;
-
-    chimera_smb_utf16le_to_utf8(&thread->iconv_ctx,
-                                request->create.name,
-                                request->create.name_len,
-                                request->create.name_utf8,
-                                sizeof(request->create.name_utf8));
-
-    slash = rindex(request->create.name_utf8, '\\');
-
-    if (slash) {
-        name = slash + 1;
-    } else {
-        name = request->create.name_utf8;
-    }
-
-    request->create.name_offset = name - request->create.name_utf8;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_error("Open parent error_code %d", error_code);
@@ -307,8 +292,8 @@ chimera_smb_create_open_parent_callback(
         chimera_vfs_mkdir(
             vfs_thread,
             oh,
-            request->create.name_utf8,
-            strlen(request->create.name_utf8),
+            request->create.name,
+            request->create.name_len,
             &request->create.set_attr,
             CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
             0,
@@ -343,8 +328,8 @@ chimera_smb_create_open_parent_callback(
         chimera_vfs_open_at(
             vfs_thread,
             oh,
-            request->create.name_utf8,
-            strlen(request->create.name_utf8),
+            request->create.name,
+            request->create.name_len,
             flags,
             &request->create.set_attr,
             CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
@@ -380,61 +365,29 @@ chimera_smb_create_lookup_parent_callback(
 } /* chimera_smb_create_lookup_parent_callback */
 
 static inline void
-chimera_smb_create_open_parent(struct chimera_smb_request *request)
+chimera_smb_create_process(struct chimera_smb_request *request)
 {
-    struct chimera_server_smb_thread *thread     = request->compound->thread;
-    struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
-    struct chimera_smb_tree          *tree       = request->tree;
-    const char                       *slash;
-    char                              path[CHIMERA_VFS_PATH_MAX];
-    int                               rc;
+    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_tree   *tree       = request->tree;
 
-    chimera_smb_utf16le_to_utf8(&thread->iconv_ctx,
-                                request->create.name,
-                                request->create.name_len,
-                                path,
-                                sizeof(path));
-
-    rc = chimera_smb_slash_back_to_forward(path, sizeof(path));
-
-    if (unlikely(rc < 0)) {
-        chimera_smb_error("Failed to convert create name to UTF-8");
-        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
-        return;
-    }
-
-    slash = rindex(path, '/');
-
-
-    if (slash) {
+    if (request->create.parent_path_len) {
         chimera_vfs_lookup_path(
             vfs_thread,
             tree->fh,
             tree->fh_len,
-            path,
-            slash - path,
+            request->create.parent_path,
+            request->create.parent_path_len,
             CHIMERA_VFS_ATTR_FH,
             chimera_smb_create_lookup_parent_callback,
             request);
-
-    } else {
+    } else if (request->create.name_len) {
         chimera_vfs_open(
             vfs_thread,
-            tree->fh,
-            tree->fh_len,
+            request->tree->fh,
+            request->tree->fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
             chimera_smb_create_open_parent_callback,
             request);
-    }
-} /* chimera_smb_create_open_parent */
-
-static inline void
-chimera_smb_create_process(struct chimera_smb_request *request)
-{
-    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
-
-    if (request->create.name_len) {
-        chimera_smb_create_open_parent(request);
     } else {
         chimera_vfs_open(
             vfs_thread,
@@ -559,6 +512,8 @@ chimera_smb_parse_create(
 {
     uint16_t name_offset;
     uint32_t blob_offset, blob_length;
+    uint16_t name16[SMB_FILENAME_MAX];
+    char    *slash;
 
     if (unlikely(request->request_struct_size != SMB2_CREATE_REQUEST_SIZE)) {
         chimera_smb_error("Received SMB2 CREATE request with invalid struct size (%u expected %u)",
@@ -581,14 +536,34 @@ chimera_smb_parse_create(
     evpl_iovec_cursor_get_uint32(request_cursor, &blob_offset);
     evpl_iovec_cursor_get_uint32(request_cursor, &blob_length);
 
-    if (request->create.name_len >= sizeof(request->create.name)) {
-        chimera_smb_error("Create request: UTF-16 name too long (%u bytes, buffer %zu bytes)",
-                          request->create.name_len, sizeof(request->create.name));
+    if (request->create.name_len >= SMB_FILENAME_MAX) {
+        chimera_smb_error("Create request: UTF-16 name too long (%u bytes)",
+                          request->create.name_len);
         return -1;
     }
 
-    evpl_iovec_cursor_copy(request_cursor, request->create.name, request->create.name_len);
-    request->create.name_len >>= 1;
+    evpl_iovec_cursor_copy(request_cursor, name16, request->create.name_len);
+
+    request->create.parent_path_len = chimera_smb_utf16le_to_utf8(&request->compound->thread->iconv_ctx,
+                                                                  name16,
+                                                                  request->create.name_len,
+                                                                  request->create.parent_path,
+                                                                  sizeof(request->create.parent_path));
+
+    slash = rindex(request->create.parent_path, '\\');
+
+    if (slash) {
+        *slash                          = '\0';
+        request->create.name            = slash + 1;
+        request->create.name_len        = request->create.parent_path_len - (slash - request->create.parent_path) - 1;
+        request->create.parent_path_len = slash - request->create.parent_path;
+
+        chimera_smb_slash_back_to_forward(request->create.parent_path, request->create.parent_path_len);
+    } else {
+        request->create.name            = request->create.parent_path;
+        request->create.name_len        = request->create.parent_path_len;
+        request->create.parent_path_len = 0;
+    }
 
     return 0;
 } /* chimera_smb_parse_create */

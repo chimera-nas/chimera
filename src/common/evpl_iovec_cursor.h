@@ -172,8 +172,7 @@ evpl_iovec_cursor_get_uint8(
     struct evpl_iovec_cursor *cursor,
     uint8_t                  *value)
 {
-    *value = *((uint8_t *) evpl_iovec_cursor_data(cursor));
-    evpl_iovec_cursor_skip(cursor, sizeof(uint8_t));
+    evpl_iovec_cursor_copy(cursor, value, sizeof(uint8_t));
 } /* evpl_iovec_cursor_get_uint8 */
 
 
@@ -183,8 +182,7 @@ evpl_iovec_cursor_get_uint16(
     uint16_t                 *value)
 {
     evpl_iovec_cursor_skip(cursor, (2 - (cursor->consumed & 1)) & 1);
-    *value = *((uint16_t *) evpl_iovec_cursor_data(cursor));
-    evpl_iovec_cursor_skip(cursor, sizeof(uint16_t));
+    evpl_iovec_cursor_copy(cursor, value, sizeof(uint16_t));
 } /* evpl_iovec_cursor_get_uint16 */
 
 static inline void
@@ -193,8 +191,7 @@ evpl_iovec_cursor_get_uint32(
     uint32_t                 *value)
 {
     evpl_iovec_cursor_skip(cursor, (4 - (cursor->consumed & 3)) & 3);
-    *value = *((uint32_t *) evpl_iovec_cursor_data(cursor));
-    evpl_iovec_cursor_skip(cursor, sizeof(uint32_t));
+    evpl_iovec_cursor_copy(cursor, value, sizeof(uint32_t));
 } /* evpl_iovec_cursor_get_uint32 */
 
 static inline void
@@ -203,8 +200,7 @@ evpl_iovec_cursor_get_uint64(
     uint64_t                 *value)
 {
     evpl_iovec_cursor_skip(cursor, (8 - (cursor->consumed & 7)) & 7);
-    *value = *((uint64_t *) evpl_iovec_cursor_data(cursor));
-    evpl_iovec_cursor_skip(cursor, sizeof(uint64_t));
+    evpl_iovec_cursor_copy(cursor, value, sizeof(uint64_t));
 } /* evpl_iovec_cursor_get_uint64 */
 
 static inline void

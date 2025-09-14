@@ -614,6 +614,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_TREE_DISCONNECT_REQUEST_SIZE           4
 #define SMB2_TREE_DISCONNECT_REPLY_SIZE             4
 
+#define SMB2_ECHO_REQUEST_SIZE                      4
+#define SMB2_ECHO_REPLY_SIZE                        4
+
 #define SMB2_IOCTL_REQUEST_SIZE                     57
 #define SMB2_IOCTL_REPLY_SIZE                       49
 
