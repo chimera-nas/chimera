@@ -6,6 +6,7 @@
 #include "smb_dump.h"
 #include "smb_string.h"
 #include "smb_internal.h"
+#include "common/format.h"
 
 static const char *
 smb_command_name(uint32_t command)
@@ -80,6 +81,8 @@ smb_status_name(uint32_t status)
             return "InvalidHandle";
         case SMB2_STATUS_REQUEST_ABORTED:
             return "RequestAborted";
+        case SMB2_STATUS_END_OF_FILE:
+            return "EndOfFile";
         default:
             return "Unknown";
     } /* switch */
@@ -139,6 +142,17 @@ _smb_dump_request(
                     request->read.file_id.pid, request->read.file_id.vid,
                     request->read.offset, request->read.length);
             break;
+        case SMB2_IOCTL:
+            sprintf(argstr, " file_id %lx.%lx ctl_code %u",
+                    request->ioctl.file_id.pid, request->ioctl.file_id.vid,
+                    request->ioctl.ctl_code);
+            break;
+        case SMB2_SET_INFO:
+            sprintf(argstr, " file_id %lx.%lx info_type %u info_class %u addl_info %u",
+                    request->set_info.file_id.pid, request->set_info.file_id.vid,
+                    request->set_info.info_type, request->set_info.info_class,
+                    request->set_info.addl_info);
+            break;
         case SMB2_QUERY_INFO:
             sprintf(argstr, " file_id %lx.%lx info_type %u info_class %u addl_info %u flags %u",
                     request->query_info.file_id.pid, request->query_info.file_id.vid,
@@ -173,6 +187,7 @@ _smb_dump_reply(
 {
     char  argstr[512];
     char  hdr_args[80];
+    char  fhstr[80];
     char *hdrp = hdr_args;
 
     switch (request->smb2_hdr.command) {
@@ -183,6 +198,14 @@ _smb_dump_reply(
                         request->create.r_open_file->file_id.vid);
             }
             break;
+        case SMB2_TREE_CONNECT:
+            if (request->status == SMB2_STATUS_SUCCESS) {
+                format_hex(fhstr, sizeof(fhstr), request->tree->fh, request->tree->fh_len);
+                sprintf(argstr, " tree_fh %s", fhstr);
+            }
+            break;
+
+
         default:
             argstr[0] = '\0';
     } /* switch */

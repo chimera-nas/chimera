@@ -14,7 +14,10 @@ chimera_smb_tree_disconnect(struct chimera_smb_request *request)
     struct chimera_server_smb_thread *thread  = request->compound->thread;
     struct chimera_smb_session       *session = request->session;
 
-    chimera_smb_abort_if(!request->tree, "Received SMB2 TREE_DISCONNECT request for unknown tree id");
+    if (!request->tree) {
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
 
     pthread_mutex_lock(&session->lock);
 

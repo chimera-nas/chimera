@@ -204,6 +204,7 @@ chimera_vfs_synth_handle_free(
     struct chimera_vfs_open_handle *handle)
 {
     chimera_vfs_abort_if(handle->cache_id != CHIMERA_VFS_OPEN_ID_SYNTHETIC, "real handle freed by synthetic procedure");
+
     LL_PREPEND(thread->free_synth_handles, handle);
 } /* chimera_vfs_synth_handle_free */
 

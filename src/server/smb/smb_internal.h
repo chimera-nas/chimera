@@ -10,7 +10,7 @@
 #include <string.h>
 #include <time.h>
 #include <utlist.h>
-//#include <gssapi/gssapi.h>
+#include <gssapi/gssapi_ntlmssp.h>
 #include "evpl/evpl.h"
 #include "common/evpl_iovec_cursor.h"
 #include "common/logging.h"
@@ -110,19 +110,22 @@ struct chimera_smb_request {
         } negotiate;
 
         struct {
-            uint8_t  flags;
-            uint8_t  security_mode;
-            uint32_t capabilities;
-            uint32_t channel;
-            uint64_t prev_session_id;
-            uint16_t blob_offset;
-            uint16_t blob_length;
+            uint8_t           flags;
+            uint8_t           security_mode;
+            uint16_t          input_niov;
+            uint32_t          capabilities;
+            uint32_t          channel;
+            uint64_t          prev_session_id;
+            uint16_t          blob_offset;
+            uint16_t          blob_length;
+            struct evpl_iovec input_iov[64];
         } session_setup;
 
         struct {
             uint16_t flags;
             uint16_t path_offset;
             uint16_t path_length;
+            uint8_t  is_ipc;
             uint16_t path[CHIMERA_VFS_PATH_MAX];
         } tree_connect;
 
@@ -136,10 +139,13 @@ struct chimera_smb_request {
             uint32_t                        create_disposition;
             uint32_t                        create_options;
             uint16_t                        name_len;
+            uint16_t                        name_offset;
             struct chimera_vfs_open_handle *parent_handle;
             struct chimera_smb_open_file   *r_open_file;
             struct chimera_smb_attrs        r_attrs;
+            struct chimera_vfs_attrs        set_attr;
             uint16_t                        name[SMB_FILENAME_MAX];
+            char                            name_utf8[SMB_FILENAME_MAX];
         } create;
 
         struct  {
@@ -174,6 +180,21 @@ struct chimera_smb_request {
         } read;
 
         struct {
+            struct chimera_smb_file_id file_id;
+        } flush;
+
+        struct {
+            uint32_t                   ctl_code;
+            struct chimera_smb_file_id file_id;
+            uint32_t                   input_offset;
+            uint32_t                   input_count;
+            uint32_t                   max_input_response;
+            uint32_t                   output_offset;
+            uint32_t                   output_count;
+            uint32_t                   max_output_response;
+            uint32_t                   flags;
+        } ioctl;
+        struct {
             uint8_t                       info_type;
             uint8_t                       info_class;
             uint32_t                      addl_info;
@@ -181,6 +202,7 @@ struct chimera_smb_request {
             uint32_t                      output_length;
             struct chimera_smb_file_id    file_id;
             struct chimera_smb_attrs      r_attrs;
+            struct chimera_smb_fs_attrs   r_fs_attrs;
             struct chimera_smb_open_file *open_file;
         } query_info;
 
@@ -191,24 +213,26 @@ struct chimera_smb_request {
             uint16_t                        buffer_offset;
             uint32_t                        addl_info;
             uint32_t                        flags;
-            struct chimera_vfs_open_handle *handle;
+            struct chimera_smb_open_file   *open_file;
+            struct chimera_vfs_open_handle *parent_handle;
             struct chimera_smb_file_id      file_id;
+            struct chimera_smb_attrs        r_attrs;
         } set_info;
 
         struct {
-            uint8_t                                 info_class;
-            uint8_t                                 flags;
-            uint32_t                                file_index;
-            uint8_t                                 eof;
-            uint16_t                                pattern_len;
-            struct chimera_smb_file_id              file_id;
-            uint16_t                                pattern_length;
-            uint32_t                                output_length;
-            uint32_t                                max_output_length;
-            struct evpl_iovec                       iov;
-            struct chimera_smb_open_file           *open_file;
-            struct smb2_file_directory_information *last_file_info;
-            uint16_t                                pattern[SMB_FILENAME_MAX];
+            uint8_t                       info_class;
+            uint8_t                       flags;
+            uint32_t                      file_index;
+            uint8_t                       eof;
+            uint16_t                      pattern_len;
+            struct chimera_smb_file_id    file_id;
+            uint16_t                      pattern_length;
+            uint32_t                      output_length;
+            uint32_t                      max_output_length;
+            struct evpl_iovec             iov;
+            struct chimera_smb_open_file *open_file;
+            uint32_t                     *last_file_offset;
+            uint16_t                      pattern[SMB_FILENAME_MAX];
         } query_directory;
     };
 };
@@ -234,8 +258,11 @@ struct chimera_smb_session_handle {
 };
 
 struct chimera_smb_conn {
-    //gss_ctx_id_t                      ctx;
-    //gss_cred_id_t                     srv_cred;
+    OM_uint32                          gss_major;
+    OM_uint32                          gss_minor;
+    gss_ctx_id_t                       ctx;
+    gss_cred_id_t                      srv_cred;
+    gss_buffer_desc                    gss_output;
     int                                established;
     struct chimera_smb_session        *last_session;
     struct chimera_smb_tree           *last_tree;
@@ -437,6 +464,22 @@ chimera_smb_conn_free(
         chimera_smb_session_release(thread->shared, session_handle->session);
 
         chimera_smb_session_handle_free(thread, session_handle);
+    }
+
+    if (conn->ctx) {
+        gss_delete_sec_context(&conn->gss_minor, &conn->ctx, NULL);
+        conn->ctx = NULL;
+    }
+
+    if (conn->srv_cred) {
+        gss_release_cred(&conn->gss_minor, &conn->srv_cred);
+        conn->srv_cred = NULL;
+    }
+
+    if (conn->gss_output.value) {
+        gss_release_buffer(&conn->gss_minor, &conn->gss_output);
+        conn->gss_output.value  = NULL;
+        conn->gss_output.length = 0;
     }
 
     LL_PREPEND(thread->free_conns, conn);

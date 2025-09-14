@@ -10,4 +10,4 @@
 	url = https://github.com/chimera-nas/libevpl.git
 [submodule "ext/libsmb2"]
 	path = ext/libsmb2
-	url = https://github.com/sahlberg/libsmb2.git
+	url = https://github.com/benjarvis/libsmb2.git

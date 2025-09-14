@@ -89,8 +89,8 @@ chimera_server_thread_wake(
 int
 chimera_server_mount(
     struct chimera_server *server,
+    const char            *mount_path,
     const char            *module_name,
-    const char            *share_path,
     const char            *module_path);
 
 int
