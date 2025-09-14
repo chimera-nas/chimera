@@ -339,6 +339,19 @@ chimera_smb_unmarshal_basic_info(
 } // chimera_smb_unmarshal_basic_info
 
 static inline void
+chimera_smb_unmarshal_end_of_file_info(
+    const struct chimera_smb_attrs *smb_attrs,
+    struct chimera_vfs_attrs       *attr)
+{
+    attr->va_req_mask = 0;
+    attr->va_set_mask = 0;
+
+    attr->va_size      = smb_attrs->smb_size;
+    attr->va_req_mask |= SMB_ATTR_SIZE;
+    attr->va_set_mask |= SMB_ATTR_SIZE;
+} // chimera_smb_unmarshal_end_of_file_info
+
+static inline void
 chimera_smb_parse_basic_info(
     struct evpl_iovec_cursor *cursor,
     struct chimera_smb_attrs *attrs)
@@ -360,6 +373,17 @@ chimera_smb_parse_disposition_info(
     evpl_iovec_cursor_get_uint8(cursor, &attrs->smb_disposition);
     attrs->smb_attr_mask |= SMB_ATTR_DISPOSITION;
 } /* chimera_smb_parse_disposition_info */
+
+static inline void
+chimera_smb_parse_end_of_file_info(
+    struct evpl_iovec_cursor *cursor,
+    struct chimera_smb_attrs *attrs)
+{
+    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_size);
+    attrs->smb_attr_mask |= SMB_ATTR_SIZE;
+} /* chimera_smb_parse_end_of_file_info */
+
+
 /* Append functions for serializing attributes - these enforce required fields */
 
 /* Helper functions to append specific information classes */

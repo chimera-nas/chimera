@@ -187,7 +187,6 @@ _smb_dump_reply(
 {
     char  argstr[512];
     char  hdr_args[80];
-    char  fhstr[80];
     char *hdrp = hdr_args;
 
     switch (request->smb2_hdr.command) {
@@ -198,14 +197,6 @@ _smb_dump_reply(
                         request->create.r_open_file->file_id.vid);
             }
             break;
-        case SMB2_TREE_CONNECT:
-            if (request->status == SMB2_STATUS_SUCCESS) {
-                format_hex(fhstr, sizeof(fhstr), request->tree->fh, request->tree->fh_len);
-                sprintf(argstr, " tree_fh %s", fhstr);
-            }
-            break;
-
-
         default:
             argstr[0] = '\0';
     } /* switch */

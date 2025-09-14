@@ -79,8 +79,19 @@ chimera_smb_set_info(struct chimera_smb_request *request)
             switch (request->set_info.info_class) {
                 case SMB2_FILE_BASIC_INFO:
 
-                    attrs.va_req_mask = 0;
-                    attrs.va_set_mask = 0;
+                    chimera_smb_unmarshal_basic_info(&request->set_info.attrs, &attrs);
+
+                    chimera_vfs_setattr(
+                        request->compound->thread->vfs_thread,
+                        open_file->handle,
+                        &attrs,
+                        0,
+                        0,
+                        chimera_smb_set_info_callback,
+                        request);
+                    break;
+                case SMB2_FILE_ENDOFFILE_INFO:
+                    chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &attrs);
 
                     chimera_vfs_setattr(
                         request->compound->thread->vfs_thread,
@@ -145,15 +156,21 @@ chimera_smb_parse_set_info(
     evpl_iovec_cursor_skip(request_cursor,
                            request->set_info.buffer_offset - evpl_iovec_cursor_consumed(request_cursor));
 
-    request->set_info.r_attrs.smb_attr_mask = 0;
+    request->set_info.attrs.smb_attr_mask = 0;
+
     switch (request->set_info.info_type) {
         case SMB2_INFO_FILE:
             switch (request->set_info.info_class) {
                 case SMB2_FILE_BASIC_INFO:
-                    chimera_smb_parse_basic_info(request_cursor, &request->set_info.r_attrs);
+                    chimera_smb_parse_basic_info(request_cursor, &request->set_info.attrs);
                     break;
                 case SMB2_FILE_DISPOSITION_INFO:
-                    chimera_smb_parse_disposition_info(request_cursor, &request->set_info.r_attrs);
+                    chimera_smb_parse_disposition_info(request_cursor, &request->set_info.attrs);
+                    break;
+                case SMB2_FILE_ENDOFFILE_INFO:
+                    chimera_smb_parse_end_of_file_info(
+                        request_cursor,
+                        &request->set_info.attrs);
                     break;
             } /* switch */
     } /* switch */

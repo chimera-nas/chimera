@@ -216,7 +216,7 @@ struct chimera_smb_request {
             struct chimera_smb_open_file   *open_file;
             struct chimera_vfs_open_handle *parent_handle;
             struct chimera_smb_file_id      file_id;
-            struct chimera_smb_attrs        r_attrs;
+            struct chimera_smb_attrs        attrs;
         } set_info;
 
         struct {
