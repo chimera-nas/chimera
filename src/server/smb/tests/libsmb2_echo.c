@@ -6,19 +6,26 @@
 #include "libsmb2_test_common.h"
 
 static void
-test_echo_callback(struct smb2_context *smb2, int status, void *command_data, void *private_data)
+test_echo_callback(
+    struct smb2_context *smb2,
+    int                  status,
+    void                *command_data,
+    void                *private_data)
 {
-    int *echo_status = (int *)private_data;
+    int *echo_status = (int *) private_data;
+
     *echo_status = status;
-}
+} /* test_echo_callback */
 
 int
-main(int argc, char *argv[])
+main(
+    int   argc,
+    char *argv[])
 {
     struct test_env env;
-    int echo_status = -1;
-    int ret;
-    struct pollfd pfd;
+    int             echo_status = -1;
+    int             ret;
+    struct pollfd   pfd;
 
     libsmb2_test_init(&env, argv, argc);
 
@@ -32,7 +39,7 @@ main(int argc, char *argv[])
     }
 
     // Process the echo response
-    pfd.fd = smb2_get_fd(env.ctx);
+    pfd.fd     = smb2_get_fd(env.ctx);
     pfd.events = smb2_which_events(env.ctx);
 
     ret = poll(&pfd, 1, 5000);  // 5 second timeout
@@ -65,34 +72,34 @@ main(int argc, char *argv[])
 
         ret = smb2_echo_async(env.ctx, test_echo_callback, &echo_status);
         if (ret != 0) {
-            fprintf(stderr, "Failed to send echo request %d: %s\n", i+1, smb2_get_error(env.ctx));
+            fprintf(stderr, "Failed to send echo request %d: %s\n", i + 1, smb2_get_error(env.ctx));
             libsmb2_test_fail(&env);
         }
 
-        pfd.fd = smb2_get_fd(env.ctx);
+        pfd.fd     = smb2_get_fd(env.ctx);
         pfd.events = smb2_which_events(env.ctx);
 
         ret = poll(&pfd, 1, 5000);
         if (ret <= 0) {
-            fprintf(stderr, "Echo request %d timed out or failed\n", i+1);
+            fprintf(stderr, "Echo request %d timed out or failed\n", i + 1);
             libsmb2_test_fail(&env);
         }
 
         if (smb2_service(env.ctx, pfd.revents) < 0) {
-            fprintf(stderr, "Failed to process echo response %d: %s\n", i+1, smb2_get_error(env.ctx));
+            fprintf(stderr, "Failed to process echo response %d: %s\n", i + 1, smb2_get_error(env.ctx));
             libsmb2_test_fail(&env);
         }
 
         if (echo_status != 0) {
-            fprintf(stderr, "Echo request %d failed with status: %d\n", i+1, echo_status);
+            fprintf(stderr, "Echo request %d failed with status: %d\n", i + 1, echo_status);
             libsmb2_test_fail(&env);
         }
 
-        printf("Echo request %d succeeded\n", i+1);
+        printf("Echo request %d succeeded\n", i + 1);
     }
 
     printf("All echo tests passed!\n");
     libsmb2_test_success(&env);
 
     return 0;
-}
+} /* main */

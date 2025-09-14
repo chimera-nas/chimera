@@ -35,8 +35,7 @@ chimera_smb_echo_reply(
 } /* chimera_smb_echo_reply */
 
 void
-chimera_smb_echo(
-    struct chimera_smb_request *request)
+chimera_smb_echo(struct chimera_smb_request *request)
 {
     // Echo request is a simple keepalive message
     // Just mark it as successful
