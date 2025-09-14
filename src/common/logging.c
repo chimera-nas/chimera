@@ -328,7 +328,11 @@ __chimera_abort(
     chimera_vlog(level_string[CHIMERA_LOG_FATAL], mod, file, line, fmt, argp);
     va_end(argp);
 
+#ifndef CHIMERA_SANITIZE
     chimera_crash_handler(SIGABRT);
+#else  /* ifndef CHIMERA_SANITIZE */
+    chimera_log_flush(SIGABRT);
+ #endif /* ifndef CHIMERA_SANITIZE */
 
     abort();
 } /* chimera_abort */

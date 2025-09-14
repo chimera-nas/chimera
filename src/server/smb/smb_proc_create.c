@@ -81,7 +81,7 @@ chimera_smb_create_gen_open_file(
     open_file->name_len = name_len;
     memcpy(open_file->name, name, open_file->name_len);
 
-    open_file_bucket = open_file->file_id.pid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+    open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
     pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
 
@@ -105,6 +105,7 @@ chimera_smb_create_mkdir_open_callback(
     struct chimera_smb_open_file *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
         return;
     }
@@ -144,6 +145,7 @@ chimera_smb_create_mkdir_callback(
     struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
         return;
     }
@@ -179,6 +181,7 @@ chimera_smb_create_open_at_callback(
     struct chimera_smb_open_file *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
         chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
         return;
     }

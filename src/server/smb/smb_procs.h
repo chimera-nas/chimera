@@ -162,3 +162,14 @@ void chimera_smb_query_directory(
 
 void chimera_smb_set_info(
     struct chimera_smb_request *request);
+
+int chimera_smb_parse_echo(
+    struct evpl_iovec_cursor   *request_cursor,
+    struct chimera_smb_request *request);
+
+void chimera_smb_echo_reply(
+    struct evpl_iovec_cursor   *reply_cursor,
+    struct chimera_smb_request *request);
+
+void chimera_smb_echo(
+    struct chimera_smb_request *request);
