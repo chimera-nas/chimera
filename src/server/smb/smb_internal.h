@@ -126,7 +126,7 @@ struct chimera_smb_request {
             uint16_t path_offset;
             uint16_t path_length;
             uint8_t  is_ipc;
-            uint16_t path[CHIMERA_VFS_PATH_MAX];
+            char     path[SMB_FILENAME_MAX];
         } tree_connect;
 
         struct {
@@ -138,14 +138,14 @@ struct chimera_smb_request {
             uint32_t                        share_access;
             uint32_t                        create_disposition;
             uint32_t                        create_options;
+            uint16_t                        parent_path_len;
             uint16_t                        name_len;
-            uint16_t                        name_offset;
             struct chimera_vfs_open_handle *parent_handle;
             struct chimera_smb_open_file   *r_open_file;
             struct chimera_smb_attrs        r_attrs;
             struct chimera_vfs_attrs        set_attr;
-            uint16_t                        name[SMB_FILENAME_MAX];
-            char                            name_utf8[SMB_FILENAME_MAX];
+            char                            parent_path[SMB_FILENAME_MAX];
+            char                           *name;
         } create;
 
         struct  {
@@ -232,7 +232,7 @@ struct chimera_smb_request {
             struct evpl_iovec             iov;
             struct chimera_smb_open_file *open_file;
             uint32_t                     *last_file_offset;
-            uint16_t                      pattern[SMB_FILENAME_MAX];
+            char                          pattern[SMB_FILENAME_MAX];
         } query_directory;
     };
 };

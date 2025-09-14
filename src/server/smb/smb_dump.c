@@ -88,18 +88,34 @@ smb_status_name(uint32_t status)
     } /* switch */
 } /* smb_status_name */
 
+static const char *
+smb_create_disposition_name(uint32_t disposition)
+{
+    switch (disposition) {
+        case SMB2_FILE_CREATE:
+            return "Create";
+        case SMB2_FILE_OPEN:
+            return "Open";
+        case SMB2_FILE_OPEN_IF:
+            return "OpenIf";
+        case SMB2_FILE_OVERWRITE:
+            return "Overwrite";
+        case SMB2_FILE_OVERWRITE_IF:
+            return "OverwriteIf";
+        default:
+            return "Unknown";
+    } /* switch */
+} /* smb_create_disposition_name */
+
 void
 _smb_dump_request(
     int                         i,
     int                         n,
     struct chimera_smb_request *request)
 {
-    struct chimera_server_smb_thread *thread = request->compound->thread;
-    char                              argstr[512];
-    char                              hdr_args[80];
-    char                              filename[CHIMERA_VFS_PATH_MAX * 3];
-    int                               filename_len;
-    char                             *hdrp = hdr_args;
+    char  argstr[512];
+    char  hdr_args[80];
+    char *hdrp = hdr_args;
 
     *hdrp = '\0';
 
@@ -113,18 +129,13 @@ _smb_dump_request(
 
     switch (request->smb2_hdr.command) {
         case SMB2_TREE_CONNECT:
-            filename_len = chimera_smb_utf16le_to_utf8(&thread->iconv_ctx,
-                                                       request->tree_connect.path,
-                                                       request->tree_connect.path_length,
-                                                       filename, sizeof(filename));
-            sprintf(argstr, " path %.*s", filename_len, filename);
+            sprintf(argstr, " path %.*s", request->tree_connect.path_length, request->tree_connect.path);
             break;
         case SMB2_CREATE:
-            filename_len = chimera_smb_utf16le_to_utf8(&thread->iconv_ctx,
-                                                       request->create.name,
-                                                       request->create.name_len,
-                                                       filename, sizeof(filename));
-            sprintf(argstr, " name %.*s", filename_len, filename);
+            sprintf(argstr, " parent_path %.*s name %.*s create_disposition %s",
+                    request->create.parent_path_len, request->create.parent_path,
+                    request->create.name_len, request->create.name,
+                    smb_create_disposition_name(request->create.create_disposition));
             break;
         case SMB2_CLOSE:
             if (request->close.file_id.pid != UINT64_MAX) {
@@ -160,14 +171,11 @@ _smb_dump_request(
                     request->query_info.addl_info, request->query_info.flags);
             break;
         case SMB2_QUERY_DIRECTORY:
-            filename_len = chimera_smb_utf16le_to_utf8(&thread->iconv_ctx,
-                                                       request->query_directory.pattern,
-                                                       request->query_directory.pattern_length,
-                                                       filename, sizeof(filename));
             sprintf(argstr, " file_id %lx.%lx flags %x info_class %u file_index %u pattern %.*s",
                     request->query_directory.file_id.pid, request->query_directory.file_id.vid,
                     request->query_directory.flags, request->query_directory.info_class,
-                    request->query_directory.file_index, filename_len, filename);
+                    request->query_directory.file_index, request->query_directory.pattern_length,
+                    request->query_directory.pattern);
             break;
         default:
             argstr[0] = '\0';

@@ -18,14 +18,8 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
     struct chimera_smb_session       *session = request->session;
     char                             *request_pathp;
     int                               i;
-    char                              path[CHIMERA_VFS_PATH_MAX];
 
-    chimera_smb_utf16le_to_utf8(&thread->iconv_ctx,
-                                request->tree_connect.path,
-                                request->tree_connect.path_length,
-                                path, sizeof(path));
-
-    request_pathp = path;
+    request_pathp = request->tree_connect.path;
 
     while (*request_pathp == '\\') {
         request_pathp++;
@@ -145,6 +139,8 @@ chimera_smb_parse_tree_connect(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request)
 {
+    uint16_t path16[SMB_FILENAME_MAX];
+
     if (unlikely(request->request_struct_size != SMB2_TREE_CONNECT_REQUEST_SIZE)) {
         chimera_smb_error("Received SMB2 TREE_CONNECT request with invalid struct size (%u expected %u)",
                           request->request_struct_size,
@@ -163,9 +159,14 @@ chimera_smb_parse_tree_connect(
         return -1;
     }
 
-    evpl_iovec_cursor_copy(request_cursor, request->tree_connect.path, request->tree_connect.path_length);
+    evpl_iovec_cursor_copy(request_cursor, path16, request->tree_connect.path_length);
 
-    request->tree_connect.path_length >>= 1;
+    request->tree_connect.path_length = chimera_smb_utf16le_to_utf8(&request->compound->thread->iconv_ctx,
+                                                                    path16,
+                                                                    request->tree_connect.path_length,
+                                                                    request->tree_connect.path,
+                                                                    sizeof(request->tree_connect.path));
+
 
     return 0;
 } /* chimera_smb_parse_tree_connect */
