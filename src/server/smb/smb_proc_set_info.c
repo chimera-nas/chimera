@@ -4,10 +4,8 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
-#include "common/macros.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_release.h"
 
 static void
 chimera_smb_set_info_callback(
@@ -18,6 +16,8 @@ chimera_smb_set_info_callback(
     void                     *private_data)
 {
     struct chimera_smb_request *request = private_data;
+
+    chimera_smb_open_file_release(request, request->set_info.open_file);
 
     chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_info_callback */
@@ -31,7 +31,7 @@ chimera_smb_set_info_remove_callback(
 {
     struct chimera_smb_request *request = private_data;
 
-    chimera_vfs_release(request->compound->thread->vfs_thread, request->set_info.parent_handle);
+    chimera_smb_open_file_release(request, request->set_info.open_file);
 
     chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_info_remove_callback */
@@ -48,6 +48,7 @@ chimera_smb_set_info_open_unlink_callback(
     request->set_info.parent_handle = oh;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, request->set_info.open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
         return;
     }
@@ -67,12 +68,9 @@ chimera_smb_set_info_open_unlink_callback(
 void
 chimera_smb_set_info(struct chimera_smb_request *request)
 {
-    struct chimera_smb_open_file *open_file;
-    struct chimera_vfs_attrs      attrs;
+    struct chimera_vfs_attrs attrs;
 
-    open_file = chimera_smb_open_file_lookup(request, &request->set_info.file_id);
-
-    request->set_info.open_file = open_file;
+    request->set_info.open_file = chimera_smb_open_file_resolve(request, &request->set_info.file_id);
 
     switch (request->set_info.info_type) {
         case SMB2_INFO_FILE:
@@ -83,7 +81,7 @@ chimera_smb_set_info(struct chimera_smb_request *request)
 
                     chimera_vfs_setattr(
                         request->compound->thread->vfs_thread,
-                        open_file->handle,
+                        request->set_info.open_file->handle,
                         &attrs,
                         0,
                         0,
@@ -95,7 +93,7 @@ chimera_smb_set_info(struct chimera_smb_request *request)
 
                     chimera_vfs_setattr(
                         request->compound->thread->vfs_thread,
-                        open_file->handle,
+                        request->set_info.open_file->handle,
                         &attrs,
                         0,
                         0,
@@ -103,13 +101,13 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         request);
                     break;
                 case SMB2_FILE_DISPOSITION_INFO:
-                    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) {
+                    if (request->set_info.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) {
                         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
                     } else {
                         chimera_vfs_open(
                             request->compound->thread->vfs_thread,
-                            open_file->parent_fh,
-                            open_file->parent_fh_len,
+                            request->set_info.open_file->parent_fh,
+                            request->set_info.open_file->parent_fh_len,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                             chimera_smb_set_info_open_unlink_callback,
                             request);
@@ -117,10 +115,12 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     }
                     break;
                 default:
+                    chimera_smb_open_file_release(request, request->set_info.open_file);
                     chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
             } /* switch */
             break;
         default:
+            chimera_smb_open_file_release(request, request->set_info.open_file);
             chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
     } /* switch */
 } /* chimera_smb_set_info */

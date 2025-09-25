@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <stdio.h>
+
 #include <pthread.h>
 #include <utlist.h>
 
@@ -17,10 +17,8 @@
 #include "nfs_portmap.h"
 #include "nfs_common.h"
 #include "nfs_internal.h"
-#include "vfs/vfs_procs.h"
 #include "prometheus-c.h"
 
-#include "common/logging.h"
 #include "common/macros.h"
 
 #define NFS_PROGIDX_PORTMAP_V2 0
@@ -173,6 +171,17 @@ nfs_server_start(void *arg)
 
 } /* nfs_server_start */
 
+void
+nfs_server_stop(void *arg)
+{
+    struct chimera_server_nfs_shared *shared = arg;
+
+    evpl_rpc2_stop(shared->mount_server);
+    evpl_rpc2_stop(shared->portmap_server);
+    evpl_rpc2_stop(shared->nfs_server);
+
+} /* nfs_server_stop */
+
 static void
 nfs_server_destroy(void *data)
 {
@@ -245,6 +254,7 @@ SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
     .init           = nfs_server_init,
     .destroy        = nfs_server_destroy,
     .start          = nfs_server_start,
+    .stop           = nfs_server_stop,
     .thread_init    = nfs_server_thread_init,
     .thread_destroy = nfs_server_thread_destroy,
 };

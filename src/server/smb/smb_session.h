@@ -20,8 +20,26 @@ struct chimera_smb_file_id {
 
 #define CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY       0x00000001
 #define CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE 0x00000002
+#define CHIMERA_SMB_OPEN_FILE_CLOSED               0x00000004
+
+enum chimera_smb_open_file_type {
+    CHIMERA_SMB_OPEN_FILE_TYPE_FILE,
+    CHIMERA_SMB_OPEN_FILE_TYPE_PIPE,
+};
+
+enum chimera_smb_pipe_magic {
+    CHIMERA_SMB_OPEN_FILE_LSA_RPC,
+};
+
+typedef int (*chimera_smb_pipe_transceive_t)(
+    struct evpl_iovec *input_iov,
+    int                input_niov,
+    struct evpl_iovec *output_iov);
 
 struct chimera_smb_open_file {
+    enum chimera_smb_open_file_type type;
+    enum chimera_smb_pipe_magic     pipe_magic;
+    chimera_smb_pipe_transceive_t   pipe_transceive;
     struct UT_hash_handle           hh;
     struct chimera_smb_file_id      file_id;
     struct chimera_vfs_open_handle *handle;
@@ -29,6 +47,7 @@ struct chimera_smb_open_file {
     uint32_t                        flags;
     uint64_t                        position;
     uint32_t                        parent_fh_len;
+    uint32_t                        refcnt;
     struct chimera_smb_open_file   *next;
     uint8_t                         parent_fh[CHIMERA_VFS_FH_SIZE];
     char                            name[SMB_FILENAME_MAX];
@@ -38,7 +57,13 @@ struct chimera_smb_open_file {
 #define CHIMERA_SMB_OPEN_FILE_BUCKETS     256
 #define CHIMERA_SMB_OPEN_FILE_BUCKET_MASK (CHIMERA_SMB_OPEN_FILE_BUCKETS - 1)
 
+enum chimera_smb_tree_type {
+    CHIMERA_SMB_TREE_TYPE_PIPE,
+    CHIMERA_SMB_TREE_TYPE_SHARE,
+};
+
 struct chimera_smb_tree {
+    enum chimera_smb_tree_type    type;
     uint32_t                      tree_id;
     uint32_t                      refcnt;
     uint64_t                      next_file_id;

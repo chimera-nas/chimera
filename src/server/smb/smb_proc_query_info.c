@@ -5,10 +5,8 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_string.h"
-#include "common/macros.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_release.h"
 
 static void
 chimera_smb_query_info_getattr_callback(
@@ -61,6 +59,8 @@ chimera_smb_query_info_getattr_callback(
             } /* switch */
     } /* switch */
 
+    chimera_smb_open_file_release(request, request->query_info.open_file);
+
     if (unlikely(error_code)) {
         chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
     } else {
@@ -76,7 +76,7 @@ chimera_smb_query_info(struct chimera_smb_request *request)
     uint32_t                          status       = SMB2_STATUS_SUCCESS;
 
 
-    request->query_info.open_file             = chimera_smb_open_file_lookup(request, &request->query_info.file_id);
+    request->query_info.open_file             = chimera_smb_open_file_resolve(request, &request->query_info.file_id);
     request->query_info.r_attrs.smb_attr_mask = 0;
 
     if (unlikely(!request->query_info.open_file)) {
@@ -125,10 +125,7 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     request->query_info.output_length = 8;
                     break;
                 default:
-
-                    chimera_smb_error("Unsupported info class %d in reply, defaulting to ALL_INFO size",
-                                      request->query_info.info_class);
-                    status = SMB2_STATUS_INVALID_PARAMETER;
+                    status = SMB2_STATUS_NOT_IMPLEMENTED;
                     break;
             } /* switch */
             break;
@@ -144,11 +141,13 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     request->query_info.output_length = 32;
                     getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STATFS;
                     break;
+                default:
+                    status = SMB2_STATUS_NOT_IMPLEMENTED;
+                    break;
             } /* switch */
             break;
         default:
-            chimera_smb_error("Unsupported information type: %d", request->query_info.info_type);
-            status = SMB2_STATUS_INVALID_PARAMETER;
+            status = SMB2_STATUS_NOT_IMPLEMENTED;
             break;
     } /* switch */
 
@@ -160,6 +159,7 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                             chimera_smb_query_info_getattr_callback,
                             request);
     } else {
+        chimera_smb_open_file_release(request, request->query_info.open_file);
         chimera_smb_complete_request(request, status);
     }
 

@@ -23,6 +23,9 @@ struct chimera_server_protocol {
     void  (*start)(
         void *data);
 
+    void  (*stop)(
+        void *data);
+
     void *(*thread_init)(
         struct evpl *,
         struct chimera_vfs_thread *vfs_thread,

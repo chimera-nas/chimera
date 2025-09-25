@@ -5,10 +5,9 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_string.h"
-#include "common/macros.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_release.h"
+#include "vfs/vfs_procs.h"
 #include "xxhash.h"
 
 void
@@ -25,6 +24,8 @@ chimera_smb_query_directory_readdir_complete(
     if (request->query_directory.last_file_offset) {
         *request->query_directory.last_file_offset = 0;
     }
+
+    chimera_smb_open_file_release(request, request->query_directory.open_file);
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
@@ -186,7 +187,7 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
     struct chimera_server_smb_thread *thread = request->compound->thread;
     struct evpl                      *evpl   = thread->evpl;
 
-    request->query_directory.open_file = chimera_smb_open_file_lookup(request, &request->query_directory.file_id);
+    request->query_directory.open_file = chimera_smb_open_file_resolve(request, &request->query_directory.file_id);
 
     if (unlikely(!request->query_directory.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);

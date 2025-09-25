@@ -8,6 +8,7 @@
 #include "vfs/vfs.h"
 #include <sys/stat.h>
 #include "vfs/vfs_internal.h"
+#include "common/evpl_iovec_cursor.h"
 
 #include "smb_session.h"
 

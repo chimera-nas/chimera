@@ -26,23 +26,25 @@ main(
     int    argc,
     char **argv)
 {
-    const char                   *config_path = "/usr/local/etc/chimera.json";
-    extern char                  *optarg;
-    int                           opt;
-    const char                   *mount_name;
-    const char                   *mount_module;
-    const char                   *mount_path;
-    const char                   *share_name;
-    const char                   *share_path;
-    const char                   *bucket_name;
-    const char                   *bucket_path;
-    json_t                       *config, *shares, *share, *server_params, *buckets, *bucket;
-    json_t                       *mounts, *mount;
-    json_error_t                  error;
-    struct chimera_server        *server;
-    struct chimera_server_config *server_config;
-    struct evpl_global_config    *evpl_global_config;
-    struct chimera_metrics       *metrics;
+    const char                          *config_path = "/usr/local/etc/chimera.json";
+    extern char                         *optarg;
+    int                                  opt;
+    const char                          *mount_name;
+    const char                          *mount_module;
+    const char                          *mount_path;
+    const char                          *share_name;
+    const char                          *share_path;
+    const char                          *bucket_name;
+    const char                          *bucket_path;
+    json_t                              *config, *shares, *share, *server_params, *buckets, *bucket;
+    json_t                              *mounts, *mount;
+    json_error_t                         error;
+    struct chimera_server               *server;
+    struct chimera_server_config        *server_config;
+    struct evpl_global_config           *evpl_global_config;
+    struct chimera_metrics              *metrics;
+    int                                  i;
+    struct chimera_server_config_smb_nic smb_nic_info[16];
 
     chimera_log_init();
 
@@ -54,7 +56,7 @@ main(
     chimera_enable_crash_handler();
  #endif /* ifndef CHIMERA_SANITIZE */
 
-    evpl_set_log_fn(chimera_vlog);
+    evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 
     evpl_global_config = evpl_global_config_init();
     evpl_global_config_set_rdmacm_datagram_size_override(evpl_global_config, 4096);
@@ -122,6 +124,28 @@ main(
     if (rdma_port_value && json_is_integer(rdma_port_value)) {
         int rdma_port = json_integer_value(rdma_port_value);
         chimera_server_config_set_nfs_rdma_port(server_config, rdma_port);
+    }
+
+    json_t *smb_multichannel = json_object_get(server_params, "smb_multichannel");
+    if (smb_multichannel && json_is_array(smb_multichannel)) {
+        json_t *smb_nic_info_json;
+        json_array_foreach(smb_multichannel, i, smb_nic_info_json)
+        {
+            const char *smb_nic_info_name  = json_string_value(json_object_get(smb_nic_info_json, "address"));
+            int         smb_nic_info_speed = json_integer_value(json_object_get(smb_nic_info_json, "speed"));
+
+            if (!smb_nic_info_name || !smb_nic_info_speed) {
+                chimera_server_error(
+                    "SMB Multichannel: Invalid address or speed on SMB multichannel interface");
+                return 1;
+            }
+
+            strncpy(smb_nic_info[i].address, smb_nic_info_name,
+                    sizeof(smb_nic_info[i].address) - 1);
+            smb_nic_info[i].speed = smb_nic_info_speed;
+        }
+
+        chimera_server_config_set_smb_nic_info(server_config, json_array_size(smb_multichannel), smb_nic_info);
     }
 
     json_t *vfs_modules = json_object_get(server_params, "vfs");

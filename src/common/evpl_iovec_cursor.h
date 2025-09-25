@@ -4,6 +4,10 @@
 
 #pragma once
 
+#include <string.h>
+#include <stdlib.h>
+#include "evpl/evpl.h"
+
 struct evpl_iovec_cursor {
     struct evpl_iovec *iov;
     int                offset;
@@ -95,7 +99,7 @@ evpl_iovec_cursor_copy(
     }
 } /* evpl_iovec_cursor_copy */
 
-static void
+static inline void
 evpl_iovec_cursor_skip(
     struct evpl_iovec_cursor *cursor,
     int                       length)
