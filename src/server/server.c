@@ -17,19 +17,24 @@
 #include "vfs/vfs.h"
 #include "common/macros.h"
 #include "server/server.h"
+#include "smb/smb2.h"
 
 #define CHIMERA_SERVER_MAX_MODULES 64
 
 struct chimera_server_config {
-    int                           nfs_rdma;
-    char                          nfs_rdma_hostname[256];
-    int                           nfs_rdma_port;
-    int                           core_threads;
-    int                           delegation_threads;
-    int                           cache_ttl;
-    struct chimera_vfs_module_cfg modules[CHIMERA_SERVER_MAX_MODULES];
-    int                           num_modules;
-    int                           metrics_port;
+    int                                  nfs_rdma;
+    int                                  nfs_rdma_port;
+    int                                  core_threads;
+    int                                  delegation_threads;
+    int                                  cache_ttl;
+    int                                  num_modules;
+    int                                  metrics_port;
+    int                                  smb_num_dialects;
+    uint32_t                             smb_dialects[16];
+    int                                  smb_num_nic_info;
+    char                                 nfs_rdma_hostname[256];
+    struct chimera_vfs_module_cfg        modules[CHIMERA_SERVER_MAX_MODULES];
+    struct chimera_server_config_smb_nic smb_nic_info[16];
 };
 
 struct chimera_server {
@@ -62,6 +67,12 @@ chimera_server_config_init(void)
     config->core_threads       = 16;
     config->delegation_threads = 64;
     config->nfs_rdma           = 0;
+
+    config->smb_num_dialects = 2;
+    config->smb_dialects[0]  = SMB2_DIALECT_2_1;
+    config->smb_dialects[1]  = SMB2_DIALECT_3_0;
+
+    config->smb_num_nic_info = 0;
 
     config->cache_ttl = 60;
 
@@ -192,6 +203,46 @@ chimera_server_config_set_metrics_port(
 {
     config->metrics_port = port;
 } /* chimera_server_config_set_metrics_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_num_dialects(const struct chimera_server_config *config)
+{
+    return config->smb_num_dialects;
+} /* chimera_server_config_get_smb_num_dialects */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_smb_dialects(
+    const struct chimera_server_config *config,
+    int                                 index)
+{
+    return config->smb_dialects[index];
+} /* chimera_server_config_get_smb_dialects */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_num_nic_info(const struct chimera_server_config *config)
+{
+    return config->smb_num_nic_info;
+} /* chimera_server_config_get_smb_num_nic_info */
+
+SYMBOL_EXPORT const struct chimera_server_config_smb_nic *
+chimera_server_config_get_smb_nic_info(
+    const struct chimera_server_config *config,
+    int                                 index)
+{
+    return &config->smb_nic_info[index];
+} /* chimera_server_config_get_smb_nic_info */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_nic_info(
+    struct chimera_server_config               *config,
+    int                                         num_nic_info,
+    const struct chimera_server_config_smb_nic *smb_nic_info)
+{
+    config->smb_num_nic_info = num_nic_info;
+    memcpy(config->smb_nic_info, smb_nic_info, num_nic_info * sizeof(struct chimera_server_config_smb_nic));
+} /* chimera_server_config_set_smb_nic_info */
+
+
 
 static void
 chimera_server_thread_wake(
@@ -368,6 +419,10 @@ SYMBOL_EXPORT void
 chimera_server_destroy(struct chimera_server *server)
 {
     int i;
+
+    for (i = 0; i < server->num_protocols; i++) {
+        server->protocols[i]->stop(server->protocol_private[i]);
+    }
 
     evpl_threadpool_destroy(server->pool);
     chimera_vfs_destroy(server->vfs);

@@ -16,9 +16,7 @@ TEST_NAME="chimera_test_$$_$(date +%s%N)"
 NETNS_NAME="netns_${TEST_NAME}"
 
 cleanup() {
-    if ip netns list | grep -q "^${NETNS_NAME}"; then
-        ip netns delete "${NETNS_NAME}" 2>/dev/null || true
-    fi
+    ip netns delete "${NETNS_NAME}" 2>/dev/null || true
 }
 
 trap cleanup EXIT

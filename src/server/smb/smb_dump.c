@@ -107,6 +107,41 @@ smb_create_disposition_name(uint32_t disposition)
     } /* switch */
 } /* smb_create_disposition_name */
 
+static const char *
+smb_dialect_name(uint16_t dialect)
+{
+    switch (dialect) {
+        case 0x0210:
+            return "SMB2.1";
+        case 0x02ff:
+            return "SMB2.??";
+        case 0x0300:
+            return "SMB3.0";
+        case 0x0302:
+            return "SMB3.02";
+        case 0x0311:
+            return "SMB3.11";
+        default:
+            return "Unknown";
+    } /* switch */
+
+} /* smb_dialect_name */
+
+static const char *
+smb_ioctl_ctl_code_name(uint32_t ctl_code)
+{
+    switch (ctl_code) {
+        case SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO:
+            return "VALIDATE_NEGOTIATE_INFO";
+        case SMB2_FSCTL_TRANSCEIVE_PIPE:
+            return "TRANSCEIVE_PIPE";
+        case SMB2_FSCTL_DFS_GET_REFERRALS:
+            return "DFS_GET_REFERRALS";
+        default:
+            return "Unknown";
+    } /* switch */
+} /* smb_ioctl_ctl_code_name */
+
 void
 _smb_dump_request(
     int                         i,
@@ -114,17 +149,23 @@ _smb_dump_request(
     struct chimera_smb_request *request)
 {
     char  argstr[512];
-    char  hdr_args[80];
+    char  hdr_args[160];
     char *hdrp = hdr_args;
 
     *hdrp = '\0';
 
     if (request->smb2_hdr.session_id) {
-        hdrp += sprintf(hdrp, " sessiond %lx", request->smb2_hdr.session_id);
+        hdrp += sprintf(hdrp, " session %lx", request->smb2_hdr.session_id);
     }
 
     if (request->smb2_hdr.sync.tree_id) {
-        sprintf(hdrp, " tree_id %x", request->smb2_hdr.sync.tree_id);
+        if (request->tree) {
+            sprintf(hdrp, " tree %s(%x)",
+                    request->tree->type == CHIMERA_SMB_TREE_TYPE_PIPE ? "IPC$" : request->tree->share->name,
+                    request->smb2_hdr.sync.tree_id);
+        } else {
+            sprintf(hdrp, " tree_id %x", request->smb2_hdr.sync.tree_id);
+        }
     }
 
     switch (request->smb2_hdr.command) {
@@ -154,9 +195,10 @@ _smb_dump_request(
                     request->read.offset, request->read.length);
             break;
         case SMB2_IOCTL:
-            sprintf(argstr, " file_id %lx.%lx ctl_code %u",
+            sprintf(argstr, " file_id %lx.%lx ctl_code %s count %u",
                     request->ioctl.file_id.pid, request->ioctl.file_id.vid,
-                    request->ioctl.ctl_code);
+                    smb_ioctl_ctl_code_name(request->ioctl.ctl_code),
+                    request->ioctl.input_count);
             break;
         case SMB2_SET_INFO:
             sprintf(argstr, " file_id %lx.%lx info_type %u info_class %u addl_info %u",
@@ -198,6 +240,9 @@ _smb_dump_reply(
     char *hdrp = hdr_args;
 
     switch (request->smb2_hdr.command) {
+        case SMB2_NEGOTIATE:
+            sprintf(argstr, " dialect %s", smb_dialect_name(request->negotiate.r_dialect));
+            break;
         case SMB2_CREATE:
             if (request->status == SMB2_STATUS_SUCCESS) {
                 sprintf(argstr, " file_id %lx.%lx",

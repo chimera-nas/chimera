@@ -166,19 +166,31 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                           #endif /* if 0 */
 
     if (conn->gss_major == GSS_S_COMPLETE) {
-        session = chimera_smb_session_alloc(shared);
+
+        if (request->session_setup.flags) {
+            session = chimera_smb_session_lookup(shared, request->smb2_hdr.session_id);
+
+            if (!session) {
+                chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
+                return;
+            }
+
+        } else {
+            session = chimera_smb_session_alloc(shared);
+        }
 
         session_handle = chimera_smb_session_handle_alloc(thread);
 
         session_handle->session_id = session->session_id;
         session_handle->session    = session;
 
+        chimera_smb_debug("Adding session handle %x", session_handle->session_id);
         HASH_ADD(hh, conn->session_handles, session_id, sizeof(uint64_t), session_handle);
 
         request->compound->conn->last_session = session;
 
         request->session = session;
-    }
+    } /* chimera_smb_session_setup */
 
     switch (conn->gss_major) {
         case GSS_S_COMPLETE:

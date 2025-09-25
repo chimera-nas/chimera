@@ -7,7 +7,6 @@
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
-#include "smb_string.h"
 
 static void
 chimera_smb_flush_callback(
@@ -18,6 +17,8 @@ chimera_smb_flush_callback(
 {
     struct chimera_smb_request *request = private_data;
 
+    chimera_smb_open_file_release(request, request->flush.open_file);
+
     chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
 } /* chimera_smb_flush_callback */
 
@@ -25,13 +26,12 @@ void
 chimera_smb_flush(struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread = request->compound->thread;
-    struct chimera_smb_open_file     *open_file;
 
-    open_file = chimera_smb_open_file_lookup(request, &request->flush.file_id);
+    request->flush.open_file = chimera_smb_open_file_resolve(request, &request->flush.file_id);
 
     chimera_vfs_commit(
         thread->vfs_thread,
-        open_file->handle,
+        request->flush.open_file->handle,
         0,
         0xffffffffffffffffULL,
         0,

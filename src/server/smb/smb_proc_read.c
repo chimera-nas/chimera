@@ -4,10 +4,7 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
-#include "common/macros.h"
-#include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_release.h"
 
 static void
 chimera_smb_read_callback(
@@ -20,6 +17,8 @@ chimera_smb_read_callback(
     void                     *private_data)
 {
     struct chimera_smb_request *request = private_data;
+
+    chimera_smb_open_file_release(request, request->read.open_file);
 
     request->read.niov     = niov;
     request->read.r_length = count;
@@ -38,13 +37,12 @@ void
 chimera_smb_read(struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread = request->compound->thread;
-    struct chimera_smb_open_file     *open_file;
 
-    open_file = chimera_smb_open_file_lookup(request, &request->read.file_id);
+    request->read.open_file = chimera_smb_open_file_resolve(request, &request->read.file_id);
 
     chimera_vfs_read(
         thread->vfs_thread,
-        open_file->handle,
+        request->read.open_file->handle,
         request->read.offset,
         request->read.length,
         request->read.iov,

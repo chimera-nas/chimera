@@ -4,10 +4,7 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
-#include "common/macros.h"
-#include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_release.h"
 
 static void
 chimera_smb_write_callback(
@@ -20,6 +17,9 @@ chimera_smb_write_callback(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
+    struct chimera_smb_request *request = private_data;
+
+    chimera_smb_open_file_release(private_data, request->write.open_file);
     chimera_smb_complete_request(private_data, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
 } /* chimera_smb_write_callback */
 
@@ -28,13 +28,12 @@ void
 chimera_smb_write(struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread = request->compound->thread;
-    struct chimera_smb_open_file     *open_file;
 
-    open_file = chimera_smb_open_file_lookup(request, &request->write.file_id);
+    request->write.open_file = chimera_smb_open_file_resolve(request, &request->write.file_id);
 
     chimera_vfs_write(
         thread->vfs_thread,
-        open_file->handle,
+        request->write.open_file->handle,
         request->write.offset,
         request->write.length,
         !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH),

@@ -4,10 +4,8 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
-#include "common/macros.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_release.h"
 
 static void
 chimera_smb_close_getattr_callback(
@@ -15,10 +13,9 @@ chimera_smb_close_getattr_callback(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_smb_request       *request = private_data;
-    struct chimera_server_smb_thread *thread  = request->compound->thread;
+    struct chimera_smb_request *request = private_data;
 
-    chimera_vfs_release(thread->vfs_thread, request->close.handle);
+    chimera_smb_open_file_release(request, request->close.open_file);
 
     chimera_smb_marshal_attrs(
         attr,
@@ -36,32 +33,25 @@ void
 chimera_smb_close(struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread = request->compound->thread;
-    struct chimera_smb_open_file     *open_file;
 
 
-    open_file = chimera_smb_open_file_remove(request, &request->close.file_id);
+    request->close.open_file = chimera_smb_open_file_close(request, &request->close.file_id);
 
-    if (unlikely(!open_file)) {
+    if (unlikely(!request->close.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
 
-    request->close.handle = open_file->handle;
-
-    chimera_smb_open_file_free(
-        thread,
-        open_file);
-
     if (request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) {
 
         chimera_vfs_getattr(thread->vfs_thread,
-                            request->close.handle,
+                            request->close.open_file->handle,
                             CHIMERA_VFS_ATTR_MASK_STAT,
                             chimera_smb_close_getattr_callback,
                             request);
 
     } else {
-        chimera_vfs_release(thread->vfs_thread, request->close.handle);
+        chimera_smb_open_file_release(request, request->close.open_file);
 
         memset(&request->close.r_attrs, 0, sizeof(request->close.r_attrs));
 

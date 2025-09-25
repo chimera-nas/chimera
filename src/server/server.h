@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -18,6 +19,13 @@ struct chimera_server_config;
 struct chimera_server;
 struct chimera_thread;
 struct prometheus_metrics;
+
+
+struct chimera_server_config_smb_nic {
+    char     address[80];
+    uint64_t speed;
+};
+
 
 struct chimera_server_config *
 chimera_server_config_init(
@@ -80,6 +88,30 @@ void
 chimera_server_config_set_metrics_port(
     struct chimera_server_config *config,
     int                           port);
+
+int
+chimera_server_config_get_smb_num_dialects(
+    const struct chimera_server_config *config);
+
+uint32_t
+chimera_server_config_get_smb_dialects(
+    const struct chimera_server_config *config,
+    int                                 index);
+
+int
+chimera_server_config_get_smb_num_nic_info(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_nic_info(
+    struct chimera_server_config               *config,
+    int                                         num_nic_info,
+    const struct chimera_server_config_smb_nic *smb_nic_info);
+
+const struct chimera_server_config_smb_nic *
+chimera_server_config_get_smb_nic_info(
+    const struct chimera_server_config *config,
+    int                                 index);
 
 static void
 chimera_server_thread_wake(

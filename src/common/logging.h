@@ -19,6 +19,9 @@ void chimera_log_init(
 void chimera_enable_crash_handler(
     void);
 
+void chimera_log_flush(
+    void);
+
 void
 chimera_vlog(
     const char *level,

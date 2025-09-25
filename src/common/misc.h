@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <stdint.h>
 #include <sys/random.h>
 #include "common/logging.h"
 #ifndef likely
