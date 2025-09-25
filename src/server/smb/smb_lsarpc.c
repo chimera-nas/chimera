@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_lsarpc.h"
 #include "smb_dcerpc.h"
