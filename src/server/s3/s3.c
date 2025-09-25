@@ -458,11 +458,17 @@ s3_server_init(
 } /* s3_server_init */
 
 static void
-s3_server_destroy(void *data)
+s3_server_stop(void *data)
 {
     struct chimera_server_s3_shared *shared = data;
 
     evpl_listener_destroy(shared->listener);
+} /* s3_server_stop */
+
+static void
+s3_server_destroy(void *data)
+{
+    struct chimera_server_s3_shared *shared = data;
 
     s3_bucket_map_destroy(shared->bucket_map);
 
@@ -531,6 +537,7 @@ SYMBOL_EXPORT struct chimera_server_protocol s3_protocol = {
     .init           = s3_server_init,
     .destroy        = s3_server_destroy,
     .start          = s3_server_start,
+    .stop           = s3_server_stop,
     .thread_init    = s3_server_thread_init,
     .thread_destroy = s3_server_thread_destroy,
 };

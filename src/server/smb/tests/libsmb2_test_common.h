@@ -72,9 +72,11 @@ libsmb2_test_init(
 
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 
+#ifndef CHIMERA_SANITIZE
     chimera_enable_crash_handler();
+#endif /* ifndef CHIMERA_SANITIZE */
 
-    evpl_set_log_fn(chimera_vlog);
+    evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 
     snprintf(env->session_dir, sizeof(env->session_dir),
              "/build/test/session_%d_%lu_%lu", getpid(), tv.tv_sec, tv.tv_nsec);

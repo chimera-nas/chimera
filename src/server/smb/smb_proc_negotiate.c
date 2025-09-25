@@ -10,7 +10,10 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread = request->compound->thread;
     struct chimera_server_smb_shared *shared = thread->shared;
+    struct chimera_smb_conn          *conn   = request->compound->conn;
     struct timespec                   now, up, boot;
+    uint16_t                          dialect = 0, candidate;
+    int                               i, j;
 
     clock_gettime(
         CLOCK_REALTIME,
@@ -29,9 +32,38 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
         boot.tv_sec--;
     }
 
-    request->negotiate.r_dialect           = 0x0210;
+    for (i = 0; i < request->negotiate.dialect_count; i++) {
+        for (j = 0; j < shared->config.num_dialects; j++) {
+            if (request->negotiate.dialects[i] == shared->config.dialects[j]) {
+                candidate = request->negotiate.dialects[i];
+
+                if ((candidate > dialect && dialect != 0x2ff) || candidate == 0x2ff) {
+                    dialect = candidate;
+                }
+
+                break;
+            }
+        }
+    }
+
+    if (dialect == 0) {
+        chimera_smb_error("No valid dialect found");
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    conn->capabilities = 0;
+
+    if (dialect >= 0x210 && (shared->config.capabilities & SMB2_GLOBAL_CAP_LARGE_MTU)) {
+        conn->capabilities |= SMB2_GLOBAL_CAP_LARGE_MTU;
+    }
+    if (dialect >= 0x300 && (shared->config.capabilities & SMB2_GLOBAL_CAP_MULTI_CHANNEL)) {
+        conn->capabilities |= SMB2_GLOBAL_CAP_MULTI_CHANNEL;
+    }
+
+    request->negotiate.r_dialect           = dialect;
     request->negotiate.r_security_mode     = 0;
-    request->negotiate.r_capabilities      = 0x4; /* LARGE MTU */
+    request->negotiate.r_capabilities      = conn->capabilities;
     request->negotiate.r_max_transact_size = 1048576;
     request->negotiate.r_max_read_size     = 1048576;
     request->negotiate.r_max_write_size    = 1048576;
@@ -40,7 +72,11 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
 
     memcpy(request->negotiate.r_server_guid, shared->guid, SMB2_GUID_SIZE);
 
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    conn->dialect = dialect;
+
+    chimera_smb_complete_request(
+        request,
+        SMB2_STATUS_SUCCESS);
 } /* smb_procs_negotiate */
 
 void
@@ -85,6 +121,7 @@ chimera_smb_parse_negotiate(
     evpl_iovec_cursor_copy(request_cursor, request->negotiate.client_guid, 16);
     evpl_iovec_cursor_get_uint32(request_cursor, &request->negotiate.negotiate_context_offset);
     evpl_iovec_cursor_get_uint16(request_cursor, &request->negotiate.negotiate_context_count);
+    evpl_iovec_cursor_skip(request_cursor, 2);
 
     if (request->negotiate.dialect_count > SMB2_MAX_DIALECTS) {
         chimera_smb_error("Received SMB2 NEGOTIATE request with invalid dialect count (%u max %u)",
@@ -92,20 +129,23 @@ chimera_smb_parse_negotiate(
                           SMB2_MAX_DIALECTS);
         return -1;
     }
+
     for (i = 0; i < request->negotiate.dialect_count; i++) {
         evpl_iovec_cursor_get_uint16(request_cursor, &request->negotiate.dialects[i]);
     }
 
-    evpl_iovec_cursor_skip(request_cursor,
-                           request->negotiate.negotiate_context_offset -
-                           evpl_iovec_cursor_consumed(request_cursor));
+    if (request->negotiate.negotiate_context_count) {
+        evpl_iovec_cursor_skip(request_cursor,
+                               request->negotiate.negotiate_context_offset -
+                               evpl_iovec_cursor_consumed(request_cursor));
 
-    for (i = 0; i < request->negotiate.negotiate_context_count; i++) {
-        evpl_iovec_cursor_get_uint16(request_cursor, &request->negotiate.negotiate_context[i].type);
-        evpl_iovec_cursor_get_uint16(request_cursor, &request->negotiate.negotiate_context[i].length);
-        evpl_iovec_cursor_skip(request_cursor, 4);
-        evpl_iovec_cursor_skip(request_cursor, request->negotiate.negotiate_context[i].length);
-        evpl_iovec_cursor_align64(request_cursor);
+        for (i = 0; i < request->negotiate.negotiate_context_count; i++) {
+            evpl_iovec_cursor_get_uint16(request_cursor, &request->negotiate.negotiate_context[i].type);
+            evpl_iovec_cursor_get_uint16(request_cursor, &request->negotiate.negotiate_context[i].length);
+            evpl_iovec_cursor_skip(request_cursor, 4);
+            evpl_iovec_cursor_skip(request_cursor, request->negotiate.negotiate_context[i].length);
+            evpl_iovec_cursor_align64(request_cursor);
+        }
     }
 
     return 0;

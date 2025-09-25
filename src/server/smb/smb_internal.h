@@ -10,15 +10,17 @@
 #include <string.h>
 #include <time.h>
 #include <utlist.h>
+#include <netinet/in.h>
 #include <gssapi/gssapi_ntlmssp.h>
 #include "evpl/evpl.h"
-#include "common/evpl_iovec_cursor.h"
 #include "common/logging.h"
 #include "common/misc.h"
 #include "smb2.h"
+#include "smb1.h"
 #include "smb_attr.h"
 #include "smb_session.h"
 #include "smb_string.h"
+#include "vfs/vfs_release.h"
 
 #define SMB2_MAX_DIALECTS           16
 #define SMB2_MAX_NEGOTIATE_CONTEXTS 16
@@ -57,9 +59,19 @@
                          __VA_ARGS__)
 
 
+struct chimera_smb_nic_info {
+    struct sockaddr_storage addr;
+    uint64_t                speed;
+};
+
 struct chimera_smb_config {
-    char identity[80];
-    int  port;
+    char                        identity[80];
+    int                         port;
+    int                         num_dialects;
+    int                         num_nic_info;
+    uint32_t                    capabilities;
+    uint32_t                    dialects[16];
+    struct chimera_smb_nic_info nic_info[16];
 };
 
 struct netbios_header {
@@ -78,7 +90,10 @@ struct chimera_smb_conn;
 struct chimera_smb_request {
     uint32_t                     status;
     uint16_t                     request_struct_size;
-    struct smb2_header           smb2_hdr;
+    union {
+        struct smb1_header smb1_hdr;
+        struct smb2_header smb2_hdr;
+    };
     struct chimera_smb_session  *session;
     struct chimera_smb_tree     *tree;
     struct chimera_smb_compound *compound;
@@ -149,38 +164,41 @@ struct chimera_smb_request {
         } create;
 
         struct  {
-            uint16_t                        flags;
-            struct chimera_smb_file_id      file_id;
-            struct chimera_vfs_open_handle *handle;
-            struct chimera_smb_attrs        r_attrs;
+            uint16_t                      flags;
+            struct chimera_smb_file_id    file_id;
+            struct chimera_smb_open_file *open_file;
+            struct chimera_smb_attrs      r_attrs;
         } close;
 
         struct {
-            uint64_t                   offset;
-            uint32_t                   length;
-            uint32_t                   channel;
-            uint32_t                   remaining;
-            uint32_t                   flags;
-            uint32_t                   niov;
-            struct chimera_smb_file_id file_id;
-            struct evpl_iovec          iov[64];
+            uint64_t                      offset;
+            uint32_t                      length;
+            uint32_t                      channel;
+            uint32_t                      remaining;
+            uint32_t                      flags;
+            uint32_t                      niov;
+            struct chimera_smb_file_id    file_id;
+            struct evpl_iovec             iov[64];
+            struct chimera_smb_open_file *open_file;
         } write;
 
         struct {
-            uint8_t                    flags;
-            uint32_t                   length;
-            uint32_t                   niov;
-            uint64_t                   offset;
-            uint32_t                   minimum;
-            uint32_t                   channel;
-            uint32_t                   remaining;
-            uint32_t                   r_length;
-            struct chimera_smb_file_id file_id;
-            struct evpl_iovec          iov[64];
+            uint8_t                       flags;
+            uint32_t                      length;
+            uint32_t                      niov;
+            uint64_t                      offset;
+            uint32_t                      minimum;
+            uint32_t                      channel;
+            uint32_t                      remaining;
+            uint32_t                      r_length;
+            struct chimera_smb_file_id    file_id;
+            struct evpl_iovec             iov[64];
+            struct chimera_smb_open_file *open_file;
         } read;
 
         struct {
-            struct chimera_smb_file_id file_id;
+            struct chimera_smb_file_id    file_id;
+            struct chimera_smb_open_file *open_file;
         } flush;
 
         struct {
@@ -192,7 +210,22 @@ struct chimera_smb_request {
             uint32_t                   output_offset;
             uint32_t                   output_count;
             uint32_t                   max_output_response;
+            uint32_t                   input_niov;
             uint32_t                   flags;
+            /* Validate Negotiate Info fields */
+            uint32_t                   vni_capabilities;
+            uint8_t                    vni_guid[16];
+            uint8_t                    vni_security_mode;
+            uint16_t                   vni_dialect_count;
+            uint16_t                   vni_dialects[SMB2_MAX_DIALECTS];
+            /* Response fields */
+            uint32_t                   r_capabilities;
+            uint8_t                    r_guid[16];
+            uint8_t                    r_security_mode;
+
+            uint16_t                   r_dialect;
+            struct evpl_iovec          input_iov[64];
+            struct evpl_iovec          output_iov;
         } ioctl;
         struct {
             uint8_t                       info_type;
@@ -264,6 +297,9 @@ struct chimera_smb_conn {
     gss_cred_id_t                      srv_cred;
     gss_buffer_desc                    gss_output;
     int                                established;
+    uint16_t                           dialect;
+    uint16_t                           smbvers;
+    uint32_t                           capabilities;
     struct chimera_smb_session        *last_session;
     struct chimera_smb_tree           *last_tree;
     struct chimera_smb_session_handle *session_handles;
@@ -292,6 +328,7 @@ struct chimera_server_smb_shared {
 struct chimera_server_smb_thread {
     struct evpl                       *evpl;
     struct chimera_vfs_thread         *vfs_thread;
+    struct evpl_listener_binding      *binding;
     struct chimera_server_smb_shared  *shared;
     struct chimera_smb_request        *free_requests;
     struct chimera_smb_compound       *free_compounds;
@@ -379,6 +416,26 @@ chimera_smb_session_alloc(struct chimera_server_smb_shared *shared)
 
     return session;
 } /* chimera_smb_session_alloc */
+
+static inline struct chimera_smb_session *
+chimera_smb_session_lookup(
+    struct chimera_server_smb_shared *shared,
+    uint64_t                          session_id)
+{
+    struct chimera_smb_session *session;
+
+    pthread_mutex_lock(&shared->sessions_lock);
+    HASH_FIND(hh, shared->sessions, &session_id, sizeof(uint64_t), session);
+
+    if (session) {
+        session->refcnt++;
+    }
+
+    pthread_mutex_unlock(&shared->sessions_lock);
+
+    return session;
+} /* chimera_smb_session_lookup */
+
 
 static inline void
 chimera_smb_session_release(
@@ -548,7 +605,7 @@ chimera_smb_compound_free(
 } /* chimera_smb_compound_free */
 
 static inline struct chimera_smb_open_file *
-chimera_smb_open_file_lookup(
+chimera_smb_open_file_resolve(
     struct chimera_smb_request *request,
     struct chimera_smb_file_id *file_id)
 {
@@ -558,7 +615,7 @@ chimera_smb_open_file_lookup(
 
     chimera_smb_abort_if(!tree, "tree is NULL");
 
-    if (file_id->pid == UINT64_MAX) {
+    if (unlikely(file_id->pid == UINT64_MAX)) {
         if (request->compound->saved_file_id.pid == UINT64_MAX) {
             chimera_smb_error("Attempted to lookup invalid file id");
             return NULL;
@@ -566,7 +623,7 @@ chimera_smb_open_file_lookup(
         file_id->pid = request->compound->saved_file_id.pid;
     }
 
-    if (file_id->vid == UINT64_MAX) {
+    if (unlikely(file_id->vid == UINT64_MAX)) {
         if (request->compound->saved_file_id.vid == UINT64_MAX) {
             chimera_smb_error("Attempted to lookup invalid file id");
             return NULL;
@@ -580,17 +637,58 @@ chimera_smb_open_file_lookup(
 
     HASH_FIND(hh, tree->open_files[open_file_bucket], file_id, sizeof(*file_id), open_file);
 
+    if (likely(open_file)) {
+        if (likely(!(open_file->flags & CHIMERA_SMB_OPEN_FILE_CLOSED))) {
+            open_file->refcnt++;
+        } else {
+            open_file = NULL;
+        }
+    }
+
     pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
 
     chimera_smb_abort_if(!open_file, "open request for file id %lx.%lx did not match an open file",
                          file_id->pid, file_id->vid);
 
     return open_file;
-} /* chimera_smb_open_file_find */
+} /* chimera_smb_open_file_resolve */
 
+static inline void
+chimera_smb_open_file_release(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file)
+{
+    struct chimera_smb_tree      *tree              = request->tree;
+    struct chimera_smb_open_file *open_file_to_free = NULL;
+    int                           open_file_bucket;
+
+    chimera_smb_abort_if(!tree, "tree is NULL");
+
+    open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+
+    pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
+
+    chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at release");
+
+    open_file->refcnt--;
+
+    if (open_file->refcnt == 0) {
+        if (open_file->handle) {
+            chimera_vfs_release(request->compound->thread->vfs_thread, open_file->handle);
+        }
+
+        open_file_to_free = open_file;
+    }
+
+    pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+
+    if (open_file_to_free) {
+        chimera_smb_open_file_free(request->compound->thread, open_file_to_free);
+    }
+} // chimera_smb_open_file_release
 
 static inline struct chimera_smb_open_file *
-chimera_smb_open_file_remove(
+chimera_smb_open_file_close(
     struct chimera_smb_request *request,
     struct chimera_smb_file_id *file_id)
 {
@@ -600,7 +698,7 @@ chimera_smb_open_file_remove(
 
     chimera_smb_abort_if(!tree, "tree is NULL");
 
-    if (file_id->pid == UINT64_MAX) {
+    if (unlikely(file_id->pid == UINT64_MAX)) {
         if (request->compound->saved_file_id.pid == UINT64_MAX) {
             chimera_smb_error("Attempted to close invalid file id");
             return NULL;
@@ -608,7 +706,7 @@ chimera_smb_open_file_remove(
         file_id->pid = request->compound->saved_file_id.pid;
     }
 
-    if (file_id->vid == UINT64_MAX) {
+    if (unlikely(file_id->vid == UINT64_MAX)) {
         if (request->compound->saved_file_id.vid == UINT64_MAX) {
             chimera_smb_error("Attempted to close invalid file id");
             return NULL;
@@ -623,10 +721,19 @@ chimera_smb_open_file_remove(
     HASH_FIND(hh, tree->open_files[open_file_bucket], file_id, sizeof(*file_id), open_file);
 
     if (open_file) {
-        HASH_DELETE(hh, tree->open_files[open_file_bucket], open_file);
+
+        chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at close");
+
+        if (open_file->flags & CHIMERA_SMB_OPEN_FILE_CLOSED) {
+            chimera_smb_error("Attempted to close already closed file id %lx.%lx",
+                              file_id->pid, file_id->vid);
+        } else {
+            open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
+            HASH_DELETE(hh, tree->open_files[open_file_bucket], open_file);
+        }
     }
 
     pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
 
     return open_file;
-} /* chimera_smb_open_file_find */
+} /* chimera_smb_open_file_remove */

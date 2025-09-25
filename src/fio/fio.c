@@ -12,8 +12,8 @@
 #include <xxhash.h>
 
 #include "client/client.h"
-#include "metrics/metrics.h"
 #include "evpl/evpl.h"
+#include "metrics/metrics.h"
 
 #include "config-host.h"
 #include "fio.h"
@@ -226,7 +226,7 @@ fio_chimera_init(struct thread_data *td)
 
         //ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 
-        evpl_set_log_fn(chimera_vlog);
+        evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 
 
         ChimeraMetrics = prometheus_metrics_create(NULL, NULL, 0);

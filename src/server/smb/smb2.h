@@ -7,6 +7,14 @@
 
 #define SMB_FILENAME_MAX                              255
 
+
+#define SMB2_DIALECT_2_0_2                            0x0202
+#define SMB2_DIALECT_2_1                              0x0210
+#define SMB2_DIALECT_3_0                              0x0300
+#define SMB2_DIALECT_3_0_2                            0x0302
+#define SMB2_DIALECT_3_1_1                            0x0311
+
+
 /*
  * NTSTATUS fields
  */
@@ -587,6 +595,15 @@ enum smb2_command {
 
 typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 
+// SMB2/3 Negotiate Capabilities
+#define SMB2_GLOBAL_CAP_DFS                         0x00000001 // Server supports DFS
+#define SMB2_GLOBAL_CAP_LEASING                     0x00000002 // Supports leasing (SMB 2.1+)
+#define SMB2_GLOBAL_CAP_LARGE_MTU                   0x00000004 // Supports >64KB read/write (SMB 2.1+)
+#define SMB2_GLOBAL_CAP_MULTI_CHANNEL               0x00000008 // Supports multiple channels per session (SMB 3.0+)
+#define SMB2_GLOBAL_CAP_PERSISTENT_HANDLES          0x00000010 // Supports persistent handles (SMB 3.0+)
+#define SMB2_GLOBAL_CAP_DIRECTORY_LEASING           0x00000020 // Supports directory leasing (SMB 3.0+)
+#define SMB2_GLOBAL_CAP_ENCRYPTION                  0x00000040 // Supports encryption (SMB 3.0+)
+
 #define SMB2_NEGOTIATE_MAX_DIALECTS                 10
 
 #define SMB2_FLAGS_SERVER_TO_REDIR                  0x00000001
@@ -770,6 +787,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 
 
 #define SMB2_FSCTL_DFS_GET_REFERRALS                0x00060194
+#define SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO          0x00140204
+#define SMB2_FSCTL_TRANSCEIVE_PIPE                  0x0011C017
+#define SMB2_FSCTL_QUERY_NETWORK_INTERFACE_INFO     0x001401FC
 
 #define SMB2_FLUSH_REQUEST_SIZE                     24
 #define SMB2_FLUSH_REPLY_SIZE                       4

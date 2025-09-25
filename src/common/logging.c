@@ -167,11 +167,19 @@ chimera_log_thread_exit(void)
     pthread_join(ChimeraLogThread, NULL);
 } /* chimera_log_thread_exit */
 
-static void
-chimera_log_flush(int signum)
+SYMBOL_EXPORT void
+chimera_log_flush(void)
 {
-    ChimeraLogRun = 0;
-    pthread_join(ChimeraLogThread, NULL);
+    if (ChimeraLogRun) {
+        ChimeraLogRun = 0;
+        pthread_join(ChimeraLogThread, NULL);
+    }
+} /* chimera_log_flush */
+
+static void
+chimera_log_flush_signal(int signum)
+{
+    chimera_log_flush();
 } /* chimera_log_flush */
 
 static void
@@ -187,7 +195,7 @@ chimera_log_thread_init(void)
     ChimeraLogBufPtr = ChimeraLogBuf;
 
     struct sigaction sa;
-    sa.sa_handler = chimera_log_flush;
+    sa.sa_handler = chimera_log_flush_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     sigaction(SIGABRT, &sa, NULL);
@@ -249,9 +257,6 @@ chimera_vlog(
     pthread_mutex_unlock(&ChimeraLogBufLock);
 } /* chimera_vlog */
 
-
-
-
 SYMBOL_EXPORT void
 __chimera_debug(
     const char *mod,
@@ -311,6 +316,8 @@ __chimera_fatal(
     chimera_vlog(level_string[CHIMERA_LOG_FATAL], mod, file, line, fmt, argp);
     va_end(argp);
 
+    chimera_log_flush();
+
     exit(1);
 } /* chimera_fatal */
 
@@ -331,7 +338,7 @@ __chimera_abort(
 #ifndef CHIMERA_SANITIZE
     chimera_crash_handler(SIGABRT);
 #else  /* ifndef CHIMERA_SANITIZE */
-    chimera_log_flush(SIGABRT);
+    chimera_log_flush();
  #endif /* ifndef CHIMERA_SANITIZE */
 
     abort();
@@ -365,8 +372,7 @@ chimera_crash_handler(int signum)
         }
     }
 
-    sleep(1);
-    chimera_log_flush(signum);
+    chimera_log_flush_signal(signum);
 
     signal(signum, SIG_DFL);
     raise(signum);

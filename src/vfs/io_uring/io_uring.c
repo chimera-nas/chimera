@@ -27,8 +27,6 @@
 #include "io_uring.h"
 #include "../linux/linux_common.h"
 #include "common/logging.h"
-#include "common/format.h"
-#include "common/misc.h"
 #include "common/macros.h"
 
 static void

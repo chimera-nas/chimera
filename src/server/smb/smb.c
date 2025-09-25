@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+       #include <arpa/inet.h>
 
 #include "smb.h"
 #include "server/protocol.h"
@@ -12,6 +13,7 @@
 #include "common/macros.h"
 #include "common/misc.h"
 #include "common/evpl_iovec_cursor.h"
+#include "server/server.h"
 #include "evpl/evpl.h"
 #include "smb_internal.h"
 #include "smb_procs.h"
@@ -39,13 +41,47 @@ chimera_smb_server_init(
     struct chimera_vfs                 *vfs,
     struct prometheus_metrics          *metrics)
 {
-    struct chimera_server_smb_shared *shared = calloc(1, sizeof(*shared));
+    struct chimera_server_smb_shared           *shared = calloc(1, sizeof(*shared));
+    const struct chimera_server_config_smb_nic *smb_nic_info;
+    int                                         i;
+    struct sockaddr_storage                    *ss;
+    struct sockaddr_in                         *sin;
+    struct sockaddr_in6                        *sin6;
 
     if (!shared) {
         return NULL;
     }
 
     shared->config.port = 445;
+
+    shared->config.capabilities = SMB2_GLOBAL_CAP_LARGE_MTU | SMB2_GLOBAL_CAP_MULTI_CHANNEL;
+
+    shared->config.num_dialects = chimera_server_config_get_smb_num_dialects(config);
+
+    for (i = 0; i < shared->config.num_dialects; i++) {
+        shared->config.dialects[i] = chimera_server_config_get_smb_dialects(config, i);
+    }
+
+    shared->config.num_nic_info = chimera_server_config_get_smb_num_nic_info(config);
+
+    for (i = 0; i < shared->config.num_nic_info; i++) {
+        smb_nic_info = chimera_server_config_get_smb_nic_info(config, i);
+
+        ss = &shared->config.nic_info[i].addr;
+
+        memset(ss, 0, sizeof(*ss));
+
+        if (strchr(smb_nic_info->address, ':')) {
+            sin6              = (struct sockaddr_in6 *) ss;
+            sin6->sin6_family = AF_INET6;
+            inet_pton(AF_INET6, smb_nic_info->address, &sin6->sin6_addr);
+        } else {
+            sin             = (struct sockaddr_in *) ss;
+            sin->sin_family = AF_INET;
+            inet_pton(AF_INET, smb_nic_info->address, &sin->sin_addr);
+        }
+        shared->config.nic_info[i].speed = smb_nic_info->speed * 1000000000UL;
+    }
 
     snprintf(shared->config.identity, sizeof(shared->config.identity), "chimera");
 
@@ -64,6 +100,14 @@ chimera_smb_server_init(
 
     return shared;
 } /* smb_server_init */
+
+static void
+chimera_smb_server_stop(void *data)
+{
+    struct chimera_server_smb_shared *shared = data;
+
+    evpl_listener_destroy(shared->listener);
+} /* smb_server_stop */
 
 static void
 chimera_smb_server_destroy(void *data)
@@ -93,8 +137,6 @@ chimera_smb_server_destroy(void *data)
         LL_DELETE(shared->shares, share);
         free(share);
     }
-
-    evpl_listener_destroy(shared->listener);
 
     free(shared);
 } /* smb_server_destroy */
@@ -339,13 +381,14 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
             chimera_smb_set_info(request);
             break;
         default:
-            chimera_smb_abort("smb_server_handle_msg: unknown command %u", request->smb2_hdr.command);
+            chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
+            break;
     } /* switch */
 
 } /* chimera_smb_compound_advance */
 
 static void
-chimera_smb_server_handle_compound(
+chimera_smb_server_handle_smb2(
     struct evpl                      *evpl,
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_conn          *conn,
@@ -390,7 +433,7 @@ chimera_smb_server_handle_compound(
 
         evpl_iovec_cursor_copy(&request_cursor, &request->smb2_hdr, sizeof(request->smb2_hdr));
 
-        if (unlikely(request->smb2_hdr.protocol_id[0] != 0xFE ||
+        if (unlikely((request->smb2_hdr.protocol_id[0] != 0xFE && request->smb2_hdr.protocol_id[0] != 0xFF) ||
                      request->smb2_hdr.protocol_id[1] != 0x53 ||
                      request->smb2_hdr.protocol_id[2] != 0x4D ||
                      request->smb2_hdr.protocol_id[3] != 0x42)) {
@@ -412,7 +455,8 @@ chimera_smb_server_handle_compound(
                                sizeof(request->request_struct_size));
 
 
-        if (request->smb2_hdr.session_id) {
+        if (request->smb2_hdr.session_id &&
+            request->smb2_hdr.command != SMB2_SESSION_SETUP) {
 
             if (conn->last_session && conn->last_session->session_id == request->smb2_hdr.session_id) {
                 request->session = conn->last_session;
@@ -420,7 +464,7 @@ chimera_smb_server_handle_compound(
                 HASH_FIND(hh, conn->session_handles, &request->smb2_hdr.session_id, sizeof(uint64_t), request->session);
 
                 if (!request->session) {
-                    chimera_smb_error("Received SMB2 message with invalid session id");
+                    chimera_smb_error("Received SMB2 message with invalid session id %x", request->smb2_hdr.session_id);
                     chimera_smb_request_free(thread, request);
                     evpl_close(evpl, conn->bind);
                     return;
@@ -492,8 +536,6 @@ chimera_smb_server_handle_compound(
                 rc = chimera_smb_parse_set_info(&request_cursor, request);
                 break;
             default:
-                chimera_smb_error("smb_server_handle_msg: unknown command %u", request->smb2_hdr.command);
-                chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
                 rc = 0;
         } /* switch */
 
@@ -521,6 +563,181 @@ chimera_smb_server_handle_compound(
 
 } /* chimera_smb_server_handle_compound */
 
+static void
+chimera_smb_server_handle_smb1(
+    struct evpl                      *evpl,
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_conn          *conn,
+    struct evpl_iovec                *iov,
+    int                               niov,
+    int                               length)
+{
+    struct evpl_iovec_cursor     request_cursor;
+    struct netbios_header        netbios_hdr;
+    struct chimera_smb_compound *compound;
+    struct chimera_smb_request  *request;
+    uint8_t                      wct;
+    uint16_t                     bcc;
+    uint8_t                     *dialects, *bp;
+    char                        *dialect;
+    int                          matched = 0;
+
+    evpl_iovec_cursor_init(&request_cursor, iov, niov);
+    evpl_iovec_cursor_copy(&request_cursor, &netbios_hdr, sizeof(netbios_hdr));
+
+    request = chimera_smb_request_alloc(thread);
+
+    evpl_iovec_cursor_copy(&request_cursor, &request->smb1_hdr, sizeof(request->smb1_hdr));
+
+    if (request->smb1_hdr.command != SMB1_NEGOTIATE) {
+        chimera_smb_error("Received SMB1 message with invalid command");
+        chimera_smb_request_free(thread, request);
+        evpl_close(evpl, conn->bind);
+        return;
+    } /* switch */
+
+    evpl_iovec_cursor_get_uint8(&request_cursor, &wct);
+    evpl_iovec_cursor_reset_consumed(&request_cursor);
+    evpl_iovec_cursor_get_uint16(&request_cursor, &bcc);
+
+    dialects = alloca(bcc + 1);
+
+    evpl_iovec_cursor_copy(&request_cursor, dialects, bcc);
+
+    dialects[bcc] = 0;
+
+    bp = dialects;
+
+    while (bp < dialects + bcc) {
+
+        if (*bp != 0x02) {
+            chimera_smb_error("Received SMB1 NEGOTIATE with buffer format that isn't dialects");
+            chimera_smb_request_free(thread, request);
+            evpl_close(evpl, conn->bind);
+            return;
+        }
+
+        bp++;
+
+
+        if (bp >= dialects + bcc) {
+            chimera_smb_error("Received SMB1 NEGOTIATE with truncated dialect buffer");
+            chimera_smb_request_free(thread, request);
+            evpl_close(evpl, conn->bind);
+            return;
+        }
+
+        dialect = (char *) bp;
+
+        while (*bp != 0 && bp < dialects + bcc) {
+            bp++;
+        }
+
+        if (*bp != 0) {
+            chimera_smb_error("Received SMB1 NEGOTIATE with truncated dialect buffer");
+            chimera_smb_request_free(thread, request);
+            evpl_close(evpl, conn->bind);
+            return;
+        }
+
+        if (strcmp(dialect, "SMB 2.???") == 0) {
+            matched = 1;
+        }
+
+        bp++;
+    } /* chimera_smb_server_handle_smb1 */
+
+    if (!matched) {
+        chimera_smb_error("Received SMB1 NEGOTIATE with no SMB2 dialect, and we don't support SMB1");
+        chimera_smb_request_free(thread, request);
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    compound = chimera_smb_compound_alloc(thread);
+
+    compound->thread = thread;
+    compound->conn   = conn;
+
+    compound->saved_session_id  = UINT64_MAX;
+    compound->saved_tree_id     = UINT64_MAX;
+    compound->saved_file_id.pid = UINT64_MAX;
+    compound->saved_file_id.vid = UINT64_MAX;
+
+    compound->num_requests      = 0;
+    compound->complete_requests = 0;
+
+    request->compound = compound;
+    request->session  = NULL;
+    request->tree     = NULL;
+
+    /* Now fabricate the SMB2 header and NEGOTIATE request structures
+     * so we can proceed to handle this as though it had been SMB2 all along
+     */
+
+    request->smb2_hdr.protocol_id[0]          = 0xFE;
+    request->smb2_hdr.protocol_id[1]          = 'S';
+    request->smb2_hdr.protocol_id[2]          = 'M';
+    request->smb2_hdr.protocol_id[3]          = 'B';
+    request->smb2_hdr.struct_size             = SMB2_NEGOTIATE_REQUEST_SIZE;
+    request->smb2_hdr.credit_charge           = 0;
+    request->smb2_hdr.status                  = SMB2_STATUS_SUCCESS;
+    request->smb2_hdr.command                 = SMB2_NEGOTIATE;
+    request->smb2_hdr.credit_request_response = 0;
+    request->smb2_hdr.flags                   = 0;
+    request->smb2_hdr.next_command            = 0;
+    request->smb2_hdr.message_id              = 0;
+    request->smb2_hdr.session_id              = 0;
+
+    request->negotiate.dialect_count = 1;
+    request->negotiate.security_mode = 0;
+    request->negotiate.capabilities  = 0;
+    memset(request->negotiate.client_guid, 0, sizeof(request->negotiate.client_guid));
+    request->negotiate.negotiate_context_offset = 0;
+    request->negotiate.negotiate_context_count  = 0;
+    request->negotiate.dialects[0]              = 0x02ff;
+
+    compound->requests[compound->num_requests++] = request;
+
+    smb_dump_compound_request(compound);
+
+    chimera_smb_compound_advance(compound);
+
+} /* chimera_smb_server_handle_smb1 */
+
+static void
+chimera_smb_server_handle(
+    struct evpl                      *evpl,
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_conn          *conn,
+    struct evpl_iovec                *iov,
+    int                               niov,
+    int                               length)
+{
+    struct evpl_iovec_cursor request_cursor;
+    struct netbios_header    netbios_hdr;
+    uint32_t                 smb_hdr;
+
+    if (conn->smbvers == 2) {
+        chimera_smb_server_handle_smb2(evpl, thread, conn, iov, niov, length);
+        return;
+    }
+
+    evpl_iovec_cursor_init(&request_cursor, iov, niov);
+    evpl_iovec_cursor_copy(&request_cursor, &netbios_hdr, sizeof(netbios_hdr));
+    evpl_iovec_cursor_get_uint32(&request_cursor, &smb_hdr);
+
+    if (smb_hdr == 0x424d53fe) {
+        conn->smbvers = 2;
+        chimera_smb_server_handle_smb2(evpl, thread, conn, iov, niov, length);
+    } else if (smb_hdr == 0x424d53ff) {
+        chimera_smb_server_handle_smb1(evpl, thread, conn, iov, niov, length);
+    } else {
+        chimera_smb_error("Received SMB message with invalid protocol header");
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+} /* chimera_smb_server_handle */
 
 static void
 chimera_smb_server_notify(
@@ -531,18 +748,26 @@ chimera_smb_server_notify(
 {
     struct chimera_smb_conn          *conn   = private_data;
     struct chimera_server_smb_thread *thread = conn->thread;
+    char                              local_addr[128];
+    char                              remote_addr[128];
 
     switch (notify->notify_type) {
         case EVPL_NOTIFY_CONNECTED:
+            evpl_bind_get_local_address(bind, local_addr, sizeof(local_addr));
+            evpl_bind_get_remote_address(bind, remote_addr, sizeof(remote_addr));
+            chimera_smb_info("Established SMB connection from %s to %s", remote_addr, local_addr);
             break;
         case EVPL_NOTIFY_DISCONNECTED:
+            evpl_bind_get_local_address(bind, local_addr, sizeof(local_addr));
+            evpl_bind_get_remote_address(bind, remote_addr, sizeof(remote_addr));
+            chimera_smb_info("Disconnected SMB connection from %s to %s", remote_addr, local_addr);
             chimera_smb_conn_free(thread, conn);
             break;
         case EVPL_NOTIFY_RECV_MSG:
-            chimera_smb_server_handle_compound(evpl, thread, conn,
-                                               notify->recv_msg.iovec,
-                                               notify->recv_msg.niov,
-                                               notify->recv_msg.length);
+            chimera_smb_server_handle(evpl, thread, conn,
+                                      notify->recv_msg.iovec,
+                                      notify->recv_msg.niov,
+                                      notify->recv_msg.length);
             break;
         case EVPL_NOTIFY_SENT:
             break;
@@ -587,8 +812,9 @@ chimera_smb_server_accept(
 
     conn = chimera_smb_conn_alloc(thread);
 
-    conn->thread = thread;
-    conn->bind   = bind;
+    conn->thread  = thread;
+    conn->bind    = bind;
+    conn->smbvers = 0;
 
     *notify_callback   = chimera_smb_server_notify;
     *segment_callback  = chimera_smb_server_segment;
@@ -616,7 +842,11 @@ chimera_smb_server_thread_init(
 
     chimera_smb_iconv_init(&thread->iconv_ctx);
 
-    evpl_listener_attach(evpl, shared->listener, chimera_smb_server_accept, thread);
+    thread->binding = evpl_listener_attach(
+        evpl,
+        shared->listener,
+        chimera_smb_server_accept,
+        thread);
 
     return thread;
 } /* smb_server_thread_init */
@@ -661,7 +891,7 @@ chimera_smb_server_thread_destroy(void *data)
         free(session_handle);
     }
 
-    evpl_listener_detach(thread->evpl, thread->shared->listener);
+    evpl_listener_detach(thread->evpl, thread->binding);
 
     chimera_smb_iconv_destroy(&thread->iconv_ctx);
 
@@ -691,6 +921,7 @@ SYMBOL_EXPORT struct chimera_server_protocol smb_protocol = {
     .init           = chimera_smb_server_init,
     .destroy        = chimera_smb_server_destroy,
     .start          = chimera_smb_server_start,
+    .stop           = chimera_smb_server_stop,
     .thread_init    = chimera_smb_server_thread_init,
     .thread_destroy = chimera_smb_server_thread_destroy,
 };
