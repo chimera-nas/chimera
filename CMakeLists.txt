@@ -4,6 +4,9 @@
 
 cmake_minimum_required(VERSION 3.22)
 
+option(IO_URING_ENABLED "Enable io_uring support" ON)
+option(CAIRN_ENABLED "Enable cairn support" ON)
+
 if (EXISTS "/usr/local/cuda")
     set(CUDA_ENABLED true)
     set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
@@ -81,6 +84,28 @@ if (FIO_ENABLED)
     message(STATUS "FIO enabled")
 else()
     message(STATUS "FIO disabled")
+endif()
+
+if (IO_URING_ENABLED) 
+
+    find_library(URING_LIB NAMES uring)
+    find_path(URING_INCLUDE_DIR NAMES liburing/io_uring.h)
+
+    if (URING_LIB AND URING_INCLUDE_DIR)
+        add_definitions(-DHAVE_IO_URING=1)
+        message(STATUS "IO_URING enabled")
+    else()
+        message(FATAL_ERROR "io_uring enabled but library not found.")
+    endif()
+else()
+    message(STATUS "IO_URING disabled")
+endif()
+
+if (CAIRN_ENABLED)
+    message(STATUS "CAIRN enabled")
+    add_definitions(-DHAVE_CAIRN=1)
+else()
+    message(STATUS "CAIRN disabled")
 endif()
 
 add_subdirectory(ext)

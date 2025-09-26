@@ -294,6 +294,8 @@ s3_server_dispatch(
         int         has_dot = 0;
         int         is_ip   = 1;
 
+        dot = NULL;
+
         while (*p) {
             if (*p == '.' && !has_dot) {
                 has_dot = 1;

@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#define _GNU_SOURCE 1
+
 #include <stdio.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
@@ -20,8 +22,15 @@
 #include "vfs/vfs_attr_cache.h"
 #include "vfs/memfs/memfs.h"
 #include "vfs/linux/linux.h"
+
+#ifdef HAVE_IO_URING
 #include "vfs/io_uring/io_uring.h"
+#endif /* ifdef HAVE_IO_URING */
+
+#ifdef HAVE_CAIRN
 #include "vfs/cairn/cairn.h"
+#endif /* ifdef HAVE_CAIRN */
+
 #include "vfs/demofs/demofs.h"
 #include "common/misc.h"
 #include "common/macros.h"

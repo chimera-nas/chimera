@@ -7,9 +7,9 @@ add_library(chimera_vfs_memfs SHARED
 )
 
 target_compile_definitions(chimera_vfs_memfs PRIVATE
-    -DXXH_INLINE_ALL
-    $<$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>:-DXXH_VECTOR=XXH_NEON>
-    $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>>:-DXXH_VECTOR=XXH_AVX2>
+    XXH_INLINE_ALL
+    $<$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>:XXH_VECTOR=XXH_NEON>
+    $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>>:XXH_VECTOR=XXH_AVX2>
 )
 
 install(TARGETS chimera_vfs_memfs DESTINATION lib)
