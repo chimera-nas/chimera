@@ -19,6 +19,7 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
@@ -71,7 +72,7 @@ jobs:
             bash -euxc '\
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} /workspace && \
               ninja && \
-              ctest -j 4 --output-on-failure'
+              ctest --output-on-failure'
 
       - name: Perform clang static analysis
         run: |

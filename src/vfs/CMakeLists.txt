@@ -13,9 +13,9 @@ add_library(chimera_vfs SHARED vfs.c
             vfs_proc_find.c vfs_dump.c)
 
 target_compile_definitions(chimera_vfs PRIVATE
-    -DXXH_INLINE_ALL
-    $<$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>:-DXXH_VECTOR=XXH_NEON>
-    $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>>:-DXXH_VECTOR=XXH_AVX2>
+    XXH_INLINE_ALL
+    $<$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>:XXH_VECTOR=XXH_NEON>
+    $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>>:XXH_VECTOR=XXH_AVX2>
 )
 
 install(TARGETS chimera_vfs DESTINATION lib)
@@ -23,10 +23,29 @@ install(TARGETS chimera_vfs DESTINATION lib)
 add_subdirectory(root)
 add_subdirectory(memfs)
 add_subdirectory(linux)
-add_subdirectory(io_uring)
+
+if (IO_URING_ENABLED)
+    add_subdirectory(io_uring)
+endif()
+
 add_subdirectory(demofs)
-add_subdirectory(cairn)
+
+if (CAIRN_ENABLED)
+    add_subdirectory(cairn)
+endif()
 
 target_link_libraries(chimera_vfs  
-    chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_io_uring chimera_vfs_demofs chimera_vfs_cairn 
+    chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_demofs 
     chimera_common prometheus-c xxhash dl urcu)
+
+if (IO_URING_ENABLED)
+    target_link_libraries(chimera_vfs chimera_vfs_io_uring)
+endif()
+
+if (DEMFS_ENABLED)
+    target_link_libraries(chimera_vfs chimera_vfs_demofs)
+endif()
+
+if (CAIRN_ENABLED)
+    target_link_libraries(chimera_vfs chimera_vfs_cairn)
+endif()
