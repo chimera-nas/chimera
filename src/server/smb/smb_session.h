@@ -94,8 +94,7 @@ struct chimera_smb_session {
     struct chimera_smb_tree   **trees;
 
     int                         max_trees;
-    uint8_t                     session_key[64];
-    int                         session_key_len;
+    uint8_t                     signing_key[16];
 };
 
 static struct chimera_smb_session *

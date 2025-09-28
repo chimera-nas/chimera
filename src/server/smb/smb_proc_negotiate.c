@@ -64,7 +64,7 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     }
 
     request->negotiate.r_dialect           = dialect;
-    request->negotiate.r_security_mode     = 0;
+    request->negotiate.r_security_mode     = SMB2_SIGNING_ENABLED;
     request->negotiate.r_capabilities      = conn->capabilities;
     request->negotiate.r_max_transact_size = 1048576;
     request->negotiate.r_max_read_size     = 1048576;

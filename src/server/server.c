@@ -68,9 +68,9 @@ chimera_server_config_init(void)
     config->delegation_threads = 64;
     config->nfs_rdma           = 0;
 
-    config->smb_num_dialects = 1;
+    config->smb_num_dialects = 2;
     config->smb_dialects[0]  = SMB2_DIALECT_2_1;
-    //config->smb_dialects[1]  = SMB2_DIALECT_3_0;
+    config->smb_dialects[1]  = SMB2_DIALECT_3_0;
 
     config->smb_num_nic_info = 0;
 

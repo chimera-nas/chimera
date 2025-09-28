@@ -7,6 +7,7 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
+#include "smb_signing.h"
 
 static int
 chimera_smb_gss_display_status(
@@ -164,21 +165,12 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             &session_key_buffers
             );
 
-        session->session_key_len = 0;
-
         if (maj_stat == GSS_S_COMPLETE && session_key_buffers->count > 0) {
-            session->session_key_len = session_key_buffers->elements[0].length;
+            chimera_smb_derive_signing_key(conn->dialect,
+                                           session->signing_key,
+                                           session_key_buffers->elements[0].value,
+                                           session_key_buffers->elements[0].length);
 
-            if (session->session_key_len > sizeof(session->session_key)) {
-                /* This should never happen, but if it does lets log it and turn it into an error message and
-                 * a signing failure rather than a crash
-                 */
-                chimera_smb_error("Session key length %d is greater than %d",
-                                  session->session_key_len, sizeof(session->session_key));
-                session->session_key_len = 64;
-            }
-
-            memcpy(&session->session_key, session_key_buffers->elements[0].value, session->session_key_len);
             gss_release_buffer_set(&min_stat, &session_key_buffers);
         }
     }
