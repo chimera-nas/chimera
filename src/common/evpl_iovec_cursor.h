@@ -311,16 +311,14 @@ evpl_iovec_cursor_move(
     return niov;
 } /* evpl_iovec_cursor_move */
 
-static void
-evpl_iovec_cursor_inject(
+static inline void
+evpl_iovec_cursor_inject_unaligned(
     struct evpl_iovec_cursor *cursor,
     struct evpl_iovec        *iov,
     int                       niov,
     int                       length)
 {
     struct evpl_iovec saved = *cursor->iov;
-
-    evpl_iovec_cursor_zero(cursor, (8 - (cursor->consumed & 7)) & 7);
 
     cursor->iov->length = cursor->offset;
 
@@ -337,9 +335,19 @@ evpl_iovec_cursor_inject(
 
     *cursor->iov = saved;
 
-    cursor->consumed += length;
+} /* evpl_iovec_cursor_inject */
 
-    //evpl_iovec_addref(cursor->iov);
+
+static inline void
+evpl_iovec_cursor_inject(
+    struct evpl_iovec_cursor *cursor,
+    struct evpl_iovec        *iov,
+    int                       niov,
+    int                       length)
+{
+    evpl_iovec_cursor_zero(cursor, (8 - (cursor->consumed & 7)) & 7);
+
+    evpl_iovec_cursor_inject_unaligned(cursor, iov, niov, length);
 } /* evpl_iovec_cursor_inject */
 
 static inline int

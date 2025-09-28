@@ -63,7 +63,7 @@ chimera_smb_lsarpc_handler(
 
             outputp += dce_append_string_array(ctx, outputp, 0x00030000, 0x00030010, "WORKGROUP");
 
-            *(uint32_t *) outputp = 1;
+            *(uint32_t *) outputp = 4;
             outputp              += 4;
 
             /* SID */

@@ -732,10 +732,12 @@ chimera_smb_open_file_close(
         } else {
             open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
             HASH_DELETE(hh, tree->open_files[open_file_bucket], open_file);
+            open_file->refcnt--;
         }
     }
 
     pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+
 
     return open_file;
 } /* chimera_smb_open_file_remove */

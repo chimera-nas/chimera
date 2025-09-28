@@ -114,8 +114,10 @@ chimera_smb_ioctl_reply(
             evpl_iovec_cursor_append_uint16(reply_cursor, request->ioctl.r_dialect);
             break;
         case SMB2_FSCTL_TRANSCEIVE_PIPE:
-            evpl_iovec_cursor_append_blob(reply_cursor, request->ioctl.output_iov.data, request->ioctl.output_iov.length
-                                          );
+            evpl_iovec_cursor_inject_unaligned(reply_cursor,
+                                               &request->ioctl.output_iov,
+                                               1,
+                                               request->ioctl.output_iov.length);
             break;
         case SMB2_FSCTL_QUERY_NETWORK_INTERFACE_INFO:
 
