@@ -92,9 +92,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
     struct chimera_smb_session        *session;
     struct chimera_smb_session_handle *session_handle;
     struct evpl_iovec_cursor           input_cursor;
-    OM_uint32                          flags;
-    gss_buffer_desc                    input     = GSS_C_EMPTY_BUFFER;
-    gss_OID                            mech_type = GSS_C_NO_OID;
+    gss_buffer_desc                    input = GSS_C_EMPTY_BUFFER;
 
     if (request->session_setup.blob_length > 0) {
         input.length = request->session_setup.blob_length;
@@ -112,27 +110,6 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
     } /* chimera_smb_session_setup */
 
-#if 0
-    if (conn->srv_cred == GSS_C_NO_CREDENTIAL) {
-        chimera_smb_debug("Acquiring server credentials");
-        maj = gss_acquire_cred(&min,
-                               GSS_C_NO_NAME,
-                               GSS_C_INDEFINITE,
-                               GSS_C_NO_OID_SET,
-                               GSS_C_ACCEPT,
-                               &conn->srv_cred,
-                               NULL,
-                               NULL);
-
-        if (maj != GSS_S_COMPLETE) {
-            chimera_smb_gss_error("gss_acquire_cred", maj, min);
-            request->status = SMB2_STATUS_LOGON_FAILURE;
-            return;
-        }
-        chimera_smb_debug("Server credentials acquired successfully");
-    }
- #endif /* if 0 */
-
     // Release any previous GSS output buffer before the next call
     if (conn->gss_output.value != NULL) {
         gss_release_buffer(&conn->gss_minor, &conn->gss_output);
@@ -142,28 +119,14 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
     conn->gss_major = gss_accept_sec_context(&conn->gss_minor,
                                              &conn->ctx,
-                                             conn->srv_cred,
+                                             shared->srv_cred,
                                              &input,
                                              GSS_C_NO_CHANNEL_BINDINGS,
                                              NULL,
-                                             &mech_type,
+                                             NULL,
                                              &conn->gss_output,
-                                             &flags,
+                                             &conn->gss_flags,
                                              NULL, NULL);
-
-                                             #if 0
-    {
-        char err_buf[256];
-        chimera_smb_gss_display_status(GSS_C_GSS_CODE,
-                                       conn->gss_major,
-                                       err_buf,
-                                       sizeof(err_buf));
-
-        chimera_smb_debug("gss_accept_sec_context: %s output length %d",
-                          err_buf,
-                          conn->gss_output.length);
-    }
-                          #endif /* if 0 */
 
     if (conn->gss_major == GSS_S_COMPLETE) {
 
@@ -184,13 +147,41 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         session_handle->session_id = session->session_id;
         session_handle->session    = session;
 
-        chimera_smb_debug("Adding session handle %x", session_handle->session_id);
         HASH_ADD(hh, conn->session_handles, session_id, sizeof(uint64_t), session_handle);
 
         request->compound->conn->last_session = session;
 
         request->session = session;
-    } /* chimera_smb_session_setup */
+
+        // Retrieve the session key from the established GSS context
+        gss_buffer_set_t session_key_buffers;
+        OM_uint32        maj_stat, min_stat;
+
+        maj_stat = gss_inquire_sec_context_by_oid(
+            &min_stat,
+            conn->ctx,
+            GSS_C_INQ_SSPI_SESSION_KEY,
+            &session_key_buffers
+            );
+
+        session->session_key_len = 0;
+
+        if (maj_stat == GSS_S_COMPLETE && session_key_buffers->count > 0) {
+            session->session_key_len = session_key_buffers->elements[0].length;
+
+            if (session->session_key_len > sizeof(session->session_key)) {
+                /* This should never happen, but if it does lets log it and turn it into an error message and
+                 * a signing failure rather than a crash
+                 */
+                chimera_smb_error("Session key length %d is greater than %d",
+                                  session->session_key_len, sizeof(session->session_key));
+                session->session_key_len = 64;
+            }
+
+            memcpy(&session->session_key, session_key_buffers->elements[0].value, session->session_key_len);
+            gss_release_buffer_set(&min_stat, &session_key_buffers);
+        }
+    }
 
     switch (conn->gss_major) {
         case GSS_S_COMPLETE:

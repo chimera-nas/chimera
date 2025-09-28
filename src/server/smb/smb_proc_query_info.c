@@ -131,6 +131,12 @@ chimera_smb_query_info(struct chimera_smb_request *request)
             break;
         case SMB2_INFO_FILESYSTEM:
             switch (request->query_info.info_class) {
+                case SMB2_FILE_FS_VOLUME_INFO:
+                    request->query_info.output_length = 22;
+                    break;
+                case SMB2_FILE_FS_SIZE_INFO:
+                    request->query_info.output_length = 24;
+                    break;
                 case SMB2_FILE_FS_DEVICE_INFO:
                     request->query_info.output_length = 8;
                     break;
@@ -214,6 +220,28 @@ chimera_smb_query_info_reply(
             break;
         case SMB2_INFO_FILESYSTEM:
             switch (request->query_info.info_class) {
+                case SMB2_FILE_FS_VOLUME_INFO:
+                    evpl_iovec_cursor_append_uint64(reply_cursor, 0); /* Create time */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 0x12345678); /* Serial number */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 4); /* Label length */
+                    evpl_iovec_cursor_append_uint8(reply_cursor, 0);
+                    evpl_iovec_cursor_append_uint8(reply_cursor, 0);
+                    chimera_smb_utf8_to_utf16le(
+                        &request->compound->thread->iconv_ctx,
+                        "fs",
+                        2,
+                        namebuf,
+                        8);
+                    evpl_iovec_cursor_append_blob_unaligned(reply_cursor, namebuf, 4);
+                case SMB2_FILE_FS_SIZE_INFO:
+                    evpl_iovec_cursor_append_uint64(reply_cursor, request->query_info.r_fs_attrs.
+                                                    smb_total_allocation_units);
+                    evpl_iovec_cursor_append_uint64(reply_cursor, request->query_info.r_fs_attrs.
+                                                    smb_caller_available_allocation_units);
+                    evpl_iovec_cursor_append_uint32(reply_cursor, request->query_info.r_fs_attrs.
+                                                    smb_sectors_per_allocation_unit);
+                    evpl_iovec_cursor_append_uint32(reply_cursor, request->query_info.r_fs_attrs.smb_bytes_per_sector);
+                    break;
                 case SMB2_FILE_FS_DEVICE_INFO:
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0x14); /* Network File System */
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0x20); /* Remote Device */

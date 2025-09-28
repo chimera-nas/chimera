@@ -33,15 +33,17 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     }
 
     for (i = 0; i < request->negotiate.dialect_count; i++) {
+
+        candidate = request->negotiate.dialects[i];
+
+        if (candidate == 0x2ff) {
+            dialect = 0x2ff;
+            break;
+        }
+
         for (j = 0; j < shared->config.num_dialects; j++) {
-            if (request->negotiate.dialects[i] == shared->config.dialects[j]) {
-                candidate = request->negotiate.dialects[i];
-
-                if ((candidate > dialect && dialect != 0x2ff) || candidate == 0x2ff) {
-                    dialect = candidate;
-                }
-
-                break;
+            if (shared->config.dialects[j] == candidate && candidate > dialect) {
+                dialect = candidate;
             }
         }
     }
@@ -140,11 +142,11 @@ chimera_smb_parse_negotiate(
                                evpl_iovec_cursor_consumed(request_cursor));
 
         for (i = 0; i < request->negotiate.negotiate_context_count; i++) {
+            evpl_iovec_cursor_align64(request_cursor);
             evpl_iovec_cursor_get_uint16(request_cursor, &request->negotiate.negotiate_context[i].type);
             evpl_iovec_cursor_get_uint16(request_cursor, &request->negotiate.negotiate_context[i].length);
             evpl_iovec_cursor_skip(request_cursor, 4);
             evpl_iovec_cursor_skip(request_cursor, request->negotiate.negotiate_context[i].length);
-            evpl_iovec_cursor_align64(request_cursor);
         }
     }
 

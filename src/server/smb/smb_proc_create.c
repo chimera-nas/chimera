@@ -4,6 +4,7 @@
 
 #include <sys/time.h>
 #include <strings.h>
+#include "server/smb/smb2.h"
 #include "server/smb/smb_session.h"
 #include "smb_internal.h"
 #include "smb_procs.h"
@@ -158,7 +159,7 @@ chimera_smb_create_mkdir_open_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_release(vfs_thread, request->create.parent_handle);
-        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
         return;
     }
 
@@ -199,7 +200,7 @@ chimera_smb_create_mkdir_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_release(vfs_thread, request->create.parent_handle);
-        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
         return;
     }
 
@@ -235,7 +236,7 @@ chimera_smb_create_open_at_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_release(vfs_thread, request->create.parent_handle);
-        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
         return;
     }
 
@@ -271,7 +272,7 @@ chimera_smb_create_open_getattr_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         /* XXX open file */
-        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
         return;
     }
 
@@ -297,7 +298,7 @@ chimera_smb_create_open_callback(
     struct chimera_smb_open_file     *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
         return;
     }
 
@@ -331,7 +332,7 @@ chimera_smb_create_open_parent_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_error("Open parent error_code %d", error_code);
-        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_NOT_FOUND);
         return;
     }
 
@@ -405,7 +406,7 @@ chimera_smb_create_lookup_parent_callback(
     struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_NOT_FOUND);
         return;
     }
 
@@ -466,7 +467,7 @@ chimera_smb_revalidate_tree_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_error("Revalidate error_code %d", error_code);
-        chimera_smb_complete_request(request, SMB2_STATUS_BAD_NETWORK_NAME);
+        chimera_smb_complete_request(request, SMB2_STATUS_NETWORK_NAME_DELETED);
         return;
     }
 
@@ -512,7 +513,7 @@ chimera_smb_create(struct chimera_smb_request *request)
             pipe_magic = CHIMERA_SMB_OPEN_FILE_LSA_RPC;
             transceive = chimera_smb_lsarpc_transceive;
         } else {
-            chimera_smb_complete_request(request, SMB2_STATUS_NOT_FOUND);
+            chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
             return;
         }
 

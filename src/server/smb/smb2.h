@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 // Copyright (C) 2016 by Ronnie Sahlberg <ronniesahlberg@gmail.com>
 // SPDX-FileCopyrightText: 2025 Ben Jarvis
 //
@@ -771,6 +773,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FILE_DIRECTORY_INFORMATION             0x01
 #define SMB2_FILE_FULL_DIRECTORY_INFORMATION        0x02
 #define SMB2_FILE_BOTH_DIRECTORY_INFORMATION        0x03
+#define SMB2_FILE_NAMES_INFORMATION                 0x0c
 #define SMB2_FILE_ID_BOTH_DIRECTORY_INFORMATION     0x25
 #define SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION     0x26
 
@@ -839,6 +842,8 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FILE_NETWORK_OPEN_INFO_SIZE            56
 #define SMB2_FILE_ATTRIBUTE_TAG_INFO_SIZE           8
 
+#define SMB2_FILE_FS_VOLUME_INFO                    1
+#define SMB2_FILE_FS_SIZE_INFO                      3
 #define SMB2_FILE_FS_DEVICE_INFO                    4
 #define SMB2_FILE_FS_ATTRIBUTE_INFO                 5
 #define SMB2_FILE_FS_FULL_SIZE_INFO                 7

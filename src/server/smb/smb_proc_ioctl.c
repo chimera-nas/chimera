@@ -41,7 +41,8 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                 1,
                 &request->ioctl.output_iov);
 
-            status = open_file->pipe_transceive(request->ioctl.input_iov,
+            status = open_file->pipe_transceive(request,
+                                                request->ioctl.input_iov,
                                                 request->ioctl.input_niov,
                                                 &request->ioctl.output_iov);
 
