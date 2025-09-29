@@ -24,7 +24,7 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
         case SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO:
             request->ioctl.r_capabilities = conn->capabilities;
             memcpy(request->ioctl.r_guid, shared->guid, 16);
-            request->ioctl.r_security_mode = 0;
+            request->ioctl.r_security_mode = SMB2_SIGNING_ENABLED;
             request->ioctl.r_dialect       = conn->dialect;
 
             chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
@@ -41,7 +41,8 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                 1,
                 &request->ioctl.output_iov);
 
-            status = open_file->pipe_transceive(request->ioctl.input_iov,
+            status = open_file->pipe_transceive(request,
+                                                request->ioctl.input_iov,
                                                 request->ioctl.input_niov,
                                                 &request->ioctl.output_iov);
 
@@ -72,7 +73,9 @@ chimera_smb_ioctl_reply(
 {
     struct chimera_server_smb_shared *shared = request->compound->thread->shared;
     struct chimera_smb_nic_info      *nic_info;
-    uint32_t                          output_offset = 64 + SMB2_IOCTL_REPLY_SIZE + 7;
+    uint32_t                          input_offset  = 0x70;
+    uint32_t                          input_length  = 0;
+    uint32_t                          output_offset = input_offset + input_length;
     uint32_t                          output_length = 0;
 
     /* Calculate length based on IOCTL type */
@@ -86,24 +89,21 @@ chimera_smb_ioctl_reply(
         case SMB2_FSCTL_QUERY_NETWORK_INTERFACE_INFO:
             output_length = 152 * shared->config.num_nic_info;
             break;
-        default:
-            output_length = 0;
-            break;
     } /* switch */
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_IOCTL_REPLY_SIZE);
     evpl_iovec_cursor_append_uint32(reply_cursor, request->ioctl.ctl_code);
     evpl_iovec_cursor_append_uint64(reply_cursor, 0xffffffffffffffffULL); /* file_id.pid */
     evpl_iovec_cursor_append_uint64(reply_cursor, 0xffffffffffffffffULL); /* file_id.vid */
-    evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* input offset */
-    evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* input count */
+    evpl_iovec_cursor_append_uint32(reply_cursor, input_offset); /* input offset */
+    evpl_iovec_cursor_append_uint32(reply_cursor, input_length); /* input count */
     evpl_iovec_cursor_append_uint32(reply_cursor, output_offset); /* output_offset */
     evpl_iovec_cursor_append_uint32(reply_cursor, output_length); /* output_count */
     evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* flags */
     evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* reserved */
 
     /* Pad to 54 bytes for 8-byte aligned buffer offset */
-    evpl_iovec_cursor_append_uint64(reply_cursor, 0);
+    //evpl_iovec_cursor_append_uint64(reply_cursor, 0);
 
     switch (request->ioctl.ctl_code) {
         case SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO:
@@ -114,8 +114,10 @@ chimera_smb_ioctl_reply(
             evpl_iovec_cursor_append_uint16(reply_cursor, request->ioctl.r_dialect);
             break;
         case SMB2_FSCTL_TRANSCEIVE_PIPE:
-            evpl_iovec_cursor_append_blob(reply_cursor, request->ioctl.output_iov.data, request->ioctl.output_iov.length
-                                          );
+            evpl_iovec_cursor_inject_unaligned(reply_cursor,
+                                               &request->ioctl.output_iov,
+                                               1,
+                                               request->ioctl.output_iov.length);
             break;
         case SMB2_FSCTL_QUERY_NETWORK_INTERFACE_INFO:
 

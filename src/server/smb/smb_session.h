@@ -31,10 +31,13 @@ enum chimera_smb_pipe_magic {
     CHIMERA_SMB_OPEN_FILE_LSA_RPC,
 };
 
+struct chimera_smb_request;
+
 typedef int (*chimera_smb_pipe_transceive_t)(
-    struct evpl_iovec *input_iov,
-    int                input_niov,
-    struct evpl_iovec *output_iov);
+    struct chimera_smb_request *request,
+    struct evpl_iovec          *input_iov,
+    int                         input_niov,
+    struct evpl_iovec          *output_iov);
 
 struct chimera_smb_open_file {
     enum chimera_smb_open_file_type type;
@@ -91,6 +94,7 @@ struct chimera_smb_session {
     struct chimera_smb_tree   **trees;
 
     int                         max_trees;
+    uint8_t                     signing_key[16];
 };
 
 static struct chimera_smb_session *

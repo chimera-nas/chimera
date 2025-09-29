@@ -4,7 +4,9 @@
 
 #pragma once
 
+#include "common/misc.h"
 #include "smb_internal.h"
+#include "smb_string.h"
 
 /* DCE/RPC common (connection-oriented) PDU types (ptype field) */
 #define DCE_RPC_PTYPE_REQUEST            0x00     /* normal call request (stub data follows) */
@@ -69,6 +71,7 @@ typedef struct {
     uint32_t assoc_group_id;  // 0 or existing assoc group
     uint8_t  num_ctx_items;   // number of presentation context items
     uint8_t  _pad;            // must pad so the next is 2-byte aligned
+    uint16_t _pad2;           // must pad so the next is 2-byte aligned
     // then: num_ctx_items * p_cont_elem_t
 } __attribute__((packed)) dce_bind_t;
 
@@ -107,14 +110,22 @@ typedef struct {
     uint16_t max_xmit_frag;   // server's max xmit
     uint16_t max_recv_frag;   // server's max recv
     uint32_t assoc_group_id;  // assigned group id
-    /* secondary address: counted ASCII string (port/endpoint), here often "" for SMB pipes */
-    uint16_t sec_addr_len;    // byte count of sec_addr (not including NUL)
-    char     sec_addr[];      // sec_addr_len bytes, then NUL; then 4-byte align padding
+    /* secondary address: counted ASCII string (port/endpoint), always empty string
+     * in SMB so we just return zero bytes plus NULL and a pad byte
+     */
+    uint16_t sec_addr_len;
+    uint16_t sec_addr;
 
     // followed by:
     // uint32_t num_results;
     // num_results * p_result_t
 } __attribute__((packed)) dce_bind_ack_t;
+
+typedef struct {
+    uint8_t  num_results;
+    uint8_t  _pad;
+    uint16_t _pad2;
+} __attribute__((packed)) p_result_list_t;
 
 /* One presentation result per context offered in the Bind */
 typedef struct {
@@ -149,32 +160,41 @@ typedef struct {
 } __attribute__((packed)) dce_co_response_t;
 
 typedef int (*dce_rpc_handler_t)(
-    const dce_if_uuid_t *if_uuid,
-    struct evpl_iovec   *input_iov,
-    int                  input_niov,
-    struct evpl_iovec   *output_iov);
+    int                       opnum,
+    struct evpl_iovec_cursor *cursor,
+    void                     *output,
+    void                     *private_data);
 
 static inline int
 dce_rpc(
     const dce_if_uuid_t *if_uuid,
     struct evpl_iovec   *input_iov,
     int                  input_niov,
-    struct evpl_iovec   *output_iov)
+    struct evpl_iovec   *output_iov,
+    dce_rpc_handler_t    handler,
+    void                *private_data)
 {
     struct evpl_iovec_cursor input_cursor;
-    dce_common_t             request_common, reply_common;
+    dce_common_t             request_common, *reply_common;
     dce_bind_t               request_bind;
-    dce_bind_ack_t           reply_bind_ack;
+    dce_bind_ack_t          *reply_bind_ack;
     dce_co_request_t         request_call;
-    dce_co_response_t        reply_call;
+    dce_co_response_t       *reply_call;
     p_cont_elem_t            request_cont_elem;
-    p_result_t               reply_result;
-    uint32_t                 num_results, zero = 0, i;
+    p_result_list_t         *reply_result_list;
+    p_result_t              *reply_result;
+    uint32_t                 i;
     void                    *outputp = output_iov->data;
+    int                      rc;
 
     evpl_iovec_cursor_init(&input_cursor, input_iov, input_niov);
 
-    evpl_iovec_cursor_get_blob(&input_cursor, &request_common, sizeof(dce_common_t));
+    rc = evpl_iovec_cursor_get_blob(&input_cursor, &request_common, sizeof(dce_common_t));
+
+    if (unlikely(rc != 0)) {
+        chimera_smb_error("failed to get DCE RPC common header");
+        return -1;
+    }
 
     if (unlikely(request_common.ver != 5 || request_common.ver_minor != 0)) {
         chimera_smb_error("invalid DCE RPC version");
@@ -192,71 +212,106 @@ dce_rpc(
     }
 
 
+    reply_common = outputp;
+    outputp     += sizeof(dce_common_t);
 
-    reply_common.ver       = 5;
-    reply_common.ver_minor = 0;
-    reply_common.flags     = DCE_RPC_FLAG_FIRST_FRAG | DCE_RPC_FLAG_LAST_FRAG;
-    reply_common.drep[0]   = 0x10;
-    reply_common.drep[1]   = 0x00;
-    reply_common.drep[2]   = 0x00;
-    reply_common.drep[3]   = 0x00;
-    reply_common.auth_len  = 0;
-    reply_common.call_id   = request_common.call_id;
+    reply_common->ver       = 5;
+    reply_common->ver_minor = 0;
+    reply_common->flags     = DCE_RPC_FLAG_FIRST_FRAG | DCE_RPC_FLAG_LAST_FRAG;
+    reply_common->drep[0]   = 0x10;
+    reply_common->drep[1]   = 0x00;
+    reply_common->drep[2]   = 0x00;
+    reply_common->drep[3]   = 0x00;
+    reply_common->auth_len  = 0;
+    reply_common->call_id   = request_common.call_id;
 
     switch (request_common.ptype) {
         case DCE_RPC_PTYPE_BIND:
 
-            reply_common.ptype    = DCE_RPC_PTYPE_BIND_ACK;
-            reply_common.frag_len = sizeof(reply_common) + sizeof(reply_bind_ack) +
-                sizeof(uint16_t) + sizeof(uint32_t) + sizeof(reply_result);
+            reply_common->ptype    = DCE_RPC_PTYPE_BIND_ACK;
+            reply_common->frag_len = sizeof(*reply_common) + sizeof(*reply_bind_ack) +
+                sizeof(*reply_result_list) + sizeof(*reply_result);
 
-            reply_bind_ack.max_xmit_frag  = 65535;
-            reply_bind_ack.max_recv_frag  = 65535;
-            reply_bind_ack.assoc_group_id = 0;
-            reply_bind_ack.sec_addr_len   = 0;
+            reply_bind_ack = outputp;
+            outputp       += sizeof(dce_bind_ack_t);
 
-            num_results = 1;
+            reply_bind_ack->max_xmit_frag  = 65535;
+            reply_bind_ack->max_recv_frag  = 65535;
+            reply_bind_ack->assoc_group_id = 0;
+            reply_bind_ack->sec_addr_len   = 0;
+            reply_bind_ack->sec_addr       = 0;
 
+            reply_result_list = outputp;
+            outputp          += sizeof(p_result_list_t);
 
-            reply_result.result                   = 0;
-            reply_result.reason                   = 0;
-            reply_result.transfer_syntax_accepted = NDR32_SYNTAX;
+            reply_result_list->num_results = 1;
+            reply_result_list->_pad        = 0;
+            reply_result_list->_pad2       = 0;
 
-            evpl_iovec_cursor_get_blob(&input_cursor, &request_bind, sizeof(dce_bind_t));
+            reply_result = outputp;
+            outputp     += sizeof(p_result_t);
+
+            reply_result->result                   = 0;
+            reply_result->reason                   = 0;
+            reply_result->transfer_syntax_accepted = NDR32_SYNTAX;
+
+            rc = evpl_iovec_cursor_get_blob(&input_cursor, &request_bind, sizeof(dce_bind_t));
+
+            if (unlikely(rc != 0)) {
+                chimera_smb_error("failed to get DCE RPC bind");
+                return -1;
+            }
 
             for (i = 0; i < request_bind.num_ctx_items; i++) {
-                evpl_iovec_cursor_get_blob(&input_cursor, &request_cont_elem, sizeof(p_cont_elem_t));
+
+                rc = evpl_iovec_cursor_get_blob(&input_cursor, &request_cont_elem, sizeof(p_cont_elem_t));
+
+                if (unlikely(rc != 0)) {
+                    chimera_smb_error("failed to get DCE RPC cont elem");
+                    return -1;
+                }
 
                 if (memcmp(request_cont_elem.if_uuid, if_uuid->if_uuid, 16) != 0 ||
                     request_cont_elem.if_vers_major != if_uuid->if_vers_major ||
                     request_cont_elem.if_vers_minor != if_uuid->if_vers_minor) {
-                    chimera_smb_error("invalid DCE RPC interface UUID or version");
-                    reply_result.result = 2;
+                    chimera_smb_error("invalid DCE RPC interface UUID or version V%d.%d",
+                                      (int) request_cont_elem.if_vers_major, (int) request_cont_elem.if_vers_minor);
+                    reply_result->result = 2;
                 }
             }
 
-            memcpy(outputp, &reply_common, sizeof(dce_common_t));
-            outputp += sizeof(dce_common_t);
-            memcpy(outputp, &reply_bind_ack, sizeof(dce_bind_ack_t));
-            outputp += sizeof(dce_bind_ack_t);
-            memcpy(outputp, &zero, sizeof(uint16_t));
-            outputp += sizeof(uint16_t);
-            memcpy(outputp, &num_results, sizeof(uint32_t));
-            outputp += sizeof(uint32_t);
-            memcpy(outputp, &reply_result, sizeof(p_result_t));
-            outputp += sizeof(p_result_t);
-
             break;
         case DCE_RPC_PTYPE_REQUEST:
-            evpl_iovec_cursor_get_blob(&input_cursor, &request_call, sizeof(dce_co_request_t));
 
-            reply_common.ptype    = DCE_RPC_PTYPE_RESPONSE;
-            reply_common.frag_len = sizeof(reply_common) + sizeof(reply_call);
+            rc = evpl_iovec_cursor_get_blob(&input_cursor, &request_call, sizeof(dce_co_request_t));
 
-            reply_call.alloc_hint   = 0;
-            reply_call.p_cont_id    = request_call.p_cont_id;
-            reply_call.cancel_count = 0;
-            reply_call.reserved     = 0;
+            if (unlikely(rc != 0)) {
+                chimera_smb_error("failed to get DCE RPC request");
+                return -1;
+            }
+
+            reply_common->ptype    = DCE_RPC_PTYPE_RESPONSE;
+            reply_common->frag_len = sizeof(*reply_common) + sizeof(*reply_call);
+
+            reply_call = outputp;
+            outputp   += sizeof(dce_co_response_t);
+
+            reply_call->alloc_hint   = 0;
+            reply_call->p_cont_id    = request_call.p_cont_id;
+            reply_call->cancel_count = 0;
+            reply_call->reserved     = 0;
+
+            rc = handler(request_call.opnum, &input_cursor, outputp, private_data);
+
+            if (unlikely(rc < 0)) {
+                chimera_smb_error("failed to handle DCE RPC request");
+                return -1;
+            }
+
+            reply_call->alloc_hint = rc;
+
+            reply_common->frag_len += rc;
+            outputp                += rc;
 
             break;
         default:
@@ -268,3 +323,135 @@ dce_rpc(
 
     return 0;
 } // dce_rpc
+
+static inline int
+dce_append_ref_id(
+    void    *outputp,
+    uint32_t ref_id)
+{
+    uint32_t *ref_id_ptr = (uint32_t *) outputp;
+
+    *ref_id_ptr = ref_id;
+    return sizeof(uint32_t);
+} // dce_append_ref_id
+
+static inline int
+dce_append_string(
+    struct chimera_smb_iconv_ctx *ctx,
+    void                         *output,
+    uint32_t                      ref_id,
+    const char                   *string)
+{
+    void     *outputp = output;
+    int       pad, len_utf8 = strlen(string);
+    uint16_t *len, *maxlen;
+    uint32_t *refid, *conform_len, *vary_offset, *vary_length;
+
+    len      = (uint16_t *) outputp;
+    outputp += sizeof(uint16_t);
+
+    maxlen   = (uint16_t *) outputp;
+    outputp += sizeof(uint16_t);
+
+    refid    = (uint32_t *) outputp;
+    outputp += sizeof(uint32_t);
+
+
+    conform_len = (uint32_t *) outputp;
+    outputp    += sizeof(uint32_t);
+
+    vary_offset = (uint32_t *) outputp;
+    outputp    += sizeof(uint32_t);
+
+    vary_length = (uint32_t *) outputp;
+    outputp    += sizeof(uint32_t);
+
+    *len     = chimera_smb_utf8_to_utf16le(ctx, string, len_utf8, outputp, 2 * len_utf8);
+    outputp += *len;
+
+    //*(uint8_t *) outputp = 0;
+    //outputp++;
+
+    pad = (4 - ((outputp - output) & 0x03)) & 0x03;
+    memset(outputp, 0, pad);
+    outputp += pad;
+
+    while ((uintptr_t) outputp % 4 != 0) {
+        *(uint8_t *) outputp = 0;
+        outputp++;
+    }
+
+    *maxlen = *len + 2;
+
+    *conform_len = len_utf8 + 1;
+    *vary_offset = 0;
+    *vary_length = len_utf8;
+
+    *refid = ref_id;
+
+    return outputp - output;
+} // dce_append_string
+
+
+static inline int
+dce_append_string_array(
+    struct chimera_smb_iconv_ctx *ctx,
+    void                         *output,
+    uint32_t                      ref_id,
+    uint32_t                      ref_id2,
+    const char                   *string)
+{
+    void     *outputp = output;
+    int       pad, len_utf8 = strlen(string);
+    uint16_t *len, *maxlen;
+    uint32_t *refid, *conform_len, *vary_offset, *vary_length;
+    uint32_t *conform_array_len;
+
+    len      = (uint16_t *) outputp;
+    outputp += sizeof(uint16_t);
+
+    maxlen   = (uint16_t *) outputp;
+    outputp += sizeof(uint16_t);
+
+    refid    = (uint32_t *) outputp;
+    outputp += sizeof(uint32_t);
+
+
+    conform_array_len = (uint32_t *) outputp;
+    outputp          += sizeof(uint32_t);
+
+    conform_len = (uint32_t *) outputp;
+    outputp    += sizeof(uint32_t);
+
+    vary_offset = (uint32_t *) outputp;
+    outputp    += sizeof(uint32_t);
+
+    vary_length = (uint32_t *) outputp;
+    outputp    += sizeof(uint32_t);
+
+    *len     = chimera_smb_utf8_to_utf16le(ctx, string, len_utf8, outputp, 2 * len_utf8);
+    outputp += *len;
+
+    //*(uint8_t *) outputp = 0;
+    //outputp++;
+
+    pad = (4 - ((outputp - output) & 0x03)) & 0x03;
+    memset(outputp, 0, pad);
+    outputp += pad;
+
+    while ((uintptr_t) outputp % 4 != 0) {
+        *(uint8_t *) outputp = 0;
+        outputp++;
+    }
+
+    *maxlen = *len + 2;
+
+    *conform_len       = len_utf8 + 1;
+    *conform_array_len = ref_id2;
+    *vary_offset       = 0;
+    *vary_length       = len_utf8;
+
+    *refid = ref_id;
+
+    return outputp - output;
+} // dce_append_string

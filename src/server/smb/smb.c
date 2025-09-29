@@ -5,7 +5,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
-       #include <arpa/inet.h>
+#include <arpa/inet.h>
+#include <gssapi/gssapi_ntlmssp.h>
+#include <openssl/hmac.h>
+
 
 #include "smb.h"
 #include "server/protocol.h"
@@ -18,6 +21,7 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_dump.h"
+#include "smb_signing.h"
 #include "xxhash.h"
 
 static inline int
@@ -90,6 +94,18 @@ chimera_smb_server_init(
 
     *(XXH128_hash_t *) shared->guid = XXH3_128bits(shared->config.identity, strlen(shared->config.identity));
 
+    shared->svc      = GSS_C_NO_NAME;
+    shared->srv_cred = GSS_C_NO_CREDENTIAL;
+
+    uint32_t        min;
+    gss_buffer_desc name;
+
+    name.value  = "cifs@10.67.25.209";
+    name.length = strlen(name.value);
+
+    gss_import_name(&min, &name, GSS_C_NT_HOSTBASED_SERVICE, &shared->svc);
+    //gss_acquire_cred(&min, shared->svc, 0, GSS_C_NO_OID_SET, GSS_C_ACCEPT, &shared->srv_cred, NULL, NULL);
+
     shared->endpoint = evpl_endpoint_create("0.0.0.0", shared->config.port);
 
     shared->listener = evpl_listener_create();
@@ -138,6 +154,16 @@ chimera_smb_server_destroy(void *data)
         free(share);
     }
 
+    uint32_t min;
+
+    if (shared->svc != GSS_C_NO_NAME) {
+        gss_release_name(&min, &shared->svc);
+    }
+
+    if (shared->srv_cred != GSS_C_NO_CREDENTIAL) {
+        gss_release_cred(&min, &shared->srv_cred);
+    }
+
     free(shared);
 } /* smb_server_destroy */
 
@@ -166,7 +192,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     struct chimera_smb_request       *request;
     uint32_t                         *prev_command = NULL;
     uint16_t                          prev_hdr     = 0;
-    int                               i;
+    int                               i, rc;
 
     smb_dump_compound_reply(compound);
 
@@ -268,13 +294,24 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
             } /* switch */
         }
 
+        evpl_iovec_cursor_zero(&reply_cursor, (8 - (evpl_iovec_cursor_consumed(&reply_cursor) & 7)) & 7);
+
         chimera_smb_request_free(thread, request);
 
-        evpl_iovec_cursor_zero(&reply_cursor, (8 - (evpl_iovec_cursor_consumed(&reply_cursor) & 7)) & 7);
 
     }
 
     netbios_hdr->word = __builtin_bswap32(evpl_iovec_cursor_consumed(&reply_cursor));
+
+    rc = chimera_smb_sign_compound(compound, reply_iov, reply_cursor.niov, evpl_iovec_cursor_consumed(&reply_cursor) + 4
+                                   );
+
+    if (unlikely(rc != 0)) {
+        chimera_smb_error("Failed to sign compound");
+        chimera_smb_compound_free(thread, compound);
+        evpl_close(evpl, conn->bind);
+        return;
+    }
 
     evpl_sendv(evpl, conn->bind, reply_iov, reply_cursor.niov, evpl_iovec_cursor_consumed(&reply_cursor) + 4);
 
@@ -398,10 +435,10 @@ chimera_smb_server_handle_smb2(
 {
     struct chimera_smb_compound *compound;
     struct chimera_smb_request  *request;
-    struct evpl_iovec_cursor     request_cursor;
+    struct evpl_iovec_cursor     request_cursor, signature_cursor;
     //uint32_t                     netbios_length;
     struct netbios_header        netbios_hdr;
-    int                          more_requests, rc;
+    int                          more_requests, rc, left = length, payload_length;
 
 
     compound = chimera_smb_compound_alloc(thread);
@@ -415,13 +452,12 @@ chimera_smb_server_handle_smb2(
     compound->saved_file_id.vid = UINT64_MAX;
 
     evpl_iovec_cursor_init(&request_cursor, iov, niov);
-
     evpl_iovec_cursor_copy(&request_cursor, &netbios_hdr, sizeof(netbios_hdr));
-
-    //netbios_length = __builtin_bswap32(netbios_hdr.word) & 0x00ffffff;
 
     compound->num_requests      = 0;
     compound->complete_requests = 0;
+
+    left = length - 4;
 
     do {
 
@@ -432,6 +468,10 @@ chimera_smb_server_handle_smb2(
         request->compound = compound;
 
         evpl_iovec_cursor_copy(&request_cursor, &request->smb2_hdr, sizeof(request->smb2_hdr));
+
+        left -= sizeof(request->smb2_hdr);
+
+        signature_cursor = request_cursor;
 
         if (unlikely((request->smb2_hdr.protocol_id[0] != 0xFE && request->smb2_hdr.protocol_id[0] != 0xFF) ||
                      request->smb2_hdr.protocol_id[1] != 0x53 ||
@@ -455,6 +495,8 @@ chimera_smb_server_handle_smb2(
                                sizeof(request->request_struct_size));
 
 
+
+
         if (request->smb2_hdr.session_id &&
             request->smb2_hdr.command != SMB2_SESSION_SETUP) {
 
@@ -474,6 +516,26 @@ chimera_smb_server_handle_smb2(
             }
         } else {
             request->session = NULL;
+        }
+
+        if (request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) {
+
+            request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
+
+            if (request->smb2_hdr.next_command) {
+                payload_length = request->smb2_hdr.next_command - sizeof(request->smb2_hdr);
+            } else {
+                payload_length = left;
+            }
+
+            rc = chimera_smb_verify_signature(request, &signature_cursor, payload_length);
+
+            if (unlikely(rc != 0)) {
+                chimera_smb_error("Received SMB2 message with invalid signature");
+                chimera_smb_request_free(thread, request);
+                evpl_close(evpl, conn->bind);
+                return;
+            }
         }
 
         if (unlikely(!request->session && (request->smb2_hdr.command != SMB2_NEGOTIATE &&
@@ -554,6 +616,8 @@ chimera_smb_server_handle_smb2(
             evpl_iovec_cursor_skip(&request_cursor,
                                    request->smb2_hdr.next_command - evpl_iovec_cursor_consumed(&request_cursor));
         }
+
+        left -= evpl_iovec_cursor_consumed(&request_cursor) - sizeof(request->smb2_hdr);
 
     } while (more_requests);
 
@@ -812,9 +876,15 @@ chimera_smb_server_accept(
 
     conn = chimera_smb_conn_alloc(thread);
 
-    conn->thread  = thread;
-    conn->bind    = bind;
-    conn->smbvers = 0;
+    conn->thread            = thread;
+    conn->bind              = bind;
+    conn->smbvers           = 0;
+    conn->gss_flags         = 0;
+    conn->gss_major         = 0;
+    conn->gss_minor         = 0;
+    conn->gss_output.value  = NULL;
+    conn->gss_output.length = 0;
+    conn->ctx               = GSS_C_NO_CONTEXT;
 
     *notify_callback   = chimera_smb_server_notify;
     *segment_callback  = chimera_smb_server_segment;

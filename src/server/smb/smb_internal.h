@@ -87,9 +87,13 @@ struct chimera_smb_share {
 
 struct chimera_smb_conn;
 
+#define CHIMERA_SMB_REQUEST_FLAG_SIGN 0x01
+
+
 struct chimera_smb_request {
     uint32_t                     status;
     uint16_t                     request_struct_size;
+    uint16_t                     flags;
     union {
         struct smb1_header smb1_hdr;
         struct smb2_header smb2_hdr;
@@ -293,8 +297,8 @@ struct chimera_smb_session_handle {
 struct chimera_smb_conn {
     OM_uint32                          gss_major;
     OM_uint32                          gss_minor;
+    OM_uint32                          gss_flags;
     gss_ctx_id_t                       ctx;
-    gss_cred_id_t                      srv_cred;
     gss_buffer_desc                    gss_output;
     int                                established;
     uint16_t                           dialect;
@@ -312,6 +316,8 @@ struct chimera_smb_conn {
 struct chimera_server_smb_shared {
     struct chimera_smb_config   config;
     uint8_t                     guid[SMB2_GUID_SIZE];
+    gss_name_t                  svc;
+    gss_cred_id_t               srv_cred;
     struct chimera_vfs         *vfs;
     struct prometheus_metrics  *metrics;
     struct evpl_endpoint       *endpoint;
@@ -377,7 +383,8 @@ chimera_smb_request_alloc(struct chimera_server_smb_thread *thread)
         request = calloc(1, sizeof(*request));
     }
 
-    request->tree = NULL;
+    request->flags = 0;
+    request->tree  = NULL;
 
     return request;
 } /* chimera_smb_request_alloc */
@@ -526,11 +533,6 @@ chimera_smb_conn_free(
     if (conn->ctx) {
         gss_delete_sec_context(&conn->gss_minor, &conn->ctx, NULL);
         conn->ctx = NULL;
-    }
-
-    if (conn->srv_cred) {
-        gss_release_cred(&conn->gss_minor, &conn->srv_cred);
-        conn->srv_cred = NULL;
     }
 
     if (conn->gss_output.value) {
@@ -730,10 +732,12 @@ chimera_smb_open_file_close(
         } else {
             open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
             HASH_DELETE(hh, tree->open_files[open_file_bucket], open_file);
+            open_file->refcnt--;
         }
     }
 
     pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+
 
     return open_file;
 } /* chimera_smb_open_file_remove */

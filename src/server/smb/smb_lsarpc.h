@@ -8,6 +8,7 @@
 
 int
 chimera_smb_lsarpc_transceive(
-    struct evpl_iovec *input_iov,
-    int                input_niov,
-    struct evpl_iovec *output_iov);
+    struct chimera_smb_request *request,
+    struct evpl_iovec          *input_iov,
+    int                         input_niov,
+    struct evpl_iovec          *output_iov);
