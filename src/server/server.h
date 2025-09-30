@@ -24,6 +24,7 @@ struct prometheus_metrics;
 struct chimera_server_config_smb_nic {
     char     address[80];
     uint64_t speed;
+    uint8_t  rdma;
 };
 
 

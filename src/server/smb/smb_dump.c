@@ -4,9 +4,7 @@
 
 #include <stdio.h>
 #include "smb_dump.h"
-#include "smb_string.h"
 #include "smb_internal.h"
-#include "common/format.h"
 
 static const char *
 smb_command_name(uint32_t command)
@@ -256,8 +254,8 @@ _smb_dump_reply(
 
     *hdrp = '\0';
 
-    if (request->session) {
-        hdrp += sprintf(hdrp, " sessiond %lx", request->session->session_id);
+    if (request->session_handle) {
+        hdrp += sprintf(hdrp, " sessiond %lx", request->session_handle->session->session_id);
     }
 
     if (request->tree) {

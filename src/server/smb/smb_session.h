@@ -83,9 +83,12 @@ struct chimera_smb_tree {
     uint8_t                       fh[CHIMERA_VFS_FH_SIZE];
 };
 
+#define CHIMERA_SMB_SESSION_AUTHORIZED 0x1
+
 struct chimera_smb_session {
     uint64_t                    session_id;
-    uint64_t                    refcnt;
+    uint32_t                    refcnt;
+    uint32_t                    flags;
     struct UT_hash_handle       hh;
     struct chimera_smb_session *prev;
     struct chimera_smb_session *next;
@@ -105,6 +108,7 @@ chimera_smb_session_create()
     pthread_mutex_init(&session->lock, NULL);
 
     session->max_trees = 32;
+    session->flags     = 0;
 
     session->trees = calloc(session->max_trees, sizeof(struct chimera_smb_tree *));
 

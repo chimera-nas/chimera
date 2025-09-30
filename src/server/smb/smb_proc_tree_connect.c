@@ -15,7 +15,7 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
     struct chimera_server_smb_shared *shared = thread->shared;
     struct chimera_smb_share         *share  = NULL, *cur_share;
     struct chimera_smb_tree          *tree    = NULL;
-    struct chimera_smb_session       *session = request->session;
+    struct chimera_smb_session       *session = request->session_handle->session;
     char                             *request_pathp;
     int                               i;
 

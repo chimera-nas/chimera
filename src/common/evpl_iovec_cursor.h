@@ -348,6 +348,7 @@ evpl_iovec_cursor_inject(
     evpl_iovec_cursor_zero(cursor, (8 - (cursor->consumed & 7)) & 7);
 
     evpl_iovec_cursor_inject_unaligned(cursor, iov, niov, length);
+    cursor->consumed += length;
 } /* evpl_iovec_cursor_inject */
 
 static inline int
