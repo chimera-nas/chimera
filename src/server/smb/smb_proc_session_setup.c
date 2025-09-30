@@ -130,29 +130,23 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                                              NULL, NULL);
 
     if (conn->gss_major == GSS_S_COMPLETE) {
-
-        if (request->session_setup.flags) {
-            session = chimera_smb_session_lookup(shared, request->smb2_hdr.session_id);
-
-            if (!session) {
-                chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
-                return;
-            }
-
-        } else {
+        if (!request->session_handle) {
             session = chimera_smb_session_alloc(shared);
+
+            session_handle = chimera_smb_session_handle_alloc(thread);
+
+            session_handle->session_id = session->session_id;
+            session_handle->session    = session;
+
+            HASH_ADD(hh, conn->session_handles, session_id, sizeof(uint64_t), session_handle);
+
+            request->compound->conn->last_session_handle = session_handle;
+
+            request->session_handle = session_handle;
         }
 
-        session_handle = chimera_smb_session_handle_alloc(thread);
-
-        session_handle->session_id = session->session_id;
-        session_handle->session    = session;
-
-        HASH_ADD(hh, conn->session_handles, session_id, sizeof(uint64_t), session_handle);
-
-        request->compound->conn->last_session = session;
-
-        request->session = session;
+        session_handle = request->session_handle;
+        session        = session_handle->session;
 
         // Retrieve the session key from the established GSS context
         gss_buffer_set_t session_key_buffers;
@@ -167,11 +161,15 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
         if (maj_stat == GSS_S_COMPLETE && session_key_buffers->count > 0) {
             chimera_smb_derive_signing_key(conn->dialect,
-                                           session->signing_key,
+                                           session_handle->signing_key,
                                            session_key_buffers->elements[0].value,
                                            session_key_buffers->elements[0].length);
-
             gss_release_buffer_set(&min_stat, &session_key_buffers);
+        }
+
+        if (!(session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
+            memcpy(session->signing_key, session_handle->signing_key, sizeof(session_handle->signing_key));
+            chimera_smb_session_authorize(shared, session);
         }
     }
 
@@ -185,6 +183,15 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         default:
             chimera_smb_gss_error("gss_accept_sec_context", conn->gss_major, conn->gss_minor);
             chimera_smb_complete_request(request, SMB2_STATUS_LOGON_FAILURE);
+
+            if (request->session_handle &&
+                (!(request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED))) {
+                chimera_smb_session_release(thread, shared, request->session_handle->session);
+                chimera_smb_session_handle_free(thread, request->session_handle);
+                request->session_handle   = NULL;
+                conn->last_session_handle = NULL;
+            }
+
             break;
     } /* switch */
 

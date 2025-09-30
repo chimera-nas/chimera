@@ -270,6 +270,8 @@ chimera_smb_create_open_getattr_callback(
 {
     struct chimera_smb_request *request = private_data;
 
+    chimera_smb_open_file_release(request, request->create.r_open_file);
+
     if (error_code != CHIMERA_VFS_OK) {
         /* XXX open file */
         chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);

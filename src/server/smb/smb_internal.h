@@ -62,6 +62,7 @@
 struct chimera_smb_nic_info {
     struct sockaddr_storage addr;
     uint64_t                speed;
+    uint8_t                 rdma;
 };
 
 struct chimera_smb_config {
@@ -91,17 +92,17 @@ struct chimera_smb_conn;
 
 
 struct chimera_smb_request {
-    uint32_t                     status;
-    uint16_t                     request_struct_size;
-    uint16_t                     flags;
+    uint32_t                           status;
+    uint16_t                           request_struct_size;
+    uint16_t                           flags;
     union {
         struct smb1_header smb1_hdr;
         struct smb2_header smb2_hdr;
     };
-    struct chimera_smb_session  *session;
-    struct chimera_smb_tree     *tree;
-    struct chimera_smb_compound *compound;
-    struct chimera_smb_request  *next;
+    struct chimera_smb_session_handle *session_handle;
+    struct chimera_smb_tree           *tree;
+    struct chimera_smb_compound       *compound;
+    struct chimera_smb_request        *next;
 
     union {
 
@@ -290,6 +291,7 @@ struct chimera_smb_compound {
 struct chimera_smb_session_handle {
     uint64_t                           session_id;
     struct chimera_smb_session        *session;
+    uint8_t                            signing_key[16];
     struct UT_hash_handle              hh;
     struct chimera_smb_session_handle *next;
 };
@@ -304,7 +306,7 @@ struct chimera_smb_conn {
     uint16_t                           dialect;
     uint16_t                           smbvers;
     uint32_t                           capabilities;
-    struct chimera_smb_session        *last_session;
+    struct chimera_smb_session_handle *last_session_handle;
     struct chimera_smb_tree           *last_tree;
     struct chimera_smb_session_handle *session_handles;
     struct chimera_server_smb_thread  *thread;
@@ -347,6 +349,7 @@ struct chimera_server_smb_thread {
 
 static inline void
 chimera_smb_tree_free(
+    struct chimera_server_smb_thread *thread,
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_tree          *tree);
 
@@ -414,15 +417,30 @@ chimera_smb_session_alloc(struct chimera_server_smb_shared *shared)
     }
 
     session->session_id = chimera_rand64();
+    session->flags      = 0;
+    session->refcnt     = 1;
+
+    pthread_mutex_unlock(&shared->sessions_lock);
+
+
+    return session;
+} /* chimera_smb_session_alloc */
+
+static inline void
+chimera_smb_session_authorize(
+    struct chimera_server_smb_shared *shared,
+    struct chimera_smb_session       *session)
+{
+    pthread_mutex_lock(&shared->sessions_lock);
+
+    session->flags |= CHIMERA_SMB_SESSION_AUTHORIZED;
 
     HASH_ADD(hh, shared->sessions, session_id, sizeof(uint64_t), session);
 
     pthread_mutex_unlock(&shared->sessions_lock);
 
-    session->refcnt = 1;
 
-    return session;
-} /* chimera_smb_session_alloc */
+} // chimera_smb_session_authorize
 
 static inline struct chimera_smb_session *
 chimera_smb_session_lookup(
@@ -446,15 +464,26 @@ chimera_smb_session_lookup(
 
 static inline void
 chimera_smb_session_release(
+    struct chimera_server_smb_thread *thread,
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_session       *session)
 {
     struct chimera_smb_tree *tree;
-    int                      destroy;
+    int                      destroy = 0;
 
     pthread_mutex_lock(&session->lock);
+
+    chimera_smb_abort_if(session->refcnt == 0, "session refcnt is 0 at release");
+
     session->refcnt--;
-    destroy = session->refcnt == 0;
+
+    if (session->refcnt == 0) {
+        destroy = 1;
+        if (session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) {
+            HASH_DEL(shared->sessions, session);
+        }
+    }
+
     pthread_mutex_unlock(&session->lock);
 
     if (destroy) {
@@ -463,13 +492,11 @@ chimera_smb_session_release(
             tree = session->trees[i];
 
             if (tree) {
-                chimera_smb_tree_free(shared, tree);
+                chimera_smb_tree_free(thread, shared, tree);
             }
         }
 
         pthread_mutex_lock(&shared->sessions_lock);
-
-        HASH_DEL(shared->sessions, session);
 
         LL_PREPEND(shared->free_sessions, session);
 
@@ -525,7 +552,7 @@ chimera_smb_conn_free(
     {
         HASH_DELETE(hh, conn->session_handles, session_handle);
 
-        chimera_smb_session_release(thread->shared, session_handle->session);
+        chimera_smb_session_release(thread, thread->shared, session_handle->session);
 
         chimera_smb_session_handle_free(thread, session_handle);
     }
@@ -574,9 +601,35 @@ chimera_smb_tree_alloc(struct chimera_server_smb_shared *shared)
 
 static inline void
 chimera_smb_tree_free(
+    struct chimera_server_smb_thread *thread,
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_tree          *tree)
 {
+    struct chimera_smb_open_file *open_file, *tmp;
+    int                           i;
+
+    for (i = 0; i < CHIMERA_SMB_OPEN_FILE_BUCKETS; i++) {
+
+        pthread_mutex_lock(&tree->open_files_lock[i]);
+
+        HASH_ITER(hh, tree->open_files[i], open_file, tmp)
+        {
+            chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at tree destruction");
+            open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
+            HASH_DELETE(hh, tree->open_files[i], open_file);
+            open_file->refcnt--;
+
+            if (open_file->refcnt == 0) {
+                if (open_file->handle) {
+                    chimera_vfs_release(thread->vfs_thread, open_file->handle);
+                }
+                chimera_smb_open_file_free(thread, open_file);
+            }
+        }
+
+        pthread_mutex_unlock(&tree->open_files_lock[i]);
+    }
+
     pthread_mutex_lock(&shared->trees_lock);
 
     LL_PREPEND(shared->free_trees, tree);
@@ -729,10 +782,10 @@ chimera_smb_open_file_close(
         if (open_file->flags & CHIMERA_SMB_OPEN_FILE_CLOSED) {
             chimera_smb_error("Attempted to close already closed file id %lx.%lx",
                               file_id->pid, file_id->vid);
+            open_file = NULL;
         } else {
             open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
             HASH_DELETE(hh, tree->open_files[open_file_bucket], open_file);
-            open_file->refcnt--;
         }
     }
 

@@ -290,13 +290,13 @@ chimera_smb_verify_signature(
     struct evpl_iovec_cursor   *cursor,
     int                         length)
 {
-    struct chimera_smb_conn    *conn    = request->compound->conn;
-    struct chimera_smb_session *session = request->session;
-    uint8_t                     signature[16];
-    uint8_t                     calculated[16];
-    char                        recv_sig[80];
-    char                        calc_sig[80];
-    int                         rc;
+    struct chimera_smb_conn           *conn           = request->compound->conn;
+    struct chimera_smb_session_handle *session_handle = request->session_handle;
+    uint8_t                            signature[16];
+    uint8_t                            calculated[16];
+    char                               recv_sig[80];
+    char                               calc_sig[80];
+    int                                rc;
 
     memcpy(&signature, &request->smb2_hdr.signature, sizeof(signature));
     memset(request->smb2_hdr.signature, 0, sizeof(request->smb2_hdr.signature));
@@ -308,7 +308,7 @@ chimera_smb_verify_signature(
                 &request->smb2_hdr,
                 cursor,
                 length,
-                session->signing_key,
+                session_handle->signing_key,
                 16,
                 calculated);
 
@@ -322,7 +322,7 @@ chimera_smb_verify_signature(
                 &request->smb2_hdr,
                 cursor,
                 length,
-                session->signing_key,
+                session_handle->signing_key,
                 16,
                 calculated);
 
@@ -366,14 +366,14 @@ chimera_smb_sign_compound(
     int                          niov,
     int                          length)
 {
-    struct chimera_smb_conn    *conn = compound->conn;
-    struct chimera_smb_session *session;
-    struct chimera_smb_request *request;
-    struct evpl_iovec_cursor    cursor;
-    struct smb2_header         *hdr;
-    int                         i, rc;
-    int                         left = length, payload_length;
-    uint8_t                     signature[16];
+    struct chimera_smb_conn           *conn = compound->conn;
+    struct chimera_smb_session_handle *session_handle;
+    struct chimera_smb_request        *request;
+    struct evpl_iovec_cursor           cursor;
+    struct smb2_header                *hdr;
+    int                                i, rc;
+    int                                left = length, payload_length;
+    uint8_t                            signature[16];
 
     evpl_iovec_cursor_init(&cursor, iov, niov);
     evpl_iovec_cursor_skip(&cursor, sizeof(struct netbios_header));
@@ -382,8 +382,8 @@ chimera_smb_sign_compound(
 
     for (i = 0; i < compound->num_requests && left; i++) {
 
-        request = compound->requests[i];
-        session = request->session;
+        request        = compound->requests[i];
+        session_handle = request->session_handle;
 
         /* We know hdr is contig since we allocated it that way */
         hdr = evpl_iovec_cursor_data(&cursor);
@@ -407,7 +407,7 @@ chimera_smb_sign_compound(
                         hdr,
                         &cursor,
                         payload_length,
-                        session->signing_key,
+                        session_handle->signing_key,
                         16,
                         signature);
 
@@ -421,7 +421,7 @@ chimera_smb_sign_compound(
                         hdr,
                         &cursor,
                         payload_length,
-                        session->signing_key,
+                        session_handle->signing_key,
                         16,
                         signature);
 

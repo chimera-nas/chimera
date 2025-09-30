@@ -5,8 +5,6 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "common/misc.h"
-#include "vfs/vfs.h"
-#include "smb_string.h"
 
 void
 chimera_smb_logoff(struct chimera_smb_request *request)
@@ -20,15 +18,15 @@ chimera_smb_logoff(struct chimera_smb_request *request)
     chimera_smb_abort_if(!session_handle,
                          "Received SMB2 LOGOFF request for unknown session, should have been caught by session setup");
 
-    chimera_smb_session_release(thread->shared, session_handle->session);
+    chimera_smb_session_release(thread, thread->shared, session_handle->session);
 
     HASH_DELETE(hh, conn->session_handles, session_handle);
 
-    if (conn->last_session == session_handle->session) {
-        conn->last_session = NULL;
-    }
+    conn->last_session_handle = NULL;
 
-    free(session_handle);
+    chimera_smb_session_handle_free(thread, session_handle);
+
+    request->session_handle = NULL;
 
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 
