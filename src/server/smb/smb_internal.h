@@ -68,6 +68,7 @@ struct chimera_smb_nic_info {
 struct chimera_smb_config {
     char                        identity[80];
     int                         port;
+    int                         rdma_port;
     int                         num_dialects;
     int                         num_nic_info;
     uint32_t                    capabilities;
@@ -296,16 +297,23 @@ struct chimera_smb_session_handle {
     struct chimera_smb_session_handle *next;
 };
 
+#define CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED      0x01
+#define CHIMERA_SMB_CONN_FLAG_SMB_DIRECT_NEGOTIATED 0x02
+
 struct chimera_smb_conn {
     OM_uint32                          gss_major;
     OM_uint32                          gss_minor;
     OM_uint32                          gss_flags;
     gss_ctx_id_t                       ctx;
     gss_buffer_desc                    gss_output;
-    int                                established;
+    unsigned int                       flags;
+    enum evpl_protocol_id              protocol;
     uint16_t                           dialect;
     uint16_t                           smbvers;
     uint32_t                           capabilities;
+    int                                rdma_max_send;
+    int                                rdma_niov;
+    int                                rdma_length;
     struct chimera_smb_session_handle *last_session_handle;
     struct chimera_smb_tree           *last_tree;
     struct chimera_smb_session_handle *session_handles;
@@ -313,16 +321,21 @@ struct chimera_smb_conn {
     struct evpl_bind                  *bind;
     struct chimera_smb_conn           *prev;
     struct chimera_smb_conn           *next;
+    struct evpl_iovec                  rdma_iov[256];
+    char                               local_addr[128];
+    char                               remote_addr[128];
 };
 
 struct chimera_server_smb_shared {
     struct chimera_smb_config   config;
+    int                         rdma;
     uint8_t                     guid[SMB2_GUID_SIZE];
     gss_name_t                  svc;
     gss_cred_id_t               srv_cred;
     struct chimera_vfs         *vfs;
     struct prometheus_metrics  *metrics;
     struct evpl_endpoint       *endpoint;
+    struct evpl_endpoint       *endpoint_rdma;
     struct evpl_listener       *listener;
     struct chimera_smb_session *sessions;
     struct chimera_smb_session *free_sessions;
@@ -343,6 +356,7 @@ struct chimera_server_smb_thread {
     struct chimera_smb_conn           *free_conns;
     struct chimera_smb_session_handle *free_session_handles;
     struct chimera_smb_open_file      *free_open_files;
+    struct chimera_smb_signing_ctx    *signing_ctx;
     struct chimera_smb_iconv_ctx       iconv_ctx;
 };
 

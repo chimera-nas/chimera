@@ -63,6 +63,10 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
         conn->capabilities |= SMB2_GLOBAL_CAP_MULTI_CHANNEL;
     }
 
+    if (request->negotiate.security_mode & SMB2_SIGNING_REQUIRED) {
+        conn->flags |= CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED;
+    }
+
     request->negotiate.r_dialect           = dialect;
     request->negotiate.r_security_mode     = SMB2_SIGNING_ENABLED;
     request->negotiate.r_capabilities      = conn->capabilities;

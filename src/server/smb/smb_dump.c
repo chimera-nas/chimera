@@ -81,6 +81,20 @@ smb_status_name(uint32_t status)
             return "RequestAborted";
         case SMB2_STATUS_END_OF_FILE:
             return "EndOfFile";
+        case SMB2_STATUS_OBJECT_NAME_NOT_FOUND:
+            return "ObjectNameNotFound";
+        case SMB2_STATUS_OBJECT_PATH_INVALID:
+            return "ObjectPathInvalid";
+        case SMB2_STATUS_OBJECT_PATH_NOT_FOUND:
+            return "ObjectPathNotFound";
+        case SMB2_STATUS_OBJECT_PATH_SYNTAX_BAD:
+            return "ObjectPathSyntaxBad";
+        case SMB2_STATUS_NO_SUCH_DEVICE:
+            return "NoSuchDevice";
+        case SMB2_STATUS_INVALID_DEVICE_REQUEST:
+            return "InvalidDeviceRequest";
+        case SMB2_STATUS_WRONG_VOLUME:
+            return "WrongVolume";
         default:
             return "Unknown";
     } /* switch */
@@ -237,6 +251,8 @@ _smb_dump_reply(
     char  hdr_args[80];
     char *hdrp = hdr_args;
 
+    argstr[0] = '\0';
+
     switch (request->smb2_hdr.command) {
         case SMB2_NEGOTIATE:
             sprintf(argstr, " dialect %s", smb_dialect_name(request->negotiate.r_dialect));
@@ -249,12 +265,12 @@ _smb_dump_reply(
             }
             break;
         default:
-            argstr[0] = '\0';
+            break;
     } /* switch */
 
     *hdrp = '\0';
 
-    if (request->session_handle) {
+    if (request->session_handle && request->session_handle->session) {
         hdrp += sprintf(hdrp, " sessiond %lx", request->session_handle->session->session_id);
     }
 

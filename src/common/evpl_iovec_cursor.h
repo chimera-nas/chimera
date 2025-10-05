@@ -29,6 +29,7 @@ evpl_iovec_cursor_init(
     cursor->offset   = 0;
 } /* evpl_iovec_cursor_init */
 
+
 static inline int
 evpl_iovec_cursor_get_blob(
     struct evpl_iovec_cursor *cursor,

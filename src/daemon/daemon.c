@@ -59,7 +59,7 @@ main(
     evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 
     evpl_global_config = evpl_global_config_init();
-    evpl_global_config_set_rdmacm_datagram_size_override(evpl_global_config, 4096);
+    evpl_global_config_set_rdmacm_datagram_size_override(evpl_global_config, 8192);
     evpl_global_config_set_spin_ns(evpl_global_config, 1000000UL);
     evpl_global_config_set_huge_pages(evpl_global_config, 1);
 
@@ -133,7 +133,7 @@ main(
         {
             const char *smb_nic_info_name  = json_string_value(json_object_get(smb_nic_info_json, "address"));
             int         smb_nic_info_speed = json_integer_value(json_object_get(smb_nic_info_json, "speed"));
-            int         smb_nic_info_rdma  = json_integer_value(json_object_get(smb_nic_info_json, "rdma"));
+            int         smb_nic_info_rdma  = json_boolean_value(json_object_get(smb_nic_info_json, "rdma"));
 
             if (!smb_nic_info_name || !smb_nic_info_speed) {
                 chimera_server_error(
