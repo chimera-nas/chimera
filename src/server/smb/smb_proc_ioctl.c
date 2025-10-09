@@ -77,6 +77,7 @@ chimera_smb_ioctl_reply(
     uint32_t                          input_length  = 0;
     uint32_t                          output_offset = input_offset + input_length;
     uint32_t                          output_length = 0;
+    uint32_t                          caps          = 0;
 
     /* Calculate length based on IOCTL type */
     switch (request->ioctl.ctl_code) {
@@ -123,9 +124,16 @@ chimera_smb_ioctl_reply(
 
             for (int i = 0; i < shared->config.num_nic_info; i++) {
                 nic_info = &shared->config.nic_info[i];
+
+                caps = 0x1; /* RSS */
+
+                if (nic_info->rdma) {
+                    caps |= 0x2; /* RDMA */
+                }
+
                 evpl_iovec_cursor_append_uint32(reply_cursor,  i == shared->config.num_nic_info - 1 ? 0 : 152); /* next */
                 evpl_iovec_cursor_append_uint32(reply_cursor, i + 1); /* ifindex */
-                evpl_iovec_cursor_append_uint32(reply_cursor, 0x00000001); /* capabilities (RSS) */
+                evpl_iovec_cursor_append_uint32(reply_cursor, caps); /* capabilities (RSS) */
                 evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* reserved */
                 evpl_iovec_cursor_append_uint64(reply_cursor, nic_info->speed); /* speed */
                 evpl_iovec_cursor_append_uint16(reply_cursor, nic_info->addr.ss_family == AF_INET ? 2 :

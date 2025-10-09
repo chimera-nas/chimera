@@ -884,3 +884,39 @@ struct smb2_file_directory_information {
     //uint32_t reserved;
     //uint64_t file_id;
 };
+
+struct smb_direct_negotiate_request {
+    uint16_t min_version;
+    uint16_t max_version;
+    uint16_t reserved;
+    uint16_t credits_requested;
+    uint32_t preferred_send_size;
+    uint32_t max_receive_size;
+    uint32_t max_fragmented_size;
+};
+
+struct smb_direct_negotiate_reply {
+    uint16_t min_version;
+    uint16_t max_version;
+    uint16_t negotiated_version;
+    uint16_t reserved;
+    uint16_t credits_requested;
+    uint16_t credits_granted;
+    uint32_t status;
+    uint32_t max_readwrite_size;
+    uint32_t preferred_send_size;
+    uint32_t max_receive_size;
+    uint32_t max_fragmented_size;
+};
+
+struct smb_direct_hdr {
+    uint16_t credits_requested;
+    uint16_t credits_granted;
+    uint16_t flags;
+    uint16_t reserved;
+    uint32_t remaining_length;
+    uint32_t data_offset;
+    uint32_t data_length;
+};
+
+#define SMB2_CHANNEL_RDMA_V1 0x00000001

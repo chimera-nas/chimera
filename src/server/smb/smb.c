@@ -47,7 +47,7 @@ chimera_smb_server_init(
 {
     struct chimera_server_smb_shared           *shared = calloc(1, sizeof(*shared));
     const struct chimera_server_config_smb_nic *smb_nic_info;
-    int                                         i;
+    int                                         i, rdma = 0;
     struct sockaddr_storage                    *ss;
     struct sockaddr_in                         *sin;
     struct sockaddr_in6                        *sin6;
@@ -56,7 +56,8 @@ chimera_smb_server_init(
         return NULL;
     }
 
-    shared->config.port = 445;
+    shared->config.port      = 445;
+    shared->config.rdma_port = 445;
 
     shared->config.capabilities = SMB2_GLOBAL_CAP_LARGE_MTU | SMB2_GLOBAL_CAP_MULTI_CHANNEL;
 
@@ -86,6 +87,13 @@ chimera_smb_server_init(
         }
         shared->config.nic_info[i].speed = smb_nic_info->speed * 1000000000UL;
         shared->config.nic_info[i].rdma  = smb_nic_info->rdma;
+
+        if (shared->config.nic_info[i].rdma) {
+            rdma = 1;
+        }
+
+        chimera_smb_info("SMB Multichannel: %s, speed: %llu, rdma: %d", smb_nic_info->address, smb_nic_info->speed,
+                         smb_nic_info->rdma);
     }
 
     snprintf(shared->config.identity, sizeof(shared->config.identity), "chimera");
@@ -108,6 +116,10 @@ chimera_smb_server_init(
     //gss_acquire_cred(&min, shared->svc, 0, GSS_C_NO_OID_SET, GSS_C_ACCEPT, &shared->srv_cred, NULL, NULL);
 
     shared->endpoint = evpl_endpoint_create("0.0.0.0", shared->config.port);
+
+    if (rdma) {
+        shared->endpoint_rdma = evpl_endpoint_create("0.0.0.0", shared->config.rdma_port);
+    }
 
     shared->listener = evpl_listener_create();
 
@@ -174,6 +186,10 @@ chimera_smb_server_start(void *data)
     struct chimera_server_smb_shared *shared = data;
 
     evpl_listen(shared->listener, EVPL_STREAM_SOCKET_TCP, shared->endpoint);
+
+    if (shared->endpoint_rdma) {
+        evpl_listen(shared->listener, EVPL_DATAGRAM_RDMACM_RC, shared->endpoint_rdma);
+    }
 } /* smb_server_start */
 
 static inline void
@@ -188,26 +204,42 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     struct chimera_smb_conn          *conn   = compound->conn;
     struct evpl_iovec_cursor          reply_cursor;
     struct evpl_iovec                 reply_iov[65];
-    struct netbios_header            *netbios_hdr;
+    struct netbios_header            *netbios_hdr = NULL;
     struct smb2_header               *reply_hdr;
+    struct smb_direct_hdr            *direct_hdr = NULL;
     struct chimera_smb_request       *request;
     uint32_t                         *prev_command = NULL;
     uint16_t                          prev_hdr     = 0;
-    int                               i, rc;
+    struct evpl_iovec                 chunk_iov[3];
+    int                               i, rc, chunk_niov;
+    int                               reply_hdr_len, reply_payload_length, left, chunk;
 
     smb_dump_compound_reply(compound);
 
-    evpl_iovec_alloc(evpl, 4096, 8, 1, &reply_iov[0]);
+    evpl_iovec_alloc(evpl, 8192, 8, 1, &reply_iov[0]);
 
     evpl_iovec_cursor_init(&reply_cursor, reply_iov, 1);
 
-    netbios_hdr = evpl_iovec_cursor_data(&reply_cursor);
-    evpl_iovec_cursor_skip(&reply_cursor, sizeof(struct netbios_header));
+    if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
+        direct_hdr = evpl_iovec_cursor_data(&reply_cursor);
+        evpl_iovec_cursor_skip(&reply_cursor, sizeof(struct smb_direct_hdr));
+        evpl_iovec_cursor_zero(&reply_cursor, 4); /* pad to 24 bytes */
+        reply_hdr_len = sizeof(struct smb_direct_hdr) + 4;
+    } else {
+        netbios_hdr = evpl_iovec_cursor_data(&reply_cursor);
+        evpl_iovec_cursor_skip(&reply_cursor, sizeof(struct netbios_header));
+        reply_hdr_len = sizeof(struct netbios_header);
+    }
 
     evpl_iovec_cursor_reset_consumed(&reply_cursor);
 
     for (i = 0; i < compound->num_requests; i++) {
         request = compound->requests[i];
+
+        if ((conn->flags & CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED) &&
+            request->session_handle) {
+            request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
+        }
 
         if (prev_command) {
             *prev_command = evpl_iovec_cursor_consumed(&reply_cursor) - prev_hdr;
@@ -233,9 +265,10 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         reply_hdr->flags                   = request->smb2_hdr.flags | SMB2_FLAGS_SERVER_TO_REDIR;
         reply_hdr->next_command            = 0;
         reply_hdr->message_id              = request->smb2_hdr.message_id;
-        reply_hdr->session_id              = request->session_handle ? request->session_handle->session->session_id : 0;
-        reply_hdr->sync.process_id         = request->smb2_hdr.sync.process_id;
-        reply_hdr->sync.tree_id            = request->tree ? request->tree->tree_id : 0;
+        reply_hdr->session_id              = request->session_handle && request->session_handle->session ?
+            request->session_handle->session->session_id : 0;
+        reply_hdr->sync.process_id = request->smb2_hdr.sync.process_id;
+        reply_hdr->sync.tree_id    = request->tree ? request->tree->tree_id : 0;
 
         memset(reply_hdr->signature, 0, sizeof(reply_hdr->signature));
 
@@ -297,14 +330,10 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
         evpl_iovec_cursor_zero(&reply_cursor, (8 - (evpl_iovec_cursor_consumed(&reply_cursor) & 7)) & 7);
 
-        chimera_smb_request_free(thread, request);
-
-
     }
 
-    netbios_hdr->word = __builtin_bswap32(evpl_iovec_cursor_consumed(&reply_cursor));
-
-    rc = chimera_smb_sign_compound(compound, reply_iov, reply_cursor.niov, evpl_iovec_cursor_consumed(&reply_cursor) + 4
+    rc = chimera_smb_sign_compound(thread->signing_ctx, compound, reply_iov, reply_cursor.niov,
+                                   evpl_iovec_cursor_consumed(&reply_cursor) + reply_hdr_len
                                    );
 
     if (unlikely(rc != 0)) {
@@ -314,7 +343,65 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         return;
     }
 
-    evpl_sendv(evpl, conn->bind, reply_iov, reply_cursor.niov, evpl_iovec_cursor_consumed(&reply_cursor) + 4);
+    reply_payload_length = evpl_iovec_cursor_consumed(&reply_cursor);
+
+    if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
+
+        left = reply_payload_length;
+
+        chunk = conn->rdma_max_send;
+
+        if (left < chunk) {
+            chunk = left;
+        }
+
+        direct_hdr->credits_requested = 255;
+        direct_hdr->credits_granted   = 255;
+        direct_hdr->flags             = 0;
+        direct_hdr->reserved          = 0;
+        direct_hdr->remaining_length  = left - chunk;
+        direct_hdr->data_offset       = 24;
+        direct_hdr->data_length       = chunk;
+
+        evpl_sendv(evpl, conn->bind, reply_iov, reply_cursor.niov, direct_hdr->data_length + 24);
+
+        left -= direct_hdr->data_length;
+
+        evpl_iovec_cursor_init(&reply_cursor, reply_iov, reply_cursor.niov);
+        evpl_iovec_cursor_skip(&reply_cursor, direct_hdr->data_length + 24);
+
+        while (left) {
+
+            chunk = conn->rdma_max_send;
+
+            if (left < 4096) {
+                chunk = left;
+            }
+
+            evpl_iovec_alloc(evpl, 24, 8, 1, &chunk_iov[0]);
+
+            direct_hdr = evpl_iovec_data(&chunk_iov[0]);
+
+            direct_hdr->credits_requested = 255;
+            direct_hdr->credits_granted   = 255;
+            direct_hdr->flags             = 0;
+            direct_hdr->reserved          = 0;
+            direct_hdr->remaining_length  = left - chunk;
+            direct_hdr->data_offset       = 24;
+            direct_hdr->data_length       = chunk;
+
+            chunk_niov = 1 + evpl_iovec_cursor_move(&reply_cursor, &chunk_iov[1], 2, chunk, 1);
+
+            evpl_sendv(evpl, conn->bind, chunk_iov, chunk_niov, chunk + 24);
+
+            left -= chunk;
+        }
+
+    } else {
+        netbios_hdr->word = __builtin_bswap32(reply_payload_length);
+
+        evpl_sendv(evpl, conn->bind, reply_iov, reply_cursor.niov, reply_payload_length + reply_hdr_len);
+    }
 
     chimera_smb_compound_free(thread, compound);
 } /* chimera_smb_compound_reply */
@@ -344,7 +431,7 @@ chimera_smb_complete_request(
         chimera_smb_compound_abort(compound);
     } else {
 
-        if (request->session_handle) {
+        if (request->session_handle && request->session_handle->session) {
             compound->saved_session_id = request->session_handle->session->session_id;
         }
 
@@ -426,22 +513,69 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
 } /* chimera_smb_compound_advance */
 
 static void
+chimera_smb_direct_negotiate(
+    struct chimera_smb_conn *conn,
+    struct evpl_iovec       *iov,
+    int                      niov,
+    int                      length)
+{
+    struct evpl                         *evpl = conn->thread->evpl;
+    struct smb_direct_negotiate_request *request;
+    struct smb_direct_negotiate_reply   *reply;
+    struct evpl_iovec                    reply_iov;
+
+    if (length != 20 || niov != 1) {
+        chimera_smb_error("Received SMB2 message with invalid length or niov");
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    evpl_iovec_alloc(evpl, sizeof(*reply), 8, 1, &reply_iov);
+
+    request = (struct smb_direct_negotiate_request *) evpl_iovec_data(&iov[0]);
+    reply   = (struct smb_direct_negotiate_reply *) evpl_iovec_data(&reply_iov);
+
+    if (request->min_version > 0x100 || request->max_version < 0x100) {
+        chimera_smb_error("Received SMB2 message with invalid min or max version");
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    conn->rdma_max_send = request->max_receive_size - 24;
+
+    reply->min_version         = 0x100;
+    reply->max_version         = 0x100;
+    reply->negotiated_version  = 0x100;
+    reply->reserved            = 0;
+    reply->credits_requested   = request->credits_requested;
+    reply->credits_granted     = request->credits_requested;
+    reply->status              = SMB2_STATUS_SUCCESS;
+    reply->max_readwrite_size  = 8 * 1024 * 1024;
+    reply->preferred_send_size = 7168;
+    reply->max_receive_size    = 8192;
+    reply->max_fragmented_size = 1 * 1024 * 1024;
+
+    evpl_iovec_set_length(&reply_iov, sizeof(*reply));
+
+    evpl_sendv(evpl, conn->bind, &reply_iov, 1, sizeof(*reply));
+
+    conn->flags |= CHIMERA_SMB_CONN_FLAG_SMB_DIRECT_NEGOTIATED;
+} /* chimera_smb_direct_negotiate */
+
+static void
 chimera_smb_server_handle_smb2(
     struct evpl                      *evpl,
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_conn          *conn,
-    struct evpl_iovec                *iov,
-    int                               niov,
+    struct evpl_iovec_cursor         *request_cursor,
     int                               length)
 {
     struct chimera_smb_compound       *compound;
     struct chimera_smb_request        *request;
     struct chimera_smb_session_handle *session_handle;
     struct chimera_smb_session        *session;
-    struct evpl_iovec_cursor           request_cursor, signature_cursor;
-    struct netbios_header              netbios_hdr;
+    struct evpl_iovec_cursor           signature_cursor;
     int                                more_requests, rc, left = length, payload_length;
-
 
     compound = chimera_smb_compound_alloc(thread);
 
@@ -453,27 +587,24 @@ chimera_smb_server_handle_smb2(
     compound->saved_file_id.pid = UINT64_MAX;
     compound->saved_file_id.vid = UINT64_MAX;
 
-    evpl_iovec_cursor_init(&request_cursor, iov, niov);
-    evpl_iovec_cursor_copy(&request_cursor, &netbios_hdr, sizeof(netbios_hdr));
-
     compound->num_requests      = 0;
     compound->complete_requests = 0;
 
-    left = length - 4;
+    left = length;
 
-    do {
+    while (left) {
 
-        evpl_iovec_cursor_reset_consumed(&request_cursor);
+        evpl_iovec_cursor_reset_consumed(request_cursor);
 
         request = chimera_smb_request_alloc(thread);
 
         request->compound = compound;
 
-        evpl_iovec_cursor_copy(&request_cursor, &request->smb2_hdr, sizeof(request->smb2_hdr));
+        evpl_iovec_cursor_copy(request_cursor, &request->smb2_hdr, sizeof(request->smb2_hdr));
 
         left -= sizeof(request->smb2_hdr);
 
-        signature_cursor = request_cursor;
+        signature_cursor = *request_cursor;
 
         if (unlikely((request->smb2_hdr.protocol_id[0] != 0xFE && request->smb2_hdr.protocol_id[0] != 0xFF) ||
                      request->smb2_hdr.protocol_id[1] != 0x53 ||
@@ -492,7 +623,7 @@ chimera_smb_server_handle_smb2(
             return;
         }
 
-        evpl_iovec_cursor_copy(&request_cursor,
+        evpl_iovec_cursor_copy(request_cursor,
                                &request->request_struct_size,
                                sizeof(request->request_struct_size));
 
@@ -560,7 +691,7 @@ chimera_smb_server_handle_smb2(
                 return;
             }
 
-            rc = chimera_smb_verify_signature(request, &signature_cursor, payload_length);
+            rc = chimera_smb_verify_signature(thread->signing_ctx, request, &signature_cursor, payload_length);
 
             if (unlikely(rc != 0)) {
                 chimera_smb_error("Received SMB2 message with invalid signature");
@@ -585,49 +716,49 @@ chimera_smb_server_handle_smb2(
 
         switch (request->smb2_hdr.command) {
             case SMB2_NEGOTIATE:
-                rc = chimera_smb_parse_negotiate(&request_cursor, request);
+                rc = chimera_smb_parse_negotiate(request_cursor, request);
                 break;
             case SMB2_SESSION_SETUP:
-                rc = chimera_smb_parse_session_setup(&request_cursor, request);
+                rc = chimera_smb_parse_session_setup(request_cursor, request);
                 break;
             case SMB2_LOGOFF:
-                rc = chimera_smb_parse_logoff(&request_cursor, request);
+                rc = chimera_smb_parse_logoff(request_cursor, request);
                 break;
             case SMB2_TREE_CONNECT:
-                rc = chimera_smb_parse_tree_connect(&request_cursor, request);
+                rc = chimera_smb_parse_tree_connect(request_cursor, request);
                 break;
             case SMB2_TREE_DISCONNECT:
-                rc = chimera_smb_parse_tree_disconnect(&request_cursor, request);
+                rc = chimera_smb_parse_tree_disconnect(request_cursor, request);
                 break;
             case SMB2_CREATE:
-                rc = chimera_smb_parse_create(&request_cursor, request);
+                rc = chimera_smb_parse_create(request_cursor, request);
                 break;
             case SMB2_CLOSE:
-                rc = chimera_smb_parse_close(&request_cursor, request);
+                rc = chimera_smb_parse_close(request_cursor, request);
                 break;
             case SMB2_WRITE:
-                rc = chimera_smb_parse_write(&request_cursor, request);
+                rc = chimera_smb_parse_write(request_cursor, request);
                 break;
             case SMB2_READ:
-                rc = chimera_smb_parse_read(&request_cursor, request);
+                rc = chimera_smb_parse_read(request_cursor, request);
                 break;
             case SMB2_FLUSH:
-                rc = chimera_smb_parse_flush(&request_cursor, request);
+                rc = chimera_smb_parse_flush(request_cursor, request);
                 break;
             case SMB2_IOCTL:
-                rc = chimera_smb_parse_ioctl(&request_cursor, request);
+                rc = chimera_smb_parse_ioctl(request_cursor, request);
                 break;
             case SMB2_ECHO:
-                rc = chimera_smb_parse_echo(&request_cursor, request);
+                rc = chimera_smb_parse_echo(request_cursor, request);
                 break;
             case SMB2_QUERY_INFO:
-                rc = chimera_smb_parse_query_info(&request_cursor, request);
+                rc = chimera_smb_parse_query_info(request_cursor, request);
                 break;
             case SMB2_QUERY_DIRECTORY:
-                rc = chimera_smb_parse_query_directory(&request_cursor, request);
+                rc = chimera_smb_parse_query_directory(request_cursor, request);
                 break;
             case SMB2_SET_INFO:
-                rc = chimera_smb_parse_set_info(&request_cursor, request);
+                rc = chimera_smb_parse_set_info(request_cursor, request);
                 break;
             default:
                 rc = 0;
@@ -645,13 +776,17 @@ chimera_smb_server_handle_smb2(
         more_requests = request->smb2_hdr.next_command != 0;
 
         if (more_requests) {
-            evpl_iovec_cursor_skip(&request_cursor,
-                                   request->smb2_hdr.next_command - evpl_iovec_cursor_consumed(&request_cursor));
+            evpl_iovec_cursor_skip(request_cursor,
+                                   request->smb2_hdr.next_command - evpl_iovec_cursor_consumed(request_cursor));
         }
 
-        left -= evpl_iovec_cursor_consumed(&request_cursor) - sizeof(request->smb2_hdr);
+        left -= evpl_iovec_cursor_consumed(request_cursor) - sizeof(request->smb2_hdr);
 
-    } while (more_requests);
+        if (!more_requests) {
+            break;
+        }
+
+    }
 
     smb_dump_compound_request(compound);
 
@@ -802,7 +937,7 @@ chimera_smb_server_handle_smb1(
 } /* chimera_smb_server_handle_smb1 */
 
 static void
-chimera_smb_server_handle(
+chimera_smb_server_handle_rdma(
     struct evpl                      *evpl,
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_conn          *conn,
@@ -811,21 +946,85 @@ chimera_smb_server_handle(
     int                               length)
 {
     struct evpl_iovec_cursor request_cursor;
-    struct netbios_header    netbios_hdr;
-    uint32_t                 smb_hdr;
+    struct smb_direct_hdr   *direct_hdr;
+    struct evpl_iovec       *segment_iov;
 
-    if (conn->smbvers == 2) {
-        chimera_smb_server_handle_smb2(evpl, thread, conn, iov, niov, length);
+    if (unlikely(!(conn->flags & CHIMERA_SMB_CONN_FLAG_SMB_DIRECT_NEGOTIATED))) {
+        /* There will be a one-time smb-direct specific negotiation per connection */
+        chimera_smb_direct_negotiate(conn, iov, niov, length);
         return;
     }
 
+    chimera_smb_abort_if(niov != 1, "Received SMB2 message over RDMA with multiple iovecs");
+
+    if (unlikely(length < sizeof(*direct_hdr))) {
+        chimera_smb_error("Received SMB2 message over RDMA that is too short for header");
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    direct_hdr = (struct smb_direct_hdr *) evpl_iovec_data(&iov[0]);
+
+    if (unlikely(direct_hdr->data_length &&
+                 direct_hdr->data_offset < sizeof(*direct_hdr))) {
+        chimera_smb_error("Received SMB2 message over RDMA that has data offset that is too small");
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    if (unlikely(direct_hdr->data_length &&
+                 direct_hdr->data_length < sizeof(struct smb2_header))) {
+        chimera_smb_error("Received SMB2 message over RDMA that has data length that is too small");
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    segment_iov = &conn->rdma_iov[conn->rdma_niov++];
+
+    *segment_iov = iov[0];
+
+    segment_iov->data += direct_hdr->data_offset;
+    evpl_iovec_set_length(segment_iov, direct_hdr->data_length);
+
+    conn->rdma_length += direct_hdr->data_length;
+
+    if (direct_hdr->remaining_length == 0) {
+        evpl_iovec_cursor_init(&request_cursor, conn->rdma_iov, conn->rdma_niov);
+        chimera_smb_server_handle_smb2(evpl, thread, conn, &request_cursor, conn->rdma_length);
+        conn->rdma_niov   = 0;
+        conn->rdma_length = 0;
+    }
+
+} /* chimera_smb_server_handle_rdma */
+
+
+static void
+chimera_smb_server_handle_tcp(
+    struct evpl                      *evpl,
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_conn          *conn,
+    struct evpl_iovec                *iov,
+    int                               niov,
+    int                               length)
+{
+    struct evpl_iovec_cursor request_cursor, peek_cursor;
+    struct netbios_header    netbios_hdr;
+    uint32_t                 smb_hdr;
+
     evpl_iovec_cursor_init(&request_cursor, iov, niov);
     evpl_iovec_cursor_copy(&request_cursor, &netbios_hdr, sizeof(netbios_hdr));
-    evpl_iovec_cursor_get_uint32(&request_cursor, &smb_hdr);
+
+    if (likely(conn->smbvers == 2)) {
+        chimera_smb_server_handle_smb2(evpl, thread, conn, &request_cursor, length - 4);
+        return;
+    }
+
+    peek_cursor = request_cursor;
+    evpl_iovec_cursor_get_uint32(&peek_cursor, &smb_hdr);
 
     if (smb_hdr == 0x424d53fe) {
         conn->smbvers = 2;
-        chimera_smb_server_handle_smb2(evpl, thread, conn, iov, niov, length);
+        chimera_smb_server_handle_smb2(evpl, thread, conn, &request_cursor, length - 4);
     } else if (smb_hdr == 0x424d53ff) {
         chimera_smb_server_handle_smb1(evpl, thread, conn, iov, niov, length);
     } else {
@@ -833,7 +1032,7 @@ chimera_smb_server_handle(
         evpl_close(evpl, conn->bind);
         return;
     }
-} /* chimera_smb_server_handle */
+} /* chimera_smb_server_handle_tcp */
 
 static void
 chimera_smb_server_notify(
@@ -844,26 +1043,35 @@ chimera_smb_server_notify(
 {
     struct chimera_smb_conn          *conn   = private_data;
     struct chimera_server_smb_thread *thread = conn->thread;
-    char                              local_addr[128];
-    char                              remote_addr[128];
 
     switch (notify->notify_type) {
         case EVPL_NOTIFY_CONNECTED:
-            evpl_bind_get_local_address(bind, local_addr, sizeof(local_addr));
-            evpl_bind_get_remote_address(bind, remote_addr, sizeof(remote_addr));
-            chimera_smb_info("Established SMB connection from %s to %s", remote_addr, local_addr);
+            chimera_smb_info("Established %s SMB connection from %s to %s",
+                             conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? "RDMA" : "TCP",
+                             conn->remote_addr,
+                             conn->local_addr);
+
             break;
         case EVPL_NOTIFY_DISCONNECTED:
-            evpl_bind_get_local_address(bind, local_addr, sizeof(local_addr));
-            evpl_bind_get_remote_address(bind, remote_addr, sizeof(remote_addr));
-            chimera_smb_info("Disconnected SMB connection from %s to %s", remote_addr, local_addr);
+            chimera_smb_info("Disconnected %s SMB connection from %s to %s, handled %lu requests",
+                             conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? "RDMA" : "TCP",
+                             conn->remote_addr, conn->local_addr, conn->requests_completed);
             chimera_smb_conn_free(thread, conn);
             break;
         case EVPL_NOTIFY_RECV_MSG:
-            chimera_smb_server_handle(evpl, thread, conn,
-                                      notify->recv_msg.iovec,
-                                      notify->recv_msg.niov,
-                                      notify->recv_msg.length);
+            conn->requests_completed++;
+
+            if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
+                chimera_smb_server_handle_rdma(evpl, thread, conn,
+                                               notify->recv_msg.iovec,
+                                               notify->recv_msg.niov,
+                                               notify->recv_msg.length);
+            } else {
+                chimera_smb_server_handle_tcp(evpl, thread, conn,
+                                              notify->recv_msg.iovec,
+                                              notify->recv_msg.niov,
+                                              notify->recv_msg.length);
+            }
             break;
         case EVPL_NOTIFY_SENT:
             break;
@@ -910,13 +1118,19 @@ chimera_smb_server_accept(
 
     conn->thread            = thread;
     conn->bind              = bind;
-    conn->smbvers           = 0;
+    conn->protocol          = evpl_bind_get_protocol(bind);
+    conn->smbvers           = conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? 2 : 0;
     conn->gss_flags         = 0;
     conn->gss_major         = 0;
     conn->gss_minor         = 0;
     conn->gss_output.value  = NULL;
     conn->gss_output.length = 0;
     conn->ctx               = GSS_C_NO_CONTEXT;
+    conn->rdma_niov         = 0;
+    conn->rdma_length       = 0;
+
+    evpl_bind_get_local_address(bind, conn->local_addr, sizeof(conn->local_addr));
+    evpl_bind_get_remote_address(bind, conn->remote_addr, sizeof(conn->remote_addr));
 
     *notify_callback   = chimera_smb_server_notify;
     *segment_callback  = chimera_smb_server_segment;
@@ -938,9 +1152,10 @@ chimera_smb_server_thread_init(
         return NULL;
     }
 
-    thread->vfs_thread = vfs_thread;
-    thread->shared     = shared;
-    thread->evpl       = evpl;
+    thread->vfs_thread  = vfs_thread;
+    thread->shared      = shared;
+    thread->evpl        = evpl;
+    thread->signing_ctx = chimera_smb_signing_ctx_create();
 
     chimera_smb_iconv_init(&thread->iconv_ctx);
 
@@ -996,6 +1211,7 @@ chimera_smb_server_thread_destroy(void *data)
     evpl_listener_detach(thread->evpl, thread->binding);
 
     chimera_smb_iconv_destroy(&thread->iconv_ctx);
+    chimera_smb_signing_ctx_destroy(thread->signing_ctx);
 
     free(thread);
 } /* smb_server_thread_destroy */

@@ -65,9 +65,16 @@ struct chimera_smb_nic_info {
     uint8_t                 rdma;
 };
 
+struct chimera_smb_rdma_element {
+    uint32_t token;
+    uint32_t length;
+    uint64_t offset;
+};
+
 struct chimera_smb_config {
     char                        identity[80];
     int                         port;
+    int                         rdma_port;
     int                         num_dialects;
     int                         num_nic_info;
     uint32_t                    capabilities;
@@ -176,29 +183,40 @@ struct chimera_smb_request {
         } close;
 
         struct {
-            uint64_t                      offset;
-            uint32_t                      length;
-            uint32_t                      channel;
-            uint32_t                      remaining;
-            uint32_t                      flags;
-            uint32_t                      niov;
-            struct chimera_smb_file_id    file_id;
-            struct evpl_iovec             iov[64];
-            struct chimera_smb_open_file *open_file;
+            uint64_t                        offset;
+            uint32_t                        length;
+            uint32_t                        channel;
+            uint32_t                        remaining;
+            uint32_t                        flags;
+            uint32_t                        niov;
+            uint32_t                        num_rdma_elements;
+            uint32_t                        pending_rdma_reads;
+            uint32_t                        r_rdma_status;
+            struct chimera_smb_file_id      file_id;
+            struct chimera_smb_open_file   *open_file;
+            struct chimera_smb_rdma_element rdma_elements[8];
+            struct evpl_iovec               iov[64];
+            struct evpl_iovec               chunk_iov[64];
+
         } write;
 
         struct {
-            uint8_t                       flags;
-            uint32_t                      length;
-            uint32_t                      niov;
-            uint64_t                      offset;
-            uint32_t                      minimum;
-            uint32_t                      channel;
-            uint32_t                      remaining;
-            uint32_t                      r_length;
-            struct chimera_smb_file_id    file_id;
-            struct evpl_iovec             iov[64];
-            struct chimera_smb_open_file *open_file;
+            uint8_t                         flags;
+            uint32_t                        length;
+            uint32_t                        niov;
+            uint64_t                        offset;
+            uint32_t                        minimum;
+            uint32_t                        channel;
+            uint32_t                        remaining;
+            uint32_t                        r_length;
+            uint32_t                        num_rdma_elements;
+            uint32_t                        pending_rdma_writes;
+            uint32_t                        r_rdma_status;
+            struct chimera_smb_file_id      file_id;
+            struct chimera_smb_open_file   *open_file;
+            struct chimera_smb_rdma_element rdma_elements[8];
+            struct evpl_iovec               iov[64];
+            struct evpl_iovec               chunk_iov[64];
         } read;
 
         struct {
@@ -296,16 +314,24 @@ struct chimera_smb_session_handle {
     struct chimera_smb_session_handle *next;
 };
 
+#define CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED      0x01
+#define CHIMERA_SMB_CONN_FLAG_SMB_DIRECT_NEGOTIATED 0x02
+
 struct chimera_smb_conn {
     OM_uint32                          gss_major;
     OM_uint32                          gss_minor;
     OM_uint32                          gss_flags;
     gss_ctx_id_t                       ctx;
     gss_buffer_desc                    gss_output;
-    int                                established;
+    unsigned int                       flags;
+    enum evpl_protocol_id              protocol;
     uint16_t                           dialect;
     uint16_t                           smbvers;
     uint32_t                           capabilities;
+    uint32_t                           requests_completed;
+    int                                rdma_max_send;
+    int                                rdma_niov;
+    int                                rdma_length;
     struct chimera_smb_session_handle *last_session_handle;
     struct chimera_smb_tree           *last_tree;
     struct chimera_smb_session_handle *session_handles;
@@ -313,16 +339,21 @@ struct chimera_smb_conn {
     struct evpl_bind                  *bind;
     struct chimera_smb_conn           *prev;
     struct chimera_smb_conn           *next;
+    struct evpl_iovec                  rdma_iov[256];
+    char                               local_addr[128];
+    char                               remote_addr[128];
 };
 
 struct chimera_server_smb_shared {
     struct chimera_smb_config   config;
+    int                         rdma;
     uint8_t                     guid[SMB2_GUID_SIZE];
     gss_name_t                  svc;
     gss_cred_id_t               srv_cred;
     struct chimera_vfs         *vfs;
     struct prometheus_metrics  *metrics;
     struct evpl_endpoint       *endpoint;
+    struct evpl_endpoint       *endpoint_rdma;
     struct evpl_listener       *listener;
     struct chimera_smb_session *sessions;
     struct chimera_smb_session *free_sessions;
@@ -343,6 +374,7 @@ struct chimera_server_smb_thread {
     struct chimera_smb_conn           *free_conns;
     struct chimera_smb_session_handle *free_session_handles;
     struct chimera_smb_open_file      *free_open_files;
+    struct chimera_smb_signing_ctx    *signing_ctx;
     struct chimera_smb_iconv_ctx       iconv_ctx;
 };
 
@@ -656,6 +688,10 @@ chimera_smb_compound_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_compound      *compound)
 {
+    for (int i = 0; i < compound->num_requests; i++) {
+        chimera_smb_request_free(thread, compound->requests[i]);
+    }
+
     LL_PREPEND(thread->free_compounds, compound);
 } /* chimera_smb_compound_free */
 

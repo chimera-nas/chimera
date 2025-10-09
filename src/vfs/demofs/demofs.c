@@ -1373,7 +1373,7 @@ demofs_open_at(
     if (!dirent) {
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
             pthread_mutex_unlock(&parent_inode->lock);
-            request->status = CHIMERA_VFS_EEXIST;
+            request->status = CHIMERA_VFS_ENOENT;
             request->complete(request);
             return;
         }
