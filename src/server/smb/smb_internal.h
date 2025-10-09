@@ -65,6 +65,12 @@ struct chimera_smb_nic_info {
     uint8_t                 rdma;
 };
 
+struct chimera_smb_rdma_element {
+    uint32_t token;
+    uint32_t length;
+    uint64_t offset;
+};
+
 struct chimera_smb_config {
     char                        identity[80];
     int                         port;
@@ -177,29 +183,40 @@ struct chimera_smb_request {
         } close;
 
         struct {
-            uint64_t                      offset;
-            uint32_t                      length;
-            uint32_t                      channel;
-            uint32_t                      remaining;
-            uint32_t                      flags;
-            uint32_t                      niov;
-            struct chimera_smb_file_id    file_id;
-            struct evpl_iovec             iov[64];
-            struct chimera_smb_open_file *open_file;
+            uint64_t                        offset;
+            uint32_t                        length;
+            uint32_t                        channel;
+            uint32_t                        remaining;
+            uint32_t                        flags;
+            uint32_t                        niov;
+            uint32_t                        num_rdma_elements;
+            uint32_t                        pending_rdma_reads;
+            uint32_t                        r_rdma_status;
+            struct chimera_smb_file_id      file_id;
+            struct chimera_smb_open_file   *open_file;
+            struct chimera_smb_rdma_element rdma_elements[8];
+            struct evpl_iovec               iov[64];
+            struct evpl_iovec               chunk_iov[64];
+
         } write;
 
         struct {
-            uint8_t                       flags;
-            uint32_t                      length;
-            uint32_t                      niov;
-            uint64_t                      offset;
-            uint32_t                      minimum;
-            uint32_t                      channel;
-            uint32_t                      remaining;
-            uint32_t                      r_length;
-            struct chimera_smb_file_id    file_id;
-            struct evpl_iovec             iov[64];
-            struct chimera_smb_open_file *open_file;
+            uint8_t                         flags;
+            uint32_t                        length;
+            uint32_t                        niov;
+            uint64_t                        offset;
+            uint32_t                        minimum;
+            uint32_t                        channel;
+            uint32_t                        remaining;
+            uint32_t                        r_length;
+            uint32_t                        num_rdma_elements;
+            uint32_t                        pending_rdma_writes;
+            uint32_t                        r_rdma_status;
+            struct chimera_smb_file_id      file_id;
+            struct chimera_smb_open_file   *open_file;
+            struct chimera_smb_rdma_element rdma_elements[8];
+            struct evpl_iovec               iov[64];
+            struct evpl_iovec               chunk_iov[64];
         } read;
 
         struct {
@@ -311,6 +328,7 @@ struct chimera_smb_conn {
     uint16_t                           dialect;
     uint16_t                           smbvers;
     uint32_t                           capabilities;
+    uint32_t                           requests_completed;
     int                                rdma_max_send;
     int                                rdma_niov;
     int                                rdma_length;
@@ -670,6 +688,10 @@ chimera_smb_compound_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_compound      *compound)
 {
+    for (int i = 0; i < compound->num_requests; i++) {
+        chimera_smb_request_free(thread, compound->requests[i]);
+    }
+
     LL_PREPEND(thread->free_compounds, compound);
 } /* chimera_smb_compound_free */
 

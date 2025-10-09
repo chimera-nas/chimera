@@ -330,9 +330,6 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
         evpl_iovec_cursor_zero(&reply_cursor, (8 - (evpl_iovec_cursor_consumed(&reply_cursor) & 7)) & 7);
 
-        chimera_smb_request_free(thread, request);
-
-
     }
 
     rc = chimera_smb_sign_compound(thread->signing_ctx, compound, reply_iov, reply_cursor.niov,
@@ -553,10 +550,10 @@ chimera_smb_direct_negotiate(
     reply->credits_requested   = request->credits_requested;
     reply->credits_granted     = request->credits_requested;
     reply->status              = SMB2_STATUS_SUCCESS;
-    reply->max_readwrite_size  = 1048576;
+    reply->max_readwrite_size  = 8 * 1024 * 1024;
     reply->preferred_send_size = 7168;
     reply->max_receive_size    = 8192;
-    reply->max_fragmented_size = 1048576;
+    reply->max_fragmented_size = 1 * 1024 * 1024;
 
     evpl_iovec_set_length(&reply_iov, sizeof(*reply));
 
@@ -1049,15 +1046,21 @@ chimera_smb_server_notify(
 
     switch (notify->notify_type) {
         case EVPL_NOTIFY_CONNECTED:
-            chimera_smb_info("Established %s SMB connection from %s to %s", conn->protocol == EVPL_DATAGRAM_RDMACM_RC ?
-                             "RDMA" : "TCP", conn->remote_addr, conn->local_addr);
+            chimera_smb_info("Established %s SMB connection from %s to %s",
+                             conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? "RDMA" : "TCP",
+                             conn->remote_addr,
+                             conn->local_addr);
 
             break;
         case EVPL_NOTIFY_DISCONNECTED:
-            chimera_smb_info("Disconnected SMB connection from %s to %s", conn->remote_addr, conn->local_addr);
+            chimera_smb_info("Disconnected %s SMB connection from %s to %s, handled %lu requests",
+                             conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? "RDMA" : "TCP",
+                             conn->remote_addr, conn->local_addr, conn->requests_completed);
             chimera_smb_conn_free(thread, conn);
             break;
         case EVPL_NOTIFY_RECV_MSG:
+            conn->requests_completed++;
+
             if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
                 chimera_smb_server_handle_rdma(evpl, thread, conn,
                                                notify->recv_msg.iovec,

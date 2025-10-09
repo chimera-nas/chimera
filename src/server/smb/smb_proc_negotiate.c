@@ -70,9 +70,9 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     request->negotiate.r_dialect           = dialect;
     request->negotiate.r_security_mode     = SMB2_SIGNING_ENABLED;
     request->negotiate.r_capabilities      = conn->capabilities;
-    request->negotiate.r_max_transact_size = 1048576;
-    request->negotiate.r_max_read_size     = 1048576;
-    request->negotiate.r_max_write_size    = 1048576;
+    request->negotiate.r_max_transact_size = 1 * 1024 * 1024;
+    request->negotiate.r_max_read_size     = 8 * 1024 * 1024;
+    request->negotiate.r_max_write_size    = 8 * 1024 * 1024;
     request->negotiate.r_system_time       = chimera_nt_time(&now);
     request->negotiate.r_server_start_time = chimera_nt_time(&boot);
 

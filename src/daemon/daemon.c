@@ -60,6 +60,7 @@ main(
 
     evpl_global_config = evpl_global_config_init();
     evpl_global_config_set_rdmacm_datagram_size_override(evpl_global_config, 8192);
+    evpl_global_config_set_buffer_size(evpl_global_config, 8 * 1024 * 1024);
     evpl_global_config_set_spin_ns(evpl_global_config, 1000000UL);
     evpl_global_config_set_huge_pages(evpl_global_config, 1);
 
