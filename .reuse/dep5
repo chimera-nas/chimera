@@ -1,0 +1,9 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: chimera
+Upstream-Contact: Ben Jarvis
+Source: https://github.com/chimera-nas/chimera
+
+# Documentation files (Jekyll markdown)
+Files: README.md docs/*.md docs/**/*.md
+Copyright: 2025 Ben Jarvis
+License: Unlicense
