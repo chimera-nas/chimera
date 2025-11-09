@@ -331,7 +331,6 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     while (vfs->mounts) {
         mount = vfs->mounts;
         DL_DELETE(vfs->mounts, mount);
-        free(mount->name);
         free(mount->path);
         free(mount);
     }
@@ -545,82 +544,6 @@ chimera_vfs_register(
     }
 
 } /* chimera_vfs_register */
-
-SYMBOL_EXPORT int
-chimera_vfs_mount(
-    struct chimera_vfs *vfs,
-    const char         *mount_path,
-    const char         *module_name,
-    const char         *module_path)
-{
-    struct chimera_vfs_mount  *mount;
-    struct chimera_vfs_module *module;
-    int                        i;
-
-    while (mount_path[0] == '/') {
-        mount_path++;
-    }
-
-    for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
-        module = vfs->modules[i];
-
-        if (!module) {
-            continue;
-        }
-
-        if (strcmp(module->name, module_name) == 0) {
-            break;
-        }
-    }
-
-    if (i == CHIMERA_VFS_FH_MAGIC_MAX) {
-        chimera_vfs_error("chimera_vfs_mount: module %s not found",
-                          module_name);
-        return -1;
-    }
-
-    mount = calloc(1, sizeof(*mount));
-
-    mount->module  = module;
-    mount->name    = strdup(mount_path);
-    mount->path    = strdup(module_path);
-    mount->pathlen = strlen(module_path);
-
-    pthread_rwlock_wrlock(&vfs->mounts_lock);
-    DL_APPEND(vfs->mounts, mount);
-    pthread_rwlock_unlock(&vfs->mounts_lock);
-
-    return 0;
-} /* chimera_vfs_mount */
-
-SYMBOL_EXPORT int
-chimera_vfs_umount(
-    struct chimera_vfs *vfs,
-    const char         *mount_path)
-{
-    struct chimera_vfs_mount *mount, *tmp;
-
-    pthread_rwlock_wrlock(&vfs->mounts_lock);
-    DL_FOREACH_SAFE(vfs->mounts, mount, tmp)
-    {
-        if (strcmp(mount->name, mount_path) == 0) {
-            DL_DELETE(vfs->mounts, mount);
-            break;
-        }
-    }
-    pthread_rwlock_unlock(&vfs->mounts_lock);
-
-    if (!mount) {
-        return CHIMERA_VFS_ENOENT;
-    }
-
-    free(mount->name);
-    free(mount->path);
-    free(mount);
-
-    return CHIMERA_VFS_OK;
-
-} /* chimera_vfs_umount */
 
 SYMBOL_EXPORT void
 chimera_vfs_thread_drain(struct chimera_vfs_thread *thread)

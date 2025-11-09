@@ -961,7 +961,7 @@ demofs_setattr(
 } /* demofs_setattr */
 
 static void
-demofs_getrootfh(
+demofs_mount(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request,
@@ -977,13 +977,25 @@ demofs_getrootfh(
         return;
     }
 
-    demofs_map_attrs(thread, &request->getrootfh.r_attr, inode);
+    demofs_map_attrs(thread, &request->mount.r_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* demofs_getrootfh */
+} /* demofs_mount */
+
+static void
+demofs_umount(
+    struct demofs_thread       *thread,
+    struct demofs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    /* No action required */
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* demofs_umount */
 
 static void
 demofs_lookup(
@@ -2305,8 +2317,11 @@ demofs_dispatch(
     }
 
     switch (request->opcode) {
-        case CHIMERA_VFS_OP_GETROOTFH:
-            demofs_getrootfh(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_MOUNT:
+            demofs_mount(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_UMOUNT:
+            demofs_umount(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             demofs_lookup(thread, shared, request, private_data);
@@ -2372,7 +2387,7 @@ demofs_dispatch(
 SYMBOL_EXPORT struct chimera_vfs_module vfs_demofs = {
     .name           = "demofs",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_DEMOFS,
-    .capabilities   = CHIMERA_VFS_CAP_HANDLE_ALL | CHIMERA_VFS_CAP_CREATE_UNLINKED,
+    .capabilities   = CHIMERA_VFS_CAP_CREATE_UNLINKED,
     .init           = demofs_init,
     .destroy        = demofs_destroy,
     .thread_init    = demofs_thread_init,

@@ -139,17 +139,17 @@ nfs_server_init(
 
     programs[0] = &shared->mount_v3.rpc2;
 
-    shared->mount_server = evpl_rpc2_init(programs, 1);
+    shared->mount_server = evpl_rpc2_server_init(programs, 1);
 
     programs[0] = &shared->portmap_v2.rpc2;
 
-    shared->portmap_server = evpl_rpc2_init(programs, 1);
+    shared->portmap_server = evpl_rpc2_server_init(programs, 1);
 
     programs[0] = &shared->nfs_v3.rpc2;
     programs[1] = &shared->nfs_v4.rpc2;
     programs[2] = &shared->nfs_v4_cb.rpc2;
 
-    shared->nfs_server = evpl_rpc2_init(programs, 3);
+    shared->nfs_server = evpl_rpc2_server_init(programs, 3);
 
     return shared;
 } /* nfs_server_init */
@@ -159,15 +159,15 @@ nfs_server_start(void *arg)
 {
     struct chimera_server_nfs_shared *shared = arg;
 
-    evpl_rpc2_start(shared->nfs_server, EVPL_STREAM_SOCKET_TCP, shared->nfs_endpoint);
+    evpl_rpc2_server_start(shared->nfs_server, EVPL_STREAM_SOCKET_TCP, shared->nfs_endpoint);
 
     if (shared->nfs_rdma_endpoint) {
-        evpl_rpc2_start(shared->nfs_server, EVPL_DATAGRAM_RDMACM_RC, shared->nfs_rdma_endpoint);
+        evpl_rpc2_server_start(shared->nfs_server, EVPL_DATAGRAM_RDMACM_RC, shared->nfs_rdma_endpoint);
     }
 
-    evpl_rpc2_start(shared->mount_server, EVPL_STREAM_SOCKET_TCP, shared->mount_endpoint);
+    evpl_rpc2_server_start(shared->mount_server, EVPL_STREAM_SOCKET_TCP, shared->mount_endpoint);
 
-    evpl_rpc2_start(shared->portmap_server, EVPL_STREAM_SOCKET_TCP, shared->portmap_endpoint);
+    evpl_rpc2_server_start(shared->portmap_server, EVPL_STREAM_SOCKET_TCP, shared->portmap_endpoint);
 
 } /* nfs_server_start */
 
@@ -176,9 +176,9 @@ nfs_server_stop(void *arg)
 {
     struct chimera_server_nfs_shared *shared = arg;
 
-    evpl_rpc2_stop(shared->mount_server);
-    evpl_rpc2_stop(shared->portmap_server);
-    evpl_rpc2_stop(shared->nfs_server);
+    evpl_rpc2_server_stop(shared->mount_server);
+    evpl_rpc2_server_stop(shared->portmap_server);
+    evpl_rpc2_server_stop(shared->nfs_server);
 
 } /* nfs_server_stop */
 
@@ -194,9 +194,9 @@ nfs_server_destroy(void *data)
         prometheus_histogram_destroy(shared->metrics, shared->op_histogram);
     }
 
-    evpl_rpc2_destroy(shared->mount_server);
-    evpl_rpc2_destroy(shared->portmap_server);
-    evpl_rpc2_destroy(shared->nfs_server);
+    evpl_rpc2_server_destroy(shared->mount_server);
+    evpl_rpc2_server_destroy(shared->portmap_server);
+    evpl_rpc2_server_destroy(shared->nfs_server);
 
     free(shared->portmap_v2.rpc2.metrics);
     free(shared->mount_v3.rpc2.metrics);
@@ -224,9 +224,11 @@ nfs_server_thread_init(
     thread->vfs        = shared->vfs;
     thread->vfs_thread = vfs_thread;
 
-    thread->mount_server_thread   = evpl_rpc2_attach(evpl, shared->mount_server, thread);
-    thread->portmap_server_thread = evpl_rpc2_attach(evpl, shared->portmap_server, thread);
-    thread->nfs_server_thread     = evpl_rpc2_attach(evpl, shared->nfs_server, thread);
+    thread->rpc2_thread = evpl_rpc2_thread_init(evpl, NULL, 0);
+
+    evpl_rpc2_server_attach(thread->rpc2_thread, shared->mount_server, thread);
+    evpl_rpc2_server_attach(thread->rpc2_thread, shared->portmap_server, thread);
+    evpl_rpc2_server_attach(thread->rpc2_thread, shared->nfs_server, thread);
 
     return thread;
 } /* nfs_server_thread_init */
@@ -237,9 +239,11 @@ nfs_server_thread_destroy(void *data)
     struct chimera_server_nfs_thread *thread = data;
     struct nfs_request               *req;
 
-    evpl_rpc2_detach(thread->nfs_server_thread);
-    evpl_rpc2_detach(thread->mount_server_thread);
-    evpl_rpc2_detach(thread->portmap_server_thread);
+    evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->mount_server);
+    evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->portmap_server);
+    evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->nfs_server);
+
+    evpl_rpc2_thread_destroy(thread->rpc2_thread);
 
     while (thread->free_requests) {
         req = thread->free_requests;

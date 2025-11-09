@@ -202,6 +202,7 @@ fio_chimera_atexit(void)
     pthread_mutex_lock(&ChimeraClientMutex);
 
     if (ChimeraNumClients == 0) {
+
         chimera_destroy(ChimeraClient);
         prometheus_metrics_destroy(ChimeraMetrics);
     }
@@ -209,14 +210,38 @@ fio_chimera_atexit(void)
     pthread_mutex_unlock(&ChimeraClientMutex);
 } /* fio_chimera_atexit */
 
+struct mount_ctx {
+    int status;
+    int complete;
+    int total;
+};
+
+static void
+mount_callback(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data)
+{
+    struct mount_ctx *ctx = private_data;
+
+    if (status) {
+        ctx->status = status;
+    }
+    ctx->complete++;
+} /* mount_callback */
+
 static int
 fio_chimera_init(struct thread_data *td)
 {
-    struct chimera_fio_thread *chimera_thread;
-    int                        rc, i;
-    json_t                    *config = NULL, *mounts, *mount;
-    json_t                    *modules, *module, *module_name, *mount_point, *module_path, *config_path;
-    struct chimera_options    *o = td->eo;
+    struct chimera_fio_thread    *chimera_thread;
+    int                           i;
+    json_t                       *config = NULL, *mounts, *mount;
+    json_t                       *modules, *module, *module_name, *mount_point, *module_path, *config_path;
+    struct chimera_options       *o         = td->eo;
+    struct mount_ctx              mount_ctx = { 0 };
+    struct evpl                  *evpl;
+    struct chimera_client_thread *client_thread;
+
 
     pthread_mutex_lock(&ChimeraClientMutex);
 
@@ -270,6 +295,9 @@ fio_chimera_init(struct thread_data *td)
 
         ChimeraClient = chimera_client_init(ChimeraClientConfig, ChimeraMetrics);
 
+        evpl          = evpl_create(NULL);
+        client_thread = chimera_client_thread_init(evpl, ChimeraClient);
+
         if (config) {
 
             mounts = json_object_get(config, "mounts");
@@ -290,17 +318,26 @@ fio_chimera_init(struct thread_data *td)
                     fprintf(stderr, "Mounting %s:%s at %s\n", json_string_value(module),
                             json_string_value(module_path), json_string_value(mount_point));
 
-                    rc = chimera_mount(ChimeraClient,
-                                       json_string_value(mount_point),
-                                       json_string_value(module),
-                                       json_string_value(module_path));
+                    chimera_mount(client_thread,
+                                  json_string_value(mount_point),
+                                  json_string_value(module),
+                                  json_string_value(module_path),
+                                  mount_callback,
+                                  &mount_ctx);
+                }
 
-                    if (rc != 0) {
-                        fprintf(stderr, "Failed to mount test module\n");
-                        return 1;
-                    }
+                while (mount_ctx.complete < mount_ctx.total) {
+                    evpl_continue(evpl);
+                }
+
+                if (mount_ctx.status != 0) {
+                    fprintf(stderr, "Failed to mount test module\n");
+                    return 1;
                 }
             }
+
+            chimera_client_thread_shutdown(evpl, client_thread);
+            evpl_destroy(evpl);
 
             json_decref(config);
 

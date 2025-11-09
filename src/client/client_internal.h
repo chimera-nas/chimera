@@ -32,6 +32,8 @@ struct chimera_client_fh {
 };
 
 enum chimera_client_request_opcode {
+    CHIMERA_CLIENT_OP_MOUNT,
+    CHIMERA_CLIENT_OP_UMOUNT,
     CHIMERA_CLIENT_OP_OPEN,
     CHIMERA_CLIENT_OP_MKDIR,
     CHIMERA_CLIENT_OP_READ,
@@ -45,6 +47,16 @@ struct chimera_client_request {
     struct chimera_client_request     *next;
 
     union {
+        struct {
+            chimera_mount_callback_t callback;
+            void                    *private_data;
+        } mount;
+
+        struct {
+            chimera_umount_callback_t callback;
+            void                     *private_data;
+        } umount;
+
         struct {
             struct chimera_vfs_open_handle *parent_handle;
             chimera_open_callback_t         callback;

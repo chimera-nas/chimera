@@ -607,19 +607,16 @@ chimera_io_uring_setattr(
 } /* io_uring_setattr */
 
 static void
-chimera_io_uring_getrootfh(
+chimera_io_uring_mount(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_io_uring_thread *thread = private_data;
-    int                             mount_fd, rc;
-    char                           *scratch = (char *) request->plugin_data;
-
-    --thread->inflight;
+    int   mount_fd, rc;
+    char *scratch = (char *) request->plugin_data;
 
     TERM_STR(fullpath,
-             request->getrootfh.path,
-             request->getrootfh.pathlen,
+             request->mount.path,
+             request->mount.pathlen,
              scratch);
 
     mount_fd = open(fullpath, O_DIRECTORY | O_RDONLY | O_NOFOLLOW);
@@ -633,8 +630,8 @@ chimera_io_uring_getrootfh(
     rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
                       mount_fd,
                       fullpath,
-                      request->getrootfh.r_attr.va_fh,
-                      &request->getrootfh.r_attr.va_fh_len);
+                      request->mount.r_attr.va_fh,
+                      &request->mount.r_attr.va_fh_len);
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
@@ -643,10 +640,10 @@ chimera_io_uring_getrootfh(
         return;
     }
 
-    request->getrootfh.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
+    request->mount.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
-                            &request->getrootfh.r_attr,
+                            &request->mount.r_attr,
                             mount_fd);
 
     close(mount_fd);
@@ -655,6 +652,16 @@ chimera_io_uring_getrootfh(
 
     request->complete(request);
 } /* chimera_io_uring_getrootfh */
+
+static void
+chimera_io_uring_umount(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    /* No action required */
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_io_uring_umount */
 
 static void
 chimera_io_uring_lookup(
@@ -1221,8 +1228,11 @@ chimera_io_uring_dispatch(
     thread->inflight++;
 
     switch (request->opcode) {
-        case CHIMERA_VFS_OP_GETROOTFH:
-            chimera_io_uring_getrootfh(request, private_data);
+        case CHIMERA_VFS_OP_MOUNT:
+            chimera_io_uring_mount(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_UMOUNT:
+            chimera_io_uring_umount(request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             chimera_io_uring_lookup(request, private_data);

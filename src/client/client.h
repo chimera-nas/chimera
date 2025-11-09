@@ -40,17 +40,32 @@ chimera_client_thread_shutdown(
     struct evpl                  *evpl,
     struct chimera_client_thread *thread);
 
-int
-chimera_mount(
-    struct chimera_client *client,
-    const char            *mount_path,
-    const char            *module_name,
-    const char            *module_path);
+typedef void (*chimera_mount_callback_t)(
+    struct chimera_client_thread *thread,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
 
-int
+
+void
+chimera_mount(
+    struct chimera_client_thread *client,
+    const char                   *mount_path,
+    const char                   *module_name,
+    const char                   *module_path,
+    chimera_mount_callback_t      callback,
+    void                         *private_data);
+
+typedef void (*chimera_umount_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+void
 chimera_umount(
-    struct chimera_client *client,
-    const char            *mount_path);
+    struct chimera_client_thread *thread,
+    const char                   *mount_path,
+    chimera_umount_callback_t     callback,
+    void                         *private_data);
 
 
 void

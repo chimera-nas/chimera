@@ -31,18 +31,27 @@ chimera_client_config_init(void)
     config->modules[0].config_path[0] = '\0';
     config->modules[0].module_path[0] = '\0';
 
-    strncpy(config->modules[1].module_name, "memfs", sizeof(config->modules[1].module_name));
+    strncpy(config->modules[1].module_name, "nfs", sizeof(config->modules[1].module_name));
     config->modules[1].config_path[0] = '\0';
     config->modules[1].module_path[0] = '\0';
 
-    strncpy(config->modules[2].module_name, "linux", sizeof(config->modules[2].module_name));
+    strncpy(config->modules[2].module_name, "memfs", sizeof(config->modules[2].module_name));
     config->modules[2].config_path[0] = '\0';
     config->modules[2].module_path[0] = '\0';
 
-    strncpy(config->modules[3].module_name, "io_uring", sizeof(config->modules[3].module_name));
+    strncpy(config->modules[3].module_name, "linux", sizeof(config->modules[3].module_name));
     config->modules[3].config_path[0] = '\0';
     config->modules[3].module_path[0] = '\0';
-    config->num_modules               = 4;
+
+    config->num_modules = 3;
+
+#ifdef HAVE_IO_URING
+    strncpy(config->modules[4].module_name, "io_uring", sizeof(config->modules[4].module_name));
+    config->modules[4].config_path[0] = '\0';
+    config->modules[4].module_path[0] = '\0';
+
+    config->num_modules = 4;
+#endif /* ifdef HAVE_IO_URING */
 
     return config;
 } /* chimera_server_config_init */
@@ -142,23 +151,6 @@ chimera_destroy(struct chimera_client *client)
     free(client);
 } /* chimera_client_destroy */
 
-SYMBOL_EXPORT int
-chimera_mount(
-    struct chimera_client *client,
-    const char            *mount_path,
-    const char            *module_name,
-    const char            *module_path)
-{
-    return chimera_vfs_mount(client->vfs, mount_path, module_name, module_path);
-} /* chimera_client_mount */
-
-SYMBOL_EXPORT int
-chimera_umount(
-    struct chimera_client *client,
-    const char            *mount_path)
-{
-    return chimera_vfs_umount(client->vfs, mount_path);
-} /* chimera_umount */
 
 SYMBOL_EXPORT void
 chimera_drain(struct chimera_client_thread *thread)

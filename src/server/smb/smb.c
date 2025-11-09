@@ -1072,6 +1072,10 @@ chimera_smb_server_notify(
                                               notify->recv_msg.niov,
                                               notify->recv_msg.length);
             }
+
+            for (int i = 0; i < notify->recv_msg.niov; i++) {
+                evpl_iovec_release(&notify->recv_msg.iovec[i]);
+            }
             break;
         case EVPL_NOTIFY_SENT:
             break;

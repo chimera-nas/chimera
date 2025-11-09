@@ -9,20 +9,31 @@
 struct evpl_iovec;
 
 
-typedef void (*chimera_vfs_getrootfh_callback_t)(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data);
+typedef void (*chimera_vfs_mount_callback_t)(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data);
 
 void
-chimera_vfs_getrootfh(
-    struct chimera_vfs_thread       *thread,
-    struct chimera_vfs_module       *module,
-    const char                      *path,
-    uint32_t                         pathlen,
-    uint64_t                         req_attr_mask,
-    chimera_vfs_getrootfh_callback_t callback,
-    void                            *private_data);
+chimera_vfs_mount(
+    struct chimera_vfs_thread   *thread,
+    const char                  *mount_path,
+    const char                  *module_name,
+    const char                  *module_path,
+    chimera_vfs_mount_callback_t callback,
+    void                        *private_data);
+
+typedef void (*chimera_vfs_umount_callback_t)(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data);
+
+void
+chimera_vfs_umount(
+    struct chimera_vfs_thread    *thread,
+    const char                   *mount_path,
+    chimera_vfs_umount_callback_t callback,
+    void                         *private_data);
 
 typedef void (*chimera_vfs_lookup_callback_t)(
     enum chimera_vfs_error    error_code,

@@ -18,7 +18,8 @@ const char *
 chimera_vfs_op_name(unsigned int opcode)
 {
     switch (opcode) {
-        case CHIMERA_VFS_OP_GETROOTFH: return "GetRootFH";
+        case CHIMERA_VFS_OP_MOUNT: return "Mount";
+        case CHIMERA_VFS_OP_UMOUNT: return "Umount";
         case CHIMERA_VFS_OP_LOOKUP: return "Lookup";
         case CHIMERA_VFS_OP_GETATTR: return "GetAttr";
         case CHIMERA_VFS_OP_READDIR: return "ReadDir";
@@ -48,15 +49,26 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
     char fhstr[80], fhstr2[80];
 
     switch (req->opcode) {
-        case CHIMERA_VFS_OP_GETROOTFH:
-            chimera_snprintf(argstr, sizeof(argstr), "attrmask %lx",
-                             req->getrootfh.r_attr.va_req_mask);
+        case CHIMERA_VFS_OP_MOUNT:
+            chimera_snprintf(argstr, sizeof(argstr), "path %s:%s@%s attrmask %lx",
+                             req->mount.module->name,
+                             req->mount.path,
+                             req->mount.mount_path,
+                             req->mount.r_attr.va_req_mask);
+            break;
+        case CHIMERA_VFS_OP_UMOUNT:
+            chimera_snprintf(argstr, sizeof(argstr), "path %s",
+                             req->umount.mount->path);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             chimera_snprintf(argstr, sizeof(argstr), "name %.*s attrmask %lx dir_attr_mask %lx",
                              req->lookup.component_len, req->lookup.component,
                              req->lookup.r_attr.va_req_mask,
                              req->lookup.r_dir_attr.va_req_mask);
+            break;
+        case CHIMERA_VFS_OP_GETATTR:
+            chimera_snprintf(argstr, sizeof(argstr), "attrmask %lx",
+                             req->getattr.r_attr.va_req_mask);
             break;
         case CHIMERA_VFS_OP_SETATTR:
             chimera_snprintf(argstr, sizeof(argstr), "attrmask %lx",
@@ -157,8 +169,8 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
     argstr[0] = '\0';
 
     switch (req->opcode) {
-        case CHIMERA_VFS_OP_GETROOTFH:
-            format_hex(fhstr, sizeof(fhstr), req->getrootfh.r_attr.va_fh, req->getrootfh.r_attr.va_fh_len);
+        case CHIMERA_VFS_OP_MOUNT:
+            format_hex(fhstr, sizeof(fhstr), req->mount.r_attr.va_fh, req->mount.r_attr.va_fh_len);
             if (req->status == CHIMERA_VFS_OK) {
                 chimera_snprintf(argstr, sizeof(argstr), "r_fh %s", fhstr);
             }
@@ -171,6 +183,12 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
                                  req->lookup.component,
                                  fhstr);
             }
+            break;
+        case CHIMERA_VFS_OP_GETATTR:
+            if (req->status == CHIMERA_VFS_OK) {
+                chimera_snprintf(argstr, sizeof(argstr), "r_attr %lx", req->getattr.r_attr.va_set_mask);
+            }
+
             break;
         case CHIMERA_VFS_OP_OPEN_AT:
             format_hex(fhstr, sizeof(fhstr), req->open_at.r_attr.va_fh, req->open_at.r_attr.va_fh_len);

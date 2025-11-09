@@ -27,8 +27,39 @@ chimera_open_complete(
 {
     struct chimera_vfs_open_handle **handle = private_data;
 
+    fprintf(stderr, "open complete: status %d, handle %p\n", status, oh);
+
     *handle = oh;
 } /* chimera_client_open_complete */
+
+struct mount_ctx {
+    int done;
+    int status;
+};
+
+static void
+mount_callback(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data)
+{
+    struct mount_ctx *ctx = private_data;
+
+    ctx->status = status;
+    ctx->done   = 1;
+} /* mount_callback */
+
+static void
+unmount_callback(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data)
+{
+    struct mount_ctx *ctx = private_data;
+
+    ctx->status = status;
+    ctx->done   = 1;
+} /* unmount_callback */
 
 int
 main(
@@ -38,11 +69,11 @@ main(
     struct chimera_client          *client;
     struct chimera_client_config   *config;
     struct chimera_client_thread   *thread;
-    int                             rc;
     struct evpl                    *evpl;
     struct chimera_vfs_open_handle *dir_handle = NULL, *file_handle = NULL;
     int                             complete;
     struct prometheus_metrics      *metrics;
+    struct mount_ctx                mount_ctx = { 0 };
 
     chimera_log_init();
 
@@ -56,14 +87,24 @@ main(
 
     client = chimera_client_init(config, metrics);
 
-    rc = chimera_mount(client, "memfs", "memfs", "/");
+    thread = chimera_client_thread_init(evpl, client);
 
-    if (rc != 0) {
+    chimera_mount(
+        thread,
+        "/memfs",
+        "memfs",
+        "/",
+        mount_callback,
+        &mount_ctx);
+
+    while (!mount_ctx.done) {
+        evpl_continue(evpl);
+    }
+
+    if (mount_ctx.status != 0) {
         fprintf(stderr, "Failed to mount test module\n");
         return 1;
     }
-
-    thread = chimera_client_thread_init(evpl, client);
 
     dir_handle = NULL;
 
@@ -104,10 +145,31 @@ main(
 
     chimera_close(thread, file_handle);
 
-    rc = chimera_mount(client, "newshare", "memfs", "/test");
+    memset(&mount_ctx, 0, sizeof(mount_ctx));
 
-    if (rc != 0) {
-        fprintf(stderr, "Failed to mount test module\n");
+    chimera_umount(thread, "/memfs", unmount_callback, &mount_ctx);
+
+    while (!mount_ctx.done) {
+        evpl_continue(evpl);
+    }
+
+    if (mount_ctx.status != 0) {
+        fprintf(stderr, "Failed to unmount /memfs\n");
+        return 1;
+    }
+
+    fprintf(stderr, "Unmounted /\n");
+
+    memset(&mount_ctx, 0, sizeof(mount_ctx));
+
+    chimera_mount(thread, "/newshare", "memfs", "/test", mount_callback, &mount_ctx);
+
+    while (!mount_ctx.done) {
+        evpl_continue(evpl);
+    }
+
+    if (mount_ctx.status != 0) {
+        fprintf(stderr, "Failed to mount /newshare module\n");
         return 1;
     }
 
@@ -121,6 +183,19 @@ main(
     }
 
     chimera_close(thread, file_handle);
+
+    memset(&mount_ctx, 0, sizeof(mount_ctx));
+
+    chimera_umount(thread, "/newshare", unmount_callback, &mount_ctx);
+
+    while (!mount_ctx.done) {
+        evpl_continue(evpl);
+    }
+
+    if (mount_ctx.status != 0) {
+        fprintf(stderr, "Failed to unmount /newshare\n");
+        return 1;
+    }
 
     chimera_client_thread_shutdown(evpl, thread);
 

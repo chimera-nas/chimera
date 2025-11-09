@@ -887,7 +887,7 @@ cairn_setattr(
 } /* cairn_setattr */
 
 static void
-cairn_getrootfh(
+cairn_mount(
     struct cairn_thread        *thread,
     struct cairn_shared        *shared,
     struct chimera_vfs_request *request,
@@ -910,14 +910,26 @@ cairn_getrootfh(
 
     inode = ih.inode;
 
-    cairn_map_attrs(&request->getrootfh.r_attr, inode);
+    cairn_map_attrs(&request->mount.r_attr, inode);
 
     cairn_inode_handle_release(&ih);
 
     request->status = CHIMERA_VFS_OK;
 
     DL_APPEND(thread->txn_requests, request);
-} /* cairn_getrootfh */
+} /* cairn_mount */
+
+static void
+cairn_umount(
+    struct cairn_thread        *thread,
+    struct cairn_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    /* No action required */
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* cairn_umount */
 
 static void
 cairn_lookup(
@@ -2301,8 +2313,11 @@ cairn_dispatch(
     struct cairn_shared *shared = thread->shared;
 
     switch (request->opcode) {
-        case CHIMERA_VFS_OP_GETROOTFH:
-            cairn_getrootfh(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_MOUNT:
+            cairn_mount(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_UMOUNT:
+            cairn_umount(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             cairn_lookup(thread, shared, request, private_data);
@@ -2365,7 +2380,7 @@ cairn_dispatch(
 SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
     .name           = "cairn",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_CAIRN,
-    .capabilities   = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_HANDLE_ALL,
+    .capabilities   = CHIMERA_VFS_CAP_BLOCKING,
     .init           = cairn_init,
     .destroy        = cairn_destroy,
     .thread_init    = cairn_thread_init,
