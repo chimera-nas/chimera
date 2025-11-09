@@ -824,6 +824,11 @@ memfs_lookup_path(
 
         pthread_mutex_unlock(&parent->lock);
 
+        if (!S_ISDIR(inode->mode)) {
+            pthread_mutex_unlock(&inode->lock);
+            return NULL;
+        }
+
     }
 
     return inode;

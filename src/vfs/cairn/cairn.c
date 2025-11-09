@@ -18,6 +18,7 @@
 #include "common/varint.h"
 
 #include "vfs/vfs.h"
+#include "vfs/vfs_internal.h"
 #include "cairn.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -886,6 +887,97 @@ cairn_setattr(
     DL_APPEND(thread->txn_requests, request);
 } /* cairn_setattr */
 
+static inline int
+cairn_lookup_path(
+    struct cairn_thread       *thread,
+    struct cairn_shared       *shared,
+    rocksdb_transaction_t     *txn,
+    const char                *path,
+    int                        pathlen,
+    struct cairn_inode_handle *ih)
+{
+    struct cairn_inode_handle  parent_ih;
+    struct cairn_inode        *inode;
+    struct cairn_dirent_key    dirent_key;
+    struct cairn_dirent_value *dirent_value;
+    struct cairn_dirent_handle dh;
+    const char                *name;
+    const char                *pathc = path;
+    const char                *slash;
+    int                        namelen;
+    uint64_t                   hash;
+    int                        rc;
+
+    rc = cairn_inode_get_fh(thread, txn, shared->root_fh, shared->root_fhlen, 0, &parent_ih);
+
+    if (unlikely(rc)) {
+        return -1;
+    }
+
+    inode = parent_ih.inode;
+
+    while (*pathc == '/') {
+        pathc++;
+    }
+
+    while (pathc < (path + pathlen)) {
+
+        slash = strchr(pathc, '/');
+
+        if (slash) {
+            name    = pathc;
+            namelen = slash - pathc;
+        } else {
+            name    = pathc;
+            namelen = pathlen - (pathc - path);
+        }
+
+        pathc += namelen;
+
+        while (*pathc == '/') {
+            pathc++;
+        }
+
+        if (!S_ISDIR(inode->mode)) {
+            cairn_inode_handle_release(&parent_ih);
+            return -1;
+        }
+
+        hash = chimera_vfs_hash(name, namelen);
+
+        dirent_key.keytype = CAIRN_KEY_DIRENT;
+        dirent_key.inum    = inode->inum;
+        dirent_key.hash    = hash;
+
+        rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
+
+        if (rc) {
+            cairn_inode_handle_release(&parent_ih);
+            return -1;
+        }
+
+        dirent_value = dh.dirent;
+
+        cairn_inode_handle_release(&parent_ih);
+
+        rc = cairn_inode_get_inum(thread, txn, dirent_value->inum, 0, &parent_ih);
+
+        cairn_dirent_handle_release(&dh);
+
+        if (rc) {
+            return -1;
+        }
+
+        inode = parent_ih.inode;
+
+    }
+
+    *ih = parent_ih;
+
+    return 0;
+
+} /* cairn_lookup_path */
+
 static void
 cairn_mount(
     struct cairn_thread        *thread,
@@ -900,7 +992,7 @@ cairn_mount(
 
     txn = cairn_get_transaction(thread);
 
-    rc = cairn_inode_get_fh(thread, txn, shared->root_fh, shared->root_fhlen, 0, &ih);
+    rc = cairn_lookup_path(thread, shared, txn, request->mount.path, request->mount.pathlen, &ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;

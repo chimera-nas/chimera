@@ -25,6 +25,7 @@
 #include "evpl/evpl.h"
 
 #include "vfs/vfs.h"
+#include "vfs/vfs_internal.h"
 #include "demofs.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -960,6 +961,75 @@ demofs_setattr(
     request->complete(request);
 } /* demofs_setattr */
 
+static inline struct demofs_inode *
+demofs_lookup_path(
+    struct demofs_thread *thread,
+    struct demofs_shared *shared,
+    const char           *path,
+    int                   pathlen)
+{
+    struct demofs_inode  *parent, *inode;
+    struct demofs_dirent *dirent;
+    const char           *name;
+    const char           *pathc = path;
+    const char           *slash;
+    int                   namelen;
+    uint64_t              hash;
+
+    inode = demofs_inode_get_fh(shared, shared->root_fh, shared->root_fhlen);
+
+    if (unlikely(!inode)) {
+        return NULL;
+    }
+
+    while (*pathc == '/') {
+        pathc++;
+    }
+
+    while (pathc < (path + pathlen)) {
+
+        slash = strchr(pathc, '/');
+
+        if (slash) {
+            name    = pathc;
+            namelen = slash - pathc;
+        } else {
+            name    = pathc;
+            namelen = pathlen - (pathc - path);
+        }
+
+        pathc += namelen;
+
+        while (*pathc == '/') {
+            pathc++;
+        }
+
+        hash = chimera_vfs_hash(name, namelen);
+
+        rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
+
+        if (!dirent) {
+            pthread_mutex_unlock(&inode->lock);
+            return NULL;
+        }
+
+        parent = inode;
+
+        inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
+
+        pthread_mutex_unlock(&parent->lock);
+
+        if (!S_ISDIR(inode->mode)) {
+            pthread_mutex_unlock(&inode->lock);
+            return NULL;
+        }
+
+    }
+
+    return inode;
+
+} /* demofs_lookup_path */
+
 static void
 demofs_mount(
     struct demofs_thread       *thread,
@@ -969,7 +1039,7 @@ demofs_mount(
 {
     struct demofs_inode *inode;
 
-    inode = demofs_inode_get_fh(shared, shared->root_fh, shared->root_fhlen);
+    inode = demofs_lookup_path(thread, shared, request->mount.path, request->mount.pathlen);
 
     if (unlikely(!inode)) {
         request->status = CHIMERA_VFS_ENOENT;
