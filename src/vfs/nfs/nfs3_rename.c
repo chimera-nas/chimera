@@ -30,7 +30,7 @@ chimera_nfs3_rename_callback(
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 
-} /* nfs3_rename_callback */
+} /* chimera_nfs3_rename_callback */
 
 void
 chimera_nfs3_rename(

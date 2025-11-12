@@ -34,7 +34,7 @@ chimera_nfs3_setattr_callback(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* nfs3_setattr_callback */
+} /* chimera_nfs3_setattr_callback */
 
 void
 chimera_nfs3_setattr(

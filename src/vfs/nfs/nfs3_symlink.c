@@ -48,7 +48,7 @@ chimera_nfs3_symlink_callback(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* nfs3_symlink_callback */
+} /* chimera_nfs3_symlink_callback */
 
 
 void

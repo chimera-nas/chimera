@@ -38,7 +38,7 @@ chimera_nfs3_remove_callback(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* nfs3_remove_callback */
+} /* chimera_nfs3_remove_callback */
 
 void
 chimera_nfs3_remove(

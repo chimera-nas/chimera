@@ -40,7 +40,7 @@ chimera_nfs3_commit_callback(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* nfs3_close_callback */
+} /* chimera_nfs3_close_callback */
 
 void
 chimera_nfs3_close(

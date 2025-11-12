@@ -38,7 +38,7 @@ chimera_nfs3_readlink_callback(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* nfs3_readlink_callback */
+} /* chimera_nfs3_readlink_callback */
 void
 chimera_nfs3_readlink(
     struct chimera_nfs_thread          *thread,

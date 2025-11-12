@@ -83,7 +83,7 @@ chimera_nfs3_readdir_callback(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* nfs3_readdir_callback */
+} /* chimera_nfs3_readdir_callback */
 
 void
 chimera_nfs3_readdir(

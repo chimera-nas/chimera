@@ -42,7 +42,7 @@ chimera_nfs3_link_callback(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* nfs3_link_callback */
+} /* chimera_nfs3_link_callback */
 
 void
 chimera_nfs3_link(
