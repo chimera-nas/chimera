@@ -138,6 +138,112 @@ chimera_close(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *oh);
 
+typedef void (*chimera_symlink_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+void
+chimera_symlink(
+    struct chimera_client_thread *thread,
+    const char                   *path,
+    int                           path_len,
+    const char                   *target,
+    int                           target_len,
+    chimera_symlink_callback_t    callback,
+    void                         *private_data);
+
+typedef void (*chimera_link_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+void
+chimera_link(
+    struct chimera_client_thread *thread,
+    const char                   *source_path,
+    int                           source_path_len,
+    const char                   *dest_path,
+    int                           dest_path_len,
+    chimera_link_callback_t       callback,
+    void                         *private_data);
+
+typedef void (*chimera_remove_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+void
+chimera_remove(
+    struct chimera_client_thread *thread,
+    const char                   *path,
+    int                           path_len,
+    chimera_remove_callback_t     callback,
+    void                         *private_data);
+
+typedef void (*chimera_rename_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+void
+chimera_rename(
+    struct chimera_client_thread *thread,
+    const char                   *source_path,
+    int                           source_path_len,
+    const char                   *dest_path,
+    int                           dest_path_len,
+    chimera_rename_callback_t     callback,
+    void                         *private_data);
+
+#include <sys/time.h>
+#include <stdint.h>
+
+struct chimera_stat {
+    uint64_t        st_dev;
+    uint64_t        st_ino;
+    uint64_t        st_mode;
+    uint64_t        st_nlink;
+    uint64_t        st_uid;
+    uint64_t        st_gid;
+    uint64_t        st_rdev;
+    uint64_t        st_size;
+    struct timespec st_atim;
+    struct timespec st_mtim;
+    struct timespec st_ctim;
+};
+
+typedef void (*chimera_readlink_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    const char                   *target,
+    int                           targetlen,
+    void                         *private_data);
+
+void
+chimera_readlink(
+    struct chimera_client_thread *thread,
+    const char                   *path,
+    int                           path_len,
+    char                         *target,
+    uint32_t                      target_maxlength,
+    chimera_readlink_callback_t   callback,
+    void                         *private_data);
+
+typedef void (*chimera_stat_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    const struct chimera_stat    *st,
+    void                         *private_data);
+
+void
+chimera_stat(
+    struct chimera_client_thread *thread,
+    const char                   *path,
+    int                           path_len,
+    chimera_stat_callback_t       callback,
+    void                         *private_data);
+
 void
 chimera_destroy(
     struct chimera_client *client);
