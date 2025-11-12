@@ -44,8 +44,6 @@ chimera_nfs_mount_lookup_complete(
         auth_flavors[0]                = AUTH_NONE;
         auth_flavors[1]                = AUTH_SYS;
 
-        chimera_nfs_info("mount lookup complete: attr %lx", attr->va_set_mask);
-
         chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
                              "NFS mount: no file handle was returned");
 

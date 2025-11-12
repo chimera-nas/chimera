@@ -13,6 +13,7 @@ add_library(chimera_vfs_nfs SHARED
     nfs3_create_unlinked.c
     nfs3_getattr.c
     nfs3_mount.c
+    nfs3_umount.c
     nfs3_link.c
     nfs3_lookup.c
     nfs3_mkdir.c

@@ -16,6 +16,9 @@ nfs3_dispatch(
         case CHIMERA_VFS_OP_MOUNT:
             nfs3_mount(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_UMOUNT:
+            nfs3_umount(thread, shared, request, private_data);
+            break;
         case CHIMERA_VFS_OP_LOOKUP:
             nfs3_lookup(thread, shared, request, private_data);
             break;

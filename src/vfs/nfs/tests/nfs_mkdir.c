@@ -74,7 +74,7 @@ main(
         exit(EXIT_FAILURE);
     }
 
-    chimera_mkdir(env.client_thread, "mnt/testdir", 10, mkdir_complete, &mkdir_ctx);
+    chimera_mkdir(env.client_thread, "mnt/testdir", 11, mkdir_complete, &mkdir_ctx);
 
     while (!mkdir_ctx.done) {
         evpl_continue(env.evpl);
@@ -82,6 +82,19 @@ main(
 
     if (mkdir_ctx.status) {
         fprintf(stderr, "Failed to create directory\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* try to make a directory with invalid parent */
+    memset(&mkdir_ctx, 0, sizeof(mkdir_ctx));
+    chimera_mkdir(env.client_thread, "mnt/invalid/testdir", 11, mkdir_complete, &mkdir_ctx);
+
+    while (!mkdir_ctx.done) {
+        evpl_continue(env.evpl);
+    }
+
+    if (mkdir_ctx.status == 0 ) {
+        fprintf(stderr, "Created directory with invalid parent\n");
         exit(EXIT_FAILURE);
     }
 

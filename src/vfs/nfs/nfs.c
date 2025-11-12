@@ -21,11 +21,11 @@ nfs_init(const char *cfgfile)
 
     shared->protocol_version = 3;
 
-    pthread_rwlock_init(&shared->mounts_lock, NULL);
+    pthread_mutex_init(&shared->lock, NULL);
 
-    shared->max_mounts = 64;
-    shared->mounts     = calloc(shared->max_mounts, sizeof(*shared->mounts));
-    shared->mounts_map = NULL;
+    shared->max_servers = 64;
+    shared->servers     = calloc(shared->max_servers, sizeof(*shared->servers));
+    shared->servers_map = NULL;
 
     NFS_PORTMAP_V2_init(&shared->portmap_v2);
     NFS_MOUNT_V3_init(&shared->mount_v3);
@@ -42,6 +42,7 @@ nfs_destroy(void *private_data)
     struct nfs_shared *shared = private_data;
 
     free(shared->mounts);
+    free(shared->servers);
 
     free(shared);
 } /* nfs_destroy */
@@ -66,6 +67,9 @@ nfs_thread_init(
 
     thread->rpc2_thread = evpl_rpc2_thread_init(evpl, programs, 5);
 
+    thread->max_server_threads = shared->max_servers;
+    thread->server_threads     = calloc(thread->max_server_threads, sizeof(*thread->server_threads));
+
     return thread;
 } /* nfs_thread_init */
 
@@ -73,6 +77,15 @@ static void
 nfs_thread_destroy(void *private_data)
 {
     struct nfs_thread *thread = private_data;
+    int                i;
+
+    for (i = 0; i < thread->max_server_threads; i++) {
+        if (thread->server_threads[i]) {
+            free(thread->server_threads[i]);
+        }
+    }
+
+    free(thread->server_threads);
 
     evpl_rpc2_thread_destroy(thread->rpc2_thread);
 

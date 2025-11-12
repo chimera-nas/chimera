@@ -205,7 +205,6 @@ chimera_log_thread_init(void)
     pthread_create(&ChimeraLogThread, NULL, chimera_log_thread, NULL);
     atexit(chimera_log_thread_exit);
 
-    evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 } /* chimera_log_thread_init */
 
 SYMBOL_EXPORT void

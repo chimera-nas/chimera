@@ -3,112 +3,227 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include <utlist.h>
+#include <pthread.h>
 
 #include "nfs_internal.h"
 #include "evpl/evpl_rpc2.h"
+#include "vfs/vfs_internal.h"
 
-struct nfs_mount_ctx {
-    struct nfs_thread *thread;
-    struct nfs_shared *shared;
+struct nfs_client_server_thread_ctx {
+    struct nfs_client_server_thread *server_thread;
 };
 
 static void
-mountd_mnt_callback(
+mount_mountd_mnt_callback(
     struct evpl      *evpl,
     struct mountres3 *reply,
     int               status,
     void             *private_data)
 {
-    struct nfs_client_mount    *mount   = private_data;
-    struct chimera_vfs_request *request = mount->mount_requests;
-    struct nfs_mount_ctx       *ctx     = request->plugin_data;
-    struct nfs_shared          *shared  = ctx->shared;
-
-    chimera_nfsclient_info("NFS3 GetRootFH mount mnt callback %s status %d res %d", mount->key, status, reply->
-                           fhs_status);
+    struct nfs_client_mount             *mount         = private_data;
+    struct chimera_vfs_request          *request       = mount->mount_request;
+    struct nfs_shared                   *shared        = mount->server->shared;
+    struct nfs_client_server_thread_ctx *server_ctx    = request->plugin_data;
+    struct nfs_client_server_thread     *server_thread = server_ctx->server_thread;
 
     if (status != 0) {
-        chimera_nfsclient_error("NFS3 GetRootFH mount mnt callback failed %s", mount->key);
+        chimera_nfsclient_error("NFS3 GetRootFH mount mnt callback failed %s", mount->path);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
 
-    pthread_rwlock_wrlock(&shared->mounts_lock);
+    evpl_rpc2_client_disconnect(server_thread->thread->rpc2_thread, server_thread->mount_conn);
+    server_thread->mount_conn = NULL;
+
     mount->fh[0] = CHIMERA_VFS_FH_MAGIC_NFS;
-    memcpy(mount->fh + 1, reply->mountinfo.fhandle.data, reply->mountinfo.fhandle.len);
-    mount->fhlen  = 1 + reply->mountinfo.fhandle.len;
-    mount->status = NFS_CLIENT_MOUNT_STATE_MOUNTED;
+    mount->fh[1] = mount->server->index;
+    memcpy(mount->fh + 2, reply->mountinfo.fhandle.data, reply->mountinfo.fhandle.len);
+    mount->fhlen = 2 + reply->mountinfo.fhandle.len;
 
     request->mount.r_attr.va_set_mask = CHIMERA_VFS_ATTR_FH;
-    request->mount.r_attr.va_fh_len   = mount->fhlen;
     memcpy(request->mount.r_attr.va_fh, mount->fh, mount->fhlen);
+    request->mount.r_attr.va_fh_len = mount->fhlen;
 
-    pthread_rwlock_unlock(&shared->mounts_lock);
+    pthread_mutex_unlock(&shared->lock);
+    mount->status = NFS_CLIENT_MOUNT_STATE_MOUNTED;
+    pthread_mutex_unlock(&shared->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-
-
-} /* mount_mnt_callback */
+} /* nfs3_mount_mountd_mnt_callback */
 
 static void
-mount_null_callback(
-    struct evpl *evpl,
-    int          status,
-    void        *private_data)
+nfs3_mount_process_mount(
+    struct nfs_client_server_thread *server_thread,
+    struct chimera_vfs_request      *request)
 {
-    struct nfs_client_mount    *mount   = private_data;
-    struct chimera_vfs_request *request = mount->mount_requests;
-    struct nfs_mount_ctx       *ctx     = request->plugin_data;
-    struct nfs_shared          *shared  = ctx->shared;
-    struct mountarg3            mount_arg;
+    struct nfs_client_server *server = server_thread->server;
+    struct nfs_shared        *shared = server_thread->shared;
+    struct nfs_client_mount  *mount;
+    struct mountarg3          mount_arg;
+    int                       i;
+    const char               *path = NULL;
+
+    mount = calloc(1, sizeof(*mount));
+
+    mount->server        = server;
+    mount->status        = NFS_CLIENT_MOUNT_STATE_MOUNTING;
+    mount->mount_request = request;
+
+    for (i = 0; i < request->mount.pathlen; i++) {
+        if (request->mount.path[i] == ':') {
+            path = request->mount.path + i + 1;
+            break;
+        }
+    }
+
+    if (!path) {
+        chimera_nfsclient_error("NFS3 GetRootFH mount process mount failed %s", request->mount.path);
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    memcpy(mount->path, path, strlen(path) + 1);
+
+    pthread_mutex_lock(&shared->lock);
+    DL_APPEND(shared->mounts, mount);
+    pthread_mutex_unlock(&shared->lock);
 
     mount_arg.path.str = mount->path;
     mount_arg.path.len = strlen(mount->path);
 
-    chimera_nfsclient_info("NFS3 GetRootFH mount null callback %s", mount->key);
-
-    shared->mount_v3.send_call_MOUNTPROC3_MNT(&shared->mount_v3.rpc2, evpl, mount->mount_conn, &mount_arg,
-                                              mountd_mnt_callback, mount);
-} /* mount_null_callback */
+    shared->mount_v3.send_call_MOUNTPROC3_MNT(&shared->mount_v3.rpc2,
+                                              server_thread->thread->evpl,
+                                              server_thread->mount_conn,
+                                              &mount_arg,
+                                              mount_mountd_mnt_callback, mount);
+}     /* nfs3_mount_process_mount */
 
 static void
-portmap_getport_callback(
+nfs3_mount_discover_callback(
+    struct nfs_client_server_thread *server_thread,
+    int                              status)
+{
+    struct nfs_client_server *server = server_thread->server;
+    struct nfs_shared        *shared = server_thread->shared;
+
+    evpl_rpc2_client_disconnect(server_thread->thread->rpc2_thread, server_thread->portmap_conn);
+    server_thread->portmap_conn = NULL;
+
+    pthread_mutex_lock(&shared->lock);
+    server->state = NFS_CLIENT_SERVER_STATE_DISCOVERED;
+    pthread_mutex_unlock(&shared->lock);
+
+    nfs3_mount_process_mount(server_thread, server->pending_mounts);
+
+} /* nfs3_mount_discover_callback */
+
+static void
+nfs3_mount_nfs_null_callback(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct nfs_client_server_thread *server_thread = private_data;
+
+    nfs3_mount_discover_callback(server_thread, status);
+} /* nfs3_mount_nfs_null_callback */
+
+static void
+portmap_getport_nfs_callback(
     struct evpl *evpl,
     struct port *reply,
     int          status,
     void        *private_data)
 {
-    struct nfs_client_mount    *mount   = private_data;
-    struct chimera_vfs_request *request = mount->mount_requests;
-    struct nfs_mount_ctx       *ctx     = request->plugin_data;
-    struct nfs_shared          *shared  = ctx->shared;
+    struct nfs_client_server_thread *server_thread = private_data;
+    struct nfs_client_server        *server        = server_thread->server;
+    struct nfs_shared               *shared        = server_thread->shared;
 
-    chimera_nfsclient_info("NFS3 GetRootFH portmap getport callback %s port %u", mount->key, reply->port);
-
-
-    mount->mount_endpoint = evpl_endpoint_create(mount->hostname, reply->port);
-
-    mount->mount_conn = evpl_rpc2_client_connect(ctx->thread->rpc2_thread,
-                                                 EVPL_STREAM_SOCKET_TCP,
-                                                 mount->mount_endpoint);
-
-    if (!mount->mount_conn) {
-        chimera_nfsclient_error("NFS3 GetRootFH mount mount connect failed %s", mount->hostname);
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
+    if (status != 0) {
+        chimera_nfsclient_error("NFS3 portmap getport NFS failed %s", server->hostname);
+        nfs3_mount_discover_callback(server_thread, status);
         return;
     }
 
-    shared->mount_v3.send_call_MOUNTPROC3_NULL(&shared->mount_v3.rpc2,
-                                               evpl,
-                                               mount->mount_conn,
-                                               mount_null_callback,
-                                               mount);
-} /* portmap_getport_callback */
+    server->nfs_port     = reply->port;
+    server->nfs_endpoint = evpl_endpoint_create(server->hostname, reply->port);
 
+    server_thread->nfs_conn = evpl_rpc2_client_connect(server_thread->thread->rpc2_thread,
+                                                       EVPL_STREAM_SOCKET_TCP,
+                                                       server->nfs_endpoint);
+
+    shared->nfs_v3.send_call_NFSPROC3_NULL(&shared->nfs_v3.rpc2,
+                                           server_thread->thread->evpl,
+                                           server_thread->nfs_conn,
+                                           nfs3_mount_nfs_null_callback, server_thread);
+
+} /* portmap_getport_nfs_callback */
+
+
+static void
+mount_mountd_null_callback(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct nfs_client_server_thread *server_thread = private_data;
+    struct nfs_client_server        *server        = server_thread->server;
+    struct nfs_shared               *shared        = server_thread->shared;
+    struct mapping                   mapping;
+
+    if (status != 0) {
+        chimera_nfsclient_error("NFS3 mountd null failed %s", server->hostname);
+        nfs3_mount_discover_callback(server_thread, status);
+        return;
+    }
+
+    mapping.prog = 100003;
+    mapping.vers = 3;
+    mapping.prot = 6;
+    mapping.port = 0;
+
+    shared->portmap_v2.send_call_PMAPPROC_GETPORT(&shared->portmap_v2.rpc2,
+                                                  server_thread->thread->evpl,
+                                                  server_thread->portmap_conn,
+                                                  &mapping,
+                                                  portmap_getport_nfs_callback, server_thread);
+} /* mount_null_callback */
+
+static void
+portmap_getport_mountd_callback(
+    struct evpl *evpl,
+    struct port *reply,
+    int          status,
+    void        *private_data)
+{
+    struct nfs_client_server_thread *server_thread = private_data;
+    struct nfs_client_server        *server        = server_thread->server;
+    struct nfs_shared               *shared        = server_thread->shared;
+
+    if (status != 0) {
+        chimera_nfsclient_error("NFS3 portmap getport mountd failed %s", server->hostname);
+        nfs3_mount_discover_callback(server_thread, status);
+        return;
+    }
+
+    server->mount_port     = reply->port;
+    server->mount_endpoint = evpl_endpoint_create(server->hostname, reply->port);
+
+    server_thread->mount_conn = evpl_rpc2_client_connect(server_thread->thread->rpc2_thread,
+                                                         EVPL_STREAM_SOCKET_TCP,
+                                                         server->mount_endpoint);
+
+    shared->mount_v3.send_call_MOUNTPROC3_NULL(&shared->mount_v3.rpc2,
+                                               server_thread->thread->evpl,
+                                               server_thread->mount_conn,
+                                               mount_mountd_null_callback, server_thread);
+} /* portmap_getport_mountd_callback */
 
 static void
 portmap_null_callback(
@@ -116,13 +231,16 @@ portmap_null_callback(
     int          status,
     void        *private_data)
 {
-    struct nfs_client_mount    *mount   = private_data;
-    struct chimera_vfs_request *request = mount->mount_requests;
-    struct nfs_mount_ctx       *ctx     = request->plugin_data;
-    struct nfs_shared          *shared  = ctx->shared;
-    struct mapping              mapping;
+    struct nfs_client_server_thread *server_thread = private_data;
+    struct nfs_client_server        *server        = server_thread->server;
+    struct nfs_shared               *shared        = server_thread->shared;
+    struct mapping                   mapping;
 
-    chimera_nfsclient_info("NFS3 GetRootFH portmap null callback %s", mount->key);
+    if (status != 0) {
+        chimera_nfsclient_error("NFS3 portmap null failed %s", server->hostname);
+        nfs3_mount_discover_callback(server_thread, status);
+        return;
+    }
 
     mapping.prog = 100005;
     mapping.vers = 3;
@@ -130,9 +248,10 @@ portmap_null_callback(
     mapping.port = 0;
 
     shared->portmap_v2.send_call_PMAPPROC_GETPORT(&shared->portmap_v2.rpc2,
-                                                  evpl, mount->portmap_conn,
+                                                  server_thread->thread->evpl,
+                                                  server_thread->portmap_conn,
                                                   &mapping,
-                                                  portmap_getport_callback, mount);
+                                                  portmap_getport_mountd_callback, server_thread);
 } /* portmap_null_callback */
 
 void
@@ -142,13 +261,14 @@ nfs3_mount(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    const char              *path     = request->mount.path;
-    const char              *hostname = NULL;
-    struct nfs_client_mount *mount    = NULL, **new_mounts;
-    struct nfs_mount_ctx    *ctx = private_data;
-    int                      hostnamelen = 0, mount_keylen = 0;
-    int                      index;
-    char                     mount_key[256];
+    const char                          *path     = request->mount.path;
+    const char                          *hostname = NULL;
+    struct nfs_client_server           **new_servers, *server   = NULL;
+    struct nfs_client_server_thread     *server_thread;
+    struct nfs_client_server_thread_ctx *server_thread_ctx;
+    int                                  hostnamelen = 0;
+    int                                  i, idx = -1;
+    int                                  need_discover = 0;
 
     for (int i = 0; i < request->mount.pathlen; i++) {
         if (path[i] == ':') {
@@ -159,101 +279,102 @@ nfs3_mount(
     }
 
     if (hostnamelen == 0) {
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-    }
-
-    mount_keylen = snprintf(mount_key, sizeof(mount_key), "%.*s?v3", hostnamelen, hostname);
-
-    chimera_nfsclient_info("NFS3 GetRootFH mount key %.*s", mount_keylen, mount_key);
-
-    pthread_rwlock_rdlock(&shared->mounts_lock);
-
-    HASH_FIND(hh, shared->mounts_map, mount_key, mount_keylen, mount);
-
-    if (mount) {
-        if (mount->status == NFS_CLIENT_MOUNT_STATE_MOUNTING) {
-            DL_APPEND(mount->mount_requests, request);
-        }
-
-        mount->refcnt++;
-    }
-
-    pthread_rwlock_unlock(&shared->mounts_lock);
-
-    if (mount && mount->status == NFS_CLIENT_MOUNT_STATE_MOUNTED) {
-        chimera_nfsclient_info("NFS3 GetRootFH mount found %s", mount->key);
-        request->status = CHIMERA_VFS_OK;
+        request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
     }
 
-    pthread_rwlock_wrlock(&shared->mounts_lock);
+    pthread_mutex_lock(&shared->lock);
 
-    do {
+    for (i = 0; i < shared->max_servers; i++) {
+        if (shared->servers[i] &&
+            strcmp(shared->servers[i]->hostname, hostname) == 0 &&
+            shared->servers[i]->nfsvers == 3) {
+            server = shared->servers[i];
+            break;
+        }
+    }
 
-        index = -1;
+    if (server) {
 
-        for (index = 0; index < shared->max_mounts; index++) {
-            if (shared->mounts[index] == NULL) {
+        server->refcnt++;
+
+        if (server->state == NFS_CLIENT_SERVER_STATE_DISCOVERING) {
+            /* Someone else is discovering this server, so we need to wait for them to complete */
+            DL_APPEND(server->pending_mounts, request);
+        }
+
+    } else {
+        need_discover = 1;
+
+        for (i = 0; i < shared->max_servers; i++) {
+            if (shared->servers[i] == NULL) {
+                idx = i;
                 break;
             }
         }
 
-        if (index < 0) {
-            shared->max_mounts *= 2;
-            new_mounts          = calloc(shared->max_mounts, sizeof(*new_mounts));
-            memcpy(new_mounts, shared->mounts, shared->max_mounts * sizeof(*new_mounts));
-            free(shared->mounts);
-            shared->mounts = new_mounts;
+        if (idx < 0 || idx >= shared->max_servers) {
+            shared->max_servers *= 2;
+            new_servers          = calloc(shared->max_servers, sizeof(*new_servers));
+            memcpy(new_servers, shared->servers, (shared->max_servers / 2) * sizeof(*new_servers));
+            free(shared->servers);
+            shared->servers = new_servers;
+
+            idx = i;
         }
 
-    } while (index < 0);
+        server          = calloc(1, sizeof(*server));
+        server->state   = NFS_CLIENT_SERVER_STATE_DISCOVERING;
+        server->refcnt  = 1;
+        server->nfsvers = 3;
+        server->shared  = shared;
 
-    mount = calloc(1, sizeof(*mount));
+        strncpy(server->hostname, hostname, hostnamelen);
 
-    shared->mounts[index] = mount;
+        shared->servers[idx] = server;
 
-    mount->keylen  = mount_keylen;
-    mount->index   = index;
-    mount->nfsvers = 3;
-    mount->refcnt  = 1;
-    mount->status  = NFS_CLIENT_MOUNT_STATE_MOUNTING;
+        server->index = idx;
 
-    strncpy(mount->key, mount_key, mount_keylen);
-    strncpy(mount->hostname, hostname, hostnamelen);
-    strncpy(mount->path, request->mount.path + hostnamelen + 1, request->mount.pathlen - hostnamelen + 1);
+        need_discover = 1;
 
-    HASH_ADD(hh, shared->mounts_map, key, mount_keylen, mount);
-
-    DL_APPEND(mount->mount_requests, request);
-
-    ctx         = request->plugin_data;
-    ctx->thread = thread;
-    ctx->shared = shared;
-
-    pthread_rwlock_unlock(&shared->mounts_lock);
-
-    chimera_nfsclient_info("NFS3 GetRootFH mount added %s hostname '%s' path '%s'", mount->key, mount->hostname, mount->
-                           path);
-
-    mount->portmap_endpoint = evpl_endpoint_create(mount->hostname, 111);
-
-    mount->portmap_conn = evpl_rpc2_client_connect(thread->rpc2_thread,
-                                                   EVPL_STREAM_SOCKET_TCP,
-                                                   mount->portmap_endpoint);
-
-    if (!mount->portmap_conn) {
-        chimera_nfsclient_error("NFS3 GetRootFH mount portmap connect failed %s", mount->hostname);
-        request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
+        DL_APPEND(server->pending_mounts, request);
     }
 
+    pthread_mutex_unlock(&shared->lock);
 
-    shared->portmap_v2.send_call_PMAPPROC_NULL(&shared->portmap_v2.rpc2, thread->evpl, mount->portmap_conn,
-                                               portmap_null_callback, mount);
+    server_thread         = calloc(1, sizeof(*server_thread));
+    server_thread->thread = thread;
+    server_thread->shared = shared;
+    server_thread->server = server;
 
+    server_thread_ctx                = request->plugin_data;
+    server_thread_ctx->server_thread = server_thread;
 
+    if (thread->max_server_threads != shared->max_servers) {
+        thread->max_server_threads = shared->max_servers;
+        thread->server_threads     = realloc(thread->server_threads,
+                                             thread->max_server_threads * sizeof(*thread->server_threads));
+    }
 
-} /* nfs3_getrootfh */
+    thread->server_threads[idx] = server_thread;
+
+    if (need_discover) {
+
+        server->portmap_endpoint = evpl_endpoint_create(server->hostname, 111);
+
+        server_thread->portmap_conn = evpl_rpc2_client_connect(thread->rpc2_thread,
+                                                               EVPL_STREAM_SOCKET_TCP,
+                                                               server->portmap_endpoint);
+
+        if (!server_thread->portmap_conn) {
+            nfs3_mount_discover_callback(server_thread, CHIMERA_VFS_EINVAL);
+            return;
+        }
+
+        shared->portmap_v2.send_call_PMAPPROC_NULL(&shared->portmap_v2.rpc2,
+                                                   thread->evpl,
+                                                   server_thread->portmap_conn,
+                                                   portmap_null_callback, server_thread);
+    }
+} /* nfs3_mount */

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs3_procs.h"
-#include "nfs3_status.h"
+#include "nfs_common/nfs3_status.h"
 #include "vfs/vfs_procs.h"
 #include "nfs3_dump.h"
 static void
