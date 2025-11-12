@@ -190,9 +190,9 @@ nfs_test_cleanup(
         }
     }
 
-    chimera_server_destroy(env->server);
     chimera_client_thread_shutdown(env->evpl, env->client_thread);
     chimera_destroy(env->client);
+    chimera_server_destroy(env->server);
     evpl_destroy(env->evpl);
 
     prometheus_metrics_destroy(env->server_metrics);

@@ -57,8 +57,8 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                              req->mount.r_attr.va_req_mask);
             break;
         case CHIMERA_VFS_OP_UMOUNT:
-            chimera_snprintf(argstr, sizeof(argstr), "path %s",
-                             req->umount.mount->path);
+            chimera_snprintf(argstr, sizeof(argstr), "private %p",
+                             req->umount.mount_private);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             chimera_snprintf(argstr, sizeof(argstr), "name %.*s attrmask %lx dir_attr_mask %lx",
@@ -98,10 +98,11 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
             break;
         case CHIMERA_VFS_OP_WRITE:
             chimera_snprintf(argstr, sizeof(argstr),
-                             "hdl %lx offset %lu len %u",
+                             "hdl %lx offset %lu len %u sync %d",
                              req->write.handle->vfs_private,
                              req->write.offset,
-                             req->write.length);
+                             req->write.length,
+                             req->write.sync);
             break;
         case CHIMERA_VFS_OP_MKDIR:
             chimera_snprintf(argstr, sizeof(argstr), "name %.*s",

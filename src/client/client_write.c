@@ -20,6 +20,7 @@ chimera_write_complete(
     request->write.callback(request->thread, error_code, request->write.private_data);
 
     chimera_client_request_free(request->thread, request);
+
 } /* chimera_write_complete */
 
 SYMBOL_EXPORT void

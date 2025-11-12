@@ -272,6 +272,19 @@ chimera_nfs3_unmarshall_attrs(
     attr->va_set_mask = CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_ATOMIC;
 } /* chimera_nfs3_unmarshall_attrs */
 
+static inline void
+chimera_nfs3_unmarshall_fh(
+    const struct nfs_fh3     *fh,
+    int                       server_index,
+    struct chimera_vfs_attrs *attr)
+{
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
+    attr->va_fh_len    = fh->data.len + 2;
+    attr->va_fh[0]     = CHIMERA_VFS_FH_MAGIC_NFS;
+    attr->va_fh[1]     = server_index;
+    memcpy(attr->va_fh + 2, fh->data.data, fh->data.len);
+} /* chimera_nfs3_unmarshall_fh */
+
 
 static inline void
 chimera_nfs3_get_wcc_data(

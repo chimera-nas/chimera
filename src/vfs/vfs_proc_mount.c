@@ -24,9 +24,10 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
 
     mount = calloc(1, sizeof(*mount));
 
-    mount->module  = request->mount.module;
-    mount->path    = strdup(request->mount.mount_path);
-    mount->pathlen = strlen(request->mount.mount_path);
+    mount->module        = request->mount.module;
+    mount->path          = strdup(request->mount.mount_path);
+    mount->pathlen       = strlen(request->mount.mount_path);
+    mount->mount_private = request->mount.r_mount_private;
 
     memcpy(mount->fh, request->mount.r_attr.va_fh, request->mount.r_attr.va_fh_len);
     mount->fhlen = request->mount.r_attr.va_fh_len;

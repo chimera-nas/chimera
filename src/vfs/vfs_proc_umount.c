@@ -12,20 +12,11 @@ static void
 chimera_vfs_umount_complete(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread    *thread   = request->thread;
-    struct chimera_vfs           *vfs      = thread->vfs;
-    struct chimera_vfs_mount     *mount    = request->umount.mount;
     chimera_vfs_umount_callback_t callback = request->proto_callback;
-
-    pthread_rwlock_wrlock(&vfs->mounts_lock);
-    DL_DELETE(vfs->mounts, request->umount.mount);
-    pthread_rwlock_unlock(&vfs->mounts_lock);
 
     chimera_vfs_complete(request);
 
     callback(thread, CHIMERA_VFS_OK, request->proto_private_data);
-
-    free(mount->path);
-    free(mount);
 
     chimera_vfs_request_free(thread, request);
 
@@ -57,6 +48,10 @@ chimera_vfs_umount(
         }
     }
 
+    if (mount) {
+        DL_DELETE(vfs->mounts, mount);
+    }
+
     pthread_rwlock_unlock(&vfs->mounts_lock);
 
     if (!mount) {
@@ -66,12 +61,17 @@ chimera_vfs_umount(
 
     request = chimera_vfs_request_alloc(thread, &mount->fh, mount->fhlen);
 
-    request->opcode             = CHIMERA_VFS_OP_UMOUNT;
-    request->complete           = chimera_vfs_umount_complete;
-    request->umount.mount       = mount;
-    request->proto_callback     = callback;
-    request->proto_private_data = private_data;
+    request->opcode               = CHIMERA_VFS_OP_UMOUNT;
+    request->complete             = chimera_vfs_umount_complete;
+    request->umount.mount_private = mount->mount_private;
+    request->proto_callback       = callback;
+    request->proto_private_data   = private_data;
 
     chimera_vfs_dispatch(request);
+
+    free(mount->path);
+    free(mount);
+
+
 
 } /* chimera_vfs_umount */

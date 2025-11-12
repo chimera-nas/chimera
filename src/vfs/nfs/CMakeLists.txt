@@ -10,7 +10,6 @@ add_library(chimera_vfs_nfs SHARED
     nfs4.c
     nfs3_close.c
     nfs3_commit.c
-    nfs3_create_unlinked.c
     nfs3_getattr.c
     nfs3_mount.c
     nfs3_umount.c
@@ -29,7 +28,6 @@ add_library(chimera_vfs_nfs SHARED
     nfs3_write.c
     nfs4_close.c
     nfs4_commit.c
-    nfs4_create_unlinked.c
     nfs4_getattr.c
     nfs4_mount.c
     nfs4_link.c

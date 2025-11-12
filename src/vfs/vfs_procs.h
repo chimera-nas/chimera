@@ -313,6 +313,7 @@ chimera_vfs_symlink(
     int                             namelen,
     const char                     *target,
     int                             targetlen,
+    struct chimera_vfs_attrs       *set_attr,
     uint64_t                        attr_mask,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,

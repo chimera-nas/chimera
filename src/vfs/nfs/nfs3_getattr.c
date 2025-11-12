@@ -7,7 +7,7 @@
 #include "nfs_common/nfs3_attr.h"
 
 static void
-nfs3_getattr_callback(
+chimera_nfs3_getattr_callback(
     struct evpl        *evpl,
     struct GETATTR3res *res,
     int                 status,
@@ -15,8 +15,14 @@ nfs3_getattr_callback(
 {
     struct chimera_vfs_request *request = private_data;
 
-    if (status) {
-        request->status = nfs3_client_status_to_chimera_vfs_error(status);
+    if (unlikely(status)) {
+        request->status = CHIMERA_VFS_EFAULT;
+        request->complete(request);
+        return;
+    }
+
+    if (res->status != NFS3_OK) {
+        request->status = nfs3_client_status_to_chimera_vfs_error(res->status);
         request->complete(request);
         return;
     }
@@ -25,16 +31,16 @@ nfs3_getattr_callback(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* nfs3_getattr_callback */
+} /* chimera_nfs3_getattr_callback */
 
 void
-nfs3_getattr(
-    struct nfs_thread          *thread,
-    struct nfs_shared          *shared,
+chimera_nfs3_getattr(
+    struct chimera_nfs_thread          *thread,
+    struct chimera_nfs_shared          *shared,
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct nfs_client_server_thread *server_thread = nfs_thread_get_server_thread(thread, request->fh, request->fh_len);
+    struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh, request->fh_len);
     struct GETATTR3args              args;
     uint8_t                         *fh;
     int                              fhlen;
@@ -45,13 +51,13 @@ nfs3_getattr(
         return;
     }
 
-    nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
+    chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
     args.object.data.data = fh;
     args.object.data.len  = fhlen;
 
     shared->nfs_v3.send_call_NFSPROC3_GETATTR(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                              nfs3_getattr_callback, request);
+                                              chimera_nfs3_getattr_callback, request);
 
-} /* nfs3_getattr */
+} /* chimera_nfs3_getattr */
 

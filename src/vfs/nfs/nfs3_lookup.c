@@ -5,9 +5,10 @@
 #include "nfs_internal.h"
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
+#include "vfs/vfs_error.h"
 
 static void
-nfs3_lookup_callback(
+chimera_nfs3_lookup_callback(
     struct evpl       *evpl,
     struct LOOKUP3res *res,
     int                status,
@@ -15,8 +16,18 @@ nfs3_lookup_callback(
 {
     struct chimera_vfs_request *request = private_data;
 
-    if (status != NFS3_OK) {
-        request->status = nfs3_client_status_to_chimera_vfs_error(status);
+    if (unlikely(status)) {
+        request->status = CHIMERA_VFS_EFAULT;
+        request->complete(request);
+        return;
+    }
+
+    if (res->status != NFS3_OK) {
+        if (res->resfail.dir_attributes.attributes_follow) {
+            chimera_nfs3_unmarshall_attrs(&res->resfail.dir_attributes.attributes, &request->lookup.r_dir_attr);
+        }
+
+        request->status = nfs3_client_status_to_chimera_vfs_error(res->status);
         request->complete(request);
         return;
     }
@@ -31,16 +42,16 @@ nfs3_lookup_callback(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* nfs3_lookup_callback */
+} /* chimera_nfs3_lookup_callback */
 
 void
-nfs3_lookup(
-    struct nfs_thread          *thread,
-    struct nfs_shared          *shared,
+chimera_nfs3_lookup(
+    struct chimera_nfs_thread          *thread,
+    struct chimera_nfs_shared          *shared,
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct nfs_client_server_thread *server_thread = nfs_thread_get_server_thread(thread, request->fh, request->fh_len);
+    struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh, request->fh_len);
     struct LOOKUP3args               args;
     uint8_t                         *fh;
     int                              fhlen;
@@ -51,7 +62,7 @@ nfs3_lookup(
         return;
     }
 
-    nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
+    chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
     args.what.dir.data.data = fh;
     args.what.dir.data.len  = fhlen;
@@ -59,6 +70,6 @@ nfs3_lookup(
     args.what.name.len      = request->lookup.component_len;
 
     shared->nfs_v3.send_call_NFSPROC3_LOOKUP(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                             nfs3_lookup_callback, request);
-} /* nfs3_lookup */
+                                             chimera_nfs3_lookup_callback, request);
+} /* chimera_nfs3_lookup */
 

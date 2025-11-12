@@ -5,9 +5,9 @@
 #include "nfs_internal.h"
 
 void
-nfs4_open(
-    struct nfs_thread          *thread,
-    struct nfs_shared          *shared,
+chimera_nfs4_open(
+    struct chimera_nfs_thread          *thread,
+    struct chimera_nfs_shared          *shared,
     struct chimera_vfs_request *request,
     void                       *private_data)
 {

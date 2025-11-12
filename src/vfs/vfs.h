@@ -325,11 +325,12 @@ struct chimera_vfs_request {
             struct chimera_vfs_module *module;
             const char                *mount_path;
             uint32_t                   mount_pathlen;
+            void                      *r_mount_private;
             struct chimera_vfs_attrs   r_attr;
         } mount;
 
         struct {
-            struct chimera_vfs_mount *mount;
+            void *mount_private;
         } umount;
 
         struct {
@@ -464,6 +465,7 @@ struct chimera_vfs_request {
             uint64_t                        name_hash;
             const char                     *target;
             int                             targetlen;
+            struct chimera_vfs_attrs       *set_attr;
             struct chimera_vfs_attrs        r_attr;
             struct chimera_vfs_attrs        r_dir_pre_attr;
             struct chimera_vfs_attrs        r_dir_post_attr;
@@ -659,6 +661,7 @@ struct chimera_vfs_mount {
     char                      *path;
     uint32_t                   pathlen;
     int                        fhlen;
+    void                      *mount_private;
     struct chimera_vfs_mount  *prev;
     struct chimera_vfs_mount  *next;
     uint8_t                    fh[CHIMERA_VFS_FH_SIZE];

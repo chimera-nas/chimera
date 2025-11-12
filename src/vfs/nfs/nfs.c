@@ -15,11 +15,9 @@
 #include "evpl/evpl_rpc2.h"
 
 static void *
-nfs_init(const char *cfgfile)
+chimera_nfs_init(const char *cfgfile)
 {
-    struct nfs_shared *shared = calloc(1, sizeof(*shared));
-
-    shared->protocol_version = 3;
+    struct chimera_nfs_shared *shared = calloc(1, sizeof(*shared));
 
     pthread_mutex_init(&shared->lock, NULL);
 
@@ -34,26 +32,33 @@ nfs_init(const char *cfgfile)
     NFS_V4_CB_init(&shared->nfs_v4_cb);
 
     return shared;
-} /* nfs_init */
+} /* chimera_nfs_init */
 
 static void
-nfs_destroy(void *private_data)
+chimera_nfs_destroy(void *private_data)
 {
-    struct nfs_shared *shared = private_data;
+    struct chimera_nfs_shared *shared = private_data;
+    int                i;
+
+    for (i = 0; i < shared->max_servers; i++) {
+        if (shared->servers[i]) {
+            free(shared->servers[i]);
+        }
+    }
 
     free(shared->mounts);
     free(shared->servers);
 
     free(shared);
-} /* nfs_destroy */
+} /* chimera_nfs_destroy */
 
 static void *
-nfs_thread_init(
+chimera_nfs_thread_init(
     struct evpl *evpl,
     void        *private_data)
 {
-    struct nfs_shared        *shared = private_data;
-    struct nfs_thread        *thread = calloc(1, sizeof(*thread));
+    struct chimera_nfs_shared        *shared = private_data;
+    struct chimera_nfs_thread        *thread = calloc(1, sizeof(*thread));
     struct evpl_rpc2_program *programs[5];
 
     thread->shared = shared;
@@ -71,13 +76,20 @@ nfs_thread_init(
     thread->server_threads     = calloc(thread->max_server_threads, sizeof(*thread->server_threads));
 
     return thread;
-} /* nfs_thread_init */
+} /* chimera_nfs_thread_init */
 
 static void
-nfs_thread_destroy(void *private_data)
+chimera_nfs_thread_destroy(void *private_data)
 {
-    struct nfs_thread *thread = private_data;
-    int                i;
+    struct chimera_nfs_thread             *thread = private_data;
+    struct chimera_nfs_client_open_handle *open_handle;
+    int                            i;
+
+    while (thread->free_open_handles) {
+        open_handle = thread->free_open_handles;
+        LL_DELETE(thread->free_open_handles, open_handle);
+        free(open_handle);
+    }
 
     for (i = 0; i < thread->max_server_threads; i++) {
         if (thread->server_threads[i]) {
@@ -90,40 +102,64 @@ nfs_thread_destroy(void *private_data)
     evpl_rpc2_thread_destroy(thread->rpc2_thread);
 
     free(thread);
-} /* nfs_thread_destroy */
+} /* chimera_nfs_thread_destroy */
 
 static void
-nfs_dispatch(
+chimera_nfs_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct nfs_thread *thread = private_data;
-    struct nfs_shared *shared = thread->shared;
+    struct chimera_nfs_thread        *thread = private_data;
+    struct chimera_nfs_shared        *shared = thread->shared;
+    struct chimera_nfs_client_server *server;
+    const uint8_t            *fh;
+    int                       nfsvers;
 
-    switch (shared->protocol_version) {
+    if (request->opcode == CHIMERA_VFS_OP_MOUNT || request->opcode == CHIMERA_VFS_OP_UMOUNT) {
+        nfsvers = 3;
+    } else {
+        fh = request->fh;
+
+        if (unlikely(request->fh_len < 2)) {
+            chimera_nfsclient_error("fhlen %d < 2", request->fh_len);
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
+
+        server = shared->servers[fh[1]];
+
+        if (unlikely(!server)) {
+            chimera_nfsclient_error("server not found for fh %p", fh);
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
+
+        nfsvers = server->nfsvers;
+    }
+
+    switch (nfsvers) {
         case 3:
-            nfs3_dispatch(thread, shared, request, private_data);
+            chimera_nfs3_dispatch(thread, shared, request, private_data);
             break;
         case 4:
-            nfs4_dispatch(thread, shared, request, private_data);
+            chimera_nfs4_dispatch(thread, shared, request, private_data);
             break;
         default:
-            chimera_error("nfs", __FILE__, __LINE__,
-                          "nfs_dispatch: unknown protocol version %u",
-                          shared->protocol_version);
-            request->status = CHIMERA_VFS_ENOTSUP;
+            request->status = CHIMERA_VFS_EFAULT;
             request->complete(request);
             break;
     } /* switch */
-} /* nfs_dispatch */
+} /* chimera_nfs_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_nfs = {
     .name           = "nfs",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_NFS,
     .capabilities   = 0,
-    .init           = nfs_init,
-    .destroy        = nfs_destroy,
-    .thread_init    = nfs_thread_init,
-    .thread_destroy = nfs_thread_destroy,
-    .dispatch       = nfs_dispatch,
+    .init           = chimera_nfs_init,
+    .destroy        = chimera_nfs_destroy,
+    .thread_init    = chimera_nfs_thread_init,
+    .thread_destroy = chimera_nfs_thread_destroy,
+    .dispatch       = chimera_nfs_dispatch,
 };

@@ -18,6 +18,8 @@ endmacro()
 
 add_nfs_testprog(nfs_mount)
 add_nfs_testprog(nfs_mkdir)
+add_nfs_testprog(nfs_create)
 
 add_nfs_test(nfs3_memfs_mount nfs_mount -v 3 -b memfs)
 add_nfs_test(nfs3_memfs_mkdir nfs_mkdir -v 3 -b memfs)
+add_nfs_test(nfs3_memfs_create nfs_create -v 3 -b memfs)

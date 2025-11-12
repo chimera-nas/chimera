@@ -403,7 +403,7 @@ chimera_vfs_root_readdir(
     uint64_t                               cookie = request->readdir.cookie;
     struct chimera_vfs_root_readdir_ctx   *ctx    = request->plugin_data;
     struct chimera_vfs_root_readdir_entry *entry;
-    int                                    i;
+    int                                    i = 0;
 
     ctx->pending     = 0;
     ctx->complete    = 0;

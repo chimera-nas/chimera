@@ -65,9 +65,13 @@ chimera_nfs3_symlink_open_callback(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct SYMLINK3args              *args   = req->args_symlink;
     struct SYMLINK3res                res;
+    struct chimera_vfs_attrs         *attr;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
+        xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
+
+        chimera_nfs3_sattr3_to_va(attr, &args->symlink.symlink_attributes);
 
         chimera_vfs_symlink(thread->vfs_thread,
                             handle,
@@ -75,6 +79,7 @@ chimera_nfs3_symlink_open_callback(
                             args->where.name.len,
                             args->symlink.symlink_data.str,
                             args->symlink.symlink_data.len,
+                            attr,
                             CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
                             CHIMERA_NFS3_ATTR_WCC_MASK,
                             CHIMERA_NFS3_ATTR_MASK,
