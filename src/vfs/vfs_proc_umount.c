@@ -20,6 +20,9 @@ chimera_vfs_umount_complete(struct chimera_vfs_request *request)
 
     chimera_vfs_request_free(thread, request);
 
+    free(request->umount.mount->path);
+    free(request->umount.mount);
+
 } /* chimera_vfs_umount */
 
 
@@ -63,15 +66,11 @@ chimera_vfs_umount(
 
     request->opcode               = CHIMERA_VFS_OP_UMOUNT;
     request->complete             = chimera_vfs_umount_complete;
+    request->umount.mount         = mount;
     request->umount.mount_private = mount->mount_private;
     request->proto_callback       = callback;
     request->proto_private_data   = private_data;
 
     chimera_vfs_dispatch(request);
-
-    free(mount->path);
-    free(mount);
-
-
 
 } /* chimera_vfs_umount */

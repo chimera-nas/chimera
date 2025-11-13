@@ -72,10 +72,13 @@ chimera_readlink_lookup_complete(
         return;
     }
 
+    memcpy(request->fh, attr->va_fh, attr->va_fh_len);
+    request->fh_len = attr->va_fh_len;
+
     chimera_vfs_open(
         request->thread->vfs_thread,
-        attr->va_fh,
-        attr->va_fh_len,
+        request->fh,
+        request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
         chimera_readlink_open_complete,
         request);
@@ -101,11 +104,11 @@ chimera_readlink(
 
     request = chimera_client_request_alloc(thread);
 
-    request->opcode                      = CHIMERA_CLIENT_OP_READLINK;
-    request->readlink.callback           = callback;
-    request->readlink.private_data       = private_data;
-    request->readlink.target_maxlength    = target_maxlength;
-    request->readlink.target              = target;
+    request->opcode                    = CHIMERA_CLIENT_OP_READLINK;
+    request->readlink.callback         = callback;
+    request->readlink.private_data     = private_data;
+    request->readlink.target_maxlength = target_maxlength;
+    request->readlink.target           = target;
 
     chimera_vfs_lookup_path(
         thread->vfs_thread,

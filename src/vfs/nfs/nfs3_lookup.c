@@ -7,6 +7,10 @@
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_error.h"
 
+struct chimera_nfs3_lookup_ctx {
+    struct chimera_nfs_client_server *server;
+};
+
 static void
 chimera_nfs3_lookup_callback(
     struct evpl       *evpl,
@@ -14,7 +18,8 @@ chimera_nfs3_lookup_callback(
     int                status,
     void              *private_data)
 {
-    struct chimera_vfs_request *request = private_data;
+    struct chimera_vfs_request     *request = private_data;
+    struct chimera_nfs3_lookup_ctx *ctx     = request->plugin_data;
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -32,6 +37,8 @@ chimera_nfs3_lookup_callback(
         return;
     }
 
+    chimera_nfs3_unmarshall_fh(&res->resok.object, ctx->server->index, &request->lookup.r_attr);
+
     if (res->resok.obj_attributes.attributes_follow) {
         chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->lookup.r_attr);
     }
@@ -46,21 +53,26 @@ chimera_nfs3_lookup_callback(
 
 void
 chimera_nfs3_lookup(
-    struct chimera_nfs_thread          *thread,
-    struct chimera_nfs_shared          *shared,
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh, request->fh_len);
-    struct LOOKUP3args               args;
-    uint8_t                         *fh;
-    int                              fhlen;
+    struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
+                                                                                                  request->fh_len);
+    struct LOOKUP3args                       args;
+    uint8_t                                 *fh;
+    int                                      fhlen;
+    struct chimera_nfs3_lookup_ctx          *ctx;
 
     if (!server_thread) {
         request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
+
+    ctx         = request->plugin_data;
+    ctx->server = server_thread->server;
 
     chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 

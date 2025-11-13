@@ -87,10 +87,13 @@ chimera_stat_lookup_complete(
         return;
     }
 
+    memcpy(request->fh, request->stat.handle->fh, request->stat.handle->fh_len);
+    request->fh_len = request->stat.handle->fh_len;
+
     chimera_vfs_open(
         request->thread->vfs_thread,
-        attr->va_fh,
-        attr->va_fh_len,
+        request->fh,
+        request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
         chimera_stat_open_complete,
         request);

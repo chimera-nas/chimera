@@ -2,13 +2,70 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <stdio.h>
-#include <string.h>
+#include "client_test_common.h"
 
-#include "client/client.h"
-#include "evpl/evpl.h"
-#include "prometheus-c.h"
-#include "vfs/vfs.h"
+struct symlink_ctx {
+    int done;
+    int status;
+};
+
+static void
+symlink_callback(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data)
+{
+    struct symlink_ctx *ctx = private_data;
+
+    ctx->status = status;
+    ctx->done   = 1;
+} /* symlink_callback */
+
+struct readlink_ctx {
+    int  done;
+    int  status;
+    int  targetlen;
+    char target[CHIMERA_VFS_PATH_MAX];
+};
+
+static void
+readlink_callback(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    const char                   *target,
+    int                           targetlen,
+    void                         *private_data)
+{
+    struct readlink_ctx *ctx = private_data;
+
+    ctx->status    = status;
+    ctx->targetlen = targetlen;
+    if (target && targetlen > 0) {
+        memcpy(ctx->target, target, targetlen);
+        ctx->target[targetlen] = '\0';
+    }
+    ctx->done = 1;
+} /* readlink_callback */
+
+struct open_ctx {
+    int                             done;
+    enum chimera_vfs_error status;
+    struct chimera_vfs_open_handle *handle;
+};
+
+static void
+open_complete(
+    struct chimera_client_thread   *client,
+    enum chimera_vfs_error          status,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct open_ctx *ctx = private_data;
+
+    ctx->status = status;
+    ctx->handle = oh;
+    ctx->done   = 1;
+} /* open_complete */
 
 struct mount_ctx {
     int done;
@@ -39,144 +96,99 @@ unmount_callback(
     ctx->done   = 1;
 } /* unmount_callback */
 
-struct symlink_ctx {
-    int done;
-    int status;
-};
-
-static void
-symlink_callback(
-    struct chimera_client_thread *client,
-    enum chimera_vfs_error        status,
-    void                         *private_data)
-{
-    struct symlink_ctx *ctx = private_data;
-
-    ctx->status = status;
-    ctx->done   = 1;
-} /* symlink_callback */
-
-static void
-open_complete(
-    struct chimera_client_thread   *client,
-    enum chimera_vfs_error          status,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_vfs_open_handle **handle = private_data;
-
-    *handle = oh;
-} /* open_complete */
-
 int
 main(
     int    argc,
     char **argv)
 {
-    struct chimera_client          *client;
-    struct chimera_client_config   *config;
-    struct chimera_client_thread   *thread;
-    struct evpl                    *evpl;
-    struct chimera_vfs_open_handle *file_handle = NULL;
-    struct prometheus_metrics      *metrics;
-    struct mount_ctx                mount_ctx = { 0 };
-    struct symlink_ctx              symlink_ctx = { 0 };
+    struct test_env     env;
+    struct mount_ctx    mount_ctx    = { 0 };
+    struct symlink_ctx  symlink_ctx  = { 0 };
+    struct readlink_ctx readlink_ctx = { 0 };
+    struct open_ctx     open_ctx     = { 0 };
+    char                target[CHIMERA_VFS_PATH_MAX];
 
-    chimera_log_init();
+    client_test_init(&env, argv, argc);
 
-    metrics = prometheus_metrics_create(NULL, NULL, 0);
-
-    ChimeraLogLevel = CHIMERA_LOG_DEBUG;
-
-    evpl = evpl_create(NULL);
-
-    config = chimera_client_config_init();
-
-    client = chimera_client_init(config, metrics);
-
-    thread = chimera_client_thread_init(evpl, client);
-
-    chimera_mount(
-        thread,
-        "/memfs",
-        "memfs",
-        "/",
-        mount_callback,
-        &mount_ctx);
+    client_test_mount(&env, "/test", mount_callback, &mount_ctx);
 
     while (!mount_ctx.done) {
-        evpl_continue(evpl);
+        evpl_continue(env.evpl);
     }
 
     if (mount_ctx.status != 0) {
         fprintf(stderr, "Failed to mount test module\n");
-        return 1;
+        client_test_fail(&env);
     }
 
-    file_handle = NULL;
+    memset(&open_ctx, 0, sizeof(open_ctx));
 
-    chimera_open(thread, "/memfs/testfile", 15, CHIMERA_VFS_OPEN_CREATE,
-                 open_complete, &file_handle);
+    chimera_open(env.client_thread, "/test/testfile", 14, CHIMERA_VFS_OPEN_CREATE,
+                 open_complete, &open_ctx);
 
-    while (!file_handle) {
-        evpl_continue(evpl);
+    while (!open_ctx.done) {
+        evpl_continue(env.evpl);
     }
 
-    chimera_close(thread, file_handle);
+    if (open_ctx.status != 0 || open_ctx.handle == NULL) {
+        fprintf(stderr, "Failed to create test file\n");
+        client_test_fail(&env);
+    }
+
+    chimera_close(env.client_thread, open_ctx.handle);
 
     memset(&symlink_ctx, 0, sizeof(symlink_ctx));
 
-    chimera_symlink(thread, "/memfs/symlink", 14, "/memfs/testfile", 15,
+    chimera_symlink(env.client_thread, "/test/symlink", 13, "/test/testfile", 14,
                     symlink_callback, &symlink_ctx);
 
     while (!symlink_ctx.done) {
-        evpl_continue(evpl);
+        evpl_continue(env.evpl);
     }
 
     if (symlink_ctx.status != 0) {
         fprintf(stderr, "Failed to create symlink: %d\n", symlink_ctx.status);
-        return 1;
+        client_test_fail(&env);
     }
 
     fprintf(stderr, "Created symlink successfully\n");
 
-    file_handle = NULL;
+    memset(&readlink_ctx, 0, sizeof(readlink_ctx));
 
-    chimera_open(thread, "/memfs/symlink", 14, 0, open_complete, &file_handle);
+    chimera_readlink(env.client_thread, "/test/symlink", 13, target, sizeof(target),
+                     readlink_callback, &readlink_ctx);
 
-    while (!file_handle) {
-        evpl_continue(evpl);
+    while (!readlink_ctx.done) {
+        evpl_continue(env.evpl);
     }
 
-    if (file_handle == NULL) {
-        fprintf(stderr, "Failed to open symlink\n");
-        return 1;
+    if (readlink_ctx.status != 0) {
+        fprintf(stderr, "Failed to readlink: %d\n", readlink_ctx.status);
+        client_test_fail(&env);
     }
 
-    fprintf(stderr, "Opened symlink successfully\n");
+    if (readlink_ctx.targetlen != 14 || memcmp(readlink_ctx.target, "/test/testfile", 14) != 0) {
+        fprintf(stderr, "Readlink returned wrong target: '%.*s' (expected '/test/testfile', got %d bytes)\n",
+                readlink_ctx.targetlen, readlink_ctx.target, readlink_ctx.targetlen);
+        client_test_fail(&env);
+    }
 
-    chimera_close(thread, file_handle);
+    fprintf(stderr, "Readlink successful: '%.*s'\n", readlink_ctx.targetlen, readlink_ctx.target);
 
     memset(&mount_ctx, 0, sizeof(mount_ctx));
 
-    chimera_umount(thread, "/memfs", unmount_callback, &mount_ctx);
+    chimera_umount(env.client_thread, "/test", unmount_callback, &mount_ctx);
 
     while (!mount_ctx.done) {
-        evpl_continue(evpl);
+        evpl_continue(env.evpl);
     }
 
     if (mount_ctx.status != 0) {
-        fprintf(stderr, "Failed to unmount /memfs\n");
-        return 1;
+        fprintf(stderr, "Failed to unmount /test\n");
+        client_test_fail(&env);
     }
 
-    chimera_client_thread_shutdown(evpl, thread);
-
-    chimera_destroy(client);
-
-    prometheus_metrics_destroy(metrics);
-
-    evpl_destroy(evpl);
+    client_test_success(&env);
 
     return 0;
 } /* main */

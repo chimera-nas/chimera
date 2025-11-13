@@ -330,7 +330,8 @@ struct chimera_vfs_request {
         } mount;
 
         struct {
-            void *mount_private;
+            struct chimera_vfs_mount *mount;
+            void                     *mount_private;
         } umount;
 
         struct {

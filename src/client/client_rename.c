@@ -14,9 +14,7 @@ chimera_rename_at_complete(
     request->rename.callback(request->thread, error_code, request->rename.private_data);
 
     chimera_vfs_release(request->thread->vfs_thread, request->rename.source_parent_handle);
-    if (request->rename.dest_parent_handle != request->rename.source_parent_handle) {
-        chimera_vfs_release(request->thread->vfs_thread, request->rename.dest_parent_handle);
-    }
+    chimera_vfs_release(request->thread->vfs_thread, request->rename.dest_parent_handle);
 
     chimera_client_request_free(request->thread, request);
 
@@ -177,13 +175,13 @@ chimera_rename(
 
     request = chimera_client_request_alloc(thread);
 
-    request->opcode                      = CHIMERA_CLIENT_OP_RENAME;
-    request->rename.callback              = callback;
-    request->rename.private_data          = private_data;
-    request->rename.source_path_len       = source_path_len;
-    request->rename.source_parent_len     = source_slash ? source_slash - source_path : source_path_len;
-    request->rename.dest_path_len         = dest_path_len;
-    request->rename.dest_parent_len       = dest_slash ? dest_slash - dest_path : dest_path_len;
+    request->opcode                   = CHIMERA_CLIENT_OP_RENAME;
+    request->rename.callback          = callback;
+    request->rename.private_data      = private_data;
+    request->rename.source_path_len   = source_path_len;
+    request->rename.source_parent_len = source_slash ? source_slash - source_path : source_path_len;
+    request->rename.dest_path_len     = dest_path_len;
+    request->rename.dest_parent_len   = dest_slash ? dest_slash - dest_path : dest_path_len;
 
     while (source_slash && *source_slash == '/') {
         source_slash++;
@@ -194,7 +192,7 @@ chimera_rename(
     }
 
     request->rename.source_name_offset = source_slash ? source_slash - source_path : -1;
-    request->rename.dest_name_offset  = dest_slash ? dest_slash - dest_path : -1;
+    request->rename.dest_name_offset   = dest_slash ? dest_slash - dest_path : -1;
 
     memcpy(request->rename.source_path, source_path, source_path_len);
     memcpy(request->rename.dest_path, dest_path, dest_path_len);

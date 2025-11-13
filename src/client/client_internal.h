@@ -52,10 +52,17 @@ struct chimera_client_request {
     struct chimera_client_request     *prev;
     struct chimera_client_request     *next;
 
+    uint32_t                           fh_len;
+
+    uint8_t                            fh[CHIMERA_VFS_FH_SIZE];
+
     union {
         struct {
             chimera_mount_callback_t callback;
             void                    *private_data;
+            char                     mount_path[CHIMERA_VFS_PATH_MAX];
+            char                     module_path[CHIMERA_VFS_PATH_MAX];
+            char                     module_name[64];
         } mount;
 
         struct {
@@ -71,6 +78,7 @@ struct chimera_client_request {
             int                             path_len;
             int                             parent_len;
             int                             name_offset;
+            struct chimera_vfs_attrs        set_attr;
             char                            path[CHIMERA_VFS_PATH_MAX];
         } open;
 
@@ -98,75 +106,76 @@ struct chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;
-            chimera_symlink_callback_t       callback;
-            void                            *private_data;
-            int                              path_len;
-            int                              parent_len;
-            int                              name_offset;
-            int                              target_len;
-            char                             path[CHIMERA_VFS_PATH_MAX];
-            char                             target[CHIMERA_VFS_PATH_MAX];
+            chimera_symlink_callback_t      callback;
+            void                           *private_data;
+            int                             path_len;
+            int                             parent_len;
+            int                             name_offset;
+            int                             target_len;
+            struct chimera_vfs_attrs        set_attr;
+            char                            path[CHIMERA_VFS_PATH_MAX];
+            char                            target[CHIMERA_VFS_PATH_MAX];
         } symlink;
 
         struct {
             struct chimera_vfs_open_handle *dest_parent_handle;
             chimera_link_callback_t         callback;
-            void                            *private_data;
-            int                              source_path_len;
-            int                              source_parent_len;
-            int                              source_name_offset;
-            int                              dest_path_len;
-            int                              dest_parent_len;
-            int                              dest_name_offset;
-            uint32_t                         source_fh_len;
-            uint32_t                         dest_fh_len;
-            char                             source_path[CHIMERA_VFS_PATH_MAX];
-            char                             dest_path[CHIMERA_VFS_PATH_MAX];
-            uint8_t                          source_fh[CHIMERA_VFS_FH_SIZE];
-            uint8_t                          dest_fh[CHIMERA_VFS_FH_SIZE];
+            void                           *private_data;
+            int                             source_path_len;
+            int                             source_parent_len;
+            int                             source_name_offset;
+            int                             dest_path_len;
+            int                             dest_parent_len;
+            int                             dest_name_offset;
+            uint32_t                        source_fh_len;
+            uint32_t                        dest_fh_len;
+            char                            source_path[CHIMERA_VFS_PATH_MAX];
+            char                            dest_path[CHIMERA_VFS_PATH_MAX];
+            uint8_t                         source_fh[CHIMERA_VFS_FH_SIZE];
+            uint8_t                         dest_fh[CHIMERA_VFS_FH_SIZE];
         } link;
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;
             chimera_remove_callback_t       callback;
-            void                            *private_data;
-            int                              path_len;
-            int                              parent_len;
-            int                              name_offset;
-            char                             path[CHIMERA_VFS_PATH_MAX];
+            void                           *private_data;
+            int                             path_len;
+            int                             parent_len;
+            int                             name_offset;
+            char                            path[CHIMERA_VFS_PATH_MAX];
         } remove;
 
         struct {
             struct chimera_vfs_open_handle *source_parent_handle;
             struct chimera_vfs_open_handle *dest_parent_handle;
-            chimera_rename_callback_t        callback;
-            void                            *private_data;
-            int                              source_path_len;
-            int                              source_parent_len;
-            int                              source_name_offset;
-            int                              dest_path_len;
-            int                              dest_parent_len;
-            int                              dest_name_offset;
-            uint32_t                         source_fh_len;
-            uint32_t                         dest_fh_len;
-            char                             source_path[CHIMERA_VFS_PATH_MAX];
-            char                             dest_path[CHIMERA_VFS_PATH_MAX];
-            uint8_t                          source_fh[CHIMERA_VFS_FH_SIZE];
-            uint8_t                          dest_fh[CHIMERA_VFS_FH_SIZE];
+            chimera_rename_callback_t       callback;
+            void                           *private_data;
+            int                             source_path_len;
+            int                             source_parent_len;
+            int                             source_name_offset;
+            int                             dest_path_len;
+            int                             dest_parent_len;
+            int                             dest_name_offset;
+            uint32_t                        source_fh_len;
+            uint32_t                        dest_fh_len;
+            char                            source_path[CHIMERA_VFS_PATH_MAX];
+            char                            dest_path[CHIMERA_VFS_PATH_MAX];
+            uint8_t                         source_fh[CHIMERA_VFS_FH_SIZE];
+            uint8_t                         dest_fh[CHIMERA_VFS_FH_SIZE];
         } rename;
 
         struct {
             struct chimera_vfs_open_handle *handle;
-            chimera_readlink_callback_t      callback;
-            void                            *private_data;
-            uint32_t                         target_maxlength;
-            char                            *target;
+            chimera_readlink_callback_t     callback;
+            void                           *private_data;
+            uint32_t                        target_maxlength;
+            char                           *target;
         } readlink;
 
         struct {
             struct chimera_vfs_open_handle *handle;
-            chimera_stat_callback_t          callback;
-            void                            *private_data;
+            chimera_stat_callback_t         callback;
+            void                           *private_data;
         } stat;
     };
 };

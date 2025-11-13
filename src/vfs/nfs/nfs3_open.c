@@ -6,8 +6,8 @@
 
 void
 chimera_nfs3_open(
-    struct chimera_nfs_thread          *thread,
-    struct chimera_nfs_shared          *shared,
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
@@ -17,7 +17,7 @@ chimera_nfs3_open(
     open_handle->dirty          = 0;
     request->open.r_vfs_private = (uint64_t) open_handle;
 
-    request->status = CHIMERA_VFS_ENOTSUP;
+    request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs3_open */
 

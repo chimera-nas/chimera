@@ -34,7 +34,15 @@ chimera_mount(
     request->mount.callback     = callback;
     request->mount.private_data = private_data;
 
-    chimera_vfs_mount(client_thread->vfs_thread, mount_path, module_name, module_path,
+    memcpy(request->mount.module_path, module_path, strlen(module_path) + 1);
+    memcpy(request->mount.mount_path, mount_path, strlen(mount_path) + 1);
+    memcpy(request->mount.module_name, module_name, strlen(module_name) + 1);
+
+    chimera_vfs_mount(client_thread->vfs_thread,
+                      request->mount.mount_path,
+                      request->mount.module_name,
+                      request->mount.
+                      module_path,
                       chimera_client_mount_callback,
                       request);
 } /* chimera_client_mount */

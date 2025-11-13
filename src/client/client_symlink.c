@@ -29,7 +29,6 @@ chimera_symlink_parent_complete(
     void                           *private_data)
 {
     struct chimera_client_request *request = private_data;
-    struct chimera_vfs_attrs       set_attr;
 
     if (error_code != CHIMERA_VFS_OK) {
         request->symlink.callback(request->thread, error_code, request->symlink.private_data);
@@ -39,8 +38,8 @@ chimera_symlink_parent_complete(
 
     request->symlink.parent_handle = oh;
 
-    set_attr.va_req_mask = 0;
-    set_attr.va_set_mask = 0;
+    request->symlink.set_attr.va_req_mask = 0;
+    request->symlink.set_attr.va_set_mask = 0;
 
     chimera_vfs_symlink(
         request->thread->vfs_thread,
@@ -49,7 +48,7 @@ chimera_symlink_parent_complete(
         request->symlink.path_len - request->symlink.name_offset,
         request->symlink.target,
         request->symlink.target_len,
-        &set_attr,
+        &request->symlink.set_attr,
         CHIMERA_VFS_ATTR_FH,
         0,
         0,
@@ -72,14 +71,16 @@ chimera_symlink_parent_lookup_complete(
         return;
     }
 
+    memcpy(request->fh, attr->va_fh, attr->va_fh_len);
+    request->fh_len = attr->va_fh_len;
+
     chimera_vfs_open(
         request->thread->vfs_thread,
-        attr->va_fh,
-        attr->va_fh_len,
+        request->fh,
+        request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
         chimera_symlink_parent_complete,
         request);
-
 
 } /* chimera_symlink_parent_lookup_complete */
 
@@ -128,12 +129,12 @@ chimera_symlink(
 
     request = chimera_client_request_alloc(thread);
 
-    request->opcode                = CHIMERA_CLIENT_OP_SYMLINK;
-    request->symlink.callback      = callback;
-    request->symlink.private_data  = private_data;
-    request->symlink.path_len      = path_len;
-    request->symlink.parent_len    = slash ? slash - path : path_len;
-    request->symlink.target_len    = target_len;
+    request->opcode               = CHIMERA_CLIENT_OP_SYMLINK;
+    request->symlink.callback     = callback;
+    request->symlink.private_data = private_data;
+    request->symlink.path_len     = path_len;
+    request->symlink.parent_len   = slash ? slash - path : path_len;
+    request->symlink.target_len   = target_len;
 
     while (slash && *slash == '/') {
         slash++;
