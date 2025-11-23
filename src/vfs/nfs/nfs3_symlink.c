@@ -17,8 +17,8 @@ chimera_nfs3_symlink_callback(
     int                 status,
     void               *private_data)
 {
-    struct chimera_vfs_request *request = private_data;
-    struct chimera_nfs3_symlink_ctx    *ctx     = request->plugin_data;
+    struct chimera_vfs_request      *request = private_data;
+    struct chimera_nfs3_symlink_ctx *ctx     = request->plugin_data;
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -53,16 +53,17 @@ chimera_nfs3_symlink_callback(
 
 void
 chimera_nfs3_symlink(
-    struct chimera_nfs_thread          *thread,
-    struct chimera_nfs_shared          *shared,
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh, request->fh_len);
-    struct SYMLINK3args              args;
+    struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
+                                                                                                  request->fh_len);
+    struct SYMLINK3args                      args;
     struct chimera_nfs3_symlink_ctx         *ctx;
-    uint8_t                         *fh;
-    int                              fhlen;
+    uint8_t                                 *fh;
+    int                                      fhlen;
 
     if (!server_thread) {
         request->status = CHIMERA_VFS_ESTALE;
@@ -86,6 +87,7 @@ chimera_nfs3_symlink(
     ctx->server = server_thread->server;
 
     shared->nfs_v3.send_call_NFSPROC3_SYMLINK(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
+                                              0, 0, 0,
                                               chimera_nfs3_symlink_callback, request);
 } /* chimera_nfs3_symlink */
 

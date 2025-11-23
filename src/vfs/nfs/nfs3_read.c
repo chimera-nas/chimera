@@ -44,15 +44,16 @@ chimera_nfs3_read_callback(
 
 void
 chimera_nfs3_read(
-    struct chimera_nfs_thread          *thread,
-    struct chimera_nfs_shared          *shared,
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh, request->fh_len);
-    struct READ3args                 args;
-    uint8_t                         *fh;
-    int                              fhlen;
+    struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
+                                                                                                  request->fh_len);
+    struct READ3args                         args;
+    uint8_t                                 *fh;
+    int                                      fhlen;
 
     if (!server_thread) {
         request->status = CHIMERA_VFS_ESTALE;
@@ -68,6 +69,6 @@ chimera_nfs3_read(
     args.count          = request->read.length;
 
     shared->nfs_v3.send_call_NFSPROC3_READ(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                           chimera_nfs3_read_callback, request);
+                                           0, request->read.length, 0, chimera_nfs3_read_callback, request);
 } /* chimera_nfs3_read */
 

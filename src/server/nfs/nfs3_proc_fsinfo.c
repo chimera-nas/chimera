@@ -23,11 +23,7 @@ chimera_nfs3_fsinfo_complete(
     struct FSINFO3res                 res;
     uint64_t                          max_xfer;
 
-    if (msg->rdma) {
-        max_xfer = 4 * 1024 * 1024;
-    } else {
-        max_xfer = 1024 * 1024;
-    }
+    max_xfer = 1024 * 1024;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 

@@ -82,6 +82,6 @@ chimera_nfs3_lookup(
     args.what.name.len      = request->lookup.component_len;
 
     shared->nfs_v3.send_call_NFSPROC3_LOOKUP(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                             chimera_nfs3_lookup_callback, request);
+                                             0, 0, 0, chimera_nfs3_lookup_callback, request);
 } /* chimera_nfs3_lookup */
 

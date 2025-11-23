@@ -38,7 +38,7 @@ static void
 chimera_nfs_destroy(void *private_data)
 {
     struct chimera_nfs_shared *shared = private_data;
-    int                i;
+    int                        i;
 
     for (i = 0; i < shared->max_servers; i++) {
         if (shared->servers[i]) {
@@ -52,14 +52,37 @@ chimera_nfs_destroy(void *private_data)
     free(shared);
 } /* chimera_nfs_destroy */
 
+static void
+chimera_nfs_notify(
+    struct evpl_rpc2_thread *thread,
+    struct evpl_rpc2_conn   *conn,
+    struct evpl_rpc2_notify *notify,
+    void                    *private_data)
+{
+    char local_addr[80], remote_addr[80];
+
+    switch (notify->notify_type) {
+        case EVPL_RPC2_NOTIFY_CONNECTED:
+            evpl_bind_get_local_address(conn->bind, local_addr, sizeof(local_addr));
+            evpl_bind_get_remote_address(conn->bind, remote_addr, sizeof(remote_addr));
+            chimera_nfsclient_info("Connected from %s to %s", local_addr, remote_addr);
+            break;
+        case EVPL_RPC2_NOTIFY_DISCONNECTED:
+            evpl_bind_get_local_address(conn->bind, local_addr, sizeof(local_addr));
+            evpl_bind_get_remote_address(conn->bind, remote_addr, sizeof(remote_addr));
+            chimera_nfsclient_info("Disconnected from %s to %s", local_addr, remote_addr);
+            break;
+    } /* switch */
+} /* chimera_nfs_notify */
+
 static void *
 chimera_nfs_thread_init(
     struct evpl *evpl,
     void        *private_data)
 {
-    struct chimera_nfs_shared        *shared = private_data;
-    struct chimera_nfs_thread        *thread = calloc(1, sizeof(*thread));
-    struct evpl_rpc2_program *programs[5];
+    struct chimera_nfs_shared *shared = private_data;
+    struct chimera_nfs_thread *thread = calloc(1, sizeof(*thread));
+    struct evpl_rpc2_program  *programs[5];
 
     thread->shared = shared;
     thread->evpl   = evpl;
@@ -70,7 +93,7 @@ chimera_nfs_thread_init(
     programs[3] = &shared->nfs_v4.rpc2;
     programs[4] = &shared->nfs_v4_cb.rpc2;
 
-    thread->rpc2_thread = evpl_rpc2_thread_init(evpl, programs, 5);
+    thread->rpc2_thread = evpl_rpc2_thread_init(evpl, programs, 5, chimera_nfs_notify, thread);
 
     thread->max_server_threads = shared->max_servers;
     thread->server_threads     = calloc(thread->max_server_threads, sizeof(*thread->server_threads));
@@ -83,7 +106,7 @@ chimera_nfs_thread_destroy(void *private_data)
 {
     struct chimera_nfs_thread             *thread = private_data;
     struct chimera_nfs_client_open_handle *open_handle;
-    int                            i;
+    int                                    i;
 
     while (thread->free_open_handles) {
         open_handle = thread->free_open_handles;
@@ -112,8 +135,8 @@ chimera_nfs_dispatch(
     struct chimera_nfs_thread        *thread = private_data;
     struct chimera_nfs_shared        *shared = thread->shared;
     struct chimera_nfs_client_server *server;
-    const uint8_t            *fh;
-    int                       nfsvers;
+    const uint8_t                    *fh;
+    int                               nfsvers;
 
     if (request->opcode == CHIMERA_VFS_OP_MOUNT || request->opcode == CHIMERA_VFS_OP_UMOUNT) {
         nfsvers = 3;

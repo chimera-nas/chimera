@@ -208,6 +208,29 @@ nfs_server_destroy(void *data)
     free(shared);
 } /* nfs_server_destroy */
 
+static void
+chimera_nfs_server_notify(
+    struct evpl_rpc2_thread *thread,
+    struct evpl_rpc2_conn   *conn,
+    struct evpl_rpc2_notify *notify,
+    void                    *private_data)
+{
+    char local_addr[80], remote_addr[80];
+
+    switch (notify->notify_type) {
+        case EVPL_RPC2_NOTIFY_CONNECTED:
+            evpl_bind_get_local_address(conn->bind, local_addr, sizeof(local_addr));
+            evpl_bind_get_remote_address(conn->bind, remote_addr, sizeof(remote_addr));
+            chimera_nfs_info("Connected from %s to %s", local_addr, remote_addr);
+            break;
+        case EVPL_RPC2_NOTIFY_DISCONNECTED:
+            evpl_bind_get_local_address(conn->bind, local_addr, sizeof(local_addr));
+            evpl_bind_get_remote_address(conn->bind, remote_addr, sizeof(remote_addr));
+            chimera_nfs_info("Disconnected from %s to %s", local_addr, remote_addr);
+            break;
+    } /* switch */
+} /* chimera_nfs_server_notify */
+
 static void *
 nfs_server_thread_init(
     struct evpl               *evpl,
@@ -224,7 +247,7 @@ nfs_server_thread_init(
     thread->vfs        = shared->vfs;
     thread->vfs_thread = vfs_thread;
 
-    thread->rpc2_thread = evpl_rpc2_thread_init(evpl, NULL, 0);
+    thread->rpc2_thread = evpl_rpc2_thread_init(evpl, NULL, 0, chimera_nfs_server_notify, thread);
 
     evpl_rpc2_server_attach(thread->rpc2_thread, shared->mount_server, thread);
     evpl_rpc2_server_attach(thread->rpc2_thread, shared->portmap_server, thread);

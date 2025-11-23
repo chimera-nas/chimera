@@ -74,6 +74,6 @@ chimera_nfs3_link(
     args.link.name.len      = request->link.namelen;
 
     shared->nfs_v3.send_call_NFSPROC3_LINK(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                           chimera_nfs3_link_callback, request);
+                                           0, 0, 0, chimera_nfs3_link_callback, request);
 } /* chimera_nfs3_link */
 

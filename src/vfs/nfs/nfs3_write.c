@@ -45,16 +45,17 @@ chimera_nfs3_write_callback(
 
 void
 chimera_nfs3_write(
-    struct chimera_nfs_thread          *thread,
-    struct chimera_nfs_shared          *shared,
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh, request->fh_len);
+    struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
+                                                                                                  request->fh_len);
     struct chimera_nfs_client_open_handle   *open_handle;
-    struct WRITE3args                args;
-    uint8_t                         *fh;
-    int                              fhlen;
+    struct WRITE3args                        args;
+    uint8_t                                 *fh;
+    int                                      fhlen;
 
     if (!server_thread) {
         request->status = CHIMERA_VFS_ESTALE;
@@ -80,6 +81,6 @@ chimera_nfs3_write(
     args.data.length    = request->write.length;
 
     shared->nfs_v3.send_call_NFSPROC3_WRITE(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                            chimera_nfs3_write_callback, request);
+                                            1, 0, 0, chimera_nfs3_write_callback, request);
 } /* chimera_nfs3_write */
 
