@@ -235,6 +235,7 @@ chimera_vfs_init(
     struct chimera_vfs        *vfs;
     struct chimera_vfs_module *module;
     char                       modsym[80];
+    void                      *handle;
 
     vfs = calloc(1, sizeof(*vfs));
 
@@ -269,6 +270,14 @@ chimera_vfs_init(
 
     for (int i = 0; i < num_modules; i++) {
         chimera_vfs_info("Initializing VFS module %s...", module_cfgs[i].module_name);
+        if (module_cfgs[i].module_path[0] != '\0') {
+            handle = dlopen(module_cfgs[i].module_path, RTLD_NOW | RTLD_GLOBAL);
+            chimera_vfs_abort_if(!handle, "failed to load module %s from %s: %s",
+                                 module_cfgs[i].module_name,
+                                 module_cfgs[i].module_path,
+                                 dlerror());
+            chimera_vfs_info("Module %s loaded from %s", module_cfgs[i].module_name, module_cfgs[i].module_path);
+        }
 
         snprintf(modsym, sizeof(modsym), "vfs_%s", module_cfgs[i].module_name);
         module = dlsym(RTLD_DEFAULT, modsym);
