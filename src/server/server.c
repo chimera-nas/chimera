@@ -195,9 +195,13 @@ chimera_server_config_add_module(
     module_cfg = &config->modules[config->num_modules];
 
     strncpy(module_cfg->module_name, module_name, sizeof(module_cfg->module_name));
-    strncpy(module_cfg->module_path, module_path, sizeof(module_cfg->module_path));
     strncpy(module_cfg->config_path, config_path, sizeof(module_cfg->config_path));
-
+    if (module_path) {
+        strncpy(module_cfg->module_path, module_path, sizeof(module_cfg->module_path));
+    } else {
+        /* We don't specify a path for preloaded modules like demofs */
+        module_cfg->module_path[0] = '\0';
+    }
     config->num_modules++;
 } /* chimera_server_config_add_module */
 
@@ -298,7 +302,7 @@ chimera_server_mount(
     const char            *module_path)
 {
     return chimera_vfs_mount(server->vfs, mount_path, module_name, module_path);
-} /* chimera_server_create_share */
+} /* chimera_server_mount */
 
 SYMBOL_EXPORT int
 chimera_server_create_bucket(
