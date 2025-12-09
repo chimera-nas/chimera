@@ -1,9 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2025 Ben Jarvis
-
-SPDX-License-Identifier: LGPL-2.1-only
--->
-
 # Chimera
 
 Chimera is a userspace virtual file system (VFS) aimed primarily at network attached storage (NAS).   The chimera virtual file system aims to allow applications to serve and consume NAS storage using standard protocols such as NFS, SMB, and S3 without a dependency on kernel-resident storage code.
