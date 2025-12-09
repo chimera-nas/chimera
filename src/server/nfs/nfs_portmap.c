@@ -16,8 +16,10 @@ chimera_portmap_null(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
+    int                               rc;
 
-    shared->portmap_v2.send_reply_PMAPPROC_NULL(evpl, msg);
+    rc = shared->portmap_v2.send_reply_PMAPPROC_NULL(evpl, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_portmap_null */
 
 void
@@ -31,6 +33,7 @@ chimera_portmap_getport(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct port                       port;
+    int                               rc;
 
     switch (mapping->prog) {
         case 100003:
@@ -45,6 +48,7 @@ chimera_portmap_getport(
             port.port = 0;
     } /* switch */
 
-    shared->portmap_v2.send_reply_PMAPPROC_GETPORT(evpl, &port, msg);
+    rc = shared->portmap_v2.send_reply_PMAPPROC_GETPORT(evpl, &port, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
 } /* chimera_portmap_getport */

@@ -19,8 +19,10 @@ chimera_nfs_mount_null(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
+    int                               rc;
 
-    shared->mount_v3.send_reply_MOUNTPROC3_NULL(evpl, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_NULL(evpl, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs_mount_null */
 
 static void
@@ -36,6 +38,7 @@ chimera_nfs_mount_lookup_complete(
     struct chimera_server_nfs_shared *shared = thread->shared;
     int32_t                           auth_flavors[2];
     struct mountres3                  res;
+    int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
         res.fhs_status                 = MNT3_OK;
@@ -47,9 +50,10 @@ chimera_nfs_mount_lookup_complete(
         chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
                              "NFS mount: no file handle was returned");
 
-        xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle,
-                              attr->va_fh_len,
-                              msg->dbuf);
+        rc = xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle,
+                                   attr->va_fh_len,
+                                   msg->dbuf);
+        chimera_nfs_abort_if(rc, "Failed to allocate opaque");
         memcpy(res.mountinfo.fhandle.data,
                attr->va_fh,
                attr->va_fh_len);
@@ -57,7 +61,8 @@ chimera_nfs_mount_lookup_complete(
         res.fhs_status = MNT3ERR_NOENT;
     }
 
-    shared->mount_v3.send_reply_MOUNTPROC3_MNT(evpl, &res, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_MNT(evpl, &res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
 } /* chimera_nfs_mount_lookup_complete */
@@ -74,7 +79,8 @@ chimera_nfs_mount_mnt(
     struct nfs_request               *req;
     uint8_t                          *fh_magic;
 
-    xdr_dbuf_alloc_space(fh_magic, sizeof(fh_magic), msg->dbuf);
+    fh_magic = xdr_dbuf_alloc_space(sizeof(*fh_magic), msg->dbuf);
+    chimera_nfs_abort_if(fh_magic == NULL, "Failed to allocate space");
 
     *fh_magic = CHIMERA_VFS_FH_MAGIC_ROOT;
 
@@ -110,8 +116,10 @@ chimera_nfs_mount_umnt(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
+    int                               rc;
 
-    shared->mount_v3.send_reply_MOUNTPROC3_UMNT(evpl, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_UMNT(evpl, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs_mount_umnt */
 
 void
@@ -133,8 +141,10 @@ chimera_nfs_mount_export(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct exportres                  export;
+    int                               rc;
 
     export.exports = NULL;
 
-    shared->mount_v3.send_reply_MOUNTPROC3_EXPORT(evpl, &export, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_EXPORT(evpl, &export, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs_mount_export */

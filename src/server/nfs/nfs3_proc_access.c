@@ -22,6 +22,7 @@ chimera_nfs3_access_complete(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct ACCESS3args               *args   = req->args_access;
     struct ACCESS3res                 res;
+    int                               rc;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
@@ -64,7 +65,8 @@ chimera_nfs3_access_complete(
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
-    shared->nfs_v3.send_reply_NFSPROC3_ACCESS(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_ACCESS(evpl, &res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
 } /* chimera_nfs3_access_complete */
@@ -81,6 +83,7 @@ chimera_nfs3_access_open_callback(
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct ACCESS3res                 res;
+    int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
@@ -92,7 +95,8 @@ chimera_nfs3_access_open_callback(
                             req);
     } else {
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
-        shared->nfs_v3.send_reply_NFSPROC3_ACCESS(evpl, &res, msg);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_ACCESS(evpl, &res, msg);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
 } /* chimera_nfs3_access_open_callback */

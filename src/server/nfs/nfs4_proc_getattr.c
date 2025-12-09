@@ -16,6 +16,7 @@ chimera_nfs4_getattr_complete(
     struct nfs_request  *req  = private_data;
     struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
     struct GETATTR4res  *res  = &req->res_compound.resarray[req->index].opgetattr;
+    int                  rc;
 
     if (error_code != CHIMERA_VFS_OK) {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
@@ -25,14 +26,13 @@ chimera_nfs4_getattr_complete(
 
     res->status = NFS4_OK;
 
-    xdr_dbuf_reserve(&res->resok4.obj_attributes,
-                     attrmask,
-                     3,
-                     req->msg->dbuf);
+    rc = xdr_dbuf_alloc_array(&res->resok4.obj_attributes, attrmask, 3, req->msg->dbuf);
+    chimera_nfs_abort_if(rc, "Failed to allocate array");
 
-    xdr_dbuf_alloc_opaque(&res->resok4.obj_attributes.attr_vals,
-                          4096,
-                          req->msg->dbuf);
+    rc = xdr_dbuf_alloc_opaque(&res->resok4.obj_attributes.attr_vals,
+                               4096,
+                               req->msg->dbuf);
+    chimera_nfs_abort_if(rc, "Failed to allocate opaque");
 
     chimera_nfs4_marshall_attrs(attr,
                                 args->num_attr_request,
