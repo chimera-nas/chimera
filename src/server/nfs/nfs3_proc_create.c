@@ -35,10 +35,10 @@ chimera_nfs3_create_open_at_complete(
 
         if (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
             res.resok.obj.handle_follows = 1;
-            rc = xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
-                                      handle->fh,
-                                      handle->fh_len,
-                                      msg->dbuf);
+            rc                           = xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
+                                                                handle->fh,
+                                                                handle->fh_len,
+                                                                msg->dbuf);
             chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
         } else {

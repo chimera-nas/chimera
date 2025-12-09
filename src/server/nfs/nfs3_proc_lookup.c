@@ -32,9 +32,9 @@ chimera_nfs3_lookup_complete(
                              "NFS3 lookup: no file handle was returned");
 
         rc = xdr_dbuf_opaque_copy(&res.resok.object.data,
-                                   attr->va_fh,
-                                   attr->va_fh_len,
-                                   msg->dbuf);
+                                  attr->va_fh,
+                                  attr->va_fh_len,
+                                  msg->dbuf);
         chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
         chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
@@ -82,7 +82,7 @@ chimera_nfs3_lookup_open_callback(
         res.status =
             chimera_vfs_error_to_nfsstat3(error_code);
         res.resfail.dir_attributes.attributes_follow = 0;
-        rc = shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, &res, msg);
+        rc                                           = shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, &res, msg);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }

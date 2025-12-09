@@ -34,10 +34,10 @@ chimera_nfs3_mkdir_complete(
     if (res.status == NFS3_OK) {
         if (r_attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
             res.resok.obj.handle_follows = 1;
-            rc = xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
-                                      r_attr->va_fh,
-                                      r_attr->va_fh_len,
-                                      msg->dbuf);
+            rc                           = xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
+                                                                r_attr->va_fh,
+                                                                r_attr->va_fh_len,
+                                                                msg->dbuf);
             chimera_nfs_abort_if(rc, "Failed to copy opaque");
         } else {
             res.resok.obj.handle_follows = 0;

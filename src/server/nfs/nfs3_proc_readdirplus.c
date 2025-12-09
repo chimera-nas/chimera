@@ -44,9 +44,9 @@ chimera_nfs3_readdirplus_callback(
         entry->name_handle.handle_follows = 1;
 
         rc = xdr_dbuf_opaque_copy(&entry->name_handle.handle.data,
-                                   attrs->va_fh,
-                                   attrs->va_fh_len,
-                                   msg->dbuf);
+                                  attrs->va_fh,
+                                  attrs->va_fh_len,
+                                  msg->dbuf);
         chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
     } else {
@@ -139,7 +139,7 @@ chimera_nfs3_readdirplus_open_callback(
 
     } else {
         res->status = chimera_vfs_error_to_nfsstat3(error_code);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, res, msg);
+        rc          = shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, res, msg);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }

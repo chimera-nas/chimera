@@ -116,7 +116,7 @@ chimera_nfs3_readdir_open_callback(
 
     } else {
         res->status = chimera_vfs_error_to_nfsstat3(error_code);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_READDIR(evpl, res, msg);
+        rc          = shared->nfs_v3.send_reply_NFSPROC3_READDIR(evpl, res, msg);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
