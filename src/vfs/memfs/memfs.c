@@ -15,6 +15,7 @@
 #include "common/rbtree.h"
 
 #include "vfs/vfs.h"
+#include "vfs/vfs_internal.h"
 #include "memfs.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -765,8 +766,77 @@ memfs_setattr(
     request->complete(request);
 } /* memfs_setattr */
 
+static inline struct memfs_inode *
+memfs_lookup_path(
+    struct memfs_thread *thread,
+    struct memfs_shared *shared,
+    const char          *path,
+    int                  pathlen)
+{
+    struct memfs_inode  *parent, *inode;
+    struct memfs_dirent *dirent;
+    const char          *name;
+    const char          *pathc = path;
+    const char          *slash;
+    int                  namelen;
+    uint64_t             hash;
+
+    inode = memfs_inode_get_fh(shared, shared->root_fh, shared->root_fhlen);
+
+    if (unlikely(!inode)) {
+        return NULL;
+    }
+
+    while (*pathc == '/') {
+        pathc++;
+    }
+
+    while (pathc < (path + pathlen)) {
+
+        slash = strchr(pathc, '/');
+
+        if (slash) {
+            name    = pathc;
+            namelen = slash - pathc;
+        } else {
+            name    = pathc;
+            namelen = pathlen - (pathc - path);
+        }
+
+        pathc += namelen;
+
+        while (*pathc == '/') {
+            pathc++;
+        }
+
+        hash = chimera_vfs_hash(name, namelen);
+
+        rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
+
+        if (!dirent) {
+            pthread_mutex_unlock(&inode->lock);
+            return NULL;
+        }
+
+        parent = inode;
+
+        inode = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
+
+        pthread_mutex_unlock(&parent->lock);
+
+        if (!S_ISDIR(inode->mode)) {
+            pthread_mutex_unlock(&inode->lock);
+            return NULL;
+        }
+
+    }
+
+    return inode;
+
+} /* memfs_lookup_path */
+
 static void
-memfs_getrootfh(
+memfs_mount(
     struct memfs_thread        *thread,
     struct memfs_shared        *shared,
     struct chimera_vfs_request *request,
@@ -774,7 +844,7 @@ memfs_getrootfh(
 {
     struct memfs_inode *inode;
 
-    inode = memfs_inode_get_fh(shared, shared->root_fh, shared->root_fhlen);
+    inode = memfs_lookup_path(thread, shared, request->mount.path, request->mount.pathlen);
 
     if (unlikely(!inode)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -782,13 +852,27 @@ memfs_getrootfh(
         return;
     }
 
-    memfs_map_attrs(&request->getrootfh.r_attr, inode);
+    memfs_map_attrs(&request->mount.r_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* memfs_getrootfh */
+} /* memfs_mount */
+
+
+static void
+memfs_umount(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+
+    /* No action required */
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_umount */
 
 static void
 memfs_lookup(
@@ -1962,8 +2046,11 @@ memfs_dispatch(
     struct memfs_shared *shared = thread->shared;
 
     switch (request->opcode) {
-        case CHIMERA_VFS_OP_GETROOTFH:
-            memfs_getrootfh(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_MOUNT:
+            memfs_mount(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_UMOUNT:
+            memfs_umount(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             memfs_lookup(thread, shared, request, private_data);
@@ -2029,7 +2116,7 @@ memfs_dispatch(
 SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
     .name           = "memfs",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_MEMFS,
-    .capabilities   = CHIMERA_VFS_CAP_HANDLE_ALL | CHIMERA_VFS_CAP_CREATE_UNLINKED,
+    .capabilities   = CHIMERA_VFS_CAP_CREATE_UNLINKED,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

@@ -16,6 +16,8 @@
 #include <pthread.h>
 #include <execinfo.h>
 
+#include "evpl/evpl.h"
+
  #define UNW_LOCAL_ONLY
 #include <libunwind.h>
 
@@ -202,6 +204,7 @@ chimera_log_thread_init(void)
 
     pthread_create(&ChimeraLogThread, NULL, chimera_log_thread, NULL);
     atexit(chimera_log_thread_exit);
+
 } /* chimera_log_thread_init */
 
 SYMBOL_EXPORT void

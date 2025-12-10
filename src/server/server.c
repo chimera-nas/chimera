@@ -15,6 +15,7 @@
 #include "s3/s3.h"
 #include "smb/smb.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_procs.h"
 #include "common/macros.h"
 #include "server/server.h"
 #include "smb/smb2.h"
@@ -83,22 +84,26 @@ chimera_server_config_init(void)
     config->modules[0].config_path[0] = '\0';
     config->modules[0].module_path[0] = '\0';
 
-    strncpy(config->modules[1].module_name, "memfs", sizeof(config->modules[1].module_name));
+    strncpy(config->modules[1].module_name, "nfs", sizeof(config->modules[1].module_name));
     config->modules[1].config_path[0] = '\0';
     config->modules[1].module_path[0] = '\0';
 
-    strncpy(config->modules[2].module_name, "linux", sizeof(config->modules[2].module_name));
+    strncpy(config->modules[2].module_name, "memfs", sizeof(config->modules[2].module_name));
     config->modules[2].config_path[0] = '\0';
     config->modules[2].module_path[0] = '\0';
 
-    config->num_modules = 3;
-
-#ifdef HAVE_IO_URING
-    strncpy(config->modules[3].module_name, "io_uring", sizeof(config->modules[3].module_name));
+    strncpy(config->modules[3].module_name, "linux", sizeof(config->modules[3].module_name));
     config->modules[3].config_path[0] = '\0';
     config->modules[3].module_path[0] = '\0';
 
     config->num_modules = 4;
+
+#ifdef HAVE_IO_URING
+    strncpy(config->modules[4].module_name, "io_uring", sizeof(config->modules[4].module_name));
+    config->modules[4].config_path[0] = '\0';
+    config->modules[4].module_path[0] = '\0';
+
+    config->num_modules = 5;
 #endif /* ifdef HAVE_IO_URING */
 
     config->metrics_port = 0;
@@ -294,6 +299,23 @@ chimera_server_thread_init(
     return thread;
 } /* chimera_server_thread_init */
 
+struct mount_ctx {
+    int done;
+    int status;
+};
+
+static void
+chimera_server_mount_callback(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data)
+{
+    struct mount_ctx *ctx = private_data;
+
+    ctx->done   = 1;
+    ctx->status = status;
+} /* chimera_server_mount_callback */
+
 SYMBOL_EXPORT int
 chimera_server_mount(
     struct chimera_server *server,
@@ -301,8 +323,27 @@ chimera_server_mount(
     const char            *module_name,
     const char            *module_path)
 {
-    return chimera_vfs_mount(server->vfs, mount_path, module_name, module_path);
-} /* chimera_server_mount */
+    struct evpl               *evpl;
+    struct chimera_vfs_thread *thread;
+    struct mount_ctx           ctx = { .done = 0, .status = 0 };
+
+    evpl = evpl_create(NULL);
+
+    thread = chimera_vfs_thread_init(evpl, server->vfs);
+
+    chimera_vfs_mount(thread, mount_path, module_name, module_path, chimera_server_mount_callback, &ctx);
+
+    while (!ctx.done) {
+        evpl_continue(evpl);
+    }
+
+    chimera_vfs_thread_destroy(thread);
+
+    evpl_destroy(evpl);
+
+    return ctx.status;
+
+} /* chimera_server_create_share */
 
 SYMBOL_EXPORT int
 chimera_server_create_bucket(

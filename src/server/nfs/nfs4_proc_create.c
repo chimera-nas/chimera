@@ -138,6 +138,7 @@ chimera_nfs4_create_open_callback(
                 break;
             case NF4LNK:
                 req->handle = handle;
+
                 chimera_vfs_symlink(
                     thread->vfs_thread,
                     handle,
@@ -145,6 +146,7 @@ chimera_nfs4_create_open_callback(
                     args->objname.len,
                     args->objtype.linkdata.data,
                     args->objtype.linkdata.len,
+                    attr,
                     CHIMERA_VFS_ATTR_FH,
                     CHIMERA_VFS_ATTR_MTIME,
                     CHIMERA_VFS_ATTR_MTIME,

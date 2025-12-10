@@ -106,25 +106,26 @@ struct chimera_vfs_attrs {
 
 };
 
-#define CHIMERA_VFS_OP_GETROOTFH       1
-#define CHIMERA_VFS_OP_LOOKUP          2
-#define CHIMERA_VFS_OP_GETATTR         3
-#define CHIMERA_VFS_OP_READDIR         4
-#define CHIMERA_VFS_OP_READLINK        5
-#define CHIMERA_VFS_OP_OPEN            6
-#define CHIMERA_VFS_OP_OPEN_AT         7
-#define CHIMERA_VFS_OP_CLOSE           8
-#define CHIMERA_VFS_OP_READ            9
-#define CHIMERA_VFS_OP_WRITE           10
-#define CHIMERA_VFS_OP_REMOVE          11
-#define CHIMERA_VFS_OP_MKDIR           12
-#define CHIMERA_VFS_OP_COMMIT          13
-#define CHIMERA_VFS_OP_SYMLINK         14
-#define CHIMERA_VFS_OP_RENAME          15
-#define CHIMERA_VFS_OP_SETATTR         16
-#define CHIMERA_VFS_OP_LINK            17
-#define CHIMERA_VFS_OP_CREATE_UNLINKED 18
-#define CHIMERA_VFS_OP_NUM             19
+#define CHIMERA_VFS_OP_MOUNT           1
+#define CHIMERA_VFS_OP_UMOUNT          2
+#define CHIMERA_VFS_OP_LOOKUP          3
+#define CHIMERA_VFS_OP_GETATTR         4
+#define CHIMERA_VFS_OP_READDIR         5
+#define CHIMERA_VFS_OP_READLINK        6
+#define CHIMERA_VFS_OP_OPEN            7
+#define CHIMERA_VFS_OP_OPEN_AT         8
+#define CHIMERA_VFS_OP_CLOSE           9
+#define CHIMERA_VFS_OP_READ            10
+#define CHIMERA_VFS_OP_WRITE           11
+#define CHIMERA_VFS_OP_REMOVE          12
+#define CHIMERA_VFS_OP_MKDIR           13
+#define CHIMERA_VFS_OP_COMMIT          14
+#define CHIMERA_VFS_OP_SYMLINK         15
+#define CHIMERA_VFS_OP_RENAME          16
+#define CHIMERA_VFS_OP_SETATTR         17
+#define CHIMERA_VFS_OP_LINK            18
+#define CHIMERA_VFS_OP_CREATE_UNLINKED 19
+#define CHIMERA_VFS_OP_NUM             20
 
 #define CHIMERA_VFS_OPEN_CREATE        (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH          (1U << 1)
@@ -318,11 +319,20 @@ struct chimera_vfs_request {
         } find;
 
         struct {
-            uint8_t                  fh_magic;
-            const char              *path;
-            uint32_t                 pathlen;
-            struct chimera_vfs_attrs r_attr;
-        } getrootfh;
+            uint8_t                    fh_magic;
+            const char                *path;
+            uint32_t                   pathlen;
+            struct chimera_vfs_module *module;
+            const char                *mount_path;
+            uint32_t                   mount_pathlen;
+            void                      *r_mount_private;
+            struct chimera_vfs_attrs   r_attr;
+        } mount;
+
+        struct {
+            struct chimera_vfs_mount *mount;
+            void                     *mount_private;
+        } umount;
 
         struct {
             struct chimera_vfs_open_handle *handle;
@@ -456,6 +466,7 @@ struct chimera_vfs_request {
             uint64_t                        name_hash;
             const char                     *target;
             int                             targetlen;
+            struct chimera_vfs_attrs       *set_attr;
             struct chimera_vfs_attrs        r_attr;
             struct chimera_vfs_attrs        r_dir_pre_attr;
             struct chimera_vfs_attrs        r_dir_post_attr;
@@ -517,7 +528,8 @@ enum CHIMERA_FS_FH_MAGIC {
     CHIMERA_VFS_FH_MAGIC_IO_URING = 3,
     CHIMERA_VFS_FH_MAGIC_CAIRN    = 4,
     CHIMERA_VFS_FH_MAGIC_DEMOFS   = 5,
-    CHIMERA_VFS_FH_MAGIC_MAX      = 6
+    CHIMERA_VFS_FH_MAGIC_NFS      = 6,
+    CHIMERA_VFS_FH_MAGIC_MAX      = 7
 
 };
 
@@ -542,21 +554,6 @@ enum CHIMERA_FS_FH_MAGIC {
  */
 #define CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED (1U << 1)
 
-/* If set, module guarantees that a file handle can be
- * generated for every possible path in its namespace.
- * If not set, then only file handles within mounted
- * trees must support file handles.
- *
- * If set, VFS will find mount points by lookup from
- * the GETROOTFH file handle.
- *
- * If not set, VFS will provide mount paths to
- * GETROOTFH and module must return mount point
- * file handle.
- */
-
-#define CHIMERA_VFS_CAP_HANDLE_ALL         (1U << 2)
-
 /* If set, dispatch function is synchronous/blocking
  * and chimera will delegate VFS requests to a separate
  * threadpool.  This is useful for modules that perform
@@ -566,13 +563,13 @@ enum CHIMERA_FS_FH_MAGIC {
  * main threadpool and the dispatch function is expected
  * to return quickly.
  */
-#define CHIMERA_VFS_CAP_BLOCKING           (1U << 3)
+#define CHIMERA_VFS_CAP_BLOCKING           (1U << 2)
 
 /* If set, module supports chimera_vfs_create_unlinked()
  * Used primarily for S3 PUT.
  */
 
-#define CHIMERA_VFS_CAP_CREATE_UNLINKED    (1U << 4)
+#define CHIMERA_VFS_CAP_CREATE_UNLINKED    (1U << 3)
 
 struct chimera_vfs_module {
     /* Required
@@ -662,11 +659,13 @@ struct chimera_vfs_module {
 
 struct chimera_vfs_mount {
     struct chimera_vfs_module *module;
-    char                      *name;
     char                      *path;
     uint32_t                   pathlen;
+    int                        fhlen;
+    void                      *mount_private;
     struct chimera_vfs_mount  *prev;
     struct chimera_vfs_mount  *next;
+    uint8_t                    fh[CHIMERA_VFS_FH_SIZE];
 };
 
 struct chimera_vfs_delegation_thread {
@@ -759,18 +758,6 @@ chimera_vfs_register(
     struct chimera_vfs        *vfs,
     struct chimera_vfs_module *module,
     const char                *cfgfile);
-
-int
-chimera_vfs_mount(
-    struct chimera_vfs *vfs,
-    const char         *mount_path,
-    const char         *module_name,
-    const char         *module_path);
-
-int
-chimera_vfs_umount(
-    struct chimera_vfs *vfs,
-    const char         *mount_path);
 
 void
 chimera_vfs_thread_drain(

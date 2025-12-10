@@ -128,6 +128,8 @@ chimera_vfs_name_cache_destroy(struct chimera_vfs_name_cache *cache)
     struct chimera_vfs_name_cache_entry *entry;
     int                                  i, j;
 
+    rcu_barrier();
+
     for (i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
 

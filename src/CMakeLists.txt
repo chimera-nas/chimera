@@ -5,6 +5,7 @@
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 add_subdirectory(common)
+add_subdirectory(nfs_common)
 add_subdirectory(metrics)
 add_subdirectory(vfs)
 add_subdirectory(server)

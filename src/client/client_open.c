@@ -50,11 +50,13 @@ chimera_open_path_lookup_complete(
         chimera_client_request_free(request->thread, request);
         return;
     }
+    memcpy(request->fh, attr->va_fh, attr->va_fh_len);
+    request->fh_len = attr->va_fh_len;
 
     chimera_vfs_open(
         request->thread->vfs_thread,
-        attr->va_fh,
-        attr->va_fh_len,
+        request->fh,
+        request->fh_len,
         request->open.flags,
         chimera_open_path_complete,
         request);
@@ -69,7 +71,6 @@ chimera_open_path_parent_complete(
     void                           *private_data)
 {
     struct chimera_client_request *request = private_data;
-    struct chimera_vfs_attrs       set_attr;
 
     if (error_code != CHIMERA_VFS_OK) {
         request->open.callback(request->thread, error_code, NULL, request->open.private_data);
@@ -79,8 +80,8 @@ chimera_open_path_parent_complete(
 
     request->open.parent_handle = oh;
 
-    set_attr.va_req_mask = 0;
-    set_attr.va_set_mask = 0;
+    request->open.set_attr.va_req_mask = 0;
+    request->open.set_attr.va_set_mask = 0;
 
     chimera_vfs_open_at(
         request->thread->vfs_thread,
@@ -88,7 +89,7 @@ chimera_open_path_parent_complete(
         request->open.path + request->open.name_offset,
         request->open.path_len - request->open.name_offset,
         request->open.flags,
-        &set_attr,
+        &request->open.set_attr,
         CHIMERA_VFS_ATTR_FH,
         0,
         0,

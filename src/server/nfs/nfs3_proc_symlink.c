@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs3_procs.h"
-#include "nfs3_status.h"
-#include "nfs3_attr.h"
+#include "nfs_common/nfs3_status.h"
+#include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
@@ -85,6 +85,7 @@ chimera_nfs3_symlink_open_callback(
             args->where.name.len,
             args->symlink.symlink_data.str,
             args->symlink.symlink_data.len,
+            attr,
             CHIMERA_VFS_ATTR_FH |      CHIMERA_NFS3_ATTR_MASK,
             CHIMERA_NFS3_ATTR_WCC_MASK,
             CHIMERA_NFS3_ATTR_MASK,

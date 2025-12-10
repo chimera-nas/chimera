@@ -237,7 +237,7 @@ chimera_linux_setattr(
 } /* linux_setattr */
 
 static void
-chimera_linux_getrootfh(
+chimera_linux_mount(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
@@ -245,11 +245,11 @@ chimera_linux_getrootfh(
     struct chimera_vfs_attrs *r_attr;
     char                     *scratch = (char *) request->plugin_data;
 
-    r_attr = &request->getrootfh.r_attr;
+    r_attr = &request->mount.r_attr;
 
     TERM_STR(fullpath,
-             request->getrootfh.path,
-             request->getrootfh.pathlen,
+             request->mount.path,
+             request->mount.pathlen,
              scratch);
 
     mount_fd = open(fullpath, O_DIRECTORY | O_RDONLY);
@@ -285,6 +285,17 @@ chimera_linux_getrootfh(
 
     request->complete(request);
 } /* chimera_linux_lookup_path */
+
+
+static void
+chimera_linux_umount(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    /* No action required */
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_linux_umount */
 
 static void
 chimera_linux_lookup(
@@ -909,8 +920,11 @@ chimera_linux_dispatch(
     void                       *private_data)
 {
     switch (request->opcode) {
-        case CHIMERA_VFS_OP_GETROOTFH:
-            chimera_linux_getrootfh(request, private_data);
+        case CHIMERA_VFS_OP_MOUNT:
+            chimera_linux_mount(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_UMOUNT:
+            chimera_linux_umount(request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             chimera_linux_lookup(request, private_data);

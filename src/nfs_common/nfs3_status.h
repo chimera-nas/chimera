@@ -5,7 +5,6 @@
 #pragma once
 
 #include "vfs/vfs_error.h"
-#include "nfs_internal.h"
 
 static inline nfsstat3
 chimera_vfs_error_to_nfsstat3(enum chimera_vfs_error err)
@@ -58,9 +57,62 @@ chimera_vfs_error_to_nfsstat3(enum chimera_vfs_error err)
         case CHIMERA_VFS_EOVERFLOW:
             return NFS3ERR_TOOSMALL;
         case CHIMERA_VFS_EMFILE:
-            chimera_nfs_abort("Too many open files");
             return NFS3ERR_SERVERFAULT;
         default:
             return NFS3ERR_SERVERFAULT;
     } /* switch */
 } /* chimera_vfs_error_to_nfsstat3 */
+
+
+static inline int
+nfs3_client_status_to_chimera_vfs_error(int status)
+{
+    switch (status) {
+        case NFS3_OK:
+            return CHIMERA_VFS_OK;
+        case NFS3ERR_NOENT:
+            return CHIMERA_VFS_ENOENT;
+        case NFS3ERR_IO:
+            return CHIMERA_VFS_EIO;
+        case NFS3ERR_NXIO:
+            return CHIMERA_VFS_ENXIO;
+        case NFS3ERR_ACCES:
+            return CHIMERA_VFS_EACCES;
+        case NFS3ERR_EXIST:
+            return CHIMERA_VFS_EEXIST;
+        case NFS3ERR_XDEV:
+            return CHIMERA_VFS_EXDEV;
+        case NFS3ERR_NOTDIR:
+            return CHIMERA_VFS_ENOTDIR;
+        case NFS3ERR_ISDIR:
+            return CHIMERA_VFS_EISDIR;
+        case NFS3ERR_INVAL:
+            return CHIMERA_VFS_EINVAL;
+        case NFS3ERR_FBIG:
+            return CHIMERA_VFS_EFBIG;
+        case NFS3ERR_NOSPC:
+            return CHIMERA_VFS_ENOSPC;
+        case NFS3ERR_ROFS:
+            return CHIMERA_VFS_EROFS;
+        case NFS3ERR_MLINK:
+            return CHIMERA_VFS_EMLINK;
+        case NFS3ERR_NAMETOOLONG:
+            return CHIMERA_VFS_ENAMETOOLONG;
+        case NFS3ERR_NOTEMPTY:
+            return CHIMERA_VFS_ENOTEMPTY;
+        case NFS3ERR_DQUOT:
+            return CHIMERA_VFS_EDQUOT;
+        case NFS3ERR_STALE:
+            return CHIMERA_VFS_ESTALE;
+        case NFS3ERR_BADHANDLE:
+            return CHIMERA_VFS_EBADF;
+        case NFS3ERR_NOTSUPP:
+            return CHIMERA_VFS_ENOTSUP;
+        case NFS3ERR_TOOSMALL:
+            return CHIMERA_VFS_EOVERFLOW;
+        case NFS3ERR_SERVERFAULT:
+            return CHIMERA_VFS_EFAULT;
+        default:
+            return CHIMERA_VFS_EINVAL;
+    } // switch
+} // nfs3_client_status_to_chimera_vfs_error

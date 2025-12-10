@@ -64,6 +64,7 @@ chimera_vfs_symlink(
     int                             namelen,
     const char                     *target,
     int                             targetlen,
+    struct chimera_vfs_attrs       *set_attr,
     uint64_t                        attr_mask,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
@@ -82,6 +83,7 @@ chimera_vfs_symlink(
     request->symlink.name_hash                   = chimera_vfs_hash(name, namelen);
     request->symlink.target                      = target;
     request->symlink.targetlen                   = targetlen;
+    request->symlink.set_attr                    = set_attr;
     request->symlink.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->symlink.r_attr.va_set_mask          = 0;
     request->symlink.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
