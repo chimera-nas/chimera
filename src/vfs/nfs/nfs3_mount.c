@@ -156,7 +156,8 @@ chimera_portmap_getport_nfs_callback(
 
     server_thread->nfs_conn = evpl_rpc2_client_connect(server_thread->thread->rpc2_thread,
                                                        EVPL_STREAM_SOCKET_TCP,
-                                                       server->nfs_endpoint);
+                                                       server->nfs_endpoint,
+                                                       NULL, 0, NULL);
 
     shared->nfs_v3.send_call_NFSPROC3_NULL(&shared->nfs_v3.rpc2,
                                            server_thread->thread->evpl,
@@ -219,7 +220,8 @@ chimera_portmap_getport_mountd_callback(
 
     server_thread->mount_conn = evpl_rpc2_client_connect(server_thread->thread->rpc2_thread,
                                                          EVPL_STREAM_SOCKET_TCP,
-                                                         server->mount_endpoint);
+                                                         server->mount_endpoint,
+                                                         NULL, 0, NULL);
 
     shared->mount_v3.send_call_MOUNTPROC3_NULL(&shared->mount_v3.rpc2,
                                                server_thread->thread->evpl,
@@ -369,7 +371,8 @@ chimera_nfs3_mount(
 
         server_thread->portmap_conn = evpl_rpc2_client_connect(thread->rpc2_thread,
                                                                EVPL_STREAM_SOCKET_TCP,
-                                                               server->portmap_endpoint);
+                                                               server->portmap_endpoint,
+                                                               NULL, 0, NULL);
 
         if (!server_thread->portmap_conn) {
             chimera_nfs3_mount_discover_callback(server_thread, CHIMERA_VFS_EINVAL);

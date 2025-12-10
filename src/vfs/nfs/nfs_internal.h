@@ -60,13 +60,13 @@ struct chimera_nfs_client_server_thread {
     struct chimera_nfs_shared        *shared;
     struct chimera_nfs_client_server *server;
 
-    struct evpl_rpc2_conn    *portmap_conn;
-    struct evpl_rpc2_conn    *mount_conn;
-    struct evpl_rpc2_conn    *nfs_conn;
+    struct evpl_rpc2_conn            *portmap_conn;
+    struct evpl_rpc2_conn            *mount_conn;
+    struct evpl_rpc2_conn            *nfs_conn;
 };
 
 struct chimera_nfs_client_server {
-    struct chimera_nfs_shared          *shared;
+    struct chimera_nfs_shared  *shared;
     int                         state;
     int                         refcnt;
     int                         nfsvers;
@@ -86,44 +86,44 @@ struct chimera_nfs_client_server {
 };
 
 struct chimera_nfs_client_mount {
-    int                         status;
-    struct chimera_nfs_client_server   *server;
-    struct chimera_nfs_client_mount    *prev;
-    struct chimera_nfs_client_mount    *next;
-    struct chimera_vfs_request *mount_request;
-    char                        path[CHIMERA_VFS_PATH_MAX];
+    int                               status;
+    struct chimera_nfs_client_server *server;
+    struct chimera_nfs_client_mount  *prev;
+    struct chimera_nfs_client_mount  *next;
+    struct chimera_vfs_request       *mount_request;
+    char                              path[CHIMERA_VFS_PATH_MAX];
 };
 
 struct chimera_nfs_client_open_handle {
-    int                            dirty;
+    int                                    dirty;
     struct chimera_nfs_client_open_handle *next;
 };
 
 struct chimera_nfs_shared {
-    struct chimera_nfs_client_mount     *mounts;
+    struct chimera_nfs_client_mount   *mounts;
 
-    struct chimera_nfs_client_server   **servers;
-    struct chimera_nfs_client_server    *servers_map;
-    int                          max_servers;
-    pthread_mutex_t              lock;
+    struct chimera_nfs_client_server **servers;
+    struct chimera_nfs_client_server  *servers_map;
+    int                                max_servers;
+    pthread_mutex_t                    lock;
 
-    struct NFS_PORTMAP_V2        portmap_v2;
-    struct NFS_MOUNT_V3          mount_v3;
-    struct NFS_V3                nfs_v3;
-    struct NFS_V4                nfs_v4;
-    struct NFS_V4_CB             nfs_v4_cb;
+    struct NFS_PORTMAP_V2              portmap_v2;
+    struct NFS_MOUNT_V3                mount_v3;
+    struct NFS_V3                      nfs_v3;
+    struct NFS_V4                      nfs_v4;
+    struct NFS_V4_CB                   nfs_v4_cb;
 
-    struct prometheus_histogram *op_histogram;
-    struct prometheus_metrics   *metrics;
+    struct prometheus_histogram       *op_histogram;
+    struct prometheus_metrics         *metrics;
 };
 
 struct chimera_nfs_thread {
-    struct evpl                      *evpl;
+    struct evpl                              *evpl;
     struct chimera_nfs_shared                *shared;
-    struct evpl_rpc2_thread          *rpc2_thread;
+    struct evpl_rpc2_thread                  *rpc2_thread;
     struct chimera_nfs_client_server_thread **server_threads;
     struct chimera_nfs_client_open_handle    *free_open_handles;
-    int                               max_server_threads;
+    int                                       max_server_threads;
 };
 
 static inline struct chimera_nfs_client_open_handle *
@@ -151,11 +151,11 @@ chimera_nfs_thread_open_handle_free(
 static inline struct chimera_nfs_client_server_thread *
 chimera_nfs_thread_get_server_thread(
     struct chimera_nfs_thread *thread,
-    const uint8_t     *fh,
-    int                fhlen)
+    const uint8_t             *fh,
+    int                        fhlen)
 {
     struct chimera_nfs_client_server_thread *server_thread = NULL;
-    int                              index;
+    int                                      index;
 
     if (unlikely(fhlen < 2)) {
         return NULL;
@@ -189,7 +189,8 @@ chimera_nfs_thread_get_server_thread(
     if (unlikely(!server_thread->nfs_conn)) {
         server_thread->nfs_conn = evpl_rpc2_client_connect(thread->rpc2_thread,
                                                            EVPL_STREAM_SOCKET_TCP,
-                                                           server_thread->server->nfs_endpoint);
+                                                           server_thread->server->nfs_endpoint,
+                                                           NULL, 0, NULL);
     }
 
     return server_thread;

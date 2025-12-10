@@ -85,6 +85,7 @@ chimera_nfs3_symlink_open_callback(
             args->where.name.len,
             args->symlink.symlink_data.str,
             args->symlink.symlink_data.len,
+            attr,
             CHIMERA_VFS_ATTR_FH |      CHIMERA_NFS3_ATTR_MASK,
             CHIMERA_NFS3_ATTR_WCC_MASK,
             CHIMERA_NFS3_ATTR_MASK,

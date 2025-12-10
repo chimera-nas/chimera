@@ -260,7 +260,6 @@ static void
 nfs_server_thread_destroy(void *data)
 {
     struct chimera_server_nfs_thread *thread = data;
-    struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
 
     evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->mount_server);
