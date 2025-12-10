@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -25,6 +25,7 @@ chimera_nfs4_open_at_complete(
     struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
     struct chimera_vfs_open_handle *parent_handle = req->handle;
     struct nfs4_state              *state;
+    int                             rc;
 
     if (error_code != CHIMERA_VFS_OK) {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
@@ -45,8 +46,8 @@ chimera_nfs4_open_at_complete(
 
         if (args->openhow.opentype == OPEN4_CREATE &&
             (args->openhow.how.mode == UNCHECKED4 || args->openhow.how.mode == GUARDED4)) {
-            xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
-            xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
+            rc = xdr_dbuf_alloc_array(&res->resok4, attrset, 4, msg->dbuf);
+            chimera_nfs_abort_if(rc, "Failed to allocate array");
             res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
                                                              args->openhow.how.createattrs.num_attrmask,
                                                              args->openhow.how.createattrs.attrmask,
@@ -127,7 +128,8 @@ chimera_nfs4_open_parent_complete(
         return;
     }
 
-    xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
+    attr = xdr_dbuf_alloc_space(sizeof(*attr), msg->dbuf);
+    chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
     attr->va_req_mask = 0;
 

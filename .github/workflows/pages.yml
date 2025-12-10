@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Ben Jarvis
+# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: Unlicense
 
@@ -58,6 +58,12 @@ jobs:
         run: bundle exec jekyll build --baseurl "${{ steps.pages.outputs.base_path }}"
         env:
           JEKYLL_ENV: production
+      - name: Verify Jekyll output
+        run: |
+          if [ ! -f "_site/index.html" ]; then
+            echo "ERROR: _site/index.html not found!"
+            exit 1
+          fi
       - name: Upload artifact
         if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3

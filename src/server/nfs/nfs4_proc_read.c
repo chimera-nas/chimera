@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -47,7 +47,8 @@ chimera_nfs4_read(
 
     state = nfs4_session_get_state(session, &args->stateid);
 
-    xdr_dbuf_alloc_space(iov, sizeof(*iov) * 64, msg->dbuf);
+    iov = xdr_dbuf_alloc_space(sizeof(*iov) * 64, msg->dbuf);
+    chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
 
     chimera_vfs_read(thread->vfs_thread,

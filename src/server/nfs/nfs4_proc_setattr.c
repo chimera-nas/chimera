@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -25,7 +25,8 @@ chimera_nfs4_setattr_complete(
     if (error_code == CHIMERA_VFS_OK) {
         res->status = NFS4_OK;
 
-        xdr_dbuf_alloc_space(res->attrsset, sizeof(uint32_t) * 4, msg->dbuf);
+        res->attrsset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), msg->dbuf);
+        chimera_nfs_abort_if(res->attrsset == NULL, "Failed to allocate space");
 
         res->num_attrsset = chimera_nfs4_mask2attr(set_attr,
                                                    args->obj_attributes.num_attrmask,
@@ -53,7 +54,8 @@ chimera_nfs4_setattr_open_callback(
     struct chimera_vfs_attrs *attr;
     int                       rc;
 
-    xdr_dbuf_alloc_space(attr, sizeof(*attr), req->msg->dbuf);
+    attr = xdr_dbuf_alloc_space(sizeof(*attr), req->msg->dbuf);
+    chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
     req->handle = handle;
 

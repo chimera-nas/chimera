@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -21,6 +21,7 @@ chimera_nfs3_readlink_complete(
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct READLINK3res              *res;
+    int                               rc;
 
     res = &req->res_readlink;
 
@@ -32,7 +33,8 @@ chimera_nfs3_readlink_complete(
         res->resok.data.len = targetlen;
     }
 
-    shared->nfs_v3.send_reply_NFSPROC3_READLINK(evpl, res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_READLINK(evpl, res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
@@ -52,6 +54,7 @@ chimera_nfs3_readlink_open_callback(
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct READLINK3res              *res    = &req->res_readlink;
+    int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
@@ -65,7 +68,8 @@ chimera_nfs3_readlink_open_callback(
     } else {
         res->status                                     = chimera_vfs_error_to_nfsstat3(error_code);
         res->resok.symlink_attributes.attributes_follow = 0;
-        shared->nfs_v3.send_reply_NFSPROC3_READLINK(evpl, res, msg);
+        rc                                              = shared->nfs_v3.send_reply_NFSPROC3_READLINK(evpl, res, msg);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
 } /* chimera_nfs3_readlink_open_callback */
@@ -87,7 +91,8 @@ chimera_nfs3_readlink(
     nfs3_dump_readlink(req, args);
     res = &req->res_readlink;
 
-    xdr_dbuf_reserve_str(&res->resok, data, 4096, msg->dbuf);
+    res->resok.data.len = 4096;
+    res->resok.data.str = xdr_dbuf_alloc_space(4096, msg->dbuf);
 
     req->args_readlink = args;
 

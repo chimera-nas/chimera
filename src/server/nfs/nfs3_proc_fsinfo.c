@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -21,9 +21,8 @@ chimera_nfs3_fsinfo_complete(
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct FSINFO3res                 res;
-    uint64_t                          max_xfer;
-
-    max_xfer = 1024 * 1024;
+    uint64_t                          max_xfer = 1024 * 1024;
+    int                               rc;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
@@ -48,7 +47,8 @@ chimera_nfs3_fsinfo_complete(
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
-    shared->nfs_v3.send_reply_NFSPROC3_FSINFO(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_FSINFO(evpl, &res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
 } /* chimera_nfs3_fsinfo_complete */
@@ -65,6 +65,7 @@ chimera_nfs3_fsinfo_open_callback(
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct FSINFO3res                 res;
+    int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
@@ -77,7 +78,8 @@ chimera_nfs3_fsinfo_open_callback(
     } else {
         res.status                                   = chimera_vfs_error_to_nfsstat3(error_code);
         res.resfail.obj_attributes.attributes_follow = 0;
-        shared->nfs_v3.send_reply_NFSPROC3_FSINFO(evpl, &res, msg);
+        rc                                           = shared->nfs_v3.send_reply_NFSPROC3_FSINFO(evpl, &res, msg);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
 } /* chimera_nfs3_fsinfo_open_callback */

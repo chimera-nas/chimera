@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -235,6 +235,7 @@ chimera_vfs_init(
     struct chimera_vfs        *vfs;
     struct chimera_vfs_module *module;
     char                       modsym[80];
+    void                      *handle;
 
     vfs = calloc(1, sizeof(*vfs));
 
@@ -269,10 +270,36 @@ chimera_vfs_init(
 
     for (int i = 0; i < num_modules; i++) {
         chimera_vfs_info("Initializing VFS module %s...", module_cfgs[i].module_name);
-
         snprintf(modsym, sizeof(modsym), "vfs_%s", module_cfgs[i].module_name);
+
+        // If a module path is specified, attempt to load the shared object
+        if (module_cfgs[i].module_path[0] != '\0') {
+            // Check if the symbol is already present (module already loaded)
+            if (dlsym(RTLD_DEFAULT, modsym) != NULL) {
+                chimera_vfs_error("Module %s already loaded, skipping dlopen of %s",
+                                  module_cfgs[i].module_name, module_cfgs[i].module_path);
+            } else {
+                // Attempt to load the module shared object
+                handle = dlopen(module_cfgs[i].module_path, RTLD_NOW | RTLD_GLOBAL);
+                if (!handle) {
+                    chimera_vfs_abort_if(1, "Failed to load module %s from %s: %s",
+                                         module_cfgs[i].module_name,
+                                         module_cfgs[i].module_path,
+                                         dlerror());
+                }
+                chimera_vfs_info("Module %s loaded from %s", module_cfgs[i].module_name, module_cfgs[i].module_path);
+            }
+        }
+
+        // Lookup the module symbol (should be present after dlopen or if statically linked)
         module = dlsym(RTLD_DEFAULT, modsym);
-        chimera_vfs_abort_if(!module, "module %s symbol %s not found", module_cfgs[i].module_name, modsym);
+        chimera_vfs_abort_if(!module,
+                             "Module %s symbol %s not found after loading %s",
+                             module_cfgs[i].module_name,
+                             modsym,
+                             module_cfgs[i].module_path);
+
+        // Register the module with the VFS, passing its config path
         chimera_vfs_register(vfs, module, module_cfgs[i].config_path);
     }
 

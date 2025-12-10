@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -6,34 +6,6 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "vfs/vfs.h"
-
-static void
-chimera_smb_rdma_read_callback(
-    int   status,
-    void *private_data)
-{
-    struct chimera_smb_request *request = private_data;
-
-    if (status) {
-        request->read.r_rdma_status = status;
-    }
-
-    request->read.pending_rdma_writes--;
-
-    if (request->read.pending_rdma_writes == 0) {
-
-        for (int i = 0; i < request->read.niov; i++) {
-            evpl_iovec_release(&request->read.iov[i]);
-        }
-
-        if (request->read.r_rdma_status) {
-            chimera_smb_complete_request(private_data, SMB2_STATUS_INTERNAL_ERROR);
-        } else {
-            chimera_smb_complete_request(private_data, SMB2_STATUS_SUCCESS);
-        }
-    }
-
-} /* chimera_smb_rdma_read_callback */
 
 static void
 chimera_smb_read_callback(
@@ -81,15 +53,15 @@ chimera_smb_read_callback(
                 request->read.rdma_elements[0].offset,
                 chunk_iov,
                 chunk_niov,
-                chimera_smb_rdma_read_callback,
-                request);
+                EVPL_RDMA_FLAG_TAKE_REF,
+                NULL,
+                NULL);
 
             chunk_iov += chunk_niov;
         }
-
-    } else {
-        chimera_smb_complete_request(private_data, SMB2_STATUS_SUCCESS);
     }
+
+    chimera_smb_complete_request(private_data, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_read_callback */
 
 void

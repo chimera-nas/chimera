@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 // Copyright (C) 2016 by Ronnie Sahlberg <ronniesahlberg@gmail.com>
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 

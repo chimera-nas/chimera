@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -31,13 +31,15 @@ chimera_nfs3_readdir_callback(
         return -1;
     }
 
-    xdr_dbuf_alloc_space(entry, sizeof(*entry), msg->dbuf);
+    entry = xdr_dbuf_alloc_space(sizeof(*entry), msg->dbuf);
+    chimera_nfs_abort_if(entry == NULL, "Failed to allocate space");
 
     entry->fileid    = inum;
     entry->cookie    = cookie;
     entry->nextentry = NULL;
 
-    xdr_dbuf_strncpy(entry, name, name, namelen, msg->dbuf);
+    int rc = xdr_dbuf_alloc_string(&entry->name, name, namelen, msg->dbuf);
+    chimera_nfs_abort_if(rc, "Failed to allocate string");
 
     if (cursor->entries) {
         cursor->last->nextentry = entry;
@@ -67,6 +69,7 @@ chimera_nfs3_readdir_complete(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct READDIR3res               *res    = &req->res_readdir;
     struct nfs_nfs3_readdir_cursor   *cursor = &req->readdir3_cursor;
+    int                               rc;
 
     res->status = chimera_vfs_error_to_nfsstat3(error_code);
 
@@ -76,7 +79,8 @@ chimera_nfs3_readdir_complete(
         res->resok.reply.entries = cursor->entries;
     }
 
-    shared->nfs_v3.send_reply_NFSPROC3_READDIR(evpl, res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_READDIR(evpl, res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
@@ -96,6 +100,7 @@ chimera_nfs3_readdir_open_callback(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct READDIR3args              *args   = req->args_readdir;
     struct READDIR3res               *res    = &req->res_readdir;
+    int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
@@ -111,7 +116,8 @@ chimera_nfs3_readdir_open_callback(
 
     } else {
         res->status = chimera_vfs_error_to_nfsstat3(error_code);
-        shared->nfs_v3.send_reply_NFSPROC3_READDIR(evpl, res, msg);
+        rc          = shared->nfs_v3.send_reply_NFSPROC3_READDIR(evpl, res, msg);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
 } /* chimera_nfs3_readdir_open_callback */

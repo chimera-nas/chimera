@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -27,6 +27,7 @@ chimera_nfs3_create_open_at_complete(
     struct evpl                      *evpl          = thread->evpl;
     struct evpl_rpc2_msg             *msg           = req->msg;
     struct CREATE3res                 res;
+    int                               rc;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
@@ -34,10 +35,11 @@ chimera_nfs3_create_open_at_complete(
 
         if (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
             res.resok.obj.handle_follows = 1;
-            xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
-                                 handle->fh,
-                                 handle->fh_len,
-                                 msg->dbuf);
+            rc                           = xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
+                                                                handle->fh,
+                                                                handle->fh_len,
+                                                                msg->dbuf);
+            chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
         } else {
             res.resok.obj.handle_follows = 0;
@@ -51,7 +53,8 @@ chimera_nfs3_create_open_at_complete(
 
     chimera_vfs_release(thread->vfs_thread, parent_handle);
 
-    shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, &res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
     nfs_request_free(thread, req);
 } /* chimera_nfs3_create_open_at_complete */
 
@@ -66,19 +69,22 @@ chimera_nfs3_create_open_at_parent_complete(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct CREATE3args               *args   = req->args_create;
     struct chimera_vfs_attrs         *attr;
+    int                               rc;
 
     if (error_code != CHIMERA_VFS_OK) {
         struct CREATE3res res;
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
-        thread->shared->nfs_v3.send_reply_NFSPROC3_CREATE(thread->evpl, &res, req->msg);
+        rc = thread->shared->nfs_v3.send_reply_NFSPROC3_CREATE(thread->evpl, &res, req->msg);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
         return;
     }
 
     req->handle = parent_handle;
 
-    xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
+    attr = xdr_dbuf_alloc_space(sizeof(*attr), msg->dbuf);
+    chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
     attr->va_req_mask = 0;
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -17,6 +17,7 @@ chimera_nfs3_pathconf(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct PATHCONF3res               res;
+    int                               rc;
 
     nfs3_dump_pathconf(NULL, args);
 
@@ -30,5 +31,6 @@ chimera_nfs3_pathconf(
     res.resok.linkmax          = UINT32_MAX;
     res.resok.name_max         = 255;
 
-    shared->nfs_v3.send_reply_NFSPROC3_PATHCONF(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_PATHCONF(evpl, &res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs3_pathconf */

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -200,9 +200,13 @@ chimera_server_config_add_module(
     module_cfg = &config->modules[config->num_modules];
 
     strncpy(module_cfg->module_name, module_name, sizeof(module_cfg->module_name));
-    strncpy(module_cfg->module_path, module_path, sizeof(module_cfg->module_path));
     strncpy(module_cfg->config_path, config_path, sizeof(module_cfg->config_path));
-
+    if (module_path) {
+        strncpy(module_cfg->module_path, module_path, sizeof(module_cfg->module_path));
+    } else {
+        /* We don't specify a path for preloaded modules like demofs */
+        module_cfg->module_path[0] = '\0';
+    }
     config->num_modules++;
 } /* chimera_server_config_add_module */
 

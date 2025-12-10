@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -26,6 +26,7 @@ chimera_nfs3_read_complete(
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct READ3res                   res;
+    int                               rc;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
@@ -43,9 +44,10 @@ chimera_nfs3_read_complete(
         chimera_nfs3_set_post_op_attr(&res.resfail.file_attributes, attr);
     }
 
-    chimera_vfs_release(thread->vfs_thread, req->handle);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, &res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
-    shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, &res, msg);
+    chimera_vfs_release(thread->vfs_thread, req->handle);
 
     nfs_request_free(thread, req);
 } /* chimera_nfs3_read_complete */
@@ -64,11 +66,13 @@ chimera_nfs3_read_open_callback(
     struct READ3args                 *args   = req->args_read;
     struct READ3res                   res;
     struct evpl_iovec                *iov;
+    int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        xdr_dbuf_alloc_space(iov, sizeof(*iov) * 64, msg->dbuf);
+        iov = xdr_dbuf_alloc_space(sizeof(*iov) * 64, msg->dbuf);
+        chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
         chimera_vfs_read(thread->vfs_thread,
                          handle,
@@ -83,7 +87,8 @@ chimera_nfs3_read_open_callback(
         res.status =
             chimera_vfs_error_to_nfsstat3(error_code);
         res.resfail.file_attributes.attributes_follow = 0;
-        shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, &res, msg);
+        rc                                            = shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, &res, msg);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
 } /* chimera_nfs3_read_open_callback */

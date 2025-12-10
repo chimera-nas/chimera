@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -12,11 +12,13 @@ chimera_nfs4_getfh(
     struct nfs_resop4                *resop)
 {
     struct GETFH4res *res = &resop->opgetfh;
+    int               rc;
 
-    xdr_dbuf_opaque_copy(&res->resok4.object,
-                         req->fh,
-                         req->fhlen,
-                         req->msg->dbuf);
+    rc = xdr_dbuf_opaque_copy(&res->resok4.object,
+                              req->fh,
+                              req->fhlen,
+                              req->msg->dbuf);
+    chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
     res->status = NFS4_OK;
 

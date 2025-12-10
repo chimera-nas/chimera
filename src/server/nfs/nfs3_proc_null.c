@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -17,5 +17,6 @@ chimera_nfs3_null(
 
     nfs3_dump_null(NULL);
 
-    shared->nfs_v3.send_reply_NFSPROC3_NULL(evpl, msg);
+    int                               rc = shared->nfs_v3.send_reply_NFSPROC3_NULL(evpl, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* nfs3_null */

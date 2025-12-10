@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -18,7 +18,9 @@ chimera_nfs4_secinfo_no_name(
     res->status     = NFS4_OK;
     res->num_resok4 = 1;
 
-    xdr_dbuf_alloc_space(res->resok4, sizeof(struct secinfo4), msg->dbuf);
+    res->resok4 = xdr_dbuf_alloc_space(sizeof(struct secinfo4), msg->dbuf);
+    chimera_nfs_abort_if(res->resok4 == NULL, "Failed to allocate space");
+
     res->resok4[0].flavor = RPC_GSS_SVC_NONE;
 
     chimera_nfs4_compound_complete(req, NFS4_OK);

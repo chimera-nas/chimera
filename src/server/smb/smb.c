@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -363,7 +363,8 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         direct_hdr->data_offset       = 24;
         direct_hdr->data_length       = chunk;
 
-        evpl_sendv(evpl, conn->bind, reply_iov, reply_cursor.niov, direct_hdr->data_length + 24);
+        evpl_sendv(evpl, conn->bind, reply_iov, reply_cursor.niov, direct_hdr->data_length + 24,
+                   EVPL_SEND_FLAG_TAKE_REF);
 
         left -= direct_hdr->data_length;
 
@@ -392,7 +393,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
             chunk_niov = 1 + evpl_iovec_cursor_move(&reply_cursor, &chunk_iov[1], 2, chunk, 1);
 
-            evpl_sendv(evpl, conn->bind, chunk_iov, chunk_niov, chunk + 24);
+            evpl_sendv(evpl, conn->bind, chunk_iov, chunk_niov, chunk + 24, EVPL_SEND_FLAG_TAKE_REF);
 
             left -= chunk;
         }
@@ -400,7 +401,8 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     } else {
         netbios_hdr->word = __builtin_bswap32(reply_payload_length);
 
-        evpl_sendv(evpl, conn->bind, reply_iov, reply_cursor.niov, reply_payload_length + reply_hdr_len);
+        evpl_sendv(evpl, conn->bind, reply_iov, reply_cursor.niov, reply_payload_length + reply_hdr_len,
+                   EVPL_SEND_FLAG_TAKE_REF);
     }
 
     chimera_smb_compound_free(thread, compound);
@@ -557,7 +559,7 @@ chimera_smb_direct_negotiate(
 
     evpl_iovec_set_length(&reply_iov, sizeof(*reply));
 
-    evpl_sendv(evpl, conn->bind, &reply_iov, 1, sizeof(*reply));
+    evpl_sendv(evpl, conn->bind, &reply_iov, 1, sizeof(*reply), EVPL_SEND_FLAG_TAKE_REF);
 
     conn->flags |= CHIMERA_SMB_CONN_FLAG_SMB_DIRECT_NEGOTIATED;
 } /* chimera_smb_direct_negotiate */

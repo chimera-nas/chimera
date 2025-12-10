@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -17,6 +17,7 @@ chimera_nfs3_link_complete(
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct LINK3res                   res;
+    int                               rc;
 
     res.status = chimera_vfs_error_to_nfsstat3(
         error_code);
@@ -27,7 +28,8 @@ chimera_nfs3_link_complete(
         res.resok.linkdir_wcc.after.attributes_follow  = 0;
     }
 
-    shared->nfs_v3.send_reply_NFSPROC3_LINK(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_LINK(evpl, &res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
 } /* chimera_nfs3_mkdir_complete */

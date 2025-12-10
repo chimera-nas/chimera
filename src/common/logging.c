@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Ben Jarvis
+// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -114,10 +114,10 @@ chimera_timet2tmZ(
 
 static const char *level_string[] = {
     "none",
-    "debug",
-    "info",
+    "fatal",
     "error",
-    "fatal"
+    "info",
+    "debug"
 };
 
 #define CHIMERA_LOG_BUF_SIZE 1024 * 1024
