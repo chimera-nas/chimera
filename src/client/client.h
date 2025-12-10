@@ -6,7 +6,7 @@
 
 #include "vfs/vfs.h"
 
-#define CHIMERA_CLIENT_IOV_MAX 256
+#define CHIMERA_CLIENT_IOV_MAX 260
 
 struct chimera_client;
 struct chimera_client_thread;

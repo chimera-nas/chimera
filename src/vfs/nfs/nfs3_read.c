@@ -38,6 +38,8 @@ chimera_nfs3_read_callback(
 
     request->read.r_length = res->resok.count;
     request->read.r_eof    = res->resok.eof;
+    request->read.r_niov   = res->resok.data.niov;
+    request->read.iov      = res->resok.data.iov;
     request->status        = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs3_read_callback */

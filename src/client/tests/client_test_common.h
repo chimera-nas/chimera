@@ -232,8 +232,6 @@ client_test_init(
             json_decref(cfg);
 
             chimera_client_config_add_module(client_config, "cairn", "/build/test/cairn", cairn_cfgfile);
-        } else if (strcmp(backend, "io_uring") == 0) {
-            chimera_client_config_add_module(client_config, "io_uring", "/build/test/io_uring", "");
         }
     }
 
