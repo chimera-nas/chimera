@@ -22,7 +22,7 @@ link_callback(
 } /* link_callback */
 
 struct open_ctx {
-    int done;
+    int                             done;
     enum chimera_vfs_error status;
     struct chimera_vfs_open_handle *handle;
 };
@@ -75,10 +75,10 @@ main(
     int    argc,
     char **argv)
 {
-    struct test_env                env;
-    struct mount_ctx                mount_ctx = { 0 };
-    struct link_ctx                  link_ctx = { 0 };
-    struct open_ctx                 open_ctx = { 0 };
+    struct test_env  env;
+    struct mount_ctx mount_ctx = { 0 };
+    struct link_ctx  link_ctx  = { 0 };
+    struct open_ctx  open_ctx  = { 0 };
 
     client_test_init(&env, argv, argc);
 

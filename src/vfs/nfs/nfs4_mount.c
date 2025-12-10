@@ -6,8 +6,8 @@
 
 void
 chimera_nfs4_mount(
-    struct chimera_nfs_thread          *thread,
-    struct chimera_nfs_shared          *shared,
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
     void                       *private_data)
 {

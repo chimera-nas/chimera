@@ -22,9 +22,9 @@ symlink_callback(
 } /* symlink_callback */
 
 struct readlink_ctx {
-    int done;
-    int status;
-    int targetlen;
+    int  done;
+    int  status;
+    int  targetlen;
     char target[CHIMERA_VFS_PATH_MAX];
 };
 
@@ -48,7 +48,7 @@ readlink_callback(
 } /* readlink_callback */
 
 struct open_ctx {
-    int done;
+    int                             done;
     enum chimera_vfs_error status;
     struct chimera_vfs_open_handle *handle;
 };
@@ -101,12 +101,12 @@ main(
     int    argc,
     char **argv)
 {
-    struct test_env                env;
-    struct mount_ctx                mount_ctx = { 0 };
-    struct symlink_ctx              symlink_ctx = { 0 };
-    struct readlink_ctx              readlink_ctx = { 0 };
-    struct open_ctx                  open_ctx = { 0 };
-    char                             target[CHIMERA_VFS_PATH_MAX];
+    struct test_env     env;
+    struct mount_ctx    mount_ctx    = { 0 };
+    struct symlink_ctx  symlink_ctx  = { 0 };
+    struct readlink_ctx readlink_ctx = { 0 };
+    struct open_ctx     open_ctx     = { 0 };
+    char                target[CHIMERA_VFS_PATH_MAX];
 
     client_test_init(&env, argv, argc);
 

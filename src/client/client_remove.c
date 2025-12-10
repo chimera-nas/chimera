@@ -115,8 +115,8 @@ chimera_remove(
     request->opcode              = CHIMERA_CLIENT_OP_REMOVE;
     request->remove.callback     = callback;
     request->remove.private_data = private_data;
-    request->remove.path_len      = path_len;
-    request->remove.parent_len    = slash ? slash - path : path_len;
+    request->remove.path_len     = path_len;
+    request->remove.parent_len   = slash ? slash - path : path_len;
 
     while (slash && *slash == '/') {
         slash++;
