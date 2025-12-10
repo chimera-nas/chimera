@@ -24,26 +24,30 @@ chimera_nfs3_readdirplus_callback(
     struct entryplus3                  *entry;
     struct nfs_nfs3_readdirplus_cursor *cursor;
     int                                 dbuf_before = msg->dbuf->used, dbuf_cur;
+    int                                 rc;
 
     cursor = &req->readdirplus3_cursor;
 
-    xdr_dbuf_alloc_space(entry, sizeof(*entry), msg->dbuf);
+    entry = xdr_dbuf_alloc_space(sizeof(*entry), msg->dbuf);
+    chimera_nfs_abort_if(entry == NULL, "Failed to allocate space");
 
     entry->cookie    = cookie;
     entry->fileid    = inum;
     entry->nextentry = NULL;
 
-    xdr_dbuf_strncpy(entry, name, name, namelen, msg->dbuf);
+    rc = xdr_dbuf_alloc_string(&entry->name, name, namelen, msg->dbuf);
+    chimera_nfs_abort_if(rc, "Failed to allocate string");
 
     chimera_nfs3_set_post_op_attr(&entry->name_attributes, attrs);
 
     if (attrs->va_set_mask & CHIMERA_VFS_ATTR_FH) {
         entry->name_handle.handle_follows = 1;
 
-        xdr_dbuf_opaque_copy(&entry->name_handle.handle.data,
-                             attrs->va_fh,
-                             attrs->va_fh_len,
-                             msg->dbuf);
+        rc = xdr_dbuf_opaque_copy(&entry->name_handle.handle.data,
+                                  attrs->va_fh,
+                                  attrs->va_fh_len,
+                                  msg->dbuf);
+        chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
     } else {
         entry->name_handle.handle_follows = 0;
@@ -85,6 +89,7 @@ chimera_nfs3_readdirplus_complete(
     struct evpl_rpc2_msg               *msg    = req->msg;
     struct READDIRPLUS3res             *res    = &req->res_readdirplus;
     struct nfs_nfs3_readdirplus_cursor *cursor = &req->readdirplus3_cursor;
+    int                                 rc;
 
     res->status = chimera_vfs_error_to_nfsstat3(error_code);
 
@@ -97,7 +102,8 @@ chimera_nfs3_readdirplus_complete(
                sizeof(res->resok.cookieverf));
     }
 
-    shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
@@ -117,6 +123,7 @@ chimera_nfs3_readdirplus_open_callback(
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct READDIRPLUS3args          *args   = req->args_readdirplus;
     struct READDIRPLUS3res           *res    = &req->res_readdirplus;
+    int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
@@ -132,7 +139,8 @@ chimera_nfs3_readdirplus_open_callback(
 
     } else {
         res->status = chimera_vfs_error_to_nfsstat3(error_code);
-        shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, res, msg);
+        rc          = shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, res, msg);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
 } /* chimera_nfs3_readdir_open_callback */

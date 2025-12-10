@@ -31,7 +31,8 @@ chimera_nfs4_create_complete(
 
     res->status = NFS4_OK;
 
-    xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
+    res->resok4.attrset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), msg->dbuf);
+    chimera_nfs_abort_if(res->resok4.attrset == NULL, "Failed to allocate space");
     res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
                                                      args->createattrs.num_attrmask,
                                                      args->createattrs.attrmask,
@@ -72,7 +73,8 @@ chimera_nfs4_create_symlink_complete(
 
     res->status = NFS4_OK;
 
-    xdr_dbuf_alloc_space(res->resok4.attrset, sizeof(uint32_t) * 4, msg->dbuf);
+    res->resok4.attrset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), msg->dbuf);
+    chimera_nfs_abort_if(res->resok4.attrset == NULL, "Failed to allocate space");
     res->resok4.num_attrset = chimera_nfs4_mask2attr(attr,
                                                      args->createattrs.num_attrmask,
                                                      args->createattrs.attrmask,
@@ -105,7 +107,8 @@ chimera_nfs4_create_open_callback(
 
     args = &req->args_compound->argarray[req->index].opcreate;
 
-    xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
+    attr = xdr_dbuf_alloc_space(sizeof(*attr), msg->dbuf);
+    chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
     chimera_nfs4_unmarshall_attrs(attr,
                                   args->createattrs.num_attrmask,

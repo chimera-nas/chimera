@@ -22,6 +22,7 @@ chimera_nfs3_setattr_complete(
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct SETATTR3res                res;
+    int                               rc;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
@@ -31,7 +32,8 @@ chimera_nfs3_setattr_complete(
         chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, pre_attr, post_attr);
     }
 
-    shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, &res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
@@ -52,11 +54,13 @@ chimera_nfs3_setattr_open_callback(
     struct SETATTR3args              *args   = req->args_setattr;
     struct SETATTR3res                res;
     struct chimera_vfs_attrs         *attr;
+    int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
+        attr = xdr_dbuf_alloc_space(sizeof(*attr), msg->dbuf);
+        chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
         chimera_nfs3_sattr3_to_va(attr, &args->new_attributes);
 
@@ -71,7 +75,8 @@ chimera_nfs3_setattr_open_callback(
     } else {
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, NULL, NULL);
-        shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, &res, msg);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, &res, msg);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
 } /* chimera_nfs3_setattr_open_callback */

@@ -27,16 +27,18 @@ chimera_nfs3_mkdir_complete(
     struct evpl                      *evpl   = thread->evpl;
     struct evpl_rpc2_msg             *msg    = req->msg;
     struct MKDIR3res                  res;
+    int                               rc;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
         if (r_attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
             res.resok.obj.handle_follows = 1;
-            xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
-                                 r_attr->va_fh,
-                                 r_attr->va_fh_len,
-                                 msg->dbuf);
+            rc                           = xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
+                                                                r_attr->va_fh,
+                                                                r_attr->va_fh_len,
+                                                                msg->dbuf);
+            chimera_nfs_abort_if(rc, "Failed to copy opaque");
         } else {
             res.resok.obj.handle_follows = 0;
         }
@@ -49,7 +51,8 @@ chimera_nfs3_mkdir_complete(
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
-    shared->nfs_v3.send_reply_NFSPROC3_MKDIR(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_MKDIR(evpl, &res, msg);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
 } /* chimera_nfs3_mkdir_complete */
@@ -68,11 +71,13 @@ chimera_nfs3_mkdir_open_callback(
     struct MKDIR3args                *args   = req->args_mkdir;
     struct MKDIR3res                  res;
     struct chimera_vfs_attrs         *attr;
+    int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        xdr_dbuf_alloc_space(attr, sizeof(*attr), msg->dbuf);
+        attr = xdr_dbuf_alloc_space(sizeof(*attr), msg->dbuf);
+        chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
         chimera_nfs3_sattr3_to_va(attr, &args->attributes);
 
@@ -89,7 +94,8 @@ chimera_nfs3_mkdir_open_callback(
     } else {
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
-        shared->nfs_v3.send_reply_NFSPROC3_MKDIR(evpl, &res, msg);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_MKDIR(evpl, &res, msg);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
 } /* chimera_nfs3_mkdir_open_callback */
