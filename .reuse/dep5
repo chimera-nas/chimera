@@ -5,5 +5,5 @@ Source: https://github.com/chimera-nas/chimera
 
 # Documentation files (Jekyll markdown)
 Files: README.md docs/*.md docs/**/*.md
-Copyright: 2025 Ben Jarvis
+Copyright: 2025 Chimera-NAS Project Contributors
 License: Unlicense
