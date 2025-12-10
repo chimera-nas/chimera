@@ -43,14 +43,14 @@ chimera_client_config_init(void)
     config->modules[3].config_path[0] = '\0';
     config->modules[3].module_path[0] = '\0';
 
-    config->num_modules = 3;
+    config->num_modules = 4;
 
 #ifdef HAVE_IO_URING
     strncpy(config->modules[4].module_name, "io_uring", sizeof(config->modules[4].module_name));
     config->modules[4].config_path[0] = '\0';
     config->modules[4].module_path[0] = '\0';
 
-    config->num_modules = 4;
+    config->num_modules = 5;
 #endif /* ifdef HAVE_IO_URING */
 
     return config;

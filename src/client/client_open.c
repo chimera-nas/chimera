@@ -83,11 +83,6 @@ chimera_open_path_parent_complete(
     request->open.set_attr.va_req_mask = 0;
     request->open.set_attr.va_set_mask = 0;
 
-    chimera_client_info("open_path_parent_complete name '%.*s' len %d",
-                        request->open.path_len - request->open.name_offset,
-                        request->open.path + request->open.name_offset,
-                        request->open.path_len - request->open.name_offset);
-
     chimera_vfs_open_at(
         request->thread->vfs_thread,
         oh,
