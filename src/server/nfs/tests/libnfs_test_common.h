@@ -118,7 +118,7 @@ libnfs_test_init(
         json_dump_file(cfg, demofs_cfg, 0);
         json_decref(cfg);
 
-        chimera_server_config_add_module(config, "demofs", "/build/test/demofs", demofs_cfg);
+        chimera_server_config_add_module(config, "demofs", NULL, demofs_cfg);
     } else if (strcmp(backend, "cairn") == 0) {
         char    cairn_cfgfile[300];
         json_t *cfg;
@@ -132,7 +132,7 @@ libnfs_test_init(
         json_dump_file(cfg, cairn_cfgfile, 0);
         json_decref(cfg);
 
-        chimera_server_config_add_module(config, "cairn", "/build/test/cairn", cairn_cfgfile);
+        chimera_server_config_add_module(config, "cairn", NULL, cairn_cfgfile);
     }
 
     env->server = chimera_server_init(config, env->metrics);

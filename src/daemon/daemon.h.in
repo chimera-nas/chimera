@@ -1,0 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Ben Jarvis
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
+
+#define CONFIG_PATH  "@CMAKE_INSTALL_PREFIX@/etc/chimera.json"

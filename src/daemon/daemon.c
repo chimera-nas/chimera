@@ -13,6 +13,8 @@
 #include "server/server_internal.h"
 #include "common/logging.h"
 #include "metrics/metrics.h"
+#include "daemon.h"
+
 int SigInt = 0;
 
 void
@@ -26,7 +28,7 @@ main(
     int    argc,
     char **argv)
 {
-    const char                          *config_path = "/usr/local/etc/chimera.json";
+    const char                          *config_path = CONFIG_PATH;
     extern char                         *optarg;
     int                                  opt;
     const char                          *mount_name;
@@ -160,10 +162,8 @@ main(
             const char *path   = json_string_value(json_object_get(module, "path"));
             const char *config = json_string_value(json_object_get(module, "config"));
 
-            if (path) {
-                chimera_server_config_add_module(server_config, module_name, path,
-                                                 config ? config : "");
-            }
+            chimera_server_config_add_module(server_config, module_name, path,
+                                             config ? config : "");
         }
     }
 
