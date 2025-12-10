@@ -273,6 +273,7 @@ struct chimera_smb_request {
             struct chimera_vfs_open_handle *parent_handle;
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_attrs        attrs;
+            struct chimera_vfs_attrs        vfs_attrs;
         } set_info;
 
         struct {
