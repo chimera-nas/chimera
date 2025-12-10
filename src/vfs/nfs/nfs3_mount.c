@@ -67,12 +67,6 @@ chimera_nfs3_mount_process_mount(
     int                               i;
     const char                       *path = NULL;
 
-    mount = calloc(1, sizeof(*mount));
-
-    mount->server        = server;
-    mount->status        = CHIMERA_NFS_CLIENT_MOUNT_STATE_MOUNTING;
-    mount->mount_request = request;
-
     for (i = 0; i < request->mount.pathlen; i++) {
         if (request->mount.path[i] == ':') {
             path = request->mount.path + i + 1;
@@ -81,11 +75,17 @@ chimera_nfs3_mount_process_mount(
     }
 
     if (!path) {
-        chimera_nfsclient_error("NFS3 GetRootFH mount process mount failed %s", request->mount.path);
+        chimera_nfsclient_error("NFS3 mount failed %s", request->mount.path);
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
     }
+
+    mount = calloc(1, sizeof(*mount));
+
+    mount->server        = server;
+    mount->status        = CHIMERA_NFS_CLIENT_MOUNT_STATE_MOUNTING;
+    mount->mount_request = request;
 
     memcpy(mount->path, path, strlen(path) + 1);
 
@@ -311,8 +311,6 @@ chimera_nfs3_mount(
         }
 
     } else {
-        need_discover = 1;
-
         for (i = 0; i < shared->max_servers; i++) {
             if (shared->servers[i] == NULL) {
                 idx = i;
