@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2025 Ben Jarvis
+SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 SPDX-License-Identifier: Unlicense
 -->
 
