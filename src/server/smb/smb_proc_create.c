@@ -15,6 +15,19 @@
 #include "smb_attr.h"
 #include "smb_lsarpc.h"
 
+#define SMB2_WRITE_MASK (SMB2_FILE_WRITE_DATA | \
+                         SMB2_FILE_APPEND_DATA | \
+                         SMB2_FILE_WRITE_EA | \
+                         SMB2_FILE_WRITE_ATTRIBUTES | \
+                         SMB2_FILE_DELETE_CHILD | \
+                         SMB2_FILE_ADD_FILE | \
+                         SMB2_FILE_ADD_SUBDIRECTORY | \
+                         SMB2_DELETE | \
+                         SMB2_WRITE_DACL | \
+                         SMB2_WRITE_OWNER | \
+                         SMB2_GENERIC_WRITE | \
+                         SMB2_GENERIC_ALL)
+
 const uint8_t root_fh = CHIMERA_VFS_FH_MAGIC_ROOT;
 
 static inline void
@@ -361,6 +374,14 @@ chimera_smb_create_open_parent_callback(
     } else {
         if (request->create.create_options & SMB2_FILE_DIRECTORY_FILE) {
             flags |= CHIMERA_VFS_OPEN_DIRECTORY;
+        }
+
+        if (request->create.desired_access == SMB2_FILE_READ_ATTRIBUTES) {
+            flags |= CHIMERA_VFS_OPEN_PATH;
+        }
+
+        if (!(request->create.desired_access & SMB2_WRITE_MASK)) {
+            flags |= CHIMERA_VFS_OPEN_READ_ONLY;
         }
 
         switch (request->create.create_disposition) {
