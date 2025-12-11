@@ -131,6 +131,8 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OPEN_PATH          (1U << 1)
 #define CHIMERA_VFS_OPEN_INFERRED      (1U << 2)
 #define CHIMERA_VFS_OPEN_DIRECTORY     (1U << 3)
+#define CHIMERA_VFS_OPEN_READ_ONLY     (1U << 4)
+
 
 #define CHIMERA_VFS_OPEN_ID_SYNTHETIC  0
 #define CHIMERA_VFS_OPEN_ID_PATH       1

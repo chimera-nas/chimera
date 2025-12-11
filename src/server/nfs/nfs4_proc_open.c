@@ -149,7 +149,10 @@ chimera_nfs4_open_parent_complete(
             case EXCLUSIVE4_1:
                 break;
         } /* switch */
+    }
 
+    if (args->share_access == OPEN4_SHARE_ACCESS_READ) {
+        flags |= CHIMERA_VFS_OPEN_READ_ONLY;
     }
 
     switch (args->claim.claim) {
