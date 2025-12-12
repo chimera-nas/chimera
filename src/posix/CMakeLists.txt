@@ -2,9 +2,25 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_posix SHARED posix.c)
+add_library(chimera_posix SHARED
+            posix.c
+            posix_internal.c
+            posix_dispatch.c
+            posix_mount.c
+            posix_umount.c
+            posix_open.c
+            posix_close.c
+            posix_read.c
+            posix_write.c
+            posix_mkdir.c
+            posix_symlink.c
+            posix_link.c
+            posix_unlink.c
+            posix_rename.c
+            posix_readlink.c
+            posix_stat.c)
 
-target_link_libraries(chimera_posix chimera_client)
+target_link_libraries(chimera_posix chimera_client evpl pthread)
 
 
 install(TARGETS chimera_posix DESTINATION lib)
