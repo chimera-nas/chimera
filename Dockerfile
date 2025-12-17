@@ -13,7 +13,7 @@ RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install clang cmake ninja-build git flex bison uuid-dev uthash-dev libkrb5-3 libkrb5-dev libgssapi-krb5-2  gss-ntlmssp-dev \
     librdmacm-dev libjansson-dev libclang-rt-18-dev llvm libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev libssl-dev openssl libnuma-dev && \
-    apt-get clean && \
+    apt-get clean libtirpc-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # We need gssapi-ntlm 1.3.x for a fix to work with recent versions of windows

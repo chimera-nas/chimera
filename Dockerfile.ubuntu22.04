@@ -13,7 +13,7 @@ RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install gcc g++ cmake ninja-build git flex bison uuid-dev uthash-dev libkrb5-3 libkrb5-dev libgssapi-krb5-2  gss-ntlmssp-dev \
     librdmacm-dev libjansson-dev libxxhash-dev liburcu-dev libunwind-dev libssl-dev openssl libnuma-dev && \
-    apt-get clean && \
+    apt-get clean libtirpc-dev && \
     rm -rf /var/lib/apt/lists/*
 
 
