@@ -1169,10 +1169,12 @@ _smb_dump_request(
             sprintf(argstr, " path %.*s", request->tree_connect.path_length, request->tree_connect.path);
             break;
         case SMB2_CREATE:
-            sprintf(argstr, " parent_path %.*s name %.*s create_disposition %s",
+            sprintf(argstr, " parent_path %.*s name %.*s create_disposition %s create_options %x desired_access %x",
                     request->create.parent_path_len, request->create.parent_path,
                     request->create.name_len, request->create.name,
-                    smb_create_disposition_name(request->create.create_disposition));
+                    smb_create_disposition_name(request->create.create_disposition),
+                    request->create.create_options,
+                    request->create.desired_access);
             break;
         case SMB2_CLOSE:
             if (request->close.file_id.pid != UINT64_MAX) {

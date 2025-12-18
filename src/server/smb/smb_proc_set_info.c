@@ -68,8 +68,6 @@ chimera_smb_set_info_open_unlink_callback(
 void
 chimera_smb_set_info(struct chimera_smb_request *request)
 {
-    struct chimera_vfs_attrs attrs;
-
     request->set_info.open_file = chimera_smb_open_file_resolve(request, &request->set_info.file_id);
 
     switch (request->set_info.info_type) {
@@ -77,24 +75,24 @@ chimera_smb_set_info(struct chimera_smb_request *request)
             switch (request->set_info.info_class) {
                 case SMB2_FILE_BASIC_INFO:
 
-                    chimera_smb_unmarshal_basic_info(&request->set_info.attrs, &attrs);
+                    chimera_smb_unmarshal_basic_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
                     chimera_vfs_setattr(
                         request->compound->thread->vfs_thread,
                         request->set_info.open_file->handle,
-                        &attrs,
+                        &request->set_info.vfs_attrs,
                         0,
                         0,
                         chimera_smb_set_info_callback,
                         request);
                     break;
                 case SMB2_FILE_ENDOFFILE_INFO:
-                    chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &attrs);
+                    chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
                     chimera_vfs_setattr(
                         request->compound->thread->vfs_thread,
                         request->set_info.open_file->handle,
-                        &attrs,
+                        &request->set_info.vfs_attrs,
                         0,
                         0,
                         chimera_smb_set_info_callback,
