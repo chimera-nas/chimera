@@ -19,7 +19,7 @@ RUN apt-get -y update && \
     net-tools tshark tcpdump uuid-dev iproute2 man-db manpages-dev ca-certificates ssh libjansson-dev libclang-rt-18-dev llvm wget \
     libxxhash-dev liburcu-dev librdmacm-dev liburing-dev libunwind-dev librocksdb-dev libcurl4-openssl-dev clangd uthash-dev libnuma-dev \
     libcurl4-openssl-dev build-essential ruby-full autoconf automake make libtool pkg-config libs3-dev gh npm reuse libssl-dev openssl \
-    gss-ntlmssp-dev libkrb5-3 libkrb5-dev libgssapi-krb5-2 libtirpc-dev && \
+    gss-ntlmssp-dev libkrb5-3 libkrb5-dev libgssapi-krb5-2 && \
     gem install jekyll bundler 
 
 RUN if [ "$ENABLE_CLAUDE" = "1" ] ; then \

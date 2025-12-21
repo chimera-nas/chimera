@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: LGPL-2.1-only
 
 include_directories(${NFS_COMMON_INCLUDE_DIR})
-include_directories(/usr/include/tirpc)
 
 # Create libraries for NFSv3 and NFSv4
 add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs_mount.c nfs_portmap.c nfs3_dump.c nfs4_dump.c
@@ -25,7 +24,7 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs_mount.c nfs_portmap.c nf
             nfs4_proc_destroy_clientid.c nfs4_proc_sequence.c nfs4_proc_reclaim_complete.c
             nfs4_proc_secinfo_no_name.c)
 
-target_link_libraries(chimera_nfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid tirpc)
+target_link_libraries(chimera_nfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid)
 
 install(TARGETS chimera_nfs DESTINATION lib)
 
