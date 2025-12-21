@@ -25,6 +25,7 @@
 struct chimera_server_config {
     int                                  nfs_rdma;
     int                                  nfs_rdma_port;
+    int                                  external_portmap;
     int                                  core_threads;
     int                                  delegation_threads;
     int                                  cache_ttl;
@@ -68,6 +69,7 @@ chimera_server_config_init(void)
     config->core_threads       = 16;
     config->delegation_threads = 64;
     config->nfs_rdma           = 0;
+    config->external_portmap   = 0;
 
     config->smb_num_dialects = 2;
     config->smb_dialects[0]  = SMB2_DIALECT_2_1;
@@ -126,6 +128,14 @@ chimera_server_config_set_delegation_threads(
 {
     config->delegation_threads = threads;
 } /* chimera_server_config_set_delegation_threads */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_external_portmap(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->external_portmap = enable;
+} /* chimera_server_config_set_external_portmap */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs_rdma(
@@ -187,6 +197,12 @@ chimera_server_config_get_nfs_rdma_port(const struct chimera_server_config *conf
 {
     return config->nfs_rdma_port;
 } /* chimera_server_config_get_nfs_rdma_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_external_portmap(const struct chimera_server_config *config)
+{
+    return config->external_portmap;
+} /* chimera_server_config_get_external_portmap */
 
 SYMBOL_EXPORT void
 chimera_server_config_add_module(

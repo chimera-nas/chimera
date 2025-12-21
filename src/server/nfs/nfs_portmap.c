@@ -32,23 +32,23 @@ chimera_portmap_getport(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
-    struct port                       port;
+    unsigned int                      port;
     int                               rc;
 
     switch (mapping->prog) {
         case 100003:
-            port.port = 2049;
+            port = 2049;
             break;
         case 100005:
-            port.port = 20048;
+            port = 20048;
             break;
         default:
             chimera_nfs_error("portmap request for unknown program %u",
                               mapping->prog);
-            port.port = 0;
+            port = 0;
     } /* switch */
 
-    rc = shared->portmap_v2.send_reply_PMAPPROC_GETPORT(evpl, &port, msg);
+    rc = shared->portmap_v2.send_reply_PMAPPROC_GETPORT(evpl, port, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
 } /* chimera_portmap_getport */

@@ -2,9 +2,9 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-
 #include <pthread.h>
 #include <utlist.h>
+
 
 #include "nfs.h"
 #include "server/protocol.h"
@@ -18,6 +18,7 @@
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "prometheus-c.h"
+#include "nfs_external_portmap.h"
 
 #include "common/macros.h"
 
@@ -55,11 +56,14 @@ nfs_server_init(
     int                               nfs_rdma;
     const char                       *nfs_rdma_hostname;
     int                               nfs_rdma_port;
-
+    int                               external_portmap;
 
     nfs_rdma          = chimera_server_config_get_nfs_rdma(config);
     nfs_rdma_hostname = chimera_server_config_get_nfs_rdma_hostname(config);
     nfs_rdma_port     = chimera_server_config_get_nfs_rdma_port(config);
+    external_portmap  = chimera_server_config_get_external_portmap(config);
+    chimera_nfs_debug("NFS RDMA: %s", nfs_rdma ? "enabled" : "disabled");
+    chimera_nfs_debug("External Portmap: %s", external_portmap ? "enabled" : "disabled");
 
     clock_gettime(CLOCK_REALTIME, &now);
 
@@ -74,7 +78,6 @@ nfs_server_init(
     chimera_nfs_abort_if(sizeof(shared->nfs_verifier) != NFS3_WRITEVERFSIZE,
                          "nfs_verifier size mismatch");
 
-    NFS_PORTMAP_V2_init(&shared->portmap_v2);
     NFS_MOUNT_V3_init(&shared->mount_v3);
     NFS_V3_init(&shared->nfs_v3);
     NFS_V4_init(&shared->nfs_v4);
@@ -84,8 +87,12 @@ nfs_server_init(
     shared->op_histogram = prometheus_metrics_create_histogram_exponential(metrics, "chimera_nfs_op_latency",
                                                                            "The latency of NFS operations", 24);
 
-
-    chimera_nfs_init_metrics(shared, &shared->portmap_v2.rpc2);
+    if (!external_portmap) {
+        NFS_PORTMAP_V2_init(&shared->portmap_v2);
+        chimera_nfs_init_metrics(shared, &shared->portmap_v2.rpc2);
+        shared->portmap_v2.recv_call_PMAPPROC_NULL    = chimera_portmap_null;
+        shared->portmap_v2.recv_call_PMAPPROC_GETPORT = chimera_portmap_getport;
+    }
     chimera_nfs_init_metrics(shared, &shared->mount_v3.rpc2);
     chimera_nfs_init_metrics(shared, &shared->nfs_v3.rpc2);
     chimera_nfs_init_metrics(shared, &shared->nfs_v4.rpc2);
@@ -97,9 +104,6 @@ nfs_server_init(
     shared->mount_v3.recv_call_MOUNTPROC3_UMNT    = chimera_nfs_mount_umnt;
     shared->mount_v3.recv_call_MOUNTPROC3_UMNTALL = chimera_nfs_mount_umntall;
     shared->mount_v3.recv_call_MOUNTPROC3_EXPORT  = chimera_nfs_mount_export;
-
-    shared->portmap_v2.recv_call_PMAPPROC_NULL    = chimera_portmap_null;
-    shared->portmap_v2.recv_call_PMAPPROC_GETPORT = chimera_portmap_getport;
 
     shared->nfs_v3.recv_call_NFSPROC3_NULL        = chimera_nfs3_null;
     shared->nfs_v3.recv_call_NFSPROC3_GETATTR     = chimera_nfs3_getattr;
@@ -129,22 +133,29 @@ nfs_server_init(
 
     nfs4_client_table_init(&shared->nfs4_shared_clients);
 
-    shared->mount_endpoint   = evpl_endpoint_create("0.0.0.0", 20048);
-    shared->portmap_endpoint = evpl_endpoint_create("0.0.0.0", 111);
-    shared->nfs_endpoint     = evpl_endpoint_create("0.0.0.0", 2049);
+    shared->mount_endpoint = evpl_endpoint_create("0.0.0.0", NFS_MOUNT_PORT);
+    shared->nfs_endpoint   = evpl_endpoint_create("0.0.0.0", NFS_PORT);
 
     if (nfs_rdma) {
         shared->nfs_rdma_endpoint = evpl_endpoint_create(nfs_rdma_hostname, nfs_rdma_port);
     }
+    if (external_portmap) {
+        chimera_nfs_debug("Using external portmap/rpcbind services");
+        shared->portmap_server   = NULL;
+        shared->portmap_endpoint = NULL;
+    } else {
+        chimera_nfs_debug("Initializing internal portmap support");
+        shared->portmap_endpoint = evpl_endpoint_create("0.0.0.0", 111);
+        programs[0]              = &shared->portmap_v2.rpc2;
+        shared->portmap_server   = evpl_rpc2_server_init(programs, 1);
+    }
 
+    chimera_nfs_debug("Initializing NFS mountd server");
     programs[0] = &shared->mount_v3.rpc2;
 
     shared->mount_server = evpl_rpc2_server_init(programs, 1);
 
-    programs[0] = &shared->portmap_v2.rpc2;
-
-    shared->portmap_server = evpl_rpc2_server_init(programs, 1);
-
+    chimera_nfs_debug("Initializing NFS server");
     programs[0] = &shared->nfs_v3.rpc2;
     programs[1] = &shared->nfs_v4.rpc2;
     programs[2] = &shared->nfs_v4_cb.rpc2;
@@ -153,6 +164,7 @@ nfs_server_init(
 
     return shared;
 } /* nfs_server_init */
+
 
 void
 nfs_server_start(void *arg)
@@ -167,7 +179,11 @@ nfs_server_start(void *arg)
 
     evpl_rpc2_server_start(shared->mount_server, EVPL_STREAM_SOCKET_TCP, shared->mount_endpoint);
 
-    evpl_rpc2_server_start(shared->portmap_server, EVPL_STREAM_SOCKET_TCP, shared->portmap_endpoint);
+    if (shared->portmap_server) {
+        evpl_rpc2_server_start(shared->portmap_server, EVPL_STREAM_SOCKET_TCP, shared->portmap_endpoint);
+    } else {
+        register_nfs_rpc_services();
+    }
 
 } /* nfs_server_start */
 
@@ -177,8 +193,12 @@ nfs_server_stop(void *arg)
     struct chimera_server_nfs_shared *shared = arg;
 
     evpl_rpc2_server_stop(shared->mount_server);
-    evpl_rpc2_server_stop(shared->portmap_server);
     evpl_rpc2_server_stop(shared->nfs_server);
+    if (shared->portmap_server) {
+        evpl_rpc2_server_stop(shared->portmap_server);
+    } else {
+        unregister_nfs_rpc_services();
+    }
 
 } /* nfs_server_stop */
 
@@ -195,15 +215,16 @@ nfs_server_destroy(void *data)
     }
 
     evpl_rpc2_server_destroy(shared->mount_server);
-    evpl_rpc2_server_destroy(shared->portmap_server);
     evpl_rpc2_server_destroy(shared->nfs_server);
 
-    free(shared->portmap_v2.rpc2.metrics);
+    if (shared->portmap_server) {
+        evpl_rpc2_server_destroy(shared->portmap_server);
+        free(shared->portmap_v2.rpc2.metrics);
+    }
     free(shared->mount_v3.rpc2.metrics);
     free(shared->nfs_v3.rpc2.metrics);
     free(shared->nfs_v4.rpc2.metrics);
     free(shared->nfs_v4_cb.rpc2.metrics);
-
 
     free(shared);
 } /* nfs_server_destroy */
@@ -250,8 +271,10 @@ nfs_server_thread_init(
     thread->rpc2_thread = evpl_rpc2_thread_init(evpl, NULL, 0, chimera_nfs_server_notify, thread);
 
     evpl_rpc2_server_attach(thread->rpc2_thread, shared->mount_server, thread);
-    evpl_rpc2_server_attach(thread->rpc2_thread, shared->portmap_server, thread);
     evpl_rpc2_server_attach(thread->rpc2_thread, shared->nfs_server, thread);
+    if (shared->portmap_server) {
+        evpl_rpc2_server_attach(thread->rpc2_thread, shared->portmap_server, thread);
+    }
 
     return thread;
 } /* nfs_server_thread_init */
@@ -263,9 +286,10 @@ nfs_server_thread_destroy(void *data)
     struct nfs_request               *req;
 
     evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->mount_server);
-    evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->portmap_server);
     evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->nfs_server);
-
+    if (thread->shared->portmap_server) {
+        evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->portmap_server);
+    }
     evpl_rpc2_thread_destroy(thread->rpc2_thread);
 
     while (thread->free_requests) {

@@ -91,6 +91,7 @@ main(
     }
 
     signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
 
     chimera_server_info("Initializing server...");
 
@@ -110,6 +111,12 @@ main(
     if (delegation_threads_value && json_is_integer(delegation_threads_value)) {
         int delegation_threads = json_integer_value(delegation_threads_value);
         chimera_server_config_set_delegation_threads(server_config, delegation_threads);
+    }
+
+    json_t *external_portmap = json_object_get(server_params, "external_portmap");
+    if (external_portmap && json_is_true(external_portmap)) {
+        chimera_server_info("Enabling external portmap/rpcbind support");
+        chimera_server_config_set_external_portmap(server_config, 1);
     }
 
     json_t *rdma_value = json_object_get(server_params, "rdma");
