@@ -16,7 +16,7 @@ chimera_posix_remove_complete(
     struct chimera_posix_request *request = private_data;
 
     chimera_posix_request_finish(request, status);
-} // chimera_posix_remove_complete
+}
 
 void
 chimera_posix_exec_remove(
@@ -28,28 +28,22 @@ chimera_posix_exec_remove(
                    strlen(request->u.remove.path),
                    chimera_posix_remove_complete,
                    request);
-} // chimera_posix_exec_remove
+}
 
 int
 chimera_posix_unlink(const char *path)
 {
-    struct chimera_posix_client  *posix = chimera_posix_get_global();
-
-    if (!posix) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_REMOVE);
+    struct chimera_posix_client  *posix  = chimera_posix_get_global();
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_request *req    = chimera_posix_request_create(worker);
 
     req->u.remove.path = path;
 
-    chimera_posix_worker_enqueue(worker, req);
+    chimera_posix_worker_enqueue(worker, req, chimera_posix_exec_remove);
 
-    int                           err = chimera_posix_wait(req);
+    int err = chimera_posix_wait(req);
 
-    chimera_posix_request_destroy(req);
+    chimera_posix_request_release(worker, req);
 
     if (err) {
         errno = err;
@@ -57,5 +51,4 @@ chimera_posix_unlink(const char *path)
     }
 
     return 0;
-} // chimera_posix_unlink
-
+}

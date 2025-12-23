@@ -7,13 +7,88 @@
 #include "posix_internal.h"
 #include "evpl/evpl.h"
 
+struct chimera_posix_client *chimera_posix_global;
+
+void *
+chimera_posix_worker_init(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct chimera_posix_client *posix  = private_data;
+    int                          idx    = atomic_fetch_add(&posix->init_cursor, 1);
+    struct chimera_posix_worker *worker = &posix->workers[idx];
+
+    worker->parent = posix;
+    worker->index  = idx;
+    worker->evpl   = evpl;
+
+    pthread_mutex_init(&worker->lock, NULL);
+    evpl_add_doorbell(evpl, &worker->doorbell, chimera_posix_worker_doorbell);
+
+    worker->client_thread = chimera_client_thread_init(evpl, posix->client);
+
+    return worker;
+} /* chimera_posix_worker_init */
+
+void
+chimera_posix_worker_shutdown(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct chimera_posix_worker  *worker = private_data;
+    struct chimera_posix_request *req;
+
+    if (worker->client_thread) {
+        chimera_client_thread_shutdown(evpl, worker->client_thread);
+    }
+
+    while (worker->free_requests) {
+        req = worker->free_requests;
+        LL_DELETE(worker->free_requests, req);
+        pthread_mutex_destroy(&req->lock);
+        pthread_cond_destroy(&req->cond);
+        free(req);
+    }
+
+    evpl_remove_doorbell(evpl, &worker->doorbell);
+    pthread_mutex_destroy(&worker->lock);
+} /* chimera_posix_worker_shutdown */
+
+void
+chimera_posix_worker_doorbell(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct chimera_posix_worker *worker = container_of(doorbell, struct chimera_posix_worker, doorbell);
+
+    for (;;) {
+        struct chimera_posix_request *request;
+
+        pthread_mutex_lock(&worker->lock);
+        request = worker->head;
+        if (request) {
+            worker->head = request->next;
+            if (worker->head == NULL) {
+                worker->tail = NULL;
+            }
+        }
+        pthread_mutex_unlock(&worker->lock);
+
+        if (!request) {
+            break;
+        }
+
+        request->callback(worker, request);
+    }
+} /* chimera_posix_worker_doorbell */
+
 SYMBOL_EXPORT struct chimera_posix_client *
 chimera_posix_init(
     const struct chimera_client_config *config,
     struct prometheus_metrics          *metrics)
 {
-    struct chimera_posix_client       *posix;
-    struct chimera_client_config      *owned_config = NULL;
+    struct chimera_posix_client        *posix;
+    struct chimera_client_config       *owned_config = NULL;
     const struct chimera_client_config *use_config;
 
     if (chimera_posix_global) {
@@ -27,7 +102,7 @@ chimera_posix_init(
     }
 
     if (config) {
-        use_config = config;
+        use_config         = config;
         posix->owns_config = 0;
     } else {
         owned_config = chimera_client_config_init();
@@ -35,7 +110,7 @@ chimera_posix_init(
             free(posix);
             return NULL;
         }
-        use_config = owned_config;
+        use_config         = owned_config;
         posix->owns_config = 1;
     }
 
@@ -80,7 +155,7 @@ chimera_posix_init(
     chimera_posix_global = posix;
 
     return posix;
-}
+} /* chimera_posix_init */
 
 SYMBOL_EXPORT void
 chimera_posix_shutdown(void)
@@ -112,4 +187,4 @@ chimera_posix_shutdown(void)
     }
 
     free(posix);
-}
+} /* chimera_posix_shutdown */

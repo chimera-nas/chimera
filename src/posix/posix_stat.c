@@ -38,19 +38,13 @@ chimera_posix_stat(
     const char  *path,
     struct stat *st)
 {
-    struct chimera_posix_client *posix = chimera_posix_get_global();
-
-    if (!posix) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_STAT);
+    struct chimera_posix_client  *posix  = chimera_posix_get_global();
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_request *req    = chimera_posix_request_create(worker);
 
     req->u.stat.path = path;
 
-    chimera_posix_worker_enqueue(worker, req);
+    chimera_posix_worker_enqueue(worker, req, chimera_posix_exec_stat);
 
     int err = chimera_posix_wait(req);
 
@@ -58,7 +52,7 @@ chimera_posix_stat(
         chimera_posix_fill_stat(st, &req->st);
     }
 
-    chimera_posix_request_destroy(req);
+    chimera_posix_request_release(worker, req);
 
     if (err) {
         errno = err;
@@ -67,4 +61,3 @@ chimera_posix_stat(
 
     return 0;
 }
-

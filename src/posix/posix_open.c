@@ -42,13 +42,7 @@ chimera_posix_open(
     ...)
 {
     struct chimera_posix_client *posix = chimera_posix_get_global();
-
-    if (!posix) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    mode_t mode = 0;
+    mode_t                       mode  = 0;
 
     if (flags & O_CREAT) {
         va_list ap;
@@ -59,13 +53,13 @@ chimera_posix_open(
 
     (void) mode;
 
-    struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_OPEN);
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_request *req    = chimera_posix_request_create(worker);
 
     req->u.open.path  = path;
     req->u.open.flags = chimera_posix_to_chimera_flags(flags);
 
-    chimera_posix_worker_enqueue(worker, req);
+    chimera_posix_worker_enqueue(worker, req, chimera_posix_exec_open);
 
     int err = chimera_posix_wait(req);
     int fd  = -1;
@@ -78,7 +72,7 @@ chimera_posix_open(
         }
     }
 
-    chimera_posix_request_destroy(req);
+    chimera_posix_request_release(worker, req);
 
     if (err) {
         errno = err;
@@ -87,4 +81,3 @@ chimera_posix_open(
 
     return fd;
 }
-

@@ -48,11 +48,6 @@ chimera_posix_write(
 {
     struct chimera_posix_client *posix = chimera_posix_get_global();
 
-    if (!posix) {
-        errno = EINVAL;
-        return -1;
-    }
-
     pthread_mutex_lock(&posix->fd_lock);
     struct chimera_posix_fd_entry *entry = chimera_posix_fd_get(posix, fd);
     struct chimera_vfs_open_handle *handle = entry ? entry->handle : NULL;
@@ -64,8 +59,8 @@ chimera_posix_write(
         return -1;
     }
 
-    struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_WRITE);
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_request *req    = chimera_posix_request_create(worker);
 
     req->u.write.handle = handle;
     req->u.write.offset = offset;
@@ -74,7 +69,7 @@ chimera_posix_write(
 
     int niov = evpl_iovec_alloc(worker->evpl, count, 1, CHIMERA_CLIENT_IOV_MAX, req->u.write.iov);
     if (niov < 0) {
-        chimera_posix_request_destroy(req);
+        chimera_posix_request_release(worker, req);
         errno = ENOMEM;
         return -1;
     }
@@ -83,7 +78,7 @@ chimera_posix_write(
     chimera_posix_iovec_memcpy(req->u.write.iov, buf, count);
     evpl_iovec_commit(worker->evpl, 1, req->u.write.iov, niov);
 
-    chimera_posix_worker_enqueue(worker, req);
+    chimera_posix_worker_enqueue(worker, req, chimera_posix_exec_write);
 
     int err = chimera_posix_wait(req);
 
@@ -98,7 +93,7 @@ chimera_posix_write(
 
     ssize_t ret = req->result;
 
-    chimera_posix_request_destroy(req);
+    chimera_posix_request_release(worker, req);
 
     if (err) {
         errno = err;
@@ -107,4 +102,3 @@ chimera_posix_write(
 
     return ret;
 }
-

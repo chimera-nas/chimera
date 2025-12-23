@@ -45,27 +45,21 @@ chimera_posix_readlink(
     char       *buf,
     size_t      bufsiz)
 {
-    struct chimera_posix_client *posix = chimera_posix_get_global();
-
-    if (!posix) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_READLINK);
+    struct chimera_posix_client  *posix  = chimera_posix_get_global();
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_request *req    = chimera_posix_request_create(worker);
 
     req->u.readlink.path   = path;
     req->u.readlink.buf    = buf;
     req->u.readlink.buflen = bufsiz;
 
-    chimera_posix_worker_enqueue(worker, req);
+    chimera_posix_worker_enqueue(worker, req, chimera_posix_exec_readlink);
 
     int err = chimera_posix_wait(req);
 
     ssize_t ret = req->result;
 
-    chimera_posix_request_destroy(req);
+    chimera_posix_request_release(worker, req);
 
     if (err) {
         errno = err;
@@ -74,4 +68,3 @@ chimera_posix_readlink(
 
     return ret;
 }
-

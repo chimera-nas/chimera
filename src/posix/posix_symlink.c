@@ -35,24 +35,18 @@ chimera_posix_symlink(
     const char *target,
     const char *path)
 {
-    struct chimera_posix_client *posix = chimera_posix_get_global();
-
-    if (!posix) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_SYMLINK);
+    struct chimera_posix_client  *posix  = chimera_posix_get_global();
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_request *req    = chimera_posix_request_create(worker);
 
     req->u.symlink.path   = path;
     req->u.symlink.target = target;
 
-    chimera_posix_worker_enqueue(worker, req);
+    chimera_posix_worker_enqueue(worker, req, chimera_posix_exec_symlink);
 
     int err = chimera_posix_wait(req);
 
-    chimera_posix_request_destroy(req);
+    chimera_posix_request_release(worker, req);
 
     if (err) {
         errno = err;
@@ -61,4 +55,3 @@ chimera_posix_symlink(
 
     return 0;
 }
-

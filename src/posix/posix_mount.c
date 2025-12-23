@@ -35,25 +35,19 @@ chimera_posix_mount(
     const char *module_name,
     const char *module_path)
 {
-    struct chimera_posix_client *posix = chimera_posix_get_global();
-
-    if (!posix) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_MOUNT);
+    struct chimera_posix_client  *posix  = chimera_posix_get_global();
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_request *req    = chimera_posix_request_create(worker);
 
     req->u.mount.mount_path  = mount_path;
     req->u.mount.module_name = module_name;
     req->u.mount.module_path = module_path;
 
-    chimera_posix_worker_enqueue(worker, req);
+    chimera_posix_worker_enqueue(worker, req, chimera_posix_exec_mount);
 
     int err = chimera_posix_wait(req);
 
-    chimera_posix_request_destroy(req);
+    chimera_posix_request_release(worker, req);
 
     if (err) {
         errno = err;
@@ -62,4 +56,3 @@ chimera_posix_mount(
 
     return 0;
 }
-

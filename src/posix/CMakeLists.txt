@@ -4,8 +4,6 @@
 
 add_library(chimera_posix SHARED
             posix.c
-            posix_internal.c
-            posix_dispatch.c
             posix_mount.c
             posix_umount.c
             posix_open.c
@@ -26,4 +24,3 @@ target_link_libraries(chimera_posix chimera_client evpl pthread)
 install(TARGETS chimera_posix DESTINATION lib)
 
 add_subdirectory(tests)
-
