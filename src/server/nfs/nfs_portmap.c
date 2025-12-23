@@ -67,7 +67,7 @@ portmap_make_uaddr(
 
     return snprintf(uaddr, uaddr_size, "%s.%u.%u",
                     local_addr, port >> 8, port & 0xff);
-}
+} /* portmap_make_uaddr */
 
 /*
  * Look up port number for a given program.
@@ -82,7 +82,7 @@ portmap_lookup_port(uint32_t prog)
         }
     }
     return 0;
-}
+} /* portmap_lookup_port */
 
 /*
  * Build a V2 pmaplist linked list from the service table.
@@ -116,7 +116,7 @@ portmap_build_pmaplist(struct evpl_rpc2_msg *msg)
     }
 
     return head;
-}
+} /* portmap_build_pmaplist */
 
 /*
  * Build a V3/V4 rp__list linked list from the service table.
@@ -164,7 +164,7 @@ portmap_build_rpcblist(
     }
 
     return head;
-}
+} /* portmap_build_rpcblist */
 
 void
 chimera_portmap_null_v2(
@@ -229,11 +229,11 @@ chimera_portmap_dump_v2(
  */
 static void
 portmap_getaddr_common(
-    struct evpl           *evpl,
+    struct evpl *evpl,
     struct evpl_rpc2_conn *conn,
-    struct rpcb           *args,
-    struct evpl_rpc2_msg  *msg,
-    int                  (*send_reply)(struct evpl *, xdr_string *, void *))
+    struct rpcb *args,
+    struct evpl_rpc2_msg *msg,
+    int ( *send_reply )(struct evpl *, xdr_string *, void *))
 {
     xdr_string   addr;
     char         uaddr[64];
@@ -254,7 +254,7 @@ portmap_getaddr_common(
 
     rc = send_reply(evpl, &addr, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-}
+} /* portmap_getaddr_common */
 
 void
 chimera_portmap_getaddr_v3(
@@ -277,10 +277,10 @@ chimera_portmap_getaddr_v3(
  */
 static void
 portmap_dump_common(
-    struct evpl           *evpl,
+    struct evpl *evpl,
     struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_msg  *msg,
-    int                  (*send_reply)(struct evpl *, struct rp__list *, void *))
+    struct evpl_rpc2_msg *msg,
+    int ( *send_reply )(struct evpl *, struct rp__list *, void *))
 {
     struct rp__list *list;
     int              rc;
@@ -289,7 +289,7 @@ portmap_dump_common(
 
     rc = send_reply(evpl, list, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-}
+} /* portmap_dump_common */
 
 void
 chimera_portmap_dump_v3(
