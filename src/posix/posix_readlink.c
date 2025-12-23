@@ -55,7 +55,7 @@ chimera_posix_readlink(
     struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_READLINK);
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
 
-    req->u.readlink.path   = strdup(path);
+    req->u.readlink.path   = path;
     req->u.readlink.buf    = buf;
     req->u.readlink.buflen = bufsiz;
 
@@ -65,7 +65,6 @@ chimera_posix_readlink(
 
     ssize_t ret = req->result;
 
-    free(req->u.readlink.path);
     chimera_posix_request_destroy(req);
 
     if (err) {

@@ -45,17 +45,14 @@ chimera_posix_mount(
     struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_MOUNT);
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
 
-    req->u.mount.mount_path  = strdup(mount_path);
-    req->u.mount.module_name = strdup(module_name);
-    req->u.mount.module_path = strdup(module_path);
+    req->u.mount.mount_path  = mount_path;
+    req->u.mount.module_name = module_name;
+    req->u.mount.module_path = module_path;
 
     chimera_posix_worker_enqueue(worker, req);
 
     int err = chimera_posix_wait(req);
 
-    free(req->u.mount.mount_path);
-    free(req->u.mount.module_name);
-    free(req->u.mount.module_path);
     chimera_posix_request_destroy(req);
 
     if (err) {

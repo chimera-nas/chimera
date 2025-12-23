@@ -48,8 +48,8 @@ struct chimera_posix_request {
     struct chimera_posix_request   *next;
     union {
         struct {
-            char *path;
-            int   flags;
+            const char *path;
+            int         flags;
         } open;
         struct {
             struct chimera_vfs_open_handle *handle;
@@ -69,38 +69,38 @@ struct chimera_posix_request {
             int                             niov;
         } write;
         struct {
-            char *path;
+            const char *path;
         } mkdir;
         struct {
-            char *path;
-            char *target;
+            const char *path;
+            const char *target;
         } symlink;
         struct {
-            char *oldpath;
-            char *newpath;
+            const char *oldpath;
+            const char *newpath;
         } link;
         struct {
-            char *path;
+            const char *path;
         } remove;
         struct {
-            char *oldpath;
-            char *newpath;
+            const char *oldpath;
+            const char *newpath;
         } rename;
         struct {
-            char  *path;
-            char  *buf;
-            size_t buflen;
+            const char *path;
+            char       *buf;
+            size_t      buflen;
         } readlink;
         struct {
-            char *path;
+            const char *path;
         } stat;
         struct {
-            char *mount_path;
-            char *module_name;
-            char *module_path;
+            const char *mount_path;
+            const char *module_name;
+            const char *module_path;
         } mount;
         struct {
-            char *mount_path;
+            const char *mount_path;
         } umount;
     } u;
 };

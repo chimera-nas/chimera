@@ -45,15 +45,13 @@ chimera_posix_symlink(
     struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_SYMLINK);
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
 
-    req->u.symlink.path   = strdup(path);
-    req->u.symlink.target = strdup(target);
+    req->u.symlink.path   = path;
+    req->u.symlink.target = target;
 
     chimera_posix_worker_enqueue(worker, req);
 
     int err = chimera_posix_wait(req);
 
-    free(req->u.symlink.path);
-    free(req->u.symlink.target);
     chimera_posix_request_destroy(req);
 
     if (err) {

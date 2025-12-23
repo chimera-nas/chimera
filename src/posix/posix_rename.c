@@ -45,15 +45,13 @@ chimera_posix_rename(
     struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_RENAME);
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
 
-    req->u.rename.oldpath = strdup(oldpath);
-    req->u.rename.newpath = strdup(newpath);
+    req->u.rename.oldpath = oldpath;
+    req->u.rename.newpath = newpath;
 
     chimera_posix_worker_enqueue(worker, req);
 
     int err = chimera_posix_wait(req);
 
-    free(req->u.rename.oldpath);
-    free(req->u.rename.newpath);
     chimera_posix_request_destroy(req);
 
     if (err) {

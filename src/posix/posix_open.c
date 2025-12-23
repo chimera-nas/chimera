@@ -62,7 +62,7 @@ chimera_posix_open(
     struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_OPEN);
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
 
-    req->u.open.path  = strdup(path);
+    req->u.open.path  = path;
     req->u.open.flags = chimera_posix_to_chimera_flags(flags);
 
     chimera_posix_worker_enqueue(worker, req);
@@ -78,7 +78,6 @@ chimera_posix_open(
         }
     }
 
-    free(req->u.open.path);
     chimera_posix_request_destroy(req);
 
     if (err) {

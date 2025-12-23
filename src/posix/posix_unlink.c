@@ -43,13 +43,12 @@ chimera_posix_unlink(const char *path)
     struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_REMOVE);
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
 
-    req->u.remove.path = strdup(path);
+    req->u.remove.path = path;
 
     chimera_posix_worker_enqueue(worker, req);
 
     int                           err = chimera_posix_wait(req);
 
-    free(req->u.remove.path);
     chimera_posix_request_destroy(req);
 
     if (err) {

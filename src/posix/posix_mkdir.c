@@ -45,13 +45,12 @@ chimera_posix_mkdir(
     struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_MKDIR);
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
 
-    req->u.mkdir.path = strdup(path);
+    req->u.mkdir.path = path;
 
     chimera_posix_worker_enqueue(worker, req);
 
     int err = chimera_posix_wait(req);
 
-    free(req->u.mkdir.path);
     chimera_posix_request_destroy(req);
 
     if (err) {

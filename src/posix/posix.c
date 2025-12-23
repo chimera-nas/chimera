@@ -2,61 +2,114 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <errno.h>
-#include <string.h>
+#include <stdlib.h>
 
 #include "posix_internal.h"
+#include "evpl/evpl.h"
 
-static void
-chimera_posix_remove_complete(
-    struct chimera_client_thread *thread,
-    enum chimera_vfs_error        status,
-    void                         *private_data)
+SYMBOL_EXPORT struct chimera_posix_client *
+chimera_posix_init(
+    const struct chimera_client_config *config,
+    struct prometheus_metrics          *metrics)
 {
-    struct chimera_posix_request *request = private_data;
+    struct chimera_posix_client       *posix;
+    struct chimera_client_config      *owned_config = NULL;
+    const struct chimera_client_config *use_config;
 
-    chimera_posix_request_finish(request, status);
-} // chimera_posix_remove_complete
+    if (chimera_posix_global) {
+        return chimera_posix_global;
+    }
 
-void
-chimera_posix_exec_remove(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request)
-{
-    chimera_remove(worker->client_thread,
-                   request->u.remove.path,
-                   strlen(request->u.remove.path),
-                   chimera_posix_remove_complete,
-                   request);
-} // chimera_posix_exec_remove
-
-int
-chimera_posix_unlink(const char *path)
-{
-    struct chimera_posix_client  *posix = chimera_posix_get_global();
+    posix = calloc(1, sizeof(*posix));
 
     if (!posix) {
-        errno = EINVAL;
-        return -1;
+        return NULL;
     }
 
-    struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_REMOVE);
-    struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
-
-    req->u.remove.path = strdup(path);
-
-    chimera_posix_worker_enqueue(worker, req);
-
-    int                           err = chimera_posix_wait(req);
-
-    free(req->u.remove.path);
-    chimera_posix_request_destroy(req);
-
-    if (err) {
-        errno = err;
-        return -1;
+    if (config) {
+        use_config = config;
+        posix->owns_config = 0;
+    } else {
+        owned_config = chimera_client_config_init();
+        if (!owned_config) {
+            free(posix);
+            return NULL;
+        }
+        use_config = owned_config;
+        posix->owns_config = 1;
     }
 
-    return 0;
-} // chimera_posix_unlink
+    posix->client = chimera_client_init(use_config, metrics);
 
+    if (!posix->client) {
+        if (owned_config) {
+            free(owned_config);
+        }
+        free(posix);
+        return NULL;
+    }
+
+    posix->nworkers = use_config->core_threads;
+    posix->workers  = calloc(posix->nworkers, sizeof(*posix->workers));
+
+    if (!posix->workers) {
+        chimera_destroy(posix->client);
+        free(posix);
+        return NULL;
+    }
+
+    pthread_mutex_init(&posix->fd_lock, NULL);
+    atomic_init(&posix->next_worker, 0);
+    atomic_init(&posix->init_cursor, 0);
+
+    posix->pool = evpl_threadpool_create(
+        NULL,
+        posix->nworkers,
+        chimera_posix_worker_init,
+        chimera_posix_worker_shutdown,
+        posix);
+
+    if (!posix->pool) {
+        pthread_mutex_destroy(&posix->fd_lock);
+        free(posix->workers);
+        chimera_destroy(posix->client);
+        free(posix);
+        return NULL;
+    }
+
+    chimera_posix_global = posix;
+
+    return posix;
+}
+
+SYMBOL_EXPORT void
+chimera_posix_shutdown(void)
+{
+    struct chimera_posix_client *posix = chimera_posix_global;
+
+    if (!posix) {
+        return;
+    }
+
+    chimera_posix_global = NULL;
+
+    if (posix->pool) {
+        evpl_threadpool_destroy(posix->pool);
+    }
+
+    pthread_mutex_destroy(&posix->fd_lock);
+
+    if (posix->fds) {
+        free(posix->fds);
+    }
+
+    if (posix->workers) {
+        free(posix->workers);
+    }
+
+    if (posix->client) {
+        chimera_destroy(posix->client);
+    }
+
+    free(posix);
+}

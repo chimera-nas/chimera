@@ -41,13 +41,12 @@ chimera_posix_umount(
     struct chimera_posix_request *req    = chimera_posix_request_create(CHIMERA_POSIX_REQ_UMOUNT);
     struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
 
-    req->u.umount.mount_path = strdup(mount_path);
+    req->u.umount.mount_path = mount_path;
 
     chimera_posix_worker_enqueue(worker, req);
 
     int err = chimera_posix_wait(req);
 
-    free(req->u.umount.mount_path);
     chimera_posix_request_destroy(req);
 
     if (err) {
