@@ -123,7 +123,7 @@ chimera_open_path_parent_lookup_complete(
 
 } /* chimera_client_open_path_complete */
 
-static inline void
+void
 chimera_dispatch_open(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)

@@ -21,6 +21,22 @@ chimera_read_complete(
     chimera_client_request_free(request->thread, request);
 } /* chimera_read_complete */
 
+void
+chimera_dispatch_read(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_read(thread->vfs_thread,
+                     request->read.handle,
+                     request->read.offset,
+                     request->read.length,
+                     request->read.iov,
+                     CHIMERA_CLIENT_IOV_MAX,
+                     0,
+                     chimera_read_complete,
+                     request);
+} /* chimera_dispatch_read */
+
 SYMBOL_EXPORT void
 chimera_read(
     struct chimera_client_thread   *thread,
@@ -37,8 +53,9 @@ chimera_read(
     request->opcode            = CHIMERA_CLIENT_OP_READ;
     request->read.callback     = callback;
     request->read.private_data = private_data;
+    request->read.handle       = handle;
+    request->read.offset       = offset;
+    request->read.length       = length;
 
-    chimera_vfs_read(thread->vfs_thread, handle, offset, length,
-                     request->read.iov, CHIMERA_CLIENT_IOV_MAX, 0,
-                     chimera_read_complete, request);
+    chimera_dispatch_read(thread, request);
 } /* chimera_read */

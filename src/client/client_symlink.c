@@ -84,7 +84,7 @@ chimera_symlink_parent_lookup_complete(
 
 } /* chimera_symlink_parent_lookup_complete */
 
-static inline void
+void
 chimera_dispatch_symlink(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)

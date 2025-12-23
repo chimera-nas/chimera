@@ -133,7 +133,7 @@ chimera_rename_source_parent_lookup_complete(
 
 } /* chimera_rename_source_parent_lookup_complete */
 
-static inline void
+void
 chimera_dispatch_rename(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)

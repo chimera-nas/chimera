@@ -23,6 +23,24 @@ chimera_write_complete(
 
 } /* chimera_write_complete */
 
+void
+chimera_dispatch_write(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_write(thread->vfs_thread,
+                      request->write.handle,
+                      request->write.offset,
+                      request->write.length,
+                      1,
+                      0,
+                      0,
+                      request->write.iov,
+                      request->write.niov,
+                      chimera_write_complete,
+                      request);
+} /* chimera_dispatch_write */
+
 SYMBOL_EXPORT void
 chimera_write(
     struct chimera_client_thread   *thread,
@@ -41,8 +59,12 @@ chimera_write(
     request->opcode             = CHIMERA_CLIENT_OP_WRITE;
     request->write.callback     = callback;
     request->write.private_data = private_data;
+    request->write.handle       = handle;
+    request->write.offset       = offset;
+    request->write.length       = length;
+    request->write.niov         = niov;
 
-    chimera_vfs_write(thread->vfs_thread, handle, offset, length, 1, 0, 0, iov, niov, chimera_write_complete,
-                      request);
+    memcpy(request->write.iov, iov, niov * sizeof(struct evpl_iovec));
 
+    chimera_dispatch_write(thread, request);
 } /* chimera_write */

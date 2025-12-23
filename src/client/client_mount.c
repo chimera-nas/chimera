@@ -17,6 +17,19 @@ chimera_client_mount_callback(
     chimera_client_request_free(request->thread, request);
 } /* chimera_client_mount_callback */
 
+void
+chimera_dispatch_mount(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_mount(thread->vfs_thread,
+                      request->mount.mount_path,
+                      request->mount.module_name,
+                      request->mount.module_path,
+                      chimera_client_mount_callback,
+                      request);
+} /* chimera_dispatch_mount */
+
 SYMBOL_EXPORT void
 chimera_mount(
     struct chimera_client_thread *client_thread,
@@ -38,11 +51,5 @@ chimera_mount(
     memcpy(request->mount.mount_path, mount_path, strlen(mount_path) + 1);
     memcpy(request->mount.module_name, module_name, strlen(module_name) + 1);
 
-    chimera_vfs_mount(client_thread->vfs_thread,
-                      request->mount.mount_path,
-                      request->mount.module_name,
-                      request->mount.
-                      module_path,
-                      chimera_client_mount_callback,
-                      request);
+    chimera_dispatch_mount(client_thread, request);
 } /* chimera_client_mount */

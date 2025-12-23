@@ -35,19 +35,10 @@ chimera_posix_worker_shutdown(
     struct evpl *evpl,
     void        *private_data)
 {
-    struct chimera_posix_worker  *worker = private_data;
-    struct chimera_posix_request *req;
+    struct chimera_posix_worker *worker = private_data;
 
     if (worker->client_thread) {
         chimera_client_thread_shutdown(evpl, worker->client_thread);
-    }
-
-    while (worker->free_requests) {
-        req = worker->free_requests;
-        LL_DELETE(worker->free_requests, req);
-        pthread_mutex_destroy(&req->lock);
-        pthread_cond_destroy(&req->cond);
-        free(req);
     }
 
     evpl_remove_doorbell(evpl, &worker->doorbell);
@@ -62,12 +53,12 @@ chimera_posix_worker_doorbell(
     struct chimera_posix_worker *worker = container_of(doorbell, struct chimera_posix_worker, doorbell);
 
     for (;;) {
-        struct chimera_posix_request *request;
+        struct chimera_client_request *request;
 
         pthread_mutex_lock(&worker->lock);
         request = worker->head;
         if (request) {
-            worker->head = request->next;
+            worker->head = request->sync_next;
             if (worker->head == NULL) {
                 worker->tail = NULL;
             }
@@ -78,7 +69,8 @@ chimera_posix_worker_doorbell(
             break;
         }
 
-        request->callback(worker, request);
+        request->thread = worker->client_thread;
+        request->sync_callback(worker->client_thread, request);
     }
 } /* chimera_posix_worker_doorbell */
 

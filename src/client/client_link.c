@@ -133,7 +133,7 @@ chimera_link_source_lookup_complete(
 
 } /* chimera_link_source_lookup_complete */
 
-static inline void
+void
 chimera_dispatch_link(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)

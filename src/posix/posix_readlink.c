@@ -8,35 +8,29 @@
 #include "posix_internal.h"
 
 static void
-chimera_posix_readlink_complete(
+chimera_posix_readlink_callback(
     struct chimera_client_thread *thread,
     enum chimera_vfs_error        status,
     const char                   *target,
     int                           targetlen,
     void                         *private_data)
 {
-    struct chimera_posix_request *request = private_data;
+    struct chimera_client_request *request = private_data;
 
     if (status == CHIMERA_VFS_OK) {
-        size_t copy_len = targetlen < (int) request->u.readlink.buflen ? (size_t) targetlen : request->u.readlink.buflen;
-        memcpy(request->u.readlink.buf, target, copy_len);
-        request->result     = (ssize_t) copy_len;
-        request->target_len = targetlen;
+        request->sync_result     = (ssize_t) targetlen;
+        request->sync_target_len = targetlen;
     }
 
-    chimera_posix_request_finish(request, status);
+    chimera_posix_request_complete(request, status);
 }
 
-void
-chimera_posix_exec_readlink(struct chimera_posix_worker *worker, struct chimera_posix_request *request)
+static void
+chimera_posix_readlink_exec(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
 {
-    chimera_readlink(worker->client_thread,
-                     request->u.readlink.path,
-                     strlen(request->u.readlink.path),
-                     request->u.readlink.buf,
-                     request->u.readlink.buflen,
-                     chimera_posix_readlink_complete,
-                     request);
+    chimera_dispatch_readlink(thread, request);
 }
 
 ssize_t
@@ -45,21 +39,34 @@ chimera_posix_readlink(
     char       *buf,
     size_t      bufsiz)
 {
-    struct chimera_posix_client  *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
-    struct chimera_posix_request *req    = chimera_posix_request_create(worker);
+    struct chimera_posix_client   *posix    = chimera_posix_get_global();
+    struct chimera_posix_worker   *worker   = chimera_posix_choose_worker(posix);
+    struct chimera_client_request  req;
+    pthread_mutex_t                mutex    = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t                 cond     = PTHREAD_COND_INITIALIZER;
+    int                            path_len;
 
-    req->u.readlink.path   = path;
-    req->u.readlink.buf    = buf;
-    req->u.readlink.buflen = bufsiz;
+    chimera_posix_request_init(&req, &mutex, &cond);
 
-    chimera_posix_worker_enqueue(worker, req, chimera_posix_exec_readlink);
+    path_len = strlen(path);
 
-    int err = chimera_posix_wait(req);
+    req.opcode                    = CHIMERA_CLIENT_OP_READLINK;
+    req.readlink.callback         = chimera_posix_readlink_callback;
+    req.readlink.private_data     = &req;
+    req.readlink.path_len         = path_len;
+    req.readlink.target           = buf;
+    req.readlink.target_maxlength = bufsiz;
 
-    ssize_t ret = req->result;
+    memcpy(req.readlink.path, path, path_len);
 
-    chimera_posix_request_release(worker, req);
+    chimera_posix_worker_enqueue(worker, &req, chimera_posix_readlink_exec);
+
+    int err = chimera_posix_wait(&req);
+
+    ssize_t ret = req.sync_result;
+
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&cond);
 
     if (err) {
         errno = err;

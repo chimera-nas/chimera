@@ -83,7 +83,7 @@ chimera_mkdir_parent_lookup_complete(
 
 } /* chimera_mkdir_parent_lookup_complete */
 
-static inline void
+void
 chimera_dispatch_mkdir(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)

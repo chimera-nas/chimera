@@ -17,6 +17,17 @@ chimera_client_umount_callback(
     chimera_client_request_free(request->thread, request);
 } /* chimera_client_mount_callback */
 
+void
+chimera_dispatch_umount(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_umount(thread->vfs_thread,
+                       request->umount.mount_path,
+                       chimera_client_umount_callback,
+                       request);
+} /* chimera_dispatch_umount */
+
 SYMBOL_EXPORT void
 chimera_umount(
     struct chimera_client_thread *client_thread,
@@ -32,5 +43,7 @@ chimera_umount(
     request->umount.callback     = callback;
     request->umount.private_data = private_data;
 
-    chimera_vfs_umount(client_thread->vfs_thread, mount_path, chimera_client_umount_callback, request);
-} /* chimera_client_mount */
+    memcpy(request->umount.mount_path, mount_path, strlen(mount_path) + 1);
+
+    chimera_dispatch_umount(client_thread, request);
+} /* chimera_client_umount */

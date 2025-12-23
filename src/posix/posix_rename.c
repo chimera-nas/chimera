@@ -8,26 +8,22 @@
 #include "posix_internal.h"
 
 static void
-chimera_posix_rename_complete(
+chimera_posix_rename_callback(
     struct chimera_client_thread *thread,
     enum chimera_vfs_error        status,
     void                         *private_data)
 {
-    struct chimera_posix_request *request = private_data;
+    struct chimera_client_request *request = private_data;
 
-    chimera_posix_request_finish(request, status);
+    chimera_posix_request_complete(request, status);
 }
 
-void
-chimera_posix_exec_rename(struct chimera_posix_worker *worker, struct chimera_posix_request *request)
+static void
+chimera_posix_rename_exec(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
 {
-    chimera_rename(worker->client_thread,
-                   request->u.rename.oldpath,
-                   strlen(request->u.rename.oldpath),
-                   request->u.rename.newpath,
-                   strlen(request->u.rename.newpath),
-                   chimera_posix_rename_complete,
-                   request);
+    chimera_dispatch_rename(thread, request);
 }
 
 int
@@ -35,18 +31,51 @@ chimera_posix_rename(
     const char *oldpath,
     const char *newpath)
 {
-    struct chimera_posix_client  *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
-    struct chimera_posix_request *req    = chimera_posix_request_create(worker);
+    struct chimera_posix_client   *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker   *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request  req;
+    pthread_mutex_t                mutex  = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t                 cond   = PTHREAD_COND_INITIALIZER;
+    const char                    *source_slash;
+    const char                    *dest_slash;
+    int                            source_path_len;
+    int                            dest_path_len;
 
-    req->u.rename.oldpath = oldpath;
-    req->u.rename.newpath = newpath;
+    chimera_posix_request_init(&req, &mutex, &cond);
 
-    chimera_posix_worker_enqueue(worker, req, chimera_posix_exec_rename);
+    source_path_len = strlen(oldpath);
+    dest_path_len   = strlen(newpath);
+    source_slash    = rindex(oldpath, '/');
+    dest_slash      = rindex(newpath, '/');
 
-    int err = chimera_posix_wait(req);
+    req.opcode                    = CHIMERA_CLIENT_OP_RENAME;
+    req.rename.callback           = chimera_posix_rename_callback;
+    req.rename.private_data       = &req;
+    req.rename.source_path_len    = source_path_len;
+    req.rename.source_parent_len  = source_slash ? source_slash - oldpath : source_path_len;
+    req.rename.dest_path_len      = dest_path_len;
+    req.rename.dest_parent_len    = dest_slash ? dest_slash - newpath : dest_path_len;
 
-    chimera_posix_request_release(worker, req);
+    while (source_slash && *source_slash == '/') {
+        source_slash++;
+    }
+
+    while (dest_slash && *dest_slash == '/') {
+        dest_slash++;
+    }
+
+    req.rename.source_name_offset = source_slash ? source_slash - oldpath : -1;
+    req.rename.dest_name_offset   = dest_slash ? dest_slash - newpath : -1;
+
+    memcpy(req.rename.source_path, oldpath, source_path_len);
+    memcpy(req.rename.dest_path, newpath, dest_path_len);
+
+    chimera_posix_worker_enqueue(worker, &req, chimera_posix_rename_exec);
+
+    int err = chimera_posix_wait(&req);
+
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&cond);
 
     if (err) {
         errno = err;

@@ -100,6 +100,22 @@ chimera_stat_lookup_complete(
 
 } /* chimera_stat_lookup_complete */
 
+void
+chimera_dispatch_stat(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_lookup_path(
+        thread->vfs_thread,
+        root_fh,
+        sizeof(root_fh),
+        request->stat.path,
+        request->stat.path_len,
+        CHIMERA_VFS_ATTR_FH,
+        chimera_stat_lookup_complete,
+        request);
+} /* chimera_dispatch_stat */
+
 SYMBOL_EXPORT void
 chimera_stat(
     struct chimera_client_thread *thread,
@@ -115,15 +131,10 @@ chimera_stat(
     request->opcode            = CHIMERA_CLIENT_OP_STAT;
     request->stat.callback     = callback;
     request->stat.private_data = private_data;
+    request->stat.path_len     = path_len;
 
-    chimera_vfs_lookup_path(
-        thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
-        path,
-        path_len,
-        CHIMERA_VFS_ATTR_FH,
-        chimera_stat_lookup_complete,
-        request);
+    memcpy(request->stat.path, path, path_len);
+
+    chimera_dispatch_stat(thread, request);
 } /* chimera_stat */
 

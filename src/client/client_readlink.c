@@ -85,6 +85,22 @@ chimera_readlink_lookup_complete(
 
 } /* chimera_readlink_lookup_complete */
 
+void
+chimera_dispatch_readlink(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_lookup_path(
+        thread->vfs_thread,
+        root_fh,
+        sizeof(root_fh),
+        request->readlink.path,
+        request->readlink.path_len,
+        CHIMERA_VFS_ATTR_FH,
+        chimera_readlink_lookup_complete,
+        request);
+} /* chimera_dispatch_readlink */
+
 SYMBOL_EXPORT void
 chimera_readlink(
     struct chimera_client_thread *thread,
@@ -109,15 +125,10 @@ chimera_readlink(
     request->readlink.private_data     = private_data;
     request->readlink.target_maxlength = target_maxlength;
     request->readlink.target           = target;
+    request->readlink.path_len         = path_len;
 
-    chimera_vfs_lookup_path(
-        thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
-        path,
-        path_len,
-        CHIMERA_VFS_ATTR_FH,
-        chimera_readlink_lookup_complete,
-        request);
+    memcpy(request->readlink.path, path, path_len);
+
+    chimera_dispatch_readlink(thread, request);
 } /* chimera_readlink */
 

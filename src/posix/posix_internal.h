@@ -22,83 +22,6 @@
 #include "vfs/vfs.h"
 #include "posix.h"
 
-struct chimera_posix_worker;
-struct chimera_posix_request;
-
-typedef void (*chimera_posix_request_callback)(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-
-struct chimera_posix_request {
-    pthread_mutex_t                  lock;
-    pthread_cond_t                   cond;
-    int                              done;
-    enum chimera_vfs_error           status;
-    ssize_t                          result;
-    struct chimera_vfs_open_handle  *handle;
-    struct chimera_stat              st;
-    int                              target_len;
-    chimera_posix_request_callback   callback;
-    struct chimera_posix_request    *next;
-    union {
-        struct {
-            const char *path;
-            int         flags;
-        } open;
-        struct {
-            struct chimera_vfs_open_handle *handle;
-        } close;
-        struct {
-            struct chimera_vfs_open_handle *handle;
-            uint64_t                        offset;
-            size_t                          length;
-            void                           *buf;
-        } read;
-        struct {
-            struct chimera_vfs_open_handle *handle;
-            uint64_t                        offset;
-            size_t                          length;
-            const void                     *buf;
-            struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
-            int                             niov;
-        } write;
-        struct {
-            const char *path;
-        } mkdir;
-        struct {
-            const char *path;
-            const char *target;
-        } symlink;
-        struct {
-            const char *oldpath;
-            const char *newpath;
-        } link;
-        struct {
-            const char *path;
-        } remove;
-        struct {
-            const char *oldpath;
-            const char *newpath;
-        } rename;
-        struct {
-            const char *path;
-            char       *buf;
-            size_t      buflen;
-        } readlink;
-        struct {
-            const char *path;
-        } stat;
-        struct {
-            const char *mount_path;
-            const char *module_name;
-            const char *module_path;
-        } mount;
-        struct {
-            const char *mount_path;
-        } umount;
-    } u;
-};
-
 struct chimera_posix_fd_entry {
     struct chimera_vfs_open_handle *handle;
     uint64_t                        offset;
@@ -107,9 +30,8 @@ struct chimera_posix_fd_entry {
 
 struct chimera_posix_worker {
     pthread_mutex_t               lock;
-    struct chimera_posix_request *head;
-    struct chimera_posix_request *tail;
-    struct chimera_posix_request *free_requests;
+    struct chimera_client_request *head;
+    struct chimera_client_request *tail;
     struct evpl_doorbell          doorbell;
     struct chimera_client_thread *client_thread;
     struct chimera_posix_client  *parent;
@@ -150,61 +72,44 @@ chimera_posix_errno_from_status(enum chimera_vfs_error status)
 }
 
 static FORCE_INLINE void
-chimera_posix_request_finish(struct chimera_posix_request *req, enum chimera_vfs_error status)
+chimera_posix_request_complete(
+    struct chimera_client_request *req,
+    enum chimera_vfs_error         status)
 {
-    pthread_mutex_lock(&req->lock);
-    req->status = status;
-    req->done   = 1;
-    pthread_cond_signal(&req->cond);
-    pthread_mutex_unlock(&req->lock);
-}
-
-static FORCE_INLINE struct chimera_posix_request *
-chimera_posix_request_create(struct chimera_posix_worker *worker)
-{
-    struct chimera_posix_request *req;
-
-    if (worker->free_requests) {
-        req = worker->free_requests;
-        LL_DELETE(worker->free_requests, req);
-        req->done   = 0;
-        req->status = CHIMERA_VFS_OK;
-        req->result = 0;
-        req->handle = NULL;
-        req->next   = NULL;
-    } else {
-        req = calloc(1, sizeof(*req));
-        pthread_mutex_init(&req->lock, NULL);
-        pthread_cond_init(&req->cond, NULL);
-    }
-
-    return req;
+    pthread_mutex_lock(req->sync_mutex);
+    req->sync_status = status;
+    req->sync_done   = 1;
+    pthread_cond_signal(req->sync_cond);
+    pthread_mutex_unlock(req->sync_mutex);
 }
 
 static FORCE_INLINE void
-chimera_posix_request_release(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *req)
+chimera_posix_request_init(
+    struct chimera_client_request *req,
+    pthread_mutex_t               *mutex,
+    pthread_cond_t                *cond)
 {
-    if (!req) {
-        return;
-    }
-
-    LL_PREPEND(worker->free_requests, req);
+    memset(req, 0, sizeof(*req));
+    req->heap_allocated = 0;
+    req->sync_mutex     = mutex;
+    req->sync_cond      = cond;
+    req->sync_done      = 0;
+    req->sync_status    = CHIMERA_VFS_OK;
+    req->sync_result    = 0;
 }
 
 static FORCE_INLINE void
 chimera_posix_worker_enqueue(
-    struct chimera_posix_worker    *worker,
-    struct chimera_posix_request   *request,
-    chimera_posix_request_callback  callback)
+    struct chimera_posix_worker        *worker,
+    struct chimera_client_request      *request,
+    chimera_client_request_callback     callback)
 {
-    request->callback = callback;
+    request->sync_callback = callback;
 
     pthread_mutex_lock(&worker->lock);
     if (worker->tail) {
-        worker->tail->next = request;
-        worker->tail       = request;
+        worker->tail->sync_next = request;
+        worker->tail            = request;
     } else {
         worker->head = worker->tail = request;
     }
@@ -222,15 +127,15 @@ chimera_posix_choose_worker(struct chimera_posix_client *posix)
 }
 
 static FORCE_INLINE int
-chimera_posix_wait(struct chimera_posix_request *req)
+chimera_posix_wait(struct chimera_client_request *req)
 {
-    pthread_mutex_lock(&req->lock);
-    while (!req->done) {
-        pthread_cond_wait(&req->cond, &req->lock);
+    pthread_mutex_lock(req->sync_mutex);
+    while (!req->sync_done) {
+        pthread_cond_wait(req->sync_cond, req->sync_mutex);
     }
-    pthread_mutex_unlock(&req->lock);
+    pthread_mutex_unlock(req->sync_mutex);
 
-    return chimera_posix_errno_from_status(req->status);
+    return chimera_posix_errno_from_status(req->sync_status);
 }
 
 static FORCE_INLINE void
@@ -373,45 +278,5 @@ void chimera_posix_worker_shutdown(
 void chimera_posix_worker_doorbell(
     struct evpl          *evpl,
     struct evpl_doorbell *doorbell);
-
-void chimera_posix_exec_open(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_close(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_read(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_write(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_mkdir(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_symlink(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_link(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_remove(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_rename(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_readlink(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_stat(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_mount(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
-void chimera_posix_exec_umount(
-    struct chimera_posix_worker  *worker,
-    struct chimera_posix_request *request);
 
 #endif /* CHIMERA_POSIX_INTERNAL_H */

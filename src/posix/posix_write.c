@@ -8,36 +8,30 @@
 #include "posix_internal.h"
 
 static void
-chimera_posix_write_complete(
+chimera_posix_write_callback(
     struct chimera_client_thread *thread,
     enum chimera_vfs_error        status,
     void                         *private_data)
 {
-    struct chimera_posix_request *request = private_data;
-    int                           i;
+    struct chimera_client_request *request = private_data;
 
-    for (i = 0; i < request->u.write.niov; i++) {
-        evpl_iovec_release(&request->u.write.iov[i]);
+    for (int i = 0; i < request->write.niov; i++) {
+        evpl_iovec_release(&request->write.iov[i]);
     }
 
     if (status == CHIMERA_VFS_OK) {
-        request->result = (ssize_t) request->u.write.length;
+        request->sync_result = (ssize_t) request->write.length;
     }
 
-    chimera_posix_request_finish(request, status);
+    chimera_posix_request_complete(request, status);
 }
 
-void
-chimera_posix_exec_write(struct chimera_posix_worker *worker, struct chimera_posix_request *request)
+static void
+chimera_posix_write_exec(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
 {
-    chimera_write(worker->client_thread,
-                  request->u.write.handle,
-                  request->u.write.offset,
-                  request->u.write.length,
-                  request->u.write.iov,
-                  request->u.write.niov,
-                  chimera_posix_write_complete,
-                  request);
+    chimera_dispatch_write(thread, request);
 }
 
 ssize_t
@@ -46,12 +40,16 @@ chimera_posix_write(
     const void *buf,
     size_t      count)
 {
-    struct chimera_posix_client *posix = chimera_posix_get_global();
+    struct chimera_posix_client   *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker   *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request  req;
+    pthread_mutex_t                mutex  = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t                 cond   = PTHREAD_COND_INITIALIZER;
 
     pthread_mutex_lock(&posix->fd_lock);
-    struct chimera_posix_fd_entry *entry = chimera_posix_fd_get(posix, fd);
+    struct chimera_posix_fd_entry  *entry  = chimera_posix_fd_get(posix, fd);
     struct chimera_vfs_open_handle *handle = entry ? entry->handle : NULL;
-    uint64_t offset = entry ? entry->offset : 0;
+    uint64_t                        offset = entry ? entry->offset : 0;
     pthread_mutex_unlock(&posix->fd_lock);
 
     if (!handle) {
@@ -59,41 +57,44 @@ chimera_posix_write(
         return -1;
     }
 
-    struct chimera_posix_worker  *worker = chimera_posix_choose_worker(posix);
-    struct chimera_posix_request *req    = chimera_posix_request_create(worker);
+    chimera_posix_request_init(&req, &mutex, &cond);
 
-    req->u.write.handle = handle;
-    req->u.write.offset = offset;
-    req->u.write.length = count;
-    req->u.write.buf    = buf;
+    req.opcode             = CHIMERA_CLIENT_OP_WRITE;
+    req.write.callback     = chimera_posix_write_callback;
+    req.write.private_data = &req;
+    req.write.handle       = handle;
+    req.write.offset       = offset;
+    req.write.length       = count;
 
-    int niov = evpl_iovec_alloc(worker->evpl, count, 1, CHIMERA_CLIENT_IOV_MAX, req->u.write.iov);
+    int niov = evpl_iovec_alloc(worker->evpl, count, 1, CHIMERA_CLIENT_IOV_MAX, req.write.iov);
     if (niov < 0) {
-        chimera_posix_request_release(worker, req);
+        pthread_mutex_destroy(&mutex);
+        pthread_cond_destroy(&cond);
         errno = ENOMEM;
         return -1;
     }
 
-    req->u.write.niov = niov;
-    chimera_posix_iovec_memcpy(req->u.write.iov, buf, count);
-    evpl_iovec_commit(worker->evpl, 1, req->u.write.iov, niov);
+    req.write.niov = niov;
+    chimera_posix_iovec_memcpy(req.write.iov, buf, count);
+    evpl_iovec_commit(worker->evpl, 1, req.write.iov, niov);
 
-    chimera_posix_worker_enqueue(worker, req, chimera_posix_exec_write);
+    chimera_posix_worker_enqueue(worker, &req, chimera_posix_write_exec);
 
-    int err = chimera_posix_wait(req);
+    int err = chimera_posix_wait(&req);
 
-    if (!err && req->result >= 0) {
+    if (!err && req.sync_result >= 0) {
         pthread_mutex_lock(&posix->fd_lock);
         entry = chimera_posix_fd_get(posix, fd);
         if (entry) {
-            entry->offset += (uint64_t) req->result;
+            entry->offset += (uint64_t) req.sync_result;
         }
         pthread_mutex_unlock(&posix->fd_lock);
     }
 
-    ssize_t ret = req->result;
+    ssize_t ret = req.sync_result;
 
-    chimera_posix_request_release(worker, req);
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&cond);
 
     if (err) {
         errno = err;
