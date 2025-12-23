@@ -25,7 +25,7 @@ chimera_nfs_init(const char *cfgfile)
     shared->servers     = calloc(shared->max_servers, sizeof(*shared->servers));
     shared->servers_map = NULL;
 
-    NFS_PORTMAP_V2_init(&shared->portmap_v2);
+    PORTMAP_V2_init(&shared->portmap_v2);
     NFS_MOUNT_V3_init(&shared->mount_v3);
     NFS_V3_init(&shared->nfs_v3);
     NFS_V4_init(&shared->nfs_v4);

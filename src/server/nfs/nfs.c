@@ -88,11 +88,26 @@ nfs_server_init(
                                                                            "The latency of NFS operations", 24);
 
     if (!external_portmap) {
-        NFS_PORTMAP_V2_init(&shared->portmap_v2);
+        /* PORTMAP V2 */
+        PORTMAP_V2_init(&shared->portmap_v2);
         chimera_nfs_init_metrics(shared, &shared->portmap_v2.rpc2);
-        shared->portmap_v2.recv_call_PMAPPROC_NULL    = chimera_portmap_null;
-        shared->portmap_v2.recv_call_PMAPPROC_GETPORT = chimera_portmap_getport;
+        shared->portmap_v2.recv_call_PMAPPROC_NULL    = chimera_portmap_null_v2;
+        shared->portmap_v2.recv_call_PMAPPROC_GETPORT = chimera_portmap_getport_v2;
+        shared->portmap_v2.recv_call_PMAPPROC_DUMP    = chimera_portmap_dump_v2;
+
+        /* PORTMAP V3 (rpcbind) */
+        PORTMAP_V3_init(&shared->portmap_v3);
+        chimera_nfs_init_metrics(shared, &shared->portmap_v3.rpc2);
+        shared->portmap_v3.recv_call_rpcbproc_getaddr = chimera_portmap_getaddr_v3;
+        shared->portmap_v3.recv_call_rpcbproc_dump    = chimera_portmap_dump_v3;
+
+        /* PORTMAP V4 (rpcbind) */
+        PORTMAP_V4_init(&shared->portmap_v4);
+        chimera_nfs_init_metrics(shared, &shared->portmap_v4.rpc2);
+        shared->portmap_v4.recv_call_RPCBPROC_GETADDR = chimera_portmap_getaddr_v4;
+        shared->portmap_v4.recv_call_RPCBPROC_DUMP    = chimera_portmap_dump_v4;
     }
+
     chimera_nfs_init_metrics(shared, &shared->mount_v3.rpc2);
     chimera_nfs_init_metrics(shared, &shared->nfs_v3.rpc2);
     chimera_nfs_init_metrics(shared, &shared->nfs_v4.rpc2);
@@ -147,7 +162,9 @@ nfs_server_init(
         chimera_nfs_debug("Initializing internal portmap support");
         shared->portmap_endpoint = evpl_endpoint_create("0.0.0.0", 111);
         programs[0]              = &shared->portmap_v2.rpc2;
-        shared->portmap_server   = evpl_rpc2_server_init(programs, 1);
+        programs[1]              = &shared->portmap_v3.rpc2;
+        programs[2]              = &shared->portmap_v4.rpc2;
+        shared->portmap_server   = evpl_rpc2_server_init(programs, 3);
     }
 
     chimera_nfs_debug("Initializing NFS mountd server");
@@ -220,6 +237,8 @@ nfs_server_destroy(void *data)
     if (shared->portmap_server) {
         evpl_rpc2_server_destroy(shared->portmap_server);
         free(shared->portmap_v2.rpc2.metrics);
+        free(shared->portmap_v3.rpc2.metrics);
+        free(shared->portmap_v4.rpc2.metrics);
     }
     free(shared->mount_v3.rpc2.metrics);
     free(shared->nfs_v3.rpc2.metrics);
