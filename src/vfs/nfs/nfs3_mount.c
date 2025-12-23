@@ -137,7 +137,7 @@ chimera_nfs3_mount_nfs_null_callback(
 static void
 chimera_portmap_getport_nfs_callback(
     struct evpl *evpl,
-    struct port *reply,
+    unsigned int port,
     int          status,
     void        *private_data)
 {
@@ -151,8 +151,8 @@ chimera_portmap_getport_nfs_callback(
         return;
     }
 
-    server->nfs_port     = reply->port;
-    server->nfs_endpoint = evpl_endpoint_create(server->hostname, reply->port);
+    server->nfs_port     = port;
+    server->nfs_endpoint = evpl_endpoint_create(server->hostname, port);
 
     server_thread->nfs_conn = evpl_rpc2_client_connect(server_thread->thread->rpc2_thread,
                                                        EVPL_STREAM_SOCKET_TCP,
@@ -201,7 +201,7 @@ chimera_mount_mountd_null_callback(
 static void
 chimera_portmap_getport_mountd_callback(
     struct evpl *evpl,
-    struct port *reply,
+    unsigned int port,
     int          status,
     void        *private_data)
 {
@@ -215,8 +215,8 @@ chimera_portmap_getport_mountd_callback(
         return;
     }
 
-    server->mount_port     = reply->port;
-    server->mount_endpoint = evpl_endpoint_create(server->hostname, reply->port);
+    server->mount_port     = port;
+    server->mount_endpoint = evpl_endpoint_create(server->hostname, port);
 
     server_thread->mount_conn = evpl_rpc2_client_connect(server_thread->thread->rpc2_thread,
                                                          EVPL_STREAM_SOCKET_TCP,

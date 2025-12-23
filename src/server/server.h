@@ -51,6 +51,15 @@ int
 chimera_server_config_get_cache_ttl(
     const struct chimera_server_config *config);
 
+int
+chimera_server_config_get_external_portmap(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_external_portmap(
+    struct chimera_server_config *config,
+    int                           enable);
+
 void
 chimera_server_config_set_nfs_rdma(
     struct chimera_server_config *config,

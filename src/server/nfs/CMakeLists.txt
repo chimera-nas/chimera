@@ -6,7 +6,7 @@ include_directories(${NFS_COMMON_INCLUDE_DIR})
 
 # Create libraries for NFSv3 and NFSv4
 add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs_mount.c nfs_portmap.c nfs3_dump.c nfs4_dump.c
-
+            nfs_external_portmap.c
             nfs3_proc_null.c nfs3_proc_getattr.c nfs3_proc_setattr.c nfs3_proc_lookup.c 
             nfs3_proc_access.c nfs3_proc_readlink.c nfs3_proc_read.c nfs3_proc_write.c
             nfs3_proc_create.c nfs3_proc_mkdir.c nfs3_proc_remove.c nfs3_proc_mknod.c nfs3_proc_symlink.c
