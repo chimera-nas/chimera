@@ -67,7 +67,6 @@ struct chimera_client_request {
     int                                sync_target_len;
 
     chimera_client_request_callback    sync_callback;
-    struct chimera_client_request     *sync_next;
 
     uint32_t                           fh_len;
 
@@ -209,7 +208,7 @@ struct chimera_client_request {
             char                            path[CHIMERA_VFS_PATH_MAX];
         } stat;
     };
-};
+} __attribute__((aligned(64)));
 
 struct chimera_client_config {
     int                           core_threads;
@@ -218,18 +217,18 @@ struct chimera_client_config {
     int                           max_fds;
     struct chimera_vfs_module_cfg modules[CHIMERA_CLIENT_MAX_MODULES];
     int                           num_modules;
-};
+} __attribute__((aligned(64)));
 
 struct chimera_client {
     const struct chimera_client_config *config;
     struct chimera_vfs                 *vfs;
-};
+} __attribute__((aligned(64)));
 
 struct chimera_client_thread {
     struct chimera_client         *client;
     struct chimera_vfs_thread     *vfs_thread;
     struct chimera_client_request *free_requests;
-};
+} __attribute__((aligned(64)));
 
 static inline struct chimera_client_request *
 chimera_client_request_alloc(struct chimera_client_thread *thread)

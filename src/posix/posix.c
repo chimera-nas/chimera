@@ -10,7 +10,7 @@
 
 struct chimera_posix_client *chimera_posix_global;
 
-const uint8_t root_fh[1] = { CHIMERA_VFS_FH_MAGIC_ROOT };
+const uint8_t                root_fh[1] = { CHIMERA_VFS_FH_MAGIC_ROOT };
 
 void *
 chimera_posix_worker_init(
@@ -59,12 +59,9 @@ chimera_posix_worker_doorbell(
         struct chimera_client_request *request;
 
         pthread_mutex_lock(&worker->lock);
-        request = worker->head;
+        request = worker->pending_requests;
         if (request) {
-            worker->head = request->sync_next;
-            if (worker->head == NULL) {
-                worker->tail = NULL;
-            }
+            DL_DELETE(worker->pending_requests, request);
         }
         pthread_mutex_unlock(&worker->lock);
 

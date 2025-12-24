@@ -31,9 +31,9 @@ struct chimera_posix_completion {
     int                            done;
 };
 
-#define CHIMERA_POSIX_FD_IO_ACTIVE  0x01
-#define CHIMERA_POSIX_FD_CLOSING    0x02
-#define CHIMERA_POSIX_FD_CLOSED     0x04
+#define CHIMERA_POSIX_FD_IO_ACTIVE 0x01
+#define CHIMERA_POSIX_FD_CLOSING   0x02
+#define CHIMERA_POSIX_FD_CLOSED    0x04
 
 struct chimera_posix_fd_entry {
     pthread_mutex_t                 lock;
@@ -50,14 +50,13 @@ struct chimera_posix_fd_entry {
 
 struct chimera_posix_worker {
     pthread_mutex_t                lock;
-    struct chimera_client_request *head;
-    struct chimera_client_request *tail;
+    struct chimera_client_request *pending_requests;
     struct evpl_doorbell           doorbell;
     struct chimera_client_thread  *client_thread;
     struct chimera_posix_client   *parent;
     int                            index;
     struct evpl                   *evpl;
-};
+} __attribute__((aligned(64)));
 
 struct chimera_posix_client {
     struct chimera_client         *client;
@@ -71,7 +70,7 @@ struct chimera_posix_client {
     int                            max_fds;
     atomic_int                     init_cursor;
     int                            owns_config;
-};
+} __attribute__((aligned(64)));
 
 extern struct chimera_posix_client *chimera_posix_global;
 
@@ -114,7 +113,6 @@ chimera_posix_completion_init(
     comp->status  = CHIMERA_VFS_OK;
     comp->done    = 0;
 
-    memset(req, 0, sizeof(*req));
     req->heap_allocated = 0;
 } // chimera_posix_completion_init
 
@@ -134,12 +132,7 @@ chimera_posix_worker_enqueue(
     request->sync_callback = callback;
 
     pthread_mutex_lock(&worker->lock);
-    if (worker->tail) {
-        worker->tail->sync_next = request;
-        worker->tail            = request;
-    } else {
-        worker->head = worker->tail = request;
-    }
+    DL_APPEND(worker->pending_requests, request);
     pthread_mutex_unlock(&worker->lock);
 
     evpl_ring_doorbell(&worker->doorbell);
@@ -224,18 +217,6 @@ chimera_posix_to_chimera_flags(int flags)
     return out;
 } // chimera_posix_to_chimera_flags
 
-static FORCE_INLINE struct chimera_posix_fd_entry *
-chimera_posix_fd_get(
-    struct chimera_posix_client *posix,
-    int                          fd)
-{
-    if (fd < 0 || fd >= posix->max_fds) {
-        return NULL;
-    }
-
-    return &posix->fds[fd];
-} // chimera_posix_fd_get
-
 static FORCE_INLINE int
 chimera_posix_fd_alloc(
     struct chimera_posix_client    *posix,
@@ -260,7 +241,6 @@ chimera_posix_fd_alloc(
 
     fd = (int) (entry - posix->fds);
 
-    pthread_mutex_lock(&entry->lock);
     entry->handle        = handle;
     entry->offset        = 0;
     entry->flags         = 0;
@@ -268,7 +248,6 @@ chimera_posix_fd_alloc(
     entry->io_waiters    = 0;
     entry->pending_close = 0;
     entry->close_waiters = 0;
-    pthread_mutex_unlock(&entry->lock);
 
     return fd;
 } // chimera_posix_fd_alloc
@@ -286,28 +265,14 @@ chimera_posix_fd_free(
 
     entry = &posix->fds[fd];
 
-    pthread_mutex_lock(&entry->lock);
     entry->handle = NULL;
     entry->offset = 0;
-    pthread_mutex_unlock(&entry->lock);
 
     pthread_mutex_lock(&posix->fd_lock);
     entry->next      = posix->free_list;
     posix->free_list = entry;
     pthread_mutex_unlock(&posix->fd_lock);
 } // chimera_posix_fd_free
-
-static FORCE_INLINE void
-chimera_posix_fd_lock(struct chimera_posix_fd_entry *entry)
-{
-    pthread_mutex_lock(&entry->lock);
-} // chimera_posix_fd_lock
-
-static FORCE_INLINE void
-chimera_posix_fd_unlock(struct chimera_posix_fd_entry *entry)
-{
-    pthread_mutex_unlock(&entry->lock);
-} // chimera_posix_fd_unlock
 
 static FORCE_INLINE struct chimera_posix_fd_entry *
 chimera_posix_fd_acquire(
@@ -348,7 +313,7 @@ chimera_posix_fd_acquire(
         }
 
         // Set CLOSING and pending_close
-        entry->flags |= CHIMERA_POSIX_FD_CLOSING;
+        entry->flags        |= CHIMERA_POSIX_FD_CLOSING;
         entry->pending_close = 1;
 
         // Wait for existing operations to complete
@@ -418,8 +383,8 @@ chimera_posix_fd_release(
 
     // If completing a close operation
     if (flags_to_clear & CHIMERA_POSIX_FD_CLOSING) {
-        entry->flags &= ~CHIMERA_POSIX_FD_CLOSING;
-        entry->flags |= CHIMERA_POSIX_FD_CLOSED;
+        entry->flags        &= ~CHIMERA_POSIX_FD_CLOSING;
+        entry->flags        |= CHIMERA_POSIX_FD_CLOSED;
         entry->pending_close = 0;
         if (entry->close_waiters > 0) {
             pthread_cond_broadcast(&entry->cond);
