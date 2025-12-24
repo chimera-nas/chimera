@@ -15,10 +15,11 @@ chimera_posix_open_callback(
     struct chimera_vfs_open_handle *oh,
     void                           *private_data)
 {
-    struct chimera_client_request *request = private_data;
+    struct chimera_posix_completion *comp    = private_data;
+    struct chimera_client_request   *request = comp->request;
 
     request->sync_open_handle = oh;
-    chimera_posix_request_complete(request, status);
+    chimera_posix_complete(comp, status);
 }
 
 static void
@@ -35,13 +36,12 @@ chimera_posix_open(
     int         flags,
     ...)
 {
-    struct chimera_posix_client   *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker   *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request  req;
-    pthread_mutex_t                mutex  = PTHREAD_MUTEX_INITIALIZER;
-    pthread_cond_t                 cond   = PTHREAD_COND_INITIALIZER;
-    const char                    *slash;
-    int                            path_len;
+    struct chimera_posix_client     *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request    req;
+    struct chimera_posix_completion  comp;
+    const char                      *slash;
+    int                              path_len;
 
     mode_t mode = 0;
 
@@ -54,14 +54,14 @@ chimera_posix_open(
 
     (void) mode;
 
-    chimera_posix_request_init(&req, &mutex, &cond);
+    chimera_posix_completion_init(&comp, &req);
 
     path_len = strlen(path);
     slash    = rindex(path, '/');
 
     req.opcode            = CHIMERA_CLIENT_OP_OPEN;
     req.open.callback     = chimera_posix_open_callback;
-    req.open.private_data = &req;
+    req.open.private_data = &comp;
     req.open.flags        = chimera_posix_to_chimera_flags(flags);
     req.open.path_len     = path_len;
     req.open.parent_len   = slash ? slash - path : path_len;
@@ -76,19 +76,18 @@ chimera_posix_open(
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_open_exec);
 
-    int err = chimera_posix_wait(&req);
+    int err = chimera_posix_wait(&comp);
     int fd  = -1;
 
     if (!err && req.sync_open_handle) {
-        fd = chimera_posix_fd_put(posix, req.sync_open_handle);
+        fd = chimera_posix_fd_alloc(posix, req.sync_open_handle);
         if (fd < 0) {
             chimera_close(worker->client_thread, req.sync_open_handle);
             err = EMFILE;
         }
     }
 
-    pthread_mutex_destroy(&mutex);
-    pthread_cond_destroy(&cond);
+    chimera_posix_completion_destroy(&comp);
 
     if (err) {
         errno = err;

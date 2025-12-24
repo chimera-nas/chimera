@@ -11,20 +11,29 @@ chimera_posix_close(int fd)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_fd_entry  *entry;
     struct chimera_vfs_open_handle *handle;
 
-    pthread_mutex_lock(&posix->fd_lock);
-    struct chimera_posix_fd_entry *entry = chimera_posix_fd_get(posix, fd);
-    handle = entry ? entry->handle : NULL;
-    pthread_mutex_unlock(&posix->fd_lock);
+    entry = chimera_posix_fd_get(posix, fd);
 
-    if (!handle) {
+    if (!entry) {
         errno = EBADF;
         return -1;
     }
 
+    chimera_posix_fd_lock(entry);
+
+    if (!entry->in_use) {
+        chimera_posix_fd_unlock(entry);
+        errno = EBADF;
+        return -1;
+    }
+
+    handle = entry->handle;
+    chimera_posix_fd_unlock(entry);
+
     chimera_close(worker->client_thread, handle);
-    chimera_posix_fd_clear(posix, fd);
+    chimera_posix_fd_free(posix, fd);
 
     return 0;
 }

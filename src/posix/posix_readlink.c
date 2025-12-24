@@ -15,14 +15,15 @@ chimera_posix_readlink_callback(
     int                           targetlen,
     void                         *private_data)
 {
-    struct chimera_client_request *request = private_data;
+    struct chimera_posix_completion *comp    = private_data;
+    struct chimera_client_request   *request = comp->request;
 
     if (status == CHIMERA_VFS_OK) {
         request->sync_result     = (ssize_t) targetlen;
         request->sync_target_len = targetlen;
     }
 
-    chimera_posix_request_complete(request, status);
+    chimera_posix_complete(comp, status);
 }
 
 static void
@@ -39,20 +40,19 @@ chimera_posix_readlink(
     char       *buf,
     size_t      bufsiz)
 {
-    struct chimera_posix_client   *posix    = chimera_posix_get_global();
-    struct chimera_posix_worker   *worker   = chimera_posix_choose_worker(posix);
-    struct chimera_client_request  req;
-    pthread_mutex_t                mutex    = PTHREAD_MUTEX_INITIALIZER;
-    pthread_cond_t                 cond     = PTHREAD_COND_INITIALIZER;
-    int                            path_len;
+    struct chimera_posix_client     *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request    req;
+    struct chimera_posix_completion  comp;
+    int                              path_len;
 
-    chimera_posix_request_init(&req, &mutex, &cond);
+    chimera_posix_completion_init(&comp, &req);
 
     path_len = strlen(path);
 
     req.opcode                    = CHIMERA_CLIENT_OP_READLINK;
     req.readlink.callback         = chimera_posix_readlink_callback;
-    req.readlink.private_data     = &req;
+    req.readlink.private_data     = &comp;
     req.readlink.path_len         = path_len;
     req.readlink.target           = buf;
     req.readlink.target_maxlength = bufsiz;
@@ -61,12 +61,11 @@ chimera_posix_readlink(
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_readlink_exec);
 
-    int err = chimera_posix_wait(&req);
+    int err = chimera_posix_wait(&comp);
 
     ssize_t ret = req.sync_result;
 
-    pthread_mutex_destroy(&mutex);
-    pthread_cond_destroy(&cond);
+    chimera_posix_completion_destroy(&comp);
 
     if (err) {
         errno = err;

@@ -22,21 +22,32 @@
 #include "vfs/vfs.h"
 #include "posix.h"
 
-struct chimera_posix_fd_entry {
-    struct chimera_vfs_open_handle *handle;
-    uint64_t                        offset;
-    int                             in_use;
+struct chimera_posix_completion {
+    pthread_mutex_t                mutex;
+    pthread_cond_t                 cond;
+    struct chimera_client_request *request;
+    enum chimera_vfs_error status;
+    int                            done;
 };
 
+struct chimera_posix_fd_entry {
+    pthread_mutex_t                 lock;
+    pthread_cond_t                  cond;
+    struct chimera_vfs_open_handle *handle;
+    struct chimera_posix_fd_entry  *next;
+    uint64_t                        offset;
+    int                             in_use;
+} __attribute__((aligned(64)));
+
 struct chimera_posix_worker {
-    pthread_mutex_t               lock;
+    pthread_mutex_t                lock;
     struct chimera_client_request *head;
     struct chimera_client_request *tail;
-    struct evpl_doorbell          doorbell;
-    struct chimera_client_thread *client_thread;
-    struct chimera_posix_client  *parent;
-    int                           index;
-    struct evpl                  *evpl;
+    struct evpl_doorbell           doorbell;
+    struct chimera_client_thread  *client_thread;
+    struct chimera_posix_client   *parent;
+    int                            index;
+    struct evpl                   *evpl;
 };
 
 struct chimera_posix_client {
@@ -47,8 +58,8 @@ struct chimera_posix_client {
     atomic_uint                    next_worker;
     pthread_mutex_t                fd_lock;
     struct chimera_posix_fd_entry *fds;
-    int                            fd_cap;
-    int                            next_fd;
+    struct chimera_posix_fd_entry *free_list;
+    int                            max_fds;
     atomic_int                     init_cursor;
     int                            owns_config;
 };
@@ -59,7 +70,7 @@ static FORCE_INLINE struct chimera_posix_client *
 chimera_posix_get_global(void)
 {
     return chimera_posix_global;
-}
+} // chimera_posix_get_global
 
 static FORCE_INLINE int
 chimera_posix_errno_from_status(enum chimera_vfs_error status)
@@ -69,40 +80,47 @@ chimera_posix_errno_from_status(enum chimera_vfs_error status)
     }
 
     return (int) status;
-}
+} // chimera_posix_errno_from_status
 
 static FORCE_INLINE void
-chimera_posix_request_complete(
-    struct chimera_client_request *req,
-    enum chimera_vfs_error         status)
+chimera_posix_complete(
+    struct chimera_posix_completion *comp,
+    enum chimera_vfs_error           status)
 {
-    pthread_mutex_lock(req->sync_mutex);
-    req->sync_status = status;
-    req->sync_done   = 1;
-    pthread_cond_signal(req->sync_cond);
-    pthread_mutex_unlock(req->sync_mutex);
-}
+    pthread_mutex_lock(&comp->mutex);
+    comp->status = status;
+    comp->done   = 1;
+    pthread_cond_signal(&comp->cond);
+    pthread_mutex_unlock(&comp->mutex);
+} // chimera_posix_complete
 
 static FORCE_INLINE void
-chimera_posix_request_init(
-    struct chimera_client_request *req,
-    pthread_mutex_t               *mutex,
-    pthread_cond_t                *cond)
+chimera_posix_completion_init(
+    struct chimera_posix_completion *comp,
+    struct chimera_client_request   *req)
 {
+    pthread_mutex_init(&comp->mutex, NULL);
+    pthread_cond_init(&comp->cond, NULL);
+    comp->request = req;
+    comp->status  = CHIMERA_VFS_OK;
+    comp->done    = 0;
+
     memset(req, 0, sizeof(*req));
     req->heap_allocated = 0;
-    req->sync_mutex     = mutex;
-    req->sync_cond      = cond;
-    req->sync_done      = 0;
-    req->sync_status    = CHIMERA_VFS_OK;
-    req->sync_result    = 0;
-}
+} // chimera_posix_completion_init
+
+static FORCE_INLINE void
+chimera_posix_completion_destroy(struct chimera_posix_completion *comp)
+{
+    pthread_mutex_destroy(&comp->mutex);
+    pthread_cond_destroy(&comp->cond);
+} // chimera_posix_completion_destroy
 
 static FORCE_INLINE void
 chimera_posix_worker_enqueue(
-    struct chimera_posix_worker        *worker,
-    struct chimera_client_request      *request,
-    chimera_client_request_callback     callback)
+    struct chimera_posix_worker    *worker,
+    struct chimera_client_request  *request,
+    chimera_client_request_callback callback)
 {
     request->sync_callback = callback;
 
@@ -116,7 +134,7 @@ chimera_posix_worker_enqueue(
     pthread_mutex_unlock(&worker->lock);
 
     evpl_ring_doorbell(&worker->doorbell);
-}
+} // chimera_posix_worker_enqueue
 
 static FORCE_INLINE struct chimera_posix_worker *
 chimera_posix_choose_worker(struct chimera_posix_client *posix)
@@ -124,22 +142,24 @@ chimera_posix_choose_worker(struct chimera_posix_client *posix)
     unsigned int idx = atomic_fetch_add(&posix->next_worker, 1);
 
     return &posix->workers[idx % (unsigned int) posix->nworkers];
-}
+} // chimera_posix_choose_worker
 
 static FORCE_INLINE int
-chimera_posix_wait(struct chimera_client_request *req)
+chimera_posix_wait(struct chimera_posix_completion *comp)
 {
-    pthread_mutex_lock(req->sync_mutex);
-    while (!req->sync_done) {
-        pthread_cond_wait(req->sync_cond, req->sync_mutex);
+    pthread_mutex_lock(&comp->mutex);
+    while (!comp->done) {
+        pthread_cond_wait(&comp->cond, &comp->mutex);
     }
-    pthread_mutex_unlock(req->sync_mutex);
+    pthread_mutex_unlock(&comp->mutex);
 
-    return chimera_posix_errno_from_status(req->sync_status);
-}
+    return chimera_posix_errno_from_status(comp->status);
+} // chimera_posix_wait
 
 static FORCE_INLINE void
-chimera_posix_fill_stat(struct stat *dst, const struct chimera_stat *src)
+chimera_posix_fill_stat(
+    struct stat               *dst,
+    const struct chimera_stat *src)
 {
     dst->st_dev   = src->st_dev;
     dst->st_ino   = src->st_ino;
@@ -152,7 +172,7 @@ chimera_posix_fill_stat(struct stat *dst, const struct chimera_stat *src)
     dst->st_atim  = src->st_atim;
     dst->st_mtim  = src->st_mtim;
     dst->st_ctim  = src->st_ctim;
-}
+} // chimera_posix_fill_stat
 
 static FORCE_INLINE void
 chimera_posix_iovec_memcpy(
@@ -173,7 +193,7 @@ chimera_posix_iovec_memcpy(
         memcpy(iov[i].data, p + copied, chunk);
         copied += chunk;
     }
-}
+} // chimera_posix_iovec_memcpy
 
 static FORCE_INLINE unsigned int
 chimera_posix_to_chimera_flags(int flags)
@@ -193,81 +213,89 @@ chimera_posix_to_chimera_flags(int flags)
     }
 
     return out;
-}
+} // chimera_posix_to_chimera_flags
 
 static FORCE_INLINE struct chimera_posix_fd_entry *
-chimera_posix_fd_get(struct chimera_posix_client *posix, int fd)
+chimera_posix_fd_get(
+    struct chimera_posix_client *posix,
+    int                          fd)
 {
-    if (fd < 0 || fd >= posix->fd_cap) {
-        return NULL;
-    }
-
-    if (!posix->fds[fd].in_use) {
+    if (fd < 0 || fd >= posix->max_fds) {
         return NULL;
     }
 
     return &posix->fds[fd];
-}
+} // chimera_posix_fd_get
 
 static FORCE_INLINE int
-chimera_posix_fd_put(struct chimera_posix_client *posix, struct chimera_vfs_open_handle *handle)
+chimera_posix_fd_alloc(
+    struct chimera_posix_client    *posix,
+    struct chimera_vfs_open_handle *handle)
 {
-    int fd;
+    struct chimera_posix_fd_entry *entry;
+    int                            fd;
 
     pthread_mutex_lock(&posix->fd_lock);
 
-    fd = -1;
+    entry = posix->free_list;
 
-    for (int i = 0; i < posix->fd_cap; i++) {
-        int idx = (posix->next_fd + i) % (posix->fd_cap ? posix->fd_cap : 1);
-
-        if (idx < 3) {
-            continue;
-        }
-
-        if (!posix->fds[idx].in_use) {
-            fd = idx;
-            break;
-        }
+    if (!entry) {
+        pthread_mutex_unlock(&posix->fd_lock);
+        return -1;
     }
 
-    if (fd == -1) {
-        int oldcap = posix->fd_cap ? posix->fd_cap : 0;
-        int newcap = oldcap ? oldcap * 2 : 64;
-        struct chimera_posix_fd_entry *newfds = realloc(posix->fds, sizeof(*newfds) * newcap);
-
-        if (!newfds) {
-            pthread_mutex_unlock(&posix->fd_lock);
-            return -1;
-        }
-
-        memset(newfds + oldcap, 0, sizeof(*newfds) * (newcap - oldcap));
-        posix->fds    = newfds;
-        posix->fd_cap = newcap;
-        fd            = oldcap ? oldcap : 3;
-    }
-
-    posix->next_fd        = fd + 1;
-    posix->fds[fd].handle = handle;
-    posix->fds[fd].offset = 0;
-    posix->fds[fd].in_use = 1;
+    posix->free_list = entry->next;
+    entry->next      = NULL;
 
     pthread_mutex_unlock(&posix->fd_lock);
+
+    fd = (int) (entry - posix->fds);
+
+    pthread_mutex_lock(&entry->lock);
+    entry->handle = handle;
+    entry->offset = 0;
+    entry->in_use = 1;
+    pthread_mutex_unlock(&entry->lock);
 
     return fd;
-}
+} // chimera_posix_fd_alloc
 
 static FORCE_INLINE void
-chimera_posix_fd_clear(struct chimera_posix_client *posix, int fd)
+chimera_posix_fd_free(
+    struct chimera_posix_client *posix,
+    int                          fd)
 {
-    pthread_mutex_lock(&posix->fd_lock);
-    if (fd >= 0 && fd < posix->fd_cap) {
-        posix->fds[fd].handle = NULL;
-        posix->fds[fd].offset = 0;
-        posix->fds[fd].in_use = 0;
+    struct chimera_posix_fd_entry *entry;
+
+    if (fd < 0 || fd >= posix->max_fds) {
+        return;
     }
+
+    entry = &posix->fds[fd];
+
+    pthread_mutex_lock(&entry->lock);
+    entry->handle = NULL;
+    entry->offset = 0;
+    entry->in_use = 0;
+    pthread_mutex_unlock(&entry->lock);
+
+    pthread_mutex_lock(&posix->fd_lock);
+    entry->next      = posix->free_list;
+    posix->free_list = entry;
     pthread_mutex_unlock(&posix->fd_lock);
-}
+} // chimera_posix_fd_free
+
+static FORCE_INLINE void
+chimera_posix_fd_lock(struct chimera_posix_fd_entry *entry)
+{
+    pthread_mutex_lock(&entry->lock);
+} // chimera_posix_fd_lock
+
+static FORCE_INLINE void
+chimera_posix_fd_unlock(struct chimera_posix_fd_entry *entry)
+{
+    pthread_mutex_unlock(&entry->lock);
+} // chimera_posix_fd_unlock
 
 void * chimera_posix_worker_init(
     struct evpl *evpl,

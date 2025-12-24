@@ -13,9 +13,9 @@ chimera_posix_rename_callback(
     enum chimera_vfs_error        status,
     void                         *private_data)
 {
-    struct chimera_client_request *request = private_data;
+    struct chimera_posix_completion *comp = private_data;
 
-    chimera_posix_request_complete(request, status);
+    chimera_posix_complete(comp, status);
 }
 
 static void
@@ -31,17 +31,16 @@ chimera_posix_rename(
     const char *oldpath,
     const char *newpath)
 {
-    struct chimera_posix_client   *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker   *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request  req;
-    pthread_mutex_t                mutex  = PTHREAD_MUTEX_INITIALIZER;
-    pthread_cond_t                 cond   = PTHREAD_COND_INITIALIZER;
-    const char                    *source_slash;
-    const char                    *dest_slash;
-    int                            source_path_len;
-    int                            dest_path_len;
+    struct chimera_posix_client     *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request    req;
+    struct chimera_posix_completion  comp;
+    const char                      *source_slash;
+    const char                      *dest_slash;
+    int                              source_path_len;
+    int                              dest_path_len;
 
-    chimera_posix_request_init(&req, &mutex, &cond);
+    chimera_posix_completion_init(&comp, &req);
 
     source_path_len = strlen(oldpath);
     dest_path_len   = strlen(newpath);
@@ -50,7 +49,7 @@ chimera_posix_rename(
 
     req.opcode                    = CHIMERA_CLIENT_OP_RENAME;
     req.rename.callback           = chimera_posix_rename_callback;
-    req.rename.private_data       = &req;
+    req.rename.private_data       = &comp;
     req.rename.source_path_len    = source_path_len;
     req.rename.source_parent_len  = source_slash ? source_slash - oldpath : source_path_len;
     req.rename.dest_path_len      = dest_path_len;
@@ -72,10 +71,9 @@ chimera_posix_rename(
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_rename_exec);
 
-    int err = chimera_posix_wait(&req);
+    int err = chimera_posix_wait(&comp);
 
-    pthread_mutex_destroy(&mutex);
-    pthread_cond_destroy(&cond);
+    chimera_posix_completion_destroy(&comp);
 
     if (err) {
         errno = err;

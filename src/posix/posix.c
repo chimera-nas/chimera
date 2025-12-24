@@ -125,6 +125,31 @@ chimera_posix_init(
         return NULL;
     }
 
+    posix->max_fds = use_config->max_fds;
+    posix->fds     = calloc(posix->max_fds, sizeof(*posix->fds));
+
+    if (!posix->fds) {
+        free(posix->workers);
+        chimera_destroy(posix->client);
+        free(posix);
+        return NULL;
+    }
+
+    for (int i = 0; i < posix->max_fds; i++) {
+        pthread_mutex_init(&posix->fds[i].lock, NULL);
+        pthread_cond_init(&posix->fds[i].cond, NULL);
+        posix->fds[i].handle = NULL;
+        posix->fds[i].offset = 0;
+        posix->fds[i].in_use = 0;
+
+        if (i >= 3) {
+            posix->fds[i].next = posix->free_list;
+            posix->free_list   = &posix->fds[i];
+        } else {
+            posix->fds[i].next = NULL;
+        }
+    }
+
     pthread_mutex_init(&posix->fd_lock, NULL);
     atomic_init(&posix->next_worker, 0);
     atomic_init(&posix->init_cursor, 0);
@@ -137,6 +162,11 @@ chimera_posix_init(
         posix);
 
     if (!posix->pool) {
+        for (int i = 0; i < posix->max_fds; i++) {
+            pthread_mutex_destroy(&posix->fds[i].lock);
+            pthread_cond_destroy(&posix->fds[i].cond);
+        }
+        free(posix->fds);
         pthread_mutex_destroy(&posix->fd_lock);
         free(posix->workers);
         chimera_destroy(posix->client);
@@ -167,6 +197,10 @@ chimera_posix_shutdown(void)
     pthread_mutex_destroy(&posix->fd_lock);
 
     if (posix->fds) {
+        for (int i = 0; i < posix->max_fds; i++) {
+            pthread_mutex_destroy(&posix->fds[i].lock);
+            pthread_cond_destroy(&posix->fds[i].cond);
+        }
         free(posix->fds);
     }
 

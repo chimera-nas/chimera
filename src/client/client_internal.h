@@ -61,10 +61,6 @@ struct chimera_client_request {
 
     int                                heap_allocated;
 
-    pthread_mutex_t                   *sync_mutex;
-    pthread_cond_t                    *sync_cond;
-    int                                sync_done;
-    enum chimera_vfs_error             sync_status;
     ssize_t                            sync_result;
     struct chimera_vfs_open_handle    *sync_open_handle;
     struct chimera_stat                sync_stat;
@@ -219,6 +215,7 @@ struct chimera_client_config {
     int                           core_threads;
     int                           delegation_threads;
     int                           cache_ttl;
+    int                           max_fds;
     struct chimera_vfs_module_cfg modules[CHIMERA_CLIENT_MAX_MODULES];
     int                           num_modules;
 };
