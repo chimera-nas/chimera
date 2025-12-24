@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "posix_internal.h"
+#include "../client/client_link.h"
 
 static void
 chimera_posix_link_callback(
@@ -26,7 +27,7 @@ chimera_posix_link_exec(
     chimera_dispatch_link(thread, request);
 }
 
-int
+SYMBOL_EXPORT int
 chimera_posix_link(
     const char *oldpath,
     const char *newpath)

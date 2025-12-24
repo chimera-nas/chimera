@@ -6,8 +6,11 @@
 
 #include "posix_internal.h"
 #include "evpl/evpl.h"
+#include "vfs/vfs.h"
 
 struct chimera_posix_client *chimera_posix_global;
+
+const uint8_t root_fh[1] = { CHIMERA_VFS_FH_MAGIC_ROOT };
 
 void *
 chimera_posix_worker_init(
@@ -138,9 +141,13 @@ chimera_posix_init(
     for (int i = 0; i < posix->max_fds; i++) {
         pthread_mutex_init(&posix->fds[i].lock, NULL);
         pthread_cond_init(&posix->fds[i].cond, NULL);
-        posix->fds[i].handle = NULL;
-        posix->fds[i].offset = 0;
-        posix->fds[i].in_use = 0;
+        posix->fds[i].handle        = NULL;
+        posix->fds[i].offset        = 0;
+        posix->fds[i].flags         = CHIMERA_POSIX_FD_CLOSED;
+        posix->fds[i].refcnt        = 0;
+        posix->fds[i].io_waiters    = 0;
+        posix->fds[i].pending_close = 0;
+        posix->fds[i].close_waiters = 0;
 
         if (i >= 3) {
             posix->fds[i].next = posix->free_list;

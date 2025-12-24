@@ -10,14 +10,18 @@ chimera_client_mount_callback(
     enum chimera_vfs_error     status,
     void                      *private_data)
 {
-    struct chimera_client_request *request = private_data;
+    struct chimera_client_request *request       = private_data;
+    struct chimera_client_thread  *client_thread = request->thread;
+    int                            heap_allocated = request->heap_allocated;
 
-    request->mount.callback(request->thread, status, request->mount.private_data);
+    request->mount.callback(client_thread, status, request->mount.private_data);
 
-    chimera_client_request_free(request->thread, request);
+    if (heap_allocated) {
+        chimera_client_request_free(client_thread, request);
+    }
 } /* chimera_client_mount_callback */
 
-void
+SYMBOL_EXPORT void
 chimera_dispatch_mount(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)

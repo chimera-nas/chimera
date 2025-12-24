@@ -26,7 +26,7 @@ chimera_posix_mount_exec(
     chimera_dispatch_mount(thread, request);
 }
 
-int
+SYMBOL_EXPORT int
 chimera_posix_mount(
     const char *mount_path,
     const char *module_name,

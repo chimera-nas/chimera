@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "posix_internal.h"
+#include "../client/client_mkdir.h"
 
 static void
 chimera_posix_mkdir_callback(
@@ -26,7 +27,7 @@ chimera_posix_mkdir_exec(
     chimera_dispatch_mkdir(thread, request);
 }
 
-int
+SYMBOL_EXPORT int
 chimera_posix_mkdir(
     const char *path,
     mode_t      mode)

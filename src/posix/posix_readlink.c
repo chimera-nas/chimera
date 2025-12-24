@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "posix_internal.h"
+#include "../client/client_readlink.h"
 
 static void
 chimera_posix_readlink_callback(
@@ -34,7 +35,7 @@ chimera_posix_readlink_exec(
     chimera_dispatch_readlink(thread, request);
 }
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_readlink(
     const char *path,
     char       *buf,

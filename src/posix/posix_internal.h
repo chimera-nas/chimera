@@ -5,6 +5,7 @@
 #ifndef CHIMERA_POSIX_INTERNAL_H
 #define CHIMERA_POSIX_INTERNAL_H
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -30,13 +31,21 @@ struct chimera_posix_completion {
     int                            done;
 };
 
+#define CHIMERA_POSIX_FD_IO_ACTIVE  0x01
+#define CHIMERA_POSIX_FD_CLOSING    0x02
+#define CHIMERA_POSIX_FD_CLOSED     0x04
+
 struct chimera_posix_fd_entry {
     pthread_mutex_t                 lock;
     pthread_cond_t                  cond;
     struct chimera_vfs_open_handle *handle;
     struct chimera_posix_fd_entry  *next;
     uint64_t                        offset;
-    int                             in_use;
+    unsigned int                    flags;
+    int                             refcnt;
+    int                             io_waiters;
+    int                             pending_close;
+    int                             close_waiters;
 } __attribute__((aligned(64)));
 
 struct chimera_posix_worker {
@@ -252,9 +261,13 @@ chimera_posix_fd_alloc(
     fd = (int) (entry - posix->fds);
 
     pthread_mutex_lock(&entry->lock);
-    entry->handle = handle;
-    entry->offset = 0;
-    entry->in_use = 1;
+    entry->handle        = handle;
+    entry->offset        = 0;
+    entry->flags         = 0;
+    entry->refcnt        = 0;
+    entry->io_waiters    = 0;
+    entry->pending_close = 0;
+    entry->close_waiters = 0;
     pthread_mutex_unlock(&entry->lock);
 
     return fd;
@@ -276,7 +289,6 @@ chimera_posix_fd_free(
     pthread_mutex_lock(&entry->lock);
     entry->handle = NULL;
     entry->offset = 0;
-    entry->in_use = 0;
     pthread_mutex_unlock(&entry->lock);
 
     pthread_mutex_lock(&posix->fd_lock);
@@ -296,6 +308,133 @@ chimera_posix_fd_unlock(struct chimera_posix_fd_entry *entry)
 {
     pthread_mutex_unlock(&entry->lock);
 } // chimera_posix_fd_unlock
+
+static FORCE_INLINE struct chimera_posix_fd_entry *
+chimera_posix_fd_acquire(
+    struct chimera_posix_client *posix,
+    int                          fd,
+    unsigned int                 flags_to_set)
+{
+    struct chimera_posix_fd_entry *entry;
+
+    if (fd < 0 || fd >= posix->max_fds) {
+        errno = EBADF;
+        return NULL;
+    }
+
+    entry = &posix->fds[fd];
+
+    pthread_mutex_lock(&entry->lock);
+
+    // If CLOSED, return error
+    if (entry->flags & CHIMERA_POSIX_FD_CLOSED) {
+        pthread_mutex_unlock(&entry->lock);
+        errno = EBADF;
+        return NULL;
+    }
+
+    // If caller wants CLOSING flag
+    if (flags_to_set & CHIMERA_POSIX_FD_CLOSING) {
+        // If CLOSING is already set by another thread, wait for it to complete
+        if (entry->flags & CHIMERA_POSIX_FD_CLOSING) {
+            entry->close_waiters++;
+            while (!(entry->flags & CHIMERA_POSIX_FD_CLOSED)) {
+                pthread_cond_wait(&entry->cond, &entry->lock);
+            }
+            entry->close_waiters--;
+            pthread_mutex_unlock(&entry->lock);
+            errno = EBADF;
+            return NULL;
+        }
+
+        // Set CLOSING and pending_close
+        entry->flags |= CHIMERA_POSIX_FD_CLOSING;
+        entry->pending_close = 1;
+
+        // Wait for existing operations to complete
+        while (entry->refcnt > 0) {
+            pthread_cond_wait(&entry->cond, &entry->lock);
+        }
+    } else if (entry->flags & CHIMERA_POSIX_FD_CLOSING) {
+        // Caller doesn't want CLOSING, but CLOSING is set - wait and fail
+        entry->close_waiters++;
+        while (!(entry->flags & CHIMERA_POSIX_FD_CLOSED)) {
+            pthread_cond_wait(&entry->cond, &entry->lock);
+        }
+        entry->close_waiters--;
+        pthread_mutex_unlock(&entry->lock);
+        errno = EBADF;
+        return NULL;
+    }
+
+    // If caller wants IO_ACTIVE flag
+    if (flags_to_set & CHIMERA_POSIX_FD_IO_ACTIVE) {
+        // Wait for existing IO to complete
+        while (entry->flags & CHIMERA_POSIX_FD_IO_ACTIVE) {
+            entry->io_waiters++;
+            pthread_cond_wait(&entry->cond, &entry->lock);
+            entry->io_waiters--;
+
+            // Re-check if fd was closed while waiting
+            if (entry->flags & CHIMERA_POSIX_FD_CLOSED) {
+                pthread_mutex_unlock(&entry->lock);
+                errno = EBADF;
+                return NULL;
+            }
+            if (entry->flags & CHIMERA_POSIX_FD_CLOSING) {
+                entry->close_waiters++;
+                while (!(entry->flags & CHIMERA_POSIX_FD_CLOSED)) {
+                    pthread_cond_wait(&entry->cond, &entry->lock);
+                }
+                entry->close_waiters--;
+                pthread_mutex_unlock(&entry->lock);
+                errno = EBADF;
+                return NULL;
+            }
+        }
+        entry->flags |= CHIMERA_POSIX_FD_IO_ACTIVE;
+    }
+
+    entry->refcnt++;
+    pthread_mutex_unlock(&entry->lock);
+
+    return entry;
+} // chimera_posix_fd_acquire
+
+static FORCE_INLINE void
+chimera_posix_fd_release(
+    struct chimera_posix_fd_entry *entry,
+    unsigned int                   flags_to_clear)
+{
+    pthread_mutex_lock(&entry->lock);
+
+    // If completing an IO operation
+    if (flags_to_clear & CHIMERA_POSIX_FD_IO_ACTIVE) {
+        entry->flags &= ~CHIMERA_POSIX_FD_IO_ACTIVE;
+        if (entry->io_waiters > 0) {
+            pthread_cond_signal(&entry->cond);
+        }
+    }
+
+    // If completing a close operation
+    if (flags_to_clear & CHIMERA_POSIX_FD_CLOSING) {
+        entry->flags &= ~CHIMERA_POSIX_FD_CLOSING;
+        entry->flags |= CHIMERA_POSIX_FD_CLOSED;
+        entry->pending_close = 0;
+        if (entry->close_waiters > 0) {
+            pthread_cond_broadcast(&entry->cond);
+        }
+    }
+
+    entry->refcnt--;
+
+    // Signal if refcnt is zero and a close is pending
+    if (entry->refcnt == 0 && entry->pending_close) {
+        pthread_cond_signal(&entry->cond);
+    }
+
+    pthread_mutex_unlock(&entry->lock);
+} // chimera_posix_fd_release
 
 void * chimera_posix_worker_init(
     struct evpl *evpl,

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "posix_internal.h"
+#include "../client/client_remove.h"
 
 static void
 chimera_posix_remove_callback(
@@ -26,7 +27,7 @@ chimera_posix_remove_exec(
     chimera_dispatch_remove(thread, request);
 }
 
-int
+SYMBOL_EXPORT int
 chimera_posix_unlink(const char *path)
 {
     struct chimera_posix_client     *posix  = chimera_posix_get_global();

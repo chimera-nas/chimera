@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "posix_internal.h"
+#include "../client/client_stat.h"
 
 static void
 chimera_posix_stat_callback(
@@ -32,7 +33,7 @@ chimera_posix_stat_exec(
     chimera_dispatch_stat(thread, request);
 }
 
-int
+SYMBOL_EXPORT int
 chimera_posix_stat(
     const char  *path,
     struct stat *st)

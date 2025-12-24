@@ -262,50 +262,10 @@ chimera_client_request_free(
     DL_PREPEND(thread->free_requests, request);
 } /* chimera_client_request_free */
 
-void chimera_dispatch_open(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request);
-
-void chimera_dispatch_mkdir(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request);
-
-void chimera_dispatch_symlink(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request);
-
-void chimera_dispatch_link(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request);
-
-void chimera_dispatch_remove(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request);
-
-void chimera_dispatch_rename(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request);
-
-void chimera_dispatch_readlink(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request);
-
-void chimera_dispatch_stat(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request);
-
 void chimera_dispatch_mount(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request);
 
 void chimera_dispatch_umount(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request);
-
-void chimera_dispatch_read(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request);
-
-void chimera_dispatch_write(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request);

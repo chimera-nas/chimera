@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "posix_internal.h"
+#include "../client/client_rename.h"
 
 static void
 chimera_posix_rename_callback(
@@ -26,7 +27,7 @@ chimera_posix_rename_exec(
     chimera_dispatch_rename(thread, request);
 }
 
-int
+SYMBOL_EXPORT int
 chimera_posix_rename(
     const char *oldpath,
     const char *newpath)

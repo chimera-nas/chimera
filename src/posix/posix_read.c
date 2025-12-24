@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "posix_internal.h"
+#include "../client/client_read.h"
 
 static void
 chimera_posix_read_callback(
@@ -48,7 +49,7 @@ chimera_posix_read_exec(
     chimera_dispatch_read(thread, request);
 }
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_read(
     int     fd,
     void   *buf,
@@ -59,35 +60,20 @@ chimera_posix_read(
     struct chimera_client_request    req;
     struct chimera_posix_completion  comp;
     struct chimera_posix_fd_entry   *entry;
-    struct chimera_vfs_open_handle  *handle;
-    uint64_t                         offset;
 
-    entry = chimera_posix_fd_get(posix, fd);
+    entry = chimera_posix_fd_acquire(posix, fd, CHIMERA_POSIX_FD_IO_ACTIVE);
 
     if (!entry) {
-        errno = EBADF;
         return -1;
     }
-
-    chimera_posix_fd_lock(entry);
-
-    if (!entry->in_use) {
-        chimera_posix_fd_unlock(entry);
-        errno = EBADF;
-        return -1;
-    }
-
-    handle = entry->handle;
-    offset = entry->offset;
-    chimera_posix_fd_unlock(entry);
 
     chimera_posix_completion_init(&comp, &req);
 
     req.opcode            = CHIMERA_CLIENT_OP_READ;
     req.read.callback     = chimera_posix_read_callback;
     req.read.private_data = &comp;
-    req.read.handle       = handle;
-    req.read.offset       = offset;
+    req.read.handle       = entry->handle;
+    req.read.offset       = entry->offset;
     req.read.length       = count;
     req.read.buf          = buf;
 
@@ -96,16 +82,14 @@ chimera_posix_read(
     int err = chimera_posix_wait(&comp);
 
     if (!err && req.sync_result >= 0) {
-        chimera_posix_fd_lock(entry);
-        if (entry->in_use) {
-            entry->offset += (uint64_t) req.sync_result;
-        }
-        chimera_posix_fd_unlock(entry);
+        entry->offset += (uint64_t) req.sync_result;
     }
 
     ssize_t ret = req.sync_result;
 
     chimera_posix_completion_destroy(&comp);
+
+    chimera_posix_fd_release(entry, CHIMERA_POSIX_FD_IO_ACTIVE);
 
     if (err) {
         errno = err;

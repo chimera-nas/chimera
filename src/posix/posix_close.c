@@ -6,7 +6,7 @@
 
 #include "posix_internal.h"
 
-int
+SYMBOL_EXPORT int
 chimera_posix_close(int fd)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
@@ -14,25 +14,18 @@ chimera_posix_close(int fd)
     struct chimera_posix_fd_entry  *entry;
     struct chimera_vfs_open_handle *handle;
 
-    entry = chimera_posix_fd_get(posix, fd);
+    entry = chimera_posix_fd_acquire(posix, fd, CHIMERA_POSIX_FD_CLOSING);
 
     if (!entry) {
-        errno = EBADF;
-        return -1;
-    }
-
-    chimera_posix_fd_lock(entry);
-
-    if (!entry->in_use) {
-        chimera_posix_fd_unlock(entry);
-        errno = EBADF;
         return -1;
     }
 
     handle = entry->handle;
-    chimera_posix_fd_unlock(entry);
 
     chimera_close(worker->client_thread, handle);
+
+    chimera_posix_fd_release(entry, CHIMERA_POSIX_FD_CLOSING);
+
     chimera_posix_fd_free(posix, fd);
 
     return 0;

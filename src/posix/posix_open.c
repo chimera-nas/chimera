@@ -7,6 +7,7 @@
 #include <stdarg.h>
 
 #include "posix_internal.h"
+#include "../client/client_open.h"
 
 static void
 chimera_posix_open_callback(
@@ -30,7 +31,7 @@ chimera_posix_open_exec(
     chimera_dispatch_open(thread, request);
 }
 
-int
+SYMBOL_EXPORT int
 chimera_posix_open(
     const char *path,
     int         flags,

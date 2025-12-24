@@ -26,7 +26,7 @@ chimera_posix_umount_exec(
     chimera_dispatch_umount(thread, request);
 }
 
-int
+SYMBOL_EXPORT int
 chimera_posix_umount(const char *mount_path)
 {
     struct chimera_posix_client     *posix  = chimera_posix_get_global();

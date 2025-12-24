@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "posix_internal.h"
+#include "../client/client_symlink.h"
 
 static void
 chimera_posix_symlink_callback(
@@ -26,7 +27,7 @@ chimera_posix_symlink_exec(
     chimera_dispatch_symlink(thread, request);
 }
 
-int
+SYMBOL_EXPORT int
 chimera_posix_symlink(
     const char *target,
     const char *path)
