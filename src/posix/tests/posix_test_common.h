@@ -18,10 +18,10 @@
 #include "prometheus-c.h"
 
 struct posix_test_env {
-    struct chimera_posix_client  *posix;
-    struct prometheus_metrics    *metrics;
-    char                          session_dir[256];
-    const char                   *backend;
+    struct chimera_posix_client *posix;
+    struct prometheus_metrics   *metrics;
+    char                         session_dir[256];
+    const char                  *backend;
 };
 
 static inline void
@@ -94,7 +94,7 @@ posix_test_init(
                 exit(EXIT_FAILURE);
             }
 
-            rc = ftruncate(fd, 1024 * 1024 * 1024);
+            rc = ftruncate(fd, 256 * 1024 * 1024 * 1024UL);
 
             if (rc < 0) {
                 fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));

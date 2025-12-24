@@ -29,6 +29,7 @@ set(POSIX_TEST_PROGRAMS
     test_rename
     test_readlink
     test_stat
+    test_io_serialize
 )
 
 # Create test programs

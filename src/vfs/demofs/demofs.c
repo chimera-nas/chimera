@@ -523,17 +523,17 @@ demofs_thread_alloc_space(
         shared->device_rotor = 0;
     }
 
-    if (!device->free_space) {
-        pthread_mutex_unlock(&shared->lock);
-        return CHIMERA_VFS_ENOSPC;
-    }
-
     thread->freespace->offset = device->free_space->offset;
 
     rsrv_size = 1024 * 1024 * 1024;
 
     if (device->free_space->length < rsrv_size) {
         rsrv_size = device->free_space->length;
+    }
+
+    if (rsrv_size < size) {
+        pthread_mutex_unlock(&shared->lock);
+        return CHIMERA_VFS_ENOSPC;
     }
 
     thread->freespace->length    = rsrv_size;
