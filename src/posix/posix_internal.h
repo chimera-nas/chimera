@@ -382,6 +382,78 @@ chimera_posix_fd_release(
     pthread_mutex_unlock(&entry->lock);
 } // chimera_posix_fd_release
 
+static FORCE_INLINE off_t
+chimera_posix_fd_lseek(
+    struct chimera_posix_client *posix,
+    int                          fd,
+    off_t                        offset,
+    int                          whence,
+    off_t                        file_size)
+{
+    struct chimera_posix_fd_entry *entry;
+    off_t                          new_offset;
+
+    if (fd < 0 || fd >= posix->max_fds) {
+        errno = EBADF;
+        return -1;
+    }
+
+    entry = &posix->fds[fd];
+
+    pthread_mutex_lock(&entry->lock);
+
+    // If CLOSED, return error
+    if (entry->flags & CHIMERA_POSIX_FD_CLOSED) {
+        pthread_mutex_unlock(&entry->lock);
+        errno = EBADF;
+        return -1;
+    }
+
+    // Wait for any IO to complete
+    while (entry->flags & CHIMERA_POSIX_FD_IO_ACTIVE) {
+        entry->io_waiters++;
+        pthread_cond_wait(&entry->cond, &entry->lock);
+        entry->io_waiters--;
+    }
+
+    // Check again if fd was closed while waiting
+    if (entry->flags & (CHIMERA_POSIX_FD_CLOSED | CHIMERA_POSIX_FD_CLOSING)) {
+        pthread_mutex_unlock(&entry->lock);
+        errno = EBADF;
+        return -1;
+    }
+
+    // Calculate new offset based on whence
+    switch (whence) {
+        case SEEK_SET:
+            new_offset = offset;
+            break;
+        case SEEK_CUR:
+            new_offset = (off_t) entry->offset + offset;
+            break;
+        case SEEK_END:
+            new_offset = file_size + offset;
+            break;
+        default:
+            pthread_mutex_unlock(&entry->lock);
+            errno = EINVAL;
+            return -1;
+    }
+
+    // Validate new offset
+    if (new_offset < 0) {
+        pthread_mutex_unlock(&entry->lock);
+        errno = EINVAL;
+        return -1;
+    }
+
+    entry->offset = (uint64_t) new_offset;
+
+    pthread_mutex_unlock(&entry->lock);
+
+    return new_offset;
+} // chimera_posix_fd_lseek
+
 void * chimera_posix_worker_init(
     struct evpl *evpl,
     void        *private_data);

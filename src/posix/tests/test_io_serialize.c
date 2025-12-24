@@ -165,13 +165,10 @@ main(
         posix_test_fail(&env);
     }
 
-    // Close and reopen for read test
-    chimera_posix_close(fd);
-
-    fd = chimera_posix_open("/test/io_serialize_test", O_RDONLY, 0);
-
-    if (fd < 0) {
-        fprintf(stderr, "Failed to reopen test file for reading: %s\n", strerror(errno));
+    // Rewind to beginning for read test
+    if (chimera_posix_lseek(fd, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "Failed to rewind file: %s\n", strerror(errno));
+        chimera_posix_close(fd);
         posix_test_fail(&env);
     }
 

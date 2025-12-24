@@ -6,8 +6,10 @@
 #define CHIMERA_POSIX_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 struct chimera_posix_client;
 struct chimera_client_config;
@@ -93,5 +95,17 @@ int
 chimera_posix_fstat(
     int          fd,
     struct stat *st);
+
+off_t
+chimera_posix_lseek(
+    int   fd,
+    off_t offset,
+    int   whence);
+
+int64_t
+chimera_posix_lseek64(
+    int     fd,
+    int64_t offset,
+    int     whence);
 
 #endif /* CHIMERA_POSIX_H */
