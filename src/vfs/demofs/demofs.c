@@ -80,6 +80,20 @@ struct demofs_request_private {
     uint32_t          read_prefix;
     uint32_t          read_suffix;
     struct evpl_iovec iov[64];
+
+    // For RMW (read-modify-write) on partial block writes
+    struct demofs_thread *rmw_thread;    // Thread for async callback
+    int               rmw_phase;         // 0 = no RMW, 1 = reading, 2 = writing
+    uint64_t          rmw_aligned_start; // Block-aligned start offset
+    uint64_t          rmw_aligned_length;// Block-aligned length
+    uint64_t          rmw_device_id;     // Device for the new extent
+    uint64_t          rmw_device_offset; // Device offset for the new extent
+    uint32_t          rmw_prefix_len;    // Bytes to preserve at start of first block
+    uint32_t          rmw_suffix_len;    // Bytes to preserve at end of last block
+    struct evpl_iovec rmw_prefix_iov;    // IOV for prefix data (if read from existing extent)
+    struct evpl_iovec rmw_suffix_iov;    // IOV for suffix data (if read from existing extent)
+    int               rmw_prefix_pending;// Pending read for prefix
+    int               rmw_suffix_pending;// Pending read for suffix
 };
 
 struct demofs_extent {
@@ -1627,12 +1641,22 @@ demofs_io_callback(
                         (request->read.iov[0].length - demofs_private->read_prefix);
                 }
             }
+        } else if (demofs_private->opcode == CHIMERA_VFS_OP_WRITE) {
+            // Release RMW buffers if they were used
+            if (demofs_private->rmw_prefix_iov.data) {
+                evpl_iovec_release(&demofs_private->rmw_prefix_iov);
+                demofs_private->rmw_prefix_iov.data = NULL;
+            }
+            if (demofs_private->rmw_suffix_iov.data) {
+                evpl_iovec_release(&demofs_private->rmw_suffix_iov);
+                demofs_private->rmw_suffix_iov.data = NULL;
+            }
         }
 
         request->status = demofs_private->status;
         request->complete(request);
     }
-} /* demofs_read_callback */
+} /* demofs_io_callback */
 
 static void
 demofs_read(
@@ -1790,6 +1814,182 @@ demofs_read(
     }
 } /* demofs_read */
 
+// Forward declaration
+static void demofs_write_phase2(
+    struct demofs_thread       *thread,
+    struct demofs_shared       *shared,
+    struct chimera_vfs_request *request);
+
+// Callback for RMW prefix/suffix reads
+static void
+demofs_write_rmw_read_callback(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct chimera_vfs_request    *request        = private_data;
+    struct demofs_request_private *demofs_private = request->plugin_data;
+    struct demofs_thread          *thread         = demofs_private->rmw_thread;
+    struct demofs_shared          *shared         = thread->shared;
+
+    if (status && demofs_private->status == 0) {
+        demofs_private->status = status;
+    }
+
+    demofs_private->pending--;
+
+    if (demofs_private->pending == 0) {
+        if (demofs_private->status) {
+            // RMW read failed
+            if (demofs_private->rmw_prefix_iov.data) {
+                evpl_iovec_release(&demofs_private->rmw_prefix_iov);
+            }
+            if (demofs_private->rmw_suffix_iov.data) {
+                evpl_iovec_release(&demofs_private->rmw_suffix_iov);
+            }
+            request->status = demofs_private->status;
+            request->complete(request);
+            return;
+        }
+
+        // All RMW reads complete, proceed to write phase
+        demofs_private->rmw_phase = 2;
+        demofs_write_phase2(thread, shared, request);
+    }
+}
+
+// Phase 2: Issue actual writes (called after RMW reads complete or if no RMW needed)
+static void
+demofs_write_phase2(
+    struct demofs_thread       *thread,
+    struct demofs_shared       *shared,
+    struct chimera_vfs_request *request)
+{
+    struct evpl                   *evpl = thread->evpl;
+    struct demofs_request_private *demofs_private = request->plugin_data;
+    struct evpl_iovec              write_iov[66]; // prefix + data + suffix + padding
+    int                            write_niov = 0;
+    uint64_t                       offset, chunk;
+    uint32_t                       left;
+    struct evpl_iovec             *chunk_iov;
+    int                            chunk_niov;
+    struct evpl_iovec_cursor       cursor;
+    uint64_t                       write_length = request->write.length;
+    uint32_t                       prefix_len   = demofs_private->rmw_prefix_len;
+    uint32_t                       suffix_len   = demofs_private->rmw_suffix_len;
+
+    // Build the combined write iovec:
+    // [prefix (if any)] + [write data] + [suffix (if any)] + [padding to 4KB]
+
+    // Add prefix if present
+    if (prefix_len > 0) {
+        if (demofs_private->rmw_prefix_iov.data) {
+            // Prefix from existing extent
+            write_iov[write_niov] = demofs_private->rmw_prefix_iov;
+            write_iov[write_niov].length = prefix_len;
+            write_niov++;
+        } else {
+            // Prefix is zeros (no existing data)
+            // Use thread->zero without adding ref - it's persistent
+            write_iov[write_niov] = thread->zero;
+            write_iov[write_niov].length = prefix_len;
+            write_niov++;
+        }
+    }
+
+    // Add write data
+    for (int i = 0; i < request->write.niov; i++) {
+        write_iov[write_niov] = request->write.iov[i];
+        write_niov++;
+    }
+
+    // Add suffix if present
+    if (suffix_len > 0) {
+        if (demofs_private->rmw_suffix_iov.data) {
+            // Suffix from existing extent - extract the portion after write_end
+            uint64_t write_end    = request->write.offset + write_length;
+            uint32_t suffix_start = write_end & 4095; // offset within block
+            write_iov[write_niov].data   = (char *)demofs_private->rmw_suffix_iov.data + suffix_start;
+            write_iov[write_niov].length = suffix_len;
+            write_niov++;
+        } else {
+            // Suffix is zeros (no existing data)
+            // Use thread->zero without adding ref - it's persistent
+            write_iov[write_niov] = thread->zero;
+            write_iov[write_niov].length = suffix_len;
+            write_niov++;
+        }
+    }
+
+    // Add padding to align to 4KB if needed
+    uint64_t total_len = prefix_len + write_length + suffix_len;
+    uint32_t padding   = (4096 - (total_len & 4095)) & 4095;
+
+    if (padding > 0) {
+        // Use thread->zero without adding ref - it's persistent
+        write_iov[write_niov] = thread->zero;
+        write_iov[write_niov].length = padding;
+        write_niov++;
+    }
+
+    // Reset pending and niov for write phase
+    demofs_private->pending = 0;
+    demofs_private->niov    = 0;
+
+    evpl_iovec_cursor_init(&cursor, write_iov, write_niov);
+
+    offset = 0;
+    left   = demofs_private->rmw_aligned_length;
+
+    while (left) {
+        chunk = shared->devices[demofs_private->rmw_device_id].max_request_size;
+
+        if (left < chunk) {
+            chunk = left;
+        }
+
+        chunk_iov = &demofs_private->iov[demofs_private->niov];
+
+        chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 32, chunk, 0);
+
+        demofs_private->niov += chunk_niov;
+
+        demofs_private->pending++;
+
+        evpl_block_write(evpl,
+                         thread->queue[demofs_private->rmw_device_id],
+                         chunk_iov,
+                         chunk_niov,
+                         demofs_private->rmw_device_offset + offset,
+                         1,
+                         demofs_io_callback,
+                         request);
+
+        offset += chunk;
+        left   -= chunk;
+    }
+
+    // Note: RMW buffers will be released in demofs_io_callback when write completes
+}
+
+// Find extent covering a specific file offset
+static struct demofs_extent *
+demofs_find_extent_at(struct demofs_inode *inode, uint64_t file_offset)
+{
+    struct demofs_extent *extent;
+
+    rb_tree_query_floor(&inode->file.extents, file_offset, file_offset, extent);
+
+    if (extent) {
+        uint64_t extent_end = extent->file_offset + extent->length;
+        if (file_offset >= extent->file_offset && file_offset < extent_end) {
+            return extent;
+        }
+    }
+
+    return NULL;
+}
+
 static void
 demofs_write(
     struct demofs_thread       *thread,
@@ -1803,21 +2003,23 @@ demofs_write(
     struct demofs_extent          *extent, *next_extent, *new_extent;
     uint64_t                       write_start = request->write.offset;
     uint64_t                       write_end   = write_start + request->write.length;
-    uint64_t                       extent_start, extent_end, device_id, device_offset;
-    uint64_t                       offset, chunk;
-    uint32_t                       left;
-    const struct evpl_iovec       *iov;
-    struct evpl_iovec             *chunk_iov;
-    int                            niov, chunk_niov;
+    uint64_t                       aligned_start, aligned_end, aligned_length;
+    uint64_t                       device_id, device_offset;
+    uint64_t                       extent_start, extent_end;
     int                            rc;
-    struct evpl_iovec_cursor       cursor;
     struct timespec                now;
 
-    demofs_private          = request->plugin_data;
-    demofs_private->opcode  = request->opcode;
-    demofs_private->status  = 0;
-    demofs_private->pending = 0;
-    demofs_private->niov    = 0;
+    demofs_private                      = request->plugin_data;
+    demofs_private->opcode              = request->opcode;
+    demofs_private->status              = 0;
+    demofs_private->pending             = 0;
+    demofs_private->niov                = 0;
+    demofs_private->rmw_thread          = thread;
+    demofs_private->rmw_phase           = 0;
+    demofs_private->rmw_prefix_iov.data = NULL;
+    demofs_private->rmw_suffix_iov.data = NULL;
+    demofs_private->rmw_prefix_pending  = 0;
+    demofs_private->rmw_suffix_pending  = 0;
 
     inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1836,7 +2038,22 @@ demofs_write(
 
     demofs_map_attrs(thread, &request->write.r_pre_attr, inode);
 
-    rc = demofs_thread_alloc_space(thread, request->write.length, &device_id, &device_offset);
+    // Calculate block-aligned boundaries
+    aligned_start  = write_start & ~4095ULL;
+    aligned_end    = (write_end + 4095ULL) & ~4095ULL;
+    aligned_length = aligned_end - aligned_start;
+
+    // Calculate prefix/suffix lengths for partial blocks
+    uint32_t prefix_len = write_start - aligned_start;
+    uint32_t suffix_len = aligned_end - write_end;
+
+    demofs_private->rmw_prefix_len     = prefix_len;
+    demofs_private->rmw_suffix_len     = suffix_len;
+    demofs_private->rmw_aligned_start  = aligned_start;
+    demofs_private->rmw_aligned_length = aligned_length;
+
+    // Allocate space for the aligned write
+    rc = demofs_thread_alloc_space(thread, aligned_length, &device_id, &device_offset);
 
     if (rc) {
         pthread_mutex_unlock(&inode->lock);
@@ -1845,63 +2062,97 @@ demofs_write(
         return;
     }
 
+    demofs_private->rmw_device_id     = device_id;
+    demofs_private->rmw_device_offset = device_offset;
 
-    // Find first potentially overlapping extent
-    rb_tree_query_floor(&inode->file.extents, write_start, file_offset, extent);
+    // Check if we need to read existing data for partial blocks
+    int                   need_prefix_read = 0;
+    int                   need_suffix_read = 0;
+    struct demofs_extent *prefix_extent    = NULL;
+    struct demofs_extent *suffix_extent    = NULL;
+    uint64_t              prefix_device_id = 0, prefix_device_offset = 0;
+    uint64_t              suffix_device_id = 0, suffix_device_offset = 0;
 
-    // Handle overlapping extents
+    if (prefix_len > 0) {
+        // Check if there's an existing extent covering the prefix region
+        prefix_extent = demofs_find_extent_at(inode, aligned_start);
+        if (prefix_extent) {
+            need_prefix_read    = 1;
+            prefix_device_id    = prefix_extent->device_id;
+            prefix_device_offset = prefix_extent->device_offset +
+                                  (aligned_start - prefix_extent->file_offset);
+        }
+    }
+
+    if (suffix_len > 0) {
+        // Check if there's an existing extent covering the suffix region
+        // The suffix starts at write_end
+        suffix_extent = demofs_find_extent_at(inode, write_end);
+        if (suffix_extent) {
+            need_suffix_read     = 1;
+            suffix_device_id     = suffix_extent->device_id;
+            // Read the block containing write_end
+            uint64_t suffix_block = write_end & ~4095ULL;
+            suffix_device_offset = suffix_extent->device_offset +
+                                  (suffix_block - suffix_extent->file_offset);
+        }
+    }
+
+    // Remove/trim extents that overlap with the aligned write region
+    rb_tree_query_floor(&inode->file.extents, aligned_start, file_offset, extent);
+
     while (extent) {
         extent_start = extent->file_offset;
         extent_end   = extent_start + extent->length;
 
-        // Get next node before we potentially modify the tree
         next_extent = rb_tree_next(&inode->file.extents, extent);
 
-        if (extent_start >= write_end) {
+        if (extent_start >= aligned_end) {
             break;
         }
 
-        // Remove fully overlapped extent
-        if (extent_start >= write_start && extent_end <= write_end) {
+        // Check if extent is completely inside aligned region - remove it
+        if (extent_start >= aligned_start && extent_end <= aligned_end) {
             rb_tree_remove(&inode->file.extents, &extent->node);
             demofs_extent_free(thread, extent);
             extent = next_extent;
             continue;
         }
 
-        // Trim start of extent if needed
-        if (extent_start < write_start && extent_end > write_start) {
-            extent->length = write_start - extent_start;
+        // Trim extent if it extends before aligned_start
+        if (extent_start < aligned_start && extent_end > aligned_start) {
+            // Trim to end at aligned_start (this is always block-aligned)
+            extent->length = aligned_start - extent_start;
         }
 
-        // Trim end of extent if needed
-        if (extent_start < write_end && extent_end > write_end) {
-            uint64_t overlap = write_end - extent_start;
-            extent->file_offset   += overlap;
-            extent->device_offset += overlap;
-            extent->length        -= overlap;
+        // Trim extent if it extends past aligned_end
+        if (extent_start < aligned_end && extent_end > aligned_end) {
+            // The extent starts before aligned_end but ends after
+            // We need to shift the extent to start at aligned_end
+            uint64_t shift = aligned_end - extent_start;
+            extent->file_offset   = aligned_end;
+            extent->device_offset += shift;
+            extent->length        -= shift;
             if (extent->buffer) {
-                extent->buffer += overlap;
+                extent->buffer = (char *)extent->buffer + shift;
             }
         }
 
         extent = next_extent;
     }
 
-// Allocate new extent for write
+    // Create new extent for the aligned write
     new_extent = demofs_extent_alloc(thread);
 
-// Initialize new extent
     new_extent->device_id     = device_id;
     new_extent->device_offset = device_offset;
-    new_extent->file_offset   = write_start;
-    new_extent->length        = request->write.length;
+    new_extent->file_offset   = aligned_start;
+    new_extent->length        = aligned_length;
     new_extent->buffer        = NULL;
 
-// Insert new extent
     rb_tree_insert(&inode->file.extents, file_offset, new_extent);
 
-// Update inode metadata
+    // Update inode metadata
     if (inode->size < write_end) {
         inode->size       = write_end;
         inode->space_used = (inode->size + 4095) & ~4095;
@@ -1914,64 +2165,62 @@ demofs_write(
 
     demofs_map_attrs(thread, &request->write.r_post_attr, inode);
 
-    pthread_mutex_unlock(&inode->lock);
-
-// Submit write
-
-    if (request->write.length & 4095) {
-        struct evpl_iovec *copy_iov;
-
-        niov = request->write.niov + 1;
-
-        copy_iov = alloca(niov * sizeof(*copy_iov));
-
-        memcpy(copy_iov, request->write.iov, request->write.niov * sizeof(*copy_iov));
-
-        copy_iov[niov - 1]        = thread->zero;
-        copy_iov[niov - 1].length = 4096 - (request->write.length & 4095);
-
-        iov = copy_iov;
-
-    } else {
-        iov  = request->write.iov;
-        niov = request->write.niov;
-    }
-
-    evpl_iovec_cursor_init(&cursor, (struct evpl_iovec *) iov, niov);
-
-    offset = 0;
-    left   = (request->write.length + 4095) & ~4095;
-
-    while (left) {
-        chunk = shared->devices[device_id].max_request_size;
-
-        if (left < chunk) {
-            chunk = left;
-        }
-
-        chunk_iov = &demofs_private->iov[demofs_private->niov];
-
-        chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 32, chunk, 0);
-
-        demofs_private->niov += chunk_niov;
-
-        demofs_private->pending++;
-
-        evpl_block_write(evpl,
-                         thread->queue[new_extent->device_id],
-                         chunk_iov,
-                         chunk_niov,
-                         new_extent->device_offset + offset,
-                         1,
-                         demofs_io_callback,
-                         request);
-
-        offset += chunk;
-        left   -= chunk;
-    }
-
     request->write.r_length = request->write.length;
     request->write.r_sync   = 1;
+
+    pthread_mutex_unlock(&inode->lock);
+
+    // Issue RMW reads if needed
+    if (need_prefix_read || need_suffix_read) {
+        demofs_private->rmw_phase = 1;
+
+        if (need_prefix_read) {
+            // Allocate buffer and read prefix block
+            int niov = evpl_iovec_alloc(evpl, 4096, 4096, 1,
+                                        &demofs_private->rmw_prefix_iov);
+            if (niov > 0) {
+                demofs_private->pending++;
+                demofs_private->rmw_prefix_pending = 1;
+
+                evpl_block_read(evpl,
+                                thread->queue[prefix_device_id],
+                                &demofs_private->rmw_prefix_iov,
+                                1,
+                                prefix_device_offset,
+                                demofs_write_rmw_read_callback,
+                                request);
+            }
+        }
+
+        if (need_suffix_read) {
+            // Allocate buffer and read suffix block
+            int niov = evpl_iovec_alloc(evpl, 4096, 4096, 1,
+                                        &demofs_private->rmw_suffix_iov);
+            if (niov > 0) {
+                demofs_private->pending++;
+                demofs_private->rmw_suffix_pending = 1;
+
+                evpl_block_read(evpl,
+                                thread->queue[suffix_device_id],
+                                &demofs_private->rmw_suffix_iov,
+                                1,
+                                suffix_device_offset,
+                                demofs_write_rmw_read_callback,
+                                request);
+            }
+        }
+
+        // Wait for RMW reads to complete before proceeding
+        if (demofs_private->pending == 0) {
+            // No reads were actually issued (allocation failed?)
+            demofs_private->rmw_phase = 2;
+            demofs_write_phase2(thread, shared, request);
+        }
+    } else {
+        // No RMW needed, proceed directly to write
+        demofs_private->rmw_phase = 2;
+        demofs_write_phase2(thread, shared, request);
+    }
 } /* demofs_write */
 
 static void
