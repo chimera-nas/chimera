@@ -45,6 +45,7 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_RENAME,
     CHIMERA_CLIENT_OP_READLINK,
     CHIMERA_CLIENT_OP_STAT,
+    CHIMERA_CLIENT_OP_FSTAT,
 };
 
 struct chimera_client_request;
@@ -207,6 +208,12 @@ struct chimera_client_request {
             int                             path_len;
             char                            path[CHIMERA_VFS_PATH_MAX];
         } stat;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_fstat_callback_t        callback;
+            void                           *private_data;
+        } fstat;
     };
 } __attribute__((aligned(64)));
 

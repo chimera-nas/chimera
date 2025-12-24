@@ -244,6 +244,19 @@ chimera_stat(
     chimera_stat_callback_t       callback,
     void                         *private_data);
 
+typedef void (*chimera_fstat_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    const struct chimera_stat    *st,
+    void                         *private_data);
+
+void
+chimera_fstat(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    chimera_fstat_callback_t        callback,
+    void                           *private_data);
+
 void
 chimera_destroy(
     struct chimera_client *client);

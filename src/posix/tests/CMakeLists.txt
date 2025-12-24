@@ -15,12 +15,6 @@ macro(add_posix_test testname prog backend)
     set_tests_properties(chimera/posix/${testname} PROPERTIES
         ENVIRONMENT "TEST_FILE=${test_file}")
 endmacro()
-
-# Keep basic test as-is for now
-add_executable(posix_basic basic.c)
-target_link_libraries(posix_basic chimera_client)
-add_test(NAME chimera/posix/basic COMMAND posix_basic)
-
 # List of test programs
 set(POSIX_TEST_PROGRAMS
     test_symlink
@@ -29,6 +23,7 @@ set(POSIX_TEST_PROGRAMS
     test_rename
     test_readlink
     test_stat
+    test_fstat
     test_io_serialize
 )
 

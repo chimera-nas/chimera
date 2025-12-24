@@ -16,7 +16,8 @@ add_library(chimera_posix SHARED
             posix_unlink.c
             posix_rename.c
             posix_readlink.c
-            posix_stat.c)
+            posix_stat.c
+            posix_fstat.c)
 
 target_link_libraries(chimera_posix chimera_client evpl pthread)
 

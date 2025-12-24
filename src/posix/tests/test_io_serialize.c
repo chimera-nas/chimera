@@ -146,11 +146,11 @@ main(
         posix_test_fail(&env);
     }
 
-    // Verify file size
-    rc = chimera_posix_stat("/test/io_serialize_test", &st);
+    // Verify file size using fstat on the open fd
+    rc = chimera_posix_fstat(fd, &st);
 
     if (rc != 0) {
-        fprintf(stderr, "Failed to stat file: %s\n", strerror(errno));
+        fprintf(stderr, "Failed to fstat file: %s\n", strerror(errno));
         chimera_posix_close(fd);
         posix_test_fail(&env);
     }

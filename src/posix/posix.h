@@ -89,4 +89,9 @@ chimera_posix_stat(
     const char  *path,
     struct stat *st);
 
+int
+chimera_posix_fstat(
+    int          fd,
+    struct stat *st);
+
 #endif /* CHIMERA_POSIX_H */
