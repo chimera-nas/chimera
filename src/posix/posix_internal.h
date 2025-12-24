@@ -298,7 +298,26 @@ chimera_posix_fd_acquire(
         return NULL;
     }
 
-    // If caller wants CLOSING flag
+    // If caller wants IO_ACTIVE flag (read/write operations)
+    if (flags_to_set & CHIMERA_POSIX_FD_IO_ACTIVE) {
+        // Wait for existing IO to complete
+        while (entry->flags & CHIMERA_POSIX_FD_IO_ACTIVE) {
+            entry->io_waiters++;
+            pthread_cond_wait(&entry->cond, &entry->lock);
+            entry->io_waiters--;
+        }
+
+        // Check if fd was closed or is closing
+        if (entry->flags & (CHIMERA_POSIX_FD_CLOSED | CHIMERA_POSIX_FD_CLOSING)) {
+            pthread_mutex_unlock(&entry->lock);
+            errno = EBADF;
+            return NULL;
+        }
+
+        entry->flags |= CHIMERA_POSIX_FD_IO_ACTIVE;
+    }
+
+    // If caller wants CLOSING flag (close operation)
     if (flags_to_set & CHIMERA_POSIX_FD_CLOSING) {
         // If CLOSING is already set by another thread, wait for it to complete
         if (entry->flags & CHIMERA_POSIX_FD_CLOSING) {
@@ -320,44 +339,6 @@ chimera_posix_fd_acquire(
         while (entry->refcnt > 0) {
             pthread_cond_wait(&entry->cond, &entry->lock);
         }
-    } else if (entry->flags & CHIMERA_POSIX_FD_CLOSING) {
-        // Caller doesn't want CLOSING, but CLOSING is set - wait and fail
-        entry->close_waiters++;
-        while (!(entry->flags & CHIMERA_POSIX_FD_CLOSED)) {
-            pthread_cond_wait(&entry->cond, &entry->lock);
-        }
-        entry->close_waiters--;
-        pthread_mutex_unlock(&entry->lock);
-        errno = EBADF;
-        return NULL;
-    }
-
-    // If caller wants IO_ACTIVE flag
-    if (flags_to_set & CHIMERA_POSIX_FD_IO_ACTIVE) {
-        // Wait for existing IO to complete
-        while (entry->flags & CHIMERA_POSIX_FD_IO_ACTIVE) {
-            entry->io_waiters++;
-            pthread_cond_wait(&entry->cond, &entry->lock);
-            entry->io_waiters--;
-
-            // Re-check if fd was closed while waiting
-            if (entry->flags & CHIMERA_POSIX_FD_CLOSED) {
-                pthread_mutex_unlock(&entry->lock);
-                errno = EBADF;
-                return NULL;
-            }
-            if (entry->flags & CHIMERA_POSIX_FD_CLOSING) {
-                entry->close_waiters++;
-                while (!(entry->flags & CHIMERA_POSIX_FD_CLOSED)) {
-                    pthread_cond_wait(&entry->cond, &entry->lock);
-                }
-                entry->close_waiters--;
-                pthread_mutex_unlock(&entry->lock);
-                errno = EBADF;
-                return NULL;
-            }
-        }
-        entry->flags |= CHIMERA_POSIX_FD_IO_ACTIVE;
     }
 
     entry->refcnt++;

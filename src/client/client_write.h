@@ -17,15 +17,14 @@ chimera_write_complete(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request = private_data;
-    struct chimera_client_thread  *thread  = request->thread;
+    struct chimera_client_request *request       = private_data;
+    struct chimera_client_thread  *client_thread = request->thread;
+    chimera_write_callback_t       callback      = request->write.callback;
+    void                          *callback_arg  = request->write.private_data;
 
-    if (request->heap_allocated) {
-        chimera_client_request_free(thread, request);
-    }
+    chimera_client_request_free(client_thread, request);
 
-    request->write.callback(thread, error_code, request->write.private_data);
-
+    callback(client_thread, error_code, callback_arg);
 } /* chimera_write_complete */
 
 static inline void

@@ -12,13 +12,12 @@ chimera_client_umount_callback(
 {
     struct chimera_client_request *request       = private_data;
     struct chimera_client_thread  *client_thread = request->thread;
-    int                            heap_allocated = request->heap_allocated;
+    chimera_umount_callback_t      callback      = request->umount.callback;
+    void                          *callback_arg  = request->umount.private_data;
 
-    request->umount.callback(client_thread, status, request->umount.private_data);
+    chimera_client_request_free(client_thread, request);
 
-    if (heap_allocated) {
-        chimera_client_request_free(client_thread, request);
-    }
+    callback(client_thread, status, callback_arg);
 } /* chimera_client_umount_callback */
 
 SYMBOL_EXPORT void

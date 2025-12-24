@@ -16,15 +16,12 @@ chimera_read_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request        = private_data;
-    struct chimera_client_thread  *client_thread  = request->thread;
-    chimera_read_callback_t        callback       = request->read.callback;
-    void                          *callback_arg   = request->read.private_data;
-    int                            heap_allocated = request->heap_allocated;
+    struct chimera_client_request *request       = private_data;
+    struct chimera_client_thread  *client_thread = request->thread;
+    chimera_read_callback_t        callback      = request->read.callback;
+    void                          *callback_arg  = request->read.private_data;
 
-    if (heap_allocated) {
-        chimera_client_request_free(client_thread, request);
-    }
+    chimera_client_request_free(client_thread, request);
 
     callback(client_thread, error_code, iov, niov, callback_arg);
 } /* chimera_read_complete */

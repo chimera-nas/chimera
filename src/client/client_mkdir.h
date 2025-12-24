@@ -20,14 +20,17 @@ chimera_mkdir_at_complete(
     struct chimera_vfs_attrs *dir_post_attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request = private_data;
+    struct chimera_client_request  *request       = private_data;
+    struct chimera_client_thread   *client_thread = request->thread;
+    struct chimera_vfs_open_handle *parent_handle = request->mkdir.parent_handle;
+    chimera_mkdir_callback_t        callback      = request->mkdir.callback;
+    void                           *callback_arg  = request->mkdir.private_data;
 
-    request->mkdir.callback(request->thread, error_code, request->mkdir.private_data);
+    chimera_client_request_free(client_thread, request);
 
-    chimera_vfs_release(request->thread->vfs_thread, request->mkdir.parent_handle);
+    chimera_vfs_release(client_thread->vfs_thread, parent_handle);
 
-    chimera_client_request_free(request->thread, request);
-
+    callback(client_thread, error_code, callback_arg);
 } /* chimera_mkdir_at_complete */
 
 static void
@@ -40,8 +43,12 @@ chimera_mkdir_parent_complete(
     struct chimera_vfs_attrs       set_attr;
 
     if (error_code != CHIMERA_VFS_OK) {
-        request->mkdir.callback(request->thread, error_code, request->mkdir.private_data);
-        chimera_client_request_free(request->thread, request);
+        struct chimera_client_thread *client_thread = request->thread;
+        chimera_mkdir_callback_t      callback      = request->mkdir.callback;
+        void                         *callback_arg  = request->mkdir.private_data;
+
+        chimera_client_request_free(client_thread, request);
+        callback(client_thread, error_code, callback_arg);
         return;
     }
 
@@ -73,8 +80,12 @@ chimera_mkdir_parent_lookup_complete(
     struct chimera_client_request *request = private_data;
 
     if (error_code != CHIMERA_VFS_OK) {
-        request->mkdir.callback(request->thread, error_code, request->mkdir.private_data);
-        chimera_client_request_free(request->thread, request);
+        struct chimera_client_thread *client_thread = request->thread;
+        chimera_mkdir_callback_t      callback      = request->mkdir.callback;
+        void                         *callback_arg  = request->mkdir.private_data;
+
+        chimera_client_request_free(client_thread, request);
+        callback(client_thread, error_code, callback_arg);
         return;
     }
 
@@ -86,7 +97,6 @@ chimera_mkdir_parent_lookup_complete(
         chimera_mkdir_parent_complete,
         request);
 
-
 } /* chimera_mkdir_parent_lookup_complete */
 
 static inline void
@@ -97,8 +107,11 @@ chimera_dispatch_mkdir(
 
     if (unlikely(request->mkdir.name_offset == -1)) {
         /* Caller is trying to mkdir the root directory, which always exists already */
-        request->mkdir.callback(request->thread, CHIMERA_VFS_EEXIST, request->mkdir.private_data);
-        chimera_client_request_free(request->thread, request);
+        chimera_mkdir_callback_t callback     = request->mkdir.callback;
+        void                    *callback_arg = request->mkdir.private_data;
+
+        chimera_client_request_free(thread, request);
+        callback(thread, CHIMERA_VFS_EEXIST, callback_arg);
         return;
     }
 
