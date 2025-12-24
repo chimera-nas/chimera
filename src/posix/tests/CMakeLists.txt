@@ -25,6 +25,7 @@ set(POSIX_TEST_PROGRAMS
     test_stat
     test_fstat
     test_lseek
+    test_pio
     test_io_serialize
 )
 

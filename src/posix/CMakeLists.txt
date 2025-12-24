@@ -10,6 +10,10 @@ add_library(chimera_posix SHARED
             posix_close.c
             posix_read.c
             posix_write.c
+            posix_pread.c
+            posix_pwrite.c
+            posix_readv.c
+            posix_writev.c
             posix_mkdir.c
             posix_symlink.c
             posix_link.c

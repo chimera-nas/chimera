@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 struct chimera_posix_client;
@@ -107,5 +108,105 @@ chimera_posix_lseek64(
     int     fd,
     int64_t offset,
     int     whence);
+
+ssize_t
+chimera_posix_pread(
+    int    fd,
+    void  *buf,
+    size_t count,
+    off_t  offset);
+
+ssize_t
+chimera_posix_pread64(
+    int     fd,
+    void   *buf,
+    size_t  count,
+    int64_t offset);
+
+ssize_t
+chimera_posix_pwrite(
+    int         fd,
+    const void *buf,
+    size_t      count,
+    off_t       offset);
+
+ssize_t
+chimera_posix_pwrite64(
+    int         fd,
+    const void *buf,
+    size_t      count,
+    int64_t     offset);
+
+ssize_t
+chimera_posix_readv(
+    int                 fd,
+    const struct iovec *iov,
+    int                 iovcnt);
+
+ssize_t
+chimera_posix_writev(
+    int                 fd,
+    const struct iovec *iov,
+    int                 iovcnt);
+
+ssize_t
+chimera_posix_preadv(
+    int                 fd,
+    const struct iovec *iov,
+    int                 iovcnt,
+    off_t               offset);
+
+ssize_t
+chimera_posix_preadv64(
+    int                 fd,
+    const struct iovec *iov,
+    int                 iovcnt,
+    int64_t             offset);
+
+ssize_t
+chimera_posix_pwritev(
+    int                 fd,
+    const struct iovec *iov,
+    int                 iovcnt,
+    off_t               offset);
+
+ssize_t
+chimera_posix_pwritev64(
+    int                 fd,
+    const struct iovec *iov,
+    int                 iovcnt,
+    int64_t             offset);
+
+ssize_t
+chimera_posix_preadv2(
+    int                 fd,
+    const struct iovec *iov,
+    int                 iovcnt,
+    off_t               offset,
+    int                 flags);
+
+ssize_t
+chimera_posix_preadv64v2(
+    int                 fd,
+    const struct iovec *iov,
+    int                 iovcnt,
+    int64_t             offset,
+    int                 flags);
+
+ssize_t
+chimera_posix_pwritev2(
+    int                 fd,
+    const struct iovec *iov,
+    int                 iovcnt,
+    off_t               offset,
+    int                 flags);
+
+ssize_t
+chimera_posix_pwritev64v2(
+    int                 fd,
+    const struct iovec *iov,
+    int                 iovcnt,
+    int64_t             offset,
+    int                 flags);
 
 #endif /* CHIMERA_POSIX_H */

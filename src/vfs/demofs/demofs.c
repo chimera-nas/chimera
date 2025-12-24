@@ -1612,23 +1612,23 @@ demofs_io_callback(
         demofs_private->status = status;
     }
 
-    if (demofs_private->opcode == CHIMERA_VFS_OP_READ) {
-        int last = request->read.r_niov - 1;
-
-        if (request->read.r_niov > 0) {
-            request->read.iov[0].data  += demofs_private->read_prefix;
-            request->read.iov[0].length = request->read.length;
-
-            if (request->read.r_niov > 1) {
-                request->read.iov[last].length = request->read.length -
-                    (request->read.iov[0].length - demofs_private->read_prefix);
-            }
-        }
-    }
-
     demofs_private->pending--;
 
     if (demofs_private->pending == 0) {
+        if (demofs_private->opcode == CHIMERA_VFS_OP_READ) {
+            int last = request->read.r_niov - 1;
+
+            if (request->read.r_niov > 0) {
+                request->read.iov[0].data  += demofs_private->read_prefix;
+                request->read.iov[0].length = request->read.length;
+
+                if (request->read.r_niov > 1) {
+                    request->read.iov[last].length = request->read.length -
+                        (request->read.iov[0].length - demofs_private->read_prefix);
+                }
+            }
+        }
+
         request->status = demofs_private->status;
         request->complete(request);
     }
@@ -1888,20 +1888,20 @@ demofs_write(
         extent = next_extent;
     }
 
-    // Allocate new extent for write
+// Allocate new extent for write
     new_extent = demofs_extent_alloc(thread);
 
-    // Initialize new extent
+// Initialize new extent
     new_extent->device_id     = device_id;
     new_extent->device_offset = device_offset;
     new_extent->file_offset   = write_start;
     new_extent->length        = request->write.length;
     new_extent->buffer        = NULL;
 
-    // Insert new extent
+// Insert new extent
     rb_tree_insert(&inode->file.extents, file_offset, new_extent);
 
-    // Update inode metadata
+// Update inode metadata
     if (inode->size < write_end) {
         inode->size       = write_end;
         inode->space_used = (inode->size + 4095) & ~4095;
@@ -1916,7 +1916,7 @@ demofs_write(
 
     pthread_mutex_unlock(&inode->lock);
 
-    // Submit write
+// Submit write
 
     if (request->write.length & 4095) {
         struct evpl_iovec *copy_iov;
