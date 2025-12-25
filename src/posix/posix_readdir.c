@@ -52,14 +52,7 @@ chimera_posix_readdir_exec(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_readdir(thread->vfs_thread,
-                        request->readdir.handle,
-                        0,  // attr_mask for entries
-                        0,  // dir_attr_mask
-                        request->readdir.cookie,
-                        chimera_readdir_entry_callback,
-                        chimera_readdir_complete,
-                        request);
+    chimera_dispatch_readdir(thread, request);
 } /* chimera_posix_readdir_exec */
 
 SYMBOL_EXPORT struct dirent *

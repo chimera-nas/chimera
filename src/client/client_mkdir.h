@@ -124,3 +124,45 @@ chimera_dispatch_mkdir(
         chimera_mkdir_parent_lookup_complete,
         request);
 } /* chimera_mkdir */
+
+static void
+chimera_mkdir_dispatch_at_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr,
+    void                     *private_data)
+{
+    struct chimera_client_request *request        = private_data;
+    struct chimera_client_thread  *client_thread  = request->thread;
+    chimera_mkdir_callback_t       callback       = request->mkdir.callback;
+    void                          *callback_arg   = request->mkdir.private_data;
+    int                            heap_allocated = request->heap_allocated;
+
+    if (heap_allocated) {
+        chimera_client_request_free(client_thread, request);
+    }
+
+    /* Note: parent handle is NOT released - caller owns it */
+    callback(client_thread, error_code, callback_arg);
+} /* chimera_mkdir_dispatch_at_complete */
+
+static inline void
+chimera_dispatch_mkdir_at(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *parent_handle,
+    struct chimera_client_request  *request)
+{
+    chimera_vfs_mkdir(
+        thread->vfs_thread,
+        parent_handle,
+        request->mkdir.path,
+        request->mkdir.path_len,
+        &request->mkdir.set_attr,
+        CHIMERA_VFS_ATTR_FH,
+        0,
+        0,
+        chimera_mkdir_dispatch_at_complete,
+        request);
+} /* chimera_dispatch_mkdir_at */

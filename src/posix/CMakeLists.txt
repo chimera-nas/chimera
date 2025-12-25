@@ -39,7 +39,17 @@ add_library(chimera_posix SHARED
             posix_fputc.c
             posix_fgets.c
             posix_fputs.c
-            posix_ungetc.c)
+            posix_ungetc.c
+            posix_rmdir.c
+            posix_openat.c
+            posix_mkdirat.c
+            posix_unlinkat.c
+            posix_renameat.c
+            posix_linkat.c
+            posix_symlinkat.c
+            posix_readlinkat.c
+            posix_fstatat.c
+            posix_faccessat.c)
 
 target_link_libraries(chimera_posix chimera_client evpl pthread)
 

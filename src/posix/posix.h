@@ -367,4 +367,71 @@ chimera_posix_ungetc(
     int           c,
     CHIMERA_FILE *stream);
 
+// rmdir
+int
+chimera_posix_rmdir(
+    const char *path);
+
+// *at() functions - directory-relative operations
+int
+chimera_posix_openat(
+    int         dirfd,
+    const char *pathname,
+    int         flags,
+    ...);
+
+int
+chimera_posix_mkdirat(
+    int         dirfd,
+    const char *pathname,
+    mode_t      mode);
+
+int
+chimera_posix_unlinkat(
+    int         dirfd,
+    const char *pathname,
+    int         flags);
+
+int
+chimera_posix_renameat(
+    int         olddirfd,
+    const char *oldpath,
+    int         newdirfd,
+    const char *newpath);
+
+int
+chimera_posix_linkat(
+    int         olddirfd,
+    const char *oldpath,
+    int         newdirfd,
+    const char *newpath,
+    int         flags);
+
+int
+chimera_posix_symlinkat(
+    const char *target,
+    int         newdirfd,
+    const char *linkpath);
+
+ssize_t
+chimera_posix_readlinkat(
+    int         dirfd,
+    const char *pathname,
+    char       *buf,
+    size_t      bufsiz);
+
+int
+chimera_posix_fstatat(
+    int          dirfd,
+    const char  *pathname,
+    struct stat *statbuf,
+    int          flags);
+
+int
+chimera_posix_faccessat(
+    int         dirfd,
+    const char *pathname,
+    int         mode,
+    int         flags);
+
 #endif /* CHIMERA_POSIX_H */

@@ -28,7 +28,23 @@ set(POSIX_TEST_PROGRAMS
     test_pio
     test_io_serialize
     test_opendir
-    test_stdio
+    test_rmdir
+    test_openat
+    test_mkdirat
+    test_renameat
+    test_symlinkat
+    test_linkat
+    test_faccessat
+    test_fopen
+    test_fread
+    test_fseek
+    test_frewind
+    test_feof
+    test_fileno
+    test_fgetpos
+    test_fgetc
+    test_fgets
+    test_ungetc
 )
 
 # Create test programs

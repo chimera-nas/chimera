@@ -121,3 +121,41 @@ chimera_dispatch_remove(
         chimera_remove_parent_lookup_complete,
         request);
 } /* chimera_dispatch_remove */
+
+static void
+chimera_remove_dispatch_at_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_client_request *request        = private_data;
+    struct chimera_client_thread  *thread         = request->thread;
+    chimera_remove_callback_t      callback       = request->remove.callback;
+    void                          *callback_arg   = request->remove.private_data;
+    int                            heap_allocated = request->heap_allocated;
+
+    if (heap_allocated) {
+        chimera_client_request_free(thread, request);
+    }
+
+    /* Note: parent handle is NOT released - caller owns it */
+    callback(thread, error_code, callback_arg);
+} /* chimera_remove_dispatch_at_complete */
+
+static inline void
+chimera_dispatch_remove_at(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *parent_handle,
+    struct chimera_client_request  *request)
+{
+    chimera_vfs_remove(
+        thread->vfs_thread,
+        parent_handle,
+        request->remove.path,
+        request->remove.path_len,
+        0,
+        0,
+        chimera_remove_dispatch_at_complete,
+        request);
+} /* chimera_dispatch_remove_at */
