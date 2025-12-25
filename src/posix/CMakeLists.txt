@@ -21,6 +21,7 @@ add_library(chimera_posix SHARED
             posix_rename.c
             posix_readlink.c
             posix_stat.c
+            posix_lstat.c
             posix_fstat.c
             posix_lseek.c
             posix_opendir.c
@@ -54,6 +55,7 @@ add_library(chimera_posix SHARED
             posix_fchmod.c
             posix_fchmodat.c
             posix_chown.c
+            posix_lchown.c
             posix_fchown.c
             posix_fchownat.c
             posix_truncate.c

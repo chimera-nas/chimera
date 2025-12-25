@@ -93,6 +93,11 @@ chimera_posix_stat(
     struct stat *st);
 
 int
+chimera_posix_lstat(
+    const char  *path,
+    struct stat *st);
+
+int
 chimera_posix_fstat(
     int          fd,
     struct stat *st);
@@ -454,6 +459,12 @@ chimera_posix_fchmodat(
 
 int
 chimera_posix_chown(
+    const char *path,
+    uid_t       owner,
+    gid_t       group);
+
+int
+chimera_posix_lchown(
     const char *path,
     uid_t       owner,
     gid_t       group);

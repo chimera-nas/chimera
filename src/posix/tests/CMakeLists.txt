@@ -23,6 +23,7 @@ set(POSIX_TEST_PROGRAMS
     test_rename
     test_readlink
     test_stat
+    test_lstat
     test_fstat
     test_lseek
     test_pio
@@ -49,6 +50,7 @@ set(POSIX_TEST_PROGRAMS
     test_fchmod
     test_fchmodat
     test_chown
+    test_lchown
     test_fchown
     test_fchownat
     test_truncate
