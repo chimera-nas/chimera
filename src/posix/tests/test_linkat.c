@@ -7,7 +7,7 @@
 
 #ifndef AT_FDCWD
 #define AT_FDCWD -100
-#endif
+#endif /* ifndef AT_FDCWD */
 
 int
 main(
@@ -40,7 +40,7 @@ main(
 
     // Create a hard link
     rc = chimera_posix_linkat(AT_FDCWD, "/test/linkat_src.txt",
-                               AT_FDCWD, "/test/linkat_dst.txt", 0);
+                              AT_FDCWD, "/test/linkat_dst.txt", 0);
     if (rc != 0) {
         fprintf(stderr, "linkat failed: %s\n", strerror(errno));
         posix_test_fail(&env);
@@ -80,4 +80,4 @@ main(
     posix_test_success(&env);
 
     return 0;
-}
+} /* main */

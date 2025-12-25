@@ -6,7 +6,7 @@
 
 #ifndef AT_FDCWD
 #define AT_FDCWD -100
-#endif
+#endif /* ifndef AT_FDCWD */
 
 int
 main(
@@ -72,4 +72,4 @@ main(
     posix_test_success(&env);
 
     return 0;
-}
+} /* main */

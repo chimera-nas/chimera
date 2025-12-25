@@ -17,7 +17,7 @@ chimera_posix_remove_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_remove_callback */
 
 static void
 chimera_posix_remove_exec(
@@ -25,17 +25,17 @@ chimera_posix_remove_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_remove(thread, request);
-}
+} /* chimera_posix_remove_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_unlink(const char *path)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    const char                      *slash;
-    int                              path_len;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    const char                     *slash;
+    int                             path_len;
 
     chimera_posix_completion_init(&comp, &req);
 
@@ -68,4 +68,4 @@ chimera_posix_unlink(const char *path)
     }
 
     return 0;
-}
+} /* chimera_posix_unlink */

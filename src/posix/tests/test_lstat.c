@@ -87,7 +87,7 @@ main(
     // Symlink's inode should be different from file's inode
     if (link_st.st_ino == file_st.st_ino) {
         fprintf(stderr, "Warning: lstat returned same inode as file "
-                        "(may indicate symlink following)\n");
+                "(may indicate symlink following)\n");
     } else {
         fprintf(stderr, "lstat returned different inode (file: %lu, link: %lu)\n",
                 (unsigned long) file_st.st_ino,
@@ -122,4 +122,4 @@ main(
     posix_test_success(&env);
 
     return 0;
-}
+} /* main */

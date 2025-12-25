@@ -46,7 +46,7 @@ chimera_posix_read_callback(
     }
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_read_callback */
 
 static void
 chimera_posix_read_exec(
@@ -54,19 +54,19 @@ chimera_posix_read_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_read(thread, request);
-}
+} /* chimera_posix_read_exec */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_read(
-    int     fd,
-    void   *buf,
-    size_t  count)
+    int    fd,
+    void  *buf,
+    size_t count)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    struct chimera_posix_fd_entry   *entry;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    struct chimera_posix_fd_entry  *entry;
 
     entry = chimera_posix_fd_acquire(posix, fd, CHIMERA_POSIX_FD_IO_ACTIVE);
 
@@ -86,7 +86,7 @@ chimera_posix_read(
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_read_exec);
 
-    int err = chimera_posix_wait(&comp);
+    int     err = chimera_posix_wait(&comp);
 
     if (!err && req.sync_result >= 0) {
         entry->offset += (uint64_t) req.sync_result;
@@ -104,4 +104,4 @@ chimera_posix_read(
     }
 
     return ret;
-}
+} /* chimera_posix_read */

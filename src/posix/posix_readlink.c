@@ -25,7 +25,7 @@ chimera_posix_readlink_callback(
     }
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_readlink_callback */
 
 static void
 chimera_posix_readlink_exec(
@@ -33,7 +33,7 @@ chimera_posix_readlink_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_readlink(thread, request);
-}
+} /* chimera_posix_readlink_exec */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_readlink(
@@ -41,11 +41,11 @@ chimera_posix_readlink(
     char       *buf,
     size_t      bufsiz)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    int                              path_len;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    int                             path_len;
 
     chimera_posix_completion_init(&comp, &req);
 
@@ -62,7 +62,7 @@ chimera_posix_readlink(
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_readlink_exec);
 
-    int err = chimera_posix_wait(&comp);
+    int     err = chimera_posix_wait(&comp);
 
     ssize_t ret = req.sync_result;
 
@@ -74,4 +74,4 @@ chimera_posix_readlink(
     }
 
     return ret;
-}
+} /* chimera_posix_readlink */

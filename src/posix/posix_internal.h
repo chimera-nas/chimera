@@ -461,7 +461,7 @@ chimera_posix_fd_lseek(
             pthread_mutex_unlock(&entry->lock);
             errno = EINVAL;
             return -1;
-    }
+    } // switch
 
     // Validate new offset
     if (new_offset < 0) {

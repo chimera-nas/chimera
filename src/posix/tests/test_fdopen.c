@@ -9,14 +9,14 @@ main(
     int    argc,
     char **argv)
 {
-    struct posix_test_env  env;
-    int                    fd;
-    int                    rc;
-    CHIMERA_FILE          *fp;
-    char                   buf[64];
-    size_t                 nread;
-    const char            *test_data = "Hello, World!";
-    size_t                 data_len;
+    struct posix_test_env env;
+    int                   fd;
+    int                   rc;
+    CHIMERA_FILE         *fp;
+    char                  buf[64];
+    size_t                nread;
+    const char           *test_data = "Hello, World!";
+    size_t                data_len;
 
     posix_test_init(&env, argv, argc);
 
@@ -125,4 +125,4 @@ main(
     posix_test_success(&env);
 
     return 0;
-}
+} /* main */

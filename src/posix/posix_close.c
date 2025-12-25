@@ -29,4 +29,4 @@ chimera_posix_close(int fd)
     chimera_posix_fd_free(posix, fd);
 
     return 0;
-}
+} /* chimera_posix_close */

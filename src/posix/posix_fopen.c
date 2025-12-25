@@ -28,7 +28,7 @@ chimera_posix_parse_mode(
             break;
         default:
             return -1;
-    }
+    } /* switch */
 
     // Check for '+' modifier (read+write)
     for (int i = 1; mode[i]; i++) {

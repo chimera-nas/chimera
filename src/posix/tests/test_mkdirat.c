@@ -6,12 +6,12 @@
 #include "posix_test_common.h"
 
 #ifndef AT_FDCWD
-#define AT_FDCWD -100
-#endif
+#define AT_FDCWD     -100
+#endif /* ifndef AT_FDCWD */
 
 #ifndef AT_REMOVEDIR
 #define AT_REMOVEDIR 0x200
-#endif
+#endif /* ifndef AT_REMOVEDIR */
 
 int
 main(
@@ -71,4 +71,4 @@ main(
     posix_test_success(&env);
 
     return 0;
-}
+} /* main */

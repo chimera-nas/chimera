@@ -39,7 +39,7 @@ chimera_posix_pread_callback(
     }
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_pread_callback */
 
 static void
 chimera_posix_pread_exec(
@@ -47,7 +47,7 @@ chimera_posix_pread_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_read(thread, request);
-}
+} /* chimera_posix_pread_exec */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_pread(
@@ -56,11 +56,11 @@ chimera_posix_pread(
     size_t count,
     off_t  offset)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    struct chimera_posix_fd_entry   *entry;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    struct chimera_posix_fd_entry  *entry;
 
     // pread doesn't need IO_ACTIVE serialization - just validate the fd
     entry = chimera_posix_fd_acquire(posix, fd, 0);
@@ -81,7 +81,7 @@ chimera_posix_pread(
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_pread_exec);
 
-    int err = chimera_posix_wait(&comp);
+    int     err = chimera_posix_wait(&comp);
 
     // pread does NOT update the file offset
 
@@ -97,7 +97,7 @@ chimera_posix_pread(
     }
 
     return ret;
-}
+} /* chimera_posix_pread */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_pread64(
@@ -107,4 +107,4 @@ chimera_posix_pread64(
     int64_t offset)
 {
     return chimera_posix_pread(fd, buf, count, (off_t) offset);
-}
+} /* chimera_posix_pread64 */

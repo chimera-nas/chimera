@@ -21,7 +21,7 @@ chimera_posix_open_callback(
 
     request->sync_open_handle = oh;
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_open_callback */
 
 static void
 chimera_posix_open_exec(
@@ -29,7 +29,7 @@ chimera_posix_open_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_open(thread, request);
-}
+} /* chimera_posix_open_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_open(
@@ -37,14 +37,14 @@ chimera_posix_open(
     int         flags,
     ...)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    const char                      *slash;
-    int                              path_len;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    const char                     *slash;
+    int                             path_len;
 
-    mode_t mode = 0;
+    mode_t                          mode = 0;
 
     if (flags & O_CREAT) {
         va_list ap;
@@ -96,4 +96,4 @@ chimera_posix_open(
     }
 
     return fd;
-}
+} /* chimera_posix_open */

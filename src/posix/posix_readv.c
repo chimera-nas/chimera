@@ -9,7 +9,7 @@
 
 #ifndef IOV_MAX
 #define IOV_MAX 1024
-#endif
+#endif /* ifndef IOV_MAX */
 
 #include "posix_internal.h"
 #include "../client/client_read.h"
@@ -67,7 +67,7 @@ chimera_posix_readv_callback(
     }
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_readv_callback */
 
 static void
 chimera_posix_readv_exec(
@@ -75,7 +75,7 @@ chimera_posix_readv_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_read(thread, request);
-}
+} /* chimera_posix_readv_exec */
 
 static ssize_t
 chimera_posix_readv_internal(
@@ -85,13 +85,13 @@ chimera_posix_readv_internal(
     off_t               offset,
     int                 use_fd_offset)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    struct chimera_posix_fd_entry   *entry;
-    size_t                           total_len = 0;
-    unsigned int                     flags;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    struct chimera_posix_fd_entry  *entry;
+    size_t                          total_len = 0;
+    unsigned int                    flags;
 
     if (iovcnt <= 0 || iovcnt > IOV_MAX) {
         errno = EINVAL;
@@ -124,7 +124,7 @@ chimera_posix_readv_internal(
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_readv_exec);
 
-    int err = chimera_posix_wait(&comp);
+    int     err = chimera_posix_wait(&comp);
 
     if (!err && req.sync_result >= 0 && use_fd_offset) {
         entry->offset += (uint64_t) req.sync_result;
@@ -142,7 +142,7 @@ chimera_posix_readv_internal(
     }
 
     return ret;
-}
+} /* chimera_posix_readv_internal */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_readv(
@@ -151,7 +151,7 @@ chimera_posix_readv(
     int                 iovcnt)
 {
     return chimera_posix_readv_internal(fd, iov, iovcnt, 0, 1);
-}
+} /* chimera_posix_readv */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_preadv(
@@ -161,7 +161,7 @@ chimera_posix_preadv(
     off_t               offset)
 {
     return chimera_posix_readv_internal(fd, iov, iovcnt, offset, 0);
-}
+} /* chimera_posix_preadv */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_preadv64(
@@ -171,7 +171,7 @@ chimera_posix_preadv64(
     int64_t             offset)
 {
     return chimera_posix_readv_internal(fd, iov, iovcnt, (off_t) offset, 0);
-}
+} /* chimera_posix_preadv64 */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_preadv2(
@@ -184,7 +184,7 @@ chimera_posix_preadv2(
     // Ignore RWF_HIPRI and RWF_NOWAIT for now - just behave as preadv
     (void) flags;
     return chimera_posix_readv_internal(fd, iov, iovcnt, offset, 0);
-}
+} /* chimera_posix_preadv2 */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_preadv64v2(
@@ -196,4 +196,4 @@ chimera_posix_preadv64v2(
 {
     (void) flags;
     return chimera_posix_readv_internal(fd, iov, iovcnt, (off_t) offset, 0);
-}
+} /* chimera_posix_preadv64v2 */

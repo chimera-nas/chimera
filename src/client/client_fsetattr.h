@@ -14,10 +14,10 @@ chimera_fsetattr_complete(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request       = private_data;
-    struct chimera_client_thread  *client_thread = request->thread;
-    chimera_fsetattr_callback_t    callback      = request->fsetattr.callback;
-    void                          *callback_arg  = request->fsetattr.private_data;
+    struct chimera_client_request *request        = private_data;
+    struct chimera_client_thread  *client_thread  = request->thread;
+    chimera_fsetattr_callback_t    callback       = request->fsetattr.callback;
+    void                          *callback_arg   = request->fsetattr.private_data;
     int                            heap_allocated = request->heap_allocated;
 
     if (heap_allocated) {

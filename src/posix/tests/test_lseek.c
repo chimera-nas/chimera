@@ -112,15 +112,15 @@ main(
     fprintf(stderr, "Testing SEEK_END...\n");
     pos = chimera_posix_lseek(fd, -5, SEEK_END);
 
-    if (pos != (off_t)(data_len - 5)) {
+    if (pos != (off_t) (data_len - 5)) {
         fprintf(stderr, "SEEK_END failed: expected %ld, got %ld\n",
-                (long)(data_len - 5), (long) pos);
+                (long) (data_len - 5), (long) pos);
         chimera_posix_close(fd);
         posix_test_fail(&env);
     }
 
     // Verify by reading
-    nread = chimera_posix_read(fd, buf, 5);
+    nread  = chimera_posix_read(fd, buf, 5);
     buf[5] = '\0';
 
     if (nread != 5 || strcmp(buf, "VWXYZ") != 0) {

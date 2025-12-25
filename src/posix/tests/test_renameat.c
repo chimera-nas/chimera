@@ -7,7 +7,7 @@
 
 #ifndef AT_FDCWD
 #define AT_FDCWD -100
-#endif
+#endif /* ifndef AT_FDCWD */
 
 int
 main(
@@ -40,7 +40,7 @@ main(
 
     // Rename it
     rc = chimera_posix_renameat(AT_FDCWD, "/test/rename_src.txt",
-                                 AT_FDCWD, "/test/rename_dst.txt");
+                                AT_FDCWD, "/test/rename_dst.txt");
     if (rc != 0) {
         fprintf(stderr, "renameat failed: %s\n", strerror(errno));
         posix_test_fail(&env);
@@ -74,4 +74,4 @@ main(
     posix_test_success(&env);
 
     return 0;
-}
+} /* main */

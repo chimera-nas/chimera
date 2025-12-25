@@ -9,7 +9,7 @@
 
 #ifndef IOV_MAX
 #define IOV_MAX 1024
-#endif
+#endif /* ifndef IOV_MAX */
 
 #include "posix_internal.h"
 #include "../client/client_write.h"
@@ -32,7 +32,7 @@ chimera_posix_writev_callback(
     }
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_writev_callback */
 
 static void
 chimera_posix_writev_exec(
@@ -40,7 +40,7 @@ chimera_posix_writev_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_write(thread, request);
-}
+} /* chimera_posix_writev_exec */
 
 static ssize_t
 chimera_posix_writev_internal(
@@ -125,7 +125,7 @@ chimera_posix_writev_internal(
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_writev_exec);
 
-    int err = chimera_posix_wait(&comp);
+    int     err = chimera_posix_wait(&comp);
 
     if (!err && req.sync_result >= 0 && use_fd_offset) {
         entry->offset += (uint64_t) req.sync_result;
@@ -143,7 +143,7 @@ chimera_posix_writev_internal(
     }
 
     return ret;
-}
+} /* chimera_posix_writev_internal */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_writev(
@@ -152,7 +152,7 @@ chimera_posix_writev(
     int                 iovcnt)
 {
     return chimera_posix_writev_internal(fd, iov, iovcnt, 0, 1);
-}
+} /* chimera_posix_writev */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_pwritev(
@@ -162,7 +162,7 @@ chimera_posix_pwritev(
     off_t               offset)
 {
     return chimera_posix_writev_internal(fd, iov, iovcnt, offset, 0);
-}
+} /* chimera_posix_pwritev */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_pwritev64(
@@ -172,7 +172,7 @@ chimera_posix_pwritev64(
     int64_t             offset)
 {
     return chimera_posix_writev_internal(fd, iov, iovcnt, (off_t) offset, 0);
-}
+} /* chimera_posix_pwritev64 */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_pwritev2(
@@ -185,7 +185,7 @@ chimera_posix_pwritev2(
     // Ignore RWF_HIPRI and RWF_NOWAIT for now - just behave as pwritev
     (void) flags;
     return chimera_posix_writev_internal(fd, iov, iovcnt, offset, 0);
-}
+} /* chimera_posix_pwritev2 */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_pwritev64v2(
@@ -197,4 +197,4 @@ chimera_posix_pwritev64v2(
 {
     (void) flags;
     return chimera_posix_writev_internal(fd, iov, iovcnt, (off_t) offset, 0);
-}
+} /* chimera_posix_pwritev64v2 */

@@ -10,7 +10,7 @@
 
 #ifndef AT_FDCWD
 #define AT_FDCWD -100
-#endif
+#endif /* ifndef AT_FDCWD */
 
 static void
 chimera_posix_renameat_callback(
@@ -21,7 +21,7 @@ chimera_posix_renameat_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_renameat_callback */
 
 static void
 chimera_posix_renameat_exec(
@@ -29,7 +29,7 @@ chimera_posix_renameat_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_rename(thread, request);
-}
+} /* chimera_posix_renameat_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_renameat(
@@ -38,12 +38,12 @@ chimera_posix_renameat(
     int         newdirfd,
     const char *newpath)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    int                              old_path_len, new_path_len;
-    const char                      *old_slash, *new_slash;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    int                             old_path_len, new_path_len;
+    const char                     *old_slash, *new_slash;
 
     // For now, only support AT_FDCWD for both paths
     // Full fd-relative support would require VFS-level changes

@@ -9,21 +9,21 @@
 #include "../client/client_setattr.h"
 
 #ifndef AT_FDCWD
-#define AT_FDCWD -100
-#endif
+#define AT_FDCWD            -100
+#endif /* ifndef AT_FDCWD */
 
 #ifndef AT_SYMLINK_NOFOLLOW
 #define AT_SYMLINK_NOFOLLOW 0x100
-#endif
+#endif /* ifndef AT_SYMLINK_NOFOLLOW */
 
 #ifndef AT_EMPTY_PATH
-#define AT_EMPTY_PATH 0x1000
-#endif
+#define AT_EMPTY_PATH       0x1000
+#endif /* ifndef AT_EMPTY_PATH */
 
 struct chimera_posix_fchownat_ctx {
-    struct chimera_posix_completion  comp;
-    struct chimera_vfs_open_handle  *file_handle;
-    struct chimera_vfs_attrs         set_attr;
+    struct chimera_posix_completion comp;
+    struct chimera_vfs_open_handle *file_handle;
+    struct chimera_vfs_attrs        set_attr;
 };
 
 static void
@@ -35,7 +35,7 @@ chimera_posix_fchownat_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_fchownat_callback */
 
 /* Callback after setattr completes - release the file handle */
 static void
@@ -50,7 +50,7 @@ chimera_posix_fchownat_setattr_complete(
 
     chimera_vfs_release(ctx->comp.request->thread->vfs_thread, ctx->file_handle);
     chimera_posix_complete(&ctx->comp, error_code);
-}
+} /* chimera_posix_fchownat_setattr_complete */
 
 /* Callback after opening the target file - now call setattr */
 static void
@@ -81,7 +81,7 @@ chimera_posix_fchownat_open_complete(
         0,  /* post_attr_mask */
         chimera_posix_fchownat_setattr_complete,
         ctx);
-}
+} /* chimera_posix_fchownat_open_complete */
 
 static void
 chimera_posix_fchownat_at_exec(
@@ -106,7 +106,7 @@ chimera_posix_fchownat_at_exec(
         0,
         chimera_posix_fchownat_open_complete,
         ctx);
-}
+} /* chimera_posix_fchownat_at_exec */
 
 static void
 chimera_posix_fchownat_exec(
@@ -114,7 +114,7 @@ chimera_posix_fchownat_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_setattr(thread, request);
-}
+} /* chimera_posix_fchownat_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_fchownat(
@@ -124,14 +124,14 @@ chimera_posix_fchownat(
     gid_t       group,
     int         flags)
 {
-    struct chimera_posix_client       *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker       *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request      req;
-    struct chimera_posix_fchownat_ctx  ctx;
-    struct chimera_posix_fd_entry     *dir_entry = NULL;
-    int                                path_len;
-    const char                        *slash;
-    int                                err;
+    struct chimera_posix_client      *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker      *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request     req;
+    struct chimera_posix_fchownat_ctx ctx;
+    struct chimera_posix_fd_entry    *dir_entry = NULL;
+    int                               path_len;
+    const char                       *slash;
+    int                               err;
 
     // AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH are not implemented
     (void) flags;

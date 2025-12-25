@@ -80,4 +80,4 @@ main(
     posix_test_success(&env);
 
     return 0;
-}
+} /* main */

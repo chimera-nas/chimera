@@ -19,11 +19,11 @@ chimera_setattr_vfs_complete(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
-    struct chimera_client_request  *request       = private_data;
-    struct chimera_client_thread   *thread        = request->thread;
-    struct chimera_vfs_open_handle *handle        = request->setattr.parent_handle;
-    chimera_setattr_callback_t      callback      = request->setattr.callback;
-    void                           *callback_arg  = request->setattr.private_data;
+    struct chimera_client_request  *request        = private_data;
+    struct chimera_client_thread   *thread         = request->thread;
+    struct chimera_vfs_open_handle *handle         = request->setattr.parent_handle;
+    chimera_setattr_callback_t      callback       = request->setattr.callback;
+    void                           *callback_arg   = request->setattr.private_data;
     int                             heap_allocated = request->heap_allocated;
 
     if (heap_allocated) {

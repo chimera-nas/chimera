@@ -17,7 +17,7 @@ chimera_posix_truncate_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_truncate_callback */
 
 static void
 chimera_posix_truncate_exec(
@@ -25,18 +25,18 @@ chimera_posix_truncate_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_setattr(thread, request);
-}
+} /* chimera_posix_truncate_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_truncate(
     const char *path,
     off_t       length)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    int                              path_len;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    int                             path_len;
 
     if (length < 0) {
         errno = EINVAL;

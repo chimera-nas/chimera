@@ -6,16 +6,16 @@
 
 SYMBOL_EXPORT int
 chimera_posix_scandir(
-    const char      *path,
+    const char *path,
     struct dirent ***namelist,
-    int (*filter)(const struct dirent *),
-    int (*compar)(const struct dirent **, const struct dirent **))
+    int ( *filter )(const struct dirent *),
+    int ( *compar )(const struct dirent **, const struct dirent **))
 {
     CHIMERA_DIR    *dirp;
     struct dirent  *entry;
-    struct dirent **list    = NULL;
-    int             count   = 0;
-    int             alloc   = 0;
+    struct dirent **list  = NULL;
+    int             count = 0;
+    int             alloc = 0;
     struct dirent  *copy;
 
     if (!namelist) {
@@ -51,7 +51,7 @@ chimera_posix_scandir(
             goto error;
         }
 
-        *copy        = *entry;
+        *copy         = *entry;
         list[count++] = copy;
     }
 
@@ -66,7 +66,7 @@ chimera_posix_scandir(
     *namelist = list;
     return count;
 
-error:
+ error:
     // Free all allocated entries
     for (int i = 0; i < count; i++) {
         free(list[i]);

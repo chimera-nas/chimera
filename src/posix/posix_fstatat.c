@@ -9,12 +9,12 @@
 #include "../client/client_stat.h"
 
 #ifndef AT_FDCWD
-#define AT_FDCWD -100
-#endif
+#define AT_FDCWD            -100
+#endif /* ifndef AT_FDCWD */
 
 #ifndef AT_SYMLINK_NOFOLLOW
 #define AT_SYMLINK_NOFOLLOW 0x100
-#endif
+#endif /* ifndef AT_SYMLINK_NOFOLLOW */
 
 static void
 chimera_posix_fstatat_callback(
@@ -31,7 +31,7 @@ chimera_posix_fstatat_callback(
     }
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_fstatat_callback */
 
 static void
 chimera_posix_fstatat_exec(
@@ -39,7 +39,7 @@ chimera_posix_fstatat_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_stat(thread, request);
-}
+} /* chimera_posix_fstatat_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_fstatat(
@@ -48,11 +48,11 @@ chimera_posix_fstatat(
     struct stat *statbuf,
     int          flags)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    int                              path_len;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    int                             path_len;
 
     // Note: AT_SYMLINK_NOFOLLOW is not yet implemented (would need lstat)
     (void) flags;

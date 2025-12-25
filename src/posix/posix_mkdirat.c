@@ -10,7 +10,7 @@
 
 #ifndef AT_FDCWD
 #define AT_FDCWD -100
-#endif
+#endif /* ifndef AT_FDCWD */
 
 static void
 chimera_posix_mkdirat_callback(
@@ -21,7 +21,7 @@ chimera_posix_mkdirat_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_mkdirat_callback */
 
 static void
 chimera_posix_mkdirat_exec(
@@ -35,7 +35,7 @@ chimera_posix_mkdirat_exec(
         // Use the normal path-based mkdir
         chimera_dispatch_mkdir(thread, request);
     }
-}
+} /* chimera_posix_mkdirat_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_mkdirat(
@@ -43,13 +43,13 @@ chimera_posix_mkdirat(
     const char *pathname,
     mode_t      mode)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    struct chimera_posix_fd_entry   *dir_entry = NULL;
-    int                              path_len;
-    const char                      *slash;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    struct chimera_posix_fd_entry  *dir_entry = NULL;
+    int                             path_len;
+    const char                     *slash;
 
     chimera_posix_completion_init(&comp, &req);
 
@@ -94,9 +94,9 @@ chimera_posix_mkdirat(
         req.mkdir.name_offset   = 0;
     }
 
-    req.opcode              = CHIMERA_CLIENT_OP_MKDIR;
-    req.mkdir.callback      = chimera_posix_mkdirat_callback;
-    req.mkdir.private_data  = &comp;
+    req.opcode             = CHIMERA_CLIENT_OP_MKDIR;
+    req.mkdir.callback     = chimera_posix_mkdirat_callback;
+    req.mkdir.private_data = &comp;
 
     req.mkdir.set_attr.va_req_mask = 0;
     req.mkdir.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;

@@ -35,11 +35,11 @@ chimera_stat_getattr_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_client_request  *request = private_data;
-    struct chimera_client_thread   *thread  = request->thread;
-    struct chimera_vfs_open_handle *handle  = request->stat.handle;
-    chimera_stat_callback_t         callback     = request->stat.callback;
-    void                           *callback_arg = request->stat.private_data;
+    struct chimera_client_request  *request        = private_data;
+    struct chimera_client_thread   *thread         = request->thread;
+    struct chimera_vfs_open_handle *handle         = request->stat.handle;
+    chimera_stat_callback_t         callback       = request->stat.callback;
+    void                           *callback_arg   = request->stat.private_data;
     int                             heap_allocated = request->heap_allocated;
     struct chimera_stat             st;
 

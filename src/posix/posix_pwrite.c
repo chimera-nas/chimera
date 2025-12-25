@@ -26,7 +26,7 @@ chimera_posix_pwrite_callback(
     }
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_pwrite_callback */
 
 static void
 chimera_posix_pwrite_exec(
@@ -34,7 +34,7 @@ chimera_posix_pwrite_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_write(thread, request);
-}
+} /* chimera_posix_pwrite_exec */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_pwrite(
@@ -78,7 +78,7 @@ chimera_posix_pwrite(
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_pwrite_exec);
 
-    int err = chimera_posix_wait(&comp);
+    int     err = chimera_posix_wait(&comp);
 
     // pwrite does NOT update the file offset
 
@@ -94,7 +94,7 @@ chimera_posix_pwrite(
     }
 
     return ret;
-}
+} /* chimera_posix_pwrite */
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_pwrite64(
@@ -104,4 +104,4 @@ chimera_posix_pwrite64(
     int64_t     offset)
 {
     return chimera_posix_pwrite(fd, buf, count, (off_t) offset);
-}
+} /* chimera_posix_pwrite64 */

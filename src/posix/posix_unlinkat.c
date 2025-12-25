@@ -9,12 +9,12 @@
 #include "../client/client_remove.h"
 
 #ifndef AT_FDCWD
-#define AT_FDCWD -100
-#endif
+#define AT_FDCWD     -100
+#endif /* ifndef AT_FDCWD */
 
 #ifndef AT_REMOVEDIR
 #define AT_REMOVEDIR 0x200
-#endif
+#endif /* ifndef AT_REMOVEDIR */
 
 static void
 chimera_posix_unlinkat_callback(
@@ -25,7 +25,7 @@ chimera_posix_unlinkat_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_unlinkat_callback */
 
 static void
 chimera_posix_unlinkat_exec(
@@ -39,7 +39,7 @@ chimera_posix_unlinkat_exec(
         // Use the normal path-based remove
         chimera_dispatch_remove(thread, request);
     }
-}
+} /* chimera_posix_unlinkat_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_unlinkat(
@@ -47,13 +47,13 @@ chimera_posix_unlinkat(
     const char *pathname,
     int         flags)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    struct chimera_posix_fd_entry   *dir_entry = NULL;
-    int                              path_len;
-    const char                      *slash;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    struct chimera_posix_fd_entry  *dir_entry = NULL;
+    int                             path_len;
+    const char                     *slash;
 
     // Note: AT_REMOVEDIR flag is handled by the VFS layer
     // which will enforce directory-only removal semantics

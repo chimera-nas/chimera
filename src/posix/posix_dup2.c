@@ -21,7 +21,7 @@ chimera_posix_remove_from_free_list(
 
     while (*pp) {
         if (*pp == target) {
-            *pp = target->next;
+            *pp          = target->next;
             target->next = NULL;
             break;
         }
@@ -29,7 +29,7 @@ chimera_posix_remove_from_free_list(
     }
 
     pthread_mutex_unlock(&posix->fd_lock);
-}
+} /* chimera_posix_remove_from_free_list */
 
 SYMBOL_EXPORT int
 chimera_posix_dup2(

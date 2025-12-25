@@ -13,7 +13,7 @@ chimera_fstat_getattr_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request      = private_data;
+    struct chimera_client_request *request       = private_data;
     struct chimera_client_thread  *client_thread = request->thread;
     chimera_fstat_callback_t       callback      = request->fstat.callback;
     void                          *callback_arg  = request->fstat.private_data;

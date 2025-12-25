@@ -26,8 +26,8 @@ chimera_posix_fread(
 
     // Handle ungetc character first
     if (stream->ungetc_char >= 0 && total_bytes > 0) {
-        buf[0]               = (char) stream->ungetc_char;
-        stream->ungetc_char  = -1;
+        buf[0]              = (char) stream->ungetc_char;
+        stream->ungetc_char = -1;
         buf++;
         bytes_read++;
         total_bytes--;

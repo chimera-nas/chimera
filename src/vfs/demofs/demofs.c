@@ -73,27 +73,27 @@
         chimera_abort_if(cond, "demofs", __FILE__, __LINE__, __VA_ARGS__)
 
 struct demofs_request_private {
-    int               opcode;
-    int               status;
-    int               pending;
-    int               niov;
-    uint32_t          read_prefix;
-    uint32_t          read_suffix;
-    struct evpl_iovec iov[64];
+    int                   opcode;
+    int                   status;
+    int                   pending;
+    int                   niov;
+    uint32_t              read_prefix;
+    uint32_t              read_suffix;
+    struct evpl_iovec     iov[64];
 
     // For RMW (read-modify-write) on partial block writes
     struct demofs_thread *rmw_thread;    // Thread for async callback
-    int               rmw_phase;         // 0 = no RMW, 1 = reading, 2 = writing
-    uint64_t          rmw_aligned_start; // Block-aligned start offset
-    uint64_t          rmw_aligned_length;// Block-aligned length
-    uint64_t          rmw_device_id;     // Device for the new extent
-    uint64_t          rmw_device_offset; // Device offset for the new extent
-    uint32_t          rmw_prefix_len;    // Bytes to preserve at start of first block
-    uint32_t          rmw_suffix_len;    // Bytes to preserve at end of last block
-    struct evpl_iovec rmw_prefix_iov;    // IOV for prefix data (if read from existing extent)
-    struct evpl_iovec rmw_suffix_iov;    // IOV for suffix data (if read from existing extent)
-    int               rmw_prefix_pending;// Pending read for prefix
-    int               rmw_suffix_pending;// Pending read for suffix
+    int                   rmw_phase;     // 0 = no RMW, 1 = reading, 2 = writing
+    uint64_t              rmw_aligned_start; // Block-aligned start offset
+    uint64_t              rmw_aligned_length;// Block-aligned length
+    uint64_t              rmw_device_id; // Device for the new extent
+    uint64_t              rmw_device_offset; // Device offset for the new extent
+    uint32_t              rmw_prefix_len; // Bytes to preserve at start of first block
+    uint32_t              rmw_suffix_len; // Bytes to preserve at end of last block
+    struct evpl_iovec     rmw_prefix_iov; // IOV for prefix data (if read from existing extent)
+    struct evpl_iovec     rmw_suffix_iov; // IOV for suffix data (if read from existing extent)
+    int                   rmw_prefix_pending;// Pending read for prefix
+    int                   rmw_suffix_pending;// Pending read for suffix
 };
 
 struct demofs_extent {
@@ -1856,7 +1856,7 @@ demofs_write_rmw_read_callback(
         demofs_private->rmw_phase = 2;
         demofs_write_phase2(thread, shared, request);
     }
-}
+} /* demofs_write_rmw_read_callback */
 
 // Phase 2: Issue actual writes (called after RMW reads complete or if no RMW needed)
 static void
@@ -1865,7 +1865,7 @@ demofs_write_phase2(
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request)
 {
-    struct evpl                   *evpl = thread->evpl;
+    struct evpl                   *evpl           = thread->evpl;
     struct demofs_request_private *demofs_private = request->plugin_data;
     struct evpl_iovec              write_iov[66]; // prefix + data + suffix + padding
     int                            write_niov = 0;
@@ -1885,13 +1885,13 @@ demofs_write_phase2(
     if (prefix_len > 0) {
         if (demofs_private->rmw_prefix_iov.data) {
             // Prefix from existing extent
-            write_iov[write_niov] = demofs_private->rmw_prefix_iov;
+            write_iov[write_niov]        = demofs_private->rmw_prefix_iov;
             write_iov[write_niov].length = prefix_len;
             write_niov++;
         } else {
             // Prefix is zeros (no existing data)
             // Use thread->zero without adding ref - it's persistent
-            write_iov[write_niov] = thread->zero;
+            write_iov[write_niov]        = thread->zero;
             write_iov[write_niov].length = prefix_len;
             write_niov++;
         }
@@ -1909,13 +1909,13 @@ demofs_write_phase2(
             // Suffix from existing extent - extract the portion after write_end
             uint64_t write_end    = request->write.offset + write_length;
             uint32_t suffix_start = write_end & 4095; // offset within block
-            write_iov[write_niov].data   = (char *)demofs_private->rmw_suffix_iov.data + suffix_start;
+            write_iov[write_niov].data   = (char *) demofs_private->rmw_suffix_iov.data + suffix_start;
             write_iov[write_niov].length = suffix_len;
             write_niov++;
         } else {
             // Suffix is zeros (no existing data)
             // Use thread->zero without adding ref - it's persistent
-            write_iov[write_niov] = thread->zero;
+            write_iov[write_niov]        = thread->zero;
             write_iov[write_niov].length = suffix_len;
             write_niov++;
         }
@@ -1927,7 +1927,7 @@ demofs_write_phase2(
 
     if (padding > 0) {
         // Use thread->zero without adding ref - it's persistent
-        write_iov[write_niov] = thread->zero;
+        write_iov[write_niov]        = thread->zero;
         write_iov[write_niov].length = padding;
         write_niov++;
     }
@@ -1970,11 +1970,13 @@ demofs_write_phase2(
     }
 
     // Note: RMW buffers will be released in demofs_io_callback when write completes
-}
+} /* demofs_write_phase2 */
 
 // Find extent covering a specific file offset
 static struct demofs_extent *
-demofs_find_extent_at(struct demofs_inode *inode, uint64_t file_offset)
+demofs_find_extent_at(
+    struct demofs_inode *inode,
+    uint64_t             file_offset)
 {
     struct demofs_extent *extent;
 
@@ -1988,7 +1990,7 @@ demofs_find_extent_at(struct demofs_inode *inode, uint64_t file_offset)
     }
 
     return NULL;
-}
+} /* demofs_find_extent_at */
 
 static void
 demofs_write(
@@ -2077,10 +2079,10 @@ demofs_write(
         // Check if there's an existing extent covering the prefix region
         prefix_extent = demofs_find_extent_at(inode, aligned_start);
         if (prefix_extent) {
-            need_prefix_read    = 1;
-            prefix_device_id    = prefix_extent->device_id;
+            need_prefix_read     = 1;
+            prefix_device_id     = prefix_extent->device_id;
             prefix_device_offset = prefix_extent->device_offset +
-                                  (aligned_start - prefix_extent->file_offset);
+                (aligned_start - prefix_extent->file_offset);
         }
     }
 
@@ -2089,12 +2091,12 @@ demofs_write(
         // The suffix starts at write_end
         suffix_extent = demofs_find_extent_at(inode, write_end);
         if (suffix_extent) {
-            need_suffix_read     = 1;
-            suffix_device_id     = suffix_extent->device_id;
+            need_suffix_read = 1;
+            suffix_device_id = suffix_extent->device_id;
             // Read the block containing write_end
             uint64_t suffix_block = write_end & ~4095ULL;
             suffix_device_offset = suffix_extent->device_offset +
-                                  (suffix_block - suffix_extent->file_offset);
+                (suffix_block - suffix_extent->file_offset);
         }
     }
 
@@ -2130,11 +2132,11 @@ demofs_write(
             // The extent starts before aligned_end but ends after
             // We need to shift the extent to start at aligned_end
             uint64_t shift = aligned_end - extent_start;
-            extent->file_offset   = aligned_end;
+            extent->file_offset    = aligned_end;
             extent->device_offset += shift;
             extent->length        -= shift;
             if (extent->buffer) {
-                extent->buffer = (char *)extent->buffer + shift;
+                extent->buffer = (char *) extent->buffer + shift;
             }
         }
 

@@ -17,7 +17,7 @@ chimera_posix_fchown_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_fchown_callback */
 
 static void
 chimera_posix_fchown_exec(
@@ -25,7 +25,7 @@ chimera_posix_fchown_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_fsetattr(thread, request);
-}
+} /* chimera_posix_fchown_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_fchown(
@@ -33,11 +33,11 @@ chimera_posix_fchown(
     uid_t owner,
     gid_t group)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_posix_fd_entry   *entry;
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_fd_entry  *entry;
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
 
     entry = chimera_posix_fd_acquire(posix, fd, 0);
 

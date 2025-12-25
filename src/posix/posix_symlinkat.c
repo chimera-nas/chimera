@@ -10,7 +10,7 @@
 
 #ifndef AT_FDCWD
 #define AT_FDCWD -100
-#endif
+#endif /* ifndef AT_FDCWD */
 
 static void
 chimera_posix_symlinkat_callback(
@@ -21,7 +21,7 @@ chimera_posix_symlinkat_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_symlinkat_callback */
 
 static void
 chimera_posix_symlinkat_exec(
@@ -29,7 +29,7 @@ chimera_posix_symlinkat_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_symlink(thread, request);
-}
+} /* chimera_posix_symlinkat_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_symlinkat(
@@ -37,12 +37,12 @@ chimera_posix_symlinkat(
     int         newdirfd,
     const char *linkpath)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    int                              path_len, target_len;
-    const char                      *slash;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    int                             path_len, target_len;
+    const char                     *slash;
 
     // For now, only support AT_FDCWD
     if (newdirfd != AT_FDCWD) {

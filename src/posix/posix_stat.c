@@ -23,7 +23,7 @@ chimera_posix_stat_callback(
     }
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_stat_callback */
 
 static void
 chimera_posix_stat_exec(
@@ -31,18 +31,18 @@ chimera_posix_stat_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_stat(thread, request);
-}
+} /* chimera_posix_stat_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_stat(
     const char  *path,
     struct stat *st)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    int                              path_len;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    int                             path_len;
 
     chimera_posix_completion_init(&comp, &req);
 
@@ -71,4 +71,4 @@ chimera_posix_stat(
     }
 
     return 0;
-}
+} /* chimera_posix_stat */

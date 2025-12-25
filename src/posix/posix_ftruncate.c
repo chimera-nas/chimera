@@ -17,7 +17,7 @@ chimera_posix_ftruncate_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_ftruncate_callback */
 
 static void
 chimera_posix_ftruncate_exec(
@@ -25,18 +25,18 @@ chimera_posix_ftruncate_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_fsetattr(thread, request);
-}
+} /* chimera_posix_ftruncate_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_ftruncate(
     int   fd,
     off_t length)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_posix_fd_entry   *entry;
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_fd_entry  *entry;
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
 
     if (length < 0) {
         errno = EINVAL;

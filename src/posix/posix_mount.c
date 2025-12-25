@@ -16,7 +16,7 @@ chimera_posix_mount_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_mount_callback */
 
 static void
 chimera_posix_mount_exec(
@@ -24,7 +24,7 @@ chimera_posix_mount_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_mount(thread, request);
-}
+} /* chimera_posix_mount_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_mount(
@@ -32,10 +32,10 @@ chimera_posix_mount(
     const char *module_name,
     const char *module_path)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
 
     chimera_posix_completion_init(&comp, &req);
 
@@ -59,4 +59,4 @@ chimera_posix_mount(
     }
 
     return 0;
-}
+} /* chimera_posix_mount */

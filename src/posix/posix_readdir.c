@@ -6,9 +6,9 @@
 #include "../client/client_readdir.h"
 
 struct chimera_posix_readdir_ctx {
-    struct chimera_posix_completion  comp;
-    struct chimera_posix_dir        *dir;
-    int                              got_entry;
+    struct chimera_posix_completion comp;
+    struct chimera_posix_dir       *dir;
+    int                             got_entry;
 };
 
 static int
@@ -58,12 +58,12 @@ chimera_posix_readdir_exec(
 SYMBOL_EXPORT struct dirent *
 chimera_posix_readdir(CHIMERA_DIR *dirp)
 {
-    struct chimera_posix_client      *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker      *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request     req;
-    struct chimera_posix_readdir_ctx  ctx;
-    struct chimera_posix_fd_entry    *entry;
-    int                               err;
+    struct chimera_posix_client     *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request    req;
+    struct chimera_posix_readdir_ctx ctx;
+    struct chimera_posix_fd_entry   *entry;
+    int                              err;
 
     if (!dirp) {
         errno = EBADF;

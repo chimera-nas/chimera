@@ -9,16 +9,16 @@
 #include "../client/client_stat.h"
 
 #ifndef AT_FDCWD
-#define AT_FDCWD -100
-#endif
+#define AT_FDCWD            -100
+#endif /* ifndef AT_FDCWD */
 
 #ifndef AT_EACCESS
-#define AT_EACCESS 0x200
-#endif
+#define AT_EACCESS          0x200
+#endif /* ifndef AT_EACCESS */
 
 #ifndef AT_SYMLINK_NOFOLLOW
 #define AT_SYMLINK_NOFOLLOW 0x100
-#endif
+#endif /* ifndef AT_SYMLINK_NOFOLLOW */
 
 static void
 chimera_posix_faccessat_callback(
@@ -30,7 +30,7 @@ chimera_posix_faccessat_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_faccessat_callback */
 
 static void
 chimera_posix_faccessat_exec(
@@ -38,7 +38,7 @@ chimera_posix_faccessat_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_stat(thread, request);
-}
+} /* chimera_posix_faccessat_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_faccessat(
@@ -47,11 +47,11 @@ chimera_posix_faccessat(
     int         mode,
     int         flags)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    int                              path_len;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    int                             path_len;
 
     // Note: We only check for file existence, not actual access permissions
     // Full implementation would require checking uid/gid against file mode

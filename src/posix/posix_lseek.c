@@ -12,7 +12,7 @@ chimera_posix_lseek(
     off_t offset,
     int   whence)
 {
-    struct chimera_posix_client *posix = chimera_posix_get_global();
+    struct chimera_posix_client *posix     = chimera_posix_get_global();
     off_t                        file_size = 0;
 
     if (whence == SEEK_END) {
@@ -26,7 +26,7 @@ chimera_posix_lseek(
     }
 
     return chimera_posix_fd_lseek(posix, fd, offset, whence, file_size);
-}
+} /* chimera_posix_lseek */
 
 SYMBOL_EXPORT int64_t
 chimera_posix_lseek64(
@@ -34,7 +34,7 @@ chimera_posix_lseek64(
     int64_t offset,
     int     whence)
 {
-    struct chimera_posix_client *posix = chimera_posix_get_global();
+    struct chimera_posix_client *posix     = chimera_posix_get_global();
     int64_t                      file_size = 0;
 
     if (whence == SEEK_END) {
@@ -49,4 +49,4 @@ chimera_posix_lseek64(
 
     return (int64_t) chimera_posix_fd_lseek(posix, fd, (off_t) offset, whence,
                                             (off_t) file_size);
-}
+} /* chimera_posix_lseek64 */

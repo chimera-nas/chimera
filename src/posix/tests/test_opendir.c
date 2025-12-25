@@ -51,7 +51,7 @@ test_opendir_closedir(void)
     }
 
     fprintf(stderr, "opendir/closedir/dirfd tests passed\n");
-}
+} /* test_opendir_closedir */
 
 static void
 test_readdir(void)
@@ -59,7 +59,7 @@ test_readdir(void)
     CHIMERA_DIR   *dir;
     struct dirent *entry;
     int            found_file1 = 0, found_file2 = 0, found_subdir = 0;
-    int            count       = 0;
+    int            count = 0;
     int            fd;
 
     fprintf(stderr, "Testing readdir...\n");
@@ -114,7 +114,7 @@ test_readdir(void)
 
     fprintf(stderr, "Found %d entries in directory\n", count);
     fprintf(stderr, "readdir tests passed\n");
-}
+} /* test_readdir */
 
 static void
 test_rewinddir(void)
@@ -152,7 +152,7 @@ test_rewinddir(void)
     }
 
     fprintf(stderr, "rewinddir tests passed (count=%d)\n", first_count);
-}
+} /* test_rewinddir */
 
 static void
 test_seekdir_telldir(void)
@@ -209,7 +209,7 @@ test_seekdir_telldir(void)
     chimera_posix_closedir(dir);
 
     fprintf(stderr, "seekdir/telldir tests passed\n");
-}
+} /* test_seekdir_telldir */
 
 static int
 filter_txt_files(const struct dirent *entry)
@@ -221,13 +221,15 @@ filter_txt_files(const struct dirent *entry)
         return 1;
     }
     return 0;
-}
+} /* filter_txt_files */
 
 static int
-compare_entries(const struct dirent **a, const struct dirent **b)
+compare_entries(
+    const struct dirent **a,
+    const struct dirent **b)
 {
     return strcmp((*a)->d_name, (*b)->d_name);
-}
+} /* compare_entries */
 
 static void
 test_scandir(void)
@@ -278,7 +280,7 @@ test_scandir(void)
     free(namelist);
 
     fprintf(stderr, "scandir tests passed\n");
-}
+} /* test_scandir */
 
 int
 main(
@@ -316,4 +318,4 @@ main(
     posix_test_success(&env);
 
     return 0;
-}
+} /* main */

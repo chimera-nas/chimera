@@ -17,7 +17,7 @@ chimera_posix_symlink_callback(
     struct chimera_posix_completion *comp = private_data;
 
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_symlink_callback */
 
 static void
 chimera_posix_symlink_exec(
@@ -25,20 +25,20 @@ chimera_posix_symlink_exec(
     struct chimera_client_request *request)
 {
     chimera_dispatch_symlink(thread, request);
-}
+} /* chimera_posix_symlink_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_symlink(
     const char *target,
     const char *path)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    const char                      *slash;
-    int                              path_len;
-    int                              target_len;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    const char                     *slash;
+    int                             path_len;
+    int                             target_len;
 
     chimera_posix_completion_init(&comp, &req);
 
@@ -74,4 +74,4 @@ chimera_posix_symlink(
     }
 
     return 0;
-}
+} /* chimera_posix_symlink */

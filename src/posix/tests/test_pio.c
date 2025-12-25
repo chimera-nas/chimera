@@ -7,7 +7,7 @@
 #include <sys/uio.h>
 #include "posix_test_common.h"
 
-#define TEST_DATA "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+#define TEST_DATA     "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 #define TEST_DATA_LEN 36
 
 static void
@@ -85,7 +85,7 @@ test_pread_pwrite(int fd)
     }
 
     fprintf(stderr, "pread/pwrite tests passed\n");
-}
+} /* test_pread_pwrite */
 
 static void
 test_readv_writev(int fd)
@@ -100,9 +100,9 @@ test_readv_writev(int fd)
     chimera_posix_lseek(fd, 0, SEEK_SET);
 
     // Setup write iovecs
-    char data1[] = "AAA";
-    char data2[] = "BBBBB";
-    char data3[] = "CC";
+    char         data1[] = "AAA";
+    char         data2[] = "BBBBB";
+    char         data3[] = "CC";
 
     iov[0].iov_base = data1;
     iov[0].iov_len  = 3;
@@ -147,7 +147,7 @@ test_readv_writev(int fd)
     }
 
     fprintf(stderr, "readv/writev tests passed\n");
-}
+} /* test_readv_writev */
 
 static void
 test_preadv_pwritev(int fd)
@@ -159,8 +159,8 @@ test_preadv_pwritev(int fd)
     fprintf(stderr, "Testing preadv/pwritev...\n");
 
     // Write at specific offset using pwritev
-    char data1[] = "111";
-    char data2[] = "222";
+    char         data1[] = "111";
+    char         data2[] = "222";
 
     iov[0].iov_base = data1;
     iov[0].iov_len  = 3;
@@ -207,7 +207,7 @@ test_preadv_pwritev(int fd)
     }
 
     fprintf(stderr, "preadv/pwritev tests passed\n");
-}
+} /* test_preadv_pwritev */
 
 static void
 test_preadv2_pwritev2(int fd)
@@ -219,8 +219,8 @@ test_preadv2_pwritev2(int fd)
     fprintf(stderr, "Testing preadv2/pwritev2...\n");
 
     // Write at specific offset using pwritev2 (with flags=0)
-    char data1[] = "XXX";
-    char data2[] = "YYY";
+    char         data1[] = "XXX";
+    char         data2[] = "YYY";
 
     iov[0].iov_base = data1;
     iov[0].iov_len  = 3;
@@ -288,7 +288,7 @@ test_preadv2_pwritev2(int fd)
     }
 
     fprintf(stderr, "preadv2/pwritev2 tests passed\n");
-}
+} /* test_preadv2_pwritev2 */
 
 static void
 test_64bit_variants(int fd)
@@ -336,7 +336,7 @@ test_64bit_variants(int fd)
     }
 
     fprintf(stderr, "64-bit variants tests passed\n");
-}
+} /* test_64bit_variants */
 
 int
 main(
@@ -385,4 +385,4 @@ main(
     posix_test_success(&env);
 
     return 0;
-}
+} /* main */

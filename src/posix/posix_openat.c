@@ -12,7 +12,7 @@
 
 #ifndef AT_FDCWD
 #define AT_FDCWD -100
-#endif
+#endif /* ifndef AT_FDCWD */
 
 static void
 chimera_posix_openat_callback(
@@ -25,7 +25,7 @@ chimera_posix_openat_callback(
 
     comp->request->sync_open_handle = oh;
     chimera_posix_complete(comp, status);
-}
+} /* chimera_posix_openat_callback */
 
 static void
 chimera_posix_openat_exec(
@@ -39,7 +39,7 @@ chimera_posix_openat_exec(
         // Use the normal path-based open
         chimera_dispatch_open(thread, request);
     }
-}
+} /* chimera_posix_openat_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_openat(
@@ -48,14 +48,14 @@ chimera_posix_openat(
     int         flags,
     ...)
 {
-    struct chimera_posix_client     *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker     *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request    req;
-    struct chimera_posix_completion  comp;
-    struct chimera_posix_fd_entry   *dir_entry = NULL;
-    mode_t                           mode      = 0;
-    int                              path_len;
-    const char                      *slash;
+    struct chimera_posix_client    *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+    struct chimera_posix_fd_entry  *dir_entry = NULL;
+    mode_t                          mode      = 0;
+    int                             path_len;
+    const char                     *slash;
 
     // Handle optional mode argument
     if (flags & O_CREAT) {

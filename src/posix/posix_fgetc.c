@@ -17,7 +17,7 @@ chimera_posix_fgetc(CHIMERA_FILE *stream)
 
     // Check for ungetc character first
     if (stream->ungetc_char >= 0) {
-        int ch              = stream->ungetc_char;
+        int ch = stream->ungetc_char;
         stream->ungetc_char = -1;
         return ch;
     }
