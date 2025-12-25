@@ -119,9 +119,8 @@ test_readdir(void)
 static void
 test_rewinddir(void)
 {
-    CHIMERA_DIR   *dir;
-    struct dirent *entry;
-    int            first_count = 0, second_count = 0;
+    CHIMERA_DIR *dir;
+    int          first_count = 0, second_count = 0;
 
     fprintf(stderr, "Testing rewinddir...\n");
 
@@ -132,7 +131,7 @@ test_rewinddir(void)
     }
 
     // Read all entries
-    while ((entry = chimera_posix_readdir(dir)) != NULL) {
+    while (chimera_posix_readdir(dir) != NULL) {
         first_count++;
     }
 
@@ -140,7 +139,7 @@ test_rewinddir(void)
     chimera_posix_rewinddir(dir);
 
     // Read all entries again
-    while ((entry = chimera_posix_readdir(dir)) != NULL) {
+    while (chimera_posix_readdir(dir) != NULL) {
         second_count++;
     }
 

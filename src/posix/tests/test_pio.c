@@ -196,7 +196,12 @@ test_preadv_pwritev(int fd)
     // Verify preadv/pwritev don't change file offset
     off_t pos_before = chimera_posix_lseek(fd, 0, SEEK_CUR);
 
-    ret = chimera_posix_preadv(fd, iov, 2, 20);
+    off_t amt = chimera_posix_preadv(fd, iov, 2, 20);
+
+    if (amt != 6) {
+        fprintf(stderr, "preadv failed: expected 6, got %zd\n", amt);
+        exit(1);
+    }
 
     off_t pos_after = chimera_posix_lseek(fd, 0, SEEK_CUR);
 

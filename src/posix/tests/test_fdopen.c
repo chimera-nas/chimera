@@ -113,6 +113,11 @@ main(
     // Close the stream (this also closes the fd)
     rc = chimera_posix_fclose(chimera_posix_fdopen(fd, "r"));
 
+    if (rc != 0) {
+        fprintf(stderr, "fclose failed: %s\n", strerror(errno));
+        posix_test_fail(&env);
+    }
+
     fprintf(stderr, "fdopen test passed\n");
 
     rc = posix_test_umount();
