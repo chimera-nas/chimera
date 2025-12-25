@@ -288,3 +288,13 @@ chimera_readdir(
     chimera_readdir_callback_t      callback,
     chimera_readdir_complete_t      complete,
     void                           *private_data);
+
+typedef void (*chimera_setattr_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+typedef void (*chimera_fsetattr_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);

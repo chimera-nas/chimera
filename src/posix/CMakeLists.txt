@@ -49,7 +49,13 @@ add_library(chimera_posix SHARED
             posix_symlinkat.c
             posix_readlinkat.c
             posix_fstatat.c
-            posix_faccessat.c)
+            posix_faccessat.c
+            posix_chmod.c
+            posix_fchmod.c
+            posix_fchmodat.c
+            posix_chown.c
+            posix_fchown.c
+            posix_fchownat.c)
 
 target_link_libraries(chimera_posix chimera_client evpl pthread)
 

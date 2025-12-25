@@ -47,6 +47,8 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_STAT,
     CHIMERA_CLIENT_OP_FSTAT,
     CHIMERA_CLIENT_OP_READDIR,
+    CHIMERA_CLIENT_OP_SETATTR,
+    CHIMERA_CLIENT_OP_FSETATTR,
 };
 
 struct chimera_client_request;
@@ -226,6 +228,24 @@ struct chimera_client_request {
             chimera_readdir_complete_t      complete;
             void                           *private_data;
         } readdir;
+
+        struct {
+            struct chimera_vfs_open_handle *parent_handle;
+            chimera_setattr_callback_t      callback;
+            void                           *private_data;
+            int                             path_len;
+            int                             parent_len;
+            int                             name_offset;
+            struct chimera_vfs_attrs        set_attr;
+            char                            path[CHIMERA_VFS_PATH_MAX];
+        } setattr;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_fsetattr_callback_t     callback;
+            void                           *private_data;
+            struct chimera_vfs_attrs        set_attr;
+        } fsetattr;
     };
 } __attribute__((aligned(64)));
 

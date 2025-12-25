@@ -434,4 +434,42 @@ chimera_posix_faccessat(
     int         mode,
     int         flags);
 
+// Permission and ownership functions
+int
+chimera_posix_chmod(
+    const char *path,
+    mode_t      mode);
+
+int
+chimera_posix_fchmod(
+    int    fd,
+    mode_t mode);
+
+int
+chimera_posix_fchmodat(
+    int         dirfd,
+    const char *pathname,
+    mode_t      mode,
+    int         flags);
+
+int
+chimera_posix_chown(
+    const char *path,
+    uid_t       owner,
+    gid_t       group);
+
+int
+chimera_posix_fchown(
+    int   fd,
+    uid_t owner,
+    gid_t group);
+
+int
+chimera_posix_fchownat(
+    int         dirfd,
+    const char *pathname,
+    uid_t       owner,
+    gid_t       group,
+    int         flags);
+
 #endif /* CHIMERA_POSIX_H */

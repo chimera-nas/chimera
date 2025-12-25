@@ -45,6 +45,12 @@ set(POSIX_TEST_PROGRAMS
     test_fgetc
     test_fgets
     test_ungetc
+    test_chmod
+    test_fchmod
+    test_fchmodat
+    test_chown
+    test_fchown
+    test_fchownat
 )
 
 # Create test programs
