@@ -19,13 +19,20 @@ chimera_posix_read_callback(
     struct chimera_posix_completion *comp    = private_data;
     struct chimera_client_request   *request = comp->request;
     size_t                           copied  = 0;
+    size_t                           to_copy;
 
     if (status == CHIMERA_VFS_OK) {
-        for (int i = 0; i < niov; i++) {
+        // Use the actual count from the VFS, not the iovec lengths
+        to_copy = request->read.result_count;
+        if (to_copy > request->read.length) {
+            to_copy = request->read.length;
+        }
+
+        for (int i = 0; i < niov && copied < to_copy; i++) {
             size_t chunk = iov[i].length;
 
-            if (copied + chunk > request->read.length) {
-                chunk = request->read.length - copied;
+            if (copied + chunk > to_copy) {
+                chunk = to_copy - copied;
             }
 
             memcpy((char *) request->read.buf + copied, iov[i].data, chunk);

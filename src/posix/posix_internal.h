@@ -57,7 +57,13 @@ struct chimera_posix_fd_entry {
     int                             io_waiters;
     int                             pending_close;
     int                             close_waiters;
+    int                             eof_flag;    // For FILE* feof() support
+    int                             error_flag;  // For FILE* ferror() support
+    int                             ungetc_char; // For FILE* ungetc() support (-1 = none)
 } __attribute__((aligned(64)));
+
+// CHIMERA_FILE is a pointer to an fd_entry for FILE* operations
+typedef struct chimera_posix_fd_entry CHIMERA_FILE;
 
 struct chimera_posix_worker {
     pthread_mutex_t                lock;
@@ -259,6 +265,9 @@ chimera_posix_fd_alloc(
     entry->io_waiters    = 0;
     entry->pending_close = 0;
     entry->close_waiters = 0;
+    entry->eof_flag      = 0;
+    entry->error_flag    = 0;
+    entry->ungetc_char   = -1;
 
     return fd;
 } // chimera_posix_fd_alloc
@@ -276,8 +285,11 @@ chimera_posix_fd_free(
 
     entry = &posix->fds[fd];
 
-    entry->handle = NULL;
-    entry->offset = 0;
+    entry->handle      = NULL;
+    entry->offset      = 0;
+    entry->eof_flag    = 0;
+    entry->error_flag  = 0;
+    entry->ungetc_char = -1;
 
     pthread_mutex_lock(&posix->fd_lock);
     entry->next      = posix->free_list;
@@ -474,5 +486,30 @@ void chimera_posix_worker_shutdown(
 void chimera_posix_worker_doorbell(
     struct evpl          *evpl,
     struct evpl_doorbell *doorbell);
+
+// FILE* helper functions
+static FORCE_INLINE int
+chimera_posix_file_to_fd(
+    struct chimera_posix_client *posix,
+    CHIMERA_FILE                *file)
+{
+    if (!file) {
+        return -1;
+    }
+
+    return (int) (file - posix->fds);
+} // chimera_posix_file_to_fd
+
+static FORCE_INLINE CHIMERA_FILE *
+chimera_posix_fd_to_file(
+    struct chimera_posix_client *posix,
+    int                          fd)
+{
+    if (fd < 0 || fd >= posix->max_fds) {
+        return NULL;
+    }
+
+    return &posix->fds[fd];
+} // chimera_posix_fd_to_file
 
 #endif /* CHIMERA_POSIX_INTERNAL_H */

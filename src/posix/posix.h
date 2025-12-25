@@ -249,4 +249,122 @@ chimera_posix_scandir(
     int (*filter)(const struct dirent *),
     int (*compar)(const struct dirent **, const struct dirent **));
 
+// FILE* operations
+// CHIMERA_FILE is defined in posix_internal.h as a pointer to fd_entry
+struct chimera_posix_fd_entry;
+typedef struct chimera_posix_fd_entry CHIMERA_FILE;
+
+// fpos_t equivalent for chimera
+typedef struct {
+    int64_t pos;
+} chimera_fpos_t;
+
+CHIMERA_FILE *
+chimera_posix_fopen(
+    const char *path,
+    const char *mode);
+
+CHIMERA_FILE *
+chimera_posix_freopen(
+    const char   *path,
+    const char   *mode,
+    CHIMERA_FILE *stream);
+
+int
+chimera_posix_fclose(
+    CHIMERA_FILE *stream);
+
+size_t
+chimera_posix_fread(
+    void         *ptr,
+    size_t        size,
+    size_t        nmemb,
+    CHIMERA_FILE *stream);
+
+size_t
+chimera_posix_fwrite(
+    const void   *ptr,
+    size_t        size,
+    size_t        nmemb,
+    CHIMERA_FILE *stream);
+
+int
+chimera_posix_fseek(
+    CHIMERA_FILE *stream,
+    long          offset,
+    int           whence);
+
+int
+chimera_posix_fseeko(
+    CHIMERA_FILE *stream,
+    off_t         offset,
+    int           whence);
+
+long
+chimera_posix_ftell(
+    CHIMERA_FILE *stream);
+
+off_t
+chimera_posix_ftello(
+    CHIMERA_FILE *stream);
+
+void
+chimera_posix_rewind(
+    CHIMERA_FILE *stream);
+
+int
+chimera_posix_fgetpos(
+    CHIMERA_FILE   *stream,
+    chimera_fpos_t *pos);
+
+int
+chimera_posix_fsetpos(
+    CHIMERA_FILE         *stream,
+    const chimera_fpos_t *pos);
+
+int
+chimera_posix_feof(
+    CHIMERA_FILE *stream);
+
+int
+chimera_posix_ferror(
+    CHIMERA_FILE *stream);
+
+void
+chimera_posix_clearerr(
+    CHIMERA_FILE *stream);
+
+int
+chimera_posix_fileno(
+    CHIMERA_FILE *stream);
+
+int
+chimera_posix_fflush(
+    CHIMERA_FILE *stream);
+
+int
+chimera_posix_fgetc(
+    CHIMERA_FILE *stream);
+
+int
+chimera_posix_fputc(
+    int           c,
+    CHIMERA_FILE *stream);
+
+char *
+chimera_posix_fgets(
+    char         *s,
+    int           size,
+    CHIMERA_FILE *stream);
+
+int
+chimera_posix_fputs(
+    const char   *s,
+    CHIMERA_FILE *stream);
+
+int
+chimera_posix_ungetc(
+    int           c,
+    CHIMERA_FILE *stream);
+
 #endif /* CHIMERA_POSIX_H */

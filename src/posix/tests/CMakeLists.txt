@@ -28,6 +28,7 @@ set(POSIX_TEST_PROGRAMS
     test_pio
     test_io_serialize
     test_opendir
+    test_stdio
 )
 
 # Create test programs

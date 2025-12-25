@@ -116,6 +116,8 @@ struct chimera_client_request {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        offset;
             uint32_t                        length;
+            uint32_t                        result_count;
+            uint32_t                        result_eof;
             int                             niov;
             chimera_read_callback_t         callback;
             void                           *private_data;

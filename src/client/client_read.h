@@ -21,6 +21,10 @@ chimera_read_complete(
     chimera_read_callback_t        callback      = request->read.callback;
     void                          *callback_arg  = request->read.private_data;
 
+    // Store the actual count and eof for use by the callback
+    request->read.result_count = count;
+    request->read.result_eof   = eof;
+
     chimera_client_request_free(client_thread, request);
 
     callback(client_thread, error_code, iov, niov, callback_arg);
