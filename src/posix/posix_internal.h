@@ -16,12 +16,23 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include <dirent.h>
 #include <utlist.h>
 #include "common/macros.h"
 #include "../client/client.h"
 #include "../client/client_internal.h"
 #include "vfs/vfs.h"
 #include "posix.h"
+
+// Directory stream for opendir/readdir/closedir
+struct chimera_posix_dir {
+    int                   fd;        // File descriptor for the directory
+    uint64_t              cookie;    // Current position cookie
+    int                   eof;       // End of directory reached
+    int                   buf_valid; // Whether buf contains valid entry
+    struct chimera_dirent buf;       // Buffer for current entry
+    struct dirent         entry;     // POSIX dirent to return
+};
 
 struct chimera_posix_completion {
     pthread_mutex_t                mutex;

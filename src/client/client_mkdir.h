@@ -40,7 +40,6 @@ chimera_mkdir_parent_complete(
     void                           *private_data)
 {
     struct chimera_client_request *request = private_data;
-    struct chimera_vfs_attrs       set_attr;
 
     if (error_code != CHIMERA_VFS_OK) {
         struct chimera_client_thread *client_thread = request->thread;
@@ -54,15 +53,15 @@ chimera_mkdir_parent_complete(
 
     request->mkdir.parent_handle = oh;
 
-    set_attr.va_req_mask = 0;
-    set_attr.va_set_mask = 0;
+    request->mkdir.set_attr.va_req_mask = 0;
+    request->mkdir.set_attr.va_set_mask = 0;
 
     chimera_vfs_mkdir(
         request->thread->vfs_thread,
         oh,
         request->mkdir.path + request->mkdir.name_offset,
         request->mkdir.path_len - request->mkdir.name_offset,
-        &set_attr,
+        &request->mkdir.set_attr,
         0,
         0,
         0,

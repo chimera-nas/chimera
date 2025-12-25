@@ -209,4 +209,44 @@ chimera_posix_pwritev64v2(
     int64_t             offset,
     int                 flags);
 
+// Directory operations
+struct chimera_posix_dir;
+typedef struct chimera_posix_dir CHIMERA_DIR;
+
+CHIMERA_DIR *
+chimera_posix_opendir(
+    const char *path);
+
+int
+chimera_posix_closedir(
+    CHIMERA_DIR *dirp);
+
+struct dirent *
+chimera_posix_readdir(
+    CHIMERA_DIR *dirp);
+
+int
+chimera_posix_dirfd(
+    CHIMERA_DIR *dirp);
+
+void
+chimera_posix_rewinddir(
+    CHIMERA_DIR *dirp);
+
+void
+chimera_posix_seekdir(
+    CHIMERA_DIR *dirp,
+    long         loc);
+
+long
+chimera_posix_telldir(
+    CHIMERA_DIR *dirp);
+
+int
+chimera_posix_scandir(
+    const char      *dirp,
+    struct dirent ***namelist,
+    int (*filter)(const struct dirent *),
+    int (*compar)(const struct dirent **, const struct dirent **));
+
 #endif /* CHIMERA_POSIX_H */

@@ -1386,12 +1386,12 @@ demofs_readdir(
             &attr,
             request->proto_private_data);
 
+        next_cookie = dirent->hash;
+
         if (rc) {
             eof = 0;
             break;
         }
-
-        next_cookie = dirent->hash;
 
         dirent = rb_tree_next(&inode->dir.dirents, dirent);
     }

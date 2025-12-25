@@ -144,10 +144,13 @@ chimera_open_path_parent_lookup_complete(
         return;
     }
 
+    memcpy(request->fh, attr->va_fh, attr->va_fh_len);
+    request->fh_len = attr->va_fh_len;
+
     chimera_vfs_open(
         request->thread->vfs_thread,
-        attr->va_fh,
-        attr->va_fh_len,
+        request->fh,
+        request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
         chimera_open_path_parent_complete,
         request);

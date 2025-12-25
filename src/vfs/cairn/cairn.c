@@ -1402,12 +1402,12 @@ cairn_readdir(
             &attr,
             request->proto_private_data);
 
+        next_cookie = dirent_key->hash;
+
         if (rc) {
             eof = 0;
             break;
         }
-
-        next_cookie = dirent_key->hash;
 
         rocksdb_iter_next(iter);
 
