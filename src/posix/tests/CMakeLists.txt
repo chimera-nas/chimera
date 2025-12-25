@@ -51,6 +51,12 @@ set(POSIX_TEST_PROGRAMS
     test_chown
     test_fchown
     test_fchownat
+    test_truncate
+    test_ftruncate
+    test_fsync
+    test_fdatasync
+    test_dup
+    test_fdopen
 )
 
 # Create test programs

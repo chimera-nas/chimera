@@ -72,6 +72,7 @@ chimera_setattr_lookup_complete(
     void                     *private_data)
 {
     struct chimera_client_request *request = private_data;
+    unsigned int                   open_flags;
 
     if (error_code != CHIMERA_VFS_OK) {
         struct chimera_client_thread *thread       = request->thread;
@@ -86,11 +87,21 @@ chimera_setattr_lookup_complete(
     memcpy(request->fh, attr->va_fh, attr->va_fh_len);
     request->fh_len = attr->va_fh_len;
 
+    /*
+     * Use a real file handle instead of OPEN_PATH when setting size, because
+     * ftruncate() requires a real file descriptor, not an O_PATH handle.
+     */
+    if (request->setattr.set_attr.va_req_mask & CHIMERA_VFS_ATTR_SIZE) {
+        open_flags = CHIMERA_VFS_OPEN_INFERRED;
+    } else {
+        open_flags = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
+    }
+
     chimera_vfs_open(
         request->thread->vfs_thread,
         request->fh,
         request->fh_len,
-        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
+        open_flags,
         chimera_setattr_open_complete,
         request);
 } /* chimera_setattr_lookup_complete */

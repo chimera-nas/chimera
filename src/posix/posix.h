@@ -472,4 +472,40 @@ chimera_posix_fchownat(
     gid_t       group,
     int         flags);
 
+// Truncate functions
+int
+chimera_posix_truncate(
+    const char *path,
+    off_t       length);
+
+int
+chimera_posix_ftruncate(
+    int   fd,
+    off_t length);
+
+// Sync functions
+int
+chimera_posix_fsync(
+    int fd);
+
+int
+chimera_posix_fdatasync(
+    int fd);
+
+// Duplicate file descriptor functions
+int
+chimera_posix_dup(
+    int oldfd);
+
+int
+chimera_posix_dup2(
+    int oldfd,
+    int newfd);
+
+// Convert fd to FILE*
+CHIMERA_FILE *
+chimera_posix_fdopen(
+    int         fd,
+    const char *mode);
+
 #endif /* CHIMERA_POSIX_H */

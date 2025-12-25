@@ -215,6 +215,28 @@ chimera_vfs_open_cache_release(
 
 } /* vfs_open_cache_release */
 
+/* Increment opencnt on an already-acquired handle (for dup operations) */
+static inline void
+chimera_vfs_open_cache_dup(
+    struct vfs_open_cache          *cache,
+    struct chimera_vfs_open_handle *handle)
+{
+    struct vfs_open_cache_shard *shard;
+
+    shard = &cache->shards[handle->fh_hash & cache->shard_mask];
+
+    chimera_vfs_abort_if(handle->cache_id != shard->cache_id, "handle duped by wrong cache");
+
+    pthread_mutex_lock(&shard->lock);
+
+    chimera_vfs_abort_if(handle->opencnt == 0, "dup on handle with zero opencnt");
+
+    handle->opencnt++;
+
+    pthread_mutex_unlock(&shard->lock);
+
+} /* chimera_vfs_open_cache_dup */
+
 static void
 chimera_vfs_open_cache_close_callback(
     enum chimera_vfs_error error_code,

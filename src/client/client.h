@@ -298,3 +298,8 @@ typedef void (*chimera_fsetattr_callback_t)(
     struct chimera_client_thread *client,
     enum chimera_vfs_error        status,
     void                         *private_data);
+
+typedef void (*chimera_commit_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);

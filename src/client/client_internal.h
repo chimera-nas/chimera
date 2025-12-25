@@ -49,6 +49,7 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_READDIR,
     CHIMERA_CLIENT_OP_SETATTR,
     CHIMERA_CLIENT_OP_FSETATTR,
+    CHIMERA_CLIENT_OP_COMMIT,
 };
 
 struct chimera_client_request;
@@ -246,6 +247,12 @@ struct chimera_client_request {
             void                           *private_data;
             struct chimera_vfs_attrs        set_attr;
         } fsetattr;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_commit_callback_t       callback;
+            void                           *private_data;
+        } commit;
     };
 } __attribute__((aligned(64)));
 

@@ -55,7 +55,14 @@ add_library(chimera_posix SHARED
             posix_fchmodat.c
             posix_chown.c
             posix_fchown.c
-            posix_fchownat.c)
+            posix_fchownat.c
+            posix_truncate.c
+            posix_ftruncate.c
+            posix_fsync.c
+            posix_fdatasync.c
+            posix_dup.c
+            posix_dup2.c
+            posix_fdopen.c)
 
 target_link_libraries(chimera_posix chimera_client evpl pthread)
 
