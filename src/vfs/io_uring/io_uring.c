@@ -488,8 +488,9 @@ chimera_io_uring_setattr(
         request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
     }
 
-    if (request->setattr.set_attr->va_req_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
-
+    if ((request->setattr.set_attr->va_req_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) ==
+        (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+        /* Both UID and GID are being set */
         rc = fchownat(fd, "", request->setattr.set_attr->va_uid, request->setattr.set_attr->va_gid,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
@@ -505,10 +506,8 @@ chimera_io_uring_setattr(
         }
 
         request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
-    }
-
-    if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_UID) {
-
+    } else if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_UID) {
+        /* Only UID is being set */
         rc = fchownat(fd, "", request->setattr.set_attr->va_uid, -1,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
@@ -523,15 +522,13 @@ chimera_io_uring_setattr(
         }
 
         request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
-    }
-
-    if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_GID) {
-
+    } else if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_GID) {
+        /* Only GID is being set */
         rc = fchownat(fd, "", -1, request->setattr.set_attr->va_gid,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
         if (rc) {
-            chimera_io_uring_error("io_uring_setattr: fchown(%u,-1) failed: %s",
+            chimera_io_uring_error("io_uring_setattr: fchown(-1,%u) failed: %s",
                                    request->setattr.set_attr->va_gid,
                                    strerror(errno));
 
