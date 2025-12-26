@@ -14,3 +14,7 @@
 #define container_of(ptr, type, member) \
         ((type *) ((char *) (ptr) - offsetof(type, member)))
 #endif /* ifndef container_of */
+
+#ifndef FORCE_INLINE
+#define FORCE_INLINE __attribute__((always_inline)) inline
+#endif /* ifndef FORCE_INLINE */

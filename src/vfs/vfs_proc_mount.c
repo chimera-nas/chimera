@@ -43,7 +43,6 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
     callback(thread, CHIMERA_VFS_OK, request->proto_private_data);
 
     chimera_vfs_request_free(thread, request);
-
 } /* chimera_vfs_mount_complete */
 
 SYMBOL_EXPORT void

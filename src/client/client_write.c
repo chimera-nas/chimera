@@ -2,26 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include "client_internal.h"
-
-static void
-chimera_write_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  length,
-    uint32_t                  sync,
-    struct evpl_iovec        *iov,
-    int                       niov,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct chimera_client_request *request = private_data;
-
-    request->write.callback(request->thread, error_code, request->write.private_data);
-
-    chimera_client_request_free(request->thread, request);
-
-} /* chimera_write_complete */
+#include "client_write.h"
 
 SYMBOL_EXPORT void
 chimera_write(
@@ -41,8 +22,12 @@ chimera_write(
     request->opcode             = CHIMERA_CLIENT_OP_WRITE;
     request->write.callback     = callback;
     request->write.private_data = private_data;
+    request->write.handle       = handle;
+    request->write.offset       = offset;
+    request->write.length       = length;
+    request->write.niov         = niov;
 
-    chimera_vfs_write(thread->vfs_thread, handle, offset, length, 1, 0, 0, iov, niov, chimera_write_complete,
-                      request);
+    memcpy(request->write.iov, iov, niov * sizeof(struct evpl_iovec));
 
+    chimera_dispatch_write(thread, request);
 } /* chimera_write */

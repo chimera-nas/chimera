@@ -42,6 +42,22 @@ chimera_vfs_release(
     }
 } /* chimera_vfs_release_handle */
 
+/* Duplicate a handle by incrementing its opencnt (for dup operations) */
+static inline void
+chimera_vfs_dup_handle(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle)
+{
+    if (handle->cache_id == CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
+        chimera_vfs_abort("cannot dup synthetic handle");
+    } else if (handle->cache_id == CHIMERA_VFS_OPEN_ID_PATH) {
+        chimera_vfs_open_cache_dup(thread->vfs->vfs_open_path_cache, handle);
+    } else if (handle->cache_id == CHIMERA_VFS_OPEN_ID_FILE) {
+        chimera_vfs_open_cache_dup(thread->vfs->vfs_open_file_cache, handle);
+    } else {
+        chimera_vfs_abort("invalid cache id");
+    }
+} /* chimera_vfs_dup_handle */
 
 static inline void
 chimera_vfs_release_failed(

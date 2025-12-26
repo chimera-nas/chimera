@@ -26,6 +26,7 @@ chimera_client_config_init(void)
     config->core_threads       = 16;
     config->delegation_threads = 64;
     config->cache_ttl          = 60;
+    config->max_fds            = 1024;
 
     strncpy(config->modules[0].module_name, "root", sizeof(config->modules[0].module_name));
     config->modules[0].config_path[0] = '\0';
