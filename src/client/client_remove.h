@@ -5,6 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
+#include "client_dispatch.h"
 
 static void chimera_remove_parent_complete(
     enum chimera_vfs_error          error_code,
@@ -103,11 +104,7 @@ chimera_dispatch_remove(
 {
 
     if (unlikely(request->remove.name_offset == -1)) {
-        chimera_remove_callback_t callback     = request->remove.callback;
-        void                     *callback_arg = request->remove.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, CHIMERA_VFS_EINVAL, callback_arg);
+        chimera_dispatch_error_remove(thread, request, CHIMERA_VFS_EINVAL);
         return;
     }
 

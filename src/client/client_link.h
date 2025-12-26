@@ -5,6 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
+#include "client_dispatch.h"
 
 static void chimera_link_dest_parent_complete(
     enum chimera_vfs_error          error_code,
@@ -170,11 +171,7 @@ chimera_dispatch_link(
 {
 
     if (unlikely(request->link.dest_name_offset == -1)) {
-        chimera_link_callback_t callback     = request->link.callback;
-        void                   *callback_arg = request->link.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, CHIMERA_VFS_EINVAL, callback_arg);
+        chimera_dispatch_error_link(thread, request, CHIMERA_VFS_EINVAL);
         return;
     }
 

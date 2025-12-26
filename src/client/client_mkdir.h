@@ -5,6 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
+#include "client_dispatch.h"
 
 static void chimera_mkdir_parent_complete(
     enum chimera_vfs_error          error_code,
@@ -106,11 +107,7 @@ chimera_dispatch_mkdir(
 
     if (unlikely(request->mkdir.name_offset == -1)) {
         /* Caller is trying to mkdir the root directory, which always exists already */
-        chimera_mkdir_callback_t callback     = request->mkdir.callback;
-        void                    *callback_arg = request->mkdir.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, CHIMERA_VFS_EEXIST, callback_arg);
+        chimera_dispatch_error_mkdir(thread, request, CHIMERA_VFS_EEXIST);
         return;
     }
 

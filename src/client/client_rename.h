@@ -5,6 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
+#include "client_dispatch.h"
 
 static void chimera_rename_dest_parent_complete(
     enum chimera_vfs_error          error_code,
@@ -178,11 +179,7 @@ chimera_dispatch_rename(
 {
 
     if (unlikely(request->rename.source_name_offset == -1 || request->rename.dest_name_offset == -1)) {
-        chimera_rename_callback_t callback     = request->rename.callback;
-        void                     *callback_arg = request->rename.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, CHIMERA_VFS_EINVAL, callback_arg);
+        chimera_dispatch_error_rename(thread, request, CHIMERA_VFS_EINVAL);
         return;
     }
 

@@ -1909,8 +1909,9 @@ demofs_write_phase2(
             // Suffix from existing extent - extract the portion after write_end
             uint64_t write_end    = request->write.offset + write_length;
             uint32_t suffix_start = write_end & 4095; // offset within block
-            write_iov[write_niov].data   = (char *) demofs_private->rmw_suffix_iov.data + suffix_start;
-            write_iov[write_niov].length = suffix_len;
+            write_iov[write_niov].data         = (char *) demofs_private->rmw_suffix_iov.data + suffix_start;
+            write_iov[write_niov].private_data = demofs_private->rmw_suffix_iov.private_data;
+            write_iov[write_niov].length       = suffix_len;
             write_niov++;
         } else {
             // Suffix is zeros (no existing data)
