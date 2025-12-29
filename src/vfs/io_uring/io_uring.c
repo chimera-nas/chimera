@@ -336,12 +336,14 @@ chimera_io_uring_complete(
                     } else {
                         request->status = chimera_linux_errno_to_status(-cqe->res);
                     }
+                    evpl_iovecs_release(request->write.iov, request->write.niov);
                 } else {
                     if (cqe->res == 0) {
                         chimera_linux_statx_to_attr(&request->write.r_post_attr, (struct statx *) request->plugin_data);
                     }
                 }
                 break;
+
             default:
                 if (cqe->res) {
                     request->status = chimera_linux_errno_to_status(-cqe->res);

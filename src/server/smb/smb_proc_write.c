@@ -86,9 +86,7 @@ chimera_smb_write(struct chimera_smb_request *request)
 
         for (i = 0; i < request->write.num_rdma_elements; i++) {
 
-            chunk_iov->data         = request->write.iov[0].data + offset;
-            chunk_iov->length       = request->write.rdma_elements[i].length;
-            chunk_iov->private_data = request->write.iov[0].private_data;
+            evpl_iovec_clone_segment(chunk_iov, &request->write.iov[0], offset, request->write.rdma_elements[i].length);
 
             evpl_rdma_read(
                 evpl,

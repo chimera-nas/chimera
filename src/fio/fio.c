@@ -452,9 +452,7 @@ fio_chimera_queue(
             break;
         case DDIR_WRITE:
 
-            iov.data         = io_u->xfer_buf;
-            iov.length       = io_u->xfer_buflen;
-            iov.private_data = chimera_thread->iov.private_data;
+            evpl_iovec_clone_segment(&iov, io_u->xfer_buf, 0, io_u->xfer_buflen);
 
             chimera_write(chimera_thread->client, fh, io_u->offset, io_u->xfer_buflen, &iov, 1,
                           fio_chimera_write_callback, io_u);

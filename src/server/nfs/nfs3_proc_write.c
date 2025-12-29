@@ -93,6 +93,8 @@ chimera_nfs3_write_open_callback(
         chimera_nfs3_set_wcc_data(&res.resfail.file_wcc, NULL, NULL);
         rc = shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, &res, msg);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+
+        evpl_iovecs_release(args->data.iov, args->data.niov);
         nfs_request_free(thread, req);
     }
 } /* chimera_nfs3_write_open_callback */

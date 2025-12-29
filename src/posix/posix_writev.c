@@ -23,10 +23,6 @@ chimera_posix_writev_callback(
     struct chimera_posix_completion *comp    = private_data;
     struct chimera_client_request   *request = comp->request;
 
-    for (int i = 0; i < request->write.niov; i++) {
-        evpl_iovec_release(&request->write.iov[i]);
-    }
-
     if (status == CHIMERA_VFS_OK) {
         request->sync_result = (ssize_t) request->write.length;
     }

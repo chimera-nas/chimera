@@ -288,12 +288,10 @@ evpl_iovec_cursor_move(
             chunk = left;
         }
 
-        iov[niov].data         = cursor->iov->data + cursor->offset;
-        iov[niov].length       = chunk;
-        iov[niov].private_data = cursor->iov->private_data;
-
         if (addrefs) {
-            evpl_iovec_addref(&iov[niov]);
+            evpl_iovec_clone_segment(&iov[niov], cursor->iov, cursor->offset, chunk);
+        } else {
+            evpl_iovec_move_segment(&iov[niov], cursor->iov, cursor->offset, chunk);
         }
 
         niov++;

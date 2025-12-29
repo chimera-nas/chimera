@@ -724,6 +724,8 @@ chimera_linux_write(
                    request->write.offset,
                    flags);
 
+    evpl_iovecs_release(request->write.iov, request->write.niov);
+
     if (len < 0) {
         request->status         = chimera_linux_errno_to_status(errno);
         request->write.r_length = 0;

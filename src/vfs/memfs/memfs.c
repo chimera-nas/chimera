@@ -744,7 +744,8 @@ memfs_setattr(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct memfs_inode *inode;
+    struct memfs_inode       *inode;
+    struct chimera_vfs_attrs *attr = request->setattr.set_attr;
 
     inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -756,7 +757,66 @@ memfs_setattr(
 
     memfs_map_attrs(&request->setattr.r_pre_attr, inode);
 
-    memfs_apply_attrs(inode, request->setattr.set_attr);
+    /* Handle truncation: free blocks past new EOF and zero partial block */
+    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        S_ISREG(inode->mode) &&
+        attr->va_size < inode->size) {
+
+        struct evpl *evpl           = thread->evpl;
+        uint64_t     new_size       = attr->va_size;
+        uint64_t     new_num_blocks = (new_size + CHIMERA_MEMFS_BLOCK_SIZE - 1) >>
+            CHIMERA_MEMFS_BLOCK_SHIFT;
+        uint64_t     bi;
+
+        /* Free blocks that are entirely past the new EOF */
+        for (bi = new_num_blocks; bi < inode->file.num_blocks; bi++) {
+            if (inode->file.blocks[bi]) {
+                memfs_block_free(thread, inode->file.blocks[bi]);
+                inode->file.blocks[bi] = NULL;
+            }
+        }
+
+        /* Zero the partial region in the last block if EOF is not aligned.
+         * We must allocate a new block and copy the retained portion because
+         * readers may still be referencing the old block's iovecs. */
+        if (new_size > 0 && (new_size & CHIMERA_MEMFS_BLOCK_MASK)) {
+            uint64_t last_block_idx = (new_size - 1) >> CHIMERA_MEMFS_BLOCK_SHIFT;
+
+            if (last_block_idx < inode->file.num_blocks &&
+                inode->file.blocks[last_block_idx]) {
+
+                struct memfs_block      *old_block = inode->file.blocks[last_block_idx];
+                struct memfs_block      *new_block;
+                struct evpl_iovec_cursor old_cursor;
+                uint32_t                 offset_in_block = new_size &
+                    CHIMERA_MEMFS_BLOCK_MASK;
+
+                new_block       = memfs_block_alloc(thread);
+                new_block->niov = evpl_iovec_alloc(evpl, 4096, 4096,
+                                                   CHIMERA_MEMFS_BLOCK_MAX_IOV,
+                                                   new_block->iov);
+
+                /* Copy the retained portion from the old block */
+                evpl_iovec_cursor_init(&old_cursor, old_block->iov,
+                                       old_block->niov);
+                evpl_iovec_cursor_copy(&old_cursor, new_block->iov[0].data,
+                                       offset_in_block);
+
+                /* Zero the rest of the block */
+                memset(new_block->iov[0].data + offset_in_block, 0,
+                       CHIMERA_MEMFS_BLOCK_SIZE - offset_in_block);
+
+                /* Replace old block with new block */
+                inode->file.blocks[last_block_idx] = new_block;
+                memfs_block_free(thread, old_block);
+            }
+        }
+
+        inode->file.num_blocks = new_num_blocks;
+        inode->space_used      = new_num_blocks * CHIMERA_MEMFS_BLOCK_SIZE;
+    }
+
+    memfs_apply_attrs(inode, attr);
 
     memfs_map_attrs(&request->setattr.r_post_attr, inode);
 
@@ -1494,9 +1554,7 @@ memfs_read(
         }
 
         if (!block) {
-            iov[niov]        = thread->zero;
-            iov[niov].length = block_len;
-            evpl_iovec_addref(&iov[niov]);
+            evpl_iovec_clone_segment(&iov[niov], &thread->zero, 0, block_len);
             niov++;
         } else {
 
@@ -1592,8 +1650,10 @@ memfs_write(
         free(blocks);
     }
 
-    inode->file.num_blocks = last_block + 1;
-
+    /* Only increase num_blocks, never decrease it during write */
+    if (last_block + 1 > inode->file.num_blocks) {
+        inode->file.num_blocks = last_block + 1;
+    }
 
     for (bi = first_block; bi <= last_block; bi++) {
 
@@ -1637,6 +1697,9 @@ memfs_write(
                 memset(block->iov[0].data + block_offset + block_len, 0,
                        CHIMERA_MEMFS_BLOCK_SIZE - block_offset - block_len);
             }
+        } else if (old_block) {
+            /* Full block overwrite: free the old block */
+            memfs_block_free(thread, old_block);
         }
 
         evpl_iovec_cursor_copy(&cursor,
@@ -1658,6 +1721,8 @@ memfs_write(
     memfs_map_attrs(&request->write.r_post_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
+
+    evpl_iovecs_release(request->write.iov, request->write.niov);
 
     request->status         = CHIMERA_VFS_OK;
     request->write.r_length = request->write.length;

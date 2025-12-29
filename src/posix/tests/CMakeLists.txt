@@ -2,6 +2,10 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
+# FSX - File System Exerciser ported to Chimera POSIX API
+add_executable(posix_fsx fsx.c)
+target_link_libraries(posix_fsx chimera_posix chimera_client jansson)
+
 macro(add_posix_testprog name)
     add_executable(posix_${name} ${name}.c)
     target_link_libraries(posix_${name} chimera_posix chimera_client jansson)
@@ -91,3 +95,31 @@ generate_posix_backend_tests(demofs "")
 generate_posix_backend_tests(cairn CAIRN_ENABLED)
 generate_posix_backend_tests(linux "")
 generate_posix_backend_tests(io_uring IO_URING_ENABLED)
+
+# FSX tests for each backend
+# Uses run_fsx.sh wrapper to generate config and run fsx
+set(FSX_WRAPPER "${CMAKE_CURRENT_SOURCE_DIR}/run_fsx.sh")
+set(FSX_NUM_OPS 10000)
+set(FSX_MAX_LEN 262144)
+
+macro(add_fsx_test backend)
+    add_test(NAME chimera/posix/fsx_${backend}
+        COMMAND ${FSX_WRAPPER} -b ${backend} -N ${FSX_NUM_OPS} -l ${FSX_MAX_LEN} -q
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(chimera/posix/fsx_${backend} PROPERTIES
+        ENVIRONMENT "BUILD_DIR=${CMAKE_BINARY_DIR}"
+        TIMEOUT 300
+    )
+endmacro()
+
+# Add FSX tests for each backend
+add_fsx_test(memfs)
+add_fsx_test(demofs)
+if(CAIRN_ENABLED)
+    add_fsx_test(cairn)
+endif()
+add_fsx_test(linux)
+if(IO_URING_ENABLED)
+    add_fsx_test(io_uring)
+endif()

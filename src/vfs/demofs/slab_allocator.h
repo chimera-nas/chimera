@@ -89,9 +89,11 @@ slab_allocator_alloc_new_chunk(
     }
 
     if (!slab) {
+        void *slab_private;
+
         slab = calloc(1, sizeof(*slab));
 
-        slab->buffer = evpl_slab_alloc();
+        slab->buffer = evpl_slab_alloc(&slab_private);
 
         slab->size = allocator->slab_size;
         slab->used = 0;
@@ -148,9 +150,11 @@ slab_allocator_alloc_perm(
     }
 
     if (!slab) {
+        void *slab_private;
+
         slab = calloc(1, sizeof(*slab));
 
-        slab->buffer = evpl_slab_alloc();
+        slab->buffer = evpl_slab_alloc(&slab_private);
 
         slab->size = allocator->slab_size;
         slab->used = 0;
