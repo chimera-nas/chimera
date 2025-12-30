@@ -326,12 +326,10 @@ demofs_extent_release(
     struct rb_node *node,
     void           *private_data)
 {
-    struct demofs_thread *thread = private_data;
+    struct demofs_shared *shared = private_data;
     struct demofs_extent *extent = container_of(node, struct demofs_extent, node);
 
-    if (thread) {
-        struct demofs_shared *shared = thread->shared;
-
+    if (shared) {
         pthread_mutex_lock(&shared->extent_allocator_lock);
         slab_allocator_free(shared->extent_allocator, extent, sizeof(*extent));
         pthread_mutex_unlock(&shared->extent_allocator_lock);
@@ -470,7 +468,7 @@ demofs_inode_free(
     inode_list = &shared->inode_list[list_id];
 
     if (S_ISREG(inode->mode)) {
-        rb_tree_destroy(&inode->file.extents, demofs_extent_release, thread);
+        rb_tree_destroy(&inode->file.extents, demofs_extent_release, shared);
     } else if (S_ISDIR(inode->mode)) {
         rb_tree_destroy(&inode->dir.dirents, demofs_dirent_release, thread);
     } else if (S_ISLNK(inode->mode)) {
