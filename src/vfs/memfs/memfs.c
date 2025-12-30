@@ -1639,15 +1639,16 @@ memfs_write(
         inode->file.blocks = malloc(inode->file.max_blocks *
                                     sizeof(struct memfs_block *));
 
-        memcpy(inode->file.blocks, blocks,
-               inode->file.num_blocks * sizeof(struct memfs_block *));
+        if (blocks) {
+            memcpy(inode->file.blocks, blocks,
+                   inode->file.num_blocks * sizeof(struct memfs_block *));
+            free(blocks);
+        }
 
         memset(inode->file.blocks + inode->file.num_blocks,
                0,
                (inode->file.max_blocks - inode->file.num_blocks) *
                sizeof(struct memfs_block *));
-
-        free(blocks);
     }
 
     /* Only increase num_blocks, never decrease it during write */
