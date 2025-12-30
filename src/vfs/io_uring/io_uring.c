@@ -188,11 +188,12 @@ chimera_io_uring_complete(
                 break;
             case CHIMERA_VFS_OP_GETATTR:
                 if (cqe->res == 0) {
+                    struct statx *stx = (struct statx *) request->plugin_data;
                     request->status = CHIMERA_VFS_OK;
                     chimera_linux_map_attrs_statx(CHIMERA_VFS_FH_MAGIC_IO_URING,
                                                   &request->getattr.r_attr,
                                                   request->getattr.handle->vfs_private,
-                                                  (struct statx *) request->plugin_data);
+                                                  stx);
                 }
                 break;
             case CHIMERA_VFS_OP_OPEN_AT:
@@ -329,19 +330,13 @@ chimera_io_uring_complete(
                 }
                 break;
             case CHIMERA_VFS_OP_WRITE:
-                if (handle->slot == 0) {
-                    if (cqe->res >= 0) {
-                        request->status         = CHIMERA_VFS_OK;
-                        request->write.r_length = cqe->res;
-                    } else {
-                        request->status = chimera_linux_errno_to_status(-cqe->res);
-                    }
-                    evpl_iovecs_release(request->write.iov, request->write.niov);
+                if (cqe->res >= 0) {
+                    request->status         = CHIMERA_VFS_OK;
+                    request->write.r_length = cqe->res;
                 } else {
-                    if (cqe->res == 0) {
-                        chimera_linux_statx_to_attr(&request->write.r_post_attr, (struct statx *) request->plugin_data);
-                    }
+                    request->status = chimera_linux_errno_to_status(-cqe->res);
                 }
+                evpl_iovecs_release(request->write.iov, request->write.niov);
                 break;
 
             default:
@@ -369,7 +364,7 @@ chimera_io_uring_complete(
         DL_DELETE(thread->pending_requests, request);
         chimera_io_uring_dispatch(request, thread);
     }
-} /* chimera_io_uring_complete */
+} /* chimera_io_uring_complete */ /* chimera_io_uring_complete */ /* chimera_io_uring_complete */
 
 static void
 chimera_io_uring_flush(
@@ -986,16 +981,13 @@ chimera_io_uring_write(
     uint32_t                        left, chunk;
     struct iovec                   *iov;
     int                             flags = 0;
-    struct statx                   *stx;
     void                           *scratch = request->plugin_data;
 
-    stx = (struct statx *) scratch;
-
-    sge = chimera_io_uring_get_sqe(thread, request, 0, 1);
+    sge = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     request->write.r_sync = request->write.sync;
 
-    iov = (struct iovec *) request->plugin_data;
+    iov = (struct iovec *) scratch;
 
     left = request->write.length;
     for (i = 0; left && i < request->write.niov; i++) {
@@ -1018,13 +1010,14 @@ chimera_io_uring_write(
 
     io_uring_prep_writev2(sge, fd, iov, niov, request->write.offset, flags);
 
-    sge = chimera_io_uring_get_sqe(thread, request, 1, 0);
-
-    io_uring_prep_statx(sge, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
+    /* Don't return post-write stat info - the linked statx may see stale
+     * metadata before the write's effects are fully visible. Let the VFS
+     * make an explicit getattr call when needed. */
+    request->write.r_post_attr.va_set_mask = 0;
 
     evpl_defer(thread->evpl, &thread->deferral);
 
-} /* chimera_io_uring_write */
+} /* chimera_io_uring_write */ /* chimera_io_uring_write */
 
 static void
 chimera_io_uring_commit(
