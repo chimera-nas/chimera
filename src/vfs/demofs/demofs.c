@@ -197,8 +197,6 @@ struct demofs_shared {
     uint32_t                  root_fhlen;
     uint64_t                  total_bytes;
     pthread_mutex_t           lock;
-    struct slab_allocator    *extent_allocator;
-    pthread_mutex_t           extent_allocator_lock;
 };
 
 struct demofs_thread {
@@ -299,12 +297,9 @@ demofs_inode_get_fh(
 static inline struct demofs_extent *
 demofs_extent_alloc(struct demofs_thread *thread)
 {
-    struct demofs_shared *shared = thread->shared;
     struct demofs_extent *extent;
 
-    pthread_mutex_lock(&shared->extent_allocator_lock);
-    extent = slab_allocator_alloc(shared->extent_allocator, sizeof(struct demofs_extent));
-    pthread_mutex_unlock(&shared->extent_allocator_lock);
+    extent = slab_allocator_alloc(thread->allocator, sizeof(struct demofs_extent));
 
     return extent;
 } /* demofs_extent_alloc */ /* demofs_extent_alloc */ /* demofs_extent_alloc */
@@ -314,11 +309,7 @@ demofs_extent_free(
     struct demofs_thread *thread,
     struct demofs_extent *extent)
 {
-    struct demofs_shared *shared = thread->shared;
-
-    pthread_mutex_lock(&shared->extent_allocator_lock);
-    slab_allocator_free(shared->extent_allocator, extent, sizeof(*extent));
-    pthread_mutex_unlock(&shared->extent_allocator_lock);
+    slab_allocator_free(thread->allocator, extent, sizeof(*extent));
 } /* demofs_extent_free */ /* demofs_extent_free */ /* demofs_extent_free */
 
 static inline void
@@ -326,13 +317,11 @@ demofs_extent_release(
     struct rb_node *node,
     void           *private_data)
 {
-    struct demofs_shared *shared = private_data;
+    struct demofs_thread *thread = private_data;
     struct demofs_extent *extent = container_of(node, struct demofs_extent, node);
 
-    if (shared) {
-        pthread_mutex_lock(&shared->extent_allocator_lock);
-        slab_allocator_free(shared->extent_allocator, extent, sizeof(*extent));
-        pthread_mutex_unlock(&shared->extent_allocator_lock);
+    if (thread) {
+        slab_allocator_free(thread->allocator, extent, sizeof(*extent));
     }
 } /* demofs_extent_release */
 
@@ -468,7 +457,7 @@ demofs_inode_free(
     inode_list = &shared->inode_list[list_id];
 
     if (S_ISREG(inode->mode)) {
-        rb_tree_destroy(&inode->file.extents, demofs_extent_release, shared);
+        rb_tree_destroy(&inode->file.extents, demofs_extent_release, thread);
     } else if (S_ISDIR(inode->mode)) {
         rb_tree_destroy(&inode->dir.dirents, demofs_dirent_release, thread);
     } else if (S_ISLNK(inode->mode)) {
@@ -659,8 +648,6 @@ demofs_init(const char *cfgfile)
 
 
     pthread_mutex_init(&shared->lock, NULL);
-    pthread_mutex_init(&shared->extent_allocator_lock, NULL);
-    shared->extent_allocator = slab_allocator_create(4096, 1024 * 1024 * 1024);
 
     shared->num_inode_list = 255;
     shared->inode_list     = calloc(shared->num_inode_list,
@@ -737,7 +724,7 @@ demofs_destroy(void *private_data)
                 } else if (S_ISLNK(inode->mode)) {
                     /* do nothing */
                 } else if (S_ISREG(inode->mode)) {
-                    rb_tree_destroy(&inode->file.extents, demofs_extent_release, shared);
+                    rb_tree_destroy(&inode->file.extents, demofs_extent_release, NULL);
                 }
             }
         }
@@ -754,8 +741,6 @@ demofs_destroy(void *private_data)
         }
     }
 
-    slab_allocator_destroy(shared->extent_allocator);
-    pthread_mutex_destroy(&shared->extent_allocator_lock);
     pthread_mutex_destroy(&shared->lock);
     free(shared->devices);
     free(shared->inode_list);
