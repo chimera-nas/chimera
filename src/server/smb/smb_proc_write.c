@@ -169,7 +169,7 @@ chimera_smb_parse_write(
         request->write.niov = evpl_iovec_alloc(evpl, request->write.length, 4096, 1, request->write.iov);
 
     } else {
-        request->write.niov = evpl_iovec_cursor_move(request_cursor, request->write.iov, 64, request->write.length, 0);
+        request->write.niov = evpl_iovec_cursor_move(request_cursor, request->write.iov, 64, request->write.length, 1);
     }
 
     return 0;

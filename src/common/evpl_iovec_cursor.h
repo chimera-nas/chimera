@@ -318,6 +318,7 @@ evpl_iovec_cursor_inject_unaligned(
     int                       length)
 {
     struct evpl_iovec saved = *cursor->iov;
+    int               i;
 
     cursor->iov->length = cursor->offset;
 
@@ -328,7 +329,10 @@ evpl_iovec_cursor_inject_unaligned(
 
     cursor->iov++;
 
-    memcpy(cursor->iov, iov, niov * sizeof(struct evpl_iovec));
+    for (i = 0; i < niov; i++) {
+        evpl_iovec_move(&cursor->iov[i], &iov[i]);
+    }
+
     cursor->iov  += niov;
     cursor->niov += niov;
 

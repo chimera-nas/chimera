@@ -94,6 +94,7 @@ struct demofs_request_private {
     struct evpl_iovec     rmw_suffix_iov; // IOV for suffix data (if read from existing extent)
     int                   rmw_prefix_pending;// Pending read for prefix
     int                   rmw_suffix_pending;// Pending read for suffix
+    uint32_t              rmw_prefix_valid;  // Valid bytes in prefix (extent may be truncated)
     uint32_t              rmw_suffix_adjust; // Adjustment for suffix when block starts before extent
     uint32_t              rmw_suffix_valid;  // Valid bytes in suffix (extent may be truncated)
 };
@@ -1682,6 +1683,51 @@ demofs_close(
     request->complete(request);
 } /* demofs_close */
 
+/*
+ * Adjust read iovecs: skip prefix padding and trim to actual read length.
+ * Called after block reads complete (or when no reads needed).
+ */
+static inline void
+demofs_read_adjust_iovecs(
+    struct chimera_vfs_request    *request,
+    struct demofs_request_private *demofs_private)
+{
+    if (request->read.r_niov == 0) {
+        return;
+    }
+
+    // Adjust first iovec to skip prefix (alignment padding)
+    request->read.iov[0].data   += demofs_private->read_prefix;
+    request->read.iov[0].length -= demofs_private->read_prefix;
+
+    // Calculate total length across all iovecs
+    uint64_t total = 0;
+
+    for (int i = 0; i < request->read.r_niov; i++) {
+        total += request->read.iov[i].length;
+    }
+
+    // Trim excess from the last iovec(s) if needed
+    // Use r_length (actual capped length), not length (original request)
+    // NOTE: Do NOT decrement r_niov here - we must keep the count of allocated
+    // iovecs so they all get properly released by the caller.
+    if (total > request->read.r_length) {
+        uint64_t excess = total - request->read.r_length;
+        int      last   = request->read.r_niov - 1;
+
+        while (excess > 0 && last >= 0) {
+            if (request->read.iov[last].length <= excess) {
+                excess                        -= request->read.iov[last].length;
+                request->read.iov[last].length = 0;
+                last--;
+            } else {
+                request->read.iov[last].length -= excess;
+                excess                          = 0;
+            }
+        }
+    }
+} /* demofs_read_adjust_iovecs */ /* demofs_read_adjust_iovecs */
+
 static inline void
 demofs_io_callback(
     struct evpl *evpl,
@@ -1701,34 +1747,7 @@ demofs_io_callback(
 
     if (demofs_private->pending == 0) {
         if (demofs_private->opcode == CHIMERA_VFS_OP_READ) {
-            if (request->read.r_niov > 0) {
-                // Adjust first iovec to skip prefix (alignment padding)
-                // The prefix is already in the buffer, we just skip it
-                request->read.iov[0].data   += demofs_private->read_prefix;
-                request->read.iov[0].length -= demofs_private->read_prefix;
-
-                // If total iovecs hold more than requested, trim from the end
-                // Calculate total length across all iovecs
-                uint64_t total = 0;
-                for (int i = 0; i < request->read.r_niov; i++) {
-                    total += request->read.iov[i].length;
-                }
-
-                // Trim excess from the last iovec(s) if needed
-                uint64_t excess = total - request->read.length;
-                int      last   = request->read.r_niov - 1;
-                while (excess > 0 && last >= 0) {
-                    if (request->read.iov[last].length <= excess) {
-                        excess                        -= request->read.iov[last].length;
-                        request->read.iov[last].length = 0;
-                        request->read.r_niov--;
-                        last--;
-                    } else {
-                        request->read.iov[last].length -= excess;
-                        excess                          = 0;
-                    }
-                }
-            }
+            demofs_read_adjust_iovecs(request, demofs_private);
         }
 
         evpl_iovecs_release(demofs_private->iov, demofs_private->niov);
@@ -1895,6 +1914,8 @@ demofs_read(
     pthread_mutex_unlock(&inode->lock);
 
     if (demofs_private->pending == 0) {
+        // No block reads issued - adjust iovecs and complete immediately
+        demofs_read_adjust_iovecs(request, demofs_private);
         request->status = CHIMERA_VFS_OK;
         request->complete(request);
     }
@@ -1970,10 +1991,23 @@ demofs_write_phase2(
 
     // Add prefix if present
     if (prefix_len > 0) {
-        if (demofs_private->rmw_prefix_iov.data) {
+        if (demofs_private->rmw_prefix_iov.data && demofs_private->rmw_prefix_valid > 0) {
             // Prefix from existing extent
-            evpl_iovec_move_segment(&write_iov[write_niov], &demofs_private->rmw_prefix_iov, 0, prefix_len);
+            uint32_t valid_len = demofs_private->rmw_prefix_valid;
+
+            if (valid_len > prefix_len) {
+                valid_len = prefix_len;
+            }
+
+            // Add the valid portion from existing extent
+            evpl_iovec_move_segment(&write_iov[write_niov], &demofs_private->rmw_prefix_iov, 0, valid_len);
             write_niov++;
+
+            // If extent was truncated, remaining prefix bytes should be zeros
+            if (valid_len < prefix_len) {
+                evpl_iovec_clone_segment(&write_iov[write_niov], &thread->zero, 0, prefix_len - valid_len);
+                write_niov++;
+            }
         } else {
             // Prefix is zeros (no existing data)
             // Use thread->zero without adding ref - it's persistent
@@ -2121,6 +2155,7 @@ demofs_write(
     demofs_private->rmw_suffix_iov.data = NULL;
     demofs_private->rmw_prefix_pending  = 0;
     demofs_private->rmw_suffix_pending  = 0;
+    demofs_private->rmw_prefix_valid    = 0;
     demofs_private->rmw_suffix_adjust   = 0;
     demofs_private->rmw_suffix_valid    = 0;
 
@@ -2180,10 +2215,24 @@ demofs_write(
         // Check if there's an existing extent covering the prefix region
         prefix_extent = demofs_find_extent_at(inode, aligned_start);
         if (prefix_extent) {
-            need_prefix_read     = 1;
-            prefix_device_id     = prefix_extent->device_id;
-            prefix_device_offset = prefix_extent->device_offset +
-                (aligned_start - prefix_extent->file_offset);
+            uint64_t extent_end = prefix_extent->file_offset + prefix_extent->length;
+
+            // Calculate how much of the prefix is actually valid data
+            // (extent may have been truncated to non-4K boundary)
+            if (extent_end >= aligned_start + prefix_len) {
+                demofs_private->rmw_prefix_valid = prefix_len;
+            } else if (extent_end > aligned_start) {
+                demofs_private->rmw_prefix_valid = extent_end - aligned_start;
+            } else {
+                demofs_private->rmw_prefix_valid = 0;
+            }
+
+            if (demofs_private->rmw_prefix_valid > 0) {
+                need_prefix_read     = 1;
+                prefix_device_id     = prefix_extent->device_id;
+                prefix_device_offset = prefix_extent->device_offset +
+                    (aligned_start - prefix_extent->file_offset);
+            }
         }
     }
 
