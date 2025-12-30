@@ -326,15 +326,17 @@ demofs_extent_release(
     struct rb_node *node,
     void           *private_data)
 {
-    struct demofs_shared *shared = private_data;
+    struct demofs_thread *thread = private_data;
     struct demofs_extent *extent = container_of(node, struct demofs_extent, node);
 
-    if (shared) {
+    if (thread) {
+        struct demofs_shared *shared = thread->shared;
+
         pthread_mutex_lock(&shared->extent_allocator_lock);
         slab_allocator_free(shared->extent_allocator, extent, sizeof(*extent));
         pthread_mutex_unlock(&shared->extent_allocator_lock);
     }
-} /* demofs_extent_release */ /* demofs_extent_free */ /* demofs_extent_free */
+} /* demofs_extent_release */
 
 static inline struct demofs_symlink_target *
 demofs_symlink_target_alloc(

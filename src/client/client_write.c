@@ -27,7 +27,9 @@ chimera_write(
     request->write.length       = length;
     request->write.niov         = niov;
 
-    memcpy(request->write.iov, iov, niov * sizeof(struct evpl_iovec));
+    for (int i = 0; i < niov; i++) {
+        evpl_iovec_move(&request->write.iov[i], &iov[i]);
+    }
 
     chimera_dispatch_write(thread, request);
 } /* chimera_write */

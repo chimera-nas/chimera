@@ -451,12 +451,16 @@ fio_chimera_queue(
                          fio_chimera_read_callback, io_u);
             break;
         case DDIR_WRITE:
+        {
+            unsigned int buf_offset = (unsigned int) ((char *) io_u->xfer_buf -
+                                                      (char *) evpl_iovec_data(&chimera_thread->iov));
 
-            evpl_iovec_clone_segment(&iov, io_u->xfer_buf, 0, io_u->xfer_buflen);
+            evpl_iovec_clone_segment(&iov, &chimera_thread->iov, buf_offset, io_u->xfer_buflen);
 
             chimera_write(chimera_thread->client, fh, io_u->offset, io_u->xfer_buflen, &iov, 1,
                           fio_chimera_write_callback, io_u);
-            break;
+        }
+        break;
         default:
             rc = FIO_Q_COMPLETED;
             break;
