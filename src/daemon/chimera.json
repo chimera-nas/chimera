@@ -1,12 +1,22 @@
 {
+    "server": {
+	"threads": 16,
+	"delegation_threads": 1
+    },
+    "mounts": {
+	"memfs_dir": {
+	    "module": "memfs",
+	    "path": "/"
+	}
+    },
+    "exports": {
+        "/nfs1": {
+            "path": "/memfs_dir"
+        }
+    },
     "shares": {
-        "memfs": {
-            "module": "memfs",
-            "path": "/"
-        },
-        "linux": {
-            "module": "linux",
-            "path": "/share"
+        "smb1": {
+            "path": "/memfs_dir"
         }
     }
 }

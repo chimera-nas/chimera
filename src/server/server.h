@@ -147,6 +147,12 @@ chimera_server_create_share(
     const char            *share_name,
     const char            *share_path);
 
+int
+chimera_server_create_export(
+    struct chimera_server *server,
+    const char            *share_name,
+    const char            *share_path);
+
 struct chimera_server *
 chimera_server_init(
     const struct chimera_server_config *config,
