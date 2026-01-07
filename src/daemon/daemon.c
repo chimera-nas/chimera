@@ -31,15 +31,11 @@ main(
     const char                          *config_path = CONFIG_PATH;
     extern char                         *optarg;
     int                                  opt;
-    const char                          *mount_name;
-    const char                          *mount_module;
-    const char                          *mount_path;
-    const char                          *share_name;
-    const char                          *share_path;
-    const char                          *bucket_name;
-    const char                          *bucket_path;
+    const char                          *name;
+    const char                          *module;
+    const char                          *path;
     json_t                              *config, *shares, *share, *server_params, *buckets, *bucket;
-    json_t                              *mounts, *mount;
+    json_t                              *mounts, *mount, *exports, *export;
     json_error_t                         error;
     struct chimera_server               *server;
     struct chimera_server_config        *server_config;
@@ -188,36 +184,47 @@ main(
     mounts = json_object_get(config, "mounts");
 
     if (mounts) {
-        json_object_foreach(mounts, mount_name, mount)
+        json_object_foreach(mounts, name, mount)
         {
-            mount_module = json_string_value(json_object_get(mount, "module"));
-            mount_path   = json_string_value(json_object_get(mount, "path"));
+            module = json_string_value(json_object_get(mount, "module"));
+            path   = json_string_value(json_object_get(mount, "path"));
 
-            chimera_server_info("Mounting %s://%s to /%s..."
-                                , mount_module, mount_path, mount_name);
-            chimera_server_mount(server, mount_name, mount_module, mount_path);
+            chimera_server_info("Mounting %s://%s to /%s...",
+                                module, path, name);
+            chimera_server_mount(server, name, module, path);
         }
     }
 
     shares = json_object_get(config, "shares");
 
     if (shares) {
-        json_object_foreach(shares, share_name, share)
+        json_object_foreach(shares, name, share)
         {
-            share_path = json_string_value(json_object_get(share, "path"));
+            path = json_string_value(json_object_get(share, "path"));
+            chimera_server_info("Adding SMB share %s -> %s", name, path);
+            chimera_server_create_share(server, name, path);
+        }
+    }
 
-            chimera_server_create_share(server, share_name, share_path);
+    exports = json_object_get(config, "exports");
+
+    if (exports) {
+        json_object_foreach(exports, name, export)
+        {
+            path = json_string_value(json_object_get(export, "path"));
+            chimera_server_info("Adding NFS export %s -> %s", name, path);
+            chimera_server_create_export(server, name, path);
         }
     }
 
     buckets = json_object_get(config, "buckets");
 
     if (buckets) {
-        json_object_foreach(buckets, bucket_name, bucket)
+        json_object_foreach(buckets, name, bucket)
         {
-            bucket_path = json_string_value(json_object_get(bucket, "path"));
-
-            chimera_server_create_bucket(server, bucket_name, bucket_path);
+            path = json_string_value(json_object_get(bucket, "path"));
+            chimera_server_info("Adding S3 bucket %s -> %s", name, path);
+            chimera_server_create_bucket(server, name, path);
         }
     }
 
