@@ -19,6 +19,7 @@
 #include <liburing.h>
 #include <uthash.h>
 #include <utlist.h>
+#include <linux/version.h>
 
 #include "vfs/vfs_error.h"
 
@@ -28,6 +29,13 @@
 #include "../linux/linux_common.h"
 #include "common/logging.h"
 #include "common/macros.h"
+
+// fchmodat support for AT_SYMLINK_NOFOLLOW was added in Linux 6.6
+#if defined(LINUX_VERSION_CODE) && defined(KERNEL_VERSION)
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+        #define HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW 1
+    #endif /* if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) */
+#endif /* if defined(LINUX_VERSION_CODE) && defined(KERNEL_VERSION) */
 
 static void
 chimera_io_uring_dispatch(
@@ -472,8 +480,14 @@ chimera_io_uring_setattr(
 
 
     if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
-        rc = fchmodat(fd, "", request->setattr.set_attr->va_mode, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH
-                      );
+#ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW
+        // Use fchmodat with AT_SYMLINK_NOFOLLOW on kernels >= 6.6
+        rc = fchmodat(fd, "", request->setattr.set_attr->va_mode,
+                      AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
+#else  /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
+        // Fall back to fchmod on older kernels (AT_SYMLINK_NOFOLLOW not supported)
+        rc = fchmod(fd, attr->va_mode);
+#endif /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
 
         if (rc) {
             chimera_io_uring_error("io_uring_setattr: fchmod(%o) failed: %s",
