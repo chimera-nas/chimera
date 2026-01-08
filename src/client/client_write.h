@@ -83,8 +83,8 @@ chimera_dispatch_write(
     struct evpl *evpl   = thread->vfs_thread->evpl;
     uint32_t     length = request->write.length;
 
-    int niov = evpl_iovec_alloc(evpl, length, 1, CHIMERA_CLIENT_IOV_MAX,
-                                0, request->write.iov);
+    int          niov = evpl_iovec_alloc(evpl, length, 1, CHIMERA_CLIENT_IOV_MAX,
+                                         0, request->write.iov);
 
     if (niov < 0) {
         chimera_write_complete(CHIMERA_VFS_EIO, 0, 0, NULL, 0,
@@ -131,8 +131,8 @@ chimera_dispatch_writev(
     const struct iovec *src_iov    = request->writev.src_iov;
     int                 src_iovcnt = request->writev.src_iovcnt;
 
-    int niov = evpl_iovec_alloc(evpl, length, 1, CHIMERA_CLIENT_IOV_MAX,
-                                0, request->writev.iov);
+    int                 niov = evpl_iovec_alloc(evpl, length, 1, CHIMERA_CLIENT_IOV_MAX,
+                                                0, request->writev.iov);
 
     if (niov < 0) {
         chimera_writev_complete(CHIMERA_VFS_EIO, 0, 0, NULL, 0,

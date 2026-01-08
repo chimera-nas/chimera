@@ -71,7 +71,7 @@ chimera_writerv(
 
     request = chimera_client_request_alloc(thread);
 
-    request->opcode              = CHIMERA_CLIENT_OP_WRITE;
+    request->opcode               = CHIMERA_CLIENT_OP_WRITE;
     request->writerv.callback     = callback;
     request->writerv.private_data = private_data;
     request->writerv.handle       = handle;
