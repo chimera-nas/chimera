@@ -457,8 +457,8 @@ fio_chimera_queue(
 
             evpl_iovec_clone_segment(&iov, &chimera_thread->iov, buf_offset, io_u->xfer_buflen);
 
-            chimera_write(chimera_thread->client, fh, io_u->offset, io_u->xfer_buflen, &iov, 1,
-                          fio_chimera_write_callback, io_u);
+            chimera_writerv(chimera_thread->client, fh, io_u->offset, io_u->xfer_buflen, &iov, 1,
+                            fio_chimera_write_callback, io_u);
         }
         break;
         default:

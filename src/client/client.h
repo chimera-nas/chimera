@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <sys/uio.h>
+
 #include "vfs/vfs.h"
 
 #define CHIMERA_CLIENT_IOV_MAX 260
@@ -121,8 +123,32 @@ typedef void (*chimera_write_callback_t)(
     enum chimera_vfs_error        status,
     void                         *private_data);
 
+/* Write from a simple buffer - copies to evpl_iovec internally */
 void
 chimera_write(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        length,
+    const void                     *buf,
+    chimera_write_callback_t        callback,
+    void                           *private_data);
+
+/* Write from struct iovec array - copies to evpl_iovec internally */
+void
+chimera_writev(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        length,
+    const struct iovec             *iov,
+    int                             iovcnt,
+    chimera_write_callback_t        callback,
+    void                           *private_data);
+
+/* Write from evpl_iovec directly - caller provides evpl_iovec (moves ownership) */
+void
+chimera_writerv(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,

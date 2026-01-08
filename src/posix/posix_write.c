@@ -58,17 +58,7 @@ chimera_posix_write(
     req.write.handle       = entry->handle;
     req.write.offset       = entry->offset;
     req.write.length       = count;
-
-    int niov = evpl_iovec_alloc(worker->evpl, count, 1, CHIMERA_CLIENT_IOV_MAX, 0, req.write.iov);
-    if (niov < 0) {
-        chimera_posix_completion_destroy(&comp);
-        chimera_posix_fd_release(entry, CHIMERA_POSIX_FD_IO_ACTIVE);
-        errno = ENOMEM;
-        return -1;
-    }
-
-    req.write.niov = niov;
-    chimera_posix_iovec_memcpy(req.write.iov, buf, count);
+    req.write.buf          = buf;
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_write_exec);
 

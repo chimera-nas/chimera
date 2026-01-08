@@ -5,6 +5,7 @@
 #pragma once
 
 #include <pthread.h>
+#include <sys/uio.h>
 #include <utlist.h>
 
 #include "client.h"
@@ -128,6 +129,30 @@ struct chimera_client_request {
             struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
         } read;
 
+        /* For chimera_write - caller provides a simple buffer */
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        length;
+            chimera_write_callback_t        callback;
+            void                           *private_data;
+            const void                     *buf;
+            struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
+        } write;
+
+        /* For chimera_writev - caller provides struct iovec array */
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        length;
+            chimera_write_callback_t        callback;
+            void                           *private_data;
+            const struct iovec             *src_iov;
+            int                             src_iovcnt;
+            struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
+        } writev;
+
+        /* For chimera_writerv - caller provides evpl_iovec */
         struct {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        offset;
@@ -136,7 +161,7 @@ struct chimera_client_request {
             chimera_write_callback_t        callback;
             void                           *private_data;
             struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
-        } write;
+        } writerv;
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;

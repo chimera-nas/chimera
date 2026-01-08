@@ -24,7 +24,7 @@ chimera_posix_writev_callback(
     struct chimera_client_request   *request = comp->request;
 
     if (status == CHIMERA_VFS_OK) {
-        request->sync_result = (ssize_t) request->write.length;
+        request->sync_result = (ssize_t) request->writev.length;
     }
 
     chimera_posix_complete(comp, status);
@@ -35,7 +35,7 @@ chimera_posix_writev_exec(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_dispatch_write(thread, request);
+    chimera_dispatch_writev(thread, request);
 } /* chimera_posix_writev_exec */
 
 static ssize_t
@@ -74,50 +74,14 @@ chimera_posix_writev_internal(
 
     chimera_posix_completion_init(&comp, &req);
 
-    req.opcode             = CHIMERA_CLIENT_OP_WRITE;
-    req.write.callback     = chimera_posix_writev_callback;
-    req.write.private_data = &comp;
-    req.write.handle       = entry->handle;
-    req.write.offset       = use_fd_offset ? entry->offset : (uint64_t) offset;
-    req.write.length       = total_len;
-
-    int niov = evpl_iovec_alloc(worker->evpl, total_len, 1, CHIMERA_CLIENT_IOV_MAX, 0, req.write.iov);
-    if (niov < 0) {
-        chimera_posix_completion_destroy(&comp);
-        chimera_posix_fd_release(entry, flags);
-        errno = ENOMEM;
-        return -1;
-    }
-
-    req.write.niov = niov;
-
-    // Copy from user iovecs to evpl iovecs
-    size_t copied  = 0;
-    int    dst_idx = 0;
-    size_t dst_off = 0;
-
-    for (int src_idx = 0; src_idx < iovcnt && dst_idx < niov; src_idx++) {
-        size_t src_off = 0;
-
-        while (src_off < iov[src_idx].iov_len && dst_idx < niov) {
-            size_t src_avail = iov[src_idx].iov_len - src_off;
-            size_t dst_avail = req.write.iov[dst_idx].length - dst_off;
-            size_t chunk     = src_avail < dst_avail ? src_avail : dst_avail;
-
-            memcpy((char *) req.write.iov[dst_idx].data + dst_off,
-                   (char *) iov[src_idx].iov_base + src_off,
-                   chunk);
-
-            copied  += chunk;
-            src_off += chunk;
-            dst_off += chunk;
-
-            if (dst_off >= req.write.iov[dst_idx].length) {
-                dst_idx++;
-                dst_off = 0;
-            }
-        }
-    }
+    req.opcode              = CHIMERA_CLIENT_OP_WRITE;
+    req.writev.callback     = chimera_posix_writev_callback;
+    req.writev.private_data = &comp;
+    req.writev.handle       = entry->handle;
+    req.writev.offset       = use_fd_offset ? entry->offset : (uint64_t) offset;
+    req.writev.length       = total_len;
+    req.writev.src_iov      = iov;
+    req.writev.src_iovcnt   = iovcnt;
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_writev_exec);
 
