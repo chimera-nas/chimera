@@ -3488,10 +3488,10 @@ init_buffers(void)
 } /* init_buffers */
 
 static struct option longopts[] = {
-    { "replay-ops",     required_argument,       0,       256             },
-    { "record-ops",     optional_argument,       0,       255             },
-    { "duration",       optional_argument,       0,       254             },
-    { "chimera-config", required_argument,       0,       257             },
+    { "replay-ops",     required_argument,       0,       256                   },
+    { "record-ops",     optional_argument,       0,       255                   },
+    { "duration",       optional_argument,       0,       254                   },
+    { "chimera-config", required_argument,       0,       257                   },
     { }
 };
 
