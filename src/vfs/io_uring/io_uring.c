@@ -320,7 +320,7 @@ chimera_io_uring_complete(
                         request->status = chimera_linux_errno_to_status(-cqe->res);
 
                         for (i = 0; i < request->read.r_niov; i++) {
-                            evpl_iovec_release(&request->read.iov[i]);
+                            evpl_iovec_release(evpl, &request->read.iov[i]);
                         }
                     }
                 } else {
@@ -336,7 +336,7 @@ chimera_io_uring_complete(
                 } else {
                     request->status = chimera_linux_errno_to_status(-cqe->res);
                 }
-                evpl_iovecs_release(request->write.iov, request->write.niov);
+                evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
                 break;
 
             default:
@@ -940,7 +940,7 @@ chimera_io_uring_read(
                                             request->read.length,
                                             4096,
                                             8,
-                                            request->read.iov);
+                                            0, request->read.iov);
 
     stx      = (struct statx *) scratch;
     scratch += sizeof(*stx);
@@ -980,7 +980,7 @@ chimera_io_uring_write(
     int                             fd, i, niov = 0;
     uint32_t                        left, chunk;
     struct iovec                   *iov;
-    int                             flags = 0;
+    int                             flags   = 0;
     void                           *scratch = request->plugin_data;
 
     sge = chimera_io_uring_get_sqe(thread, request, 0, 0);

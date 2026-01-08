@@ -58,15 +58,15 @@
 #include "prometheus-c.h"
 
 #ifndef MAP_FILE
-# define MAP_FILE       0
+# define MAP_FILE     0
 #endif /* ifndef MAP_FILE */
 
 #ifndef RWF_DONTCACHE
-#define RWF_DONTCACHE   0x80
+#define RWF_DONTCACHE 0x80
 #endif /* ifndef RWF_DONTCACHE */
 
 #ifndef RWF_ATOMIC
-#define RWF_ATOMIC      0x40
+#define RWF_ATOMIC    0x40
 #endif /* ifndef RWF_ATOMIC */
 
 #ifndef MIN
@@ -166,77 +166,77 @@ enum {
 #undef PAGE_MASK
 #define PAGE_MASK (PAGE_SIZE - 1)
 
-char         *original_buf;                      /* a pointer to the original data */
-char         *good_buf;                          /* a pointer to the correct data */
-char         *temp_buf;                          /* a pointer to the current data */
-char         *fname;                             /* name of our test file */
-char         *bname;                             /* basename of our test file */
-char         *logdev;                            /* -i flag */
-char         *logid;                             /* -j flag */
-char          dname[1024];                       /* -P flag */
-char          goodfile[PATH_MAX];
-int           dirpath = 0;                       /* -P flag */
-int           fd;                                /* fd for our test file */
+char                         *original_buf;               /* a pointer to the original data */
+char                         *good_buf;                   /* a pointer to the correct data */
+char                         *temp_buf;                   /* a pointer to the current data */
+char                         *fname;                      /* name of our test file */
+char                         *bname;                      /* basename of our test file */
+char                         *logdev;                     /* -i flag */
+char                         *logid;                      /* -j flag */
+char                          dname[1024];                /* -P flag */
+char                          goodfile[PATH_MAX];
+int                           dirpath = 0;                /* -P flag */
+int                           fd;                         /* fd for our test file */
 
-blksize_t     block_size = 0;
-off_t         file_size  = 0;
-off_t         biggest    = 0;
-long long     testcalls  = 0;                    /* calls to function "test" */
+blksize_t                     block_size = 0;
+off_t                         file_size  = 0;
+off_t                         biggest    = 0;
+long long                     testcalls  = 0;             /* calls to function "test" */
 
-long long     simulatedopcount     = 0; /* -b flag */
-int           closeprob            = 0;          /* -c flag */
-int           debug                = 0;          /* -d flag */
-long long     debugstart           = 0;          /* -D flag */
-char          filldata             = 0;          /* -g flag */
-int           flush                = 0;          /* -f flag */
-int           do_fsync             = 0;          /* -y flag */
-unsigned long maxfilelen           = 256 * 1024; /* -l flag */
-int           sizechecks           = 1;          /* -n flag disables them */
-int           maxoplen             = 64 * 1024;  /* -o flag */
-int           quiet                = 0;          /* -q flag */
-long long     progressinterval     = 0; /* -p flag */
-int           readbdy              = 1;          /* -r flag */
-int           style                = 0;          /* -s flag */
-int           prealloc             = 0;          /* -x flag */
-int           truncbdy             = 1;          /* -t flag */
-int           writebdy             = 1;          /* -w flag */
-long          monitorstart         = -1;         /* -m flag */
-long          monitorend           = -1;         /* -m flag */
-int           lite                 = 0;          /* -L flag */
-long long     numops               = -1;         /* -N flag */
-int           randomoplen          = 1;          /* -O flag disables it */
-int           seed                 = 1;          /* -S flag */
-int           mapped_writes        = 1;          /* -W flag disables */
-int           fallocate_calls      = 1;          /* -F flag disables */
-int           keep_size_calls      = 1;          /* -K flag disables */
-int           unshare_range_calls  = 1;          /* -u flag disables */
-int           punch_hole_calls     = 1;          /* -H flag disables */
-int           zero_range_calls     = 1;          /* -z flag disables */
-int           collapse_range_calls = 1; /* -C flag disables */
-int           insert_range_calls   = 1;          /* -I flag disables */
-int           mapped_reads         = 1;          /* -R flag disables it */
-int           check_file           = 0;          /* -X flag enables */
-int           clone_range_calls    = 1;          /* -J flag disables */
-int           dedupe_range_calls   = 1;          /* -B flag disables */
-int           copy_range_calls     = 1;          /* -E flag disables */
-int           exchange_range_calls = 1; /* -0 flag disables */
-int           integrity            = 0;          /* -i flag */
-int           pollute_eof          = 0;          /* -e flag */
-int           fsxgoodfd            = 0;
-int           o_direct;                          /* -Z */
-int           aio              = 0;
-int           uring            = 0;
-int           mark_nr          = 0;
-int           dontcache_io     = 1;
-int           hugepages        = 0;              /* -h flag */
-int           do_atomic_writes = 1;              /* -a flag disables */
+long long                     simulatedopcount     = 0; /* -b flag */
+int                           closeprob            = 0;   /* -c flag */
+int                           debug                = 0;   /* -d flag */
+long long                     debugstart           = 0;   /* -D flag */
+char                          filldata             = 0;   /* -g flag */
+int                           flush                = 0;   /* -f flag */
+int                           do_fsync             = 0;   /* -y flag */
+unsigned long                 maxfilelen           = 256 * 1024; /* -l flag */
+int                           sizechecks           = 1;   /* -n flag disables them */
+int                           maxoplen             = 64 * 1024; /* -o flag */
+int                           quiet                = 0;   /* -q flag */
+long long                     progressinterval     = 0; /* -p flag */
+int                           readbdy              = 1;   /* -r flag */
+int                           style                = 0;   /* -s flag */
+int                           prealloc             = 0;   /* -x flag */
+int                           truncbdy             = 1;   /* -t flag */
+int                           writebdy             = 1;   /* -w flag */
+long                          monitorstart         = -1;  /* -m flag */
+long                          monitorend           = -1;  /* -m flag */
+int                           lite                 = 0;   /* -L flag */
+long long                     numops               = -1;  /* -N flag */
+int                           randomoplen          = 1;   /* -O flag disables it */
+int                           seed                 = 1;   /* -S flag */
+int                           mapped_writes        = 1;   /* -W flag disables */
+int                           fallocate_calls      = 1;   /* -F flag disables */
+int                           keep_size_calls      = 1;   /* -K flag disables */
+int                           unshare_range_calls  = 1;   /* -u flag disables */
+int                           punch_hole_calls     = 1;   /* -H flag disables */
+int                           zero_range_calls     = 1;   /* -z flag disables */
+int                           collapse_range_calls = 1; /* -C flag disables */
+int                           insert_range_calls   = 1;   /* -I flag disables */
+int                           mapped_reads         = 1;   /* -R flag disables it */
+int                           check_file           = 0;   /* -X flag enables */
+int                           clone_range_calls    = 1;   /* -J flag disables */
+int                           dedupe_range_calls   = 1;   /* -B flag disables */
+int                           copy_range_calls     = 1;   /* -E flag disables */
+int                           exchange_range_calls = 1; /* -0 flag disables */
+int                           integrity            = 0;   /* -i flag */
+int                           pollute_eof          = 0;   /* -e flag */
+int                           fsxgoodfd            = 0;
+int                           o_direct;                   /* -Z */
+int                           aio              = 0;
+int                           uring            = 0;
+int                           mark_nr          = 0;
+int                           dontcache_io     = 1;
+int                           hugepages        = 0;       /* -h flag */
+int                           do_atomic_writes = 1;       /* -a flag disables */
 
 /* User for atomic writes */
-int           awu_min = 0;
-int           awu_max = 0;
+int                           awu_min = 0;
+int                           awu_max = 0;
 
 /* Chimera POSIX configuration */
-const char                   *chimera_config_file = NULL;         /* --chimera-config */
+const char                   *chimera_config_file = NULL; /* --chimera-config */
 struct chimera_posix_client  *chimera_posix       = NULL;
 struct chimera_client_config *chimera_config      = NULL;
 struct prometheus_metrics    *chimera_metrics     = NULL;
@@ -2996,7 +2996,7 @@ usage(void)
 	fname: path inside the Chimera VFS (REQUIRED)\n\n\
 NOTE: mmap operations are disabled as Chimera POSIX API does not support them.\n\
       The config file should define modules and mounts. The fname path is\n\
-      interpreted relative to the VFS mounts specified in the config.\n"    );
+      interpreted relative to the VFS mounts specified in the config.\n");
     exit(90);
 } /* usage */
 
@@ -3315,7 +3315,7 @@ __test_fallocate(
         }
     }
     return ret;
-#else
+#else  /* ifdef HAVE_LINUX_FALLOC_H */
     (void) mode;
     (void) mode_str;
     return 0;
@@ -3486,10 +3486,10 @@ init_buffers(void)
 } /* init_buffers */
 
 static struct option longopts[] = {
-    { "replay-ops",     required_argument, 0, 256 },
-    { "record-ops",     optional_argument, 0, 255 },
-    { "duration",       optional_argument, 0, 254 },
-    { "chimera-config", required_argument, 0, 257 },
+    { "replay-ops",     required_argument,       0, 256 },
+    { "record-ops",     optional_argument,       0, 255 },
+    { "duration",       optional_argument,       0, 254 },
+    { "chimera-config", required_argument,       0, 257 },
     { }
 };
 
@@ -3863,7 +3863,8 @@ main(
             const char *module_name;
             json_t     *module_cfg;
 
-            json_object_foreach(modules, module_name, module_cfg) {
+            json_object_foreach(modules, module_name, module_cfg)
+            {
                 const char *module_path = json_string_value(
                     json_object_get(module_cfg, "path"));
                 const char *config_path = json_string_value(
@@ -3895,7 +3896,8 @@ main(
             const char *mount_path;
             json_t     *mount_cfg;
 
-            json_object_foreach(mounts, mount_path, mount_cfg) {
+            json_object_foreach(mounts, mount_path, mount_cfg)
+            {
                 const char *module_name = json_string_value(
                     json_object_get(mount_cfg, "module"));
                 const char *module_path = json_string_value(

@@ -176,7 +176,7 @@ fio_chimera_iomem_alloc(
 {
     struct chimera_fio_thread *chimera_thread = td->io_ops_data;
 
-    evpl_iovec_alloc(chimera_thread->evpl, total_mem, 4096, 1, &chimera_thread->iov);
+    evpl_iovec_alloc(chimera_thread->evpl, total_mem, 4096, 1, 0, &chimera_thread->iov);
 
     td->orig_buffer = evpl_iovec_data(&chimera_thread->iov);
 
@@ -189,7 +189,7 @@ fio_chimera_iomem_free(struct thread_data *td)
     struct chimera_fio_thread *chimera_thread = td->io_ops_data;
 
     if (td->orig_buffer) {
-        evpl_iovec_release(&chimera_thread->iov);
+        evpl_iovec_release(chimera_thread->evpl, &chimera_thread->iov);
         td->orig_buffer = NULL;
     }
 
@@ -405,7 +405,7 @@ fio_chimera_read_callback(
     }
 
     for (i = 0; i < niov; i++) {
-        evpl_iovec_release(&iov[i]);
+        evpl_iovec_release(chimera_thread->evpl, &iov[i]);
     }
 
     fio_chimera_ring_enqueue(chimera_thread, io_u);

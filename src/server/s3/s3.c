@@ -138,7 +138,7 @@ s3_server_respond(
             evpl_http_server_dispatch_default(request->http_request, 200);
         }
     } else {
-        evpl_iovec_alloc(evpl, 1024, 0, 1, &iov);
+        evpl_iovec_alloc(evpl, 1024, 0, 1, 0, &iov);
 
         error_response = (char *) evpl_iovec_data(&iov);
         http_code      = chimera_s3_prepare_error_response(request, error_response, &error_response_len);

@@ -1711,7 +1711,7 @@ cairn_read(
         eof    = 1;
     }
 
-    request->read.r_niov = evpl_iovec_alloc(thread->evpl, length, 4096, 1, request->read.iov);
+    request->read.r_niov = evpl_iovec_alloc(thread->evpl, length, 4096, 1, 0, request->read.iov);
     iov                  = request->read.iov;
 
     start_key.keytype = CAIRN_KEY_EXTENT;
@@ -2018,7 +2018,7 @@ cairn_write(
     request->write.r_length = request->write.length;
     request->write.r_sync   = 1;
 
-    evpl_iovecs_release(request->write.iov, request->write.niov);
+    evpl_iovecs_release(thread->evpl, request->write.iov, request->write.niov);
 
     DL_APPEND(thread->txn_requests, request);
 } /* cairn_write */

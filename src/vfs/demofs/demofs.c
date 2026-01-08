@@ -758,9 +758,9 @@ demofs_thread_init(
 
     thread->allocator = slab_allocator_create(4096, 1024 * 1024 * 1024);
 
-    evpl_iovec_alloc(evpl, 4096, 4096, 1, &thread->zero);
+    evpl_iovec_alloc(evpl, 4096, 4096, 1, 0, &thread->zero);
     memset(thread->zero.data, 0, 4096);  // Zero buffer must contain zeros!
-    evpl_iovec_alloc(evpl, 4096, 4096, 1, &thread->pad);
+    evpl_iovec_alloc(evpl, 4096, 4096, 1, 0, &thread->pad);
 
     thread->queue = calloc(shared->num_devices, sizeof(*thread->queue));
 
@@ -793,8 +793,8 @@ demofs_thread_destroy(void *private_data)
         chimera_demofs_debug("demofs_thread_destroy: drain complete");
     }
 
-    evpl_iovec_release(&thread->zero);
-    evpl_iovec_release(&thread->pad);
+    evpl_iovec_release(thread->evpl, &thread->zero);
+    evpl_iovec_release(thread->evpl, &thread->pad);
 
     slab_allocator_destroy(thread->allocator);
 
@@ -1735,7 +1735,7 @@ demofs_io_callback(
             demofs_read_adjust_iovecs(request, demofs_private);
         }
 
-        evpl_iovecs_release(demofs_private->iov, demofs_private->niov);
+        evpl_iovecs_release(thread->evpl, demofs_private->iov, demofs_private->niov);
 
 
         request->status = demofs_private->status;
@@ -1812,7 +1812,7 @@ demofs_read(
 
     // Allocate iovec for full aligned size
     request->read.r_niov = evpl_iovec_alloc(evpl, aligned_length, 4096, 1,
-                                            request->read.iov);
+                                            0, request->read.iov);
 
     read_offset = aligned_offset;
     read_left   = aligned_length;
@@ -1935,10 +1935,10 @@ demofs_write_rmw_read_callback(
         if (demofs_private->status) {
             // RMW read failed
             if (demofs_private->rmw_prefix_iov.data) {
-                evpl_iovec_release(&demofs_private->rmw_prefix_iov);
+                evpl_iovec_release(thread->evpl, &demofs_private->rmw_prefix_iov);
             }
             if (demofs_private->rmw_suffix_iov.data) {
-                evpl_iovec_release(&demofs_private->rmw_suffix_iov);
+                evpl_iovec_release(thread->evpl, &demofs_private->rmw_suffix_iov);
             }
             request->status = demofs_private->status;
             request->complete(request);
@@ -2358,7 +2358,7 @@ demofs_write(
         if (need_prefix_read) {
             // Allocate buffer and read prefix block
             int niov = evpl_iovec_alloc(evpl, 4096, 4096, 1,
-                                        &demofs_private->rmw_prefix_iov);
+                                        0, &demofs_private->rmw_prefix_iov);
             if (niov > 0) {
                 demofs_private->pending++;
                 thread->pending_io++;
@@ -2377,7 +2377,7 @@ demofs_write(
         if (need_suffix_read) {
             // Allocate buffer and read suffix block
             int niov = evpl_iovec_alloc(evpl, 4096, 4096, 1,
-                                        &demofs_private->rmw_suffix_iov);
+                                        0, &demofs_private->rmw_suffix_iov);
             if (niov > 0) {
                 demofs_private->pending++;
                 thread->pending_io++;

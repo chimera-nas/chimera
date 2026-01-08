@@ -17,7 +17,7 @@ chimera_nfs3_write_callback(
 
     /* XXX should not be needed */
     for (int i = 0; i < request->write.niov; i++) {
-        evpl_iovec_release(&request->write.iov[i]);
+        evpl_iovec_release(evpl, &request->write.iov[i]);
     }
 
     if (unlikely(status)) {

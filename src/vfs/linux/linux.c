@@ -637,7 +637,7 @@ chimera_linux_read(
                                             request->read.length,
                                             4096,
                                             8,
-                                            request->read.iov);
+                                            0, request->read.iov);
 
     iov = request->plugin_data;
 
@@ -664,7 +664,7 @@ chimera_linux_read(
         request->status = chimera_linux_errno_to_status(errno);
 
         for (i = 0; i < request->read.r_niov; i++) {
-            evpl_iovec_release(&request->read.iov[i]);
+            evpl_iovec_release(evpl, &request->read.iov[i]);
         }
 
         request->read.r_niov   = 0;
@@ -689,10 +689,12 @@ chimera_linux_write(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int           fd, i, niov = 0, flags = 0;
-    uint32_t      left, chunk;
-    ssize_t       len;
-    struct iovec *iov;
+    struct chimera_linux_thread *thread = private_data;
+    struct evpl                 *evpl   = thread->evpl;
+    int                          fd, i, niov = 0, flags = 0;
+    uint32_t                     left, chunk;
+    ssize_t                      len;
+    struct iovec                *iov;
 
     request->write.r_sync = request->write.sync;
 
@@ -724,7 +726,7 @@ chimera_linux_write(
                    request->write.offset,
                    flags);
 
-    evpl_iovecs_release(request->write.iov, request->write.niov);
+    evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
 
     if (len < 0) {
         request->status         = chimera_linux_errno_to_status(errno);

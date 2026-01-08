@@ -81,7 +81,7 @@ chimera_posix_writev_internal(
     req.write.offset       = use_fd_offset ? entry->offset : (uint64_t) offset;
     req.write.length       = total_len;
 
-    int niov = evpl_iovec_alloc(worker->evpl, total_len, 1, CHIMERA_CLIENT_IOV_MAX, req.write.iov);
+    int niov = evpl_iovec_alloc(worker->evpl, total_len, 1, CHIMERA_CLIENT_IOV_MAX, 0, req.write.iov);
     if (niov < 0) {
         chimera_posix_completion_destroy(&comp);
         chimera_posix_fd_release(entry, flags);

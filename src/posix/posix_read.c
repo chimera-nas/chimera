@@ -42,7 +42,7 @@ chimera_posix_read_callback(
     }
 
     for (int i = 0; i < niov; i++) {
-        evpl_iovec_release(&iov[i]);
+        evpl_iovec_release(thread->vfs_thread->evpl, &iov[i]);
     }
 
     chimera_posix_complete(comp, status);

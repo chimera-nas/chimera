@@ -261,7 +261,7 @@ memfs_block_free(
     int i;
 
     for (i = 0; i < block->niov; i++) {
-        evpl_iovec_release(&block->iov[i]);
+        evpl_iovec_release(thread->evpl, &block->iov[i]);
     }
 
     LL_PREPEND(thread->free_block, block);
@@ -543,7 +543,7 @@ memfs_destroy(void *private_data)
                         if (inode->file.blocks[bi]) {
                             for (iovi = 0; iovi < inode->file.blocks[bi]->niov;
                                  iovi++) {
-                                evpl_iovec_release(&inode->file.blocks[bi]->iov[
+                                evpl_iovec_release(NULL, &inode->file.blocks[bi]->iov[
                                                        iovi]);
                             }
                             free(inode->file.blocks[bi]);
@@ -573,7 +573,7 @@ memfs_thread_init(
     struct memfs_shared *shared = private_data;
     struct memfs_thread *thread = calloc(1, sizeof(*thread));
 
-    evpl_iovec_alloc(evpl, 4096, 4096, 1, &thread->zero);
+    evpl_iovec_alloc(evpl, 4096, 4096, 1, 0, &thread->zero);
 
     thread->shared = shared;
     thread->evpl   = evpl;
@@ -592,7 +592,7 @@ memfs_thread_destroy(void *private_data)
     struct memfs_symlink_target *target;
     struct memfs_block          *block;
 
-    evpl_iovec_release(&thread->zero);
+    evpl_iovec_release(thread->evpl, &thread->zero);
 
     while (thread->free_dirent) {
         dirent = thread->free_dirent;
@@ -794,7 +794,7 @@ memfs_setattr(
                 new_block       = memfs_block_alloc(thread);
                 new_block->niov = evpl_iovec_alloc(evpl, 4096, 4096,
                                                    CHIMERA_MEMFS_BLOCK_MAX_IOV,
-                                                   new_block->iov);
+                                                   0, new_block->iov);
 
                 /* Copy the retained portion from the old block */
                 evpl_iovec_cursor_init(&old_cursor, old_block->iov,
@@ -1670,7 +1670,7 @@ memfs_write(
 
         block->niov = evpl_iovec_alloc(evpl, 4096, 4096,
                                        CHIMERA_MEMFS_BLOCK_MAX_IOV,
-                                       block->iov);
+                                       0, block->iov);
 
         if (block_offset || block_len < CHIMERA_MEMFS_BLOCK_SIZE) {
 
@@ -1723,7 +1723,7 @@ memfs_write(
 
     pthread_mutex_unlock(&inode->lock);
 
-    evpl_iovecs_release(request->write.iov, request->write.niov);
+    evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
 
     request->status         = CHIMERA_VFS_OK;
     request->write.r_length = request->write.length;

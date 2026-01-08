@@ -39,7 +39,7 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                 65535,
                 8,
                 1,
-                &request->ioctl.output_iov);
+                0, &request->ioctl.output_iov);
 
             status = open_file->pipe_transceive(request,
                                                 request->ioctl.input_iov,
@@ -49,7 +49,7 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             chimera_smb_open_file_release(request, open_file);
 
             if (status != 0) {
-                evpl_iovec_release(&request->ioctl.output_iov);
+                evpl_iovec_release(thread->evpl, &request->ioctl.output_iov);
                 chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
                 return;
             }
