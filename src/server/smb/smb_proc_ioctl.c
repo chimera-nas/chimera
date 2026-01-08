@@ -48,6 +48,8 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
 
             chimera_smb_open_file_release(request, open_file);
 
+            evpl_iovecs_release(thread->evpl, request->ioctl.input_iov, request->ioctl.input_niov);
+
             if (status != 0) {
                 evpl_iovec_release(thread->evpl, &request->ioctl.output_iov);
                 chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
@@ -225,7 +227,7 @@ chimera_smb_parse_ioctl(
                                                                    request->ioctl.input_iov, 64,
                                                                    request->ioctl.
                                                                    input_count,
-                                                                   0);
+                                                                   1);
                 break;
             default:
                 /* Other IOCTLs don't need input parsing yet */

@@ -1269,7 +1269,11 @@ is_power_of_2(unsigned n)
 static int
 rounddown_pow_of_2(int n)
 {
-    int i = 0;
+    int i = 1;
+
+    if (n <= 1) {
+        return n > 0 ? n : 1;
+    }
 
     if (is_power_of_2(n)) {
         return n;

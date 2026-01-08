@@ -141,7 +141,6 @@ chimera_dispatch_writev(
     }
 
     /* Copy from source iovecs to evpl_iovec */
-    size_t copied  = 0;
     int    dst_idx = 0;
     size_t dst_off = 0;
 
@@ -157,7 +156,6 @@ chimera_dispatch_writev(
                    (char *) src_iov[src_idx].iov_base + src_off,
                    chunk);
 
-            copied  += chunk;
             src_off += chunk;
             dst_off += chunk;
 

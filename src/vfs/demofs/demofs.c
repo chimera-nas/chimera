@@ -2068,7 +2068,7 @@ demofs_write_phase2(
 
         chunk_iov = &demofs_private->iov[demofs_private->niov];
 
-        chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 32, chunk, 0);
+        chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 32, chunk, 1);
 
         demofs_private->niov += chunk_niov;
 
@@ -2087,6 +2087,8 @@ demofs_write_phase2(
         offset += chunk;
         left   -= chunk;
     }
+
+    evpl_iovecs_release(evpl, write_iov, write_niov);
 
 } /* demofs_write_phase2 */
 
