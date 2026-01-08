@@ -107,7 +107,7 @@ struct chimera_nfs_shared {
     int                                max_servers;
     pthread_mutex_t                    lock;
 
-    struct NFS_PORTMAP_V2              portmap_v2;
+    struct PORTMAP_V2                  portmap_v2;
     struct NFS_MOUNT_V3                mount_v3;
     struct NFS_V3                      nfs_v3;
     struct NFS_V4                      nfs_v4;

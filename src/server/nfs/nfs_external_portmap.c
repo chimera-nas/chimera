@@ -17,7 +17,7 @@
 struct portmap_reg_ctx {
     struct evpl             *evpl;
     struct evpl_rpc2_thread *rpc2_thread;
-    struct NFS_PORTMAP_V2    portmap_v2;
+    struct PORTMAP_V2        portmap_v2;
     struct evpl_rpc2_conn   *portmap_conn;
     struct evpl_endpoint    *portmap_endpoint;
     int                      complete;
@@ -82,7 +82,7 @@ portmap_init_context(struct portmap_reg_ctx *ctx)
         return -1;
     }
 
-    NFS_PORTMAP_V2_init(&ctx->portmap_v2);
+    PORTMAP_V2_init(&ctx->portmap_v2);
 
     programs[0]      = &ctx->portmap_v2.rpc2;
     ctx->rpc2_thread = evpl_rpc2_thread_init(ctx->evpl, programs, 1, NULL, NULL);
