@@ -1670,7 +1670,7 @@ memfs_write(
 
         block->niov = evpl_iovec_alloc(evpl, 4096, 4096,
                                        CHIMERA_MEMFS_BLOCK_MAX_IOV,
-                                       0, block->iov);
+                                       EVPL_IOVEC_FLAG_SHARED, block->iov);
 
         if (block_offset || block_len < CHIMERA_MEMFS_BLOCK_SIZE) {
 
