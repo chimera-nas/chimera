@@ -21,9 +21,9 @@
 
 // fchmodat support for AT_SYMLINK_NOFOLLOW was added in Linux 6.6
 #if defined(LINUX_VERSION_CODE) && defined(KERNEL_VERSION)
-    #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
-        #define HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW 1
-    #endif /* if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+#define HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW 1
+#endif /* if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) */
 #endif /* if defined(LINUX_VERSION_CODE) && defined(KERNEL_VERSION) */
 
 #include "evpl/evpl.h"
@@ -34,7 +34,6 @@
 #include "common/format.h"
 #include "common/misc.h"
 #include "common/macros.h"
-
 
 struct chimera_linux_thread {
     struct evpl                     *evpl;
@@ -79,54 +78,60 @@ chimera_linux_thread_destroy(void *private_data)
 
 static inline int
 chimera_linux_set_attrs(
-    int                       fd,
-    struct chimera_vfs_attrs *attr,
-    uint64_t                  preset_attr)
+    int                       dirfd,
+    char                     *path,
+    struct chimera_vfs_attrs *attr)
 {
     int rc;
 
-    attr->va_set_mask = preset_attr;
-
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
-
 #ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW
         // Use fchmodat with AT_SYMLINK_NOFOLLOW on kernels >= 6.6
-        rc = fchmodat(fd, "", attr->va_mode, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
+        rc = fchmodat(dirfd, path, attr->va_mode, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 #else  /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
-        // Fall back to fchmod on older kernels (AT_SYMLINK_NOFOLLOW not supported)
-        rc = fchmod(fd, attr->va_mode);
+        if (strlen(path) != 0) {
+            rc = fchmodat(dirfd, path, attr->va_mode, 0);
+        } else {
+            // dirfd might be O_PATH, reopen without O_PATH via /proc/self/fd
+            char procpath[64];
+            snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", dirfd);
+            int  reopen_fd = open(procpath, O_RDONLY);
+            if (reopen_fd < 0) {
+                chimera_linux_error("linux_setattr: reopen via /proc for fchmod failed: %s",
+                                    strerror(errno));
+                return -errno;
+            }
+            rc = fchmod(reopen_fd, attr->va_mode);
+            close(reopen_fd);
+        }
 #endif /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
         if (rc) {
             chimera_linux_error("linux_setattr: fchmod(%o) failed: %s",
-                                attr->va_mode,
-                                strerror(errno));
+                                attr->va_mode, strerror(errno));
 
             return -errno;
         }
 
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
-    } /* chimera_linux_set_attrs */
+    }
 
     if ((attr->va_req_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) ==
         (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
 
-        rc = fchownat(fd, "", attr->va_uid, attr->va_gid,
+        rc = fchownat(dirfd, path, attr->va_uid, attr->va_gid,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
         if (rc) {
             chimera_linux_error("linux_setattr: fchown(%u,%u) failed: %s",
-                                attr->va_uid,
-                                attr->va_gid,
-                                strerror(errno));
+                                attr->va_uid, attr->va_gid, strerror(errno));
 
             return -errno;
         }
 
         attr->va_set_mask |= CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
-
     } else if (attr->va_req_mask & CHIMERA_VFS_ATTR_UID) {
 
-        rc = fchownat(fd, "", attr->va_uid, -1,
+        rc = fchownat(dirfd, path, attr->va_uid, -1,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
         if (rc) {
@@ -138,10 +143,9 @@ chimera_linux_set_attrs(
         }
 
         attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
-
     } else if (attr->va_req_mask & CHIMERA_VFS_ATTR_GID) {
 
-        rc = fchownat(fd, "", -1, attr->va_gid,
+        rc = fchownat(dirfd, path, -1, attr->va_gid,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
         if (rc) {
@@ -156,7 +160,8 @@ chimera_linux_set_attrs(
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) {
-        rc = ftruncate(fd, attr->va_size);
+        // code assume that path is empty when dirfd is valid
+        rc = ftruncate(dirfd, attr->va_size);
 
         if (rc) {
             chimera_linux_error("linux_setattr: ftruncate(%ld) failed: %s",
@@ -192,12 +197,11 @@ chimera_linux_set_attrs(
             }
 
             attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
-
         } else {
             times[1].tv_nsec = UTIME_OMIT;
         }
 
-        rc = utimensat(fd, "", times, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
+        rc = utimensat(dirfd, path, times, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
         if (rc) {
             chimera_linux_error("linux_setattr: utimensat() failed: %s",
@@ -205,7 +209,6 @@ chimera_linux_set_attrs(
 
             return -errno;
         }
-
     }
 
     return 0;
@@ -224,7 +227,6 @@ chimera_linux_getattr(
                             &request->getattr.r_attr,
                             fd);
 
-
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* linux_getattr */
@@ -238,7 +240,7 @@ chimera_linux_setattr(
 
     fd = request->setattr.handle->vfs_private;
 
-    rc = chimera_linux_set_attrs(fd, request->setattr.set_attr, 0);
+    rc = chimera_linux_set_attrs(fd, "", request->setattr.set_attr);
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                             &request->setattr.r_post_attr,
@@ -290,14 +292,12 @@ chimera_linux_mount(
                             r_attr,
                             mount_fd);
 
-
     request->status = CHIMERA_VFS_OK;
 
     close(mount_fd);
 
     request->complete(request);
 } /* chimera_linux_lookup_path */
-
 
 static void
 chimera_linux_umount(
@@ -415,24 +415,39 @@ chimera_linux_readdir(
     request->complete(request);
 } /* linux_readdir */
 
+static int
+chimera_linux_set_open_flags(uint32_t in_flags)
+{
+    int flags = 0;
+
+    if (in_flags & CHIMERA_VFS_OPEN_PATH) {
+        flags |= O_PATH;
+    } else {
+        if (in_flags & (CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_READ_ONLY)) {
+            flags |= O_RDONLY;
+        } else {
+            flags |= O_RDWR;
+        }
+        if (in_flags & CHIMERA_VFS_OPEN_CREATE) {
+            flags |= O_CREAT;
+        }
+    }
+    if (in_flags & CHIMERA_VFS_OPEN_DIRECTORY) {
+        flags |= O_DIRECTORY;
+    }
+    return flags;
+} /* chimera_linux_set_open_flags */
+
 static void
 chimera_linux_open(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
     struct chimera_linux_thread *thread = private_data;
-    int                          flags  = 0;
+    int                          flags;
     int                          fd;
 
-    if (request->open.flags & CHIMERA_VFS_OPEN_PATH) {
-        flags |= O_PATH;
-    }
-
-    if (request->open.flags & CHIMERA_VFS_OPEN_DIRECTORY) {
-        flags |= O_DIRECTORY | O_RDONLY;
-    } else {
-        flags |= O_RDWR;
-    }
+    flags = chimera_linux_set_open_flags(request->open.flags);
 
     fd = linux_open_by_handle(&thread->mount_table,
                               request->fh,
@@ -464,26 +479,6 @@ chimera_linux_open_at(
 
     parent_fd = request->open_at.handle->vfs_private;
 
-    flags = 0;
-
-    if (request->open_at.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_READ_ONLY)) {
-        flags |= O_RDONLY;
-    } else {
-        flags |= O_RDWR;
-    }
-
-    if (request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY) {
-        flags |= O_DIRECTORY;
-    }
-
-    if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) {
-        flags |= O_CREAT;
-    }
-
-    if (request->open_at.flags & CHIMERA_VFS_OPEN_PATH) {
-        flags |= O_PATH;
-    }
-
     if (request->open_at.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
         mode                                    = request->open_at.set_attr->va_mode;
         request->open_at.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
@@ -491,26 +486,21 @@ chimera_linux_open_at(
         mode = 0600;
     }
 
-    fd = openat(parent_fd,
-                fullname,
-                flags,
-                mode);
+    flags = chimera_linux_set_open_flags(request->open_at.flags);
+    fd    = openat(parent_fd, fullname, flags, mode);
 
     if (fd < 0) {
-        chimera_linux_error("linux_open_at: openat(%d,%s,%d) failed: %s",
-                            parent_fd,
-                            fullname,
-                            flags,
-                            strerror(errno));
+        chimera_linux_debug("linux_open_at: openat(%d,%s,%d, 0%o) failed: %s",
+                            parent_fd, fullname, flags, mode, strerror(errno));
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
 
-    rc = chimera_linux_set_attrs(fd, request->open_at.set_attr, CHIMERA_VFS_ATTR_MODE);
+    rc = chimera_linux_set_attrs(fd, "", request->open_at.set_attr);
 
     if (rc < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(-rc);
         request->complete(request);
         return;
     }
@@ -580,7 +570,7 @@ chimera_linux_mkdir(
         return;
     }
 
-    rc = chimera_linux_set_attrs(fd, request->mkdir.set_attr, CHIMERA_VFS_ATTR_MODE);
+    rc = chimera_linux_set_attrs(fd, fullname, request->mkdir.set_attr);
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
@@ -593,7 +583,6 @@ chimera_linux_mkdir(
                                   &request->mkdir.r_attr,
                                   fd,
                                   fullname);
-
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -707,7 +696,6 @@ chimera_linux_write(
     struct iovec *iov;
 
     request->write.r_sync = request->write.sync;
-
 
     iov = request->plugin_data;
 
@@ -858,9 +846,9 @@ chimera_linux_rename(
                                   O_PATH | O_RDONLY | O_NOFOLLOW);
 
     if (new_fd < 0) {
-        close(old_fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
+        close(old_fd);
         return;
     }
 
