@@ -164,8 +164,8 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
 void
 __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
 {
-    char       argstr[80];
-    char       fhstr[80];
+    char        argstr[80];
+    char        fhstr[80];
     const char *fhstr_ptr;
 
     argstr[0] = '\0';
@@ -209,7 +209,8 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
             break;
         case CHIMERA_VFS_OP_CREATE_UNLINKED:
             if (req->create_unlinked.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
-                format_hex(fhstr, sizeof(fhstr), req->create_unlinked.r_attr.va_fh, req->create_unlinked.r_attr.va_fh_len);
+                format_hex(fhstr, sizeof(fhstr), req->create_unlinked.r_attr.va_fh, req->create_unlinked.r_attr.
+                           va_fh_len);
                 fhstr_ptr = fhstr;
             } else {
                 fhstr_ptr = "UNSET";
