@@ -51,6 +51,7 @@ struct chimera_server {
     int                                 num_protocols;
     int                                 threads_online;
     pthread_mutex_t                     lock;
+    pthread_cond_t                      all_threads_online;
 };
 
 struct chimera_thread {
@@ -310,7 +311,9 @@ chimera_server_thread_init(
     }
 
     pthread_mutex_lock(&server->lock);
-    server->threads_online++;
+    if (++server->threads_online == server->config->core_threads) {
+        pthread_cond_signal(&server->all_threads_online);
+    }
     pthread_mutex_unlock(&server->lock);
 
     return thread;
@@ -451,6 +454,7 @@ chimera_server_init(
     server->config = config;
 
     pthread_mutex_init(&server->lock, NULL);
+    pthread_cond_init(&server->all_threads_online, NULL);
 
     chimera_server_info("Initializing VFS...");
     server->vfs = chimera_vfs_init(config->delegation_threads,
@@ -487,9 +491,12 @@ chimera_server_start(struct chimera_server *server)
                                           server);
 
     chimera_server_info("Waiting for %d threads to start...", server->config->core_threads);
+
+    pthread_mutex_lock(&server->lock);
     while (server->threads_online < server->config->core_threads) {
-        usleep(100);
+        pthread_cond_wait(&server->all_threads_online, &server->lock);
     }
+    pthread_mutex_unlock(&server->lock);
 
     for (i = 0; i < server->num_protocols; i++) {
         server->protocols[i]->start(server->protocol_private[i]);
