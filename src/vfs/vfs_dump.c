@@ -164,56 +164,69 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
 void
 __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
 {
-    char argstr[80];
-    char fhstr[80];
+    char       argstr[80];
+    char       fhstr[80];
+    const char *fhstr_ptr;
 
     argstr[0] = '\0';
 
     switch (req->opcode) {
         case CHIMERA_VFS_OP_MOUNT:
-            format_hex(fhstr, sizeof(fhstr), req->mount.r_attr.va_fh, req->mount.r_attr.va_fh_len);
-            if (req->status == CHIMERA_VFS_OK) {
-                chimera_snprintf(argstr, sizeof(argstr), "r_fh %s", fhstr);
+            if (req->mount.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
+                format_hex(fhstr, sizeof(fhstr), req->mount.r_attr.va_fh, req->mount.r_attr.va_fh_len);
+                fhstr_ptr = fhstr;
+            } else {
+                fhstr_ptr = "UNSET";
             }
+            chimera_snprintf(argstr, sizeof(argstr), "r_fh %s", fhstr_ptr);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
-            format_hex(fhstr, sizeof(fhstr), req->lookup.r_attr.va_fh, req->lookup.r_attr.va_fh_len);
-            if (req->status == CHIMERA_VFS_OK) {
-                chimera_snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
-                                 req->lookup.component_len,
-                                 req->lookup.component,
-                                 fhstr);
+            if (req->lookup.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
+                format_hex(fhstr, sizeof(fhstr), req->lookup.r_attr.va_fh, req->lookup.r_attr.va_fh_len);
+                fhstr_ptr = fhstr;
+            } else {
+                fhstr_ptr = "UNSET";
             }
+            chimera_snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
+                             req->lookup.component_len,
+                             req->lookup.component,
+                             fhstr_ptr);
             break;
         case CHIMERA_VFS_OP_GETATTR:
-            if (req->status == CHIMERA_VFS_OK) {
-                chimera_snprintf(argstr, sizeof(argstr), "r_attr %lx", req->getattr.r_attr.va_set_mask);
-            }
-
+            chimera_snprintf(argstr, sizeof(argstr), "r_attr %lx", req->getattr.r_attr.va_set_mask);
             break;
         case CHIMERA_VFS_OP_OPEN_AT:
-            format_hex(fhstr, sizeof(fhstr), req->open_at.r_attr.va_fh, req->open_at.r_attr.va_fh_len);
-            if (req->status == CHIMERA_VFS_OK) {
-                chimera_snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
-                                 req->open_at.namelen,
-                                 req->open_at.name,
-                                 fhstr);
+            if (req->open_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
+                format_hex(fhstr, sizeof(fhstr), req->open_at.r_attr.va_fh, req->open_at.r_attr.va_fh_len);
+                fhstr_ptr = fhstr;
+            } else {
+                fhstr_ptr = "UNSET";
             }
+            chimera_snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
+                             req->open_at.namelen,
+                             req->open_at.name,
+                             fhstr_ptr);
             break;
         case CHIMERA_VFS_OP_CREATE_UNLINKED:
-            format_hex(fhstr, sizeof(fhstr), req->create_unlinked.r_attr.va_fh, req->create_unlinked.r_attr.va_fh_len);
-            if (req->status == CHIMERA_VFS_OK) {
-                chimera_snprintf(argstr, sizeof(argstr), "r_fh %s", fhstr);
+            if (req->create_unlinked.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
+                format_hex(fhstr, sizeof(fhstr), req->create_unlinked.r_attr.va_fh, req->create_unlinked.r_attr.va_fh_len);
+                fhstr_ptr = fhstr;
+            } else {
+                fhstr_ptr = "UNSET";
             }
+            chimera_snprintf(argstr, sizeof(argstr), "r_fh %s", fhstr_ptr);
             break;
         case CHIMERA_VFS_OP_MKDIR:
-            format_hex(fhstr, sizeof(fhstr), req->mkdir.r_attr.va_fh, req->mkdir.r_attr.va_fh_len);
-            if (req->status == CHIMERA_VFS_OK || req->status == CHIMERA_VFS_EEXIST) {
-                chimera_snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
-                                 req->mkdir.name_len,
-                                 req->mkdir.name,
-                                 fhstr);
+            if (req->mkdir.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
+                format_hex(fhstr, sizeof(fhstr), req->mkdir.r_attr.va_fh, req->mkdir.r_attr.va_fh_len);
+                fhstr_ptr = fhstr;
+            } else {
+                fhstr_ptr = "UNSET";
             }
+            chimera_snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
+                             req->mkdir.name_len,
+                             req->mkdir.name,
+                             fhstr_ptr);
             break;
         case CHIMERA_VFS_OP_READDIR:
             if (req->status == CHIMERA_VFS_OK) {
