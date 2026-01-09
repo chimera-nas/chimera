@@ -108,8 +108,8 @@ chimera_s3_list_find_complete(
     struct evpl_iovec                prefix_iov, suffix_iov;
     char                            *prefix, *suffix;
 
-    evpl_iovec_alloc(evpl, 4096, 0, 1, &prefix_iov);
-    evpl_iovec_alloc(evpl, 4096, 0, 1, &suffix_iov);
+    evpl_iovec_alloc(evpl, 4096, 0, 1, 0, &prefix_iov);
+    evpl_iovec_alloc(evpl, 4096, 0, 1, 0, &suffix_iov);
 
     prefix = evpl_iovec_data(&prefix_iov);
     suffix = evpl_iovec_data(&suffix_iov);
@@ -215,7 +215,7 @@ chimera_s3_list(
         request->path_len--;
     }
 
-    evpl_iovec_alloc(evpl, 1024 * 1024, 0, 1, &request->list.response);
+    evpl_iovec_alloc(evpl, 1024 * 1024, 0, 1, 0, &request->list.response);
 
     request->list.rp = evpl_iovec_data(&request->list.response);
 

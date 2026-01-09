@@ -10,12 +10,28 @@ chimera_client_mount_callback(
     enum chimera_vfs_error     status,
     void                      *private_data)
 {
-    struct chimera_client_request *request = private_data;
+    struct chimera_client_request *request       = private_data;
+    struct chimera_client_thread  *client_thread = request->thread;
+    chimera_mount_callback_t       callback      = request->mount.callback;
+    void                          *callback_arg  = request->mount.private_data;
 
-    request->mount.callback(request->thread, status, request->mount.private_data);
+    chimera_client_request_free(client_thread, request);
 
-    chimera_client_request_free(request->thread, request);
+    callback(client_thread, status, callback_arg);
 } /* chimera_client_mount_callback */
+
+SYMBOL_EXPORT void
+chimera_dispatch_mount(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_mount(thread->vfs_thread,
+                      request->mount.mount_path,
+                      request->mount.module_name,
+                      request->mount.module_path,
+                      chimera_client_mount_callback,
+                      request);
+} /* chimera_dispatch_mount */
 
 SYMBOL_EXPORT void
 chimera_mount(
@@ -38,11 +54,5 @@ chimera_mount(
     memcpy(request->mount.mount_path, mount_path, strlen(mount_path) + 1);
     memcpy(request->mount.module_name, module_name, strlen(module_name) + 1);
 
-    chimera_vfs_mount(client_thread->vfs_thread,
-                      request->mount.mount_path,
-                      request->mount.module_name,
-                      request->mount.
-                      module_path,
-                      chimera_client_mount_callback,
-                      request);
+    chimera_dispatch_mount(client_thread, request);
 } /* chimera_client_mount */

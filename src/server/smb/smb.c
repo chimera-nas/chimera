@@ -216,7 +216,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
     smb_dump_compound_reply(compound);
 
-    evpl_iovec_alloc(evpl, 8192, 8, 1, &reply_iov[0]);
+    evpl_iovec_alloc(evpl, 8192, 8, 1, 0, &reply_iov[0]);
 
     evpl_iovec_cursor_init(&reply_cursor, reply_iov, 1);
 
@@ -379,7 +379,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
                 chunk = left;
             }
 
-            evpl_iovec_alloc(evpl, 24, 8, 1, &chunk_iov[0]);
+            evpl_iovec_alloc(evpl, 24, 8, 1, 0, &chunk_iov[0]);
 
             direct_hdr = evpl_iovec_data(&chunk_iov[0]);
 
@@ -532,7 +532,7 @@ chimera_smb_direct_negotiate(
         return;
     }
 
-    evpl_iovec_alloc(evpl, sizeof(*reply), 8, 1, &reply_iov);
+    evpl_iovec_alloc(evpl, sizeof(*reply), 8, 1, 0, &reply_iov);
 
     request = (struct smb_direct_negotiate_request *) evpl_iovec_data(&iov[0]);
     reply   = (struct smb_direct_negotiate_reply *) evpl_iovec_data(&reply_iov);
@@ -1076,7 +1076,7 @@ chimera_smb_server_notify(
             }
 
             for (int i = 0; i < notify->recv_msg.niov; i++) {
-                evpl_iovec_release(&notify->recv_msg.iovec[i]);
+                evpl_iovec_release(evpl, &notify->recv_msg.iovec[i]);
             }
             break;
         case EVPL_NOTIFY_SENT:

@@ -20,7 +20,7 @@ chimera_smb_write_callback(
     struct chimera_smb_request *request = private_data;
 
     if (request->write.channel == SMB2_CHANNEL_RDMA_V1) {
-        evpl_iovec_release(&request->write.iov[0]);
+        evpl_iovec_release(request->compound->thread->evpl, &request->write.iov[0]);
     }
 
     chimera_smb_open_file_release(private_data, request->write.open_file);
@@ -86,9 +86,7 @@ chimera_smb_write(struct chimera_smb_request *request)
 
         for (i = 0; i < request->write.num_rdma_elements; i++) {
 
-            chunk_iov->data         = request->write.iov[0].data + offset;
-            chunk_iov->length       = request->write.rdma_elements[i].length;
-            chunk_iov->private_data = request->write.iov[0].private_data;
+            evpl_iovec_clone_segment(chunk_iov, &request->write.iov[0], offset, request->write.rdma_elements[i].length);
 
             evpl_rdma_read(
                 evpl,
@@ -168,10 +166,10 @@ chimera_smb_parse_write(
         }
         request->write.length = request->write.remaining;
 
-        request->write.niov = evpl_iovec_alloc(evpl, request->write.length, 4096, 1, request->write.iov);
+        request->write.niov = evpl_iovec_alloc(evpl, request->write.length, 4096, 1, 0, request->write.iov);
 
     } else {
-        request->write.niov = evpl_iovec_cursor_move(request_cursor, request->write.iov, 64, request->write.length, 0);
+        request->write.niov = evpl_iovec_cursor_move(request_cursor, request->write.iov, 64, request->write.length, 1);
     }
 
     return 0;

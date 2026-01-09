@@ -58,7 +58,7 @@ chimera_metrics_notify(
                 break;
             }
 
-            n = evpl_iovec_alloc(evpl, 2 * 1024 * 1024, 0, 1, &iov);
+            n = evpl_iovec_alloc(evpl, 2 * 1024 * 1024, 0, 1, 0, &iov);
 
             if (n < 1) {
                 evpl_http_server_set_response_length(request, 0);
@@ -69,7 +69,7 @@ chimera_metrics_notify(
             len = prometheus_metrics_scrape(metrics->metrics, (char *) evpl_iovec_data(&iov), evpl_iovec_length(&iov));
 
             if (len < 0) {
-                evpl_iovec_release(&iov);
+                evpl_iovec_release(evpl, &iov);
                 evpl_http_server_set_response_length(request, 0);
                 evpl_http_server_dispatch_default(request, 500);
                 break;

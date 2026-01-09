@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <sys/uio.h>
+
 #include "vfs/vfs.h"
 
 #define CHIMERA_CLIENT_IOV_MAX 260
@@ -121,8 +123,32 @@ typedef void (*chimera_write_callback_t)(
     enum chimera_vfs_error        status,
     void                         *private_data);
 
+/* Write from a simple buffer - copies to evpl_iovec internally */
 void
 chimera_write(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        length,
+    const void                     *buf,
+    chimera_write_callback_t        callback,
+    void                           *private_data);
+
+/* Write from struct iovec array - copies to evpl_iovec internally */
+void
+chimera_writev(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        length,
+    const struct iovec             *iov,
+    int                             iovcnt,
+    chimera_write_callback_t        callback,
+    void                           *private_data);
+
+/* Write from evpl_iovec directly - caller provides evpl_iovec (moves ownership) */
+void
+chimera_writerv(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
@@ -244,6 +270,62 @@ chimera_stat(
     chimera_stat_callback_t       callback,
     void                         *private_data);
 
+typedef void (*chimera_fstat_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    const struct chimera_stat    *st,
+    void                         *private_data);
+
+void
+chimera_fstat(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    chimera_fstat_callback_t        callback,
+    void                           *private_data);
+
 void
 chimera_destroy(
     struct chimera_client *client);
+
+struct chimera_dirent {
+    uint64_t ino;
+    uint64_t cookie;
+    char     name[256];
+    int      namelen;
+};
+
+typedef int (*chimera_readdir_callback_t)(
+    struct chimera_client_thread *thread,
+    const struct chimera_dirent  *dirent,
+    void                         *private_data);
+
+typedef void (*chimera_readdir_complete_t)(
+    struct chimera_client_thread *thread,
+    enum chimera_vfs_error        status,
+    uint64_t                      cookie,
+    int                           eof,
+    void                         *private_data);
+
+void
+chimera_readdir(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        cookie,
+    chimera_readdir_callback_t      callback,
+    chimera_readdir_complete_t      complete,
+    void                           *private_data);
+
+typedef void (*chimera_setattr_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+typedef void (*chimera_fsetattr_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+typedef void (*chimera_commit_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);

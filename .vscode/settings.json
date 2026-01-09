@@ -18,7 +18,7 @@
   "[c]": {
     "editor.defaultFormatter": "benjarvis.uncrustify"
   },
-  "cmakeExplorer.extraCtestRunArgs": "-V --timeout 60",
+  "cmakeExplorer.extraCtestRunArgs": "-V --timeout 300",
   "cmakeExplorer.suiteDelimiter": "/",
   "cmakeExplorer.testFileVar": "TEST_FILE",
   "cmakeExplorer.parallelJobs": 8,

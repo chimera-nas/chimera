@@ -9,6 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <endian.h>
 #include <rocksdb/c.h>
 #include <jansson.h>
 #include <limits.h>
@@ -141,6 +142,15 @@ struct cairn_thread {
     int                         thread_id;
     uint64_t                    next_inum;
 };
+
+/* Forward declaration for truncation handling */
+static inline void
+cairn_punch_hole(
+    struct cairn_thread *thread,
+    struct cairn_shared *shared,
+    struct cairn_inode  *inode,
+    uint64_t             offset,
+    uint64_t             length);
 
 static inline uint32_t
 cairn_inum_to_fh(
@@ -451,7 +461,7 @@ cairn_remove_file_extents(
 
     start_key.keytype = CAIRN_KEY_EXTENT;
     start_key.inum    = file_inum;
-    start_key.offset  = 0;
+    start_key.offset  = htobe64(0);
 
     iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
 
@@ -874,6 +884,17 @@ cairn_setattr(
     inode = ih.inode;
 
     cairn_map_attrs(&request->setattr.r_pre_attr, inode);
+
+    /* Handle truncation: remove extents past new EOF when size decreases */
+    if ((request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        S_ISREG(inode->mode) &&
+        request->setattr.set_attr->va_size < inode->size) {
+
+        uint64_t new_size = request->setattr.set_attr->va_size;
+        uint64_t old_size = inode->size;
+
+        cairn_punch_hole(thread, shared, inode, new_size, old_size - new_size);
+    }
 
     cairn_apply_attrs(inode, request->setattr.set_attr);
 
@@ -1402,12 +1423,12 @@ cairn_readdir(
             &attr,
             request->proto_private_data);
 
+        next_cookie = dirent_key->hash;
+
         if (rc) {
             eof = 0;
             break;
         }
-
-        next_cookie = dirent_key->hash;
 
         rocksdb_iter_next(iter);
 
@@ -1690,16 +1711,35 @@ cairn_read(
         eof    = 1;
     }
 
-    request->read.r_niov = evpl_iovec_alloc(thread->evpl, length, 4096, 1, request->read.iov);
+    request->read.r_niov = evpl_iovec_alloc(thread->evpl, length, 4096, 1, 0, request->read.iov);
     iov                  = request->read.iov;
 
     start_key.keytype = CAIRN_KEY_EXTENT;
     start_key.inum    = inode->inum;
-    start_key.offset  = offset;
+    start_key.offset  = htobe64(offset);
 
     iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
 
     rocksdb_iter_seek_for_prev(iter, (const char *) &start_key, sizeof(start_key));
+
+    /*
+     * After seek_for_prev, we might be at:
+     * 1. No valid position (before the first key)
+     * 2. An extent for a different inode
+     * In these cases, seek forward to find extents within our range.
+     */
+    if (!rocksdb_iter_valid(iter)) {
+        start_key.offset = htobe64(0);
+        rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+    } else {
+        extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
+
+        if (extent_key->keytype != CAIRN_KEY_EXTENT || extent_key->inum != inode->inum) {
+            /* Different inode, seek forward to our inode's first extent */
+            start_key.offset = htobe64(0);
+            rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+        }
+    }
 
     current_offset  = offset;
     bytes_remaining = length;
@@ -1711,15 +1751,21 @@ cairn_read(
             break;
         }
 
-        uint64_t extent_start = extent_key->offset;
+        uint64_t extent_start = be64toh(extent_key->offset);
         uint64_t extent_length;
         rocksdb_iter_value(iter, &extent_length);
         uint64_t extent_end = extent_start + extent_length;
 
         if (current_offset < extent_start) {
-            memset(iov[0].data + current_offset - extent_start, 0, extent_start - current_offset);
-            current_offset   = extent_start;
-            bytes_remaining -= extent_start - current_offset;
+            /* Fill hole with zeros */
+            uint64_t hole_size = extent_start - current_offset;
+
+            if (hole_size > bytes_remaining) {
+                hole_size = bytes_remaining;
+            }
+            memset(iov[0].data + (current_offset - offset), 0, hole_size);
+            current_offset  += hole_size;
+            bytes_remaining -= hole_size;
         }
 
         // Skip if extent is entirely after our range
@@ -1753,7 +1799,8 @@ cairn_read(
     }
 
     if (bytes_remaining) {
-        memset(iov[0].data + current_offset, 0, bytes_remaining);
+        /* Fill trailing hole with zeros */
+        memset(iov[0].data + (current_offset - offset), 0, bytes_remaining);
     }
 
     rocksdb_iter_destroy(iter);
@@ -1796,12 +1843,28 @@ cairn_punch_hole(
 
     start_key.keytype = CAIRN_KEY_EXTENT;
     start_key.inum    = inode->inum;
-    start_key.offset  = offset;
+    start_key.offset  = htobe64(offset);
 
     iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
 
     // Find first extent less than or equal to our start offset
     rocksdb_iter_seek_for_prev(iter, (const char *) &start_key, sizeof(start_key));
+
+    /*
+     * After seek_for_prev, if we don't find a valid extent for our inode,
+     * seek forward to find extents that might overlap our punch range.
+     */
+    if (!rocksdb_iter_valid(iter)) {
+        start_key.offset = htobe64(0);
+        rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+    } else {
+        extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
+
+        if (extent_key->keytype != CAIRN_KEY_EXTENT || extent_key->inum != inode->inum) {
+            start_key.offset = htobe64(0);
+            rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+        }
+    }
 
     while (rocksdb_iter_valid(iter)) {
         extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
@@ -1813,7 +1876,7 @@ cairn_punch_hole(
             break;
         }
 
-        uint64_t extent_start = extent_key->offset;
+        uint64_t extent_start = be64toh(extent_key->offset);
         uint64_t extent_end   = extent_start + extent_length;
 
         // Stop if extent starts after hole
@@ -1836,7 +1899,7 @@ cairn_punch_hole(
                 struct cairn_extent_key new_key = {
                     .keytype = CAIRN_KEY_EXTENT,
                     .inum    = inode->inum,
-                    .offset  = extent_start,
+                    .offset  = htobe64(extent_start),
                 };
 
                 rocksdb_transaction_put(txn, (const char *) &new_key, sizeof(new_key),
@@ -1853,7 +1916,7 @@ cairn_punch_hole(
                 struct cairn_extent_key new_key = {
                     .keytype = CAIRN_KEY_EXTENT,
                     .inum    = inode->inum,
-                    .offset  = hole_end,
+                    .offset  = htobe64(hole_end),
                 };
 
                 rocksdb_transaction_put(txn, (const char *) &new_key, sizeof(new_key),
@@ -1923,7 +1986,7 @@ cairn_write(
         struct cairn_extent_key  key = {
             .keytype = CAIRN_KEY_EXTENT,
             .inum    = inode->inum,
-            .offset  = current_offset,
+            .offset  = htobe64(current_offset),
         };
 
         // Store the extent with just the data
@@ -1954,6 +2017,8 @@ cairn_write(
     request->status         = CHIMERA_VFS_OK;
     request->write.r_length = request->write.length;
     request->write.r_sync   = 1;
+
+    evpl_iovecs_release(thread->evpl, request->write.iov, request->write.niov);
 
     DL_APPEND(thread->txn_requests, request);
 } /* cairn_write */

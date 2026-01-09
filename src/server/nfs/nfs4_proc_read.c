@@ -27,9 +27,11 @@ chimera_nfs4_read_complete(
         res->resok4.data.niov   = niov;
     } else {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        evpl_iovecs_release(req->thread->evpl, iov, niov);
     }
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
+
 } /* chimera_nfs3_write_complete */
 
 void

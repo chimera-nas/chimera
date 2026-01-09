@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <pthread.h>
+#include <sys/uio.h>
 #include <utlist.h>
 
 #include "client.h"
@@ -44,13 +46,33 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_RENAME,
     CHIMERA_CLIENT_OP_READLINK,
     CHIMERA_CLIENT_OP_STAT,
+    CHIMERA_CLIENT_OP_FSTAT,
+    CHIMERA_CLIENT_OP_READDIR,
+    CHIMERA_CLIENT_OP_SETATTR,
+    CHIMERA_CLIENT_OP_FSETATTR,
+    CHIMERA_CLIENT_OP_COMMIT,
 };
+
+struct chimera_client_request;
+
+typedef void (*chimera_client_request_callback)(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request);
 
 struct chimera_client_request {
     enum chimera_client_request_opcode opcode;
     struct chimera_client_thread      *thread;
     struct chimera_client_request     *prev;
     struct chimera_client_request     *next;
+
+    int                                heap_allocated;
+
+    ssize_t                            sync_result;
+    struct chimera_vfs_open_handle    *sync_open_handle;
+    struct chimera_stat                sync_stat;
+    int                                sync_target_len;
+
+    chimera_client_request_callback    sync_callback;
 
     uint32_t                           fh_len;
 
@@ -68,6 +90,7 @@ struct chimera_client_request {
         struct {
             chimera_umount_callback_t callback;
             void                     *private_data;
+            char                      mount_path[CHIMERA_VFS_PATH_MAX];
         } umount;
 
         struct {
@@ -89,20 +112,56 @@ struct chimera_client_request {
             int                             path_len;
             int                             parent_len;
             int                             name_offset;
+            struct chimera_vfs_attrs        set_attr;
             char                            path[CHIMERA_VFS_PATH_MAX];
         } mkdir;
 
         struct {
-            int                     niov;
-            chimera_read_callback_t callback;
-            void                   *private_data;
-            struct evpl_iovec       iov[CHIMERA_CLIENT_IOV_MAX];
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        length;
+            uint32_t                        result_count;
+            uint32_t                        result_eof;
+            int                             niov;
+            chimera_read_callback_t         callback;
+            void                           *private_data;
+            void                           *buf;
+            struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
         } read;
 
+        /* For chimera_write - caller provides a simple buffer */
         struct {
-            chimera_write_callback_t callback;
-            void                    *private_data;
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        length;
+            chimera_write_callback_t        callback;
+            void                           *private_data;
+            const void                     *buf;
+            struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
         } write;
+
+        /* For chimera_writev - caller provides struct iovec array */
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        length;
+            chimera_write_callback_t        callback;
+            void                           *private_data;
+            const struct iovec             *src_iov;
+            int                             src_iovcnt;
+            struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
+        } writev;
+
+        /* For chimera_writerv - caller provides evpl_iovec */
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        length;
+            int                             niov;
+            chimera_write_callback_t        callback;
+            void                           *private_data;
+            struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
+        } writerv;
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;
@@ -170,34 +229,77 @@ struct chimera_client_request {
             void                           *private_data;
             uint32_t                        target_maxlength;
             char                           *target;
+            int                             path_len;
+            char                            path[CHIMERA_VFS_PATH_MAX];
         } readlink;
 
         struct {
             struct chimera_vfs_open_handle *handle;
             chimera_stat_callback_t         callback;
             void                           *private_data;
+            int                             path_len;
+            char                            path[CHIMERA_VFS_PATH_MAX];
         } stat;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_fstat_callback_t        callback;
+            void                           *private_data;
+        } fstat;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        cookie;
+            chimera_readdir_callback_t      callback;
+            chimera_readdir_complete_t      complete;
+            void                           *private_data;
+        } readdir;
+
+        struct {
+            struct chimera_vfs_open_handle *parent_handle;
+            chimera_setattr_callback_t      callback;
+            void                           *private_data;
+            int                             path_len;
+            int                             parent_len;
+            int                             name_offset;
+            struct chimera_vfs_attrs        set_attr;
+            char                            path[CHIMERA_VFS_PATH_MAX];
+        } setattr;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_fsetattr_callback_t     callback;
+            void                           *private_data;
+            struct chimera_vfs_attrs        set_attr;
+        } fsetattr;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_commit_callback_t       callback;
+            void                           *private_data;
+        } commit;
     };
-};
+} __attribute__((aligned(64)));
 
 struct chimera_client_config {
     int                           core_threads;
     int                           delegation_threads;
     int                           cache_ttl;
+    int                           max_fds;
     struct chimera_vfs_module_cfg modules[CHIMERA_CLIENT_MAX_MODULES];
     int                           num_modules;
-};
+} __attribute__((aligned(64)));
 
 struct chimera_client {
     const struct chimera_client_config *config;
     struct chimera_vfs                 *vfs;
-};
+} __attribute__((aligned(64)));
 
 struct chimera_client_thread {
     struct chimera_client         *client;
     struct chimera_vfs_thread     *vfs_thread;
     struct chimera_client_request *free_requests;
-};
+} __attribute__((aligned(64)));
 
 static inline struct chimera_client_request *
 chimera_client_request_alloc(struct chimera_client_thread *thread)
@@ -213,6 +315,8 @@ chimera_client_request_alloc(struct chimera_client_thread *thread)
         request->thread = thread;
     }
 
+    request->heap_allocated = 1;
+
     return request;
 } /* chimera_client_request_alloc */
 
@@ -221,5 +325,17 @@ chimera_client_request_free(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
+    if (!request->heap_allocated) {
+        return;
+    }
+
     DL_PREPEND(thread->free_requests, request);
 } /* chimera_client_request_free */
+
+void chimera_dispatch_mount(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request);
+
+void chimera_dispatch_umount(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request);
