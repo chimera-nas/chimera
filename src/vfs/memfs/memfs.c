@@ -140,6 +140,7 @@ struct memfs_shared {
     int                      num_active_threads;
     uint8_t                  root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                 root_fhlen;
+    uint64_t                 fsid;
     pthread_mutex_t          lock;
 };
 
@@ -481,6 +482,9 @@ memfs_init(const char *cfgfile)
 
     pthread_mutex_init(&shared->lock, NULL);
 
+    /* Generate a random 64-bit filesystem ID */
+    shared->fsid = chimera_rand64();
+
     shared->num_inode_list = 255;
     shared->inode_list     = calloc(shared->num_inode_list,
                                     sizeof(*shared->inode_list));
@@ -618,6 +622,7 @@ memfs_thread_destroy(void *private_data)
 
 static inline void
 memfs_map_attrs(
+    struct memfs_shared      *shared,
     struct chimera_vfs_attrs *attr,
     struct memfs_inode       *inode)
 {
@@ -655,6 +660,7 @@ memfs_map_attrs(
         attr->va_fs_files_total = 0;
         attr->va_fs_files_free  = 0;
         attr->va_fs_files_avail = 0;
+        attr->va_fsid           = shared->fsid;
     }
 
 } /* memfs_map_attrs */
@@ -729,7 +735,7 @@ memfs_getattr(
         return;
     }
 
-    memfs_map_attrs(&request->getattr.r_attr, inode);
+    memfs_map_attrs(shared, &request->getattr.r_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
@@ -755,7 +761,7 @@ memfs_setattr(
         return;
     }
 
-    memfs_map_attrs(&request->setattr.r_pre_attr, inode);
+    memfs_map_attrs(shared, &request->setattr.r_pre_attr, inode);
 
     /* Handle truncation: free blocks past new EOF and zero partial block */
     if ((attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) &&
@@ -818,7 +824,7 @@ memfs_setattr(
 
     memfs_apply_attrs(inode, attr);
 
-    memfs_map_attrs(&request->setattr.r_post_attr, inode);
+    memfs_map_attrs(shared, &request->setattr.r_post_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
@@ -912,7 +918,7 @@ memfs_mount(
         return;
     }
 
-    memfs_map_attrs(&request->mount.r_attr, inode);
+    memfs_map_attrs(shared, &request->mount.r_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
@@ -971,7 +977,7 @@ memfs_lookup(
         return;
     }
 
-    memfs_map_attrs(&request->lookup.r_dir_attr, inode);
+    memfs_map_attrs(shared, &request->lookup.r_dir_attr, inode);
 
 
     child = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
@@ -983,7 +989,7 @@ memfs_lookup(
         return;
     }
 
-    memfs_map_attrs(&request->lookup.r_attr, child);
+    memfs_map_attrs(shared, &request->lookup.r_attr, child);
 
     pthread_mutex_unlock(&child->lock);
 
@@ -1029,7 +1035,7 @@ memfs_mkdir(
 
     memfs_apply_attrs(inode, request->mkdir.set_attr);
 
-    memfs_map_attrs(r_attr, inode);
+    memfs_map_attrs(shared, r_attr, inode);
 
     /* Optimistically allocate a dirent */
     dirent = memfs_dirent_alloc(thread,
@@ -1058,7 +1064,7 @@ memfs_mkdir(
         return;
     }
 
-    memfs_map_attrs(r_dir_pre_attr, parent_inode);
+    memfs_map_attrs(shared, r_dir_pre_attr, parent_inode);
 
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
 
@@ -1066,8 +1072,8 @@ memfs_mkdir(
 
         existing_inode = memfs_inode_get_inum(shared, existing_dirent->inum, existing_dirent->gen);
 
-        memfs_map_attrs(r_attr, existing_inode);
-        memfs_map_attrs(r_dir_post_attr, parent_inode);
+        memfs_map_attrs(shared, r_attr, existing_inode);
+        memfs_map_attrs(shared, r_dir_post_attr, parent_inode);
 
         pthread_mutex_unlock(&parent_inode->lock);
         pthread_mutex_unlock(&existing_inode->lock);
@@ -1085,7 +1091,7 @@ memfs_mkdir(
 
     parent_inode->mtime = now;
 
-    memfs_map_attrs(r_dir_post_attr, parent_inode);
+    memfs_map_attrs(shared, r_dir_post_attr, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
 
@@ -1117,7 +1123,7 @@ memfs_remove(
         return;
     }
 
-    memfs_map_attrs(&request->remove.r_dir_pre_attr, parent_inode);
+    memfs_map_attrs(shared, &request->remove.r_dir_pre_attr, parent_inode);
 
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -1169,7 +1175,7 @@ memfs_remove(
         request->remove.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
     }
 
-    memfs_map_attrs(&request->remove.r_removed_attr, inode);
+    memfs_map_attrs(shared, &request->remove.r_removed_attr, inode);
 
     if (inode->nlink == 0) {
         --inode->refcnt;
@@ -1178,7 +1184,7 @@ memfs_remove(
             memfs_inode_free(thread, inode);
         }
     }
-    memfs_map_attrs(&request->remove.r_dir_post_attr, parent_inode);
+    memfs_map_attrs(shared, &request->remove.r_dir_post_attr, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
     pthread_mutex_unlock(&inode->lock);
@@ -1234,7 +1240,7 @@ memfs_readdir(
             continue;
         }
 
-        memfs_map_attrs(&attr, dirent_inode);
+        memfs_map_attrs(shared, &attr, dirent_inode);
 
         pthread_mutex_unlock(&dirent_inode->lock);
 
@@ -1256,7 +1262,7 @@ memfs_readdir(
         dirent = rb_tree_next(&inode->dir.dirents, dirent);
     }
 
-    memfs_map_attrs(&request->readdir.r_dir_attr, inode);
+    memfs_map_attrs(shared, &request->readdir.r_dir_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
@@ -1324,7 +1330,7 @@ memfs_open_at(
         return;
     }
 
-    memfs_map_attrs(&request->open_at.r_dir_pre_attr, parent_inode);
+    memfs_map_attrs(shared, &request->open_at.r_dir_pre_attr, parent_inode);
 
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
 
@@ -1388,11 +1394,11 @@ memfs_open_at(
         request->open_at.r_vfs_private = (uint64_t) inode;
     }
 
-    memfs_map_attrs(&request->open_at.r_dir_post_attr, parent_inode);
+    memfs_map_attrs(shared, &request->open_at.r_dir_post_attr, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
 
-    memfs_map_attrs(&request->open_at.r_attr, inode);
+    memfs_map_attrs(shared, &request->open_at.r_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
@@ -1436,7 +1442,7 @@ memfs_create_unlinked(
 
     request->create_unlinked.r_vfs_private = (uint64_t) inode;
 
-    memfs_map_attrs(&request->create_unlinked.r_attr, inode);
+    memfs_map_attrs(shared, &request->create_unlinked.r_attr, inode);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -1574,7 +1580,7 @@ memfs_read(
 
     inode->atime = now;
 
-    memfs_map_attrs(&request->read.r_attr, inode);
+    memfs_map_attrs(shared, &request->read.r_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
@@ -1624,7 +1630,7 @@ memfs_write(
         }
     }
 
-    memfs_map_attrs(&request->write.r_pre_attr, inode);
+    memfs_map_attrs(shared, &request->write.r_pre_attr, inode);
 
     if (inode->file.max_blocks <= last_block) {
 
@@ -1719,7 +1725,7 @@ memfs_write(
 
     inode->mtime = now;
 
-    memfs_map_attrs(&request->write.r_post_attr, inode);
+    memfs_map_attrs(shared, &request->write.r_post_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
 
@@ -1768,7 +1774,7 @@ memfs_symlink(
            request->symlink.target,
            request->symlink.targetlen);
 
-    memfs_map_attrs(&request->symlink.r_attr, inode);
+    memfs_map_attrs(shared, &request->symlink.r_attr, inode);
 
     /* Optimistically allocate a dirent */
     dirent = memfs_dirent_alloc(thread,
@@ -1808,13 +1814,13 @@ memfs_symlink(
         return;
     }
 
-    memfs_map_attrs(&request->symlink.r_dir_pre_attr, parent_inode);
+    memfs_map_attrs(shared, &request->symlink.r_dir_pre_attr, parent_inode);
 
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
     parent_inode->mtime = now;
 
-    memfs_map_attrs(&request->symlink.r_dir_post_attr, parent_inode);
+    memfs_map_attrs(shared, &request->symlink.r_dir_post_attr, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
 
@@ -2042,7 +2048,7 @@ memfs_link(
         return;
     }
 
-    memfs_map_attrs(&request->link.r_dir_pre_attr, parent_inode);
+    memfs_map_attrs(shared, &request->link.r_dir_pre_attr, parent_inode);
 
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -2092,8 +2098,8 @@ memfs_link(
     inode->ctime        = now;
     parent_inode->mtime = now;
 
-    memfs_map_attrs(&request->link.r_dir_post_attr, parent_inode);
-    memfs_map_attrs(&request->link.r_attr, inode);
+    memfs_map_attrs(shared, &request->link.r_dir_post_attr, parent_inode);
+    memfs_map_attrs(shared, &request->link.r_attr, inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
     pthread_mutex_unlock(&inode->lock);

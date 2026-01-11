@@ -168,6 +168,7 @@ chimera_linux_statvfs_to_attr(
     attr->va_fs_files_avail = stvfs->f_ffree;
     attr->va_fs_files_free  = stvfs->f_ffree;
     attr->va_fs_files_total = stvfs->f_files;
+    attr->va_fsid           = stvfs->f_fsid;
 } /* linux_statvfs_to_chimera_attr */
 
 static int

@@ -30,6 +30,7 @@
 #define CAIRN_KEY_DIRENT  1
 #define CAIRN_KEY_SYMLINK 2
 #define CAIRN_KEY_EXTENT  3
+#define CAIRN_KEY_SUPER   4
 
 #define chimera_cairn_debug(...) chimera_debug("cairn", \
                                                __FILE__, \
@@ -80,6 +81,14 @@ struct cairn_extent_key {
     uint64_t offset;
 } __attribute__((packed));
 
+struct cairn_super_key {
+    uint8_t keytype;
+} __attribute__((packed));
+
+struct cairn_super {
+    uint64_t fsid;
+};
+
 struct cairn_dirent_value {
     uint64_t inum;
     uint32_t name_len;
@@ -129,8 +138,9 @@ struct cairn_shared {
     int                                  num_active_threads;
     uint8_t                              root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                             root_fhlen;
+    uint64_t                             fsid;
     pthread_mutex_t                      lock;
-    int                                  noatime; // New field
+    int                                  noatime;
 };
 
 struct cairn_thread {
@@ -592,6 +602,8 @@ cairn_init(const char *cfgfile)
     clock_gettime(CLOCK_REALTIME, &now);
 
     if (initialize) {
+        struct cairn_super_key super_key;
+        struct cairn_super     super;
 
         inode.inum       = 2;
         inode.gen        = 1;
@@ -607,6 +619,8 @@ cairn_init(const char *cfgfile)
         inode.mtime      = now;
         inode.ctime      = now;
 
+        /* Generate a random 64-bit filesystem ID */
+        super.fsid = chimera_rand64();
 
         txn = rocksdb_transaction_begin(shared->db_txn, shared->write_options, shared->txn_options, NULL);
 
@@ -615,12 +629,20 @@ cairn_init(const char *cfgfile)
         inode_key.keytype = CAIRN_KEY_INODE;
         inode_key.inum    = inode.inum;
 
-
         rocksdb_transaction_put(txn,
                                 (const char *) &inode_key, sizeof(inode_key),
                                 (const char *) &inode, sizeof(inode), &err);
 
         chimera_cairn_abort_if(err, "Error putting root inode: %s\n", err);
+
+        /* Store the super block with FSID */
+        super_key.keytype = CAIRN_KEY_SUPER;
+
+        rocksdb_transaction_put(txn,
+                                (const char *) &super_key, sizeof(super_key),
+                                (const char *) &super, sizeof(super), &err);
+
+        chimera_cairn_abort_if(err, "Error putting super block: %s\n", err);
 
         rocksdb_transaction_commit(txn, &err);
 
@@ -628,6 +650,27 @@ cairn_init(const char *cfgfile)
 
         rocksdb_transaction_destroy(txn);
 
+    }
+
+    /* Load the super block to get the persisted FSID */
+    {
+        struct cairn_super_key super_key;
+        struct cairn_super    *super;
+        size_t                 super_len;
+
+        super_key.keytype = CAIRN_KEY_SUPER;
+
+        super = (struct cairn_super *) rocksdb_transactiondb_get(
+            shared->db_txn,
+            shared->read_options,
+            (const char *) &super_key, sizeof(super_key),
+            &super_len, &err);
+
+        chimera_cairn_abort_if(err, "Error reading super block: %s\n", err);
+        chimera_cairn_abort_if(!super, "Super block not found in database\n");
+
+        shared->fsid = super->fsid;
+        free(super);
     }
 
     shared->root_fhlen = cairn_inum_to_fh(shared->root_fh, 2, 1);
@@ -721,6 +764,7 @@ cairn_alloc_inum(
 
 static inline void
 cairn_map_attrs(
+    struct cairn_shared      *shared,
     struct chimera_vfs_attrs *attr,
     struct cairn_inode       *inode)
 {
@@ -757,6 +801,7 @@ cairn_map_attrs(
         attr->va_fs_files_total = 0;
         attr->va_fs_files_free  = 0;
         attr->va_fs_files_avail = 0;
+        attr->va_fsid           = shared->fsid;
     }
 } /* cairn_map_attrs */
 
@@ -850,7 +895,7 @@ cairn_getattr(
 
     inode = ih.inode;
 
-    cairn_map_attrs(&request->getattr.r_attr, inode);
+    cairn_map_attrs(shared, &request->getattr.r_attr, inode);
 
     cairn_inode_handle_release(&ih);
 
@@ -883,7 +928,7 @@ cairn_setattr(
 
     inode = ih.inode;
 
-    cairn_map_attrs(&request->setattr.r_pre_attr, inode);
+    cairn_map_attrs(shared, &request->setattr.r_pre_attr, inode);
 
     /* Handle truncation: remove extents past new EOF when size decreases */
     if ((request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) &&
@@ -898,7 +943,7 @@ cairn_setattr(
 
     cairn_apply_attrs(inode, request->setattr.set_attr);
 
-    cairn_map_attrs(&request->setattr.r_post_attr, inode);
+    cairn_map_attrs(shared, &request->setattr.r_post_attr, inode);
 
     cairn_put_inode(txn, inode);
     cairn_inode_handle_release(&ih);
@@ -1023,7 +1068,7 @@ cairn_mount(
 
     inode = ih.inode;
 
-    cairn_map_attrs(&request->mount.r_attr, inode);
+    cairn_map_attrs(shared, &request->mount.r_attr, inode);
 
     cairn_inode_handle_release(&ih);
 
@@ -1093,7 +1138,7 @@ cairn_lookup(
 
     dirent_value = dh.dirent;
 
-    cairn_map_attrs(&request->lookup.r_dir_attr, inode);
+    cairn_map_attrs(shared, &request->lookup.r_dir_attr, inode);
 
     rc = cairn_inode_get_inum(thread, txn, dirent_value->inum, 0, &child_ih);
 
@@ -1107,7 +1152,7 @@ cairn_lookup(
 
     child = child_ih.inode;
 
-    cairn_map_attrs(&request->lookup.r_attr, child);
+    cairn_map_attrs(shared, &request->lookup.r_attr, child);
 
     cairn_inode_handle_release(&ih);
     cairn_dirent_handle_release(&dh);
@@ -1162,14 +1207,14 @@ cairn_mkdir(
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
     if (rc == 0) {
-        cairn_map_attrs(&request->mkdir.r_dir_pre_attr, parent_inode);
-        cairn_map_attrs(&request->mkdir.r_dir_post_attr, parent_inode);
+        cairn_map_attrs(shared, &request->mkdir.r_dir_pre_attr, parent_inode);
+        cairn_map_attrs(shared, &request->mkdir.r_dir_post_attr, parent_inode);
 
         rc = cairn_inode_get_inum(thread, txn, dh.dirent->inum, 0, &existing_ih);
 
         if (rc == 0) {
             existing_inode = existing_ih.inode;
-            cairn_map_attrs(&request->mkdir.r_attr, existing_inode);
+            cairn_map_attrs(shared, &request->mkdir.r_attr, existing_inode);
             cairn_inode_handle_release(&existing_ih);
         }
         cairn_inode_handle_release(&parent_ih);
@@ -1192,19 +1237,19 @@ cairn_mkdir(
 
     cairn_apply_attrs(&inode, request->mkdir.set_attr);
 
-    cairn_map_attrs(&request->mkdir.r_attr, &inode);
+    cairn_map_attrs(shared, &request->mkdir.r_attr, &inode);
 
     dirent_value.inum     = inode.inum;
     dirent_value.name_len = request->mkdir.name_len;
     memcpy(dirent_value.name, request->mkdir.name, request->mkdir.name_len);
 
-    cairn_map_attrs(&request->mkdir.r_dir_pre_attr, parent_inode);
+    cairn_map_attrs(shared, &request->mkdir.r_dir_pre_attr, parent_inode);
 
     parent_inode->nlink++;
 
     parent_inode->mtime = now;
 
-    cairn_map_attrs(&request->mkdir.r_dir_post_attr, parent_inode);
+    cairn_map_attrs(shared, &request->mkdir.r_dir_post_attr, parent_inode);
 
     cairn_put_dirent(txn, &dirent_key, &dirent_value);
     cairn_put_inode(txn, parent_inode);
@@ -1289,7 +1334,7 @@ cairn_remove(
         return;
     }
 
-    cairn_map_attrs(&request->remove.r_dir_pre_attr, parent_inode);
+    cairn_map_attrs(shared, &request->remove.r_dir_pre_attr, parent_inode);
 
     parent_inode->mtime = now;
 
@@ -1308,7 +1353,7 @@ cairn_remove(
         request->remove.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
     }
 
-    cairn_map_attrs(&request->remove.r_removed_attr, inode);
+    cairn_map_attrs(shared, &request->remove.r_removed_attr, inode);
 
     if (inode->nlink == 0) {
         --inode->refcnt;
@@ -1327,7 +1372,7 @@ cairn_remove(
         }
     }
 
-    cairn_map_attrs(&request->remove.r_dir_post_attr, parent_inode);
+    cairn_map_attrs(shared, &request->remove.r_dir_post_attr, parent_inode);
 
     cairn_remove_dirent(txn, &dirent_key);
 
@@ -1411,7 +1456,7 @@ cairn_readdir(
 
         dirent_inode = dirent_ih.inode;
 
-        cairn_map_attrs(&attr, dirent_inode);
+        cairn_map_attrs(shared, &attr, dirent_inode);
 
         cairn_inode_handle_release(&dirent_ih);
 
@@ -1437,7 +1482,7 @@ cairn_readdir(
     rocksdb_iter_destroy(iter);
 
 
-    cairn_map_attrs(&request->readdir.r_dir_attr, inode);
+    cairn_map_attrs(shared, &request->readdir.r_dir_attr, inode);
 
     cairn_inode_handle_release(&ih);
 
@@ -1521,7 +1566,7 @@ cairn_open_at(
         return;
     }
 
-    cairn_map_attrs(&request->open_at.r_dir_pre_attr, parent_inode);
+    cairn_map_attrs(shared, &request->open_at.r_dir_pre_attr, parent_inode);
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
@@ -1593,8 +1638,8 @@ cairn_open_at(
         request->open_at.r_vfs_private = (uint64_t) inode->inum;
     }
 
-    cairn_map_attrs(&request->open_at.r_dir_post_attr, parent_inode);
-    cairn_map_attrs(&request->open_at.r_attr, inode);
+    cairn_map_attrs(shared, &request->open_at.r_dir_post_attr, parent_inode);
+    cairn_map_attrs(shared, &request->open_at.r_attr, inode);
 
     cairn_put_inode(txn, parent_inode);
     cairn_put_inode(txn, inode);
@@ -1810,7 +1855,7 @@ cairn_read(
         cairn_put_inode(txn, inode);
     }
 
-    cairn_map_attrs(&request->read.r_attr, inode);
+    cairn_map_attrs(shared, &request->read.r_attr, inode);
 
     cairn_inode_handle_release(&ih);
 
@@ -1971,7 +2016,7 @@ cairn_write(
 
     inode = ih.inode;
 
-    cairn_map_attrs(&request->write.r_pre_attr, inode);
+    cairn_map_attrs(shared, &request->write.r_pre_attr, inode);
 
     if (inode->size > request->write.offset) {
         cairn_punch_hole(thread, shared, inode, request->write.offset, request->write.length);
@@ -2009,7 +2054,7 @@ cairn_write(
     inode->space_used += total_space;
     inode->mtime       = now;
 
-    cairn_map_attrs(&request->write.r_post_attr, inode);
+    cairn_map_attrs(shared, &request->write.r_post_attr, inode);
 
     cairn_put_inode(txn, inode);
     cairn_inode_handle_release(&ih);
@@ -2060,7 +2105,7 @@ cairn_symlink(
         return;
     }
 
-    cairn_map_attrs(&request->symlink.r_dir_pre_attr, parent_inode);
+    cairn_map_attrs(shared, &request->symlink.r_dir_pre_attr, parent_inode);
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
@@ -2083,8 +2128,8 @@ cairn_symlink(
 
     parent_inode->mtime = now;
 
-    cairn_map_attrs(&request->symlink.r_attr, &new_inode);
-    cairn_map_attrs(&request->symlink.r_dir_post_attr, parent_inode);
+    cairn_map_attrs(shared, &request->symlink.r_attr, &new_inode);
+    cairn_map_attrs(shared, &request->symlink.r_dir_post_attr, parent_inode);
 
     target_key.keytype = CAIRN_KEY_SYMLINK;
     target_key.inum    = new_inode.inum;

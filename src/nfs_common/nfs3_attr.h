@@ -20,7 +20,8 @@
             CHIMERA_VFS_ATTR_SIZE | \
             CHIMERA_VFS_ATTR_ATIME | \
             CHIMERA_VFS_ATTR_MTIME | \
-            CHIMERA_VFS_ATTR_CTIME)
+            CHIMERA_VFS_ATTR_CTIME | \
+            CHIMERA_VFS_ATTR_FSID)
 
 #define CHIMERA_NFS3_ATTR_WCC_MASK ( \
             CHIMERA_VFS_ATTR_SIZE | \
@@ -167,7 +168,7 @@ chimera_nfs3_marshall_attrs(
     fattr->used           = attr->va_space_used;
     fattr->rdev.specdata1 = (attr->va_rdev >> 32) & 0xFFFFFFFF;
     fattr->rdev.specdata2 = attr->va_rdev & 0xFFFFFFFF;
-    fattr->fsid           = attr->va_dev;
+    fattr->fsid           = attr->va_fsid;
     fattr->fileid         = attr->va_ino;
     fattr->atime.seconds  = attr->va_atime.tv_sec;
     fattr->atime.nseconds = attr->va_atime.tv_nsec;
@@ -175,7 +176,7 @@ chimera_nfs3_marshall_attrs(
     fattr->mtime.nseconds = attr->va_mtime.tv_nsec;
     fattr->ctime.seconds  = attr->va_ctime.tv_sec;
     fattr->ctime.nseconds = attr->va_ctime.tv_nsec;
-} /* chimera_nfs4_marshall_attrs */
+} /* chimera_nfs3_marshall_attrs */
 
 static inline void
 chimera_nfs3_marshall_wcc_attrs(
@@ -260,6 +261,7 @@ chimera_nfs3_unmarshall_attrs(
     attr->va_size          = fattr->size;
     attr->va_space_used    = fattr->used;
     attr->va_dev           = fattr->fsid;
+    attr->va_fsid          = fattr->fsid;
     attr->va_ino           = fattr->fileid;
     attr->va_rdev          = ((uint64_t) fattr->rdev.specdata1 << 32) | fattr->rdev.specdata2;
     attr->va_atime.tv_sec  = fattr->atime.seconds;
@@ -269,7 +271,7 @@ chimera_nfs3_unmarshall_attrs(
     attr->va_ctime.tv_sec  = fattr->ctime.seconds;
     attr->va_ctime.tv_nsec = fattr->ctime.nseconds;
 
-    attr->va_set_mask = CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_ATOMIC;
+    attr->va_set_mask = CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FSID | CHIMERA_VFS_ATTR_ATOMIC;
 } /* chimera_nfs3_unmarshall_attrs */
 
 static inline void
