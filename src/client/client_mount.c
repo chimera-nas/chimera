@@ -29,6 +29,7 @@ chimera_dispatch_mount(
                       request->mount.mount_path,
                       request->mount.module_name,
                       request->mount.module_path,
+                      request->mount.options[0] ? request->mount.options : NULL,
                       chimera_client_mount_callback,
                       request);
 } /* chimera_dispatch_mount */
@@ -39,6 +40,7 @@ chimera_mount(
     const char                   *mount_path,
     const char                   *module_name,
     const char                   *module_path,
+    const char                   *options,
     chimera_mount_callback_t      callback,
     void                         *private_data)
 {
@@ -53,6 +55,12 @@ chimera_mount(
     memcpy(request->mount.module_path, module_path, strlen(module_path) + 1);
     memcpy(request->mount.mount_path, mount_path, strlen(mount_path) + 1);
     memcpy(request->mount.module_name, module_name, strlen(module_name) + 1);
+
+    if (options) {
+        memcpy(request->mount.options, options, strlen(options) + 1);
+    } else {
+        request->mount.options[0] = '\0';
+    }
 
     chimera_dispatch_mount(client_thread, request);
 } /* chimera_client_mount */

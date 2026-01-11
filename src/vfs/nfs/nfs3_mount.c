@@ -84,6 +84,7 @@ chimera_nfs3_mount_process_mount(
     mount = calloc(1, sizeof(*mount));
 
     mount->server        = server;
+    mount->nfsvers       = 3;
     mount->status        = CHIMERA_NFS_CLIENT_MOUNT_STATE_MOUNTING;
     mount->mount_request = request;
 

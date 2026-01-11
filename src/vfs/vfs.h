@@ -11,39 +11,39 @@
 #include "evpl/evpl.h"
 
 
-#define CHIMERA_VFS_FH_SIZE             32
+#define CHIMERA_VFS_FH_SIZE              32
 
-#define CHIMERA_VFS_PATH_MAX            4096
-#define CHIMERA_VFS_NAME_MAX            256
+#define CHIMERA_VFS_PATH_MAX             4096
+#define CHIMERA_VFS_NAME_MAX             256
 struct evpl;
 
 struct chimera_vfs;
 struct prometheus_metrics;
 
-#define CHIMERA_VFS_ATTR_DEV            (1UL << 0)
-#define CHIMERA_VFS_ATTR_INUM           (1UL << 1)
-#define CHIMERA_VFS_ATTR_MODE           (1UL << 2)
-#define CHIMERA_VFS_ATTR_NLINK          (1UL << 3)
-#define CHIMERA_VFS_ATTR_UID            (1UL << 4)
-#define CHIMERA_VFS_ATTR_GID            (1UL << 5)
-#define CHIMERA_VFS_ATTR_RDEV           (1UL << 6)
-#define CHIMERA_VFS_ATTR_SIZE           (1UL << 7)
-#define CHIMERA_VFS_ATTR_ATIME          (1UL << 8)
-#define CHIMERA_VFS_ATTR_MTIME          (1UL << 9)
-#define CHIMERA_VFS_ATTR_CTIME          (1UL << 10)
-#define CHIMERA_VFS_ATTR_SPACE_USED     (1UL << 11)
+#define CHIMERA_VFS_ATTR_DEV             (1UL << 0)
+#define CHIMERA_VFS_ATTR_INUM            (1UL << 1)
+#define CHIMERA_VFS_ATTR_MODE            (1UL << 2)
+#define CHIMERA_VFS_ATTR_NLINK           (1UL << 3)
+#define CHIMERA_VFS_ATTR_UID             (1UL << 4)
+#define CHIMERA_VFS_ATTR_GID             (1UL << 5)
+#define CHIMERA_VFS_ATTR_RDEV            (1UL << 6)
+#define CHIMERA_VFS_ATTR_SIZE            (1UL << 7)
+#define CHIMERA_VFS_ATTR_ATIME           (1UL << 8)
+#define CHIMERA_VFS_ATTR_MTIME           (1UL << 9)
+#define CHIMERA_VFS_ATTR_CTIME           (1UL << 10)
+#define CHIMERA_VFS_ATTR_SPACE_USED      (1UL << 11)
 
-#define CHIMERA_VFS_ATTR_SPACE_AVAIL    (1UL << 12)
-#define CHIMERA_VFS_ATTR_SPACE_FREE     (1UL << 13)
-#define CHIMERA_VFS_ATTR_SPACE_TOTAL    (1UL << 14)
-#define CHIMERA_VFS_ATTR_FILES_TOTAL    (1UL << 15)
-#define CHIMERA_VFS_ATTR_FILES_FREE     (1UL << 16)
-#define CHIMERA_VFS_ATTR_FILES_AVAIL    (1UL << 17)
+#define CHIMERA_VFS_ATTR_SPACE_AVAIL     (1UL << 12)
+#define CHIMERA_VFS_ATTR_SPACE_FREE      (1UL << 13)
+#define CHIMERA_VFS_ATTR_SPACE_TOTAL     (1UL << 14)
+#define CHIMERA_VFS_ATTR_FILES_TOTAL     (1UL << 15)
+#define CHIMERA_VFS_ATTR_FILES_FREE      (1UL << 16)
+#define CHIMERA_VFS_ATTR_FILES_AVAIL     (1UL << 17)
 
-#define CHIMERA_VFS_ATTR_FH             (1UL << 18)
-#define CHIMERA_VFS_ATTR_ATOMIC         (1UL << 19)
+#define CHIMERA_VFS_ATTR_FH              (1UL << 18)
+#define CHIMERA_VFS_ATTR_ATOMIC          (1UL << 19)
 
-#define CHIMERA_VFS_ATTR_MASK_STAT      ( \
+#define CHIMERA_VFS_ATTR_MASK_STAT       ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \
             CHIMERA_VFS_ATTR_MODE | \
@@ -57,7 +57,7 @@ struct prometheus_metrics;
             CHIMERA_VFS_ATTR_MTIME | \
             CHIMERA_VFS_ATTR_CTIME)
 
-#define CHIMERA_VFS_ATTR_MASK_STATFS    ( \
+#define CHIMERA_VFS_ATTR_MASK_STATFS     ( \
             CHIMERA_VFS_ATTR_SPACE_AVAIL | \
             CHIMERA_VFS_ATTR_SPACE_FREE | \
             CHIMERA_VFS_ATTR_SPACE_TOTAL | \
@@ -65,10 +65,23 @@ struct prometheus_metrics;
             CHIMERA_VFS_ATTR_FILES_FREE | \
             CHIMERA_VFS_ATTR_FILES_AVAIL)
 
-#define CHIMERA_VFS_ATTR_MASK_CACHEABLE ( \
+#define CHIMERA_VFS_ATTR_MASK_CACHEABLE  ( \
             CHIMERA_VFS_ATTR_MASK_STAT)
 
-#define CHIMERA_VFS_TIME_NOW            ((1l << 30) - 3l)
+#define CHIMERA_VFS_TIME_NOW             ((1l << 30) - 3l)
+
+#define CHIMERA_VFS_MOUNT_OPT_MAX        16
+#define CHIMERA_VFS_MOUNT_OPT_BUFFER_MAX 1024
+
+struct chimera_vfs_mount_option {
+    const char *key;
+    const char *value;   /* NULL if no value */
+};
+
+struct chimera_vfs_mount_options {
+    int                             num_options;
+    struct chimera_vfs_mount_option options[CHIMERA_VFS_MOUNT_OPT_MAX];
+};
 
 struct chimera_vfs_attrs {
     uint64_t        va_req_mask;
@@ -103,7 +116,6 @@ struct chimera_vfs_attrs {
      * to prevent this from causing compiler complaints?
      */
     uint8_t         va_fh[CHIMERA_VFS_FH_SIZE + 32];
-
 };
 
 #define CHIMERA_VFS_OP_MOUNT           1
@@ -321,14 +333,16 @@ struct chimera_vfs_request {
         } find;
 
         struct {
-            uint8_t                    fh_magic;
-            const char                *path;
-            uint32_t                   pathlen;
-            struct chimera_vfs_module *module;
-            const char                *mount_path;
-            uint32_t                   mount_pathlen;
-            void                      *r_mount_private;
-            struct chimera_vfs_attrs   r_attr;
+            uint8_t                          fh_magic;
+            const char                      *path;
+            uint32_t                         pathlen;
+            struct chimera_vfs_module       *module;
+            const char                      *mount_path;
+            uint32_t                         mount_pathlen;
+            struct chimera_vfs_mount_options options;
+            char                             options_buffer[CHIMERA_VFS_MOUNT_OPT_BUFFER_MAX];
+            void                            *r_mount_private;
+            struct chimera_vfs_attrs         r_attr;
         } mount;
 
         struct {
@@ -659,15 +673,26 @@ struct chimera_vfs_module {
 
 };
 
+struct chimera_vfs_mount_attrs {
+    uint64_t flags;
+};
+
 struct chimera_vfs_mount {
-    struct chimera_vfs_module *module;
-    char                      *path;
-    uint32_t                   pathlen;
-    int                        fhlen;
-    void                      *mount_private;
-    struct chimera_vfs_mount  *prev;
-    struct chimera_vfs_mount  *next;
-    uint8_t                    fh[CHIMERA_VFS_FH_SIZE];
+    struct chimera_vfs_module     *module;
+    char                          *path;
+    uint32_t                       pathlen;
+    int                            mount_id_len;
+    void                          *mount_private;
+    struct chimera_vfs_mount_attrs attrs;
+    struct chimera_vfs_mount      *prev;
+    struct chimera_vfs_mount      *next;
+
+    /* XXH3 uses SIMD memory loads that may read beyond the end
+     * of the actual data, so we need to provide enough padding
+     * to prevent this from causing compiler complaints?
+     */
+
+    uint8_t                        mount_id[CHIMERA_VFS_FH_SIZE + 32];
 };
 
 struct chimera_vfs_delegation_thread {
@@ -694,6 +719,8 @@ struct chimera_vfs_close_thread {
     pthread_cond_t             cond;
 };
 
+struct chimera_vfs_mount_table;
+
 struct chimera_vfs {
     struct chimera_vfs_module            *modules[CHIMERA_VFS_FH_MAGIC_MAX];
     void                                 *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
@@ -701,8 +728,7 @@ struct chimera_vfs {
     struct vfs_open_cache                *vfs_open_file_cache;
     struct chimera_vfs_name_cache        *vfs_name_cache;
     struct chimera_vfs_attr_cache        *vfs_attr_cache;
-    struct chimera_vfs_mount             *mounts;
-    pthread_rwlock_t                      mounts_lock;
+    struct chimera_vfs_mount_table       *mount_table;
     int                                   num_delegation_threads;
     struct chimera_vfs_delegation_thread *delegation_threads;
     struct chimera_vfs_close_thread       close_thread;

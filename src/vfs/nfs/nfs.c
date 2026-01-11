@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 
 #include "vfs/vfs.h"
@@ -13,6 +14,30 @@
 #include "common/macros.h"
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
+
+#define CHIMERA_NFS_DEFAULT_VERSION 3
+
+static int
+chimera_nfs_get_mount_version(const struct chimera_vfs_mount_options *options)
+{
+    int i;
+    int vers;
+
+    for (i = 0; i < options->num_options; i++) {
+        if (strcmp(options->options[i].key, "vers") == 0) {
+            if (!options->options[i].value) {
+                return -1;                 /* vers requires a value */
+            }
+            vers = atoi(options->options[i].value);
+            if (vers != 3 && vers != 4) {
+                return -1;                 /* only v3 and v4 supported */
+            }
+            return vers;
+        }
+    }
+
+    return CHIMERA_NFS_DEFAULT_VERSION;
+} /* chimera_nfs_get_mount_version */
 
 static void *
 chimera_nfs_init(const char *cfgfile)
@@ -135,11 +160,21 @@ chimera_nfs_dispatch(
     struct chimera_nfs_thread        *thread = private_data;
     struct chimera_nfs_shared        *shared = thread->shared;
     struct chimera_nfs_client_server *server;
+    struct chimera_nfs_client_mount  *mount;
     const uint8_t                    *fh;
     int                               nfsvers;
 
-    if (request->opcode == CHIMERA_VFS_OP_MOUNT || request->opcode == CHIMERA_VFS_OP_UMOUNT) {
-        nfsvers = 3;
+    if (request->opcode == CHIMERA_VFS_OP_MOUNT) {
+        nfsvers = chimera_nfs_get_mount_version(&request->mount.options);
+        if (nfsvers < 0) {
+            chimera_nfsclient_error("Invalid NFS version in mount options");
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
+    } else if (request->opcode == CHIMERA_VFS_OP_UMOUNT) {
+        mount   = request->umount.mount_private;
+        nfsvers = mount->nfsvers;
     } else {
         fh = request->fh;
 

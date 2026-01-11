@@ -94,6 +94,7 @@ main(
         "/memfs",
         "memfs",
         "/",
+        NULL,
         mount_callback,
         &mount_ctx);
 
@@ -162,7 +163,7 @@ main(
 
     memset(&mount_ctx, 0, sizeof(mount_ctx));
 
-    chimera_mount(thread, "/newshare", "memfs", "/test", mount_callback, &mount_ctx);
+    chimera_mount(thread, "/newshare", "memfs", "/test", NULL, mount_callback, &mount_ctx);
 
     while (!mount_ctx.done) {
         evpl_continue(evpl);
