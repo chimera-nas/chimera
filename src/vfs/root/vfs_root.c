@@ -104,6 +104,18 @@ chimera_vfs_root_getattr(
     attr->va_dev   = 0;
     attr->va_rdev  = 0;
 
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+        attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
+        attr->va_fs_space_total = 0;
+        attr->va_fs_space_free  = 0;
+        attr->va_fs_space_avail = 0;
+        attr->va_fs_space_used  = 0;
+        attr->va_fs_files_total = 0;
+        attr->va_fs_files_free  = 0;
+        attr->va_fs_files_avail = 0;
+        attr->va_fsid           = 0;
+    }
+
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_vfs_getattr_root */

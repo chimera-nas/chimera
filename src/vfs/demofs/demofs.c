@@ -196,6 +196,7 @@ struct demofs_shared {
     uint8_t                   root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                  root_fhlen;
     uint64_t                  total_bytes;
+    uint64_t                  fsid;
     pthread_mutex_t           lock;
 };
 
@@ -649,6 +650,9 @@ demofs_init(const char *cfgfile)
 
     pthread_mutex_init(&shared->lock, NULL);
 
+    /* Generate a random 64-bit filesystem ID */
+    shared->fsid = chimera_rand64();
+
     shared->num_inode_list = 255;
     shared->inode_list     = calloc(shared->num_inode_list,
                                     sizeof(*shared->inode_list));
@@ -878,6 +882,7 @@ demofs_map_attrs(
 
         attr->va_fs_files_free  = 0;
         attr->va_fs_files_avail = 0;
+        attr->va_fsid           = shared->fsid;
 
     }
 

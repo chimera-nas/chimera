@@ -42,6 +42,7 @@ struct prometheus_metrics;
 
 #define CHIMERA_VFS_ATTR_FH              (1UL << 18)
 #define CHIMERA_VFS_ATTR_ATOMIC          (1UL << 19)
+#define CHIMERA_VFS_ATTR_FSID            (1UL << 20)
 
 #define CHIMERA_VFS_ATTR_MASK_STAT       ( \
             CHIMERA_VFS_ATTR_DEV | \
@@ -63,7 +64,8 @@ struct prometheus_metrics;
             CHIMERA_VFS_ATTR_SPACE_TOTAL | \
             CHIMERA_VFS_ATTR_FILES_TOTAL | \
             CHIMERA_VFS_ATTR_FILES_FREE | \
-            CHIMERA_VFS_ATTR_FILES_AVAIL)
+            CHIMERA_VFS_ATTR_FILES_AVAIL | \
+            CHIMERA_VFS_ATTR_FSID)
 
 #define CHIMERA_VFS_ATTR_MASK_CACHEABLE  ( \
             CHIMERA_VFS_ATTR_MASK_STAT)
@@ -107,6 +109,7 @@ struct chimera_vfs_attrs {
     uint64_t        va_fs_files_total;
     uint64_t        va_fs_files_free;
     uint64_t        va_fs_files_avail;
+    uint64_t        va_fsid;
 
     uint32_t        va_fh_len;
     uint64_t        va_fh_hash;
