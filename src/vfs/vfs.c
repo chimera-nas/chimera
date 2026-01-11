@@ -20,6 +20,7 @@
 #include "vfs/vfs_dump.h"
 #include "vfs/vfs_name_cache.h"
 #include "vfs/vfs_attr_cache.h"
+#include "vfs/vfs_mount_table.h"
 #include "vfs/memfs/memfs.h"
 #include "vfs/linux/linux.h"
 
@@ -239,7 +240,7 @@ chimera_vfs_init(
 
     vfs = calloc(1, sizeof(*vfs));
 
-    pthread_rwlock_init(&vfs->mounts_lock, NULL);
+    vfs->mount_table = chimera_vfs_mount_table_create(4);
 
     if (metrics) {
         vfs->metrics.metrics    = metrics;
@@ -335,7 +336,6 @@ SYMBOL_EXPORT void
 chimera_vfs_destroy(struct chimera_vfs *vfs)
 {
     struct chimera_vfs_module *module;
-    struct chimera_vfs_mount  *mount;
     int                        i;
 
     pthread_mutex_lock(&vfs->close_thread.lock);
@@ -355,12 +355,7 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     }
     free(vfs->delegation_threads);
 
-    while (vfs->mounts) {
-        mount = vfs->mounts;
-        DL_DELETE(vfs->mounts, mount);
-        free(mount->path);
-        free(mount);
-    }
+    chimera_vfs_mount_table_destroy(vfs->mount_table);
 
     for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
         module = vfs->modules[i];

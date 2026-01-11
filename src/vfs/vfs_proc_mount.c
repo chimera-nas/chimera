@@ -9,6 +9,7 @@
 #include "common/misc.h"
 #include "vfs_open_cache.h"
 #include "vfs_release.h"
+#include "vfs_mount_table.h"
 #include "common/macros.h"
 
 static int
@@ -130,12 +131,10 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
     mount->pathlen       = strlen(request->mount.mount_path);
     mount->mount_private = request->mount.r_mount_private;
 
-    memcpy(mount->fh, request->mount.r_attr.va_fh, request->mount.r_attr.va_fh_len);
-    mount->fhlen = request->mount.r_attr.va_fh_len;
+    memcpy(mount->mount_id, request->mount.r_attr.va_fh, request->mount.r_attr.va_fh_len);
+    mount->mount_id_len = request->mount.r_attr.va_fh_len;
 
-    pthread_rwlock_wrlock(&vfs->mounts_lock);
-    DL_APPEND(vfs->mounts, mount);
-    pthread_rwlock_unlock(&vfs->mounts_lock);
+    chimera_vfs_mount_table_insert(vfs->mount_table, mount);
 
     callback(thread, CHIMERA_VFS_OK, request->proto_private_data);
 
