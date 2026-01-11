@@ -116,7 +116,6 @@ struct chimera_vfs_attrs {
      * to prevent this from causing compiler complaints?
      */
     uint8_t         va_fh[CHIMERA_VFS_FH_SIZE + 32];
-
 };
 
 #define CHIMERA_VFS_OP_MOUNT           1
@@ -687,7 +686,13 @@ struct chimera_vfs_mount {
     struct chimera_vfs_mount_attrs attrs;
     struct chimera_vfs_mount      *prev;
     struct chimera_vfs_mount      *next;
-    uint8_t                        mount_id[CHIMERA_VFS_FH_SIZE];
+
+    /* XXH3 uses SIMD memory loads that may read beyond the end
+     * of the actual data, so we need to provide enough padding
+     * to prevent this from causing compiler complaints?
+     */
+
+    uint8_t                        mount_id[CHIMERA_VFS_FH_SIZE + 32];
 };
 
 struct chimera_vfs_delegation_thread {

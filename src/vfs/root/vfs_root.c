@@ -207,7 +207,8 @@ chimera_vfs_root_lookup(
     struct chimera_vfs_root_lookup_ctx *ctx     = request->plugin_data;
     int                                 rc;
 
-    rc = chimera_vfs_mount_table_lookup_mount_id_by_name(vfs->mount_table, name, namelen, ctx->mount_id, &ctx->mount_id_len);
+    rc = chimera_vfs_mount_table_lookup_mount_id_by_name(vfs->mount_table, name, namelen, ctx->mount_id, &ctx->
+                                                         mount_id_len);
 
     if (rc != 0) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -382,10 +383,10 @@ chimera_vfs_root_readdir_open_callback(
 } /* chimera_vfs_root_readdir_open_callback */
 
 struct chimera_vfs_root_readdir_iter_ctx {
-    struct chimera_vfs_root_readdir_ctx   *ctx;
-    struct chimera_vfs_request            *request;
-    uint64_t                               cookie;
-    int                                    index;
+    struct chimera_vfs_root_readdir_ctx *ctx;
+    struct chimera_vfs_request          *request;
+    uint64_t                             cookie;
+    int                                  index;
 };
 
 static int
@@ -430,12 +431,12 @@ chimera_vfs_root_readdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_vfs_thread                *thread = request->thread;
-    struct chimera_vfs                       *vfs    = thread->vfs;
-    struct chimera_vfs_root_readdir_ctx      *ctx    = request->plugin_data;
-    struct chimera_vfs_root_readdir_iter_ctx  iter;
-    struct chimera_vfs_root_readdir_entry    *entry;
-    int                                       i;
+    struct chimera_vfs_thread               *thread = request->thread;
+    struct chimera_vfs                      *vfs    = thread->vfs;
+    struct chimera_vfs_root_readdir_ctx     *ctx    = request->plugin_data;
+    struct chimera_vfs_root_readdir_iter_ctx iter;
+    struct chimera_vfs_root_readdir_entry   *entry;
+    int                                      i;
 
     ctx->pending     = 0;
     ctx->complete    = 0;

@@ -73,9 +73,9 @@ chimera_vfs_parse_mount_options(
 
         /* Copy key to buffer */
         memcpy(buffer + buf_offset, p, key_len);
-        buffer[buf_offset + key_len]         = '\0';
-        mount_options->options[opt_idx].key  = buffer + buf_offset;
-        buf_offset                          += key_len + 1;
+        buffer[buf_offset + key_len]        = '\0';
+        mount_options->options[opt_idx].key = buffer + buf_offset;
+        buf_offset                         += key_len + 1;
 
         /* Check for value */
         if (eq < end && *eq == '=') {
@@ -88,9 +88,9 @@ chimera_vfs_parse_mount_options(
             }
 
             memcpy(buffer + buf_offset, eq, value_len);
-            buffer[buf_offset + value_len]         = '\0';
-            mount_options->options[opt_idx].value  = buffer + buf_offset;
-            buf_offset                            += value_len + 1;
+            buffer[buf_offset + value_len]        = '\0';
+            mount_options->options[opt_idx].value = buffer + buf_offset;
+            buf_offset                           += value_len + 1;
         } else {
             mount_options->options[opt_idx].value = NULL;
         }
@@ -151,9 +151,9 @@ chimera_vfs_mount(
     chimera_vfs_mount_callback_t callback,
     void                        *private_data)
 {
-    struct chimera_vfs        *vfs    = thread->vfs;
-    struct chimera_vfs_module *module = NULL;
-    int                        i, rc;
+    struct chimera_vfs         *vfs    = thread->vfs;
+    struct chimera_vfs_module  *module = NULL;
+    int                         i, rc;
     struct chimera_vfs_request *request;
 
     while (mount_path[0] == '/') {

@@ -21,9 +21,9 @@
  */
 
 struct chimera_vfs_mount_table_entry {
-    struct chimera_vfs_mount            *mount;
+    struct chimera_vfs_mount             *mount;
     struct chimera_vfs_mount_table_entry *next;
-    struct rcu_head                      rcu;
+    struct rcu_head                       rcu;
 };
 
 struct chimera_vfs_mount_table {
@@ -92,7 +92,7 @@ chimera_vfs_mount_table_insert(
     uint64_t                              hash;
     uint32_t                              bucket;
 
-    entry = calloc(1, sizeof(*entry));
+    entry        = calloc(1, sizeof(*entry));
     entry->mount = mount;
 
     hash   = chimera_vfs_hash(mount->mount_id, mount->mount_id_len);
@@ -262,9 +262,9 @@ typedef int (*chimera_vfs_mount_table_iter_cb)(
  */
 static inline int
 chimera_vfs_mount_table_foreach(
-    struct chimera_vfs_mount_table   *table,
-    chimera_vfs_mount_table_iter_cb   callback,
-    void                             *private_data)
+    struct chimera_vfs_mount_table *table,
+    chimera_vfs_mount_table_iter_cb callback,
+    void                           *private_data)
 {
     struct chimera_vfs_mount_table_entry *entry;
     uint32_t                              i;
