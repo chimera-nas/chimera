@@ -322,6 +322,7 @@ fio_chimera_init(struct thread_data *td)
                                   json_string_value(mount_point),
                                   json_string_value(module),
                                   json_string_value(module_path),
+                                  NULL,
                                   mount_callback,
                                   &mount_ctx);
                 }

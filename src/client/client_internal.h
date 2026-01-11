@@ -85,6 +85,7 @@ struct chimera_client_request {
             char                     mount_path[CHIMERA_VFS_PATH_MAX];
             char                     module_path[CHIMERA_VFS_PATH_MAX];
             char                     module_name[64];
+            char                     options[CHIMERA_VFS_PATH_MAX];
         } mount;
 
         struct {

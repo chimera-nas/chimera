@@ -70,6 +70,19 @@ struct prometheus_metrics;
 
 #define CHIMERA_VFS_TIME_NOW            ((1l << 30) - 3l)
 
+#define CHIMERA_VFS_MOUNT_OPT_MAX        16
+#define CHIMERA_VFS_MOUNT_OPT_BUFFER_MAX 1024
+
+struct chimera_vfs_mount_option {
+    const char *key;
+    const char *value;   /* NULL if no value */
+};
+
+struct chimera_vfs_mount_options {
+    int                             num_options;
+    struct chimera_vfs_mount_option options[CHIMERA_VFS_MOUNT_OPT_MAX];
+};
+
 struct chimera_vfs_attrs {
     uint64_t        va_req_mask;
     uint64_t        va_set_mask;
@@ -321,14 +334,16 @@ struct chimera_vfs_request {
         } find;
 
         struct {
-            uint8_t                    fh_magic;
-            const char                *path;
-            uint32_t                   pathlen;
-            struct chimera_vfs_module *module;
-            const char                *mount_path;
-            uint32_t                   mount_pathlen;
-            void                      *r_mount_private;
-            struct chimera_vfs_attrs   r_attr;
+            uint8_t                          fh_magic;
+            const char                      *path;
+            uint32_t                         pathlen;
+            struct chimera_vfs_module       *module;
+            const char                      *mount_path;
+            uint32_t                         mount_pathlen;
+            struct chimera_vfs_mount_options options;
+            char                             options_buffer[CHIMERA_VFS_MOUNT_OPT_BUFFER_MAX];
+            void                            *r_mount_private;
+            struct chimera_vfs_attrs         r_attr;
         } mount;
 
         struct {
