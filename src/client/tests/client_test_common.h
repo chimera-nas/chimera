@@ -295,13 +295,13 @@ client_test_mount(
     if (env->use_nfs) {
         char nfs_path[256];
         snprintf(nfs_path, sizeof(nfs_path), "127.0.0.1:/share");
-        chimera_mount(env->client_thread, mount_path, "nfs", nfs_path, callback, private_data);
+        chimera_mount(env->client_thread, mount_path, "nfs", nfs_path, NULL, callback, private_data);
     } else {
         const char *module_path = "/";
         if (strcmp(env->backend, "linux") == 0 || strcmp(env->backend, "io_uring") == 0) {
             module_path = env->session_dir;
         }
-        chimera_mount(env->client_thread, mount_path, env->backend, module_path, callback, private_data);
+        chimera_mount(env->client_thread, mount_path, env->backend, module_path, NULL, callback, private_data);
     }
 } /* client_test_mount */
 

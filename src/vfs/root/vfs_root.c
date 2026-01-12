@@ -14,6 +14,7 @@
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_mount_table.h"
 
 #define chimera_vfs_root_debug(...) chimera_debug("vfs_root", \
                                                   __FILE__, \
@@ -80,12 +81,9 @@ chimera_vfs_root_getattr(
     void                       *private_data)
 {
     struct chimera_vfs_attrs *attr;
-    struct chimera_vfs_mount *mount;
     int                       num_mounts;
 
-    pthread_rwlock_rdlock(&request->thread->vfs->mounts_lock);
-    DL_COUNT(request->thread->vfs->mounts, mount, num_mounts);
-    pthread_rwlock_unlock(&request->thread->vfs->mounts_lock);
+    num_mounts = chimera_vfs_mount_table_count(request->thread->vfs->mount_table);
 
     attr = &request->getattr.r_attr;
 
@@ -106,12 +104,26 @@ chimera_vfs_root_getattr(
     attr->va_dev   = 0;
     attr->va_rdev  = 0;
 
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+        attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
+        attr->va_fs_space_total = 0;
+        attr->va_fs_space_free  = 0;
+        attr->va_fs_space_avail = 0;
+        attr->va_fs_space_used  = 0;
+        attr->va_fs_files_total = 0;
+        attr->va_fs_files_free  = 0;
+        attr->va_fs_files_avail = 0;
+        attr->va_fsid           = 0;
+    }
+
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_vfs_getattr_root */
 
 struct chimera_vfs_root_lookup_ctx {
     struct chimera_vfs_open_handle *oh;
+    uint8_t                         mount_id[CHIMERA_VFS_FH_SIZE];
+    int                             mount_id_len;
 };
 
 static void
@@ -124,7 +136,6 @@ chimera_vfs_root_lookup_getattr_callback(
     struct chimera_vfs                 *vfs            = lookup_request->thread->vfs;
     chimera_vfs_lookup_callback_t       callback       = lookup_request->proto_callback;
     struct chimera_vfs_attrs           *dir_attr;
-    struct chimera_vfs_mount           *mount;
     int                                 num_mounts;
     struct chimera_vfs_root_lookup_ctx *ctx = lookup_request->plugin_data;
 
@@ -139,9 +150,7 @@ chimera_vfs_root_lookup_getattr_callback(
         dir_attr = &lookup_request->lookup.r_dir_attr;
 
 
-        pthread_rwlock_rdlock(&vfs->mounts_lock);
-        DL_COUNT(vfs->mounts, mount, num_mounts);
-        pthread_rwlock_unlock(&vfs->mounts_lock);
+        num_mounts = chimera_vfs_mount_table_count(vfs->mount_table);
 
         dir_attr->va_set_mask = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT;
         dir_attr->va_fh[0]    = CHIMERA_VFS_FH_MAGIC_ROOT;
@@ -203,37 +212,29 @@ chimera_vfs_root_lookup(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_vfs_thread *thread  = request->thread;
-    struct chimera_vfs        *vfs     = thread->vfs;
-    struct chimera_vfs_mount  *mount   = NULL;
-    const char                *path    = request->lookup.component;
-    int                        pathlen = request->lookup.component_len;
+    struct chimera_vfs_thread          *thread  = request->thread;
+    struct chimera_vfs                 *vfs     = thread->vfs;
+    const char                         *name    = request->lookup.component;
+    int                                 namelen = request->lookup.component_len;
+    struct chimera_vfs_root_lookup_ctx *ctx     = request->plugin_data;
+    int                                 rc;
 
-    pthread_rwlock_rdlock(&vfs->mounts_lock);
+    rc = chimera_vfs_mount_table_lookup_mount_id_by_name(vfs->mount_table, name, namelen, ctx->mount_id, &ctx->
+                                                         mount_id_len);
 
-    DL_FOREACH(vfs->mounts, mount)
-    {
-        if (strncmp(mount->path, path, pathlen) == 0) {
-            break;
-        }
-    } /* DL_FOREACH */
-
-    if (!mount) {
+    if (rc != 0) {
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
-        pthread_rwlock_unlock(&vfs->mounts_lock);
         return;
     }
 
     chimera_vfs_open(
         thread,
-        mount->fh,
-        mount->fhlen,
+        ctx->mount_id,
+        ctx->mount_id_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
         chimera_vfs_root_lookup_open_callback,
         request);
-
-    pthread_rwlock_unlock(&vfs->mounts_lock);
 
 } /* chimera_vfs_root_lookup */
 
@@ -245,7 +246,6 @@ chimera_vfs_root_mount(
     struct chimera_vfs_attrs  *attr   = &request->mount.r_attr;
     struct chimera_vfs_thread *thread = request->thread;
     struct chimera_vfs        *vfs    = thread->vfs;
-    struct chimera_vfs_mount  *mount;
     int                        num_mounts;
 
     if (strcmp(request->mount.path, "/") != 0) {
@@ -254,10 +254,7 @@ chimera_vfs_root_mount(
         return;
     }
 
-    pthread_rwlock_rdlock(&vfs->mounts_lock);
-    DL_COUNT(vfs->mounts, mount, num_mounts);
-    pthread_rwlock_unlock(&vfs->mounts_lock);
-
+    num_mounts = chimera_vfs_mount_table_count(vfs->mount_table);
 
     attr->va_set_mask = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT;
     attr->va_fh[0]    = CHIMERA_VFS_FH_MAGIC_ROOT;
@@ -291,9 +288,14 @@ chimera_vfs_root_umount(
     request->complete(request);
 } /* chimera_vfs_root_umount */
 
+/* Max mount path length for readdir - short since mount names are typically simple */
+#define CHIMERA_VFS_ROOT_MOUNT_PATH_MAX 128
+
 struct chimera_vfs_root_readdir_entry {
     uint64_t                        cookie;
-    struct chimera_vfs_mount       *mount;
+    char                            path[CHIMERA_VFS_ROOT_MOUNT_PATH_MAX];
+    uint8_t                         mount_id[CHIMERA_VFS_FH_SIZE];
+    int                             mount_id_len;
     struct chimera_vfs_open_handle *oh;
     struct chimera_vfs_attrs        attr;
     struct chimera_vfs_request     *request;
@@ -324,8 +326,8 @@ chimera_vfs_root_readdir_complete(struct chimera_vfs_request *request)
         rc = request->readdir.callback(
             entry->cookie,
             entry->attr.va_ino,
-            entry->mount->path,
-            strlen(entry->mount->path),
+            entry->path,
+            strlen(entry->path),
             &entry->attr,
             request->proto_private_data);
 
@@ -392,54 +394,85 @@ chimera_vfs_root_readdir_open_callback(
 
 } /* chimera_vfs_root_readdir_open_callback */
 
+struct chimera_vfs_root_readdir_iter_ctx {
+    struct chimera_vfs_root_readdir_ctx *ctx;
+    struct chimera_vfs_request          *request;
+    uint64_t                             cookie;
+    int                                  index;
+};
+
+static int
+chimera_vfs_root_readdir_iter_cb(
+    struct chimera_vfs_mount *mount,
+    void                     *private_data)
+{
+    struct chimera_vfs_root_readdir_iter_ctx *iter = private_data;
+    struct chimera_vfs_root_readdir_ctx      *ctx  = iter->ctx;
+    struct chimera_vfs_root_readdir_entry    *entry;
+
+    if (iter->index < iter->cookie) {
+        iter->index++;
+        return 0;
+    }
+
+    if (ctx->num_entries >= CHIMERA_VFS_ROOT_MAX_READDIR) {
+        return 1; /* Stop iteration - buffer full */
+    }
+
+    entry = &ctx->entries[ctx->num_entries++];
+
+    entry->cookie           = iter->index;
+    entry->attr.va_req_mask = iter->request->readdir.attr_mask;
+    entry->attr.va_set_mask = 0;
+    entry->request          = iter->request;
+
+    /* Copy mount data by value for safe access after RCU unlock */
+    strncpy(entry->path, mount->path, CHIMERA_VFS_ROOT_MOUNT_PATH_MAX - 1);
+    entry->path[CHIMERA_VFS_ROOT_MOUNT_PATH_MAX - 1] = '\0';
+    memcpy(entry->mount_id, mount->mount_id, mount->mount_id_len);
+    entry->mount_id_len = mount->mount_id_len;
+
+    ctx->pending++;
+    iter->index++;
+
+    return 0;
+} /* chimera_vfs_root_readdir_iter_cb */
+
 static void
 chimera_vfs_root_readdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_vfs_thread             *thread = request->thread;
-    struct chimera_vfs                    *vfs    = thread->vfs;
-    struct chimera_vfs_mount              *mount;
-    uint64_t                               cookie = request->readdir.cookie;
-    struct chimera_vfs_root_readdir_ctx   *ctx    = request->plugin_data;
-    struct chimera_vfs_root_readdir_entry *entry;
-    int                                    i = 0;
+    struct chimera_vfs_thread               *thread = request->thread;
+    struct chimera_vfs                      *vfs    = thread->vfs;
+    struct chimera_vfs_root_readdir_ctx     *ctx    = request->plugin_data;
+    struct chimera_vfs_root_readdir_iter_ctx iter;
+    struct chimera_vfs_root_readdir_entry   *entry;
+    int                                      i;
 
     ctx->pending     = 0;
     ctx->complete    = 0;
     ctx->num_entries = 0;
 
-    pthread_rwlock_rdlock(&vfs->mounts_lock);
+    iter.ctx     = ctx;
+    iter.request = request;
+    iter.cookie  = request->readdir.cookie;
+    iter.index   = 0;
 
-    DL_FOREACH(vfs->mounts, mount)
-    {
+    chimera_vfs_mount_table_foreach(vfs->mount_table, chimera_vfs_root_readdir_iter_cb, &iter);
 
-        if (i < cookie) {
-            continue;
-        }
-
-        entry = &ctx->entries[ctx->num_entries++];
-
-        entry->cookie           = i;
-        entry->mount            = mount;
-        entry->attr.va_req_mask = request->readdir.attr_mask;
-        entry->attr.va_set_mask = 0;
-        entry->request          = request;
-        ctx->pending++;
+    /* Now issue async opens for all collected entries */
+    for (i = 0; i < ctx->num_entries; i++) {
+        entry = &ctx->entries[i];
 
         chimera_vfs_open(
             thread,
-            mount->fh,
-            mount->fhlen,
+            entry->mount_id,
+            entry->mount_id_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
             chimera_vfs_root_readdir_open_callback,
             entry);
-
-        i++;
     }
-
-    pthread_rwlock_unlock(&vfs->mounts_lock);
-
 
     ctx->complete = 1;
 

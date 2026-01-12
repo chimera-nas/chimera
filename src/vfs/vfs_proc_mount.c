@@ -3,12 +3,110 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <string.h>
+#include <errno.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "common/misc.h"
 #include "vfs_open_cache.h"
 #include "vfs_release.h"
+#include "vfs_mount_table.h"
 #include "common/macros.h"
+
+static int
+chimera_vfs_parse_mount_options(
+    const char                       *options,
+    struct chimera_vfs_mount_options *mount_options,
+    char                             *buffer,
+    int                               buffer_size)
+{
+    const char *p, *end, *eq;
+    int         opt_idx    = 0;
+    int         buf_offset = 0;
+    int         key_len, value_len;
+
+    mount_options->num_options = 0;
+
+    if (!options || !options[0]) {
+        return 0;
+    }
+
+    p = options;
+
+    while (*p) {
+        /* Skip leading whitespace */
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+
+        if (!*p) {
+            break;
+        }
+
+        /* Find end of this option (comma or end of string) */
+        end = p;
+        while (*end && *end != ',') {
+            end++;
+        }
+
+        /* Check for too many options */
+        if (opt_idx >= CHIMERA_VFS_MOUNT_OPT_MAX) {
+            return -EINVAL;
+        }
+
+        /* Find '=' if present */
+        eq = p;
+        while (eq < end && *eq != '=') {
+            eq++;
+        }
+
+        if (eq == p) {
+            /* Empty key */
+            return -EINVAL;
+        }
+
+        key_len = eq - p;
+
+        /* Check buffer space for key + null terminator */
+        if (buf_offset + key_len + 1 > buffer_size) {
+            return -EINVAL;
+        }
+
+        /* Copy key to buffer */
+        memcpy(buffer + buf_offset, p, key_len);
+        buffer[buf_offset + key_len]        = '\0';
+        mount_options->options[opt_idx].key = buffer + buf_offset;
+        buf_offset                         += key_len + 1;
+
+        /* Check for value */
+        if (eq < end && *eq == '=') {
+            eq++;             /* Skip '=' */
+            value_len = end - eq;
+
+            /* Check buffer space for value + null terminator */
+            if (buf_offset + value_len + 1 > buffer_size) {
+                return -EINVAL;
+            }
+
+            memcpy(buffer + buf_offset, eq, value_len);
+            buffer[buf_offset + value_len]        = '\0';
+            mount_options->options[opt_idx].value = buffer + buf_offset;
+            buf_offset                           += value_len + 1;
+        } else {
+            mount_options->options[opt_idx].value = NULL;
+        }
+
+        opt_idx++;
+
+        /* Move past comma if present */
+        p = end;
+        if (*p == ',') {
+            p++;
+        }
+    }
+
+    mount_options->num_options = opt_idx;
+    return 0;
+} /* chimera_vfs_parse_mount_options */
 
 
 static void
@@ -33,17 +131,14 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
     mount->pathlen       = strlen(request->mount.mount_path);
     mount->mount_private = request->mount.r_mount_private;
 
-    memcpy(mount->fh, request->mount.r_attr.va_fh, request->mount.r_attr.va_fh_len);
-    mount->fhlen = request->mount.r_attr.va_fh_len;
+    memcpy(mount->mount_id, request->mount.r_attr.va_fh, request->mount.r_attr.va_fh_len);
+    mount->mount_id_len = request->mount.r_attr.va_fh_len;
 
-    pthread_rwlock_wrlock(&vfs->mounts_lock);
-    DL_APPEND(vfs->mounts, mount);
-    pthread_rwlock_unlock(&vfs->mounts_lock);
+    chimera_vfs_mount_table_insert(vfs->mount_table, mount);
 
     callback(thread, CHIMERA_VFS_OK, request->proto_private_data);
 
     chimera_vfs_request_free(thread, request);
-
 } /* chimera_vfs_mount_complete */
 
 SYMBOL_EXPORT void
@@ -52,12 +147,13 @@ chimera_vfs_mount(
     const char                  *mount_path,
     const char                  *module_name,
     const char                  *module_path,
+    const char                  *options,
     chimera_vfs_mount_callback_t callback,
     void                        *private_data)
 {
     struct chimera_vfs         *vfs    = thread->vfs;
     struct chimera_vfs_module  *module = NULL;
-    int                         i;
+    int                         i, rc;
     struct chimera_vfs_request *request;
 
     while (mount_path[0] == '/') {
@@ -84,6 +180,19 @@ chimera_vfs_mount(
     }
 
     request = chimera_vfs_request_alloc(thread, &module->fh_magic, 1);
+
+    /* Parse mount options directly into request buffer */
+    rc = chimera_vfs_parse_mount_options(options,
+                                         &request->mount.options,
+                                         request->mount.options_buffer,
+                                         sizeof(request->mount.options_buffer));
+    if (rc) {
+        chimera_vfs_error("chimera_vfs_mount: invalid mount options: %s",
+                          options ? options : "(null)");
+        chimera_vfs_request_free(thread, request);
+        callback(thread, CHIMERA_VFS_EINVAL, private_data);
+        return;
+    }
 
     request->opcode                   = CHIMERA_VFS_OP_MOUNT;
     request->complete                 = chimera_vfs_mount_complete;

@@ -87,6 +87,7 @@ struct chimera_nfs_client_server {
 
 struct chimera_nfs_client_mount {
     int                               status;
+    int                               nfsvers;
     struct chimera_nfs_client_server *server;
     struct chimera_nfs_client_mount  *prev;
     struct chimera_nfs_client_mount  *next;

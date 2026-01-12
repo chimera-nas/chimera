@@ -97,7 +97,7 @@ chimera_vfs_bounce_complete(struct chimera_vfs_request *request)
         data_ptr += (sizeof(*entry) + entry->namelen + 7) & ~7;
     }
 
-    evpl_iovec_release(&request->readdir.bounce_iov);
+    evpl_iovec_release(request->thread->evpl, &request->readdir.bounce_iov);
 
     chimera_vfs_readdir_complete(request);
 } /* chimera_vfs_bounce_complete */
@@ -139,7 +139,7 @@ chimera_vfs_readdir(
 
     if (module->capabilities & CHIMERA_VFS_CAP_BLOCKING) {
 
-        evpl_iovec_alloc(thread->evpl, 64 * 1024, 8, 1, &request->readdir.bounce_iov);
+        evpl_iovec_alloc(thread->evpl, 64 * 1024, 8, 1, 0, &request->readdir.bounce_iov);
 
         request->readdir.orig_callback     = callback;
         request->readdir.orig_private_data = private_data;

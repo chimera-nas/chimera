@@ -69,7 +69,7 @@ main(
     evpl_init(evpl_global_config);
 
 
-    while ((opt = getopt(argc, argv, "c:dv")) != -1) {
+    while ((opt = getopt(argc, argv, "c:dvh")) != -1) {
         switch (opt) {
             case 'c':
                 config_path = optarg;
@@ -80,6 +80,15 @@ main(
             case 'v':
                 printf("Version: %s\n", CHIMERA_VERSION);
                 return 0;
+            case 'h':
+            default:
+                printf("Usage: chimera-daemon [options]\n"
+                       "  -c <config file>   Specify configuration file (default: %s)\n"
+                       "  -d                 Enable debug logging\n"
+                       "  -v                 Print version information\n"
+                       "  -h                 Show this help message\n",
+                       CONFIG_PATH);
+                return 1;
         } /* switch */
     }
 

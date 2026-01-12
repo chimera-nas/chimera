@@ -195,6 +195,8 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             break;
     } /* switch */
 
+    evpl_iovecs_release(thread->evpl, request->session_setup.input_iov, request->session_setup.input_niov);
+
 } /* smb_proc_session_setup */
 
 
@@ -252,7 +254,7 @@ chimera_smb_parse_session_setup(
                                                                request->session_setup.input_iov,
                                                                64,
                                                                request->session_setup.blob_length,
-                                                               0);
+                                                               1);
 
     return 0;
 } /* chimera_smb_parse_session_setup */

@@ -350,7 +350,7 @@ chimera_server_mount(
 
     thread = chimera_vfs_thread_init(evpl, server->vfs);
 
-    chimera_vfs_mount(thread, mount_path, module_name, module_path, chimera_server_mount_callback, &ctx);
+    chimera_vfs_mount(thread, mount_path, module_name, module_path, NULL, chimera_server_mount_callback, &ctx);
 
     while (!ctx.done) {
         evpl_continue(evpl);

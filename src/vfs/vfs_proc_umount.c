@@ -9,6 +9,7 @@
 #include "common/misc.h"
 #include "vfs_open_cache.h"
 #include "vfs_release.h"
+#include "vfs_mount_table.h"
 #include "common/macros.h"
 
 
@@ -46,27 +47,14 @@ chimera_vfs_umount(
         path++;
     }
 
-    pthread_rwlock_rdlock(&vfs->mounts_lock);
-
-    DL_FOREACH(vfs->mounts, mount)
-    {
-        if (strcmp(mount->path, path) == 0) {
-            break;
-        }
-    }
-
-    if (mount) {
-        DL_DELETE(vfs->mounts, mount);
-    }
-
-    pthread_rwlock_unlock(&vfs->mounts_lock);
+    mount = chimera_vfs_mount_table_remove_by_path(vfs->mount_table, path, strlen(path));
 
     if (!mount) {
         callback(thread, CHIMERA_VFS_ENOENT, private_data);
         return;
     }
 
-    request = chimera_vfs_request_alloc(thread, &mount->fh, mount->fhlen);
+    request = chimera_vfs_request_alloc(thread, &mount->mount_id, mount->mount_id_len);
 
     request->opcode               = CHIMERA_VFS_OP_UMOUNT;
     request->complete             = chimera_vfs_umount_complete;

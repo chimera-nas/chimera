@@ -48,7 +48,7 @@ chimera_nfs4_attr2mask(
                         attr_mask |= CHIMERA_VFS_ATTR_MODE;
                         break;
                     case FATTR4_FSID:
-                        attr_mask |= CHIMERA_VFS_ATTR_DEV;
+                        attr_mask |= CHIMERA_VFS_ATTR_FSID;
                         break;
                     case FATTR4_FILES_AVAIL:
                         attr_mask |= CHIMERA_VFS_ATTR_SPACE_AVAIL;
@@ -334,12 +334,13 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, 0);
         }
 
-        if (req_mask[0] & (1 << FATTR4_FSID)) {
+        if ((req_mask[0] & (1 << FATTR4_FSID)) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_FSID)) {
             rsp_mask[0]  |= (1 << FATTR4_FSID);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint64(&attrs, 42);
-            chimera_nfs4_attr_append_uint64(&attrs, 42);
+            chimera_nfs4_attr_append_uint64(&attrs, attr->va_fsid);
+            chimera_nfs4_attr_append_uint64(&attrs, 0);
 
         }
 

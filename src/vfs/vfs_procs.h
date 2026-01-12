@@ -20,6 +20,7 @@ chimera_vfs_mount(
     const char                  *mount_path,
     const char                  *module_name,
     const char                  *module_path,
+    const char                  *options,
     chimera_vfs_mount_callback_t callback,
     void                        *private_data);
 

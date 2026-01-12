@@ -34,7 +34,7 @@ chimera_smb_query_directory_readdir_complete(
     if (request->query_directory.output_length) {
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
     } else {
-        evpl_iovec_release(&request->query_directory.iov);
+        evpl_iovec_release(request->compound->thread->evpl, &request->query_directory.iov);
         chimera_smb_complete_request(request, SMB2_STATUS_NO_MORE_FILES);
     }
 
@@ -286,7 +286,7 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
                      request->query_directory.max_output_length,
                      4096,
                      1,
-                     &request->query_directory.iov);
+                     0, &request->query_directory.iov);
 
     chimera_vfs_readdir(
         thread->vfs_thread,

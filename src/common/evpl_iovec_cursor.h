@@ -288,12 +288,10 @@ evpl_iovec_cursor_move(
             chunk = left;
         }
 
-        iov[niov].data         = cursor->iov->data + cursor->offset;
-        iov[niov].length       = chunk;
-        iov[niov].private_data = cursor->iov->private_data;
-
         if (addrefs) {
-            evpl_iovec_addref(&iov[niov]);
+            evpl_iovec_clone_segment(&iov[niov], cursor->iov, cursor->offset, chunk);
+        } else {
+            evpl_iovec_move_segment(&iov[niov], cursor->iov, cursor->offset, chunk);
         }
 
         niov++;
@@ -320,6 +318,7 @@ evpl_iovec_cursor_inject_unaligned(
     int                       length)
 {
     struct evpl_iovec saved = *cursor->iov;
+    int               i;
 
     cursor->iov->length = cursor->offset;
 
@@ -330,7 +329,10 @@ evpl_iovec_cursor_inject_unaligned(
 
     cursor->iov++;
 
-    memcpy(cursor->iov, iov, niov * sizeof(struct evpl_iovec));
+    for (i = 0; i < niov; i++) {
+        evpl_iovec_move(&cursor->iov[i], &iov[i]);
+    }
+
     cursor->iov  += niov;
     cursor->niov += niov;
 

@@ -49,6 +49,9 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_definitions(-fsanitize=address -fno-omit-frame-pointer
                     -fno-optimize-sibling-calls -fstack-protector-all -DCHIMERA_SANITIZE=1)
     add_link_options(-fsanitize=address)
+
+    message(STATUS "Enabling iovec reference tracing")
+    add_definitions(-DEVPL_IOVEC_TRACE=1)
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
