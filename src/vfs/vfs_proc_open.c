@@ -86,6 +86,11 @@ chimera_vfs_open(
 
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
+    if (!module) {
+        callback(CHIMERA_VFS_ESTALE, NULL, private_data);
+        return;
+    }
+
     if ((module->capabilities & CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED) || !(flags & CHIMERA_VFS_OPEN_INFERRED)) {
 
         /* We really need to open the file */

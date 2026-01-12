@@ -178,14 +178,15 @@ chimera_nfs_dispatch(
     } else {
         fh = request->fh;
 
-        if (unlikely(request->fh_len < 2)) {
-            chimera_nfsclient_error("fhlen %d < 2", request->fh_len);
+        if (unlikely(request->fh_len < CHIMERA_VFS_MOUNT_ID_SIZE + 1)) {
+            chimera_nfsclient_error("fhlen %d < %d", request->fh_len, CHIMERA_VFS_MOUNT_ID_SIZE + 1);
             request->status = CHIMERA_VFS_EINVAL;
             request->complete(request);
             return;
         }
 
-        server = shared->servers[fh[1]];
+        /* Server index is at position CHIMERA_VFS_MOUNT_ID_SIZE (first byte of fh_fragment) */
+        server = shared->servers[fh[CHIMERA_VFS_MOUNT_ID_SIZE]];
 
         if (unlikely(!server)) {
             chimera_nfsclient_error("server not found for fh %p", fh);

@@ -97,11 +97,10 @@ chimera_vfs_close_thread_callback(
     enum chimera_vfs_error status,
     void                  *private_data)
 {
-    struct chimera_vfs_open_handle  *handle       = private_data;
-    struct chimera_vfs_close_thread *close_thread = handle->close_private;
+    struct chimera_vfs_close_thread *close_thread = private_data;
 
     close_thread->num_pending--;
-    free(handle);
+    /* Handle is freed by chimera_vfs_close() */
 } /* chimera_vfs_close_thread_callback */
 
 static uint64_t
@@ -127,13 +126,12 @@ chimera_vfs_close_thread_sweep(
 
         close_thread->num_pending++;
 
-        handle->close_private = close_thread;
         chimera_vfs_close(thread,
-                          handle->fh,
-                          handle->fh_len,
-                          handle->vfs_private,
+                          handle,
                           chimera_vfs_close_thread_callback,
-                          handle);
+                          close_thread);
+
+        free(handle);
     }
 
     return count;
@@ -268,6 +266,11 @@ chimera_vfs_init(
 
     vfs->vfs_name_cache = chimera_vfs_name_cache_create(8, 4, 2, cache_ttl, metrics);
     vfs->vfs_attr_cache = chimera_vfs_attr_cache_create(8, 4, 2, cache_ttl, metrics);
+
+    /* Register the root pseudo-filesystem module */
+    chimera_vfs_register(vfs, &vfs_root, NULL);
+    /* Create the root mount entry in the mount table */
+    chimera_vfs_root_register_mount(vfs);
 
     for (int i = 0; i < num_modules; i++) {
         chimera_vfs_info("Initializing VFS module %s...", module_cfgs[i].module_name);
@@ -574,3 +577,11 @@ chimera_vfs_thread_drain(struct chimera_vfs_thread *thread)
         evpl_continue(thread->evpl);
     }
 } /* chimera_vfs_thread_drain */
+
+SYMBOL_EXPORT void
+chimera_vfs_get_root_fh(
+    uint8_t  *fh,
+    uint32_t *fh_len)
+{
+    chimera_vfs_root_get_fh(fh, fh_len);
+} /* chimera_vfs_get_root_fh */

@@ -24,9 +24,6 @@
 #define chimera_client_fatal_if(cond, ...) \
         chimera_fatal_if(cond, "client", __FILE__, __LINE__, __VA_ARGS__)
 
-extern const uint8_t root_fh[1];
-
-
 #define CHIMERA_CLIENT_MAX_MODULES 64
 
 struct chimera_client_fh {
@@ -294,6 +291,8 @@ struct chimera_client_config {
 struct chimera_client {
     const struct chimera_client_config *config;
     struct chimera_vfs                 *vfs;
+    uint32_t                            root_fh_len;
+    uint8_t                             root_fh[CHIMERA_VFS_FH_SIZE];
 } __attribute__((aligned(64)));
 
 struct chimera_client_thread {

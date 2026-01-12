@@ -124,8 +124,8 @@ chimera_link_source_complete(
 
     chimera_vfs_lookup_path(
         request->thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
+        request->thread->client->root_fh,
+        request->thread->client->root_fh_len,
         request->link.dest_path,
         request->link.dest_parent_len,
         CHIMERA_VFS_ATTR_FH,
@@ -154,8 +154,8 @@ chimera_link_source_lookup_complete(
 
     chimera_vfs_lookup_path(
         request->thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
+        request->thread->client->root_fh,
+        request->thread->client->root_fh_len,
         request->link.source_path,
         request->link.source_path_len,
         CHIMERA_VFS_ATTR_FH,
@@ -177,8 +177,8 @@ chimera_dispatch_link(
 
     chimera_vfs_lookup_path(
         thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
+        thread->client->root_fh,
+        thread->client->root_fh_len,
         request->link.source_path,
         request->link.source_path_len,
         CHIMERA_VFS_ATTR_FH,

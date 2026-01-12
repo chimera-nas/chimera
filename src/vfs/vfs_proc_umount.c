@@ -6,9 +6,6 @@
 #include <string.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
-#include "common/misc.h"
-#include "vfs_open_cache.h"
-#include "vfs_release.h"
 #include "vfs_mount_table.h"
 #include "common/macros.h"
 
@@ -54,7 +51,11 @@ chimera_vfs_umount(
         return;
     }
 
-    request = chimera_vfs_request_alloc(thread, &mount->mount_id, mount->mount_id_len);
+    request = chimera_vfs_request_alloc(thread, mount->root_fh, mount->root_fh_len);
+
+    /* For umount operations, the mount was already removed from the table,
+     * so chimera_vfs_get_module returns NULL. Set the module directly. */
+    request->module = mount->module;
 
     request->opcode               = CHIMERA_VFS_OP_UMOUNT;
     request->complete             = chimera_vfs_umount_complete;

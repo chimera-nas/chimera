@@ -103,8 +103,8 @@ chimera_dispatch_readlink(
 {
     chimera_vfs_lookup_path(
         thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
+        thread->client->root_fh,
+        thread->client->root_fh_len,
         request->readlink.path,
         request->readlink.path_len,
         CHIMERA_VFS_ATTR_FH,
