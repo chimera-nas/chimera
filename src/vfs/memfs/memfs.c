@@ -113,6 +113,8 @@ struct memfs_inode {
     union {
         struct {
             struct rb_tree dirents;
+            uint64_t       parent_inum;
+            uint32_t       parent_gen;
         } dir;
         struct {
             struct memfs_block **blocks;
@@ -515,6 +517,10 @@ memfs_init(const char *cfgfile)
     inode->ctime      = now;
 
     rb_tree_init(&inode->dir.dirents);
+
+    /* Root directory's parent is itself */
+    inode->dir.parent_inum = inode->inum;
+    inode->dir.parent_gen  = inode->gen;
 
     shared->root_fhlen = memfs_inum_to_fh(shared->root_fh, inode->inum,
                                           inode->gen);
@@ -950,6 +956,8 @@ memfs_lookup(
     struct memfs_inode  *inode, *child;
     struct memfs_dirent *dirent;
     uint64_t             hash;
+    const char          *name    = request->lookup.component;
+    uint32_t             namelen = request->lookup.component_len;
 
     hash = request->lookup.component_hash;
 
@@ -968,6 +976,34 @@ memfs_lookup(
         return;
     }
 
+    memfs_map_attrs(shared, &request->lookup.r_dir_attr, inode);
+
+    /* Handle "." - return the directory itself */
+    if (namelen == 1 && name[0] == '.') {
+        memfs_map_attrs(shared, &request->lookup.r_attr, inode);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    /* Handle ".." - return the parent directory */
+    if (namelen == 2 && name[0] == '.' && name[1] == '.') {
+        child = memfs_inode_get_inum(shared, inode->dir.parent_inum, inode->dir.parent_gen);
+        if (unlikely(!child)) {
+            pthread_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+        memfs_map_attrs(shared, &request->lookup.r_attr, child);
+        pthread_mutex_unlock(&child->lock);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
     rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
 
     if (!dirent) {
@@ -976,9 +1012,6 @@ memfs_lookup(
         request->complete(request);
         return;
     }
-
-    memfs_map_attrs(shared, &request->lookup.r_dir_attr, inode);
-
 
     child = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
@@ -1063,6 +1096,10 @@ memfs_mkdir(
         memfs_dirent_free(thread, dirent);
         return;
     }
+
+    /* Set parent pointer for .. lookup support */
+    inode->dir.parent_inum = parent_inode->inum;
+    inode->dir.parent_gen  = parent_inode->gen;
 
     memfs_map_attrs(shared, r_dir_pre_attr, parent_inode);
 

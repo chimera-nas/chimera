@@ -347,10 +347,10 @@ struct chimera_statvfs {
 };
 
 typedef void (*chimera_statfs_callback_t)(
-    struct chimera_client_thread  *client,
-    enum chimera_vfs_error         status,
-    const struct chimera_statvfs  *st,
-    void                          *private_data);
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    const struct chimera_statvfs *st,
+    void                         *private_data);
 
 void
 chimera_statfs(

@@ -101,6 +101,7 @@ chimera_dispatch_readlink(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
+    /* Do not follow the final symlink - we want to read its target */
     chimera_vfs_lookup_path(
         thread->vfs_thread,
         root_fh,
@@ -108,6 +109,7 @@ chimera_dispatch_readlink(
         request->readlink.path,
         request->readlink.path_len,
         CHIMERA_VFS_ATTR_FH,
+        0,
         chimera_readlink_lookup_complete,
         request);
 } /* chimera_dispatch_readlink */

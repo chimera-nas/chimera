@@ -11,7 +11,9 @@
 #include "cthon_common.h"
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -32,14 +34,16 @@ main(int argc, char **argv)
         switch (opt) {
             case 'b': break;
             default: break;
-        }
+        } /* switch */
     }
 
     argc -= optind;
     argv += optind;
 
     // Optional arg: count
-    if (argc > 0) { count = atoi(argv[0]); argc--; argv++; }
+    if (argc > 0) {
+        count = atoi(argv[0]); argc--; argv++;
+    }
 
     rc = posix_test_mount(&env);
     if (rc != 0) {
@@ -108,4 +112,4 @@ main(int argc, char **argv)
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

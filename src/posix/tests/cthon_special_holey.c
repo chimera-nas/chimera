@@ -7,20 +7,22 @@
 
 #include "cthon_common.h"
 
-#define BUFSZ   8192
-#define FILESZ  70000
-#define DATASZ  4321
-#define HOLESZ  9012
-#define FILENM  "holeyfile"
+#define BUFSZ  8192
+#define FILESZ 70000
+#define DATASZ 4321
+#define HOLESZ 9012
+#define FILENM "holeyfile"
 
 #ifndef MIN
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
-#endif
+#endif /* ifndef MIN */
 
 static int Debug = 0;
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -44,16 +46,22 @@ main(int argc, char **argv)
             case 'd': Debug = 1; break;
             case 'b': break;
             default: break;
-        }
+        } /* switch */
     }
 
     argc -= optind;
     argv += optind;
 
     // Optional args: filesz datasz holesz
-    if (argc > 0) { filesz = atoi(argv[0]); argc--; argv++; }
-    if (argc > 0) { datasz = atoi(argv[0]); argc--; argv++; }
-    if (argc > 0) { holesz = atoi(argv[0]); argc--; argv++; }
+    if (argc > 0) {
+        filesz = atoi(argv[0]); argc--; argv++;
+    }
+    if (argc > 0) {
+        datasz = atoi(argv[0]); argc--; argv++;
+    }
+    if (argc > 0) {
+        holesz = atoi(argv[0]); argc--; argv++;
+    }
 
     rc = posix_test_mount(&env);
     if (rc != 0) {
@@ -91,16 +99,17 @@ main(int argc, char **argv)
     }
 
     // Initialize buffer with pattern
-    for (i = 0; i < BUFSZ / (int)sizeof(int); i++) {
-        ((int *)buf)[i] = i;
+    for (i = 0; i < BUFSZ / (int) sizeof(int); i++) {
+        ((int *) buf)[i] = i;
     }
 
     // Write phase: write data, then seek over holes
     for (sz = filesz; sz > 0; ) {
         if (datasz || sz == 1) {
             bytes = MIN(sz, datasz);
-            if (bytes == 0)
+            if (bytes == 0) {
                 bytes = 1;
+            }
             ret = chimera_posix_write(fd, buf, bytes);
             if (ret != bytes) {
                 serrno = errno;
@@ -136,8 +145,9 @@ main(int argc, char **argv)
     for (sz = filesz; sz > 0; ) {
         if (datasz || sz == 1) {
             bytes = MIN(sz, datasz);
-            if (bytes == 0)
+            if (bytes == 0) {
                 bytes = 1;
+            }
             sz -= bytes;
             for (; bytes > 0; bytes -= ret) {
                 if (Debug) {
@@ -161,12 +171,12 @@ main(int argc, char **argv)
                 if (Debug) {
                     fprintf(stderr, "  ret=%d, ct=%d\n", ret, ct);
                 }
-                for (i = 0; i < ct / (int)sizeof(int); i++) {
-                    if (((int *)buf)[i] != i) {
+                for (i = 0; i < ct / (int) sizeof(int); i++) {
+                    if (((int *) buf)[i] != i) {
                         fprintf(stderr, "bad data in %s\n", str);
                         if (Debug) {
                             fprintf(stderr, "  address=%d, valueis=%d, shouldbe=%d\n",
-                                    i, ((int *)buf)[i], i);
+                                    i, ((int *) buf)[i], i);
                         }
                         chimera_posix_close(fd);
                         posix_test_fail(&env);
@@ -221,4 +231,4 @@ main(int argc, char **argv)
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

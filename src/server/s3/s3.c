@@ -416,6 +416,7 @@ s3_server_dispatch(
                             bucket->path,
                             strlen(bucket->path),
                             CHIMERA_VFS_ATTR_FH,
+                            CHIMERA_VFS_LOOKUP_FOLLOW,
                             chimera_s3_dispatch_callback,
                             s3_request);
 

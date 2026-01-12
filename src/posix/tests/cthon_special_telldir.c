@@ -10,9 +10,9 @@
 
 #include "cthon_common.h"
 
-static int debug = 0;
-static int numfiles = 200;
-static char *tdirname = "telldir-test";
+static int          debug    = 0;
+static int          numfiles = 200;
+static char        *tdirname = "telldir-test";
 
 typedef struct {
     int  inuse;
@@ -30,22 +30,27 @@ alloc_file_info(int nfiles)
         fprintf(stderr, "can't allocate file info array: %s\n", strerror(errno));
         exit(1);
     }
-}
+} /* alloc_file_info */
 
 static void
-save_file_info(int filenum, long cookie, int files_left)
+save_file_info(
+    int  filenum,
+    long cookie,
+    int  files_left)
 {
     if (debug) {
         printf("\t%d 0x%lx %d\n", filenum, cookie, files_left);
     }
 
-    file_info[filenum].inuse = 1;
-    file_info[filenum].cookie = cookie;
+    file_info[filenum].inuse    = 1;
+    file_info[filenum].cookie   = cookie;
     file_info[filenum].numfiles = files_left;
-}
+} /* save_file_info */
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -69,7 +74,7 @@ main(int argc, char **argv)
             case 'b': break;
             case 'n': numfiles = atoi(optarg); break;
             default: break;
-        }
+        } /* switch */
     }
 
     rc = posix_test_mount(&env);
@@ -116,7 +121,7 @@ main(int argc, char **argv)
     fprintf(stdout, "\tWalking directory with telldir...\n");
     files_left = numfiles;
     while (files_left > 0) {
-        int filenum;
+        int   filenum;
         char *fname;
 
         cookie = chimera_posix_telldir(dp);
@@ -135,8 +140,9 @@ main(int argc, char **argv)
         }
 
         fname = entry->d_name;
-        if (strcmp(fname, ".") == 0 || strcmp(fname, "..") == 0)
+        if (strcmp(fname, ".") == 0 || strcmp(fname, "..") == 0) {
             continue;
+        }
 
         filenum = atoi(fname);
         if (filenum < 0 || filenum >= numfiles) {
@@ -152,8 +158,8 @@ main(int argc, char **argv)
     fprintf(stdout, "\tVerifying seekdir...\n");
     for (i = 0; i < numfiles; i++) {
         file_info_t *ip = &file_info[i];
-        int files_found;
-        int first_file = 1;
+        int          files_found;
+        int          first_file = 1;
 
         if (!ip->inuse) {
             fprintf(stderr, "\tno information for file %d\n", i);
@@ -173,8 +179,9 @@ main(int argc, char **argv)
                 fprintf(stderr, "\tentry for %d (cookie %ld):\n", i, ip->cookie);
                 fprintf(stderr, "\texpected to find %d entries, only found %d\n",
                         ip->numfiles, files_found);
-                if (errmsg)
+                if (errmsg) {
                     fprintf(stderr, "\terror: %s\n", errmsg);
+                }
                 chimera_posix_closedir(dp);
                 posix_test_fail(&env);
             }
@@ -209,4 +216,4 @@ main(int argc, char **argv)
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

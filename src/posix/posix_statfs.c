@@ -12,10 +12,10 @@
 
 static void
 chimera_posix_statfs_callback(
-    struct chimera_client_thread  *thread,
-    enum chimera_vfs_error         status,
-    const struct chimera_statvfs  *st,
-    void                          *private_data)
+    struct chimera_client_thread *thread,
+    enum chimera_vfs_error        status,
+    const struct chimera_statvfs *st,
+    void                         *private_data)
 {
     struct chimera_posix_completion *comp    = private_data;
     struct chimera_client_request   *request = comp->request;
@@ -37,8 +37,8 @@ chimera_posix_statfs_exec(
 
 SYMBOL_EXPORT int
 chimera_posix_statfs(
-    const char     *path,
-    struct statfs  *buf)
+    const char    *path,
+    struct statfs *buf)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
@@ -62,18 +62,18 @@ chimera_posix_statfs(
     int err = chimera_posix_wait(&comp);
 
     if (!err) {
-        buf->f_type    = 0; // Chimera filesystem
-        buf->f_bsize   = req.sync_statvfs.f_bsize;
-        buf->f_blocks  = req.sync_statvfs.f_blocks;
-        buf->f_bfree   = req.sync_statvfs.f_bfree;
-        buf->f_bavail  = req.sync_statvfs.f_bavail;
-        buf->f_files   = req.sync_statvfs.f_files;
-        buf->f_ffree   = req.sync_statvfs.f_ffree;
-        buf->f_fsid.__val[0] = (int)(req.sync_statvfs.f_fsid & 0xFFFFFFFF);
-        buf->f_fsid.__val[1] = (int)(req.sync_statvfs.f_fsid >> 32);
-        buf->f_namelen = req.sync_statvfs.f_namemax;
-        buf->f_frsize  = req.sync_statvfs.f_frsize;
-        buf->f_flags   = req.sync_statvfs.f_flag;
+        buf->f_type          = 0; // Chimera filesystem
+        buf->f_bsize         = req.sync_statvfs.f_bsize;
+        buf->f_blocks        = req.sync_statvfs.f_blocks;
+        buf->f_bfree         = req.sync_statvfs.f_bfree;
+        buf->f_bavail        = req.sync_statvfs.f_bavail;
+        buf->f_files         = req.sync_statvfs.f_files;
+        buf->f_ffree         = req.sync_statvfs.f_ffree;
+        buf->f_fsid.__val[0] = (int) (req.sync_statvfs.f_fsid & 0xFFFFFFFF);
+        buf->f_fsid.__val[1] = (int) (req.sync_statvfs.f_fsid >> 32);
+        buf->f_namelen       = req.sync_statvfs.f_namemax;
+        buf->f_frsize        = req.sync_statvfs.f_frsize;
+        buf->f_flags         = req.sync_statvfs.f_flag;
     }
 
     chimera_posix_completion_destroy(&comp);
@@ -99,8 +99,8 @@ chimera_posix_fstatfs(
 
 SYMBOL_EXPORT int
 chimera_posix_statvfs(
-    const char      *path,
-    struct statvfs  *buf)
+    const char     *path,
+    struct statvfs *buf)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);

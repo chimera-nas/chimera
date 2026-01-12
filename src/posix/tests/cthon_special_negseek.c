@@ -10,7 +10,9 @@
 #include "cthon_common.h"
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -29,7 +31,7 @@ main(int argc, char **argv)
         switch (opt) {
             case 'b': break;
             default: break;
-        }
+        } /* switch */
     }
 
     rc = posix_test_mount(&env);
@@ -101,4 +103,4 @@ main(int argc, char **argv)
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

@@ -12,21 +12,21 @@
 
 #include "cthon_common.h"
 
-char *cthon_Myname = "cthon";
-char  cthon_cwd[MAXPATHLEN] = "/test";
+char                 *cthon_Myname          = "cthon";
+char                  cthon_cwd[MAXPATHLEN] = "/test";
 
 static struct timeval cthon_ts, cthon_te;
 
 // Stack for directory navigation
 #define MAX_DIR_DEPTH 32
-static char  cthon_dir_stack[MAX_DIR_DEPTH][MAXPATHLEN];
-static int   cthon_dir_depth = 0;
+static char           cthon_dir_stack[MAX_DIR_DEPTH][MAXPATHLEN];
+static int            cthon_dir_depth = 0;
 
 void
 cthon_starttime(void)
 {
     gettimeofday(&cthon_ts, NULL);
-}
+} /* cthon_starttime */
 
 void
 cthon_endtime(struct timeval *tv)
@@ -38,10 +38,12 @@ cthon_endtime(struct timeval *tv)
     }
     tv->tv_usec = cthon_te.tv_usec - cthon_ts.tv_usec;
     tv->tv_sec  = cthon_te.tv_sec - cthon_ts.tv_sec;
-}
+} /* cthon_endtime */
 
 void
-cthon_error(const char *fmt, ...)
+cthon_error(
+    const char *fmt,
+    ...)
 {
     int     oerrno = errno;
     va_list ap;
@@ -58,10 +60,13 @@ cthon_error(const char *fmt, ...)
         fprintf(stderr, "\n");
     }
     fflush(stderr);
-}
+} /* cthon_error */
 
 long
-cthon_getparm(const char *parm, long min, const char *label)
+cthon_getparm(
+    const char *parm,
+    long        min,
+    const char *label)
 {
     long val = atol(parm);
 
@@ -71,26 +76,26 @@ cthon_getparm(const char *parm, long min, const char *label)
         exit(1);
     }
     return val;
-}
+} /* cthon_getparm */
 
 void
 cthon_complete(void)
 {
     fprintf(stdout, "\t%s ok.\n", cthon_Myname);
-}
+} /* cthon_complete */
 
 const char *
 cthon_getcwd(void)
 {
     return cthon_cwd;
-}
+} /* cthon_getcwd */
 
 void
 cthon_setcwd(const char *path)
 {
     strncpy(cthon_cwd, path, MAXPATHLEN - 1);
     cthon_cwd[MAXPATHLEN - 1] = '\0';
-}
+} /* cthon_setcwd */
 
 void
 cthon_pushdir(const char *name)
@@ -116,7 +121,7 @@ cthon_pushdir(const char *name)
         strncat(cthon_cwd, name, MAXPATHLEN - strlen(cthon_cwd) - 1);
     }
     cthon_cwd[MAXPATHLEN - 1] = '\0';
-}
+} /* cthon_pushdir */
 
 void
 cthon_popdir(void)
@@ -129,10 +134,12 @@ cthon_popdir(void)
     cthon_dir_depth--;
     strncpy(cthon_cwd, cthon_dir_stack[cthon_dir_depth], MAXPATHLEN - 1);
     cthon_cwd[MAXPATHLEN - 1] = '\0';
-}
+} /* cthon_popdir */
 
 int
-cthon_creat(const char *path, mode_t mode)
+cthon_creat(
+    const char *path,
+    mode_t      mode)
 {
     char fullpath[MAXPATHLEN];
 
@@ -144,7 +151,7 @@ cthon_creat(const char *path, mode_t mode)
     fullpath[MAXPATHLEN - 1] = '\0';
 
     return chimera_posix_open(fullpath, O_CREAT | O_WRONLY | O_TRUNC, mode);
-}
+} /* cthon_creat */
 
 // Build a directory tree
 void
@@ -198,7 +205,7 @@ cthon_dirtree(
         cthon_dirtree(lev, files, dirs, fname, dname, totfiles, totdirs);
         cthon_popdir();
     }
-}
+} /* cthon_dirtree */
 
 // Remove a directory tree
 void
@@ -247,7 +254,7 @@ cthon_rmdirtree(
         }
         (*totdirs)++;
     }
-}
+} /* cthon_rmdirtree */
 
 // Set up test directory
 void
@@ -284,7 +291,7 @@ cthon_testdir(const char *dir)
 
     // Set as current working directory
     cthon_setcwd(fullpath);
-}
+} /* cthon_testdir */
 
 // Move to test directory (without creating)
 int
@@ -305,4 +312,4 @@ cthon_mtestdir(const char *dir)
 
     cthon_setcwd(fullpath);
     return 0;
-}
+} /* cthon_mtestdir */

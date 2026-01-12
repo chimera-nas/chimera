@@ -13,7 +13,9 @@
 #define STRCHARS 100
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -39,14 +41,16 @@ main(int argc, char **argv)
         switch (opt) {
             case 'b': break;
             default: break;
-        }
+        } /* switch */
     }
 
     argc -= optind;
     argv += optind;
 
     // Optional args: count
-    if (argc > 0) { count = atoi(argv[0]); argc--; argv++; }
+    if (argc > 0) {
+        count = atoi(argv[0]); argc--; argv++;
+    }
 
     rc = posix_test_mount(&env);
     if (rc != 0) {
@@ -65,7 +69,7 @@ main(int argc, char **argv)
     snprintf(sbar, sizeof(sbar), "%s/SBAR", base);
     snprintf(tbar, sizeof(tbar), "%s/DIR/BAR", base);
     snprintf(lbar, sizeof(lbar), "../TEST/DIR/BAR");
-    snprintf(str, sizeof(str), "Idempotency test %ld running\n", (long)getpid());
+    snprintf(str, sizeof(str), "Idempotency test %ld running\n", (long) getpid());
     slen = strlen(str);
 
     slerr = 1;  // assume symlink not supported unless we try
@@ -153,7 +157,7 @@ main(int argc, char **argv)
         if ((sb.st_mode & (S_IFMT | 07777)) != (S_IFREG | 0611) ||
             sb.st_size != slen) {
             fprintf(stderr, "\tbad file type/size: mode=0%o, size=%ld (expected 0%o, %d)\n",
-                    (int)sb.st_mode, (long)sb.st_size, S_IFREG | 0611, slen);
+                    (int) sb.st_mode, (long) sb.st_size, S_IFREG | 0611, slen);
             posix_test_fail(&env);
         }
 
@@ -206,4 +210,4 @@ main(int argc, char **argv)
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

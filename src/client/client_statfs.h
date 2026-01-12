@@ -137,6 +137,7 @@ chimera_dispatch_statfs(
         request->statfs.path,
         request->statfs.path_len,
         CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_LOOKUP_FOLLOW,
         chimera_statfs_lookup_complete,
         request);
 } /* chimera_dispatch_statfs */

@@ -118,6 +118,7 @@ chimera_dispatch_setattr(
         request->setattr.path,
         request->setattr.path_len,
         CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_LOOKUP_FOLLOW,
         chimera_setattr_lookup_complete,
         request);
 } /* chimera_dispatch_setattr */

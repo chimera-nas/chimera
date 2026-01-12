@@ -16,8 +16,8 @@
 
 #include "cthon_common.h"
 
-#define BUFSZ   8192
-#define DSIZE   1048576
+#define BUFSZ 8192
+#define DSIZE 1048576
 
 static int Tflag = 0;
 static int Fflag = 0;
@@ -27,10 +27,12 @@ static void
 usage(void)
 {
     fprintf(stdout, "usage: %s [-htfn] [size count fname]\n", cthon_Myname);
-}
+} /* usage */
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -39,7 +41,7 @@ main(int argc, char **argv)
     off_t                 size = DSIZE;
     off_t                 si;
     int                   fd;
-    off_t                 bytes = 0;
+    off_t                 bytes   = 0;
     char                 *bigfile = "bigfile";
     struct timeval        time;
     struct stat           statb;
@@ -55,7 +57,7 @@ main(int argc, char **argv)
 
     // Initialize buffer with pattern
     for (int i = 0; i < BUFSZ; i++) {
-        buf[i] = (char)(i % 256);
+        buf[i] = (char) (i % 256);
     }
 
     optind = 1;
@@ -77,7 +79,7 @@ main(int argc, char **argv)
                 break;
             default:
                 break;
-        }
+        } /* switch */
     }
 
     argc -= optind;
@@ -136,7 +138,7 @@ main(int argc, char **argv)
                 cthon_error("write failed");
                 posix_test_fail(&env);
             }
-            if ((size_t)n != towrite) {
+            if ((size_t) n != towrite) {
                 cthon_error("short write: %zd vs %zu", n, towrite);
                 posix_test_fail(&env);
             }
@@ -155,7 +157,7 @@ main(int argc, char **argv)
         }
         if (statb.st_size != size) {
             cthon_error("%s has size %lld, expected %lld",
-                       str, (long long)statb.st_size, (long long)size);
+                        str, (long long) statb.st_size, (long long) size);
             posix_test_fail(&env);
         }
 
@@ -197,16 +199,16 @@ main(int argc, char **argv)
     }
 
     fprintf(stdout, "\twrote %lld bytes, read %lld bytes",
-            (long long)(size * count), (long long)(size * count));
+            (long long) (size * count), (long long) (size * count));
     if (Tflag) {
-        etime = (double)time.tv_sec + (double)time.tv_usec / 1000000.0;
+        etime = (double) time.tv_sec + (double) time.tv_usec / 1000000.0;
         if (etime != 0.0) {
             fprintf(stdout, " in %ld.%-2ld seconds (%ld KB/sec)",
-                    (long)time.tv_sec, (long)time.tv_usec / 10000,
-                    (long)((double)bytes / etime / 1024.0));
+                    (long) time.tv_sec, (long) time.tv_usec / 10000,
+                    (long) ((double) bytes / etime / 1024.0));
         } else {
             fprintf(stdout, " in %ld.%-2ld seconds",
-                    (long)time.tv_sec, (long)time.tv_usec / 10000);
+                    (long) time.tv_sec, (long) time.tv_usec / 10000);
         }
     }
     fprintf(stdout, "\n");
@@ -221,4 +223,4 @@ main(int argc, char **argv)
 
     posix_test_success(&env);
     return 0;
-}
+} /* main */

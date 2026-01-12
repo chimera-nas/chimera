@@ -19,7 +19,9 @@ static int Fflag = 0;
 static int Nflag = 0;
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -48,18 +50,28 @@ main(int argc, char **argv)
             case 'n': Nflag++; break;
             case 'b': break;
             default: break;
-        }
+        } /* switch */
     }
 
     argc -= optind;
     argv += optind;
 
-    if (argc > 0) { files = cthon_getparm(*argv++, 1, "files"); argc--; }
-    if (argc > 0) { count = cthon_getparm(*argv++, 1, "count"); argc--; }
-    if (argc > 0) { fname = *argv++; argc--; }
-    if (argc > 0) { nname = *argv++; argc--; }
+    if (argc > 0) {
+        files = cthon_getparm(*argv++, 1, "files"); argc--;
+    }
+    if (argc > 0) {
+        count = cthon_getparm(*argv++, 1, "count"); argc--;
+    }
+    if (argc > 0) {
+        fname = *argv++; argc--;
+    }
+    if (argc > 0) {
+        nname = *argv++; argc--;
+    }
 
-    if (Fflag) { Tflag = 0; count = 1; }
+    if (Fflag) {
+        Tflag = 0; count = 1;
+    }
 
     rc = posix_test_mount(&env);
     if (rc != 0) {
@@ -67,8 +79,11 @@ main(int argc, char **argv)
         posix_test_fail(&env);
     }
 
-    if (!Nflag) cthon_testdir(NULL);
-    else cthon_mtestdir(NULL);
+    if (!Nflag) {
+        cthon_testdir(NULL);
+    } else {
+        cthon_mtestdir(NULL);
+    }
 
     fprintf(stdout, "%s: rename and link\n", cthon_Myname);
 
@@ -83,7 +98,9 @@ main(int argc, char **argv)
         chimera_posix_close(fd);
     }
 
-    if (Tflag) cthon_starttime();
+    if (Tflag) {
+        cthon_starttime();
+    }
 
     for (ct = 0; ct < count; ct++) {
         for (fi = 0; fi < files; fi++) {
@@ -121,7 +138,7 @@ main(int argc, char **argv)
             }
             if (statb.st_nlink != 2) {
                 cthon_error("%s has %d links, expected 2",
-                           str, (int)statb.st_nlink);
+                            str, (int) statb.st_nlink);
                 posix_test_fail(&env);
             }
 
@@ -138,13 +155,15 @@ main(int argc, char **argv)
             }
             if (statb.st_nlink != 1) {
                 cthon_error("%s has %d links, expected 1",
-                           str, (int)statb.st_nlink);
+                            str, (int) statb.st_nlink);
                 posix_test_fail(&env);
             }
         }
     }
 
-    if (Tflag) cthon_endtime(&time);
+    if (Tflag) {
+        cthon_endtime(&time);
+    }
 
     // Cleanup
     for (fi = 0; fi < files; fi++) {
@@ -156,7 +175,7 @@ main(int argc, char **argv)
             files * count * 2, files);
     if (Tflag) {
         fprintf(stdout, " in %ld.%-2ld seconds",
-                (long)time.tv_sec, (long)time.tv_usec / 10000);
+                (long) time.tv_sec, (long) time.tv_usec / 10000);
     }
     fprintf(stdout, "\n");
 
@@ -164,4 +183,4 @@ main(int argc, char **argv)
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

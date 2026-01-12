@@ -23,18 +23,20 @@ usage(void)
     fprintf(stdout, "          t    Print execution time statistics\n");
     fprintf(stdout, "          f    Test function only (negate -t)\n");
     fprintf(stdout, "          n    Suppress test directory create operations\n");
-}
+} /* usage */
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
-    int                   levels = CTHON_DLEVS;
-    int                   files  = CTHON_DFILS;
-    int                   dirs   = CTHON_DDIRS;
-    char                 *fname  = CTHON_FNAME;
-    char                 *dname  = CTHON_DNAME;
+    int                   levels   = CTHON_DLEVS;
+    int                   files    = CTHON_DFILS;
+    int                   dirs     = CTHON_DDIRS;
+    char                 *fname    = CTHON_FNAME;
+    char                 *dname    = CTHON_DNAME;
     int                   totfiles = 0;
     int                   totdirs  = 0;
     struct timeval        time;
@@ -64,7 +66,7 @@ main(int argc, char **argv)
                 break;
             default:
                 break;
-        }
+        } /* switch */
     }
 
     argc -= optind;
@@ -97,10 +99,10 @@ main(int argc, char **argv)
     }
 
     if (Fflag) {
-        Tflag = 0;
+        Tflag  = 0;
         levels = 2;
-        files = 2;
-        dirs = 2;
+        files  = 2;
+        dirs   = 2;
     }
 
     rc = posix_test_mount(&env);
@@ -121,7 +123,7 @@ main(int argc, char **argv)
     cthon_dirtree(levels, files, dirs, fname, dname, &totfiles, &totdirs);
 
     totfiles = 0;
-    totdirs = 0;
+    totdirs  = 0;
 
     if (Tflag) {
         cthon_starttime();
@@ -137,7 +139,7 @@ main(int argc, char **argv)
             totfiles, totdirs, levels);
     if (Tflag) {
         fprintf(stdout, " in %ld.%-2ld seconds",
-                (long)time.tv_sec, (long)time.tv_usec / 10000);
+                (long) time.tv_sec, (long) time.tv_usec / 10000);
     }
     fprintf(stdout, "\n");
 
@@ -152,4 +154,4 @@ main(int argc, char **argv)
     posix_test_success(&env);
 
     return 0;
-}
+} /* main */

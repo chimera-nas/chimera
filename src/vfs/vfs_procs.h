@@ -61,6 +61,7 @@ chimera_vfs_lookup_path(
     const char                        *path,
     int                                pathlen,
     uint64_t                           attr_mask,
+    uint32_t                           flags,
     chimera_vfs_lookup_path_callback_t callback,
     void                              *private_data);
 

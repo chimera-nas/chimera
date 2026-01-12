@@ -172,6 +172,7 @@ chimera_dispatch_open(
             request->open.path,
             request->open.parent_len,
             CHIMERA_VFS_ATTR_FH,
+            CHIMERA_VFS_LOOKUP_FOLLOW,
             chimera_open_path_parent_lookup_complete,
             request);
     } else {
@@ -182,6 +183,7 @@ chimera_dispatch_open(
             request->open.path,
             request->open.path_len,
             CHIMERA_VFS_ATTR_FH,
+            CHIMERA_VFS_LOOKUP_FOLLOW,
             chimera_open_path_lookup_complete,
             request);
 

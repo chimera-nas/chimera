@@ -115,6 +115,7 @@ chimera_dispatch_remove(
         request->remove.path,
         request->remove.parent_len,
         CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_LOOKUP_FOLLOW,
         chimera_remove_parent_lookup_complete,
         request);
 } /* chimera_dispatch_remove */

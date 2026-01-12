@@ -23,7 +23,9 @@ static int Nflag = 0;
 static int Iflag = 0;   // Ignore non-test files
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -54,17 +56,25 @@ main(int argc, char **argv)
             case 'i': Iflag++; break;
             case 'b': break;
             default: break;
-        }
+        } /* switch */
     }
 
     argc -= optind;
     argv += optind;
 
-    if (argc > 0) { files = cthon_getparm(*argv++, 0, "files"); argc--; }
-    if (argc > 0) { count = cthon_getparm(*argv++, 0, "count"); argc--; }
-    if (argc > 0) { fname = *argv++; argc--; }
+    if (argc > 0) {
+        files = cthon_getparm(*argv++, 0, "files"); argc--;
+    }
+    if (argc > 0) {
+        count = cthon_getparm(*argv++, 0, "count"); argc--;
+    }
+    if (argc > 0) {
+        fname = *argv++; argc--;
+    }
 
-    if (Fflag) { Tflag = 0; count = 1; }
+    if (Fflag) {
+        Tflag = 0; count = 1;
+    }
 
     rc = posix_test_mount(&env);
     if (rc != 0) {
@@ -72,8 +82,11 @@ main(int argc, char **argv)
         posix_test_fail(&env);
     }
 
-    if (!Nflag) cthon_testdir(NULL);
-    else cthon_mtestdir(NULL);
+    if (!Nflag) {
+        cthon_testdir(NULL);
+    } else {
+        cthon_mtestdir(NULL);
+    }
 
     fprintf(stdout, "%s: readdir\n", cthon_Myname);
 
@@ -88,7 +101,9 @@ main(int argc, char **argv)
         chimera_posix_close(fd);
     }
 
-    if (Tflag) cthon_starttime();
+    if (Tflag) {
+        cthon_starttime();
+    }
 
     for (ct = 0; ct < count; ct++) {
         dir = chimera_posix_opendir(cthon_getcwd());
@@ -121,7 +136,7 @@ main(int argc, char **argv)
         }
         if (found != entries) {
             cthon_error("rewinddir: found %d entries first time, %d second time",
-                       entries, found);
+                        entries, found);
             posix_test_fail(&env);
         }
 
@@ -134,7 +149,9 @@ main(int argc, char **argv)
         }
     }
 
-    if (Tflag) cthon_endtime(&time);
+    if (Tflag) {
+        cthon_endtime(&time);
+    }
 
     // Cleanup remaining files
     for (fi = count; fi < files; fi++) {
@@ -145,7 +162,7 @@ main(int argc, char **argv)
     fprintf(stdout, "\t%d readdirs on %d files", count * 2, files);
     if (Tflag) {
         fprintf(stdout, " in %ld.%-2ld seconds",
-                (long)time.tv_sec, (long)time.tv_usec / 10000);
+                (long) time.tv_sec, (long) time.tv_usec / 10000);
     }
     fprintf(stdout, "\n");
 
@@ -153,4 +170,4 @@ main(int argc, char **argv)
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

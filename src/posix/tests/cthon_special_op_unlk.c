@@ -17,10 +17,12 @@
 
 #define TBUFSIZ 100
 static char wbuf[TBUFSIZ], rbuf[TBUFSIZ];
-#define TMSG "This is a test message written to the unlinked file\n"
+#define TMSG    "This is a test message written to the unlinked file\n"
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -40,7 +42,7 @@ main(int argc, char **argv)
         switch (opt) {
             case 'b': break;
             default: break;
-        }
+        } /* switch */
     }
 
     rc = posix_test_mount(&env);
@@ -76,8 +78,9 @@ main(int argc, char **argv)
     ret = chimera_posix_write(fd, wbuf, TBUFSIZ);
     if (ret != TBUFSIZ) {
         fprintf(stderr, "\twrite ret %d; expected %d\n", ret, TBUFSIZ);
-        if (ret < 0)
+        if (ret < 0) {
             perror("\twrite");
+        }
         chimera_posix_close(fd);
         posix_test_fail(&env);
     }
@@ -86,8 +89,9 @@ main(int argc, char **argv)
     lret = chimera_posix_lseek(fd, 0L, SEEK_SET);
     if (lret != 0L) {
         fprintf(stderr, "\tlseek ret %ld; expected 0\n", lret);
-        if (lret < 0)
+        if (lret < 0) {
             perror("\tlseek");
+        }
         chimera_posix_close(fd);
         posix_test_fail(&env);
     }
@@ -96,8 +100,9 @@ main(int argc, char **argv)
     ret = chimera_posix_read(fd, rbuf, TBUFSIZ);
     if (ret != TBUFSIZ) {
         fprintf(stderr, "\tread ret %d; expected %d\n", ret, TBUFSIZ);
-        if (ret < 0)
+        if (ret < 0) {
             perror("\tread");
+        }
         chimera_posix_close(fd);
         posix_test_fail(&env);
     }
@@ -146,4 +151,4 @@ main(int argc, char **argv)
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

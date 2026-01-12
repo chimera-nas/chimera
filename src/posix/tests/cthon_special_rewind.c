@@ -10,7 +10,9 @@
 #include "cthon_common.h"
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -31,7 +33,7 @@ main(int argc, char **argv)
         switch (opt) {
             case 'b': break;
             default: break;
-        }
+        } /* switch */
     }
 
     rc = posix_test_mount(&env);
@@ -63,9 +65,9 @@ main(int argc, char **argv)
     }
 
     // Rewind to beginning
-    off = chimera_posix_lseek(fd, (off_t)0, SEEK_SET);
+    off = chimera_posix_lseek(fd, (off_t) 0, SEEK_SET);
     if (off != 0) {
-        fprintf(stderr, "\tfile offset=%ld after rewind, expected 0\n", (long)off);
+        fprintf(stderr, "\tfile offset=%ld after rewind, expected 0\n", (long) off);
         chimera_posix_close(fd);
         posix_test_fail(&env);
     }
@@ -90,7 +92,7 @@ main(int argc, char **argv)
     // Seek to end and verify position
     off = chimera_posix_lseek(fd, 0, SEEK_END);
     if (off != 1) {
-        fprintf(stderr, "\tfile offset=%ld after write, expected 1\n", (long)off);
+        fprintf(stderr, "\tfile offset=%ld after write, expected 1\n", (long) off);
         chimera_posix_close(fd);
         posix_test_fail(&env);
     }
@@ -105,4 +107,4 @@ main(int argc, char **argv)
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

@@ -17,7 +17,9 @@ static int Fflag = 0;
 static int Nflag = 0;
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -39,15 +41,19 @@ main(int argc, char **argv)
             case 'n': Nflag++; break;
             case 'b': break;
             default: break;
-        }
+        } /* switch */
     }
 
     argc -= optind;
     argv += optind;
 
-    if (argc > 0) { count = cthon_getparm(*argv++, 1, "count"); argc--; }
+    if (argc > 0) {
+        count = cthon_getparm(*argv++, 1, "count"); argc--;
+    }
 
-    if (Fflag) { Tflag = 0; count = 1; }
+    if (Fflag) {
+        Tflag = 0; count = 1;
+    }
 
     rc = posix_test_mount(&env);
     if (rc != 0) {
@@ -55,12 +61,17 @@ main(int argc, char **argv)
         posix_test_fail(&env);
     }
 
-    if (!Nflag) cthon_testdir(NULL);
-    else cthon_mtestdir(NULL);
+    if (!Nflag) {
+        cthon_testdir(NULL);
+    } else {
+        cthon_mtestdir(NULL);
+    }
 
     fprintf(stdout, "%s: statfs\n", cthon_Myname);
 
-    if (Tflag) cthon_starttime();
+    if (Tflag) {
+        cthon_starttime();
+    }
 
     for (ct = 0; ct < count; ct++) {
         if (chimera_posix_statvfs(cthon_getcwd(), &svbuf) < 0) {
@@ -69,26 +80,28 @@ main(int argc, char **argv)
         }
     }
 
-    if (Tflag) cthon_endtime(&time);
+    if (Tflag) {
+        cthon_endtime(&time);
+    }
 
     fprintf(stdout, "\t%d statvfs calls", count);
     if (Tflag) {
         fprintf(stdout, " in %ld.%-2ld seconds",
-                (long)time.tv_sec, (long)time.tv_usec / 10000);
+                (long) time.tv_sec, (long) time.tv_usec / 10000);
     }
     fprintf(stdout, "\n");
 
     // Print some filesystem info
     fprintf(stdout, "\tFilesystem info:\n");
-    fprintf(stdout, "\t  block size: %lu\n", (unsigned long)svbuf.f_bsize);
-    fprintf(stdout, "\t  total blocks: %lu\n", (unsigned long)svbuf.f_blocks);
-    fprintf(stdout, "\t  free blocks: %lu\n", (unsigned long)svbuf.f_bfree);
-    fprintf(stdout, "\t  available blocks: %lu\n", (unsigned long)svbuf.f_bavail);
-    fprintf(stdout, "\t  total inodes: %lu\n", (unsigned long)svbuf.f_files);
-    fprintf(stdout, "\t  free inodes: %lu\n", (unsigned long)svbuf.f_ffree);
+    fprintf(stdout, "\t  block size: %lu\n", (unsigned long) svbuf.f_bsize);
+    fprintf(stdout, "\t  total blocks: %lu\n", (unsigned long) svbuf.f_blocks);
+    fprintf(stdout, "\t  free blocks: %lu\n", (unsigned long) svbuf.f_bfree);
+    fprintf(stdout, "\t  available blocks: %lu\n", (unsigned long) svbuf.f_bavail);
+    fprintf(stdout, "\t  total inodes: %lu\n", (unsigned long) svbuf.f_files);
+    fprintf(stdout, "\t  free inodes: %lu\n", (unsigned long) svbuf.f_ffree);
 
     cthon_complete();
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

@@ -7,15 +7,17 @@
 
 #include "cthon_common.h"
 
-#define BUFSZ   8192
-#define DSIZE   1048576
+#define BUFSZ 8192
+#define DSIZE 1048576
 
 static int Tflag = 0;
 static int Fflag = 0;
 static int Nflag = 0;
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -24,7 +26,7 @@ main(int argc, char **argv)
     off_t                 size = DSIZE;
     off_t                 si;
     int                   fd;
-    off_t                 bytes = 0;
+    off_t                 bytes   = 0;
     char                 *bigfile = "bigfile";
     struct timeval        time;
     int                   opt;
@@ -38,7 +40,7 @@ main(int argc, char **argv)
     posix_test_init(&env, argv, argc);
 
     for (int i = 0; i < BUFSZ; i++) {
-        buf[i] = (char)(i % 256);
+        buf[i] = (char) (i % 256);
     }
 
     optind = 1;
@@ -49,17 +51,25 @@ main(int argc, char **argv)
             case 'n': Nflag++; break;
             case 'b': break;
             default: break;
-        }
+        } /* switch */
     }
 
     argc -= optind;
     argv += optind;
 
-    if (argc > 0) { size = cthon_getparm(*argv++, 1, "size"); argc--; }
-    if (argc > 0) { count = cthon_getparm(*argv++, 1, "count"); argc--; }
-    if (argc > 0) { bigfile = *argv++; argc--; }
+    if (argc > 0) {
+        size = cthon_getparm(*argv++, 1, "size"); argc--;
+    }
+    if (argc > 0) {
+        count = cthon_getparm(*argv++, 1, "count"); argc--;
+    }
+    if (argc > 0) {
+        bigfile = *argv++; argc--;
+    }
 
-    if (Fflag) { Tflag = 0; count = 1; }
+    if (Fflag) {
+        Tflag = 0; count = 1;
+    }
 
     rc = posix_test_mount(&env);
     if (rc != 0) {
@@ -67,13 +77,18 @@ main(int argc, char **argv)
         posix_test_fail(&env);
     }
 
-    if (!Nflag) cthon_testdir(NULL);
-    else cthon_mtestdir(NULL);
+    if (!Nflag) {
+        cthon_testdir(NULL);
+    } else {
+        cthon_mtestdir(NULL);
+    }
 
     fprintf(stdout, "%s: write\n", cthon_Myname);
     snprintf(str, sizeof(str), "%s/%s", cthon_getcwd(), bigfile);
 
-    if (Tflag) cthon_starttime();
+    if (Tflag) {
+        cthon_starttime();
+    }
 
     for (ct = 0; ct < count; ct++) {
         fd = chimera_posix_open(str, O_CREAT | O_RDWR | O_TRUNC, CTHON_CHMOD_RW);
@@ -85,7 +100,7 @@ main(int argc, char **argv)
         for (si = size; si > 0; si -= n) {
             size_t towrite = (si < BUFSZ) ? si : BUFSZ;
             n = chimera_posix_write(fd, buf, towrite);
-            if (n < 0 || (size_t)n != towrite) {
+            if (n < 0 || (size_t) n != towrite) {
                 cthon_error("write failed");
                 posix_test_fail(&env);
             }
@@ -96,15 +111,17 @@ main(int argc, char **argv)
         chimera_posix_unlink(str);
     }
 
-    if (Tflag) cthon_endtime(&time);
-
-    fprintf(stdout, "\twrote %lld bytes", (long long)(size * count));
     if (Tflag) {
-        etime = (double)time.tv_sec + (double)time.tv_usec / 1000000.0;
+        cthon_endtime(&time);
+    }
+
+    fprintf(stdout, "\twrote %lld bytes", (long long) (size * count));
+    if (Tflag) {
+        etime = (double) time.tv_sec + (double) time.tv_usec / 1000000.0;
         if (etime != 0.0) {
             fprintf(stdout, " in %ld.%-2ld seconds (%ld KB/sec)",
-                    (long)time.tv_sec, (long)time.tv_usec / 10000,
-                    (long)((double)bytes / etime / 1024.0));
+                    (long) time.tv_sec, (long) time.tv_usec / 10000,
+                    (long) ((double) bytes / etime / 1024.0));
         }
     }
     fprintf(stdout, "\n");
@@ -113,4 +130,4 @@ main(int argc, char **argv)
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

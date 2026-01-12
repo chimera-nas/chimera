@@ -10,7 +10,9 @@
 #include "cthon_common.h"
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -28,7 +30,7 @@ main(int argc, char **argv)
         switch (opt) {
             case 'b': break;
             default: break;
-        }
+        } /* switch */
     }
 
     rc = posix_test_mount(&env);
@@ -62,7 +64,7 @@ main(int argc, char **argv)
     }
     if (statb.st_size != 0L) {
         fprintf(stderr, "\ttestfile not zero length after ftruncate(0), size=%ld\n",
-                (long)statb.st_size);
+                (long) statb.st_size);
         chimera_posix_close(fd);
         posix_test_fail(&env);
     }
@@ -81,7 +83,7 @@ main(int argc, char **argv)
     }
     if (statb.st_size != 10L) {
         fprintf(stderr, "\ttestfile length not set correctly by ftruncate(10), size=%ld\n",
-                (long)statb.st_size);
+                (long) statb.st_size);
         chimera_posix_close(fd);
         posix_test_fail(&env);
     }
@@ -96,4 +98,4 @@ main(int argc, char **argv)
     posix_test_umount();
     posix_test_success(&env);
     return 0;
-}
+} /* main */

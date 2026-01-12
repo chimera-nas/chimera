@@ -22,10 +22,12 @@ usage(void)
     fprintf(stdout, "          t    Print execution time statistics\n");
     fprintf(stdout, "          f    Test function only (negate -t)\n");
     fprintf(stdout, "          n    Suppress test directory create operations\n");
-}
+} /* usage */
 
 int
-main(int argc, char **argv)
+main(
+    int    argc,
+    char **argv)
 {
     struct posix_test_env env;
     int                   rc;
@@ -60,7 +62,7 @@ main(int argc, char **argv)
                 break;
             default:
                 break;
-        }
+        } /* switch */
     }
 
     argc -= optind;
@@ -111,7 +113,7 @@ main(int argc, char **argv)
     fprintf(stdout, "\t%d stats on %s", count, path);
     if (Tflag) {
         fprintf(stdout, " in %ld.%-2ld seconds",
-                (long)time.tv_sec, (long)time.tv_usec / 10000);
+                (long) time.tv_sec, (long) time.tv_usec / 10000);
     }
     fprintf(stdout, "\n");
 
@@ -126,4 +128,4 @@ main(int argc, char **argv)
     posix_test_success(&env);
 
     return 0;
-}
+} /* main */

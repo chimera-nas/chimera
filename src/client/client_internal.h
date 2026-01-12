@@ -240,6 +240,7 @@ struct chimera_client_request {
             struct chimera_vfs_open_handle *handle;
             chimera_stat_callback_t         callback;
             void                           *private_data;
+            uint32_t                        flags;  /* CHIMERA_VFS_LOOKUP_FOLLOW for stat, 0 for lstat */
             int                             path_len;
             char                            path[CHIMERA_VFS_PATH_MAX];
         } stat;

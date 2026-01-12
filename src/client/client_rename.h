@@ -139,6 +139,7 @@ chimera_rename_source_parent_complete(
         request->rename.dest_path,
         request->rename.dest_parent_len,
         CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_LOOKUP_FOLLOW,
         chimera_rename_dest_parent_lookup_complete,
         request);
 
@@ -190,6 +191,7 @@ chimera_dispatch_rename(
         request->rename.source_path,
         request->rename.source_parent_len,
         CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_LOOKUP_FOLLOW,
         chimera_rename_source_parent_lookup_complete,
         request);
 } /* chimera_dispatch_rename */
