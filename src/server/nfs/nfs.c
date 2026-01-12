@@ -224,6 +224,7 @@ static void
 nfs_server_destroy(void *data)
 {
     struct chimera_server_nfs_shared *shared = data;
+    struct chimera_nfs_export        *export;
 
     /* Close out all the nfs4 session state */
     nfs4_client_table_free(&shared->nfs4_shared_clients);
@@ -246,6 +247,11 @@ nfs_server_destroy(void *data)
     free(shared->nfs_v4.rpc2.metrics);
     free(shared->nfs_v4_cb.rpc2.metrics);
 
+    while (shared->exports) {
+        export = shared->exports;
+        LL_DELETE(shared->exports, export);
+        free(export);
+    }
     free(shared);
 } /* nfs_server_destroy */
 
