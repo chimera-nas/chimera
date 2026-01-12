@@ -42,7 +42,10 @@ chimera_vfs_encode_fh_mount(
 
     /* Build concatenation buffer: fsid || fh_fragment */
     memcpy(concat_buf, fsid, CHIMERA_VFS_FSID_SIZE);
-    memcpy(concat_buf + CHIMERA_VFS_FSID_SIZE, fh_fragment, fh_fragment_len);
+
+    if (fh_fragment_len > 0) {
+        memcpy(concat_buf + CHIMERA_VFS_FSID_SIZE, fh_fragment, fh_fragment_len);
+    }
 
     /* Compute 128-bit hash to get mount_id */
     hash = XXH3_128bits(concat_buf, CHIMERA_VFS_FSID_SIZE + fh_fragment_len);
@@ -51,7 +54,9 @@ chimera_vfs_encode_fh_mount(
     memcpy(fh, &hash, CHIMERA_VFS_MOUNT_ID_SIZE);
 
     /* Append fh_fragment */
-    memcpy(fh + CHIMERA_VFS_MOUNT_ID_SIZE, fh_fragment, fh_fragment_len);
+    if (fh_fragment_len > 0) {
+        memcpy(fh + CHIMERA_VFS_MOUNT_ID_SIZE, fh_fragment, fh_fragment_len);
+    }
 
     return CHIMERA_VFS_MOUNT_ID_SIZE + fh_fragment_len;
 } /* chimera_vfs_encode_fh_mount */
