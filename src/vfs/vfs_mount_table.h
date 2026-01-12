@@ -208,19 +208,14 @@ chimera_vfs_mount_table_lookup_attrs(
 
 /*
  * Lookup full mount pointer by mount ID.
- * Returns mount pointer or NULL if not found (or if mount is pending umount
- * and allow_pending_umount is false).
+ * Returns mount pointer or NULL if not found.
  * IMPORTANT: Caller MUST call urcu_memb_read_lock() before and
  * urcu_memb_read_unlock() after using the returned pointer.
- *
- * @param allow_pending_umount  If true, return mount even if pending_umount is set.
- *                              Use true for close operations that need to complete.
  */
 static inline struct chimera_vfs_mount *
 chimera_vfs_mount_table_lookup(
     struct chimera_vfs_mount_table *table,
-    const uint8_t                  *mount_id,
-    int                             allow_pending_umount)
+    const uint8_t                  *mount_id)
 {
     struct chimera_vfs_mount_table_entry *entry;
     struct chimera_vfs_mount             *mount = NULL;
@@ -235,10 +230,7 @@ chimera_vfs_mount_table_lookup(
     while (entry) {
         /* Compare the full 16-byte mount_id (first 16 bytes of root_fh) */
         if (memcmp(entry->mount->root_fh, mount_id, CHIMERA_VFS_MOUNT_ID_SIZE) == 0) {
-            /* Skip mounts that are pending umount unless explicitly allowed */
-            if (!entry->mount->pending_umount || allow_pending_umount) {
-                mount = entry->mount;
-            }
+            mount = entry->mount;
             break;
         }
         entry = rcu_dereference(entry->next);
@@ -395,42 +387,6 @@ chimera_vfs_mount_table_remove_by_path(
 
     return mount;
 } /* chimera_vfs_mount_table_remove_by_path */
-
-/*
- * Find a mount by exact path match and set its pending_umount flag.
- * Returns a copy of the mount info needed for umount operations,
- * or NULL if not found.
- * The mount remains in the table but new operations will be blocked.
- */
-static inline struct chimera_vfs_mount *
-chimera_vfs_mount_table_set_pending_umount_by_path(
-    struct chimera_vfs_mount_table *table,
-    const char                     *path,
-    int                             pathlen)
-{
-    struct chimera_vfs_mount_table_entry *entry;
-    struct chimera_vfs_mount             *mount = NULL;
-    uint32_t                              i;
-
-    pthread_mutex_lock(&table->lock);
-
-    for (i = 0; i < table->num_buckets && !mount; i++) {
-        entry = table->buckets[i];
-        while (entry) {
-            if (entry->mount->pathlen == pathlen &&
-                memcmp(entry->mount->path, path, pathlen) == 0) {
-                entry->mount->pending_umount = 1;
-                mount                        = entry->mount;
-                break;
-            }
-            entry = entry->next;
-        }
-    }
-
-    pthread_mutex_unlock(&table->lock);
-
-    return mount;
-} /* chimera_vfs_mount_table_set_pending_umount_by_path */
 
 /*
  * Lookup a mount by name and copy its root file handle.

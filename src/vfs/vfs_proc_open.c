@@ -84,7 +84,7 @@ chimera_vfs_open(
 
     fh_hash = chimera_vfs_hash(fh, fhlen);
 
-    module = chimera_vfs_get_module(thread, fh, fhlen, 0);
+    module = chimera_vfs_get_module(thread, fh, fhlen);
 
     if (!module) {
         callback(CHIMERA_VFS_ESTALE, NULL, private_data);

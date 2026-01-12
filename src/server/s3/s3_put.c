@@ -241,7 +241,7 @@ chimera_s3_put_open_dir_callback(
     request->set_attr.va_req_mask = 0;
     request->set_attr.va_set_mask = 0;
 
-    module = chimera_vfs_get_module(thread->vfs, oh->fh, oh->fh_len, 0);
+    module = chimera_vfs_get_module(thread->vfs, oh->fh, oh->fh_len);
 
     if (module->capabilities & CHIMERA_VFS_CAP_CREATE_UNLINKED) {
 

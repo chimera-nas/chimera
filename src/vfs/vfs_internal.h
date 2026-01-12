@@ -103,8 +103,7 @@ static inline struct chimera_vfs_module *
 chimera_vfs_get_module(
     struct chimera_vfs_thread *thread,
     const void                *fh,
-    int                        fhlen,
-    int                        allow_pending_umount)
+    int                        fhlen)
 {
     struct chimera_vfs        *vfs = thread->vfs;
     struct chimera_vfs_mount  *mount;
@@ -116,7 +115,7 @@ chimera_vfs_get_module(
 
     urcu_memb_read_lock();
 
-    mount = chimera_vfs_mount_table_lookup(vfs->mount_table, fh, allow_pending_umount);
+    mount = chimera_vfs_mount_table_lookup(vfs->mount_table, fh);
 
     module = mount ? mount->module : NULL;
 
@@ -144,7 +143,7 @@ chimera_vfs_request_alloc_by_hash(
     }
     request->status = CHIMERA_VFS_UNSET;
 
-    request->module = chimera_vfs_get_module(thread, fh, fhlen, 0);
+    request->module = chimera_vfs_get_module(thread, fh, fhlen);
 
     request->fh          = fh;
     request->fh_len      = fhlen;

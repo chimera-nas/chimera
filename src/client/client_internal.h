@@ -73,7 +73,7 @@ struct chimera_client_request {
 
     uint32_t                           fh_len;
 
-    uint8_t                            fh[CHIMERA_VFS_FH_SIZE + 16];
+    uint8_t                            fh[CHIMERA_VFS_FH_SIZE];
 
     union {
         struct {
@@ -188,8 +188,8 @@ struct chimera_client_request {
             uint32_t                        dest_fh_len;
             char                            source_path[CHIMERA_VFS_PATH_MAX];
             char                            dest_path[CHIMERA_VFS_PATH_MAX];
-            uint8_t                         source_fh[CHIMERA_VFS_FH_SIZE + 16];
-            uint8_t                         dest_fh[CHIMERA_VFS_FH_SIZE + 16];
+            uint8_t                         source_fh[CHIMERA_VFS_FH_SIZE];
+            uint8_t                         dest_fh[CHIMERA_VFS_FH_SIZE];
         } link;
 
         struct {
@@ -217,8 +217,8 @@ struct chimera_client_request {
             uint32_t                        dest_fh_len;
             char                            source_path[CHIMERA_VFS_PATH_MAX];
             char                            dest_path[CHIMERA_VFS_PATH_MAX];
-            uint8_t                         source_fh[CHIMERA_VFS_FH_SIZE + 16];
-            uint8_t                         dest_fh[CHIMERA_VFS_FH_SIZE + 16];
+            uint8_t                         source_fh[CHIMERA_VFS_FH_SIZE];
+            uint8_t                         dest_fh[CHIMERA_VFS_FH_SIZE];
         } rename;
 
         struct {

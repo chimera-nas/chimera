@@ -685,7 +685,6 @@ struct chimera_vfs_mount {
     char                          *path;
     uint32_t                       pathlen;
     int                            root_fh_len;
-    int                            pending_umount;  /* Set when umount is in progress */
     void                          *mount_private;
     struct chimera_vfs_mount_attrs attrs;
     struct chimera_vfs_mount      *prev;
