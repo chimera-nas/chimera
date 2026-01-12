@@ -256,17 +256,8 @@ chimera_io_uring_complete(
                 }
                 break;
             case CHIMERA_VFS_OP_REMOVE:
-                if (cqe->res == 0) {
-                    request->status = CHIMERA_VFS_OK;
-                } else if (cqe->res == -EISDIR) {
-                    parent_fd = request->remove.handle->vfs_private;
-                    name      = request->plugin_data;
-                    sqe       = chimera_io_uring_get_sqe(thread, request, 0, 0);
-                    io_uring_prep_unlinkat(sqe, parent_fd, name, AT_REMOVEDIR);
-                    evpl_defer(thread->evpl, &thread->deferral);
-                } else {
-                    request->status = chimera_linux_errno_to_status(-cqe->res);
-                }
+                /* Remove is now synchronous, so this should never be reached */
+                chimera_io_uring_abort("io_uring completion for synchronous remove operation");
                 break;
             case CHIMERA_VFS_OP_MKDIR:
                 if (handle->slot == 0) {
@@ -919,20 +910,38 @@ chimera_io_uring_remove(
     void                       *private_data)
 {
     struct chimera_io_uring_thread *thread = private_data;
-    int                             fd;
+    int                             fd, rc;
     char                           *scratch = (char *) request->plugin_data;
-    struct io_uring_sqe            *sqe;
+
+    --thread->inflight;
 
     TERM_STR(fullname, request->remove.name, request->remove.namelen, scratch);
 
     fd = request->remove.handle->vfs_private;
 
-    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
+    /* Get the file handle before removing, so VFS can invalidate attribute cache */
+    request->remove.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
 
-    io_uring_prep_unlinkat(sqe, fd, fullname, 0);
+    chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                                  request,
+                                  &request->remove.r_removed_attr,
+                                  fd,
+                                  fullname);
 
-    evpl_defer(thread->evpl, &thread->deferral);
-} /* chimera_io_uring_remove */
+    rc = unlinkat(fd, fullname, 0);
+
+    if (rc == -1 && errno == EISDIR) {
+        rc = unlinkat(fd, fullname, AT_REMOVEDIR);
+    }
+
+    if (rc) {
+        request->status = chimera_linux_errno_to_status(errno);
+    } else {
+        request->status = CHIMERA_VFS_OK;
+    }
+
+    request->complete(request);
+} /* chimera_io_uring_remove */ /* chimera_io_uring_remove */
 
 static void
 chimera_io_uring_read(

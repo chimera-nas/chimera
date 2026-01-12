@@ -1878,7 +1878,8 @@ memfs_rename(
     void                       *private_data)
 {
     struct memfs_inode  *old_parent_inode, *new_parent_inode, *child_inode;
-    struct memfs_dirent *dirent, *old_dirent;
+    struct memfs_inode  *existing_inode = NULL;
+    struct memfs_dirent *new_dirent, *old_dirent, *existing_dirent = NULL;
     int                  cmp;
     struct timespec      now;
     uint64_t             hash, new_hash;
@@ -1961,18 +1962,10 @@ memfs_rename(
 
     if (!old_dirent) {
         pthread_mutex_unlock(&old_parent_inode->lock);
-        pthread_mutex_unlock(&new_parent_inode->lock);
+        if (cmp != 0) {
+            pthread_mutex_unlock(&new_parent_inode->lock);
+        }
         request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
-    }
-
-    rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, dirent);
-
-    if (dirent) {
-        pthread_mutex_unlock(&old_parent_inode->lock);
-        pthread_mutex_unlock(&new_parent_inode->lock);
-        request->status = CHIMERA_VFS_EEXIST;
         request->complete(request);
         return;
     }
@@ -1981,20 +1974,86 @@ memfs_rename(
 
     if (!child_inode) {
         pthread_mutex_unlock(&old_parent_inode->lock);
-        pthread_mutex_unlock(&new_parent_inode->lock);
+        if (cmp != 0) {
+            pthread_mutex_unlock(&new_parent_inode->lock);
+        }
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
 
-    dirent = memfs_dirent_alloc(thread,
-                                old_dirent->inum,
-                                old_dirent->gen,
-                                new_hash,
-                                request->rename.new_name,
-                                request->rename.new_namelen);
+    /* Check if destination already exists */
+    rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, existing_dirent);
 
-    rb_tree_insert(&new_parent_inode->dir.dirents, hash, dirent);
+    if (existing_dirent) {
+        /* Check if source and destination refer to the same inode (hardlinks).
+         * Per POSIX/Linux: if oldpath and newpath are hardlinks to the same file,
+         * rename() should do nothing and return success. */
+        if (existing_dirent->inum == old_dirent->inum &&
+            existing_dirent->gen == old_dirent->gen) {
+            /* Same inode - do nothing, just return success */
+            pthread_mutex_unlock(&child_inode->lock);
+            if (cmp != 0) {
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                pthread_mutex_unlock(&new_parent_inode->lock);
+            } else {
+                pthread_mutex_unlock(&old_parent_inode->lock);
+            }
+
+            request->status = CHIMERA_VFS_OK;
+            request->complete(request);
+            return;
+        }
+
+        /* Destination exists - check if we can replace it */
+        existing_inode = memfs_inode_get_inum(shared, existing_dirent->inum, existing_dirent->gen);
+
+        if (existing_inode) {
+            /* Cannot rename a directory over a non-directory or vice versa */
+            if (S_ISDIR(child_inode->mode) != S_ISDIR(existing_inode->mode)) {
+                pthread_mutex_unlock(&existing_inode->lock);
+                pthread_mutex_unlock(&child_inode->lock);
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                if (cmp != 0) {
+                    pthread_mutex_unlock(&new_parent_inode->lock);
+                }
+                request->status = S_ISDIR(existing_inode->mode) ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR;
+                request->complete(request);
+                return;
+            }
+
+            /* Cannot replace non-empty directory */
+            if (S_ISDIR(existing_inode->mode) && existing_inode->nlink > 2) {
+                pthread_mutex_unlock(&existing_inode->lock);
+                pthread_mutex_unlock(&child_inode->lock);
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                if (cmp != 0) {
+                    pthread_mutex_unlock(&new_parent_inode->lock);
+                }
+                request->status = CHIMERA_VFS_ENOTEMPTY;
+                request->complete(request);
+                return;
+            }
+
+            /* Remove the existing destination entry and decrement link count */
+            rb_tree_remove(&new_parent_inode->dir.dirents, &existing_dirent->node);
+            existing_inode->nlink--;
+            if (S_ISDIR(existing_inode->mode)) {
+                new_parent_inode->nlink--;
+            }
+            pthread_mutex_unlock(&existing_inode->lock);
+            memfs_dirent_free(thread, existing_dirent);
+        }
+    }
+
+    new_dirent = memfs_dirent_alloc(thread,
+                                    old_dirent->inum,
+                                    old_dirent->gen,
+                                    new_hash,
+                                    request->rename.new_name,
+                                    request->rename.new_namelen);
+
+    rb_tree_insert(&new_parent_inode->dir.dirents, hash, new_dirent);
 
     rb_tree_remove(&old_parent_inode->dir.dirents, &old_dirent->node);
 

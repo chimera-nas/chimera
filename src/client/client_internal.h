@@ -51,6 +51,7 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_SETATTR,
     CHIMERA_CLIENT_OP_FSETATTR,
     CHIMERA_CLIENT_OP_COMMIT,
+    CHIMERA_CLIENT_OP_STATFS,
 };
 
 struct chimera_client_request;
@@ -70,6 +71,7 @@ struct chimera_client_request {
     ssize_t                            sync_result;
     struct chimera_vfs_open_handle    *sync_open_handle;
     struct chimera_stat                sync_stat;
+    struct chimera_statvfs             sync_statvfs;
     int                                sync_target_len;
 
     chimera_client_request_callback    sync_callback;
@@ -279,6 +281,14 @@ struct chimera_client_request {
             chimera_commit_callback_t       callback;
             void                           *private_data;
         } commit;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_statfs_callback_t       callback;
+            void                           *private_data;
+            int                             path_len;
+            char                            path[CHIMERA_VFS_PATH_MAX];
+        } statfs;
     };
 } __attribute__((aligned(64)));
 

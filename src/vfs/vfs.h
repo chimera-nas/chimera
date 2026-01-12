@@ -286,7 +286,7 @@ struct chimera_vfs_request {
     struct chimera_vfs_request       *active_prev;
     struct chimera_vfs_request       *active_next;
 
-    const void                       *fh;
+    uint8_t                           fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                          fh_len;
     uint64_t                          fh_hash;
 

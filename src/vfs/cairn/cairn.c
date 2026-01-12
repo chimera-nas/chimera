@@ -1370,6 +1370,9 @@ cairn_remove(
         } else {
             cairn_put_inode(txn, inode);
         }
+    } else {
+        // nlink > 0: file still has other hard links, persist the decremented nlink
+        cairn_put_inode(txn, inode);
     }
 
     cairn_map_attrs(shared, &request->remove.r_dir_post_attr, parent_inode);
@@ -1679,8 +1682,14 @@ cairn_close(
     inode = ih.inode;
     inode->refcnt--;
 
+    if (inode->refcnt == 0 && inode->nlink == 0) {
+        // Remove type-specific data before removing inode
+        if (S_ISREG(inode->mode)) {
+            cairn_remove_file_extents(thread, txn, inode->inum);
+        } else if (S_ISLNK(inode->mode)) {
+            cairn_remove_symlink_target(txn, inode->inum);
+        }
 
-    if (inode->refcnt == 0) {
         cairn_remove_inode(txn, inode);
     } else {
         cairn_put_inode(txn, inode);
@@ -2009,6 +2018,7 @@ cairn_write(
     rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &ih);
 
     if (rc) {
+        evpl_iovecs_release(thread->evpl, request->write.iov, request->write.niov);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -2360,7 +2370,20 @@ cairn_rename(
             existing_inode->nlink--;
 
             if (existing_inode->nlink == 0) {
-                cairn_remove_inode(txn, existing_inode);
+                existing_inode->refcnt--;
+
+                if (existing_inode->refcnt == 0) {
+                    // Remove type-specific data before removing inode
+                    if (S_ISREG(existing_inode->mode)) {
+                        cairn_remove_file_extents(thread, txn, existing_inode->inum);
+                    } else if (S_ISLNK(existing_inode->mode)) {
+                        cairn_remove_symlink_target(txn, existing_inode->inum);
+                    }
+
+                    cairn_remove_inode(txn, existing_inode);
+                } else {
+                    cairn_put_inode(txn, existing_inode);
+                }
             } else {
                 cairn_put_inode(txn, existing_inode);
             }
