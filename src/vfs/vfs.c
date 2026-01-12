@@ -97,11 +97,10 @@ chimera_vfs_close_thread_callback(
     enum chimera_vfs_error status,
     void                  *private_data)
 {
-    struct chimera_vfs_open_handle  *handle       = private_data;
-    struct chimera_vfs_close_thread *close_thread = handle->close_private;
+    struct chimera_vfs_close_thread *close_thread = private_data;
 
     close_thread->num_pending--;
-    free(handle);
+    /* Handle is freed by chimera_vfs_close() */
 } /* chimera_vfs_close_thread_callback */
 
 static uint64_t
@@ -127,11 +126,12 @@ chimera_vfs_close_thread_sweep(
 
         close_thread->num_pending++;
 
-        handle->close_private = close_thread;
-        chimera_vfs_close_handle(thread,
-                                 handle,
-                                 chimera_vfs_close_thread_callback,
-                                 handle);
+        chimera_vfs_close(thread,
+                          handle,
+                          chimera_vfs_close_thread_callback,
+                          close_thread);
+
+        free(handle);
     }
 
     return count;

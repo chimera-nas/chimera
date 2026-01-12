@@ -8,8 +8,8 @@
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "nfs_mount.h"
+#include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/root/vfs_root.h"
 
 void
 chimera_nfs_mount_null(
@@ -81,7 +81,7 @@ chimera_nfs_mount_mnt(
     uint8_t                           root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                          root_fh_len;
 
-    chimera_vfs_root_get_fh(root_fh, &root_fh_len);
+    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
 
     req = nfs_request_alloc(thread, conn, msg);
 

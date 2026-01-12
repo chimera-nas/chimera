@@ -10,9 +10,9 @@
 #include "smb_procs.h"
 #include "smb_string.h"
 #include "common/misc.h"
+#include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-#include "vfs/root/vfs_root.h"
 #include "smb_attr.h"
 #include "smb_lsarpc.h"
 
@@ -511,7 +511,7 @@ chimera_smb_revalidate_tree(
     uint8_t                    root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                   root_fh_len;
 
-    chimera_vfs_root_get_fh(root_fh, &root_fh_len);
+    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
 
     chimera_vfs_lookup_path(
         vfs_thread,

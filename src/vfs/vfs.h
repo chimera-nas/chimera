@@ -180,7 +180,6 @@ struct chimera_vfs_open_handle {
         struct chimera_vfs_request     *request,
         struct chimera_vfs_open_handle *handle);
     struct chimera_vfs_request     *request;
-    void                           *close_private;
     struct timespec                 timestamp;
     struct UT_hash_handle           hh_by_fh;
     struct chimera_vfs_open_handle *prev;
@@ -432,6 +431,7 @@ struct chimera_vfs_request {
 
         struct {
             uint64_t vfs_private;
+            uint8_t  fh[CHIMERA_VFS_FH_SIZE];
         } close;
 
         struct {

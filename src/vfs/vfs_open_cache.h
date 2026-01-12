@@ -359,8 +359,7 @@ chimera_vfs_open_cache_acquire(
             DL_DELETE(shard->pending_close, existing);
             HASH_DELETE(hh_by_fh, shard->open_files, existing);
 
-            chimera_vfs_close(thread, existing->fh, existing->fh_len, existing->vfs_private,
-                              chimera_vfs_open_cache_close_callback, handle);
+            chimera_vfs_close(thread, existing, chimera_vfs_open_cache_close_callback, handle);
 
             chimera_vfs_open_cache_free(shard, existing);
 
