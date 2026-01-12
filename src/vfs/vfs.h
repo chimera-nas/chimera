@@ -11,7 +11,7 @@
 #include "evpl/evpl.h"
 
 
-#define CHIMERA_VFS_FH_SIZE              32
+#define CHIMERA_VFS_FH_SIZE              48
 
 #define CHIMERA_VFS_PATH_MAX             4096
 #define CHIMERA_VFS_NAME_MAX             256
@@ -118,7 +118,7 @@ struct chimera_vfs_attrs {
      * of the actual data, so we need to provide enough padding
      * to prevent this from causing compiler complaints?
      */
-    uint8_t         va_fh[CHIMERA_VFS_FH_SIZE + 32];
+    uint8_t         va_fh[CHIMERA_VFS_FH_SIZE + 16];
 };
 
 #define CHIMERA_VFS_OP_MOUNT           1
@@ -185,7 +185,7 @@ struct chimera_vfs_open_handle {
     struct UT_hash_handle           hh_by_fh;
     struct chimera_vfs_open_handle *prev;
     struct chimera_vfs_open_handle *next;
-    uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                         fh[CHIMERA_VFS_FH_SIZE + 16];
 
 };
 
@@ -684,18 +684,18 @@ struct chimera_vfs_mount {
     struct chimera_vfs_module     *module;
     char                          *path;
     uint32_t                       pathlen;
-    int                            mount_id_len;
+    int                            root_fh_len;
+    int                            pending_umount;  /* Set when umount is in progress */
     void                          *mount_private;
     struct chimera_vfs_mount_attrs attrs;
     struct chimera_vfs_mount      *prev;
     struct chimera_vfs_mount      *next;
 
-    /* XXH3 uses SIMD memory loads that may read beyond the end
-     * of the actual data, so we need to provide enough padding
-     * to prevent this from causing compiler complaints?
+    /* The first CHIMERA_VFS_MOUNT_ID_SIZE (16) bytes of root_fh is the mount_id,
+     * which is itself a 128-bit hash. The remaining bytes are the fh_fragment.
+     * Extra space is provided for NFS file handles which may exceed CHIMERA_VFS_FH_SIZE.
      */
-
-    uint8_t                        mount_id[CHIMERA_VFS_FH_SIZE + 32];
+    uint8_t                        root_fh[CHIMERA_VFS_FH_SIZE + 16];
 };
 
 struct chimera_vfs_delegation_thread {
@@ -774,6 +774,12 @@ chimera_vfs_init(
 void
 chimera_vfs_destroy(
     struct chimera_vfs *vfs);
+
+/* Get the root pseudo-filesystem's file handle */
+void
+chimera_vfs_get_root_fh(
+    uint8_t  *fh,
+    uint32_t *fh_len);
 
 struct chimera_vfs_thread *
 chimera_vfs_thread_init(

@@ -5,6 +5,7 @@
 #pragma once
 
 #include "common/varint.h"
+#include "vfs/vfs_fh.h"
 
 #define chimera_linux_debug(...) chimera_debug("linux", \
                                                __FILE__, \
@@ -222,9 +223,15 @@ open_mount_path_by_id(int mount_id)
     return open(mount_path, O_RDONLY);
 } /* open_mount_path_by_id */
 
+/*
+ * Get file handle for a linux filesystem object.
+ *
+ * If parent_fh is provided (non-NULL), copy mount_id from parent.
+ * If parent_fh is NULL, this is a mount operation - use fsid from statvfs.
+ */
 static inline int
 linux_get_fh(
-    uint8_t     fh_magic,
+    const void *parent_fh,
     int         fd,
     const char *path,
     void       *fh,
@@ -232,9 +239,10 @@ linux_get_fh(
 {
     uint8_t             buf[sizeof(struct file_handle) + MAX_HANDLE_SZ];
     struct file_handle *handle = (struct file_handle *) buf;
+    uint8_t             fragment[32];   /* varint(mount_id) + varint(type) + handle */
+    uint8_t            *frag_ptr = fragment;
     int                 rc;
     int                 mount_id;
-    uint8_t            *fhp = (uint8_t *) fh;
 
     handle->handle_bytes = MAX_HANDLE_SZ;
 
@@ -249,18 +257,31 @@ linux_get_fh(
         return -1;
     }
 
-    chimera_linux_abort_if(13 + handle->handle_bytes > CHIMERA_VFS_FH_SIZE,
+    /* Build fh_fragment: varint(mount_id) + varint(handle_type) + f_handle */
+    frag_ptr += chimera_encode_uint32(mount_id, frag_ptr);
+    frag_ptr += chimera_encode_uint32(handle->handle_type, frag_ptr);
+    memcpy(frag_ptr, &handle->f_handle, handle->handle_bytes);
+    frag_ptr += handle->handle_bytes;
+
+    chimera_linux_abort_if(CHIMERA_VFS_MOUNT_ID_SIZE + (frag_ptr - fragment) > CHIMERA_VFS_FH_SIZE,
                            "Returned handle exceeds CHIMERA_VFS_FH_SIZE");
 
-    *fhp = fh_magic;
-    fhp++;
+    if (parent_fh) {
+        /* Copy mount_id from parent */
+        *fh_len = chimera_vfs_encode_fh_parent(parent_fh, fragment, frag_ptr - fragment, fh);
+    } else {
+        /* Mount context: compute mount_id from fsid */
+        struct statvfs stvfs;
+        uint8_t        fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
 
-    fhp += chimera_encode_uint32(mount_id, fhp);
-    fhp += chimera_encode_uint32(handle->handle_type, fhp);
-    memcpy(fhp, &handle->f_handle, handle->handle_bytes);
-    fhp += handle->handle_bytes;
+        rc = fstatvfs(fd, &stvfs);
+        if (rc < 0) {
+            return -1;
+        }
 
-    *fh_len = fhp - (uint8_t *) fh;
+        memcpy(fsid_buf, &stvfs.f_fsid, sizeof(stvfs.f_fsid));
+        *fh_len = chimera_vfs_encode_fh_mount(fsid_buf, fragment, frag_ptr - fragment, fh);
+    }
 
     return 0;
 } /* linux_get_fh */
@@ -296,12 +317,12 @@ linux_open_by_handle(
     uint32_t                    handle_type;
     uint8_t                     buf[sizeof(struct file_handle) + MAX_HANDLE_SZ];
     struct file_handle         *handle = (struct file_handle *) buf;
-    uint8_t                    *fhp    = (uint8_t *) fh + 1;
+    const uint8_t              *fhp    = (const uint8_t *) fh + CHIMERA_VFS_MOUNT_ID_SIZE;
 
     fhp                 += chimera_decode_uint32(fhp, &mount_id);
     fhp                 += chimera_decode_uint32(fhp, &handle_type);
     handle->handle_type  = handle_type;
-    handle->handle_bytes = fh_len - (fhp - (uint8_t *) fh);
+    handle->handle_bytes = fh_len - (fhp - (const uint8_t *) fh);
     memcpy(&handle->f_handle, fhp, handle->handle_bytes);
 
     HASH_FIND_INT(mount_table->mounts, &mount_id, mount);
@@ -391,6 +412,8 @@ chimera_linux_map_child_attrs(
     struct stat    st;
     struct statvfs stvfs;
 
+    (void) fh_magic; /* No longer used, kept for API compatibility */
+
     attr->va_set_mask = 0;
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
@@ -405,7 +428,7 @@ chimera_linux_map_child_attrs(
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FH) {
-        rc = linux_get_fh(fh_magic, dirfd, name,
+        rc = linux_get_fh(request->fh, dirfd, name,
                           attr->va_fh,
                           &attr->va_fh_len);
 
@@ -439,13 +462,15 @@ chimera_linux_map_child_attrs_statx(
     int            rc;
     struct statvfs stvfs;
 
+    (void) fh_magic; /* No longer used, kept for API compatibility */
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
 
         chimera_linux_statx_to_attr(attr, stx);
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FH) {
-        rc = linux_get_fh(fh_magic, dirfd, name,
+        rc = linux_get_fh(request->fh, dirfd, name,
                           attr->va_fh,
                           &attr->va_fh_len);
 

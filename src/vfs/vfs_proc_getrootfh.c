@@ -53,6 +53,10 @@ chimera_vfs_getrootfh(
 
     request = chimera_vfs_request_alloc_by_hash(thread, fh, 1, fh_hash);
 
+    /* For getrootfh operations, the module is passed directly - set it
+     * since chimera_vfs_get_module returns NULL (no mount exists for this FH) */
+    request->module = module;
+
     request->opcode                       = CHIMERA_VFS_OP_GETROOTFH;
     request->complete                     = chimera_vfs_getrootfh_complete;
     request->getrootfh.path               = path;

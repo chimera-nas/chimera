@@ -12,6 +12,7 @@
 #include "common/misc.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/root/vfs_root.h"
 #include "smb_attr.h"
 #include "smb_lsarpc.h"
 
@@ -27,8 +28,6 @@
                          SMB2_WRITE_OWNER | \
                          SMB2_GENERIC_WRITE | \
                          SMB2_GENERIC_ALL)
-
-const uint8_t root_fh = CHIMERA_VFS_FH_MAGIC_ROOT;
 
 static inline void
 chimera_smb_create_unlink_callback(
@@ -509,11 +508,15 @@ chimera_smb_revalidate_tree(
     struct chimera_smb_request *request)
 {
     struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
+    uint8_t                    root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                   root_fh_len;
+
+    chimera_vfs_root_get_fh(root_fh, &root_fh_len);
 
     chimera_vfs_lookup_path(
         vfs_thread,
-        &root_fh,
-        1,
+        root_fh,
+        root_fh_len,
         tree->share->path,
         strlen(tree->share->path),
         CHIMERA_VFS_ATTR_FH,

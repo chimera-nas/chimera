@@ -199,6 +199,13 @@ chimera_vfs_close(
     chimera_vfs_close_callback_t callback,
     void                        *private_data);
 
+void
+chimera_vfs_close_handle(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    chimera_vfs_close_callback_t    callback,
+    void                           *private_data);
+
 typedef void (*chimera_vfs_mkdir_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *set_attr,

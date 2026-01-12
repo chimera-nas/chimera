@@ -425,3 +425,73 @@ chimera_vfs_open_cache_defer_close(
     return NULL;
 #endif /* ifndef __clang_analyzer__ */
 } /* vfs_open_cache_defer_close */
+
+/*
+ * Count handles in the cache that belong to the given mount.
+ * mount_id is the first 16 bytes of the file handle.
+ * Returns count of handles with opencnt > 0 (actively referenced).
+ */
+static inline uint64_t
+chimera_vfs_open_cache_count_by_mount(
+    struct vfs_open_cache *cache,
+    const uint8_t         *mount_id)
+{
+    struct vfs_open_cache_shard    *shard;
+    struct chimera_vfs_open_handle *handle, *tmp;
+    uint64_t                        count = 0;
+
+    for (unsigned int i = 0; i < cache->num_shards; i++) {
+        shard = &cache->shards[i];
+
+        pthread_mutex_lock(&shard->lock);
+
+        HASH_ITER(hh_by_fh, shard->open_files, handle, tmp)
+        {
+            if (memcmp(handle->fh, mount_id, CHIMERA_VFS_MOUNT_ID_SIZE) == 0) {
+                if (handle->opencnt > 0) {
+                    count++;
+                }
+            }
+        }
+
+        pthread_mutex_unlock(&shard->lock);
+    }
+
+    return count;
+} /* chimera_vfs_open_cache_count_by_mount */
+
+/*
+ * Mark all handles belonging to the given mount for immediate close.
+ * This sets their timestamp to 0 so the close thread will close them
+ * on the next sweep.
+ * Returns count of handles marked.
+ */
+static inline uint64_t
+chimera_vfs_open_cache_mark_for_close_by_mount(
+    struct vfs_open_cache *cache,
+    const uint8_t         *mount_id)
+{
+    struct vfs_open_cache_shard    *shard;
+    struct chimera_vfs_open_handle *handle, *tmp;
+    uint64_t                        count = 0;
+
+    for (unsigned int i = 0; i < cache->num_shards; i++) {
+        shard = &cache->shards[i];
+
+        pthread_mutex_lock(&shard->lock);
+
+        HASH_ITER(hh_by_fh, shard->open_files, handle, tmp)
+        {
+            if (memcmp(handle->fh, mount_id, CHIMERA_VFS_MOUNT_ID_SIZE) == 0) {
+                /* Set timestamp to 0 so it will be closed immediately */
+                handle->timestamp.tv_sec  = 0;
+                handle->timestamp.tv_nsec = 0;
+                count++;
+            }
+        }
+
+        pthread_mutex_unlock(&shard->lock);
+    }
+
+    return count;
+} /* chimera_vfs_open_cache_mark_for_close_by_mount */

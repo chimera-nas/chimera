@@ -4,6 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/root/vfs_root.h"
 
 void
 chimera_nfs4_putrootfh(
@@ -13,9 +14,10 @@ chimera_nfs4_putrootfh(
     struct nfs_resop4                *resop)
 {
     struct PUTROOTFH4res *res = &resop->opputrootfh;
+    uint32_t              fhlen;
 
-    req->fh[0] = CHIMERA_VFS_FH_MAGIC_ROOT;
-    req->fhlen = 1;
+    chimera_vfs_root_get_fh(req->fh, &fhlen);
+    req->fhlen = fhlen;
 
     res->status = NFS4_OK;
 

@@ -11,6 +11,7 @@
 #include "common/logging.h"
 #include "common/macros.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_fh.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
@@ -47,12 +48,50 @@ struct chimera_vfs_root_mount_ctx {
     struct chimera_vfs_mount *mount;
 };
 
+/* Static root file handle for the vfs_root pseudo-filesystem */
+static uint8_t  vfs_root_fh[CHIMERA_VFS_MOUNT_ID_SIZE];
+static uint32_t vfs_root_fh_len;
+
 static void *
 chimera_vfs_root_init(const char *cfgfile)
 {
+    /* Create the root FH using a fixed FSID of all zeros */
+    uint8_t fsid[CHIMERA_VFS_FSID_SIZE] = { 0 };
+
+    /* The root has no fh_fragment, just the mount_id derived from fsid alone */
+    vfs_root_fh_len = chimera_vfs_encode_fh_mount(fsid, NULL, 0, vfs_root_fh);
+
     /* We don't need any private data, but we're expected to return something */
     return (void *) 42;
 } /* vfs_root_init */
+
+SYMBOL_EXPORT void
+chimera_vfs_root_get_fh(
+    uint8_t  *fh,
+    uint32_t *fh_len)
+{
+    memcpy(fh, vfs_root_fh, vfs_root_fh_len);
+    *fh_len = vfs_root_fh_len;
+} /* chimera_vfs_root_get_fh */
+
+SYMBOL_EXPORT void
+chimera_vfs_root_register_mount(struct chimera_vfs *vfs)
+{
+    struct chimera_vfs_mount *mount;
+
+    /* Create a pseudo-mount entry for the root filesystem */
+    mount = calloc(1, sizeof(*mount));
+
+    mount->module  = &vfs_root;
+    mount->path    = strdup("");
+    mount->pathlen = 0;
+
+    /* Store the root FH (first 16 bytes is the mount_id) */
+    memcpy(mount->root_fh, vfs_root_fh, vfs_root_fh_len);
+    mount->root_fh_len = vfs_root_fh_len;
+
+    chimera_vfs_mount_table_insert(vfs->mount_table, mount);
+} /* chimera_vfs_root_register_mount */
 
 static void
 chimera_vfs_root_destroy(void *private_data)
@@ -122,7 +161,7 @@ chimera_vfs_root_getattr(
 
 struct chimera_vfs_root_lookup_ctx {
     struct chimera_vfs_open_handle *oh;
-    uint8_t                         mount_id[CHIMERA_VFS_FH_SIZE];
+    uint8_t                         mount_id[CHIMERA_VFS_FH_SIZE + 16];
     int                             mount_id_len;
 };
 
@@ -153,8 +192,8 @@ chimera_vfs_root_lookup_getattr_callback(
         num_mounts = chimera_vfs_mount_table_count(vfs->mount_table);
 
         dir_attr->va_set_mask = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT;
-        dir_attr->va_fh[0]    = CHIMERA_VFS_FH_MAGIC_ROOT;
-        dir_attr->va_fh_len   = 1;
+        memcpy(dir_attr->va_fh, vfs_root_fh, vfs_root_fh_len);
+        dir_attr->va_fh_len = vfs_root_fh_len;
 
         /* Synthetic root directory attribute */
         dir_attr->va_mode  = S_IFDIR | 0755;
@@ -219,8 +258,8 @@ chimera_vfs_root_lookup(
     struct chimera_vfs_root_lookup_ctx *ctx     = request->plugin_data;
     int                                 rc;
 
-    rc = chimera_vfs_mount_table_lookup_mount_id_by_name(vfs->mount_table, name, namelen, ctx->mount_id, &ctx->
-                                                         mount_id_len);
+    rc = chimera_vfs_mount_table_lookup_root_fh_by_name(vfs->mount_table, name, namelen, ctx->mount_id, &ctx->
+                                                        mount_id_len);
 
     if (rc != 0) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -257,8 +296,8 @@ chimera_vfs_root_mount(
     num_mounts = chimera_vfs_mount_table_count(vfs->mount_table);
 
     attr->va_set_mask = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT;
-    attr->va_fh[0]    = CHIMERA_VFS_FH_MAGIC_ROOT;
-    attr->va_fh_len   = 1;
+    memcpy(attr->va_fh, vfs_root_fh, vfs_root_fh_len);
+    attr->va_fh_len = vfs_root_fh_len;
 
     /* Synthetic root directory attribute */
     attr->va_mode  = S_IFDIR | 0755;
@@ -294,7 +333,7 @@ chimera_vfs_root_umount(
 struct chimera_vfs_root_readdir_entry {
     uint64_t                        cookie;
     char                            path[CHIMERA_VFS_ROOT_MOUNT_PATH_MAX];
-    uint8_t                         mount_id[CHIMERA_VFS_FH_SIZE];
+    uint8_t                         mount_id[CHIMERA_VFS_FH_SIZE + 16];
     int                             mount_id_len;
     struct chimera_vfs_open_handle *oh;
     struct chimera_vfs_attrs        attr;
@@ -429,8 +468,8 @@ chimera_vfs_root_readdir_iter_cb(
     /* Copy mount data by value for safe access after RCU unlock */
     strncpy(entry->path, mount->path, CHIMERA_VFS_ROOT_MOUNT_PATH_MAX - 1);
     entry->path[CHIMERA_VFS_ROOT_MOUNT_PATH_MAX - 1] = '\0';
-    memcpy(entry->mount_id, mount->mount_id, mount->mount_id_len);
-    entry->mount_id_len = mount->mount_id_len;
+    memcpy(entry->mount_id, mount->root_fh, mount->root_fh_len);
+    entry->mount_id_len = mount->root_fh_len;
 
     ctx->pending++;
     iter->index++;

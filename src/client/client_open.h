@@ -167,8 +167,8 @@ chimera_dispatch_open(
 
         chimera_vfs_lookup_path(
             thread->vfs_thread,
-            root_fh,
-            sizeof(root_fh),
+            thread->client->root_fh,
+            thread->client->root_fh_len,
             request->open.path,
             request->open.parent_len,
             CHIMERA_VFS_ATTR_FH,
@@ -177,8 +177,8 @@ chimera_dispatch_open(
     } else {
         chimera_vfs_lookup_path(
             thread->vfs_thread,
-            root_fh,
-            sizeof(root_fh),
+            thread->client->root_fh,
+            thread->client->root_fh_len,
             request->open.path,
             request->open.path_len,
             CHIMERA_VFS_ATTR_FH,

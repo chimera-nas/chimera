@@ -45,3 +45,32 @@ chimera_vfs_close(
     chimera_vfs_dispatch(request);
 
 } /* chimera_vfs_close */
+
+/*
+ * Close using an open handle's stored module pointer.
+ * Use this when closing handles from the close thread to avoid mount table lookup.
+ */
+SYMBOL_EXPORT void
+chimera_vfs_close_handle(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    chimera_vfs_close_callback_t    callback,
+    void                           *private_data)
+{
+    struct chimera_vfs_request *request;
+
+    request = chimera_vfs_request_alloc_with_module(thread,
+                                                    handle->fh,
+                                                    handle->fh_len,
+                                                    handle->fh_hash,
+                                                    handle->vfs_module);
+
+    request->opcode             = CHIMERA_VFS_OP_CLOSE;
+    request->complete           = chimera_vfs_close_complete;
+    request->close.vfs_private  = handle->vfs_private;
+    request->proto_callback     = callback;
+    request->proto_private_data = private_data;
+
+    chimera_vfs_dispatch(request);
+
+} /* chimera_vfs_close_handle */
