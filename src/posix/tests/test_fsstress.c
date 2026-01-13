@@ -863,7 +863,10 @@ do_cleanup(void)
             if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
                 continue;
             }
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
             snprintf(path, sizeof(path), "%s/%s", homedir, de->d_name);
+#pragma GCC diagnostic pop
             if (chimera_posix_lstat(path, &statb) == 0) {
                 if (S_ISDIR(statb.st_mode)) {
                     chimera_posix_rmdir(path);
