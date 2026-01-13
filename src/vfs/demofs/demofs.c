@@ -1488,15 +1488,22 @@ demofs_readdir(
 
     /* Handle ".." entry (cookie 1 -> 2) */
     if (cookie < DEMOFS_COOKIE_DOTDOT) {
-        parent_inode = demofs_inode_get_inum(shared,
-                                             inode->dir.parent_inum,
-                                             inode->dir.parent_gen);
-
-        if (parent_inode) {
-            demofs_map_attrs(thread, &attr, parent_inode);
-            pthread_mutex_unlock(&parent_inode->lock);
-        } else {
+        /* Check if parent is the same inode (root directory case) to avoid deadlock */
+        if (inode->dir.parent_inum == inode->inum &&
+            inode->dir.parent_gen == inode->gen) {
+            /* Root directory - parent is self, reuse current inode */
             demofs_map_attrs(thread, &attr, inode);
+        } else {
+            parent_inode = demofs_inode_get_inum(shared,
+                                                 inode->dir.parent_inum,
+                                                 inode->dir.parent_gen);
+
+            if (parent_inode) {
+                demofs_map_attrs(thread, &attr, parent_inode);
+                pthread_mutex_unlock(&parent_inode->lock);
+            } else {
+                demofs_map_attrs(thread, &attr, inode);
+            }
         }
 
         rc = request->readdir.callback(

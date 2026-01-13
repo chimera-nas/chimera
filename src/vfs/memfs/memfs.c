@@ -1324,16 +1324,23 @@ memfs_readdir(
     /* Handle ".." entry (cookie 1 -> 2) */
     if (cookie < MEMFS_COOKIE_DOTDOT) {
         /* Get parent inode for ".." attributes */
-        parent_inode = memfs_inode_get_inum(shared,
-                                            inode->dir.parent_inum,
-                                            inode->dir.parent_gen);
-
-        if (parent_inode) {
-            memfs_map_attrs(shared, &attr, parent_inode, request->fh);
-            pthread_mutex_unlock(&parent_inode->lock);
-        } else {
-            /* Fallback to current directory attrs if parent not found */
+        /* Check if parent is the same inode (root directory case) to avoid deadlock */
+        if (inode->dir.parent_inum == inode->inum &&
+            inode->dir.parent_gen == inode->gen) {
+            /* Root directory - parent is self, reuse current inode */
             memfs_map_attrs(shared, &attr, inode, request->fh);
+        } else {
+            parent_inode = memfs_inode_get_inum(shared,
+                                                inode->dir.parent_inum,
+                                                inode->dir.parent_gen);
+
+            if (parent_inode) {
+                memfs_map_attrs(shared, &attr, parent_inode, request->fh);
+                pthread_mutex_unlock(&parent_inode->lock);
+            } else {
+                /* Fallback to current directory attrs if parent not found */
+                memfs_map_attrs(shared, &attr, inode, request->fh);
+            }
         }
 
         rc = request->readdir.callback(
