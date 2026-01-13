@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 // SPDX-FileCopyrightText: 2000-2001 Silicon Graphics, Inc.
 //
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 
 /*
  * dirstress - directory stress test
@@ -40,7 +40,7 @@ static int remove_entries(
     int                    nfiles);
 
 /* Current working directory tracking (since we can't use chdir with Chimera API) */
-static char current_dir[2048];
+static char current_dir[4096];
 
 static void
 set_cwd(const char *path)
@@ -70,6 +70,8 @@ parent_cwd(void)
     }
 } /* parent_cwd */
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
 static void
 make_path(
     char       *buf,
@@ -78,6 +80,7 @@ make_path(
 {
     snprintf(buf, bufsize, "%s/%s", current_dir, name);
 } /* make_path */
+#pragma GCC diagnostic pop
 
 int
 main(
@@ -226,8 +229,8 @@ dirstress(
     int                    nprocs_per_dir)
 {
     int  error;
-    char buf[1024];
-    char path[2048];
+    char buf[4096];
+    char path[4096];
     int  r;
 
     /* Start from the base directory */
@@ -336,8 +339,8 @@ create_entries(
 {
     int  i;
     int  fd;
-    char buf[1024];
-    char path[2048];
+    char buf[4096];
+    char path[4096];
 
     for (i = 0; i < nfiles; i++) {
         snprintf(buf, sizeof(buf), "XXXXXXXXXXXX.%d", i);
@@ -403,10 +406,10 @@ scramble_entries(
     int                    nfiles)
 {
     int  i;
-    char buf[1024];
-    char buf1[1024];
-    char path[2048];
-    char path1[2048];
+    char buf[4096];
+    char buf1[4096];
+    char path[4096];
+    char path1[4096];
     long r;
     int  fd;
 

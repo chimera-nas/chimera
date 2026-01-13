@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 // SPDX-FileCopyrightText: 2023 SUSE Linux Products GmbH
 //
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 
 /*
  * rewinddir-test - Test rewinddir() semantics

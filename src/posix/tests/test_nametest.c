@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 // SPDX-FileCopyrightText: 2000-2001 Silicon Graphics, Inc.
 //
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 
 /*
  * nametest - Namespace stress test

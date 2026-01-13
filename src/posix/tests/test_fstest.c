@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 // SPDX-FileCopyrightText: 2002 tridge@samba.org
 //
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 
 /*
  * fstest - Filesystem data integrity verification tool
@@ -125,7 +125,7 @@ create_file(
 {
     char *buf;
     int   size, fd;
-    char  fname[1024];
+    char  fname[2048];
 
     buf = x_malloc(block_size);
     snprintf(fname, sizeof(fname), "%s/file%d", dir, fnum);
@@ -170,7 +170,7 @@ check_file(
 {
     uchar *buf;
     int    size, fd;
-    char   fname[1024];
+    char   fname[2048];
     int    ret = 0;
 
     buf = x_malloc(block_size);
@@ -222,7 +222,7 @@ traverse(
     }
 
     while ((de = chimera_posix_readdir(d))) {
-        char        fname[1024];
+        char        fname[2048];
         struct stat st;
 
         if (strcmp(de->d_name, ".") == 0) {

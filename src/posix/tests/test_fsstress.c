@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 // SPDX-FileCopyrightText: 2000-2002 Silicon Graphics, Inc.
 //
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 
 /*
  * fsstress - Filesystem stress test
@@ -92,14 +92,16 @@ static flist_t flist[FT_NTYPE] = {
     { 0, 0, 's', NULL },    /* symlinks */
 };
 
-static int     nops    = 0;
-static int     verbose = 0;
-static long    seed    = 0;
-static char   *homedir = "/test/fsstress";
-static opnum_t opno    = 0;
-static int     procid  = 0;
-static int     nproc   = 1;
-static int     nameseq = 0;
+/* *INDENT-OFF* */
+static int     nops                  = 0;
+static int     verbose               = 0;
+static long    seed                  = 0;
+static char    homedir[PATH_MAX_LEN] = "/test/fsstress";
+static opnum_t opno                  = 0;
+static int     procid                = 0;
+static int     nproc                 = 1;
+static int     nameseq               = 0;
+/* *INDENT-ON* */
 
 /* Operation function declarations */
 static void chown_f(
@@ -151,25 +153,27 @@ static void write_f(
     opnum_t opno,
     long    r);
 
+/* *INDENT-OFF* */
 /* Operation table */
 static opdesc_t ops[OP_LAST] = {
-    [OP_CHOWN]     = { "chown",     chown_f,     3,      1      },
-    [OP_CREAT]     = { "creat",     creat_f,     4,      1      },
-    [OP_FDATASYNC] = { "fdatasync", fdatasync_f, 1,      1      },
-    [OP_FSYNC]     = { "fsync",     fsync_f,     1,      1      },
-    [OP_GETDENTS]  = { "getdents",  getdents_f,  2,      0      },
-    [OP_LINK]      = { "link",      link_f,      2,      1      },
-    [OP_MKDIR]     = { "mkdir",     mkdir_f,     4,      1      },
-    [OP_READ]      = { "read",      read_f,      4,      0      },
-    [OP_READLINK]  = { "readlink",  readlink_f,  2,      0      },
-    [OP_RENAME]    = { "rename",    rename_f,    4,      1      },
-    [OP_RMDIR]     = { "rmdir",     rmdir_f,     2,      1      },
-    [OP_STAT]      = { "stat",      stat_f,      2,      0      },
-    [OP_SYMLINK]   = { "symlink",   symlink_f,   2,      1      },
-    [OP_TRUNCATE]  = { "truncate",  truncate_f,  2,      1      },
-    [OP_UNLINK]    = { "unlink",    unlink_f,    2,      1      },
-    [OP_WRITE]     = { "write",     write_f,     8,      1      },
+    [OP_CHOWN]     = { "chown",     chown_f,     3,      1                },
+    [OP_CREAT]     = { "creat",     creat_f,     4,      1                },
+    [OP_FDATASYNC] = { "fdatasync", fdatasync_f, 1,      1                },
+    [OP_FSYNC]     = { "fsync",     fsync_f,     1,      1                },
+    [OP_GETDENTS]  = { "getdents",  getdents_f,  2,      0                },
+    [OP_LINK]      = { "link",      link_f,      2,      1                },
+    [OP_MKDIR]     = { "mkdir",     mkdir_f,     4,      1                },
+    [OP_READ]      = { "read",      read_f,      4,      0                },
+    [OP_READLINK]  = { "readlink",  readlink_f,  2,      0                },
+    [OP_RENAME]    = { "rename",    rename_f,    4,      1                },
+    [OP_RMDIR]     = { "rmdir",     rmdir_f,     2,      1                },
+    [OP_STAT]      = { "stat",      stat_f,      2,      0                },
+    [OP_SYMLINK]   = { "symlink",   symlink_f,   2,      1                },
+    [OP_TRUNCATE]  = { "truncate",  truncate_f,  2,      1                },
+    [OP_UNLINK]    = { "unlink",    unlink_f,    2,      1                },
+    [OP_WRITE]     = { "write",     write_f,     8,      1                },
 };
+/* *INDENT-ON* */
 
 /* Helper: allocate pathname */
 static void
