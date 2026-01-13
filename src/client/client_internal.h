@@ -49,6 +49,7 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_FSETATTR,
     CHIMERA_CLIENT_OP_COMMIT,
     CHIMERA_CLIENT_OP_STATFS,
+    CHIMERA_CLIENT_OP_FSTATFS,
 };
 
 struct chimera_client_request;
@@ -287,6 +288,12 @@ struct chimera_client_request {
             int                             path_len;
             char                            path[CHIMERA_VFS_PATH_MAX];
         } statfs;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_fstatfs_callback_t      callback;
+            void                           *private_data;
+        } fstatfs;
     };
 } __attribute__((aligned(64)));
 

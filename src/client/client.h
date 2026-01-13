@@ -359,3 +359,16 @@ chimera_statfs(
     int                           path_len,
     chimera_statfs_callback_t     callback,
     void                         *private_data);
+
+typedef void (*chimera_fstatfs_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    const struct chimera_statvfs *st,
+    void                         *private_data);
+
+void
+chimera_fstatfs(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    chimera_fstatfs_callback_t      callback,
+    void                           *private_data);
