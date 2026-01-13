@@ -8,6 +8,7 @@
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "nfs_mount.h"
+#include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 
 void
@@ -77,18 +78,16 @@ chimera_nfs_mount_mnt(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
-    uint8_t                          *fh_magic;
+    uint8_t                           root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                          root_fh_len;
 
-    fh_magic = xdr_dbuf_alloc_space(sizeof(*fh_magic), msg->dbuf);
-    chimera_nfs_abort_if(fh_magic == NULL, "Failed to allocate space");
-
-    *fh_magic = CHIMERA_VFS_FH_MAGIC_ROOT;
+    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
 
     req = nfs_request_alloc(thread, conn, msg);
 
     chimera_vfs_lookup_path(thread->vfs_thread,
-                            fh_magic,
-                            sizeof(*fh_magic),
+                            root_fh,
+                            root_fh_len,
                             args->path.str,
                             args->path.len,
                             CHIMERA_VFS_ATTR_FH,

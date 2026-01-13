@@ -8,6 +8,7 @@
 
 #include "nfs3_xdr.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_fh.h"
 
 #define CHIMERA_NFS3_ATTR_MASK     ( \
             CHIMERA_VFS_ATTR_DEV | \
@@ -278,13 +279,19 @@ static inline void
 chimera_nfs3_unmarshall_fh(
     const struct nfs_fh3     *fh,
     int                       server_index,
+    const void               *parent_fh,
     struct chimera_vfs_attrs *attr)
 {
+    uint8_t fragment[CHIMERA_VFS_FH_SIZE];
+    int     fragment_len;
+
+    /* Build fh_fragment: [server_index][remote_fh_data] */
+    fragment[0] = server_index;
+    memcpy(fragment + 1, fh->data.data, fh->data.len);
+    fragment_len = 1 + fh->data.len;
+
     attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
-    attr->va_fh_len    = fh->data.len + 2;
-    attr->va_fh[0]     = CHIMERA_VFS_FH_MAGIC_NFS;
-    attr->va_fh[1]     = server_index;
-    memcpy(attr->va_fh + 2, fh->data.data, fh->data.len);
+    attr->va_fh_len    = chimera_vfs_encode_fh_parent(parent_fh, fragment, fragment_len, attr->va_fh);
 } /* chimera_nfs3_unmarshall_fh */
 
 

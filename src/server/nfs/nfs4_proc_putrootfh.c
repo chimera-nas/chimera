@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 
 void
@@ -13,9 +14,10 @@ chimera_nfs4_putrootfh(
     struct nfs_resop4                *resop)
 {
     struct PUTROOTFH4res *res = &resop->opputrootfh;
+    uint32_t              fhlen;
 
-    req->fh[0] = CHIMERA_VFS_FH_MAGIC_ROOT;
-    req->fhlen = 1;
+    chimera_vfs_get_root_fh(req->fh, &fhlen);
+    req->fhlen = fhlen;
 
     res->status = NFS4_OK;
 

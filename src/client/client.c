@@ -14,7 +14,6 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "prometheus-c.h"
-const uint8_t root_fh[1] = { CHIMERA_VFS_FH_MAGIC_ROOT };
 
 SYMBOL_EXPORT struct chimera_client_config *
 chimera_client_config_init(void)
@@ -138,6 +137,9 @@ chimera_client_init(
                                    config->num_modules,
                                    config->cache_ttl,
                                    metrics);
+
+    /* Initialize the root file handle after VFS is initialized */
+    chimera_vfs_get_root_fh(client->root_fh, &client->root_fh_len);
 
     return client;
 } /* chimera_client_init */

@@ -626,7 +626,7 @@ chimera_io_uring_mount(
         return;
     }
 
-    rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_IO_URING,
+    rc = linux_get_fh(NULL, /* mount context - compute fsid */
                       mount_fd,
                       fullpath,
                       request->mount.r_attr.va_fh,

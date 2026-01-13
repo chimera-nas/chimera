@@ -134,8 +134,8 @@ chimera_rename_source_parent_complete(
 
     chimera_vfs_lookup_path(
         request->thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
+        request->thread->client->root_fh,
+        request->thread->client->root_fh_len,
         request->rename.dest_path,
         request->rename.dest_parent_len,
         CHIMERA_VFS_ATTR_FH,
@@ -186,8 +186,8 @@ chimera_dispatch_rename(
 
     chimera_vfs_lookup_path(
         thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
+        thread->client->root_fh,
+        thread->client->root_fh_len,
         request->rename.source_path,
         request->rename.source_parent_len,
         CHIMERA_VFS_ATTR_FH,

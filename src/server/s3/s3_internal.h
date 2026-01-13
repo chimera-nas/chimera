@@ -112,6 +112,8 @@ struct chimera_server_s3_shared {
     struct s3_bucket_map     *bucket_map;
     struct evpl_endpoint     *endpoint;
     struct evpl_listener     *listener;
+    uint32_t                  root_fh_len;
+    uint8_t                   root_fh[CHIMERA_VFS_FH_SIZE];
 };
 
 static inline struct chimera_s3_io *

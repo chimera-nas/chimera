@@ -113,8 +113,8 @@ chimera_dispatch_mkdir(
 
     chimera_vfs_lookup_path(
         thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
+        thread->client->root_fh,
+        thread->client->root_fh_len,
         request->mkdir.path,
         request->mkdir.parent_len,
         CHIMERA_VFS_ATTR_FH,

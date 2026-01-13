@@ -11,6 +11,7 @@
 #include "nfs_internal.h"
 #include "evpl/evpl_rpc2.h"
 #include "vfs/vfs_internal.h"
+#include "vfs/vfs_fh.h"
 
 struct chimera_nfs_client_server_thread_ctx {
     struct chimera_nfs_client_server_thread *server_thread;
@@ -39,11 +40,41 @@ chimera_mount_mountd_mnt_callback(
     evpl_rpc2_client_disconnect(server_thread->thread->rpc2_thread, server_thread->mount_conn);
     server_thread->mount_conn = NULL;
 
-    request->mount.r_attr.va_set_mask = CHIMERA_VFS_ATTR_FH;
-    request->mount.r_attr.va_fh[0]    = CHIMERA_VFS_FH_MAGIC_NFS;
-    request->mount.r_attr.va_fh[1]    = mount->server->index;
-    memcpy(request->mount.r_attr.va_fh + 2, reply->mountinfo.fhandle.data, reply->mountinfo.fhandle.len);
-    request->mount.r_attr.va_fh_len = 2 + reply->mountinfo.fhandle.len;
+    /*
+     * Build the FH using the new format:
+     * - fh_fragment = [server_index (1 byte)][remote_root_fh]
+     * - FSID = XXH3_128bits(server_hostname || remote_root_fh)
+     *
+     * The FSID must be unique per NFS mount, so we hash the server name
+     * together with the remote root file handle to create it.
+     */
+    {
+        uint8_t       fh_fragment[CHIMERA_VFS_FH_SIZE];
+        uint8_t       fsid_buf[CHIMERA_VFS_FSID_SIZE];
+        uint8_t       hash_input[256 + 64];  /* hostname + remote fh */
+        int           hash_input_len;
+        int           fh_fragment_len;
+        int           hostname_len;
+        XXH128_hash_t fsid_hash;
+
+        /* Build fh_fragment: [server_index][remote_fh_data] */
+        fh_fragment[0] = mount->server->index;
+        memcpy(fh_fragment + 1, reply->mountinfo.fhandle.data, reply->mountinfo.fhandle.len);
+        fh_fragment_len = 1 + reply->mountinfo.fhandle.len;
+
+        /* Compute FSID by hashing server hostname + remote root FH */
+        hostname_len = strlen(mount->server->hostname);
+        memcpy(hash_input, mount->server->hostname, hostname_len);
+        memcpy(hash_input + hostname_len, reply->mountinfo.fhandle.data, reply->mountinfo.fhandle.len);
+        hash_input_len = hostname_len + reply->mountinfo.fhandle.len;
+
+        fsid_hash = XXH3_128bits(hash_input, hash_input_len);
+        memcpy(fsid_buf, &fsid_hash, CHIMERA_VFS_FSID_SIZE);
+
+        request->mount.r_attr.va_set_mask = CHIMERA_VFS_ATTR_FH;
+        request->mount.r_attr.va_fh_len   = chimera_vfs_encode_fh_mount(fsid_buf, fh_fragment,
+                                                                        fh_fragment_len, request->mount.r_attr.va_fh);
+    }
 
     request->mount.r_mount_private = mount;
 

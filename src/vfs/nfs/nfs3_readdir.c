@@ -55,7 +55,7 @@ chimera_nfs3_readdir_callback(
         attrs.va_set_mask = 0;
 
         if (entry->name_handle.handle_follows) {
-            chimera_nfs3_unmarshall_fh(&entry->name_handle.handle, ctx->server->index, &attrs);
+            chimera_nfs3_unmarshall_fh(&entry->name_handle.handle, ctx->server->index, request->fh, &attrs);
         }
 
         if (entry->name_attributes.attributes_follow) {

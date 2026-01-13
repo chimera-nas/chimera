@@ -271,7 +271,7 @@ chimera_linux_mount(
         request->complete(request);
         return;
     }
-    rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
+    rc = linux_get_fh(NULL, /* mount context - compute fsid */
                       mount_fd,
                       fullpath,
                       r_attr->va_fh,
@@ -793,7 +793,7 @@ chimera_linux_symlink(
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->symlink.r_dir_post_attr, fd);
 
-    linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
+    linux_get_fh(request->fh, /* use parent's mount_id */
                  fd,
                  fullname,
                  request->symlink.r_attr.va_fh,

@@ -165,18 +165,12 @@ cairn_punch_hole(
 
 static inline uint32_t
 cairn_inum_to_fh(
-    uint8_t *fh,
-    uint64_t inum,
-    uint32_t gen)
+    struct cairn_shared *shared,
+    uint8_t             *fh,
+    uint64_t             inum,
+    uint32_t             gen)
 {
-    uint8_t *ptr = fh;
-
-    *ptr++ = CHIMERA_VFS_FH_MAGIC_CAIRN;
-
-    ptr += chimera_encode_uint64(inum, ptr);
-    ptr += chimera_encode_uint32(gen, ptr);
-
-    return ptr - fh;
+    return chimera_vfs_encode_fh_inum_parent(shared->root_fh, inum, gen, fh);
 } /* cairn_inum_to_fh */
 
 static inline void
@@ -186,12 +180,7 @@ cairn_fh_to_inum(
     const uint8_t *fh,
     int            fhlen)
 {
-    const uint8_t *ptr = fh;
-
-    ptr++;
-
-    ptr += chimera_decode_uint64(ptr, inum);
-    chimera_decode_uint32(ptr, gen);
+    chimera_vfs_decode_fh_inum(fh, fhlen, inum, gen);
 } /* cairn_fh_to_inum */
 
 static inline void
@@ -709,7 +698,13 @@ cairn_init(const char *cfgfile)
         free(super);
     }
 
-    shared->root_fhlen = cairn_inum_to_fh(shared->root_fh, 2, 1);
+    /* Create 16-byte fsid buffer for root FH encoding (8-byte fsid + 8 bytes padding) */
+    {
+        uint8_t fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
+        memcpy(fsid_buf, &shared->fsid, sizeof(shared->fsid));
+        shared->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf, 2, 1,
+                                                              shared->root_fh);
+    }
 
     return shared;
 } /* cairn_init */
@@ -809,7 +804,7 @@ cairn_map_attrs(
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FH) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
-        attr->va_fh_len    = cairn_inum_to_fh(attr->va_fh, inode->inum, inode->gen);
+        attr->va_fh_len    = cairn_inum_to_fh(shared, attr->va_fh, inode->inum, inode->gen);
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
