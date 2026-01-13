@@ -25,8 +25,8 @@ main(
     int                   rc;
     int                   count = 1500;
     int                   ct;
-    struct statvfs        svbuf;
-    struct timeval        time;
+    struct statvfs        svbuf = { 0 };
+    struct timeval        time  = { 0, 0 };
     int                   opt;
 
     cthon_Myname = "cthon_basic_9";

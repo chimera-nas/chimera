@@ -72,8 +72,6 @@ main(
     snprintf(str, sizeof(str), "Idempotency test %ld running\n", (long) getpid());
     slen = strlen(str);
 
-    slerr = 1;  // assume symlink not supported unless we try
-
     while (count--) {
         // mkdir TEST
         if (chimera_posix_mkdir(base, 0755) < 0) {

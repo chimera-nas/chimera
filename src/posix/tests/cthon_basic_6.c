@@ -131,7 +131,7 @@ main(
         // Test rewinddir
         chimera_posix_rewinddir(dir);
         found = 0;
-        while ((dp = chimera_posix_readdir(dir)) != NULL) {
+        while (chimera_posix_readdir(dir) != NULL) {
             found++;
         }
         if (found != entries) {

@@ -179,7 +179,18 @@ set(CTHON_SPECIAL_TEST_PROGRAMS
     cthon_special_telldir
     cthon_special_nfsidem
     cthon_special_fstat
+    cthon_special_excltest
+    cthon_special_touchn
+    cthon_special_nstat
+    cthon_special_stat
+    cthon_special_stat2
 )
+
+# List of cthon lock test programs (disabled - lock APIs not yet implemented)
+# When lock support is added, move these to CTHON_LOCK_TEST_PROGRAMS and enable
+# set(CTHON_LOCK_TEST_PROGRAMS
+#     cthon_lock_tlock
+# )
 
 # All cthon test programs
 set(CTHON_TEST_PROGRAMS

@@ -70,7 +70,7 @@ main(
     int                   fd;
     long                  numbufs;
     int                   i;
-    struct timeval        time;
+    struct timeval        time = { 0, 0 };
     off_t                 size;
 
     cthon_Myname = "cthon_special_bigfile";
@@ -140,6 +140,7 @@ main(
                 chimera_posix_unlink(str);
                 free(buf);
                 posix_test_success(&env);  // Warn but don't fail
+                return 0;  // posix_test_success exits, but be explicit
             }
             chimera_posix_close(fd);
             free(buf);
@@ -160,6 +161,7 @@ main(
             chimera_posix_unlink(str);
             free(buf);
             posix_test_success(&env);
+            return 0;  // posix_test_success exits, but be explicit
         }
         chimera_posix_close(fd);
         free(buf);
