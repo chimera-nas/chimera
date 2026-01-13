@@ -455,6 +455,7 @@ chimera_smb_create_process(struct chimera_smb_request *request)
             request->create.parent_path,
             request->create.parent_path_len,
             CHIMERA_VFS_ATTR_FH,
+            CHIMERA_VFS_LOOKUP_FOLLOW,
             chimera_smb_create_lookup_parent_callback,
             request);
     } else if (request->create.name_len) {
@@ -520,6 +521,7 @@ chimera_smb_revalidate_tree(
         tree->share->path,
         strlen(tree->share->path),
         CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_LOOKUP_FOLLOW,
         chimera_smb_revalidate_tree_callback,
         request);
 

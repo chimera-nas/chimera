@@ -125,6 +125,7 @@ chimera_dispatch_symlink(
         request->symlink.path,
         request->symlink.parent_len,
         CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_LOOKUP_FOLLOW,
         chimera_symlink_parent_lookup_complete,
         request);
 } /* chimera_dispatch_symlink */

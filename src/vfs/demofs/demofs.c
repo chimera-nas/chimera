@@ -165,6 +165,8 @@ struct demofs_inode {
     union {
         struct {
             struct rb_tree dirents;
+            uint64_t       parent_inum;
+            uint32_t       parent_gen;
         } dir;
         struct {
             struct rb_tree extents;
@@ -690,6 +692,10 @@ demofs_bootstrap(struct demofs_thread *thread)
 
     rb_tree_init(&inode->dir.dirents);
 
+    /* Root directory's parent is itself for ".." lookup */
+    inode->dir.parent_inum = inode->inum;
+    inode->dir.parent_gen  = inode->gen;
+
     /* Create 16-byte fsid buffer for root FH encoding (8-byte fsid + 8 bytes padding) */
     {
         uint8_t fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
@@ -1146,6 +1152,8 @@ demofs_lookup(
     struct demofs_inode  *inode, *child;
     struct demofs_dirent *dirent;
     uint64_t              hash;
+    const char           *name    = request->lookup.component;
+    uint32_t              namelen = request->lookup.component_len;
 
     hash = request->lookup.component_hash;
 
@@ -1164,6 +1172,34 @@ demofs_lookup(
         return;
     }
 
+    demofs_map_attrs(thread, &request->lookup.r_dir_attr, inode);
+
+    /* Handle "." - return the directory itself */
+    if (namelen == 1 && name[0] == '.') {
+        demofs_map_attrs(thread, &request->lookup.r_attr, inode);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    /* Handle ".." - return the parent directory */
+    if (namelen == 2 && name[0] == '.' && name[1] == '.') {
+        child = demofs_inode_get_inum(shared, inode->dir.parent_inum, inode->dir.parent_gen);
+        if (unlikely(!child)) {
+            pthread_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+        demofs_map_attrs(thread, &request->lookup.r_attr, child);
+        pthread_mutex_unlock(&child->lock);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
     rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
 
     if (!dirent) {
@@ -1172,8 +1208,6 @@ demofs_lookup(
         request->complete(request);
         return;
     }
-
-    demofs_map_attrs(thread, &request->lookup.r_dir_attr, inode);
 
     child = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
@@ -1220,6 +1254,8 @@ demofs_mkdir(
     inode->ctime_nsec = now.tv_nsec;
 
     rb_tree_init(&inode->dir.dirents);
+
+    /* Parent will be set after we validate parent_inode */
 
     demofs_apply_attrs(inode, request->mkdir.set_attr);
 
@@ -1269,6 +1305,9 @@ demofs_mkdir(
         return;
     }
 
+    /* Set parent pointer for ".." lookup support */
+    inode->dir.parent_inum = parent_inode->inum;
+    inode->dir.parent_gen  = parent_inode->gen;
 
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
@@ -1564,6 +1603,11 @@ demofs_open_at(
         parent_inode->mtime_sec  = now.tv_sec;
         parent_inode->mtime_nsec = now.tv_nsec;
 
+    } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
     } else {
 
         inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
@@ -2556,7 +2600,8 @@ demofs_rename(
     void                       *private_data)
 {
     struct demofs_inode  *old_parent_inode, *new_parent_inode, *child_inode;
-    struct demofs_dirent *dirent, *old_dirent;
+    struct demofs_inode  *existing_inode = NULL;
+    struct demofs_dirent *new_dirent, *old_dirent, *existing_dirent = NULL;
     uint64_t              hash, new_hash;
     int                   cmp;
     struct timespec       now;
@@ -2645,34 +2690,92 @@ demofs_rename(
         return;
     }
 
-    rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, dirent);
-
-    if (dirent) {
-        pthread_mutex_unlock(&old_parent_inode->lock);
-        pthread_mutex_unlock(&new_parent_inode->lock);
-        request->status = CHIMERA_VFS_EEXIST;
-        request->complete(request);
-        return;
-    }
-
     child_inode = demofs_inode_get_inum(shared, old_dirent->inum, old_dirent->gen);
 
     if (!child_inode) {
         pthread_mutex_unlock(&old_parent_inode->lock);
-        pthread_mutex_unlock(&new_parent_inode->lock);
+        if (cmp != 0) {
+            pthread_mutex_unlock(&new_parent_inode->lock);
+        }
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
 
-    dirent = demofs_dirent_alloc(thread,
-                                 old_dirent->inum,
-                                 old_dirent->gen,
-                                 new_hash,
-                                 request->rename.new_name,
-                                 request->rename.new_namelen);
+    /* Check if destination already exists */
+    rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, existing_dirent);
 
-    rb_tree_insert(&new_parent_inode->dir.dirents, hash, dirent);
+    if (existing_dirent) {
+        /* Check if source and destination refer to the same inode (hardlinks).
+         * Per POSIX/Linux: if oldpath and newpath are hardlinks to the same file,
+         * rename() should do nothing and return success. */
+        if (existing_dirent->inum == old_dirent->inum &&
+            existing_dirent->gen == old_dirent->gen) {
+            /* Same inode - do nothing, just return success */
+            pthread_mutex_unlock(&child_inode->lock);
+            if (cmp != 0) {
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                pthread_mutex_unlock(&new_parent_inode->lock);
+            } else {
+                pthread_mutex_unlock(&old_parent_inode->lock);
+            }
+
+            request->status = CHIMERA_VFS_OK;
+            request->complete(request);
+            return;
+        }
+
+        /* Destination exists - check if we can replace it */
+        existing_inode = demofs_inode_get_inum(shared, existing_dirent->inum, existing_dirent->gen);
+
+        if (existing_inode) {
+            /* Cannot rename a directory over a non-directory or vice versa */
+            if (S_ISDIR(child_inode->mode) != S_ISDIR(existing_inode->mode)) {
+                pthread_mutex_unlock(&existing_inode->lock);
+                pthread_mutex_unlock(&child_inode->lock);
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                if (cmp != 0) {
+                    pthread_mutex_unlock(&new_parent_inode->lock);
+                }
+                request->status = S_ISDIR(existing_inode->mode) ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR;
+                request->complete(request);
+                return;
+            }
+
+            /* Cannot replace non-empty directory */
+            if (S_ISDIR(existing_inode->mode) && existing_inode->nlink > 2) {
+                pthread_mutex_unlock(&existing_inode->lock);
+                pthread_mutex_unlock(&child_inode->lock);
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                if (cmp != 0) {
+                    pthread_mutex_unlock(&new_parent_inode->lock);
+                }
+                request->status = CHIMERA_VFS_ENOTEMPTY;
+                request->complete(request);
+                return;
+            }
+
+            /* Remove the existing destination entry and decrement link count */
+            rb_tree_remove(&new_parent_inode->dir.dirents, &existing_dirent->node);
+            existing_inode->nlink--;
+            if (S_ISDIR(existing_inode->mode)) {
+                new_parent_inode->nlink--;
+            }
+            pthread_mutex_unlock(&existing_inode->lock);
+            demofs_dirent_free(thread, existing_dirent);
+        }
+    }
+
+    new_dirent = demofs_dirent_alloc(thread,
+                                     old_dirent->inum,
+                                     old_dirent->gen,
+                                     new_hash,
+                                     request->rename.new_name,
+                                     request->rename.new_namelen);
+
+    rb_tree_insert(&new_parent_inode->dir.dirents, hash, new_dirent);
+
+    rb_tree_remove(&old_parent_inode->dir.dirents, &old_dirent->node);
 
     if (S_ISDIR(child_inode->mode)) {
         old_parent_inode->nlink--;
@@ -2692,6 +2795,8 @@ demofs_rename(
     }
 
     pthread_mutex_unlock(&child_inode->lock);
+
+    demofs_dirent_free(thread, old_dirent);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);

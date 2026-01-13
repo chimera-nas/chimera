@@ -9,6 +9,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/vfs.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -518,5 +520,26 @@ CHIMERA_FILE *
 chimera_posix_fdopen(
     int         fd,
     const char *mode);
+
+// Filesystem statistics
+int
+chimera_posix_statfs(
+    const char    *path,
+    struct statfs *buf);
+
+int
+chimera_posix_fstatfs(
+    int            fd,
+    struct statfs *buf);
+
+int
+chimera_posix_statvfs(
+    const char     *path,
+    struct statvfs *buf);
+
+int
+chimera_posix_fstatvfs(
+    int             fd,
+    struct statvfs *buf);
 
 #endif /* CHIMERA_POSIX_H */

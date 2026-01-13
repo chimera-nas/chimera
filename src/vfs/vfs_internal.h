@@ -145,7 +145,7 @@ chimera_vfs_request_alloc_by_hash(
 
     request->module = chimera_vfs_get_module(thread, fh, fhlen);
 
-    request->fh          = fh;
+    memcpy(request->fh, fh, fhlen);
     request->fh_len      = fhlen;
     request->fh_hash     = fh_hash;
     request->active_prev = NULL;
@@ -215,8 +215,8 @@ chimera_vfs_request_alloc_with_module(
     }
     request->status = CHIMERA_VFS_UNSET;
 
-    request->module      = module;
-    request->fh          = fh;
+    request->module = module;
+    memcpy(request->fh, fh, fhlen);
     request->fh_len      = fhlen;
     request->fh_hash     = fh_hash;
     request->active_prev = NULL;

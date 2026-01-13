@@ -91,6 +91,7 @@ chimera_nfs_mount_mnt(
                             args->path.str,
                             args->path.len,
                             CHIMERA_VFS_ATTR_FH,
+                            CHIMERA_VFS_LOOKUP_FOLLOW,
                             chimera_nfs_mount_lookup_complete,
                             req);
 

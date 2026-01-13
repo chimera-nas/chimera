@@ -118,6 +118,7 @@ chimera_dispatch_mkdir(
         request->mkdir.path,
         request->mkdir.parent_len,
         CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_LOOKUP_FOLLOW,
         chimera_mkdir_parent_lookup_complete,
         request);
 } /* chimera_mkdir */

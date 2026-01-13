@@ -113,6 +113,8 @@ struct memfs_inode {
     union {
         struct {
             struct rb_tree dirents;
+            uint64_t       parent_inum;
+            uint32_t       parent_gen;
         } dir;
         struct {
             struct memfs_block **blocks;
@@ -494,6 +496,10 @@ memfs_init(const char *cfgfile)
     inode->ctime      = now;
 
     rb_tree_init(&inode->dir.dirents);
+
+    /* Root directory's parent is itself */
+    inode->dir.parent_inum = inode->inum;
+    inode->dir.parent_gen  = inode->gen;
 
     /* Create 16-byte fsid buffer for root FH encoding (8-byte fsid + 8 bytes padding) */
     {
@@ -971,6 +977,8 @@ memfs_lookup(
     struct memfs_inode  *inode, *child;
     struct memfs_dirent *dirent;
     uint64_t             hash;
+    const char          *name    = request->lookup.component;
+    uint32_t             namelen = request->lookup.component_len;
 
     hash = request->lookup.component_hash;
 
@@ -989,6 +997,34 @@ memfs_lookup(
         return;
     }
 
+    memfs_map_attrs(shared, &request->lookup.r_dir_attr, inode, request->fh);
+
+    /* Handle "." - return the directory itself */
+    if (namelen == 1 && name[0] == '.') {
+        memfs_map_attrs(shared, &request->lookup.r_attr, inode, request->fh);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    /* Handle ".." - return the parent directory */
+    if (namelen == 2 && name[0] == '.' && name[1] == '.') {
+        child = memfs_inode_get_inum(shared, inode->dir.parent_inum, inode->dir.parent_gen);
+        if (unlikely(!child)) {
+            pthread_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+        memfs_map_attrs(shared, &request->lookup.r_attr, child, request->fh);
+        pthread_mutex_unlock(&child->lock);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
     rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
 
     if (!dirent) {
@@ -997,9 +1033,6 @@ memfs_lookup(
         request->complete(request);
         return;
     }
-
-    memfs_map_attrs(shared, &request->lookup.r_dir_attr, inode, request->fh);
-
 
     child = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
@@ -1085,9 +1118,17 @@ memfs_mkdir(
         return;
     }
 
+    /* Set parent pointer for .. lookup support */
+    inode->dir.parent_inum = parent_inode->inum;
+    inode->dir.parent_gen  = parent_inode->gen;
+
     memfs_map_attrs(shared, r_dir_pre_attr, parent_inode, request->fh);
 
-    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
+    rb_tree_query_exact(
+        &parent_inode->dir.dirents,
+        hash,
+        hash,
+        existing_dirent);
 
     if (existing_dirent) {
 
@@ -1392,6 +1433,11 @@ memfs_open_at(
         rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
         parent_inode->mtime = now;
+    } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
     } else {
         inode = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
@@ -1899,7 +1945,8 @@ memfs_rename(
     void                       *private_data)
 {
     struct memfs_inode  *old_parent_inode, *new_parent_inode, *child_inode;
-    struct memfs_dirent *dirent, *old_dirent;
+    struct memfs_inode  *existing_inode = NULL;
+    struct memfs_dirent *new_dirent, *old_dirent, *existing_dirent = NULL;
     int                  cmp;
     struct timespec      now;
     uint64_t             hash, new_hash;
@@ -1982,18 +2029,10 @@ memfs_rename(
 
     if (!old_dirent) {
         pthread_mutex_unlock(&old_parent_inode->lock);
-        pthread_mutex_unlock(&new_parent_inode->lock);
+        if (cmp != 0) {
+            pthread_mutex_unlock(&new_parent_inode->lock);
+        }
         request->status = CHIMERA_VFS_ENOENT;
-        request->complete(request);
-        return;
-    }
-
-    rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, dirent);
-
-    if (dirent) {
-        pthread_mutex_unlock(&old_parent_inode->lock);
-        pthread_mutex_unlock(&new_parent_inode->lock);
-        request->status = CHIMERA_VFS_EEXIST;
         request->complete(request);
         return;
     }
@@ -2002,20 +2041,86 @@ memfs_rename(
 
     if (!child_inode) {
         pthread_mutex_unlock(&old_parent_inode->lock);
-        pthread_mutex_unlock(&new_parent_inode->lock);
+        if (cmp != 0) {
+            pthread_mutex_unlock(&new_parent_inode->lock);
+        }
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
 
-    dirent = memfs_dirent_alloc(thread,
-                                old_dirent->inum,
-                                old_dirent->gen,
-                                new_hash,
-                                request->rename.new_name,
-                                request->rename.new_namelen);
+    /* Check if destination already exists */
+    rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, existing_dirent);
 
-    rb_tree_insert(&new_parent_inode->dir.dirents, hash, dirent);
+    if (existing_dirent) {
+        /* Check if source and destination refer to the same inode (hardlinks).
+         * Per POSIX/Linux: if oldpath and newpath are hardlinks to the same file,
+         * rename() should do nothing and return success. */
+        if (existing_dirent->inum == old_dirent->inum &&
+            existing_dirent->gen == old_dirent->gen) {
+            /* Same inode - do nothing, just return success */
+            pthread_mutex_unlock(&child_inode->lock);
+            if (cmp != 0) {
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                pthread_mutex_unlock(&new_parent_inode->lock);
+            } else {
+                pthread_mutex_unlock(&old_parent_inode->lock);
+            }
+
+            request->status = CHIMERA_VFS_OK;
+            request->complete(request);
+            return;
+        }
+
+        /* Destination exists - check if we can replace it */
+        existing_inode = memfs_inode_get_inum(shared, existing_dirent->inum, existing_dirent->gen);
+
+        if (existing_inode) {
+            /* Cannot rename a directory over a non-directory or vice versa */
+            if (S_ISDIR(child_inode->mode) != S_ISDIR(existing_inode->mode)) {
+                pthread_mutex_unlock(&existing_inode->lock);
+                pthread_mutex_unlock(&child_inode->lock);
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                if (cmp != 0) {
+                    pthread_mutex_unlock(&new_parent_inode->lock);
+                }
+                request->status = S_ISDIR(existing_inode->mode) ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR;
+                request->complete(request);
+                return;
+            }
+
+            /* Cannot replace non-empty directory */
+            if (S_ISDIR(existing_inode->mode) && existing_inode->nlink > 2) {
+                pthread_mutex_unlock(&existing_inode->lock);
+                pthread_mutex_unlock(&child_inode->lock);
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                if (cmp != 0) {
+                    pthread_mutex_unlock(&new_parent_inode->lock);
+                }
+                request->status = CHIMERA_VFS_ENOTEMPTY;
+                request->complete(request);
+                return;
+            }
+
+            /* Remove the existing destination entry and decrement link count */
+            rb_tree_remove(&new_parent_inode->dir.dirents, &existing_dirent->node);
+            existing_inode->nlink--;
+            if (S_ISDIR(existing_inode->mode)) {
+                new_parent_inode->nlink--;
+            }
+            pthread_mutex_unlock(&existing_inode->lock);
+            memfs_dirent_free(thread, existing_dirent);
+        }
+    }
+
+    new_dirent = memfs_dirent_alloc(thread,
+                                    old_dirent->inum,
+                                    old_dirent->gen,
+                                    new_hash,
+                                    request->rename.new_name,
+                                    request->rename.new_namelen);
+
+    rb_tree_insert(&new_parent_inode->dir.dirents, hash, new_dirent);
 
     rb_tree_remove(&old_parent_inode->dir.dirents, &old_dirent->node);
 

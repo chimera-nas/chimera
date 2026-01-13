@@ -72,6 +72,12 @@ struct prometheus_metrics;
 
 #define CHIMERA_VFS_TIME_NOW             ((1l << 30) - 3l)
 
+/* Flags for chimera_vfs_lookup_path */
+#define CHIMERA_VFS_LOOKUP_FOLLOW        (1U << 0) /* Follow symlinks in final component */
+
+/* Maximum number of symlinks to follow before returning ELOOP */
+#define CHIMERA_VFS_SYMLOOP_MAX          40
+
 #define CHIMERA_VFS_MOUNT_OPT_MAX        16
 #define CHIMERA_VFS_MOUNT_OPT_BUFFER_MAX 1024
 
@@ -147,6 +153,7 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OPEN_INFERRED      (1U << 2)
 #define CHIMERA_VFS_OPEN_DIRECTORY     (1U << 3)
 #define CHIMERA_VFS_OPEN_READ_ONLY     (1U << 4)
+#define CHIMERA_VFS_OPEN_EXCLUSIVE     (1U << 5)
 
 
 #define CHIMERA_VFS_OPEN_ID_SYNTHETIC  0
@@ -285,7 +292,7 @@ struct chimera_vfs_request {
     struct chimera_vfs_request       *active_prev;
     struct chimera_vfs_request       *active_next;
 
-    const void                       *fh;
+    uint8_t                           fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                          fh_len;
     uint64_t                          fh_hash;
 
@@ -302,9 +309,13 @@ struct chimera_vfs_request {
             int                                pathlen;
             struct chimera_vfs_open_handle    *handle;
             uint64_t                           attr_mask;
+            uint32_t                           flags;
+            uint32_t                           symlink_count;
             chimera_vfs_lookup_path_callback_t callback;
             void                              *private_data;
             uint8_t                            next_fh[CHIMERA_VFS_FH_SIZE];
+            uint8_t                            parent_fh[CHIMERA_VFS_FH_SIZE];
+            int                                parent_fh_len;
         } lookup_path;
 
         struct {
@@ -431,7 +442,6 @@ struct chimera_vfs_request {
 
         struct {
             uint64_t vfs_private;
-            uint8_t  fh[CHIMERA_VFS_FH_SIZE];
         } close;
 
         struct {

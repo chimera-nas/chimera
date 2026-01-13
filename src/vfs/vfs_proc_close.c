@@ -38,9 +38,6 @@ chimera_vfs_close(
                                                     handle->fh_hash,
                                                     handle->vfs_module);
 
-    memcpy(request->close.fh, handle->fh, handle->fh_len);
-    request->fh = request->close.fh;
-
     request->opcode             = CHIMERA_VFS_OP_CLOSE;
     request->complete           = chimera_vfs_close_complete;
     request->close.vfs_private  = handle->vfs_private;

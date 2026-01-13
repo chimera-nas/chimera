@@ -480,6 +480,10 @@ chimera_linux_open_at(
         flags |= O_CREAT;
     }
 
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+        flags |= O_EXCL;
+    }
+
     if (request->open_at.flags & CHIMERA_VFS_OPEN_PATH) {
         flags |= O_PATH;
     }
