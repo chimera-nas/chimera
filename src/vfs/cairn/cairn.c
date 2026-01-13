@@ -1676,6 +1676,12 @@ cairn_open_at(
         parent_inode->mtime = now;
 
         inode = &new_inode;
+    } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+        cairn_inode_handle_release(&parent_ih);
+        cairn_dirent_handle_release(&dh);
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
     } else {
 
         dirent_value = dh.dirent;

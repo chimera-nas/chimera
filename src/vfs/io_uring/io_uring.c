@@ -843,6 +843,10 @@ chimera_io_uring_open_at(
         flags |= O_CREAT;
     }
 
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+        flags |= O_EXCL;
+    }
+
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     if (request->open_at.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {

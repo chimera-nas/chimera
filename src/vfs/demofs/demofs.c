@@ -1603,6 +1603,11 @@ demofs_open_at(
         parent_inode->mtime_sec  = now.tv_sec;
         parent_inode->mtime_nsec = now.tv_nsec;
 
+    } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
     } else {
 
         inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);

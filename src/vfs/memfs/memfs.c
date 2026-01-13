@@ -1433,6 +1433,11 @@ memfs_open_at(
         rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
         parent_inode->mtime = now;
+    } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
     } else {
         inode = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
