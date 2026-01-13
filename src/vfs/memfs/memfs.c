@@ -1257,6 +1257,17 @@ memfs_remove(
     request->complete(request);
 } /* memfs_remove */
 
+/*
+ * Cookie values for readdir:
+ *   0 = start of directory, will return "."
+ *   1 = "." was returned, will return ".."
+ *   2 = ".." was returned, will return first real entry
+ *   3+ = real entry cookie (hash + 3)
+ */
+#define MEMFS_COOKIE_DOT    1
+#define MEMFS_COOKIE_DOTDOT 2
+#define MEMFS_COOKIE_FIRST  3
+
 static void
 memfs_readdir(
     struct memfs_thread        *thread,
@@ -1264,7 +1275,7 @@ memfs_readdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct memfs_inode      *inode, *dirent_inode;
+    struct memfs_inode      *inode, *dirent_inode, *parent_inode;
     struct memfs_dirent     *dirent;
     uint64_t                 cookie      = request->readdir.cookie;
     uint64_t                 next_cookie = 0;
@@ -1288,10 +1299,69 @@ memfs_readdir(
 
     attr.va_req_mask = request->readdir.attr_mask;
 
-    if (cookie) {
-        rb_tree_query_ceil(&inode->dir.dirents, cookie + 1, hash, dirent);
-    } else {
+    /* Handle "." entry (cookie 0 -> 1) */
+    if (cookie < MEMFS_COOKIE_DOT) {
+        memfs_map_attrs(shared, &attr, inode, request->fh);
+
+        rc = request->readdir.callback(
+            inode->inum,
+            MEMFS_COOKIE_DOT,
+            ".",
+            1,
+            &attr,
+            request->proto_private_data);
+
+        if (rc) {
+            /* Caller wants to stop after this entry */
+            next_cookie = MEMFS_COOKIE_DOT;
+            eof         = 0;
+            goto out;
+        }
+
+        cookie = MEMFS_COOKIE_DOT;
+    }
+
+    /* Handle ".." entry (cookie 1 -> 2) */
+    if (cookie < MEMFS_COOKIE_DOTDOT) {
+        /* Get parent inode for ".." attributes */
+        parent_inode = memfs_inode_get_inum(shared,
+                                            inode->dir.parent_inum,
+                                            inode->dir.parent_gen);
+
+        if (parent_inode) {
+            memfs_map_attrs(shared, &attr, parent_inode, request->fh);
+            pthread_mutex_unlock(&parent_inode->lock);
+        } else {
+            /* Fallback to current directory attrs if parent not found */
+            memfs_map_attrs(shared, &attr, inode, request->fh);
+        }
+
+        rc = request->readdir.callback(
+            inode->dir.parent_inum,
+            MEMFS_COOKIE_DOTDOT,
+            "..",
+            2,
+            &attr,
+            request->proto_private_data);
+
+        if (rc) {
+            next_cookie = MEMFS_COOKIE_DOTDOT;
+            eof         = 0;
+            goto out;
+        }
+
+        cookie = MEMFS_COOKIE_DOTDOT;
+    }
+
+    /* Handle real directory entries (cookie >= 2) */
+    if (cookie < MEMFS_COOKIE_FIRST) {
+        /* Start from the first real entry */
         rb_tree_first(&inode->dir.dirents, dirent);
+    } else {
+        /* Resume from where we left off - cookie is (hash + 3) */
+        uint64_t hash_cookie = cookie - MEMFS_COOKIE_FIRST;
+
+        rb_tree_query_ceil(&inode->dir.dirents, hash_cookie + 1, hash, dirent);
     }
 
     while (dirent) {
@@ -1299,6 +1369,7 @@ memfs_readdir(
         dirent_inode = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
         if (!dirent_inode) {
+            dirent = rb_tree_next(&inode->dir.dirents, dirent);
             continue;
         }
 
@@ -1308,13 +1379,13 @@ memfs_readdir(
 
         rc = request->readdir.callback(
             dirent->inum,
-            dirent->hash,
+            dirent->hash + MEMFS_COOKIE_FIRST,
             dirent->name,
             dirent->name_len,
             &attr,
             request->proto_private_data);
 
-        next_cookie = dirent->hash;
+        next_cookie = dirent->hash + MEMFS_COOKIE_FIRST;
 
         if (rc) {
             eof = 0;
@@ -1324,6 +1395,7 @@ memfs_readdir(
         dirent = rb_tree_next(&inode->dir.dirents, dirent);
     }
 
+ out:
     memfs_map_attrs(shared, &request->readdir.r_dir_attr, inode, request->fh);
 
     pthread_mutex_unlock(&inode->lock);

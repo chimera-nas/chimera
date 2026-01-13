@@ -1423,6 +1423,17 @@ demofs_remove(
     request->complete(request);
 } /* demofs_remove */
 
+/*
+ * Cookie values for readdir:
+ *   0 = start of directory, will return "."
+ *   1 = "." was returned, will return ".."
+ *   2 = ".." was returned, will return first real entry
+ *   3+ = real entry cookie (hash + 3)
+ */
+#define DEMOFS_COOKIE_DOT    1
+#define DEMOFS_COOKIE_DOTDOT 2
+#define DEMOFS_COOKIE_FIRST  3
+
 static void
 demofs_readdir(
     struct demofs_thread       *thread,
@@ -1430,7 +1441,7 @@ demofs_readdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct demofs_inode     *inode, *dirent_inode;
+    struct demofs_inode     *inode, *dirent_inode, *parent_inode;
     struct demofs_dirent    *dirent;
     uint64_t                 cookie      = request->readdir.cookie;
     uint64_t                 next_cookie = 0;
@@ -1452,19 +1463,74 @@ demofs_readdir(
         return;
     }
 
-    if (cookie) {
-        rb_tree_query_ceil(&inode->dir.dirents, cookie + 1, hash, dirent);
-    } else {
-        rb_tree_first(&inode->dir.dirents, dirent);
+    attr.va_req_mask = request->readdir.attr_mask;
+
+    /* Handle "." entry (cookie 0 -> 1) */
+    if (cookie < DEMOFS_COOKIE_DOT) {
+        demofs_map_attrs(thread, &attr, inode);
+
+        rc = request->readdir.callback(
+            inode->inum,
+            DEMOFS_COOKIE_DOT,
+            ".",
+            1,
+            &attr,
+            request->proto_private_data);
+
+        if (rc) {
+            next_cookie = DEMOFS_COOKIE_DOT;
+            eof         = 0;
+            goto out;
+        }
+
+        cookie = DEMOFS_COOKIE_DOT;
     }
 
-    attr.va_req_mask = request->readdir.attr_mask;
+    /* Handle ".." entry (cookie 1 -> 2) */
+    if (cookie < DEMOFS_COOKIE_DOTDOT) {
+        parent_inode = demofs_inode_get_inum(shared,
+                                             inode->dir.parent_inum,
+                                             inode->dir.parent_gen);
+
+        if (parent_inode) {
+            demofs_map_attrs(thread, &attr, parent_inode);
+            pthread_mutex_unlock(&parent_inode->lock);
+        } else {
+            demofs_map_attrs(thread, &attr, inode);
+        }
+
+        rc = request->readdir.callback(
+            inode->dir.parent_inum,
+            DEMOFS_COOKIE_DOTDOT,
+            "..",
+            2,
+            &attr,
+            request->proto_private_data);
+
+        if (rc) {
+            next_cookie = DEMOFS_COOKIE_DOTDOT;
+            eof         = 0;
+            goto out;
+        }
+
+        cookie = DEMOFS_COOKIE_DOTDOT;
+    }
+
+    /* Handle real directory entries (cookie >= 2) */
+    if (cookie < DEMOFS_COOKIE_FIRST) {
+        rb_tree_first(&inode->dir.dirents, dirent);
+    } else {
+        uint64_t hash_cookie = cookie - DEMOFS_COOKIE_FIRST;
+
+        rb_tree_query_ceil(&inode->dir.dirents, hash_cookie + 1, hash, dirent);
+    }
 
     while (dirent) {
 
         dirent_inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
         if (!dirent_inode) {
+            dirent = rb_tree_next(&inode->dir.dirents, dirent);
             continue;
         }
 
@@ -1474,13 +1540,13 @@ demofs_readdir(
 
         rc = request->readdir.callback(
             dirent->inum,
-            dirent->hash,
+            dirent->hash + DEMOFS_COOKIE_FIRST,
             dirent->name,
             dirent->name_len,
             &attr,
             request->proto_private_data);
 
-        next_cookie = dirent->hash;
+        next_cookie = dirent->hash + DEMOFS_COOKIE_FIRST;
 
         if (rc) {
             eof = 0;
@@ -1490,6 +1556,7 @@ demofs_readdir(
         dirent = rb_tree_next(&inode->dir.dirents, dirent);
     }
 
+ out:
     demofs_map_attrs(thread, &request->readdir.r_dir_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);

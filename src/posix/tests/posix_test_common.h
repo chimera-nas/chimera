@@ -42,13 +42,20 @@ posix_test_init(
 
     env->session_dir[0] = '\0';
 
-    while ((opt = getopt(argc, argv, "b:")) != -1) {
+    /* Suppress error messages for options we don't handle here -
+     * individual tests may have additional options they parse after.
+     * Use "+" prefix to stop at first non-option (POSIX behavior),
+     * preventing argv permutation that would break subsequent getopt calls. */
+    opterr = 0;
+    while ((opt = getopt(argc, argv, "+b:")) != -1) {
         switch (opt) {
             case 'b':
                 backend = optarg;
                 break;
         } /* switch */
     }
+    opterr = 1;  /* Re-enable for subsequent getopt calls */
+    optind = 1;  /* Reset for next getopt caller */
 
     env->backend = backend;
 

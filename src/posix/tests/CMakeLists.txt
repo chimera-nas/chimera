@@ -227,3 +227,81 @@ generate_cthon_backend_tests(demofs "")
 generate_cthon_backend_tests(cairn CAIRN_ENABLED)
 generate_cthon_backend_tests(linux "")
 generate_cthon_backend_tests(io_uring IO_URING_ENABLED)
+# ============================================================================
+# Stress Tests ported from xfstests
+# These are longer-running tests that exercise filesystem operations heavily
+# ============================================================================
+
+# Build stress test executables
+set(POSIX_STRESS_TEST_PROGRAMS
+    test_dirstress
+    test_rewinddir
+    test_fstest
+    test_nametest
+    test_fsstress
+)
+
+foreach(prog ${POSIX_STRESS_TEST_PROGRAMS})
+    add_posix_testprog(${prog})
+endforeach()
+
+# Macro to add a stress test for a specific backend with custom timeout
+macro(add_stress_test testname prog backend timeout)
+    add_test(NAME chimera/posix/${testname}_${backend}
+        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_${prog} -b ${backend}
+    )
+    set_tests_properties(chimera/posix/${testname}_${backend} PROPERTIES
+        TIMEOUT ${timeout}
+    )
+endmacro()
+
+# Helper macro to generate stress tests for a backend
+macro(_generate_stress_tests_for_backend backend)
+    # dirstress: directory operations stress test (reduced params for testing)
+    add_test(NAME chimera/posix/dirstress_${backend}
+        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_test_dirstress -b ${backend} -p 1 -f 50
+    )
+    set_tests_properties(chimera/posix/dirstress_${backend} PROPERTIES TIMEOUT 120)
+
+    # rewinddir: tests rewinddir() POSIX semantics
+    add_test(NAME chimera/posix/rewinddir_${backend}
+        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_test_rewinddir -b ${backend}
+    )
+    set_tests_properties(chimera/posix/rewinddir_${backend} PROPERTIES TIMEOUT 120)
+
+    # fstest: data integrity verification test
+    add_test(NAME chimera/posix/fstest_${backend}
+        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_test_fstest -b ${backend} -n 1 -f 2 -l 5 -s 65536
+    )
+    set_tests_properties(chimera/posix/fstest_${backend} PROPERTIES TIMEOUT 120)
+
+    # nametest: namespace stress test
+    add_test(NAME chimera/posix/nametest_${backend}
+        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_test_nametest -b ${backend} -n 50 -i 1000
+    )
+    set_tests_properties(chimera/posix/nametest_${backend} PROPERTIES TIMEOUT 120)
+
+    # fsstress: comprehensive filesystem stress test
+    add_test(NAME chimera/posix/fsstress_${backend}
+        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_test_fsstress -b ${backend} -n 500 -p 1
+    )
+    set_tests_properties(chimera/posix/fsstress_${backend} PROPERTIES TIMEOUT 180)
+endmacro()
+
+# Macro to generate stress tests with optional condition
+macro(generate_stress_tests backend condition_var)
+    if(condition_var)
+        if(${condition_var})
+            _generate_stress_tests_for_backend(${backend})
+        endif()
+    else()
+        _generate_stress_tests_for_backend(${backend})
+    endif()
+endmacro()
+
+# Generate stress tests for each backend
+generate_stress_tests(memfs "")
+generate_stress_tests(demofs "")
+generate_stress_tests(cairn CAIRN_ENABLED)
+generate_stress_tests(linux "")
+generate_stress_tests(io_uring IO_URING_ENABLED)
