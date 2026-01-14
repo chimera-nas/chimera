@@ -579,7 +579,7 @@ chimera_nfs4_unmarshall_attrs(
     void    *attrsend = attrs + attrvals_len;
     uint32_t set_it;
 
-    attr->va_req_mask = 0;
+    attr->va_set_mask = 0;
 
     if (num_req_mask >= 1) {
         if (req_mask[0] & (1 << FATTR4_SIZE)) {
@@ -590,7 +590,7 @@ chimera_nfs4_unmarshall_attrs(
 
             attr->va_size      = chimera_nfs_ntoh64(*(uint64_t *) attrs);
             attrs             += sizeof(uint64_t);
-            attr->va_req_mask |= CHIMERA_VFS_ATTR_SIZE;
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         }
     }
 
@@ -603,7 +603,7 @@ chimera_nfs4_unmarshall_attrs(
 
             attr->va_mode      = chimera_nfs_ntoh32(*(uint32_t *) attrs);
             attrs             += sizeof(uint32_t);
-            attr->va_req_mask |= CHIMERA_VFS_ATTR_MODE;
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         }
 
         if (req_mask[1] & (1 << (FATTR4_TIME_ACCESS_SET - 32))) {
@@ -630,7 +630,7 @@ chimera_nfs4_unmarshall_attrs(
                 attr->va_atime.tv_nsec = CHIMERA_VFS_TIME_NOW;
             }
 
-            attr->va_req_mask |= CHIMERA_VFS_ATTR_ATIME;
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
         }
 
         if (req_mask[1] & (1 << (FATTR4_TIME_MODIFY_SET - 32))) {
@@ -657,7 +657,7 @@ chimera_nfs4_unmarshall_attrs(
                 attr->va_mtime.tv_nsec = CHIMERA_VFS_TIME_NOW;
             }
 
-            attr->va_req_mask |= CHIMERA_VFS_ATTR_MTIME;
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
         }
 
 
