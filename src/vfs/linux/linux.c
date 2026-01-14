@@ -659,6 +659,18 @@ chimera_linux_read(
     ssize_t                      len, left = request->read.length;
     struct iovec                *iov;
 
+    /* Handle 0-byte reads specially - preadv with uninitialized iov causes EFAULT */
+    if (request->read.length == 0) {
+        fd = (int) request->read.handle->vfs_private;
+        chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->read.r_attr, fd);
+        request->read.r_niov   = 0;
+        request->read.r_length = 0;
+        request->read.r_eof    = 1;
+        request->status        = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
     request->read.r_niov = evpl_iovec_alloc(evpl,
                                             request->read.length,
                                             4096,
