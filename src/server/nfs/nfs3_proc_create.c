@@ -49,6 +49,8 @@ chimera_nfs3_create_open_at_complete(
         chimera_nfs3_set_wcc_data(&res.resok.dir_wcc, dir_pre_attr, dir_post_attr);
 
         chimera_vfs_release(thread->vfs_thread, handle);
+    } else {
+        chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, dir_pre_attr, dir_post_attr);
     }
 
     chimera_vfs_release(thread->vfs_thread, parent_handle);

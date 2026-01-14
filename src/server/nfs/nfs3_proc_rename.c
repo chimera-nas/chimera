@@ -27,6 +27,11 @@ chimera_nfs3_rename_complete(
         res.resok.fromdir_wcc.after.attributes_follow  = 0;
         res.resok.todir_wcc.before.attributes_follow   = 0;
         res.resok.todir_wcc.after.attributes_follow    = 0;
+    } else {
+        res.resfail.fromdir_wcc.before.attributes_follow = 0;
+        res.resfail.fromdir_wcc.after.attributes_follow  = 0;
+        res.resfail.todir_wcc.before.attributes_follow   = 0;
+        res.resfail.todir_wcc.after.attributes_follow    = 0;
     }
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_RENAME(evpl, &res, msg);

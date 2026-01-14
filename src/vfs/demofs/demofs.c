@@ -457,6 +457,9 @@ demofs_inode_free(
         inode->symlink.target = NULL;
     }
 
+    /* Increment generation so stale file handles return ESTALE */
+    inode->gen++;
+
     pthread_mutex_lock(&inode_list->lock);
     LL_PREPEND(inode_list->free_inode, inode);
     inode_list->num_inodes--;

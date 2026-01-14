@@ -287,7 +287,7 @@ chimera_nfs3_unmarshall_attrs(
     attr->va_ctime.tv_sec  = fattr->ctime.seconds;
     attr->va_ctime.tv_nsec = fattr->ctime.nseconds;
 
-    attr->va_set_mask = CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FSID | CHIMERA_VFS_ATTR_ATOMIC;
+    attr->va_set_mask |= CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FSID | CHIMERA_VFS_ATTR_ATOMIC;
 } /* chimera_nfs3_unmarshall_attrs */
 
 static inline void
