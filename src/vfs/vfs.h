@@ -486,6 +486,8 @@ struct chimera_vfs_request {
             const char                     *name;
             int                             namelen;
             uint64_t                        name_hash;
+            const uint8_t                  *child_fh;     /* Optional: child FH if known */
+            int                             child_fh_len; /* 0 if child_fh not provided */
             struct chimera_vfs_attrs        r_dir_pre_attr;
             struct chimera_vfs_attrs        r_dir_post_attr;
             struct chimera_vfs_attrs        r_removed_attr;

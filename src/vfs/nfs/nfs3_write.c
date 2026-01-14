@@ -3,8 +3,14 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs_internal.h"
+#include "nfs3_open_state.h"
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
+
+struct chimera_nfs3_write_ctx {
+    struct chimera_nfs_shared      *shared;
+    struct chimera_nfs3_open_state *open_state;
+};
 
 static void
 chimera_nfs3_write_callback(
@@ -13,7 +19,8 @@ chimera_nfs3_write_callback(
     int               status,
     void             *private_data)
 {
-    struct chimera_vfs_request *request = private_data;
+    struct chimera_vfs_request    *request = private_data;
+    struct chimera_nfs3_write_ctx *ctx     = request->plugin_data;
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -32,6 +39,11 @@ chimera_nfs3_write_callback(
 
     chimera_nfs3_get_wcc_data(&request->write.r_pre_attr, &request->write.r_post_attr, &res->resok.file_wcc);
 
+    /* Mark file as dirty if the write was not fully committed to stable storage */
+    if (res->resok.committed != FILE_SYNC && ctx->open_state) {
+        chimera_nfs3_open_state_mark_dirty(ctx->open_state);
+    }
+
     request->write.r_sync   = res->resok.committed;
     request->write.r_length = res->resok.count;
     request->status         = CHIMERA_VFS_OK;
@@ -47,6 +59,7 @@ chimera_nfs3_write(
 {
     struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
                                                                                                   request->fh_len);
+    struct chimera_nfs3_write_ctx           *ctx;
     struct WRITE3args                        args;
     uint8_t                                 *fh;
     int                                      fhlen;
@@ -57,7 +70,10 @@ chimera_nfs3_write(
         return;
     }
 
-    /* NFS3 is stateless - no dirty tracking needed */
+    /* Initialize context for dirty tracking in callback */
+    ctx             = request->plugin_data;
+    ctx->shared     = shared;
+    ctx->open_state = (struct chimera_nfs3_open_state *) request->write.handle->vfs_private;
 
     chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 

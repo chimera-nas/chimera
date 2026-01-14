@@ -59,6 +59,8 @@ chimera_smb_create_unlink(struct chimera_smb_request *request)
         request->create.parent_handle,
         open_file->name,
         open_file->name_len,
+        NULL,
+        0,
         0,
         0,
         chimera_smb_create_unlink_callback,

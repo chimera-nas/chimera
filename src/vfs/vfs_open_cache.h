@@ -494,3 +494,68 @@ chimera_vfs_open_cache_mark_for_close_by_mount(
 
     return count;
 } /* chimera_vfs_open_cache_mark_for_close_by_mount */
+
+/*
+ * Lookup a file handle in the open cache and increment its refcount if found.
+ *
+ * This is used for checking if a file is open (e.g., for silly rename on remove).
+ * If the file is open (opencnt > 0), increments opencnt and returns the handle.
+ * If not found or not open, returns NULL.
+ *
+ * The caller must call chimera_vfs_open_cache_release() when done with the handle.
+ */
+static inline struct chimera_vfs_open_handle *
+chimera_vfs_open_cache_lookup_ref(
+    struct vfs_open_cache *cache,
+    const uint8_t         *fh,
+    uint32_t               fh_len,
+    uint64_t               fh_hash)
+{
+    struct vfs_open_cache_shard    *shard;
+    struct chimera_vfs_open_handle *handle = NULL;
+
+    shard = &cache->shards[fh_hash & cache->shard_mask];
+
+    pthread_mutex_lock(&shard->lock);
+
+    HASH_FIND_BYHASHVALUE(hh_by_fh, shard->open_files, fh, fh_len, (fh_hash & 0xFFFFFFFF), handle);
+
+    if (handle && handle->opencnt > 0 && !(handle->flags & CHIMERA_VFS_OPEN_HANDLE_PENDING)) {
+        /* Found an open, non-pending handle - increment refcount */
+        handle->opencnt++;
+    } else {
+        handle = NULL;
+    }
+
+    pthread_mutex_unlock(&shard->lock);
+
+    return handle;
+} /* chimera_vfs_open_cache_lookup_ref */
+
+/*
+ * Check if a file handle exists in the open cache.
+ *
+ * Returns true if the handle exists (regardless of opencnt or pending state).
+ * This is used by backends to avoid allocating per-open state when the VFS
+ * cache will reuse an existing entry.
+ */
+static inline int
+chimera_vfs_open_cache_exists(
+    struct vfs_open_cache *cache,
+    const uint8_t         *fh,
+    uint32_t               fh_len,
+    uint64_t               fh_hash)
+{
+    struct vfs_open_cache_shard    *shard;
+    struct chimera_vfs_open_handle *handle = NULL;
+
+    shard = &cache->shards[fh_hash & cache->shard_mask];
+
+    pthread_mutex_lock(&shard->lock);
+
+    HASH_FIND_BYHASHVALUE(hh_by_fh, shard->open_files, fh, fh_len, (fh_hash & 0xFFFFFFFF), handle);
+
+    pthread_mutex_unlock(&shard->lock);
+
+    return handle != NULL;
+} /* chimera_vfs_open_cache_exists */

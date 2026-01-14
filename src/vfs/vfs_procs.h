@@ -232,6 +232,8 @@ chimera_vfs_remove(
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
+    const uint8_t                  *child_fh,
+    int                             child_fh_len,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
     chimera_vfs_remove_callback_t   callback,

@@ -60,6 +60,8 @@ chimera_vfs_remove(
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
+    const uint8_t                  *child_fh,
+    int                             child_fh_len,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
     chimera_vfs_remove_callback_t   callback,
@@ -75,6 +77,8 @@ chimera_vfs_remove(
     request->remove.name                        = name;
     request->remove.namelen                     = namelen;
     request->remove.name_hash                   = chimera_vfs_hash(name, namelen);
+    request->remove.child_fh                    = child_fh;
+    request->remove.child_fh_len                = child_fh_len;
     request->remove.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
     request->remove.r_dir_pre_attr.va_set_mask  = 0;
     request->remove.r_dir_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;

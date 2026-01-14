@@ -202,6 +202,8 @@ struct chimera_client_request {
             int                             path_len;
             int                             parent_len;
             int                             name_offset;
+            int                             child_fh_len;
+            uint8_t                         child_fh[CHIMERA_VFS_FH_SIZE];
             char                            path[CHIMERA_VFS_PATH_MAX];
         } remove;
 
