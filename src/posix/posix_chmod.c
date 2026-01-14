@@ -49,8 +49,8 @@ chimera_posix_chmod(
 
     memcpy(req.setattr.path, path, path_len);
 
-    req.setattr.set_attr.va_req_mask = CHIMERA_VFS_ATTR_MODE;
-    req.setattr.set_attr.va_set_mask = 0;
+    req.setattr.set_attr.va_req_mask = 0;
+    req.setattr.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     req.setattr.set_attr.va_mode     = mode;
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_chmod_exec);

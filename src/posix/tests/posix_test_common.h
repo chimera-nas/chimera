@@ -14,15 +14,103 @@
 #include <jansson.h>
 #include "posix/posix.h"
 #include "client/client.h"
+#include "server/server.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
 
 struct posix_test_env {
     struct chimera_posix_client *posix;
+    struct chimera_server       *server;       // For NFS backend tests
     struct prometheus_metrics   *metrics;
     char                         session_dir[256];
     const char                  *backend;
+    const char                  *nfs_backend;  // Actual backend behind NFS (e.g., "memfs")
+    int                          nfs_version;  // 3 or 4, 0 if not NFS
 };
+
+// Helper to parse backend string for NFS backends (e.g., "nfs3_memfs" -> version=3, backend="memfs")
+static inline int
+posix_test_parse_nfs_backend(
+    const char  *backend,
+    int         *nfs_version,
+    const char **nfs_backend)
+{
+    if (strncmp(backend, "nfs3_", 5) == 0) {
+        *nfs_version = 3;
+        *nfs_backend = backend + 5;
+        return 1;
+    } else if (strncmp(backend, "nfs4_", 5) == 0) {
+        *nfs_version = 4;
+        *nfs_backend = backend + 5;
+        return 1;
+    }
+    *nfs_version = 0;
+    *nfs_backend = NULL;
+    return 0;
+} // posix_test_parse_nfs_backend
+
+// Helper to configure demofs backend
+static inline void
+posix_test_configure_demofs(
+    const char *session_dir,
+    char       *demofs_cfg,
+    size_t      demofs_cfg_size)
+{
+    char    device_path[300];
+    json_t *cfg, *devices, *device;
+    int     rc;
+
+    snprintf(demofs_cfg, demofs_cfg_size, "%s/demofs.json", session_dir);
+
+    cfg     = json_object();
+    devices = json_array();
+
+    for (int i = 0; i < 10; ++i) {
+        device = json_object();
+        snprintf(device_path, sizeof(device_path), "%s/device-%d.img", session_dir, i);
+        json_object_set_new(device, "type", json_string("io_uring"));
+        json_object_set_new(device, "size", json_integer(1));
+        json_object_set_new(device, "path", json_string(device_path));
+        json_array_append_new(devices, device);
+
+        int fd = open(device_path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (fd < 0) {
+            fprintf(stderr, "Failed to create device %s: %s\n", device_path, strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+
+        rc = ftruncate(fd, 256 * 1024 * 1024 * 1024UL);
+
+        if (rc < 0) {
+            fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+
+        close(fd);
+    }
+
+    json_object_set_new(cfg, "devices", devices);
+    json_dump_file(cfg, demofs_cfg, 0);
+    json_decref(cfg);
+} // posix_test_configure_demofs
+
+// Helper to configure cairn backend
+static inline void
+posix_test_configure_cairn(
+    const char *session_dir,
+    char       *cairn_cfg,
+    size_t      cairn_cfg_size)
+{
+    json_t *cfg;
+
+    snprintf(cairn_cfg, cairn_cfg_size, "%s/cairn.cfg", session_dir);
+
+    cfg = json_object();
+    json_object_set_new(cfg, "initialize", json_true());
+    json_object_set_new(cfg, "path", json_string(session_dir));
+    json_dump_file(cfg, cairn_cfg, 0);
+    json_decref(cfg);
+} // posix_test_configure_cairn
 
 static inline void
 posix_test_init(
@@ -30,13 +118,18 @@ posix_test_init(
     char                 **argv,
     int                    argc)
 {
-    int                           opt, rc;
+    int                           opt;
     extern char                  *optarg;
     const char                   *backend = "memfs";
-    struct chimera_client_config *config;
+    struct chimera_client_config *client_config;
+    struct chimera_server_config *server_config;
     struct timespec               tv;
+    int                           is_nfs;
+    const char                   *nfs_backend_name;
+    int                           nfs_version;
 
     env->metrics = prometheus_metrics_create(NULL, NULL, 0);
+    env->server  = NULL;
 
     clock_gettime(CLOCK_MONOTONIC, &tv);
 
@@ -59,6 +152,11 @@ posix_test_init(
 
     env->backend = backend;
 
+    // Check if this is an NFS backend (e.g., "nfs3_memfs")
+    is_nfs           = posix_test_parse_nfs_backend(backend, &nfs_version, &nfs_backend_name);
+    env->nfs_version = nfs_version;
+    env->nfs_backend = nfs_backend_name;
+
     chimera_log_init();
 
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
@@ -66,6 +164,10 @@ posix_test_init(
 #ifndef CHIMERA_SANITIZE
     chimera_enable_crash_handler();
 #endif /* ifndef CHIMERA_SANITIZE */
+
+    if (is_nfs) {
+        evpl_set_log_fn(chimera_vlog, chimera_log_flush);
+    }
 
     snprintf(env->session_dir, sizeof(env->session_dir),
              "/build/test/posix_session_%d_%lu_%lu",
@@ -76,63 +178,58 @@ posix_test_init(
     (void) mkdir("/build/test", 0755);
     (void) mkdir(env->session_dir, 0755);
 
-    config = chimera_client_config_init();
+    if (is_nfs) {
+        // NFS backend: Start server with the actual backend, then connect via NFS client
+        char config_path[300];
 
-    if (strcmp(backend, "demofs") == 0) {
-        char    demofs_cfg[300];
-        char    device_path[300];
-        json_t *cfg, *devices, *device;
-        snprintf(demofs_cfg, sizeof(demofs_cfg), "%s/demofs.json", env->session_dir);
+        server_config = chimera_server_config_init();
 
-        cfg     = json_object();
-        devices = json_array();
-
-        for (int i = 0; i < 10; ++i) {
-            device = json_object();
-            snprintf(device_path, sizeof(device_path), "%s/device-%d.img", env->session_dir, i);
-            json_object_set_new(device, "type", json_string("io_uring"));
-            json_object_set_new(device, "size", json_integer(1));
-            json_object_set_new(device, "path", json_string(device_path));
-            json_array_append_new(devices, device);
-
-            int fd = open(device_path, O_CREAT | O_TRUNC | O_RDWR, 0644);
-            if (fd < 0) {
-                fprintf(stderr, "Failed to create device %s: %s\n", device_path, strerror(errno));
-                exit(EXIT_FAILURE);
-            }
-
-            rc = ftruncate(fd, 256 * 1024 * 1024 * 1024UL);
-
-            if (rc < 0) {
-                fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));
-                exit(EXIT_FAILURE);
-            }
-
-            close(fd);
+        if (strcmp(nfs_backend_name, "demofs") == 0) {
+            posix_test_configure_demofs(env->session_dir, config_path, sizeof(config_path));
+            chimera_server_config_add_module(server_config, "demofs", NULL, config_path);
+        } else if (strcmp(nfs_backend_name, "cairn") == 0) {
+            posix_test_configure_cairn(env->session_dir, config_path, sizeof(config_path));
+            chimera_server_config_add_module(server_config, "cairn", NULL, config_path);
         }
 
-        json_object_set_new(cfg, "devices", devices);
-        json_dump_file(cfg, demofs_cfg, 0);
-        json_decref(cfg);
+        env->server = chimera_server_init(server_config, env->metrics);
 
-        chimera_client_config_add_module(config, "demofs", "/build/test/demofs", demofs_cfg);
-    } else if (strcmp(backend, "cairn") == 0) {
-        char    cairn_cfgfile[300];
-        json_t *cfg;
+        // Mount the backend on the server as "share"
+        if (strcmp(nfs_backend_name, "linux") == 0) {
+            chimera_server_mount(env->server, "share", "linux", env->session_dir);
+        } else if (strcmp(nfs_backend_name, "io_uring") == 0) {
+            chimera_server_mount(env->server, "share", "io_uring", env->session_dir);
+        } else if (strcmp(nfs_backend_name, "memfs") == 0) {
+            chimera_server_mount(env->server, "share", "memfs", "/");
+        } else if (strcmp(nfs_backend_name, "demofs") == 0) {
+            chimera_server_mount(env->server, "share", "demofs", "/");
+        } else if (strcmp(nfs_backend_name, "cairn") == 0) {
+            chimera_server_mount(env->server, "share", "cairn", "/");
+        } else {
+            fprintf(stderr, "Unknown NFS backend: %s\n", nfs_backend_name);
+            exit(EXIT_FAILURE);
+        }
 
-        snprintf(cairn_cfgfile, sizeof(cairn_cfgfile),
-                 "%s/cairn.cfg", env->session_dir);
+        chimera_server_start(env->server);
 
-        cfg = json_object();
-        json_object_set_new(cfg, "initialize", json_true());
-        json_object_set_new(cfg, "path", json_string(env->session_dir));
-        json_dump_file(cfg, cairn_cfgfile, 0);
-        json_decref(cfg);
+        // Initialize the POSIX client (NFS client module is already registered by default)
+        client_config = chimera_client_config_init();
+    } else {
+        // Direct backend: No server needed
+        client_config = chimera_client_config_init();
 
-        chimera_client_config_add_module(config, "cairn", "/build/test/cairn", cairn_cfgfile);
+        if (strcmp(backend, "demofs") == 0) {
+            char demofs_cfg[300];
+            posix_test_configure_demofs(env->session_dir, demofs_cfg, sizeof(demofs_cfg));
+            chimera_client_config_add_module(client_config, "demofs", "/build/test/demofs", demofs_cfg);
+        } else if (strcmp(backend, "cairn") == 0) {
+            char cairn_cfg[300];
+            posix_test_configure_cairn(env->session_dir, cairn_cfg, sizeof(cairn_cfg));
+            chimera_client_config_add_module(client_config, "cairn", "/build/test/cairn", cairn_cfg);
+        }
     }
 
-    env->posix = chimera_posix_init(config, env->metrics);
+    env->posix = chimera_posix_init(client_config, env->metrics);
 
     if (!env->posix) {
         fprintf(stderr, "Failed to initialize POSIX client\n");
@@ -148,6 +245,11 @@ posix_test_cleanup(
     int rc;
 
     chimera_posix_shutdown();
+
+    // Destroy the server if it was created (NFS backend)
+    if (env->server) {
+        chimera_server_destroy(env->server);
+    }
 
     if (remove_session && env->session_dir[0] != '\0') {
         char cmd[1024];
@@ -182,12 +284,25 @@ static inline int
 posix_test_mount(struct posix_test_env *env)
 {
     const char *module_path = "/";
+    const char *module_name;
+    char        nfs_mount_path[256];
+    char        nfs_mount_options[64];
 
+    if (env->nfs_version > 0) {
+        // NFS backend: mount via NFS client
+        // Mount path format: hostname:path
+        snprintf(nfs_mount_path, sizeof(nfs_mount_path), "127.0.0.1:/share");
+        snprintf(nfs_mount_options, sizeof(nfs_mount_options), "vers=%d", env->nfs_version);
+        return chimera_posix_mount_with_options("/test", "nfs", nfs_mount_path, nfs_mount_options);
+    }
+
+    // Direct backend
+    module_name = env->backend;
     if (strcmp(env->backend, "linux") == 0 || strcmp(env->backend, "io_uring") == 0) {
         module_path = env->session_dir;
     }
 
-    return chimera_posix_mount("/test", env->backend, module_path);
+    return chimera_posix_mount("/test", module_name, module_path);
 } /* posix_test_mount */
 
 static inline int

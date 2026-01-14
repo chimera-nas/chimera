@@ -128,6 +128,7 @@ chimera_vfs_readdir(
     uint64_t                        attr_mask,
     uint64_t                        dir_attr_mask,
     uint64_t                        cookie,
+    uint32_t                        flags,
     chimera_vfs_readdir_callback_t  callback,
     chimera_vfs_readdir_complete_t  complete,
     void                           *private_data);

@@ -15,11 +15,6 @@ chimera_nfs3_write_callback(
 {
     struct chimera_vfs_request *request = private_data;
 
-    /* XXX should not be needed */
-    for (int i = 0; i < request->write.niov; i++) {
-        evpl_iovec_release(evpl, &request->write.iov[i]);
-    }
-
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
         request->complete(request);
@@ -52,7 +47,6 @@ chimera_nfs3_write(
 {
     struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
                                                                                                   request->fh_len);
-    struct chimera_nfs_client_open_handle   *open_handle;
     struct WRITE3args                        args;
     uint8_t                                 *fh;
     int                                      fhlen;
@@ -63,11 +57,7 @@ chimera_nfs3_write(
         return;
     }
 
-    open_handle = (struct chimera_nfs_client_open_handle *) request->write.handle->vfs_private;
-
-    if (!request->write.sync) {
-        open_handle->dirty++;
-    }
+    /* NFS3 is stateless - no dirty tracking needed */
 
     chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 

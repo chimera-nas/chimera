@@ -663,32 +663,33 @@ memfs_apply_attrs(
     struct chimera_vfs_attrs *attr)
 {
     struct timespec now;
+    uint64_t        set_mask = attr->va_set_mask;
 
     clock_gettime(CLOCK_REALTIME, &now);
 
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+    if (set_mask & CHIMERA_VFS_ATTR_MODE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         inode->mode        = (inode->mode & S_IFMT) | (attr->va_mode & ~S_IFMT);
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_UID) {
+    if (set_mask & CHIMERA_VFS_ATTR_UID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         inode->uid         = attr->va_uid;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_GID) {
+    if (set_mask & CHIMERA_VFS_ATTR_GID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         inode->gid         = attr->va_gid;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) {
+    if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         inode->size        = attr->va_size;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_ATIME) {
+    if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
         if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->atime = now;
@@ -697,7 +698,7 @@ memfs_apply_attrs(
         }
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MTIME) {
+    if (set_mask & CHIMERA_VFS_ATTR_MTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
         if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->mtime = now;
@@ -756,7 +757,7 @@ memfs_setattr(
     memfs_map_attrs(shared, &request->setattr.r_pre_attr, inode, request->fh);
 
     /* Handle truncation: free blocks past new EOF and zero partial block */
-    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) &&
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
         S_ISREG(inode->mode) &&
         attr->va_size < inode->size) {
 
@@ -1299,65 +1300,73 @@ memfs_readdir(
 
     attr.va_req_mask = request->readdir.attr_mask;
 
-    /* Handle "." entry (cookie 0 -> 1) */
-    if (cookie < MEMFS_COOKIE_DOT) {
-        memfs_map_attrs(shared, &attr, inode, request->fh);
-
-        rc = request->readdir.callback(
-            inode->inum,
-            MEMFS_COOKIE_DOT,
-            ".",
-            1,
-            &attr,
-            request->proto_private_data);
-
-        if (rc) {
-            /* Caller wants to stop after this entry */
-            next_cookie = MEMFS_COOKIE_DOT;
-            eof         = 0;
-            goto out;
-        }
-
-        cookie = MEMFS_COOKIE_DOT;
-    }
-
-    /* Handle ".." entry (cookie 1 -> 2) */
-    if (cookie < MEMFS_COOKIE_DOTDOT) {
-        /* Get parent inode for ".." attributes */
-        /* Check if parent is the same inode (root directory case) to avoid deadlock */
-        if (inode->dir.parent_inum == inode->inum &&
-            inode->dir.parent_gen == inode->gen) {
-            /* Root directory - parent is self, reuse current inode */
+    /* Handle "." and ".." entries only if requested */
+    if (request->readdir.flags & CHIMERA_VFS_READDIR_EMIT_DOT) {
+        /* Handle "." entry (cookie 0 -> 1) */
+        if (cookie < MEMFS_COOKIE_DOT) {
             memfs_map_attrs(shared, &attr, inode, request->fh);
-        } else {
-            parent_inode = memfs_inode_get_inum(shared,
-                                                inode->dir.parent_inum,
-                                                inode->dir.parent_gen);
 
-            if (parent_inode) {
-                memfs_map_attrs(shared, &attr, parent_inode, request->fh);
-                pthread_mutex_unlock(&parent_inode->lock);
-            } else {
-                /* Fallback to current directory attrs if parent not found */
-                memfs_map_attrs(shared, &attr, inode, request->fh);
+            rc = request->readdir.callback(
+                inode->inum,
+                MEMFS_COOKIE_DOT,
+                ".",
+                1,
+                &attr,
+                request->proto_private_data);
+
+            if (rc) {
+                /* Caller wants to stop after this entry */
+                next_cookie = MEMFS_COOKIE_DOT;
+                eof         = 0;
+                goto out;
             }
+
+            cookie = MEMFS_COOKIE_DOT;
         }
 
-        rc = request->readdir.callback(
-            inode->dir.parent_inum,
-            MEMFS_COOKIE_DOTDOT,
-            "..",
-            2,
-            &attr,
-            request->proto_private_data);
+        /* Handle ".." entry (cookie 1 -> 2) */
+        if (cookie < MEMFS_COOKIE_DOTDOT) {
+            /* Get parent inode for ".." attributes */
+            /* Check if parent is the same inode (root directory case) to avoid deadlock */
+            if (inode->dir.parent_inum == inode->inum &&
+                inode->dir.parent_gen == inode->gen) {
+                /* Root directory - parent is self, reuse current inode */
+                memfs_map_attrs(shared, &attr, inode, request->fh);
+            } else {
+                parent_inode = memfs_inode_get_inum(shared,
+                                                    inode->dir.parent_inum,
+                                                    inode->dir.parent_gen);
 
-        if (rc) {
-            next_cookie = MEMFS_COOKIE_DOTDOT;
-            eof         = 0;
-            goto out;
+                if (parent_inode) {
+                    memfs_map_attrs(shared, &attr, parent_inode, request->fh);
+                    pthread_mutex_unlock(&parent_inode->lock);
+                } else {
+                    /* Fallback to current directory attrs if parent not found */
+                    memfs_map_attrs(shared, &attr, inode, request->fh);
+                }
+            }
+
+            rc = request->readdir.callback(
+                inode->dir.parent_inum,
+                MEMFS_COOKIE_DOTDOT,
+                "..",
+                2,
+                &attr,
+                request->proto_private_data);
+
+            if (rc) {
+                next_cookie = MEMFS_COOKIE_DOTDOT;
+                eof         = 0;
+                goto out;
+            }
+
+            cookie = MEMFS_COOKIE_DOTDOT;
         }
-
-        cookie = MEMFS_COOKIE_DOTDOT;
+    } else {
+        /* Skip . and .. entries - advance cookie past them */
+        if (cookie < MEMFS_COOKIE_DOTDOT) {
+            cookie = MEMFS_COOKIE_DOTDOT;
+        }
     }
 
     /* Handle real directory entries (cookie >= 2) */

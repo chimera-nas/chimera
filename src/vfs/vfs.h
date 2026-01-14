@@ -155,6 +155,8 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OPEN_READ_ONLY     (1U << 4)
 #define CHIMERA_VFS_OPEN_EXCLUSIVE     (1U << 5)
 
+/* Readdir flags */
+#define CHIMERA_VFS_READDIR_EMIT_DOT   (1U << 0) /* Emit "." and ".." entries */
 
 #define CHIMERA_VFS_OPEN_ID_SYNTHETIC  0
 #define CHIMERA_VFS_OPEN_ID_PATH       1
@@ -393,6 +395,7 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        cookie;
             uint64_t                        attr_mask;
+            uint32_t                        flags;
             uint64_t                        r_cookie;
             uint32_t                        r_eof;
             struct chimera_vfs_attrs        r_dir_attr;

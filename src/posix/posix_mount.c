@@ -32,6 +32,16 @@ chimera_posix_mount(
     const char *module_name,
     const char *module_path)
 {
+    return chimera_posix_mount_with_options(mount_path, module_name, module_path, NULL);
+} /* chimera_posix_mount */
+
+SYMBOL_EXPORT int
+chimera_posix_mount_with_options(
+    const char *mount_path,
+    const char *module_name,
+    const char *module_path,
+    const char *options)
+{
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
     struct chimera_client_request   req;
@@ -47,6 +57,12 @@ chimera_posix_mount(
     memcpy(req.mount.module_name, module_name, strlen(module_name) + 1);
     memcpy(req.mount.module_path, module_path, strlen(module_path) + 1);
 
+    if (options) {
+        memcpy(req.mount.options, options, strlen(options) + 1);
+    } else {
+        req.mount.options[0] = '\0';
+    }
+
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_mount_exec);
 
     int err = chimera_posix_wait(&comp);
@@ -59,4 +75,4 @@ chimera_posix_mount(
     }
 
     return 0;
-} /* chimera_posix_mount */
+} /* chimera_posix_mount_with_options */

@@ -69,6 +69,7 @@ chimera_nfs3_create_open_at_parent_complete(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct CREATE3args               *args   = req->args_create;
     struct chimera_vfs_attrs         *attr;
+    unsigned int                      flags;
     int                               rc;
 
     if (error_code != CHIMERA_VFS_OK) {
@@ -87,6 +88,7 @@ chimera_nfs3_create_open_at_parent_complete(
     chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
     attr->va_req_mask = 0;
+    flags             = CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_INFERRED;
 
     switch (args->how.mode) {
         case UNCHECKED:
@@ -94,6 +96,7 @@ chimera_nfs3_create_open_at_parent_complete(
             break;
         case GUARDED:
             chimera_nfs3_sattr3_to_va(attr, &args->how.obj_attributes);
+            flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
             break;
         case EXCLUSIVE:
             break;
@@ -103,7 +106,7 @@ chimera_nfs3_create_open_at_parent_complete(
                         parent_handle,
                         args->where.name.str,
                         args->where.name.len,
-                        CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_INFERRED,
+                        flags,
                         attr,
                         CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
                         CHIMERA_NFS3_ATTR_WCC_MASK,

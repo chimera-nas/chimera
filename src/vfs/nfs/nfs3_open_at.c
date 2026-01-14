@@ -19,9 +19,8 @@ chimera_nfs3_open_at_lookup_callback(
     int                status,
     void              *private_data)
 {
-    struct chimera_vfs_request            *request = private_data;
-    struct chimera_nfs3_open_at_ctx       *ctx     = request->plugin_data;
-    struct chimera_nfs_client_open_handle *open_handle;
+    struct chimera_vfs_request      *request = private_data;
+    struct chimera_nfs3_open_at_ctx *ctx     = request->plugin_data;
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -51,10 +50,8 @@ chimera_nfs3_open_at_lookup_callback(
 
     chimera_nfs3_unmarshall_fh(&res->resok.object, ctx->server->index, request->fh, &request->open_at.r_attr);
 
-    open_handle        = chimera_nfs_thread_open_handle_alloc(ctx->thread);
-    open_handle->dirty = 0;
-
-    request->open_at.r_vfs_private = (uint64_t) open_handle;
+    /* NFS3 is stateless - no per-open handle needed */
+    request->open_at.r_vfs_private = 0;
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -68,9 +65,8 @@ chimera_nfs3_open_at_create_callback(
     int                status,
     void              *private_data)
 {
-    struct chimera_vfs_request            *request = private_data;
-    struct chimera_nfs3_open_at_ctx       *ctx     = request->plugin_data;
-    struct chimera_nfs_client_open_handle *open_handle;
+    struct chimera_vfs_request      *request = private_data;
+    struct chimera_nfs3_open_at_ctx *ctx     = request->plugin_data;
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -97,11 +93,8 @@ chimera_nfs3_open_at_create_callback(
 
     chimera_nfs3_get_wcc_data(&request->open_at.r_dir_pre_attr, &request->open_at.r_dir_post_attr, &res->resok.dir_wcc);
 
-    open_handle        = chimera_nfs_thread_open_handle_alloc(ctx->thread);
-    open_handle->dirty = 0;
-
-    request->open_at.r_vfs_private = (uint64_t) open_handle;
-
+    /* NFS3 is stateless - no per-open handle needed */
+    request->open_at.r_vfs_private = 0;
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -142,7 +135,7 @@ chimera_nfs3_open_at(
         create_args.where.dir.data.len  = fhlen;
         create_args.where.name.str      = (char *) request->open_at.name;
         create_args.where.name.len      = request->open_at.namelen;
-        create_args.how.mode            = UNCHECKED;
+        create_args.how.mode            = (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE) ? GUARDED : UNCHECKED;
 
         chimera_nfs_va_to_sattr3(&create_args.how.obj_attributes, request->open_at.set_attr);
 

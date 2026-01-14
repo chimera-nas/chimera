@@ -69,12 +69,12 @@ chimera_nfs3_readdir_callback(
                                        &attrs,
                                        request->proto_private_data);
 
+        request->readdir.r_cookie = entry->cookie;
+
         if (rc) {
             eof = 0;
             break;
         }
-
-        request->readdir.r_cookie = entry->cookie;
 
         entry = entry->nextentry;
     }
