@@ -64,6 +64,8 @@ chimera_nfs3_rename(
                        args->to.dir.data.len,
                        args->to.name.str,
                        args->to.name.len,
+                       NULL,
+                       0,
                        chimera_nfs3_rename_complete,
                        req);
 } /* chimera_nfs3_rename */

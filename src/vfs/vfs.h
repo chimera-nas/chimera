@@ -514,15 +514,17 @@ struct chimera_vfs_request {
         } readlink;
 
         struct {
-            const char *name;
-            int         namelen;
-            uint64_t    name_hash;
-            uint64_t    new_fh_hash;
-            const void *new_fh;
-            int         new_fhlen;
-            uint64_t    new_name_hash;
-            const char *new_name;
-            int         new_namelen;
+            const char    *name;
+            int            namelen;
+            uint64_t       name_hash;
+            uint64_t       new_fh_hash;
+            const void    *new_fh;
+            int            new_fhlen;
+            uint64_t       new_name_hash;
+            const char    *new_name;
+            int            new_namelen;
+            const uint8_t *target_fh;     /* Optional: target FH if known (for silly rename) */
+            int            target_fh_len; /* 0 if target_fh not provided */
         } rename;
 
         struct {

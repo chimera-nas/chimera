@@ -352,6 +352,8 @@ chimera_vfs_rename(
     int                           new_fhlen,
     const char                   *new_name,
     int                           new_namelen,
+    const uint8_t                *target_fh,
+    int                           target_fh_len,
     chimera_vfs_rename_callback_t callback,
     void                         *private_data);
 

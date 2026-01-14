@@ -58,6 +58,8 @@ chimera_vfs_rename(
     int                           new_fhlen,
     const char                   *new_name,
     int                           new_namelen,
+    const uint8_t                *target_fh,
+    int                           target_fh_len,
     chimera_vfs_rename_callback_t callback,
     void                         *private_data)
 {
@@ -76,6 +78,8 @@ chimera_vfs_rename(
     request->rename.new_name      = new_name;
     request->rename.new_namelen   = new_namelen;
     request->rename.new_name_hash = chimera_vfs_hash(new_name, new_namelen);
+    request->rename.target_fh     = target_fh;
+    request->rename.target_fh_len = target_fh_len;
     request->proto_callback       = callback;
     request->proto_private_data   = private_data;
 
