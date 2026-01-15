@@ -173,6 +173,18 @@ if(IO_URING_ENABLED)
     add_fsx_test(io_uring)
 endif()
 
+# NFS3 FSX tests
+# These tests run FSX through the NFS3 protocol to an in-process server
+add_fsx_test(nfs3_memfs)
+add_fsx_test(nfs3_demofs)
+if(CAIRN_ENABLED)
+    add_fsx_test(nfs3_cairn)
+endif()
+add_fsx_test(nfs3_linux)
+if(IO_URING_ENABLED)
+    add_fsx_test(nfs3_io_uring)
+endif()
+
 # Cthon common library (shared helpers for all cthon tests)
 add_library(cthon_common STATIC cthon_common.c)
 # Link with chimera_server for NFS backend tests

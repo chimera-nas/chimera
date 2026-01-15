@@ -56,6 +56,7 @@
 
 #include "posix/posix.h"
 #include "client/client.h"
+#include "server/server.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
 
@@ -238,10 +239,16 @@ int                           awu_min = 0;
 int                           awu_max = 0;
 
 /* Chimera POSIX configuration */
-const char                   *chimera_config_file = NULL; /* --chimera-config */
-struct chimera_posix_client  *chimera_posix       = NULL;
-struct chimera_client_config *chimera_config      = NULL;
-struct prometheus_metrics    *chimera_metrics     = NULL;
+const char                   *chimera_config_file      = NULL; /* --chimera-config */
+const char                   *chimera_backend          = NULL; /* -b backend option */
+struct chimera_posix_client  *chimera_posix            = NULL;
+struct chimera_client_config *chimera_config           = NULL;
+struct chimera_server_config *chimera_server_config    = NULL;
+struct chimera_server        *chimera_server           = NULL;
+struct prometheus_metrics    *chimera_metrics          = NULL;
+int                           chimera_nfs_version      = 0; /* 0=direct, 3=NFS3, 4=NFS4 */
+const char                   *chimera_nfs_backend      = NULL; /* backend behind NFS */
+char                          chimera_session_dir[256] = "";
 
 /* Stores info needed to periodically collapse hugepages */
 struct hugepages_collapse_info {
@@ -2439,6 +2446,29 @@ cleanup(int sig)
         prt("signal %d\n", sig);
     }
     prt("testcalls = %lld\n", testcalls);
+
+    /* Shutdown Chimera subsystems - check if initialized first */
+    if (chimera_posix) {
+        chimera_posix_shutdown();
+    }
+    if (chimera_server) {
+        chimera_server_destroy(chimera_server);
+        chimera_server = NULL;
+    }
+    if (chimera_metrics) {
+        prometheus_metrics_destroy(chimera_metrics);
+        chimera_metrics = NULL;
+    }
+
+    /* Clean up session directory */
+    if (chimera_session_dir[0] != '\0') {
+        char cmd[512];
+        int  rc;
+        snprintf(cmd, sizeof(cmd), "rm -rf %s", chimera_session_dir);
+        rc = system(cmd);
+        (void) rc;  /* Ignore return value in cleanup */
+    }
+
     exit(sig);
 } /* cleanup */
 
@@ -2998,11 +3028,13 @@ usage(void)
 	--replay-ops=opsfile: replay ops from recorded .fsxops file\n\
 	--record-ops[=opsfile]: dump ops file also on success. optionally specify ops file name\n\
 	--duration=seconds: ignore any -N setting and run for this many seconds\n\
-	--chimera-config=file: Chimera JSON configuration file (required)\n\
+	--chimera-config=file: Chimera JSON configuration file\n\
+	--backend=backend: use specified backend (memfs, linux, nfs3_memfs, etc.)\n\
 	fname: path inside the Chimera VFS (REQUIRED)\n\n\
 NOTE: mmap operations are disabled as Chimera POSIX API does not support them.\n\
-      The config file should define modules and mounts. The fname path is\n\
-      interpreted relative to the VFS mounts specified in the config.\n");
+      Either --chimera-config or --backend must be specified.\n\
+      With --backend, supported backends: memfs, demofs, cairn, linux, io_uring\n\
+      NFS backends: nfs3_memfs, nfs3_demofs, nfs3_cairn, nfs3_linux, nfs3_io_uring\n");
     exit(90);
 } /* usage */
 
@@ -3497,6 +3529,7 @@ static struct option longopts[] = {
     { "record-ops",     optional_argument, 0, 255 },
     { "duration",       optional_argument, 0, 254 },
     { "chimera-config", required_argument, 0, 257 },
+    { "backend",        required_argument, 0, 258 },
     { }
 };
 /* *INDENT-ON* */
@@ -3784,6 +3817,9 @@ main(
             case 257:      /* --chimera-config */
                 chimera_config_file = optarg;
                 break;
+            case 258:      /* --backend */
+                chimera_backend = optarg;
+                break;
             default:
                 usage();
                 /* NOTREACHED */
@@ -3795,9 +3831,13 @@ main(
         usage();
     }
 
-    /* Chimera config file is required */
-    if (!chimera_config_file) {
-        fprintf(stderr, "Error: --chimera-config is required\n");
+    /* Either --chimera-config or --backend is required */
+    if (!chimera_config_file && !chimera_backend) {
+        fprintf(stderr, "Error: either --chimera-config or --backend is required\n");
+        usage();
+    }
+    if (chimera_config_file && chimera_backend) {
+        fprintf(stderr, "Error: --chimera-config and --backend are mutually exclusive\n");
         usage();
     }
 
@@ -3853,8 +3893,176 @@ main(
         exit(100);
     }
 
-    /* Load config file for module and mount configuration */
-    {
+    if (chimera_backend) {
+        /* --backend mode: Initialize using backend string */
+        const char *mount_module;
+        const char *mount_path;
+        char        nfs_mount_path[256];
+        char        nfs_mount_options[64];
+
+        /* Parse NFS backend format (e.g., "nfs3_memfs") */
+        if (strncmp(chimera_backend, "nfs3_", 5) == 0) {
+            chimera_nfs_version = 3;
+            chimera_nfs_backend = chimera_backend + 5;
+        } else if (strncmp(chimera_backend, "nfs4_", 5) == 0) {
+            chimera_nfs_version = 4;
+            chimera_nfs_backend = chimera_backend + 5;
+        } else {
+            chimera_nfs_version = 0;
+            chimera_nfs_backend = NULL;
+        }
+
+        /* Create session directory */
+        snprintf(chimera_session_dir, sizeof(chimera_session_dir),
+                 "/build/test/fsx_%d_%ld", getpid(), (long) time(NULL));
+        (void) mkdir("/build/test", 0755);
+        if (mkdir(chimera_session_dir, 0755) != 0 && errno != EEXIST) {
+            fprintf(stderr, "Failed to create session directory %s: %s\n",
+                    chimera_session_dir, strerror(errno));
+            exit(100);
+        }
+
+        if (chimera_nfs_version > 0) {
+            /* NFS backend: Start server with the actual backend */
+            chimera_server_config = chimera_server_config_init();
+
+            /* Configure demofs/cairn modules before server init */
+            if (strcmp(chimera_nfs_backend, "demofs") == 0) {
+                char  demofs_cfg[512];
+                char  device_path[512];
+                int   i, fd, rc;
+
+                snprintf(demofs_cfg, sizeof(demofs_cfg), "%s/demofs.json", chimera_session_dir);
+
+                /* Create device files and config */
+                FILE *cfgf = fopen(demofs_cfg, "w");
+                if (!cfgf) {
+                    fprintf(stderr, "Failed to create demofs config\n");
+                    exit(100);
+                }
+                fprintf(cfgf, "{\"devices\":[\n");
+                for (i = 0; i < 10; i++) {
+                    snprintf(device_path, sizeof(device_path), "%s/device-%d.img",
+                             chimera_session_dir, i);
+                    fd = open(device_path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+                    if (fd < 0) {
+                        fprintf(stderr, "Failed to create device %s: %s\n",
+                                device_path, strerror(errno));
+                        exit(100);
+                    }
+                    rc = ftruncate(fd, 256UL * 1024 * 1024 * 1024);
+                    if (rc < 0) {
+                        fprintf(stderr, "Failed to truncate device %s: %s\n",
+                                device_path, strerror(errno));
+                        exit(100);
+                    }
+                    close(fd);
+                    fprintf(cfgf, "%s{\"type\":\"io_uring\",\"size\":1,\"path\":\"%s\"}",
+                            i > 0 ? ",\n" : "", device_path);
+                }
+                fprintf(cfgf, "\n]}\n");
+                fclose(cfgf);
+
+                chimera_server_config_add_module(chimera_server_config, "demofs", NULL, demofs_cfg);
+            } else if (strcmp(chimera_nfs_backend, "cairn") == 0) {
+                char  cairn_cfg[512];
+
+                snprintf(cairn_cfg, sizeof(cairn_cfg), "%s/cairn.cfg", chimera_session_dir);
+
+                FILE *cfgf = fopen(cairn_cfg, "w");
+                if (!cfgf) {
+                    fprintf(stderr, "Failed to create cairn config\n");
+                    exit(100);
+                }
+                fprintf(cfgf, "{\"initialize\":true,\"path\":\"%s\"}\n", chimera_session_dir);
+                fclose(cfgf);
+
+                chimera_server_config_add_module(chimera_server_config, "cairn", NULL, cairn_cfg);
+            }
+
+            chimera_server = chimera_server_init(chimera_server_config, chimera_metrics);
+            if (!chimera_server) {
+                fprintf(stderr, "Failed to initialize Chimera server\n");
+                exit(100);
+            }
+
+            /* Mount the backend on the server as "share" */
+            if (strcmp(chimera_nfs_backend, "linux") == 0) {
+                /* Create fsx subdirectory for linux backend */
+                char fsx_dir[512];
+                snprintf(fsx_dir, sizeof(fsx_dir), "%s/fsx", chimera_session_dir);
+                (void) mkdir(fsx_dir, 0755);
+                chimera_server_mount(chimera_server, "share", "linux", chimera_session_dir);
+            } else if (strcmp(chimera_nfs_backend, "io_uring") == 0) {
+                char fsx_dir[512];
+                snprintf(fsx_dir, sizeof(fsx_dir), "%s/fsx", chimera_session_dir);
+                (void) mkdir(fsx_dir, 0755);
+                chimera_server_mount(chimera_server, "share", "io_uring", chimera_session_dir);
+            } else if (strcmp(chimera_nfs_backend, "memfs") == 0) {
+                chimera_server_mount(chimera_server, "share", "memfs", "/");
+            } else if (strcmp(chimera_nfs_backend, "demofs") == 0) {
+                chimera_server_mount(chimera_server, "share", "demofs", "/");
+            } else if (strcmp(chimera_nfs_backend, "cairn") == 0) {
+                chimera_server_mount(chimera_server, "share", "cairn", "/");
+            } else {
+                fprintf(stderr, "Unknown NFS backend: %s\n", chimera_nfs_backend);
+                exit(100);
+            }
+
+            chimera_server_start(chimera_server);
+
+            chimera_posix = chimera_posix_init(chimera_config, chimera_metrics);
+            if (!chimera_posix) {
+                fprintf(stderr, "Failed to initialize Chimera POSIX client\n");
+                exit(100);
+            }
+
+            /* Mount via NFS */
+            snprintf(nfs_mount_path, sizeof(nfs_mount_path), "127.0.0.1:/share");
+            snprintf(nfs_mount_options, sizeof(nfs_mount_options), "vers=%d", chimera_nfs_version);
+            if (chimera_posix_mount_with_options("/fsx", "nfs", nfs_mount_path, nfs_mount_options) != 0) {
+                fprintf(stderr, "Failed to mount NFS share\n");
+                exit(100);
+            }
+            if (!quiet) {
+                prt("Chimera: mounted /fsx via NFS%d using %s backend\n",
+                    chimera_nfs_version, chimera_nfs_backend);
+            }
+        } else {
+            /* Direct backend: No server needed */
+            chimera_posix = chimera_posix_init(chimera_config, chimera_metrics);
+            if (!chimera_posix) {
+                fprintf(stderr, "Failed to initialize Chimera POSIX client\n");
+                exit(100);
+            }
+
+            /* Determine mount module and path */
+            mount_module = chimera_backend;
+            if (strcmp(chimera_backend, "linux") == 0 ||
+                strcmp(chimera_backend, "io_uring") == 0) {
+                mount_path = chimera_session_dir;
+                /* Create fsx subdirectory */
+                char fsx_dir[512];
+                snprintf(fsx_dir, sizeof(fsx_dir), "%s/fsx", chimera_session_dir);
+                (void) mkdir(fsx_dir, 0755);
+            } else {
+                mount_path = "/";
+            }
+
+            if (chimera_posix_mount("/fsx", mount_module, mount_path) != 0) {
+                fprintf(stderr, "Failed to mount %s backend\n", chimera_backend);
+                exit(100);
+            }
+            if (!quiet) {
+                prt("Chimera: mounted /fsx using %s backend\n", chimera_backend);
+            }
+        }
+
+        if (!quiet) {
+            prt("Chimera POSIX initialized with backend %s\n", chimera_backend);
+        }
+    } else {
+        /* --chimera-config mode: Load config file for module and mount configuration */
         json_error_t json_error;
         json_t      *json_config = json_load_file(chimera_config_file, 0, &json_error);
 
@@ -3927,10 +4135,10 @@ main(
         }
 
         json_decref(json_config);
-    }
 
-    if (!quiet) {
-        prt("Chimera POSIX initialized from %s\n", chimera_config_file);
+        if (!quiet) {
+            prt("Chimera POSIX initialized from %s\n", chimera_config_file);
+        }
     }
 
     if (!quiet && seed) {
@@ -4119,7 +4327,22 @@ main(
 
     /* Shutdown Chimera POSIX subsystem */
     chimera_posix_shutdown();
+
+    /* Destroy the server if it was created (NFS backend) */
+    if (chimera_server) {
+        chimera_server_destroy(chimera_server);
+    }
+
     prometheus_metrics_destroy(chimera_metrics);
+
+    /* Clean up session directory */
+    if (chimera_session_dir[0] != '\0') {
+        char cmd[512];
+        int  rc;
+        snprintf(cmd, sizeof(cmd), "rm -rf %s", chimera_session_dir);
+        rc = system(cmd);
+        (void) rc;  /* Ignore return value in cleanup */
+    }
 
     exit(0);
     return 0;

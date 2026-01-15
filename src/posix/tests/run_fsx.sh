@@ -22,7 +22,8 @@ EXTRA_ARGS=""
 usage() {
     echo "Usage: $0 -b <backend> [options]"
     echo ""
-    echo "Backends: memfs, demofs, cairn, linux, io_uring"
+    echo "Direct backends: memfs, demofs, cairn, linux, io_uring"
+    echo "NFS3 backends:   nfs3_memfs, nfs3_demofs, nfs3_cairn, nfs3_linux, nfs3_io_uring"
     echo ""
     echo "Options:"
     echo "  -b <backend>   VFS backend to use (required)"
@@ -52,9 +53,11 @@ shift $((OPTIND-1))
 # Remaining arguments passed to fsx
 EXTRA_ARGS="$@"
 
-# Validate backend
+# Validate backend and check if NFS
+IS_NFS=0
 case "$BACKEND" in
     memfs|demofs|cairn|linux|io_uring) ;;
+    nfs3_memfs|nfs3_demofs|nfs3_cairn|nfs3_linux|nfs3_io_uring) IS_NFS=1 ;;
     *) echo "Error: Unknown backend '$BACKEND'"; usage ;;
 esac
 
@@ -135,11 +138,8 @@ generate_config() {
 EOF
 }
 
-generate_config
-
 # Build fsx arguments
-FSX_ARGS="--chimera-config=$CONFIG_FILE"
-FSX_ARGS="$FSX_ARGS -N $NUM_OPS"
+FSX_ARGS="-N $NUM_OPS"
 FSX_ARGS="$FSX_ARGS -l $MAX_FILE_LEN"
 
 if [ "$SEED" != "0" ]; then
@@ -170,15 +170,37 @@ if [ -n "$EXTRA_ARGS" ]; then
     FSX_ARGS="$FSX_ARGS $EXTRA_ARGS"
 fi
 
-if [ "$QUIET" != "1" ]; then
-    echo "Running FSX test:"
-    echo "  Backend: $BACKEND"
-    echo "  Config: $CONFIG_FILE"
-    echo "  Operations: $NUM_OPS"
-    echo "  Max file length: $MAX_FILE_LEN"
-    echo "  Command: $FSX_BINARY $FSX_ARGS $TEST_FILE"
-    echo ""
-fi
+if [ "$IS_NFS" = "1" ]; then
+    # NFS backend: use --backend option and network namespace wrapper
+    NETNS_WRAPPER="${SCRIPT_DIR}/../../../scripts/netns_test_wrapper.sh"
+    FSX_ARGS="--backend=$BACKEND $FSX_ARGS"
 
-# Run fsx
-exec "$FSX_BINARY" $FSX_ARGS "$TEST_FILE"
+    if [ "$QUIET" != "1" ]; then
+        echo "Running FSX test (NFS mode):"
+        echo "  Backend: $BACKEND"
+        echo "  Operations: $NUM_OPS"
+        echo "  Max file length: $MAX_FILE_LEN"
+        echo "  Command: $NETNS_WRAPPER $FSX_BINARY $FSX_ARGS $TEST_FILE"
+        echo ""
+    fi
+
+    # Run fsx in network namespace
+    exec "$NETNS_WRAPPER" "$FSX_BINARY" $FSX_ARGS "$TEST_FILE"
+else
+    # Direct backend: use --chimera-config with generated config
+    generate_config
+    FSX_ARGS="--chimera-config=$CONFIG_FILE $FSX_ARGS"
+
+    if [ "$QUIET" != "1" ]; then
+        echo "Running FSX test:"
+        echo "  Backend: $BACKEND"
+        echo "  Config: $CONFIG_FILE"
+        echo "  Operations: $NUM_OPS"
+        echo "  Max file length: $MAX_FILE_LEN"
+        echo "  Command: $FSX_BINARY $FSX_ARGS $TEST_FILE"
+        echo ""
+    fi
+
+    # Run fsx
+    exec "$FSX_BINARY" $FSX_ARGS "$TEST_FILE"
+fi
