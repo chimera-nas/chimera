@@ -707,8 +707,9 @@ chimera_smb_server_handle_smb2(
                                                   request->smb2_hdr.command != SMB2_SESSION_SETUP &&
                                                   request->smb2_hdr.command != SMB2_ECHO))) {
             chimera_smb_error("Received SMB2 message with invalid command and no session");
-            chimera_smb_request_free(thread, request);
+            chimera_smb_complete_request(request, SMB2_STATUS_NO_SUCH_LOGON_SESSION);
             evpl_close(evpl, conn->bind);
+            chimera_smb_request_free(thread, request);
             return;
         }
 
@@ -763,13 +764,21 @@ chimera_smb_server_handle_smb2(
                 rc = chimera_smb_parse_set_info(request_cursor, request);
                 break;
             default:
-                rc = 0;
+                chimera_smb_error("Received SMB2 message with unimplemented command %u",
+                                  request->smb2_hdr.command);
+                request->status = SMB2_STATUS_NOT_IMPLEMENTED;
+                rc              = -1;
         } /* switch */
 
         if (rc) {
             chimera_smb_error("smb_server_handle_msg: failed to parse command %u", request->smb2_hdr.command);
-            chimera_smb_request_free(thread, request);
+            if (request->status != SMB2_STATUS_SUCCESS) {
+                chimera_smb_complete_request(request, request->status);
+            } else {
+                chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            }
             evpl_close(evpl, conn->bind);
+            chimera_smb_request_free(thread, request);
             return;
         }
 

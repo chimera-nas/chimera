@@ -68,7 +68,8 @@ chimera_smb_set_info_open_unlink_callback(
 void
 chimera_smb_set_info(struct chimera_smb_request *request)
 {
-    request->set_info.open_file = chimera_smb_open_file_resolve(request, &request->set_info.file_id);
+    request->set_info.open_file     = chimera_smb_open_file_resolve(request, &request->set_info.file_id);
+    request->set_info.parent_handle = NULL;
 
     switch (request->set_info.info_type) {
         case SMB2_INFO_FILE:
@@ -112,12 +113,17 @@ chimera_smb_set_info(struct chimera_smb_request *request)
 
                     }
                     break;
+                case SMB2_FILE_RENAME_INFO:
+                    chimera_smb_set_info_rename_process(request);
+                    break;
                 default:
+                    chimera_smb_error("SET_INFO info_class %u not implemented", request->set_info.info_class);
                     chimera_smb_open_file_release(request, request->set_info.open_file);
                     chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
             } /* switch */
             break;
         default:
+            chimera_smb_error("SET_INFO info_type %u not implemented", request->set_info.info_type);
             chimera_smb_open_file_release(request, request->set_info.open_file);
             chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
     } /* switch */
@@ -131,15 +137,19 @@ chimera_smb_set_info_reply(
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_SET_INFO_REPLY_SIZE);
 } /* chimera_smb_set_info_reply */
 
+
 int
 chimera_smb_parse_set_info(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request)
 {
+    int rc = 0;
+
     if (unlikely(request->request_struct_size != SMB2_SET_INFO_REQUEST_SIZE)) {
         chimera_smb_error("Received SMB2 SET_INFO request with invalid struct size (%u expected %u)",
                           request->smb2_hdr.struct_size,
                           SMB2_SET_INFO_REQUEST_SIZE);
+        request->status = SMB2_STATUS_INFO_LENGTH_MISMATCH;
         return -1;
     }
 
@@ -170,7 +180,23 @@ chimera_smb_parse_set_info(
                         request_cursor,
                         &request->set_info.attrs);
                     break;
+                case SMB2_FILE_RENAME_INFO:
+                    rc = chimera_smb_parse_rename_info(request_cursor, request);
+                    break;
+
+                default:
+                    chimera_smb_error("parse_set_info: SET_INFO info_class %u not implemented",
+                                      request->set_info.info_class);
+                    request->status = SMB2_STATUS_NOT_IMPLEMENTED;
+                    rc              = -1;
+                    break;
             } /* switch */
+            break;
+        default:
+            chimera_smb_error("parse_set_info: SET_INFO info_type %u not implemented", request->set_info.info_type);
+            request->status = SMB2_STATUS_NOT_IMPLEMENTED;
+            rc              = -1;
+            break;
     } /* switch */
-    return 0;
+    return rc;
 } /* chimera_smb_parse_set_info */
