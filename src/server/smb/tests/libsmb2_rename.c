@@ -117,7 +117,7 @@ main(
     }
 
     /* Cleanup */
-    smb2_unlink(env.ctx, TEST_RENAME2);
+    smb2_unlink(env.ctx, TEST_RENAME3);  /* File is now in testdir after test 4 */
     smb2_unlink(env.ctx, TEST_FILE2);
     smb2_unlink(env.ctx, TEST_FILE3);
     smb2_rmdir(env.ctx, TEST_DIR);
