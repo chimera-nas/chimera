@@ -110,6 +110,7 @@ chimera_vfs_readdir(
     uint64_t                        attr_mask,
     uint64_t                        dir_attr_mask,
     uint64_t                        cookie,
+    uint32_t                        flags,
     chimera_vfs_readdir_callback_t  callback,
     chimera_vfs_readdir_complete_t  complete,
     void                           *private_data)
@@ -124,6 +125,7 @@ chimera_vfs_readdir(
     request->readdir.handle                 = handle;
     request->readdir.attr_mask              = attr_mask;
     request->readdir.cookie                 = cookie;
+    request->readdir.flags                  = flags;
     request->readdir.callback               = callback;
     request->readdir.r_dir_attr.va_req_mask = dir_attr_mask;
     request->readdir.r_dir_attr.va_set_mask = 0;

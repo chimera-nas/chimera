@@ -8,6 +8,7 @@
 
 #include "nfs3_xdr.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_fh.h"
 
 #define CHIMERA_NFS3_ATTR_MASK     ( \
             CHIMERA_VFS_ATTR_DEV | \
@@ -46,49 +47,64 @@ chimera_nfs3_type_from_vfs(uint16_t mode)
     } /* switch */
 } /* chimera_nfs3_type_from_vfs */
 
+static inline mode_t
+chimera_nfs3_type_to_vfs(ftype3 type)
+{
+    switch (type) {
+        case NF3REG:  return S_IFREG;
+        case NF3DIR:  return S_IFDIR;
+        case NF3BLK:  return S_IFBLK;
+        case NF3CHR:  return S_IFCHR;
+        case NF3LNK:  return S_IFLNK;
+        case NF3SOCK: return S_IFSOCK;
+        case NF3FIFO: return S_IFIFO;
+        default:      return S_IFREG;
+    } /* switch */
+} /* chimera_nfs3_type_to_vfs */
+
 static inline void
 chimera_nfs3_sattr3_to_va(
     struct chimera_vfs_attrs *attr,
     struct sattr3            *sattr)
 {
-    attr->va_req_mask = 0;
+    attr->va_set_mask = 0;
 
     if (sattr->mode.set_it) {
-        attr->va_req_mask |= CHIMERA_VFS_ATTR_MODE;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         attr->va_mode      = sattr->mode.mode;
     }
 
     if (sattr->uid.set_it) {
-        attr->va_req_mask |= CHIMERA_VFS_ATTR_UID;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         attr->va_uid       = sattr->uid.uid;
     }
 
     if (sattr->gid.set_it) {
-        attr->va_req_mask |= CHIMERA_VFS_ATTR_GID;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         attr->va_gid       = sattr->gid.gid;
     }
 
     if (sattr->size.set_it) {
-        attr->va_req_mask |= CHIMERA_VFS_ATTR_SIZE;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         attr->va_size      = sattr->size.size;
     }
 
     if (sattr->atime.set_it == SET_TO_CLIENT_TIME) {
-        attr->va_req_mask     |= CHIMERA_VFS_ATTR_ATIME;
+        attr->va_set_mask     |= CHIMERA_VFS_ATTR_ATIME;
         attr->va_atime.tv_sec  = sattr->atime.atime.seconds;
         attr->va_atime.tv_nsec = sattr->atime.atime.nseconds;
     } else if (sattr->atime.set_it == SET_TO_SERVER_TIME) {
-        attr->va_req_mask     |= CHIMERA_VFS_ATTR_ATIME;
+        attr->va_set_mask     |= CHIMERA_VFS_ATTR_ATIME;
         attr->va_atime.tv_sec  = 0;
         attr->va_atime.tv_nsec = CHIMERA_VFS_TIME_NOW;
     }
 
     if (sattr->mtime.set_it == SET_TO_CLIENT_TIME) {
-        attr->va_req_mask     |= CHIMERA_VFS_ATTR_MTIME;
+        attr->va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
         attr->va_mtime.tv_sec  = sattr->mtime.mtime.seconds;
         attr->va_mtime.tv_nsec = sattr->mtime.mtime.nseconds;
     } else if (sattr->mtime.set_it == SET_TO_SERVER_TIME) {
-        attr->va_req_mask     |= CHIMERA_VFS_ATTR_MTIME;
+        attr->va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
         attr->va_mtime.tv_sec  = 0;
         attr->va_mtime.tv_nsec = CHIMERA_VFS_TIME_NOW;
     }
@@ -254,7 +270,7 @@ chimera_nfs3_unmarshall_attrs(
     const struct fattr3      *fattr,
     struct chimera_vfs_attrs *attr)
 {
-    attr->va_mode          = fattr->mode & ~S_IFMT;
+    attr->va_mode          = chimera_nfs3_type_to_vfs(fattr->type) | (fattr->mode & ~S_IFMT);
     attr->va_nlink         = fattr->nlink;
     attr->va_uid           = fattr->uid;
     attr->va_gid           = fattr->gid;
@@ -271,20 +287,26 @@ chimera_nfs3_unmarshall_attrs(
     attr->va_ctime.tv_sec  = fattr->ctime.seconds;
     attr->va_ctime.tv_nsec = fattr->ctime.nseconds;
 
-    attr->va_set_mask = CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FSID | CHIMERA_VFS_ATTR_ATOMIC;
+    attr->va_set_mask |= CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FSID | CHIMERA_VFS_ATTR_ATOMIC;
 } /* chimera_nfs3_unmarshall_attrs */
 
 static inline void
 chimera_nfs3_unmarshall_fh(
     const struct nfs_fh3     *fh,
     int                       server_index,
+    const void               *parent_fh,
     struct chimera_vfs_attrs *attr)
 {
+    uint8_t fragment[CHIMERA_VFS_FH_SIZE];
+    int     fragment_len;
+
+    /* Build fh_fragment: [server_index][remote_fh_data] */
+    fragment[0] = server_index;
+    memcpy(fragment + 1, fh->data.data, fh->data.len);
+    fragment_len = 1 + fh->data.len;
+
     attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
-    attr->va_fh_len    = fh->data.len + 2;
-    attr->va_fh[0]     = CHIMERA_VFS_FH_MAGIC_NFS;
-    attr->va_fh[1]     = server_index;
-    memcpy(attr->va_fh + 2, fh->data.data, fh->data.len);
+    attr->va_fh_len    = chimera_vfs_encode_fh_parent(parent_fh, fragment, fragment_len, attr->va_fh);
 } /* chimera_nfs3_unmarshall_fh */
 
 

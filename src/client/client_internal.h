@@ -24,9 +24,6 @@
 #define chimera_client_fatal_if(cond, ...) \
         chimera_fatal_if(cond, "client", __FILE__, __LINE__, __VA_ARGS__)
 
-extern const uint8_t root_fh[1];
-
-
 #define CHIMERA_CLIENT_MAX_MODULES 64
 
 struct chimera_client_fh {
@@ -51,6 +48,8 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_SETATTR,
     CHIMERA_CLIENT_OP_FSETATTR,
     CHIMERA_CLIENT_OP_COMMIT,
+    CHIMERA_CLIENT_OP_STATFS,
+    CHIMERA_CLIENT_OP_FSTATFS,
 };
 
 struct chimera_client_request;
@@ -70,6 +69,7 @@ struct chimera_client_request {
     ssize_t                            sync_result;
     struct chimera_vfs_open_handle    *sync_open_handle;
     struct chimera_stat                sync_stat;
+    struct chimera_statvfs             sync_statvfs;
     int                                sync_target_len;
 
     chimera_client_request_callback    sync_callback;
@@ -202,6 +202,8 @@ struct chimera_client_request {
             int                             path_len;
             int                             parent_len;
             int                             name_offset;
+            int                             child_fh_len;
+            uint8_t                         child_fh[CHIMERA_VFS_FH_SIZE];
             char                            path[CHIMERA_VFS_PATH_MAX];
         } remove;
 
@@ -218,10 +220,12 @@ struct chimera_client_request {
             int                             dest_name_offset;
             uint32_t                        source_fh_len;
             uint32_t                        dest_fh_len;
+            int                             target_fh_len;
             char                            source_path[CHIMERA_VFS_PATH_MAX];
             char                            dest_path[CHIMERA_VFS_PATH_MAX];
             uint8_t                         source_fh[CHIMERA_VFS_FH_SIZE];
             uint8_t                         dest_fh[CHIMERA_VFS_FH_SIZE];
+            uint8_t                         target_fh[CHIMERA_VFS_FH_SIZE];
         } rename;
 
         struct {
@@ -238,6 +242,7 @@ struct chimera_client_request {
             struct chimera_vfs_open_handle *handle;
             chimera_stat_callback_t         callback;
             void                           *private_data;
+            uint32_t                        flags;  /* CHIMERA_VFS_LOOKUP_FOLLOW for stat, 0 for lstat */
             int                             path_len;
             char                            path[CHIMERA_VFS_PATH_MAX];
         } stat;
@@ -279,6 +284,20 @@ struct chimera_client_request {
             chimera_commit_callback_t       callback;
             void                           *private_data;
         } commit;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_statfs_callback_t       callback;
+            void                           *private_data;
+            int                             path_len;
+            char                            path[CHIMERA_VFS_PATH_MAX];
+        } statfs;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_fstatfs_callback_t      callback;
+            void                           *private_data;
+        } fstatfs;
     };
 } __attribute__((aligned(64)));
 
@@ -294,6 +313,8 @@ struct chimera_client_config {
 struct chimera_client {
     const struct chimera_client_config *config;
     struct chimera_vfs                 *vfs;
+    uint32_t                            root_fh_len;
+    uint8_t                             root_fh[CHIMERA_VFS_FH_SIZE];
 } __attribute__((aligned(64)));
 
 struct chimera_client_thread {

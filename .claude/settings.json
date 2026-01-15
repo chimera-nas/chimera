@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ctest:*)",
+      "Bash(ninja:*)",
+      "Bash(make:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(ldd:*)",
+      "Bash(find:*)",
+      "Bash(reuse:*)",
+      "Read(/build/**)",
+      "Write(/build/**)",
+      "Edit(/build/**)",
+      "mcp__serena__*"
+    ]
+  }
+}

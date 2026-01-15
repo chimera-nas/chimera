@@ -7,6 +7,7 @@
 
 #include "posix_internal.h"
 #include "../client/client_stat.h"
+#include "../vfs/vfs.h"
 
 static void
 chimera_posix_stat_callback(
@@ -51,6 +52,7 @@ chimera_posix_stat(
     req.opcode            = CHIMERA_CLIENT_OP_STAT;
     req.stat.callback     = chimera_posix_stat_callback;
     req.stat.private_data = &comp;
+    req.stat.flags        = CHIMERA_VFS_LOOKUP_FOLLOW;  /* stat() follows symlinks */
     req.stat.path_len     = path_len;
 
     memcpy(req.stat.path, path, path_len);

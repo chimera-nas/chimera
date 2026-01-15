@@ -54,8 +54,8 @@ chimera_posix_truncate(
 
     memcpy(req.setattr.path, path, path_len);
 
-    req.setattr.set_attr.va_req_mask = CHIMERA_VFS_ATTR_SIZE;
-    req.setattr.set_attr.va_set_mask = 0;
+    req.setattr.set_attr.va_req_mask = 0;
+    req.setattr.set_attr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
     req.setattr.set_attr.va_size     = (uint64_t) length;
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_truncate_exec);

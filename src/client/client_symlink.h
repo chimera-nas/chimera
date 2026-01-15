@@ -120,11 +120,12 @@ chimera_dispatch_symlink(
 
     chimera_vfs_lookup_path(
         thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
+        thread->client->root_fh,
+        thread->client->root_fh_len,
         request->symlink.path,
         request->symlink.parent_len,
         CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_LOOKUP_FOLLOW,
         chimera_symlink_parent_lookup_complete,
         request);
 } /* chimera_dispatch_symlink */

@@ -50,6 +50,8 @@ chimera_nfs4_remove_open_callback(
                        parent_handle,
                        args->target.data,
                        args->target.len,
+                       NULL,
+                       0,
                        0,
                        0,
                        chimera_nfs4_remove_complete,

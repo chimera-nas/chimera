@@ -124,11 +124,12 @@ chimera_link_source_complete(
 
     chimera_vfs_lookup_path(
         request->thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
+        request->thread->client->root_fh,
+        request->thread->client->root_fh_len,
         request->link.dest_path,
         request->link.dest_parent_len,
         CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_LOOKUP_FOLLOW,
         chimera_link_dest_parent_lookup_complete,
         request);
 
@@ -152,13 +153,15 @@ chimera_link_source_lookup_complete(
         return;
     }
 
+    /* Do not follow final symlink - we want to link the symlink itself */
     chimera_vfs_lookup_path(
         request->thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
+        request->thread->client->root_fh,
+        request->thread->client->root_fh_len,
         request->link.source_path,
         request->link.source_path_len,
         CHIMERA_VFS_ATTR_FH,
+        0,
         chimera_link_source_complete,
         request);
 
@@ -175,13 +178,15 @@ chimera_dispatch_link(
         return;
     }
 
+    /* Do not follow final symlink - we want to link the symlink itself */
     chimera_vfs_lookup_path(
         thread->vfs_thread,
-        root_fh,
-        sizeof(root_fh),
+        thread->client->root_fh,
+        thread->client->root_fh_len,
         request->link.source_path,
         request->link.source_path_len,
         CHIMERA_VFS_ATTR_FH,
+        0,
         chimera_link_source_lookup_complete,
         request);
 } /* chimera_dispatch_link */

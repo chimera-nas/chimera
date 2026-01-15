@@ -20,8 +20,6 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 
-const uint8_t root_fh = CHIMERA_VFS_FH_MAGIC_ROOT;
-
 static inline void
 chimera_s3_sterilize_path(
     struct chimera_s3_request *request,
@@ -411,11 +409,12 @@ s3_server_dispatch(
     }
 
     chimera_vfs_lookup_path(thread->vfs,
-                            &root_fh,
-                            sizeof(root_fh),
+                            shared->root_fh,
+                            shared->root_fh_len,
                             bucket->path,
                             strlen(bucket->path),
                             CHIMERA_VFS_ATTR_FH,
+                            CHIMERA_VFS_LOOKUP_FOLLOW,
                             chimera_s3_dispatch_callback,
                             s3_request);
 
@@ -455,6 +454,9 @@ s3_server_init(
     shared->listener = evpl_listener_create();
 
     shared->bucket_map = s3_bucket_map_create();
+
+    /* Initialize the root file handle for VFS lookups */
+    chimera_vfs_get_root_fh(shared->root_fh, &shared->root_fh_len);
 
     return shared;
 } /* s3_server_init */

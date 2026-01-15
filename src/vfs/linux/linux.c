@@ -82,9 +82,10 @@ chimera_linux_set_attrs(
     char                     *path,
     struct chimera_vfs_attrs *attr)
 {
-    int rc;
+    int      rc;
+    uint64_t set_mask = attr->va_set_mask;
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+    if (set_mask & CHIMERA_VFS_ATTR_MODE) {
 #ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW
         // Use fchmodat with AT_SYMLINK_NOFOLLOW on kernels >= 6.6
         rc = fchmodat(dirfd, path, attr->va_mode, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
@@ -115,7 +116,7 @@ chimera_linux_set_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
     }
 
-    if ((attr->va_req_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) ==
+    if ((set_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) ==
         (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
 
         rc = fchownat(dirfd, path, attr->va_uid, attr->va_gid,
@@ -129,7 +130,7 @@ chimera_linux_set_attrs(
         }
 
         attr->va_set_mask |= CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
-    } else if (attr->va_req_mask & CHIMERA_VFS_ATTR_UID) {
+    } else if (set_mask & CHIMERA_VFS_ATTR_UID) {
 
         rc = fchownat(dirfd, path, attr->va_uid, -1,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
@@ -143,7 +144,7 @@ chimera_linux_set_attrs(
         }
 
         attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
-    } else if (attr->va_req_mask & CHIMERA_VFS_ATTR_GID) {
+    } else if (set_mask & CHIMERA_VFS_ATTR_GID) {
 
         rc = fchownat(dirfd, path, -1, attr->va_gid,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
@@ -159,8 +160,8 @@ chimera_linux_set_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) {
-        // code assume that path is empty when dirfd is valid
+    if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
+        // code assumes that path is empty when dirfd is valid
         rc = ftruncate(dirfd, attr->va_size);
 
         if (rc) {
@@ -174,10 +175,10 @@ chimera_linux_set_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
     }
 
-    if (attr->va_req_mask & (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME)) {
+    if (set_mask & (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME)) {
         struct timespec times[2];
 
-        if (attr->va_req_mask & CHIMERA_VFS_ATTR_ATIME) {
+        if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
             if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
                 times[0].tv_nsec = UTIME_NOW;
             } else {
@@ -189,7 +190,7 @@ chimera_linux_set_attrs(
             times[0].tv_nsec = UTIME_OMIT;
         }
 
-        if (attr->va_req_mask & CHIMERA_VFS_ATTR_MTIME) {
+        if (set_mask & CHIMERA_VFS_ATTR_MTIME) {
             if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
                 times[1].tv_nsec = UTIME_NOW;
             } else {
@@ -273,7 +274,7 @@ chimera_linux_mount(
         request->complete(request);
         return;
     }
-    rc = linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
+    rc = linux_get_fh(NULL, /* mount context - compute fsid */
                       mount_fd,
                       fullpath,
                       r_attr->va_fh,
@@ -385,6 +386,15 @@ chimera_linux_readdir(
 
     while ((dirent = readdir(dir))) {
 
+        /* Skip . and .. unless explicitly requested */
+        if (!(request->readdir.flags & CHIMERA_VFS_READDIR_EMIT_DOT)) {
+            if ((dirent->d_name[0] == '.' && dirent->d_name[1] == '\0') ||
+                (dirent->d_name[0] == '.' && dirent->d_name[1] == '.' &&
+                 dirent->d_name[2] == '\0')) {
+                continue;
+            }
+        }
+
         chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                                       request,
                                       &vattr,
@@ -430,6 +440,9 @@ chimera_linux_set_open_flags(uint32_t in_flags)
         }
         if (in_flags & CHIMERA_VFS_OPEN_CREATE) {
             flags |= O_CREAT;
+        }
+        if (in_flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+            flags |= O_EXCL;
         }
     }
     if (in_flags & CHIMERA_VFS_OPEN_DIRECTORY) {
@@ -479,7 +492,7 @@ chimera_linux_open_at(
 
     parent_fd = request->open_at.handle->vfs_private;
 
-    if (request->open_at.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+    if (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         mode                                    = request->open_at.set_attr->va_mode;
         request->open_at.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
     } else {
@@ -543,7 +556,7 @@ chimera_linux_mkdir(
 
     fd = request->mkdir.handle->vfs_private;
 
-    if (request->mkdir.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+    if (request->mkdir.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         mode = request->mkdir.set_attr->va_mode;
     } else {
         mode = S_IRWXU;
@@ -633,6 +646,18 @@ chimera_linux_read(
     int                          fd, i;
     ssize_t                      len, left = request->read.length;
     struct iovec                *iov;
+
+    /* Handle 0-byte reads specially - preadv with uninitialized iov causes EFAULT */
+    if (request->read.length == 0) {
+        fd = (int) request->read.handle->vfs_private;
+        chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->read.r_attr, fd);
+        request->read.r_niov   = 0;
+        request->read.r_length = 0;
+        request->read.r_eof    = 1;
+        request->status        = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
 
     request->read.r_niov = evpl_iovec_alloc(evpl,
                                             request->read.length,
@@ -781,7 +806,7 @@ chimera_linux_symlink(
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->symlink.r_dir_post_attr, fd);
 
-    linux_get_fh(CHIMERA_VFS_FH_MAGIC_LINUX,
+    linux_get_fh(request->fh, /* use parent's mount_id */
                  fd,
                  fullname,
                  request->symlink.r_attr.va_fh,

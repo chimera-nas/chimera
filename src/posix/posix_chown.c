@@ -54,12 +54,12 @@ chimera_posix_chown(
     req.setattr.set_attr.va_set_mask = 0;
 
     if (owner != (uid_t) -1) {
-        req.setattr.set_attr.va_req_mask |= CHIMERA_VFS_ATTR_UID;
+        req.setattr.set_attr.va_set_mask |= CHIMERA_VFS_ATTR_UID;
         req.setattr.set_attr.va_uid       = owner;
     }
 
     if (group != (gid_t) -1) {
-        req.setattr.set_attr.va_req_mask |= CHIMERA_VFS_ATTR_GID;
+        req.setattr.set_attr.va_set_mask |= CHIMERA_VFS_ATTR_GID;
         req.setattr.set_attr.va_gid       = group;
     }
 

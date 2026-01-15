@@ -244,6 +244,7 @@ chimera_s3_list(
             request->path,
             request->path_len,
             CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+            CHIMERA_VFS_LOOKUP_FOLLOW,
             chimera_s3_list_lookup_path_callback,
             request);
     }

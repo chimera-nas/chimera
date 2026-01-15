@@ -107,6 +107,7 @@ struct cairn_symlink_target {
 
 struct cairn_inode {
     uint64_t        inum;
+    uint64_t        parent_inum; /* Parent directory for ".." lookup */
     uint32_t        gen;
     uint32_t        refcnt;
     uint64_t        size;
@@ -164,18 +165,12 @@ cairn_punch_hole(
 
 static inline uint32_t
 cairn_inum_to_fh(
-    uint8_t *fh,
-    uint64_t inum,
-    uint32_t gen)
+    struct cairn_shared *shared,
+    uint8_t             *fh,
+    uint64_t             inum,
+    uint32_t             gen)
 {
-    uint8_t *ptr = fh;
-
-    *ptr++ = CHIMERA_VFS_FH_MAGIC_CAIRN;
-
-    ptr += chimera_encode_uint64(inum, ptr);
-    ptr += chimera_encode_uint32(gen, ptr);
-
-    return ptr - fh;
+    return chimera_vfs_encode_fh_inum_parent(shared->root_fh, inum, gen, fh);
 } /* cairn_inum_to_fh */
 
 static inline void
@@ -185,12 +180,7 @@ cairn_fh_to_inum(
     const uint8_t *fh,
     int            fhlen)
 {
-    const uint8_t *ptr = fh;
-
-    ptr++;
-
-    ptr += chimera_decode_uint64(ptr, inum);
-    chimera_decode_uint32(ptr, gen);
+    chimera_vfs_decode_fh_inum(fh, fhlen, inum, gen);
 } /* cairn_fh_to_inum */
 
 static inline void
@@ -457,6 +447,40 @@ cairn_remove_directory_contents(
     rocksdb_iter_destroy(iter);
 } /* cairn_remove_directory_contents */
 
+static inline int
+cairn_directory_is_empty(
+    struct cairn_thread   *thread,
+    rocksdb_transaction_t *txn,
+    uint64_t               dir_inum)
+{
+    struct cairn_shared    *shared = thread->shared;
+    rocksdb_iterator_t     *iter;
+    struct cairn_dirent_key start_key, *dirent_key;
+    size_t                  klen;
+    int                     is_empty = 1;
+
+    start_key.keytype = CAIRN_KEY_DIRENT;
+    start_key.inum    = dir_inum;
+    start_key.hash    = 0;
+
+    iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
+
+    rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+
+    if (rocksdb_iter_valid(iter)) {
+        dirent_key = (struct cairn_dirent_key *) rocksdb_iter_key(iter, &klen);
+
+        if (dirent_key->keytype == CAIRN_KEY_DIRENT &&
+            dirent_key->inum == dir_inum) {
+            is_empty = 0;  /* Found at least one dirent */
+        }
+    }
+
+    rocksdb_iter_destroy(iter);
+
+    return is_empty;
+} /* cairn_directory_is_empty */
+
 static inline void
 cairn_remove_file_extents(
     struct cairn_thread   *thread,
@@ -605,19 +629,20 @@ cairn_init(const char *cfgfile)
         struct cairn_super_key super_key;
         struct cairn_super     super;
 
-        inode.inum       = 2;
-        inode.gen        = 1;
-        inode.size       = 4096;
-        inode.space_used = 4096;
-        inode.gen        = 1;
-        inode.refcnt     = 1;
-        inode.uid        = 0;
-        inode.gid        = 0;
-        inode.nlink      = 2;
-        inode.mode       = S_IFDIR | 0755;
-        inode.atime      = now;
-        inode.mtime      = now;
-        inode.ctime      = now;
+        inode.inum        = 2;
+        inode.parent_inum = 2; /* Root directory's parent is itself */
+        inode.gen         = 1;
+        inode.size        = 4096;
+        inode.space_used  = 4096;
+        inode.gen         = 1;
+        inode.refcnt      = 1;
+        inode.uid         = 0;
+        inode.gid         = 0;
+        inode.nlink       = 2;
+        inode.mode        = S_IFDIR | 0755;
+        inode.atime       = now;
+        inode.mtime       = now;
+        inode.ctime       = now;
 
         /* Generate a random 64-bit filesystem ID */
         super.fsid = chimera_rand64();
@@ -673,7 +698,13 @@ cairn_init(const char *cfgfile)
         free(super);
     }
 
-    shared->root_fhlen = cairn_inum_to_fh(shared->root_fh, 2, 1);
+    /* Create 16-byte fsid buffer for root FH encoding (8-byte fsid + 8 bytes padding) */
+    {
+        uint8_t fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
+        memcpy(fsid_buf, &shared->fsid, sizeof(shared->fsid));
+        shared->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf, 2, 1,
+                                                              shared->root_fh);
+    }
 
     return shared;
 } /* cairn_init */
@@ -773,7 +804,7 @@ cairn_map_attrs(
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FH) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
-        attr->va_fh_len    = cairn_inum_to_fh(attr->va_fh, inode->inum, inode->gen);
+        attr->va_fh_len    = cairn_inum_to_fh(shared, attr->va_fh, inode->inum, inode->gen);
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
@@ -811,32 +842,33 @@ cairn_apply_attrs(
     struct chimera_vfs_attrs *attr)
 {
     struct timespec now;
+    uint64_t        set_mask = attr->va_set_mask;
 
     clock_gettime(CLOCK_REALTIME, &now);
 
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+    if (set_mask & CHIMERA_VFS_ATTR_MODE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         inode->mode        = (inode->mode & S_IFMT) | (attr->va_mode & ~S_IFMT);
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_UID) {
+    if (set_mask & CHIMERA_VFS_ATTR_UID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         inode->uid         = attr->va_uid;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_GID) {
+    if (set_mask & CHIMERA_VFS_ATTR_GID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         inode->gid         = attr->va_gid;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) {
+    if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         inode->size        = attr->va_size;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_ATIME) {
+    if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
         if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->atime = now;
@@ -845,7 +877,7 @@ cairn_apply_attrs(
         }
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MTIME) {
+    if (set_mask & CHIMERA_VFS_ATTR_MTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
         if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->mtime = now;
@@ -931,7 +963,7 @@ cairn_setattr(
     cairn_map_attrs(shared, &request->setattr.r_pre_attr, inode);
 
     /* Handle truncation: remove extents past new EOF when size decreases */
-    if ((request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) &&
+    if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
         S_ISREG(inode->mode) &&
         request->setattr.set_attr->va_size < inode->size) {
 
@@ -1102,6 +1134,8 @@ cairn_lookup(
     struct cairn_dirent_key    dirent_key;
     struct cairn_dirent_value *dirent_value;
     struct cairn_dirent_handle dh;
+    const char                *name    = request->lookup.component;
+    uint32_t                   namelen = request->lookup.component_len;
     int                        rc;
 
     txn = cairn_get_transaction(thread);
@@ -1120,6 +1154,38 @@ cairn_lookup(
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
+        return;
+    }
+
+    /* Handle "." - return the directory itself */
+    if (namelen == 1 && name[0] == '.') {
+        cairn_map_attrs(shared, &request->lookup.r_dir_attr, inode);
+        cairn_map_attrs(shared, &request->lookup.r_attr, inode);
+        cairn_inode_handle_release(&ih);
+        request->status = CHIMERA_VFS_OK;
+        DL_APPEND(thread->txn_requests, request);
+        return;
+    }
+
+    /* Handle ".." - return the parent directory */
+    if (namelen == 2 && name[0] == '.' && name[1] == '.') {
+        cairn_map_attrs(shared, &request->lookup.r_dir_attr, inode);
+
+        rc = cairn_inode_get_inum(thread, txn, inode->parent_inum, 0, &child_ih);
+
+        if (unlikely(rc)) {
+            cairn_inode_handle_release(&ih);
+            request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+
+        child = child_ih.inode;
+        cairn_map_attrs(shared, &request->lookup.r_attr, child);
+        cairn_inode_handle_release(&ih);
+        cairn_inode_handle_release(&child_ih);
+        request->status = CHIMERA_VFS_OK;
+        DL_APPEND(thread->txn_requests, request);
         return;
     }
 
@@ -1225,15 +1291,16 @@ cairn_mkdir(
     }
 
     cairn_alloc_inum(thread, &inode);
-    inode.size       = 4096;
-    inode.space_used = 4096;
-    inode.uid        = 0;
-    inode.gid        = 0;
-    inode.nlink      = 2;
-    inode.mode       = S_IFDIR | 0755;
-    inode.atime      = now;
-    inode.mtime      = now;
-    inode.ctime      = now;
+    inode.parent_inum = parent_inode->inum; /* Set parent for ".." lookup */
+    inode.size        = 4096;
+    inode.space_used  = 4096;
+    inode.uid         = 0;
+    inode.gid         = 0;
+    inode.nlink       = 2;
+    inode.mode        = S_IFDIR | 0755;
+    inode.atime       = now;
+    inode.mtime       = now;
+    inode.ctime       = now;
 
     cairn_apply_attrs(&inode, request->mkdir.set_attr);
 
@@ -1325,13 +1392,16 @@ cairn_remove(
 
     inode = child_ih.inode;
 
-    if (S_ISDIR(inode->mode) && inode->nlink > 2) {
-        cairn_inode_handle_release(&parent_ih);
-        cairn_inode_handle_release(&child_ih);
-        cairn_dirent_handle_release(&dh);
-        request->status = CHIMERA_VFS_ENOTEMPTY;
-        request->complete(request);
-        return;
+    if (S_ISDIR(inode->mode)) {
+        /* Check if directory is empty (proper rmdir semantics) */
+        if (!cairn_directory_is_empty(thread, txn, inode->inum)) {
+            cairn_inode_handle_release(&parent_ih);
+            cairn_inode_handle_release(&child_ih);
+            cairn_dirent_handle_release(&dh);
+            request->status = CHIMERA_VFS_ENOTEMPTY;
+            request->complete(request);
+            return;
+        }
     }
 
     cairn_map_attrs(shared, &request->remove.r_dir_pre_attr, parent_inode);
@@ -1341,9 +1411,6 @@ cairn_remove(
     if (S_ISDIR(inode->mode)) {
         inode->nlink = 0;
         parent_inode->nlink--;
-
-        // Remove all directory entries
-        cairn_remove_directory_contents(thread, txn, inode->inum);
 
     } else {
         inode->nlink--;
@@ -1370,6 +1437,9 @@ cairn_remove(
         } else {
             cairn_put_inode(txn, inode);
         }
+    } else {
+        // nlink > 0: file still has other hard links, persist the decremented nlink
+        cairn_put_inode(txn, inode);
     }
 
     cairn_map_attrs(shared, &request->remove.r_dir_post_attr, parent_inode);
@@ -1386,6 +1456,17 @@ cairn_remove(
     DL_APPEND(thread->txn_requests, request);
 } /* cairn_remove */
 
+/*
+ * Cookie values for readdir:
+ *   0 = start of directory, will return "."
+ *   1 = "." was returned, will return ".."
+ *   2 = ".." was returned, will return first real entry
+ *   3+ = real entry cookie (hash + 3)
+ */
+#define CAIRN_COOKIE_DOT    1
+#define CAIRN_COOKIE_DOTDOT 2
+#define CAIRN_COOKIE_FIRST  3
+
 static void
 cairn_readdir(
     struct cairn_thread        *thread,
@@ -1394,12 +1475,13 @@ cairn_readdir(
     void                       *private_data)
 {
     rocksdb_transaction_t     *txn;
-    struct cairn_inode_handle  ih, dirent_ih;
-    struct cairn_inode        *inode, *dirent_inode;
-    uint64_t                   next_cookie = request->readdir.cookie;
+    struct cairn_inode_handle  ih, dirent_ih, parent_ih;
+    struct cairn_inode        *inode, *dirent_inode, *parent_inode;
+    uint64_t                   cookie      = request->readdir.cookie;
+    uint64_t                   next_cookie = 0;
     int                        rc, eof = 1;
     struct chimera_vfs_attrs   attr;
-    rocksdb_iterator_t        *iter;
+    rocksdb_iterator_t        *iter = NULL;
     struct cairn_dirent_key    start_key, *dirent_key;
     struct cairn_dirent_value *dirent_value;
     size_t                     len;
@@ -1423,19 +1505,86 @@ cairn_readdir(
         return;
     }
 
+    attr.va_req_mask = request->readdir.attr_mask;
+
+    /* Handle "." and ".." entries only if requested */
+    if (request->readdir.flags & CHIMERA_VFS_READDIR_EMIT_DOT) {
+        /* Handle "." entry (cookie 0 -> 1) */
+        if (cookie < CAIRN_COOKIE_DOT) {
+            cairn_map_attrs(shared, &attr, inode);
+
+            rc = request->readdir.callback(
+                inode->inum,
+                CAIRN_COOKIE_DOT,
+                ".",
+                1,
+                &attr,
+                request->proto_private_data);
+
+            if (rc) {
+                next_cookie = CAIRN_COOKIE_DOT;
+                eof         = 0;
+                goto out;
+            }
+
+            cookie = CAIRN_COOKIE_DOT;
+        }
+
+        /* Handle ".." entry (cookie 1 -> 2) */
+        if (cookie < CAIRN_COOKIE_DOTDOT) {
+            rc = cairn_inode_get_inum(thread, txn, inode->parent_inum, 0, &parent_ih);
+
+            if (rc == 0) {
+                parent_inode = parent_ih.inode;
+                cairn_map_attrs(shared, &attr, parent_inode);
+                cairn_inode_handle_release(&parent_ih);
+            } else {
+                cairn_map_attrs(shared, &attr, inode);
+            }
+
+            rc = request->readdir.callback(
+                inode->parent_inum,
+                CAIRN_COOKIE_DOTDOT,
+                "..",
+                2,
+                &attr,
+                request->proto_private_data);
+
+            if (rc) {
+                next_cookie = CAIRN_COOKIE_DOTDOT;
+                eof         = 0;
+                goto out;
+            }
+
+            cookie = CAIRN_COOKIE_DOTDOT;
+        }
+    } else {
+        /* Skip . and .. entries - advance cookie past them */
+        if (cookie < CAIRN_COOKIE_DOTDOT) {
+            cookie = CAIRN_COOKIE_DOTDOT;
+        }
+    }
+
+    /* Handle real directory entries (cookie >= 2) */
     start_key.keytype = CAIRN_KEY_DIRENT;
     start_key.inum    = inode->inum;
-    start_key.hash    = request->readdir.cookie;
+
+    if (cookie < CAIRN_COOKIE_FIRST) {
+        /* Start from the beginning of real entries */
+        start_key.hash = 0;
+    } else {
+        /* Resume from where we left off - cookie is (hash + 3) */
+        start_key.hash = cookie - CAIRN_COOKIE_FIRST;
+    }
 
     iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
 
     rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
 
-    if (rocksdb_iter_valid(iter) && request->readdir.cookie) {
+    /* If resuming (cookie >= 3), skip past the last returned entry */
+    if (rocksdb_iter_valid(iter) && cookie >= CAIRN_COOKIE_FIRST) {
         rocksdb_iter_next(iter);
     }
-
-    attr.va_req_mask = request->readdir.attr_mask;
 
     while (rocksdb_iter_valid(iter)) {
 
@@ -1462,13 +1611,13 @@ cairn_readdir(
 
         rc = request->readdir.callback(
             dirent_value->inum,
-            dirent_key->hash,
+            dirent_key->hash + CAIRN_COOKIE_FIRST,
             dirent_value->name,
             dirent_value->name_len,
             &attr,
             request->proto_private_data);
 
-        next_cookie = dirent_key->hash;
+        next_cookie = dirent_key->hash + CAIRN_COOKIE_FIRST;
 
         if (rc) {
             eof = 0;
@@ -1480,7 +1629,12 @@ cairn_readdir(
     } /* cairn_readdir */
 
     rocksdb_iter_destroy(iter);
+    iter = NULL;
 
+ out:
+    if (iter) {
+        rocksdb_iter_destroy(iter);
+    }
 
     cairn_map_attrs(shared, &request->readdir.r_dir_attr, inode);
 
@@ -1607,6 +1761,12 @@ cairn_open_at(
         parent_inode->mtime = now;
 
         inode = &new_inode;
+    } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+        cairn_inode_handle_release(&parent_ih);
+        cairn_dirent_handle_release(&dh);
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
     } else {
 
         dirent_value = dh.dirent;
@@ -1679,8 +1839,14 @@ cairn_close(
     inode = ih.inode;
     inode->refcnt--;
 
+    if (inode->refcnt == 0 && inode->nlink == 0) {
+        // Remove type-specific data before removing inode
+        if (S_ISREG(inode->mode)) {
+            cairn_remove_file_extents(thread, txn, inode->inum);
+        } else if (S_ISLNK(inode->mode)) {
+            cairn_remove_symlink_target(txn, inode->inum);
+        }
 
-    if (inode->refcnt == 0) {
         cairn_remove_inode(txn, inode);
     } else {
         cairn_put_inode(txn, inode);
@@ -2009,6 +2175,7 @@ cairn_write(
     rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &ih);
 
     if (rc) {
+        evpl_iovecs_release(thread->evpl, request->write.iov, request->write.niov);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -2350,7 +2517,21 @@ cairn_rename(
 
     rc = cairn_dirent_get(thread, txn, &new_dirent_key, &new_dh);
     if (rc == 0) {
-        // Target exists - need to remove it
+        // Target exists
+        // Per POSIX: if old and new refer to same file, return success with no action
+        if (new_dh.dirent->inum == old_dirent_value->inum) {
+            cairn_dirent_handle_release(&old_dh);
+            cairn_dirent_handle_release(&new_dh);
+            cairn_inode_handle_release(&old_parent_ih);
+            if (have_new_parent_ih) {
+                cairn_inode_handle_release(&new_parent_ih);
+            }
+            request->status = CHIMERA_VFS_OK;
+            request->complete(request);
+            return;
+        }
+
+        // Target is different inode - need to remove it
         struct cairn_inode_handle existing_ih;
         struct cairn_inode       *existing_inode;
 
@@ -2360,7 +2541,20 @@ cairn_rename(
             existing_inode->nlink--;
 
             if (existing_inode->nlink == 0) {
-                cairn_remove_inode(txn, existing_inode);
+                existing_inode->refcnt--;
+
+                if (existing_inode->refcnt == 0) {
+                    // Remove type-specific data before removing inode
+                    if (S_ISREG(existing_inode->mode)) {
+                        cairn_remove_file_extents(thread, txn, existing_inode->inum);
+                    } else if (S_ISLNK(existing_inode->mode)) {
+                        cairn_remove_symlink_target(txn, existing_inode->inum);
+                    }
+
+                    cairn_remove_inode(txn, existing_inode);
+                } else {
+                    cairn_put_inode(txn, existing_inode);
+                }
             } else {
                 cairn_put_inode(txn, existing_inode);
             }

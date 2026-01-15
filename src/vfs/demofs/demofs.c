@@ -165,6 +165,8 @@ struct demofs_inode {
     union {
         struct {
             struct rb_tree dirents;
+            uint64_t       parent_inum;
+            uint32_t       parent_gen;
         } dir;
         struct {
             struct rb_tree extents;
@@ -214,18 +216,12 @@ struct demofs_thread {
 
 static inline uint32_t
 demofs_inum_to_fh(
-    uint8_t *fh,
-    uint64_t inum,
-    uint32_t gen)
+    struct demofs_shared *shared,
+    uint8_t              *fh,
+    uint64_t              inum,
+    uint32_t              gen)
 {
-    uint8_t *ptr = fh;
-
-    *ptr++ = CHIMERA_VFS_FH_MAGIC_DEMOFS;
-
-    ptr += chimera_encode_uint64(inum, ptr);
-    ptr += chimera_encode_uint32(gen, ptr);
-
-    return ptr - fh;
+    return chimera_vfs_encode_fh_inum_parent(shared->root_fh, inum, gen, fh);
 } /* demofs_inum_to_fh */
 
 static inline void
@@ -235,12 +231,7 @@ demofs_fh_to_inum(
     const uint8_t *fh,
     int            fhlen)
 {
-    const uint8_t *ptr = fh;
-
-    ptr++;
-
-    ptr += chimera_decode_uint64(ptr, inum);
-    chimera_decode_uint32(ptr, gen);
+    chimera_vfs_decode_fh_inum(fh, fhlen, inum, gen);
 } /* demofs_fh_to_inum */
 
 static inline struct demofs_inode *
@@ -465,6 +456,9 @@ demofs_inode_free(
         demofs_symlink_target_free(thread, inode->symlink.target);
         inode->symlink.target = NULL;
     }
+
+    /* Increment generation so stale file handles return ESTALE */
+    inode->gen++;
 
     pthread_mutex_lock(&inode_list->lock);
     LL_PREPEND(inode_list->free_inode, inode);
@@ -701,8 +695,19 @@ demofs_bootstrap(struct demofs_thread *thread)
 
     rb_tree_init(&inode->dir.dirents);
 
-    shared->root_fhlen = demofs_inum_to_fh(shared->root_fh, inode->inum,
-                                           inode->gen);
+    /* Root directory's parent is itself for ".." lookup */
+    inode->dir.parent_inum = inode->inum;
+    inode->dir.parent_gen  = inode->gen;
+
+    /* Create 16-byte fsid buffer for root FH encoding (8-byte fsid + 8 bytes padding) */
+    {
+        uint8_t fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
+        memcpy(fsid_buf, &shared->fsid, sizeof(shared->fsid));
+        shared->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf,
+                                                              inode->inum,
+                                                              inode->gen,
+                                                              shared->root_fh);
+    }
 } /* demofs_bootstrap */
 
 static void
@@ -828,8 +833,7 @@ demofs_map_attrs(
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FH) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
-        attr->va_fh_len    = demofs_inum_to_fh(attr->va_fh, inode->inum, inode->gen)
-        ;
+        attr->va_fh_len    = demofs_inum_to_fh(shared, attr->va_fh, inode->inum, inode->gen);
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
@@ -894,31 +898,32 @@ demofs_apply_attrs(
     struct chimera_vfs_attrs *attr)
 {
     struct timespec now;
+    uint64_t        set_mask = attr->va_set_mask;
 
     clock_gettime(CLOCK_REALTIME, &now);
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+    if (set_mask & CHIMERA_VFS_ATTR_MODE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         inode->mode        = (inode->mode & S_IFMT) | (attr->va_mode & ~S_IFMT);
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_UID) {
+    if (set_mask & CHIMERA_VFS_ATTR_UID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         inode->uid         = attr->va_uid;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_GID) {
+    if (set_mask & CHIMERA_VFS_ATTR_GID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         inode->gid         = attr->va_gid;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) {
+    if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         inode->size        = attr->va_size;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_ATIME) {
+    if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
         if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->atime_sec  = now.tv_sec;
@@ -929,7 +934,7 @@ demofs_apply_attrs(
         }
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MTIME) {
+    if (set_mask & CHIMERA_VFS_ATTR_MTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
         if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->mtime_sec  = now.tv_sec;
@@ -990,7 +995,7 @@ demofs_setattr(
     demofs_map_attrs(thread, &request->setattr.r_pre_attr, inode);
 
     /* Handle truncation: remove/trim extents past new EOF */
-    if ((request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) &&
+    if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
         S_ISREG(inode->mode) &&
         request->setattr.set_attr->va_size < inode->size) {
 
@@ -1151,6 +1156,8 @@ demofs_lookup(
     struct demofs_inode  *inode, *child;
     struct demofs_dirent *dirent;
     uint64_t              hash;
+    const char           *name    = request->lookup.component;
+    uint32_t              namelen = request->lookup.component_len;
 
     hash = request->lookup.component_hash;
 
@@ -1169,6 +1176,34 @@ demofs_lookup(
         return;
     }
 
+    demofs_map_attrs(thread, &request->lookup.r_dir_attr, inode);
+
+    /* Handle "." - return the directory itself */
+    if (namelen == 1 && name[0] == '.') {
+        demofs_map_attrs(thread, &request->lookup.r_attr, inode);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    /* Handle ".." - return the parent directory */
+    if (namelen == 2 && name[0] == '.' && name[1] == '.') {
+        child = demofs_inode_get_inum(shared, inode->dir.parent_inum, inode->dir.parent_gen);
+        if (unlikely(!child)) {
+            pthread_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+        demofs_map_attrs(thread, &request->lookup.r_attr, child);
+        pthread_mutex_unlock(&child->lock);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
     rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
 
     if (!dirent) {
@@ -1177,8 +1212,6 @@ demofs_lookup(
         request->complete(request);
         return;
     }
-
-    demofs_map_attrs(thread, &request->lookup.r_dir_attr, inode);
 
     child = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
@@ -1225,6 +1258,8 @@ demofs_mkdir(
     inode->ctime_nsec = now.tv_nsec;
 
     rb_tree_init(&inode->dir.dirents);
+
+    /* Parent will be set after we validate parent_inode */
 
     demofs_apply_attrs(inode, request->mkdir.set_attr);
 
@@ -1274,6 +1309,9 @@ demofs_mkdir(
         return;
     }
 
+    /* Set parent pointer for ".." lookup support */
+    inode->dir.parent_inum = parent_inode->inum;
+    inode->dir.parent_gen  = parent_inode->gen;
 
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
@@ -1389,6 +1427,17 @@ demofs_remove(
     request->complete(request);
 } /* demofs_remove */
 
+/*
+ * Cookie values for readdir:
+ *   0 = start of directory, will return "."
+ *   1 = "." was returned, will return ".."
+ *   2 = ".." was returned, will return first real entry
+ *   3+ = real entry cookie (hash + 3)
+ */
+#define DEMOFS_COOKIE_DOT    1
+#define DEMOFS_COOKIE_DOTDOT 2
+#define DEMOFS_COOKIE_FIRST  3
+
 static void
 demofs_readdir(
     struct demofs_thread       *thread,
@@ -1396,7 +1445,7 @@ demofs_readdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct demofs_inode     *inode, *dirent_inode;
+    struct demofs_inode     *inode, *dirent_inode, *parent_inode;
     struct demofs_dirent    *dirent;
     uint64_t                 cookie      = request->readdir.cookie;
     uint64_t                 next_cookie = 0;
@@ -1418,19 +1467,89 @@ demofs_readdir(
         return;
     }
 
-    if (cookie) {
-        rb_tree_query_ceil(&inode->dir.dirents, cookie + 1, hash, dirent);
+    attr.va_req_mask = request->readdir.attr_mask;
+
+    /* Handle "." and ".." entries only if requested */
+    if (request->readdir.flags & CHIMERA_VFS_READDIR_EMIT_DOT) {
+        /* Handle "." entry (cookie 0 -> 1) */
+        if (cookie < DEMOFS_COOKIE_DOT) {
+            demofs_map_attrs(thread, &attr, inode);
+
+            rc = request->readdir.callback(
+                inode->inum,
+                DEMOFS_COOKIE_DOT,
+                ".",
+                1,
+                &attr,
+                request->proto_private_data);
+
+            if (rc) {
+                next_cookie = DEMOFS_COOKIE_DOT;
+                eof         = 0;
+                goto out;
+            }
+
+            cookie = DEMOFS_COOKIE_DOT;
+        }
+
+        /* Handle ".." entry (cookie 1 -> 2) */
+        if (cookie < DEMOFS_COOKIE_DOTDOT) {
+            /* Check if parent is the same inode (root directory case) to avoid deadlock */
+            if (inode->dir.parent_inum == inode->inum &&
+                inode->dir.parent_gen == inode->gen) {
+                /* Root directory - parent is self, reuse current inode */
+                demofs_map_attrs(thread, &attr, inode);
+            } else {
+                parent_inode = demofs_inode_get_inum(shared,
+                                                     inode->dir.parent_inum,
+                                                     inode->dir.parent_gen);
+
+                if (parent_inode) {
+                    demofs_map_attrs(thread, &attr, parent_inode);
+                    pthread_mutex_unlock(&parent_inode->lock);
+                } else {
+                    demofs_map_attrs(thread, &attr, inode);
+                }
+            }
+
+            rc = request->readdir.callback(
+                inode->dir.parent_inum,
+                DEMOFS_COOKIE_DOTDOT,
+                "..",
+                2,
+                &attr,
+                request->proto_private_data);
+
+            if (rc) {
+                next_cookie = DEMOFS_COOKIE_DOTDOT;
+                eof         = 0;
+                goto out;
+            }
+
+            cookie = DEMOFS_COOKIE_DOTDOT;
+        }
     } else {
-        rb_tree_first(&inode->dir.dirents, dirent);
+        /* Skip . and .. entries - advance cookie past them */
+        if (cookie < DEMOFS_COOKIE_DOTDOT) {
+            cookie = DEMOFS_COOKIE_DOTDOT;
+        }
     }
 
-    attr.va_req_mask = request->readdir.attr_mask;
+    /* Handle real directory entries (cookie >= 2) */
+    if (cookie < DEMOFS_COOKIE_FIRST) {
+        rb_tree_first(&inode->dir.dirents, dirent);
+    } else {
+        uint64_t hash_cookie = cookie - DEMOFS_COOKIE_FIRST;
+
+        rb_tree_query_ceil(&inode->dir.dirents, hash_cookie + 1, hash, dirent);
+    }
 
     while (dirent) {
 
         dirent_inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
         if (!dirent_inode) {
+            dirent = rb_tree_next(&inode->dir.dirents, dirent);
             continue;
         }
 
@@ -1440,13 +1559,13 @@ demofs_readdir(
 
         rc = request->readdir.callback(
             dirent->inum,
-            dirent->hash,
+            dirent->hash + DEMOFS_COOKIE_FIRST,
             dirent->name,
             dirent->name_len,
             &attr,
             request->proto_private_data);
 
-        next_cookie = dirent->hash;
+        next_cookie = dirent->hash + DEMOFS_COOKIE_FIRST;
 
         if (rc) {
             eof = 0;
@@ -1456,6 +1575,7 @@ demofs_readdir(
         dirent = rb_tree_next(&inode->dir.dirents, dirent);
     }
 
+ out:
     demofs_map_attrs(thread, &request->readdir.r_dir_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);
@@ -1569,6 +1689,11 @@ demofs_open_at(
         parent_inode->mtime_sec  = now.tv_sec;
         parent_inode->mtime_nsec = now.tv_nsec;
 
+    } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
     } else {
 
         inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
@@ -2561,7 +2686,8 @@ demofs_rename(
     void                       *private_data)
 {
     struct demofs_inode  *old_parent_inode, *new_parent_inode, *child_inode;
-    struct demofs_dirent *dirent, *old_dirent;
+    struct demofs_inode  *existing_inode = NULL;
+    struct demofs_dirent *new_dirent, *old_dirent, *existing_dirent = NULL;
     uint64_t              hash, new_hash;
     int                   cmp;
     struct timespec       now;
@@ -2650,34 +2776,92 @@ demofs_rename(
         return;
     }
 
-    rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, dirent);
-
-    if (dirent) {
-        pthread_mutex_unlock(&old_parent_inode->lock);
-        pthread_mutex_unlock(&new_parent_inode->lock);
-        request->status = CHIMERA_VFS_EEXIST;
-        request->complete(request);
-        return;
-    }
-
     child_inode = demofs_inode_get_inum(shared, old_dirent->inum, old_dirent->gen);
 
     if (!child_inode) {
         pthread_mutex_unlock(&old_parent_inode->lock);
-        pthread_mutex_unlock(&new_parent_inode->lock);
+        if (cmp != 0) {
+            pthread_mutex_unlock(&new_parent_inode->lock);
+        }
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
 
-    dirent = demofs_dirent_alloc(thread,
-                                 old_dirent->inum,
-                                 old_dirent->gen,
-                                 new_hash,
-                                 request->rename.new_name,
-                                 request->rename.new_namelen);
+    /* Check if destination already exists */
+    rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, existing_dirent);
 
-    rb_tree_insert(&new_parent_inode->dir.dirents, hash, dirent);
+    if (existing_dirent) {
+        /* Check if source and destination refer to the same inode (hardlinks).
+         * Per POSIX/Linux: if oldpath and newpath are hardlinks to the same file,
+         * rename() should do nothing and return success. */
+        if (existing_dirent->inum == old_dirent->inum &&
+            existing_dirent->gen == old_dirent->gen) {
+            /* Same inode - do nothing, just return success */
+            pthread_mutex_unlock(&child_inode->lock);
+            if (cmp != 0) {
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                pthread_mutex_unlock(&new_parent_inode->lock);
+            } else {
+                pthread_mutex_unlock(&old_parent_inode->lock);
+            }
+
+            request->status = CHIMERA_VFS_OK;
+            request->complete(request);
+            return;
+        }
+
+        /* Destination exists - check if we can replace it */
+        existing_inode = demofs_inode_get_inum(shared, existing_dirent->inum, existing_dirent->gen);
+
+        if (existing_inode) {
+            /* Cannot rename a directory over a non-directory or vice versa */
+            if (S_ISDIR(child_inode->mode) != S_ISDIR(existing_inode->mode)) {
+                pthread_mutex_unlock(&existing_inode->lock);
+                pthread_mutex_unlock(&child_inode->lock);
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                if (cmp != 0) {
+                    pthread_mutex_unlock(&new_parent_inode->lock);
+                }
+                request->status = S_ISDIR(existing_inode->mode) ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR;
+                request->complete(request);
+                return;
+            }
+
+            /* Cannot replace non-empty directory */
+            if (S_ISDIR(existing_inode->mode) && existing_inode->nlink > 2) {
+                pthread_mutex_unlock(&existing_inode->lock);
+                pthread_mutex_unlock(&child_inode->lock);
+                pthread_mutex_unlock(&old_parent_inode->lock);
+                if (cmp != 0) {
+                    pthread_mutex_unlock(&new_parent_inode->lock);
+                }
+                request->status = CHIMERA_VFS_ENOTEMPTY;
+                request->complete(request);
+                return;
+            }
+
+            /* Remove the existing destination entry and decrement link count */
+            rb_tree_remove(&new_parent_inode->dir.dirents, &existing_dirent->node);
+            existing_inode->nlink--;
+            if (S_ISDIR(existing_inode->mode)) {
+                new_parent_inode->nlink--;
+            }
+            pthread_mutex_unlock(&existing_inode->lock);
+            demofs_dirent_free(thread, existing_dirent);
+        }
+    }
+
+    new_dirent = demofs_dirent_alloc(thread,
+                                     old_dirent->inum,
+                                     old_dirent->gen,
+                                     new_hash,
+                                     request->rename.new_name,
+                                     request->rename.new_namelen);
+
+    rb_tree_insert(&new_parent_inode->dir.dirents, hash, new_dirent);
+
+    rb_tree_remove(&old_parent_inode->dir.dirents, &old_dirent->node);
 
     if (S_ISDIR(child_inode->mode)) {
         old_parent_inode->nlink--;
@@ -2697,6 +2881,8 @@ demofs_rename(
     }
 
     pthread_mutex_unlock(&child_inode->lock);
+
+    demofs_dirent_free(thread, old_dirent);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
