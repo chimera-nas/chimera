@@ -56,6 +56,8 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
         dest_parent_oh->fh_len,
         dest_name,
         dest_name_len,
+        NULL,
+        0,
         chimera_smb_set_info_rename_callback,
         request);
 } /* chimera_smb_set_info_rename_do_rename */
@@ -259,6 +261,7 @@ chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
             rename_info->new_parent,
             rename_info->new_parent_len,
             CHIMERA_VFS_ATTR_FH,
+            0,
             chimera_smb_set_info_rename_lookup_dest_parent_callback,
             request);
     } else {
