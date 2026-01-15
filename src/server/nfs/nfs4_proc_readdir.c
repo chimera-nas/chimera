@@ -125,6 +125,7 @@ chimera_nfs4_readdir_open_callback(
                         attrmask,
                         0,
                         args->cookie,
+                        CHIMERA_VFS_READDIR_EMIT_DOT,
                         chimera_nfs4_readdir_callback,
                         chimera_nfs4_readdir_complete,
                         req);

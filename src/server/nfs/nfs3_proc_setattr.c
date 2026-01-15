@@ -91,6 +91,7 @@ chimera_nfs3_setattr(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
+    unsigned int                      open_flags;
 
     req = nfs_request_alloc(thread, conn, msg);
 
@@ -98,10 +99,20 @@ chimera_nfs3_setattr(
 
     req->args_setattr = args;
 
+    /*
+     * Use a real file handle instead of OPEN_PATH when setting size, because
+     * ftruncate() requires a real file descriptor, not an O_PATH handle.
+     */
+    if (args->new_attributes.size.set_it) {
+        open_flags = CHIMERA_VFS_OPEN_INFERRED;
+    } else {
+        open_flags = CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
+    }
+
     chimera_vfs_open(thread->vfs_thread,
                      args->object.data.data,
                      args->object.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                     open_flags,
                      chimera_nfs3_setattr_open_callback,
                      req);
 

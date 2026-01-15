@@ -57,8 +57,8 @@ chimera_posix_ftruncate(
     req.fsetattr.callback     = chimera_posix_ftruncate_callback;
     req.fsetattr.private_data = &comp;
 
-    req.fsetattr.set_attr.va_req_mask = CHIMERA_VFS_ATTR_SIZE;
-    req.fsetattr.set_attr.va_set_mask = 0;
+    req.fsetattr.set_attr.va_req_mask = 0;
+    req.fsetattr.set_attr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
     req.fsetattr.set_attr.va_size     = (uint64_t) length;
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_ftruncate_exec);

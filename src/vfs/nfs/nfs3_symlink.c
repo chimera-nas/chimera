@@ -39,7 +39,7 @@ chimera_nfs3_symlink_callback(
     chimera_nfs3_get_wcc_data(&request->symlink.r_dir_pre_attr, &request->symlink.r_dir_post_attr, &res->resok.dir_wcc);
 
     if (res->resok.obj.handle_follows) {
-        chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, &request->symlink.r_attr);
+        chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, request->fh, &request->symlink.r_attr);
     }
 
     if (res->resok.obj_attributes.attributes_follow) {

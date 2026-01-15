@@ -56,6 +56,8 @@ chimera_nfs4_rename_open_callback(
         req->fhlen,
         args->newname.data,
         args->newname.len,
+        NULL,
+        0,
         chimera_nfs4_rename_complete,
         req);
 

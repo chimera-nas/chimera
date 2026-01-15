@@ -359,8 +359,7 @@ chimera_vfs_open_cache_acquire(
             DL_DELETE(shard->pending_close, existing);
             HASH_DELETE(hh_by_fh, shard->open_files, existing);
 
-            chimera_vfs_close(thread, existing->fh, existing->fh_len, existing->vfs_private,
-                              chimera_vfs_open_cache_close_callback, handle);
+            chimera_vfs_close(thread, existing, chimera_vfs_open_cache_close_callback, handle);
 
             chimera_vfs_open_cache_free(shard, existing);
 
@@ -425,3 +424,138 @@ chimera_vfs_open_cache_defer_close(
     return NULL;
 #endif /* ifndef __clang_analyzer__ */
 } /* vfs_open_cache_defer_close */
+
+/*
+ * Count handles in the cache that belong to the given mount.
+ * mount_id is the first 16 bytes of the file handle.
+ * Returns count of handles with opencnt > 0 (actively referenced).
+ */
+static inline uint64_t
+chimera_vfs_open_cache_count_by_mount(
+    struct vfs_open_cache *cache,
+    const uint8_t         *mount_id)
+{
+    struct vfs_open_cache_shard    *shard;
+    struct chimera_vfs_open_handle *handle, *tmp;
+    uint64_t                        count = 0;
+
+    for (unsigned int i = 0; i < cache->num_shards; i++) {
+        shard = &cache->shards[i];
+
+        pthread_mutex_lock(&shard->lock);
+
+        HASH_ITER(hh_by_fh, shard->open_files, handle, tmp)
+        {
+            if (memcmp(handle->fh, mount_id, CHIMERA_VFS_MOUNT_ID_SIZE) == 0) {
+                if (handle->opencnt > 0) {
+                    count++;
+                }
+            }
+        }
+
+        pthread_mutex_unlock(&shard->lock);
+    }
+
+    return count;
+} /* chimera_vfs_open_cache_count_by_mount */
+
+/*
+ * Mark all handles belonging to the given mount for immediate close.
+ * This sets their timestamp to 0 so the close thread will close them
+ * on the next sweep.
+ * Returns count of handles marked.
+ */
+static inline uint64_t
+chimera_vfs_open_cache_mark_for_close_by_mount(
+    struct vfs_open_cache *cache,
+    const uint8_t         *mount_id)
+{
+    struct vfs_open_cache_shard    *shard;
+    struct chimera_vfs_open_handle *handle, *tmp;
+    uint64_t                        count = 0;
+
+    for (unsigned int i = 0; i < cache->num_shards; i++) {
+        shard = &cache->shards[i];
+
+        pthread_mutex_lock(&shard->lock);
+
+        HASH_ITER(hh_by_fh, shard->open_files, handle, tmp)
+        {
+            if (memcmp(handle->fh, mount_id, CHIMERA_VFS_MOUNT_ID_SIZE) == 0) {
+                /* Set timestamp to 0 so it will be closed immediately */
+                handle->timestamp.tv_sec  = 0;
+                handle->timestamp.tv_nsec = 0;
+                count++;
+            }
+        }
+
+        pthread_mutex_unlock(&shard->lock);
+    }
+
+    return count;
+} /* chimera_vfs_open_cache_mark_for_close_by_mount */
+
+/*
+ * Lookup a file handle in the open cache and increment its refcount if found.
+ *
+ * This is used for checking if a file is open (e.g., for silly rename on remove).
+ * If the file is open (opencnt > 0), increments opencnt and returns the handle.
+ * If not found or not open, returns NULL.
+ *
+ * The caller must call chimera_vfs_open_cache_release() when done with the handle.
+ */
+static inline struct chimera_vfs_open_handle *
+chimera_vfs_open_cache_lookup_ref(
+    struct vfs_open_cache *cache,
+    const uint8_t         *fh,
+    uint32_t               fh_len,
+    uint64_t               fh_hash)
+{
+    struct vfs_open_cache_shard    *shard;
+    struct chimera_vfs_open_handle *handle = NULL;
+
+    shard = &cache->shards[fh_hash & cache->shard_mask];
+
+    pthread_mutex_lock(&shard->lock);
+
+    HASH_FIND_BYHASHVALUE(hh_by_fh, shard->open_files, fh, fh_len, (fh_hash & 0xFFFFFFFF), handle);
+
+    if (handle && handle->opencnt > 0 && !(handle->flags & CHIMERA_VFS_OPEN_HANDLE_PENDING)) {
+        /* Found an open, non-pending handle - increment refcount */
+        handle->opencnt++;
+    } else {
+        handle = NULL;
+    }
+
+    pthread_mutex_unlock(&shard->lock);
+
+    return handle;
+} /* chimera_vfs_open_cache_lookup_ref */
+
+/*
+ * Check if a file handle exists in the open cache.
+ *
+ * Returns true if the handle exists (regardless of opencnt or pending state).
+ * This is used by backends to avoid allocating per-open state when the VFS
+ * cache will reuse an existing entry.
+ */
+static inline int
+chimera_vfs_open_cache_exists(
+    struct vfs_open_cache *cache,
+    const uint8_t         *fh,
+    uint32_t               fh_len,
+    uint64_t               fh_hash)
+{
+    struct vfs_open_cache_shard    *shard;
+    struct chimera_vfs_open_handle *handle = NULL;
+
+    shard = &cache->shards[fh_hash & cache->shard_mask];
+
+    pthread_mutex_lock(&shard->lock);
+
+    HASH_FIND_BYHASHVALUE(hh_by_fh, shard->open_files, fh, fh_len, (fh_hash & 0xFFFFFFFF), handle);
+
+    pthread_mutex_unlock(&shard->lock);
+
+    return handle != NULL;
+} /* chimera_vfs_open_cache_exists */

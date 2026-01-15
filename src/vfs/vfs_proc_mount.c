@@ -131,8 +131,9 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
     mount->pathlen       = strlen(request->mount.mount_path);
     mount->mount_private = request->mount.r_mount_private;
 
-    memcpy(mount->mount_id, request->mount.r_attr.va_fh, request->mount.r_attr.va_fh_len);
-    mount->mount_id_len = request->mount.r_attr.va_fh_len;
+    /* Store the root FH (first 16 bytes is the mount_id) */
+    memcpy(mount->root_fh, request->mount.r_attr.va_fh, request->mount.r_attr.va_fh_len);
+    mount->root_fh_len = request->mount.r_attr.va_fh_len;
 
     chimera_vfs_mount_table_insert(vfs->mount_table, mount);
 
@@ -180,6 +181,10 @@ chimera_vfs_mount(
     }
 
     request = chimera_vfs_request_alloc(thread, &module->fh_magic, 1);
+
+    /* For mount operations, the module is already known - set it directly
+     * since chimera_vfs_get_module returns NULL (no mount exists yet) */
+    request->module = module;
 
     /* Parse mount options directly into request buffer */
     rc = chimera_vfs_parse_mount_options(options,

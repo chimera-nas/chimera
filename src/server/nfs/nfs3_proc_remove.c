@@ -62,6 +62,8 @@ chimera_nfs3_remove_open_callback(
                            handle,
                            args->object.name.str,
                            args->object.name.len,
+                           NULL,
+                           0,
                            CHIMERA_NFS3_ATTR_WCC_MASK,
                            CHIMERA_NFS3_ATTR_MASK,
                            chimera_nfs3_remove_complete,

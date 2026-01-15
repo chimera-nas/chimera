@@ -6,6 +6,10 @@
 #include "nfs_common/nfs3_attr.h"
 #include "nfs_common/nfs3_status.h"
 
+struct chimera_nfs3_mkdir_ctx {
+    struct chimera_nfs_client_server *server;
+};
+
 static void
 chimera_nfs3_mkdir_callback(
     struct evpl      *evpl,
@@ -13,7 +17,8 @@ chimera_nfs3_mkdir_callback(
     int               status,
     void             *private_data)
 {
-    struct chimera_vfs_request *request = private_data;
+    struct chimera_vfs_request    *request = private_data;
+    struct chimera_nfs3_mkdir_ctx *ctx     = request->plugin_data;
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -31,6 +36,8 @@ chimera_nfs3_mkdir_callback(
         request->complete(request);
         return;
     }
+
+    chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, request->fh, &request->mkdir.r_attr);
 
     if (res->resok.obj_attributes.attributes_follow) {
         chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->mkdir.r_attr);
@@ -51,6 +58,7 @@ chimera_nfs3_mkdir(
 {
     struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
                                                                                                   request->fh_len);
+    struct chimera_nfs3_mkdir_ctx           *ctx;
     struct MKDIR3args                        args;
     uint8_t                                 *fh;
     int                                      fhlen;
@@ -60,6 +68,9 @@ chimera_nfs3_mkdir(
         request->complete(request);
         return;
     }
+
+    ctx         = request->plugin_data;
+    ctx->server = server_thread->server;
 
     chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 

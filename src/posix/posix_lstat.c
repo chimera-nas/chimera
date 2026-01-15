@@ -51,6 +51,7 @@ chimera_posix_lstat(
     req.opcode            = CHIMERA_CLIENT_OP_STAT;
     req.stat.callback     = chimera_posix_lstat_callback;
     req.stat.private_data = &comp;
+    req.stat.flags        = 0;  /* lstat() does NOT follow symlinks */
     req.stat.path_len     = path_len;
 
     memcpy(req.stat.path, path, path_len);

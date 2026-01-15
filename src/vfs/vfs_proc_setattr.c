@@ -52,7 +52,6 @@ chimera_vfs_setattr(
     request->complete                        = chimera_vfs_setattr_complete;
     request->setattr.handle                  = handle;
     request->setattr.set_attr                = set_attr;
-    request->setattr.set_attr->va_set_mask   = 0;
     request->setattr.r_pre_attr.va_req_mask  = pre_attr_mask;
     request->setattr.r_pre_attr.va_set_mask  = 0;
     request->setattr.r_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;

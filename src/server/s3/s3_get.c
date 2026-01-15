@@ -191,6 +191,7 @@ chimera_s3_get(
                             request->path,
                             request->path_len,
                             CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                            CHIMERA_VFS_LOOKUP_FOLLOW,
                             chimera_s3_get_lookup_callback,
                             request);
 } /* chimera_s3_get */
