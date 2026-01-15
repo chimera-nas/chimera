@@ -65,6 +65,10 @@ get_name(struct info *ip)
     char       *p;
     size_t      len;
 
+    if (!ip->name) {
+        return NULL;
+    }
+
     if (!mixcase) {
         return ip->name;
     }
@@ -298,7 +302,11 @@ main(
     for (i = 0; i < totalnames; i++) {
         char namebuf[1024];
         snprintf(namebuf, sizeof(namebuf), "%s/testfile_%05d", test_dir, i);
-        table[i].name    = strdup(namebuf);
+        table[i].name = strdup(namebuf);
+        if (table[i].name == NULL) {
+            perror("strdup");
+            posix_test_fail(&env);
+        }
         table[i].namelen = strlen(namebuf);
         table[i].exists  = 0;
         table[i].inumber = 0;

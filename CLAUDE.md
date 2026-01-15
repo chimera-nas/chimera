@@ -12,14 +12,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Chimera is a high-performance multi-protocol Network Attached Storage (NAS) stack with an asynchronous Virtual File System (VFS) backend. It provides unified server implementations for NFS (v3/v4), SMB2, and S3 protocols, all backed by a pluggable VFS layer.
 
+## Build Trees
+
+Build outputs are located in:
+- `/build/Release` - Release build (optimized)
+- `/build/Debug` - Debug build (with AddressSanitizer)
+
+**Note:** The user will typically have already built the project. You can run `ninja` directly in these directories to rebuild, or run `ctest` to execute tests.
+
 ## Build Commands
 
 ```bash
-# Build release version (optimized)
+# Build debug version (default)
 make
 
-# Build debug version (with AddressSanitizer)
-make debug
+# Build release version
+make release
 
 # Build without running tests
 make build_release  # or make build_debug
@@ -30,20 +38,51 @@ make test_release  # or make test_debug
 # Clean all build artifacts
 make clean
 
-# Direct CMake commands (if needed)
-cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -S . -B build/release
-ninja -C build/release
+# Fix code formatting
+make syntax
+
+# Run directly in build directory (if already configured)
+ninja -C build/Debug
+ninja -C build/Release
 ```
 
 ## Running Tests
 
+All testing is done via ctest:
+
 ```bash
-# Run all tests (after building)
-cd build/release && ctest --output-on-failure
+# Run all tests in a build directory
+cd build/Debug && ctest --output-on-failure
 
 # Run specific test
-cd build/release && ctest -R <test_name> --output-on-failure
+cd build/Debug && ctest -R <test_name> --output-on-failure
+
+# Run tests with parallel execution
+cd build/Release && ctest --output-on-failure -j 8
 ```
+
+## Pre-Completion Verification
+
+**IMPORTANT:** After finishing code changes, follow these steps:
+
+1. **Format code** - Run `make syntax` to auto-format all code with uncrustify:
+```bash
+make syntax
+```
+
+2. **Verify all checks pass** - Run `make check` to verify all CI checks pass:
+```bash
+make check
+```
+
+This runs:
+- `syntax-check` - Verifies code formatting with uncrustify
+- `build_release` / `test_release` - Release build and tests
+- `build_debug` / `test_debug` - Debug build and tests
+- `build_clang` - Clang static analysis (scan-build)
+- `reuse-lint` - SPDX license header compliance
+
+All of these checks are verified by CI, so running `make check` locally ensures your changes will pass CI.
 
 ## Architecture Overview
 
@@ -81,7 +120,7 @@ Chimera uses JSON configuration files. Example:
 {
     "shares": {
         "share_name": {
-            "module": "linux",  // VFS module type
+            "module": "linux",
             "path": "/path/to/share"
         }
     },
@@ -98,6 +137,7 @@ Chimera uses JSON configuration files. Example:
 - Use uncrustify with `/chimera/etc/uncrustify.cfg`
 - SPDX license headers required
 - Follow existing naming conventions in each module
+- Run `make syntax` to auto-fix formatting issues
 
 ### Adding New Features
 - VFS modules go in `src/vfs/<module_name>/`
@@ -109,22 +149,6 @@ Chimera uses JSON configuration files. Example:
 - External dependencies are in `ext/` (libevpl, libsmb2)
 - System libraries: liburing, librdmacm, libjansson, liburcu, librocksdb
 - Optional: CUDA toolkit, FIO
-
-### Common Development Tasks
-
-```bash
-# Start the server
-./build/release/daemon/chimera -c chimera.json
-
-# Enable debug logging
-./build/debug/daemon/chimera -c chimera.json -d
-
-# Run with Docker
-docker run -v /path/to/config:/etc/chimera.json chimera/chimera:latest
-
-# Format code (if uncrustify is installed)
-uncrustify -c etc/uncrustify.cfg --no-backup src/path/to/file.c
-```
 
 ## Important Notes
 

@@ -333,7 +333,8 @@ chimera_io_uring_complete(
                     request->status         = CHIMERA_VFS_OK;
                     request->write.r_length = cqe->res;
                 } else {
-                    request->status = chimera_linux_errno_to_status(-cqe->res);
+                    request->status         = chimera_linux_errno_to_status(-cqe->res);
+                    request->write.r_length = 0;
                 }
                 evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
                 break;
@@ -972,14 +973,14 @@ chimera_io_uring_read(
 
     /* Handle 0-byte reads specially - readv with uninitialized iov causes EFAULT */
     if (request->read.length == 0) {
-        fd = (int) request->read.handle->vfs_private;
+        fd  = (int) request->read.handle->vfs_private;
         stx = (struct statx *) scratch;
         /* Pre-fill result fields since we won't submit readv */
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;
         request->read.r_length = 0;
         request->read.r_eof    = 1;
-        sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
+        sqe                    = chimera_io_uring_get_sqe(thread, request, 1, 0);
         io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
         evpl_defer(thread->evpl, &thread->deferral);
         return;

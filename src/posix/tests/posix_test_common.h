@@ -264,7 +264,7 @@ posix_test_cleanup(
     prometheus_metrics_destroy(env->metrics);
 } /* posix_test_cleanup */
 
-static inline void
+__attribute__((noreturn)) static inline void
 posix_test_fail(struct posix_test_env *env)
 {
     fprintf(stderr, "Test failed\n");
