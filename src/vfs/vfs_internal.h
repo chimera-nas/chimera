@@ -13,6 +13,8 @@
 #include <utlist.h>
 
 #include "vfs/vfs.h"
+#include "vfs/vfs_fh.h"
+#include "vfs/vfs_mount_table.h"
 #include "common/logging.h"
 #include "common/misc.h"
 #include "metrics/metrics.h"
@@ -103,17 +105,23 @@ chimera_vfs_get_module(
     const void                *fh,
     int                        fhlen)
 {
-    struct chimera_vfs *vfs = thread->vfs;
+    struct chimera_vfs        *vfs = thread->vfs;
+    struct chimera_vfs_mount  *mount;
+    struct chimera_vfs_module *module;
 
-    uint8_t             fh_magic;
-
-    if (fhlen < 1) {
+    if (fhlen < CHIMERA_VFS_MOUNT_ID_SIZE) {
         return NULL;
     }
 
-    fh_magic = *(uint8_t *) fh;
+    urcu_memb_read_lock();
 
-    return vfs->modules[fh_magic];
+    mount = chimera_vfs_mount_table_lookup(vfs->mount_table, fh);
+
+    module = mount ? mount->module : NULL;
+
+    urcu_memb_read_unlock();
+
+    return module;
 } /* chimera_vfs_get_module */
 
 static inline struct chimera_vfs_request *
@@ -137,7 +145,7 @@ chimera_vfs_request_alloc_by_hash(
 
     request->module = chimera_vfs_get_module(thread, fh, fhlen);
 
-    request->fh          = fh;
+    memcpy(request->fh, fh, fhlen);
     request->fh_len      = fhlen;
     request->fh_hash     = fh_hash;
     request->active_prev = NULL;
@@ -182,6 +190,45 @@ chimera_vfs_request_alloc_by_handle(
 {
     return chimera_vfs_request_alloc_by_hash(thread, handle->fh, handle->fh_len, handle->fh_hash);
 } /* chimera_vfs_request_alloc_by_handle */
+
+/*
+ * Allocate a request with a pre-determined module (no mount table lookup).
+ * Use this when the module is already known, e.g., from an open handle.
+ */
+static inline struct chimera_vfs_request *
+chimera_vfs_request_alloc_with_module(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen,
+    uint64_t                   fh_hash,
+    struct chimera_vfs_module *module)
+{
+    struct chimera_vfs_request *request;
+
+    if (thread->free_requests) {
+        request = thread->free_requests;
+        LL_DELETE(thread->free_requests, request);
+    } else {
+        request              = calloc(1, sizeof(struct chimera_vfs_request));
+        request->thread      = thread;
+        request->plugin_data = malloc(4096);
+    }
+    request->status = CHIMERA_VFS_UNSET;
+
+    request->module = module;
+    memcpy(request->fh, fh, fhlen);
+    request->fh_len      = fhlen;
+    request->fh_hash     = fh_hash;
+    request->active_prev = NULL;
+    request->active_next = NULL;
+
+    clock_gettime(CLOCK_MONOTONIC, &request->start_time);
+
+    thread->num_active_requests++;
+    DL_APPEND2(thread->active_requests, request, active_prev, active_next);
+
+    return request;
+} /* chimera_vfs_request_alloc_with_module */
 
 static inline struct chimera_vfs_open_handle *
 chimera_vfs_synth_handle_alloc(struct chimera_vfs_thread *thread)
@@ -267,8 +314,8 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
 
     chimera_vfs_dump_request(request);
 
-    if (!thread->module_private[module->fh_magic]) {
-        request->status = CHIMERA_VFS_ENOTSUP;
+    if (!module || !thread->module_private[module->fh_magic]) {
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }

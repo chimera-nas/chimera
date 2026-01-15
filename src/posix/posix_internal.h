@@ -225,6 +225,10 @@ chimera_posix_to_chimera_flags(int flags)
         out |= CHIMERA_VFS_OPEN_CREATE;
     }
 
+    if (flags & O_EXCL) {
+        out |= CHIMERA_VFS_OPEN_EXCLUSIVE;
+    }
+
     if (flags & O_DIRECTORY) {
         out |= CHIMERA_VFS_OPEN_DIRECTORY;
     }

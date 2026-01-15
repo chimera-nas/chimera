@@ -50,6 +50,8 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
             request->dir_handle->fh_len,
             request->name,
             request->name_len,
+            NULL,
+            0,
             chimera_s3_put_rename_callback,
             request);
     } else {

@@ -58,6 +58,8 @@ chimera_smb_set_info_open_unlink_callback(
         oh,
         open_file->name,
         open_file->name_len,
+        NULL,
+        0,
         0,
         0,
         chimera_smb_set_info_remove_callback,

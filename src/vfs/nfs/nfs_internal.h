@@ -15,6 +15,7 @@
 #include "nfs4_xdr.h"
 #include "uthash.h"
 #include "common/misc.h"
+#include "vfs/vfs_fh.h"
 
 #define chimera_nfsclient_debug(...) chimera_debug("nfsclient", \
                                                    __FILE__, \
@@ -158,15 +159,12 @@ chimera_nfs_thread_get_server_thread(
     struct chimera_nfs_client_server_thread *server_thread = NULL;
     int                                      index;
 
-    if (unlikely(fhlen < 2)) {
+    if (unlikely(fhlen < CHIMERA_VFS_MOUNT_ID_SIZE + 1)) {
         return NULL;
     }
 
-    if (unlikely(fh[0] != CHIMERA_VFS_FH_MAGIC_NFS)) {
-        return NULL;
-    }
-
-    index = fh[1];
+    /* Server index is at position CHIMERA_VFS_MOUNT_ID_SIZE (first byte of fh_fragment) */
+    index = fh[CHIMERA_VFS_MOUNT_ID_SIZE];
 
     if (unlikely(index > thread->shared->max_servers)) {
         return NULL;
@@ -204,8 +202,9 @@ chimera_nfs3_map_fh(
     uint8_t      **mapped_fh,
     int           *mapped_fhlen)
 {
-    *mapped_fh    = (uint8_t *) fh + 2;
-    *mapped_fhlen = fhlen - 2;
+    /* Skip mount_id (16 bytes) + server_index (1 byte) to get remote NFS fh */
+    *mapped_fh    = (uint8_t *) fh + CHIMERA_VFS_MOUNT_ID_SIZE + 1;
+    *mapped_fhlen = fhlen - CHIMERA_VFS_MOUNT_ID_SIZE - 1;
 } // chimera_nfs3_map_fh
 
 void chimera_nfs3_dispatch(

@@ -330,3 +330,45 @@ typedef void (*chimera_commit_callback_t)(
     struct chimera_client_thread *client,
     enum chimera_vfs_error        status,
     void                         *private_data);
+
+// Filesystem statistics
+struct chimera_statvfs {
+    uint64_t f_bsize;    // Filesystem block size
+    uint64_t f_frsize;   // Fragment size
+    uint64_t f_blocks;   // Size of fs in f_frsize units
+    uint64_t f_bfree;    // Number of free blocks
+    uint64_t f_bavail;   // Number of free blocks for unprivileged users
+    uint64_t f_files;    // Number of inodes
+    uint64_t f_ffree;    // Number of free inodes
+    uint64_t f_favail;   // Number of free inodes for unprivileged users
+    uint64_t f_fsid;     // Filesystem ID
+    uint64_t f_flag;     // Mount flags
+    uint64_t f_namemax;  // Maximum filename length
+};
+
+typedef void (*chimera_statfs_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    const struct chimera_statvfs *st,
+    void                         *private_data);
+
+void
+chimera_statfs(
+    struct chimera_client_thread *thread,
+    const char                   *path,
+    int                           path_len,
+    chimera_statfs_callback_t     callback,
+    void                         *private_data);
+
+typedef void (*chimera_fstatfs_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    const struct chimera_statvfs *st,
+    void                         *private_data);
+
+void
+chimera_fstatfs(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    chimera_fstatfs_callback_t      callback,
+    void                           *private_data);

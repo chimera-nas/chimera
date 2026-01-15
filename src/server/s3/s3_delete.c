@@ -56,6 +56,8 @@ chimera_s3_delete_open_callback(
                        oh,
                        request->name,
                        request->name_len,
+                       NULL,
+                       0,
                        0,
                        0,
                        chimera_s3_delete_remove_callback,
@@ -128,6 +130,7 @@ chimera_s3_delete(
                             dirpath,
                             dirpathlen,
                             CHIMERA_VFS_ATTR_FH,
+                            CHIMERA_VFS_LOOKUP_FOLLOW,
                             chimera_s3_get_lookup_callback,
                             request);
 } /* chimera_s3_get */

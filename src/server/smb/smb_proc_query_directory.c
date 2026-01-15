@@ -294,6 +294,7 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         CHIMERA_VFS_ATTR_MASK_STAT,
         0, /* dir_attr_mask */
         request->query_directory.open_file->position,
+        CHIMERA_VFS_READDIR_EMIT_DOT,
         chimera_smb_query_directory_readdir_callback,
         chimera_smb_query_directory_readdir_complete,
         request

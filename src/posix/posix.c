@@ -10,8 +10,6 @@
 
 struct chimera_posix_client *chimera_posix_global;
 
-const uint8_t                root_fh[1] = { CHIMERA_VFS_FH_MAGIC_ROOT };
-
 void *
 chimera_posix_worker_init(
     struct evpl *evpl,

@@ -37,7 +37,7 @@ chimera_nfs3_lookup_callback(
         return;
     }
 
-    chimera_nfs3_unmarshall_fh(&res->resok.object, ctx->server->index, &request->lookup.r_attr);
+    chimera_nfs3_unmarshall_fh(&res->resok.object, ctx->server->index, request->fh, &request->lookup.r_attr);
 
     if (res->resok.obj_attributes.attributes_follow) {
         chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->lookup.r_attr);
