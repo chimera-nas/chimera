@@ -97,6 +97,23 @@ struct chimera_smb_conn;
 
 #define CHIMERA_SMB_REQUEST_FLAG_SIGN 0x01
 
+struct chimera_smb_rename_info {
+    uint8_t                         replace_if_exist;
+    struct chimera_vfs_open_handle *new_parent_handle;
+    char                            new_parent[SMB_FILENAME_MAX];
+    int                             new_parent_len;
+    char                           *new_name;
+    int                             new_name_len;
+};
+
+int
+chimera_smb_parse_rename_info(
+    struct evpl_iovec_cursor   *cursor,
+    struct chimera_smb_request *request);
+
+void
+chimera_smb_set_info_rename_process(
+    struct chimera_smb_request *request);
 
 struct chimera_smb_request {
     uint32_t                           status;
@@ -274,6 +291,8 @@ struct chimera_smb_request {
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_attrs        attrs;
             struct chimera_vfs_attrs        vfs_attrs;
+            /* Rename information */
+            struct chimera_smb_rename_info  rename_info;
         } set_info;
 
         struct {
@@ -419,8 +438,9 @@ chimera_smb_request_alloc(struct chimera_server_smb_thread *thread)
         request = calloc(1, sizeof(*request));
     }
 
-    request->flags = 0;
-    request->tree  = NULL;
+    request->status = SMB2_STATUS_SUCCESS;
+    request->flags  = 0;
+    request->tree   = NULL;
 
     return request;
 } /* chimera_smb_request_alloc */

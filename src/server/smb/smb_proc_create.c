@@ -619,6 +619,27 @@ chimera_smb_create_reply(
 
 } /* chimera_smb_create_reply */
 
+/*
+ * Parse SMB2 CREATE request
+ * Offset  Size  Field
+ * ------  ----  -----------------------------------------------------------
+ * 0x00    2     StructureSize = 57 (0x0039)   // fixed for request
+ * 0x02    1     SecurityFlags = 0 (reserved)
+ * 0x03    1     RequestedOplockLevel          // NONE/II/EXCLUSIVE/BATCH/LEASE
+ * 0x04    4     ImpersonationLevel            // Anonymous/Ident./Impersonation/Delegate
+ * 0x08    8     SmbCreateFlags = 0 (reserved; ignore on server)
+ * 0x10    8     Reserved (ignore on server)
+ * 0x18    4     DesiredAccess                 // access mask (see §2.2.13.1)
+ * 0x1C    4     FileAttributes                // FILE_ATTRIBUTE_* (dirs use DIRECTORY)
+ * 0x20    4     ShareAccess                   // READ/WRITE/DELETE mask
+ * 0x24    4     CreateDisposition             // SUPERSEDE, OPEN, CREATE, OPEN_IF, OVERWRITE, OVERWRITE_IF
+ * 0x28    4     CreateOptions                 // FILE_* options (e.g., DIRECTORY_FILE, NON_DIRECTORY_FILE)
+ * 0x2C    2     NameOffset                    // from start of SMB2 header to file name
+ * 0x2E    2     NameLength (bytes; UTF‑16LE; not NUL‑terminated)
+ * 0x30    4     CreateContextsOffset          // 8‑byte aligned if present; 0 if none
+ * 0x34    4     CreateContextsLength          // bytes of concatenated contexts
+ * 0x38    ...   Buffer: FileName then SMB2_CREATE_CONTEXT blobs (if any)
+ */
 int
 chimera_smb_parse_create(
     struct evpl_iovec_cursor   *request_cursor,
@@ -633,6 +654,7 @@ chimera_smb_parse_create(
         chimera_smb_error("Received SMB2 CREATE request with invalid struct size (%u expected %u)",
                           request->smb2_hdr.struct_size,
                           SMB2_CREATE_REQUEST_SIZE);
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
 

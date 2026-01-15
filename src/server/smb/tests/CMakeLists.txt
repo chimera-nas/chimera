@@ -19,17 +19,21 @@ endmacro()
 add_libsmb2_testprog(libsmb2_basic)
 add_libsmb2_testprog(libsmb2_bigdir)
 add_libsmb2_testprog(libsmb2_echo)
+add_libsmb2_testprog(libsmb2_rename)
 
 add_libsmb2_test(libsmb2_memfs_basic libsmb2_basic -b memfs)
 add_libsmb2_test(libsmb2_memfs_bigdir libsmb2_bigdir -b memfs)
 add_libsmb2_test(libsmb2_memfs_echo libsmb2_echo -b memfs)
+add_libsmb2_test(libsmb2_memfs_rename libsmb2_rename -b memfs)
 
 
 add_libsmb2_test(libsmb2_linux_basic libsmb2_basic -b linux)
 add_libsmb2_test(libsmb2_linux_bigdir libsmb2_bigdir -b linux)
 add_libsmb2_test(libsmb2_linux_echo libsmb2_echo -b linux)
+add_libsmb2_test(libsmb2_linux_rename libsmb2_rename -b linux)
 
 
 add_libsmb2_test(libsmb2_demofs_basic libsmb2_basic -b demofs)
 add_libsmb2_test(libsmb2_demofs_bigdir libsmb2_bigdir -b demofs)
 add_libsmb2_test(libsmb2_demofs_echo libsmb2_echo -b demofs)
+add_libsmb2_test(libsmb2_demofs_rename libsmb2_rename -b demofs)
