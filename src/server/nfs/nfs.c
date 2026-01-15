@@ -179,6 +179,7 @@ nfs_server_init(
 
     shared->nfs_server = evpl_rpc2_server_init(programs, 3);
 
+    pthread_mutex_init(&shared->exports_lock, NULL);
     return shared;
 } /* nfs_server_init */
 
@@ -223,6 +224,7 @@ static void
 nfs_server_destroy(void *data)
 {
     struct chimera_server_nfs_shared *shared = data;
+    struct chimera_nfs_export        *export;
 
     /* Close out all the nfs4 session state */
     nfs4_client_table_free(&shared->nfs4_shared_clients);
@@ -245,6 +247,11 @@ nfs_server_destroy(void *data)
     free(shared->nfs_v4.rpc2.metrics);
     free(shared->nfs_v4_cb.rpc2.metrics);
 
+    while (shared->exports) {
+        export = shared->exports;
+        LL_DELETE(shared->exports, export);
+        free(export);
+    }
     free(shared);
 } /* nfs_server_destroy */
 
@@ -319,6 +326,24 @@ nfs_server_thread_destroy(void *data)
 
     free(thread);
 } /* nfs_server_thread_destroy */
+
+SYMBOL_EXPORT void
+chimera_nfs_add_export(
+    void       *nfs_shared,
+    const char *name,
+    const char *path)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+    struct chimera_nfs_export        *export = calloc(1, sizeof(*export));
+
+    snprintf(export->name, sizeof(export->name), "%s", name);
+    snprintf(export->path, sizeof(export->path), "%s", path);
+
+    pthread_mutex_lock(&shared->exports_lock);
+    LL_PREPEND(shared->exports, export);
+    pthread_mutex_unlock(&shared->exports_lock);
+
+} /* chimera_nfs_add_export */
 
 SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
     .init           = nfs_server_init,

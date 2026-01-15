@@ -1248,7 +1248,7 @@ chimera_smb_add_share(
     LL_PREPEND(shared->shares, share);
     pthread_mutex_unlock(&shared->shares_lock);
 
-} /* chimera_s3_add_bucket */
+} /* chimera_smb_add_share */
 
 SYMBOL_EXPORT struct chimera_server_protocol smb_protocol = {
     .init           = chimera_smb_server_init,
