@@ -202,6 +202,8 @@ struct chimera_client_request {
             int                             path_len;
             int                             parent_len;
             int                             name_offset;
+            int                             child_fh_len;
+            uint8_t                         child_fh[CHIMERA_VFS_FH_SIZE];
             char                            path[CHIMERA_VFS_PATH_MAX];
         } remove;
 
@@ -218,10 +220,12 @@ struct chimera_client_request {
             int                             dest_name_offset;
             uint32_t                        source_fh_len;
             uint32_t                        dest_fh_len;
+            int                             target_fh_len;
             char                            source_path[CHIMERA_VFS_PATH_MAX];
             char                            dest_path[CHIMERA_VFS_PATH_MAX];
             uint8_t                         source_fh[CHIMERA_VFS_FH_SIZE];
             uint8_t                         dest_fh[CHIMERA_VFS_FH_SIZE];
+            uint8_t                         target_fh[CHIMERA_VFS_FH_SIZE];
         } rename;
 
         struct {

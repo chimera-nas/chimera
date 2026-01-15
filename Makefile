@@ -8,7 +8,8 @@ CHIMERA_BUILD_DIR ?= build
 CMAKE_ARGS := -DCMAKE_EXPORT_COMPILE_COMMANDS=1 -G Ninja
 CMAKE_ARGS_RELEASE := -DCMAKE_BUILD_TYPE=Release
 CMAKE_ARGS_DEBUG := -DCMAKE_BUILD_TYPE=Debug
-CTEST_ARGS := --output-on-failure -j 8
+CTEST_PARALLEL := $(shell n=$$(nproc); echo $$(( n < 64 ? n : 64 )))
+CTEST_ARGS := --output-on-failure -j $(CTEST_PARALLEL)
 
 default: build_debug
 
@@ -51,4 +52,19 @@ syntax-check:
 syntax:
 	@find src/ -type f \( -name "*.c" -o -name "*.h" \) -print0 | \
 		xargs -0 -I {} sh -c 'uncrustify -c etc/uncrustify.cfg --replace --no-backup {}' >/dev/null 2>&1
-		
+
+.PHONY: build_clang
+build_clang:
+	@rm -rf ${CHIMERA_BUILD_DIR}/Clang
+	@mkdir -p ${CHIMERA_BUILD_DIR}/Clang
+	@LC_ALL=C scan-build --status-bugs --exclude ext/libsmb2 -o ${CHIMERA_BUILD_DIR}/Clang/ScanReport \
+		sh -c "cmake ${CMAKE_ARGS} ${CMAKE_ARGS_DEBUG} -S . -B ${CHIMERA_BUILD_DIR}/Clang && ninja -C ${CHIMERA_BUILD_DIR}/Clang"
+
+.PHONY: reuse-lint
+reuse-lint:
+	@reuse lint
+
+.PHONY: check
+check: syntax-check build_release test_release build_debug test_debug build_clang reuse-lint
+	@echo "All checks passed!"
+

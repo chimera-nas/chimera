@@ -155,6 +155,8 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OPEN_READ_ONLY     (1U << 4)
 #define CHIMERA_VFS_OPEN_EXCLUSIVE     (1U << 5)
 
+/* Readdir flags */
+#define CHIMERA_VFS_READDIR_EMIT_DOT   (1U << 0) /* Emit "." and ".." entries */
 
 #define CHIMERA_VFS_OPEN_ID_SYNTHETIC  0
 #define CHIMERA_VFS_OPEN_ID_PATH       1
@@ -393,6 +395,7 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        cookie;
             uint64_t                        attr_mask;
+            uint32_t                        flags;
             uint64_t                        r_cookie;
             uint32_t                        r_eof;
             struct chimera_vfs_attrs        r_dir_attr;
@@ -483,6 +486,8 @@ struct chimera_vfs_request {
             const char                     *name;
             int                             namelen;
             uint64_t                        name_hash;
+            const uint8_t                  *child_fh;     /* Optional: child FH if known */
+            int                             child_fh_len; /* 0 if child_fh not provided */
             struct chimera_vfs_attrs        r_dir_pre_attr;
             struct chimera_vfs_attrs        r_dir_post_attr;
             struct chimera_vfs_attrs        r_removed_attr;
@@ -509,15 +514,17 @@ struct chimera_vfs_request {
         } readlink;
 
         struct {
-            const char *name;
-            int         namelen;
-            uint64_t    name_hash;
-            uint64_t    new_fh_hash;
-            const void *new_fh;
-            int         new_fhlen;
-            uint64_t    new_name_hash;
-            const char *new_name;
-            int         new_namelen;
+            const char    *name;
+            int            namelen;
+            uint64_t       name_hash;
+            uint64_t       new_fh_hash;
+            const void    *new_fh;
+            int            new_fhlen;
+            uint64_t       new_name_hash;
+            const char    *new_name;
+            int            new_namelen;
+            const uint8_t *target_fh;     /* Optional: target FH if known (for silly rename) */
+            int            target_fh_len; /* 0 if target_fh not provided */
         } rename;
 
         struct {

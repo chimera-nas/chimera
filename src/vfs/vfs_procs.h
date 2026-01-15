@@ -128,6 +128,7 @@ chimera_vfs_readdir(
     uint64_t                        attr_mask,
     uint64_t                        dir_attr_mask,
     uint64_t                        cookie,
+    uint32_t                        flags,
     chimera_vfs_readdir_callback_t  callback,
     chimera_vfs_readdir_complete_t  complete,
     void                           *private_data);
@@ -231,6 +232,8 @@ chimera_vfs_remove(
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
+    const uint8_t                  *child_fh,
+    int                             child_fh_len,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
     chimera_vfs_remove_callback_t   callback,
@@ -349,6 +352,8 @@ chimera_vfs_rename(
     int                           new_fhlen,
     const char                   *new_name,
     int                           new_namelen,
+    const uint8_t                *target_fh,
+    int                           target_fh_len,
     chimera_vfs_rename_callback_t callback,
     void                         *private_data);
 

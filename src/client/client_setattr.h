@@ -91,7 +91,7 @@ chimera_setattr_lookup_complete(
      * Use a real file handle instead of OPEN_PATH when setting size, because
      * ftruncate() requires a real file descriptor, not an O_PATH handle.
      */
-    if (request->setattr.set_attr.va_req_mask & CHIMERA_VFS_ATTR_SIZE) {
+    if (request->setattr.set_attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
         open_flags = CHIMERA_VFS_OPEN_INFERRED;
     } else {
         open_flags = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;

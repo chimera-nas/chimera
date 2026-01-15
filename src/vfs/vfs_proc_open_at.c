@@ -106,7 +106,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
             handle->vfs_module  = request->module;
             handle->fh_len      = request->open_at.r_attr.va_fh_len;
             handle->fh_hash     = fh_hash;
-            handle->vfs_private =  0xdeadbeefUL;
+            handle->vfs_private = 0;
 
             chimera_vfs_open_at_hdl_callback(request, handle);
 

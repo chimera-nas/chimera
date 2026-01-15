@@ -2,12 +2,9 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <string.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
-#include "vfs_attr_cache.h"
-#include "common/misc.h"
 #include "common/macros.h"
 
 static void
@@ -19,21 +16,20 @@ chimera_vfs_rename_complete(struct chimera_vfs_request *request)
 
     if (request->status == CHIMERA_VFS_OK) {
 
-        /* XXX for now just remove any pertinent cache entries
-         * ideally we would get the VFS to give us back enough info
-         * about the moved and potentially replaced inodes to
-         * populate the new info now
-         */
+        /* Remove cache entries for both old and new paths.
+         * We don't insert a negative entry for the old path because
+         * if the source and destination are hard links to the same inode,
+         * the backend may treat the rename as a no-op and leave both
+         * paths valid. Inserting a negative entry would incorrectly
+         * mark the old path as deleted. */
 
-        chimera_vfs_name_cache_insert(name_cache,
+        chimera_vfs_name_cache_remove(name_cache,
                                       request->fh_hash,
                                       request->fh,
                                       request->fh_len,
                                       request->rename.name_hash,
                                       request->rename.name,
-                                      request->rename.namelen,
-                                      NULL,
-                                      0);
+                                      request->rename.namelen);
 
         chimera_vfs_name_cache_remove(name_cache,
                                       request->rename.new_fh_hash,
@@ -62,6 +58,8 @@ chimera_vfs_rename(
     int                           new_fhlen,
     const char                   *new_name,
     int                           new_namelen,
+    const uint8_t                *target_fh,
+    int                           target_fh_len,
     chimera_vfs_rename_callback_t callback,
     void                         *private_data)
 {
@@ -80,6 +78,8 @@ chimera_vfs_rename(
     request->rename.new_name      = new_name;
     request->rename.new_namelen   = new_namelen;
     request->rename.new_name_hash = chimera_vfs_hash(new_name, new_namelen);
+    request->rename.target_fh     = target_fh;
+    request->rename.target_fh_len = target_fh_len;
     request->proto_callback       = callback;
     request->proto_private_data   = private_data;
 

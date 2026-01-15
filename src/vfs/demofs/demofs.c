@@ -457,6 +457,9 @@ demofs_inode_free(
         inode->symlink.target = NULL;
     }
 
+    /* Increment generation so stale file handles return ESTALE */
+    inode->gen++;
+
     pthread_mutex_lock(&inode_list->lock);
     LL_PREPEND(inode_list->free_inode, inode);
     inode_list->num_inodes--;
@@ -895,31 +898,32 @@ demofs_apply_attrs(
     struct chimera_vfs_attrs *attr)
 {
     struct timespec now;
+    uint64_t        set_mask = attr->va_set_mask;
 
     clock_gettime(CLOCK_REALTIME, &now);
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+    if (set_mask & CHIMERA_VFS_ATTR_MODE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         inode->mode        = (inode->mode & S_IFMT) | (attr->va_mode & ~S_IFMT);
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_UID) {
+    if (set_mask & CHIMERA_VFS_ATTR_UID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         inode->uid         = attr->va_uid;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_GID) {
+    if (set_mask & CHIMERA_VFS_ATTR_GID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         inode->gid         = attr->va_gid;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) {
+    if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         inode->size        = attr->va_size;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_ATIME) {
+    if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
         if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->atime_sec  = now.tv_sec;
@@ -930,7 +934,7 @@ demofs_apply_attrs(
         }
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MTIME) {
+    if (set_mask & CHIMERA_VFS_ATTR_MTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
         if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->mtime_sec  = now.tv_sec;
@@ -991,7 +995,7 @@ demofs_setattr(
     demofs_map_attrs(thread, &request->setattr.r_pre_attr, inode);
 
     /* Handle truncation: remove/trim extents past new EOF */
-    if ((request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) &&
+    if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
         S_ISREG(inode->mode) &&
         request->setattr.set_attr->va_size < inode->size) {
 
@@ -1423,6 +1427,17 @@ demofs_remove(
     request->complete(request);
 } /* demofs_remove */
 
+/*
+ * Cookie values for readdir:
+ *   0 = start of directory, will return "."
+ *   1 = "." was returned, will return ".."
+ *   2 = ".." was returned, will return first real entry
+ *   3+ = real entry cookie (hash + 3)
+ */
+#define DEMOFS_COOKIE_DOT    1
+#define DEMOFS_COOKIE_DOTDOT 2
+#define DEMOFS_COOKIE_FIRST  3
+
 static void
 demofs_readdir(
     struct demofs_thread       *thread,
@@ -1430,7 +1445,7 @@ demofs_readdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct demofs_inode     *inode, *dirent_inode;
+    struct demofs_inode     *inode, *dirent_inode, *parent_inode;
     struct demofs_dirent    *dirent;
     uint64_t                 cookie      = request->readdir.cookie;
     uint64_t                 next_cookie = 0;
@@ -1452,19 +1467,89 @@ demofs_readdir(
         return;
     }
 
-    if (cookie) {
-        rb_tree_query_ceil(&inode->dir.dirents, cookie + 1, hash, dirent);
+    attr.va_req_mask = request->readdir.attr_mask;
+
+    /* Handle "." and ".." entries only if requested */
+    if (request->readdir.flags & CHIMERA_VFS_READDIR_EMIT_DOT) {
+        /* Handle "." entry (cookie 0 -> 1) */
+        if (cookie < DEMOFS_COOKIE_DOT) {
+            demofs_map_attrs(thread, &attr, inode);
+
+            rc = request->readdir.callback(
+                inode->inum,
+                DEMOFS_COOKIE_DOT,
+                ".",
+                1,
+                &attr,
+                request->proto_private_data);
+
+            if (rc) {
+                next_cookie = DEMOFS_COOKIE_DOT;
+                eof         = 0;
+                goto out;
+            }
+
+            cookie = DEMOFS_COOKIE_DOT;
+        }
+
+        /* Handle ".." entry (cookie 1 -> 2) */
+        if (cookie < DEMOFS_COOKIE_DOTDOT) {
+            /* Check if parent is the same inode (root directory case) to avoid deadlock */
+            if (inode->dir.parent_inum == inode->inum &&
+                inode->dir.parent_gen == inode->gen) {
+                /* Root directory - parent is self, reuse current inode */
+                demofs_map_attrs(thread, &attr, inode);
+            } else {
+                parent_inode = demofs_inode_get_inum(shared,
+                                                     inode->dir.parent_inum,
+                                                     inode->dir.parent_gen);
+
+                if (parent_inode) {
+                    demofs_map_attrs(thread, &attr, parent_inode);
+                    pthread_mutex_unlock(&parent_inode->lock);
+                } else {
+                    demofs_map_attrs(thread, &attr, inode);
+                }
+            }
+
+            rc = request->readdir.callback(
+                inode->dir.parent_inum,
+                DEMOFS_COOKIE_DOTDOT,
+                "..",
+                2,
+                &attr,
+                request->proto_private_data);
+
+            if (rc) {
+                next_cookie = DEMOFS_COOKIE_DOTDOT;
+                eof         = 0;
+                goto out;
+            }
+
+            cookie = DEMOFS_COOKIE_DOTDOT;
+        }
     } else {
-        rb_tree_first(&inode->dir.dirents, dirent);
+        /* Skip . and .. entries - advance cookie past them */
+        if (cookie < DEMOFS_COOKIE_DOTDOT) {
+            cookie = DEMOFS_COOKIE_DOTDOT;
+        }
     }
 
-    attr.va_req_mask = request->readdir.attr_mask;
+    /* Handle real directory entries (cookie >= 2) */
+    if (cookie < DEMOFS_COOKIE_FIRST) {
+        rb_tree_first(&inode->dir.dirents, dirent);
+    } else {
+        uint64_t hash_cookie = cookie - DEMOFS_COOKIE_FIRST;
+
+        rb_tree_query_ceil(&inode->dir.dirents, hash_cookie + 1, hash, dirent);
+    }
 
     while (dirent) {
 
         dirent_inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
         if (!dirent_inode) {
+            dirent = rb_tree_next(&inode->dir.dirents, dirent);
             continue;
         }
 
@@ -1474,13 +1559,13 @@ demofs_readdir(
 
         rc = request->readdir.callback(
             dirent->inum,
-            dirent->hash,
+            dirent->hash + DEMOFS_COOKIE_FIRST,
             dirent->name,
             dirent->name_len,
             &attr,
             request->proto_private_data);
 
-        next_cookie = dirent->hash;
+        next_cookie = dirent->hash + DEMOFS_COOKIE_FIRST;
 
         if (rc) {
             eof = 0;
@@ -1490,6 +1575,7 @@ demofs_readdir(
         dirent = rb_tree_next(&inode->dir.dirents, dirent);
     }
 
+ out:
     demofs_map_attrs(thread, &request->readdir.r_dir_attr, inode);
 
     pthread_mutex_unlock(&inode->lock);

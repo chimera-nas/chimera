@@ -34,6 +34,13 @@ chimera_posix_mount(
     const char *module_path);
 
 int
+chimera_posix_mount_with_options(
+    const char *mount_path,
+    const char *module_name,
+    const char *module_path,
+    const char *options);
+
+int
 chimera_posix_umount(
     const char *mount_path);
 

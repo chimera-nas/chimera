@@ -26,6 +26,10 @@ chimera_nfs3_link_complete(
         res.resok.file_attributes.attributes_follow    = 0;
         res.resok.linkdir_wcc.before.attributes_follow = 0;
         res.resok.linkdir_wcc.after.attributes_follow  = 0;
+    } else {
+        res.resfail.file_attributes.attributes_follow    = 0;
+        res.resfail.linkdir_wcc.before.attributes_follow = 0;
+        res.resfail.linkdir_wcc.after.attributes_follow  = 0;
     }
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_LINK(evpl, &res, msg);

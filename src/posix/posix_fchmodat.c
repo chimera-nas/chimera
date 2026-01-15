@@ -163,8 +163,8 @@ chimera_posix_fchmodat(
         req.setattr.callback     = chimera_posix_fchmodat_callback;
         req.setattr.private_data = &ctx.comp;
 
-        req.setattr.set_attr.va_req_mask = CHIMERA_VFS_ATTR_MODE;
-        req.setattr.set_attr.va_set_mask = 0;
+        req.setattr.set_attr.va_req_mask = 0;
+        req.setattr.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         req.setattr.set_attr.va_mode     = mode;
 
         chimera_posix_worker_enqueue(worker, &req, chimera_posix_fchmodat_exec);
@@ -190,8 +190,8 @@ chimera_posix_fchmodat(
         req.setattr.private_data = &ctx;
 
         // Store mode in ctx for the async chain
-        ctx.set_attr.va_req_mask = CHIMERA_VFS_ATTR_MODE;
-        ctx.set_attr.va_set_mask = 0;
+        ctx.set_attr.va_req_mask = 0;
+        ctx.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         ctx.set_attr.va_mode     = mode;
 
         chimera_posix_worker_enqueue(worker, &req, chimera_posix_fchmodat_at_exec);

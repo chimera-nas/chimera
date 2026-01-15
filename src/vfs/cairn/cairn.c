@@ -842,32 +842,33 @@ cairn_apply_attrs(
     struct chimera_vfs_attrs *attr)
 {
     struct timespec now;
+    uint64_t        set_mask = attr->va_set_mask;
 
     clock_gettime(CLOCK_REALTIME, &now);
 
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+    if (set_mask & CHIMERA_VFS_ATTR_MODE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         inode->mode        = (inode->mode & S_IFMT) | (attr->va_mode & ~S_IFMT);
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_UID) {
+    if (set_mask & CHIMERA_VFS_ATTR_UID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         inode->uid         = attr->va_uid;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_GID) {
+    if (set_mask & CHIMERA_VFS_ATTR_GID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         inode->gid         = attr->va_gid;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) {
+    if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         inode->size        = attr->va_size;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_ATIME) {
+    if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
         if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->atime = now;
@@ -876,7 +877,7 @@ cairn_apply_attrs(
         }
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MTIME) {
+    if (set_mask & CHIMERA_VFS_ATTR_MTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
         if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->mtime = now;
@@ -962,7 +963,7 @@ cairn_setattr(
     cairn_map_attrs(shared, &request->setattr.r_pre_attr, inode);
 
     /* Handle truncation: remove extents past new EOF when size decreases */
-    if ((request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) &&
+    if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
         S_ISREG(inode->mode) &&
         request->setattr.set_attr->va_size < inode->size) {
 
@@ -1455,6 +1456,17 @@ cairn_remove(
     DL_APPEND(thread->txn_requests, request);
 } /* cairn_remove */
 
+/*
+ * Cookie values for readdir:
+ *   0 = start of directory, will return "."
+ *   1 = "." was returned, will return ".."
+ *   2 = ".." was returned, will return first real entry
+ *   3+ = real entry cookie (hash + 3)
+ */
+#define CAIRN_COOKIE_DOT    1
+#define CAIRN_COOKIE_DOTDOT 2
+#define CAIRN_COOKIE_FIRST  3
+
 static void
 cairn_readdir(
     struct cairn_thread        *thread,
@@ -1463,12 +1475,13 @@ cairn_readdir(
     void                       *private_data)
 {
     rocksdb_transaction_t     *txn;
-    struct cairn_inode_handle  ih, dirent_ih;
-    struct cairn_inode        *inode, *dirent_inode;
-    uint64_t                   next_cookie = request->readdir.cookie;
+    struct cairn_inode_handle  ih, dirent_ih, parent_ih;
+    struct cairn_inode        *inode, *dirent_inode, *parent_inode;
+    uint64_t                   cookie      = request->readdir.cookie;
+    uint64_t                   next_cookie = 0;
     int                        rc, eof = 1;
     struct chimera_vfs_attrs   attr;
-    rocksdb_iterator_t        *iter;
+    rocksdb_iterator_t        *iter = NULL;
     struct cairn_dirent_key    start_key, *dirent_key;
     struct cairn_dirent_value *dirent_value;
     size_t                     len;
@@ -1492,19 +1505,86 @@ cairn_readdir(
         return;
     }
 
+    attr.va_req_mask = request->readdir.attr_mask;
+
+    /* Handle "." and ".." entries only if requested */
+    if (request->readdir.flags & CHIMERA_VFS_READDIR_EMIT_DOT) {
+        /* Handle "." entry (cookie 0 -> 1) */
+        if (cookie < CAIRN_COOKIE_DOT) {
+            cairn_map_attrs(shared, &attr, inode);
+
+            rc = request->readdir.callback(
+                inode->inum,
+                CAIRN_COOKIE_DOT,
+                ".",
+                1,
+                &attr,
+                request->proto_private_data);
+
+            if (rc) {
+                next_cookie = CAIRN_COOKIE_DOT;
+                eof         = 0;
+                goto out;
+            }
+
+            cookie = CAIRN_COOKIE_DOT;
+        }
+
+        /* Handle ".." entry (cookie 1 -> 2) */
+        if (cookie < CAIRN_COOKIE_DOTDOT) {
+            rc = cairn_inode_get_inum(thread, txn, inode->parent_inum, 0, &parent_ih);
+
+            if (rc == 0) {
+                parent_inode = parent_ih.inode;
+                cairn_map_attrs(shared, &attr, parent_inode);
+                cairn_inode_handle_release(&parent_ih);
+            } else {
+                cairn_map_attrs(shared, &attr, inode);
+            }
+
+            rc = request->readdir.callback(
+                inode->parent_inum,
+                CAIRN_COOKIE_DOTDOT,
+                "..",
+                2,
+                &attr,
+                request->proto_private_data);
+
+            if (rc) {
+                next_cookie = CAIRN_COOKIE_DOTDOT;
+                eof         = 0;
+                goto out;
+            }
+
+            cookie = CAIRN_COOKIE_DOTDOT;
+        }
+    } else {
+        /* Skip . and .. entries - advance cookie past them */
+        if (cookie < CAIRN_COOKIE_DOTDOT) {
+            cookie = CAIRN_COOKIE_DOTDOT;
+        }
+    }
+
+    /* Handle real directory entries (cookie >= 2) */
     start_key.keytype = CAIRN_KEY_DIRENT;
     start_key.inum    = inode->inum;
-    start_key.hash    = request->readdir.cookie;
+
+    if (cookie < CAIRN_COOKIE_FIRST) {
+        /* Start from the beginning of real entries */
+        start_key.hash = 0;
+    } else {
+        /* Resume from where we left off - cookie is (hash + 3) */
+        start_key.hash = cookie - CAIRN_COOKIE_FIRST;
+    }
 
     iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
 
     rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
 
-    if (rocksdb_iter_valid(iter) && request->readdir.cookie) {
+    /* If resuming (cookie >= 3), skip past the last returned entry */
+    if (rocksdb_iter_valid(iter) && cookie >= CAIRN_COOKIE_FIRST) {
         rocksdb_iter_next(iter);
     }
-
-    attr.va_req_mask = request->readdir.attr_mask;
 
     while (rocksdb_iter_valid(iter)) {
 
@@ -1531,13 +1611,13 @@ cairn_readdir(
 
         rc = request->readdir.callback(
             dirent_value->inum,
-            dirent_key->hash,
+            dirent_key->hash + CAIRN_COOKIE_FIRST,
             dirent_value->name,
             dirent_value->name_len,
             &attr,
             request->proto_private_data);
 
-        next_cookie = dirent_key->hash;
+        next_cookie = dirent_key->hash + CAIRN_COOKIE_FIRST;
 
         if (rc) {
             eof = 0;
@@ -1549,7 +1629,12 @@ cairn_readdir(
     } /* cairn_readdir */
 
     rocksdb_iter_destroy(iter);
+    iter = NULL;
 
+ out:
+    if (iter) {
+        rocksdb_iter_destroy(iter);
+    }
 
     cairn_map_attrs(shared, &request->readdir.r_dir_attr, inode);
 

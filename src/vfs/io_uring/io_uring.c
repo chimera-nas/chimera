@@ -333,7 +333,8 @@ chimera_io_uring_complete(
                     request->status         = CHIMERA_VFS_OK;
                     request->write.r_length = cqe->res;
                 } else {
-                    request->status = chimera_linux_errno_to_status(-cqe->res);
+                    request->status         = chimera_linux_errno_to_status(-cqe->res);
+                    request->write.r_length = 0;
                 }
                 evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
                 break;
@@ -467,7 +468,7 @@ chimera_io_uring_setattr(
     fd = request->setattr.handle->vfs_private;
 
 
-    if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+    if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
 #ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW
         // Use fchmodat with AT_SYMLINK_NOFOLLOW on kernels >= 6.6
         rc = fchmodat(fd, "", request->setattr.set_attr->va_mode,
@@ -490,7 +491,7 @@ chimera_io_uring_setattr(
         request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
     }
 
-    if ((request->setattr.set_attr->va_req_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) ==
+    if ((request->setattr.set_attr->va_set_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) ==
         (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
         /* Both UID and GID are being set */
         rc = fchownat(fd, "", request->setattr.set_attr->va_uid, request->setattr.set_attr->va_gid,
@@ -508,7 +509,7 @@ chimera_io_uring_setattr(
         }
 
         request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
-    } else if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_UID) {
+    } else if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_UID) {
         /* Only UID is being set */
         rc = fchownat(fd, "", request->setattr.set_attr->va_uid, -1,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
@@ -524,7 +525,7 @@ chimera_io_uring_setattr(
         }
 
         request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
-    } else if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_GID) {
+    } else if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_GID) {
         /* Only GID is being set */
         rc = fchownat(fd, "", -1, request->setattr.set_attr->va_gid,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
@@ -542,7 +543,7 @@ chimera_io_uring_setattr(
         request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
     }
 
-    if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_SIZE) {
+    if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
         rc = ftruncate(fd, request->setattr.set_attr->va_size);
 
         if (rc) {
@@ -558,10 +559,10 @@ chimera_io_uring_setattr(
         request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
     }
 
-    if (request->setattr.set_attr->va_req_mask & (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME)) {
+    if (request->setattr.set_attr->va_set_mask & (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME)) {
         struct timespec times[2];
 
-        if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_ATIME) {
+        if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME) {
             if (request->setattr.set_attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
                 times[0].tv_nsec = UTIME_NOW;
             } else {
@@ -573,7 +574,7 @@ chimera_io_uring_setattr(
             times[0].tv_nsec = UTIME_OMIT;
         }
 
-        if (request->setattr.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MTIME) {
+        if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME) {
             if (request->setattr.set_attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
                 times[1].tv_nsec = UTIME_NOW;
             } else {
@@ -733,6 +734,15 @@ chimera_io_uring_readdir(
     vattr.va_req_mask = request->readdir.attr_mask;
     while ((dirent = readdir(dir))) {
 
+        /* Skip . and .. unless explicitly requested */
+        if (!(request->readdir.flags & CHIMERA_VFS_READDIR_EMIT_DOT)) {
+            if ((dirent->d_name[0] == '.' && dirent->d_name[1] == '\0') ||
+                (dirent->d_name[0] == '.' && dirent->d_name[1] == '.' &&
+                 dirent->d_name[2] == '\0')) {
+                continue;
+            }
+        }
+
         chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
                                       request,
                                       &vattr,
@@ -849,7 +859,7 @@ chimera_io_uring_open_at(
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    if (request->open_at.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+    if (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         mode = request->open_at.set_attr->va_mode;
 
         request->open_at.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
@@ -897,7 +907,7 @@ chimera_io_uring_mkdir(
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    if (request->mkdir.set_attr->va_req_mask & CHIMERA_VFS_ATTR_MODE) {
+    if (request->mkdir.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         mode = request->mkdir.set_attr->va_mode;
     } else {
         mode = S_IRWXU;
@@ -960,6 +970,21 @@ chimera_io_uring_read(
     struct iovec                   *iov;
     struct statx                   *stx;
     void                           *scratch = request->plugin_data;
+
+    /* Handle 0-byte reads specially - readv with uninitialized iov causes EFAULT */
+    if (request->read.length == 0) {
+        fd  = (int) request->read.handle->vfs_private;
+        stx = (struct statx *) scratch;
+        /* Pre-fill result fields since we won't submit readv */
+        request->status        = CHIMERA_VFS_OK;
+        request->read.r_niov   = 0;
+        request->read.r_length = 0;
+        request->read.r_eof    = 1;
+        sqe                    = chimera_io_uring_get_sqe(thread, request, 1, 0);
+        io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
+        evpl_defer(thread->evpl, &thread->deferral);
+        return;
+    }
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
