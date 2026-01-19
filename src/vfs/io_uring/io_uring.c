@@ -156,7 +156,7 @@ chimera_io_uring_complete(
 {
     struct chimera_io_uring_thread    *thread;
     struct io_uring_cqe               *cqe;
-    int                                i, parent_fd;
+    int                                parent_fd;
     struct chimera_vfs_request        *request;
     struct chimera_vfs_request_handle *handle;
     struct statx                      *dir_stx, *stx;
@@ -315,12 +315,16 @@ chimera_io_uring_complete(
                         request->status        = CHIMERA_VFS_OK;
                         request->read.r_length = cqe->res;
                         request->read.r_eof    = (cqe->res < request->read.length);
+
+                        if (cqe->res == 0) {
+                            evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
+                            request->read.r_niov = 0;
+                        }
+
                     } else {
                         request->status = chimera_linux_errno_to_status(-cqe->res);
 
-                        for (i = 0; i < request->read.r_niov; i++) {
-                            evpl_iovec_release(evpl, &request->read.iov[i]);
-                        }
+                        evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
                     }
                 } else {
                     if (cqe->res == 0) {

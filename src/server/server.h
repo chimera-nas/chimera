@@ -88,6 +88,15 @@ chimera_server_config_get_nfs_rdma_port(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_nfs_tcp_rdma_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_nfs_tcp_rdma_port(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_add_module(
     struct chimera_server_config *config,
     const char                   *module_name,

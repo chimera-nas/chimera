@@ -67,6 +67,7 @@ chimera_nfs3_sattr3_to_va(
     struct chimera_vfs_attrs *attr,
     struct sattr3            *sattr)
 {
+    attr->va_req_mask = 0;
     attr->va_set_mask = 0;
 
     if (sattr->mode.set_it) {

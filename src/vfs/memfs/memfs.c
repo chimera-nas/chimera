@@ -831,14 +831,22 @@ memfs_setattr(
                 memset(new_block->iov[0].data + offset_in_block, 0,
                        CHIMERA_MEMFS_BLOCK_SIZE - offset_in_block);
 
+                memfs_block_free(thread, old_block);
+
                 /* Replace old block with new block */
                 inode->file.blocks[last_block_idx] = new_block;
-                memfs_block_free(thread, old_block);
             }
         }
 
-        inode->file.num_blocks = new_num_blocks;
-        inode->space_used      = new_num_blocks * CHIMERA_MEMFS_BLOCK_SIZE;
+        /* Only update num_blocks if blocks array exists.
+         * If blocks is NULL (sparse file extended via setattr), keep num_blocks=0. */
+        if (inode->file.blocks) {
+            inode->file.num_blocks = new_num_blocks;
+            inode->space_used      = new_num_blocks * CHIMERA_MEMFS_BLOCK_SIZE;
+        } else {
+            inode->file.num_blocks = 0;
+            inode->space_used      = 0;
+        }
     }
 
     memfs_apply_attrs(inode, attr);

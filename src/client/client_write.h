@@ -14,8 +14,6 @@ chimera_write_complete(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
     uint32_t                  sync,
-    struct evpl_iovec        *iov,
-    int                       niov,
     struct chimera_vfs_attrs *pre_attr,
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
@@ -36,8 +34,6 @@ chimera_writev_complete(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
     uint32_t                  sync,
-    struct evpl_iovec        *iov,
-    int                       niov,
     struct chimera_vfs_attrs *pre_attr,
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
@@ -58,8 +54,6 @@ chimera_writerv_complete(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
     uint32_t                  sync,
-    struct evpl_iovec        *iov,
-    int                       niov,
     struct chimera_vfs_attrs *pre_attr,
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
@@ -87,7 +81,7 @@ chimera_dispatch_write(
                                          0, request->write.iov);
 
     if (niov < 0) {
-        chimera_write_complete(CHIMERA_VFS_EIO, 0, 0, NULL, 0,
+        chimera_write_complete(CHIMERA_VFS_EIO, 0, 0,
                                NULL, NULL, request);
         return;
     }
@@ -135,7 +129,7 @@ chimera_dispatch_writev(
                                                 0, request->writev.iov);
 
     if (niov < 0) {
-        chimera_writev_complete(CHIMERA_VFS_EIO, 0, 0, NULL, 0,
+        chimera_writev_complete(CHIMERA_VFS_EIO, 0, 0,
                                 NULL, NULL, request);
         return;
     }

@@ -25,6 +25,7 @@
 struct chimera_server_config {
     int                                  nfs_rdma;
     int                                  nfs_rdma_port;
+    int                                  nfs_tcp_rdma_port;
     int                                  external_portmap;
     int                                  core_threads;
     int                                  delegation_threads;
@@ -198,6 +199,20 @@ chimera_server_config_get_nfs_rdma_port(const struct chimera_server_config *conf
 {
     return config->nfs_rdma_port;
 } /* chimera_server_config_get_nfs_rdma_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_tcp_rdma_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->nfs_tcp_rdma_port = port;
+} /* chimera_server_config_set_nfs_tcp_rdma_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_tcp_rdma_port(const struct chimera_server_config *config)
+{
+    return config->nfs_tcp_rdma_port;
+} /* chimera_server_config_get_nfs_tcp_rdma_port */
 
 SYMBOL_EXPORT int
 chimera_server_config_get_external_portmap(const struct chimera_server_config *config)
