@@ -16,6 +16,7 @@
 #include "evpl/evpl_rpc2.h"
 
 #define CHIMERA_NFS_DEFAULT_VERSION 3
+#define CHIMERA_NFS_RDMA_PORT       20049
 
 static int
 chimera_nfs_get_mount_version(const struct chimera_vfs_mount_options *options)
@@ -38,6 +39,43 @@ chimera_nfs_get_mount_version(const struct chimera_vfs_mount_options *options)
 
     return CHIMERA_NFS_DEFAULT_VERSION;
 } /* chimera_nfs_get_mount_version */
+
+/* Get the proto mount option - returns 1 if rdma, 0 otherwise */
+static int
+chimera_nfs_get_mount_rdma(const struct chimera_vfs_mount_options *options)
+{
+    int i;
+
+    for (i = 0; i < options->num_options; i++) {
+        if (strcmp(options->options[i].key, "proto") == 0) {
+            if (options->options[i].value &&
+                strcmp(options->options[i].value, "rdma") == 0) {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+} /* chimera_nfs_get_mount_rdma */
+
+/* Get the port mount option - returns the port, or default if not specified */
+static int
+chimera_nfs_get_mount_port(
+    const struct chimera_vfs_mount_options *options,
+    int                                     default_port)
+{
+    int i;
+
+    for (i = 0; i < options->num_options; i++) {
+        if (strcmp(options->options[i].key, "port") == 0) {
+            if (options->options[i].value) {
+                return atoi(options->options[i].value);
+            }
+        }
+    }
+
+    return default_port;
+} /* chimera_nfs_get_mount_port */
 
 static void *
 chimera_nfs_init(const char *cfgfile)
@@ -77,6 +115,34 @@ chimera_nfs_destroy(void *private_data)
     free(shared);
 } /* chimera_nfs_destroy */
 
+const char *
+chimera_nfs_protocol_to_string(enum evpl_protocol_id protocol)
+{
+    switch (protocol) {
+        case EVPL_DATAGRAM_RDMACM_RC:
+            return "RDMA";
+        case EVPL_DATAGRAM_TCP_RDMA:
+            return "TCP-RDMA";
+        case EVPL_DATAGRAM_SOCKET_UDP:
+            return "UDP";
+        case EVPL_DATAGRAM_RDMACM_UD:
+            return "RDMACM-UD";
+        case EVPL_STREAM_SOCKET_TCP:
+            return "TCP";
+        case EVPL_STREAM_XLIO_TCP:
+            return "XLIO-TCP";
+        case EVPL_STREAM_IO_URING_TCP:
+            return "IO-URING-TCP";
+        case EVPL_STREAM_RDMACM_RC:
+            return "RDMA-RC";
+        case EVPL_STREAM_SOCKET_TLS:
+            return "TLS";
+        case EVPL_NUM_PROTO:
+            return "UNKNOWN";
+    } /* switch */
+    return "UNKNOWN";
+} /* chimera_nfs_protocol_to_string */
+
 static void
 chimera_nfs_notify(
     struct evpl_rpc2_thread *thread,
@@ -90,7 +156,8 @@ chimera_nfs_notify(
         case EVPL_RPC2_NOTIFY_CONNECTED:
             evpl_bind_get_local_address(conn->bind, local_addr, sizeof(local_addr));
             evpl_bind_get_remote_address(conn->bind, remote_addr, sizeof(remote_addr));
-            chimera_nfsclient_info("Connected from %s to %s", local_addr, remote_addr);
+            chimera_nfsclient_info("Connected via %s from %s to %s", chimera_nfs_protocol_to_string(conn->protocol),
+                                   local_addr, remote_addr);
             break;
         case EVPL_RPC2_NOTIFY_DISCONNECTED:
             evpl_bind_get_local_address(conn->bind, local_addr, sizeof(local_addr));

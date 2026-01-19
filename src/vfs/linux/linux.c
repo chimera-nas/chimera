@@ -689,15 +689,18 @@ chimera_linux_read(
     if (len < 0) {
         request->status = chimera_linux_errno_to_status(errno);
 
-        for (i = 0; i < request->read.r_niov; i++) {
-            evpl_iovec_release(evpl, &request->read.iov[i]);
-        }
+        evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
 
         request->read.r_niov   = 0;
         request->read.r_length = 0;
         request->read.r_eof    = 0;
         request->complete(request);
         return;
+    }
+
+    if (len == 0) {
+        evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
+        request->read.r_niov = 0;
     }
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->read.r_attr, fd);

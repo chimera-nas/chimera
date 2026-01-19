@@ -78,8 +78,6 @@ chimera_s3_put_recv_callback(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
     uint32_t                  sync,
-    struct evpl_iovec        *iov,
-    int                       niov,
     struct chimera_vfs_attrs *pre_attr,
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)

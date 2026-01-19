@@ -11,17 +11,13 @@ chimera_smb_write_callback(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
     uint32_t                  sync,
-    struct evpl_iovec        *iov,
-    int                       niov,
     struct chimera_vfs_attrs *pre_attr,
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
     struct chimera_smb_request *request = private_data;
 
-    if (request->write.channel == SMB2_CHANNEL_RDMA_V1) {
-        evpl_iovec_release(request->compound->thread->evpl, &request->write.iov[0]);
-    }
+    /* VFS takes ownership of request->write.iov and releases it */
 
     chimera_smb_open_file_release(private_data, request->write.open_file);
     chimera_smb_complete_request(private_data, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
@@ -34,6 +30,8 @@ chimera_smb_rdma_read_callback(
 {
     struct chimera_smb_request       *request = private_data;
     struct chimera_server_smb_thread *thread  = request->compound->thread;
+    struct evpl                      *evpl    = thread->evpl;
+    int                               i;
 
     chimera_smb_abort_if(request->write.pending_rdma_reads == 0, "Pending RDMA reads is 0");
 
@@ -45,7 +43,16 @@ chimera_smb_rdma_read_callback(
 
     if (request->write.pending_rdma_reads == 0) {
 
+        /* Release all chunk_iovs that were cloned for RDMA reads.
+         * Each clone added a reference to the underlying buffer.
+         */
+        for (i = 0; i < request->write.num_rdma_elements; i++) {
+            evpl_iovec_release(evpl, &request->write.chunk_iov[i]);
+        }
+
         if (request->write.r_rdma_status) {
+            /* Error path: release the allocated iovec since VFS won't */
+            evpl_iovec_release(evpl, &request->write.iov[0]);
             chimera_smb_complete_request(private_data, SMB2_STATUS_INTERNAL_ERROR);
             return;
         }
