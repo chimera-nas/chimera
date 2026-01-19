@@ -4022,6 +4022,9 @@ main(
                 exit(100);
             }
 
+            // Create NFSv3 server export entry
+            chimera_server_create_export(chimera_server, "/share", "/share");
+
             chimera_server_start(chimera_server);
 
             chimera_posix = chimera_posix_init(chimera_config, chimera_metrics);

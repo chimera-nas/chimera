@@ -228,6 +228,9 @@ posix_test_init(
             exit(EXIT_FAILURE);
         }
 
+        // Create NFSv3 server export entry
+        chimera_server_create_export(env->server, "/share", "/share");
+
         chimera_server_start(env->server);
 
         // Initialize the POSIX client (NFS client module is already registered by default)

@@ -48,6 +48,7 @@ struct chimera_server {
     void                               *protocol_private[3];
     void                               *s3_shared;
     void                               *smb_shared;
+    void                               *nfs_shared;
     int                                 num_protocols;
     int                                 threads_online;
     pthread_mutex_t                     lock;
@@ -409,6 +410,21 @@ chimera_server_create_share(
     return 0;
 } /* chimera_server_create_share */
 
+SYMBOL_EXPORT int
+chimera_server_create_export(
+    struct chimera_server *server,
+    const char            *name,
+    const char            *path)
+{
+    if (!server->nfs_shared) {
+        return -1;
+    }
+
+    chimera_nfs_add_export(server->nfs_shared, name, path);
+
+    return 0;
+} /* chimera_server_create_export */
+
 static void
 chimera_server_thread_shutdown(
     struct evpl *evpl,
@@ -473,6 +489,7 @@ chimera_server_init(
 
     server->s3_shared  = server->protocol_private[2];
     server->smb_shared = server->protocol_private[1];
+    server->nfs_shared = server->protocol_private[0];
 
     return server;
 } /* chimera_server_init */

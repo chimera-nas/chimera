@@ -79,6 +79,13 @@ struct nfs_request {
 
 };
 
+struct chimera_nfs_export {
+    char                       name[CHIMERA_VFS_NAME_MAX];
+    char                       path[CHIMERA_VFS_PATH_MAX];
+    struct chimera_nfs_export *prev;
+    struct chimera_nfs_export *next;
+};
+
 struct chimera_server_nfs_shared {
 
     const struct chimera_server_config *config;
@@ -92,6 +99,8 @@ struct chimera_server_nfs_shared {
     struct NFS_V4                       nfs_v4;
     struct NFS_V4_CB                    nfs_v4_cb;
 
+    struct chimera_nfs_export          *exports;
+    pthread_mutex_t                     exports_lock;
     struct evpl_endpoint               *nfs_endpoint;
     struct evpl_endpoint               *mount_endpoint;
     struct evpl_endpoint               *portmap_endpoint;

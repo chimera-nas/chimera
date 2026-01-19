@@ -1,4 +1,8 @@
 {
+  "clangd.arguments": [
+    "--background-index",
+    "--compile-commands-dir=/build/Debug"
+  ],
   "cmake.buildDirectory": "/build/${buildType}",
   "cmake.saveBeforeBuild": true,
   "cmake.generator": "Ninja",

@@ -52,7 +52,7 @@ jobs:
         id: build-image
         uses: docker/build-push-action@v5
         with:
-          context: .
+          context: .devcontainer
           file: .devcontainer/Dockerfile
           platforms: ${{ matrix.platform }}
           load: true
