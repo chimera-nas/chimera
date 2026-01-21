@@ -53,7 +53,7 @@ chimera_nfs4_read(
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
 
-    chimera_vfs_read(thread->vfs_thread,
+    chimera_vfs_read(thread->vfs_thread, &req->cred,
                      state->nfs4_state_handle,
                      args->offset,
                      args->count,

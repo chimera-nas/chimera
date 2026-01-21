@@ -59,23 +59,24 @@ chimera_vfs_link_complete(struct chimera_vfs_request *request)
 
 SYMBOL_EXPORT void
 chimera_vfs_link(
-    struct chimera_vfs_thread  *thread,
-    const void                 *fh,
-    int                         fhlen,
-    const void                 *dir_fh,
-    int                         dir_fhlen,
-    const char                 *name,
-    int                         namelen,
-    unsigned int                replace,
-    uint64_t                    attr_mask,
-    uint64_t                    pre_attr_mask,
-    uint64_t                    post_attr_mask,
-    chimera_vfs_link_callback_t callback,
-    void                       *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    const void                    *dir_fh,
+    int                            dir_fhlen,
+    const char                    *name,
+    int                            namelen,
+    unsigned int                   replace,
+    uint64_t                       attr_mask,
+    uint64_t                       pre_attr_mask,
+    uint64_t                       post_attr_mask,
+    chimera_vfs_link_callback_t    callback,
+    void                          *private_data)
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    request = chimera_vfs_request_alloc(thread, cred, fh, fhlen);
 
     request->opcode                           = CHIMERA_VFS_OP_LINK;
     request->complete                         = chimera_vfs_link_complete;

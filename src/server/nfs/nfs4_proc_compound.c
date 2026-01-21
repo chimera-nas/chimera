@@ -29,6 +29,7 @@ chimera_nfs4_compound_process(
 
         rc = shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
             thread->evpl,
+            NULL,
             &req->res_compound,
             req->msg);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
@@ -148,6 +149,7 @@ void
 chimera_nfs4_compound(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct COMPOUND4args  *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
@@ -157,6 +159,8 @@ chimera_nfs4_compound(
     int                               rc;
 
     req = nfs_request_alloc(thread, conn, msg);
+
+    chimera_nfs_map_cred(&req->cred, cred);
 
     nfs4_dump_compound(req, args);
 

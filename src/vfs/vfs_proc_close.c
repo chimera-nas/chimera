@@ -33,6 +33,7 @@ chimera_vfs_close(
     struct chimera_vfs_request *request;
 
     request = chimera_vfs_request_alloc_with_module(thread,
+                                                    NULL,
                                                     handle->fh,
                                                     handle->fh_len,
                                                     handle->fh_hash,

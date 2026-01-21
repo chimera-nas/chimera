@@ -264,6 +264,7 @@ nfs_server_destroy(void *data)
         LL_DELETE(shared->exports, export);
         free(export);
     }
+
     free(shared);
 } /* nfs_server_destroy */
 

@@ -32,7 +32,7 @@ chimera_nfs3_setattr_complete(
         chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, pre_attr, post_attr);
     }
 
-    rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, NULL, &res, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
@@ -64,7 +64,7 @@ chimera_nfs3_setattr_open_callback(
 
         chimera_nfs3_sattr3_to_va(attr, &args->new_attributes);
 
-        chimera_vfs_setattr(thread->vfs_thread,
+        chimera_vfs_setattr(thread->vfs_thread, &req->cred,
                             handle,
                             attr,
                             CHIMERA_NFS3_ATTR_WCC_MASK,
@@ -75,7 +75,7 @@ chimera_nfs3_setattr_open_callback(
     } else {
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, NULL, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, &res, msg);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, NULL, &res, msg);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
@@ -85,6 +85,7 @@ void
 chimera_nfs3_setattr(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct SETATTR3args   *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
@@ -94,6 +95,7 @@ chimera_nfs3_setattr(
     unsigned int                      open_flags;
 
     req = nfs_request_alloc(thread, conn, msg);
+    chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_setattr(req, args);
 
@@ -109,7 +111,7 @@ chimera_nfs3_setattr(
         open_flags = CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
     }
 
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      args->object.data.data,
                      args->object.data.len,
                      open_flags,

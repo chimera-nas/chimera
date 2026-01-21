@@ -63,7 +63,7 @@ chimera_nfs4_getattr_open_callback(
         uint64_t attr_mask = chimera_nfs4_attr2mask(args->attr_request,
                                                     args->num_attr_request);
 
-        chimera_vfs_getattr(req->thread->vfs_thread,
+        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
                             handle,
                             attr_mask,
                             chimera_nfs4_getattr_complete,
@@ -80,7 +80,7 @@ chimera_nfs4_getattr(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

@@ -32,7 +32,7 @@ chimera_nfs3_link_complete(
         res.resfail.linkdir_wcc.after.attributes_follow  = 0;
     }
 
-    rc = shared->nfs_v3.send_reply_NFSPROC3_LINK(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_LINK(evpl, NULL, &res, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
@@ -42,6 +42,7 @@ void
 chimera_nfs3_link(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct LINK3args      *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
@@ -50,10 +51,12 @@ chimera_nfs3_link(
     struct nfs_request               *req;
 
     req = nfs_request_alloc(thread, conn, msg);
+    chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_link(req, args);
 
     chimera_vfs_link(thread->vfs_thread,
+                     &req->cred,
                      args->file.data.data,
                      args->file.data.len,
                      args->link.dir.data.data,

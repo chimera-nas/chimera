@@ -63,12 +63,13 @@ chimera_vfs_open_hdl_callback(
 
 SYMBOL_EXPORT void
 chimera_vfs_open(
-    struct chimera_vfs_thread  *thread,
-    const void                 *fh,
-    int                         fhlen,
-    unsigned int                flags,
-    chimera_vfs_open_callback_t callback,
-    void                       *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    unsigned int                   flags,
+    chimera_vfs_open_callback_t    callback,
+    void                          *private_data)
 {
     struct chimera_vfs_module      *module;
     struct chimera_vfs_request     *request;
@@ -95,7 +96,7 @@ chimera_vfs_open(
 
         /* We really need to open the file */
 
-        request = chimera_vfs_request_alloc_by_hash(thread, fh, fhlen, fh_hash);
+        request = chimera_vfs_request_alloc_by_hash(thread, cred, fh, fhlen, fh_hash);
 
         request->opcode             = CHIMERA_VFS_OP_OPEN;
         request->complete           = chimera_vfs_open_complete;

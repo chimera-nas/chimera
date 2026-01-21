@@ -58,6 +58,7 @@ chimera_vfs_lookup_complete(struct chimera_vfs_request *request)
 SYMBOL_EXPORT void
 chimera_vfs_lookup(
     struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     uint32_t                        namelen,
@@ -130,7 +131,7 @@ chimera_vfs_lookup(
         }
     }
 
-    request = chimera_vfs_request_alloc_by_handle(thread, handle);
+    request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
 
 
     request->opcode                        = CHIMERA_VFS_OP_LOOKUP;

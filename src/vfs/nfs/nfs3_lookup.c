@@ -13,10 +13,11 @@ struct chimera_nfs3_lookup_ctx {
 
 static void
 chimera_nfs3_lookup_callback(
-    struct evpl       *evpl,
-    struct LOOKUP3res *res,
-    int                status,
-    void              *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct LOOKUP3res           *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request     *request = private_data;
     struct chimera_nfs3_lookup_ctx *ctx     = request->plugin_data;
@@ -61,6 +62,7 @@ chimera_nfs3_lookup(
     struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
                                                                                                   request->fh_len);
     struct LOOKUP3args                       args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
     struct chimera_nfs3_lookup_ctx          *ctx;
@@ -81,7 +83,11 @@ chimera_nfs3_lookup(
     args.what.name.str      = (char *) request->lookup.component;
     args.what.name.len      = request->lookup.component_len;
 
-    shared->nfs_v3.send_call_NFSPROC3_LOOKUP(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                             0, 0, 0, chimera_nfs3_lookup_callback, request);
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
+    shared->nfs_v3.send_call_NFSPROC3_LOOKUP(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
+                                             &args, 0, 0, 0, chimera_nfs3_lookup_callback, request);
 } /* chimera_nfs3_lookup */
 

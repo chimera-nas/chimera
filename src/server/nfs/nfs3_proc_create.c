@@ -55,7 +55,7 @@ chimera_nfs3_create_open_at_complete(
 
     chimera_vfs_release(thread->vfs_thread, parent_handle);
 
-    rc = shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, NULL, &res, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
     nfs_request_free(thread, req);
 } /* chimera_nfs3_create_open_at_complete */
@@ -78,7 +78,7 @@ chimera_nfs3_create_open_at_parent_complete(
         struct CREATE3res res;
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
-        rc = thread->shared->nfs_v3.send_reply_NFSPROC3_CREATE(thread->evpl, &res, req->msg);
+        rc = thread->shared->nfs_v3.send_reply_NFSPROC3_CREATE(thread->evpl, NULL, &res, req->msg);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
         return;
@@ -104,7 +104,7 @@ chimera_nfs3_create_open_at_parent_complete(
             break;
     } /* switch */
 
-    chimera_vfs_open_at(thread->vfs_thread,
+    chimera_vfs_open_at(thread->vfs_thread, &req->cred,
                         parent_handle,
                         args->where.name.str,
                         args->where.name.len,
@@ -121,6 +121,7 @@ void
 chimera_nfs3_create(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct CREATE3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
@@ -129,12 +130,13 @@ chimera_nfs3_create(
     struct nfs_request               *req;
 
     req = nfs_request_alloc(thread, conn, msg);
+    chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_create(req, args);
 
     req->args_create = args;
 
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      args->where.dir.data.data,
                      args->where.dir.data.len,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

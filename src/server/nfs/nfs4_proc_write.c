@@ -53,7 +53,7 @@ chimera_nfs4_write(
      */
     evpl_rpc2_msg_take_read_chunk(req->msg, NULL, NULL);
 
-    chimera_vfs_write(thread->vfs_thread,
+    chimera_vfs_write(thread->vfs_thread, &req->cred,
                       state->nfs4_state_handle,
                       args->offset,
                       args->data.length,

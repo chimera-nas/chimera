@@ -39,7 +39,7 @@ chimera_nfs3_commit_complete(
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
-    rc = shared->nfs_v3.send_reply_NFSPROC3_COMMIT(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_COMMIT(evpl, NULL, &res, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
@@ -64,7 +64,7 @@ chimera_nfs3_commit_open_callback(
 
         req->handle = handle;
 
-        chimera_vfs_commit(thread->vfs_thread,
+        chimera_vfs_commit(thread->vfs_thread, &req->cred,
                            handle,
                            args->offset,
                            args->count,
@@ -75,7 +75,7 @@ chimera_nfs3_commit_open_callback(
     } else {
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_wcc_data(&res.resfail.file_wcc, NULL, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_COMMIT(evpl, &res, msg);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_COMMIT(evpl, NULL, &res, msg);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
@@ -85,6 +85,7 @@ void
 chimera_nfs3_commit(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct COMMIT3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
@@ -93,12 +94,13 @@ chimera_nfs3_commit(
     struct nfs_request               *req;
 
     req = nfs_request_alloc(thread, conn, msg);
+    chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_commit(req, args);
 
     req->args_commit = args;
 
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      args->file.data.data,
                      args->file.data.len,
                      CHIMERA_VFS_OPEN_INFERRED,

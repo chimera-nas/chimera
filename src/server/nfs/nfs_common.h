@@ -6,7 +6,10 @@
 
 #include <utlist.h>
 
+#include "evpl/evpl_rpc2_cred.h"
+#include "evpl/evpl_rpc2.h"
 #include "portmap_xdr.h"
+#include "vfs/vfs_cred.h"
 #include "nfs_mount_xdr.h"
 #include "nfs3_xdr.h"
 #include "nfs4_xdr.h"
@@ -35,6 +38,7 @@ struct nfs_nfs4_readdir_cursor {
 struct nfs_request {
     struct chimera_server_nfs_thread *thread;
     struct nfs4_session              *session;
+    struct chimera_vfs_cred           cred;
     uint8_t                           fh[NFS4_FHSIZE];
     int                               fhlen;
     uint8_t                           saved_fh[NFS4_FHSIZE];
@@ -163,3 +167,40 @@ nfs_request_free(
 {
     LL_PREPEND(thread->free_requests, req);
 } /* nfs_request_free */
+
+/*
+ * Map RPC2 credentials to VFS credentials.
+ *
+ * This converts the protocol-specific evpl_rpc2_cred to the
+ * protocol-independent chimera_vfs_cred used by the VFS layer.
+ *
+ * For AUTH_SYS, UNIX credentials are extracted directly.
+ * For AUTH_NONE or unknown, anonymous credentials are used.
+ *
+ * @param vfs_cred    Output VFS credentials
+ * @param rpc_cred    Input RPC credentials
+ */
+static inline void
+chimera_nfs_map_cred(
+    struct chimera_vfs_cred       *vfs_cred,
+    const struct evpl_rpc2_cred   *rpc_cred)
+{
+    if (!rpc_cred || rpc_cred->flavor == EVPL_RPC2_AUTH_NONE) {
+        /* Anonymous credentials */
+        chimera_vfs_cred_init_anonymous(vfs_cred,
+                                        CHIMERA_VFS_ANON_UID,
+                                        CHIMERA_VFS_ANON_GID);
+    } else if (rpc_cred->flavor == EVPL_RPC2_AUTH_SYS) {
+        /* UNIX credentials */
+        chimera_vfs_cred_init_unix(vfs_cred,
+                                   rpc_cred->authsys.uid,
+                                   rpc_cred->authsys.gid,
+                                   rpc_cred->authsys.num_gids,
+                                   rpc_cred->authsys.gids);
+    } else {
+        /* Unknown auth flavor - use anonymous */
+        chimera_vfs_cred_init_anonymous(vfs_cred,
+                                        CHIMERA_VFS_ANON_UID,
+                                        CHIMERA_VFS_ANON_GID);
+    }
+} /* chimera_nfs_map_cred */

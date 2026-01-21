@@ -16,10 +16,11 @@ struct chimera_nfs3_open_at_ctx {
 
 static void
 chimera_nfs3_open_at_lookup_callback(
-    struct evpl       *evpl,
-    struct LOOKUP3res *res,
-    int                status,
-    void              *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct LOOKUP3res           *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request      *request = private_data;
     struct chimera_nfs3_open_at_ctx *ctx     = request->plugin_data;
@@ -97,10 +98,11 @@ chimera_nfs3_open_at_lookup_callback(
 
 static void
 chimera_nfs3_open_at_create_callback(
-    struct evpl       *evpl,
-    struct CREATE3res *res,
-    int                status,
-    void              *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct CREATE3res           *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request      *request = private_data;
     struct chimera_nfs3_open_at_ctx *ctx     = request->plugin_data;
@@ -185,6 +187,7 @@ chimera_nfs3_open_at(
     struct chimera_nfs3_open_at_ctx         *ctx;
     struct LOOKUP3args                       lookup_args;
     struct CREATE3args                       create_args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
 
@@ -201,6 +204,10 @@ chimera_nfs3_open_at(
 
     chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
     if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) {
 
         create_args.where.dir.data.data = fh;
@@ -211,8 +218,9 @@ chimera_nfs3_open_at(
 
         chimera_nfs_va_to_sattr3(&create_args.how.obj_attributes, request->open_at.set_attr);
 
-        shared->nfs_v3.send_call_NFSPROC3_CREATE(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &
-                                                 create_args, 0, 0, 0, chimera_nfs3_open_at_create_callback, request);
+        shared->nfs_v3.send_call_NFSPROC3_CREATE(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred
+                                                 ,
+                                                 &create_args, 0, 0, 0, chimera_nfs3_open_at_create_callback, request);
     } else {
         chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
@@ -221,8 +229,9 @@ chimera_nfs3_open_at(
         lookup_args.what.name.str      = (char *) request->open_at.name;
         lookup_args.what.name.len      = request->open_at.namelen;
 
-        shared->nfs_v3.send_call_NFSPROC3_LOOKUP(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &
-                                                 lookup_args,
+        shared->nfs_v3.send_call_NFSPROC3_LOOKUP(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred
+                                                 ,
+                                                 &lookup_args,
                                                  0, 0, 0,
                                                  chimera_nfs3_open_at_lookup_callback, request);
 

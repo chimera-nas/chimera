@@ -9,6 +9,7 @@ void
 chimera_nfs3_null(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
@@ -17,6 +18,6 @@ chimera_nfs3_null(
 
     nfs3_dump_null(NULL);
 
-    int                               rc = shared->nfs_v3.send_reply_NFSPROC3_NULL(evpl, msg);
+    int                               rc = shared->nfs_v3.send_reply_NFSPROC3_NULL(evpl, NULL, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* nfs3_null */

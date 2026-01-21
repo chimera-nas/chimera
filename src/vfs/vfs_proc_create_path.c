@@ -63,6 +63,7 @@ chimera_vfs_create_path_open_dispatch(
 
     chimera_vfs_mkdir(
         thread,
+        cp_request->cred,
         oh,
         component,
         componentlen,
@@ -109,6 +110,7 @@ chimera_vfs_create_path_complete(
         memcpy(cp_request->create_path.next_fh, attr->va_fh, attr->va_fh_len);
 
         chimera_vfs_open(thread,
+                         cp_request->cred,
                          cp_request->create_path.next_fh,
                          attr->va_fh_len,
                          CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -157,17 +159,19 @@ chimera_vfs_create_path_mkdir_complete(
         memcpy(cp_request->create_path.next_fh, attr->va_fh, attr->va_fh_len);
 
         chimera_vfs_open(thread,
+                         cp_request->cred,
                          cp_request->create_path.next_fh,
                          attr->va_fh_len,
                          CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
                          chimera_vfs_create_path_open_dispatch,
                          cp_request);
     }
-} /* chimera_vfs_create_path_complete */
+} /* chimera_vfs_create_path_mkdir_complete */
 
 SYMBOL_EXPORT void
 chimera_vfs_create_path(
     struct chimera_vfs_thread         *thread,
+    const struct chimera_vfs_cred     *cred,
     const void                        *fh,
     int                                fhlen,
     const char                        *path,
@@ -197,7 +201,7 @@ chimera_vfs_create_path(
         return;
     }
 
-    cp_request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    cp_request = chimera_vfs_request_alloc(thread, cred, fh, fhlen);
 
     cp_request->create_path.path         = cp_request->plugin_data;
     cp_request->create_path.pathlen      = pathlen;
@@ -213,6 +217,7 @@ chimera_vfs_create_path(
     cp_request->create_path.path[pathlen] = '\0';
 
     chimera_vfs_open(thread,
+                     cred,
                      fh,
                      fhlen,
                      CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,

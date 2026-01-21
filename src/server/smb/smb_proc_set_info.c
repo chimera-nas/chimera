@@ -55,6 +55,7 @@ chimera_smb_set_info_open_unlink_callback(
 
     chimera_vfs_remove(
         request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred,
         oh,
         open_file->name,
         open_file->name_len,
@@ -82,6 +83,7 @@ chimera_smb_set_info(struct chimera_smb_request *request)
 
                     chimera_vfs_setattr(
                         request->compound->thread->vfs_thread,
+                        &request->session_handle->session->cred,
                         request->set_info.open_file->handle,
                         &request->set_info.vfs_attrs,
                         0,
@@ -94,6 +96,7 @@ chimera_smb_set_info(struct chimera_smb_request *request)
 
                     chimera_vfs_setattr(
                         request->compound->thread->vfs_thread,
+                        &request->session_handle->session->cred,
                         request->set_info.open_file->handle,
                         &request->set_info.vfs_attrs,
                         0,
@@ -107,6 +110,7 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     } else {
                         chimera_vfs_open(
                             request->compound->thread->vfs_thread,
+                            &request->session_handle->session->cred,
                             request->set_info.open_file->parent_fh,
                             request->set_info.open_file->parent_fh_len,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

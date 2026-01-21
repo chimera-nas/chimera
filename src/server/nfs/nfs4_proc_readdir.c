@@ -120,7 +120,7 @@ chimera_nfs4_readdir_open_callback(
     }
     attrmask = chimera_nfs4_attr2mask(args->attr_request,
                                       args->num_attr_request);
-    chimera_vfs_readdir(thread->vfs_thread,
+    chimera_vfs_readdir(thread->vfs_thread, &req->cred,
                         handle,
                         attrmask,
                         0,
@@ -149,7 +149,7 @@ chimera_nfs4_readdir(
 
     res->resok4.reply.entries = NULL;
 
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

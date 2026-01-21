@@ -31,10 +31,11 @@ struct chimera_nfs3_rename_ctx {
 
 static void
 chimera_nfs3_rename_callback(
-    struct evpl       *evpl,
-    struct RENAME3res *res,
-    int                status,
-    void              *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct RENAME3res           *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request *request = private_data;
 
@@ -62,6 +63,7 @@ chimera_nfs3_rename_do_rename(
 {
     struct chimera_nfs_client_server_thread *server_thread;
     struct RENAME3args                       args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *old_fh, *new_fh;
     int                                      old_fhlen, new_fhlen;
 
@@ -86,18 +88,23 @@ chimera_nfs3_rename_do_rename(
     args.to.name.str      = (char *) request->rename.new_name;
     args.to.name.len      = request->rename.new_namelen;
 
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
     ctx->shared->nfs_v3.send_call_NFSPROC3_RENAME(&ctx->shared->nfs_v3.rpc2, ctx->thread->evpl,
-                                                  server_thread->nfs_conn, &args,
+                                                  server_thread->nfs_conn, &rpc2_cred, &args,
                                                   0, 0, 0,
                                                   chimera_nfs3_rename_callback, request);
 } /* chimera_nfs3_rename_do_rename */
 
 static void
 chimera_nfs3_rename_link_callback(
-    struct evpl     *evpl,
-    struct LINK3res *res,
-    int              status,
-    void            *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct LINK3res             *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request     *request = private_data;
     struct chimera_nfs3_rename_ctx *ctx     = request->plugin_data;
@@ -127,6 +134,7 @@ chimera_nfs3_rename_do_silly_link(
 {
     struct chimera_nfs_client_server_thread *server_thread;
     struct LINK3args                         args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *target_fh, *dir_fh;
     int                                      target_fhlen, dir_fhlen;
 
@@ -150,8 +158,12 @@ chimera_nfs3_rename_do_silly_link(
     args.link.name.str      = ctx->silly_name;
     args.link.name.len      = ctx->silly_name_len;
 
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
     ctx->shared->nfs_v3.send_call_NFSPROC3_LINK(&ctx->shared->nfs_v3.rpc2, ctx->thread->evpl,
-                                                server_thread->nfs_conn, &args,
+                                                server_thread->nfs_conn, &rpc2_cred, &args,
                                                 0, 0, 0,
                                                 chimera_nfs3_rename_link_callback, request);
 } /* chimera_nfs3_rename_do_silly_link */
@@ -221,7 +233,7 @@ chimera_nfs3_rename(
     }
 
     /* Mark the state as silly renamed so close will remove the silly file */
-    rc = chimera_nfs3_open_state_mark_silly(state, request->rename.new_fh, request->rename.new_fhlen);
+    rc = chimera_nfs3_open_state_mark_silly(state, request->rename.new_fh, request->rename.new_fhlen, request->cred);
 
     /* Release the handle ref - we're done with it */
     chimera_vfs_open_cache_release(request->thread, cache, handle, 0);

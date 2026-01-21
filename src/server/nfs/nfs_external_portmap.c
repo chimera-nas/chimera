@@ -27,10 +27,11 @@ struct portmap_reg_ctx {
 
 static void
 portmap_set_callback(
-    struct evpl *evpl,
-    xdr_bool     reply,
-    int          status,
-    void        *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    xdr_bool                     reply,
+    int                          status,
+    void                        *private_data)
 {
     struct portmap_reg_ctx *ctx = private_data;
 
@@ -49,10 +50,11 @@ portmap_set_callback(
 
 static void
 portmap_unset_callback(
-    struct evpl *evpl,
-    xdr_bool     reply,
-    int          status,
-    void        *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    xdr_bool                     reply,
+    int                          status,
+    void                        *private_data)
 {
     struct portmap_reg_ctx *ctx = private_data;
 
@@ -154,6 +156,7 @@ register_service(
     ctx->portmap_v2.send_call_PMAPPROC_SET(&ctx->portmap_v2.rpc2,
                                            ctx->evpl,
                                            ctx->portmap_conn,
+                                           NULL,
                                            &mapping,
                                            0, 0, 0,
                                            portmap_set_callback, ctx);
@@ -181,6 +184,7 @@ unregister_service(
     ctx->portmap_v2.send_call_PMAPPROC_UNSET(&ctx->portmap_v2.rpc2,
                                              ctx->evpl,
                                              ctx->portmap_conn,
+                                             NULL,
                                              &mapping,
                                              0, 0, 0,
                                              portmap_unset_callback, ctx);

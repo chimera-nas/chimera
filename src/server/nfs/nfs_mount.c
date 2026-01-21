@@ -15,6 +15,7 @@ void
 chimera_nfs_mount_null(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
@@ -22,7 +23,7 @@ chimera_nfs_mount_null(
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    rc = shared->mount_v3.send_reply_MOUNTPROC3_NULL(evpl, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_NULL(evpl, NULL, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs_mount_null */
 
@@ -62,7 +63,7 @@ chimera_nfs_mount_lookup_complete(
         res.fhs_status = MNT3ERR_NOENT;
     }
 
-    rc = shared->mount_v3.send_reply_MOUNTPROC3_MNT(evpl, &res, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_MNT(evpl, NULL, &res, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
@@ -72,6 +73,7 @@ void
 chimera_nfs_mount_mnt(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct mountarg3      *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
@@ -90,11 +92,14 @@ chimera_nfs_mount_mnt(
 
     req = nfs_request_alloc(thread, conn, msg);
 
+    chimera_nfs_map_cred(&req->cred, cred);
+
     // Map the nfs export to a path lookup
     pthread_mutex_lock(&shared->exports_lock);
     LL_FOREACH(shared->exports, cur_export)
     {
         export_name_len = strlen(cur_export->name);
+        chimera_nfs_info("checking export '%s' against '%s'", cur_export->name, args->path.str);
         if (strncasecmp(cur_export->name, args->path.str, export_name_len) == 0) {
             // Check if this is a valid prefix match (at path boundary)
             if (args->path.str[export_name_len] == '\0' ||
@@ -132,6 +137,7 @@ chimera_nfs_mount_mnt(
     }
 
     chimera_vfs_lookup_path(thread->vfs_thread,
+                            &req->cred,
                             root_fh,
                             root_fh_len,
                             full_path,
@@ -149,6 +155,7 @@ void
 chimera_nfs_mount_dump(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
@@ -159,6 +166,7 @@ void
 chimera_nfs_mount_umnt(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct mountarg3      *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
@@ -167,7 +175,7 @@ chimera_nfs_mount_umnt(
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    rc = shared->mount_v3.send_reply_MOUNTPROC3_UMNT(evpl, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_UMNT(evpl, NULL, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs_mount_umnt */
 
@@ -175,6 +183,7 @@ void
 chimera_nfs_mount_umntall(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
@@ -185,6 +194,7 @@ void
 chimera_nfs_mount_export(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
@@ -195,6 +205,6 @@ chimera_nfs_mount_export(
 
     export.exports = NULL;
 
-    rc = shared->mount_v3.send_reply_MOUNTPROC3_EXPORT(evpl, &export, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_EXPORT(evpl, NULL, &export, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs_mount_export */

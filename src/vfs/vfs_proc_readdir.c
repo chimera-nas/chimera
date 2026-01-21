@@ -106,6 +106,7 @@ chimera_vfs_bounce_complete(struct chimera_vfs_request *request)
 SYMBOL_EXPORT void
 chimera_vfs_readdir(
     struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        attr_mask,
     uint64_t                        dir_attr_mask,
@@ -118,7 +119,7 @@ chimera_vfs_readdir(
     struct chimera_vfs_request *request;
     struct chimera_vfs_module  *module;
 
-    request = chimera_vfs_request_alloc_by_handle(thread, handle);
+    request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
     module  = request->module;
 
     request->opcode                         = CHIMERA_VFS_OP_READDIR;

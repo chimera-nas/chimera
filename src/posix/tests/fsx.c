@@ -4027,7 +4027,9 @@ main(
 
             chimera_server_start(chimera_server);
 
-            chimera_posix = chimera_posix_init(chimera_config, chimera_metrics);
+            struct chimera_vfs_cred root_cred;
+            chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+            chimera_posix = chimera_posix_init(chimera_config, &root_cred, chimera_metrics);
             if (!chimera_posix) {
                 fprintf(stderr, "Failed to initialize Chimera POSIX client\n");
                 exit(100);
@@ -4051,7 +4053,9 @@ main(
             }
         } else {
             /* Direct backend: No server needed */
-            chimera_posix = chimera_posix_init(chimera_config, chimera_metrics);
+            struct chimera_vfs_cred root_cred;
+            chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+            chimera_posix = chimera_posix_init(chimera_config, &root_cred, chimera_metrics);
             if (!chimera_posix) {
                 fprintf(stderr, "Failed to initialize Chimera POSIX client\n");
                 exit(100);
@@ -4119,7 +4123,9 @@ main(
             }
         }
 
-        chimera_posix = chimera_posix_init(chimera_config, chimera_metrics);
+        struct chimera_vfs_cred root_cred;
+        chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+        chimera_posix = chimera_posix_init(chimera_config, &root_cred, chimera_metrics);
         if (!chimera_posix) {
             fprintf(stderr, "Failed to initialize Chimera POSIX client\n");
             json_decref(json_config);

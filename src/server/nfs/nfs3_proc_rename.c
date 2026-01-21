@@ -34,7 +34,7 @@ chimera_nfs3_rename_complete(
         res.resfail.todir_wcc.after.attributes_follow    = 0;
     }
 
-    rc = shared->nfs_v3.send_reply_NFSPROC3_RENAME(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_RENAME(evpl, NULL, &res, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
@@ -44,6 +44,7 @@ void
 chimera_nfs3_rename(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct RENAME3args    *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
@@ -52,10 +53,12 @@ chimera_nfs3_rename(
     struct nfs_request               *req;
 
     req = nfs_request_alloc(thread, conn, msg);
+    chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_rename(req, args);
 
     chimera_vfs_rename(thread->vfs_thread,
+                       &req->cred,
                        args->from.dir.data.data,
                        args->from.dir.data.len,
                        args->from.name.str,

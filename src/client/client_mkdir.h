@@ -59,6 +59,7 @@ chimera_mkdir_parent_complete(
 
     chimera_vfs_mkdir(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         oh,
         request->mkdir.path + request->mkdir.name_offset,
         request->mkdir.path_len - request->mkdir.name_offset,
@@ -91,6 +92,7 @@ chimera_mkdir_parent_lookup_complete(
 
     chimera_vfs_open(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -113,6 +115,7 @@ chimera_dispatch_mkdir(
 
     chimera_vfs_lookup_path(
         thread->vfs_thread,
+        &thread->client->cred,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->mkdir.path,
@@ -154,6 +157,7 @@ chimera_dispatch_mkdir_at(
 {
     chimera_vfs_mkdir(
         thread->vfs_thread,
+        &thread->client->cred,
         parent_handle,
         request->mkdir.path,
         request->mkdir.path_len,

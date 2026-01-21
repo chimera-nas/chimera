@@ -193,7 +193,7 @@ chimera_s3_list_lookup_path_callback(
         request->list.filter_len = 0;
     }
 
-    chimera_vfs_find(thread->vfs,
+    chimera_vfs_find(thread->vfs, NULL,
                      root_fh,
                      root_fh_len,
                      CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
@@ -224,7 +224,7 @@ chimera_s3_list(
         request->list.base_path_len = 0;
         request->list.filter_len    = 0;
 
-        chimera_vfs_find(thread->vfs,
+        chimera_vfs_find(thread->vfs, NULL,
                          request->bucket_fh,
                          request->bucket_fhlen,
                          CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
@@ -239,6 +239,7 @@ chimera_s3_list(
 
         chimera_vfs_lookup_path(
             thread->vfs,
+            &thread->shared->cred,
             request->bucket_fh,
             request->bucket_fhlen,
             request->path,

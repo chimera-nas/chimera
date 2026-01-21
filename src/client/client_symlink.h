@@ -62,6 +62,7 @@ chimera_symlink_parent_complete(
 
     chimera_vfs_symlink(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         oh,
         request->symlink.path + request->symlink.name_offset,
         request->symlink.path_len - request->symlink.name_offset,
@@ -99,6 +100,7 @@ chimera_symlink_parent_lookup_complete(
 
     chimera_vfs_open(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         request->fh,
         request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -120,6 +122,7 @@ chimera_dispatch_symlink(
 
     chimera_vfs_lookup_path(
         thread->vfs_thread,
+        &thread->client->cred,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->symlink.path,

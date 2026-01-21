@@ -79,6 +79,7 @@ chimera_nfs4_setattr_open_callback(
     }
 
     chimera_vfs_setattr(req->thread->vfs_thread,
+                        &req->cred,
                         handle,
                         attr,
                         0,
@@ -95,6 +96,7 @@ chimera_nfs4_setattr(
     struct nfs_resop4                *resop)
 {
     chimera_vfs_open(thread->vfs_thread,
+                     &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

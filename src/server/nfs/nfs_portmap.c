@@ -170,6 +170,7 @@ void
 chimera_portmap_null_v2(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
@@ -177,7 +178,7 @@ chimera_portmap_null_v2(
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    rc = shared->portmap_v2.send_reply_PMAPPROC_NULL(evpl, msg);
+    rc = shared->portmap_v2.send_reply_PMAPPROC_NULL(evpl, NULL, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_portmap_null */
 
@@ -185,6 +186,7 @@ void
 chimera_portmap_getport_v2(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct mapping        *mapping,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
@@ -201,7 +203,7 @@ chimera_portmap_getport_v2(
                           mapping->prog);
     }
 
-    rc = shared->portmap_v2.send_reply_PMAPPROC_GETPORT(evpl, port, msg);
+    rc = shared->portmap_v2.send_reply_PMAPPROC_GETPORT(evpl, NULL, port, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_portmap_getport */
 
@@ -209,6 +211,7 @@ void
 chimera_portmap_dump_v2(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
@@ -219,7 +222,7 @@ chimera_portmap_dump_v2(
 
     list = portmap_build_pmaplist(msg);
 
-    rc = shared->portmap_v2.send_reply_PMAPPROC_DUMP(evpl, list, msg);
+    rc = shared->portmap_v2.send_reply_PMAPPROC_DUMP(evpl, NULL, list, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_portmap_dump */
 
@@ -233,7 +236,7 @@ portmap_getaddr_common(
     struct evpl_rpc2_conn *conn,
     struct rpcb *args,
     struct evpl_rpc2_msg *msg,
-    int ( *send_reply )(struct evpl *, xdr_string *, void *))
+    int ( *send_reply )(struct evpl *, const struct evpl_rpc2_verf *, xdr_string *, void *))
 {
     xdr_string   addr;
     char         uaddr[64];
@@ -252,7 +255,7 @@ portmap_getaddr_common(
         addr.str = uaddr;
     }
 
-    rc = send_reply(evpl, &addr, msg);
+    rc = send_reply(evpl, NULL, &addr, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* portmap_getaddr_common */
 
@@ -260,6 +263,7 @@ void
 chimera_portmap_getaddr_v3(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct rpcb           *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
@@ -280,14 +284,14 @@ portmap_dump_common(
     struct evpl *evpl,
     struct evpl_rpc2_conn *conn,
     struct evpl_rpc2_msg *msg,
-    int ( *send_reply )(struct evpl *, struct rp__list *, void *))
+    int ( *send_reply )(struct evpl *, const struct evpl_rpc2_verf *, struct rp__list *, void *))
 {
     struct rp__list *list;
     int              rc;
 
     list = portmap_build_rpcblist(conn, msg);
 
-    rc = send_reply(evpl, list, msg);
+    rc = send_reply(evpl, NULL, list, msg);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* portmap_dump_common */
 
@@ -295,6 +299,7 @@ void
 chimera_portmap_dump_v3(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
@@ -309,6 +314,7 @@ void
 chimera_portmap_dump_v4(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)
 {
@@ -323,6 +329,7 @@ void
 chimera_portmap_getaddr_v4(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
+    struct evpl_rpc2_cred *cred,
     struct rpcb           *args,
     struct evpl_rpc2_msg  *msg,
     void                  *private_data)

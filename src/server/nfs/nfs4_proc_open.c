@@ -157,7 +157,7 @@ chimera_nfs4_open_parent_complete(
 
     switch (args->claim.claim) {
         case CLAIM_NULL:
-            chimera_vfs_open_at(req->thread->vfs_thread,
+            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
                                 parent_handle,
                                 args->claim.file.data,
                                 args->claim.file.len,
@@ -171,7 +171,7 @@ chimera_nfs4_open_parent_complete(
             break;
         case CLAIM_PREVIOUS:
         case CLAIM_FH:
-            chimera_vfs_open(req->thread->vfs_thread,
+            chimera_vfs_open(req->thread->vfs_thread, &req->cred,
                              req->fh,
                              req->fhlen,
                              flags,
@@ -191,7 +191,7 @@ chimera_nfs4_open(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

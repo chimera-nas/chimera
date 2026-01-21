@@ -121,7 +121,7 @@ chimera_nfs4_create_open_callback(
         switch (args->objtype.type) {
             case NF4DIR:
                 req->handle = handle;
-                chimera_vfs_mkdir(thread->vfs_thread,
+                chimera_vfs_mkdir(thread->vfs_thread, &req->cred,
                                   handle,
                                   args->objname.data,
                                   args->objname.len,
@@ -141,6 +141,7 @@ chimera_nfs4_create_open_callback(
 
                 chimera_vfs_symlink(
                     thread->vfs_thread,
+                    &req->cred,
                     handle,
                     args->objname.data,
                     args->objname.len,
@@ -181,7 +182,7 @@ chimera_nfs4_create(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

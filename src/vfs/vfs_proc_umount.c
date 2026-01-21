@@ -30,10 +30,11 @@ chimera_vfs_umount_complete(struct chimera_vfs_request *request)
 
 SYMBOL_EXPORT void
 chimera_vfs_umount(
-    struct chimera_vfs_thread    *thread,
-    const char                   *mount_path,
-    chimera_vfs_umount_callback_t callback,
-    void                         *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const char                    *mount_path,
+    chimera_vfs_umount_callback_t  callback,
+    void                          *private_data)
 {
     struct chimera_vfs         *vfs = thread->vfs;
     struct chimera_vfs_mount   *mount;
@@ -51,7 +52,7 @@ chimera_vfs_umount(
         return;
     }
 
-    request = chimera_vfs_request_alloc(thread, mount->root_fh, mount->root_fh_len);
+    request = chimera_vfs_request_alloc(thread, cred, mount->root_fh, mount->root_fh_len);
 
     /* For umount operations, the mount was already removed from the table,
      * so chimera_vfs_get_module returns NULL. Set the module directly. */
