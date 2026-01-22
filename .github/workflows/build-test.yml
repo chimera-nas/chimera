@@ -63,8 +63,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           load: true
           tags: ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.tag }}
-          cache-from: type=registry,ref=repository.mdh.quantum.com:5001/cache/chimera-dev:${{ matrix.arch }}
-          cache-to: type=registry,ref=repository.mdh.quantum.com:5001/cache/chimera-dev:${{ matrix.arch }},mode=max
+          cache-from: type=registry,ref=repository.mdh.quantum.com:5000/cache/chimera-dev:${{ matrix.arch }}
+          cache-to: type=registry,ref=repository.mdh.quantum.com:5000/cache/chimera-dev:${{ matrix.arch }},mode=max
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
 
