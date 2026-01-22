@@ -24,18 +24,22 @@ jobs:
         include:
           - platform: linux/amd64
             runner: arc-amd64
+            arch: amd64
             build_type: Release
             tag: latest-amd64
           - platform: linux/amd64
             runner: arc-amd64
+            arch: amd64
             build_type: Debug
             tag: latest-debug-amd64
           - platform: linux/arm64
             runner: arc-arm64
+            arch: arm64
             build_type: Release
             tag: latest-arm64
           - platform: linux/arm64
             runner: arc-arm64
+            arch: arm64
             build_type: Debug
             tag: latest-debug-arm64
 
@@ -47,6 +51,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
 
       - name: Build the dev container image
         id: build-image
@@ -57,6 +63,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           load: true
           tags: ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.tag }}
+          cache-from: type=registry,ref=repository.mdh.quantum.com:5001/cache/chimera-dev:${{ matrix.arch }}
+          cache-to: type=registry,ref=repository.mdh.quantum.com:5001/cache/chimera-dev:${{ matrix.arch }},mode=max
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
 
@@ -70,7 +78,7 @@ jobs:
             bash -euxc '\
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} /workspace && \
               ninja && \
-              ctest --output-on-failure'
+              ctest --output-on-failure -j 32'
 
       - name: Perform clang static analysis
         run: |
