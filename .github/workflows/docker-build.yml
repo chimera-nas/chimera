@@ -28,19 +28,19 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-24.04
+            runner: arc-amd64
             build_type: Release
             tag: latest-amd64
           - platform: linux/amd64
-            runner: ubuntu-24.04
+            runner: arc-amd64
             build_type: Debug
             tag: latest-debug-amd64
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: arc-arm64
             build_type: Release
             tag: latest-arm64
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: arc-arm64
             build_type: Debug
             tag: latest-debug-arm64
 
@@ -76,15 +76,13 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
 
   merge-manifests:
     if: github.event_name == 'push'
     needs: build-and-push
-    runs-on: ubuntu-24.04
+    runs-on: arc-amd64
     permissions:
       packages: write
     steps:

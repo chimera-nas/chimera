@@ -10,7 +10,7 @@ on:
 
 jobs:
   reuse-lint:
-    runs-on: ubuntu-latest
+    runs-on: arc-amd64
     
     steps:
     - name: Checkout repository

@@ -23,19 +23,19 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-24.04
+            runner: arc-amd64
             build_type: Release
             tag: latest-amd64
           - platform: linux/amd64
-            runner: ubuntu-24.04
+            runner: arc-amd64
             build_type: Debug
             tag: latest-debug-amd64
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: arc-arm64
             build_type: Release
             tag: latest-arm64
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: arc-arm64
             build_type: Debug
             tag: latest-debug-arm64
 
@@ -56,8 +56,6 @@ jobs:
           file: .devcontainer/Dockerfile
           platforms: ${{ matrix.platform }}
           load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           tags: ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.tag }}
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
