@@ -67,13 +67,6 @@ jobs:
         with:
           driver: docker-container
 
-      - name: Log in to Nexus registry
-        uses: docker/login-action@v3
-        with:
-          registry: repository.mdh.quantum.com:5000
-          username: ${{ secrets.NEXUS_USERNAME }}
-          password: ${{ secrets.NEXUS_PASSWORD }}
-
       - name: Extract metadata for Docker
         id: meta
         uses: docker/metadata-action@v5
@@ -89,8 +82,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=registry,ref=repository.mdh.quantum.com:5000/cache/chimera:${{ matrix.arch }}
-          cache-to: type=registry,ref=repository.mdh.quantum.com:5000/cache/chimera:${{ matrix.arch }},mode=max
+          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera:${{ matrix.arch }}
+          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera:${{ matrix.arch }},mode=max
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
 
