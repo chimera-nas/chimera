@@ -2,7 +2,8 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-FROM ubuntu:24.04
+ARG DOCKER_MIRROR=""
+FROM ${DOCKER_MIRROR}ubuntu:24.04
 ARG ENABLE_XLIO=1
 ARG ENABLE_DOCA=0
 ARG ENABLE_FIO=1

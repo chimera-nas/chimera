@@ -17,6 +17,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
+  DOCKER_MIRROR: repository.mdh.quantum.com/
 
 jobs:
   build-and-push:
@@ -88,6 +89,7 @@ jobs:
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
             APT_MIRROR=${{ env.APT_MIRROR }}
+            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   merge-manifests:
     if: github.event_name == 'push'

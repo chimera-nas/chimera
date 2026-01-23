@@ -2,7 +2,8 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-FROM ubuntu:24.04 AS build
+ARG DOCKER_MIRROR=""
+FROM ${DOCKER_MIRROR}ubuntu:24.04 AS build
 ARG BUILD_TYPE=Release
 ARG APT_MIRROR=""
 
@@ -62,7 +63,7 @@ RUN cmake -G Ninja -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DDISABLE_TESTS=ON /chimera 
     ninja && \
     ninja install
 
-FROM ubuntu:24.04
+FROM ${DOCKER_MIRROR}ubuntu:24.04
 ARG BUILD_TYPE=Release
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \

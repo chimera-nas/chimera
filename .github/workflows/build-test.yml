@@ -11,6 +11,7 @@ on:
 env:
   DEV_IMAGE_TAG_PREFIX: chimera-dev
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
+  DOCKER_MIRROR: repository.mdh.quantum.com/
 
 jobs:
   build:
@@ -69,6 +70,7 @@ jobs:
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
             APT_MIRROR=${{ env.APT_MIRROR }}
+            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
       - name: Configure, build, and test inside the dev container
         run: |
