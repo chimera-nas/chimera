@@ -16,6 +16,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
 
 jobs:
   build-and-push:
@@ -86,6 +87,7 @@ jobs:
           cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera:${{ matrix.arch }},mode=max
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
+            APT_MIRROR=${{ env.APT_MIRROR }}
 
   merge-manifests:
     if: github.event_name == 'push'
