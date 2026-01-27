@@ -107,7 +107,9 @@ setup_worktree_existing() {
 
     # Create worktree
     echo "Creating worktree for existing branch '$branch'..." >&2
-    git worktree add "$worktree_path" "$branch" >&2
+    if ! git worktree add "$worktree_path" "$branch" >&2; then
+        error "Failed to create worktree for branch '$branch'"
+    fi
     echo "$worktree_path"
 }
 
@@ -134,7 +136,9 @@ setup_worktree_new() {
 
     # Create worktree with new branch based on origin/main
     echo "Creating worktree with new branch '$branch' from origin/main..." >&2
-    git worktree add -b "$branch" "$worktree_path" origin/main >&2
+    if ! git worktree add -b "$branch" "$worktree_path" origin/main >&2; then
+        error "Failed to create worktree for new branch '$branch'"
+    fi
     echo "$worktree_path"
 }
 
@@ -198,7 +202,9 @@ setup_worktree_pr() {
     # Create worktree tracking the PR branch
     local local_branch="pr-${pr_id}-${head_ref}"
     echo "Creating worktree with branch '$local_branch'..." >&2
-    git worktree add -b "$local_branch" "$worktree_path" "$remote_name/$head_ref" >&2
+    if ! git worktree add -b "$local_branch" "$worktree_path" "$remote_name/$head_ref" >&2; then
+        error "Failed to create worktree for PR #$pr_id"
+    fi
 
     echo "$worktree_path"
 }
@@ -268,4 +274,9 @@ setup_claude_permissions "$WORKTREE_PATH"
 echo "" >&2
 echo "Launching Claude Code in $WORKTREE_PATH..." >&2
 cd "$WORKTREE_PATH"
+
+# Set terminal title to the worktree name
+WORKTREE_NAME=$(basename "$WORKTREE_PATH")
+printf '\033]0;%s\007' "$WORKTREE_NAME"
+
 exec claude
