@@ -14,9 +14,11 @@ Chimera is a high-performance multi-protocol Network Attached Storage (NAS) stac
 
 ## Build Trees
 
-Build outputs are located in:
-- `/build/Release` - Release build (optimized)
-- `/build/Debug` - Debug build (with AddressSanitizer)
+Build outputs are located based on source tree location:
+- **Main tree (`/chimera`)**: Uses `/build/Release` and `/build/Debug`
+- **Worktrees (`/worktrees/*`)**: Uses `./build/Release` and `./build/Debug` within the worktree
+
+This allows multiple worktrees to build independently without conflicts.
 
 **Note:** The user will typically have already built the project. You can run `ninja` directly in these directories to rebuild, or run `ctest` to execute tests.
 
@@ -42,6 +44,7 @@ make clean
 make syntax
 
 # Run directly in build directory (if already configured)
+# Use ./build for worktrees, /build for main tree
 ninja -C build/Debug
 ninja -C build/Release
 ```
