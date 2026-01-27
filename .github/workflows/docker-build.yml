@@ -21,34 +21,81 @@ env:
 
 jobs:
   build-and-push:
-    name: Build ${{ matrix.platform }} ${{ matrix.build_type }}
+    name: Build ${{ matrix.os }} ${{ matrix.platform }} ${{ matrix.build_type }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         include:
+          # Ubuntu 24.04 builds
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
             build_type: Release
+            os: ubuntu24.04
+            dockerfile: Dockerfile
             tag: latest-amd64
+            publish: true
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
             build_type: Debug
+            os: ubuntu24.04
+            dockerfile: Dockerfile
             tag: latest-debug-amd64
+            publish: true
           - platform: linux/arm64
             runner: arc-arm64
             arch: arm64
             build_type: Release
+            os: ubuntu24.04
+            dockerfile: Dockerfile
             tag: latest-arm64
+            publish: true
           - platform: linux/arm64
             runner: arc-arm64
             arch: arm64
             build_type: Debug
+            os: ubuntu24.04
+            dockerfile: Dockerfile
             tag: latest-debug-arm64
+            publish: true
+          # Ubuntu 22.04 builds (build only, no push - for testing compatibility)
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            os: ubuntu22.04
+            dockerfile: Dockerfile.ubuntu22.04
+            tag: latest-ubuntu22.04-amd64
+            publish: false
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            os: ubuntu22.04
+            dockerfile: Dockerfile.ubuntu22.04
+            tag: latest-debug-ubuntu22.04-amd64
+            publish: false
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Release
+            os: ubuntu22.04
+            dockerfile: Dockerfile.ubuntu22.04
+            tag: latest-ubuntu22.04-arm64
+            publish: false
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Debug
+            os: ubuntu22.04
+            dockerfile: Dockerfile.ubuntu22.04
+            tag: latest-debug-ubuntu22.04-arm64
+            publish: false
 
     steps:
       - name: Checkout repository
@@ -81,11 +128,12 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platform }}
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ github.event_name == 'push' && matrix.publish }}
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera:${{ matrix.arch }}
-          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera:${{ matrix.arch }},mode=max
+          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera:${{ matrix.os }}-${{ matrix.arch }}
+          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera:${{ matrix.os }}-${{ matrix.arch }},mode=max
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
             APT_MIRROR=${{ env.APT_MIRROR }}
@@ -105,19 +153,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest
-            type=raw,value=latest-debug
-
-      - name: Create and push manifest
+      - name: Create and push manifests
         run: |
-          for tag in $(echo "${{ steps.meta.outputs.tags }}" | tr '\n' ' '); do
-            docker buildx imagetools create -t $tag \
-                ${tag}-amd64 \
-                ${tag}-arm64
-          done
+          IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+          # Create multi-arch manifests for Ubuntu 24.04 images
+          docker buildx imagetools create -t ${IMAGE}:latest \
+              ${IMAGE}:latest-amd64 \
+              ${IMAGE}:latest-arm64
+          docker buildx imagetools create -t ${IMAGE}:latest-debug \
+              ${IMAGE}:latest-debug-amd64 \
+              ${IMAGE}:latest-debug-arm64

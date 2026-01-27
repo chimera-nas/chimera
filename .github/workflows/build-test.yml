@@ -9,17 +9,16 @@ on:
   workflow_dispatch:   # allow manual runs
 
 env:
-  DEV_IMAGE_TAG_PREFIX: chimera-dev
+  DEV_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-dev
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
   DOCKER_MIRROR: repository.mdh.quantum.com/
 
 jobs:
-  build:
-    name: Build ${{ matrix.platform }} ${{ matrix.build_type }}
+  build-devcontainer:
+    name: Build devcontainer ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -27,23 +26,9 @@ jobs:
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
-            build_type: Release
-            tag: latest-amd64
-          - platform: linux/amd64
-            runner: arc-amd64
-            arch: amd64
-            build_type: Debug
-            tag: latest-debug-amd64
           - platform: linux/arm64
             runner: arc-arm64
             arch: arm64
-            build_type: Release
-            tag: latest-arm64
-          - platform: linux/arm64
-            runner: arc-arm64
-            arch: arm64
-            build_type: Debug
-            tag: latest-debug-arm64
 
     steps:
       - name: Checkout repository
@@ -56,21 +41,52 @@ jobs:
         with:
           driver: docker-container
 
-      - name: Build the dev container image
-        id: build-image
+      - name: Build and push the dev container image
         uses: docker/build-push-action@v5
         with:
           context: .devcontainer
           file: .devcontainer/Dockerfile
           platforms: ${{ matrix.platform }}
-          load: true
-          tags: ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.tag }}
+          push: true
+          tags: ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-dev:${{ matrix.arch }}
           cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-dev:${{ matrix.arch }},mode=max
           build-args: |
-            BUILD_TYPE=${{ matrix.build_type }}
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+
+  test:
+    name: Test ${{ matrix.platform }} ${{ matrix.build_type }}
+    needs: build-devcontainer
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Release
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Debug
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Configure, build, and test inside the dev container
         run: |
@@ -78,11 +94,44 @@ jobs:
             -v "${{ github.workspace }}:/workspace" \
             -v /build \
             -w /build \
-            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.tag }} \
+            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '\
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} /workspace && \
               ninja && \
               ctest --output-on-failure -j 32'
+
+  static-analysis:
+    name: Static Analysis ${{ matrix.platform }} ${{ matrix.build_type }}
+    needs: build-devcontainer
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Release
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Debug
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Perform clang static analysis
         run: |
@@ -90,7 +139,7 @@ jobs:
             -v "${{ github.workspace }}:/workspace" \
             -v /build \
             -w /build \
-            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.tag }} \
+            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '\
               scan-build --status-bugs --exclude /workspace/ext/libsmb2 -o /build/ScanReport \
-              sh -c "cmake -D CMAKE_BUILD_TYPE=Debug -B /build -S /workspace -G Ninja && ninja -C /build"'
+              sh -c "cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -B /build -S /workspace -G Ninja && ninja -C /build"'
