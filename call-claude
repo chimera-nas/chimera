@@ -88,6 +88,12 @@ if [[ "$GIT_COMMON_DIR" == ".git" ]]; then
     MAIN_REPO="$GIT_ROOT"
 fi
 
+init_submodules() {
+    local worktree_path="$1"
+    echo "Initializing submodules..." >&2
+    git -C "$worktree_path" submodule update --init --recursive >&2
+}
+
 setup_worktree_existing() {
     local branch="$1"
     local worktree_path="$WORKTREE_BASE/$branch"
@@ -110,6 +116,8 @@ setup_worktree_existing() {
     if ! git worktree add "$worktree_path" "$branch" >&2; then
         error "Failed to create worktree for branch '$branch'"
     fi
+
+    init_submodules "$worktree_path"
     echo "$worktree_path"
 }
 
@@ -139,6 +147,8 @@ setup_worktree_new() {
     if ! git worktree add -b "$branch" "$worktree_path" origin/main >&2; then
         error "Failed to create worktree for new branch '$branch'"
     fi
+
+    init_submodules "$worktree_path"
     echo "$worktree_path"
 }
 
@@ -206,6 +216,7 @@ setup_worktree_pr() {
         error "Failed to create worktree for PR #$pr_id"
     fi
 
+    init_submodules "$worktree_path"
     echo "$worktree_path"
 }
 
