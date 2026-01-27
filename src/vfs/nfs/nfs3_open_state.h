@@ -22,10 +22,18 @@
  */
 
 struct chimera_nfs3_open_state {
-    atomic_int dirty;           /* Count of uncommitted unstable writes */
-    int        silly_renamed;   /* File has been silly renamed */
-    uint8_t    dir_fh_len;      /* Directory fh for silly remove on close */
-    uint8_t    dir_fh[CHIMERA_VFS_FH_SIZE];
+    atomic_int              dirty; /* Count of uncommitted unstable writes */
+    int                     silly_renamed; /* File has been silly renamed */
+    uint8_t                 dir_fh_len; /* Directory fh for silly remove on close */
+    uint8_t                 dir_fh[CHIMERA_VFS_FH_SIZE];
+
+    /*
+     * Credentials for silly remove on close.
+     * These are captured from the REMOVE request that triggered the silly rename,
+     * NOT from the original open. They are used ONLY for the silly remove RPC
+     * when the file is finally closed.
+     */
+    struct chimera_vfs_cred silly_remove_cred;
 };
 
 /*
@@ -136,8 +144,9 @@ chimera_nfs3_open_state_get_dirty(struct chimera_nfs3_open_state *state)
 /*
  * Mark a file as having been silly renamed.
  *
- * Stores the directory fh so it can be used to remove the silly file
- * when the file is finally closed.
+ * Stores the directory fh and credentials so they can be used to remove
+ * the silly file when the file is finally closed. The credentials are
+ * captured from the REMOVE request that triggered the silly rename.
  *
  * Returns 1 if successfully marked, -1 if already silly renamed.
  */
@@ -145,7 +154,8 @@ static inline int
 chimera_nfs3_open_state_mark_silly(
     struct chimera_nfs3_open_state *state,
     const uint8_t                  *dir_fh,
-    int                             dir_fh_len)
+    int                             dir_fh_len,
+    const struct chimera_vfs_cred  *cred)
 {
     if (state->silly_renamed) {
         return -1;
@@ -154,6 +164,13 @@ chimera_nfs3_open_state_mark_silly(
     state->silly_renamed = 1;
     state->dir_fh_len    = dir_fh_len;
     memcpy(state->dir_fh, dir_fh, dir_fh_len);
+
+    /* Store credentials for silly remove on close */
+    if (cred) {
+        state->silly_remove_cred = *cred;
+    } else {
+        memset(&state->silly_remove_cred, 0, sizeof(state->silly_remove_cred));
+    }
 
     return 1;
 } /* chimera_nfs3_open_state_mark_silly */

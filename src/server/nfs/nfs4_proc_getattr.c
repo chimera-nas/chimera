@@ -26,12 +26,12 @@ chimera_nfs4_getattr_complete(
 
     res->status = NFS4_OK;
 
-    rc = xdr_dbuf_alloc_array(&res->resok4.obj_attributes, attrmask, 3, req->msg->dbuf);
+    rc = xdr_dbuf_alloc_array(&res->resok4.obj_attributes, attrmask, 3, req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to allocate array");
 
     rc = xdr_dbuf_alloc_opaque(&res->resok4.obj_attributes.attr_vals,
                                4096,
-                               req->msg->dbuf);
+                               req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to allocate opaque");
 
     chimera_nfs4_marshall_attrs(attr,
@@ -63,7 +63,7 @@ chimera_nfs4_getattr_open_callback(
         uint64_t attr_mask = chimera_nfs4_attr2mask(args->attr_request,
                                                     args->num_attr_request);
 
-        chimera_vfs_getattr(req->thread->vfs_thread,
+        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
                             handle,
                             attr_mask,
                             chimera_nfs4_getattr_complete,
@@ -80,7 +80,7 @@ chimera_nfs4_getattr(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

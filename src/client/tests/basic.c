@@ -85,7 +85,9 @@ main(
 
     config = chimera_client_config_init();
 
-    client = chimera_client_init(config, metrics);
+    struct chimera_vfs_cred root_cred;
+    chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+    client = chimera_client_init(config, &root_cred, metrics);
 
     thread = chimera_client_thread_init(evpl, client);
 

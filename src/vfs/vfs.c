@@ -223,6 +223,83 @@ chimera_vfs_close_thread_shutdown(
     chimera_vfs_thread_destroy(close_thread->vfs_thread);
 } /* chimera_vfs_close_thread_shutdown */
 
+static void
+chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
+{
+    char  hostname[64];
+    char  machine_id[64];
+    int   len;
+    FILE *fp;
+
+    /* Get hostname */
+    if (gethostname(hostname, sizeof(hostname)) != 0) {
+        snprintf(hostname, sizeof(hostname), "unknown");
+    }
+    hostname[sizeof(hostname) - 1] = '\0';
+
+    /* Get unique machine identifier from /etc/machine-id */
+    machine_id[0] = '\0';
+    fp            = fopen("/etc/machine-id", "r");
+
+    if (fp) {
+        if (fgets(machine_id, sizeof(machine_id), fp)) {
+            /* Remove trailing newline if present */
+            len = strlen(machine_id);
+
+            if (len > 0 && machine_id[len - 1] == '\n') {
+                machine_id[len - 1] = '\0';
+            }
+
+            /* Truncate to first 16 chars for brevity */
+            if (strlen(machine_id) > 16) {
+                machine_id[16] = '\0';
+            }
+        }
+        fclose(fp);
+    }
+
+    /* If machine-id not available, try /sys/class/dmi/id/product_uuid */
+    if (machine_id[0] == '\0') {
+        fp = fopen("/sys/class/dmi/id/product_uuid", "r");
+
+        if (fp) {
+            if (fgets(machine_id, sizeof(machine_id), fp)) {
+                len = strlen(machine_id);
+
+                if (len > 0 && machine_id[len - 1] == '\n') {
+                    machine_id[len - 1] = '\0';
+                }
+
+                if (strlen(machine_id) > 16) {
+                    machine_id[16] = '\0';
+                }
+            }
+            fclose(fp);
+        }
+    }
+
+    /* Fall back to gethostid if no machine-id found */
+    if (machine_id[0] == '\0') {
+        snprintf(machine_id, sizeof(machine_id), "%08lx", gethostid());
+    }
+
+    /* Synthesize machine name: hostname chimera version machine-id */
+    vfs->machine_name_len = snprintf(vfs->machine_name,
+                                     sizeof(vfs->machine_name),
+                                     "%s chimera %s %s",
+                                     hostname,
+                                     CHIMERA_VERSION,
+                                     machine_id);
+
+    /* Ensure we don't exceed buffer - snprintf returns what would have been
+     * written, so clamp to actual buffer size */
+    if (vfs->machine_name_len >= (int) sizeof(vfs->machine_name)) {
+        vfs->machine_name_len = sizeof(vfs->machine_name) - 1;
+    }
+
+    chimera_vfs_info("Machine name: %.*s", vfs->machine_name_len, vfs->machine_name);
+} /* chimera_vfs_synthesize_machine_name */
+
 SYMBOL_EXPORT struct chimera_vfs *
 chimera_vfs_init(
     int                                  num_delegation_threads,
@@ -237,6 +314,9 @@ chimera_vfs_init(
     void                      *handle;
 
     vfs = calloc(1, sizeof(*vfs));
+
+    /* Synthesize machine name for identification */
+    chimera_vfs_synthesize_machine_name(vfs);
 
     vfs->mount_table = chimera_vfs_mount_table_create(4);
 

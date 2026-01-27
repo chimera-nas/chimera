@@ -36,6 +36,7 @@ chimera_vfs_getattr_complete(struct chimera_vfs_request *request)
 SYMBOL_EXPORT void
 chimera_vfs_getattr(
     struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        req_attr_mask,
     chimera_vfs_getattr_callback_t  callback,
@@ -61,7 +62,7 @@ chimera_vfs_getattr(
         }
     } /* chimera_vfs_getattr */
 
-    request = chimera_vfs_request_alloc_by_handle(thread, handle);
+    request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
 
     request->opcode                     = CHIMERA_VFS_OP_GETATTR;
     request->complete                   = chimera_vfs_getattr_complete;

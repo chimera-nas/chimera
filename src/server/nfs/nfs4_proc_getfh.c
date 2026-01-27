@@ -17,7 +17,7 @@ chimera_nfs4_getfh(
     rc = xdr_dbuf_opaque_copy(&res->resok4.object,
                               req->fh,
                               req->fhlen,
-                              req->msg->dbuf);
+                              req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
     res->status = NFS4_OK;

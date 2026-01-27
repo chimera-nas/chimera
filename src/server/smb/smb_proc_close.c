@@ -45,6 +45,7 @@ chimera_smb_close(struct chimera_smb_request *request)
     if (request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) {
 
         chimera_vfs_getattr(thread->vfs_thread,
+                            &request->session_handle->session->cred,
                             request->close.open_file->handle,
                             CHIMERA_VFS_ATTR_MASK_STAT,
                             chimera_smb_close_getattr_callback,

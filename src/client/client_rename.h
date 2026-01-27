@@ -81,6 +81,7 @@ chimera_rename_target_lookup_complete(
     /* Now do the actual rename with optional target FH */
     chimera_vfs_rename(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         request->rename.source_fh,
         request->rename.source_fh_len,
         request->rename.source_path + request->rename.source_name_offset,
@@ -123,6 +124,7 @@ chimera_rename_dest_parent_complete(
     /* Look up the target file (if it exists) for silly rename handling */
     chimera_vfs_lookup(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         oh,
         request->rename.dest_path + request->rename.dest_name_offset,
         request->rename.dest_path_len - request->rename.dest_name_offset,
@@ -155,6 +157,7 @@ chimera_rename_dest_parent_lookup_complete(
 
     chimera_vfs_open(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -187,6 +190,7 @@ chimera_rename_source_parent_complete(
 
     chimera_vfs_lookup_path(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         request->thread->client->root_fh,
         request->thread->client->root_fh_len,
         request->rename.dest_path,
@@ -218,6 +222,7 @@ chimera_rename_source_parent_lookup_complete(
 
     chimera_vfs_open(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -239,6 +244,7 @@ chimera_dispatch_rename(
 
     chimera_vfs_lookup_path(
         thread->vfs_thread,
+        &thread->client->cred,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->rename.source_path,

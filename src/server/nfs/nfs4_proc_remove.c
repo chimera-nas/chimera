@@ -46,7 +46,7 @@ chimera_nfs4_remove_open_callback(
         return;
     }
 
-    chimera_vfs_remove(req->thread->vfs_thread,
+    chimera_vfs_remove(req->thread->vfs_thread, &req->cred,
                        parent_handle,
                        args->target.data,
                        args->target.len,
@@ -68,7 +68,7 @@ chimera_nfs4_remove(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

@@ -58,6 +58,7 @@ chimera_link_dest_parent_complete(
 
     chimera_vfs_link(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         request->link.source_fh,
         request->link.source_fh_len,
         request->link.dest_fh,
@@ -93,6 +94,7 @@ chimera_link_dest_parent_lookup_complete(
 
     chimera_vfs_open(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -124,6 +126,7 @@ chimera_link_source_complete(
 
     chimera_vfs_lookup_path(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         request->thread->client->root_fh,
         request->thread->client->root_fh_len,
         request->link.dest_path,
@@ -156,6 +159,7 @@ chimera_link_source_lookup_complete(
     /* Do not follow final symlink - we want to link the symlink itself */
     chimera_vfs_lookup_path(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         request->thread->client->root_fh,
         request->thread->client->root_fh_len,
         request->link.source_path,
@@ -181,6 +185,7 @@ chimera_dispatch_link(
     /* Do not follow final symlink - we want to link the symlink itself */
     chimera_vfs_lookup_path(
         thread->vfs_thread,
+        &thread->client->cred,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->link.source_path,

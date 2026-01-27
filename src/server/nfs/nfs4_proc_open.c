@@ -19,7 +19,6 @@ chimera_nfs4_open_at_complete(
     void                           *private_data)
 {
     struct nfs_request             *req           = private_data;
-    struct evpl_rpc2_msg           *msg           = req->msg;
     struct nfs4_session            *session       = req->session;
     struct OPEN4args               *args          = &req->args_compound->argarray[req->index].opopen;
     struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
@@ -46,7 +45,7 @@ chimera_nfs4_open_at_complete(
 
         if (args->openhow.opentype == OPEN4_CREATE &&
             (args->openhow.how.mode == UNCHECKED4 || args->openhow.how.mode == GUARDED4)) {
-            rc = xdr_dbuf_alloc_array(&res->resok4, attrset, 4, msg->dbuf);
+            rc = xdr_dbuf_alloc_array(&res->resok4, attrset, 4, req->encoding->dbuf);
             chimera_nfs_abort_if(rc, "Failed to allocate array");
             res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
                                                              args->openhow.how.createattrs.num_attrmask,
@@ -114,7 +113,6 @@ chimera_nfs4_open_parent_complete(
     void                           *private_data)
 {
     struct nfs_request       *req   = private_data;
-    struct evpl_rpc2_msg     *msg   = req->msg;
     struct OPEN4args         *args  = &req->args_compound->argarray[req->index].opopen;
     unsigned int              flags = 0;
     struct chimera_vfs_attrs *attr;
@@ -128,7 +126,7 @@ chimera_nfs4_open_parent_complete(
         return;
     }
 
-    attr = xdr_dbuf_alloc_space(sizeof(*attr), msg->dbuf);
+    attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
     chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
     attr->va_req_mask = 0;
@@ -157,7 +155,7 @@ chimera_nfs4_open_parent_complete(
 
     switch (args->claim.claim) {
         case CLAIM_NULL:
-            chimera_vfs_open_at(req->thread->vfs_thread,
+            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
                                 parent_handle,
                                 args->claim.file.data,
                                 args->claim.file.len,
@@ -171,7 +169,7 @@ chimera_nfs4_open_parent_complete(
             break;
         case CLAIM_PREVIOUS:
         case CLAIM_FH:
-            chimera_vfs_open(req->thread->vfs_thread,
+            chimera_vfs_open(req->thread->vfs_thread, &req->cred,
                              req->fh,
                              req->fhlen,
                              flags,
@@ -191,7 +189,7 @@ chimera_nfs4_open(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

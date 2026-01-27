@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <string.h>
 #include <pthread.h>
 #include <utlist.h>
 #include "vfs/vfs.h"
@@ -16,6 +17,7 @@
 #include "uthash.h"
 #include "common/misc.h"
 #include "vfs/vfs_fh.h"
+#include "evpl/evpl_rpc2.h"
 
 #define chimera_nfsclient_debug(...) chimera_debug("nfsclient", \
                                                    __FILE__, \
@@ -211,6 +213,50 @@ chimera_nfs3_map_fh(
     *mapped_fh    = (uint8_t *) fh + CHIMERA_VFS_MOUNT_ID_SIZE + 1;
     *mapped_fhlen = fhlen - CHIMERA_VFS_MOUNT_ID_SIZE - 1;
 } // chimera_nfs3_map_fh
+
+/*
+ * Initialize an RPC2 credential for AUTH_SYS from a VFS credential.
+ * The RPC2 cred is stack-allocated by the caller.
+ *
+ * @param rpc2_cred     Pointer to stack-allocated evpl_rpc2_cred
+ * @param vfs_cred      VFS credential with uid/gid/groups
+ * @param machine_name  Machine name string (from chimera_vfs)
+ * @param machine_name_len Length of machine name
+ */
+static inline void
+chimera_nfs_init_rpc2_cred(
+    struct evpl_rpc2_cred         *rpc2_cred,
+    const struct chimera_vfs_cred *vfs_cred,
+    const char                    *machine_name,
+    int                            machine_name_len)
+{
+    uint32_t ngids;
+
+    rpc2_cred->flavor = EVPL_RPC2_AUTH_SYS;
+
+    /* Handle NULL credential - use root (uid=0, gid=0) */
+    if (!vfs_cred) {
+        rpc2_cred->authsys.uid      = 0;
+        rpc2_cred->authsys.gid      = 0;
+        rpc2_cred->authsys.num_gids = 0;
+        rpc2_cred->authsys.gids     = NULL;
+    } else {
+        rpc2_cred->authsys.uid = vfs_cred->uid;
+        rpc2_cred->authsys.gid = vfs_cred->gid;
+
+        /* Assign pointer to gids array (valid for duration of call) */
+        ngids = vfs_cred->ngids;
+        if (ngids > EVPL_RPC2_AUTH_SYS_MAX_GIDS) {
+            ngids = EVPL_RPC2_AUTH_SYS_MAX_GIDS;
+        }
+        rpc2_cred->authsys.num_gids = ngids;
+        rpc2_cred->authsys.gids     = (uint32_t *) vfs_cred->gids;
+    }
+
+    /* Assign pointer to machine name (valid for duration of call) */
+    rpc2_cred->authsys.machinename     = machine_name;
+    rpc2_cred->authsys.machinename_len = machine_name_len;
+} /* chimera_nfs_init_rpc2_cred */
 
 void chimera_nfs3_dispatch(
     struct chimera_nfs_thread *,

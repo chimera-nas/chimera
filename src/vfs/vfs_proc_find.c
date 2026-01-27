@@ -65,6 +65,7 @@ chimera_vfs_find_drain(
 static inline void
 chimera_vfs_find_dispatch(
     struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
     const void                     *fh,
     int                             fhlen,
     const char                     *path_prefix,
@@ -79,7 +80,7 @@ chimera_vfs_find_dispatch(
 {
     struct chimera_vfs_request *find_request;
 
-    find_request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    find_request = chimera_vfs_request_alloc(thread, cred, fh, fhlen);
 
     find_request->find.path            = find_request->plugin_data;
     find_request->find.attr_mask       = attr_mask;
@@ -102,13 +103,14 @@ chimera_vfs_find_dispatch(
 
     chimera_vfs_open(
         thread,
+        cred,
         find_request->fh,
         find_request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
         chimera_vfs_find_open_callback,
         find_request);
 
-} /* chimera_vfs_find */
+} /* chimera_vfs_find_dispatch */
 
 static int
 chimera_vfs_find_readdir_callback(
@@ -154,6 +156,7 @@ chimera_vfs_find_readdir_callback(
 
         if (filter_result == 0) {
             chimera_vfs_find_dispatch(thread,
+                                      find_request->cred,
                                       attrs->va_fh,
                                       attrs->va_fh_len,
                                       result->path,
@@ -212,6 +215,7 @@ chimera_vfs_find_open_callback(
 
     chimera_vfs_readdir(
         thread,
+        find_request->cred,
         oh,
         find_request->find.attr_mask,
         0,
@@ -221,20 +225,22 @@ chimera_vfs_find_open_callback(
         chimera_vfs_find_readdir_complete,
         find_request);
 
-} /* chimera_vfs_lookup_path_open_dispatch */
+} /* chimera_vfs_find_open_callback */
 
 SYMBOL_EXPORT void
 chimera_vfs_find(
-    struct chimera_vfs_thread    *thread,
-    const void                   *fh,
-    int                           fhlen,
-    uint64_t                      attr_mask,
-    chimera_vfs_filter_callback_t filter,
-    chimera_vfs_find_callback_t   callback,
-    chimera_vfs_find_complete_t   complete,
-    void                         *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint64_t                       attr_mask,
+    chimera_vfs_filter_callback_t  filter,
+    chimera_vfs_find_callback_t    callback,
+    chimera_vfs_find_complete_t    complete,
+    void                          *private_data)
 {
     chimera_vfs_find_dispatch(thread,
+                              cred,
                               fh, fhlen,
                               "", 0,
                               attr_mask, NULL, NULL,

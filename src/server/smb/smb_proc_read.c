@@ -73,6 +73,7 @@ chimera_smb_read(struct chimera_smb_request *request)
 
     chimera_vfs_read(
         thread->vfs_thread,
+        &request->session_handle->session->cred,
         request->read.open_file->handle,
         request->read.offset,
         request->read.length,

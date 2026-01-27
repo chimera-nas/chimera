@@ -37,6 +37,7 @@ chimera_vfs_setattr_complete(struct chimera_vfs_request *request)
 SYMBOL_EXPORT void
 chimera_vfs_setattr(
     struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
     struct chimera_vfs_attrs       *set_attr,
     uint64_t                        pre_attr_mask,
@@ -46,7 +47,7 @@ chimera_vfs_setattr(
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc_by_handle(thread, handle);
+    request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
 
     request->opcode                          = CHIMERA_VFS_OP_SETATTR;
     request->complete                        = chimera_vfs_setattr_complete;

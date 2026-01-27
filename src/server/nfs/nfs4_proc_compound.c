@@ -29,8 +29,9 @@ chimera_nfs4_compound_process(
 
         rc = shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
             thread->evpl,
+            NULL,
             &req->res_compound,
-            req->msg);
+            req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
         nfs_request_free(thread, req);
@@ -146,21 +147,24 @@ chimera_nfs4_compound_process(
 
 void
 chimera_nfs4_compound(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct COMPOUND4args  *args,
-    struct evpl_rpc2_msg  *msg,
-    void                  *private_data)
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct COMPOUND4args      *args,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
     int                               rc;
 
-    req = nfs_request_alloc(thread, conn, msg);
+    req = nfs_request_alloc(thread, conn, encoding);
+
+    chimera_nfs_map_cred(&req->cred, cred);
 
     nfs4_dump_compound(req, args);
 
-    req->session              = conn->private_data;
+    req->session              = evpl_rpc2_conn_get_private_data(conn);
     req->args_compound        = args;
     req->res_compound.status  = NFS4_OK;
     req->res_compound.tag.len = 0;
@@ -168,7 +172,7 @@ chimera_nfs4_compound(
     req->saved_fhlen          = 0;
 
 
-    rc = xdr_dbuf_alloc_array(&req->res_compound, resarray, args->num_argarray, msg->dbuf);
+    rc = xdr_dbuf_alloc_array(&req->res_compound, resarray, args->num_argarray, req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to allocate array");
 
     req->index = 0;

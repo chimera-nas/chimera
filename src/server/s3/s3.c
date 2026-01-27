@@ -409,6 +409,7 @@ s3_server_dispatch(
     }
 
     chimera_vfs_lookup_path(thread->vfs,
+                            &thread->shared->cred,
                             shared->root_fh,
                             shared->root_fh_len,
                             bucket->path,
@@ -454,6 +455,9 @@ s3_server_init(
     shared->listener = evpl_listener_create();
 
     shared->bucket_map = s3_bucket_map_create();
+
+    /* Initialize root credentials for now - TODO: proper credential mapping */
+    chimera_vfs_cred_init_unix(&shared->cred, 0, 0, 0, NULL);
 
     /* Initialize the root file handle for VFS lookups */
     chimera_vfs_get_root_fh(shared->root_fh, &shared->root_fh_len);

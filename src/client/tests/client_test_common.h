@@ -238,7 +238,9 @@ client_test_init(
         }
     }
 
-    env->client = chimera_client_init(client_config, env->client_metrics);
+    struct chimera_vfs_cred root_cred;
+    chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+    env->client = chimera_client_init(client_config, &root_cred, env->client_metrics);
 
     env->client_thread = chimera_client_thread_init(env->evpl, env->client);
 
