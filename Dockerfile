@@ -2,12 +2,17 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-FROM ubuntu:24.04 AS build
+ARG DOCKER_MIRROR=""
+FROM ${DOCKER_MIRROR}ubuntu:24.04 AS build
 ARG BUILD_TYPE=Release
+ARG APT_MIRROR=""
 
-
-RUN sed -i 's|archive.ubuntu.com|azure.archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources && \
-    sed -i 's|ports.ubuntu.com|azure.ports.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources
+RUN if [ -n "$APT_MIRROR" ]; then \
+    echo "deb $APT_MIRROR noble main universe" > /etc/apt/sources.list.d/local-mirror.list && \
+    echo "deb $APT_MIRROR noble-updates main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
+    echo "deb $APT_MIRROR noble-security main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
+    rm -f /etc/apt/sources.list.d/ubuntu.sources; \
+    fi
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
@@ -58,7 +63,7 @@ RUN cmake -G Ninja -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DDISABLE_TESTS=ON /chimera 
     ninja && \
     ninja install
 
-FROM ubuntu:24.04
+FROM ${DOCKER_MIRROR}ubuntu:24.04
 ARG BUILD_TYPE=Release
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
