@@ -62,7 +62,8 @@ chimera_nfs4_exchange_id(
            .len);
 
     res->eir_resok4.eir_server_scope.len  = sizeof(server_scope);
-    res->eir_resok4.eir_server_scope.data = xdr_dbuf_alloc_space(res->eir_resok4.eir_server_scope.len, req->encoding->dbuf);
+    res->eir_resok4.eir_server_scope.data = xdr_dbuf_alloc_space(res->eir_resok4.eir_server_scope.len, req->encoding->
+                                                                 dbuf);
     chimera_nfs_abort_if(res->eir_resok4.eir_server_scope.data == NULL, "Failed to allocate space");
     memcpy(res->eir_resok4.eir_server_scope.data, &server_scope, res->eir_resok4.eir_server_scope.len);
 

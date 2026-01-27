@@ -168,11 +168,11 @@ portmap_build_rpcblist(
 
 void
 chimera_portmap_null_v2(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
     struct evpl_rpc2_encoding *encoding,
-    void                  *private_data)
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
@@ -184,12 +184,12 @@ chimera_portmap_null_v2(
 
 void
 chimera_portmap_getport_v2(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
-    struct mapping        *mapping,
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct mapping            *mapping,
     struct evpl_rpc2_encoding *encoding,
-    void                  *private_data)
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
@@ -209,11 +209,11 @@ chimera_portmap_getport_v2(
 
 void
 chimera_portmap_dump_v2(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
     struct evpl_rpc2_encoding *encoding,
-    void                  *private_data)
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
@@ -261,12 +261,12 @@ portmap_getaddr_common(
 
 void
 chimera_portmap_getaddr_v3(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
-    struct rpcb           *args,
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct rpcb               *args,
     struct evpl_rpc2_encoding *encoding,
-    void                  *private_data)
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
@@ -297,11 +297,11 @@ portmap_dump_common(
 
 void
 chimera_portmap_dump_v3(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
     struct evpl_rpc2_encoding *encoding,
-    void                  *private_data)
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
@@ -312,11 +312,11 @@ chimera_portmap_dump_v3(
 
 void
 chimera_portmap_dump_v4(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
     struct evpl_rpc2_encoding *encoding,
-    void                  *private_data)
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
@@ -327,12 +327,12 @@ chimera_portmap_dump_v4(
 
 void
 chimera_portmap_getaddr_v4(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
-    struct rpcb           *args,
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct rpcb               *args,
     struct evpl_rpc2_encoding *encoding,
-    void                  *private_data)
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;

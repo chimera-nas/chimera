@@ -19,7 +19,7 @@ chimera_nfs4_create_complete(
 {
     struct nfs_request *req  = private_data;
     struct CREATE4args *args = &req->args_compound->argarray[req->index].opcreate;
-    struct CREATE4res    *res  = &req->res_compound.resarray[req->index].opcreate;
+    struct CREATE4res  *res  = &req->res_compound.resarray[req->index].opcreate;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_nfs4_compound_complete(req,

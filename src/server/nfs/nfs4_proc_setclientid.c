@@ -34,7 +34,7 @@ chimera_nfs4_setclientid(
         NULL);
 
     evpl_rpc2_conn_set_private_data(conn, session);
-    req->session       = session;
+    req->session = session;
 
     resop->opsetclientid.status = NFS4_OK;
 

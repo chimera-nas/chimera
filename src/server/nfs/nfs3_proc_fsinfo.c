@@ -15,10 +15,10 @@ chimera_nfs3_fsinfo_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct nfs_request               *req      = private_data;
-    struct chimera_server_nfs_thread *thread   = req->thread;
-    struct chimera_server_nfs_shared *shared   = thread->shared;
-    struct evpl                      *evpl     = thread->evpl;
+    struct nfs_request               *req    = private_data;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct evpl                      *evpl   = thread->evpl;
     struct FSINFO3res                 res;
     uint64_t                          max_xfer = 1024 * 1024;
     int                               rc;
