@@ -17,7 +17,7 @@
 #include "uthash.h"
 #include "common/misc.h"
 #include "vfs/vfs_fh.h"
-#include "evpl/evpl_rpc2_cred.h"
+#include "evpl/evpl_rpc2.h"
 
 #define chimera_nfsclient_debug(...) chimera_debug("nfsclient", \
                                                    __FILE__, \
@@ -233,8 +233,6 @@ chimera_nfs_init_rpc2_cred(
     uint32_t ngids;
 
     rpc2_cred->flavor = EVPL_RPC2_AUTH_SYS;
-    rpc2_cred->key    = 0;
-    rpc2_cred->next   = NULL;
 
     /* Handle NULL credential - use root (uid=0, gid=0) */
     if (!vfs_cred) {

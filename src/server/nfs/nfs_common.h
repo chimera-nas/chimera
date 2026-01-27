@@ -6,7 +6,6 @@
 
 #include <utlist.h>
 
-#include "evpl/evpl_rpc2_cred.h"
 #include "evpl/evpl_rpc2.h"
 #include "portmap_xdr.h"
 #include "vfs/vfs_cred.h"
