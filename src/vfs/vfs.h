@@ -8,6 +8,7 @@
 #include <uthash.h>
 #include "vfs_dump.h"
 #include "vfs_error.h"
+#include "vfs_cred.h"
 #include "evpl/evpl.h"
 
 
@@ -268,6 +269,7 @@ struct chimera_vfs_request_handle {
 
 struct chimera_vfs_request {
     struct chimera_vfs_thread        *thread;
+    const struct chimera_vfs_cred    *cred;
     uint32_t                          opcode;
     enum chimera_vfs_error            status;
     chimera_vfs_complete_callback_t   complete;
@@ -752,6 +754,8 @@ struct chimera_vfs {
     struct chimera_vfs_delegation_thread *delegation_threads;
     struct chimera_vfs_close_thread       close_thread;
     struct chimera_vfs_metrics            metrics;
+    int                                   machine_name_len;
+    char                                  machine_name[256];
 };
 
 struct chimera_vfs_thread {

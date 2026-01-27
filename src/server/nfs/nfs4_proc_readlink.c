@@ -45,11 +45,11 @@ chimera_nfs4_readlink_open_callback(
         return;
     }
 
-    res->resok4.link.data = xdr_dbuf_alloc_space(4096, req->msg->dbuf);
+    res->resok4.link.data = xdr_dbuf_alloc_space(4096, req->encoding->dbuf);
     chimera_nfs_abort_if(res->resok4.link.data == NULL, "Failed to allocate space");
     res->resok4.link.len = 4096;
 
-    chimera_vfs_readlink(req->thread->vfs_thread,
+    chimera_vfs_readlink(req->thread->vfs_thread, &req->cred,
                          handle,
                          res->resok4.link.data,
                          res->resok4.link.len,
@@ -64,7 +64,7 @@ chimera_nfs4_readlink(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

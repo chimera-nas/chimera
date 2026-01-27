@@ -120,6 +120,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
 SYMBOL_EXPORT void
 chimera_vfs_open_at(
     struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
@@ -135,7 +136,7 @@ chimera_vfs_open_at(
 
     chimera_vfs_abort_if(!set_attr, "no setattr provided");
 
-    request = chimera_vfs_request_alloc_by_handle(thread, handle);
+    request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
 
     request->opcode                              = CHIMERA_VFS_OP_OPEN_AT;
     request->complete                            = chimera_vfs_open_complete;

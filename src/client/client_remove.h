@@ -70,6 +70,7 @@ chimera_remove_parent_open_complete(
 
     chimera_vfs_remove(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         oh,
         request->remove.path + request->remove.name_offset,
         request->remove.path_len - request->remove.name_offset,
@@ -102,6 +103,7 @@ chimera_remove_parent_lookup_complete(
 
     chimera_vfs_open(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -136,6 +138,7 @@ chimera_remove_child_lookup_complete(
     /* Now lookup the parent directory */
     chimera_vfs_lookup_path(
         thread->vfs_thread,
+        &thread->client->cred,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->remove.path,
@@ -163,6 +166,7 @@ chimera_dispatch_remove(
      * not the target it points to. */
     chimera_vfs_lookup_path(
         thread->vfs_thread,
+        &thread->client->cred,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->remove.path,
@@ -224,6 +228,7 @@ chimera_remove_at_lookup_complete(
     /* Now call remove with the child FH */
     chimera_vfs_remove(
         thread->vfs_thread,
+        &thread->client->cred,
         request->remove.parent_handle,
         request->remove.path,
         request->remove.path_len,
@@ -249,6 +254,7 @@ chimera_dispatch_remove_at(
      * not the target it points to. */
     chimera_vfs_lookup(
         thread->vfs_thread,
+        &thread->client->cred,
         parent_handle,
         request->remove.path,
         request->remove.path_len,

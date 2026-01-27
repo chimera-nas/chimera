@@ -41,19 +41,18 @@ chimera_nfs4_read(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct READ4args     *args    = &argop->opread;
-    struct evpl_rpc2_msg *msg     = req->msg;
-    struct nfs4_session  *session = req->session;
-    struct nfs4_state    *state;
-    struct evpl_iovec    *iov;
+    struct READ4args    *args    = &argop->opread;
+    struct nfs4_session *session = req->session;
+    struct nfs4_state   *state;
+    struct evpl_iovec   *iov;
 
     state = nfs4_session_get_state(session, &args->stateid);
 
-    iov = xdr_dbuf_alloc_space(sizeof(*iov) * 64, msg->dbuf);
+    iov = xdr_dbuf_alloc_space(sizeof(*iov) * 64, req->encoding->dbuf);
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
 
-    chimera_vfs_read(thread->vfs_thread,
+    chimera_vfs_read(thread->vfs_thread, &req->cred,
                      state->nfs4_state_handle,
                      args->offset,
                      args->count,

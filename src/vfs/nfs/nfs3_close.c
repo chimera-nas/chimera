@@ -15,6 +15,7 @@ struct chimera_nfs3_close_ctx {
     int                        silly_renamed;
     uint8_t                    dir_fh[CHIMERA_VFS_FH_SIZE]; /* Copied from open state before release */
     int                        dir_fh_len;
+    struct chimera_vfs_cred    silly_remove_cred; /* Cred from REMOVE that triggered silly rename */
 };
 
 static void
@@ -26,10 +27,11 @@ chimera_nfs3_close_complete(struct chimera_vfs_request *request)
 
 static void
 chimera_nfs3_close_remove_callback(
-    struct evpl       *evpl,
-    struct REMOVE3res *res,
-    int                status,
-    void              *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct REMOVE3res           *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request *request = private_data;
 
@@ -51,6 +53,7 @@ chimera_nfs3_close_do_silly_remove(
 {
     struct chimera_nfs_client_server_thread *server_thread;
     struct REMOVE3args                       args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
     char                                     silly_name[5 + CHIMERA_VFS_FH_SIZE * 2 + 1];
@@ -76,18 +79,23 @@ chimera_nfs3_close_do_silly_remove(
     args.object.name.str      = silly_name;
     args.object.name.len      = silly_name_len;
 
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, &ctx->silly_remove_cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
     ctx->shared->nfs_v3.send_call_NFSPROC3_REMOVE(&ctx->shared->nfs_v3.rpc2, ctx->thread->evpl,
-                                                  server_thread->nfs_conn, &args,
+                                                  server_thread->nfs_conn, &rpc2_cred, &args,
                                                   0, 0, 0,
                                                   chimera_nfs3_close_remove_callback, request);
 } /* chimera_nfs3_close_do_silly_remove */
 
 static void
 chimera_nfs3_close_commit_callback(
-    struct evpl       *evpl,
-    struct COMMIT3res *res,
-    int                status,
-    void              *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct COMMIT3res           *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request    *request = private_data;
     struct chimera_nfs3_close_ctx *ctx     = request->plugin_data;
@@ -116,6 +124,7 @@ chimera_nfs3_close_do_commit(
 {
     struct chimera_nfs_client_server_thread *server_thread;
     struct COMMIT3args                       args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
 
@@ -139,8 +148,12 @@ chimera_nfs3_close_do_commit(
     args.offset         = 0;
     args.count          = 0; /* Commit entire file */
 
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
     ctx->shared->nfs_v3.send_call_NFSPROC3_COMMIT(&ctx->shared->nfs_v3.rpc2, ctx->thread->evpl,
-                                                  server_thread->nfs_conn, &args,
+                                                  server_thread->nfs_conn, &rpc2_cred, &args,
                                                   0, 0, 0,
                                                   chimera_nfs3_close_commit_callback, request);
 } /* chimera_nfs3_close_do_commit */
@@ -179,6 +192,7 @@ chimera_nfs3_close(
     if (ctx->silly_renamed) {
         ctx->dir_fh_len = open_state->dir_fh_len;
         memcpy(ctx->dir_fh, open_state->dir_fh, open_state->dir_fh_len);
+        ctx->silly_remove_cred = open_state->silly_remove_cred;
     }
 
     /* Free the open state */

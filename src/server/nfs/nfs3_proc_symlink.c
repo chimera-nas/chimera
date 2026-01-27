@@ -21,7 +21,6 @@ chimera_nfs3_symlink_complete(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct SYMLINK3res                res;
     int                               rc;
 
@@ -34,7 +33,7 @@ chimera_nfs3_symlink_complete(
             rc                           = xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
                                                                 r_attr->va_fh,
                                                                 r_attr->va_fh_len,
-                                                                msg->dbuf);
+                                                                req->encoding->dbuf);
             chimera_nfs_abort_if(rc, "Failed to copy opaque");
         } else {
             res.resok.obj.handle_follows = 0;
@@ -48,7 +47,7 @@ chimera_nfs3_symlink_complete(
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
-    rc = shared->nfs_v3.send_reply_NFSPROC3_SYMLINK(evpl, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_SYMLINK(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
@@ -65,7 +64,6 @@ chimera_nfs3_symlink_open_callback(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct SYMLINK3args              *args   = req->args_symlink;
     struct SYMLINK3res                res;
     struct chimera_vfs_attrs         *attr;
@@ -73,20 +71,21 @@ chimera_nfs3_symlink_open_callback(
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
-        attr        = xdr_dbuf_alloc_space(sizeof(*attr), msg->dbuf);
+        attr        = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
         chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
         chimera_nfs3_sattr3_to_va(attr, &args->symlink.symlink_attributes);
 
         chimera_vfs_symlink(
             thread->vfs_thread,
+            &req->cred,
             handle,
             args->where.name.str,
             args->where.name.len,
             args->symlink.symlink_data.str,
             args->symlink.symlink_data.len,
             attr,
-            CHIMERA_VFS_ATTR_FH |      CHIMERA_NFS3_ATTR_MASK,
+            CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
             CHIMERA_NFS3_ATTR_WCC_MASK,
             CHIMERA_NFS3_ATTR_MASK,
             chimera_nfs3_symlink_complete,
@@ -95,28 +94,30 @@ chimera_nfs3_symlink_open_callback(
     } else {
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_SYMLINK(evpl, &res, msg);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_SYMLINK(evpl, NULL, &res, req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
 } /* chimera_nfs3_mkdir_open_callback */
 void
 chimera_nfs3_symlink(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct SYMLINK3args   *args,
-    struct evpl_rpc2_msg  *msg,
-    void                  *private_data)
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct SYMLINK3args       *args,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req = nfs_request_alloc(thread, conn, msg);
+    req = nfs_request_alloc(thread, conn, encoding);
+    chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_symlink(req, args);
     req->args_symlink = args;
 
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      args->where.dir.data.data,
                      args->where.dir.data.len,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

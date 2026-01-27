@@ -14,6 +14,8 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include "vfs/vfs_cred.h"
+
 struct chimera_posix_client;
 struct chimera_client_config;
 struct prometheus_metrics;
@@ -21,6 +23,7 @@ struct prometheus_metrics;
 struct chimera_posix_client *
 chimera_posix_init(
     const struct chimera_client_config *config,
+    const struct chimera_vfs_cred      *cred,
     struct prometheus_metrics          *metrics);
 
 void

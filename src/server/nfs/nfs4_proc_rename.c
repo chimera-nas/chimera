@@ -48,6 +48,7 @@ chimera_nfs4_rename_open_callback(
 
     chimera_vfs_rename(
         thread->vfs_thread,
+        &req->cred,
         req->saved_fh,
         req->saved_fhlen,
         args->oldname.data,
@@ -71,7 +72,7 @@ chimera_nfs4_rename(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

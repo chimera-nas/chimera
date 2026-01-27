@@ -31,10 +31,11 @@ struct chimera_nfs3_remove_ctx {
 
 static void
 chimera_nfs3_remove_callback(
-    struct evpl       *evpl,
-    struct REMOVE3res *res,
-    int                status,
-    void              *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct REMOVE3res           *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request *request = private_data;
 
@@ -65,10 +66,11 @@ chimera_nfs3_remove_callback(
 
 static void
 chimera_nfs3_remove_rename_callback(
-    struct evpl       *evpl,
-    struct RENAME3res *res,
-    int                status,
-    void              *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct RENAME3res           *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request *request = private_data;
 
@@ -96,6 +98,7 @@ chimera_nfs3_remove_do_silly_rename(
 {
     struct chimera_nfs_client_server_thread *server_thread;
     struct RENAME3args                       args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *dir_fh;
     int                                      dir_fhlen;
 
@@ -120,8 +123,12 @@ chimera_nfs3_remove_do_silly_rename(
     args.to.name.str      = ctx->silly_name;
     args.to.name.len      = ctx->silly_name_len;
 
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
     ctx->shared->nfs_v3.send_call_NFSPROC3_RENAME(&ctx->shared->nfs_v3.rpc2, ctx->thread->evpl,
-                                                  server_thread->nfs_conn, &args,
+                                                  server_thread->nfs_conn, &rpc2_cred, &args,
                                                   0, 0, 0,
                                                   chimera_nfs3_remove_rename_callback, request);
 } /* chimera_nfs3_remove_do_silly_rename */
@@ -133,6 +140,7 @@ chimera_nfs3_remove_do_remove(
 {
     struct chimera_nfs_client_server_thread *server_thread;
     struct REMOVE3args                       args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *dir_fh;
     int                                      dir_fhlen;
 
@@ -151,8 +159,12 @@ chimera_nfs3_remove_do_remove(
     args.object.name.str      = (char *) request->remove.name;
     args.object.name.len      = request->remove.namelen;
 
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
     ctx->shared->nfs_v3.send_call_NFSPROC3_REMOVE(&ctx->shared->nfs_v3.rpc2, ctx->thread->evpl,
-                                                  server_thread->nfs_conn, &args,
+                                                  server_thread->nfs_conn, &rpc2_cred, &args,
                                                   0, 0, 0,
                                                   chimera_nfs3_remove_callback, request);
 } /* chimera_nfs3_remove_do_remove */
@@ -222,7 +234,7 @@ chimera_nfs3_remove(
         return;
     }
 
-    rc = chimera_nfs3_open_state_mark_silly(state, request->fh, request->fh_len);
+    rc = chimera_nfs3_open_state_mark_silly(state, request->fh, request->fh_len, request->cred);
 
     /* Release the handle ref - we're done with it */
     chimera_vfs_open_cache_release(request->thread, cache, handle, 0);

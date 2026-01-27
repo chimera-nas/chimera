@@ -7,6 +7,7 @@
 #include <sys/uio.h>
 
 #include "vfs/vfs.h"
+#include "vfs/vfs_cred.h"
 
 #define CHIMERA_CLIENT_IOV_MAX 260
 
@@ -30,6 +31,7 @@ chimera_client_config_add_module(
 struct chimera_client *
 chimera_client_init(
     const struct chimera_client_config *config,
+    const struct chimera_vfs_cred      *cred,
     struct prometheus_metrics          *metrics);
 
 struct chimera_client_thread *

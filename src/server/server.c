@@ -35,6 +35,8 @@ struct chimera_server_config {
     int                                  smb_num_dialects;
     uint32_t                             smb_dialects[16];
     int                                  smb_num_nic_info;
+    uint32_t                             anonuid;
+    uint32_t                             anongid;
     char                                 nfs_rdma_hostname[256];
     struct chimera_vfs_module_cfg        modules[CHIMERA_SERVER_MAX_MODULES];
     struct chimera_server_config_smb_nic smb_nic_info[16];
@@ -79,6 +81,9 @@ chimera_server_config_init(void)
     config->smb_dialects[1]  = SMB2_DIALECT_3_0;
 
     config->smb_num_nic_info = 0;
+
+    config->anonuid = 65534;
+    config->anongid = 65534;
 
     config->cache_ttl = 60;
 
@@ -289,7 +294,33 @@ chimera_server_config_set_smb_nic_info(
     memcpy(config->smb_nic_info, smb_nic_info, num_nic_info * sizeof(struct chimera_server_config_smb_nic));
 } /* chimera_server_config_set_smb_nic_info */
 
+SYMBOL_EXPORT void
+chimera_server_config_set_anonuid(
+    struct chimera_server_config *config,
+    uint32_t                      anonuid)
+{
+    config->anonuid = anonuid;
+} /* chimera_server_config_set_anonuid */
 
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_anonuid(const struct chimera_server_config *config)
+{
+    return config->anonuid;
+} /* chimera_server_config_get_anonuid */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_anongid(
+    struct chimera_server_config *config,
+    uint32_t                      anongid)
+{
+    config->anongid = anongid;
+} /* chimera_server_config_set_anongid */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_anongid(const struct chimera_server_config *config)
+{
+    return config->anongid;
+} /* chimera_server_config_get_anongid */
 
 static void
 chimera_server_thread_wake(
@@ -366,7 +397,7 @@ chimera_server_mount(
 
     thread = chimera_vfs_thread_init(evpl, server->vfs);
 
-    chimera_vfs_mount(thread, mount_path, module_name, module_path, NULL, chimera_server_mount_callback, &ctx);
+    chimera_vfs_mount(thread, NULL, mount_path, module_name, module_path, NULL, chimera_server_mount_callback, &ctx);
 
     while (!ctx.done) {
         evpl_continue(evpl);

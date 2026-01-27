@@ -86,6 +86,7 @@ chimera_stat_open_complete(
 
     chimera_vfs_getattr(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         oh,
         CHIMERA_VFS_ATTR_MASK_STAT,
         chimera_stat_getattr_complete,
@@ -116,6 +117,7 @@ chimera_stat_lookup_complete(
 
     chimera_vfs_open(
         request->thread->vfs_thread,
+        &request->thread->client->cred,
         request->fh,
         request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
@@ -131,6 +133,7 @@ chimera_dispatch_stat(
 {
     chimera_vfs_lookup_path(
         thread->vfs_thread,
+        &thread->client->cred,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->stat.path,

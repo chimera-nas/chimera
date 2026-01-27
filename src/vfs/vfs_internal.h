@@ -126,10 +126,11 @@ chimera_vfs_get_module(
 
 static inline struct chimera_vfs_request *
 chimera_vfs_request_alloc_by_hash(
-    struct chimera_vfs_thread *thread,
-    const void                *fh,
-    int                        fhlen,
-    uint64_t                   fh_hash)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint64_t                       fh_hash)
 {
     struct chimera_vfs_request *request;
 
@@ -142,6 +143,7 @@ chimera_vfs_request_alloc_by_hash(
         request->plugin_data = malloc(4096);
     }
     request->status = CHIMERA_VFS_UNSET;
+    request->cred   = cred;
 
     request->module = chimera_vfs_get_module(thread, fh, fhlen);
 
@@ -162,33 +164,36 @@ chimera_vfs_request_alloc_by_hash(
 
 static inline struct chimera_vfs_request *
 chimera_vfs_request_alloc_anon(
-    struct chimera_vfs_thread *thread,
-    const void                *fh,
-    int                        fhlen,
-    uint64_t                   fh_key)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint64_t                       fh_key)
 {
     uint64_t fh_hash = chimera_vfs_hash(&fh_key, sizeof(fh_key));
 
-    return chimera_vfs_request_alloc_by_hash(thread, fh, fhlen, fh_hash);
+    return chimera_vfs_request_alloc_by_hash(thread, cred, fh, fhlen, fh_hash);
 } /* chimera_vfs_request_alloc_by_hash */
 
 static inline struct chimera_vfs_request *
 chimera_vfs_request_alloc(
-    struct chimera_vfs_thread *thread,
-    const void                *fh,
-    int                        fhlen)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen)
 {
     uint64_t fh_hash = chimera_vfs_hash(fh, fhlen);
 
-    return chimera_vfs_request_alloc_by_hash(thread, fh, fhlen, fh_hash);
+    return chimera_vfs_request_alloc_by_hash(thread, cred, fh, fhlen, fh_hash);
 } /* chimera_vfs_request_alloc */
 
 static inline struct chimera_vfs_request *
 chimera_vfs_request_alloc_by_handle(
     struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle)
 {
-    return chimera_vfs_request_alloc_by_hash(thread, handle->fh, handle->fh_len, handle->fh_hash);
+    return chimera_vfs_request_alloc_by_hash(thread, cred, handle->fh, handle->fh_len, handle->fh_hash);
 } /* chimera_vfs_request_alloc_by_handle */
 
 /*
@@ -197,11 +202,12 @@ chimera_vfs_request_alloc_by_handle(
  */
 static inline struct chimera_vfs_request *
 chimera_vfs_request_alloc_with_module(
-    struct chimera_vfs_thread *thread,
-    const void                *fh,
-    int                        fhlen,
-    uint64_t                   fh_hash,
-    struct chimera_vfs_module *module)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint64_t                       fh_hash,
+    struct chimera_vfs_module     *module)
 {
     struct chimera_vfs_request *request;
 
@@ -214,6 +220,7 @@ chimera_vfs_request_alloc_with_module(
         request->plugin_data = malloc(4096);
     }
     request->status = CHIMERA_VFS_UNSET;
+    request->cred   = cred;
 
     request->module = module;
     memcpy(request->fh, fh, fhlen);

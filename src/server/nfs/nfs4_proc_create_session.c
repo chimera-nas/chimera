@@ -36,8 +36,8 @@ chimera_nfs4_create_session(
         return;
     }
 
-    conn->private_data = session;
-    req->session       = session;
+    evpl_rpc2_conn_set_private_data(conn, session);
+    req->session = session;
 
     res->csr_status = NFS4_OK;
     memcpy(res->csr_resok4.csr_sessionid, session->nfs4_session_id, sizeof(res->csr_resok4.csr_sessionid));

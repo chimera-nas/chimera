@@ -144,13 +144,14 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
 
 SYMBOL_EXPORT void
 chimera_vfs_mount(
-    struct chimera_vfs_thread   *thread,
-    const char                  *mount_path,
-    const char                  *module_name,
-    const char                  *module_path,
-    const char                  *options,
-    chimera_vfs_mount_callback_t callback,
-    void                        *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const char                    *mount_path,
+    const char                    *module_name,
+    const char                    *module_path,
+    const char                    *options,
+    chimera_vfs_mount_callback_t   callback,
+    void                          *private_data)
 {
     struct chimera_vfs         *vfs    = thread->vfs;
     struct chimera_vfs_module  *module = NULL;
@@ -180,7 +181,7 @@ chimera_vfs_mount(
         return;
     }
 
-    request = chimera_vfs_request_alloc(thread, &module->fh_magic, 1);
+    request = chimera_vfs_request_alloc(thread, cred, &module->fh_magic, 1);
 
     /* For mount operations, the module is already known - set it directly
      * since chimera_vfs_get_module returns NULL (no mount exists yet) */

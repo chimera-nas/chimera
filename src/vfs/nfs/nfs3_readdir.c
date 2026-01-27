@@ -12,10 +12,11 @@ struct chimera_nfs3_readdir_ctx {
 
 static void
 chimera_nfs3_readdir_callback(
-    struct evpl            *evpl,
-    struct READDIRPLUS3res *res,
-    int                     status,
-    void                   *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct READDIRPLUS3res      *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request      *request = private_data;
     struct entryplus3               *entry;
@@ -96,6 +97,7 @@ chimera_nfs3_readdir(
                                                                                                   request->fh_len);
     struct chimera_nfs3_readdir_ctx         *ctx;
     struct READDIRPLUS3args                  args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
 
@@ -118,7 +120,12 @@ chimera_nfs3_readdir(
     ctx         = request->plugin_data;
     ctx->server = server_thread->server;
 
-    shared->nfs_v3.send_call_NFSPROC3_READDIRPLUS(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                                  0, 0, 0, chimera_nfs3_readdir_callback, request);
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
+    shared->nfs_v3.send_call_NFSPROC3_READDIRPLUS(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &
+                                                  rpc2_cred,
+                                                  &args, 0, 0, 0, chimera_nfs3_readdir_callback, request);
 } /* chimera_nfs3_readdir */
 

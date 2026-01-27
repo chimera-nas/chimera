@@ -113,6 +113,7 @@ chimera_client_thread_shutdown(
 SYMBOL_EXPORT struct chimera_client *
 chimera_client_init(
     const struct chimera_client_config *config,
+    const struct chimera_vfs_cred      *cred,
     struct prometheus_metrics          *metrics)
 {
     struct chimera_client *client;
@@ -129,6 +130,9 @@ chimera_client_init(
     }
 
     client->config = config;
+
+    /* Copy the credentials into the client structure */
+    client->cred = *cred;
 
     chimera_client_info("Initializing VFS...");
 
