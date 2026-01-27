@@ -24,7 +24,6 @@ chimera_nfs3_write_complete(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct WRITE3res                  res;
     int                               rc;
 
@@ -50,7 +49,7 @@ chimera_nfs3_write_complete(
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
-    rc = shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, NULL, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
@@ -66,7 +65,6 @@ chimera_nfs3_write_open_callback(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct WRITE3args                *args   = req->args_write;
     struct WRITE3res                  res;
     int                               rc;
@@ -90,7 +88,7 @@ chimera_nfs3_write_open_callback(
         res.status =
             chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_wcc_data(&res.resfail.file_wcc, NULL, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, NULL, &res, msg);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, NULL, &res, req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
         /* Iovecs were already taken from the message in chimera_nfs3_write,
@@ -103,17 +101,17 @@ chimera_nfs3_write_open_callback(
 
 void
 chimera_nfs3_write(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
-    struct WRITE3args     *args,
-    struct evpl_rpc2_msg  *msg,
-    void                  *private_data)
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct WRITE3args         *args,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req = nfs_request_alloc(thread, conn, msg);
+    req = nfs_request_alloc(thread, conn, encoding);
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_write(req, args);
@@ -125,7 +123,7 @@ chimera_nfs3_write(
      * from double-releasing (args->data.iov points to msg->read_chunk.iov
      * via XDR zerocopy). Must be done before any error paths.
      */
-    evpl_rpc2_msg_take_read_chunk(msg, NULL, NULL);
+    evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL, NULL);
 
     chimera_vfs_open(thread->vfs_thread, &req->cred,
                      args->file.data.data,

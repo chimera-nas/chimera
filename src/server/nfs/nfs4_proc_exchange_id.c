@@ -12,7 +12,6 @@ chimera_nfs4_exchange_id(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct evpl_rpc2_msg    *msg  = req->msg;
     struct EXCHANGE_ID4args *args = &argop->opexchange_id;
     struct EXCHANGE_ID4res  *res  = &resop->opexchange_id;
     uint32_t                 client_id;
@@ -39,16 +38,16 @@ chimera_nfs4_exchange_id(
     res->eir_resok4.eir_state_protect.spr_how = SP4_NONE;
     res->eir_resok4.num_eir_server_impl_id    = 1;
 
-    res->eir_resok4.eir_server_impl_id = xdr_dbuf_alloc_space(sizeof(struct nfs_impl_id4), msg->dbuf);
+    res->eir_resok4.eir_server_impl_id = xdr_dbuf_alloc_space(sizeof(struct nfs_impl_id4), req->encoding->dbuf);
     chimera_nfs_abort_if(res->eir_resok4.eir_server_impl_id == NULL, "Failed to allocate space");
 
     rc = xdr_dbuf_opaque_copy(&res->eir_resok4.eir_server_impl_id[0].nii_domain,
-                              "chimera.org", sizeof("chimera.org"), msg->dbuf);
+                              "chimera.org", sizeof("chimera.org"), req->encoding->dbuf);
 
     chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
     rc = xdr_dbuf_opaque_copy(&res->eir_resok4.eir_server_impl_id[0].nii_name,
-                              "chimera", sizeof("chimera"), msg->dbuf);
+                              "chimera", sizeof("chimera"), req->encoding->dbuf);
 
     chimera_nfs_abort_if(rc, "Failed to allocate string");
 
@@ -57,13 +56,13 @@ chimera_nfs4_exchange_id(
 
     res->eir_resok4.eir_server_owner.so_major_id.len  = sizeof(owner_major);
     res->eir_resok4.eir_server_owner.so_major_id.data = xdr_dbuf_alloc_space(res->eir_resok4.eir_server_owner.
-                                                                             so_major_id.len, msg->dbuf);
+                                                                             so_major_id.len, req->encoding->dbuf);
     chimera_nfs_abort_if(res->eir_resok4.eir_server_owner.so_major_id.data == NULL, "Failed to allocate space");
     memcpy(res->eir_resok4.eir_server_owner.so_major_id.data, &owner_major, res->eir_resok4.eir_server_owner.so_major_id
            .len);
 
     res->eir_resok4.eir_server_scope.len  = sizeof(server_scope);
-    res->eir_resok4.eir_server_scope.data = xdr_dbuf_alloc_space(res->eir_resok4.eir_server_scope.len, msg->dbuf);
+    res->eir_resok4.eir_server_scope.data = xdr_dbuf_alloc_space(res->eir_resok4.eir_server_scope.len, req->encoding->dbuf);
     chimera_nfs_abort_if(res->eir_resok4.eir_server_scope.data == NULL, "Failed to allocate space");
     memcpy(res->eir_resok4.eir_server_scope.data, &server_scope, res->eir_resok4.eir_server_scope.len);
 

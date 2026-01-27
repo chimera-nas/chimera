@@ -18,7 +18,6 @@ chimera_nfs3_fsstat_complete(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct FSSTAT3res                 res;
     int                               rc;
 
@@ -44,7 +43,7 @@ chimera_nfs3_fsstat_complete(
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
-    rc = shared->nfs_v3.send_reply_NFSPROC3_FSSTAT(evpl, NULL, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_FSSTAT(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
@@ -60,7 +59,6 @@ chimera_nfs3_fsstat_open_callback(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct FSSTAT3res                 res;
     int                               rc;
 
@@ -75,7 +73,7 @@ chimera_nfs3_fsstat_open_callback(
     } else {
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_post_op_attr(&res.resfail.obj_attributes, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_FSSTAT(evpl, NULL, &res, msg);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_FSSTAT(evpl, NULL, &res, req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
@@ -83,17 +81,17 @@ chimera_nfs3_fsstat_open_callback(
 
 void
 chimera_nfs3_fsstat(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
-    struct FSSTAT3args    *args,
-    struct evpl_rpc2_msg  *msg,
-    void                  *private_data)
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct FSSTAT3args        *args,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req = nfs_request_alloc(thread, conn, msg);
+    req = nfs_request_alloc(thread, conn, encoding);
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_fsstat(req, args);

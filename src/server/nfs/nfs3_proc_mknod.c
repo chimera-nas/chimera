@@ -7,12 +7,12 @@
 
 void
 chimera_nfs3_mknod(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
-    struct MKNOD3args     *args,
-    struct evpl_rpc2_msg  *msg,
-    void                  *private_data)
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct MKNOD3args         *args,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
@@ -23,6 +23,6 @@ chimera_nfs3_mknod(
 
     nfs3_dump_mknod(NULL, args);
 
-    int                               rc = shared->nfs_v3.send_reply_NFSPROC3_MKNOD(evpl, NULL, &res, msg);
+    int                               rc = shared->nfs_v3.send_reply_NFSPROC3_MKNOD(evpl, NULL, &res, encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs3_mknod */

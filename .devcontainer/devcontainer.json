@@ -22,6 +22,7 @@
         },
         "mounts": [
                 "source=chimera-build,target=/build,type=volume",
+                "source=chimera-worktrees,target=/worktrees,type=volume",
                 "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude,target=/root/.claude,type=bind,consistency=cached"
         ],
         "appPort": [],

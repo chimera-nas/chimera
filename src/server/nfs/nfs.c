@@ -279,13 +279,13 @@ chimera_nfs_server_notify(
 
     switch (notify->notify_type) {
         case EVPL_RPC2_NOTIFY_CONNECTED:
-            evpl_bind_get_local_address(conn->bind, local_addr, sizeof(local_addr));
-            evpl_bind_get_remote_address(conn->bind, remote_addr, sizeof(remote_addr));
+            evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
+            evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
             chimera_nfs_info("Client connected from %s to %s", remote_addr, local_addr);
             break;
         case EVPL_RPC2_NOTIFY_DISCONNECTED:
-            evpl_bind_get_local_address(conn->bind, local_addr, sizeof(local_addr));
-            evpl_bind_get_remote_address(conn->bind, remote_addr, sizeof(remote_addr));
+            evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
+            evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
             chimera_nfs_info("Client disconnected from %s to %s", remote_addr, local_addr);
             break;
     } /* switch */

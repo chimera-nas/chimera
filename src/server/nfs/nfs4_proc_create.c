@@ -17,9 +17,8 @@ chimera_nfs4_create_complete(
     struct chimera_vfs_attrs *dir_post_attr,
     void                     *private_data)
 {
-    struct nfs_request   *req  = private_data;
-    struct evpl_rpc2_msg *msg  = req->msg;
-    struct CREATE4args   *args = &req->args_compound->argarray[req->index].opcreate;
+    struct nfs_request *req  = private_data;
+    struct CREATE4args *args = &req->args_compound->argarray[req->index].opcreate;
     struct CREATE4res    *res  = &req->res_compound.resarray[req->index].opcreate;
 
     if (error_code != CHIMERA_VFS_OK) {
@@ -31,7 +30,7 @@ chimera_nfs4_create_complete(
 
     res->status = NFS4_OK;
 
-    res->resok4.attrset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), msg->dbuf);
+    res->resok4.attrset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), req->encoding->dbuf);
     chimera_nfs_abort_if(res->resok4.attrset == NULL, "Failed to allocate space");
     res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
                                                      args->createattrs.num_attrmask,
@@ -59,10 +58,9 @@ chimera_nfs4_create_symlink_complete(
     struct chimera_vfs_attrs *dir_post_attr,
     void                     *private_data)
 {
-    struct nfs_request   *req  = private_data;
-    struct evpl_rpc2_msg *msg  = req->msg;
-    struct CREATE4args   *args = &req->args_compound->argarray[req->index].opcreate;
-    struct CREATE4res    *res  = &req->res_compound.resarray[req->index].opcreate;
+    struct nfs_request *req  = private_data;
+    struct CREATE4args *args = &req->args_compound->argarray[req->index].opcreate;
+    struct CREATE4res  *res  = &req->res_compound.resarray[req->index].opcreate;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_nfs4_compound_complete(req,
@@ -73,7 +71,7 @@ chimera_nfs4_create_symlink_complete(
 
     res->status = NFS4_OK;
 
-    res->resok4.attrset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), msg->dbuf);
+    res->resok4.attrset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), req->encoding->dbuf);
     chimera_nfs_abort_if(res->resok4.attrset == NULL, "Failed to allocate space");
     res->resok4.num_attrset = chimera_nfs4_mask2attr(attr,
                                                      args->createattrs.num_attrmask,
@@ -100,14 +98,13 @@ chimera_nfs4_create_open_callback(
     void                           *private_data)
 {
     struct nfs_request               *req    = private_data;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct CREATE4args               *args;
     struct chimera_vfs_attrs         *attr;
 
     args = &req->args_compound->argarray[req->index].opcreate;
 
-    attr = xdr_dbuf_alloc_space(sizeof(*attr), msg->dbuf);
+    attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
     chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
     chimera_nfs4_unmarshall_attrs(attr,

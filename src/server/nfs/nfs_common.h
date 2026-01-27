@@ -46,7 +46,7 @@ struct nfs_request {
     struct chimera_vfs_open_handle   *handle;
     int                               index;
     struct evpl_rpc2_conn            *conn;
-    struct evpl_rpc2_msg             *msg;
+    struct evpl_rpc2_encoding        *encoding;
     struct nfs_request               *next;
     union {
         struct mountargs3       *args_mount;
@@ -141,7 +141,7 @@ static inline struct nfs_request *
 nfs_request_alloc(
     struct chimera_server_nfs_thread *thread,
     struct evpl_rpc2_conn            *conn,
-    struct evpl_rpc2_msg             *msg)
+    struct evpl_rpc2_encoding        *encoding)
 {
     struct nfs_request *req;
 
@@ -154,8 +154,8 @@ nfs_request_alloc(
     }
 
 
-    req->conn = conn;
-    req->msg  = msg;
+    req->conn     = conn;
+    req->encoding = encoding;
 
     return req;
 } /* nfs_request_alloc */
@@ -182,8 +182,8 @@ nfs_request_free(
  */
 static inline void
 chimera_nfs_map_cred(
-    struct chimera_vfs_cred       *vfs_cred,
-    const struct evpl_rpc2_cred   *rpc_cred)
+    struct chimera_vfs_cred     *vfs_cred,
+    const struct evpl_rpc2_cred *rpc_cred)
 {
     if (!rpc_cred || rpc_cred->flavor == EVPL_RPC2_AUTH_NONE) {
         /* Anonymous credentials */

@@ -45,7 +45,7 @@ chimera_nfs4_readlink_open_callback(
         return;
     }
 
-    res->resok4.link.data = xdr_dbuf_alloc_space(4096, req->msg->dbuf);
+    res->resok4.link.data = xdr_dbuf_alloc_space(4096, req->encoding->dbuf);
     chimera_nfs_abort_if(res->resok4.link.data == NULL, "Failed to allocate space");
     res->resok4.link.len = 4096;
 

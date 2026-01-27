@@ -51,7 +51,7 @@ chimera_nfs4_write(
      * from double-releasing (args->data.iov points to msg->read_chunk.iov
      * via XDR zerocopy).
      */
-    evpl_rpc2_msg_take_read_chunk(req->msg, NULL, NULL);
+    evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL, NULL);
 
     chimera_vfs_write(thread->vfs_thread, &req->cred,
                       state->nfs4_state_handle,

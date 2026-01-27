@@ -20,7 +20,6 @@ chimera_nfs3_lookup_complete(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct LOOKUP3res                 res;
     int                               rc;
 
@@ -34,7 +33,7 @@ chimera_nfs3_lookup_complete(
         rc = xdr_dbuf_opaque_copy(&res.resok.object.data,
                                   attr->va_fh,
                                   attr->va_fh_len,
-                                  msg->dbuf);
+                                  req->encoding->dbuf);
         chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
         chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
@@ -45,7 +44,7 @@ chimera_nfs3_lookup_complete(
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
-    rc = shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, NULL, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
 
@@ -62,7 +61,6 @@ chimera_nfs3_lookup_open_callback(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct LOOKUP3args               *args   = req->args_lookup;
     struct LOOKUP3res                 res;
     int                               rc;
@@ -82,7 +80,8 @@ chimera_nfs3_lookup_open_callback(
         res.status =
             chimera_vfs_error_to_nfsstat3(error_code);
         res.resfail.dir_attributes.attributes_follow = 0;
-        rc                                           = shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, NULL, &res, msg);
+        rc                                           = shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, NULL, &res,
+                                                                                                 req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
@@ -91,17 +90,17 @@ chimera_nfs3_lookup_open_callback(
 
 void
 chimera_nfs3_lookup(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
-    struct LOOKUP3args    *args,
-    struct evpl_rpc2_msg  *msg,
-    void                  *private_data)
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct LOOKUP3args        *args,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req = nfs_request_alloc(thread, conn, msg);
+    req = nfs_request_alloc(thread, conn, encoding);
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_lookup(req, args);

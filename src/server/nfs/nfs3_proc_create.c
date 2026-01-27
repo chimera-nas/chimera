@@ -25,7 +25,6 @@ chimera_nfs3_create_open_at_complete(
     struct chimera_server_nfs_shared *shared        = thread->shared;
     struct chimera_vfs_open_handle   *parent_handle = req->handle;
     struct evpl                      *evpl          = thread->evpl;
-    struct evpl_rpc2_msg             *msg           = req->msg;
     struct CREATE3res                 res;
     int                               rc;
 
@@ -38,7 +37,7 @@ chimera_nfs3_create_open_at_complete(
             rc                           = xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
                                                                 handle->fh,
                                                                 handle->fh_len,
-                                                                msg->dbuf);
+                                                                req->encoding->dbuf);
             chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
         } else {
@@ -55,7 +54,7 @@ chimera_nfs3_create_open_at_complete(
 
     chimera_vfs_release(thread->vfs_thread, parent_handle);
 
-    rc = shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, NULL, &res, msg);
+    rc = shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
     nfs_request_free(thread, req);
 } /* chimera_nfs3_create_open_at_complete */
@@ -67,7 +66,6 @@ chimera_nfs3_create_open_at_parent_complete(
     void                           *private_data)
 {
     struct nfs_request               *req    = private_data;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct CREATE3args               *args   = req->args_create;
     struct chimera_vfs_attrs         *attr;
@@ -78,7 +76,7 @@ chimera_nfs3_create_open_at_parent_complete(
         struct CREATE3res res;
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
-        rc = thread->shared->nfs_v3.send_reply_NFSPROC3_CREATE(thread->evpl, NULL, &res, req->msg);
+        rc = thread->shared->nfs_v3.send_reply_NFSPROC3_CREATE(thread->evpl, NULL, &res, req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
         return;
@@ -86,7 +84,7 @@ chimera_nfs3_create_open_at_parent_complete(
 
     req->handle = parent_handle;
 
-    attr = xdr_dbuf_alloc_space(sizeof(*attr), msg->dbuf);
+    attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
     chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
     attr->va_req_mask = 0;
@@ -119,17 +117,17 @@ chimera_nfs3_create_open_at_parent_complete(
 
 void
 chimera_nfs3_create(
-    struct evpl           *evpl,
-    struct evpl_rpc2_conn *conn,
-    struct evpl_rpc2_cred *cred,
-    struct CREATE3args    *args,
-    struct evpl_rpc2_msg  *msg,
-    void                  *private_data)
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct CREATE3args        *args,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
 
-    req = nfs_request_alloc(thread, conn, msg);
+    req = nfs_request_alloc(thread, conn, encoding);
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_create(req, args);

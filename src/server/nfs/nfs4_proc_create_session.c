@@ -36,7 +36,7 @@ chimera_nfs4_create_session(
         return;
     }
 
-    conn->private_data = session;
+    evpl_rpc2_conn_set_private_data(conn, session);
     req->session       = session;
 
     res->csr_status = NFS4_OK;

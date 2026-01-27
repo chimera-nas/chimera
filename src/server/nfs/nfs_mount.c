@@ -16,14 +16,14 @@ chimera_nfs_mount_null(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
     struct evpl_rpc2_cred *cred,
-    struct evpl_rpc2_msg  *msg,
+    struct evpl_rpc2_encoding *encoding,
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    rc = shared->mount_v3.send_reply_MOUNTPROC3_NULL(evpl, NULL, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_NULL(evpl, NULL, encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs_mount_null */
 
@@ -34,7 +34,6 @@ chimera_nfs_mount_lookup_complete(
     void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct evpl                      *evpl   = thread->evpl;
     struct chimera_server_nfs_shared *shared = thread->shared;
@@ -54,7 +53,7 @@ chimera_nfs_mount_lookup_complete(
 
         rc = xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle,
                                    attr->va_fh_len,
-                                   msg->dbuf);
+                                   req->encoding->dbuf);
         chimera_nfs_abort_if(rc, "Failed to allocate opaque");
         memcpy(res.mountinfo.fhandle.data,
                attr->va_fh,
@@ -63,7 +62,7 @@ chimera_nfs_mount_lookup_complete(
         res.fhs_status = MNT3ERR_NOENT;
     }
 
-    rc = shared->mount_v3.send_reply_MOUNTPROC3_MNT(evpl, NULL, &res, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_MNT(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
@@ -75,7 +74,7 @@ chimera_nfs_mount_mnt(
     struct evpl_rpc2_conn *conn,
     struct evpl_rpc2_cred *cred,
     struct mountarg3      *args,
-    struct evpl_rpc2_msg  *msg,
+    struct evpl_rpc2_encoding *encoding,
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
@@ -90,7 +89,7 @@ chimera_nfs_mount_mnt(
 
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
 
-    req = nfs_request_alloc(thread, conn, msg);
+    req = nfs_request_alloc(thread, conn, encoding);
 
     chimera_nfs_map_cred(&req->cred, cred);
 
@@ -156,7 +155,7 @@ chimera_nfs_mount_dump(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
     struct evpl_rpc2_cred *cred,
-    struct evpl_rpc2_msg  *msg,
+    struct evpl_rpc2_encoding *encoding,
     void                  *private_data)
 {
     chimera_nfs_debug("Received MOUNTPROC3_DUMP request");
@@ -168,14 +167,14 @@ chimera_nfs_mount_umnt(
     struct evpl_rpc2_conn *conn,
     struct evpl_rpc2_cred *cred,
     struct mountarg3      *args,
-    struct evpl_rpc2_msg  *msg,
+    struct evpl_rpc2_encoding *encoding,
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    rc = shared->mount_v3.send_reply_MOUNTPROC3_UMNT(evpl, NULL, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_UMNT(evpl, NULL, encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs_mount_umnt */
 
@@ -184,7 +183,7 @@ chimera_nfs_mount_umntall(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
     struct evpl_rpc2_cred *cred,
-    struct evpl_rpc2_msg  *msg,
+    struct evpl_rpc2_encoding *encoding,
     void                  *private_data)
 {
     chimera_nfs_debug("Received MOUNTPROC3_UMNTALL request");
@@ -195,7 +194,7 @@ chimera_nfs_mount_export(
     struct evpl           *evpl,
     struct evpl_rpc2_conn *conn,
     struct evpl_rpc2_cred *cred,
-    struct evpl_rpc2_msg  *msg,
+    struct evpl_rpc2_encoding *encoding,
     void                  *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
@@ -205,6 +204,6 @@ chimera_nfs_mount_export(
 
     export.exports = NULL;
 
-    rc = shared->mount_v3.send_reply_MOUNTPROC3_EXPORT(evpl, NULL, &export, msg);
+    rc = shared->mount_v3.send_reply_MOUNTPROC3_EXPORT(evpl, NULL, &export, encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs_mount_export */

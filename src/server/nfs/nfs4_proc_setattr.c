@@ -17,7 +17,6 @@ chimera_nfs4_setattr_complete(
     void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
-    struct evpl_rpc2_msg             *msg    = req->msg;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct SETATTR4args              *args   = &req->args_compound->argarray[req->index].opsetattr;
     struct SETATTR4res               *res    = &req->res_compound.resarray[req->index].opsetattr;
@@ -25,7 +24,7 @@ chimera_nfs4_setattr_complete(
     if (error_code == CHIMERA_VFS_OK) {
         res->status = NFS4_OK;
 
-        res->attrsset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), msg->dbuf);
+        res->attrsset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), req->encoding->dbuf);
         chimera_nfs_abort_if(res->attrsset == NULL, "Failed to allocate space");
 
         res->num_attrsset = chimera_nfs4_mask2attr(set_attr,
@@ -54,7 +53,7 @@ chimera_nfs4_setattr_open_callback(
     struct chimera_vfs_attrs *attr;
     int                       rc;
 
-    attr = xdr_dbuf_alloc_space(sizeof(*attr), req->msg->dbuf);
+    attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
     chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
     req->handle = handle;

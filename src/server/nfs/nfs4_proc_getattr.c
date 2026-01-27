@@ -26,12 +26,12 @@ chimera_nfs4_getattr_complete(
 
     res->status = NFS4_OK;
 
-    rc = xdr_dbuf_alloc_array(&res->resok4.obj_attributes, attrmask, 3, req->msg->dbuf);
+    rc = xdr_dbuf_alloc_array(&res->resok4.obj_attributes, attrmask, 3, req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to allocate array");
 
     rc = xdr_dbuf_alloc_opaque(&res->resok4.obj_attributes.attr_vals,
                                4096,
-                               req->msg->dbuf);
+                               req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to allocate opaque");
 
     chimera_nfs4_marshall_attrs(attr,
