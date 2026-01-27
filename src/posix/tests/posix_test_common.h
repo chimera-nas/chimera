@@ -26,16 +26,25 @@ struct posix_test_env {
     const char                  *backend;
     const char                  *nfs_backend;  // Actual backend behind NFS (e.g., "memfs")
     int                          nfs_version;  // 3 or 4, 0 if not NFS
+    int                          use_nfs_rdma; // 1 if using NFS over RDMA (TCP-RDMA)
 };
 
 // Helper to parse backend string for NFS backends (e.g., "nfs3_memfs" -> version=3, backend="memfs")
+// Returns 1 if NFS backend, 0 otherwise. Also sets use_rdma if backend is nfs3rdma_*
 static inline int
 posix_test_parse_nfs_backend(
     const char  *backend,
     int         *nfs_version,
-    const char **nfs_backend)
+    const char **nfs_backend,
+    int         *use_rdma)
 {
-    if (strncmp(backend, "nfs3_", 5) == 0) {
+    *use_rdma = 0;
+    if (strncmp(backend, "nfs3rdma_", 9) == 0) {
+        *nfs_version = 3;
+        *nfs_backend = backend + 9;
+        *use_rdma    = 1;
+        return 1;
+    } else if (strncmp(backend, "nfs3_", 5) == 0) {
         *nfs_version = 3;
         *nfs_backend = backend + 5;
         return 1;
@@ -127,6 +136,7 @@ posix_test_init(
     int                           is_nfs;
     const char                   *nfs_backend_name;
     int                           nfs_version;
+    int                           use_nfs_rdma;
 
     env->metrics = prometheus_metrics_create(NULL, NULL, 0);
     env->server  = NULL;
@@ -152,10 +162,11 @@ posix_test_init(
 
     env->backend = backend;
 
-    // Check if this is an NFS backend (e.g., "nfs3_memfs")
-    is_nfs           = posix_test_parse_nfs_backend(backend, &nfs_version, &nfs_backend_name);
-    env->nfs_version = nfs_version;
-    env->nfs_backend = nfs_backend_name;
+    // Check if this is an NFS backend (e.g., "nfs3_memfs" or "nfs3rdma_memfs")
+    is_nfs            = posix_test_parse_nfs_backend(backend, &nfs_version, &nfs_backend_name, &use_nfs_rdma);
+    env->nfs_version  = nfs_version;
+    env->nfs_backend  = nfs_backend_name;
+    env->use_nfs_rdma = use_nfs_rdma;
 
     chimera_log_init();
 
@@ -190,6 +201,13 @@ posix_test_init(
         } else if (strcmp(nfs_backend_name, "cairn") == 0) {
             posix_test_configure_cairn(env->session_dir, config_path, sizeof(config_path));
             chimera_server_config_add_module(server_config, "cairn", NULL, config_path);
+        }
+
+        // Enable TCP-RDMA if using RDMA backend
+        if (use_nfs_rdma) {
+            fprintf(stderr, "Enabling NFS3 over TCP-RDMA on port 20049\n");
+            chimera_server_config_set_nfs_rdma_hostname(server_config, "127.0.0.1");
+            chimera_server_config_set_nfs_tcp_rdma_port(server_config, 20049);
         }
 
         env->server = chimera_server_init(server_config, env->metrics);
@@ -289,13 +307,18 @@ posix_test_mount(struct posix_test_env *env)
     const char *module_path = "/";
     const char *module_name;
     char        nfs_mount_path[256];
-    char        nfs_mount_options[64];
+    char        nfs_mount_options[128];
 
     if (env->nfs_version > 0) {
         // NFS backend: mount via NFS client
         // Mount path format: hostname:path
         snprintf(nfs_mount_path, sizeof(nfs_mount_path), "127.0.0.1:/share");
-        snprintf(nfs_mount_options, sizeof(nfs_mount_options), "vers=%d", env->nfs_version);
+        if (env->use_nfs_rdma) {
+            // Use RDMA protocol and port for NFS3 over TCP-RDMA
+            snprintf(nfs_mount_options, sizeof(nfs_mount_options), "vers=%d,rdma=tcp,port=20049", env->nfs_version);
+        } else {
+            snprintf(nfs_mount_options, sizeof(nfs_mount_options), "vers=%d", env->nfs_version);
+        }
         return chimera_posix_mount_with_options("/test", "nfs", nfs_mount_path, nfs_mount_options);
     }
 

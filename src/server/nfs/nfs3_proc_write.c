@@ -16,8 +16,6 @@ chimera_nfs3_write_complete(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
     uint32_t                  sync,
-    struct evpl_iovec        *iov,
-    int                       niov,
     struct chimera_vfs_attrs *pre_attr,
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
@@ -76,6 +74,7 @@ chimera_nfs3_write_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
 
         req->handle = handle;
+
         chimera_vfs_write(thread->vfs_thread,
                           handle,
                           args->offset,
@@ -94,6 +93,9 @@ chimera_nfs3_write_open_callback(
         rc = shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, &res, msg);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
+        /* Iovecs were already taken from the message in chimera_nfs3_write,
+         * so we need to release them here since VFS won't do it.
+         */
         evpl_iovecs_release(evpl, args->data.iov, args->data.niov);
         nfs_request_free(thread, req);
     }
@@ -115,6 +117,13 @@ chimera_nfs3_write(
     nfs3_dump_write(req, args);
 
     req->args_write = args;
+
+    /* VFS takes ownership of write iovecs and will release them.
+     * Transfer ownership from the RPC2 message to prevent msg_free
+     * from double-releasing (args->data.iov points to msg->read_chunk.iov
+     * via XDR zerocopy). Must be done before any error paths.
+     */
+    evpl_rpc2_msg_take_read_chunk(msg, NULL, NULL);
 
     chimera_vfs_open(thread->vfs_thread,
                      args->file.data.data,

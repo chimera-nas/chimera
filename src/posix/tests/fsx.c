@@ -247,6 +247,7 @@ struct chimera_server_config *chimera_server_config    = NULL;
 struct chimera_server        *chimera_server           = NULL;
 struct prometheus_metrics    *chimera_metrics          = NULL;
 int                           chimera_nfs_version      = 0; /* 0=direct, 3=NFS3, 4=NFS4 */
+int                           chimera_use_nfs_rdma     = 0; /* 1 if using NFS over TCP-RDMA */
 const char                   *chimera_nfs_backend      = NULL; /* backend behind NFS */
 char                          chimera_session_dir[256] = "";
 
@@ -3900,8 +3901,13 @@ main(
         char        nfs_mount_path[256];
         char        nfs_mount_options[64];
 
-        /* Parse NFS backend format (e.g., "nfs3_memfs") */
-        if (strncmp(chimera_backend, "nfs3_", 5) == 0) {
+        /* Parse NFS backend format (e.g., "nfs3_memfs" or "nfs3rdma_memfs") */
+        chimera_use_nfs_rdma = 0;
+        if (strncmp(chimera_backend, "nfs3rdma_", 9) == 0) {
+            chimera_nfs_version  = 3;
+            chimera_nfs_backend  = chimera_backend + 9;
+            chimera_use_nfs_rdma = 1;
+        } else if (strncmp(chimera_backend, "nfs3_", 5) == 0) {
             chimera_nfs_version = 3;
             chimera_nfs_backend = chimera_backend + 5;
         } else if (strncmp(chimera_backend, "nfs4_", 5) == 0) {
@@ -3980,6 +3986,13 @@ main(
                 chimera_server_config_add_module(chimera_server_config, "cairn", NULL, cairn_cfg);
             }
 
+            /* Enable TCP-RDMA if using RDMA backend */
+            if (chimera_use_nfs_rdma) {
+                prt("Enabling NFS3 over TCP-RDMA on port 20049\n");
+                chimera_server_config_set_nfs_rdma_hostname(chimera_server_config, "127.0.0.1");
+                chimera_server_config_set_nfs_tcp_rdma_port(chimera_server_config, 20049);
+            }
+
             chimera_server = chimera_server_init(chimera_server_config, chimera_metrics);
             if (!chimera_server) {
                 fprintf(stderr, "Failed to initialize Chimera server\n");
@@ -4022,14 +4035,19 @@ main(
 
             /* Mount via NFS */
             snprintf(nfs_mount_path, sizeof(nfs_mount_path), "127.0.0.1:/share");
-            snprintf(nfs_mount_options, sizeof(nfs_mount_options), "vers=%d", chimera_nfs_version);
+            if (chimera_use_nfs_rdma) {
+                snprintf(nfs_mount_options, sizeof(nfs_mount_options), "vers=%d,rdma=tcp,port=20049",
+                         chimera_nfs_version);
+            } else {
+                snprintf(nfs_mount_options, sizeof(nfs_mount_options), "vers=%d", chimera_nfs_version);
+            }
             if (chimera_posix_mount_with_options("/fsx", "nfs", nfs_mount_path, nfs_mount_options) != 0) {
                 fprintf(stderr, "Failed to mount NFS share\n");
                 exit(100);
             }
             if (!quiet) {
-                prt("Chimera: mounted /fsx via NFS%d using %s backend\n",
-                    chimera_nfs_version, chimera_nfs_backend);
+                prt("Chimera: mounted /fsx via NFS%d%s using %s backend\n",
+                    chimera_nfs_version, chimera_use_nfs_rdma ? " (RDMA)" : "", chimera_nfs_backend);
             }
         } else {
             /* Direct backend: No server needed */

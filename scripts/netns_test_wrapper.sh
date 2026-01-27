@@ -25,4 +25,6 @@ ip netns add "${NETNS_NAME}"
 
 ip netns exec "${NETNS_NAME}" ip link set lo up
 
+ulimit -l unlimited
+
 ip netns exec "${NETNS_NAME}" "$@" 

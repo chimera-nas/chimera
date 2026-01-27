@@ -72,6 +72,8 @@ struct chimera_nfs_client_server {
     int                         refcnt;
     int                         nfsvers;
     int                         index;
+    int                         use_rdma;
+    enum evpl_protocol_id       rdma_protocol;
 
     struct evpl_endpoint       *portmap_endpoint;
     struct evpl_endpoint       *mount_endpoint;
@@ -186,8 +188,11 @@ chimera_nfs_thread_get_server_thread(
     server_thread = thread->server_threads[index];
 
     if (unlikely(!server_thread->nfs_conn)) {
+        enum evpl_protocol_id proto = server_thread->server->use_rdma
+                                      ? server_thread->server->rdma_protocol
+                                      : EVPL_STREAM_SOCKET_TCP;
         server_thread->nfs_conn = evpl_rpc2_client_connect(thread->rpc2_thread,
-                                                           EVPL_STREAM_SOCKET_TCP,
+                                                           proto,
                                                            server_thread->server->nfs_endpoint,
                                                            NULL, 0, NULL);
     }
