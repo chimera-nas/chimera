@@ -2,17 +2,23 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-FROM ubuntu:24.04
+ARG DOCKER_MIRROR=""
+FROM ${DOCKER_MIRROR}ubuntu:24.04
 ARG ENABLE_XLIO=1
 ARG ENABLE_DOCA=0
 ARG ENABLE_FIO=1
 ARG ENABLE_CLAUDE=1
 ARG ENABLE_UV=1
+ARG APT_MIRROR=""
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN sed -i 's|archive.ubuntu.com|azure.archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources && \
-    sed -i 's|ports.ubuntu.com|azure.ports.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources
+RUN if [ -n "$APT_MIRROR" ]; then \
+    echo "deb $APT_MIRROR noble main universe" > /etc/apt/sources.list.d/local-mirror.list && \
+    echo "deb $APT_MIRROR noble-updates main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
+    echo "deb $APT_MIRROR noble-security main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
+    rm -f /etc/apt/sources.list.d/ubuntu.sources; \
+    fi
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \

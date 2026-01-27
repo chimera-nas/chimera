@@ -12,3 +12,8 @@ License: Unlicense
 Files: *.json .vscode/*.json .devcontainer/*.json .claude/*.json src/**/*.json
 Copyright: 2025 Chimera-NAS Project Contributors
 License: Unlicense
+
+# Docker ignore file
+Files: .dockerignore
+Copyright: 2025 Chimera-NAS Project Contributors
+License: Unlicense

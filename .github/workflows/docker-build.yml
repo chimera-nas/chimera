@@ -16,6 +16,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
+  DOCKER_MIRROR: repository.mdh.quantum.com/
 
 jobs:
   build-and-push:
@@ -28,19 +30,23 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-24.04
+            runner: arc-amd64
+            arch: amd64
             build_type: Release
             tag: latest-amd64
           - platform: linux/amd64
-            runner: ubuntu-24.04
+            runner: arc-amd64
+            arch: amd64
             build_type: Debug
             tag: latest-debug-amd64
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: arc-arm64
+            arch: arm64
             build_type: Release
             tag: latest-arm64
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: arc-arm64
+            arch: arm64
             build_type: Debug
             tag: latest-debug-arm64
 
@@ -60,6 +66,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
 
       - name: Extract metadata for Docker
         id: meta
@@ -76,15 +84,17 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera:${{ matrix.arch }}
+          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera:${{ matrix.arch }},mode=max
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
+            APT_MIRROR=${{ env.APT_MIRROR }}
+            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   merge-manifests:
     if: github.event_name == 'push'
     needs: build-and-push
-    runs-on: ubuntu-24.04
+    runs-on: arc-amd64
     permissions:
       packages: write
     steps:
