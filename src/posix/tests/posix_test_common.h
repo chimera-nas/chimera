@@ -250,7 +250,9 @@ posix_test_init(
         }
     }
 
-    env->posix = chimera_posix_init(client_config, env->metrics);
+    struct chimera_vfs_cred root_cred;
+    chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+    env->posix = chimera_posix_init(client_config, &root_cred, env->metrics);
 
     if (!env->posix) {
         fprintf(stderr, "Failed to initialize POSIX client\n");

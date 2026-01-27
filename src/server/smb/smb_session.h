@@ -9,6 +9,7 @@
 #include <uthash.h>
 
 #include "vfs/vfs.h"
+#include "vfs/vfs_cred.h"
 #include "smb2.h"
 
 struct chimera_smb_share;
@@ -98,6 +99,8 @@ struct chimera_smb_session {
 
     int                         max_trees;
     uint8_t                     signing_key[16];
+
+    struct chimera_vfs_cred     cred;
 };
 
 static struct chimera_smb_session *
@@ -111,6 +114,11 @@ chimera_smb_session_create()
     session->flags     = 0;
 
     session->trees = calloc(session->max_trees, sizeof(struct chimera_smb_tree *));
+
+    /* Initialize credentials to root for now.
+     * TODO: Map authenticated SMB user to appropriate UID/GID
+     */
+    chimera_vfs_cred_init_unix(&session->cred, 0, 0, 0, NULL);
 
     return session;
 } /* chimera_smb_session_create */

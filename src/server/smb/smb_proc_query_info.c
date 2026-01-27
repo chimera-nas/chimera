@@ -160,6 +160,7 @@ chimera_smb_query_info(struct chimera_smb_request *request)
     if (getattr_mask) {
         /* Get the file attributes */
         chimera_vfs_getattr(thread->vfs_thread,
+                            &request->session_handle->session->cred,
                             request->query_info.open_file->handle,
                             getattr_mask,
                             chimera_smb_query_info_getattr_callback,

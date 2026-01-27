@@ -33,6 +33,7 @@ chimera_dispatch_commit(
 {
     chimera_vfs_commit(
         thread->vfs_thread,
+        &thread->client->cred,
         request->commit.handle,
         0,  /* offset - sync entire file */
         0,  /* count - sync entire file */

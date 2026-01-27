@@ -75,6 +75,7 @@ chimera_posix_worker_doorbell(
 SYMBOL_EXPORT struct chimera_posix_client *
 chimera_posix_init(
     const struct chimera_client_config *config,
+    const struct chimera_vfs_cred      *cred,
     struct prometheus_metrics          *metrics)
 {
     struct chimera_posix_client        *posix;
@@ -104,7 +105,7 @@ chimera_posix_init(
         posix->owns_config = 1;
     }
 
-    posix->client = chimera_client_init(use_config, metrics);
+    posix->client = chimera_client_init(use_config, cred, metrics);
 
     if (!posix->client) {
         if (owned_config) {

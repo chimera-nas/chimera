@@ -24,7 +24,8 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs_mount.c nfs_portmap.c nf
             nfs4_proc_destroy_clientid.c nfs4_proc_sequence.c nfs4_proc_reclaim_complete.c
             nfs4_proc_secinfo_no_name.c)
 
-target_link_libraries(chimera_nfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid)
+target_compile_definitions(chimera_nfs PRIVATE XXH_INLINE_ALL)
+target_link_libraries(chimera_nfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid urcu urcu-common)
 
 install(TARGETS chimera_nfs DESTINATION lib)
 

@@ -11,6 +11,7 @@
 #include "client.h"
 #include "common/macros.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_cred.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "common/logging.h"
@@ -313,6 +314,7 @@ struct chimera_client_config {
 struct chimera_client {
     const struct chimera_client_config *config;
     struct chimera_vfs                 *vfs;
+    struct chimera_vfs_cred             cred;
     uint32_t                            root_fh_len;
     uint8_t                             root_fh[CHIMERA_VFS_FH_SIZE];
 } __attribute__((aligned(64)));

@@ -33,6 +33,7 @@ chimera_vfs_commit_complete(struct chimera_vfs_request *request)
 SYMBOL_EXPORT void
 chimera_vfs_commit(
     struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
     uint64_t                        count,
@@ -43,7 +44,7 @@ chimera_vfs_commit(
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc_by_handle(thread, handle);
+    request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
 
     request->opcode                         = CHIMERA_VFS_OP_COMMIT;
     request->complete                       = chimera_vfs_commit_complete;

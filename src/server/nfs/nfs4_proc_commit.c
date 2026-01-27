@@ -49,7 +49,7 @@ chimera_nfs4_commit_open_callback(
         return;
     }
 
-    chimera_vfs_commit(req->thread->vfs_thread,
+    chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
                        file_handle,
                        args->offset,
                        args->count,
@@ -65,7 +65,7 @@ chimera_nfs4_commit(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

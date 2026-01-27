@@ -8,10 +8,11 @@
 
 static void
 chimera_nfs3_setattr_callback(
-    struct evpl        *evpl,
-    struct SETATTR3res *res,
-    int                 status,
-    void               *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct SETATTR3res          *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request *request = private_data;
 
@@ -46,6 +47,7 @@ chimera_nfs3_setattr(
     struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
                                                                                                   request->fh_len);
     struct SETATTR3args                      args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
 
@@ -64,7 +66,11 @@ chimera_nfs3_setattr(
 
     args.guard.check = 0;
 
-    shared->nfs_v3.send_call_NFSPROC3_SETATTR(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                              0, 0, 0, chimera_nfs3_setattr_callback, request);
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
+    shared->nfs_v3.send_call_NFSPROC3_SETATTR(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
+                                              &args, 0, 0, 0, chimera_nfs3_setattr_callback, request);
 } /* chimera_nfs3_setattr */
 

@@ -12,10 +12,11 @@ struct chimera_nfs3_mkdir_ctx {
 
 static void
 chimera_nfs3_mkdir_callback(
-    struct evpl      *evpl,
-    struct MKDIR3res *res,
-    int               status,
-    void             *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct MKDIR3res            *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request    *request = private_data;
     struct chimera_nfs3_mkdir_ctx *ctx     = request->plugin_data;
@@ -60,6 +61,7 @@ chimera_nfs3_mkdir(
                                                                                                   request->fh_len);
     struct chimera_nfs3_mkdir_ctx           *ctx;
     struct MKDIR3args                        args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
 
@@ -81,7 +83,11 @@ chimera_nfs3_mkdir(
 
     chimera_nfs_va_to_sattr3(&args.attributes, request->mkdir.set_attr);
 
-    shared->nfs_v3.send_call_NFSPROC3_MKDIR(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                            0, 0, 0, chimera_nfs3_mkdir_callback, request);
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
+    shared->nfs_v3.send_call_NFSPROC3_MKDIR(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
+                                            &args, 0, 0, 0, chimera_nfs3_mkdir_callback, request);
 } /* chimera_nfs3_mkdir */
 

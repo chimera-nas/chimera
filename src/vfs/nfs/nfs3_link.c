@@ -8,10 +8,11 @@
 
 static void
 chimera_nfs3_link_callback(
-    struct evpl     *evpl,
-    struct LINK3res *res,
-    int              status,
-    void            *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct LINK3res             *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request *request = private_data;
 
@@ -54,6 +55,7 @@ chimera_nfs3_link(
     struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
                                                                                                   request->fh_len);
     struct LINK3args                         args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh, *dir_fh;
     int                                      fhlen, dir_fhlen;
 
@@ -73,7 +75,11 @@ chimera_nfs3_link(
     args.link.name.str      = (char *) request->link.name;
     args.link.name.len      = request->link.namelen;
 
-    shared->nfs_v3.send_call_NFSPROC3_LINK(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                           0, 0, 0, chimera_nfs3_link_callback, request);
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
+    shared->nfs_v3.send_call_NFSPROC3_LINK(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
+                                           &args, 0, 0, 0, chimera_nfs3_link_callback, request);
 } /* chimera_nfs3_link */
 

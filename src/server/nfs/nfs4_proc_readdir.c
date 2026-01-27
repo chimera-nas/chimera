@@ -18,9 +18,8 @@ chimera_nfs4_readdir_callback(
     void                           *arg)
 {
     struct nfs_request             *req = arg;
-    struct evpl_rpc2_msg           *msg = req->msg;
     uint32_t                        dbuf_cur;
-    uint32_t                        dbuf_before = msg->dbuf->used;
+    uint32_t                        dbuf_before = req->encoding->dbuf->used;
     struct entry4                  *entry;
     struct READDIR4args            *args = &req->args_compound->argarray[req->index].opreaddir;
     struct nfs_nfs4_readdir_cursor *cursor;
@@ -28,21 +27,21 @@ chimera_nfs4_readdir_callback(
 
     cursor = &req->readdir4_cursor;
 
-    entry = xdr_dbuf_alloc_space(sizeof(*entry), req->msg->dbuf);
+    entry = xdr_dbuf_alloc_space(sizeof(*entry), req->encoding->dbuf);
     chimera_nfs_abort_if(entry == NULL, "Failed to allocate space");
 
-    rc = xdr_dbuf_opaque_copy(&entry->name, name, namelen, req->msg->dbuf);
+    rc = xdr_dbuf_opaque_copy(&entry->name, name, namelen, req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
     entry->cookie    = cookie;
     entry->nextentry = NULL;
 
-    rc = xdr_dbuf_alloc_array(&entry->attrs, attrmask, 3, req->msg->dbuf);
+    rc = xdr_dbuf_alloc_array(&entry->attrs, attrmask, 3, req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to allocate array");
 
     rc = xdr_dbuf_alloc_opaque(&entry->attrs.attr_vals,
                                256,
-                               req->msg->dbuf);
+                               req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to allocate opaque");
 
     chimera_nfs4_marshall_attrs(attrs,
@@ -54,7 +53,7 @@ chimera_nfs4_readdir_callback(
                                 entry->attrs.attr_vals.data,
                                 &entry->attrs.attr_vals.len);
 
-    dbuf_cur = msg->dbuf->used - dbuf_before;
+    dbuf_cur = req->encoding->dbuf->used - dbuf_before;
 
     if (cursor->count + dbuf_cur > args->maxcount) {
         return -1;
@@ -120,7 +119,7 @@ chimera_nfs4_readdir_open_callback(
     }
     attrmask = chimera_nfs4_attr2mask(args->attr_request,
                                       args->num_attr_request);
-    chimera_vfs_readdir(thread->vfs_thread,
+    chimera_vfs_readdir(thread->vfs_thread, &req->cred,
                         handle,
                         attrmask,
                         0,
@@ -149,7 +148,7 @@ chimera_nfs4_readdir(
 
     res->resok4.reply.entries = NULL;
 
-    chimera_vfs_open(thread->vfs_thread,
+    chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
                      CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

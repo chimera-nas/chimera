@@ -26,6 +26,7 @@ chimera_dispatch_mount(
     struct chimera_client_request *request)
 {
     chimera_vfs_mount(thread->vfs_thread,
+                      &thread->client->cred,
                       request->mount.mount_path,
                       request->mount.module_name,
                       request->mount.module_path,

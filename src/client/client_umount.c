@@ -26,6 +26,7 @@ chimera_dispatch_umount(
     struct chimera_client_request *request)
 {
     chimera_vfs_umount(thread->vfs_thread,
+                       &thread->client->cred,
                        request->umount.mount_path,
                        chimera_client_umount_callback,
                        request);

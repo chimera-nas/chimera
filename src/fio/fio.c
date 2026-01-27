@@ -293,7 +293,9 @@ fio_chimera_init(struct thread_data *td)
             }
         }
 
-        ChimeraClient = chimera_client_init(ChimeraClientConfig, ChimeraMetrics);
+        struct chimera_vfs_cred root_cred;
+        chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+        ChimeraClient = chimera_client_init(ChimeraClientConfig, &root_cred, ChimeraMetrics);
 
         evpl          = evpl_create(NULL);
         client_thread = chimera_client_thread_init(evpl, ChimeraClient);

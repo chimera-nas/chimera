@@ -14,10 +14,11 @@ struct chimera_nfs3_write_ctx {
 
 static void
 chimera_nfs3_write_callback(
-    struct evpl      *evpl,
-    struct WRITE3res *res,
-    int               status,
-    void             *private_data)
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct WRITE3res            *res,
+    int                          status,
+    void                        *private_data)
 {
     struct chimera_vfs_request    *request = private_data;
     struct chimera_nfs3_write_ctx *ctx     = request->plugin_data;
@@ -65,6 +66,7 @@ chimera_nfs3_write(
                                                                                                   request->fh_len);
     struct chimera_nfs3_write_ctx           *ctx;
     struct WRITE3args                        args;
+    struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
 
@@ -90,8 +92,12 @@ chimera_nfs3_write(
     args.data.niov      = request->write.niov;
     args.data.length    = request->write.length;
 
-    shared->nfs_v3.send_call_NFSPROC3_WRITE(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &args,
-                                            1, 0, 0, chimera_nfs3_write_callback, request);
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
+    shared->nfs_v3.send_call_NFSPROC3_WRITE(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
+                                            &args, 1, 0, 0, chimera_nfs3_write_callback, request);
 
 } /* chimera_nfs3_write */
 

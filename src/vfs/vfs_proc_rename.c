@@ -49,23 +49,24 @@ chimera_vfs_rename_complete(struct chimera_vfs_request *request)
 
 SYMBOL_EXPORT void
 chimera_vfs_rename(
-    struct chimera_vfs_thread    *thread,
-    const void                   *fh,
-    int                           fhlen,
-    const char                   *name,
-    int                           namelen,
-    const void                   *new_fh,
-    int                           new_fhlen,
-    const char                   *new_name,
-    int                           new_namelen,
-    const uint8_t                *target_fh,
-    int                           target_fh_len,
-    chimera_vfs_rename_callback_t callback,
-    void                         *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    const char                    *name,
+    int                            namelen,
+    const void                    *new_fh,
+    int                            new_fhlen,
+    const char                    *new_name,
+    int                            new_namelen,
+    const uint8_t                 *target_fh,
+    int                            target_fh_len,
+    chimera_vfs_rename_callback_t  callback,
+    void                          *private_data)
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc(thread, fh, fhlen);
+    request = chimera_vfs_request_alloc(thread, cred, fh, fhlen);
 
     request->opcode               = CHIMERA_VFS_OP_RENAME;
     request->complete             = chimera_vfs_rename_complete;

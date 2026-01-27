@@ -31,6 +31,7 @@ chimera_smb_flush(struct chimera_smb_request *request)
 
     chimera_vfs_commit(
         thread->vfs_thread,
+        &request->session_handle->session->cred,
         request->flush.open_file->handle,
         0,
         0xffffffffffffffffULL,

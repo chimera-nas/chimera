@@ -102,6 +102,7 @@ chimera_dispatch_write(
     }
 
     chimera_vfs_write(thread->vfs_thread,
+                      &thread->client->cred,
                       request->write.handle,
                       request->write.offset,
                       request->write.length,
@@ -161,6 +162,7 @@ chimera_dispatch_writev(
     }
 
     chimera_vfs_write(thread->vfs_thread,
+                      &thread->client->cred,
                       request->writev.handle,
                       request->writev.offset,
                       request->writev.length,
@@ -180,6 +182,7 @@ chimera_dispatch_writerv(
     struct chimera_client_request *request)
 {
     chimera_vfs_write(thread->vfs_thread,
+                      &thread->client->cred,
                       request->writerv.handle,
                       request->writerv.offset,
                       request->writerv.length,
