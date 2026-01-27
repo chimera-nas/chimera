@@ -1,0 +1,271 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: Unlicense
+
+# call-claude: Create a git worktree and launch Claude Code in it
+
+set -e
+
+WORKTREE_BASE="/worktrees"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Create a git worktree and launch Claude Code in it.
+
+The worktree is created in /worktrees/<name>. Claude Code will show a one-time
+trust dialog for new worktrees. File permissions for the worktree's build
+directory are pre-configured in .claude/settings.local.json.
+
+Options:
+  -b <branch>           Setup worktree from an existing branch
+  -B <branch>           Create a new branch off latest origin/main
+                        (fails if branch already exists)
+  -p <org/project/PR>   Checkout an existing PR (e.g., anthropics/claude-code/123)
+  -h                    Show this help message
+
+Examples:
+  $(basename "$0") -b feature-branch
+  $(basename "$0") -B new-feature
+  $(basename "$0") -p anthropics/claude-code/42
+EOF
+    exit "${1:-0}"
+}
+
+error() {
+    echo "Error: $1" >&2
+    exit 1
+}
+
+# Parse arguments
+MODE=""
+BRANCH=""
+PR_SPEC=""
+
+while getopts "b:B:p:h" opt; do
+    case $opt in
+        b)
+            MODE="existing"
+            BRANCH="$OPTARG"
+            ;;
+        B)
+            MODE="new"
+            BRANCH="$OPTARG"
+            ;;
+        p)
+            MODE="pr"
+            PR_SPEC="$OPTARG"
+            ;;
+        h)
+            usage 0
+            ;;
+        *)
+            usage 1
+            ;;
+    esac
+done
+
+shift $((OPTIND - 1))
+
+# Validate arguments
+if [[ -z "$MODE" ]]; then
+    error "Must specify one of -b, -B, or -p"
+fi
+
+# Ensure we're in a git repository
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    error "Not in a git repository"
+fi
+
+# Get the root of the main git repository (not worktree)
+GIT_ROOT="$(git rev-parse --show-toplevel)"
+GIT_COMMON_DIR="$(git rev-parse --git-common-dir)"
+MAIN_REPO="$(dirname "$GIT_COMMON_DIR")"
+if [[ "$GIT_COMMON_DIR" == ".git" ]]; then
+    MAIN_REPO="$GIT_ROOT"
+fi
+
+setup_worktree_existing() {
+    local branch="$1"
+    local worktree_path="$WORKTREE_BASE/$branch"
+
+    # Check if worktree already exists
+    if [[ -d "$worktree_path" ]]; then
+        echo "Worktree already exists at $worktree_path" >&2
+        echo "$worktree_path"
+        return 0
+    fi
+
+    # Check if branch exists locally or remotely
+    if ! git show-ref --verify --quiet "refs/heads/$branch" && \
+       ! git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+        error "Branch '$branch' does not exist locally or on origin"
+    fi
+
+    # Create worktree
+    echo "Creating worktree for existing branch '$branch'..." >&2
+    git worktree add "$worktree_path" "$branch" >&2
+    echo "$worktree_path"
+}
+
+setup_worktree_new() {
+    local branch="$1"
+    local worktree_path="$WORKTREE_BASE/$branch"
+
+    # Check if branch already exists
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+        error "Branch '$branch' already exists locally"
+    fi
+    if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+        error "Branch '$branch' already exists on origin"
+    fi
+
+    # Check if worktree already exists
+    if [[ -d "$worktree_path" ]]; then
+        error "Worktree directory already exists at $worktree_path"
+    fi
+
+    # Fetch latest from origin
+    echo "Fetching latest from origin..." >&2
+    git fetch origin main >&2
+
+    # Create worktree with new branch based on origin/main
+    echo "Creating worktree with new branch '$branch' from origin/main..." >&2
+    git worktree add -b "$branch" "$worktree_path" origin/main >&2
+    echo "$worktree_path"
+}
+
+setup_worktree_pr() {
+    local pr_spec="$1"
+
+    # Parse PR spec: org/project/PR_ID
+    local org project pr_id
+    IFS='/' read -r org project pr_id <<< "$pr_spec"
+
+    if [[ -z "$org" || -z "$project" || -z "$pr_id" ]]; then
+        error "Invalid PR spec. Expected format: org/project/PR_ID (e.g., anthropics/claude-code/123)"
+    fi
+
+    # Validate PR ID is a number
+    if ! [[ "$pr_id" =~ ^[0-9]+$ ]]; then
+        error "PR ID must be a number, got: $pr_id"
+    fi
+
+    local repo="$org/$project"
+    local worktree_name="${org}-${project}-pr-${pr_id}"
+    local worktree_path="$WORKTREE_BASE/$worktree_name"
+
+    # Check if worktree already exists
+    if [[ -d "$worktree_path" ]]; then
+        echo "Worktree already exists at $worktree_path" >&2
+        echo "$worktree_path"
+        return 0
+    fi
+
+    # Get PR branch info using gh
+    echo "Fetching PR #$pr_id from $repo..." >&2
+    local pr_info gh_error
+    if ! pr_info=$(gh pr view "$pr_id" --repo "$repo" --json headRefName,headRepository,headRepositoryOwner 2>&1); then
+        echo "$pr_info" >&2
+        error "Failed to fetch PR #$pr_id from $repo."
+    fi
+
+    local head_ref head_repo_owner head_repo_name
+    head_ref=$(echo "$pr_info" | jq -r '.headRefName')
+    head_repo_owner=$(echo "$pr_info" | jq -r '.headRepositoryOwner.login')
+    head_repo_name=$(echo "$pr_info" | jq -r '.headRepository.name')
+
+    if [[ -z "$head_ref" || "$head_ref" == "null" ]]; then
+        error "Could not determine PR branch name"
+    fi
+
+    # Add the PR's fork as a remote if needed
+    local remote_name="pr-$pr_id"
+    local remote_url="https://github.com/$head_repo_owner/$head_repo_name.git"
+
+    if ! git remote get-url "$remote_name" >/dev/null 2>&1; then
+        echo "Adding remote '$remote_name' for $head_repo_owner/$head_repo_name..." >&2
+        git remote add "$remote_name" "$remote_url" >&2
+    fi
+
+    # Fetch the PR branch
+    echo "Fetching branch '$head_ref' from $remote_name..." >&2
+    git fetch "$remote_name" "$head_ref" >&2
+
+    # Create worktree tracking the PR branch
+    local local_branch="pr-${pr_id}-${head_ref}"
+    echo "Creating worktree with branch '$local_branch'..." >&2
+    git worktree add -b "$local_branch" "$worktree_path" "$remote_name/$head_ref" >&2
+
+    echo "$worktree_path"
+}
+
+setup_claude_permissions() {
+    local worktree_path="$1"
+    local claude_dir="$worktree_path/.claude"
+    local settings_file="$claude_dir/settings.local.json"
+
+    # Create .claude directory if it doesn't exist
+    mkdir -p "$claude_dir"
+
+    # Permissions to add for this worktree's build directory
+    local new_perms=(
+        "Read($worktree_path/**)"
+        "Write($worktree_path/**)"
+        "Edit($worktree_path/**)"
+    )
+
+    if [[ -f "$settings_file" ]]; then
+        # Merge with existing settings using jq
+        local tmp_file
+        tmp_file=$(mktemp)
+        local perms_json
+        perms_json=$(printf '%s\n' "${new_perms[@]}" | jq -R . | jq -s .)
+
+        jq --argjson new_perms "$perms_json" '
+            .permissions.allow = ((.permissions.allow // []) + $new_perms | unique)
+        ' "$settings_file" > "$tmp_file" && mv "$tmp_file" "$settings_file"
+    else
+        # Create new settings file
+        cat > "$settings_file" <<EOF
+{
+  "permissions": {
+    "allow": [
+      "Read($worktree_path/**)",
+      "Write($worktree_path/**)",
+      "Edit($worktree_path/**)"
+    ]
+  }
+}
+EOF
+    fi
+    echo "Configured Claude permissions for $worktree_path" >&2
+}
+
+# Main execution
+cd "$MAIN_REPO"
+
+case "$MODE" in
+    existing)
+        WORKTREE_PATH=$(setup_worktree_existing "$BRANCH")
+        ;;
+    new)
+        WORKTREE_PATH=$(setup_worktree_new "$BRANCH")
+        ;;
+    pr)
+        WORKTREE_PATH=$(setup_worktree_pr "$PR_SPEC")
+        ;;
+esac
+
+# Configure Claude Code permissions for the worktree
+setup_claude_permissions "$WORKTREE_PATH"
+
+# Launch Claude Code in the worktree
+# Note: Claude will show a one-time trust dialog for new worktrees
+echo "" >&2
+echo "Launching Claude Code in $WORKTREE_PATH..." >&2
+cd "$WORKTREE_PATH"
+exec claude

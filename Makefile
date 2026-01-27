@@ -2,8 +2,19 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-# Allow override of build directory (defaults to ./build)
-CHIMERA_BUILD_DIR ?= build
+# Determine build directory based on source location:
+# - Worktrees in /worktrees use local ./build subdirectory
+# - Main tree (/chimera) uses /build
+# Only respect CHIMERA_BUILD_DIR if explicitly passed on command line
+ifeq ($(origin CHIMERA_BUILD_DIR),command line)
+  # User explicitly set via make CHIMERA_BUILD_DIR=..., use that
+else
+  ifneq ($(filter /worktrees/%,$(CURDIR)),)
+    override CHIMERA_BUILD_DIR := build
+  else
+    override CHIMERA_BUILD_DIR := /build
+  endif
+endif
 
 CMAKE_ARGS := -DCMAKE_EXPORT_COMPILE_COMMANDS=1 -G Ninja
 CMAKE_ARGS_RELEASE := -DCMAKE_BUILD_TYPE=Release
