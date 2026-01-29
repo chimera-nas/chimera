@@ -69,12 +69,22 @@ syntax:
 	@find src/ -type f \( -name "*.c" -o -name "*.h" \) -print0 | \
 		xargs -0 -I {} sh -c 'uncrustify -c etc/uncrustify.cfg --replace --no-backup {}' >/dev/null 2>&1
 
+.PHONY: build_clang_debug
+build_clang_debug:
+	@rm -rf ${CHIMERA_BUILD_DIR}/ClangDebug
+	@mkdir -p ${CHIMERA_BUILD_DIR}/ClangDebug
+	@LC_ALL=C scan-build --status-bugs --exclude ext/libsmb2 -o ${CHIMERA_BUILD_DIR}/ClangDebug/ScanReport \
+		sh -c "cmake ${CMAKE_ARGS} ${CMAKE_ARGS_DEBUG} -S . -B ${CHIMERA_BUILD_DIR}/ClangDebug && ninja -C ${CHIMERA_BUILD_DIR}/ClangDebug"
+
+.PHONY: build_clang_release
+build_clang_release:
+	@rm -rf ${CHIMERA_BUILD_DIR}/ClangRelease
+	@mkdir -p ${CHIMERA_BUILD_DIR}/ClangRelease
+	@LC_ALL=C scan-build --status-bugs --exclude ext/libsmb2 -o ${CHIMERA_BUILD_DIR}/ClangRelease/ScanReport \
+		sh -c "cmake ${CMAKE_ARGS} ${CMAKE_ARGS_RELEASE} -S . -B ${CHIMERA_BUILD_DIR}/ClangRelease && ninja -C ${CHIMERA_BUILD_DIR}/ClangRelease"
+
 .PHONY: build_clang
-build_clang:
-	@rm -rf ${CHIMERA_BUILD_DIR}/Clang
-	@mkdir -p ${CHIMERA_BUILD_DIR}/Clang
-	@LC_ALL=C scan-build --status-bugs --exclude ext/libsmb2 -o ${CHIMERA_BUILD_DIR}/Clang/ScanReport \
-		sh -c "cmake ${CMAKE_ARGS} ${CMAKE_ARGS_DEBUG} -S . -B ${CHIMERA_BUILD_DIR}/Clang && ninja -C ${CHIMERA_BUILD_DIR}/Clang"
+build_clang: build_clang_debug build_clang_release
 
 .PHONY: reuse-lint
 reuse-lint:
