@@ -33,7 +33,7 @@ chimera_nfs3_fsstat_complete(
 
         res.resok.tbytes   = attr->va_fs_space_total;
         res.resok.fbytes   = attr->va_fs_space_free;
-        res.resok.abytes   = attr->va_fs_space_used;
+        res.resok.abytes   = attr->va_fs_space_avail;
         res.resok.tfiles   = attr->va_fs_files_total;
         res.resok.ffiles   = attr->va_fs_files_free;
         res.resok.afiles   = attr->va_fs_files_avail;
