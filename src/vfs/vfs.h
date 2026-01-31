@@ -72,6 +72,10 @@ struct prometheus_metrics;
 
 #define CHIMERA_VFS_TIME_NOW             ((1l << 30) - 3l)
 
+/* FSSTAT values used with builtin backends until statvfs tracking is implemented */
+#define CHIMERA_VFS_SYNTHETIC_FS_BYTES   ((uint64_t) 100 * 1024 * 1024 * 1024)
+#define CHIMERA_VFS_SYNTHETIC_FS_INODES  (1024 * 1024)
+
 /* Flags for chimera_vfs_lookup_path */
 #define CHIMERA_VFS_LOOKUP_FOLLOW        (1U << 0) /* Follow symlinks in final component */
 
