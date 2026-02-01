@@ -27,6 +27,7 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         include:
           # Ubuntu 24.04 builds

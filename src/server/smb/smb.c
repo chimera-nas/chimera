@@ -1140,7 +1140,7 @@ chimera_smb_server_accept(
     conn->gss_minor         = 0;
     conn->gss_output.value  = NULL;
     conn->gss_output.length = 0;
-    conn->ctx               = GSS_C_NO_CONTEXT;
+    conn->nascent_ctx       = GSS_C_NO_CONTEXT;
     conn->rdma_niov         = 0;
     conn->rdma_length       = 0;
 

@@ -332,6 +332,7 @@ struct chimera_smb_session_handle {
     uint8_t                            signing_key[16];
     struct UT_hash_handle              hh;
     struct chimera_smb_session_handle *next;
+    gss_ctx_id_t                       ctx;
 };
 
 #define CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED      0x01
@@ -341,7 +342,7 @@ struct chimera_smb_conn {
     OM_uint32                          gss_major;
     OM_uint32                          gss_minor;
     OM_uint32                          gss_flags;
-    gss_ctx_id_t                       ctx;
+    gss_ctx_id_t                       nascent_ctx;
     gss_buffer_desc                    gss_output;
     unsigned int                       flags;
     enum evpl_protocol_id              protocol;
@@ -605,14 +606,24 @@ chimera_smb_conn_free(
     {
         HASH_DELETE(hh, conn->session_handles, session_handle);
 
+        if (session_handle->ctx != GSS_C_NO_CONTEXT) {
+
+            chimera_smb_debug("chimera_smb_conn_free freeing context for "
+                              "session_handle %p\n", session_handle);
+
+            gss_delete_sec_context(&conn->gss_minor,
+                                   &session_handle->ctx, NULL);
+            session_handle->ctx = GSS_C_NO_CONTEXT;
+        }
+
         chimera_smb_session_release(thread, thread->shared, session_handle->session);
 
         chimera_smb_session_handle_free(thread, session_handle);
     }
 
-    if (conn->ctx) {
-        gss_delete_sec_context(&conn->gss_minor, &conn->ctx, NULL);
-        conn->ctx = NULL;
+    if (conn->nascent_ctx != GSS_C_NO_CONTEXT) {
+        gss_delete_sec_context(&conn->gss_minor, &conn->nascent_ctx, NULL);
+        conn->nascent_ctx = GSS_C_NO_CONTEXT;
     }
 
     if (conn->gss_output.value) {

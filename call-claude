@@ -113,7 +113,7 @@ setup_worktree_existing() {
 
     # Create worktree
     echo "Creating worktree for existing branch '$branch'..." >&2
-    if ! git worktree add "$worktree_path" "$branch" >&2; then
+    if ! git worktree add --no-track "$worktree_path" "$branch" >&2; then
         error "Failed to create worktree for branch '$branch'"
     fi
 
@@ -144,7 +144,7 @@ setup_worktree_new() {
 
     # Create worktree with new branch based on origin/main
     echo "Creating worktree with new branch '$branch' from origin/main..." >&2
-    if ! git worktree add -b "$branch" "$worktree_path" origin/main >&2; then
+    if ! git worktree add --no-track -b "$branch" "$worktree_path" origin/main >&2; then
         error "Failed to create worktree for new branch '$branch'"
     fi
 
@@ -212,12 +212,24 @@ setup_worktree_pr() {
     # Create worktree tracking the PR branch
     local local_branch="pr-${pr_id}-${head_ref}"
     echo "Creating worktree with branch '$local_branch'..." >&2
-    if ! git worktree add -b "$local_branch" "$worktree_path" "$remote_name/$head_ref" >&2; then
+    if ! git worktree add --no-track -b "$local_branch" "$worktree_path" "$remote_name/$head_ref" >&2; then
         error "Failed to create worktree for PR #$pr_id"
     fi
 
     init_submodules "$worktree_path"
     echo "$worktree_path"
+}
+
+setup_serena() {
+    local worktree_path="$1"
+
+    echo "Configuring Serena MCP server for $worktree_path..." >&2
+    (cd "$worktree_path" && claude mcp add \
+        --scope local \
+        serena \
+        -- \
+        uvx --from git+https://github.com/oraios/serena \
+        serena start-mcp-server --project "$worktree_path") >&2
 }
 
 setup_claude_permissions() {
@@ -277,8 +289,9 @@ case "$MODE" in
         ;;
 esac
 
-# Configure Claude Code permissions for the worktree
+# Configure Claude Code permissions and Serena MCP server for the worktree
 setup_claude_permissions "$WORKTREE_PATH"
+setup_serena "$WORKTREE_PATH"
 
 # Launch Claude Code in the worktree
 # Note: Claude will show a one-time trust dialog for new worktrees
