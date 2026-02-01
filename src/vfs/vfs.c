@@ -431,12 +431,16 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     pthread_cond_wait(&vfs->close_thread.cond, &vfs->close_thread.lock);
     pthread_mutex_unlock(&vfs->close_thread.lock);
 
-    evpl_thread_destroy(vfs->close_thread.evpl_thread);
-
+    /* Destroy delegation threads before the close thread so that any
+     * in-flight delegated close operations finish and their completion
+     * doorbell rings execute before the close thread's vfs_thread
+     * (and its doorbell) is freed. */
     for (i = 0; i < vfs->num_delegation_threads; i++) {
         evpl_thread_destroy(vfs->delegation_threads[i].evpl_thread);
     }
     free(vfs->delegation_threads);
+
+    evpl_thread_destroy(vfs->close_thread.evpl_thread);
 
     chimera_vfs_mount_table_destroy(vfs->mount_table);
 
