@@ -51,6 +51,7 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_COMMIT,
     CHIMERA_CLIENT_OP_STATFS,
     CHIMERA_CLIENT_OP_FSTATFS,
+    CHIMERA_CLIENT_OP_MKNOD,
 };
 
 struct chimera_client_request;
@@ -117,6 +118,17 @@ struct chimera_client_request {
             struct chimera_vfs_attrs        set_attr;
             char                            path[CHIMERA_VFS_PATH_MAX];
         } mkdir;
+
+        struct {
+            struct chimera_vfs_open_handle *parent_handle;
+            chimera_mknod_callback_t        callback;
+            void                           *private_data;
+            int                             path_len;
+            int                             parent_len;
+            int                             name_offset;
+            struct chimera_vfs_attrs        set_attr;
+            char                            path[CHIMERA_VFS_PATH_MAX];
+        } mknod;
 
         struct {
             struct chimera_vfs_open_handle *handle;

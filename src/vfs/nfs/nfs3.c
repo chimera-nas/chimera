@@ -31,6 +31,9 @@ chimera_nfs3_dispatch(
         case CHIMERA_VFS_OP_MKDIR:
             chimera_nfs3_mkdir(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_MKNOD:
+            chimera_nfs3_mknod(thread, shared, request, private_data);
+            break;
         case CHIMERA_VFS_OP_REMOVE:
             chimera_nfs3_remove(thread, shared, request, private_data);
             break;

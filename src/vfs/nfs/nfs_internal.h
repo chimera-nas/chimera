@@ -356,6 +356,11 @@ void chimera_nfs3_rename(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
+void chimera_nfs3_mknod(
+    struct chimera_nfs_thread *,
+    struct chimera_nfs_shared *,
+    struct chimera_vfs_request *,
+    void *);
 void chimera_nfs3_link(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
@@ -438,6 +443,11 @@ void chimera_nfs4_readlink(
     struct chimera_vfs_request *,
     void *);
 void chimera_nfs4_rename(
+    struct chimera_nfs_thread *,
+    struct chimera_nfs_shared *,
+    struct chimera_vfs_request *,
+    void *);
+void chimera_nfs4_mknod(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,

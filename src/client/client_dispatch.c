@@ -69,3 +69,16 @@ chimera_dispatch_error_link(
     chimera_client_request_free(thread, request);
     callback(thread, error_code, callback_arg);
 } /* chimera_dispatch_error_link */
+
+SYMBOL_EXPORT void
+chimera_dispatch_error_mknod(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request,
+    enum chimera_vfs_error         error_code)
+{
+    chimera_mknod_callback_t callback     = request->mknod.callback;
+    void                    *callback_arg = request->mknod.private_data;
+
+    chimera_client_request_free(thread, request);
+    callback(thread, error_code, callback_arg);
+} /* chimera_dispatch_error_mknod */
