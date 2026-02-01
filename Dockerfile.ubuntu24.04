@@ -23,7 +23,7 @@ RUN apt-get -y update && \
     libclang-rt-18-dev uuid-dev uthash-dev libkrb5-dev libgssapi-krb5-2 gss-ntlmssp-dev \
     librdmacm-dev libjansson-dev libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev \
     libssl-dev openssl libnuma-dev libcurl4-openssl-dev libs3-dev libnfs-dev \
-    build-essential autoconf automake libtool pkg-config ca-certificates uncrustify && \
+    build-essential autoconf automake libtool pkg-config ca-certificates uncrustify iproute2 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
