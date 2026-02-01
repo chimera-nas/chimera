@@ -223,28 +223,28 @@ jobs:
             build_type: Release
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
             image_name: ubuntu22
-            cmake_extra: "-DIO_URING_ENABLED=OFF -DCAIRN_ENABLED=OFF"
+            cmake_extra: ""
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
             build_type: Debug
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
             image_name: ubuntu22
-            cmake_extra: "-DIO_URING_ENABLED=OFF -DCAIRN_ENABLED=OFF"
+            cmake_extra: ""
           - platform: linux/arm64
             runner: arc-arm64
             arch: arm64
             build_type: Release
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
             image_name: ubuntu22
-            cmake_extra: "-DIO_URING_ENABLED=OFF -DCAIRN_ENABLED=OFF"
+            cmake_extra: ""
           - platform: linux/arm64
             runner: arc-arm64
             arch: arm64
             build_type: Debug
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
             image_name: ubuntu22
-            cmake_extra: "-DIO_URING_ENABLED=OFF -DCAIRN_ENABLED=OFF"
+            cmake_extra: ""
 
     steps:
       - name: Checkout repository
@@ -342,28 +342,28 @@ jobs:
             build_type: Release
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
             image_name: ubuntu22
-            cmake_extra: "-DIO_URING_ENABLED=OFF -DCAIRN_ENABLED=OFF"
+            cmake_extra: ""
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
             build_type: Debug
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
             image_name: ubuntu22
-            cmake_extra: "-DIO_URING_ENABLED=OFF -DCAIRN_ENABLED=OFF"
+            cmake_extra: ""
           - platform: linux/arm64
             runner: arc-arm64
             arch: arm64
             build_type: Release
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
             image_name: ubuntu22
-            cmake_extra: "-DIO_URING_ENABLED=OFF -DCAIRN_ENABLED=OFF"
+            cmake_extra: ""
           - platform: linux/arm64
             runner: arc-arm64
             arch: arm64
             build_type: Debug
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
             image_name: ubuntu22
-            cmake_extra: "-DIO_URING_ENABLED=OFF -DCAIRN_ENABLED=OFF"
+            cmake_extra: ""
 
     steps:
       - name: Checkout repository
