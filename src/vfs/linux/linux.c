@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/sysmacros.h>
 #include <sys/statvfs.h>
 #include <sys/uio.h>
 #include <dirent.h>
@@ -602,6 +603,74 @@ chimera_linux_mkdir(
 } /* chimera_linux_mkdir */
 
 static void
+chimera_linux_mknod(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int      fd, rc;
+    char    *scratch = (char *) request->plugin_data;
+    uint32_t mode;
+    dev_t    dev = 0;
+
+    TERM_STR(fullname, request->mknod.name, request->mknod.name_len, scratch);
+
+    fd = request->mknod.handle->vfs_private;
+
+    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        mode = request->mknod.set_attr->va_mode;
+    } else {
+        mode = S_IFREG | 0644;
+    }
+
+    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
+        dev = makedev(request->mknod.set_attr->va_rdev >> 32,
+                      request->mknod.set_attr->va_rdev & 0xFFFFFFFF);
+    }
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->mknod.r_dir_pre_attr,
+                            fd);
+
+    rc = mknodat(fd, fullname, mode, dev);
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->mknod.r_dir_post_attr,
+                            fd);
+
+    if (rc < 0) {
+
+        if (errno == EEXIST) {
+            chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                                          request,
+                                          &request->mknod.r_attr,
+                                          fd,
+                                          fullname);
+        }
+
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    rc = chimera_linux_set_attrs(fd, fullname, request->mknod.set_attr);
+
+    if (rc < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                                  request,
+                                  &request->mknod.r_attr,
+                                  fd,
+                                  fullname);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_linux_mknod */
+
+static void
 chimera_linux_remove(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -975,6 +1044,9 @@ chimera_linux_dispatch(
             break;
         case CHIMERA_VFS_OP_MKDIR:
             chimera_linux_mkdir(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_MKNOD:
+            chimera_linux_mknod(request, private_data);
             break;
         case CHIMERA_VFS_OP_READDIR:
             chimera_linux_readdir(request, private_data);

@@ -67,6 +67,7 @@ struct nfs_request {
         struct SYMLINK3args     *args_symlink;
         struct SETATTR3args     *args_setattr;
         struct READLINK3args    *args_readlink;
+        struct MKNOD3args       *args_mknod;
     };
     union {
         struct READLINK3res    res_readlink;
