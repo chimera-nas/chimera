@@ -16,8 +16,12 @@ static void chimera_smb_set_info_rename_check_dest_callback(
 
 static void
 chimera_smb_set_info_rename_callback(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *fromdir_pre_attr,
+    struct chimera_vfs_attrs *fromdir_post_attr,
+    struct chimera_vfs_attrs *todir_pre_attr,
+    struct chimera_vfs_attrs *todir_post_attr,
+    void                     *private_data)
 {
     struct chimera_smb_request *request = private_data;
 
@@ -58,6 +62,8 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
         dest_name,
         dest_name_len,
         NULL,
+        0,
+        0,
         0,
         chimera_smb_set_info_rename_callback,
         request);

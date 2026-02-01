@@ -4,12 +4,16 @@
 
 #include "nfs3_procs.h"
 #include "nfs_common/nfs3_status.h"
+#include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_procs.h"
 #include "nfs3_dump.h"
 static void
 chimera_nfs3_link_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *r_attr,
+    struct chimera_vfs_attrs *r_dir_pre_attr,
+    struct chimera_vfs_attrs *r_dir_post_attr,
+    void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
@@ -22,13 +26,11 @@ chimera_nfs3_link_complete(
         error_code);
 
     if (res.status == NFS3_OK) {
-        res.resok.file_attributes.attributes_follow    = 0;
-        res.resok.linkdir_wcc.before.attributes_follow = 0;
-        res.resok.linkdir_wcc.after.attributes_follow  = 0;
+        chimera_nfs3_set_post_op_attr(&res.resok.file_attributes, r_attr);
+        chimera_nfs3_set_wcc_data(&res.resok.linkdir_wcc, r_dir_pre_attr, r_dir_post_attr);
     } else {
-        res.resfail.file_attributes.attributes_follow    = 0;
-        res.resfail.linkdir_wcc.before.attributes_follow = 0;
-        res.resfail.linkdir_wcc.after.attributes_follow  = 0;
+        chimera_nfs3_set_post_op_attr(&res.resfail.file_attributes, r_attr);
+        chimera_nfs3_set_wcc_data(&res.resfail.linkdir_wcc, r_dir_pre_attr, r_dir_post_attr);
     }
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_LINK(evpl, NULL, &res, req->encoding);
@@ -63,9 +65,9 @@ chimera_nfs3_link(
                      args->link.name.str,
                      args->link.name.len,
                      0,
-                     0,
-                     0,
-                     0,
+                     CHIMERA_NFS3_ATTR_MASK,
+                     CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
+                     CHIMERA_NFS3_ATTR_MASK,
                      chimera_nfs3_link_complete,
                      req);
 } /* chimera_nfs3_link */

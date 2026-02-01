@@ -2766,6 +2766,9 @@ demofs_rename(
         }
     }
 
+    demofs_map_attrs(thread, &request->rename.r_fromdir_pre_attr, old_parent_inode);
+    demofs_map_attrs(thread, &request->rename.r_todir_pre_attr, new_parent_inode);
+
     rb_tree_query_exact(&old_parent_inode->dir.dirents, hash, hash, old_dirent);
 
     if (!old_dirent) {
@@ -2798,6 +2801,8 @@ demofs_rename(
         if (existing_dirent->inum == old_dirent->inum &&
             existing_dirent->gen == old_dirent->gen) {
             /* Same inode - do nothing, just return success */
+            demofs_map_attrs(thread, &request->rename.r_fromdir_post_attr, old_parent_inode);
+            demofs_map_attrs(thread, &request->rename.r_todir_post_attr, new_parent_inode);
             pthread_mutex_unlock(&child_inode->lock);
             if (cmp != 0) {
                 pthread_mutex_unlock(&old_parent_inode->lock);
@@ -2872,6 +2877,9 @@ demofs_rename(
     old_parent_inode->ctime_nsec = now.tv_nsec;
     new_parent_inode->mtime_sec  = now.tv_sec;
     new_parent_inode->mtime_nsec = now.tv_nsec;
+
+    demofs_map_attrs(thread, &request->rename.r_fromdir_post_attr, old_parent_inode);
+    demofs_map_attrs(thread, &request->rename.r_todir_post_attr, new_parent_inode);
 
     if (cmp != 0) {
         pthread_mutex_unlock(&old_parent_inode->lock);

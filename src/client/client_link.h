@@ -14,8 +14,11 @@ static void chimera_link_dest_parent_complete(
 
 static void
 chimera_link_at_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *r_attr,
+    struct chimera_vfs_attrs *r_dir_pre_attr,
+    struct chimera_vfs_attrs *r_dir_post_attr,
+    void                     *private_data)
 {
     struct chimera_client_request  *request            = private_data;
     struct chimera_client_thread   *thread             = request->thread;

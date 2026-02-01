@@ -10,8 +10,11 @@
 
 static void
 chimera_nfs4_link_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *r_attr,
+    struct chimera_vfs_attrs *r_dir_pre_attr,
+    struct chimera_vfs_attrs *r_dir_post_attr,
+    void                     *private_data)
 {
     struct nfs_request *req = private_data;
     struct LINK4res    *res = &req->res_compound.resarray[req->index].oplink;

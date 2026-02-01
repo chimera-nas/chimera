@@ -10,8 +10,8 @@
 #include "s3_internal.h"
 #include "s3_etag.h"
 
-static void
-chimera_s3_put_rename_callback(
+static inline void
+chimera_s3_put_finish_common(
     enum chimera_vfs_error error_code,
     void                  *private_data)
 {
@@ -31,8 +31,30 @@ chimera_s3_put_rename_callback(
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
         s3_server_respond(evpl, request);
     }
+} /* chimera_s3_put_finish_common */
 
+static void
+chimera_s3_put_rename_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *fromdir_pre_attr,
+    struct chimera_vfs_attrs *fromdir_post_attr,
+    struct chimera_vfs_attrs *todir_pre_attr,
+    struct chimera_vfs_attrs *todir_post_attr,
+    void                     *private_data)
+{
+    chimera_s3_put_finish_common(error_code, private_data);
 } /* chimera_s3_put_rename_callback */
+
+static void
+chimera_s3_put_link_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *r_attr,
+    struct chimera_vfs_attrs *r_dir_pre_attr,
+    struct chimera_vfs_attrs *r_dir_post_attr,
+    void                     *private_data)
+{
+    chimera_s3_put_finish_common(error_code, private_data);
+} /* chimera_s3_put_link_callback */
 
 static inline void
 chimera_s3_put_rename(struct chimera_s3_request *request)
@@ -53,6 +75,8 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
             request->name_len,
             NULL,
             0,
+            0,
+            0,
             chimera_s3_put_rename_callback,
             request);
     } else {
@@ -69,7 +93,7 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
             CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
             0,
             0,
-            chimera_s3_put_rename_callback,
+            chimera_s3_put_link_callback,
             request);
     }
 } /* chimera_s3_put_finish */
