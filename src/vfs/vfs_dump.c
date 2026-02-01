@@ -45,8 +45,9 @@ chimera_vfs_op_name(unsigned int opcode)
 void
 __chimera_vfs_dump_request(struct chimera_vfs_request *req)
 {
-    char argstr[80];
+    char argstr[256];
     char fhstr[80], fhstr2[80];
+    char namestr[128], namestr2[128];
 
     switch (req->opcode) {
         case CHIMERA_VFS_OP_MOUNT:
@@ -61,8 +62,10 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                              req->umount.mount_private);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
-            chimera_snprintf(argstr, sizeof(argstr), "name %.*s attrmask %lx dir_attr_mask %lx",
-                             req->lookup.component_len, req->lookup.component,
+            format_safe_name(namestr, sizeof(namestr),
+                             req->lookup.component, req->lookup.component_len);
+            chimera_snprintf(argstr, sizeof(argstr), "name %s attrmask %lx dir_attr_mask %lx",
+                             namestr,
                              req->lookup.r_attr.va_req_mask,
                              req->lookup.r_dir_attr.va_req_mask);
             break;
@@ -80,9 +83,10 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                              req->readdir.attr_mask);
             break;
         case CHIMERA_VFS_OP_OPEN_AT:
-            chimera_snprintf(argstr, sizeof(argstr), "name %.*s flags %08x",
-                             req->open_at.namelen,
-                             req->open_at.name,
+            format_safe_name(namestr, sizeof(namestr),
+                             req->open_at.name, req->open_at.namelen);
+            chimera_snprintf(argstr, sizeof(argstr), "name %s flags %08x",
+                             namestr,
                              req->open_at.flags);
             break;
         case CHIMERA_VFS_OP_CLOSE:
@@ -105,46 +109,52 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                              req->write.sync);
             break;
         case CHIMERA_VFS_OP_MKDIR:
-            chimera_snprintf(argstr, sizeof(argstr), "name %.*s",
-                             req->mkdir.name_len,
-                             req->mkdir.name);
+            format_safe_name(namestr, sizeof(namestr),
+                             req->mkdir.name, req->mkdir.name_len);
+            chimera_snprintf(argstr, sizeof(argstr), "name %s",
+                             namestr);
             break;
         case CHIMERA_VFS_OP_REMOVE:
-            chimera_snprintf(argstr, sizeof(argstr), "name %.*s",
-                             req->remove.namelen,
-                             req->remove.name);
+            format_safe_name(namestr, sizeof(namestr),
+                             req->remove.name, req->remove.namelen);
+            chimera_snprintf(argstr, sizeof(argstr), "name %s",
+                             namestr);
             break;
         case CHIMERA_VFS_OP_COMMIT:
             chimera_snprintf(argstr, sizeof(argstr), "hdl %lx",
                              req->commit.handle->vfs_private);
             break;
         case CHIMERA_VFS_OP_SYMLINK:
-            chimera_snprintf(argstr, sizeof(argstr), "name %.*s target %.*s",
-                             req->symlink.namelen,
-                             req->symlink.name,
-                             req->symlink.targetlen,
-                             req->symlink.target);
+            format_safe_name(namestr, sizeof(namestr),
+                             req->symlink.name, req->symlink.namelen);
+            format_safe_name(namestr2, sizeof(namestr2),
+                             req->symlink.target, req->symlink.targetlen);
+            chimera_snprintf(argstr, sizeof(argstr), "name %s target %s",
+                             namestr,
+                             namestr2);
             break;
         case CHIMERA_VFS_OP_RENAME:
-            format_hex(fhstr2, sizeof(fhstr2), req->rename.new_fh, req->rename.new_fhlen)
-            ;
+            format_hex(fhstr2, sizeof(fhstr2), req->rename.new_fh, req->rename.new_fhlen);
+            format_safe_name(namestr, sizeof(namestr),
+                             req->rename.name, req->rename.namelen);
+            format_safe_name(namestr2, sizeof(namestr2),
+                             req->rename.new_name, req->rename.new_namelen);
             chimera_snprintf(argstr, sizeof(argstr),
-                             "name %.*s new_fh %s newname %.*s",
-                             req->rename.namelen,
-                             req->rename.name,
+                             "name %s new_fh %s newname %s",
+                             namestr,
                              fhstr2,
-                             req->rename.new_namelen,
-                             req->rename.new_name);
+                             namestr2);
             break;
         case CHIMERA_VFS_OP_LINK:
             format_hex(fhstr2, sizeof(fhstr2),
                        req->link.dir_fh,
                        req->link.dir_fhlen);
+            format_safe_name(namestr, sizeof(namestr),
+                             req->link.name, req->link.namelen);
             chimera_snprintf(argstr, sizeof(argstr),
-                             "dir %s name %.*s",
+                             "dir %s name %s",
                              fhstr2,
-                             req->link.namelen,
-                             req->link.name);
+                             namestr);
             break;
         default:
             argstr[0] = '\0';
@@ -159,13 +169,14 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                       fhstr,
                       argstr[0] ? " " : "",
                       argstr);
-} /* chimera_vfs_dump_request */
+} /* chimera_vfs_dump_request */ /* chimera_vfs_dump_request */
 
 void
 __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
 {
-    char        argstr[80];
+    char        argstr[256];
     char        fhstr[80];
+    char        namestr[128];
     const char *fhstr_ptr;
 
     argstr[0] = '\0';
@@ -187,9 +198,10 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
             } else {
                 fhstr_ptr = "UNSET";
             }
-            chimera_snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
-                             req->lookup.component_len,
-                             req->lookup.component,
+            format_safe_name(namestr, sizeof(namestr),
+                             req->lookup.component, req->lookup.component_len);
+            chimera_snprintf(argstr, sizeof(argstr), "name %s r_fh %s",
+                             namestr,
                              fhstr_ptr);
             break;
         case CHIMERA_VFS_OP_GETATTR:
@@ -202,9 +214,10 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
             } else {
                 fhstr_ptr = "UNSET";
             }
-            chimera_snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
-                             req->open_at.namelen,
-                             req->open_at.name,
+            format_safe_name(namestr, sizeof(namestr),
+                             req->open_at.name, req->open_at.namelen);
+            chimera_snprintf(argstr, sizeof(argstr), "name %s r_fh %s",
+                             namestr,
                              fhstr_ptr);
             break;
         case CHIMERA_VFS_OP_CREATE_UNLINKED:
@@ -224,9 +237,10 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
             } else {
                 fhstr_ptr = "UNSET";
             }
-            chimera_snprintf(argstr, sizeof(argstr), "name %.*s r_fh %s",
-                             req->mkdir.name_len,
-                             req->mkdir.name,
+            format_safe_name(namestr, sizeof(namestr),
+                             req->mkdir.name, req->mkdir.name_len);
+            chimera_snprintf(argstr, sizeof(argstr), "name %s r_fh %s",
+                             namestr,
                              fhstr_ptr);
             break;
         case CHIMERA_VFS_OP_READDIR:
@@ -260,5 +274,5 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
                       req->status,
                       req->status ? strerror(req->status) : "OK",
                       req->elapsed_ns);
-} /* chimera_vfs_dump_reply */
+} /* chimera_vfs_dump_reply */ /* chimera_vfs_dump_reply */
 

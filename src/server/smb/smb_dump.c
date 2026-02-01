@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include "smb_dump.h"
 #include "smb_internal.h"
+#include "common/format.h"
 
 static const char *
 smb_command_name(uint32_t command)
@@ -1166,16 +1167,27 @@ _smb_dump_request(
 
     switch (request->smb2_hdr.command) {
         case SMB2_TREE_CONNECT:
-            sprintf(argstr, " path %.*s", request->tree_connect.path_length, request->tree_connect.path);
-            break;
+        {
+            char safe_path[128];
+            format_safe_name(safe_path, sizeof(safe_path), request->tree_connect.path, request->tree_connect.path_length
+                             );
+            sprintf(argstr, " path %s", safe_path);
+        }
+        break;
         case SMB2_CREATE:
-            sprintf(argstr, " parent_path %.*s name %.*s create_disposition %s create_options %x desired_access %x",
-                    request->create.parent_path_len, request->create.parent_path,
-                    request->create.name_len, request->create.name,
+        {
+            char safe_parent[128], safe_name[128];
+            format_safe_name(safe_parent, sizeof(safe_parent), request->create.parent_path, request->create.
+                             parent_path_len);
+            format_safe_name(safe_name, sizeof(safe_name), request->create.name, request->create.name_len);
+            sprintf(argstr, " parent_path %s name %s create_disposition %s create_options %x desired_access %x",
+                    safe_parent,
+                    safe_name,
                     smb_create_disposition_name(request->create.create_disposition),
                     request->create.create_options,
                     request->create.desired_access);
-            break;
+        }
+        break;
         case SMB2_CLOSE:
             if (request->close.file_id.pid != UINT64_MAX) {
                 sprintf(argstr, " file_id %lx.%lx", request->close.file_id.pid, request->close.file_id.vid);
@@ -1211,12 +1223,17 @@ _smb_dump_request(
                     request->query_info.addl_info, request->query_info.flags);
             break;
         case SMB2_QUERY_DIRECTORY:
-            sprintf(argstr, " file_id %lx.%lx flags %x info_class %u file_index %u pattern %.*s",
+        {
+            char safe_pattern[128];
+            format_safe_name(safe_pattern, sizeof(safe_pattern), request->query_directory.pattern, request->
+                             query_directory.pattern_length);
+            sprintf(argstr, " file_id %lx.%lx flags %x info_class %u file_index %u pattern %s",
                     request->query_directory.file_id.pid, request->query_directory.file_id.vid,
                     request->query_directory.flags, request->query_directory.info_class,
-                    request->query_directory.file_index, request->query_directory.pattern_length,
-                    request->query_directory.pattern);
-            break;
+                    request->query_directory.file_index,
+                    safe_pattern);
+        }
+        break;
         default:
             argstr[0] = '\0';
     } /* switch */
