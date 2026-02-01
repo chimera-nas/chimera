@@ -40,6 +40,65 @@ chimera_nfs3_setattr_complete(
 } /* chimera_nfs3_setattr_complete */
 
 static void
+chimera_nfs3_setattr_do_setattr(struct nfs_request *req)
+{
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct SETATTR3args              *args   = req->args_setattr;
+    struct chimera_vfs_attrs         *attr;
+
+    attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
+    chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
+
+    chimera_nfs3_sattr3_to_va(attr, &args->new_attributes);
+
+    chimera_vfs_setattr(thread->vfs_thread, &req->cred,
+                        req->handle,
+                        attr,
+                        CHIMERA_NFS3_ATTR_WCC_MASK,
+                        CHIMERA_NFS3_ATTR_MASK,
+                        chimera_nfs3_setattr_complete,
+                        req);
+} /* chimera_nfs3_setattr_do_setattr */
+
+static void
+chimera_nfs3_setattr_guard_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs_request               *req    = private_data;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct evpl                      *evpl   = thread->evpl;
+    struct SETATTR3args              *args   = req->args_setattr;
+    struct SETATTR3res                res;
+    int                               rc;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res.status = chimera_vfs_error_to_nfsstat3(error_code);
+        chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, NULL, NULL);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, NULL, &res, req->encoding);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+        chimera_vfs_release(thread->vfs_thread, req->handle);
+        nfs_request_free(thread, req);
+        return;
+    }
+
+    if (attr->va_ctime.tv_sec  != args->guard.obj_ctime.seconds ||
+        attr->va_ctime.tv_nsec != args->guard.obj_ctime.nseconds) {
+        res.status = NFS3ERR_NOT_SYNC;
+        chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, NULL, NULL);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, NULL, &res, req->encoding);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+        chimera_vfs_release(thread->vfs_thread, req->handle);
+        nfs_request_free(thread, req);
+        return;
+    }
+
+    chimera_nfs3_setattr_do_setattr(req);
+} /* chimera_nfs3_setattr_guard_callback */
+
+static void
 chimera_nfs3_setattr_open_callback(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
@@ -51,24 +110,20 @@ chimera_nfs3_setattr_open_callback(
     struct evpl                      *evpl   = thread->evpl;
     struct SETATTR3args              *args   = req->args_setattr;
     struct SETATTR3res                res;
-    struct chimera_vfs_attrs         *attr;
     int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
-        chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
-
-        chimera_nfs3_sattr3_to_va(attr, &args->new_attributes);
-
-        chimera_vfs_setattr(thread->vfs_thread, &req->cred,
-                            handle,
-                            attr,
-                            CHIMERA_NFS3_ATTR_WCC_MASK,
-                            CHIMERA_NFS3_ATTR_MASK,
-                            chimera_nfs3_setattr_complete,
-                            req);
+        if (args->guard.check) {
+            chimera_vfs_getattr(thread->vfs_thread, &req->cred,
+                                handle,
+                                CHIMERA_VFS_ATTR_CTIME,
+                                chimera_nfs3_setattr_guard_callback,
+                                req);
+        } else {
+            chimera_nfs3_setattr_do_setattr(req);
+        }
 
     } else {
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
