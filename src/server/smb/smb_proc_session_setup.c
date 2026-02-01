@@ -119,7 +119,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
     }
 
     conn->gss_major = gss_accept_sec_context(&conn->gss_minor,
-                                             &conn->ctx,
+                                             &conn->nascent_ctx,
                                              shared->srv_cred,
                                              &input,
                                              GSS_C_NO_CHANNEL_BINDINGS,
@@ -138,7 +138,13 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             session_handle->session_id = session->session_id;
             session_handle->session    = session;
 
+            chimera_smb_debug("chimera_smb_session_setup adding session_handle %p\n",
+                              session_handle);
+
             HASH_ADD(hh, conn->session_handles, session_id, sizeof(uint64_t), session_handle);
+
+            session_handle->ctx = conn->nascent_ctx;
+            conn->nascent_ctx   = GSS_C_NO_CONTEXT;
 
             request->compound->conn->last_session_handle = session_handle;
 
@@ -154,7 +160,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
         maj_stat = gss_inquire_sec_context_by_oid(
             &min_stat,
-            conn->ctx,
+            session_handle->ctx,
             GSS_C_INQ_SSPI_SESSION_KEY,
             &session_key_buffers
             );

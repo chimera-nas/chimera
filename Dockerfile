@@ -2,10 +2,10 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-ARG DOCKER_MIRROR=""
+ARG DOCKER_MIRROR
 FROM ${DOCKER_MIRROR}ubuntu:24.04 AS build
 ARG BUILD_TYPE=Release
-ARG APT_MIRROR=""
+ARG APT_MIRROR
 
 RUN if [ -n "$APT_MIRROR" ]; then \
     echo "deb $APT_MIRROR noble main universe" > /etc/apt/sources.list.d/local-mirror.list && \
