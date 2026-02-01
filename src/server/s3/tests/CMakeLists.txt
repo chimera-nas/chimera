@@ -54,7 +54,7 @@ add_libs3_test(libs3_linux_head libs3_head -b linux)
 add_libs3_test(libs3_linux_delete libs3_delete -b linux)
 add_libs3_test(libs3_linux_list libs3_list -b linux)
 
-if (IO_URING_ENABLED)
+if (CHIMERA_VFS_IO_URING)
     add_libs3_test(libs3_io_uring_put libs3_put -b io_uring)
     add_libs3_test(libs3_io_uring_get libs3_get -b io_uring)
     add_libs3_test(libs3_io_uring_head libs3_head -b io_uring)
