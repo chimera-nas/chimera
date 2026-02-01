@@ -858,13 +858,13 @@ demofs_map_attrs(
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
-        attr->va_fs_space_total = 0;
+        attr->va_fs_space_total = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
         attr->va_fs_space_used  = 0;
-        attr->va_fs_space_avail = 0;
-        attr->va_fs_space_free  = 0;
-        attr->va_fs_files_total = 0;
-        attr->va_fs_files_avail = 0;
-        attr->va_fs_files_free  = 0;
+        attr->va_fs_space_avail = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
+        attr->va_fs_space_free  = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
+        attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
+        attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
+        attr->va_fs_files_free  = CHIMERA_VFS_SYNTHETIC_FS_INODES;
 
         pthread_mutex_lock(&shared->lock);
 
