@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <endian.h>
 #include <rocksdb/c.h>
+#include "rocksdb_compat.h"
 #include <jansson.h>
 #include <limits.h>
 #include <utlist.h>

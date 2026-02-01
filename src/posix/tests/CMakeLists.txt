@@ -102,7 +102,7 @@ if(HAVE_LIBAIO)
 endif()
 generate_posix_backend_tests(cairn CAIRN_ENABLED)
 generate_posix_backend_tests(linux "")
-generate_posix_backend_tests(io_uring IO_URING_ENABLED)
+generate_posix_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 Backend Tests
@@ -150,7 +150,7 @@ if(HAVE_LIBAIO)
 endif()
 generate_posix_nfs3_backend_tests(cairn CAIRN_ENABLED)
 generate_posix_nfs3_backend_tests(linux "")
-generate_posix_nfs3_backend_tests(io_uring IO_URING_ENABLED)
+generate_posix_nfs3_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 over TCP-RDMA Backend Tests
@@ -198,7 +198,7 @@ if(HAVE_LIBAIO)
 endif()
 generate_posix_nfs3rdma_backend_tests(cairn CAIRN_ENABLED)
 generate_posix_nfs3rdma_backend_tests(linux "")
-generate_posix_nfs3rdma_backend_tests(io_uring IO_URING_ENABLED)
+generate_posix_nfs3rdma_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # FSX tests for each backend
 # Uses run_fsx.sh wrapper to generate config and run fsx
@@ -227,7 +227,7 @@ if(CAIRN_ENABLED)
     add_fsx_test(cairn)
 endif()
 add_fsx_test(linux)
-if(IO_URING_ENABLED)
+if(CHIMERA_VFS_IO_URING)
     add_fsx_test(io_uring)
 endif()
 
@@ -242,7 +242,7 @@ if(CAIRN_ENABLED)
     add_fsx_test(nfs3_cairn)
 endif()
 add_fsx_test(nfs3_linux)
-if(IO_URING_ENABLED)
+if(CHIMERA_VFS_IO_URING)
     add_fsx_test(nfs3_io_uring)
 endif()
 
@@ -257,7 +257,7 @@ if(CAIRN_ENABLED)
     add_fsx_test(nfs3rdma_cairn)
 endif()
 add_fsx_test(nfs3rdma_linux)
-if(IO_URING_ENABLED)
+if(CHIMERA_VFS_IO_URING)
     add_fsx_test(nfs3rdma_io_uring)
 endif()
 
@@ -368,7 +368,7 @@ if(HAVE_LIBAIO)
 endif()
 generate_cthon_backend_tests(cairn CAIRN_ENABLED)
 generate_cthon_backend_tests(linux "")
-generate_cthon_backend_tests(io_uring IO_URING_ENABLED)
+generate_cthon_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 Cthon Tests
@@ -415,7 +415,7 @@ if(HAVE_LIBAIO)
 endif()
 generate_cthon_nfs3_backend_tests(cairn CAIRN_ENABLED)
 generate_cthon_nfs3_backend_tests(linux "")
-generate_cthon_nfs3_backend_tests(io_uring IO_URING_ENABLED)
+generate_cthon_nfs3_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 RDMA Cthon Tests
@@ -462,7 +462,7 @@ if(HAVE_LIBAIO)
 endif()
 generate_cthon_nfs3rdma_backend_tests(cairn CAIRN_ENABLED)
 generate_cthon_nfs3rdma_backend_tests(linux "")
-generate_cthon_nfs3rdma_backend_tests(io_uring IO_URING_ENABLED)
+generate_cthon_nfs3rdma_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # Stress Tests ported from xfstests
@@ -544,7 +544,7 @@ if(HAVE_LIBAIO)
 endif()
 generate_stress_tests(cairn CAIRN_ENABLED)
 generate_stress_tests(linux "")
-generate_stress_tests(io_uring IO_URING_ENABLED)
+generate_stress_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 Stress Tests
@@ -605,7 +605,7 @@ if(HAVE_LIBAIO)
 endif()
 generate_stress_nfs3_tests(cairn CAIRN_ENABLED)
 generate_stress_nfs3_tests(linux "")
-generate_stress_nfs3_tests(io_uring IO_URING_ENABLED)
+generate_stress_nfs3_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 RDMA Stress Tests
@@ -666,4 +666,4 @@ if(HAVE_LIBAIO)
 endif()
 generate_stress_nfs3rdma_tests(cairn CAIRN_ENABLED)
 generate_stress_nfs3rdma_tests(linux "")
-generate_stress_nfs3rdma_tests(io_uring IO_URING_ENABLED)
+generate_stress_nfs3rdma_tests(io_uring CHIMERA_VFS_IO_URING)
