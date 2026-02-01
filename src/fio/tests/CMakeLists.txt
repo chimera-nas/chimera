@@ -25,13 +25,14 @@ endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 
     if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-        set(ASAN_LIB "/usr/lib/aarch64-linux-gnu/libasan.so.8")
+        set(ASAN_LIB_DIR "/usr/lib/aarch64-linux-gnu")
     else()
-        set(ASAN_LIB "/usr/lib/x86_64-linux-gnu/libasan.so.8")
+        set(ASAN_LIB_DIR "/usr/lib/x86_64-linux-gnu")
     endif()
 
-    if(NOT EXISTS ${ASAN_LIB})
-        message(FATAL_ERROR "ASAN library not found at ${ASAN_LIB}")
+    file(GLOB ASAN_LIB "${ASAN_LIB_DIR}/libasan.so.[0-9]")
+    if(NOT ASAN_LIB)
+        message(FATAL_ERROR "ASAN library not found in ${ASAN_LIB_DIR}")
     endif()
 
     set_tests_properties(chimera/fio/fio_memfs_basic PROPERTIES
