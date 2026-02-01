@@ -1,9 +1,9 @@
-# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: Unlicense
 
 ARG DOCKER_MIRROR=""
-FROM ${DOCKER_MIRROR}ubuntu:22.04
+FROM ${DOCKER_MIRROR}ubuntu:24.04
 ARG ENABLE_XLIO=1
 ARG ENABLE_FIO=1
 ARG APT_MIRROR=""
@@ -11,18 +11,19 @@ ARG APT_MIRROR=""
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN if [ -n "$APT_MIRROR" ]; then \
-    echo "deb $APT_MIRROR jammy main universe" > /etc/apt/sources.list && \
-    echo "deb $APT_MIRROR jammy-updates main universe" >> /etc/apt/sources.list && \
-    echo "deb $APT_MIRROR jammy-security main universe" >> /etc/apt/sources.list; \
+    echo "deb $APT_MIRROR noble main universe" > /etc/apt/sources.list.d/local-mirror.list && \
+    echo "deb $APT_MIRROR noble-updates main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
+    echo "deb $APT_MIRROR noble-security main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
+    rm -f /etc/apt/sources.list.d/ubuntu.sources; \
     fi
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
-    apt-get -y --no-install-recommends install gcc g++ clang-tools cmake ninja-build git flex bison \
-    uuid-dev uthash-dev libkrb5-dev libgssapi-krb5-2 gss-ntlmssp-dev \
-    librdmacm-dev libjansson-dev libxxhash-dev liburcu-dev liburing-dev libunwind-dev \
-    librocksdb-dev libssl-dev openssl libnuma-dev libcurl4-openssl-dev libs3-dev libnfs-dev libaio-dev \
-    build-essential autoconf automake libtool pkg-config ca-certificates uncrustify iproute2 && \
+    apt-get -y --no-install-recommends install clang clang-tools cmake ninja-build git flex bison llvm \
+    libclang-rt-18-dev uuid-dev uthash-dev libkrb5-dev libgssapi-krb5-2 gss-ntlmssp-dev \
+    librdmacm-dev libjansson-dev libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev \
+    libssl-dev openssl libnuma-dev \
+    build-essential autoconf automake libtool pkg-config ca-certificates uncrustify && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
