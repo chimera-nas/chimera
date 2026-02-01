@@ -47,7 +47,7 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
 {
     char argstr[256];
     char fhstr[80], fhstr2[80];
-    char namestr[128], namestr2[128];
+    char namestr[FORMAT_SAFE_NAME_MAX], namestr2[FORMAT_SAFE_NAME_MAX];
 
     switch (req->opcode) {
         case CHIMERA_VFS_OP_MOUNT:
@@ -169,14 +169,14 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                       fhstr,
                       argstr[0] ? " " : "",
                       argstr);
-} /* chimera_vfs_dump_request */ /* chimera_vfs_dump_request */
+} /* chimera_vfs_dump_request */
 
 void
 __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
 {
     char        argstr[256];
     char        fhstr[80];
-    char        namestr[128];
+    char        namestr[FORMAT_SAFE_NAME_MAX];
     const char *fhstr_ptr;
 
     argstr[0] = '\0';
@@ -274,5 +274,5 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
                       req->status,
                       req->status ? strerror(req->status) : "OK",
                       req->elapsed_ns);
-} /* chimera_vfs_dump_reply */ /* chimera_vfs_dump_reply */
+} /* chimera_vfs_dump_reply */
 

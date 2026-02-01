@@ -1148,6 +1148,9 @@ _smb_dump_request(
     char  argstr[512];
     char  hdr_args[160];
     char *hdrp = hdr_args;
+    char  safe_path[256];
+    char  safe_parent[200], safe_name[200];
+    char  safe_pattern[256];
 
     *hdrp = '\0';
 
@@ -1167,27 +1170,22 @@ _smb_dump_request(
 
     switch (request->smb2_hdr.command) {
         case SMB2_TREE_CONNECT:
-        {
-            char safe_path[128];
             format_safe_name(safe_path, sizeof(safe_path), request->tree_connect.path, request->tree_connect.path_length
                              );
-            sprintf(argstr, " path %s", safe_path);
-        }
-        break;
+            snprintf(argstr, sizeof(argstr), " path %s", safe_path);
+            break;
         case SMB2_CREATE:
-        {
-            char safe_parent[128], safe_name[128];
             format_safe_name(safe_parent, sizeof(safe_parent), request->create.parent_path, request->create.
                              parent_path_len);
             format_safe_name(safe_name, sizeof(safe_name), request->create.name, request->create.name_len);
-            sprintf(argstr, " parent_path %s name %s create_disposition %s create_options %x desired_access %x",
-                    safe_parent,
-                    safe_name,
-                    smb_create_disposition_name(request->create.create_disposition),
-                    request->create.create_options,
-                    request->create.desired_access);
-        }
-        break;
+            snprintf(argstr, sizeof(argstr),
+                     " parent_path %s name %s create_disposition %s create_options %x desired_access %x",
+                     safe_parent,
+                     safe_name,
+                     smb_create_disposition_name(request->create.create_disposition),
+                     request->create.create_options,
+                     request->create.desired_access);
+            break;
         case SMB2_CLOSE:
             if (request->close.file_id.pid != UINT64_MAX) {
                 sprintf(argstr, " file_id %lx.%lx", request->close.file_id.pid, request->close.file_id.vid);
@@ -1223,17 +1221,14 @@ _smb_dump_request(
                     request->query_info.addl_info, request->query_info.flags);
             break;
         case SMB2_QUERY_DIRECTORY:
-        {
-            char safe_pattern[128];
             format_safe_name(safe_pattern, sizeof(safe_pattern), request->query_directory.pattern, request->
                              query_directory.pattern_length);
-            sprintf(argstr, " file_id %lx.%lx flags %x info_class %u file_index %u pattern %s",
-                    request->query_directory.file_id.pid, request->query_directory.file_id.vid,
-                    request->query_directory.flags, request->query_directory.info_class,
-                    request->query_directory.file_index,
-                    safe_pattern);
-        }
-        break;
+            snprintf(argstr, sizeof(argstr), " file_id %lx.%lx flags %x info_class %u file_index %u pattern %s",
+                     request->query_directory.file_id.pid, request->query_directory.file_id.vid,
+                     request->query_directory.flags, request->query_directory.info_class,
+                     request->query_directory.file_index,
+                     safe_pattern);
+            break;
         default:
             argstr[0] = '\0';
     } /* switch */
@@ -1243,7 +1238,7 @@ _smb_dump_request(
                       smb_command_name(request->smb2_hdr.command),
                       hdr_args,
                       argstr);
-} /* _smb_dump_request */
+} /* _smb_dump_request */ /* _smb_dump_request */
 
 void
 _smb_dump_reply(

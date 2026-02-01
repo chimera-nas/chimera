@@ -39,7 +39,12 @@ format_hex(
 
     out[outlen] = '\0';
     return outlen;
-} /* format_hex */ /* format_hex */
+} /* format_hex */
+
+/* Buffer size for format_safe_name output.
+ * Worst case: every byte in a 256-char name is escaped as \xHH (4 chars each)
+ * plus a null terminator. */
+#define FORMAT_SAFE_NAME_MAX (256 * 4 + 1)
 
 static inline int
 format_safe_name(

@@ -12,6 +12,7 @@ void
 chimera_s3_dump_request(struct chimera_s3_request *request)
 {
     char extra[80];
+    char safe_bucket[FORMAT_SAFE_NAME_MAX];
 
     extra[0] = '\0';
 
@@ -23,33 +24,29 @@ chimera_s3_dump_request(struct chimera_s3_request *request)
             break;
     } /* switch */
 
-    {
-        char safe_bucket[128];
-        format_safe_name(safe_bucket, sizeof(safe_bucket), request->bucket_name, request->bucket_namelen);
-        chimera_s3_debug("S3   Request %p: %s %s:%s %s",
-                         request,
-                         evpl_http_request_type_to_string(request->http_request),
-                         safe_bucket,
-                         request->path,
-                         extra);
-    }
-} /* chimera_s3_dump_request */
+    format_safe_name(safe_bucket, sizeof(safe_bucket), request->bucket_name, request->bucket_namelen);
+    chimera_s3_debug("S3   Request %p: %s %s:%s %s",
+                     request,
+                     evpl_http_request_type_to_string(request->http_request),
+                     safe_bucket,
+                     request->path,
+                     extra);
+} /* chimera_s3_dump_request */ /* chimera_s3_dump_request */
 
 void
 chimera_s3_dump_response(struct chimera_s3_request *request)
 {
-    {
-        char safe_bucket[128];
-        format_safe_name(safe_bucket, sizeof(safe_bucket), request->bucket_name, request->bucket_namelen);
-        chimera_s3_debug("S3   Reply   %p: %s %s:%s -> (%s) elapsed %lunS",
-                         request,
-                         evpl_http_request_type_to_string(request->http_request),
-                         safe_bucket,
-                         request->path,
-                         chimera_s3_status_to_string(request->status),
-                         request->elapsed);
-    }
-} /* chimera_s3_dump_response */
+    char safe_bucket[FORMAT_SAFE_NAME_MAX];
+
+    format_safe_name(safe_bucket, sizeof(safe_bucket), request->bucket_name, request->bucket_namelen);
+    chimera_s3_debug("S3   Reply   %p: %s %s:%s -> (%s) elapsed %lunS",
+                     request,
+                     evpl_http_request_type_to_string(request->http_request),
+                     safe_bucket,
+                     request->path,
+                     chimera_s3_status_to_string(request->status),
+                     request->elapsed);
+} /* chimera_s3_dump_response */ /* chimera_s3_dump_response */
 
 
 

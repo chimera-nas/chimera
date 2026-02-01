@@ -6,9 +6,7 @@
 #include "nfs_internal.h"
 #include "common/format.h"
 
-#define NFS4_SAFE_NAME(var, str, len) \
-        char var[128]; \
-        format_safe_name(var, sizeof(var), str, len)
+
 
 void
 _nfs4_dump_null(struct nfs_request *req)
@@ -21,7 +19,9 @@ _nfs4_dump_compound(
     struct nfs_request   *req,
     struct COMPOUND4args *args)
 {
-    int i;
+    int  i;
+    char namestr[FORMAT_SAFE_NAME_MAX];
+    char namestr2[FORMAT_SAFE_NAME_MAX];
 
     chimera_nfs_debug("NFS4 Request %p: Compound", req);
 
@@ -59,14 +59,12 @@ _nfs4_dump_compound(
                 break;
 
             case OP_CREATE:
-            {
-                NFS4_SAFE_NAME(namestr, args->argarray[i].opcreate.objname.data,
-                               args->argarray[i].opcreate.objname.len);
+                format_safe_name(namestr, sizeof(namestr), args->argarray[i].opcreate.objname.data,
+                                 args->argarray[i].opcreate.objname.len);
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d Create name=%s",
                                   req, i + 1, args->num_argarray,
                                   namestr);
                 break;
-            }
 
             case OP_OPEN:
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d Open access=%u deny=%u",
@@ -81,27 +79,23 @@ _nfs4_dump_compound(
                 break;
 
             case OP_RENAME:
-            {
-                NFS4_SAFE_NAME(oldnamestr, args->argarray[i].oprename.oldname.data,
-                               args->argarray[i].oprename.oldname.len);
-                NFS4_SAFE_NAME(newnamestr, args->argarray[i].oprename.newname.data,
-                               args->argarray[i].oprename.newname.len);
+                format_safe_name(namestr, sizeof(namestr), args->argarray[i].oprename.oldname.data,
+                                 args->argarray[i].oprename.oldname.len);
+                format_safe_name(namestr2, sizeof(namestr2), args->argarray[i].oprename.newname.data,
+                                 args->argarray[i].oprename.newname.len);
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d Rename old=%s new=%s",
                                   req, i + 1, args->num_argarray,
-                                  oldnamestr,
-                                  newnamestr);
+                                  namestr,
+                                  namestr2);
                 break;
-            }
 
             case OP_REMOVE:
-            {
-                NFS4_SAFE_NAME(namestr, args->argarray[i].opremove.target.data,
-                               args->argarray[i].opremove.target.len);
+                format_safe_name(namestr, sizeof(namestr), args->argarray[i].opremove.target.data,
+                                 args->argarray[i].opremove.target.len);
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d Remove target=%s",
                                   req, i + 1, args->num_argarray,
                                   namestr);
                 break;
-            }
 
             case OP_PUTFH:
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d PutFH",
@@ -141,14 +135,12 @@ _nfs4_dump_compound(
                 break;
 
             case OP_LINK:
-            {
-                NFS4_SAFE_NAME(namestr, args->argarray[i].oplink.newname.data,
-                               args->argarray[i].oplink.newname.len);
+                format_safe_name(namestr, sizeof(namestr), args->argarray[i].oplink.newname.data,
+                                 args->argarray[i].oplink.newname.len);
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d Link name=%s",
                                   req, i + 1, args->num_argarray,
                                   namestr);
                 break;
-            }
 
             case OP_LOCK:
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d Lock type=%d",
@@ -168,14 +160,12 @@ _nfs4_dump_compound(
                                   args->argarray[i].oplocku.locktype);
                 break;
             case OP_LOOKUP:
-            {
-                NFS4_SAFE_NAME(namestr, args->argarray[i].oplookup.objname.data,
-                               args->argarray[i].oplookup.objname.len);
+                format_safe_name(namestr, sizeof(namestr), args->argarray[i].oplookup.objname.data,
+                                 args->argarray[i].oplookup.objname.len);
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d Lookup name=%s",
                                   req, i + 1, args->num_argarray,
                                   namestr);
                 break;
-            }
 
             case OP_LOOKUPP:
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d LookupP",
@@ -287,5 +277,5 @@ _nfs4_dump_compound(
                 break;
         } /* switch */
     }
-} /* nfs4_dump_compound */
+} /* nfs4_dump_compound */ /* nfs4_dump_compound */
 
