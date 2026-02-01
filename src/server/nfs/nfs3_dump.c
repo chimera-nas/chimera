@@ -49,13 +49,14 @@ _nfs3_dump_lookup(
     struct LOOKUP3args *args)
 {
     char fhstr[80];
+    char namestr[FORMAT_SAFE_NAME_MAX];
 
     format_hex(fhstr, sizeof(fhstr), args->what.dir.data.data, args->what.dir.data.len);
-    chimera_nfs_debug("NFS3 Request %p: Lookup dir %s name %.*s",
+    format_safe_name(namestr, sizeof(namestr), args->what.name.str, args->what.name.len);
+    chimera_nfs_debug("NFS3 Request %p: Lookup dir %s name %s",
                       req,
                       fhstr,
-                      args->what.name.len,
-                      args->what.name.str);
+                      namestr);
 } /* nfs3_dump_lookup */
 
 void
@@ -122,13 +123,14 @@ _nfs3_dump_create(
     struct CREATE3args *args)
 {
     char fhstr[80];
+    char namestr[FORMAT_SAFE_NAME_MAX];
 
     format_hex(fhstr, sizeof(fhstr), args->where.dir.data.data, args->where.dir.data.len);
-    chimera_nfs_debug("NFS3 Request %p: Create dir %s name %.*s mode %o",
+    format_safe_name(namestr, sizeof(namestr), args->where.name.str, args->where.name.len);
+    chimera_nfs_debug("NFS3 Request %p: Create dir %s name %s mode %o",
                       req,
                       fhstr,
-                      args->where.name.len,
-                      args->where.name.str,
+                      namestr,
                       args->how.mode);
 } /* nfs3_dump_create */
 
@@ -138,13 +140,14 @@ _nfs3_dump_mkdir(
     struct MKDIR3args  *args)
 {
     char fhstr[80];
+    char namestr[FORMAT_SAFE_NAME_MAX];
 
     format_hex(fhstr, sizeof(fhstr), args->where.dir.data.data, args->where.dir.data.len);
-    chimera_nfs_debug("NFS3 Request %p: Mkdir dir %s name %.*s mode %o",
+    format_safe_name(namestr, sizeof(namestr), args->where.name.str, args->where.name.len);
+    chimera_nfs_debug("NFS3 Request %p: Mkdir dir %s name %s mode %o",
                       req,
                       fhstr,
-                      args->where.name.len,
-                      args->where.name.str,
+                      namestr,
                       args->attributes.mode.mode);
 } /* nfs3_dump_mkdir */
 
@@ -154,15 +157,17 @@ _nfs3_dump_symlink(
     struct SYMLINK3args *args)
 {
     char fhstr[80];
+    char namestr[FORMAT_SAFE_NAME_MAX];
+    char targetstr[FORMAT_SAFE_NAME_MAX];
 
     format_hex(fhstr, sizeof(fhstr), args->where.dir.data.data, args->where.dir.data.len);
-    chimera_nfs_debug("NFS3 Request %p: Symlink dir %s name %.*s target %.*s",
+    format_safe_name(namestr, sizeof(namestr), args->where.name.str, args->where.name.len);
+    format_safe_name(targetstr, sizeof(targetstr), args->symlink.symlink_data.str, args->symlink.symlink_data.len);
+    chimera_nfs_debug("NFS3 Request %p: Symlink dir %s name %s target %s",
                       req,
                       fhstr,
-                      args->where.name.len,
-                      args->where.name.str,
-                      args->symlink.symlink_data.len,
-                      args->symlink.symlink_data.str);
+                      namestr,
+                      targetstr);
 } /* nfs3_dump_symlink */
 
 void
@@ -171,13 +176,14 @@ _nfs3_dump_mknod(
     struct MKNOD3args  *args)
 {
     char fhstr[80];
+    char namestr[FORMAT_SAFE_NAME_MAX];
 
     format_hex(fhstr, sizeof(fhstr), args->where.dir.data.data, args->where.dir.data.len);
-    chimera_nfs_debug("NFS3 Request %p: Mknod dir %s name %.*s type %d",
+    format_safe_name(namestr, sizeof(namestr), args->where.name.str, args->where.name.len);
+    chimera_nfs_debug("NFS3 Request %p: Mknod dir %s name %s type %d",
                       req,
                       fhstr,
-                      args->where.name.len,
-                      args->where.name.str,
+                      namestr,
                       args->what.type);
 } /* nfs3_dump_mknod */
 
@@ -187,13 +193,14 @@ _nfs3_dump_remove(
     struct REMOVE3args *args)
 {
     char fhstr[80];
+    char namestr[FORMAT_SAFE_NAME_MAX];
 
     format_hex(fhstr, sizeof(fhstr), args->object.dir.data.data, args->object.dir.data.len);
-    chimera_nfs_debug("NFS3 Request %p: Remove dir %s name %.*s",
+    format_safe_name(namestr, sizeof(namestr), args->object.name.str, args->object.name.len);
+    chimera_nfs_debug("NFS3 Request %p: Remove dir %s name %s",
                       req,
                       fhstr,
-                      args->object.name.len,
-                      args->object.name.str);
+                      namestr);
 } /* nfs3_dump_remove */
 
 void
@@ -202,13 +209,14 @@ _nfs3_dump_rmdir(
     struct RMDIR3args  *args)
 {
     char fhstr[80];
+    char namestr[FORMAT_SAFE_NAME_MAX];
 
     format_hex(fhstr, sizeof(fhstr), args->object.dir.data.data, args->object.dir.data.len);
-    chimera_nfs_debug("NFS3 Request %p: Rmdir dir %s name %.*s",
+    format_safe_name(namestr, sizeof(namestr), args->object.name.str, args->object.name.len);
+    chimera_nfs_debug("NFS3 Request %p: Rmdir dir %s name %s",
                       req,
                       fhstr,
-                      args->object.name.len,
-                      args->object.name.str);
+                      namestr);
 } /* nfs3_dump_rmdir */
 
 void
@@ -217,17 +225,19 @@ _nfs3_dump_rename(
     struct RENAME3args *args)
 {
     char from_fhstr[80], to_fhstr[80];
+    char from_namestr[FORMAT_SAFE_NAME_MAX];
+    char to_namestr[FORMAT_SAFE_NAME_MAX];
 
     format_hex(from_fhstr, sizeof(from_fhstr), args->from.dir.data.data, args->from.dir.data.len);
     format_hex(to_fhstr, sizeof(to_fhstr), args->to.dir.data.data, args->to.dir.data.len);
-    chimera_nfs_debug("NFS3 Request %p: Rename from_dir %s from_name %.*s to_dir %s to_name %.*s",
+    format_safe_name(from_namestr, sizeof(from_namestr), args->from.name.str, args->from.name.len);
+    format_safe_name(to_namestr, sizeof(to_namestr), args->to.name.str, args->to.name.len);
+    chimera_nfs_debug("NFS3 Request %p: Rename from_dir %s from_name %s to_dir %s to_name %s",
                       req,
                       from_fhstr,
-                      args->from.name.len,
-                      args->from.name.str,
+                      from_namestr,
                       to_fhstr,
-                      args->to.name.len,
-                      args->to.name.str);
+                      to_namestr);
 } /* nfs3_dump_rename */
 
 void
@@ -236,15 +246,16 @@ _nfs3_dump_link(
     struct LINK3args   *args)
 {
     char file_fhstr[80], dir_fhstr[80];
+    char namestr[FORMAT_SAFE_NAME_MAX];
 
     format_hex(file_fhstr, sizeof(file_fhstr), args->file.data.data, args->file.data.len);
     format_hex(dir_fhstr, sizeof(dir_fhstr), args->link.dir.data.data, args->link.dir.data.len);
-    chimera_nfs_debug("NFS3 Request %p: Link file %s dir %s name %.*s",
+    format_safe_name(namestr, sizeof(namestr), args->link.name.str, args->link.name.len);
+    chimera_nfs_debug("NFS3 Request %p: Link file %s dir %s name %s",
                       req,
                       file_fhstr,
                       dir_fhstr,
-                      args->link.name.len,
-                      args->link.name.str);
+                      namestr);
 } /* nfs3_dump_link */
 
 void
