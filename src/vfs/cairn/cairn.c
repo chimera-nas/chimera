@@ -2774,7 +2774,7 @@ cairn_rename(
     void                       *private_data)
 {
     rocksdb_transaction_t     *txn;
-    struct cairn_inode_handle  old_parent_ih, new_parent_ih;
+    struct cairn_inode_handle  old_parent_ih, new_parent_ih = { 0 };
     struct cairn_inode        *old_parent_inode, *new_parent_inode;
     struct cairn_dirent_key    old_dirent_key, new_dirent_key;
     struct cairn_dirent_handle old_dh, new_dh;

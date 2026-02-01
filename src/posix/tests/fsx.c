@@ -3047,7 +3047,10 @@ getnum(
 {
     long long ret;
 
-    *e  = (char *) 0;
+    *e = (char *) 0;
+    if (!s) {
+        return 0;
+    }
     ret = strtoll(s, e, 0);
     if (*e) {
         switch (**e) {
@@ -3596,7 +3599,9 @@ main(
                 flush = 1;
                 break;
             case 'g':
-                filldata = *optarg;
+                if (optarg) {
+                    filldata = *optarg;
+                }
                 break;
             case 'h':
 #ifndef MADV_COLLAPSE
@@ -3608,14 +3613,14 @@ main(
                 break;
             case 'i':
                 integrity = 1;
-                logdev    = strdup(optarg);
+                logdev    = optarg ? strdup(optarg) : NULL;
                 if (!logdev) {
                     prterr("strdup");
                     exit(101);
                 }
                 break;
             case 'j':
-                logid = strdup(optarg);
+                logid = optarg ? strdup(optarg) : NULL;
                 if (!logid) {
                     prterr("strdup");
                     exit(101);

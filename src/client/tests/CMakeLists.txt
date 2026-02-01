@@ -60,18 +60,16 @@ endmacro()
 
 # Macro to generate all tests for a backend
 macro(generate_backend_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate tests for each backend
 generate_backend_tests(memfs "")
-generate_backend_tests(demofs_io_uring "")
+generate_backend_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_backend_tests(demofs_aio "")
 endif()
