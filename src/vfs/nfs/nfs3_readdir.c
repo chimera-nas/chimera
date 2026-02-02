@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -44,6 +44,8 @@ chimera_nfs3_readdir_callback(
     if (res->resok.dir_attributes.attributes_follow) {
         chimera_nfs3_unmarshall_attrs(&res->resok.dir_attributes.attributes, &request->readdir.r_dir_attr);
     }
+
+    memcpy(&request->readdir.r_verifier, res->resok.cookieverf, sizeof(request->readdir.r_verifier));
 
     ctx = request->plugin_data;
 
@@ -115,7 +117,7 @@ chimera_nfs3_readdir(
     args.dircount      = 1024;
     args.maxcount      = 1024;
 
-    memset(args.cookieverf, 0, sizeof(args.cookieverf));
+    memcpy(args.cookieverf, &request->readdir.verifier, sizeof(args.cookieverf));
 
     ctx         = request->plugin_data;
     ctx->server = server_thread->server;

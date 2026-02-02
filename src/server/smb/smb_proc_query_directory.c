@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -15,6 +15,7 @@ chimera_smb_query_directory_readdir_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        cookie,
+    uint64_t                        verifier,
     uint32_t                        eof,
     struct chimera_vfs_attrs       *attr,
     void                           *private_data)
@@ -38,7 +39,7 @@ chimera_smb_query_directory_readdir_complete(
         chimera_smb_complete_request(request, SMB2_STATUS_NO_MORE_FILES);
     }
 
-} /* chimera_smb_query_directory_readdir_complete */
+} /* chimera_smb_query_directory_readdir_complete */ /* chimera_smb_query_directory_readdir_complete */
 
 int
 chimera_smb_query_directory_readdir_callback(
@@ -295,6 +296,7 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         CHIMERA_VFS_ATTR_MASK_STAT,
         0, /* dir_attr_mask */
         request->query_directory.open_file->position,
+        0, /* verifier */
         CHIMERA_VFS_READDIR_EMIT_DOT,
         chimera_smb_query_directory_readdir_callback,
         chimera_smb_query_directory_readdir_complete,

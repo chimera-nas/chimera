@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -539,9 +539,9 @@ cairn_init(const char *cfgfile)
     int                    compression  = 1; // Default to enabled
     int                    bloom_filter = 1; // Default to enabled
 
-    cfg = json_load_file(cfgfile, 0, &json_error);
+    cfg = json_loads(cfgfile, 0, &json_error);
 
-    chimera_cairn_abort_if(!cfg, "Failed to load config file: %s\n", json_error.text);
+    chimera_cairn_abort_if(!cfg, "Failed to parse config: %s\n", json_error.text);
 
     db_path = json_string_value(json_object_get(cfg, "path"));
 

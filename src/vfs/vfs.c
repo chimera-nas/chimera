@@ -387,7 +387,7 @@ chimera_vfs_init(
                              module_cfgs[i].module_path);
 
         // Register the module with the VFS, passing its config path
-        chimera_vfs_register(vfs, module, module_cfgs[i].config_path);
+        chimera_vfs_register(vfs, module, module_cfgs[i].config_data);
     }
 
     vfs->num_delegation_threads = num_delegation_threads;

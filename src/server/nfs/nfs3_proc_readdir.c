@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -58,6 +58,7 @@ chimera_nfs3_readdir_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        cookie,
+    uint64_t                        verifier,
     uint32_t                        eof,
     struct chimera_vfs_attrs       *dir_attr,
     void                           *private_data)
@@ -75,6 +76,7 @@ chimera_nfs3_readdir_complete(
         chimera_nfs3_set_post_op_attr(&res->resok.dir_attributes, dir_attr);
         res->resok.reply.eof     = !!eof;
         res->resok.reply.entries = cursor->entries;
+        memcpy(res->resok.cookieverf, &verifier, sizeof(res->resok.cookieverf));
     }
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_READDIR(evpl, NULL, res, req->encoding);
@@ -83,7 +85,7 @@ chimera_nfs3_readdir_complete(
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
     nfs_request_free(req->thread, req);
-} /* chimera_nfs3_readdirplus_complete */
+} /* chimera_nfs3_readdir_complete */ /* chimera_nfs3_readdirplus_complete */
 
 static void
 chimera_nfs3_readdir_open_callback(
@@ -102,11 +104,14 @@ chimera_nfs3_readdir_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
+        uint64_t cookieverf;
+        memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
         chimera_vfs_readdir(thread->vfs_thread, &req->cred,
                             handle,
                             0,
                             CHIMERA_NFS3_ATTR_MASK,
                             args->cookie,
+                            cookieverf,
                             CHIMERA_VFS_READDIR_EMIT_DOT,
                             chimera_nfs3_readdir_callback,
                             chimera_nfs3_readdir_complete,

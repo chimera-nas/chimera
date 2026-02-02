@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -48,6 +48,8 @@ chimera_nfs4_errno_to_nfsstat4(enum chimera_vfs_error err)
             return NFS4ERR_DQUOT;
         case CHIMERA_VFS_ESTALE:
             return NFS4ERR_STALE;
+        case CHIMERA_VFS_EBADCOOKIE:
+            return NFS4ERR_NOT_SAME;
         case CHIMERA_VFS_EBADF:
             return NFS4ERR_BADHANDLE;
         case CHIMERA_VFS_ENOTSUP:

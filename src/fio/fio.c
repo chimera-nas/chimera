@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: GPL-2.0-only
 
@@ -236,7 +236,7 @@ fio_chimera_init(struct thread_data *td)
     struct chimera_fio_thread    *chimera_thread;
     int                           i;
     json_t                       *config = NULL, *mounts, *mount;
-    json_t                       *modules, *module, *module_name, *mount_point, *module_path, *config_path;
+    json_t                       *modules, *module, *module_name, *mount_point, *module_path, *config_obj;
     struct chimera_options       *o         = td->eo;
     struct mount_ctx              mount_ctx = { 0 };
     struct evpl                  *evpl;
@@ -275,18 +275,26 @@ fio_chimera_init(struct thread_data *td)
                 {
                     module_name = json_object_get(module, "module");
                     module_path = json_object_get(module, "module_path");
-                    config_path = json_object_get(module, "config_path");
+                    config_obj  = json_object_get(module, "config");
 
-                    if (!module_name || !module_path || !config_path) {
+                    if (!module_name || !module_path) {
                         fprintf(stderr, "Invalid module config\n");
                         return EINVAL;
                     }
 
-                    fprintf(stderr, "Loading module %s path %s config%s\n", json_string_value(module_name),
-                            json_string_value(module_path), json_string_value(config_path));
+                    char *config_str = NULL;
+
+                    if (config_obj && json_is_object(config_obj)) {
+                        config_str = json_dumps(config_obj, JSON_COMPACT);
+                    }
+
+                    fprintf(stderr, "Loading module %s path %s config %s\n", json_string_value(module_name),
+                            json_string_value(module_path), config_str ? config_str : "");
 
                     chimera_client_config_add_module(ChimeraClientConfig, json_string_value(module_name),
-                                                     json_string_value(module_path), json_string_value(config_path));
+                                                     json_string_value(module_path), config_str ? config_str : "");
+
+                    free(config_str);
 
 
                 }

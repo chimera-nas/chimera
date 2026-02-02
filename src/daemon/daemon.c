@@ -172,11 +172,17 @@ main(
         json_t     *module;
         json_object_foreach(vfs_modules, module_name, module)
         {
-            const char *path   = json_string_value(json_object_get(module, "path"));
-            const char *config = json_string_value(json_object_get(module, "config"));
+            const char *path       = json_string_value(json_object_get(module, "path"));
+            json_t     *config_obj = json_object_get(module, "config");
+            char       *config_str = NULL;
+
+            if (config_obj && json_is_object(config_obj)) {
+                config_str = json_dumps(config_obj, JSON_COMPACT);
+            }
 
             chimera_server_config_add_module(server_config, module_name, path,
-                                             config ? config : "");
+                                             config_str ? config_str : "");
+            free(config_str);
         }
     }
 

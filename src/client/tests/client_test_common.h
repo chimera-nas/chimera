@@ -94,10 +94,10 @@ client_test_init(
         server_config = chimera_server_config_init();
 
         if (strcmp(backend, "demofs") == 0) {
-            char    demofs_cfg[300];
+            char    demofs_cfg[4096];
             char    device_path[300];
+            char   *json_str;
             json_t *cfg, *devices, *device;
-            snprintf(demofs_cfg, sizeof(demofs_cfg), "%s/demofs.json", env->session_dir);
 
             cfg     = json_object();
             devices = json_array();
@@ -127,24 +127,26 @@ client_test_init(
             }
 
             json_object_set_new(cfg, "devices", devices);
-            json_dump_file(cfg, demofs_cfg, 0);
+            json_str = json_dumps(cfg, JSON_COMPACT);
+            snprintf(demofs_cfg, sizeof(demofs_cfg), "%s", json_str);
+            free(json_str);
             json_decref(cfg);
 
             chimera_server_config_add_module(server_config, "demofs", "/build/test/demofs", demofs_cfg);
         } else if (strcmp(backend, "cairn") == 0) {
-            char    cairn_cfgfile[300];
+            char    cairn_cfg[4096];
+            char   *json_str;
             json_t *cfg;
-
-            snprintf(cairn_cfgfile, sizeof(cairn_cfgfile),
-                     "%s/cairn.cfg", env->session_dir);
 
             cfg = json_object();
             json_object_set_new(cfg, "initialize", json_true());
             json_object_set_new(cfg, "path", json_string(env->session_dir));
-            json_dump_file(cfg, cairn_cfgfile, 0);
+            json_str = json_dumps(cfg, JSON_COMPACT);
+            snprintf(cairn_cfg, sizeof(cairn_cfg), "%s", json_str);
+            free(json_str);
             json_decref(cfg);
 
-            chimera_server_config_add_module(server_config, "cairn", "/build/test/cairn", cairn_cfgfile);
+            chimera_server_config_add_module(server_config, "cairn", "/build/test/cairn", cairn_cfg);
         }
 
         env->server = chimera_server_init(server_config, env->server_metrics);
@@ -191,10 +193,10 @@ client_test_init(
 
         if (!env->use_nfs) {
             if (strcmp(backend, "demofs") == 0) {
-                char    demofs_cfg[300];
+                char    demofs_cfg[4096];
                 char    device_path[300];
+                char   *json_str;
                 json_t *cfg, *devices, *device, *vfs, *vfs_entry;
-                snprintf(demofs_cfg, sizeof(demofs_cfg), "%s/demofs.json", env->session_dir);
 
                 cfg     = json_object();
                 devices = json_array();
@@ -224,7 +226,9 @@ client_test_init(
                 }
 
                 json_object_set_new(cfg, "devices", devices);
-                json_dump_file(cfg, demofs_cfg, 0);
+                json_str = json_dumps(cfg, JSON_COMPACT);
+                snprintf(demofs_cfg, sizeof(demofs_cfg), "%s", json_str);
+                free(json_str);
                 json_decref(cfg);
 
                 vfs       = json_object();
@@ -234,22 +238,22 @@ client_test_init(
                 json_object_set_new(vfs, "demofs", vfs_entry);
                 json_object_set_new(client_json_config, "vfs", vfs);
             } else if (strcmp(backend, "cairn") == 0) {
-                char    cairn_cfgfile[300];
+                char    cairn_cfg[4096];
+                char   *json_str;
                 json_t *cfg, *vfs, *vfs_entry;
-
-                snprintf(cairn_cfgfile, sizeof(cairn_cfgfile),
-                         "%s/cairn.cfg", env->session_dir);
 
                 cfg = json_object();
                 json_object_set_new(cfg, "initialize", json_true());
                 json_object_set_new(cfg, "path", json_string(env->session_dir));
-                json_dump_file(cfg, cairn_cfgfile, 0);
+                json_str = json_dumps(cfg, JSON_COMPACT);
+                snprintf(cairn_cfg, sizeof(cairn_cfg), "%s", json_str);
+                free(json_str);
                 json_decref(cfg);
 
                 vfs       = json_object();
                 vfs_entry = json_object();
                 json_object_set_new(vfs_entry, "path", json_string("/build/test/cairn"));
-                json_object_set_new(vfs_entry, "config", json_string(cairn_cfgfile));
+                json_object_set_new(vfs_entry, "config", json_string(cairn_cfg));
                 json_object_set_new(vfs, "cairn", vfs_entry);
                 json_object_set_new(client_json_config, "vfs", vfs);
             }

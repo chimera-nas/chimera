@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 1992 NeXT Computer, Inc
+// SPDX-FileCopyrightText: 1992-2026 NeXT Computer, Inc
 // SPDX-License-Identifier: BSD-3-Clause
 /*
  *	Copyright (C) 1991, NeXT Computer, Inc.  All Rights Reserverd.
@@ -3934,19 +3934,12 @@ main(
 
             /* Configure demofs/cairn modules before server init */
             if (strcmp(chimera_nfs_backend, "demofs") == 0) {
-                char  demofs_cfg[512];
-                char  device_path[512];
-                int   i, fd, rc;
+                char demofs_cfg[4096];
+                char device_path[512];
+                int  i, fd, rc, off;
 
-                snprintf(demofs_cfg, sizeof(demofs_cfg), "%s/demofs.json", chimera_session_dir);
-
-                /* Create device files and config */
-                FILE *cfgf = fopen(demofs_cfg, "w");
-                if (!cfgf) {
-                    fprintf(stderr, "Failed to create demofs config\n");
-                    exit(100);
-                }
-                fprintf(cfgf, "{\"devices\":[\n");
+                /* Create device files */
+                off = snprintf(demofs_cfg, sizeof(demofs_cfg), "{\"devices\":[");
                 for (i = 0; i < 10; i++) {
                     snprintf(device_path, sizeof(device_path), "%s/device-%d.img",
                              chimera_session_dir, i);
@@ -3963,25 +3956,18 @@ main(
                         exit(100);
                     }
                     close(fd);
-                    fprintf(cfgf, "%s{\"type\":\"io_uring\",\"size\":1,\"path\":\"%s\"}",
-                            i > 0 ? ",\n" : "", device_path);
+                    off += snprintf(demofs_cfg + off, sizeof(demofs_cfg) - off,
+                                    "%s{\"type\":\"io_uring\",\"size\":1,\"path\":\"%s\"}",
+                                    i > 0 ? "," : "", device_path);
                 }
-                fprintf(cfgf, "\n]}\n");
-                fclose(cfgf);
+                snprintf(demofs_cfg + off, sizeof(demofs_cfg) - off, "]}");
 
                 chimera_server_config_add_module(chimera_server_config, "demofs", NULL, demofs_cfg);
             } else if (strcmp(chimera_nfs_backend, "cairn") == 0) {
-                char  cairn_cfg[512];
+                char cairn_cfg[4096];
 
-                snprintf(cairn_cfg, sizeof(cairn_cfg), "%s/cairn.cfg", chimera_session_dir);
-
-                FILE *cfgf = fopen(cairn_cfg, "w");
-                if (!cfgf) {
-                    fprintf(stderr, "Failed to create cairn config\n");
-                    exit(100);
-                }
-                fprintf(cfgf, "{\"initialize\":true,\"path\":\"%s\"}\n", chimera_session_dir);
-                fclose(cfgf);
+                snprintf(cairn_cfg, sizeof(cairn_cfg),
+                         "{\"initialize\":true,\"path\":\"%s\"}", chimera_session_dir);
 
                 chimera_server_config_add_module(chimera_server_config, "cairn", NULL, cairn_cfg);
             }
@@ -4108,18 +4094,23 @@ main(
             {
                 const char *module_path = json_string_value(
                     json_object_get(module_cfg, "path"));
-                const char *config_path = json_string_value(
-                    json_object_get(module_cfg, "config"));
+                json_t     *config_obj = json_object_get(module_cfg, "config");
+                char       *config_str = NULL;
+
+                if (config_obj && json_is_object(config_obj)) {
+                    config_str = json_dumps(config_obj, JSON_COMPACT);
+                }
 
                 if (module_path) {
                     chimera_client_config_add_module(chimera_config,
                                                      module_name,
                                                      module_path,
-                                                     config_path ? config_path : "");
+                                                     config_str ? config_str : "");
                     if (!quiet) {
                         prt("Chimera: added module %s at %s\n", module_name, module_path);
                     }
                 }
+                free(config_str);
             }
         }
 
