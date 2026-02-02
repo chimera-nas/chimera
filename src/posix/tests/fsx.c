@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 1992 NeXT Computer, Inc
+// SPDX-FileCopyrightText: 1992-2026 NeXT Computer, Inc
 // SPDX-License-Identifier: BSD-3-Clause
 /*
  *	Copyright (C) 1991, NeXT Computer, Inc.  All Rights Reserverd.
