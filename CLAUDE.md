@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 
 SPDX-License-Identifier: Unlicense
 -->
@@ -152,6 +152,10 @@ Chimera uses JSON configuration files. Example:
 - External dependencies are in `ext/` (libevpl, libsmb2)
 - System libraries: liburing, librdmacm, libjansson, liburcu, librocksdb
 - Optional: CUDA toolkit, FIO
+
+## Pull Requests
+
+- Do not include a "Test plan" section in PR descriptions.
 
 ## Important Notes
 

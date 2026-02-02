@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 # SPDX-License-Identifier: Unlicense
 
 name: REUSE Compliance Check
@@ -15,7 +15,9 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      
+      with:
+        fetch-depth: 0
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -23,9 +25,13 @@ jobs:
         
     - name: Install reuse tool
       run: |
-        pip install --upgrade pip
-        pip install reuse
+        pip install --upgrade pip -i http://repository.mdh.quantum.com/repository/pypi-proxy/simple/ --trusted-host repository.mdh.quantum.com
+        pip install reuse -i http://repository.mdh.quantum.com/repository/pypi-proxy/simple/ --trusted-host repository.mdh.quantum.com
         
     - name: Run REUSE lint
       run: |
         reuse lint
+
+    - name: Check copyright years
+      run: |
+        bash etc/copyright-year.sh --check --base origin/${{ github.base_ref }}
