@@ -153,6 +153,10 @@ Chimera uses JSON configuration files. Example:
 - System libraries: liburing, librdmacm, libjansson, liburcu, librocksdb
 - Optional: CUDA toolkit, FIO
 
+## Pull Requests
+
+- Do not include a "Test plan" section in PR descriptions.
+
 ## Important Notes
 
 - The project is under active development (v0.1.0)
