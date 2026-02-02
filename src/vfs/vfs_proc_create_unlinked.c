@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -50,7 +50,7 @@ chimera_vfs_create_unlinked_complete(struct chimera_vfs_request *request)
     fh_hash = chimera_vfs_hash(request->create_unlinked.r_attr.va_fh,
                                request->create_unlinked.r_attr.va_fh_len);
 
-    chimera_vfs_open_cache_acquire(
+    chimera_vfs_open_cache_insert(
         thread,
         cache,
         request->module,
@@ -59,7 +59,7 @@ chimera_vfs_create_unlinked_complete(struct chimera_vfs_request *request)
         request->create_unlinked.r_attr.va_fh_len,
         fh_hash,
         request->create_unlinked.r_vfs_private,
-        0,
+        request->create_unlinked.flags,
         chimera_vfs_create_unlinked_hdl_callback);
 } /* chimera_vfs_create_unlinked_complete */
 
