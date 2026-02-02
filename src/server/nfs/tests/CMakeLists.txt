@@ -125,7 +125,7 @@ add_libnfs_test(libnfs_nfs4_demofs_setattr libnfs_setattr -v 4 -b demofs)
 add_libnfs_test(libnfs_nfs4_demofs_statvfs libnfs_statvfs -v 4 -b demofs)
 add_libnfs_test(libnfs_nfs4_demofs_symlink libnfs_symlink -v 4 -b demofs)
 
-if (IO_URING_ENABLED)
+if (CHIMERA_VFS_IO_URING)
     add_libnfs_test(libnfs_nfs3_io_uring_create libnfs_create -v 3 -b io_uring)
     add_libnfs_test(libnfs_nfs3_io_uring_mount libnfs_mount -v 3 -b io_uring)
     add_libnfs_test(libnfs_nfs3_io_uring_link libnfs_link -v 3 -b io_uring)
