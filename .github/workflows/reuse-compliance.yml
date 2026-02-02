@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 # SPDX-License-Identifier: Unlicense
 
 name: REUSE Compliance Check
@@ -29,3 +29,7 @@ jobs:
     - name: Run REUSE lint
       run: |
         reuse lint
+
+    - name: Check copyright years
+      run: |
+        bash etc/copyright-year.sh --check --base origin/${{ github.base_ref }}

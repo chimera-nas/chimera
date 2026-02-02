@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2024 - 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2024-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: Unlicense
 
@@ -86,11 +86,21 @@ build_clang_release:
 .PHONY: build_clang
 build_clang: build_clang_debug build_clang_release
 
+BASE ?= main
+
+.PHONY: copyright
+copyright:
+	@bash etc/copyright-year.sh --base $(BASE)
+
+.PHONY: copyright-check
+copyright-check:
+	@bash etc/copyright-year.sh --check --base $(BASE)
+
 .PHONY: reuse-lint
 reuse-lint:
 	@reuse lint
 
 .PHONY: check
-check: syntax-check build_release test_release build_debug test_debug build_clang reuse-lint
+check: syntax-check build_release test_release build_debug test_debug build_clang reuse-lint copyright-check
 	@echo "All checks passed!"
 
