@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -181,6 +181,10 @@ struct chimera_vfs_thread_metrics {
 #define CHIMERA_VFS_OPEN_HANDLE_EXCLUSIVE 0x1
 #define CHIMERA_VFS_OPEN_HANDLE_PENDING   0x2
 #define CHIMERA_VFS_OPEN_HANDLE_FILE_ID   0x4
+#define CHIMERA_VFS_OPEN_HANDLE_DETACHED  0x8
+
+#define CHIMERA_VFS_ACCESS_MODE_RW        0
+#define CHIMERA_VFS_ACCESS_MODE_RO        1
 
 struct chimera_vfs_open_handle {
     struct chimera_vfs_module      *vfs_module;
@@ -188,6 +192,7 @@ struct chimera_vfs_open_handle {
     uint16_t                        fh_len;
     uint8_t                         cache_id;
     uint8_t                         flags;
+    uint8_t                         access_mode;
     uint32_t                        opencnt;
     struct chimera_vfs_request     *blocked_requests;
     uint64_t                        vfs_private;
@@ -196,7 +201,8 @@ struct chimera_vfs_open_handle {
         struct chimera_vfs_open_handle *handle);
     struct chimera_vfs_request     *request;
     struct timespec                 timestamp;
-    struct UT_hash_handle           hh_by_fh;
+    struct chimera_vfs_open_handle *bucket_next;
+    struct chimera_vfs_open_handle *bucket_prev;
     struct chimera_vfs_open_handle *prev;
     struct chimera_vfs_open_handle *next;
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE + 16];
