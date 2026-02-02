@@ -103,6 +103,7 @@ struct memfs_inode {
     uint32_t            nlink;
     uint32_t            uid;
     uint32_t            gid;
+    uint64_t            rdev;
     struct timespec     atime;
     struct timespec     mtime;
     struct timespec     ctime;
@@ -655,7 +656,7 @@ memfs_map_attrs(
         attr->va_ctime      = inode->ctime;
         attr->va_ino        = inode->inum;
         attr->va_dev        = (42UL << 32) | 42;
-        attr->va_rdev       = (42UL << 32) | 42;
+        attr->va_rdev       = inode->rdev;
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
@@ -967,7 +968,7 @@ memfs_mount(
         attr->va_ctime      = inode->ctime;
         attr->va_ino        = inode->inum;
         attr->va_dev        = (42UL << 32) | 42;
-        attr->va_rdev       = (42UL << 32) | 42;
+        attr->va_rdev       = inode->rdev;
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
@@ -1195,6 +1196,118 @@ memfs_mkdir(
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* memfs_mkdir */
+
+static void
+memfs_mknod(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct memfs_inode       *parent_inode, *inode, *existing_inode;
+    struct memfs_dirent      *dirent, *existing_dirent;
+    struct chimera_vfs_attrs *r_attr          = &request->mknod.r_attr;
+    struct chimera_vfs_attrs *r_dir_pre_attr  = &request->mknod.r_dir_pre_attr;
+    struct chimera_vfs_attrs *r_dir_post_attr = &request->mknod.r_dir_post_attr;
+    struct timespec           now;
+    uint64_t                  hash;
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    hash = request->mknod.name_hash;
+
+    /* Optimistically allocate an inode */
+    inode = memfs_inode_alloc_thread(thread);
+
+    inode->size       = 0;
+    inode->space_used = 0;
+    inode->uid        = 0;
+    inode->gid        = 0;
+    inode->nlink      = 1;
+    inode->rdev       = 0;
+    inode->atime      = now;
+    inode->mtime      = now;
+    inode->ctime      = now;
+
+    /* The mode (including file type bits S_IFCHR/S_IFBLK/S_IFSOCK/S_IFIFO)
+     * and rdev are set via set_attr by the caller */
+    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        inode->mode = request->mknod.set_attr->va_mode;
+    } else {
+        inode->mode = S_IFREG | 0644;
+    }
+
+    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
+        inode->rdev = request->mknod.set_attr->va_rdev;
+    }
+
+    memfs_apply_attrs(inode, request->mknod.set_attr);
+
+    memfs_map_attrs(shared, r_attr, inode, request->fh);
+
+    /* Optimistically allocate a dirent */
+    dirent = memfs_dirent_alloc(thread,
+                                inode->inum,
+                                inode->gen,
+                                hash,
+                                request->mknod.name,
+                                request->mknod.name_len);
+
+    parent_inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
+
+    if (unlikely(!parent_inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        memfs_inode_free(thread, inode);
+        memfs_dirent_free(thread, dirent);
+        return;
+    }
+
+    if (!S_ISDIR(parent_inode->mode)) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        memfs_inode_free(thread, inode);
+        memfs_dirent_free(thread, dirent);
+        return;
+    }
+
+    memfs_map_attrs(shared, r_dir_pre_attr, parent_inode, request->fh);
+
+    rb_tree_query_exact(
+        &parent_inode->dir.dirents,
+        hash,
+        hash,
+        existing_dirent);
+
+    if (existing_dirent) {
+
+        existing_inode = memfs_inode_get_inum(shared, existing_dirent->inum, existing_dirent->gen);
+
+        memfs_map_attrs(shared, r_attr, existing_inode, request->fh);
+        memfs_map_attrs(shared, r_dir_post_attr, parent_inode, request->fh);
+
+        pthread_mutex_unlock(&parent_inode->lock);
+        pthread_mutex_unlock(&existing_inode->lock);
+
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        memfs_inode_free(thread, inode);
+        memfs_dirent_free(thread, dirent);
+        return;
+    }
+
+    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
+
+    parent_inode->mtime = now;
+
+    memfs_map_attrs(shared, r_dir_post_attr, parent_inode, request->fh);
+
+    pthread_mutex_unlock(&parent_inode->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_mknod */
 
 static void
 memfs_remove(
@@ -2413,6 +2526,9 @@ memfs_dispatch(
             break;
         case CHIMERA_VFS_OP_MKDIR:
             memfs_mkdir(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_MKNOD:
+            memfs_mknod(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_REMOVE:
             memfs_remove(thread, shared, request, private_data);

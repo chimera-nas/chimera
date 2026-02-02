@@ -44,3 +44,9 @@ chimera_dispatch_error_link(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request,
     enum chimera_vfs_error         error_code);
+
+void
+chimera_dispatch_error_mknod(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request,
+    enum chimera_vfs_error         error_code);

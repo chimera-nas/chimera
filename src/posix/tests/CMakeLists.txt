@@ -22,6 +22,7 @@ macro(add_posix_test testname prog backend)
 endmacro()
 # List of test programs
 set(POSIX_TEST_PROGRAMS
+    test_mknod
     test_symlink
     test_link
     test_remove

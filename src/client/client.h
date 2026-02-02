@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <sys/types.h>
 #include <sys/uio.h>
 
 #include "vfs/vfs.h"
@@ -103,6 +104,21 @@ chimera_mkdir(
     const char                   *path,
     int                           path_len,
     chimera_mkdir_callback_t      callback,
+    void                         *private_data);
+
+typedef void (*chimera_mknod_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+void
+chimera_mknod(
+    struct chimera_client_thread *thread,
+    const char                   *path,
+    int                           path_len,
+    mode_t                        mode,
+    dev_t                         dev,
+    chimera_mknod_callback_t      callback,
     void                         *private_data);
 
 typedef void (*chimera_read_callback_t)(

@@ -233,6 +233,28 @@ chimera_vfs_mkdir(
     chimera_vfs_mkdir_callback_t    callback,
     void                           *private_data);
 
+typedef void (*chimera_vfs_mknod_callback_t)(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr,
+    void                     *private_data);
+
+void
+chimera_vfs_mknod(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    const char                     *name,
+    int                             namelen,
+    struct chimera_vfs_attrs       *attr,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_mknod_callback_t    callback,
+    void                           *private_data);
+
 typedef void (*chimera_vfs_remove_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *pre_attr,

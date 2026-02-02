@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: Unlicense
 
@@ -19,6 +19,18 @@ jobs:
         with:
           submodules: recursive
       
+      - name: Configure APT mirror
+        run: |
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i 's|http://archive.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+            sudo sed -i 's|http://security.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+            sudo sed -i 's/Components:.*$/Components: main universe/' /etc/apt/sources.list.d/ubuntu.sources
+            sudo sed -i 's/\s*[a-z]*-backports//' /etc/apt/sources.list.d/ubuntu.sources
+          else
+            sudo sed -i 's|http://archive.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list
+            sudo sed -i 's|http://security.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list
+          fi
+
       - name: Install dependencies
         run: |
           sudo apt-get update

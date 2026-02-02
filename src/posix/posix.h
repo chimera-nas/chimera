@@ -75,6 +75,12 @@ chimera_posix_mkdir(
     mode_t      mode);
 
 int
+chimera_posix_mknod(
+    const char *path,
+    mode_t      mode,
+    dev_t       dev);
+
+int
 chimera_posix_symlink(
     const char *target,
     const char *path);

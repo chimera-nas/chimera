@@ -152,6 +152,7 @@ struct demofs_inode {
     uint32_t             nlink;
     uint32_t             uid;
     uint32_t             gid;
+    uint64_t             rdev;
     uint64_t             atime_sec;
     uint64_t             ctime_sec;
     uint64_t             mtime_sec;
@@ -852,7 +853,7 @@ demofs_map_attrs(
         attr->va_ctime.tv_nsec = inode->ctime_nsec;
         attr->va_ino           = inode->inum;
         attr->va_dev           = (42UL << 32) | 42;
-        attr->va_rdev          = (42UL << 32) | 42;
+        attr->va_rdev          = inode->rdev;
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
@@ -1327,6 +1328,110 @@ demofs_mkdir(
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* demofs_mkdir */
+
+static void
+demofs_mknod(
+    struct demofs_thread       *thread,
+    struct demofs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct demofs_inode  *parent_inode, *inode, *existing_inode;
+    struct demofs_dirent *dirent, *existing_dirent;
+    uint64_t              hash;
+    struct timespec       now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    hash = request->mknod.name_hash;
+
+    /* Optimistically allocate an inode */
+    inode = demofs_inode_alloc_thread(thread);
+
+    inode->size       = 0;
+    inode->space_used = 0;
+    inode->uid        = 0;
+    inode->gid        = 0;
+    inode->nlink      = 1;
+    inode->rdev       = 0;
+    inode->atime_sec  = now.tv_sec;
+    inode->atime_nsec = now.tv_nsec;
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+
+    /* Set mode (including file type bits) and rdev from set_attr */
+    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        inode->mode = request->mknod.set_attr->va_mode;
+    } else {
+        inode->mode = S_IFREG | 0644;
+    }
+
+    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
+        inode->rdev = request->mknod.set_attr->va_rdev;
+    }
+
+    demofs_apply_attrs(inode, request->mknod.set_attr);
+
+    demofs_map_attrs(thread, &request->mknod.r_attr, inode);
+
+    /* Optimistically allocate a dirent */
+    dirent = demofs_dirent_alloc(thread,
+                                 inode->inum,
+                                 inode->gen,
+                                 hash,
+                                 request->mknod.name,
+                                 request->mknod.name_len);
+
+    parent_inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
+
+    if (unlikely(!parent_inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        demofs_inode_free(thread, inode);
+        demofs_dirent_free(thread, dirent);
+        return;
+    }
+
+    if (!S_ISDIR(parent_inode->mode)) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        demofs_inode_free(thread, inode);
+        demofs_dirent_free(thread, dirent);
+        return;
+    }
+
+    demofs_map_attrs(thread, &request->mknod.r_dir_pre_attr, parent_inode);
+
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
+
+    if (existing_dirent) {
+        existing_inode = demofs_inode_get_inum(shared, existing_dirent->inum, existing_dirent->gen);
+        demofs_map_attrs(thread, &request->mknod.r_attr, existing_inode);
+        demofs_map_attrs(thread, &request->mknod.r_dir_post_attr, parent_inode);
+        pthread_mutex_unlock(&existing_inode->lock);
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        demofs_inode_free(thread, inode);
+        demofs_dirent_free(thread, dirent);
+        return;
+    }
+
+    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
+
+    parent_inode->mtime_sec  = now.tv_sec;
+    parent_inode->mtime_nsec = now.tv_nsec;
+
+    demofs_map_attrs(thread, &request->mknod.r_dir_post_attr, parent_inode);
+
+    pthread_mutex_unlock(&parent_inode->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* demofs_mknod */
 
 static void
 demofs_remove(
@@ -3037,6 +3142,9 @@ demofs_dispatch(
             break;
         case CHIMERA_VFS_OP_MKDIR:
             demofs_mkdir(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_MKNOD:
+            demofs_mknod(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_REMOVE:
             demofs_remove(thread, shared, request, private_data);

@@ -16,6 +16,7 @@ add_library(chimera_vfs_nfs SHARED
     nfs3_link.c
     nfs3_lookup.c
     nfs3_mkdir.c
+    nfs3_mknod.c
     nfs3_open_at.c
     nfs3_open.c
     nfs3_read.c
@@ -33,6 +34,7 @@ add_library(chimera_vfs_nfs SHARED
     nfs4_link.c
     nfs4_lookup.c
     nfs4_mkdir.c
+    nfs4_mknod.c
     nfs4_open_at.c
     nfs4_open.c
     nfs4_read.c

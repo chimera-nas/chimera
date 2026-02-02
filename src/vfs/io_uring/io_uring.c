@@ -9,6 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/statvfs.h>
 #include <sys/eventfd.h>
@@ -923,6 +924,69 @@ chimera_io_uring_mkdir(
 } /* chimera_io_uring_mkdir */
 
 static void
+chimera_io_uring_mknod(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd, rc;
+    char                           *scratch = (char *) request->plugin_data;
+    uint32_t                        mode;
+    dev_t                           dev = 0;
+
+    --thread->inflight;
+
+    TERM_STR(fullname, request->mknod.name, request->mknod.name_len, scratch);
+
+    fd = request->mknod.handle->vfs_private;
+
+    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        mode = request->mknod.set_attr->va_mode;
+    } else {
+        mode = S_IFREG | 0644;
+    }
+
+    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
+        dev = makedev(request->mknod.set_attr->va_rdev >> 32,
+                      request->mknod.set_attr->va_rdev & 0xFFFFFFFF);
+    }
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->mknod.r_dir_pre_attr,
+                            fd);
+
+    rc = mknodat(fd, fullname, mode, dev);
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->mknod.r_dir_post_attr,
+                            fd);
+
+    if (rc < 0) {
+
+        if (errno == EEXIST) {
+            chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                                          request,
+                                          &request->mknod.r_attr,
+                                          fd,
+                                          fullname);
+        }
+
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                                  request,
+                                  &request->mknod.r_attr,
+                                  fd,
+                                  fullname);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_io_uring_mknod */
+
+static void
 chimera_io_uring_remove(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -1302,6 +1366,9 @@ chimera_io_uring_dispatch(
             break;
         case CHIMERA_VFS_OP_MKDIR:
             chimera_io_uring_mkdir(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_MKNOD:
+            chimera_io_uring_mknod(request, private_data);
             break;
         case CHIMERA_VFS_OP_READDIR:
             chimera_io_uring_readdir(request, private_data);
