@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <uthash.h>
+#include <jansson.h>
 #include <linux/version.h>
 #include "vfs/vfs_error.h"
 
@@ -36,36 +37,61 @@
 #include "common/misc.h"
 #include "common/macros.h"
 
+struct chimera_linux_shared {
+    int readdir_verifier;
+};
+
 struct chimera_linux_thread {
     struct evpl                     *evpl;
     struct chimera_linux_mount_table mount_table;
+    int                              readdir_verifier;
 };
 
 static void *
 chimera_linux_init(const char *cfgfile)
 {
-    /* We don't need any private data, but we're expected to return something */
-    return (void *) 42;
-} /* linux_init */
+    struct chimera_linux_shared *shared;
+
+    shared = calloc(1, sizeof(*shared));
+
+    if (cfgfile && cfgfile[0] != '\0') {
+        json_error_t json_error;
+        json_t      *cfg = json_loads(cfgfile, 0, &json_error);
+
+        if (cfg) {
+            json_t *verf = json_object_get(cfg, "readdir_verifier");
+
+            if (verf && json_is_boolean(verf)) {
+                shared->readdir_verifier = json_boolean_value(verf);
+            }
+
+            json_decref(cfg);
+        }
+    }
+
+    return shared;
+} /* linux_init */ /* linux_init */
 
 static void
 chimera_linux_destroy(void *private_data)
 {
-
-} /* linux_destroy */
+    free(private_data);
+} /* linux_destroy */ /* linux_destroy */
 
 static void *
 chimera_linux_thread_init(
     struct evpl *evpl,
     void        *private_data)
 {
+    struct chimera_linux_shared *shared = private_data;
     struct chimera_linux_thread *thread =
         (struct chimera_linux_thread *) calloc(1, sizeof(*thread));
 
-    thread->evpl = evpl;
+    thread->evpl             = evpl;
+    thread->readdir_verifier = shared->readdir_verifier;
 
     return thread;
-} /* linux_thread_init */
+} /* linux_thread_init */ /* linux_thread_init */
 
 static void
 chimera_linux_thread_destroy(void *private_data)
@@ -348,15 +374,35 @@ chimera_linux_readdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int                      fd, dup_fd, rc;
-    DIR                     *dir;
-    struct dirent           *dirent;
-    struct chimera_vfs_attrs vattr;
-    int                      eof = 1;
+    struct chimera_linux_thread *thread = private_data;
+    int                          fd, dup_fd, rc;
+    DIR                         *dir;
+    struct dirent               *dirent;
+    struct chimera_vfs_attrs     vattr;
+    int                          eof = 1;
 
     fd = request->readdir.handle->vfs_private;
 
     chimera_linux_debug("linux_readdir: opening %d", fd);
+
+    if (thread->readdir_verifier) {
+        struct stat st;
+
+        rc = fstat(fd, &st);
+
+        if (rc == 0) {
+            uint64_t mtime_verf = chimera_linux_mtime_to_verifier(&st);
+
+            if (request->readdir.verifier &&
+                request->readdir.verifier != mtime_verf) {
+                request->status = CHIMERA_VFS_EBADCOOKIE;
+                request->complete(request);
+                return;
+            }
+
+            request->readdir.r_verifier = mtime_verf;
+        }
+    }
 
     dup_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY);
 
@@ -424,7 +470,7 @@ chimera_linux_readdir(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* linux_readdir */
+} /* linux_readdir */ /* linux_readdir */
 
 static int
 chimera_linux_set_open_flags(uint32_t in_flags)

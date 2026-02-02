@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -99,11 +99,10 @@ libsmb2_test_init(
     config = chimera_server_config_init();
 
     if (strcmp(backend, "demofs") == 0) {
-        char    demofs_cfg[300];
+        char    demofs_cfg[4096];
         char    device_path[300];
+        char   *json_str;
         json_t *cfg, *devices, *device;
-        snprintf(demofs_cfg, sizeof(demofs_cfg), "%s/demofs.json",
-                 env->session_dir);
 
         cfg     = json_object();
         devices = json_array();
@@ -136,25 +135,27 @@ libsmb2_test_init(
         }
 
         json_object_set_new(cfg, "devices", devices);
-        json_dump_file(cfg, demofs_cfg, 0);
+        json_str = json_dumps(cfg, JSON_COMPACT);
+        snprintf(demofs_cfg, sizeof(demofs_cfg), "%s", json_str);
+        free(json_str);
         json_decref(cfg);
 
         chimera_server_config_add_module(config, "demofs", NULL, demofs_cfg);
     } else if (strcmp(backend, "cairn") == 0) {
-        char    cairn_cfgfile[300];
+        char    cairn_cfg[4096];
+        char   *json_str;
         json_t *cfg;
-
-        snprintf(cairn_cfgfile, sizeof(cairn_cfgfile), "%s/cairn.cfg",
-                 env->session_dir);
 
         cfg = json_object();
         json_object_set_new(cfg, "initialize", json_true());
         json_object_set_new(cfg, "path", json_string(env->session_dir));
-        json_dump_file(cfg, cairn_cfgfile, 0);
+        json_str = json_dumps(cfg, JSON_COMPACT);
+        snprintf(cairn_cfg, sizeof(cairn_cfg), "%s", json_str);
+        free(json_str);
         json_decref(cfg);
 
         chimera_server_config_add_module(config, "cairn", "/build/test/cairn",
-                                         cairn_cfgfile);
+                                         cairn_cfg);
     }
 
     env->server = chimera_server_init(config, env->metrics);

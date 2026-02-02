@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -48,6 +48,8 @@ chimera_vfs_error_to_nfsstat3(enum chimera_vfs_error err)
             return NFS3ERR_DQUOT;
         case CHIMERA_VFS_ESTALE:
             return NFS3ERR_STALE;
+        case CHIMERA_VFS_EBADCOOKIE:
+            return NFS3ERR_BAD_COOKIE;
         case CHIMERA_VFS_EBADF:
             return NFS3ERR_BADHANDLE;
         case CHIMERA_VFS_ENOTSUP:
@@ -104,6 +106,8 @@ nfs3_client_status_to_chimera_vfs_error(int status)
             return CHIMERA_VFS_EDQUOT;
         case NFS3ERR_STALE:
             return CHIMERA_VFS_ESTALE;
+        case NFS3ERR_BAD_COOKIE:
+            return CHIMERA_VFS_EBADCOOKIE;
         case NFS3ERR_BADHANDLE:
             return CHIMERA_VFS_EBADF;
         case NFS3ERR_NOTSUPP:

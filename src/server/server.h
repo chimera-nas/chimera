@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -101,7 +101,7 @@ chimera_server_config_add_module(
     struct chimera_server_config *config,
     const char                   *module_name,
     const char                   *module_path,
-    const char                   *config_path);
+    const char                   *config_data);
 
 void
 chimera_server_config_set_metrics_port(

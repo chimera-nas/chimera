@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -77,6 +77,7 @@ chimera_nfs4_readdir_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        cookie,
+    uint64_t                        verifier,
     uint32_t                        eof,
     struct chimera_vfs_attrs       *dir_attr,
     void                           *private_data)
@@ -85,10 +86,12 @@ chimera_nfs4_readdir_complete(
     struct READDIR4res             *res    = &req->res_compound.resarray[req->index].opreaddir;
     nfsstat4                        status = chimera_nfs4_errno_to_nfsstat4(error_code);
     struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
+    uint64_t                        cv;
 
     res->status = status;
 
-    memcpy(res->resok4.cookieverf, &cookie, sizeof(res->resok4.cookieverf));
+    cv = verifier ? verifier : cookie;
+    memcpy(res->resok4.cookieverf, &cv, sizeof(res->resok4.cookieverf));
 
     res->resok4.reply.eof     = eof;
     res->resok4.reply.entries = cursor->entries;
@@ -96,7 +99,7 @@ chimera_nfs4_readdir_complete(
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
     chimera_nfs4_compound_complete(req, status);
-} /* chimera_nfs4_readdir_complete */
+} /* chimera_nfs4_readdir_complete */ /* chimera_nfs4_readdir_complete */
 
 static void
 chimera_nfs4_readdir_open_callback(
@@ -119,11 +122,14 @@ chimera_nfs4_readdir_open_callback(
     }
     attrmask = chimera_nfs4_attr2mask(args->attr_request,
                                       args->num_attr_request);
+    uint64_t cookieverf;
+    memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
     chimera_vfs_readdir(thread->vfs_thread, &req->cred,
                         handle,
                         attrmask,
                         0,
                         args->cookie,
+                        cookieverf,
                         CHIMERA_VFS_READDIR_EMIT_DOT,
                         chimera_nfs4_readdir_callback,
                         chimera_nfs4_readdir_complete,

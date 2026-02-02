@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -181,6 +181,7 @@ chimera_vfs_find_readdir_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        cookie,
+    uint64_t                        verifier,
     uint32_t                        eof,
     struct chimera_vfs_attrs       *attr,
     void                           *private_data)
@@ -195,7 +196,7 @@ chimera_vfs_find_readdir_complete(
     chimera_vfs_find_drain(thread, find_request->find.root);
 
 
-} /* chimera_vfs_find_readdir_complete */
+} /* chimera_vfs_find_readdir_complete */ /* chimera_vfs_find_readdir_complete */
 
 static void
 chimera_vfs_find_open_callback(
@@ -220,6 +221,7 @@ chimera_vfs_find_open_callback(
         find_request->find.attr_mask,
         0,
         0,
+        0, /* verifier */
         0, /* flags: don't emit . and .. entries */
         chimera_vfs_find_readdir_callback,
         chimera_vfs_find_readdir_complete,

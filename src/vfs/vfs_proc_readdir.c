@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -54,12 +54,13 @@ chimera_vfs_readdir_complete(struct chimera_vfs_request *request)
     complete(request->status,
              request->readdir.handle,
              request->readdir.r_cookie,
+             request->readdir.r_verifier,
              request->readdir.r_eof,
              &request->readdir.r_dir_attr,
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
-} /* chimera_vfs_readdir_complete */
+} /* chimera_vfs_readdir_complete */ /* chimera_vfs_readdir_complete */
 
 
 
@@ -111,6 +112,7 @@ chimera_vfs_readdir(
     uint64_t                        attr_mask,
     uint64_t                        dir_attr_mask,
     uint64_t                        cookie,
+    uint64_t                        verifier,
     uint32_t                        flags,
     chimera_vfs_readdir_callback_t  callback,
     chimera_vfs_readdir_complete_t  complete,
@@ -126,10 +128,12 @@ chimera_vfs_readdir(
     request->readdir.handle                 = handle;
     request->readdir.attr_mask              = attr_mask;
     request->readdir.cookie                 = cookie;
+    request->readdir.verifier               = verifier;
     request->readdir.flags                  = flags;
     request->readdir.callback               = callback;
     request->readdir.r_dir_attr.va_req_mask = dir_attr_mask;
     request->readdir.r_dir_attr.va_set_mask = 0;
+    request->readdir.r_verifier             = 0;
     request->proto_callback                 = complete;
     request->proto_private_data             = private_data;
 
@@ -157,4 +161,4 @@ chimera_vfs_readdir(
     }
 
     chimera_vfs_dispatch(request);
-} /* chimera_vfs_readdir */
+} /* chimera_vfs_readdir */ /* chimera_vfs_readdir */

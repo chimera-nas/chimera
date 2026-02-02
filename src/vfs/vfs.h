@@ -235,6 +235,7 @@ typedef void (*chimera_vfs_readdir_complete_t)(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        cookie,
+    uint64_t                        verifier,
     uint32_t                        eof,
     struct chimera_vfs_attrs       *attr,
     void                           *private_data);
@@ -407,9 +408,11 @@ struct chimera_vfs_request {
         struct {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        cookie;
+            uint64_t                        verifier;
             uint64_t                        attr_mask;
             uint32_t                        flags;
             uint64_t                        r_cookie;
+            uint64_t                        r_verifier;
             uint32_t                        r_eof;
             struct chimera_vfs_attrs        r_dir_attr;
             chimera_vfs_readdir_callback_t  callback;
@@ -802,7 +805,7 @@ struct chimera_vfs_thread {
 struct chimera_vfs_module_cfg {
     char module_name[64];
     char module_path[256];
-    char config_path[256];
+    char config_data[4096];
 };
 
 struct chimera_vfs *

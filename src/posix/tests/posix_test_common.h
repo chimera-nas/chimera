@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -68,8 +68,7 @@ posix_test_configure_demofs(
     char    device_path[300];
     json_t *cfg, *devices, *device;
     int     rc;
-
-    snprintf(demofs_cfg, demofs_cfg_size, "%s/demofs.json", session_dir);
+    char   *json_str;
 
     cfg     = json_object();
     devices = json_array();
@@ -99,9 +98,11 @@ posix_test_configure_demofs(
     }
 
     json_object_set_new(cfg, "devices", devices);
-    json_dump_file(cfg, demofs_cfg, 0);
+    json_str = json_dumps(cfg, JSON_COMPACT);
+    snprintf(demofs_cfg, demofs_cfg_size, "%s", json_str);
+    free(json_str);
     json_decref(cfg);
-} // posix_test_configure_demofs
+} // posix_test_configure_demofs // posix_test_configure_demofs
 
 // Helper to configure cairn backend
 static inline void
@@ -111,15 +112,16 @@ posix_test_configure_cairn(
     size_t      cairn_cfg_size)
 {
     json_t *cfg;
-
-    snprintf(cairn_cfg, cairn_cfg_size, "%s/cairn.cfg", session_dir);
+    char   *json_str;
 
     cfg = json_object();
     json_object_set_new(cfg, "initialize", json_true());
     json_object_set_new(cfg, "path", json_string(session_dir));
-    json_dump_file(cfg, cairn_cfg, 0);
+    json_str = json_dumps(cfg, JSON_COMPACT);
+    snprintf(cairn_cfg, cairn_cfg_size, "%s", json_str);
+    free(json_str);
     json_decref(cfg);
-} // posix_test_configure_cairn
+} // posix_test_configure_cairn // posix_test_configure_cairn
 
 static inline void
 posix_test_init(
@@ -191,16 +193,16 @@ posix_test_init(
 
     if (is_nfs) {
         // NFS backend: Start server with the actual backend, then connect via NFS client
-        char config_path[300];
+        char config_data[4096];
 
         server_config = chimera_server_config_init();
 
         if (strcmp(nfs_backend_name, "demofs") == 0) {
-            posix_test_configure_demofs(env->session_dir, config_path, sizeof(config_path));
-            chimera_server_config_add_module(server_config, "demofs", NULL, config_path);
+            posix_test_configure_demofs(env->session_dir, config_data, sizeof(config_data));
+            chimera_server_config_add_module(server_config, "demofs", NULL, config_data);
         } else if (strcmp(nfs_backend_name, "cairn") == 0) {
-            posix_test_configure_cairn(env->session_dir, config_path, sizeof(config_path));
-            chimera_server_config_add_module(server_config, "cairn", NULL, config_path);
+            posix_test_configure_cairn(env->session_dir, config_data, sizeof(config_data));
+            chimera_server_config_add_module(server_config, "cairn", NULL, config_data);
         }
 
         // Enable TCP-RDMA if using RDMA backend
@@ -240,11 +242,11 @@ posix_test_init(
         client_config = chimera_client_config_init();
 
         if (strcmp(backend, "demofs") == 0) {
-            char demofs_cfg[300];
+            char demofs_cfg[4096];
             posix_test_configure_demofs(env->session_dir, demofs_cfg, sizeof(demofs_cfg));
             chimera_client_config_add_module(client_config, "demofs", "/build/test/demofs", demofs_cfg);
         } else if (strcmp(backend, "cairn") == 0) {
-            char cairn_cfg[300];
+            char cairn_cfg[4096];
             posix_test_configure_cairn(env->session_dir, cairn_cfg, sizeof(cairn_cfg));
             chimera_client_config_add_module(client_config, "cairn", "/build/test/cairn", cairn_cfg);
         }

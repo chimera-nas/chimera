@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -91,26 +91,26 @@ chimera_server_config_init(void)
     config->nfs_rdma_port = 20049;
 
     strncpy(config->modules[0].module_name, "root", sizeof(config->modules[0].module_name));
-    config->modules[0].config_path[0] = '\0';
+    config->modules[0].config_data[0] = '\0';
     config->modules[0].module_path[0] = '\0';
 
     strncpy(config->modules[1].module_name, "nfs", sizeof(config->modules[1].module_name));
-    config->modules[1].config_path[0] = '\0';
+    config->modules[1].config_data[0] = '\0';
     config->modules[1].module_path[0] = '\0';
 
     strncpy(config->modules[2].module_name, "memfs", sizeof(config->modules[2].module_name));
-    config->modules[2].config_path[0] = '\0';
+    config->modules[2].config_data[0] = '\0';
     config->modules[2].module_path[0] = '\0';
 
     strncpy(config->modules[3].module_name, "linux", sizeof(config->modules[3].module_name));
-    config->modules[3].config_path[0] = '\0';
+    config->modules[3].config_data[0] = '\0';
     config->modules[3].module_path[0] = '\0';
 
     config->num_modules = 4;
 
 #ifdef HAVE_IO_URING
     strncpy(config->modules[4].module_name, "io_uring", sizeof(config->modules[4].module_name));
-    config->modules[4].config_path[0] = '\0';
+    config->modules[4].config_data[0] = '\0';
     config->modules[4].module_path[0] = '\0';
 
     config->num_modules = 5;
@@ -231,14 +231,14 @@ chimera_server_config_add_module(
     struct chimera_server_config *config,
     const char                   *module_name,
     const char                   *module_path,
-    const char                   *config_path)
+    const char                   *config_data)
 {
     struct chimera_vfs_module_cfg *module_cfg;
 
     module_cfg = &config->modules[config->num_modules];
 
     strncpy(module_cfg->module_name, module_name, sizeof(module_cfg->module_name));
-    strncpy(module_cfg->config_path, config_path, sizeof(module_cfg->config_path));
+    strncpy(module_cfg->config_data, config_data, sizeof(module_cfg->config_data));
     if (module_path) {
         strncpy(module_cfg->module_path, module_path, sizeof(module_cfg->module_path));
     } else {
@@ -246,7 +246,7 @@ chimera_server_config_add_module(
         module_cfg->module_path[0] = '\0';
     }
     config->num_modules++;
-} /* chimera_server_config_add_module */
+} /* chimera_server_config_add_module */ /* chimera_server_config_add_module */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_metrics_port(
