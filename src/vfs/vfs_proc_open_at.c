@@ -81,7 +81,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
 
         if ((request->module->capabilities & CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED) ||
             !(request->open_at.flags &  CHIMERA_VFS_OPEN_INFERRED)) {
-            chimera_vfs_open_cache_acquire(
+            chimera_vfs_open_cache_insert(
                 thread,
                 cache,
                 request->module,
@@ -90,7 +90,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
                 request->open_at.r_attr.va_fh_len,
                 fh_hash,
                 request->open_at.r_vfs_private,
-                0,
+                request->open_at.flags,
                 chimera_vfs_open_at_hdl_callback);
         } else {
 

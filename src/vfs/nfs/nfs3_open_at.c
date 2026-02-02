@@ -7,7 +7,6 @@
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_error.h"
-#include "vfs/vfs_open_cache.h"
 
 struct chimera_nfs3_open_at_ctx {
     struct chimera_nfs_thread        *thread;
@@ -55,38 +54,18 @@ chimera_nfs3_open_at_lookup_callback(
     chimera_nfs3_unmarshall_fh(&res->resok.object, ctx->server->index, request->fh, &request->open_at.r_attr);
 
     /* Allocate open state for dirty tracking and silly rename support.
-     * Skip for:
-     * - Inferred opens (use synthetic handles which don't call close)
-     * - Files already in cache (VFS will reuse existing handle with state) */
+     * Skip for inferred opens (use synthetic handles which don't call close).
+     * Always allocate for non-inferred opens since open_at always inserts fresh. */
     if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
-        struct vfs_open_cache *cache;
-        uint64_t               fh_hash;
-        int                    in_cache;
+        state = chimera_nfs3_open_state_alloc();
 
-        cache   = request->thread->vfs->vfs_open_file_cache;
-        fh_hash = chimera_vfs_hash(request->open_at.r_attr.va_fh,
-                                   request->open_at.r_attr.va_fh_len);
-
-        in_cache = chimera_vfs_open_cache_exists(cache,
-                                                 request->open_at.r_attr.va_fh,
-                                                 request->open_at.r_attr.va_fh_len,
-                                                 fh_hash);
-
-        if (in_cache) {
-            /* File already in cache - existing handle has state, skip alloc */
-            request->open_at.r_vfs_private = 0;
-        } else {
-            /* New file - allocate state */
-            state = chimera_nfs3_open_state_alloc();
-
-            if (!state) {
-                request->status = CHIMERA_VFS_EFAULT;
-                request->complete(request);
-                return;
-            }
-
-            request->open_at.r_vfs_private = (uint64_t) state;
+        if (!state) {
+            request->status = CHIMERA_VFS_EFAULT;
+            request->complete(request);
+            return;
         }
+
+        request->open_at.r_vfs_private = (uint64_t) state;
     } else {
         request->open_at.r_vfs_private = 0;
     }
@@ -134,38 +113,18 @@ chimera_nfs3_open_at_create_callback(
     chimera_nfs3_get_wcc_data(&request->open_at.r_dir_pre_attr, &request->open_at.r_dir_post_attr, &res->resok.dir_wcc);
 
     /* Allocate open state for dirty tracking and silly rename support.
-     * Skip for:
-     * - Inferred opens (use synthetic handles which don't call close)
-     * - Files already in cache (VFS will reuse existing handle with state) */
+     * Skip for inferred opens (use synthetic handles which don't call close).
+     * Always allocate for non-inferred opens since open_at always inserts fresh. */
     if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
-        struct vfs_open_cache *cache;
-        uint64_t               fh_hash;
-        int                    in_cache;
+        state = chimera_nfs3_open_state_alloc();
 
-        cache   = request->thread->vfs->vfs_open_file_cache;
-        fh_hash = chimera_vfs_hash(request->open_at.r_attr.va_fh,
-                                   request->open_at.r_attr.va_fh_len);
-
-        in_cache = chimera_vfs_open_cache_exists(cache,
-                                                 request->open_at.r_attr.va_fh,
-                                                 request->open_at.r_attr.va_fh_len,
-                                                 fh_hash);
-
-        if (in_cache) {
-            /* File already in cache - existing handle has state, skip alloc */
-            request->open_at.r_vfs_private = 0;
-        } else {
-            /* New file - allocate state */
-            state = chimera_nfs3_open_state_alloc();
-
-            if (!state) {
-                request->status = CHIMERA_VFS_EFAULT;
-                request->complete(request);
-                return;
-            }
-
-            request->open_at.r_vfs_private = (uint64_t) state;
+        if (!state) {
+            request->status = CHIMERA_VFS_EFAULT;
+            request->complete(request);
+            return;
         }
+
+        request->open_at.r_vfs_private = (uint64_t) state;
     } else {
         request->open_at.r_vfs_private = 0;
     }

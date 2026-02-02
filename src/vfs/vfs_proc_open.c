@@ -113,6 +113,7 @@ chimera_vfs_open(
             fhlen,
             fh_hash,
             UINT64_MAX,
+            request->open.flags,
             0,
             chimera_vfs_open_hdl_callback);
 
