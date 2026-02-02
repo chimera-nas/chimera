@@ -24,6 +24,7 @@ jobs:
           if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
             sudo sed -i 's|http://archive.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
             sudo sed -i 's|http://security.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+            sudo sed -i 's/Components:.*$/Components: main universe/' /etc/apt/sources.list.d/ubuntu.sources
           else
             sudo sed -i 's|http://archive.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list
             sudo sed -i 's|http://security.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list
