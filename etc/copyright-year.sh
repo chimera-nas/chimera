@@ -35,10 +35,8 @@ CURRENT_YEAR=$(date +%Y)
 
 # Get list of changed files relative to base branch, plus uncommitted changes
 # Exclude deleted files with --diff-filter=d
-MERGE_BASE=$(git merge-base HEAD "$BASE" 2>/dev/null || echo HEAD)
-
 {
-    git diff --name-only --diff-filter=d "$MERGE_BASE"
+    git diff --name-only --diff-filter=d --merge-base "$BASE"
     git diff --name-only --diff-filter=d
     git diff --name-only --diff-filter=d --cached
 } | sort -u | while IFS= read -r file; do
