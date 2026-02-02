@@ -18,6 +18,7 @@
 #include <jansson.h>
 #include "server/server.h"
 #include "common/logging.h"
+#include "common/test_users.h"
 #include "prometheus-c.h"
 struct test_env {
     struct nfs_context        *nfs;
@@ -160,6 +161,8 @@ libnfs_test_init(
     chimera_server_create_export(env->server, "/share", "/share");
 
     chimera_server_start(env->server);
+
+    chimera_test_add_server_users(env->server);
 
     env->nfs = nfs_init_context();
 

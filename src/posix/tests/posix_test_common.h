@@ -13,9 +13,9 @@
 #include <errno.h>
 #include <jansson.h>
 #include "posix/posix.h"
-#include "client/client.h"
 #include "server/server.h"
 #include "common/logging.h"
+#include "common/test_users.h"
 #include "prometheus-c.h"
 
 struct posix_test_env {
@@ -130,7 +130,6 @@ posix_test_init(
     int                           opt;
     extern char                  *optarg;
     const char                   *backend = "memfs";
-    struct chimera_client_config *client_config;
     struct chimera_server_config *server_config;
     struct timespec               tv;
     int                           is_nfs;
@@ -233,26 +232,51 @@ posix_test_init(
 
         chimera_server_start(env->server);
 
-        // Initialize the POSIX client (NFS client module is already registered by default)
-        client_config = chimera_client_config_init();
-    } else {
-        // Direct backend: No server needed
-        client_config = chimera_client_config_init();
-
-        if (strcmp(backend, "demofs") == 0) {
-            char demofs_cfg[300];
-            posix_test_configure_demofs(env->session_dir, demofs_cfg, sizeof(demofs_cfg));
-            chimera_client_config_add_module(client_config, "demofs", "/build/test/demofs", demofs_cfg);
-        } else if (strcmp(backend, "cairn") == 0) {
-            char cairn_cfg[300];
-            posix_test_configure_cairn(env->session_dir, cairn_cfg, sizeof(cairn_cfg));
-            chimera_client_config_add_module(client_config, "cairn", "/build/test/cairn", cairn_cfg);
-        }
+        chimera_test_add_server_users(env->server);
     }
 
-    struct chimera_vfs_cred root_cred;
-    chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
-    env->posix = chimera_posix_init(client_config, &root_cred, env->metrics);
+    {
+        char    posix_json_path[300];
+        json_t *posix_json_root, *posix_json_config;
+
+        posix_json_root   = json_object();
+        posix_json_config = json_object();
+
+        if (!is_nfs) {
+            if (strcmp(backend, "demofs") == 0) {
+                char    demofs_cfg[300];
+                json_t *vfs, *vfs_entry;
+                posix_test_configure_demofs(env->session_dir, demofs_cfg, sizeof(demofs_cfg));
+                vfs       = json_object();
+                vfs_entry = json_object();
+                json_object_set_new(vfs_entry, "path", json_string("/build/test/demofs"));
+                json_object_set_new(vfs_entry, "config", json_string(demofs_cfg));
+                json_object_set_new(vfs, "demofs", vfs_entry);
+                json_object_set_new(posix_json_config, "vfs", vfs);
+            } else if (strcmp(backend, "cairn") == 0) {
+                char    cairn_cfg[300];
+                json_t *vfs, *vfs_entry;
+                posix_test_configure_cairn(env->session_dir, cairn_cfg, sizeof(cairn_cfg));
+                vfs       = json_object();
+                vfs_entry = json_object();
+                json_object_set_new(vfs_entry, "path", json_string("/build/test/cairn"));
+                json_object_set_new(vfs_entry, "config", json_string(cairn_cfg));
+                json_object_set_new(vfs, "cairn", vfs_entry);
+                json_object_set_new(posix_json_config, "vfs", vfs);
+            }
+        }
+
+        json_object_set_new(posix_json_root, "config", posix_json_config);
+        chimera_test_write_users_json(posix_json_root);
+
+        snprintf(posix_json_path, sizeof(posix_json_path), "%s/posix.json", env->session_dir);
+        json_dump_file(posix_json_root, posix_json_path, 0);
+        json_decref(posix_json_root);
+
+        struct chimera_vfs_cred root_cred;
+        chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+        env->posix = chimera_posix_init_json(posix_json_path, &root_cred, env->metrics);
+    }
 
     if (!env->posix) {
         fprintf(stderr, "Failed to initialize POSIX client\n");

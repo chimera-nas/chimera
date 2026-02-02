@@ -570,3 +570,19 @@ chimera_server_destroy(struct chimera_server *server)
     free((void *) server->config);
     free(server);
 } /* chimera_server_destroy */
+
+SYMBOL_EXPORT int
+chimera_server_add_user(
+    struct chimera_server *server,
+    const char            *username,
+    const char            *password,
+    const char            *smbpasswd,
+    uint32_t               uid,
+    uint32_t               gid,
+    uint32_t               ngids,
+    const uint32_t        *gids,
+    int                    pinned)
+{
+    return chimera_vfs_add_user(server->vfs, username, password, smbpasswd,
+                                uid, gid, ngids, gids, pinned);
+} /* chimera_server_add_user */

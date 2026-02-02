@@ -6,6 +6,7 @@
 #include "common/logging.h"
 #include "prometheus-c.h"
 #include "server/server.h"
+#include "common/test_users.h"
 #include "smb2/smb2.h"
 #include "smb2/libsmb2.h"
 #include <errno.h>
@@ -179,6 +180,8 @@ libsmb2_test_init(
     }
 
     chimera_server_start(env->server);
+
+    chimera_test_add_server_users(env->server);
 
     chimera_server_create_share(env->server, "share", "share");
 

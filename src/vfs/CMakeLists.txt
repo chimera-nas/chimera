@@ -52,3 +52,5 @@ endif()
 if (CAIRN_ENABLED)
     target_link_libraries(chimera_vfs chimera_vfs_cairn)
 endif()
+
+add_subdirectory(tests)

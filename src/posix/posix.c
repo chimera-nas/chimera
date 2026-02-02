@@ -182,6 +182,100 @@ chimera_posix_init(
     return posix;
 } /* chimera_posix_init */
 
+SYMBOL_EXPORT struct chimera_posix_client *
+chimera_posix_init_json(
+    const char                    *config_path,
+    const struct chimera_vfs_cred *cred,
+    struct prometheus_metrics     *metrics)
+{
+    struct chimera_posix_client *posix;
+
+    if (chimera_posix_global) {
+        return chimera_posix_global;
+    }
+
+    posix = calloc(1, sizeof(*posix));
+
+    if (!posix) {
+        return NULL;
+    }
+
+    posix->owns_config = 0;
+
+    posix->client = chimera_client_init_json(config_path, cred, metrics);
+
+    if (!posix->client) {
+        free(posix);
+        return NULL;
+    }
+
+    posix->nworkers = posix->client->config->core_threads;
+    posix->workers  = calloc(posix->nworkers, sizeof(*posix->workers));
+
+    if (!posix->workers) {
+        chimera_destroy(posix->client);
+        free(posix);
+        return NULL;
+    }
+
+    posix->max_fds = posix->client->config->max_fds;
+    posix->fds     = calloc(posix->max_fds, sizeof(*posix->fds));
+
+    if (!posix->fds) {
+        free(posix->workers);
+        chimera_destroy(posix->client);
+        free(posix);
+        return NULL;
+    }
+
+    for (int i = 0; i < posix->max_fds; i++) {
+        pthread_mutex_init(&posix->fds[i].lock, NULL);
+        pthread_cond_init(&posix->fds[i].cond, NULL);
+        posix->fds[i].handle        = NULL;
+        posix->fds[i].offset        = 0;
+        posix->fds[i].flags         = CHIMERA_POSIX_FD_CLOSED;
+        posix->fds[i].refcnt        = 0;
+        posix->fds[i].io_waiters    = 0;
+        posix->fds[i].pending_close = 0;
+        posix->fds[i].close_waiters = 0;
+
+        if (i >= 3) {
+            posix->fds[i].next = posix->free_list;
+            posix->free_list   = &posix->fds[i];
+        } else {
+            posix->fds[i].next = NULL;
+        }
+    }
+
+    pthread_mutex_init(&posix->fd_lock, NULL);
+    atomic_init(&posix->next_worker, 0);
+    atomic_init(&posix->init_cursor, 0);
+
+    posix->pool = evpl_threadpool_create(
+        NULL,
+        posix->nworkers,
+        chimera_posix_worker_init,
+        chimera_posix_worker_shutdown,
+        posix);
+
+    if (!posix->pool) {
+        for (int i = 0; i < posix->max_fds; i++) {
+            pthread_mutex_destroy(&posix->fds[i].lock);
+            pthread_cond_destroy(&posix->fds[i].cond);
+        }
+        free(posix->fds);
+        pthread_mutex_destroy(&posix->fd_lock);
+        free(posix->workers);
+        chimera_destroy(posix->client);
+        free(posix);
+        return NULL;
+    }
+
+    chimera_posix_global = posix;
+
+    return posix;
+} /* chimera_posix_init_json */
+
 SYMBOL_EXPORT void
 chimera_posix_shutdown(void)
 {

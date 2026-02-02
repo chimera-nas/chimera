@@ -35,6 +35,24 @@ chimera_client_init(
     const struct chimera_vfs_cred      *cred,
     struct prometheus_metrics          *metrics);
 
+struct chimera_client *
+chimera_client_init_json(
+    const char                    *config_path,
+    const struct chimera_vfs_cred *cred,
+    struct prometheus_metrics     *metrics);
+
+int
+chimera_client_add_user(
+    struct chimera_client *client,
+    const char            *username,
+    const char            *password,
+    const char            *smbpasswd,
+    uint32_t               uid,
+    uint32_t               gid,
+    uint32_t               ngids,
+    const uint32_t        *gids,
+    int                    pinned);
+
 struct chimera_client_thread *
 chimera_client_thread_init(
     struct evpl           *evpl,

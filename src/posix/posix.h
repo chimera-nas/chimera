@@ -26,6 +26,12 @@ chimera_posix_init(
     const struct chimera_vfs_cred      *cred,
     struct prometheus_metrics          *metrics);
 
+struct chimera_posix_client *
+chimera_posix_init_json(
+    const char                    *config_path,
+    const struct chimera_vfs_cred *cred,
+    struct prometheus_metrics     *metrics);
+
 void
 chimera_posix_shutdown(
     void);
