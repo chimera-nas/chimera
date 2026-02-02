@@ -31,5 +31,6 @@ enum chimera_vfs_error {
     CHIMERA_VFS_ENOTSUP      = 95,     /* Operation not supported */
     CHIMERA_VFS_EDQUOT       = 122,    /* Quota exceeded */
     CHIMERA_VFS_ESTALE       = 116,    /* Stale file handle */
+    CHIMERA_VFS_EBADCOOKIE   = 200,    /* Bad readdir cookie/verifier */
     CHIMERA_VFS_UNSET        = 100000  /* Unset error code */
 };

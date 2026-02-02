@@ -4,8 +4,6 @@
 
 set(FIO_TEST_BINARY ${CMAKE_CURRENT_BINARY_DIR})
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/demofs_config.json ${CMAKE_CURRENT_BINARY_DIR}/demofs_config.json)
-
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/memfs_basic.fio ${CMAKE_CURRENT_BINARY_DIR}/memfs_basic.fio)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/demofs_basic.fio ${CMAKE_CURRENT_BINARY_DIR}/demofs_basic.fio)
 

@@ -92,34 +92,30 @@ generate_config() {
             mount_path="/"
             ;;
         demofs)
-            # Create demofs devices and config
-            DEMOFS_CFG="${SESSION_DIR}/demofs.json"
-            echo '{"devices":[' > "$DEMOFS_CFG"
+            # Create demofs devices and build inline config
+            DEVICES_JSON=""
             for i in $(seq 0 9); do
                 DEVICE_PATH="${SESSION_DIR}/device-${i}.img"
                 truncate -s 256G "$DEVICE_PATH"
                 if [ $i -gt 0 ]; then
-                    echo "," >> "$DEMOFS_CFG"
+                    DEVICES_JSON="${DEVICES_JSON},"
                 fi
-                echo "{\"type\":\"io_uring\",\"size\":1,\"path\":\"$DEVICE_PATH\"}" >> "$DEMOFS_CFG"
+                DEVICES_JSON="${DEVICES_JSON}{\"type\":\"io_uring\",\"size\":1,\"path\":\"$DEVICE_PATH\"}"
             done
-            echo ']}'  >> "$DEMOFS_CFG"
             mount_path="/"
             modules_section="\"modules\": {
         \"demofs\": {
             \"path\": \"/build/test/demofs\",
-            \"config\": \"$DEMOFS_CFG\"
+            \"config\": {\"devices\":[$DEVICES_JSON]}
         }
     },"
             ;;
         cairn)
-            CAIRN_CFG="${SESSION_DIR}/cairn.json"
-            echo "{\"initialize\":true,\"path\":\"$SESSION_DIR\"}" > "$CAIRN_CFG"
             mount_path="/"
             modules_section="\"modules\": {
         \"cairn\": {
             \"path\": \"/build/test/cairn\",
-            \"config\": \"$CAIRN_CFG\"
+            \"config\": {\"initialize\":true,\"path\":\"$SESSION_DIR\"}
         }
     },"
             ;;

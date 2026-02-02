@@ -3,7 +3,15 @@
         {
             "module": "demofs",
             "module_path": "${CMAKE_BINARY_DIR}/src/vfs/demofs/libchimera_vfs_demofs.so",
-            "config_path": "${FIO_TEST_BINARY}/demofs_config.json"
+            "config": {
+                "devices": [
+                    {
+                        "type": "io_uring",
+                        "size": 1073741824,
+                        "path": "${FIO_TEST_BINARY}/demofs_device_0.img"
+                    }
+                ]
+            }
         }
     ],
     "mounts": [

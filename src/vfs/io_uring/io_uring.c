@@ -20,6 +20,7 @@
 #include <liburing.h>
 #include <uthash.h>
 #include <utlist.h>
+#include <jansson.h>
 #include <linux/version.h>
 
 #include "vfs/vfs_error.h"
@@ -78,6 +79,7 @@ chimera_io_uring_dispatch(
 
 struct chimera_io_uring_shared {
     struct io_uring ring;
+    int             readdir_verifier;
 };
 
 struct chimera_io_uring_thread {
@@ -89,6 +91,7 @@ struct chimera_io_uring_thread {
     uint64_t                         max_inflight;
     struct chimera_vfs_request      *pending_requests;
     struct chimera_linux_mount_table mount_table;
+    int                              readdir_verifier;
 };
 
 static void *
@@ -109,8 +112,23 @@ chimera_io_uring_init(const char *cfgfile)
         return NULL;
     }
 
+    if (cfgfile && cfgfile[0] != '\0') {
+        json_error_t json_error;
+        json_t      *cfg = json_loads(cfgfile, 0, &json_error);
+
+        if (cfg) {
+            json_t *verf = json_object_get(cfg, "readdir_verifier");
+
+            if (verf && json_is_boolean(verf)) {
+                shared->readdir_verifier = json_boolean_value(verf);
+            }
+
+            json_decref(cfg);
+        }
+    }
+
     return shared;
-} /* io_uring_init */
+} /* io_uring_init */ /* io_uring_init */
 
 static void
 chimera_io_uring_destroy(void *private_data)
@@ -396,7 +414,8 @@ chimera_io_uring_thread_init(
 
     thread = calloc(1, sizeof(*thread));
 
-    thread->evpl = evpl;
+    thread->evpl             = evpl;
+    thread->readdir_verifier = shared->readdir_verifier;
 
     // Set up single issuer mode
     params.flags  = IORING_SETUP_SINGLE_ISSUER;
@@ -423,7 +442,7 @@ chimera_io_uring_thread_init(
                        thread);
 
     return thread;
-} /* io_uring_thread_init */
+} /* io_uring_thread_init */ /* io_uring_thread_init */
 
 static void
 chimera_io_uring_thread_destroy(void *private_data)
@@ -711,6 +730,25 @@ chimera_io_uring_readdir(
 
     fd = request->readdir.handle->vfs_private;
 
+    if (thread->readdir_verifier) {
+        struct stat st;
+
+        rc = fstat(fd, &st);
+
+        if (rc == 0) {
+            uint64_t mtime_verf = chimera_linux_mtime_to_verifier(&st);
+
+            if (request->readdir.verifier &&
+                request->readdir.verifier != mtime_verf) {
+                request->status = CHIMERA_VFS_EBADCOOKIE;
+                request->complete(request);
+                return;
+            }
+
+            request->readdir.r_verifier = mtime_verf;
+        }
+    }
+
     dup_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY);
 
     if (dup_fd < 0) {
@@ -776,7 +814,7 @@ chimera_io_uring_readdir(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* io_uring_readdir */
+} /* io_uring_readdir */ /* io_uring_readdir */
 
 static void
 chimera_io_uring_open(

@@ -27,7 +27,7 @@ chimera_client_config_add_module(
     struct chimera_client_config *config,
     const char                   *module_name,
     const char                   *module_path,
-    const char                   *config_path);
+    const char                   *config_data);
 
 struct chimera_client *
 chimera_client_init(

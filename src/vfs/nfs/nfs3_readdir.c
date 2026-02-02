@@ -45,6 +45,8 @@ chimera_nfs3_readdir_callback(
         chimera_nfs3_unmarshall_attrs(&res->resok.dir_attributes.attributes, &request->readdir.r_dir_attr);
     }
 
+    memcpy(&request->readdir.r_verifier, res->resok.cookieverf, sizeof(request->readdir.r_verifier));
+
     ctx = request->plugin_data;
 
     entry = res->resok.reply.entries;
@@ -115,7 +117,7 @@ chimera_nfs3_readdir(
     args.dircount      = 1024;
     args.maxcount      = 1024;
 
-    memset(args.cookieverf, 0, sizeof(args.cookieverf));
+    memcpy(args.cookieverf, &request->readdir.verifier, sizeof(args.cookieverf));
 
     ctx         = request->plugin_data;
     ctx->server = server_thread->server;
