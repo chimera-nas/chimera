@@ -192,3 +192,15 @@ chimera_server_start(
 void
 chimera_server_destroy(
     struct chimera_server *server);
+
+int
+chimera_server_add_user(
+    struct chimera_server *server,
+    const char            *username,
+    const char            *password,
+    const char            *smbpasswd,
+    uint32_t               uid,
+    uint32_t               gid,
+    uint32_t               ngids,
+    const uint32_t        *gids,
+    int                    pinned);

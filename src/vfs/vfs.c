@@ -20,6 +20,7 @@
 #include "vfs/vfs_dump.h"
 #include "vfs/vfs_name_cache.h"
 #include "vfs/vfs_attr_cache.h"
+#include "vfs/vfs_user_cache.h"
 #include "vfs/vfs_mount_table.h"
 #include "vfs/memfs/memfs.h"
 #include "vfs/linux/linux.h"
@@ -347,6 +348,8 @@ chimera_vfs_init(
     vfs->vfs_name_cache = chimera_vfs_name_cache_create(8, 4, 2, cache_ttl, metrics);
     vfs->vfs_attr_cache = chimera_vfs_attr_cache_create(8, 4, 2, cache_ttl, metrics);
 
+    vfs->vfs_user_cache = chimera_vfs_user_cache_create(8192, 600);
+
     /* Register the root pseudo-filesystem module */
     chimera_vfs_register(vfs, &vfs_root, NULL);
     /* Create the root mount entry in the mount table */
@@ -456,6 +459,10 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
         }
 
         module->destroy(vfs->module_private[i]);
+    }
+
+    if (vfs->vfs_user_cache) {
+        chimera_vfs_user_cache_destroy(vfs->vfs_user_cache);
     }
 
     if (vfs->vfs_name_cache) {
@@ -669,3 +676,45 @@ chimera_vfs_get_root_fh(
 {
     chimera_vfs_root_get_fh(fh, fh_len);
 } /* chimera_vfs_get_root_fh */
+
+SYMBOL_EXPORT int
+chimera_vfs_add_user(
+    struct chimera_vfs *vfs,
+    const char         *username,
+    const char         *password,
+    const char         *smbpasswd,
+    uint32_t            uid,
+    uint32_t            gid,
+    uint32_t            ngids,
+    const uint32_t     *gids,
+    int                 pinned)
+{
+    return chimera_vfs_user_cache_add(vfs->vfs_user_cache,
+                                      username, password, smbpasswd,
+                                      uid, gid, ngids, gids, pinned);
+} /* chimera_vfs_add_user */
+
+SYMBOL_EXPORT int
+chimera_vfs_remove_user(
+    struct chimera_vfs *vfs,
+    const char         *username)
+{
+    return chimera_vfs_user_cache_remove(vfs->vfs_user_cache, username);
+} /* chimera_vfs_remove_user */
+
+SYMBOL_EXPORT const struct chimera_vfs_user *
+chimera_vfs_lookup_user_by_name(
+    struct chimera_vfs *vfs,
+    const char         *username)
+{
+    return chimera_vfs_user_cache_lookup_by_name(vfs->vfs_user_cache, username);
+} /* chimera_vfs_lookup_user_by_name */
+
+SYMBOL_EXPORT int
+chimera_vfs_user_is_member(
+    struct chimera_vfs *vfs,
+    uint32_t            uid,
+    uint32_t            gid)
+{
+    return chimera_vfs_user_cache_is_member(vfs->vfs_user_cache, uid, gid);
+} /* chimera_vfs_user_is_member */

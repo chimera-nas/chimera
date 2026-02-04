@@ -19,6 +19,8 @@
 struct evpl;
 
 struct chimera_vfs;
+struct chimera_vfs_user;
+struct chimera_vfs_user_cache;
 struct prometheus_metrics;
 
 #define CHIMERA_VFS_ATTR_DEV             (1UL << 0)
@@ -778,6 +780,7 @@ struct chimera_vfs {
     struct vfs_open_cache                *vfs_open_file_cache;
     struct chimera_vfs_name_cache        *vfs_name_cache;
     struct chimera_vfs_attr_cache        *vfs_attr_cache;
+    struct chimera_vfs_user_cache        *vfs_user_cache;
     struct chimera_vfs_mount_table       *mount_table;
     int                                   num_delegation_threads;
     struct chimera_vfs_delegation_thread *delegation_threads;
@@ -849,6 +852,34 @@ void
 chimera_vfs_thread_drain(
     struct chimera_vfs_thread *thread);
 
+
+int
+chimera_vfs_add_user(
+    struct chimera_vfs *vfs,
+    const char         *username,
+    const char         *password,
+    const char         *smbpasswd,
+    uint32_t            uid,
+    uint32_t            gid,
+    uint32_t            ngids,
+    const uint32_t     *gids,
+    int                 pinned);
+
+int
+chimera_vfs_remove_user(
+    struct chimera_vfs *vfs,
+    const char         *username);
+
+const struct chimera_vfs_user *
+chimera_vfs_lookup_user_by_name(
+    struct chimera_vfs *vfs,
+    const char         *username);
+
+int
+chimera_vfs_user_is_member(
+    struct chimera_vfs *vfs,
+    uint32_t            uid,
+    uint32_t            gid);
 void
 chimera_vfs_watchdog(
     struct chimera_vfs_thread *thread);

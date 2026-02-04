@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
@@ -52,3 +52,5 @@ endif()
 if (CAIRN_ENABLED)
     target_link_libraries(chimera_vfs chimera_vfs_cairn)
 endif()
+
+add_subdirectory(tests)

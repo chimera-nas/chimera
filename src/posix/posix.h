@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -25,6 +25,12 @@ chimera_posix_init(
     const struct chimera_client_config *config,
     const struct chimera_vfs_cred      *cred,
     struct prometheus_metrics          *metrics);
+
+struct chimera_posix_client *
+chimera_posix_init_json(
+    const char                    *config_path,
+    const struct chimera_vfs_cred *cred,
+    struct prometheus_metrics     *metrics);
 
 void
 chimera_posix_shutdown(

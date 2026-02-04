@@ -10,6 +10,7 @@
 #include "evpl/evpl.h"
 
 #include "server/server.h"
+#include "vfs/vfs_cred.h"
 #include "server/server_internal.h"
 #include "common/logging.h"
 #include "metrics/metrics.h"
@@ -186,6 +187,46 @@ main(
     }
 
     server = chimera_server_init(server_config, chimera_metrics_get(metrics));
+
+    json_t *users = json_object_get(config, "users");
+    if (users && json_is_array(users)) {
+        json_t *user_entry;
+        size_t  user_idx;
+
+        json_array_foreach(users, user_idx, user_entry)
+        {
+            const char *username  = json_string_value(json_object_get(user_entry, "username"));
+            const char *password  = json_string_value(json_object_get(user_entry, "password"));
+            const char *smbpasswd = json_string_value(json_object_get(user_entry, "smbpasswd"));
+            int         uid       = json_integer_value(json_object_get(user_entry, "uid"));
+            int         gid       = json_integer_value(json_object_get(user_entry, "gid"));
+            uint32_t    user_gids[CHIMERA_VFS_CRED_MAX_GIDS];
+            uint32_t    ngids      = 0;
+            json_t     *gids_array = json_object_get(user_entry, "gids");
+
+            if (gids_array && json_is_array(gids_array)) {
+                json_t *gid_val;
+                size_t  gid_idx;
+                json_array_foreach(gids_array, gid_idx, gid_val)
+                {
+                    if (ngids < CHIMERA_VFS_CRED_MAX_GIDS) {
+                        user_gids[ngids++] = json_integer_value(gid_val);
+                    }
+                }
+            }
+
+            if (!username) {
+                chimera_server_error("User entry missing username, skipping");
+                continue;
+            }
+
+            chimera_server_info("Adding user %s (uid=%d, gid=%d)", username, uid, gid);
+            chimera_server_add_user(server, username,
+                                    password ? password : "",
+                                    smbpasswd ? smbpasswd : "",
+                                    uid, gid, ngids, user_gids, 1);
+        }
+    }
 
     mounts = json_object_get(config, "mounts");
 

@@ -15,6 +15,7 @@
 #include "client/client.h"
 #include "server/server.h"
 #include "common/logging.h"
+#include "common/test_users.h"
 #include "prometheus-c.h"
 #include "evpl/evpl.h"
 
@@ -42,7 +43,6 @@ client_test_init(
     int                           nfsvers = 0;
     const char                   *backend = "memfs";
     struct chimera_server_config *server_config;
-    struct chimera_client_config *client_config;
     struct timespec               tv;
 
     env->use_nfs = 0;
@@ -174,6 +174,8 @@ client_test_init(
         chimera_server_create_export(env->server, "/share", "/share");
 
         chimera_server_start(env->server);
+
+        chimera_test_add_server_users(env->server);
     } else {
         env->server = NULL;
     }
@@ -182,69 +184,92 @@ client_test_init(
 
     env->evpl = evpl_create(NULL);
 
-    client_config = chimera_client_config_init();
+    {
+        char    client_json_path[300];
+        json_t *client_json_root, *client_json_config;
 
-    if (!env->use_nfs) {
-        if (strcmp(backend, "demofs") == 0) {
-            char    demofs_cfg[4096];
-            char    device_path[300];
-            char   *json_str;
-            json_t *cfg, *devices, *device;
+        client_json_root   = json_object();
+        client_json_config = json_object();
 
-            cfg     = json_object();
-            devices = json_array();
+        if (!env->use_nfs) {
+            if (strcmp(backend, "demofs") == 0) {
+                char    demofs_cfg[4096];
+                char    device_path[300];
+                char   *json_str;
+                json_t *cfg, *devices, *device, *vfs, *vfs_entry;
 
-            for (int i = 0; i < 10; ++i) {
-                device = json_object();
-                snprintf(device_path, sizeof(device_path), "%s/device-%d.img", env->session_dir, i);
-                json_object_set_new(device, "type", json_string("io_uring"));
-                json_object_set_new(device, "size", json_integer(1));
-                json_object_set_new(device, "path", json_string(device_path));
-                json_array_append_new(devices, device);
+                cfg     = json_object();
+                devices = json_array();
 
-                int fd = open(device_path, O_CREAT | O_TRUNC | O_RDWR, 0644);
-                if (fd < 0) {
-                    fprintf(stderr, "Failed to create device %s: %s\n", device_path, strerror(errno));
-                    exit(EXIT_FAILURE);
+                for (int i = 0; i < 10; ++i) {
+                    device = json_object();
+                    snprintf(device_path, sizeof(device_path), "%s/device-%d.img", env->session_dir, i);
+                    json_object_set_new(device, "type", json_string("io_uring"));
+                    json_object_set_new(device, "size", json_integer(1));
+                    json_object_set_new(device, "path", json_string(device_path));
+                    json_array_append_new(devices, device);
+
+                    int fd = open(device_path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+                    if (fd < 0) {
+                        fprintf(stderr, "Failed to create device %s: %s\n", device_path, strerror(errno));
+                        exit(EXIT_FAILURE);
+                    }
+
+                    rc = ftruncate(fd, 1024 * 1024 * 1024);
+
+                    if (rc < 0) {
+                        fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));
+                        exit(EXIT_FAILURE);
+                    }
+
+                    close(fd);
                 }
 
-                rc = ftruncate(fd, 1024 * 1024 * 1024);
+                json_object_set_new(cfg, "devices", devices);
+                json_str = json_dumps(cfg, JSON_COMPACT);
+                snprintf(demofs_cfg, sizeof(demofs_cfg), "%s", json_str);
+                free(json_str);
+                json_decref(cfg);
 
-                if (rc < 0) {
-                    fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));
-                    exit(EXIT_FAILURE);
-                }
+                vfs       = json_object();
+                vfs_entry = json_object();
+                json_object_set_new(vfs_entry, "path", json_string("/build/test/demofs"));
+                json_object_set_new(vfs_entry, "config", json_string(demofs_cfg));
+                json_object_set_new(vfs, "demofs", vfs_entry);
+                json_object_set_new(client_json_config, "vfs", vfs);
+            } else if (strcmp(backend, "cairn") == 0) {
+                char    cairn_cfg[4096];
+                char   *json_str;
+                json_t *cfg, *vfs, *vfs_entry;
 
-                close(fd);
+                cfg = json_object();
+                json_object_set_new(cfg, "initialize", json_true());
+                json_object_set_new(cfg, "path", json_string(env->session_dir));
+                json_str = json_dumps(cfg, JSON_COMPACT);
+                snprintf(cairn_cfg, sizeof(cairn_cfg), "%s", json_str);
+                free(json_str);
+                json_decref(cfg);
+
+                vfs       = json_object();
+                vfs_entry = json_object();
+                json_object_set_new(vfs_entry, "path", json_string("/build/test/cairn"));
+                json_object_set_new(vfs_entry, "config", json_string(cairn_cfg));
+                json_object_set_new(vfs, "cairn", vfs_entry);
+                json_object_set_new(client_json_config, "vfs", vfs);
             }
-
-            json_object_set_new(cfg, "devices", devices);
-            json_str = json_dumps(cfg, JSON_COMPACT);
-            snprintf(demofs_cfg, sizeof(demofs_cfg), "%s", json_str);
-            free(json_str);
-            json_decref(cfg);
-
-            chimera_client_config_add_module(client_config, "demofs", "/build/test/demofs", demofs_cfg);
-        } else if (strcmp(backend, "cairn") == 0) {
-            char    cairn_cfg[4096];
-            char   *json_str;
-            json_t *cfg;
-
-            cfg = json_object();
-            json_object_set_new(cfg, "initialize", json_true());
-            json_object_set_new(cfg, "path", json_string(env->session_dir));
-            json_str = json_dumps(cfg, JSON_COMPACT);
-            snprintf(cairn_cfg, sizeof(cairn_cfg), "%s", json_str);
-            free(json_str);
-            json_decref(cfg);
-
-            chimera_client_config_add_module(client_config, "cairn", "/build/test/cairn", cairn_cfg);
         }
-    }
 
-    struct chimera_vfs_cred root_cred;
-    chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
-    env->client = chimera_client_init(client_config, &root_cred, env->client_metrics);
+        json_object_set_new(client_json_root, "config", client_json_config);
+        chimera_test_write_users_json(client_json_root);
+
+        snprintf(client_json_path, sizeof(client_json_path), "%s/client.json", env->session_dir);
+        json_dump_file(client_json_root, client_json_path, 0);
+        json_decref(client_json_root);
+
+        struct chimera_vfs_cred root_cred;
+        chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+        env->client = chimera_client_init_json(client_json_path, &root_cred, env->client_metrics);
+    }
 
     env->client_thread = chimera_client_thread_init(env->evpl, env->client);
 
