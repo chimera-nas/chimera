@@ -12,20 +12,22 @@
 #include <urcu/urcu-memb.h>
 
 #include "vfs_cred.h"
+#include "vfs_internal.h"
 
 struct chimera_vfs_user {
-    char                     username[256];
-    char                     password[256];
-    char                     smbpasswd[256];
     uint32_t                 uid;
     uint32_t                 gid;
     uint32_t                 ngids;
-    uint32_t                 gids[CHIMERA_VFS_CRED_MAX_GIDS];
+    int                      username_len;
     struct timespec          expiration;
     int                      pinned;
     struct rcu_head          rcu;
     struct chimera_vfs_user *next_by_name;
     struct chimera_vfs_user *next_by_uid;
+    uint32_t                 gids[CHIMERA_VFS_CRED_MAX_GIDS];
+    char                     username[256];
+    char                     password[256];
+    char                     smbpasswd[256];
 };
 
 struct chimera_vfs_user_cache_bucket {
@@ -47,15 +49,10 @@ struct chimera_vfs_user_cache {
 static inline unsigned int
 chimera_vfs_user_cache_hash_name(
     const char *name,
+    int         name_len,
     int         num_buckets)
 {
-    unsigned int hash = 5381;
-    int          c;
-
-    while ((c = (unsigned char) *name++)) {
-        hash = ((hash << 5) + hash) + c;
-    }
-    return hash % num_buckets;
+    return chimera_vfs_hash(name, name_len) % num_buckets;
 } // chimera_vfs_user_cache_hash_name
 
 static inline unsigned int
@@ -84,6 +81,7 @@ chimera_vfs_user_cache_remove_locked(
     struct chimera_vfs_user **pp;
 
     name_idx = chimera_vfs_user_cache_hash_name(user->username,
+                                                user->username_len,
                                                 cache->num_buckets);
     uid_idx = chimera_vfs_user_cache_hash_uid(user->uid,
                                               cache->num_buckets);
@@ -258,13 +256,16 @@ chimera_vfs_user_cache_add(
     struct chimera_vfs_user *user, *existing;
     unsigned int             name_idx, uid_idx;
     struct timespec          now;
+    int                      username_len;
 
-    name_idx = chimera_vfs_user_cache_hash_name(username,
-                                                cache->num_buckets);
+    username_len = strlen(username);
+    name_idx     = chimera_vfs_user_cache_hash_name(username, username_len,
+                                                    cache->num_buckets);
     uid_idx = chimera_vfs_user_cache_hash_uid(uid, cache->num_buckets);
 
     user = calloc(1, sizeof(*user));
     strncpy(user->username, username, sizeof(user->username) - 1);
+    user->username_len = username_len;
     if (password) {
         strncpy(user->password, password, sizeof(user->password) - 1);
     }
@@ -330,9 +331,11 @@ chimera_vfs_user_cache_remove(
 {
     unsigned int             name_idx, uid_idx;
     struct chimera_vfs_user *user;
+    int                      username_len;
 
-    name_idx = chimera_vfs_user_cache_hash_name(username,
-                                                cache->num_buckets);
+    username_len = strlen(username);
+    name_idx     = chimera_vfs_user_cache_hash_name(username, username_len,
+                                                    cache->num_buckets);
 
     pthread_mutex_lock(&cache->name_buckets[name_idx].lock);
 
@@ -369,9 +372,11 @@ chimera_vfs_user_cache_lookup_by_name(
 {
     unsigned int             name_idx;
     struct chimera_vfs_user *user;
+    int                      username_len;
 
-    name_idx = chimera_vfs_user_cache_hash_name(username,
-                                                cache->num_buckets);
+    username_len = strlen(username);
+    name_idx     = chimera_vfs_user_cache_hash_name(username, username_len,
+                                                    cache->num_buckets);
 
     user = rcu_dereference(cache->name_buckets[name_idx].head);
     while (user) {
