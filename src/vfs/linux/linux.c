@@ -833,10 +833,10 @@ chimera_linux_write(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int          fd, i, niov = 0, flags = 0;
-    uint32_t                     left, chunk;
-    ssize_t                      len;
-    struct iovec                *iov;
+    int           fd, i, niov = 0, flags = 0;
+    uint32_t      left, chunk;
+    ssize_t       len;
+    struct iovec *iov;
 
     request->write.r_sync = request->write.sync;
 
