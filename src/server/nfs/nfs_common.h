@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -68,6 +68,7 @@ struct nfs_request {
         struct SETATTR3args     *args_setattr;
         struct READLINK3args    *args_readlink;
         struct MKNOD3args       *args_mknod;
+        struct WRITE4args       *args_write4;
     };
     union {
         struct READLINK3res    res_readlink;

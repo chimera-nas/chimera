@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -24,8 +24,15 @@ chimera_nfs3_write_complete(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
+    struct WRITE3args                *args   = req->args_write;
     struct WRITE3res                  res;
     int                               rc;
+
+    /* Release write iovecs here on the server thread, not in VFS backend.
+     * The iovecs were allocated on this thread and must be released here
+     * to avoid cross-thread access to non-atomic refcounts.
+     */
+    evpl_iovecs_release(evpl, args->data.iov, args->data.niov);
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
@@ -118,10 +125,11 @@ chimera_nfs3_write(
 
     req->args_write = args;
 
-    /* VFS takes ownership of write iovecs and will release them.
-     * Transfer ownership from the RPC2 message to prevent msg_free
-     * from double-releasing (args->data.iov points to msg->read_chunk.iov
-     * via XDR zerocopy). Must be done before any error paths.
+    /* Transfer ownership of write iovecs from the RPC2 message to prevent
+     * msg_free from double-releasing (args->data.iov points to msg->read_chunk.iov
+     * via XDR zerocopy). The iovecs will be released in the write completion
+     * callback on this server thread, not in the VFS backend (which may run on
+     * a different delegation thread). Must be done before any error paths.
      */
     evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL, NULL);
 

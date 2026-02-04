@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -20,8 +20,13 @@ chimera_write_complete(
 {
     struct chimera_client_request *request       = private_data;
     struct chimera_client_thread  *client_thread = request->thread;
+    struct evpl                   *evpl          = client_thread->vfs_thread->evpl;
     chimera_write_callback_t       callback      = request->write.callback;
     void                          *callback_arg  = request->write.private_data;
+
+    if (request->write.niov > 0 && request->write.iov[0].data != NULL) {
+        evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+    }
 
     chimera_client_request_free(client_thread, request);
 
@@ -40,8 +45,13 @@ chimera_writev_complete(
 {
     struct chimera_client_request *request       = private_data;
     struct chimera_client_thread  *client_thread = request->thread;
+    struct evpl                   *evpl          = client_thread->vfs_thread->evpl;
     chimera_write_callback_t       callback      = request->writev.callback;
     void                          *callback_arg  = request->writev.private_data;
+
+    if (request->writev.niov > 0 && request->writev.iov[0].data != NULL) {
+        evpl_iovecs_release(evpl, request->writev.iov, request->writev.niov);
+    }
 
     chimera_client_request_free(client_thread, request);
 
@@ -60,8 +70,13 @@ chimera_writerv_complete(
 {
     struct chimera_client_request *request       = private_data;
     struct chimera_client_thread  *client_thread = request->thread;
+    struct evpl                   *evpl          = client_thread->vfs_thread->evpl;
     chimera_write_callback_t       callback      = request->writerv.callback;
     void                          *callback_arg  = request->writerv.private_data;
+
+    if (request->writerv.niov > 0 && request->writerv.iov[0].data != NULL) {
+        evpl_iovecs_release(evpl, request->writerv.iov, request->writerv.niov);
+    }
 
     chimera_client_request_free(client_thread, request);
 
@@ -81,10 +96,13 @@ chimera_dispatch_write(
                                          0, request->write.iov);
 
     if (niov < 0) {
+        request->write.niov = 0;
         chimera_write_complete(CHIMERA_VFS_EIO, 0, 0,
                                NULL, NULL, request);
         return;
     }
+
+    request->write.niov = niov;
 
     /* Copy from source buffer to evpl_iovec */
     size_t      copied = 0;
@@ -130,10 +148,13 @@ chimera_dispatch_writev(
                                                 0, request->writev.iov);
 
     if (niov < 0) {
+        request->writev.niov = 0;
         chimera_writev_complete(CHIMERA_VFS_EIO, 0, 0,
                                 NULL, NULL, request);
         return;
     }
+
+    request->writev.niov = niov;
 
     /* Copy from source iovecs to evpl_iovec */
     int    dst_idx = 0;

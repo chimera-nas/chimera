@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -15,9 +15,14 @@ chimera_smb_write_callback(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
-    struct chimera_smb_request *request = private_data;
+    struct chimera_smb_request       *request = private_data;
+    struct chimera_server_smb_thread *thread  = request->compound->thread;
 
-    /* VFS takes ownership of request->write.iov and releases it */
+    /* Release write iovecs here on the server thread, not in VFS backend.
+     * The iovecs were allocated on this thread and must be released here
+     * to avoid cross-thread access to non-atomic refcounts.
+     */
+    evpl_iovecs_release(thread->evpl, request->write.iov, request->write.niov);
 
     chimera_smb_open_file_release(private_data, request->write.open_file);
     chimera_smb_complete_request(private_data, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);

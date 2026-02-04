@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -22,10 +22,6 @@ chimera_nfs3_write_callback(
 {
     struct chimera_vfs_request    *request = private_data;
     struct chimera_nfs3_write_ctx *ctx     = request->plugin_data;
-
-    /* Write data iovecs were moved to the RPC layer (ownership transferred),
-     * so we don't need to release them here.
-     */
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -98,6 +94,4 @@ chimera_nfs3_write(
 
     shared->nfs_v3.send_call_NFSPROC3_WRITE(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
                                             &args, 1, 0, 0, chimera_nfs3_write_callback, request);
-
 } /* chimera_nfs3_write */
-
