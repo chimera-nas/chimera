@@ -2278,6 +2278,9 @@ memfs_rename(
         }
     }
 
+    memfs_map_attrs(shared, &request->rename.r_fromdir_pre_attr, old_parent_inode, request->fh);
+    memfs_map_attrs(shared, &request->rename.r_todir_pre_attr, new_parent_inode, request->rename.new_fh);
+
     rb_tree_query_exact(&old_parent_inode->dir.dirents, hash, hash, old_dirent);
 
     if (!old_dirent) {
@@ -2312,6 +2315,8 @@ memfs_rename(
         if (existing_dirent->inum == old_dirent->inum &&
             existing_dirent->gen == old_dirent->gen) {
             /* Same inode - do nothing, just return success */
+            memfs_map_attrs(shared, &request->rename.r_fromdir_post_attr, old_parent_inode, request->fh);
+            memfs_map_attrs(shared, &request->rename.r_todir_post_attr, new_parent_inode, request->rename.new_fh);
             pthread_mutex_unlock(&child_inode->lock);
             if (cmp != 0) {
                 pthread_mutex_unlock(&old_parent_inode->lock);
@@ -2384,6 +2389,9 @@ memfs_rename(
 
     old_parent_inode->ctime = now;
     new_parent_inode->mtime = now;
+
+    memfs_map_attrs(shared, &request->rename.r_fromdir_post_attr, old_parent_inode, request->fh);
+    memfs_map_attrs(shared, &request->rename.r_todir_post_attr, new_parent_inode, request->rename.new_fh);
 
     pthread_mutex_unlock(&child_inode->lock);
 

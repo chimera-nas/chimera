@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -25,8 +25,12 @@ static void chimera_rename_source_parent_complete(
 
 static void
 chimera_rename_at_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *fromdir_pre_attr,
+    struct chimera_vfs_attrs *fromdir_post_attr,
+    struct chimera_vfs_attrs *todir_pre_attr,
+    struct chimera_vfs_attrs *todir_post_attr,
+    void                     *private_data)
 {
     struct chimera_client_request  *request              = private_data;
     struct chimera_client_thread   *thread               = request->thread;
@@ -92,6 +96,8 @@ chimera_rename_target_lookup_complete(
         request->rename.dest_path_len - request->rename.dest_name_offset,
         request->rename.target_fh_len ? request->rename.target_fh : NULL,
         request->rename.target_fh_len,
+        0,
+        0,
         chimera_rename_at_complete,
         request);
 
