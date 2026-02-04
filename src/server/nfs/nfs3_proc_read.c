@@ -37,11 +37,8 @@ chimera_nfs3_read_complete(
         res.resok.data.niov   = niov;
 
         chimera_nfs3_set_post_op_attr(&res.resok.file_attributes, attr);
-
-
     } else {
         chimera_nfs3_set_post_op_attr(&res.resfail.file_attributes, attr);
-        evpl_iovecs_release(evpl, iov, niov);
     }
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, NULL, &res, req->encoding);

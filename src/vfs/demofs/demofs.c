@@ -2236,9 +2236,9 @@ demofs_write_phase2(
         }
     }
 
-    // Add write data
+    // Add write data - clone to local array (caller retains ownership and releases).
     for (int i = 0; i < request->write.niov; i++) {
-        evpl_iovec_move(&write_iov[write_niov], &request->write.iov[i]);
+        evpl_iovec_clone(&write_iov[write_niov], &request->write.iov[i]);
         write_niov++;
     }
 

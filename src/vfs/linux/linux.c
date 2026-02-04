@@ -778,7 +778,7 @@ chimera_linux_read(
                                             request->read.length,
                                             4096,
                                             8,
-                                            0, request->read.iov);
+                                            EVPL_IOVEC_FLAG_SHARED, request->read.iov);
 
     iov = request->plugin_data;
 
@@ -833,9 +833,7 @@ chimera_linux_write(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_linux_thread *thread = private_data;
-    struct evpl                 *evpl   = thread->evpl;
-    int                          fd, i, niov = 0, flags = 0;
+    int          fd, i, niov = 0, flags = 0;
     uint32_t                     left, chunk;
     ssize_t                      len;
     struct iovec                *iov;
@@ -869,7 +867,10 @@ chimera_linux_write(
                    request->write.offset,
                    flags);
 
-    evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+    /* Note: Write iovecs are NOT released here. They were allocated on the
+     * server thread and must be released there. The server's write completion
+     * callback handles the release after this request completes via doorbell.
+     */
 
     if (len < 0) {
         request->status         = chimera_linux_errno_to_status(errno);

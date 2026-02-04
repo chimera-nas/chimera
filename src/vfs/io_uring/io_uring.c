@@ -359,7 +359,10 @@ chimera_io_uring_complete(
                     request->status         = chimera_linux_errno_to_status(-cqe->res);
                     request->write.r_length = 0;
                 }
-                evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+                /* Note: Write iovecs are NOT released here. They were allocated on the
+                 * server thread and must be released there. The server's write completion
+                 * callback handles the release after this request completes via doorbell.
+                 */
                 break;
 
             default:
@@ -1098,7 +1101,7 @@ chimera_io_uring_read(
                                             request->read.length,
                                             4096,
                                             8,
-                                            0, request->read.iov);
+                                            EVPL_IOVEC_FLAG_SHARED, request->read.iov);
 
     stx      = (struct statx *) scratch;
     scratch += sizeof(*stx);

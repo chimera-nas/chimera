@@ -148,6 +148,7 @@ struct chimera_client_request {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        offset;
             uint32_t                        length;
+            int                             niov;
             chimera_write_callback_t        callback;
             void                           *private_data;
             const void                     *buf;
@@ -159,6 +160,7 @@ struct chimera_client_request {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        offset;
             uint32_t                        length;
+            int                             niov;
             chimera_write_callback_t        callback;
             void                           *private_data;
             const struct iovec             *src_iov;

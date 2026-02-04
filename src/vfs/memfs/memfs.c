@@ -820,7 +820,7 @@ memfs_setattr(
 
                 new_block->niov = evpl_iovec_alloc(evpl, 4096, 4096,
                                                    CHIMERA_MEMFS_BLOCK_MAX_IOV,
-                                                   0, new_block->iov);
+                                                   EVPL_IOVEC_FLAG_SHARED, new_block->iov);
 
                 /* Copy the retained portion from the old block */
                 evpl_iovec_cursor_init(&old_cursor, old_block->iov,
@@ -1950,7 +1950,6 @@ memfs_write(
 
         if (!new_blocks) {
             pthread_mutex_unlock(&inode->lock);
-            evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
             request->status = CHIMERA_VFS_ENOSPC;
             request->complete(request);
             return;
@@ -1990,7 +1989,6 @@ memfs_write(
 
         if (!block) {
             pthread_mutex_unlock(&inode->lock);
-            evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
             request->status = CHIMERA_VFS_ENOSPC;
             request->complete(request);
             return;
@@ -2052,8 +2050,6 @@ memfs_write(
     memfs_map_attrs(shared, &request->write.r_post_attr, inode, request->fh);
 
     pthread_mutex_unlock(&inode->lock);
-
-    evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
 
     request->status         = CHIMERA_VFS_OK;
     request->write.r_length = request->write.length;
