@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -87,7 +87,9 @@ chimera_s3_put_recv_callback(
     struct chimera_s3_io            *io      = private_data;
     struct chimera_s3_request       *request = io->request;
     struct chimera_server_s3_thread *thread  = request->thread;
+    struct evpl                     *evpl    = thread->evpl;
 
+    evpl_iovecs_release(evpl, io->iov, io->niov);
     chimera_s3_io_free(thread, io);
 
     request->io_pending--;
