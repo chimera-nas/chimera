@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -10,8 +10,12 @@
 
 static void
 chimera_nfs4_rename_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *fromdir_pre_attr,
+    struct chimera_vfs_attrs *fromdir_post_attr,
+    struct chimera_vfs_attrs *todir_pre_attr,
+    struct chimera_vfs_attrs *todir_post_attr,
+    void                     *private_data)
 {
     struct nfs_request *req = private_data;
     struct RENAME4res  *res = &req->res_compound.resarray[req->index].oprename;
@@ -58,6 +62,8 @@ chimera_nfs4_rename_open_callback(
         args->newname.data,
         args->newname.len,
         NULL,
+        0,
+        0,
         0,
         chimera_nfs4_rename_complete,
         req);

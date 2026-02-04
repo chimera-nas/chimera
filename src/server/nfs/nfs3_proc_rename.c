@@ -1,15 +1,20 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs3_procs.h"
 #include "nfs_common/nfs3_status.h"
+#include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_procs.h"
 #include "nfs3_dump.h"
 static void
 chimera_nfs3_rename_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *fromdir_pre_attr,
+    struct chimera_vfs_attrs *fromdir_post_attr,
+    struct chimera_vfs_attrs *todir_pre_attr,
+    struct chimera_vfs_attrs *todir_post_attr,
+    void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
@@ -22,15 +27,11 @@ chimera_nfs3_rename_complete(
         error_code);
 
     if (res.status == NFS3_OK) {
-        res.resok.fromdir_wcc.before.attributes_follow = 0;
-        res.resok.fromdir_wcc.after.attributes_follow  = 0;
-        res.resok.todir_wcc.before.attributes_follow   = 0;
-        res.resok.todir_wcc.after.attributes_follow    = 0;
+        chimera_nfs3_set_wcc_data(&res.resok.fromdir_wcc, fromdir_pre_attr, fromdir_post_attr);
+        chimera_nfs3_set_wcc_data(&res.resok.todir_wcc, todir_pre_attr, todir_post_attr);
     } else {
-        res.resfail.fromdir_wcc.before.attributes_follow = 0;
-        res.resfail.fromdir_wcc.after.attributes_follow  = 0;
-        res.resfail.todir_wcc.before.attributes_follow   = 0;
-        res.resfail.todir_wcc.after.attributes_follow    = 0;
+        chimera_nfs3_set_wcc_data(&res.resfail.fromdir_wcc, fromdir_pre_attr, fromdir_post_attr);
+        chimera_nfs3_set_wcc_data(&res.resfail.todir_wcc, todir_pre_attr, todir_post_attr);
     }
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_RENAME(evpl, NULL, &res, req->encoding);
@@ -68,6 +69,8 @@ chimera_nfs3_rename(
                        args->to.name.len,
                        NULL,
                        0,
+                       CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
+                       CHIMERA_NFS3_ATTR_MASK,
                        chimera_nfs3_rename_complete,
                        req);
 } /* chimera_nfs3_rename */
