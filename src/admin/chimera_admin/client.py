@@ -25,6 +25,7 @@ class ChimeraAdminClient:
         port: The REST API port (default: 8080).
         timeout: Request timeout in seconds (default: 30).
         verify_ssl: Whether to verify SSL certificates (default: True).
+        use_https: Whether to use HTTPS (default: False).
     """
 
     def __init__(
@@ -33,12 +34,15 @@ class ChimeraAdminClient:
         port: int = 8080,
         timeout: int = 30,
         verify_ssl: bool = True,
+        use_https: bool = False,
     ):
         self.host = host
         self.port = port
         self.timeout = timeout
         self.verify_ssl = verify_ssl
-        self._base_url = f"http://{host}:{port}"
+        self.use_https = use_https
+        scheme = "https" if use_https else "http"
+        self._base_url = f"{scheme}://{host}:{port}"
         self._session = requests.Session()
 
     def _request(

@@ -121,6 +121,33 @@ int
 chimera_server_config_get_rest_http_port(
     const struct chimera_server_config *config);
 
+void
+chimera_server_config_set_rest_https_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_rest_https_port(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_rest_ssl_cert(
+    struct chimera_server_config *config,
+    const char                   *cert_path);
+
+const char *
+chimera_server_config_get_rest_ssl_cert(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_rest_ssl_key(
+    struct chimera_server_config *config,
+    const char                   *key_path);
+
+const char *
+chimera_server_config_get_rest_ssl_key(
+    const struct chimera_server_config *config);
+
 int
 chimera_server_config_get_smb_num_dialects(
     const struct chimera_server_config *config);

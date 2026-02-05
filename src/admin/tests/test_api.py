@@ -66,3 +66,32 @@ class TestBucketsAPI:
         with pytest.raises(ChimeraAdminError) as exc_info:
             client.get_bucket("nonexistent_bucket")
         assert exc_info.value.status_code == 404
+
+
+class TestHTTPS:
+    """Test HTTPS API endpoints with self-signed certificate."""
+
+    def test_https_version(self, https_client):
+        """Test getting version over HTTPS."""
+        version = https_client.get_version()
+        assert "version" in version
+
+    def test_https_list_users(self, https_client):
+        """Test listing users over HTTPS."""
+        users = https_client.list_users()
+        assert isinstance(users, list)
+
+    def test_https_list_exports(self, https_client):
+        """Test listing exports over HTTPS."""
+        exports = https_client.list_exports()
+        assert isinstance(exports, list)
+
+    def test_https_list_shares(self, https_client):
+        """Test listing shares over HTTPS."""
+        shares = https_client.list_shares()
+        assert isinstance(shares, list)
+
+    def test_https_list_buckets(self, https_client):
+        """Test listing buckets over HTTPS."""
+        buckets = https_client.list_buckets()
+        assert isinstance(buckets, list)

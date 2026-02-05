@@ -6,6 +6,10 @@
 #include <signal.h>
 #include <unistd.h>
 #include <jansson.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <openssl/evp.h>
 
 #include "evpl/evpl.h"
 
@@ -23,6 +27,120 @@ signal_handler(int sig)
 {
     SigInt = 1;
 } /* signal_handler */
+
+static int
+generate_self_signed_cert(
+    const char *cert_path,
+    const char *key_path)
+{
+    EVP_PKEY     *pkey = NULL;
+    EVP_PKEY_CTX *pctx = NULL;
+    X509         *x509 = NULL;
+    X509_NAME    *name = NULL;
+    FILE         *fp   = NULL;
+    int           rc   = -1;
+
+    chimera_server_info("Generating self-signed certificate...");
+
+    /* Generate RSA key */
+    pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+    if (!pctx) {
+        chimera_server_error("Failed to create EVP_PKEY_CTX");
+        goto cleanup;
+    }
+
+    if (EVP_PKEY_keygen_init(pctx) <= 0) {
+        chimera_server_error("Failed to init keygen");
+        goto cleanup;
+    }
+
+    if (EVP_PKEY_CTX_set_rsa_keygen_bits(pctx, 2048) <= 0) {
+        chimera_server_error("Failed to set RSA key bits");
+        goto cleanup;
+    }
+
+    if (EVP_PKEY_keygen(pctx, &pkey) <= 0) {
+        chimera_server_error("Failed to generate RSA key");
+        goto cleanup;
+    }
+
+    /* Create X509 certificate */
+    x509 = X509_new();
+    if (!x509) {
+        chimera_server_error("Failed to create X509");
+        goto cleanup;
+    }
+
+    /* Set version to X509v3 */
+    X509_set_version(x509, 2);
+
+    /* Set serial number */
+    ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
+
+    /* Set validity period (1 year) */
+    X509_gmtime_adj(X509_get_notBefore(x509), 0);
+    X509_gmtime_adj(X509_get_notAfter(x509), 365 * 24 * 60 * 60);
+
+    /* Set public key */
+    X509_set_pubkey(x509, pkey);
+
+    /* Set subject name */
+    name = X509_get_subject_name(x509);
+    X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC,
+                               (unsigned char *) "US", -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC,
+                               (unsigned char *) "Chimera NAS", -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               (unsigned char *) "localhost", -1, -1, 0);
+
+    /* Self-signed: issuer = subject */
+    X509_set_issuer_name(x509, name);
+
+    /* Sign the certificate */
+    if (!X509_sign(x509, pkey, EVP_sha256())) {
+        chimera_server_error("Failed to sign certificate");
+        goto cleanup;
+    }
+
+    /* Write private key */
+    fp = fopen(key_path, "w");
+    if (!fp) {
+        chimera_server_error("Failed to open key file: %s", key_path);
+        goto cleanup;
+    }
+    PEM_write_PrivateKey(fp, pkey, NULL, NULL, 0, NULL, NULL);
+    fclose(fp);
+    fp = NULL;
+
+    /* Write certificate */
+    fp = fopen(cert_path, "w");
+    if (!fp) {
+        chimera_server_error("Failed to open cert file: %s", cert_path);
+        goto cleanup;
+    }
+    PEM_write_X509(fp, x509);
+    fclose(fp);
+    fp = NULL;
+
+    chimera_server_info("Self-signed certificate generated: %s, %s",
+                        cert_path, key_path);
+    rc = 0;
+
+ cleanup:
+    if (fp) {
+        fclose(fp);
+    }
+    if (x509) {
+        X509_free(x509);
+    }
+    if (pkey) {
+        EVP_PKEY_free(pkey);
+    }
+    if (pctx) {
+        EVP_PKEY_CTX_free(pctx);
+    }
+    return rc;
+} /* generate_self_signed_cert */
 
 int
 main(
@@ -44,6 +162,11 @@ main(
     struct chimera_metrics              *metrics;
     int                                  i;
     struct chimera_server_config_smb_nic smb_nic_info[16];
+    const char                          *rest_ssl_cert   = NULL;
+    const char                          *rest_ssl_key    = NULL;
+    int                                  rest_https_port = 0;
+    static char                          auto_cert_path[256];
+    static char                          auto_key_path[256];
 
     chimera_log_init();
 
@@ -57,15 +180,7 @@ main(
 
     evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 
-    evpl_global_config = evpl_global_config_init();
-    evpl_global_config_set_rdmacm_datagram_size_override(evpl_global_config, 8192);
-    evpl_global_config_set_buffer_size(evpl_global_config, 8 * 1024 * 1024);
-    evpl_global_config_set_spin_ns(evpl_global_config, 1000000UL);
-    evpl_global_config_set_huge_pages(evpl_global_config, 1);
-
-    evpl_init(evpl_global_config);
-
-
+    /* Parse command line first to get config path */
     while ((opt = getopt(argc, argv, "c:dvh")) != -1) {
         switch (opt) {
             case 'c':
@@ -89,6 +204,7 @@ main(
         } /* switch */
     }
 
+    /* Load config file early to get TLS settings before evpl_init */
     config = json_load_file(config_path, 0, &error);
 
     if (!config) {
@@ -96,14 +212,66 @@ main(
         return 1;
     }
 
+    /* Check for HTTPS configuration before evpl_init */
+    server_params = json_object_get(config, "server");
+    if (server_params) {
+        json_t *https_port_value = json_object_get(server_params, "rest_https_port");
+        if (https_port_value && json_is_integer(https_port_value)) {
+            rest_https_port = json_integer_value(https_port_value);
+        }
+
+        json_t *ssl_cert_value = json_object_get(server_params, "rest_ssl_cert");
+        if (ssl_cert_value && json_is_string(ssl_cert_value)) {
+            rest_ssl_cert = json_string_value(ssl_cert_value);
+        }
+
+        json_t *ssl_key_value = json_object_get(server_params, "rest_ssl_key");
+        if (ssl_key_value && json_is_string(ssl_key_value)) {
+            rest_ssl_key = json_string_value(ssl_key_value);
+        }
+    }
+
+    /* Initialize evpl global config */
+    evpl_global_config = evpl_global_config_init();
+    evpl_global_config_set_rdmacm_datagram_size_override(evpl_global_config, 8192);
+    evpl_global_config_set_buffer_size(evpl_global_config, 8 * 1024 * 1024);
+    evpl_global_config_set_spin_ns(evpl_global_config, 1000000UL);
+    evpl_global_config_set_huge_pages(evpl_global_config, 1);
+
+    /* Configure TLS if HTTPS is enabled */
+    if (rest_https_port != 0) {
+        if (rest_ssl_cert && rest_ssl_key) {
+            /* Use provided certificate */
+            evpl_global_config_set_tls_cert(evpl_global_config, rest_ssl_cert);
+            evpl_global_config_set_tls_key(evpl_global_config, rest_ssl_key);
+        } else {
+            /* Generate self-signed certificate */
+            snprintf(auto_cert_path, sizeof(auto_cert_path),
+                     "/tmp/chimera-rest-%d.crt", getpid());
+            snprintf(auto_key_path, sizeof(auto_key_path),
+                     "/tmp/chimera-rest-%d.key", getpid());
+
+            if (generate_self_signed_cert(auto_cert_path, auto_key_path) != 0) {
+                fprintf(stderr, "Failed to generate self-signed certificate\n");
+                json_decref(config);
+                return 1;
+            }
+
+            evpl_global_config_set_tls_cert(evpl_global_config, auto_cert_path);
+            evpl_global_config_set_tls_key(evpl_global_config, auto_key_path);
+            rest_ssl_cert = auto_cert_path;
+            rest_ssl_key  = auto_key_path;
+        }
+    }
+
+    evpl_init(evpl_global_config);
+
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
     chimera_server_info("Initializing server...");
 
     metrics = chimera_metrics_init(9000);
-
-    server_params = json_object_get(config, "server");
 
     server_config = chimera_server_config_init();
 
@@ -148,6 +316,16 @@ main(
         chimera_server_config_set_rest_http_port(server_config, rest_http_port);
     }
 
+    if (rest_https_port != 0) {
+        chimera_server_config_set_rest_https_port(server_config, rest_https_port);
+        if (rest_ssl_cert) {
+            chimera_server_config_set_rest_ssl_cert(server_config, rest_ssl_cert);
+        }
+        if (rest_ssl_key) {
+            chimera_server_config_set_rest_ssl_key(server_config, rest_ssl_key);
+        }
+    }
+
     json_t *smb_multichannel = json_object_get(server_params, "smb_multichannel");
     if (smb_multichannel && json_is_array(smb_multichannel)) {
         json_t *smb_nic_info_json;
@@ -175,18 +353,18 @@ main(
     json_t *vfs_modules = json_object_get(server_params, "vfs");
     if (vfs_modules && json_is_object(vfs_modules)) {
         const char *module_name;
-        json_t     *module;
-        json_object_foreach(vfs_modules, module_name, module)
+        json_t     *module_cfg;
+        json_object_foreach(vfs_modules, module_name, module_cfg)
         {
-            const char *path       = json_string_value(json_object_get(module, "path"));
-            json_t     *config_obj = json_object_get(module, "config");
+            const char *mod_path   = json_string_value(json_object_get(module_cfg, "path"));
+            json_t     *config_obj = json_object_get(module_cfg, "config");
             char       *config_str = NULL;
 
             if (config_obj && json_is_object(config_obj)) {
                 config_str = json_dumps(config_obj, JSON_COMPACT);
             }
 
-            chimera_server_config_add_module(server_config, module_name, path,
+            chimera_server_config_add_module(server_config, module_name, mod_path,
                                              config_str ? config_str : "");
             free(config_str);
         }

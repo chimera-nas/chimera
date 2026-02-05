@@ -34,12 +34,15 @@ struct chimera_server_config {
     int                                  num_modules;
     int                                  metrics_port;
     int                                  rest_http_port;
+    int                                  rest_https_port;
     int                                  smb_num_dialects;
     uint32_t                             smb_dialects[16];
     int                                  smb_num_nic_info;
     uint32_t                             anonuid;
     uint32_t                             anongid;
     char                                 nfs_rdma_hostname[256];
+    char                                 rest_ssl_cert[256];
+    char                                 rest_ssl_key[256];
     struct chimera_vfs_module_cfg        modules[CHIMERA_SERVER_MAX_MODULES];
     struct chimera_server_config_smb_nic smb_nic_info[16];
 };
@@ -274,6 +277,50 @@ chimera_server_config_get_rest_http_port(const struct chimera_server_config *con
 {
     return config->rest_http_port;
 } /* chimera_server_config_get_rest_http_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_rest_https_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->rest_https_port = port;
+} /* chimera_server_config_set_rest_https_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_rest_https_port(const struct chimera_server_config *config)
+{
+    return config->rest_https_port;
+} /* chimera_server_config_get_rest_https_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_rest_ssl_cert(
+    struct chimera_server_config *config,
+    const char                   *cert_path)
+{
+    strncpy(config->rest_ssl_cert, cert_path, sizeof(config->rest_ssl_cert) - 1);
+    config->rest_ssl_cert[sizeof(config->rest_ssl_cert) - 1] = '\0';
+} /* chimera_server_config_set_rest_ssl_cert */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_rest_ssl_cert(const struct chimera_server_config *config)
+{
+    return config->rest_ssl_cert;
+} /* chimera_server_config_get_rest_ssl_cert */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_rest_ssl_key(
+    struct chimera_server_config *config,
+    const char                   *key_path)
+{
+    strncpy(config->rest_ssl_key, key_path, sizeof(config->rest_ssl_key) - 1);
+    config->rest_ssl_key[sizeof(config->rest_ssl_key) - 1] = '\0';
+} /* chimera_server_config_set_rest_ssl_key */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_rest_ssl_key(const struct chimera_server_config *config)
+{
+    return config->rest_ssl_key;
+} /* chimera_server_config_get_rest_ssl_key */
 
 SYMBOL_EXPORT int
 chimera_server_config_get_smb_num_dialects(const struct chimera_server_config *config)

@@ -427,25 +427,36 @@ chimera_rest_init(
 {
     struct chimera_rest_server *rest;
     int                         http_port;
+    int                         https_port;
 
-    http_port = chimera_server_config_get_rest_http_port(config);
+    http_port  = chimera_server_config_get_rest_http_port(config);
+    https_port = chimera_server_config_get_rest_https_port(config);
 
-    if (http_port == 0) {
-        chimera_rest_info("REST API disabled (http_port=0)");
+    if (http_port == 0 && https_port == 0) {
+        chimera_rest_info("REST API disabled (no ports configured)");
         return NULL;
     }
 
     rest = calloc(1, sizeof(*rest));
 
-    rest->http_port = http_port;
-    rest->server    = server;
-    rest->endpoint  = evpl_endpoint_create("0.0.0.0", http_port);
-    rest->listener  = evpl_listener_create();
+    rest->http_port  = http_port;
+    rest->https_port = https_port;
+    rest->server     = server;
 
-    chimera_rest_info("REST API initialized on port %d", http_port);
+    if (http_port != 0) {
+        rest->http_endpoint = evpl_endpoint_create("0.0.0.0", http_port);
+        rest->http_listener = evpl_listener_create();
+        chimera_rest_info("REST API HTTP initialized on port %d", http_port);
+    }
+
+    if (https_port != 0) {
+        rest->https_endpoint = evpl_endpoint_create("0.0.0.0", https_port);
+        rest->https_listener = evpl_listener_create();
+        chimera_rest_info("REST API HTTPS initialized on port %d", https_port);
+    }
 
     return rest;
-} /* chimera_rest_init */ /* chimera_rest_init */
+} /* chimera_rest_init */
 
 SYMBOL_EXPORT void
 chimera_rest_start(struct chimera_rest_server *rest)
@@ -454,8 +465,19 @@ chimera_rest_start(struct chimera_rest_server *rest)
         return;
     }
 
-    evpl_listen(rest->listener, EVPL_STREAM_SOCKET_TCP, rest->endpoint);
-    chimera_rest_info("REST API server started");
+    if (rest->http_listener) {
+        evpl_listen(rest->http_listener, EVPL_STREAM_SOCKET_TCP,
+                    rest->http_endpoint);
+        chimera_rest_info("REST API HTTP server started on port %d",
+                          rest->http_port);
+    }
+
+    if (rest->https_listener) {
+        evpl_listen(rest->https_listener, EVPL_STREAM_SOCKET_TLS,
+                    rest->https_endpoint);
+        chimera_rest_info("REST API HTTPS server started on port %d",
+                          rest->https_port);
+    }
 } /* chimera_rest_start */
 
 SYMBOL_EXPORT void
@@ -465,7 +487,14 @@ chimera_rest_stop(struct chimera_rest_server *rest)
         return;
     }
 
-    evpl_listener_destroy(rest->listener);
+    if (rest->http_listener) {
+        evpl_listener_destroy(rest->http_listener);
+    }
+
+    if (rest->https_listener) {
+        evpl_listener_destroy(rest->https_listener);
+    }
+
     chimera_rest_info("REST API server stopped");
 } /* chimera_rest_stop */
 
@@ -476,7 +505,14 @@ chimera_rest_destroy(struct chimera_rest_server *rest)
         return;
     }
 
-    evpl_endpoint_close(rest->endpoint);
+    if (rest->http_endpoint) {
+        evpl_endpoint_close(rest->http_endpoint);
+    }
+
+    if (rest->https_endpoint) {
+        evpl_endpoint_close(rest->https_endpoint);
+    }
+
     free(rest);
 } /* chimera_rest_destroy */
 
@@ -496,8 +532,16 @@ chimera_rest_thread_init(
     thread->evpl   = evpl;
     thread->shared = rest;
     thread->agent  = evpl_http_init(evpl);
-    thread->server = evpl_http_attach(thread->agent, rest->listener,
-                                      chimera_rest_dispatch, thread);
+
+    if (rest->http_listener) {
+        thread->http_server = evpl_http_attach(thread->agent, rest->http_listener,
+                                               chimera_rest_dispatch, thread);
+    }
+
+    if (rest->https_listener) {
+        thread->https_server = evpl_http_attach(thread->agent, rest->https_listener,
+                                                chimera_rest_dispatch, thread);
+    }
 
     return thread;
 } /* chimera_rest_thread_init */
@@ -511,7 +555,14 @@ chimera_rest_thread_destroy(void *data)
         return;
     }
 
-    evpl_http_server_destroy(thread->agent, thread->server);
+    if (thread->http_server) {
+        evpl_http_server_destroy(thread->agent, thread->http_server);
+    }
+
+    if (thread->https_server) {
+        evpl_http_server_destroy(thread->agent, thread->https_server);
+    }
+
     evpl_http_destroy(thread->agent);
     free(thread);
 } /* chimera_rest_thread_destroy */
