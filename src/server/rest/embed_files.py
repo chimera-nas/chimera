@@ -63,10 +63,11 @@ def main():
     ]
 
     output_lines = []
-    output_lines.append("// SPDX-FileCopyrightText: 2025-2026 "
+    # Use string concatenation to avoid reuse tool detecting these as headers
+    output_lines.append("// SPDX" + "-FileCopyrightText: 2025-2026 "
                         "Chimera-NAS Project Contributors")
     output_lines.append("//")
-    output_lines.append("// SPDX-License-Identifier: LGPL-2.1-only")
+    output_lines.append("// SPDX" + "-License-Identifier: LGPL-2.1-only")
     output_lines.append("")
     output_lines.append("// Auto-generated file - do not edit")
     output_lines.append("")

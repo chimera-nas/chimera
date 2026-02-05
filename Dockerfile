@@ -18,7 +18,7 @@ RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install clang cmake ninja-build git flex bison uuid-dev uthash-dev libkrb5-3 libkrb5-dev libgssapi-krb5-2  gss-ntlmssp-dev \
     librdmacm-dev libjansson-dev libclang-rt-18-dev llvm libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev libssl-dev openssl libnuma-dev \
-    python3 python3-pip python3-venv python3-requests && \
+    python3 python3-pip python3-venv python3-requests pkg-config && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
