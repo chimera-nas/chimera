@@ -142,6 +142,12 @@ main(
         chimera_server_config_set_nfs_rdma_port(server_config, rdma_port);
     }
 
+    json_t *rest_http_port_value = json_object_get(server_params, "rest_http_port");
+    if (rest_http_port_value && json_is_integer(rest_http_port_value)) {
+        int rest_http_port = json_integer_value(rest_http_port_value);
+        chimera_server_config_set_rest_http_port(server_config, rest_http_port);
+    }
+
     json_t *smb_multichannel = json_object_get(server_params, "smb_multichannel");
     if (smb_multichannel && json_is_array(smb_multichannel)) {
         json_t *smb_nic_info_json;

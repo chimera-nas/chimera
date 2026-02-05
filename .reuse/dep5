@@ -17,3 +17,8 @@ License: Unlicense
 Files: .dockerignore
 Copyright: 2025 Chimera-NAS Project Contributors
 License: Unlicense
+
+# Swagger UI distribution files (from swagger-ui project)
+Files: src/server/rest/swagger/swagger-ui-bundle.min.js src/server/rest/swagger/swagger-ui-standalone-preset.min.js src/server/rest/swagger/swagger-ui.min.css
+Copyright: SmartBear Software
+License: Apache-2.0

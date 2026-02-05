@@ -19,6 +19,10 @@ struct chimera_server_config;
 struct chimera_server;
 struct chimera_thread;
 struct prometheus_metrics;
+struct chimera_vfs_user;
+struct chimera_nfs_export;
+struct chimera_smb_share;
+struct s3_bucket;
 
 
 struct chimera_server_config_smb_nic {
@@ -107,6 +111,15 @@ void
 chimera_server_config_set_metrics_port(
     struct chimera_server_config *config,
     int                           port);
+
+void
+chimera_server_config_set_rest_http_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_rest_http_port(
+    const struct chimera_server_config *config);
 
 int
 chimera_server_config_get_smb_num_dialects(
@@ -204,3 +217,92 @@ chimera_server_add_user(
     uint32_t               ngids,
     const uint32_t        *gids,
     int                    pinned);
+
+
+int
+chimera_server_remove_user(
+    struct chimera_server *server,
+    const char            *username);
+
+const struct chimera_vfs_user *
+chimera_server_get_user(
+    struct chimera_server *server,
+    const char            *username);
+
+typedef int (*chimera_server_user_iterate_cb)(
+    const struct chimera_vfs_user *user,
+    void                          *data);
+
+void
+chimera_server_iterate_users(
+    struct chimera_server         *server,
+    chimera_server_user_iterate_cb callback,
+    void                          *data);
+
+int
+chimera_server_remove_export(
+    struct chimera_server *server,
+    const char            *name);
+
+const struct chimera_nfs_export *
+chimera_server_get_export(
+    struct chimera_server *server,
+    const char            *name);
+
+typedef int (*chimera_server_export_iterate_cb)(
+    const struct chimera_nfs_export *export,
+    void *data);
+
+void
+chimera_server_iterate_exports(
+    struct chimera_server           *server,
+    chimera_server_export_iterate_cb callback,
+    void                            *data);
+
+int
+chimera_server_remove_share(
+    struct chimera_server *server,
+    const char            *name);
+
+const struct chimera_smb_share *
+chimera_server_get_share(
+    struct chimera_server *server,
+    const char            *name);
+
+typedef int (*chimera_server_share_iterate_cb)(
+    const struct chimera_smb_share *share,
+    void                           *data);
+
+void
+chimera_server_iterate_shares(
+    struct chimera_server          *server,
+    chimera_server_share_iterate_cb callback,
+    void                           *data);
+
+int
+chimera_server_remove_bucket(
+    struct chimera_server *server,
+    const char            *name);
+
+const struct s3_bucket *
+chimera_server_get_bucket(
+    struct chimera_server *server,
+    const char            *name);
+
+void
+chimera_server_release_bucket(
+    struct chimera_server *server);
+
+typedef int (*chimera_server_bucket_iterate_cb)(
+    const struct s3_bucket *bucket,
+    void                   *data);
+
+void
+chimera_server_iterate_buckets(
+    struct chimera_server           *server,
+    chimera_server_bucket_iterate_cb callback,
+    void                            *data);
+
+struct chimera_vfs *
+chimera_server_get_vfs(
+    struct chimera_server *server);

@@ -19,3 +19,15 @@ Testing
 compile_commands.json
 settings.local.json
 .serena
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+dist/
+.venv/
+venv/
+.pytest_cache/

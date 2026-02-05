@@ -99,3 +99,52 @@ s3_bucket_map_put(
 } /* s3_bucket_map_put */
 
 
+int
+s3_bucket_map_remove(
+    struct s3_bucket_map *map,
+    const char           *name,
+    int                   namelen)
+{
+    struct s3_bucket *bucket;
+    int               found = 0;
+
+    pthread_rwlock_wrlock(&map->rwlock);
+    HASH_FIND(hh, map->buckets, name, namelen, bucket);
+    if (bucket != NULL) {
+        HASH_DEL(map->buckets, bucket);
+        free(bucket->name);
+        free(bucket->path);
+        free(bucket);
+        found = 1;
+    }
+    pthread_rwlock_unlock(&map->rwlock);
+
+    return found ? 0 : -1;
+} /* s3_bucket_map_remove */
+
+typedef int (*s3_bucket_iterate_cb)(
+    const struct s3_bucket *bucket,
+    void                   *data);
+
+void
+s3_bucket_map_iterate(
+    struct s3_bucket_map *map,
+    s3_bucket_iterate_cb  callback,
+    void                 *data)
+{
+    struct s3_bucket *bucket, *tmp;
+
+    pthread_rwlock_rdlock(&map->rwlock);
+#ifndef __clang_analyzer__
+    /* uthash blows clangs mind */
+    HASH_ITER(hh, map->buckets, bucket, tmp)
+    {
+        if (callback(bucket, data) != 0) {
+            break;
+        }
+    }
+#endif /* ifndef __clang_analyzer__ */
+    pthread_rwlock_unlock(&map->rwlock);
+} /* s3_bucket_map_iterate */
+
+
