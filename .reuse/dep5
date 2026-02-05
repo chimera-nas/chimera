@@ -5,17 +5,17 @@ Source: https://github.com/chimera-nas/chimera
 
 # Documentation files (Jekyll markdown)
 Files: README.md docs/*.md docs/**/*.md
-Copyright: 2025 Chimera-NAS Project Contributors
+Copyright: 2025-2026 Chimera-NAS Project Contributors
 License: Unlicense
 
 # JSON configuration files
 Files: *.json .vscode/*.json .devcontainer/*.json .claude/*.json src/**/*.json
-Copyright: 2025 Chimera-NAS Project Contributors
+Copyright: 2025-2026 Chimera-NAS Project Contributors
 License: Unlicense
 
 # Docker ignore file
 Files: .dockerignore
-Copyright: 2025 Chimera-NAS Project Contributors
+Copyright: 2025-2026 Chimera-NAS Project Contributors
 License: Unlicense
 
 # Swagger UI distribution files (from swagger-ui project)
