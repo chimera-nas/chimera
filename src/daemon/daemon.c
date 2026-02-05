@@ -228,6 +228,26 @@ main(
         }
     }
 
+    json_t *s3_access_keys = json_object_get(config, "s3_access_keys");
+    if (s3_access_keys && json_is_array(s3_access_keys)) {
+        json_t *key_entry;
+        size_t  key_idx;
+
+        json_array_foreach(s3_access_keys, key_idx, key_entry)
+        {
+            const char *access_key = json_string_value(json_object_get(key_entry, "access_key"));
+            const char *secret_key = json_string_value(json_object_get(key_entry, "secret_key"));
+
+            if (!access_key || !secret_key) {
+                chimera_server_error("S3 access key entry missing access_key or secret_key, skipping");
+                continue;
+            }
+
+            chimera_server_info("Adding S3 access key %s", access_key);
+            chimera_server_add_s3_cred(server, access_key, secret_key, 1);
+        }
+    }
+
     mounts = json_object_get(config, "mounts");
 
     if (mounts) {

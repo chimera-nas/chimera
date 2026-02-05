@@ -16,22 +16,28 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
     struct chimera_vfs_open_handle *handle   = request->pending_handle;
     chimera_vfs_open_callback_t     callback = request->proto_callback;
 
+    chimera_vfs_debug("open_complete: request=%p handle=%p status=%d vfs_private=%lx",
+                      request, handle, request->status,
+                      request->status == CHIMERA_VFS_OK ? request->open.r_vfs_private : 0);
+
     if (request->status == CHIMERA_VFS_OK) {
         chimera_vfs_populate_handle(thread, handle, request->open.r_vfs_private);
     } else {
+        chimera_vfs_debug("open_complete: FAILED, releasing handle");
         chimera_vfs_release_failed(thread, handle, request->status);
         handle = NULL;
     }
 
     chimera_vfs_complete(request);
 
+    chimera_vfs_debug("open_complete: calling proto callback");
     callback(request->status,
              handle,
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
 
-} /* chimera_vfs_open_complete */
+} /* chimera_vfs_open_complete */ /* chimera_vfs_open_complete */
 
 static void
 chimera_vfs_open_hdl_callback(
@@ -40,26 +46,30 @@ chimera_vfs_open_hdl_callback(
 {
     chimera_vfs_open_callback_t callback = request->proto_callback;
 
-
+    chimera_vfs_debug("open_hdl_callback: request=%p handle=%p flags=%x",
+                      request, handle, handle ? handle->flags : 0);
 
     if (!handle) {
         /* Someone was already in process opening the file when we tried
          * and they failed, so we fail too.
          */
+        chimera_vfs_debug("open_hdl_callback: NULL handle, failing request");
         callback(request->status, NULL, request->proto_private_data);
         chimera_vfs_request_free(request->thread, request);
     } else if (handle->flags & CHIMERA_VFS_OPEN_HANDLE_PENDING) {
         /* Miss on the open cache, so a pending open record was inserted
          * for us and its now our job to actually dispatch the open
          */
+        chimera_vfs_debug("open_hdl_callback: PENDING flag set, dispatching open");
         request->pending_handle = handle;
         chimera_vfs_dispatch(request);
     } else {
         /* File was already open in the cache so we're done */
+        chimera_vfs_debug("open_hdl_callback: cache HIT, calling callback immediately");
         callback(CHIMERA_VFS_OK, handle, request->proto_private_data);
         chimera_vfs_request_free(request->thread, request);
     }
-} /* chimera_vfs_open_hdl_callback */
+} /* chimera_vfs_open_hdl_callback */ /* chimera_vfs_open_hdl_callback */
 
 SYMBOL_EXPORT void
 chimera_vfs_open(

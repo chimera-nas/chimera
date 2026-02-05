@@ -204,3 +204,11 @@ chimera_server_add_user(
     uint32_t               ngids,
     const uint32_t        *gids,
     int                    pinned);
+
+
+int
+chimera_server_add_s3_cred(
+    struct chimera_server *server,
+    const char            *access_key,
+    const char            *secret_key,
+    int                    pinned);

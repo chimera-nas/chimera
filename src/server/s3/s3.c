@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -16,6 +16,7 @@
 #include "s3_procs.h"
 #include "s3_dump.h"
 #include "s3_bucket_map.h"
+#include "s3_auth.h"
 #include "s3.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
@@ -285,6 +286,36 @@ s3_server_dispatch(
     *notify_callback = s3_server_notify;
     *notify_data     = s3_request;
 
+    /* Verify AWS V4 authentication */
+    {
+        enum chimera_s3_auth_result auth_result;
+
+        auth_result = chimera_s3_auth_verify(shared->cred_cache, request);
+
+        switch (auth_result) {
+            case CHIMERA_S3_AUTH_OK:
+                /* Authentication successful */
+                break;
+            case CHIMERA_S3_AUTH_NO_AUTH_HEADER:
+                /* No auth header - authentication required */
+                s3_request->status    = CHIMERA_S3_STATUS_MISSING_AUTH_HEADER;
+                s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+                return;
+            case CHIMERA_S3_AUTH_UNKNOWN_ACCESS_KEY:
+                s3_request->status    = CHIMERA_S3_STATUS_INVALID_ACCESS_KEY_ID;
+                s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+                return;
+            case CHIMERA_S3_AUTH_SIGNATURE_MISMATCH:
+                s3_request->status    = CHIMERA_S3_STATUS_SIGNATURE_MISMATCH;
+                s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+                return;
+            default:
+                s3_request->status    = CHIMERA_S3_STATUS_ACCESS_DENIED;
+                s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+                return;
+        } /* switch */
+    }
+
     host_header = evpl_http_request_header(request, "Host");
 
     if (host_header) {
@@ -329,15 +360,31 @@ s3_server_dispatch(
 
         slash = strchr(urlp, '/');
 
-        s3_request->bucket_name    = urlp;
-        s3_request->bucket_namelen = slash - urlp;
+        if (slash) {
+            s3_request->bucket_name    = urlp;
+            s3_request->bucket_namelen = slash - urlp;
 
-        while (*slash == '/') {
-            slash++;
+            while (*slash == '/') {
+                slash++;
+            }
+
+            s3_request->path     = slash;
+            s3_request->path_len = strlen(s3_request->path);
+        } else {
+            /* URL is /bucket or /bucket?query - no path after bucket */
+            const char *query = strchr(urlp, '?');
+            if (query) {
+                s3_request->bucket_name    = urlp;
+                s3_request->bucket_namelen = query - urlp;
+                s3_request->path           = query;
+                s3_request->path_len       = strlen(query);
+            } else {
+                s3_request->bucket_name    = urlp;
+                s3_request->bucket_namelen = strlen(urlp);
+                s3_request->path           = "";
+                s3_request->path_len       = 0;
+            }
         }
-
-        s3_request->path     = slash;
-        s3_request->path_len = strlen(s3_request->path);
     }
 
     if (*s3_request->path == '?') {
@@ -435,6 +482,19 @@ chimera_s3_add_bucket(
 
 } /* chimera_s3_add_bucket */
 
+
+SYMBOL_EXPORT int
+chimera_s3_add_cred(
+    void       *s3_shared,
+    const char *access_key,
+    const char *secret_key,
+    int         pinned)
+{
+    struct chimera_server_s3_shared *shared = s3_shared;
+
+    return chimera_s3_cred_cache_add(shared->cred_cache, access_key, secret_key, pinned);
+} /* chimera_s3_add_cred */
+
 static void *
 s3_server_init(
     const struct chimera_server_config *config,
@@ -456,6 +516,9 @@ s3_server_init(
 
     shared->bucket_map = s3_bucket_map_create();
 
+    /* Create S3 credential cache with 64 buckets and 1 hour TTL */
+    shared->cred_cache = chimera_s3_cred_cache_create(64, 3600);
+
     /* Initialize root credentials for now - TODO: proper credential mapping */
     chimera_vfs_cred_init_unix(&shared->cred, 0, 0, 0, NULL);
 
@@ -463,7 +526,7 @@ s3_server_init(
     chimera_vfs_get_root_fh(shared->root_fh, &shared->root_fh_len);
 
     return shared;
-} /* s3_server_init */
+} /* s3_server_init */ /* s3_server_init */
 
 static void
 s3_server_stop(void *data)
@@ -480,10 +543,12 @@ s3_server_destroy(void *data)
 
     s3_bucket_map_destroy(shared->bucket_map);
 
+    chimera_s3_cred_cache_destroy(shared->cred_cache);
+
     free(shared->config);
 
     free(shared);
-} /* s3_server_destroy */
+} /* s3_server_destroy */ /* s3_server_destroy */
 
 static void
 s3_server_start(void *data)

@@ -586,3 +586,18 @@ chimera_server_add_user(
     return chimera_vfs_add_user(server->vfs, username, password, smbpasswd,
                                 uid, gid, ngids, gids, pinned);
 } /* chimera_server_add_user */
+
+
+SYMBOL_EXPORT int
+chimera_server_add_s3_cred(
+    struct chimera_server *server,
+    const char            *access_key,
+    const char            *secret_key,
+    int                    pinned)
+{
+    if (!server->s3_shared) {
+        return -1;
+    }
+
+    return chimera_s3_add_cred(server->s3_shared, access_key, secret_key, pinned);
+} /* chimera_server_add_s3_cred */
