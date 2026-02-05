@@ -51,6 +51,15 @@ int
 chimera_server_config_get_cache_ttl(
     const struct chimera_server_config *config);
 
+void
+chimera_server_config_set_kv_module(
+    struct chimera_server_config *config,
+    const char                   *kv_module);
+
+const char *
+chimera_server_config_get_kv_module(
+    const struct chimera_server_config *config);
+
 int
 chimera_server_config_get_external_portmap(
     const struct chimera_server_config *config);

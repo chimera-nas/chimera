@@ -136,6 +136,21 @@ struct demofs_dirent {
     char                 *name;
 };
 
+struct demofs_kv_entry {
+    uint64_t                hash;
+    uint32_t                key_len;
+    uint32_t                value_len;
+    struct rb_node          node;
+    struct demofs_kv_entry *next;
+    void                   *key;
+    void                   *value;
+};
+
+struct demofs_kv_shard {
+    struct rb_tree  entries;
+    pthread_mutex_t lock;
+};
+
 struct demofs_symlink_target {
     int                           length;
     char                         *data;
@@ -195,6 +210,8 @@ struct demofs_shared {
     int                       device_rotor;
     struct demofs_inode_list *inode_list;
     int                       num_inode_list;
+    struct demofs_kv_shard   *kv_shards;
+    int                       num_kv_shards;
     int                       num_active_threads;
     uint8_t                   root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                  root_fhlen;
@@ -499,6 +516,53 @@ demofs_dirent_free(
     slab_allocator_free(thread->allocator, dirent, sizeof(*dirent));
 } /* demofs_dirent_free */
 
+
+static inline struct demofs_kv_entry *
+demofs_kv_entry_alloc(
+    struct demofs_thread *thread,
+    uint64_t              hash,
+    const void           *key,
+    uint32_t              key_len,
+    const void           *value,
+    uint32_t              value_len)
+{
+    struct demofs_kv_entry *entry;
+
+    entry = slab_allocator_alloc(thread->allocator, sizeof(*entry));
+
+    entry->hash      = hash;
+    entry->key_len   = key_len;
+    entry->value_len = value_len;
+    entry->key       = slab_allocator_alloc(thread->allocator, key_len);
+    entry->value     = slab_allocator_alloc(thread->allocator, value_len);
+    memcpy(entry->key, key, key_len);
+    memcpy(entry->value, value, value_len);
+
+    return entry;
+} /* demofs_kv_entry_alloc */
+
+static void
+demofs_kv_entry_free(
+    struct demofs_thread   *thread,
+    struct demofs_kv_entry *entry)
+{
+    slab_allocator_free(thread->allocator, entry->key, entry->key_len);
+    slab_allocator_free(thread->allocator, entry->value, entry->value_len);
+    slab_allocator_free(thread->allocator, entry, sizeof(*entry));
+} /* demofs_kv_entry_free */
+
+static void
+demofs_kv_entry_release(
+    struct rb_node *node,
+    void           *private_data)
+{
+    struct demofs_kv_entry *entry = container_of(node, struct demofs_kv_entry, node);
+
+    free(entry->key);
+    free(entry->value);
+    free(entry);
+} /* demofs_kv_entry_release */
+
 static inline int
 demofs_thread_alloc_space(
     struct demofs_thread *thread,
@@ -665,6 +729,15 @@ demofs_init(const char *cfgfile)
         inode_list->max_blocks = 1024 * 1024;
     }
 
+    /* Initialize KV shards */
+    shared->num_kv_shards = 256;
+    shared->kv_shards     = calloc(shared->num_kv_shards, sizeof(*shared->kv_shards));
+
+    for (i = 0; i < shared->num_kv_shards; i++) {
+        rb_tree_init(&shared->kv_shards[i].entries);
+        pthread_mutex_init(&shared->kv_shards[i].lock, NULL);
+    }
+
     return shared;
 } /* demofs_init */ /* demofs_init */
 
@@ -754,6 +827,14 @@ demofs_destroy(void *private_data)
     pthread_mutex_destroy(&shared->lock);
     free(shared->devices);
     free(shared->inode_list);
+
+    /* Clean up KV shards */
+    for (i = 0; i < shared->num_kv_shards; i++) {
+        rb_tree_destroy(&shared->kv_shards[i].entries, demofs_kv_entry_release, NULL);
+        pthread_mutex_destroy(&shared->kv_shards[i].lock);
+    }
+    free(shared->kv_shards);
+
     free(shared);
 } /* demofs_destroy */ /* demofs_destroy */
 
@@ -3112,6 +3193,212 @@ demofs_link(
 
 } /* demofs_link */
 
+
+static void
+demofs_put_key(
+    struct demofs_thread       *thread,
+    struct demofs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    uint64_t                hash;
+    int                     shard_idx;
+    struct demofs_kv_shard *shard;
+    struct demofs_kv_entry *entry, *existing;
+
+    hash      = chimera_vfs_hash(request->put_key.key, request->put_key.key_len);
+    shard_idx = hash % shared->num_kv_shards;
+    shard     = &shared->kv_shards[shard_idx];
+
+    pthread_mutex_lock(&shard->lock);
+
+    /* Check if key already exists */
+    rb_tree_query_exact(&shard->entries, hash, hash, existing);
+
+    if (existing) {
+        /* Update existing entry */
+        slab_allocator_free(thread->allocator, existing->value, existing->value_len);
+        existing->value_len = request->put_key.value_len;
+        existing->value     = slab_allocator_alloc(thread->allocator, request->put_key.value_len);
+        memcpy(existing->value, request->put_key.value, request->put_key.value_len);
+    } else {
+        /* Insert new entry */
+        entry = demofs_kv_entry_alloc(thread,
+                                      hash,
+                                      request->put_key.key,
+                                      request->put_key.key_len,
+                                      request->put_key.value,
+                                      request->put_key.value_len);
+
+        rb_tree_insert(&shard->entries, hash, entry);
+    }
+
+    pthread_mutex_unlock(&shard->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* demofs_put_key */
+
+static void
+demofs_get_key(
+    struct demofs_thread       *thread,
+    struct demofs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    uint64_t                hash;
+    int                     shard_idx;
+    struct demofs_kv_shard *shard;
+    struct demofs_kv_entry *entry;
+
+    hash      = chimera_vfs_hash(request->get_key.key, request->get_key.key_len);
+    shard_idx = hash % shared->num_kv_shards;
+    shard     = &shared->kv_shards[shard_idx];
+
+    pthread_mutex_lock(&shard->lock);
+
+    rb_tree_query_exact(&shard->entries, hash, hash, entry);
+
+    if (!entry) {
+        pthread_mutex_unlock(&shard->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    /* Return pointer to value - caller must use before callback returns */
+    request->get_key.r_value     = entry->value;
+    request->get_key.r_value_len = entry->value_len;
+
+    pthread_mutex_unlock(&shard->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* demofs_get_key */
+
+static void
+demofs_delete_key(
+    struct demofs_thread       *thread,
+    struct demofs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    uint64_t                hash;
+    int                     shard_idx;
+    struct demofs_kv_shard *shard;
+    struct demofs_kv_entry *entry;
+
+    hash      = chimera_vfs_hash(request->delete_key.key, request->delete_key.key_len);
+    shard_idx = hash % shared->num_kv_shards;
+    shard     = &shared->kv_shards[shard_idx];
+
+    pthread_mutex_lock(&shard->lock);
+
+    rb_tree_query_exact(&shard->entries, hash, hash, entry);
+
+    if (!entry) {
+        pthread_mutex_unlock(&shard->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    rb_tree_remove(&shard->entries, &entry->node);
+
+    pthread_mutex_unlock(&shard->lock);
+
+    demofs_kv_entry_free(thread, entry);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* demofs_delete_key */
+
+static int
+demofs_kv_key_in_range(
+    const void *key,
+    uint32_t    key_len,
+    const void *start_key,
+    uint32_t    start_key_len,
+    const void *end_key,
+    uint32_t    end_key_len)
+{
+    int cmp;
+
+    /* Compare key to start_key */
+    if (start_key_len > 0) {
+        cmp = memcmp(key, start_key,
+                     key_len < start_key_len ? key_len : start_key_len);
+        if (cmp < 0 || (cmp == 0 && key_len < start_key_len)) {
+            return 0; /* key < start_key */
+        }
+    }
+
+    /* Compare key to end_key */
+    if (end_key_len > 0) {
+        cmp = memcmp(key, end_key,
+                     key_len < end_key_len ? key_len : end_key_len);
+        if (cmp > 0 || (cmp == 0 && key_len > end_key_len)) {
+            return 0; /* key > end_key */
+        }
+    }
+
+    return 1; /* key is in range [start_key, end_key] */
+} /* demofs_kv_key_in_range */
+
+static void
+demofs_search_keys(
+    struct demofs_thread       *thread,
+    struct demofs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int                                i, rc;
+    struct demofs_kv_shard            *shard;
+    struct demofs_kv_entry            *entry;
+    chimera_vfs_search_keys_callback_t callback = request->search_keys.callback;
+
+    /* Iterate over all shards */
+    for (i = 0; i < shared->num_kv_shards; i++) {
+        shard = &shared->kv_shards[i];
+
+        pthread_mutex_lock(&shard->lock);
+
+        /* Iterate over all entries in the shard */
+        rb_tree_first(&shard->entries, entry);
+
+        while (entry) {
+            /* Check if key is in range */
+            if (demofs_kv_key_in_range(entry->key,
+                                       entry->key_len,
+                                       request->search_keys.start_key,
+                                       request->search_keys.start_key_len,
+                                       request->search_keys.end_key,
+                                       request->search_keys.end_key_len)) {
+                rc = callback(entry->key,
+                              entry->key_len,
+                              entry->value,
+                              entry->value_len,
+                              request->proto_private_data);
+
+                if (rc) {
+                    /* Caller wants to abort search */
+                    pthread_mutex_unlock(&shard->lock);
+                    request->status = CHIMERA_VFS_OK;
+                    request->complete(request);
+                    return;
+                }
+            }
+
+            entry = rb_tree_next(&shard->entries, entry);
+        }
+
+        pthread_mutex_unlock(&shard->lock);
+    }
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* demofs_search_keys */
+
 static void
 demofs_dispatch(
     struct chimera_vfs_request *request,
@@ -3186,6 +3473,18 @@ demofs_dispatch(
         case CHIMERA_VFS_OP_LINK:
             demofs_link(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_PUT_KEY:
+            demofs_put_key(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_GET_KEY:
+            demofs_get_key(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_DELETE_KEY:
+            demofs_delete_key(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_SEARCH_KEYS:
+            demofs_search_keys(thread, shared, request, private_data);
+            break;
         default:
             chimera_demofs_error("demofs_dispatch: unknown operation %d",
                                  request->opcode);
@@ -3198,7 +3497,7 @@ demofs_dispatch(
 SYMBOL_EXPORT struct chimera_vfs_module vfs_demofs = {
     .name           = "demofs",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_DEMOFS,
-    .capabilities   = CHIMERA_VFS_CAP_CREATE_UNLINKED,
+    .capabilities   = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV,
     .init           = demofs_init,
     .destroy        = demofs_destroy,
     .thread_init    = demofs_thread_init,

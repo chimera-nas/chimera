@@ -154,7 +154,11 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OP_LINK            18
 #define CHIMERA_VFS_OP_CREATE_UNLINKED 19
 #define CHIMERA_VFS_OP_MKNOD           20
-#define CHIMERA_VFS_OP_NUM             21
+#define CHIMERA_VFS_OP_PUT_KEY         21
+#define CHIMERA_VFS_OP_GET_KEY         22
+#define CHIMERA_VFS_OP_DELETE_KEY      23
+#define CHIMERA_VFS_OP_SEARCH_KEYS     24
+#define CHIMERA_VFS_OP_NUM             25
 
 #define CHIMERA_VFS_OPEN_CREATE        (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH          (1U << 1)
@@ -256,6 +260,34 @@ typedef int (*chimera_vfs_find_callback_t)(
     void                           *private_data);
 
 typedef void (*chimera_vfs_find_complete_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+/* KV operation callbacks */
+
+typedef void (*chimera_vfs_put_key_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+typedef void (*chimera_vfs_get_key_callback_t)(
+    enum chimera_vfs_error error_code,
+    const void            *value,
+    uint32_t               value_len,
+    void                  *private_data);
+
+typedef void (*chimera_vfs_delete_key_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+/* Returns non-zero to abort the search */
+typedef int (*chimera_vfs_search_keys_callback_t)(
+    const void *key,
+    uint32_t    key_len,
+    const void *value,
+    uint32_t    value_len,
+    void       *private_data);
+
+typedef void (*chimera_vfs_search_keys_complete_t)(
     enum chimera_vfs_error error_code,
     void                  *private_data);
 
@@ -573,6 +605,33 @@ struct chimera_vfs_request {
             struct chimera_vfs_attrs r_dir_pre_attr;
             struct chimera_vfs_attrs r_dir_post_attr;
         } link;
+
+        struct {
+            const void *key;
+            uint32_t    key_len;
+            const void *value;
+            uint32_t    value_len;
+        } put_key;
+
+        struct {
+            const void *key;
+            uint32_t    key_len;
+            const void *r_value;
+            uint32_t    r_value_len;
+        } get_key;
+
+        struct {
+            const void *key;
+            uint32_t    key_len;
+        } delete_key;
+
+        struct {
+            const void                        *start_key;
+            uint32_t                           start_key_len;
+            const void                        *end_key;
+            uint32_t                           end_key_len;
+            chimera_vfs_search_keys_callback_t callback;
+        } search_keys;
     };
 };
 
@@ -639,6 +698,16 @@ enum CHIMERA_FS_FH_MAGIC {
  */
 
 #define CHIMERA_VFS_CAP_CREATE_UNLINKED    (1U << 3)
+
+/* If set, module supports filesystem operations (directories, files, etc.)
+ * All current backends should declare this capability.
+ */
+#define CHIMERA_VFS_CAP_FS                 (1U << 4)
+
+/* If set, module supports key-value operations
+ * (put_key, get_key, delete_key, search_keys)
+ */
+#define CHIMERA_VFS_CAP_KV                 (1U << 5)
 
 struct chimera_vfs_module {
     /* Required
@@ -776,6 +845,7 @@ struct chimera_vfs_mount_table;
 struct chimera_vfs {
     struct chimera_vfs_module            *modules[CHIMERA_VFS_FH_MAGIC_MAX];
     void                                 *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
+    struct chimera_vfs_module            *kv_module;
     struct vfs_open_cache                *vfs_open_path_cache;
     struct vfs_open_cache                *vfs_open_file_cache;
     struct chimera_vfs_name_cache        *vfs_name_cache;
@@ -820,6 +890,7 @@ chimera_vfs_init(
     int                                  num_delegation_threads,
     const struct chimera_vfs_module_cfg *module_cfgs,
     int                                  num_modules,
+    const char                          *kv_module_name,
     int                                  cache_ttl,
     struct prometheus_metrics           *metrics);
 

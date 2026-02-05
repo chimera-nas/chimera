@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -281,7 +281,7 @@ chimera_nfs_dispatch(
 SYMBOL_EXPORT struct chimera_vfs_module vfs_nfs = {
     .name           = "nfs",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_NFS,
-    .capabilities   = CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED,
+    .capabilities   = CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS,
     .init           = chimera_nfs_init,
     .destroy        = chimera_nfs_destroy,
     .thread_init    = chimera_nfs_thread_init,

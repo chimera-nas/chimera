@@ -122,7 +122,13 @@ chimera_vfs_readdir(
     struct chimera_vfs_module  *module;
 
     request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
-    module  = request->module;
+
+    if (CHIMERA_VFS_IS_ERR(request)) {
+        complete(CHIMERA_VFS_PTR_ERR(request), handle, 0, 0, 0, NULL, private_data);
+        return;
+    }
+
+    module = request->module;
 
     request->opcode                         = CHIMERA_VFS_OP_READDIR;
     request->readdir.handle                 = handle;

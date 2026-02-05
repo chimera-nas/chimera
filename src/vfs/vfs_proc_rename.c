@@ -75,6 +75,11 @@ chimera_vfs_rename(
 
     request = chimera_vfs_request_alloc(thread, cred, fh, fhlen);
 
+    if (CHIMERA_VFS_IS_ERR(request)) {
+        callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
     request->opcode                                 = CHIMERA_VFS_OP_RENAME;
     request->complete                               = chimera_vfs_rename_complete;
     request->rename.name                            = name;

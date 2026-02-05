@@ -125,6 +125,12 @@ main(
         chimera_server_config_set_external_portmap(server_config, 1);
     }
 
+    json_t *kv_module_value = json_object_get(server_params, "kv_module");
+    if (kv_module_value && json_is_string(kv_module_value)) {
+        const char *kv_module_str = json_string_value(kv_module_value);
+        chimera_server_config_set_kv_module(server_config, kv_module_str);
+    }
+
     json_t *rdma_value = json_object_get(server_params, "rdma");
     if (rdma_value && json_is_true(rdma_value)) {
         chimera_server_config_set_nfs_rdma(server_config, 1);

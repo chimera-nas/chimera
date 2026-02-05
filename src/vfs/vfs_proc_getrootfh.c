@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -51,11 +51,14 @@ chimera_vfs_getrootfh(
 
     fh_hash = chimera_vfs_hash(fh, 1);
 
-    request = chimera_vfs_request_alloc_by_hash(thread, fh, 1, fh_hash);
-
-    /* For getrootfh operations, the module is passed directly - set it
+    /* For getrootfh operations, the module is passed directly - use alloc_with_module
      * since chimera_vfs_get_module returns NULL (no mount exists for this FH) */
-    request->module = module;
+    request = chimera_vfs_request_alloc_with_module(thread, NULL, fh, 1, fh_hash, module);
+
+    if (CHIMERA_VFS_IS_ERR(request)) {
+        callback(CHIMERA_VFS_PTR_ERR(request), NULL, private_data);
+        return;
+    }
 
     request->opcode                       = CHIMERA_VFS_OP_GETROOTFH;
     request->complete                     = chimera_vfs_getrootfh_complete;

@@ -306,6 +306,7 @@ chimera_vfs_init(
     int                                  num_delegation_threads,
     const struct chimera_vfs_module_cfg *module_cfgs,
     int                                  num_modules,
+    const char                          *kv_module_name,
     int                                  cache_ttl,
     struct prometheus_metrics           *metrics)
 {
@@ -313,6 +314,7 @@ chimera_vfs_init(
     struct chimera_vfs_module *module;
     char                       modsym[80];
     void                      *handle;
+    const char                *effective_kv_module;
 
     vfs = calloc(1, sizeof(*vfs));
 
@@ -389,6 +391,27 @@ chimera_vfs_init(
         // Register the module with the VFS, passing its config path
         chimera_vfs_register(vfs, module, module_cfgs[i].config_data);
     }
+
+    /* Set up KV module - default to memfs if not specified */
+    effective_kv_module = (kv_module_name && kv_module_name[0] != '\0') ? kv_module_name : "memfs";
+
+    /* Find and validate the KV module */
+    vfs->kv_module = NULL;
+    for (int i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
+        if (vfs->modules[i] && strcmp(vfs->modules[i]->name, effective_kv_module) == 0) {
+            vfs->kv_module = vfs->modules[i];
+            break;
+        }
+    }
+
+    chimera_vfs_abort_if(!vfs->kv_module,
+                         "KV module '%s' not found", effective_kv_module);
+
+    chimera_vfs_abort_if(!(vfs->kv_module->capabilities & CHIMERA_VFS_CAP_KV),
+                         "KV module '%s' does not support KV operations (missing CHIMERA_VFS_CAP_KV)",
+                         effective_kv_module);
+
+    chimera_vfs_info("Using '%s' as KV backend", effective_kv_module);
 
     vfs->num_delegation_threads = num_delegation_threads;
     vfs->delegation_threads     = calloc(num_delegation_threads, sizeof(struct chimera_vfs_delegation_thread));

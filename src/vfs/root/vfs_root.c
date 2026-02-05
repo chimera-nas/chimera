@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -584,7 +584,7 @@ chimera_vfs_root_dispatch(
 SYMBOL_EXPORT struct chimera_vfs_module vfs_root = {
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_ROOT,
     .name           = "root",
-    .capabilities   = 0,
+    .capabilities   = CHIMERA_VFS_CAP_FS,
     .init           = chimera_vfs_root_init,
     .destroy        = chimera_vfs_root_destroy,
     .thread_init    = chimera_vfs_root_thread_init,

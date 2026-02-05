@@ -80,6 +80,11 @@ chimera_vfs_create_unlinked(
 
     request = chimera_vfs_request_alloc_anon(thread, cred, fh, fh_len, thread->anon_fh_key++);
 
+    if (CHIMERA_VFS_IS_ERR(request)) {
+        callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, NULL, private_data);
+        return;
+    }
+
     chimera_vfs_abort_if(!(request->module->capabilities & CHIMERA_VFS_CAP_CREATE_UNLINKED),
                          "module does not support create_unlinked");
 

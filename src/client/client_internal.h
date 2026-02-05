@@ -321,6 +321,7 @@ struct chimera_client_config {
     int                           delegation_threads;
     int                           cache_ttl;
     int                           max_fds;
+    char                          kv_module[64];
     struct chimera_vfs_module_cfg modules[CHIMERA_CLIENT_MAX_MODULES];
     int                           num_modules;
 } __attribute__((aligned(64)));

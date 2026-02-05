@@ -1,5 +1,5 @@
 
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -52,11 +52,17 @@ chimera_vfs_umount(
         return;
     }
 
-    request = chimera_vfs_request_alloc(thread, cred, mount->root_fh, mount->root_fh_len);
-
     /* For umount operations, the mount was already removed from the table,
-     * so chimera_vfs_get_module returns NULL. Set the module directly. */
-    request->module = mount->module;
+     * so chimera_vfs_get_module returns NULL. Use alloc_with_module. */
+    request = chimera_vfs_request_alloc_with_module(thread, cred,
+                                                    mount->root_fh, mount->root_fh_len,
+                                                    chimera_vfs_hash(mount->root_fh, mount->root_fh_len),
+                                                    mount->module);
+
+    if (CHIMERA_VFS_IS_ERR(request)) {
+        callback(thread, CHIMERA_VFS_PTR_ERR(request), private_data);
+        return;
+    }
 
     request->opcode               = CHIMERA_VFS_OP_UMOUNT;
     request->complete             = chimera_vfs_umount_complete;

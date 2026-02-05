@@ -98,6 +98,11 @@ chimera_vfs_open(
 
         request = chimera_vfs_request_alloc_by_hash(thread, cred, fh, fhlen, fh_hash);
 
+        if (CHIMERA_VFS_IS_ERR(request)) {
+            callback(CHIMERA_VFS_PTR_ERR(request), NULL, private_data);
+            return;
+        }
+
         request->opcode             = CHIMERA_VFS_OP_OPEN;
         request->complete           = chimera_vfs_open_complete;
         request->open.flags         = flags;
