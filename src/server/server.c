@@ -123,9 +123,6 @@ chimera_server_config_init(void)
     config->num_modules = 5;
 #endif /* ifdef HAVE_IO_URING */
 
-    config->metrics_port   = 0;
-    config->rest_http_port = 0;
-
     return config;
 } /* chimera_server_config_init */
 
