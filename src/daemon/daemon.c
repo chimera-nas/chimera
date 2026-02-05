@@ -37,6 +37,9 @@ main(
     const char                          *path;
     json_t                              *config, *shares, *share, *server_params, *buckets, *bucket;
     json_t                              *mounts, *mount, *exports, *export;
+    json_t                              *json_value;
+    int                                  int_value;
+    const char                          *str_value;
     json_error_t                         error;
     struct chimera_server               *server;
     struct chimera_server_config        *server_config;
@@ -107,43 +110,49 @@ main(
 
     server_config = chimera_server_config_init();
 
-    json_t *threads_value = json_object_get(server_params, "threads");
-    if (threads_value && json_is_integer(threads_value)) {
-        int threads = json_integer_value(threads_value);
-        chimera_server_config_set_core_threads(server_config, threads);
+    json_value = json_object_get(server_params, "threads");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_core_threads(server_config, int_value);
     }
 
-    json_t *delegation_threads_value = json_object_get(server_params, "delegation_threads");
-    if (delegation_threads_value && json_is_integer(delegation_threads_value)) {
-        int delegation_threads = json_integer_value(delegation_threads_value);
-        chimera_server_config_set_delegation_threads(server_config, delegation_threads);
+    json_value = json_object_get(server_params, "max_open_files");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_max_open_files(server_config, int_value);
     }
 
-    json_t *external_portmap = json_object_get(server_params, "external_portmap");
-    if (external_portmap && json_is_true(external_portmap)) {
+    json_value = json_object_get(server_params, "delegation_threads");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_delegation_threads(server_config, int_value);
+    }
+
+    json_value = json_object_get(server_params, "external_portmap");
+    if (json_is_true(json_value)) {
         chimera_server_info("Enabling external portmap/rpcbind support");
         chimera_server_config_set_external_portmap(server_config, 1);
     }
 
-    json_t *rdma_value = json_object_get(server_params, "rdma");
-    if (rdma_value && json_is_true(rdma_value)) {
+    json_value = json_object_get(server_params, "rdma");
+    if (json_is_true(json_value)) {
         chimera_server_config_set_nfs_rdma(server_config, 1);
     }
 
-    json_t *rdma_hostname_value = json_object_get(server_params, "rdma_hostname");
-    if (rdma_hostname_value && json_is_string(rdma_hostname_value)) {
-        const char *rdma_hostname_str = json_string_value(rdma_hostname_value);
-        chimera_server_config_set_nfs_rdma_hostname(server_config, rdma_hostname_str);
+    json_value = json_object_get(server_params, "rdma_hostname");
+    if (json_is_string(json_value)) {
+        str_value = json_string_value(json_value);
+        chimera_server_config_set_nfs_rdma_hostname(server_config, str_value);
     }
 
-    json_t *rdma_port_value = json_object_get(server_params, "rdma_port");
-    if (rdma_port_value && json_is_integer(rdma_port_value)) {
-        int rdma_port = json_integer_value(rdma_port_value);
-        chimera_server_config_set_nfs_rdma_port(server_config, rdma_port);
+    json_value = json_object_get(server_params, "rdma_port");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_nfs_rdma_port(server_config, int_value);
     }
 
     json_t *smb_multichannel = json_object_get(server_params, "smb_multichannel");
-    if (smb_multichannel && json_is_array(smb_multichannel)) {
+    if (json_is_array(smb_multichannel)) {
         json_t *smb_nic_info_json;
         json_array_foreach(smb_multichannel, i, smb_nic_info_json)
         {
@@ -167,7 +176,7 @@ main(
     }
 
     json_t *vfs_modules = json_object_get(server_params, "vfs");
-    if (vfs_modules && json_is_object(vfs_modules)) {
+    if (json_is_object(vfs_modules)) {
         const char *module_name;
         json_t     *module;
         json_object_foreach(vfs_modules, module_name, module)
@@ -176,7 +185,7 @@ main(
             json_t     *config_obj = json_object_get(module, "config");
             char       *config_str = NULL;
 
-            if (config_obj && json_is_object(config_obj)) {
+            if (json_is_object(config_obj)) {
                 config_str = json_dumps(config_obj, JSON_COMPACT);
             }
 

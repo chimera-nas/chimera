@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/resource.h>
+#include <errno.h>
 
 #include "evpl/evpl.h"
 #include "server_internal.h"
@@ -27,6 +28,7 @@ struct chimera_server_config {
     int                                  nfs_rdma_port;
     int                                  nfs_tcp_rdma_port;
     int                                  external_portmap;
+    rlim_t                               max_open_files;
     int                                  core_threads;
     int                                  delegation_threads;
     int                                  cache_ttl;
@@ -72,6 +74,7 @@ chimera_server_config_init(void)
     config = calloc(1, sizeof(struct chimera_server_config));
 
     config->core_threads       = 16;
+    config->max_open_files     = 65535;
     config->delegation_threads = 64;
     config->nfs_rdma           = 0;
     config->external_portmap   = 0;
@@ -136,6 +139,14 @@ chimera_server_config_set_delegation_threads(
 {
     config->delegation_threads = threads;
 } /* chimera_server_config_set_delegation_threads */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_max_open_files(
+    struct chimera_server_config *config,
+    int                           open_files)
+{
+    config->max_open_files = (rlim_t) open_files;
+} /* chimera_server_config_set_max_open_files */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_external_portmap(
@@ -489,10 +500,24 @@ chimera_server_init(
 
     chimera_log_init();
 
+    /* Need to set the filedescriptor limits */
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
-        chimera_server_info("Effective file descriptor limit: %ld", rl.rlim_cur);
+        if (rl.rlim_cur < config->max_open_files) {
+            rl.rlim_cur = config->max_open_files;
+            if (rl.rlim_cur > rl.rlim_max) {
+                rl.rlim_max = rl.rlim_cur;
+            }
+            if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+                chimera_server_error("Failed to set file descriptor limit to %ld: %s",
+                                     rl.rlim_cur, strerror(errno));
+            } else {
+                chimera_server_info("Setting file descriptor limit to %ld", rl.rlim_cur);
+            }
+        } else {
+            chimera_server_info("File descriptor limit is sufficient: %ld", rl.rlim_cur);
+        }
     } else {
-        chimera_server_error("Failed to get file descriptor limit");
+        chimera_server_error("Failed to get file descriptor limit: %s", strerror(errno));
     }
 
     server = calloc(1, sizeof(*server));
