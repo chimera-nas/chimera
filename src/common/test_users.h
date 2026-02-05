@@ -8,15 +8,18 @@
 
 /* Note: include "server/server.h" before including this header */
 
-#define CHIMERA_TEST_USER_ROOT_UID    0
-#define CHIMERA_TEST_USER_ROOT_GID    0
-#define CHIMERA_TEST_USER_JOHNDOE_UID 1000
-#define CHIMERA_TEST_USER_JOHNDOE_GID 1000
+#define CHIMERA_TEST_USER_ROOT_UID         0
+#define CHIMERA_TEST_USER_ROOT_GID         0
+#define CHIMERA_TEST_USER_JOHNDOE_UID      1000
+#define CHIMERA_TEST_USER_JOHNDOE_GID      1000
+#define CHIMERA_TEST_USER_MYUSER_UID       1001
+#define CHIMERA_TEST_USER_MYUSER_GID       1001
 
 #define CHIMERA_TEST_USER_PASSWORD \
         "$6$testsalt$51yaaBMXXXt5vK522YOlIMZ267vqHtMIzc2klcsu3EEv/bkRDU9g3UmkypXf.NvlpPpIPK1nX5zdbCeJBiQbB/"
 
-#define CHIMERA_TEST_USER_SMBPASSWD   "secret"
+#define CHIMERA_TEST_USER_SMBPASSWD        "secret"
+#define CHIMERA_TEST_USER_MYUSER_SMBPASSWD "mypassword"
 
 static inline void
 chimera_test_add_server_users(struct chimera_server *server)
@@ -24,6 +27,7 @@ chimera_test_add_server_users(struct chimera_server *server)
     chimera_server_add_user(server, "root",
                             CHIMERA_TEST_USER_PASSWORD,
                             CHIMERA_TEST_USER_SMBPASSWD,
+                            NULL,  // SID
                             CHIMERA_TEST_USER_ROOT_UID,
                             CHIMERA_TEST_USER_ROOT_GID,
                             0, NULL, 1);
@@ -31,8 +35,17 @@ chimera_test_add_server_users(struct chimera_server *server)
     chimera_server_add_user(server, "johndoe",
                             CHIMERA_TEST_USER_PASSWORD,
                             CHIMERA_TEST_USER_SMBPASSWD,
+                            NULL,  // SID
                             CHIMERA_TEST_USER_JOHNDOE_UID,
                             CHIMERA_TEST_USER_JOHNDOE_GID,
+                            0, NULL, 1);
+
+    chimera_server_add_user(server, "myuser",
+                            CHIMERA_TEST_USER_PASSWORD,
+                            CHIMERA_TEST_USER_MYUSER_SMBPASSWD,
+                            NULL,  // SID
+                            CHIMERA_TEST_USER_MYUSER_UID,
+                            CHIMERA_TEST_USER_MYUSER_GID,
                             0, NULL, 1);
 } /* chimera_test_add_server_users */
 
@@ -58,6 +71,14 @@ chimera_test_write_users_json(json_t *config)
     json_object_set_new(johndoe_user, "uid", json_integer(CHIMERA_TEST_USER_JOHNDOE_UID));
     json_object_set_new(johndoe_user, "gid", json_integer(CHIMERA_TEST_USER_JOHNDOE_GID));
     json_array_append_new(users, johndoe_user);
+
+    json_t *myuser_user = json_object();
+    json_object_set_new(myuser_user, "username", json_string("myuser"));
+    json_object_set_new(myuser_user, "password", json_string(CHIMERA_TEST_USER_PASSWORD));
+    json_object_set_new(myuser_user, "smbpasswd", json_string(CHIMERA_TEST_USER_MYUSER_SMBPASSWD));
+    json_object_set_new(myuser_user, "uid", json_integer(CHIMERA_TEST_USER_MYUSER_UID));
+    json_object_set_new(myuser_user, "gid", json_integer(CHIMERA_TEST_USER_MYUSER_GID));
+    json_array_append_new(users, myuser_user);
 
     json_object_set_new(config, "users", users);
 } /* chimera_test_write_users_json */
