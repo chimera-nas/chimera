@@ -13,6 +13,11 @@ Files: *.json .vscode/*.json .devcontainer/*.json .claude/*.json src/**/*.json
 Copyright: 2025-2026 Chimera-NAS Project Contributors
 License: Unlicense
 
+# OpenAPI specification
+Files: src/server/rest/openapi.json
+Copyright: 2025-2026 Chimera-NAS Project Contributors
+License: Apache-2.0
+
 # Docker ignore file
 Files: .dockerignore
 Copyright: 2025-2026 Chimera-NAS Project Contributors

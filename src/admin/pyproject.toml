@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
-# SPDX-License-Identifier: LGPL-2.1-only
+# SPDX-License-Identifier: Apache-2.0
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
@@ -11,12 +11,12 @@ name = "chimera-admin"
 version = "0.1.0"
 description = "Python SDK for Chimera NAS REST API"
 readme = "README.md"
-license = {text = "LGPL-2.1-only"}
+license = {text = "Apache-2.0"}
 requires-python = ">=3.8"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU Lesser General Public License v2 (LGPLv2)",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",

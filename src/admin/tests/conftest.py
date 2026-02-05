@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
-# SPDX-License-Identifier: LGPL-2.1-only
+# SPDX-License-Identifier: Apache-2.0
 
 """Pytest fixtures for Chimera Admin SDK tests."""
 
