@@ -17,7 +17,7 @@ target_link_libraries(chimera_rest evpl_http evpl ${JANSSON_LIBRARIES})
 # Embed Swagger UI files at build time
 set(SWAGGER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/swagger)
 set(SWAGGER_EMBEDDED_C ${CMAKE_CURRENT_BINARY_DIR}/swagger_embedded.c)
-set(OPENAPI_JSON ${CMAKE_CURRENT_SOURCE_DIR}/openapi.json)
+set(OPENAPI_JSON ${CMAKE_SOURCE_DIR}/docs/openapi.json)
 
 add_custom_command(
     OUTPUT ${SWAGGER_EMBEDDED_C}

@@ -3,8 +3,8 @@ Upstream-Name: chimera
 Upstream-Contact: Ben Jarvis
 Source: https://github.com/chimera-nas/chimera
 
-# Documentation files (Jekyll markdown)
-Files: README.md docs/*.md docs/**/*.md
+# Documentation files (Jekyll markdown and HTML)
+Files: README.md docs/*.md docs/**/*.md docs/*.html
 Copyright: 2025-2026 Chimera-NAS Project Contributors
 License: Unlicense
 
@@ -14,7 +14,7 @@ Copyright: 2025-2026 Chimera-NAS Project Contributors
 License: Unlicense
 
 # OpenAPI specification
-Files: src/server/rest/openapi.json
+Files: docs/openapi.json
 Copyright: 2025-2026 Chimera-NAS Project Contributors
 License: Apache-2.0
 
