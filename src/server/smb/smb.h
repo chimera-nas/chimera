@@ -43,4 +43,10 @@ const char *
 chimera_smb_share_get_path(
     const struct chimera_smb_share *share);
 
+int
+chimera_smb_add_ntlm_user(
+    void       *smb_shared,
+    const char *username,
+    const char *password);
+
 extern struct chimera_server_protocol smb_protocol;

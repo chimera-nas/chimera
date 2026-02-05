@@ -47,6 +47,7 @@ chimera_client_add_user(
     const char            *username,
     const char            *password,
     const char            *smbpasswd,
+    const char            *sid,
     uint32_t               uid,
     uint32_t               gid,
     uint32_t               ngids,
