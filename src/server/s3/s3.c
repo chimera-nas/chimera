@@ -271,6 +271,7 @@ s3_server_dispatch(
     const char                      *urlp, *slash, *dot, *host_header;
     int                              host_pathing = 0;
     const char                      *range_str;
+    enum chimera_s3_auth_result      auth_result;
 
     s3_request = chimera_s3_request_alloc(thread);
 
@@ -286,35 +287,31 @@ s3_server_dispatch(
     *notify_callback = s3_server_notify;
     *notify_data     = s3_request;
 
-    /* Verify AWS V4 authentication */
-    {
-        enum chimera_s3_auth_result auth_result;
+    /* Verify AWS authentication */
+    auth_result = chimera_s3_auth_verify(shared->cred_cache, request);
 
-        auth_result = chimera_s3_auth_verify(shared->cred_cache, request);
-
-        switch (auth_result) {
-            case CHIMERA_S3_AUTH_OK:
-                /* Authentication successful */
-                break;
-            case CHIMERA_S3_AUTH_NO_AUTH_HEADER:
-                /* No auth header - authentication required */
-                s3_request->status    = CHIMERA_S3_STATUS_MISSING_AUTH_HEADER;
-                s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-                return;
-            case CHIMERA_S3_AUTH_UNKNOWN_ACCESS_KEY:
-                s3_request->status    = CHIMERA_S3_STATUS_INVALID_ACCESS_KEY_ID;
-                s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-                return;
-            case CHIMERA_S3_AUTH_SIGNATURE_MISMATCH:
-                s3_request->status    = CHIMERA_S3_STATUS_SIGNATURE_MISMATCH;
-                s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-                return;
-            default:
-                s3_request->status    = CHIMERA_S3_STATUS_ACCESS_DENIED;
-                s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-                return;
-        } /* switch */
-    }
+    switch (auth_result) {
+        case CHIMERA_S3_AUTH_OK:
+            /* Authentication successful */
+            break;
+        case CHIMERA_S3_AUTH_NO_AUTH_HEADER:
+            /* No auth header - authentication required */
+            s3_request->status    = CHIMERA_S3_STATUS_MISSING_AUTH_HEADER;
+            s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            return;
+        case CHIMERA_S3_AUTH_UNKNOWN_ACCESS_KEY:
+            s3_request->status    = CHIMERA_S3_STATUS_INVALID_ACCESS_KEY_ID;
+            s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            return;
+        case CHIMERA_S3_AUTH_SIGNATURE_MISMATCH:
+            s3_request->status    = CHIMERA_S3_STATUS_SIGNATURE_MISMATCH;
+            s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            return;
+        default:
+            s3_request->status    = CHIMERA_S3_STATUS_ACCESS_DENIED;
+            s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            return;
+    } /* switch */
 
     host_header = evpl_http_request_header(request, "Host");
 

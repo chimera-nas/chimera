@@ -41,12 +41,6 @@ struct chimera_s3_cred_cache {
     int                                  shutdown;
 };
 
-static inline int
-chimera_s3_cred_cache_has_credentials(struct chimera_s3_cred_cache *cache)
-{
-    return cache->num_credentials > 0;
-} // chimera_s3_cred_cache_has_credentials
-
 static inline unsigned int
 chimera_s3_cred_cache_hash(
     const char *access_key,
