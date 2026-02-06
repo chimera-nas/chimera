@@ -8,6 +8,7 @@ ARG ENABLE_XLIO=1
 ARG ENABLE_DOCA=0
 ARG ENABLE_FIO=1
 ARG ENABLE_CLAUDE=1
+ARG ENABLE_CODEX=1
 ARG ENABLE_UV=1
 FROM ${DOCKER_MIRROR}ubuntu:24.04
 
@@ -35,6 +36,10 @@ RUN apt-get -y update && \
 
 RUN if [ "$ENABLE_CLAUDE" = "1" ] ; then \
     npm install -g @anthropic-ai/claude-code ; \
+    fi
+
+RUN if [ "$ENABLE_CODEX" = "1" ] ; then \
+    npm install -g @openai/codex ; \
     fi
 
 RUN if [ "$ENABLE_FIO" = "1" ] ; then \
