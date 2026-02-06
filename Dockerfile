@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: Unlicense
 
@@ -17,7 +17,8 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install clang cmake ninja-build git flex bison uuid-dev uthash-dev libkrb5-3 libkrb5-dev libgssapi-krb5-2  gss-ntlmssp-dev \
-    librdmacm-dev libjansson-dev libclang-rt-18-dev llvm libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev libssl-dev openssl libnuma-dev && \
+    librdmacm-dev libjansson-dev libclang-rt-18-dev llvm libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev libssl-dev openssl libnuma-dev \
+    python3 python3-pip python3-venv python3-requests pkg-config && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -68,7 +69,8 @@ ARG BUILD_TYPE=Release
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install libuuid1 librdmacm1 libjansson4 liburcu8t64 ibverbs-providers \
-    libasan8 liburing2 libunwind8 librocksdb8.9 gss-ntlmssp libkrb5-3 libkrb5-dev libgssapi-krb5-2 gss-ntlmssp-dev openssl libnuma1 && \
+    libasan8 liburing2 libunwind8 librocksdb8.9 gss-ntlmssp libkrb5-3 libkrb5-dev libgssapi-krb5-2 gss-ntlmssp-dev openssl libnuma1 \
+    python3 python3-requests && \
     if [ "${BUILD_TYPE}" = "Debug" ]; then \
     apt-get -y --no-install-recommends install llvm gdb ; \
     fi && \

@@ -718,3 +718,13 @@ chimera_vfs_user_is_member(
 {
     return chimera_vfs_user_cache_is_member(vfs->vfs_user_cache, uid, gid);
 } /* chimera_vfs_user_is_member */
+
+
+SYMBOL_EXPORT void
+chimera_vfs_iterate_builtin_users(
+    struct chimera_vfs         *vfs,
+    chimera_vfs_user_iterate_cb callback,
+    void                       *data)
+{
+    chimera_vfs_user_cache_iterate_builtin(vfs->vfs_user_cache, callback, data);
+} /* chimera_vfs_iterate_builtin_users */

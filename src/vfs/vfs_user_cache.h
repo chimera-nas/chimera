@@ -24,6 +24,7 @@ struct chimera_vfs_user {
     struct rcu_head          rcu;
     struct chimera_vfs_user *next_by_name;
     struct chimera_vfs_user *next_by_uid;
+    struct chimera_vfs_user *next_builtin;
     uint32_t                 gids[CHIMERA_VFS_CRED_MAX_GIDS];
     char                     username[256];
     char                     password[256];
@@ -40,6 +41,8 @@ struct chimera_vfs_user_cache {
     int                                   ttl;
     struct chimera_vfs_user_cache_bucket *name_buckets;
     struct chimera_vfs_user_cache_bucket *uid_buckets;
+    struct chimera_vfs_user              *builtin_users;
+    pthread_mutex_t                       builtin_lock;
     pthread_t                             expiry_thread;
     pthread_mutex_t                       expiry_lock;
     pthread_cond_t                        expiry_cond;
@@ -192,6 +195,9 @@ chimera_vfs_user_cache_create(
     cache->uid_buckets = calloc(num_buckets,
                                 sizeof(struct chimera_vfs_user_cache_bucket));
 
+    cache->builtin_users = NULL;
+    pthread_mutex_init(&cache->builtin_lock, NULL);
+
     for (i = 0; i < num_buckets; i++) {
         pthread_mutex_init(&cache->name_buckets[i].lock, NULL);
         pthread_mutex_init(&cache->uid_buckets[i].lock, NULL);
@@ -204,7 +210,7 @@ chimera_vfs_user_cache_create(
                    chimera_vfs_user_cache_expiry_thread, cache);
 
     return cache;
-} // chimera_vfs_user_cache_create
+} // chimera_vfs_user_cache_create // chimera_vfs_user_cache_create
 
 static inline void
 chimera_vfs_user_cache_destroy(struct chimera_vfs_user_cache *cache)
@@ -235,11 +241,12 @@ chimera_vfs_user_cache_destroy(struct chimera_vfs_user_cache *cache)
     free(cache->name_buckets);
     free(cache->uid_buckets);
 
+    pthread_mutex_destroy(&cache->builtin_lock);
     pthread_mutex_destroy(&cache->expiry_lock);
     pthread_cond_destroy(&cache->expiry_cond);
 
     free(cache);
-} // chimera_vfs_user_cache_destroy
+} // chimera_vfs_user_cache_destroy // chimera_vfs_user_cache_destroy
 
 static inline int
 chimera_vfs_user_cache_add(
@@ -253,10 +260,11 @@ chimera_vfs_user_cache_add(
     const uint32_t                *gids,
     int                            pinned)
 {
-    struct chimera_vfs_user *user, *existing;
+    struct chimera_vfs_user *user, *existing, **pp;
     unsigned int             name_idx, uid_idx;
     struct timespec          now;
     int                      username_len;
+    int                      existing_pinned = 0;
 
     username_len = strlen(username);
     name_idx     = chimera_vfs_user_cache_hash_name(username, username_len,
@@ -301,6 +309,7 @@ chimera_vfs_user_cache_add(
     existing = cache->name_buckets[name_idx].head;
     while (existing) {
         if (strcmp(existing->username, username) == 0) {
+            existing_pinned = existing->pinned;
             chimera_vfs_user_cache_remove_locked(cache, existing);
             break;
         }
@@ -321,17 +330,44 @@ chimera_vfs_user_cache_add(
 
     pthread_mutex_unlock(&cache->name_buckets[name_idx].lock);
 
+    /* Maintain builtin list for pinned users */
+    if (pinned || existing_pinned) {
+        pthread_mutex_lock(&cache->builtin_lock);
+
+        /* If old user was pinned, remove it from builtin list */
+        if (existing_pinned && existing) {
+            pp = &cache->builtin_users;
+            while (*pp) {
+                if (*pp == existing) {
+                    *pp = existing->next_builtin;
+                    break;
+                }
+                pp = &(*pp)->next_builtin;
+            }
+        }
+
+        /* If new user is pinned, add to builtin list */
+        if (pinned) {
+            user->next_builtin   = cache->builtin_users;
+            cache->builtin_users = user;
+        }
+
+        pthread_mutex_unlock(&cache->builtin_lock);
+    }
+
     return 0;
-} // chimera_vfs_user_cache_add
+} // chimera_vfs_user_cache_add // chimera_vfs_user_cache_add
 
 static inline int
 chimera_vfs_user_cache_remove(
     struct chimera_vfs_user_cache *cache,
     const char                    *username)
 {
-    unsigned int             name_idx, uid_idx;
-    struct chimera_vfs_user *user;
-    int                      username_len;
+    unsigned int              name_idx, uid_idx;
+    struct chimera_vfs_user  *user;
+    struct chimera_vfs_user **pp;
+    int                       username_len;
+    int                       was_pinned = 0;
 
     username_len = strlen(username);
     name_idx     = chimera_vfs_user_cache_hash_name(username, username_len,
@@ -344,6 +380,7 @@ chimera_vfs_user_cache_remove(
         if (strcmp(user->username, username) == 0) {
             uid_idx = chimera_vfs_user_cache_hash_uid(user->uid,
                                                       cache->num_buckets);
+            was_pinned = user->pinned;
 
             if (uid_idx != name_idx) {
                 pthread_mutex_lock(&cache->uid_buckets[uid_idx].lock);
@@ -356,6 +393,21 @@ chimera_vfs_user_cache_remove(
             }
 
             pthread_mutex_unlock(&cache->name_buckets[name_idx].lock);
+
+            /* Remove from builtin list if pinned */
+            if (was_pinned) {
+                pthread_mutex_lock(&cache->builtin_lock);
+                pp = &cache->builtin_users;
+                while (*pp) {
+                    if (*pp == user) {
+                        *pp = user->next_builtin;
+                        break;
+                    }
+                    pp = &(*pp)->next_builtin;
+                }
+                pthread_mutex_unlock(&cache->builtin_lock);
+            }
+
             return 0;
         }
         user = user->next_by_name;
@@ -363,7 +415,7 @@ chimera_vfs_user_cache_remove(
 
     pthread_mutex_unlock(&cache->name_buckets[name_idx].lock);
     return -1;
-} // chimera_vfs_user_cache_remove
+} // chimera_vfs_user_cache_remove // chimera_vfs_user_cache_remove
 
 static inline const struct chimera_vfs_user *
 chimera_vfs_user_cache_lookup_by_name(
@@ -468,3 +520,29 @@ chimera_vfs_user_cache_is_member(
 
     return 0;
 } // chimera_vfs_user_cache_is_member
+
+
+typedef int (*chimera_vfs_user_iterate_cb)(
+    const struct chimera_vfs_user *user,
+    void                          *data);
+
+static inline void
+chimera_vfs_user_cache_iterate_builtin(
+    struct chimera_vfs_user_cache *cache,
+    chimera_vfs_user_iterate_cb    callback,
+    void                          *data)
+{
+    struct chimera_vfs_user *user;
+
+    pthread_mutex_lock(&cache->builtin_lock);
+
+    user = cache->builtin_users;
+    while (user) {
+        if (callback(user, data) != 0) {
+            break;
+        }
+        user = user->next_builtin;
+    }
+
+    pthread_mutex_unlock(&cache->builtin_lock);
+} // chimera_vfs_user_cache_iterate_builtin

@@ -1,0 +1,712 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Chimera NAS REST API",
+    "description": "REST API for managing Chimera NAS server configuration including users, NFS exports, SMB shares, and S3 buckets.",
+    "version": "1.0.0",
+    "license": {
+      "name": "LGPL-2.1-only",
+      "url": "https://spdx.org/licenses/LGPL-2.1-only.html"
+    }
+  },
+  "servers": [
+    {
+      "url": "/api/v1",
+      "description": "Chimera NAS REST API v1"
+    }
+  ],
+  "paths": {
+    "/users": {
+      "get": {
+        "summary": "List builtin users",
+        "description": "Returns a list of all builtin (pinned) users in the system.",
+        "operationId": "listUsers",
+        "tags": ["Users"],
+        "responses": {
+          "200": {
+            "description": "List of users",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/User"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create user",
+        "description": "Creates a new builtin user.",
+        "operationId": "createUser",
+        "tags": ["Users"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "User created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/{username}": {
+      "get": {
+        "summary": "Get user",
+        "description": "Returns details for a specific user.",
+        "operationId": "getUser",
+        "tags": ["Users"],
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "User not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete user",
+        "description": "Deletes a user from the system.",
+        "operationId": "deleteUser",
+        "tags": ["Users"],
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "User deleted"
+          },
+          "404": {
+            "description": "User not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/exports": {
+      "get": {
+        "summary": "List NFS exports",
+        "description": "Returns a list of all NFS exports.",
+        "operationId": "listExports",
+        "tags": ["NFS Exports"],
+        "responses": {
+          "200": {
+            "description": "List of exports",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Export"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create NFS export",
+        "description": "Creates a new NFS export.",
+        "operationId": "createExport",
+        "tags": ["NFS Exports"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Export created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/exports/{name}": {
+      "get": {
+        "summary": "Get NFS export",
+        "description": "Returns details for a specific NFS export.",
+        "operationId": "getExport",
+        "tags": ["NFS Exports"],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Export details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Export"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Export not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete NFS export",
+        "description": "Deletes an NFS export.",
+        "operationId": "deleteExport",
+        "tags": ["NFS Exports"],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Export deleted"
+          },
+          "404": {
+            "description": "Export not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/shares": {
+      "get": {
+        "summary": "List SMB shares",
+        "description": "Returns a list of all SMB shares.",
+        "operationId": "listShares",
+        "tags": ["SMB Shares"],
+        "responses": {
+          "200": {
+            "description": "List of shares",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Share"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create SMB share",
+        "description": "Creates a new SMB share.",
+        "operationId": "createShare",
+        "tags": ["SMB Shares"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShareCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Share created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/shares/{name}": {
+      "get": {
+        "summary": "Get SMB share",
+        "description": "Returns details for a specific SMB share.",
+        "operationId": "getShare",
+        "tags": ["SMB Shares"],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Share details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Share"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Share not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete SMB share",
+        "description": "Deletes an SMB share.",
+        "operationId": "deleteShare",
+        "tags": ["SMB Shares"],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Share deleted"
+          },
+          "404": {
+            "description": "Share not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/buckets": {
+      "get": {
+        "summary": "List S3 buckets",
+        "description": "Returns a list of all S3 buckets.",
+        "operationId": "listBuckets",
+        "tags": ["S3 Buckets"],
+        "responses": {
+          "200": {
+            "description": "List of buckets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Bucket"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create S3 bucket",
+        "description": "Creates a new S3 bucket.",
+        "operationId": "createBucket",
+        "tags": ["S3 Buckets"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BucketCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Bucket created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/buckets/{name}": {
+      "get": {
+        "summary": "Get S3 bucket",
+        "description": "Returns details for a specific S3 bucket.",
+        "operationId": "getBucket",
+        "tags": ["S3 Buckets"],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bucket details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bucket"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Bucket not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete S3 bucket",
+        "description": "Deletes an S3 bucket.",
+        "operationId": "deleteBucket",
+        "tags": ["S3 Buckets"],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Bucket deleted"
+          },
+          "404": {
+            "description": "Bucket not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "User": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "Username"
+          },
+          "uid": {
+            "type": "integer",
+            "description": "User ID"
+          },
+          "gid": {
+            "type": "integer",
+            "description": "Primary group ID"
+          },
+          "gids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Supplementary group IDs"
+          },
+          "pinned": {
+            "type": "boolean",
+            "description": "Whether user is pinned (builtin)"
+          }
+        }
+      },
+      "UserCreate": {
+        "type": "object",
+        "required": ["username", "uid", "gid"],
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "Username"
+          },
+          "password": {
+            "type": "string",
+            "description": "Password"
+          },
+          "uid": {
+            "type": "integer",
+            "description": "User ID"
+          },
+          "gid": {
+            "type": "integer",
+            "description": "Primary group ID"
+          },
+          "gids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Supplementary group IDs"
+          }
+        }
+      },
+      "Export": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Export name"
+          },
+          "path": {
+            "type": "string",
+            "description": "VFS path"
+          }
+        }
+      },
+      "ExportCreate": {
+        "type": "object",
+        "required": ["name", "path"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Export name"
+          },
+          "path": {
+            "type": "string",
+            "description": "VFS path"
+          }
+        }
+      },
+      "Share": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Share name"
+          },
+          "path": {
+            "type": "string",
+            "description": "VFS path"
+          }
+        }
+      },
+      "ShareCreate": {
+        "type": "object",
+        "required": ["name", "path"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Share name"
+          },
+          "path": {
+            "type": "string",
+            "description": "VFS path"
+          }
+        }
+      },
+      "Bucket": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Bucket name"
+          },
+          "path": {
+            "type": "string",
+            "description": "VFS path"
+          }
+        }
+      },
+      "BucketCreate": {
+        "type": "object",
+        "required": ["name", "path"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Bucket name"
+          },
+          "path": {
+            "type": "string",
+            "description": "VFS path"
+          }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Success message"
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Error type"
+          },
+          "message": {
+            "type": "string",
+            "description": "Error message"
+          }
+        }
+      }
+    }
+  }
+}

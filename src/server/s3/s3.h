@@ -4,17 +4,45 @@
 
 #pragma once
 
-void
-chimera_s3_add_bucket(
-    void       *s3_shared,
-    const char *name,
-    const char *path);
+struct s3_bucket;
 
 void
 chimera_s3_add_bucket(
     void       *s3_shared,
     const char *name,
     const char *path);
+
+int
+chimera_s3_remove_bucket(
+    void       *s3_shared,
+    const char *name);
+
+const struct s3_bucket *
+chimera_s3_get_bucket(
+    void       *s3_shared,
+    const char *name);
+
+void
+chimera_s3_release_bucket(
+    void *s3_shared);
+
+typedef int (*chimera_s3_bucket_iterate_cb)(
+    const struct s3_bucket *bucket,
+    void                   *data);
+
+void
+chimera_s3_iterate_buckets(
+    void                        *s3_shared,
+    chimera_s3_bucket_iterate_cb callback,
+    void                        *data);
+
+const char *
+chimera_s3_bucket_get_name(
+    const struct s3_bucket *bucket);
+
+const char *
+chimera_s3_bucket_get_path(
+    const struct s3_bucket *bucket);
 
 int
 chimera_s3_add_cred(
