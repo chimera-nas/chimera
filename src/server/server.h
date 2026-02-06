@@ -339,3 +339,10 @@ chimera_server_iterate_buckets(
 struct chimera_vfs *
 chimera_server_get_vfs(
     struct chimera_server *server);
+
+int
+chimera_server_add_s3_cred(
+    struct chimera_server *server,
+    const char            *access_key,
+    const char            *secret_key,
+    int                    pinned);

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -12,6 +12,7 @@
 #include "s3_status.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_cred.h"
+#include "s3_cred_cache.h"
 
 enum chimera_s3_vfs_state {
     CHIMERA_S3_VFS_STATE_INIT,
@@ -109,13 +110,14 @@ struct chimera_server_s3_thread {
 };
 
 struct chimera_server_s3_shared {
-    struct chimera_s3_config *config;
-    struct s3_bucket_map     *bucket_map;
-    struct evpl_endpoint     *endpoint;
-    struct evpl_listener     *listener;
-    struct chimera_vfs_cred   cred;
-    uint32_t                  root_fh_len;
-    uint8_t                   root_fh[CHIMERA_VFS_FH_SIZE];
+    struct chimera_s3_config     *config;
+    struct s3_bucket_map         *bucket_map;
+    struct chimera_s3_cred_cache *cred_cache;
+    struct evpl_endpoint         *endpoint;
+    struct evpl_listener         *listener;
+    struct chimera_vfs_cred       cred;
+    uint32_t                      root_fh_len;
+    uint8_t                       root_fh[CHIMERA_VFS_FH_SIZE];
 };
 
 static inline struct chimera_s3_io *

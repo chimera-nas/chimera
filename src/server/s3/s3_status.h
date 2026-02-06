@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -17,6 +17,9 @@ enum chimera_s3_status {
     CHIMERA_S3_STATUS_REQUEST_TIMEOUT,
     CHIMERA_S3_STATUS_NO_SUCH_BUCKET,
     CHIMERA_S3_STATUS_NO_SUCH_KEY,
+    CHIMERA_S3_STATUS_INVALID_ACCESS_KEY_ID,
+    CHIMERA_S3_STATUS_SIGNATURE_MISMATCH,
+    CHIMERA_S3_STATUS_MISSING_AUTH_HEADER,
 };
 
 const char *

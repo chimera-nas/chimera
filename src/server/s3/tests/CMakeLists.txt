@@ -1,67 +1,99 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-macro(add_libs3_testprog name)
-    add_executable(${name} ${name}.c)
-    target_link_libraries(${name} s3 chimera_server jansson)
-    set_target_properties(${name} PROPERTIES
-    TEST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/${name}.c")
-endmacro()
+# Find Python3 and boto3 for S3 tests
+find_package(Python3 COMPONENTS Interpreter)
 
-macro(add_libs3_test testname prog)
-    add_test(NAME chimera/server/s3/${testname} COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh  ${CMAKE_CURRENT_BINARY_DIR}/${prog} ${ARGN})
-    get_target_property(test_file ${prog} TEST_FILE)
-    set_tests_properties(chimera/server/s3/${testname} PROPERTIES 
-        ENVIRONMENT "TEST_FILE=${test_file}")
-endmacro()
-
-add_libs3_testprog(libs3_put)
-add_libs3_testprog(libs3_get)
-add_libs3_testprog(libs3_head)
-add_libs3_testprog(libs3_delete)
-add_libs3_testprog(libs3_list)
-
-add_libs3_test(libs3_memfs_put libs3_put -b memfs)
-add_libs3_test(libs3_memfs_get libs3_get -b memfs)
-add_libs3_test(libs3_memfs_head libs3_head -b memfs)
-add_libs3_test(libs3_memfs_delete libs3_delete -b memfs)
-add_libs3_test(libs3_memfs_list libs3_list -b memfs)
-
-add_libs3_test(libs3_memfs_path_put libs3_put -p -b memfs)
-add_libs3_test(libs3_memfs_path_get libs3_get -p -b memfs)
-add_libs3_test(libs3_memfs_path_head libs3_head -p -b memfs)
-add_libs3_test(libs3_memfs_path_delete libs3_delete -p -b memfs)
-add_libs3_test(libs3_memfs_path_list libs3_list -p -b memfs)
-
-add_libs3_test(libs3_demofs_put libs3_put -b demofs)
-add_libs3_test(libs3_demofs_get libs3_get -b demofs)
-add_libs3_test(libs3_demofs_head libs3_head -b demofs)
-add_libs3_test(libs3_demofs_delete libs3_delete -b demofs)
-add_libs3_test(libs3_demofs_list libs3_list -b demofs)
-
-if (CAIRN_ENABLED)
-    add_libs3_test(libs3_cairn_put libs3_put -b cairn)
-    add_libs3_test(libs3_cairn_get libs3_get -b cairn)
-    add_libs3_test(libs3_cairn_head libs3_head -b cairn)
-    add_libs3_test(libs3_cairn_delete libs3_delete -b cairn)
-    add_libs3_test(libs3_cairn_list libs3_list -b cairn)
+# Check if boto3 is available
+if(Python3_FOUND)
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import boto3"
+        RESULT_VARIABLE BOTO3_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(BOTO3_RESULT EQUAL 0)
+        set(BOTO3_FOUND TRUE)
+    else()
+        set(BOTO3_FOUND FALSE)
+        message(WARNING "boto3 not found - S3 tests will be skipped. Install with: apt install python3-boto3")
+    endif()
+else()
+    set(BOTO3_FOUND FALSE)
+    message(WARNING "Python3 not found - S3 tests will be skipped")
 endif()
 
-add_libs3_test(libs3_linux_put libs3_put -b linux)
-add_libs3_test(libs3_linux_get libs3_get -b linux)
-add_libs3_test(libs3_linux_head libs3_head -b linux)
-add_libs3_test(libs3_linux_delete libs3_delete -b linux)
-add_libs3_test(libs3_linux_list libs3_list -b linux)
+if(BOTO3_FOUND)
+    set(S3_TEST_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/s3_test.py)
+    set(CHIMERA_DAEMON ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 
-if (IO_URING_ENABLED)
-    add_libs3_test(libs3_io_uring_put libs3_put -b io_uring)
-    add_libs3_test(libs3_io_uring_get libs3_get -b io_uring)
-    add_libs3_test(libs3_io_uring_head libs3_head -b io_uring)
-    add_libs3_test(libs3_io_uring_delete libs3_delete -b io_uring)
-    add_libs3_test(libs3_io_uring_list libs3_list -b io_uring)
+    # Macro to add S3 test with specific signature version
+    macro(add_s3_test_sigver testname backend sigver)
+        add_test(
+            NAME chimera/server/s3/boto3_${sigver}_${backend}_${testname}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                    ${Python3_EXECUTABLE} ${S3_TEST_SCRIPT}
+                    --test ${testname}
+                    --backend ${backend}
+                    --sigver ${sigver}
+                    --chimera ${CHIMERA_DAEMON}
+        )
+        set_tests_properties(chimera/server/s3/boto3_${sigver}_${backend}_${testname} PROPERTIES
+            ENVIRONMENT "PYTHONUNBUFFERED=1"
+            TIMEOUT 300
+        )
+    endmacro()
+
+    # Convenience macro for V4 tests (default)
+    macro(add_s3_test testname backend)
+        add_s3_test_sigver(${testname} ${backend} v4)
+    endmacro()
+
+    # ==================== V4 Signature Tests ====================
+
+    # memfs tests (V4)
+    add_s3_test(put memfs)
+    add_s3_test(get memfs)
+    add_s3_test(head memfs)
+    add_s3_test(delete memfs)
+    add_s3_test(list memfs)
+
+    # linux tests (V4)
+    add_s3_test(put linux)
+    add_s3_test(get linux)
+    add_s3_test(head linux)
+    add_s3_test(delete linux)
+    add_s3_test(list linux)
+
+    # io_uring tests (V4)
+    add_s3_test(put io_uring)
+    add_s3_test(get io_uring)
+    add_s3_test(head io_uring)
+    add_s3_test(delete io_uring)
+    add_s3_test(list io_uring)
+
+    # demofs tests (V4)
+    add_s3_test(put demofs)
+    add_s3_test(get demofs)
+    add_s3_test(head demofs)
+    add_s3_test(delete demofs)
+    add_s3_test(list demofs)
+
+    # cairn tests (V4)
+    add_s3_test(put cairn)
+    add_s3_test(get cairn)
+    add_s3_test(head cairn)
+    add_s3_test(delete cairn)
+    add_s3_test(list cairn)
+
+    # ==================== V2 Signature Tests ====================
+    # V2 tests use memfs backend to verify V2 signing works
+
+    add_s3_test_sigver(put memfs v2)
+    add_s3_test_sigver(get memfs v2)
+    add_s3_test_sigver(head memfs v2)
+    add_s3_test_sigver(delete memfs v2)
+    add_s3_test_sigver(list memfs v2)
+
 endif()
-
-
-
-

@@ -44,4 +44,11 @@ const char *
 chimera_s3_bucket_get_path(
     const struct s3_bucket *bucket);
 
+int
+chimera_s3_add_cred(
+    void       *s3_shared,
+    const char *access_key,
+    const char *secret_key,
+    int         pinned);
+
 extern struct chimera_server_protocol s3_protocol;
