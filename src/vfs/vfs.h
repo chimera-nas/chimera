@@ -951,6 +951,17 @@ chimera_vfs_user_is_member(
     struct chimera_vfs *vfs,
     uint32_t            uid,
     uint32_t            gid);
+
+
+typedef int (*chimera_vfs_user_iterate_cb)(
+    const struct chimera_vfs_user *user,
+    void                          *data);
+
+void
+chimera_vfs_iterate_builtin_users(
+    struct chimera_vfs         *vfs,
+    chimera_vfs_user_iterate_cb callback,
+    void                       *data);
 void
 chimera_vfs_watchdog(
     struct chimera_vfs_thread *thread);

@@ -104,3 +104,9 @@ reuse-lint:
 check: syntax-check build_release test_release build_debug test_debug build_clang reuse-lint copyright-check
 	@echo "All checks passed!"
 
+.PHONY: docs
+docs:
+	@echo "API documentation: docs/api.html"
+	@echo "OpenAPI spec: docs/openapi.json"
+	@echo "Run 'cd docs && python3 -m http.server' to preview locally"
+

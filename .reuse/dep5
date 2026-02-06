@@ -3,17 +3,27 @@ Upstream-Name: chimera
 Upstream-Contact: Ben Jarvis
 Source: https://github.com/chimera-nas/chimera
 
-# Documentation files (Jekyll markdown)
-Files: README.md docs/*.md docs/**/*.md
-Copyright: 2025 Chimera-NAS Project Contributors
+# Documentation files (Jekyll markdown and HTML)
+Files: README.md docs/*.md docs/**/*.md docs/*.html
+Copyright: 2025-2026 Chimera-NAS Project Contributors
 License: Unlicense
 
 # JSON configuration files
 Files: *.json .vscode/*.json .devcontainer/*.json .claude/*.json src/**/*.json
-Copyright: 2025 Chimera-NAS Project Contributors
+Copyright: 2025-2026 Chimera-NAS Project Contributors
 License: Unlicense
+
+# OpenAPI specification
+Files: docs/openapi.json
+Copyright: 2025-2026 Chimera-NAS Project Contributors
+License: Apache-2.0
 
 # Docker ignore file
 Files: .dockerignore
-Copyright: 2025 Chimera-NAS Project Contributors
+Copyright: 2025-2026 Chimera-NAS Project Contributors
 License: Unlicense
+
+# Swagger UI distribution files (from swagger-ui project)
+Files: src/server/rest/swagger/swagger-ui-bundle.min.js src/server/rest/swagger/swagger-ui-standalone-preset.min.js src/server/rest/swagger/swagger-ui.min.css
+Copyright: SmartBear Software
+License: Apache-2.0

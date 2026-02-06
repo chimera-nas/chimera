@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -1249,6 +1249,83 @@ chimera_smb_add_share(
     pthread_mutex_unlock(&shared->shares_lock);
 
 } /* chimera_smb_add_share */
+
+
+SYMBOL_EXPORT int
+chimera_smb_remove_share(
+    void       *smb_shared,
+    const char *name)
+{
+    struct chimera_server_smb_shared *shared = smb_shared;
+    struct chimera_smb_share         *share;
+    int                               found = 0;
+
+    pthread_mutex_lock(&shared->shares_lock);
+    LL_FOREACH(shared->shares, share)
+    {
+        if (strcmp(share->name, name) == 0) {
+            LL_DELETE(shared->shares, share);
+            free(share);
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&shared->shares_lock);
+
+    return found ? 0 : -1;
+} /* chimera_smb_remove_share */
+
+SYMBOL_EXPORT const struct chimera_smb_share *
+chimera_smb_get_share(
+    void       *smb_shared,
+    const char *name)
+{
+    struct chimera_server_smb_shared *shared = smb_shared;
+    struct chimera_smb_share         *share;
+
+    pthread_mutex_lock(&shared->shares_lock);
+    LL_FOREACH(shared->shares, share)
+    {
+        if (strcmp(share->name, name) == 0) {
+            pthread_mutex_unlock(&shared->shares_lock);
+            return share;
+        }
+    }
+    pthread_mutex_unlock(&shared->shares_lock);
+
+    return NULL;
+} /* chimera_smb_get_share */
+
+SYMBOL_EXPORT void
+chimera_smb_iterate_shares(
+    void                        *smb_shared,
+    chimera_smb_share_iterate_cb callback,
+    void                        *data)
+{
+    struct chimera_server_smb_shared *shared = smb_shared;
+    struct chimera_smb_share         *share;
+
+    pthread_mutex_lock(&shared->shares_lock);
+    LL_FOREACH(shared->shares, share)
+    {
+        if (callback(share, data) != 0) {
+            break;
+        }
+    }
+    pthread_mutex_unlock(&shared->shares_lock);
+} /* chimera_smb_iterate_shares */
+
+SYMBOL_EXPORT const char *
+chimera_smb_share_get_name(const struct chimera_smb_share *share)
+{
+    return share->name;
+} /* chimera_smb_share_get_name */
+
+SYMBOL_EXPORT const char *
+chimera_smb_share_get_path(const struct chimera_smb_share *share)
+{
+    return share->path;
+} /* chimera_smb_share_get_path */
 
 SYMBOL_EXPORT struct chimera_server_protocol smb_protocol = {
     .init           = chimera_smb_server_init,

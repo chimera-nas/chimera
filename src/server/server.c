@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/resource.h>
+#include <errno.h>
 
 #include "evpl/evpl.h"
 #include "server_internal.h"
@@ -19,6 +20,7 @@
 #include "common/macros.h"
 #include "server/server.h"
 #include "smb/smb2.h"
+#include "rest/rest.h"
 
 #define CHIMERA_SERVER_MAX_MODULES 64
 
@@ -27,11 +29,14 @@ struct chimera_server_config {
     int                                  nfs_rdma_port;
     int                                  nfs_tcp_rdma_port;
     int                                  external_portmap;
+    rlim_t                               max_open_files;
     int                                  core_threads;
     int                                  delegation_threads;
     int                                  cache_ttl;
     int                                  num_modules;
     int                                  metrics_port;
+    int                                  rest_http_port;
+    int                                  rest_https_port;
     int                                  smb_num_dialects;
     uint32_t                             smb_dialects[16];
     int                                  smb_num_nic_info;
@@ -39,6 +44,8 @@ struct chimera_server_config {
     uint32_t                             anongid;
     char                                 nfs_rdma_hostname[256];
     char                                 kv_module[64];
+    char                                 rest_ssl_cert[256];
+    char                                 rest_ssl_key[256];
     struct chimera_vfs_module_cfg        modules[CHIMERA_SERVER_MAX_MODULES];
     struct chimera_server_config_smb_nic smb_nic_info[16];
 };
@@ -52,6 +59,7 @@ struct chimera_server {
     void                               *s3_shared;
     void                               *smb_shared;
     void                               *nfs_shared;
+    struct chimera_rest_server         *rest;
     int                                 num_protocols;
     int                                 threads_online;
     pthread_mutex_t                     lock;
@@ -62,6 +70,7 @@ struct chimera_thread {
     struct chimera_server     *server;
     struct chimera_vfs_thread *vfs_thread;
     void                      *protocol_private[3];
+    void                      *rest_thread;
     struct evpl_timer          watchdog;
 };
 
@@ -73,6 +82,7 @@ chimera_server_config_init(void)
     config = calloc(1, sizeof(struct chimera_server_config));
 
     config->core_threads       = 16;
+    config->max_open_files     = 65535;
     config->delegation_threads = 64;
     config->nfs_rdma           = 0;
     config->external_portmap   = 0;
@@ -117,8 +127,6 @@ chimera_server_config_init(void)
     config->num_modules = 5;
 #endif /* ifdef HAVE_IO_URING */
 
-    config->metrics_port = 0;
-
     return config;
 } /* chimera_server_config_init */
 
@@ -137,6 +145,14 @@ chimera_server_config_set_delegation_threads(
 {
     config->delegation_threads = threads;
 } /* chimera_server_config_set_delegation_threads */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_max_open_files(
+    struct chimera_server_config *config,
+    int                           open_files)
+{
+    config->max_open_files = (rlim_t) open_files;
+} /* chimera_server_config_set_max_open_files */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_external_portmap(
@@ -272,6 +288,64 @@ chimera_server_config_set_metrics_port(
     config->metrics_port = port;
 } /* chimera_server_config_set_metrics_port */
 
+SYMBOL_EXPORT void
+chimera_server_config_set_rest_http_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->rest_http_port = port;
+} /* chimera_server_config_set_rest_http_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_rest_http_port(const struct chimera_server_config *config)
+{
+    return config->rest_http_port;
+} /* chimera_server_config_get_rest_http_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_rest_https_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->rest_https_port = port;
+} /* chimera_server_config_set_rest_https_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_rest_https_port(const struct chimera_server_config *config)
+{
+    return config->rest_https_port;
+} /* chimera_server_config_get_rest_https_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_rest_ssl_cert(
+    struct chimera_server_config *config,
+    const char                   *cert_path)
+{
+    strncpy(config->rest_ssl_cert, cert_path, sizeof(config->rest_ssl_cert) - 1);
+    config->rest_ssl_cert[sizeof(config->rest_ssl_cert) - 1] = '\0';
+} /* chimera_server_config_set_rest_ssl_cert */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_rest_ssl_cert(const struct chimera_server_config *config)
+{
+    return config->rest_ssl_cert;
+} /* chimera_server_config_get_rest_ssl_cert */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_rest_ssl_key(
+    struct chimera_server_config *config,
+    const char                   *key_path)
+{
+    strncpy(config->rest_ssl_key, key_path, sizeof(config->rest_ssl_key) - 1);
+    config->rest_ssl_key[sizeof(config->rest_ssl_key) - 1] = '\0';
+} /* chimera_server_config_set_rest_ssl_key */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_rest_ssl_key(const struct chimera_server_config *config)
+{
+    return config->rest_ssl_key;
+} /* chimera_server_config_get_rest_ssl_key */
+
 SYMBOL_EXPORT int
 chimera_server_config_get_smb_num_dialects(const struct chimera_server_config *config)
 {
@@ -371,6 +445,8 @@ chimera_server_thread_init(
                                                                         protocol_private
                                                                         [i]);
     }
+
+    thread->rest_thread = chimera_rest_thread_init(evpl, server->rest);
 
     pthread_mutex_lock(&server->lock);
     if (++server->threads_online == server->config->core_threads) {
@@ -485,10 +561,12 @@ chimera_server_thread_shutdown(
         server->protocols[i]->thread_destroy(thread->protocol_private[i]);
     }
 
+    chimera_rest_thread_destroy(thread->rest_thread);
+
     evpl_remove_timer(evpl, &thread->watchdog);
     chimera_vfs_thread_destroy(thread->vfs_thread);
     free(thread);
-} /* chimera_server_create_share */
+} /* chimera_server_thread_shutdown */
 
 SYMBOL_EXPORT struct chimera_server *
 chimera_server_init(
@@ -505,10 +583,24 @@ chimera_server_init(
 
     chimera_log_init();
 
+    /* Need to set the filedescriptor limits */
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
-        chimera_server_info("Effective file descriptor limit: %ld", rl.rlim_cur);
+        if (rl.rlim_cur < config->max_open_files) {
+            rl.rlim_cur = config->max_open_files;
+            if (rl.rlim_cur > rl.rlim_max) {
+                rl.rlim_max = rl.rlim_cur;
+            }
+            if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+                chimera_server_error("Failed to set file descriptor limit to %ld: %s",
+                                     rl.rlim_cur, strerror(errno));
+            } else {
+                chimera_server_info("Setting file descriptor limit to %ld", rl.rlim_cur);
+            }
+        } else {
+            chimera_server_info("File descriptor limit is sufficient: %ld", rl.rlim_cur);
+        }
     } else {
-        chimera_server_error("Failed to get file descriptor limit");
+        chimera_server_error("Failed to get file descriptor limit: %s", strerror(errno));
     }
 
     server = calloc(1, sizeof(*server));
@@ -539,6 +631,9 @@ chimera_server_init(
     server->smb_shared = server->protocol_private[1];
     server->nfs_shared = server->protocol_private[0];
 
+    chimera_server_info("Initializing REST API...");
+    server->rest = chimera_rest_init(config, server, server->vfs, metrics);
+
     return server;
 } /* chimera_server_init */
 
@@ -565,6 +660,8 @@ chimera_server_start(struct chimera_server *server)
         server->protocols[i]->start(server->protocol_private[i]);
     }
 
+    chimera_rest_start(server->rest);
+
     chimera_server_info("Server is ready.");
 } /* chimera_server_start */
 
@@ -577,12 +674,16 @@ chimera_server_destroy(struct chimera_server *server)
         server->protocols[i]->stop(server->protocol_private[i]);
     }
 
+    chimera_rest_stop(server->rest);
+
     evpl_threadpool_destroy(server->pool);
     chimera_vfs_destroy(server->vfs);
 
     for (i = 0; i < server->num_protocols; i++) {
         server->protocols[i]->destroy(server->protocol_private[i]);
     }
+
+    chimera_rest_destroy(server->rest);
 
     free((void *) server->config);
     free(server);
@@ -603,3 +704,170 @@ chimera_server_add_user(
     return chimera_vfs_add_user(server->vfs, username, password, smbpasswd,
                                 uid, gid, ngids, gids, pinned);
 } /* chimera_server_add_user */
+
+
+SYMBOL_EXPORT int
+chimera_server_remove_user(
+    struct chimera_server *server,
+    const char            *username)
+{
+    return chimera_vfs_remove_user(server->vfs, username);
+} /* chimera_server_remove_user */
+
+SYMBOL_EXPORT const struct chimera_vfs_user *
+chimera_server_get_user(
+    struct chimera_server *server,
+    const char            *username)
+{
+    return chimera_vfs_lookup_user_by_name(server->vfs, username);
+} /* chimera_server_get_user */
+
+SYMBOL_EXPORT void
+chimera_server_iterate_users(
+    struct chimera_server         *server,
+    chimera_server_user_iterate_cb callback,
+    void                          *data)
+{
+    chimera_vfs_iterate_builtin_users(server->vfs, callback, data);
+} /* chimera_server_iterate_users */
+
+SYMBOL_EXPORT int
+chimera_server_remove_export(
+    struct chimera_server *server,
+    const char            *name)
+{
+    if (!server->nfs_shared) {
+        return -1;
+    }
+
+    return chimera_nfs_remove_export(server->nfs_shared, name);
+} /* chimera_server_remove_export */
+
+SYMBOL_EXPORT const struct chimera_nfs_export *
+chimera_server_get_export(
+    struct chimera_server *server,
+    const char            *name)
+{
+    if (!server->nfs_shared) {
+        return NULL;
+    }
+
+    return chimera_nfs_get_export(server->nfs_shared, name);
+} /* chimera_server_get_export */
+
+SYMBOL_EXPORT void
+chimera_server_iterate_exports(
+    struct chimera_server           *server,
+    chimera_server_export_iterate_cb callback,
+    void                            *data)
+{
+    if (!server->nfs_shared) {
+        return;
+    }
+
+    chimera_nfs_iterate_exports(server->nfs_shared, callback, data);
+} /* chimera_server_iterate_exports */
+
+SYMBOL_EXPORT int
+chimera_server_remove_share(
+    struct chimera_server *server,
+    const char            *name)
+{
+    if (!server->smb_shared) {
+        return -1;
+    }
+
+    return chimera_smb_remove_share(server->smb_shared, name);
+} /* chimera_server_remove_share */
+
+SYMBOL_EXPORT const struct chimera_smb_share *
+chimera_server_get_share(
+    struct chimera_server *server,
+    const char            *name)
+{
+    if (!server->smb_shared) {
+        return NULL;
+    }
+
+    return chimera_smb_get_share(server->smb_shared, name);
+} /* chimera_server_get_share */
+
+SYMBOL_EXPORT void
+chimera_server_iterate_shares(
+    struct chimera_server          *server,
+    chimera_server_share_iterate_cb callback,
+    void                           *data)
+{
+    if (!server->smb_shared) {
+        return;
+    }
+
+    chimera_smb_iterate_shares(server->smb_shared, callback, data);
+} /* chimera_server_iterate_shares */
+
+SYMBOL_EXPORT int
+chimera_server_remove_bucket(
+    struct chimera_server *server,
+    const char            *name)
+{
+    if (!server->s3_shared) {
+        return -1;
+    }
+
+    return chimera_s3_remove_bucket(server->s3_shared, name);
+} /* chimera_server_remove_bucket */
+
+SYMBOL_EXPORT const struct s3_bucket *
+chimera_server_get_bucket(
+    struct chimera_server *server,
+    const char            *name)
+{
+    if (!server->s3_shared) {
+        return NULL;
+    }
+
+    return chimera_s3_get_bucket(server->s3_shared, name);
+} /* chimera_server_get_bucket */
+
+SYMBOL_EXPORT void
+chimera_server_release_bucket(struct chimera_server *server)
+{
+    if (!server->s3_shared) {
+        return;
+    }
+
+    chimera_s3_release_bucket(server->s3_shared);
+} /* chimera_server_release_bucket */
+
+SYMBOL_EXPORT void
+chimera_server_iterate_buckets(
+    struct chimera_server           *server,
+    chimera_server_bucket_iterate_cb callback,
+    void                            *data)
+{
+    if (!server->s3_shared) {
+        return;
+    }
+
+    chimera_s3_iterate_buckets(server->s3_shared, callback, data);
+} /* chimera_server_iterate_buckets */
+
+SYMBOL_EXPORT struct chimera_vfs *
+chimera_server_get_vfs(struct chimera_server *server)
+{
+    return server->vfs;
+} /* chimera_server_get_vfs */
+
+SYMBOL_EXPORT int
+chimera_server_add_s3_cred(
+    struct chimera_server *server,
+    const char            *access_key,
+    const char            *secret_key,
+    int                    pinned)
+{
+    if (!server->s3_shared) {
+        return -1;
+    }
+
+    return chimera_s3_add_cred(server->s3_shared, access_key, secret_key, pinned);
+} /* chimera_server_add_s3_cred */
