@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -434,6 +434,74 @@ chimera_s3_add_bucket(
     s3_bucket_map_put(shared->bucket_map, name, strlen(name), path);
 
 } /* chimera_s3_add_bucket */
+
+
+SYMBOL_EXPORT int
+chimera_s3_remove_bucket(
+    void       *s3_shared,
+    const char *name)
+{
+    struct chimera_server_s3_shared *shared = s3_shared;
+
+    return s3_bucket_map_remove(shared->bucket_map, name, strlen(name));
+} /* chimera_s3_remove_bucket */
+
+SYMBOL_EXPORT const struct s3_bucket *
+chimera_s3_get_bucket(
+    void       *s3_shared,
+    const char *name)
+{
+    struct chimera_server_s3_shared *shared = s3_shared;
+
+    return s3_bucket_map_get(shared->bucket_map, name, strlen(name));
+} /* chimera_s3_get_bucket */
+
+SYMBOL_EXPORT void
+chimera_s3_release_bucket(void *s3_shared)
+{
+    struct chimera_server_s3_shared *shared = s3_shared;
+
+    s3_bucket_map_release(shared->bucket_map);
+} /* chimera_s3_release_bucket */
+
+static int
+s3_bucket_iterate_wrapper(
+    const struct s3_bucket *bucket,
+    void                   *data)
+{
+    void                       **ctx      = data;
+    chimera_s3_bucket_iterate_cb callback = ctx[0];
+    void                        *userdata = ctx[1];
+
+    return callback(bucket, userdata);
+} /* s3_bucket_iterate_wrapper */
+
+SYMBOL_EXPORT void
+chimera_s3_iterate_buckets(
+    void                        *s3_shared,
+    chimera_s3_bucket_iterate_cb callback,
+    void                        *data)
+{
+    struct chimera_server_s3_shared *shared = s3_shared;
+    void                            *ctx[2];
+
+    ctx[0] = (void *) callback;
+    ctx[1] = data;
+
+    s3_bucket_map_iterate(shared->bucket_map, s3_bucket_iterate_wrapper, ctx);
+} /* chimera_s3_iterate_buckets */
+
+SYMBOL_EXPORT const char *
+chimera_s3_bucket_get_name(const struct s3_bucket *bucket)
+{
+    return bucket->name;
+} /* chimera_s3_bucket_get_name */
+
+SYMBOL_EXPORT const char *
+chimera_s3_bucket_get_path(const struct s3_bucket *bucket)
+{
+    return bucket->path;
+} /* chimera_s3_bucket_get_path */
 
 static void *
 s3_server_init(

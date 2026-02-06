@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -357,6 +357,83 @@ chimera_nfs_add_export(
     pthread_mutex_unlock(&shared->exports_lock);
 
 } /* chimera_nfs_add_export */
+
+
+SYMBOL_EXPORT int
+chimera_nfs_remove_export(
+    void       *nfs_shared,
+    const char *name)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+    struct chimera_nfs_export        *export;
+    int                               found = 0;
+
+    pthread_mutex_lock(&shared->exports_lock);
+    LL_FOREACH(shared->exports, export)
+    {
+        if (strcmp(export->name, name) == 0) {
+            LL_DELETE(shared->exports, export);
+            free(export);
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
+
+    return found ? 0 : -1;
+} /* chimera_nfs_remove_export */
+
+SYMBOL_EXPORT const struct chimera_nfs_export *
+chimera_nfs_get_export(
+    void       *nfs_shared,
+    const char *name)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+    struct chimera_nfs_export        *export;
+
+    pthread_mutex_lock(&shared->exports_lock);
+    LL_FOREACH(shared->exports, export)
+    {
+        if (strcmp(export->name, name) == 0) {
+            pthread_mutex_unlock(&shared->exports_lock);
+            return export;
+        }
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
+
+    return NULL;
+} /* chimera_nfs_get_export */
+
+SYMBOL_EXPORT void
+chimera_nfs_iterate_exports(
+    void                         *nfs_shared,
+    chimera_nfs_export_iterate_cb callback,
+    void                         *data)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+    struct chimera_nfs_export        *export;
+
+    pthread_mutex_lock(&shared->exports_lock);
+    LL_FOREACH(shared->exports, export)
+    {
+        if (callback(export, data) != 0) {
+            break;
+        }
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
+} /* chimera_nfs_iterate_exports */
+
+SYMBOL_EXPORT const char *
+chimera_nfs_export_get_name(const struct chimera_nfs_export *export)
+{
+    return export->name;
+} /* chimera_nfs_export_get_name */
+
+SYMBOL_EXPORT const char *
+chimera_nfs_export_get_path(const struct chimera_nfs_export *export)
+{
+    return export->path;
+} /* chimera_nfs_export_get_path */
 
 SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
     .init           = nfs_server_init,
