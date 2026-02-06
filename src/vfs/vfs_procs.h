@@ -427,3 +427,42 @@ chimera_vfs_link(
     uint64_t                       post_attr_mask,
     chimera_vfs_link_callback_t    callback,
     void                          *private_data);
+
+/* Key-Value Operations */
+
+void
+chimera_vfs_put_key(
+    struct chimera_vfs_thread     *thread,
+    const void                    *key,
+    uint32_t                       key_len,
+    const void                    *value,
+    uint32_t                       value_len,
+    chimera_vfs_put_key_callback_t callback,
+    void                          *private_data);
+
+void
+chimera_vfs_get_key(
+    struct chimera_vfs_thread     *thread,
+    const void                    *key,
+    uint32_t                       key_len,
+    chimera_vfs_get_key_callback_t callback,
+    void                          *private_data);
+
+void
+chimera_vfs_delete_key(
+    struct chimera_vfs_thread        *thread,
+    const void                       *key,
+    uint32_t                          key_len,
+    chimera_vfs_delete_key_callback_t callback,
+    void                             *private_data);
+
+void
+chimera_vfs_search_keys(
+    struct chimera_vfs_thread         *thread,
+    const void                        *start_key,
+    uint32_t                           start_key_len,
+    const void                        *end_key,
+    uint32_t                           end_key_len,
+    chimera_vfs_search_keys_callback_t callback,
+    chimera_vfs_search_keys_complete_t complete,
+    void                              *private_data);

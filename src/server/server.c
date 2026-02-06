@@ -43,6 +43,7 @@ struct chimera_server_config {
     uint32_t                             anonuid;
     uint32_t                             anongid;
     char                                 nfs_rdma_hostname[256];
+    char                                 kv_module[64];
     char                                 rest_ssl_cert[256];
     char                                 rest_ssl_key[256];
     struct chimera_vfs_module_cfg        modules[CHIMERA_SERVER_MAX_MODULES];
@@ -182,6 +183,21 @@ chimera_server_config_get_cache_ttl(const struct chimera_server_config *config)
 {
     return config->cache_ttl;
 } /* chimera_server_config_get_cache_ttl */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_kv_module(
+    struct chimera_server_config *config,
+    const char                   *kv_module)
+{
+    strncpy(config->kv_module, kv_module, sizeof(config->kv_module) - 1);
+    config->kv_module[sizeof(config->kv_module) - 1] = '\0';
+} /* chimera_server_config_set_kv_module */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_kv_module(const struct chimera_server_config *config)
+{
+    return config->kv_module;
+} /* chimera_server_config_get_kv_module */
 
 SYMBOL_EXPORT int
 chimera_server_config_get_nfs_rdma(const struct chimera_server_config *config)
@@ -598,6 +614,7 @@ chimera_server_init(
     server->vfs = chimera_vfs_init(config->delegation_threads,
                                    config->modules,
                                    config->num_modules,
+                                   config->kv_module,
                                    config->cache_ttl,
                                    metrics);
 

@@ -82,6 +82,11 @@ chimera_vfs_link(
 
     request = chimera_vfs_request_alloc(thread, cred, fh, fhlen);
 
+    if (CHIMERA_VFS_IS_ERR(request)) {
+        callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, NULL, private_data);
+        return;
+    }
+
     request->opcode                           = CHIMERA_VFS_OP_LINK;
     request->complete                         = chimera_vfs_link_complete;
     request->link.dir_fh_hash                 = chimera_vfs_hash(dir_fh, dir_fhlen);

@@ -82,6 +82,11 @@ chimera_vfs_find_dispatch(
 
     find_request = chimera_vfs_request_alloc(thread, cred, fh, fhlen);
 
+    if (CHIMERA_VFS_IS_ERR(find_request)) {
+        complete(CHIMERA_VFS_PTR_ERR(find_request), private_data);
+        return;
+    }
+
     find_request->find.path            = find_request->plugin_data;
     find_request->find.attr_mask       = attr_mask;
     find_request->find.private_data    = private_data;

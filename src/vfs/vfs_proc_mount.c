@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -181,11 +181,17 @@ chimera_vfs_mount(
         return;
     }
 
-    request = chimera_vfs_request_alloc(thread, cred, &module->fh_magic, 1);
-
-    /* For mount operations, the module is already known - set it directly
+    /* For mount operations, the module is already known - use alloc_with_module
      * since chimera_vfs_get_module returns NULL (no mount exists yet) */
-    request->module = module;
+    request = chimera_vfs_request_alloc_with_module(thread, cred,
+                                                    &module->fh_magic, 1,
+                                                    chimera_vfs_hash(&module->fh_magic, 1),
+                                                    module);
+
+    if (CHIMERA_VFS_IS_ERR(request)) {
+        callback(thread, CHIMERA_VFS_PTR_ERR(request), private_data);
+        return;
+    }
 
     /* Parse mount options directly into request buffer */
     rc = chimera_vfs_parse_mount_options(options,

@@ -93,6 +93,21 @@ struct memfs_symlink_target {
     struct memfs_symlink_target *next;
 };
 
+struct memfs_kv_entry {
+    uint64_t               hash;
+    uint32_t               key_len;
+    uint32_t               value_len;
+    struct rb_node         node;
+    struct memfs_kv_entry *next;
+    void                  *key;
+    void                  *value;
+};
+
+struct memfs_kv_shard {
+    struct rb_tree  entries;
+    pthread_mutex_t lock;
+};
+
 struct memfs_inode {
     uint64_t            inum;
     uint32_t            gen;
@@ -140,6 +155,8 @@ struct memfs_inode_list {
 struct memfs_shared {
     struct memfs_inode_list *inode_list;
     int                      num_inode_list;
+    struct memfs_kv_shard   *kv_shards;
+    int                      num_kv_shards;
     int                      num_active_threads;
     uint8_t                  root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                 root_fhlen;
@@ -155,6 +172,7 @@ struct memfs_thread {
     struct memfs_dirent         *free_dirent;
     struct memfs_symlink_target *free_symlink_target;
     struct memfs_block          *free_block;
+    struct memfs_kv_entry       *free_kv_entry;
 };
 
 static inline void
@@ -466,6 +484,61 @@ memfs_dirent_release(
     }
 } /* memfs_dirent_release */
 
+
+static inline struct memfs_kv_entry *
+memfs_kv_entry_alloc(
+    struct memfs_thread *thread,
+    uint64_t             hash,
+    const void          *key,
+    uint32_t             key_len,
+    const void          *value,
+    uint32_t             value_len)
+{
+    struct memfs_kv_entry *entry;
+
+    entry = thread->free_kv_entry;
+
+    if (entry) {
+        LL_DELETE(thread->free_kv_entry, entry);
+        /* Free old key/value if reusing */
+        free(entry->key);
+        free(entry->value);
+    } else {
+        entry = malloc(sizeof(*entry));
+    }
+
+    entry->hash      = hash;
+    entry->key_len   = key_len;
+    entry->value_len = value_len;
+    entry->key       = malloc(key_len);
+    entry->value     = malloc(value_len);
+    memcpy(entry->key, key, key_len);
+    memcpy(entry->value, value, value_len);
+
+    return entry;
+
+} /* memfs_kv_entry_alloc */
+
+static inline void
+memfs_kv_entry_free(
+    struct memfs_thread   *thread,
+    struct memfs_kv_entry *entry)
+{
+    LL_PREPEND(thread->free_kv_entry, entry);
+} /* memfs_kv_entry_free */
+
+static void
+memfs_kv_entry_release(
+    struct rb_node *node,
+    void           *private_data)
+{
+    struct memfs_kv_entry *entry = container_of(node, struct memfs_kv_entry, node);
+
+    free(entry->key);
+    free(entry->value);
+    free(entry);
+} /* memfs_kv_entry_release */
+
 static void *
 memfs_init(const char *cfgfile)
 {
@@ -495,6 +568,15 @@ memfs_init(const char *cfgfile)
         inode_list->max_blocks = 0;
 
         pthread_mutex_init(&inode_list->lock, NULL);
+    }
+
+    /* Initialize KV shards */
+    shared->num_kv_shards = 256;
+    shared->kv_shards     = calloc(shared->num_kv_shards, sizeof(*shared->kv_shards));
+
+    for (i = 0; i < shared->num_kv_shards; i++) {
+        rb_tree_init(&shared->kv_shards[i].entries);
+        pthread_mutex_init(&shared->kv_shards[i].lock, NULL);
     }
 
     inode = memfs_inode_alloc(shared, 0);
@@ -574,6 +656,14 @@ memfs_destroy(void *private_data)
 
     pthread_mutex_destroy(&shared->lock);
     free(shared->inode_list);
+
+    /* Clean up KV shards */
+    for (i = 0; i < shared->num_kv_shards; i++) {
+        rb_tree_destroy(&shared->kv_shards[i].entries, memfs_kv_entry_release, NULL);
+        pthread_mutex_destroy(&shared->kv_shards[i].lock);
+    }
+    free(shared->kv_shards);
+
     free(shared);
 } /* memfs_destroy */
 
@@ -603,6 +693,7 @@ memfs_thread_destroy(void *private_data)
     struct memfs_dirent         *dirent;
     struct memfs_symlink_target *target;
     struct memfs_block          *block;
+    struct memfs_kv_entry       *kv_entry;
 
     evpl_iovec_release(thread->evpl, &thread->zero);
 
@@ -623,6 +714,14 @@ memfs_thread_destroy(void *private_data)
         block = thread->free_block;
         LL_DELETE(thread->free_block, block);
         free(block);
+    }
+
+    while (thread->free_kv_entry) {
+        kv_entry = thread->free_kv_entry;
+        LL_DELETE(thread->free_kv_entry, kv_entry);
+        free(kv_entry->key);
+        free(kv_entry->value);
+        free(kv_entry);
     }
 
     free(thread);
@@ -2496,6 +2595,212 @@ memfs_link(
 
 } /* memfs_link */
 
+
+static void
+memfs_put_key(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    uint64_t               hash;
+    int                    shard_idx;
+    struct memfs_kv_shard *shard;
+    struct memfs_kv_entry *entry, *existing;
+
+    hash      = chimera_vfs_hash(request->put_key.key, request->put_key.key_len);
+    shard_idx = hash % shared->num_kv_shards;
+    shard     = &shared->kv_shards[shard_idx];
+
+    pthread_mutex_lock(&shard->lock);
+
+    /* Check if key already exists */
+    rb_tree_query_exact(&shard->entries, hash, hash, existing);
+
+    if (existing) {
+        /* Update existing entry */
+        free(existing->value);
+        existing->value_len = request->put_key.value_len;
+        existing->value     = malloc(request->put_key.value_len);
+        memcpy(existing->value, request->put_key.value, request->put_key.value_len);
+    } else {
+        /* Insert new entry */
+        entry = memfs_kv_entry_alloc(thread,
+                                     hash,
+                                     request->put_key.key,
+                                     request->put_key.key_len,
+                                     request->put_key.value,
+                                     request->put_key.value_len);
+
+        rb_tree_insert(&shard->entries, hash, entry);
+    }
+
+    pthread_mutex_unlock(&shard->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_put_key */
+
+static void
+memfs_get_key(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    uint64_t               hash;
+    int                    shard_idx;
+    struct memfs_kv_shard *shard;
+    struct memfs_kv_entry *entry;
+
+    hash      = chimera_vfs_hash(request->get_key.key, request->get_key.key_len);
+    shard_idx = hash % shared->num_kv_shards;
+    shard     = &shared->kv_shards[shard_idx];
+
+    pthread_mutex_lock(&shard->lock);
+
+    rb_tree_query_exact(&shard->entries, hash, hash, entry);
+
+    if (!entry) {
+        pthread_mutex_unlock(&shard->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    /* Return pointer to value - caller must use before callback returns */
+    request->get_key.r_value     = entry->value;
+    request->get_key.r_value_len = entry->value_len;
+
+    pthread_mutex_unlock(&shard->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_get_key */
+
+static void
+memfs_delete_key(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    uint64_t               hash;
+    int                    shard_idx;
+    struct memfs_kv_shard *shard;
+    struct memfs_kv_entry *entry;
+
+    hash      = chimera_vfs_hash(request->delete_key.key, request->delete_key.key_len);
+    shard_idx = hash % shared->num_kv_shards;
+    shard     = &shared->kv_shards[shard_idx];
+
+    pthread_mutex_lock(&shard->lock);
+
+    rb_tree_query_exact(&shard->entries, hash, hash, entry);
+
+    if (!entry) {
+        pthread_mutex_unlock(&shard->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    rb_tree_remove(&shard->entries, &entry->node);
+
+    pthread_mutex_unlock(&shard->lock);
+
+    memfs_kv_entry_free(thread, entry);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_delete_key */
+
+static int
+memfs_kv_key_in_range(
+    const void *key,
+    uint32_t    key_len,
+    const void *start_key,
+    uint32_t    start_key_len,
+    const void *end_key,
+    uint32_t    end_key_len)
+{
+    int cmp;
+
+    /* Compare key to start_key */
+    if (start_key_len > 0) {
+        cmp = memcmp(key, start_key,
+                     key_len < start_key_len ? key_len : start_key_len);
+        if (cmp < 0 || (cmp == 0 && key_len < start_key_len)) {
+            return 0; /* key < start_key */
+        }
+    }
+
+    /* Compare key to end_key */
+    if (end_key_len > 0) {
+        cmp = memcmp(key, end_key,
+                     key_len < end_key_len ? key_len : end_key_len);
+        if (cmp > 0 || (cmp == 0 && key_len > end_key_len)) {
+            return 0; /* key > end_key */
+        }
+    }
+
+    return 1; /* key is in range [start_key, end_key] */
+} /* memfs_kv_key_in_range */
+
+static void
+memfs_search_keys(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int                                i, rc;
+    struct memfs_kv_shard             *shard;
+    struct memfs_kv_entry             *entry;
+    chimera_vfs_search_keys_callback_t callback = request->search_keys.callback;
+
+    /* Iterate over all shards */
+    for (i = 0; i < shared->num_kv_shards; i++) {
+        shard = &shared->kv_shards[i];
+
+        pthread_mutex_lock(&shard->lock);
+
+        /* Iterate over all entries in the shard */
+        rb_tree_first(&shard->entries, entry);
+
+        while (entry) {
+            /* Check if key is in range */
+            if (memfs_kv_key_in_range(entry->key,
+                                      entry->key_len,
+                                      request->search_keys.start_key,
+                                      request->search_keys.start_key_len,
+                                      request->search_keys.end_key,
+                                      request->search_keys.end_key_len)) {
+                rc = callback(entry->key,
+                              entry->key_len,
+                              entry->value,
+                              entry->value_len,
+                              request->proto_private_data);
+
+                if (rc) {
+                    /* Caller wants to abort search */
+                    pthread_mutex_unlock(&shard->lock);
+                    request->status = CHIMERA_VFS_OK;
+                    request->complete(request);
+                    return;
+                }
+            }
+
+            entry = rb_tree_next(&shard->entries, entry);
+        }
+
+        pthread_mutex_unlock(&shard->lock);
+    }
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_search_keys */
+
 static void
 memfs_dispatch(
     struct chimera_vfs_request *request,
@@ -2566,6 +2871,18 @@ memfs_dispatch(
         case CHIMERA_VFS_OP_LINK:
             memfs_link(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_PUT_KEY:
+            memfs_put_key(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_GET_KEY:
+            memfs_get_key(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_DELETE_KEY:
+            memfs_delete_key(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_SEARCH_KEYS:
+            memfs_search_keys(thread, shared, request, private_data);
+            break;
         default:
             chimera_memfs_error("memfs_dispatch: unknown operation %d",
                                 request->opcode);
@@ -2578,7 +2895,7 @@ memfs_dispatch(
 SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
     .name           = "memfs",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_MEMFS,
-    .capabilities   = CHIMERA_VFS_CAP_CREATE_UNLINKED,
+    .capabilities   = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

@@ -1137,7 +1137,8 @@ chimera_linux_dispatch(
 SYMBOL_EXPORT struct chimera_vfs_module vfs_linux = {
     .name         = "linux",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_LINUX,
-    .capabilities = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED | CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED
+    .capabilities = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED | CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED |
+        CHIMERA_VFS_CAP_FS
     ,
     .init           = chimera_linux_init,
     .destroy        = chimera_linux_destroy,

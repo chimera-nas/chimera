@@ -142,6 +142,7 @@ chimera_client_init(
     client->vfs = chimera_vfs_init(config->delegation_threads,
                                    config->modules,
                                    config->num_modules,
+                                   config->kv_module,
                                    config->cache_ttl,
                                    metrics);
 
@@ -215,6 +216,12 @@ chimera_client_init_json(
         val = json_object_get(config_section, "max_fds");
         if (val && json_is_integer(val)) {
             config->max_fds = json_integer_value(val);
+        }
+
+        val = json_object_get(config_section, "kv_module");
+        if (val && json_is_string(val)) {
+            strncpy(config->kv_module, json_string_value(val), sizeof(config->kv_module) - 1);
+            config->kv_module[sizeof(config->kv_module) - 1] = '\0';
         }
 
         vfs_modules = json_object_get(config_section, "vfs");

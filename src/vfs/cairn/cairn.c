@@ -31,6 +31,7 @@
 #define CAIRN_KEY_SYMLINK 2
 #define CAIRN_KEY_EXTENT  3
 #define CAIRN_KEY_SUPER   4
+#define CAIRN_KEY_KV      5
 
 #define chimera_cairn_debug(...) chimera_debug("cairn", \
                                                __FILE__, \
@@ -88,6 +89,9 @@ struct cairn_super_key {
 struct cairn_super {
     uint64_t fsid;
 };
+
+/* KV key structure: keytype (1 byte) + key data (variable length) */
+#define CAIRN_KV_KEY_MAX 4096
 
 struct cairn_dirent_value {
     uint64_t inum;
@@ -2820,6 +2824,216 @@ cairn_link(
     DL_APPEND(thread->txn_requests, request);
 } /* cairn_link */
 
+
+static void
+cairn_put_key(
+    struct cairn_thread        *thread,
+    struct cairn_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    rocksdb_transaction_t *txn;
+    char                  *err = NULL;
+    uint8_t                kv_key[1 + CAIRN_KV_KEY_MAX];
+    size_t                 kv_key_len;
+
+    if (request->put_key.key_len > CAIRN_KV_KEY_MAX) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    txn = cairn_get_transaction(thread);
+
+    /* Build RocksDB key: keytype + user key */
+    kv_key[0]  = CAIRN_KEY_KV;
+    kv_key_len = 1 + request->put_key.key_len;
+    memcpy(kv_key + 1, request->put_key.key, request->put_key.key_len);
+
+    rocksdb_transaction_put(txn,
+                            (const char *) kv_key, kv_key_len,
+                            (const char *) request->put_key.value,
+                            request->put_key.value_len,
+                            &err);
+
+    chimera_cairn_abort_if(err, "Error putting KV: %s\n", err);
+
+    request->status = CHIMERA_VFS_OK;
+
+    DL_APPEND(thread->txn_requests, request);
+} /* cairn_put_key */
+
+static void
+cairn_get_key(
+    struct cairn_thread        *thread,
+    struct cairn_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    rocksdb_transaction_t *txn;
+    char                  *err = NULL;
+    uint8_t                kv_key[1 + CAIRN_KV_KEY_MAX];
+    size_t                 kv_key_len;
+    char                  *value;
+    size_t                 value_len;
+
+    if (request->get_key.key_len > CAIRN_KV_KEY_MAX) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    txn = cairn_get_transaction(thread);
+
+    /* Build RocksDB key: keytype + user key */
+    kv_key[0]  = CAIRN_KEY_KV;
+    kv_key_len = 1 + request->get_key.key_len;
+    memcpy(kv_key + 1, request->get_key.key, request->get_key.key_len);
+
+    value = rocksdb_transaction_get(txn,
+                                    shared->read_options,
+                                    (const char *) kv_key, kv_key_len,
+                                    &value_len,
+                                    &err);
+
+    chimera_cairn_abort_if(err, "Error getting KV: %s\n", err);
+
+    if (!value) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    /* Store value in plugin_data for lifetime of request */
+    memcpy(request->plugin_data, value, value_len);
+    free(value);
+
+    request->get_key.r_value     = request->plugin_data;
+    request->get_key.r_value_len = value_len;
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* cairn_get_key */
+
+static void
+cairn_delete_key(
+    struct cairn_thread        *thread,
+    struct cairn_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    rocksdb_transaction_t *txn;
+    char                  *err = NULL;
+    uint8_t                kv_key[1 + CAIRN_KV_KEY_MAX];
+    size_t                 kv_key_len;
+
+    if (request->delete_key.key_len > CAIRN_KV_KEY_MAX) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    txn = cairn_get_transaction(thread);
+
+    /* Build RocksDB key: keytype + user key */
+    kv_key[0]  = CAIRN_KEY_KV;
+    kv_key_len = 1 + request->delete_key.key_len;
+    memcpy(kv_key + 1, request->delete_key.key, request->delete_key.key_len);
+
+    rocksdb_transaction_delete(txn,
+                               (const char *) kv_key, kv_key_len,
+                               &err);
+
+    chimera_cairn_abort_if(err, "Error deleting KV: %s\n", err);
+
+    request->status = CHIMERA_VFS_OK;
+
+    DL_APPEND(thread->txn_requests, request);
+} /* cairn_delete_key */
+
+static void
+cairn_search_keys(
+    struct cairn_thread        *thread,
+    struct cairn_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    rocksdb_transaction_t             *txn;
+    rocksdb_iterator_t                *iter;
+    uint8_t                            start_kv_key[1 + CAIRN_KV_KEY_MAX];
+    uint8_t                            end_kv_key[1 + CAIRN_KV_KEY_MAX];
+    size_t                             start_kv_key_len, end_kv_key_len;
+    const char                        *key, *value;
+    size_t                             key_len, value_len;
+    int                                rc;
+    chimera_vfs_search_keys_callback_t callback = request->search_keys.callback;
+
+    if (request->search_keys.start_key_len > CAIRN_KV_KEY_MAX ||
+        request->search_keys.end_key_len > CAIRN_KV_KEY_MAX) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    txn = cairn_get_transaction(thread);
+
+    /* Build start key: keytype + user start key */
+    start_kv_key[0]  = CAIRN_KEY_KV;
+    start_kv_key_len = 1 + request->search_keys.start_key_len;
+    if (request->search_keys.start_key_len > 0) {
+        memcpy(start_kv_key + 1, request->search_keys.start_key,
+               request->search_keys.start_key_len);
+    }
+
+    /* Build end key: keytype + user end key */
+    end_kv_key[0]  = CAIRN_KEY_KV;
+    end_kv_key_len = 1 + request->search_keys.end_key_len;
+    if (request->search_keys.end_key_len > 0) {
+        memcpy(end_kv_key + 1, request->search_keys.end_key,
+               request->search_keys.end_key_len);
+    }
+
+    iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
+
+    rocksdb_iter_seek(iter, (const char *) start_kv_key, start_kv_key_len);
+
+    while (rocksdb_iter_valid(iter)) {
+        key   = rocksdb_iter_key(iter, &key_len);
+        value = rocksdb_iter_value(iter, &value_len);
+
+        /* Check if we're still in KV keyspace */
+        if (key_len < 1 || (uint8_t) key[0] != CAIRN_KEY_KV) {
+            break;
+        }
+
+        /* Check if key is past end key (if end key specified) */
+        if (request->search_keys.end_key_len > 0) {
+            if (key_len > end_kv_key_len ||
+                (key_len == end_kv_key_len &&
+                 memcmp(key, end_kv_key, end_kv_key_len) > 0)) {
+                break;
+            }
+        }
+
+        /* Callback with user key (skip keytype byte) */
+        rc = callback(key + 1, key_len - 1,
+                      value, value_len,
+                      request->proto_private_data);
+
+        if (rc) {
+            /* Caller wants to abort search */
+            break;
+        }
+
+        rocksdb_iter_next(iter);
+    }
+
+    rocksdb_iter_destroy(iter);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* cairn_search_keys */
+
 static void
 cairn_dispatch(
     struct chimera_vfs_request *request,
@@ -2887,6 +3101,18 @@ cairn_dispatch(
         case CHIMERA_VFS_OP_LINK:
             cairn_link(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_PUT_KEY:
+            cairn_put_key(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_GET_KEY:
+            cairn_get_key(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_DELETE_KEY:
+            cairn_delete_key(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_SEARCH_KEYS:
+            cairn_search_keys(thread, shared, request, private_data);
+            break;
         default:
             chimera_cairn_error("cairn_dispatch: unknown operation %d",
                                 request->opcode);
@@ -2899,7 +3125,7 @@ cairn_dispatch(
 SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
     .name           = "cairn",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_CAIRN,
-    .capabilities   = CHIMERA_VFS_CAP_BLOCKING,
+    .capabilities   = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV,
     .init           = cairn_init,
     .destroy        = cairn_destroy,
     .thread_init    = cairn_thread_init,

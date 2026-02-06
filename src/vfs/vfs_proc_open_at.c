@@ -138,6 +138,11 @@ chimera_vfs_open_at(
 
     request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
 
+    if (CHIMERA_VFS_IS_ERR(request)) {
+        callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
     request->opcode                              = CHIMERA_VFS_OP_OPEN_AT;
     request->complete                            = chimera_vfs_open_complete;
     request->open_at.handle                      = handle;
