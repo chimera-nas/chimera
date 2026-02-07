@@ -1,10 +1,13 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
 # FSX - File System Exerciser ported to Chimera POSIX API
 add_executable(posix_fsx fsx.c)
 target_link_libraries(posix_fsx chimera_posix chimera_client chimera_server jansson)
+
+# Wrapper script for running tests in a network namespace
+set(NETNS_WRAPPER "${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh")
 
 macro(add_posix_testprog name)
     add_executable(posix_${name} ${name}.c)
@@ -15,7 +18,7 @@ macro(add_posix_testprog name)
 endmacro()
 
 macro(add_posix_test testname prog backend)
-    add_test(NAME chimera/posix/${testname} COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_${prog} -b ${backend})
+    add_test(NAME chimera/posix/${testname} COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_${prog} -b ${backend})
     get_target_property(test_file posix_${prog} TEST_FILE)
     set_tests_properties(chimera/posix/${testname} PROPERTIES
         ENVIRONMENT "TEST_FILE=${test_file}")
@@ -104,9 +107,6 @@ generate_posix_backend_tests(io_uring IO_URING_ENABLED)
 # connecting to a Chimera NFS server in the same process.
 # They require a network namespace for loopback networking.
 # ============================================================================
-
-# Wrapper script for running tests in a network namespace
-set(NETNS_WRAPPER "${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh")
 
 # Macro to add a test that runs via NFS3 client (requires network namespace)
 macro(add_posix_nfs3_test testname prog nfs_backend)
@@ -199,7 +199,7 @@ set(FSX_MAX_LEN 262144)
 
 macro(add_fsx_test backend)
     add_test(NAME chimera/posix/fsx_${backend}
-        COMMAND ${FSX_WRAPPER} -b ${backend} -N ${FSX_NUM_OPS} -l ${FSX_MAX_LEN} -q
+        COMMAND ${NETNS_WRAPPER} ${FSX_WRAPPER} -b ${backend} -N ${FSX_NUM_OPS} -l ${FSX_MAX_LEN} -q
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     set_tests_properties(chimera/posix/fsx_${backend} PROPERTIES
@@ -259,7 +259,7 @@ endmacro()
 
 # Macro to add a cthon test to ctest
 macro(add_cthon_test testname prog backend)
-    add_test(NAME chimera/posix/cthon/${testname} COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_${prog} -b ${backend})
+    add_test(NAME chimera/posix/cthon/${testname} COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_${prog} -b ${backend})
     get_target_property(test_file posix_${prog} TEST_FILE)
     set_tests_properties(chimera/posix/cthon/${testname} PROPERTIES
         ENVIRONMENT "TEST_FILE=${test_file}"
@@ -469,31 +469,31 @@ endmacro()
 macro(_generate_stress_tests_for_backend backend)
     # dirstress: directory operations stress test (reduced params for testing)
     add_test(NAME chimera/posix/dirstress_${backend}
-        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_test_dirstress -b ${backend} -p 1 -f 50
+        COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_test_dirstress -b ${backend} -p 1 -f 50
     )
     set_tests_properties(chimera/posix/dirstress_${backend} PROPERTIES TIMEOUT 120)
 
     # rewinddir: tests rewinddir() POSIX semantics
     add_test(NAME chimera/posix/rewinddir_${backend}
-        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_test_rewinddir -b ${backend}
+        COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_test_rewinddir -b ${backend}
     )
     set_tests_properties(chimera/posix/rewinddir_${backend} PROPERTIES TIMEOUT 120)
 
     # fstest: data integrity verification test
     add_test(NAME chimera/posix/fstest_${backend}
-        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_test_fstest -b ${backend} -n 1 -f 2 -l 5 -s 65536
+        COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_test_fstest -b ${backend} -n 1 -f 2 -l 5 -s 65536
     )
     set_tests_properties(chimera/posix/fstest_${backend} PROPERTIES TIMEOUT 120)
 
     # nametest: namespace stress test
     add_test(NAME chimera/posix/nametest_${backend}
-        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_test_nametest -b ${backend} -n 50 -i 1000
+        COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_test_nametest -b ${backend} -n 50 -i 1000
     )
     set_tests_properties(chimera/posix/nametest_${backend} PROPERTIES TIMEOUT 120)
 
     # fsstress: comprehensive filesystem stress test
     add_test(NAME chimera/posix/fsstress_${backend}
-        COMMAND ${CMAKE_CURRENT_BINARY_DIR}/posix_test_fsstress -b ${backend} -n 500 -p 1
+        COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_test_fsstress -b ${backend} -n 500 -p 1
     )
     set_tests_properties(chimera/posix/fsstress_${backend} PROPERTIES TIMEOUT 180)
 endmacro()

@@ -4,14 +4,17 @@
 
 set(FIO_TEST_BINARY ${CMAKE_CURRENT_BINARY_DIR})
 
+# Wrapper script for running tests in a network namespace
+set(NETNS_WRAPPER "${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh")
+
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/memfs_basic.fio ${CMAKE_CURRENT_BINARY_DIR}/memfs_basic.fio)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/demofs_basic.fio ${CMAKE_CURRENT_BINARY_DIR}/demofs_basic.fio)
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/memfs_basic.json ${CMAKE_CURRENT_BINARY_DIR}/memfs_basic.json)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/demofs_basic.json ${CMAKE_CURRENT_BINARY_DIR}/demofs_basic.json)
 
-add_test(NAME chimera/fio/fio_memfs_basic COMMAND /usr/local/bin/fio ${CMAKE_CURRENT_BINARY_DIR}/memfs_basic.fio)
-add_test(NAME chimera/fio/fio_demofs_basic COMMAND /usr/local/bin/fio ${CMAKE_CURRENT_BINARY_DIR}/demofs_basic.fio)
+add_test(NAME chimera/fio/fio_memfs_basic COMMAND ${NETNS_WRAPPER} /usr/local/bin/fio ${CMAKE_CURRENT_BINARY_DIR}/memfs_basic.fio)
+add_test(NAME chimera/fio/fio_demofs_basic COMMAND ${NETNS_WRAPPER} /usr/local/bin/fio ${CMAKE_CURRENT_BINARY_DIR}/demofs_basic.fio)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 
