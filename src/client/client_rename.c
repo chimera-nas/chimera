@@ -23,13 +23,11 @@ chimera_rename(
 
     request = chimera_client_request_alloc(thread);
 
-    request->opcode                   = CHIMERA_CLIENT_OP_RENAME;
-    request->rename.callback          = callback;
-    request->rename.private_data      = private_data;
-    request->rename.source_path_len   = source_path_len;
-    request->rename.source_parent_len = source_slash ? source_slash - source_path : source_path_len;
-    request->rename.dest_path_len     = dest_path_len;
-    request->rename.dest_parent_len   = dest_slash ? dest_slash - dest_path : dest_path_len;
+    request->opcode                 = CHIMERA_CLIENT_OP_RENAME;
+    request->rename.callback        = callback;
+    request->rename.private_data    = private_data;
+    request->rename.source_path_len = source_path_len;
+    request->rename.dest_path_len   = dest_path_len;
 
     while (source_slash && *source_slash == '/') {
         source_slash++;

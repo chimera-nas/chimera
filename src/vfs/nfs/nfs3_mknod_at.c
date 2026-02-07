@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -29,8 +29,8 @@ chimera_nfs3_mknod_callback(
 
     if (res->status != NFS3_OK) {
 
-        chimera_nfs3_get_wcc_data(&request->mknod.r_dir_pre_attr,
-                                  &request->mknod.r_dir_post_attr,
+        chimera_nfs3_get_wcc_data(&request->mknod_at.r_dir_pre_attr,
+                                  &request->mknod_at.r_dir_post_attr,
                                   &res->resfail.dir_wcc);
 
         request->status = nfs3_client_status_to_chimera_vfs_error(res->status);
@@ -38,20 +38,21 @@ chimera_nfs3_mknod_callback(
         return;
     }
 
-    chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, request->fh, &request->mknod.r_attr);
+    chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, request->fh, &request->mknod_at.r_attr);
 
     if (res->resok.obj_attributes.attributes_follow) {
-        chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->mknod.r_attr);
+        chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->mknod_at.r_attr);
     }
 
-    chimera_nfs3_get_wcc_data(&request->mknod.r_dir_pre_attr, &request->mknod.r_dir_post_attr, &res->resok.dir_wcc);
+    chimera_nfs3_get_wcc_data(&request->mknod_at.r_dir_pre_attr, &request->mknod_at.r_dir_post_attr, &res->resok.dir_wcc
+                              );
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs3_mknod_callback */
 
 void
-chimera_nfs3_mknod(
+chimera_nfs3_mknod_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -78,12 +79,12 @@ chimera_nfs3_mknod(
 
     args.where.dir.data.data = fh;
     args.where.dir.data.len  = fhlen;
-    args.where.name.str      = (char *) request->mknod.name;
-    args.where.name.len      = request->mknod.name_len;
+    args.where.name.str      = (char *) request->mknod_at.name;
+    args.where.name.len      = request->mknod_at.name_len;
 
     /* Map VFS mode to NFS3 ftype3 and build mknoddata3 */
-    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
-        args.what.type = chimera_nfs3_type_from_vfs(request->mknod.set_attr->va_mode);
+    if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        args.what.type = chimera_nfs3_type_from_vfs(request->mknod_at.set_attr->va_mode);
     } else {
         args.what.type = NF3REG;
     }
@@ -91,10 +92,10 @@ chimera_nfs3_mknod(
     switch (args.what.type) {
         case NF3CHR:
         case NF3BLK:
-            chimera_nfs_va_to_sattr3(&args.what.device.dev_attributes, request->mknod.set_attr);
-            if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
-                args.what.device.spec.specdata1 = (request->mknod.set_attr->va_rdev >> 32) & 0xFFFFFFFF;
-                args.what.device.spec.specdata2 = request->mknod.set_attr->va_rdev & 0xFFFFFFFF;
+            chimera_nfs_va_to_sattr3(&args.what.device.dev_attributes, request->mknod_at.set_attr);
+            if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
+                args.what.device.spec.specdata1 = (request->mknod_at.set_attr->va_rdev >> 32) & 0xFFFFFFFF;
+                args.what.device.spec.specdata2 = request->mknod_at.set_attr->va_rdev & 0xFFFFFFFF;
             } else {
                 args.what.device.spec.specdata1 = 0;
                 args.what.device.spec.specdata2 = 0;
@@ -102,7 +103,7 @@ chimera_nfs3_mknod(
             break;
         case NF3SOCK:
         case NF3FIFO:
-            chimera_nfs_va_to_sattr3(&args.what.pipe_attributes, request->mknod.set_attr);
+            chimera_nfs_va_to_sattr3(&args.what.pipe_attributes, request->mknod_at.set_attr);
             break;
         default:
             request->status = CHIMERA_VFS_EINVAL;
@@ -116,4 +117,4 @@ chimera_nfs3_mknod(
 
     shared->nfs_v3.send_call_NFSPROC3_MKNOD(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
                                             &args, 0, 0, 0, chimera_nfs3_mknod_callback, request);
-} /* chimera_nfs3_mknod */
+} /* chimera_nfs3_mknod_at */

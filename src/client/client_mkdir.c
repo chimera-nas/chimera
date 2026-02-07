@@ -23,7 +23,6 @@ chimera_mkdir(
     request->mkdir.callback     = callback;
     request->mkdir.private_data = private_data;
     request->mkdir.path_len     = path_len;
-    request->mkdir.parent_len   = slash ? slash - path : path_len;
 
     while (slash && *slash == '/') {
         slash++;

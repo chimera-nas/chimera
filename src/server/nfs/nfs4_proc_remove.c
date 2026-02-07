@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -46,16 +46,16 @@ chimera_nfs4_remove_open_callback(
         return;
     }
 
-    chimera_vfs_remove(req->thread->vfs_thread, &req->cred,
-                       parent_handle,
-                       args->target.data,
-                       args->target.len,
-                       NULL,
-                       0,
-                       0,
-                       0,
-                       chimera_nfs4_remove_complete,
-                       req);
+    chimera_vfs_remove_at(req->thread->vfs_thread, &req->cred,
+                          parent_handle,
+                          args->target.data,
+                          args->target.len,
+                          NULL,
+                          0,
+                          0,
+                          0,
+                          chimera_nfs4_remove_complete,
+                          req);
 
 
 } /* chimera_nfs4_open_complete */
@@ -68,11 +68,11 @@ chimera_nfs4_remove(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     req->fh,
-                     req->fhlen,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                     chimera_nfs4_remove_open_callback,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs4_remove_open_callback,
+                        req);
 
 } /* chimera_nfs4_create */

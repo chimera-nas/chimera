@@ -97,4 +97,4 @@ chimera_vfs_create_unlinked(
     request->proto_private_data                 = private_data;
 
     chimera_vfs_dispatch(request);
-} /* chimera_vfs_open */
+} /* chimera_vfs_open_fh */
