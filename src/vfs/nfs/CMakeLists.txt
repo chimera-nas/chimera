@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
@@ -44,6 +44,7 @@ add_library(chimera_vfs_nfs SHARED
     nfs4_rename.c
     nfs4_setattr.c
     nfs4_symlink.c
+    nfs4_umount.c
     nfs4_write.c
 )
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -15,6 +15,9 @@ chimera_nfs4_dispatch(
     switch (request->opcode) {
         case CHIMERA_VFS_OP_MOUNT:
             chimera_nfs4_mount(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_UMOUNT:
+            chimera_nfs4_umount(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP:
             chimera_nfs4_lookup(thread, shared, request, private_data);
