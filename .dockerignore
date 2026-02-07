@@ -1,4 +1,5 @@
 .git
+build
 private
 .cache
 .serena
