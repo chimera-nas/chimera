@@ -119,6 +119,52 @@ else()
     message(STATUS "CAIRN disabled")
 endif()
 
+# KVM testing detection
+find_program(DOCKER_EXECUTABLE docker)
+find_program(QEMU_EXECUTABLE qemu-system-x86_64)
+
+set(KVM_TESTING_AVAILABLE FALSE)
+
+if(DOCKER_EXECUTABLE AND QEMU_EXECUTABLE)
+    execute_process(
+        COMMAND docker info
+        RESULT_VARIABLE DOCKER_INFO_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(DOCKER_INFO_RESULT EQUAL 0)
+        set(DOCKER_FUNCTIONAL TRUE)
+    else()
+        set(DOCKER_FUNCTIONAL FALSE)
+        message(STATUS "KVM testing: docker found but not functional")
+    endif()
+
+    if(EXISTS "/dev/kvm")
+        set(KVM_AVAILABLE TRUE)
+    else()
+        set(KVM_AVAILABLE FALSE)
+        message(STATUS "KVM testing: /dev/kvm not found")
+    endif()
+
+    if(DOCKER_FUNCTIONAL AND KVM_AVAILABLE)
+        set(KVM_TESTING_AVAILABLE TRUE)
+    endif()
+else()
+    if(NOT DOCKER_EXECUTABLE)
+        message(STATUS "KVM testing: docker not found")
+    endif()
+    if(NOT QEMU_EXECUTABLE)
+        message(STATUS "KVM testing: qemu-system-x86_64 not found")
+    endif()
+endif()
+
+if(KVM_TESTING_AVAILABLE)
+    message(STATUS "KVM testing enabled")
+    add_subdirectory(kvm)
+else()
+    message(STATUS "KVM testing disabled")
+endif()
+
 add_subdirectory(ext)
 
 include_directories(ext/libevpl/include)
