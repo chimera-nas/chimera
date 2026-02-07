@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -63,6 +63,11 @@ nfs4_client_table_init(
 void
 nfs4_client_table_free(
     struct nfs4_client_table *table);
+
+void
+nfs4_client_table_release_handles(
+    struct nfs4_client_table  *table,
+    struct chimera_vfs_thread *vfs_thread);
 
 uint64_t
 nfs4_client_register(

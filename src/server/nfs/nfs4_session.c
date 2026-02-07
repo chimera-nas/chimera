@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -8,6 +8,7 @@
 #include <uuid/uuid.h>
 #include "nfs4_session.h"
 #include "nfs_internal.h"
+#include "vfs/vfs_release.h"
 
 void
 nfs4_client_table_init(struct nfs4_client_table *table)
@@ -256,3 +257,30 @@ nfs4_destroy_session(
     }
 
 } /* nfs4_destroy_session */
+
+void
+nfs4_client_table_release_handles(
+    struct nfs4_client_table  *table,
+    struct chimera_vfs_thread *vfs_thread)
+{
+#ifndef __clang_analyzer__
+    struct nfs4_session *sess, *sesstmp;
+    uint32_t             i;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, sess, sesstmp)
+    {
+        for (i = 0; i < NFS4_SESSION_MAX_STATE; i++) {
+            struct nfs4_state *state = &sess->nfs4_session_state[i];
+            if (state->nfs4_state_active && state->nfs4_state_handle) {
+                chimera_vfs_release(vfs_thread, state->nfs4_state_handle);
+                state->nfs4_state_handle = NULL;
+                state->nfs4_state_active = 0;
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+#endif /* ifndef __clang_analyzer__ */
+} /* nfs4_client_table_release_handles */
