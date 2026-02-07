@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -74,8 +74,8 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                              req->getattr.r_attr.va_req_mask);
             break;
         case CHIMERA_VFS_OP_SETATTR:
-            chimera_snprintf(argstr, sizeof(argstr), "attrmask %lx",
-                             req->setattr.set_attr->va_req_mask);
+            chimera_snprintf(argstr, sizeof(argstr), "set_mask %lx",
+                             req->setattr.set_attr->va_set_mask);
             break;
         case CHIMERA_VFS_OP_READDIR:
             chimera_snprintf(argstr, sizeof(argstr), "cookie %lu attrmask %lx",
