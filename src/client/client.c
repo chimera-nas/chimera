@@ -158,13 +158,14 @@ chimera_client_add_user(
     const char            *username,
     const char            *password,
     const char            *smbpasswd,
+    const char            *sid,
     uint32_t               uid,
     uint32_t               gid,
     uint32_t               ngids,
     const uint32_t        *gids,
     int                    pinned)
 {
-    return chimera_vfs_add_user(client->vfs, username, password, smbpasswd,
+    return chimera_vfs_add_user(client->vfs, username, password, smbpasswd, sid,
                                 uid, gid, ngids, gids, pinned);
 } /* chimera_client_add_user */
 
@@ -282,6 +283,7 @@ chimera_client_init_json(
             chimera_client_add_user(client, username,
                                     password ? password : "",
                                     smbpasswd ? smbpasswd : "",
+                                    NULL,  // SID - synthesized for builtin users
                                     u_uid, u_gid, ngids, user_gids, 1);
         }
     }

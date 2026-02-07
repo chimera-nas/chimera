@@ -15,7 +15,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
-    apt-get -y --no-install-recommends install gcc g++ cmake ninja-build git flex bison uuid-dev uthash-dev libkrb5-3 libkrb5-dev libgssapi-krb5-2  gss-ntlmssp-dev \
+    apt-get -y --no-install-recommends install gcc g++ cmake ninja-build git flex bison uuid-dev uthash-dev libkrb5-3 libkrb5-dev libgssapi-krb5-2 \
     librdmacm-dev libjansson-dev libxxhash-dev liburcu-dev libunwind-dev libssl-dev openssl libnuma-dev \
     python3 python3-pip python3-venv python3-requests pkg-config && \
     apt-get clean && \
@@ -60,7 +60,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install libuuid1 librdmacm1 libjansson4 liburcu8 ibverbs-providers \
-    libunwind8 gss-ntlmssp libkrb5-3 libkrb5-dev libgssapi-krb5-2 gss-ntlmssp-dev openssl libnuma1 \
+    libunwind8 libkrb5-3 libkrb5-dev libgssapi-krb5-2 openssl libnuma1 \
     python3 python3-requests && \
     if [ "${BUILD_TYPE}" = "Debug" ]; then \
     apt-get -y --no-install-recommends install libasan6 gdb ; \

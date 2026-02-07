@@ -253,12 +253,12 @@ chimera_server_add_user(
     const char            *username,
     const char            *password,
     const char            *smbpasswd,
+    const char            *sid,
     uint32_t               uid,
     uint32_t               gid,
     uint32_t               ngids,
     const uint32_t        *gids,
     int                    pinned);
-
 
 int
 chimera_server_remove_user(
@@ -354,3 +354,48 @@ chimera_server_add_s3_cred(
     const char            *access_key,
     const char            *secret_key,
     int                    pinned);
+
+void
+chimera_server_config_set_smb_winbind_enabled(
+    struct chimera_server_config *config,
+    int                           enabled);
+
+int
+chimera_server_config_get_smb_winbind_enabled(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_winbind_domain(
+    struct chimera_server_config *config,
+    const char                   *domain);
+
+const char *
+chimera_server_config_get_smb_winbind_domain(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_kerberos_enabled(
+    struct chimera_server_config *config,
+    int                           enabled);
+
+int
+chimera_server_config_get_smb_kerberos_enabled(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_kerberos_keytab(
+    struct chimera_server_config *config,
+    const char                   *keytab);
+
+const char *
+chimera_server_config_get_smb_kerberos_keytab(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_kerberos_realm(
+    struct chimera_server_config *config,
+    const char                   *realm);
+
+const char *
+chimera_server_config_get_smb_kerberos_realm(
+    const struct chimera_server_config *config);

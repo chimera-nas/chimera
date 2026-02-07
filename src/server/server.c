@@ -24,30 +24,39 @@
 
 #define CHIMERA_SERVER_MAX_MODULES 64
 
+struct chimera_server_config_smb_auth {
+    int  winbind_enabled;
+    int  kerberos_enabled;
+    char winbind_domain[256];
+    char kerberos_keytab[256];
+    char kerberos_realm[256];
+};
+
 struct chimera_server_config {
-    int                                  nfs_rdma;
-    int                                  nfs_rdma_port;
-    int                                  nfs_tcp_rdma_port;
-    int                                  external_portmap;
-    rlim_t                               max_open_files;
-    int                                  core_threads;
-    int                                  delegation_threads;
-    int                                  cache_ttl;
-    int                                  num_modules;
-    int                                  metrics_port;
-    int                                  rest_http_port;
-    int                                  rest_https_port;
-    int                                  smb_num_dialects;
-    uint32_t                             smb_dialects[16];
-    int                                  smb_num_nic_info;
-    uint32_t                             anonuid;
-    uint32_t                             anongid;
-    char                                 nfs_rdma_hostname[256];
-    char                                 kv_module[64];
-    char                                 rest_ssl_cert[256];
-    char                                 rest_ssl_key[256];
-    struct chimera_vfs_module_cfg        modules[CHIMERA_SERVER_MAX_MODULES];
-    struct chimera_server_config_smb_nic smb_nic_info[16];
+    int                                   nfs_rdma;
+    int                                   nfs_rdma_port;
+    int                                   nfs_tcp_rdma_port;
+    int                                   external_portmap;
+    rlim_t                                max_open_files;
+    int                                   core_threads;
+    int                                   delegation_threads;
+    int                                   cache_ttl;
+    int                                   num_modules;
+    int                                   metrics_port;
+    int                                   rest_http_port;
+    int                                   rest_https_port;
+    int                                   smb_num_dialects;
+    uint32_t                              smb_dialects[16];
+    int                                   smb_num_nic_info;
+    uint32_t                              anonuid;
+    uint32_t                              anongid;
+    char                                  nfs_rdma_hostname[256];
+    char                                  kv_module[64];
+    char                                  rest_ssl_cert[256];
+    char                                  rest_ssl_key[256];
+    struct chimera_vfs_module_cfg         modules[CHIMERA_SERVER_MAX_MODULES];
+    struct chimera_server_config_smb_nic  smb_nic_info[16];
+    struct chimera_server_config_smb_auth smb_auth;
 };
 
 struct chimera_server {
@@ -92,6 +101,13 @@ chimera_server_config_init(void)
     config->smb_dialects[1]  = SMB2_DIALECT_3_0;
 
     config->smb_num_nic_info = 0;
+
+    // SMB auth config defaults - local NTLM only
+    config->smb_auth.winbind_enabled    = 0;
+    config->smb_auth.kerberos_enabled   = 0;
+    config->smb_auth.winbind_domain[0]  = '\0';
+    config->smb_auth.kerberos_keytab[0] = '\0';
+    config->smb_auth.kerberos_realm[0]  = '\0';
 
     config->anonuid = 65534;
     config->anongid = 65534;
@@ -703,16 +719,16 @@ chimera_server_add_user(
     const char            *username,
     const char            *password,
     const char            *smbpasswd,
+    const char            *sid,
     uint32_t               uid,
     uint32_t               gid,
     uint32_t               ngids,
     const uint32_t        *gids,
     int                    pinned)
 {
-    return chimera_vfs_add_user(server->vfs, username, password, smbpasswd,
+    return chimera_vfs_add_user(server->vfs, username, password, smbpasswd, sid,
                                 uid, gid, ngids, gids, pinned);
 } /* chimera_server_add_user */
-
 
 SYMBOL_EXPORT int
 chimera_server_remove_user(
@@ -879,3 +895,76 @@ chimera_server_add_s3_cred(
 
     return chimera_s3_add_cred(server->s3_shared, access_key, secret_key, pinned);
 } /* chimera_server_add_s3_cred */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_winbind_enabled(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->smb_auth.winbind_enabled = enabled;
+} /* chimera_server_config_set_smb_winbind_enabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_winbind_enabled(const struct chimera_server_config *config)
+{
+    return config->smb_auth.winbind_enabled;
+} /* chimera_server_config_get_smb_winbind_enabled */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_winbind_domain(
+    struct chimera_server_config *config,
+    const char                   *domain)
+{
+    strncpy(config->smb_auth.winbind_domain, domain,
+            sizeof(config->smb_auth.winbind_domain) - 1);
+} /* chimera_server_config_set_smb_winbind_domain */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_smb_winbind_domain(const struct chimera_server_config *config)
+{
+    return config->smb_auth.winbind_domain;
+} /* chimera_server_config_get_smb_winbind_domain */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_kerberos_enabled(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->smb_auth.kerberos_enabled = enabled;
+} /* chimera_server_config_set_smb_kerberos_enabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_kerberos_enabled(const struct chimera_server_config *config)
+{
+    return config->smb_auth.kerberos_enabled;
+} /* chimera_server_config_get_smb_kerberos_enabled */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_kerberos_keytab(
+    struct chimera_server_config *config,
+    const char                   *keytab)
+{
+    strncpy(config->smb_auth.kerberos_keytab, keytab,
+            sizeof(config->smb_auth.kerberos_keytab) - 1);
+} /* chimera_server_config_set_smb_kerberos_keytab */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_smb_kerberos_keytab(const struct chimera_server_config *config)
+{
+    return config->smb_auth.kerberos_keytab;
+} /* chimera_server_config_get_smb_kerberos_keytab */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_kerberos_realm(
+    struct chimera_server_config *config,
+    const char                   *realm)
+{
+    strncpy(config->smb_auth.kerberos_realm, realm,
+            sizeof(config->smb_auth.kerberos_realm) - 1);
+} /* chimera_server_config_set_smb_kerberos_realm */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_smb_kerberos_realm(const struct chimera_server_config *config)
+{
+    return config->smb_auth.kerberos_realm;
+} /* chimera_server_config_get_smb_kerberos_realm */

@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: LGPL-2.1-only
+
+# Docker Compose configuration for AD integration testing
+#
+# This sets up a Samba AD DC for testing Kerberos and NTLM authentication
+# against a real Active Directory environment.
+#
+# Usage:
+#   docker-compose up -d
+#   # Wait for DC to be ready (check logs)
+#   docker-compose exec test-runner ./run_tests.sh
+#   docker-compose down
+
+services:
+  samba-ad-dc:
+    build: ./samba-ad-dc
+    hostname: dc
+    domainname: test.local
+    environment:
+      REALM: TEST.LOCAL
+      DOMAIN: TEST
+      ADMIN_PASSWORD: TestPass123!
+    networks:
+      adnet:
+        ipv4_address: 172.20.0.10
+    cap_add:
+      - SYS_ADMIN
+    volumes:
+      - samba-data:/var/lib/samba
+      - ./provision.sh:/provision.sh:ro
+    healthcheck:
+      test: ["CMD", "samba-tool", "dns", "query", "127.0.0.1", "test.local", "@", "ALL"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  test-runner:
+    build:
+      context: ../..
+      dockerfile: test/ad-integration/test-runner/Dockerfile
+    depends_on:
+      samba-ad-dc:
+        condition: service_healthy
+    environment:
+      KRB5_CONFIG: /etc/krb5.conf
+      WINBINDD_SOCKET_DIR: /var/run/samba/winbindd
+      AD_REALM: TEST.LOCAL
+      AD_DOMAIN: TEST
+      AD_DC: dc.test.local
+    volumes:
+      - ../../build:/build:ro
+      - ./krb5.conf:/etc/krb5.conf:ro
+      - ./test-users.sh:/test-users.sh:ro
+    networks:
+      adnet:
+        ipv4_address: 172.20.0.20
+    dns:
+      - 172.20.0.10
+
+networks:
+  adnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.1
+
+volumes:
+  samba-data:
