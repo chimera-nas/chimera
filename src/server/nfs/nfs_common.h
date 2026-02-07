@@ -135,6 +135,7 @@ struct chimera_server_nfs_thread {
     struct evpl_rpc2_thread          *portmap_server_thread;
     int                               active;
     int                               again;
+    int                               active_requests;
     struct nfs_request               *free_requests;
 };
 
@@ -158,6 +159,8 @@ nfs_request_alloc(
     req->conn     = conn;
     req->encoding = encoding;
 
+    thread->active_requests++;
+
     return req;
 } /* nfs_request_alloc */
 
@@ -166,6 +169,7 @@ nfs_request_free(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req)
 {
+    thread->active_requests--;
     LL_PREPEND(thread->free_requests, req);
 } /* nfs_request_free */
 

@@ -557,6 +557,12 @@ chimera_server_thread_shutdown(
     struct chimera_server *server = thread->server;
     int                    i;
 
+    /* Drain VFS thread first to ensure all in-flight operations complete
+     * before we destroy the protocol threads (NFS/RPC2 connections).
+     * This prevents use-after-free when VFS callbacks try to send RPC replies
+     * on already-destroyed connections. */
+    chimera_vfs_thread_drain(thread->vfs_thread);
+
     for (i = 0; i < server->num_protocols; i++) {
         server->protocols[i]->thread_destroy(thread->protocol_private[i]);
     }
@@ -677,11 +683,13 @@ chimera_server_destroy(struct chimera_server *server)
     chimera_rest_stop(server->rest);
 
     evpl_threadpool_destroy(server->pool);
-    chimera_vfs_destroy(server->vfs);
 
+    /* Destroy protocols before VFS so they can release any open handles */
     for (i = 0; i < server->num_protocols; i++) {
         server->protocols[i]->destroy(server->protocol_private[i]);
     }
+
+    chimera_vfs_destroy(server->vfs);
 
     chimera_rest_destroy(server->rest);
 

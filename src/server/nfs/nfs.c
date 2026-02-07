@@ -17,6 +17,7 @@
 #include "nfs_portmap.h"
 #include "nfs_common.h"
 #include "nfs_internal.h"
+#include "nfs4_session.h"
 #include "prometheus-c.h"
 #include "nfs_external_portmap.h"
 
@@ -237,6 +238,23 @@ nfs_server_destroy(void *data)
 {
     struct chimera_server_nfs_shared *shared = data;
     struct chimera_nfs_export        *export;
+    struct evpl                      *evpl;
+    struct chimera_vfs_thread        *vfs_thread;
+
+    /* Create a temporary evpl and VFS thread for releasing handles */
+    evpl       = evpl_create(NULL);
+    vfs_thread = chimera_vfs_thread_init(evpl, shared->vfs);
+
+    /* Release all open handles from NFS4 sessions */
+    nfs4_client_table_release_handles(&shared->nfs4_shared_clients, vfs_thread);
+
+    /* Drain all in-flight VFS operations before destroying the thread.
+     * This ensures delegation threads complete before we free the thread. */
+    chimera_vfs_thread_drain(vfs_thread);
+
+    /* Destroy temporary VFS thread and evpl */
+    chimera_vfs_thread_destroy(vfs_thread);
+    evpl_destroy(evpl);
 
     /* Close out all the nfs4 session state */
     nfs4_client_table_free(&shared->nfs4_shared_clients);
@@ -329,6 +347,14 @@ nfs_server_thread_destroy(void *data)
     if (thread->shared->portmap_server) {
         evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->portmap_server);
     }
+
+    /* Drain all in-flight NFS requests before destroying RPC2 thread.
+     * This prevents use-after-free when request callbacks try to free
+     * to the RPC2 thread's free list after it has been destroyed. */
+    while (thread->active_requests > 0) {
+        evpl_continue(thread->evpl);
+    }
+
     evpl_rpc2_thread_destroy(thread->rpc2_thread);
 
     while (thread->free_requests) {
