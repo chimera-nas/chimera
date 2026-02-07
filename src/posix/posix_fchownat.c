@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -91,8 +91,7 @@ chimera_posix_fchownat_at_exec(
 {
     struct chimera_posix_fchownat_ctx *ctx = request->setattr.private_data;
 
-    /* Set up the set_attr for the VFS call */
-    ctx->set_attr.va_set_mask = 0;
+    /* Note: ctx->set_attr was already initialized by chimera_posix_fchownat */
 
     /* Open the target file relative to the parent directory */
     chimera_vfs_open_at(
