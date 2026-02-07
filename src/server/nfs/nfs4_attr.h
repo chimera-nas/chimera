@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -604,6 +604,50 @@ chimera_nfs4_unmarshall_attrs(
             attr->va_mode      = chimera_nfs_ntoh32(*(uint32_t *) attrs);
             attrs             += sizeof(uint32_t);
             attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+        }
+
+        if (req_mask[1] & (1 << (FATTR4_OWNER - 32))) {
+            uint32_t owner_len;
+            uint32_t owner_padded_len;
+
+            if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
+                return -1;
+            }
+
+            owner_len        = chimera_nfs_ntoh32(*(uint32_t *) attrs);
+            attrs           += sizeof(uint32_t);
+            owner_padded_len = (owner_len + 3) & ~3;
+
+            if (unlikely(attrs + owner_padded_len > attrsend)) {
+                return -1;
+            }
+
+            /* Convert string to numeric uid */
+            attr->va_uid       = strtoul(attrs, NULL, 10);
+            attrs             += owner_padded_len;
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
+        }
+
+        if (req_mask[1] & (1 << (FATTR4_OWNER_GROUP - 32))) {
+            uint32_t group_len;
+            uint32_t group_padded_len;
+
+            if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
+                return -1;
+            }
+
+            group_len        = chimera_nfs_ntoh32(*(uint32_t *) attrs);
+            attrs           += sizeof(uint32_t);
+            group_padded_len = (group_len + 3) & ~3;
+
+            if (unlikely(attrs + group_padded_len > attrsend)) {
+                return -1;
+            }
+
+            /* Convert string to numeric gid */
+            attr->va_gid       = strtoul(attrs, NULL, 10);
+            attrs             += group_padded_len;
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         }
 
         if (req_mask[1] & (1 << (FATTR4_TIME_ACCESS_SET - 32))) {

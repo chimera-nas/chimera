@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -18,7 +18,8 @@ chimera_nfs4_readlink_complete(
     struct READLINK4res              *res    = &req->res_compound.resarray[req->index].opreadlink;
 
     if (error_code == CHIMERA_VFS_OK) {
-        res->status = NFS4_OK;
+        res->status          = NFS4_OK;
+        res->resok4.link.len = targetlen;
     } else {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
     }

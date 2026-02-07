@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -217,6 +217,9 @@ chimera_nfs4_compound_complete(
 
     if (status != NFS4_OK) {
         req->res_compound.status = status;
+
+        /* Set the status for the failed operation */
+        req->res_compound.resarray[req->index].opillegal.status = status;
 
         req->index++;
 
