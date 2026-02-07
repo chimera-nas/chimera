@@ -183,8 +183,8 @@ chimera_vfs_root_lookup_getattr_callback(
     } else {
 
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
-        memcpy(attr->va_fh, ctx->oh->fh, ctx->oh->fh_len);
-        attr->va_fh_len = ctx->oh->fh_len;
+        memcpy(attr->va_fh, ctx->mount_id, ctx->mount_id_len);
+        attr->va_fh_len = ctx->mount_id_len;
 
         dir_attr = &lookup_request->lookup.r_dir_attr;
 
