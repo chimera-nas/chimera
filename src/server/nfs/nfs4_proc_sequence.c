@@ -39,4 +39,4 @@ chimera_nfs4_sequence(
     res->sr_resok4.sr_status_flags          = 0;
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_reclaim_complete */
+} /* chimera_nfs4_sequence */
