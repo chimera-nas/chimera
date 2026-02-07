@@ -79,7 +79,11 @@ chimera_vfs_hash(
     const void *data,
     int         len)
 {
-    return XXH3_64bits(data, len);
+    /* Mask the MSB to ensure the result is non-negative when interpreted as
+     * a signed 64-bit value.  NFS readdir cookies are derived from this hash
+     * and the Linux kernel rejects negative loff_t values in nfs_llseek_dir(),
+     * which breaks seekdir()/telldir() for cookies with bit 63 set. */
+    return XXH3_64bits(data, len) & INT64_MAX;
 } /* chimera_vfs_hash */
 
 static inline struct chimera_vfs_find_result *
