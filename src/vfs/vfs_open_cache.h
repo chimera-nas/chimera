@@ -288,6 +288,7 @@ chimera_vfs_open_cache_release(
         handle->opencnt = 0;
         if (!(handle->flags & CHIMERA_VFS_OPEN_HANDLE_DETACHED)) {
             chimera_vfs_open_cache_shard_remove(shard, handle);
+            shard->open_handles--;
         }
         chimera_vfs_open_cache_free(shard, handle);
 
@@ -297,7 +298,9 @@ chimera_vfs_open_cache_release(
 
         if (handle->opencnt == 0) {
             if (handle->flags & CHIMERA_VFS_OPEN_HANDLE_DETACHED) {
-                /* Detached handle: close immediately, do not add to pending_close */
+                /* Detached handle: close immediately, do not add to pending_close.
+                 * Do not decrement open_handles - the handle was already removed
+                 * from the cache when it was detached by insert(). */
                 pthread_mutex_unlock(&shard->lock);
                 chimera_vfs_open_cache_release_blocked(thread, requests, error_code);
                 chimera_vfs_close(thread, handle, NULL, NULL);
@@ -605,8 +608,6 @@ chimera_vfs_open_cache_defer_close(
 
         pthread_mutex_lock(&shard->lock);
 
-        count += shard->open_handles;
-
         while (shard->pending_close) {
 
             handle = shard->pending_close;
@@ -622,6 +623,10 @@ chimera_vfs_open_cache_defer_close(
             LL_PREPEND(closed, handle);
             shard->open_handles--;
         }
+
+        /* Count AFTER processing - this is the number of handles still in the cache */
+        count += shard->open_handles;
+
         pthread_mutex_unlock(&shard->lock);
     }
     *r_count = count;
