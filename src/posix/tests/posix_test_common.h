@@ -58,10 +58,30 @@ posix_test_parse_nfs_backend(
     return 0;
 } // posix_test_parse_nfs_backend
 
+// Helper to get device type for a demofs variant backend name
+static inline const char *
+posix_test_demofs_device_type(const char *backend)
+{
+    if (strcmp(backend, "demofs_aio") == 0) {
+        return "libaio";
+    }
+    return "io_uring";
+} // posix_test_demofs_device_type
+
+// Helper to check if a backend name is a demofs variant
+static inline int
+posix_test_is_demofs(const char *backend)
+{
+    return strcmp(backend, "demofs") == 0 ||
+           strcmp(backend, "demofs_io_uring") == 0 ||
+           strcmp(backend, "demofs_aio") == 0;
+} // posix_test_is_demofs
+
 // Helper to configure demofs backend
 static inline void
 posix_test_configure_demofs(
     const char *session_dir,
+    const char *device_type,
     char       *demofs_cfg,
     size_t      demofs_cfg_size)
 {
@@ -76,7 +96,7 @@ posix_test_configure_demofs(
     for (int i = 0; i < 10; ++i) {
         device = json_object();
         snprintf(device_path, sizeof(device_path), "%s/device-%d.img", session_dir, i);
-        json_object_set_new(device, "type", json_string("io_uring"));
+        json_object_set_new(device, "type", json_string(device_type));
         json_object_set_new(device, "size", json_integer(1));
         json_object_set_new(device, "path", json_string(device_path));
         json_array_append_new(devices, device);
@@ -102,7 +122,7 @@ posix_test_configure_demofs(
     snprintf(demofs_cfg, demofs_cfg_size, "%s", json_str);
     free(json_str);
     json_decref(cfg);
-} // posix_test_configure_demofs // posix_test_configure_demofs
+} // posix_test_configure_demofs
 
 // Helper to configure cairn backend
 static inline void
@@ -196,8 +216,10 @@ posix_test_init(
 
         server_config = chimera_server_config_init();
 
-        if (strcmp(nfs_backend_name, "demofs") == 0) {
-            posix_test_configure_demofs(env->session_dir, config_data, sizeof(config_data));
+        if (posix_test_is_demofs(nfs_backend_name)) {
+            posix_test_configure_demofs(env->session_dir,
+                                        posix_test_demofs_device_type(nfs_backend_name),
+                                        config_data, sizeof(config_data));
             chimera_server_config_add_module(server_config, "demofs", NULL, config_data);
         } else if (strcmp(nfs_backend_name, "cairn") == 0) {
             posix_test_configure_cairn(env->session_dir, config_data, sizeof(config_data));
@@ -220,7 +242,7 @@ posix_test_init(
             chimera_server_mount(env->server, "share", "io_uring", env->session_dir);
         } else if (strcmp(nfs_backend_name, "memfs") == 0) {
             chimera_server_mount(env->server, "share", "memfs", "/");
-        } else if (strcmp(nfs_backend_name, "demofs") == 0) {
+        } else if (posix_test_is_demofs(nfs_backend_name)) {
             chimera_server_mount(env->server, "share", "demofs", "/");
         } else if (strcmp(nfs_backend_name, "cairn") == 0) {
             chimera_server_mount(env->server, "share", "cairn", "/");
@@ -245,10 +267,12 @@ posix_test_init(
         posix_json_config = json_object();
 
         if (!is_nfs) {
-            if (strcmp(backend, "demofs") == 0) {
+            if (posix_test_is_demofs(backend)) {
                 char    demofs_cfg[4096];
                 json_t *vfs, *vfs_entry;
-                posix_test_configure_demofs(env->session_dir, demofs_cfg, sizeof(demofs_cfg));
+                posix_test_configure_demofs(env->session_dir,
+                                            posix_test_demofs_device_type(backend),
+                                            demofs_cfg, sizeof(demofs_cfg));
                 vfs       = json_object();
                 vfs_entry = json_object();
                 json_object_set_new(vfs_entry, "path", json_string("/build/test/demofs"));
@@ -352,7 +376,9 @@ posix_test_mount(struct posix_test_env *env)
 
     // Direct backend
     module_name = env->backend;
-    if (strcmp(env->backend, "linux") == 0 || strcmp(env->backend, "io_uring") == 0) {
+    if (posix_test_is_demofs(env->backend)) {
+        module_name = "demofs";
+    } else if (strcmp(env->backend, "linux") == 0 || strcmp(env->backend, "io_uring") == 0) {
         module_path = env->session_dir;
     }
 

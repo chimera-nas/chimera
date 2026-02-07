@@ -82,11 +82,16 @@ libnfs_test_init(
 
     config = chimera_server_config_init();
 
-    if (strcmp(backend, "demofs") == 0) {
-        char    demofs_cfg[4096];
-        char    device_path[300];
-        char   *json_str;
-        json_t *cfg, *devices, *device;
+    if (strcmp(backend, "demofs_io_uring") == 0 ||
+        strcmp(backend, "demofs_aio") == 0) {
+        char        demofs_cfg[4096];
+        char        device_path[300];
+        char       *json_str;
+        json_t     *cfg, *devices, *device;
+        const char *device_type;
+
+        device_type = strcmp(backend, "demofs_aio") == 0
+                      ? "libaio" : "io_uring";
 
         cfg     = json_object();
         devices = json_array();
@@ -94,7 +99,7 @@ libnfs_test_init(
         for (int i = 0; i < 10; ++i) {
             device = json_object();
             snprintf(device_path, sizeof(device_path), "%s/device-%d.img", env->session_dir, i);
-            json_object_set_new(device, "type", json_string("io_uring"));
+            json_object_set_new(device, "type", json_string(device_type));
             json_object_set_new(device, "size", json_integer(1));
             json_object_set_new(device, "path", json_string(device_path));
             json_array_append_new(devices, device);
@@ -149,7 +154,8 @@ libnfs_test_init(
     } else if (strcmp(backend, "memfs") == 0) {
         chimera_server_mount(env->server, "share", "memfs", "/");
 
-    } else if (strcmp(backend, "demofs") == 0) {
+    } else if (strcmp(backend, "demofs_io_uring") == 0 ||
+               strcmp(backend, "demofs_aio") == 0) {
         chimera_server_mount(env->server, "share", "demofs", "/");
 
     } else if (strcmp(backend, "cairn") == 0) {

@@ -3034,8 +3034,8 @@ usage(void)
 	fname: path inside the Chimera VFS (REQUIRED)\n\n\
 NOTE: mmap operations are disabled as Chimera POSIX API does not support them.\n\
       Either --chimera-config or --backend must be specified.\n\
-      With --backend, supported backends: memfs, demofs, cairn, linux, io_uring\n\
-      NFS backends: nfs3_memfs, nfs3_demofs, nfs3_cairn, nfs3_linux, nfs3_io_uring\n");
+      With --backend, supported backends: memfs, demofs_io_uring, demofs_aio, cairn, linux, io_uring\n\
+      NFS backends: nfs3_memfs, nfs3_demofs_io_uring, nfs3_demofs_aio, nfs3_cairn, nfs3_linux, nfs3_io_uring\n");
     exit(90);
 } /* usage */
 
@@ -3933,10 +3933,15 @@ main(
             chimera_server_config = chimera_server_config_init();
 
             /* Configure demofs/cairn modules before server init */
-            if (strcmp(chimera_nfs_backend, "demofs") == 0) {
-                char demofs_cfg[4096];
-                char device_path[512];
-                int  i, fd, rc, off;
+            if (strcmp(chimera_nfs_backend, "demofs_io_uring") == 0 ||
+                strcmp(chimera_nfs_backend, "demofs_aio") == 0) {
+                char        demofs_cfg[4096];
+                char        device_path[512];
+                int         i, fd, rc, off;
+                const char *device_type;
+
+                device_type = strcmp(chimera_nfs_backend, "demofs_aio") == 0
+                              ? "libaio" : "io_uring";
 
                 /* Create device files */
                 off = snprintf(demofs_cfg, sizeof(demofs_cfg), "{\"devices\":[");
@@ -3957,8 +3962,8 @@ main(
                     }
                     close(fd);
                     off += snprintf(demofs_cfg + off, sizeof(demofs_cfg) - off,
-                                    "%s{\"type\":\"io_uring\",\"size\":1,\"path\":\"%s\"}",
-                                    i > 0 ? "," : "", device_path);
+                                    "%s{\"type\":\"%s\",\"size\":1,\"path\":\"%s\"}",
+                                    i > 0 ? "," : "", device_type, device_path);
                 }
                 snprintf(demofs_cfg + off, sizeof(demofs_cfg) - off, "]}");
 
@@ -3999,7 +4004,8 @@ main(
                 chimera_server_mount(chimera_server, "share", "io_uring", chimera_session_dir);
             } else if (strcmp(chimera_nfs_backend, "memfs") == 0) {
                 chimera_server_mount(chimera_server, "share", "memfs", "/");
-            } else if (strcmp(chimera_nfs_backend, "demofs") == 0) {
+            } else if (strcmp(chimera_nfs_backend, "demofs_io_uring") == 0 ||
+                       strcmp(chimera_nfs_backend, "demofs_aio") == 0) {
                 chimera_server_mount(chimera_server, "share", "demofs", "/");
             } else if (strcmp(chimera_nfs_backend, "cairn") == 0) {
                 chimera_server_mount(chimera_server, "share", "cairn", "/");
@@ -4049,6 +4055,10 @@ main(
 
             /* Determine mount module and path */
             mount_module = chimera_backend;
+            if (strcmp(chimera_backend, "demofs_io_uring") == 0 ||
+                strcmp(chimera_backend, "demofs_aio") == 0) {
+                mount_module = "demofs";
+            }
             if (strcmp(chimera_backend, "linux") == 0 ||
                 strcmp(chimera_backend, "io_uring") == 0) {
                 mount_path = chimera_session_dir;

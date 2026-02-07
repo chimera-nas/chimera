@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
@@ -33,7 +33,14 @@ add_libsmb2_test(libsmb2_linux_echo libsmb2_echo -b linux)
 add_libsmb2_test(libsmb2_linux_rename libsmb2_rename -b linux)
 
 
-add_libsmb2_test(libsmb2_demofs_basic libsmb2_basic -b demofs)
-add_libsmb2_test(libsmb2_demofs_bigdir libsmb2_bigdir -b demofs)
-add_libsmb2_test(libsmb2_demofs_echo libsmb2_echo -b demofs)
-add_libsmb2_test(libsmb2_demofs_rename libsmb2_rename -b demofs)
+add_libsmb2_test(libsmb2_demofs_io_uring_basic libsmb2_basic -b demofs_io_uring)
+add_libsmb2_test(libsmb2_demofs_io_uring_bigdir libsmb2_bigdir -b demofs_io_uring)
+add_libsmb2_test(libsmb2_demofs_io_uring_echo libsmb2_echo -b demofs_io_uring)
+add_libsmb2_test(libsmb2_demofs_io_uring_rename libsmb2_rename -b demofs_io_uring)
+
+if(HAVE_LIBAIO)
+    add_libsmb2_test(libsmb2_demofs_aio_basic libsmb2_basic -b demofs_aio)
+    add_libsmb2_test(libsmb2_demofs_aio_bigdir libsmb2_bigdir -b demofs_aio)
+    add_libsmb2_test(libsmb2_demofs_aio_echo libsmb2_echo -b demofs_aio)
+    add_libsmb2_test(libsmb2_demofs_aio_rename libsmb2_rename -b demofs_aio)
+endif()
