@@ -667,6 +667,8 @@ demofs_init(const char *cfgfile)
 
         if (strcmp(protocol_name, "io_uring") == 0) {
             protocol_id = EVPL_BLOCK_PROTOCOL_IO_URING;
+        } else if (strcmp(protocol_name, "libaio") == 0) {
+            protocol_id = EVPL_BLOCK_PROTOCOL_LIBAIO;
         } else if (strcmp(protocol_name, "vfio") == 0) {
             protocol_id = EVPL_BLOCK_PROTOCOL_VFIO;
         } else {

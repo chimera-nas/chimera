@@ -1,11 +1,11 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: Unlicense
 
 [global]
 thread=1
 ioengine=external:${PLUGIN_PATH}
-chimera_config=${FIO_TEST_BINARY}/demofs_basic.json
+chimera_config=${FIO_TEST_BINARY}/demofs_io_uring_basic.json
 group_reporting
 numjobs=1
 create_on_open=1

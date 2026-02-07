@@ -8,7 +8,7 @@
                     {
                         "type": "io_uring",
                         "size": 1073741824,
-                        "path": "${FIO_TEST_BINARY}/demofs_device_0.img"
+                        "path": "${FIO_TEST_BINARY}/demofs_io_uring_device_0.img"
                     }
                 ]
             }

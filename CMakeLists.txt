@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2024 - 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2024 - 2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
@@ -102,6 +102,14 @@ if (IO_URING_ENABLED)
     endif()
 else()
     message(STATUS "IO_URING disabled")
+endif()
+
+find_library(AIO_LIB NAMES aio)
+if (AIO_LIB)
+    set(HAVE_LIBAIO 1)
+    message(STATUS "LIBAIO enabled")
+else()
+    message(STATUS "LIBAIO not found")
 endif()
 
 if (CAIRN_ENABLED)
