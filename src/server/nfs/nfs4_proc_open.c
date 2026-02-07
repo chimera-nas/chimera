@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -135,8 +135,11 @@ chimera_nfs4_open_parent_complete(
         flags |= CHIMERA_VFS_OPEN_CREATE;
 
         switch (args->openhow.how.mode) {
-            case UNCHECKED4:
             case GUARDED4:
+                /* GUARDED4 = create only if file doesn't exist (like O_EXCL) */
+                flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
+            /* fallthrough */
+            case UNCHECKED4:
                 chimera_nfs4_unmarshall_attrs(attr,
                                               args->openhow.how.createattrs.num_attrmask,
                                               args->openhow.how.createattrs.attrmask,
