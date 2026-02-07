@@ -175,12 +175,12 @@ chimera_nfs4_open_parent_complete(
             break;
         case CLAIM_PREVIOUS:
         case CLAIM_FH:
-            chimera_vfs_open(req->thread->vfs_thread, &req->cred,
-                             req->fh,
-                             req->fhlen,
-                             flags,
-                             chimera_nfs4_open_complete,
-                             req);
+            chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                                req->fh,
+                                req->fhlen,
+                                flags,
+                                chimera_nfs4_open_complete,
+                                req);
             break;
         default:
             abort();
@@ -207,10 +207,10 @@ chimera_nfs4_open(
         }
     }
 
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     req->fh,
-                     req->fhlen,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                     chimera_nfs4_open_parent_complete,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs4_open_parent_complete,
+                        req);
 } /* chimera_nfs4_open */

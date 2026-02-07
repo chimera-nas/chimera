@@ -57,20 +57,20 @@ chimera_nfs3_rename(
 
     nfs3_dump_rename(req, args);
 
-    chimera_vfs_rename(thread->vfs_thread,
-                       &req->cred,
-                       args->from.dir.data.data,
-                       args->from.dir.data.len,
-                       args->from.name.str,
-                       args->from.name.len,
-                       args->to.dir.data.data,
-                       args->to.dir.data.len,
-                       args->to.name.str,
-                       args->to.name.len,
-                       NULL,
-                       0,
-                       CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
-                       CHIMERA_NFS3_ATTR_MASK,
-                       chimera_nfs3_rename_complete,
-                       req);
+    chimera_vfs_rename_at(thread->vfs_thread,
+                          &req->cred,
+                          args->from.dir.data.data,
+                          args->from.dir.data.len,
+                          args->from.name.str,
+                          args->from.name.len,
+                          args->to.dir.data.data,
+                          args->to.dir.data.len,
+                          args->to.name.str,
+                          args->to.name.len,
+                          NULL,
+                          0,
+                          CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
+                          CHIMERA_NFS3_ATTR_MASK,
+                          chimera_nfs3_rename_complete,
+                          req);
 } /* chimera_nfs3_rename */

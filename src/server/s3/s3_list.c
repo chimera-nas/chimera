@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -237,7 +237,7 @@ chimera_s3_list(
         /* If we are lucky, the path prefix is a valid path and we can start
          * the find from that location */
 
-        chimera_vfs_lookup_path(
+        chimera_vfs_lookup(
             thread->vfs,
             &thread->shared->cred,
             request->bucket_fh,

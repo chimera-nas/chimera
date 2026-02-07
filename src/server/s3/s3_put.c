@@ -62,7 +62,7 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
     struct chimera_server_s3_thread *thread = request->thread;
 
     if (request->put.tmp_name_len) {
-        chimera_vfs_rename(
+        chimera_vfs_rename_at(
             thread->vfs,
             &thread->shared->cred,
             request->dir_handle->fh,
@@ -80,7 +80,7 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
             chimera_s3_put_rename_callback,
             request);
     } else {
-        chimera_vfs_link(
+        chimera_vfs_link_at(
             thread->vfs,
             &thread->shared->cred,
             request->file_handle->fh,
@@ -318,12 +318,12 @@ chimera_s3_put_lookup_callback(
 
     chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "put lookup callback: no fh");
 
-    chimera_vfs_open(thread->vfs, NULL,
-                     attr->va_fh,
-                     attr->va_fh_len,
-                     CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
-                     chimera_s3_put_open_dir_callback,
-                     request);
+    chimera_vfs_open_fh(thread->vfs, NULL,
+                        attr->va_fh,
+                        attr->va_fh_len,
+                        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_s3_put_open_dir_callback,
+                        request);
 }  /* chimera_s3_put_lookup_callback */
 
 void
@@ -361,13 +361,13 @@ chimera_s3_put(
 
     request->io_pending = 0;
 
-    chimera_vfs_create_path(thread->vfs, NULL,
-                            request->bucket_fh,
-                            request->bucket_fhlen,
-                            dirpath,
-                            dirpathlen,
-                            &request->set_attr,
-                            CHIMERA_VFS_ATTR_FH,
-                            chimera_s3_put_lookup_callback,
-                            request);
+    chimera_vfs_create(thread->vfs, NULL,
+                       request->bucket_fh,
+                       request->bucket_fhlen,
+                       dirpath,
+                       dirpathlen,
+                       &request->set_attr,
+                       CHIMERA_VFS_ATTR_FH,
+                       chimera_s3_put_lookup_callback,
+                       request);
 } /* chimera_s3_put */

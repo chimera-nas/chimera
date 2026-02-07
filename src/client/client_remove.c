@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -23,7 +23,6 @@ chimera_remove(
     request->remove.callback     = callback;
     request->remove.private_data = private_data;
     request->remove.path_len     = path_len;
-    request->remove.parent_len   = slash ? slash - path : path_len;
 
     while (slash && *slash == '/') {
         slash++;

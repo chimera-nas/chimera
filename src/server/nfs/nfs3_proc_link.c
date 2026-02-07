@@ -56,18 +56,18 @@ chimera_nfs3_link(
 
     nfs3_dump_link(req, args);
 
-    chimera_vfs_link(thread->vfs_thread,
-                     &req->cred,
-                     args->file.data.data,
-                     args->file.data.len,
-                     args->link.dir.data.data,
-                     args->link.dir.data.len,
-                     args->link.name.str,
-                     args->link.name.len,
-                     0,
-                     CHIMERA_NFS3_ATTR_MASK,
-                     CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
-                     CHIMERA_NFS3_ATTR_MASK,
-                     chimera_nfs3_link_complete,
-                     req);
+    chimera_vfs_link_at(thread->vfs_thread,
+                        &req->cred,
+                        args->file.data.data,
+                        args->file.data.len,
+                        args->link.dir.data.data,
+                        args->link.dir.data.len,
+                        args->link.name.str,
+                        args->link.name.len,
+                        0,
+                        CHIMERA_NFS3_ATTR_MASK,
+                        CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
+                        CHIMERA_NFS3_ATTR_MASK,
+                        chimera_nfs3_link_complete,
+                        req);
 } /* chimera_nfs3_link */

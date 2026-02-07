@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -135,16 +135,16 @@ chimera_nfs_mount_mnt(
         chimera_nfs_abort_if(full_path == NULL, "Failed to allocate path");
     }
 
-    chimera_vfs_lookup_path(thread->vfs_thread,
-                            &req->cred,
-                            root_fh,
-                            root_fh_len,
-                            full_path,
-                            strlen(full_path),
-                            CHIMERA_VFS_ATTR_FH,
-                            CHIMERA_VFS_LOOKUP_FOLLOW,
-                            chimera_nfs_mount_lookup_complete,
-                            req);
+    chimera_vfs_lookup(thread->vfs_thread,
+                       &req->cred,
+                       root_fh,
+                       root_fh_len,
+                       full_path,
+                       strlen(full_path),
+                       CHIMERA_VFS_ATTR_FH,
+                       CHIMERA_VFS_LOOKUP_FOLLOW,
+                       chimera_nfs_mount_lookup_complete,
+                       req);
 
     free(full_path);
 

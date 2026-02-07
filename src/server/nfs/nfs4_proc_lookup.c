@@ -45,14 +45,14 @@ chimera_nfs4_lookup_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        chimera_vfs_lookup(req->thread->vfs_thread, &req->cred,
-                           handle,
-                           args->objname.data,
-                           args->objname.len,
-                           CHIMERA_VFS_ATTR_FH,
-                           0,
-                           chimera_nfs4_lookup_complete,
-                           req);
+        chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                              handle,
+                              args->objname.data,
+                              args->objname.len,
+                              CHIMERA_VFS_ATTR_FH,
+                              0,
+                              chimera_nfs4_lookup_complete,
+                              req);
     } else {
         res->status = status;
         chimera_nfs4_compound_complete(req, status);
@@ -83,10 +83,10 @@ chimera_nfs4_lookup(
         return;
     }
 
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     req->fh,
-                     req->fhlen,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                     chimera_nfs4_lookup_open_callback,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs4_lookup_open_callback,
+                        req);
 } /* chimera_nfs4_lookup */

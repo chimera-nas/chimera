@@ -133,10 +133,10 @@ chimera_nfs3_write(
      */
     evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL, NULL);
 
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     args->file.data.data,
-                     args->file.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED,
-                     chimera_nfs3_write_open_callback,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        args->file.data.data,
+                        args->file.data.len,
+                        CHIMERA_VFS_OPEN_INFERRED,
+                        chimera_nfs3_write_open_callback,
+                        req);
 } /* chimera_nfs3_write */

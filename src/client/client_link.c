@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -15,21 +15,17 @@ chimera_link(
     void                         *private_data)
 {
     struct chimera_client_request *request;
-    const char                    *source_slash;
     const char                    *dest_slash;
 
-    source_slash = rindex(source_path, '/');
-    dest_slash   = rindex(dest_path, '/');
+    dest_slash = rindex(dest_path, '/');
 
     request = chimera_client_request_alloc(thread);
 
-    request->opcode                 = CHIMERA_CLIENT_OP_LINK;
-    request->link.callback          = callback;
-    request->link.private_data      = private_data;
-    request->link.source_path_len   = source_path_len;
-    request->link.source_parent_len = source_slash ? source_slash - source_path : source_path_len;
-    request->link.dest_path_len     = dest_path_len;
-    request->link.dest_parent_len   = dest_slash ? dest_slash - dest_path : dest_path_len;
+    request->opcode               = CHIMERA_CLIENT_OP_LINK;
+    request->link.callback        = callback;
+    request->link.private_data    = private_data;
+    request->link.source_path_len = source_path_len;
+    request->link.dest_path_len   = dest_path_len;
 
     while (dest_slash && *dest_slash == '/') {
         dest_slash++;
