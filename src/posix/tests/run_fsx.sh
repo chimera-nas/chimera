@@ -169,8 +169,7 @@ if [ -n "$EXTRA_ARGS" ]; then
 fi
 
 if [ "$IS_NFS" = "1" ]; then
-    # NFS backend: use --backend option and network namespace wrapper
-    NETNS_WRAPPER="${SCRIPT_DIR}/../../../scripts/netns_test_wrapper.sh"
+    # NFS backend: use --backend option
     FSX_ARGS="--backend=$BACKEND $FSX_ARGS"
 
     if [ "$QUIET" != "1" ]; then
@@ -178,12 +177,11 @@ if [ "$IS_NFS" = "1" ]; then
         echo "  Backend: $BACKEND"
         echo "  Operations: $NUM_OPS"
         echo "  Max file length: $MAX_FILE_LEN"
-        echo "  Command: $NETNS_WRAPPER $FSX_BINARY $FSX_ARGS $TEST_FILE"
+        echo "  Command: $FSX_BINARY $FSX_ARGS $TEST_FILE"
         echo ""
     fi
 
-    # Run fsx in network namespace
-    exec "$NETNS_WRAPPER" "$FSX_BINARY" $FSX_ARGS "$TEST_FILE"
+    exec "$FSX_BINARY" $FSX_ARGS "$TEST_FILE"
 else
     # Direct backend: use --chimera-config with generated config
     generate_config
