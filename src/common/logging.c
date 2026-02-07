@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -165,8 +165,10 @@ chimera_log_thread(void *arg)
 static void
 chimera_log_thread_exit(void)
 {
-    ChimeraLogRun = 0;
-    pthread_join(ChimeraLogThread, NULL);
+    if (ChimeraLogRun) {
+        ChimeraLogRun = 0;
+        pthread_join(ChimeraLogThread, NULL);
+    }
 } /* chimera_log_thread_exit */
 
 SYMBOL_EXPORT void
