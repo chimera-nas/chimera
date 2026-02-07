@@ -45,6 +45,7 @@ add_library(chimera_vfs_nfs SHARED
     nfs4_rename_at.c
     nfs4_setattr.c
     nfs4_symlink_at.c
+    nfs4_umount.c
     nfs4_write.c
 )
 
