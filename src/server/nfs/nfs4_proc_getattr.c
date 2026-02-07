@@ -92,10 +92,10 @@ chimera_nfs4_getattr(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     req->fh,
-                     req->fhlen,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                     chimera_nfs4_getattr_open_callback,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                        chimera_nfs4_getattr_open_callback,
+                        req);
 } /* chimera_nfs4_getattr */

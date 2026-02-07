@@ -62,7 +62,7 @@ chimera_nfs4_rename_open_callback(
 
     req->handle = handle;
 
-    chimera_vfs_rename(
+    chimera_vfs_rename_at(
         thread->vfs_thread,
         &req->cred,
         req->saved_fh,
@@ -122,11 +122,11 @@ chimera_nfs4_rename(
         return;
     }
 
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     req->fh,
-                     req->fhlen,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                     chimera_nfs4_rename_open_callback,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs4_rename_open_callback,
+                        req);
 
 } /* chimera_nfs4_create */

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -98,7 +98,7 @@ chimera_setattr_lookup_complete(
         open_flags = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
     }
 
-    chimera_vfs_open(
+    chimera_vfs_open_fh(
         request->thread->vfs_thread,
         &request->thread->client->cred,
         request->fh,
@@ -113,7 +113,7 @@ chimera_dispatch_setattr(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_lookup_path(
+    chimera_vfs_lookup(
         thread->vfs_thread,
         &thread->client->cred,
         thread->client->root_fh,

@@ -100,11 +100,11 @@ chimera_nfs3_readlink(
 
     req->args_readlink = args;
 
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     args->symlink.data.data,
-                     args->symlink.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                     chimera_nfs3_readlink_open_callback,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        args->symlink.data.data,
+                        args->symlink.data.len,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                        chimera_nfs3_readlink_open_callback,
+                        req);
 
 } /* chimera_nfs3_readlink */
