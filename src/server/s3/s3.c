@@ -452,16 +452,16 @@ s3_server_dispatch(
         return;
     }
 
-    chimera_vfs_lookup_path(thread->vfs,
-                            &thread->shared->cred,
-                            shared->root_fh,
-                            shared->root_fh_len,
-                            bucket->path,
-                            strlen(bucket->path),
-                            CHIMERA_VFS_ATTR_FH,
-                            CHIMERA_VFS_LOOKUP_FOLLOW,
-                            chimera_s3_dispatch_callback,
-                            s3_request);
+    chimera_vfs_lookup(thread->vfs,
+                       &thread->shared->cred,
+                       shared->root_fh,
+                       shared->root_fh_len,
+                       bucket->path,
+                       strlen(bucket->path),
+                       CHIMERA_VFS_ATTR_FH,
+                       CHIMERA_VFS_LOOKUP_FOLLOW,
+                       chimera_s3_dispatch_callback,
+                       s3_request);
 
     s3_bucket_map_release(shared->bucket_map);
 

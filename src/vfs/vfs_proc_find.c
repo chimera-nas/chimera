@@ -106,7 +106,7 @@ chimera_vfs_find_dispatch(
         parent->child_request = find_request;
     }
 
-    chimera_vfs_open(
+    chimera_vfs_open_fh(
         thread,
         cred,
         find_request->fh,

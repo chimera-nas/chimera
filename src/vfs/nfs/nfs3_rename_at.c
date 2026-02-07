@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -76,17 +76,17 @@ chimera_nfs3_rename_do_rename(
     }
 
     chimera_nfs3_map_fh(request->fh, request->fh_len, &old_fh, &old_fhlen);
-    chimera_nfs3_map_fh(request->rename.new_fh, request->rename.new_fhlen, &new_fh, &new_fhlen);
+    chimera_nfs3_map_fh(request->rename_at.new_fh, request->rename_at.new_fhlen, &new_fh, &new_fhlen);
 
     args.from.dir.data.data = old_fh;
     args.from.dir.data.len  = old_fhlen;
-    args.from.name.str      = (char *) request->rename.name;
-    args.from.name.len      = request->rename.namelen;
+    args.from.name.str      = (char *) request->rename_at.name;
+    args.from.name.len      = request->rename_at.namelen;
 
     args.to.dir.data.data = new_fh;
     args.to.dir.data.len  = new_fhlen;
-    args.to.name.str      = (char *) request->rename.new_name;
-    args.to.name.len      = request->rename.new_namelen;
+    args.to.name.str      = (char *) request->rename_at.new_name;
+    args.to.name.len      = request->rename_at.new_namelen;
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,
@@ -147,8 +147,8 @@ chimera_nfs3_rename_do_silly_link(
     }
 
     /* Map file handles - target_fh is the file being overwritten, new_fh is the dest directory */
-    chimera_nfs3_map_fh(request->rename.target_fh, request->rename.target_fh_len, &target_fh, &target_fhlen);
-    chimera_nfs3_map_fh(request->rename.new_fh, request->rename.new_fhlen, &dir_fh, &dir_fhlen);
+    chimera_nfs3_map_fh(request->rename_at.target_fh, request->rename_at.target_fh_len, &target_fh, &target_fhlen);
+    chimera_nfs3_map_fh(request->rename_at.new_fh, request->rename_at.new_fhlen, &dir_fh, &dir_fhlen);
 
     /* Link the target file to the silly name in the same directory */
     args.file.data.data     = target_fh;
@@ -169,7 +169,7 @@ chimera_nfs3_rename_do_silly_link(
 } /* chimera_nfs3_rename_do_silly_link */
 
 void
-chimera_nfs3_rename(
+chimera_nfs3_rename_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -203,7 +203,7 @@ chimera_nfs3_rename(
      * - The caller is an NFS server serving external clients
      * - The target file doesn't exist
      */
-    if (!request->rename.target_fh || request->rename.target_fh_len == 0) {
+    if (!request->rename_at.target_fh || request->rename_at.target_fh_len == 0) {
         chimera_nfs3_rename_do_rename(request, ctx);
         return;
     }
@@ -212,9 +212,9 @@ chimera_nfs3_rename(
      * Target FH provided - check if file is open and needs silly rename.
      */
     cache   = request->thread->vfs->vfs_open_file_cache;
-    fh_hash = chimera_vfs_hash(request->rename.target_fh, request->rename.target_fh_len);
-    handle  = chimera_vfs_open_cache_lookup_ref(cache, request->rename.target_fh,
-                                                request->rename.target_fh_len, fh_hash);
+    fh_hash = chimera_vfs_hash(request->rename_at.target_fh, request->rename_at.target_fh_len);
+    handle  = chimera_vfs_open_cache_lookup_ref(cache, request->rename_at.target_fh,
+                                                request->rename_at.target_fh_len, fh_hash);
 
     if (!handle) {
         /* File is not open, proceed with normal rename */
@@ -233,7 +233,8 @@ chimera_nfs3_rename(
     }
 
     /* Mark the state as silly renamed so close will remove the silly file */
-    rc = chimera_nfs3_open_state_mark_silly(state, request->rename.new_fh, request->rename.new_fhlen, request->cred);
+    rc = chimera_nfs3_open_state_mark_silly(state, request->rename_at.new_fh, request->rename_at.new_fhlen, request->
+                                            cred);
 
     /* Release the handle ref - we're done with it */
     chimera_vfs_open_cache_release(request->thread, cache, handle, 0);
@@ -246,9 +247,9 @@ chimera_nfs3_rename(
     }
 
     /* Generate silly name from target FH and do hard link + rename */
-    ctx->silly_name_len = chimera_nfs3_silly_name_from_fh(request->rename.target_fh,
-                                                          request->rename.target_fh_len,
+    ctx->silly_name_len = chimera_nfs3_silly_name_from_fh(request->rename_at.target_fh,
+                                                          request->rename_at.target_fh_len,
                                                           ctx->silly_name, sizeof(ctx->silly_name));
 
     chimera_nfs3_rename_do_silly_link(request, ctx);
-} /* chimera_nfs3_rename */
+} /* chimera_nfs3_rename_at */

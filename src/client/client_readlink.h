@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -87,7 +87,7 @@ chimera_readlink_lookup_complete(
     memcpy(request->fh, attr->va_fh, attr->va_fh_len);
     request->fh_len = attr->va_fh_len;
 
-    chimera_vfs_open(
+    chimera_vfs_open_fh(
         request->thread->vfs_thread,
         &request->thread->client->cred,
         request->fh,
@@ -104,7 +104,7 @@ chimera_dispatch_readlink(
     struct chimera_client_request *request)
 {
     /* Do not follow the final symlink - we want to read its target */
-    chimera_vfs_lookup_path(
+    chimera_vfs_lookup(
         thread->vfs_thread,
         &thread->client->cred,
         thread->client->root_fh,

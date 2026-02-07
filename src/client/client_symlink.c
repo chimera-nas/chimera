@@ -30,7 +30,6 @@ chimera_symlink(
     request->symlink.callback     = callback;
     request->symlink.private_data = private_data;
     request->symlink.path_len     = path_len;
-    request->symlink.parent_len   = slash ? slash - path : path_len;
     request->symlink.target_len   = target_len;
 
     while (slash && *slash == '/') {
