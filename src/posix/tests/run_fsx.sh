@@ -25,6 +25,7 @@ usage() {
     echo "Direct backends:    memfs, demofs, cairn, linux, io_uring"
     echo "NFS3 backends:      nfs3_memfs, nfs3_demofs, nfs3_cairn, nfs3_linux, nfs3_io_uring"
     echo "NFS3 RDMA backends: nfs3rdma_memfs, nfs3rdma_demofs, nfs3rdma_cairn, nfs3rdma_linux, nfs3rdma_io_uring"
+    echo "NFS4 backends:      nfs4_memfs, nfs4_demofs, nfs4_cairn, nfs4_linux, nfs4_io_uring"
     echo ""
     echo "Options:"
     echo "  -b <backend>   VFS backend to use (required)"
@@ -60,6 +61,7 @@ case "$BACKEND" in
     memfs|demofs|cairn|linux|io_uring) ;;
     nfs3_memfs|nfs3_demofs|nfs3_cairn|nfs3_linux|nfs3_io_uring) IS_NFS=1 ;;
     nfs3rdma_memfs|nfs3rdma_demofs|nfs3rdma_cairn|nfs3rdma_linux|nfs3rdma_io_uring) IS_NFS=1 ;;
+    nfs4_memfs|nfs4_demofs|nfs4_cairn|nfs4_linux|nfs4_io_uring) IS_NFS=1 ;;
     *) echo "Error: Unknown backend '$BACKEND'"; usage ;;
 esac
 
