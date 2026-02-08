@@ -829,6 +829,11 @@ cairn_map_attrs(
         attr->va_rdev       = inode->rdev;
     }
 
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
+        attr->va_fsid      = shared->fsid;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
         attr->va_fs_space_avail = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
@@ -838,7 +843,6 @@ cairn_map_attrs(
         attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_free  = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
-        attr->va_fsid           = shared->fsid;
     }
 } /* cairn_map_attrs */
 
@@ -2025,6 +2029,7 @@ cairn_read(
     inode = ih.inode;
 
     if (offset >= inode->size) {
+        cairn_map_attrs(shared, &request->read.r_attr, inode);
         cairn_inode_handle_release(&ih);
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;

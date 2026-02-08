@@ -939,6 +939,11 @@ demofs_map_attrs(
         attr->va_rdev          = inode->rdev;
     }
 
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
+        attr->va_fsid      = shared->fsid;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
         attr->va_fs_space_total = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
@@ -2110,6 +2115,7 @@ demofs_read(
     }
 
     if (unlikely(length == 0)) {
+        demofs_map_attrs(thread, &request->read.r_attr, inode);
         pthread_mutex_unlock(&inode->lock);
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;
