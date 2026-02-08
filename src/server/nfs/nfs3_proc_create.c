@@ -1,8 +1,9 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <fcntl.h>
+#include <string.h>
 
 #include "nfs3_procs.h"
 #include "nfs_common/nfs3_status.h"
@@ -10,17 +11,16 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+
 static void
-chimera_nfs3_create_open_at_complete(
+chimera_nfs3_create_reply(
+    struct nfs_request             *req,
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
-    struct chimera_vfs_attrs       *set_attr,
     struct chimera_vfs_attrs       *attr,
     struct chimera_vfs_attrs       *dir_pre_attr,
-    struct chimera_vfs_attrs       *dir_post_attr,
-    void                           *private_data)
+    struct chimera_vfs_attrs       *dir_post_attr)
 {
-    struct nfs_request               *req           = private_data;
     struct chimera_server_nfs_thread *thread        = req->thread;
     struct chimera_server_nfs_shared *shared        = thread->shared;
     struct chimera_vfs_open_handle   *parent_handle = req->handle;
@@ -31,7 +31,6 @@ chimera_nfs3_create_open_at_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-
         if (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
             res.resok.obj.handle_follows = 1;
             rc                           = xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
@@ -39,14 +38,11 @@ chimera_nfs3_create_open_at_complete(
                                                                 handle->fh_len,
                                                                 req->encoding->dbuf);
             chimera_nfs_abort_if(rc, "Failed to copy opaque");
-
         } else {
             res.resok.obj.handle_follows = 0;
         }
-
         chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
         chimera_nfs3_set_wcc_data(&res.resok.dir_wcc, dir_pre_attr, dir_post_attr);
-
         chimera_vfs_release(thread->vfs_thread, handle);
     } else {
         chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, dir_pre_attr, dir_post_attr);
@@ -57,6 +53,75 @@ chimera_nfs3_create_open_at_complete(
     rc = shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
     nfs_request_free(thread, req);
+} /* chimera_nfs3_create_reply */
+
+static void
+chimera_nfs3_create_exclusive_verify(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
+    void                           *private_data)
+{
+    struct nfs_request *req  = private_data;
+    struct CREATE3args *args = req->args_create;
+    uint32_t            verf_atime, verf_mtime;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs3_create_reply(req, CHIMERA_VFS_EEXIST,
+                                  NULL, NULL, NULL, NULL);
+        return;
+    }
+
+    memcpy(&verf_atime, args->how.verf, sizeof(verf_atime));
+    memcpy(&verf_mtime, args->how.verf + sizeof(verf_atime), sizeof(verf_mtime));
+
+    if (attr->va_atime.tv_sec == verf_atime &&
+        attr->va_mtime.tv_sec == verf_mtime) {
+        chimera_nfs3_create_reply(req, CHIMERA_VFS_OK,
+                                  handle, attr, dir_pre_attr, dir_post_attr);
+    } else {
+        chimera_vfs_release(req->thread->vfs_thread, handle);
+        chimera_nfs3_create_reply(req, CHIMERA_VFS_EEXIST,
+                                  NULL, NULL, NULL, NULL);
+    }
+} /* chimera_nfs3_create_exclusive_verify */
+
+static void
+chimera_nfs3_create_open_at_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
+    void                           *private_data)
+{
+    struct nfs_request               *req    = private_data;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct CREATE3args               *args   = req->args_create;
+
+    if (error_code == CHIMERA_VFS_EEXIST &&
+        args->how.mode == EXCLUSIVE) {
+        set_attr->va_set_mask = 0;
+        chimera_vfs_open_at(thread->vfs_thread, &req->cred,
+                            req->handle,
+                            args->where.name.str,
+                            args->where.name.len,
+                            CHIMERA_VFS_OPEN_INFERRED,
+                            set_attr,
+                            CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
+                            0,
+                            0,
+                            chimera_nfs3_create_exclusive_verify,
+                            req);
+        return;
+    }
+
+    chimera_nfs3_create_reply(req, error_code, handle, attr,
+                              dir_pre_attr, dir_post_attr);
 } /* chimera_nfs3_create_open_at_complete */
 
 static void
@@ -88,6 +153,7 @@ chimera_nfs3_create_open_at_parent_complete(
     chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
     attr->va_req_mask = 0;
+    attr->va_set_mask = 0;
     flags             = CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_INFERRED;
 
     switch (args->how.mode) {
@@ -99,6 +165,12 @@ chimera_nfs3_create_open_at_parent_complete(
             flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
             break;
         case EXCLUSIVE:
+            flags            |= CHIMERA_VFS_OPEN_EXCLUSIVE;
+            attr->va_set_mask = CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
+            memcpy(&attr->va_atime.tv_sec, args->how.verf, 4);
+            attr->va_atime.tv_nsec = 0;
+            memcpy(&attr->va_mtime.tv_sec, args->how.verf + 4, 4);
+            attr->va_mtime.tv_nsec = 0;
             break;
     } /* switch */
 
@@ -113,7 +185,7 @@ chimera_nfs3_create_open_at_parent_complete(
                         CHIMERA_NFS3_ATTR_MASK,
                         chimera_nfs3_create_open_at_complete,
                         req);
-} /* chimera_nfs3_create_open_complete */
+} /* chimera_nfs3_create_open_at_parent_complete */
 
 void
 chimera_nfs3_create(
