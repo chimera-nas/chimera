@@ -23,12 +23,10 @@ chimera_nfs3_readdir_callback(
     struct READDIR3args            *args = req->args_readdir;
     struct entry3                  *entry;
     struct nfs_nfs3_readdir_cursor *cursor;
+    int                             dbuf_before = req->encoding->dbuf->used, dbuf_cur;
+    int                             rc;
 
     cursor = &req->readdir3_cursor;
-
-    if (cursor->count >= args->count) {
-        return -1;
-    }
 
     entry = xdr_dbuf_alloc_space(sizeof(*entry), req->encoding->dbuf);
     chimera_nfs_abort_if(entry == NULL, "Failed to allocate space");
@@ -37,8 +35,16 @@ chimera_nfs3_readdir_callback(
     entry->cookie    = cookie;
     entry->nextentry = NULL;
 
-    int rc = xdr_dbuf_alloc_string(&entry->name, name, namelen, req->encoding->dbuf);
+    rc = xdr_dbuf_alloc_string(&entry->name, name, namelen, req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to allocate string");
+
+    dbuf_cur = req->encoding->dbuf->used - dbuf_before;
+
+    if (cursor->count + dbuf_cur > args->count) {
+        return -1;
+    }
+
+    cursor->count += dbuf_cur;
 
     if (cursor->entries) {
         cursor->last->nextentry = entry;
@@ -47,8 +53,6 @@ chimera_nfs3_readdir_callback(
         cursor->entries = entry;
         cursor->last    = entry;
     }
-
-    cursor->count++;
 
     return 0;
 } /* chimera_nfs3_readdir_callback */
@@ -149,7 +153,7 @@ chimera_nfs3_readdir(
     res    = &req->res_readdir;
     cursor = &req->readdir3_cursor;
 
-    cursor->count   = 0;
+    cursor->count   = 256; /* reserve space for non-entry serialization */
     cursor->entries = NULL;
     cursor->last    = NULL;
 
