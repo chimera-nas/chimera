@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -48,16 +48,15 @@ chimera_nfs4_read(
 
     state = nfs4_session_get_state(session, &args->stateid);
 
-    iov = xdr_dbuf_alloc_space(sizeof(*iov) * 64, req->encoding->dbuf);
+    iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
-
 
     chimera_vfs_read(thread->vfs_thread, &req->cred,
                      state->nfs4_state_handle,
                      args->offset,
                      args->count,
                      iov,
-                     64,
+                     256,
                      0,
                      chimera_nfs4_read_complete,
                      req);

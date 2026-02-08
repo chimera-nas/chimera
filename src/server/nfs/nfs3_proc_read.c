@@ -67,7 +67,7 @@ chimera_nfs3_read_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        iov = xdr_dbuf_alloc_space(sizeof(*iov) * 64, req->encoding->dbuf);
+        iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
         chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
         chimera_vfs_read(thread->vfs_thread, &req->cred,
@@ -75,7 +75,7 @@ chimera_nfs3_read_open_callback(
                          args->offset,
                          args->count,
                          iov,
-                         64,
+                         256,
                          CHIMERA_NFS3_ATTR_MASK,
                          chimera_nfs3_read_complete,
                          req);
