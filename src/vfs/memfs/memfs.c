@@ -758,6 +758,11 @@ memfs_map_attrs(
         attr->va_rdev       = inode->rdev;
     }
 
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
+        attr->va_fsid      = shared->fsid;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
         attr->va_fs_space_avail = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
@@ -767,7 +772,6 @@ memfs_map_attrs(
         attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_free  = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
-        attr->va_fsid           = shared->fsid;
     }
 
 } /* memfs_map_attrs */
@@ -1072,13 +1076,13 @@ memfs_mount(
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
-        attr->va_fs_space_avail = 0;
-        attr->va_fs_space_free  = 0;
-        attr->va_fs_space_total = 0;
+        attr->va_fs_space_avail = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
+        attr->va_fs_space_free  = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
+        attr->va_fs_space_total = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
         attr->va_fs_space_used  = 0;
-        attr->va_fs_files_total = 0;
-        attr->va_fs_files_free  = 0;
-        attr->va_fs_files_avail = 0;
+        attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
+        attr->va_fs_files_free  = CHIMERA_VFS_SYNTHETIC_FS_INODES;
+        attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fsid           = shared->fsid;
     }
 
@@ -1887,7 +1891,7 @@ memfs_read(
     struct evpl_iovec_cursor cursor;
     uint64_t                 offset, length;
     uint32_t                 eof = 0;
-    uint64_t                 first_block, last_block, num_block, max_iov, bi;
+    uint64_t                 first_block, last_block, max_iov, bi;
     uint32_t                 block_offset, left, block_len;
     struct evpl_iovec       *iov;
     int                      niov = 0;
@@ -1922,6 +1926,7 @@ memfs_read(
     }
 
     if (unlikely(inode->size <= offset)) {
+        memfs_map_attrs(shared, &request->read.r_attr, inode, request->fh);
         pthread_mutex_unlock(&inode->lock);
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;
@@ -1941,8 +1946,7 @@ memfs_read(
     last_block   = (offset + length - 1) >> CHIMERA_MEMFS_BLOCK_SHIFT;
     left         = length;
 
-    num_block = last_block - first_block + 1;
-    max_iov   = num_block * CHIMERA_MEMFS_BLOCK_MAX_IOV;
+    max_iov = request->read.niov;
 
     iov = request->read.iov;
 
@@ -1961,6 +1965,9 @@ memfs_read(
         }
 
         if (!block) {
+            if (niov >= max_iov) {
+                break;
+            }
             evpl_iovec_clone_segment(&iov[niov], &thread->zero, 0, block_len);
             niov++;
         } else {
@@ -1987,8 +1994,8 @@ memfs_read(
 
     request->status        = CHIMERA_VFS_OK;
     request->read.r_niov   = niov;
-    request->read.r_length = length;
-    request->read.r_eof    = eof;
+    request->read.r_length = length - left;
+    request->read.r_eof    = left ? 0 : eof;
 
     request->complete(request);
 } /* memfs_read */
