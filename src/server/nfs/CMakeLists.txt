@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
@@ -19,7 +19,7 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs_mount.c nfs_portmap.c nf
             nfs4_proc_readdir.c nfs4_proc_close.c nfs4_proc_create.c  nfs4_proc_open.c
             nfs4_proc_setclientid.c nfs4_proc_setclientid_confirm.c nfs4_proc_remove.c
             nfs4_proc_read.c nfs4_proc_write.c nfs4_proc_commit.c nfs4_proc_readlink.c
-            nfs4_proc_setattr.c nfs4_proc_link.c nfs4_proc_rename.c nfs4_proc_savefh.c
+            nfs4_proc_setattr.c nfs4_proc_link.c nfs4_proc_rename.c nfs4_proc_savefh.c nfs4_proc_restorefh.c
             nfs4_proc_exchange_id.c nfs4_proc_create_session.c nfs4_proc_destroy_session.c
             nfs4_proc_destroy_clientid.c nfs4_proc_sequence.c nfs4_proc_reclaim_complete.c
             nfs4_proc_secinfo_no_name.c)
