@@ -28,21 +28,33 @@ chimera_nfs4_readdir_callback(
     cursor = &req->readdir4_cursor;
 
     entry = xdr_dbuf_alloc_space(sizeof(*entry), req->encoding->dbuf);
-    chimera_nfs_abort_if(entry == NULL, "Failed to allocate space");
+    if (!entry) {
+        req->encoding->dbuf->used = dbuf_before;
+        return -1;
+    }
 
     rc = xdr_dbuf_opaque_copy(&entry->name, name, namelen, req->encoding->dbuf);
-    chimera_nfs_abort_if(rc, "Failed to copy opaque");
+    if (rc) {
+        req->encoding->dbuf->used = dbuf_before;
+        return -1;
+    }
 
     entry->cookie    = cookie;
     entry->nextentry = NULL;
 
     rc = xdr_dbuf_alloc_array(&entry->attrs, attrmask, 3, req->encoding->dbuf);
-    chimera_nfs_abort_if(rc, "Failed to allocate array");
+    if (rc) {
+        req->encoding->dbuf->used = dbuf_before;
+        return -1;
+    }
 
     rc = xdr_dbuf_alloc_opaque(&entry->attrs.attr_vals,
                                256,
                                req->encoding->dbuf);
-    chimera_nfs_abort_if(rc, "Failed to allocate opaque");
+    if (rc) {
+        req->encoding->dbuf->used = dbuf_before;
+        return -1;
+    }
 
     chimera_nfs4_marshall_attrs(attrs,
                                 args->num_attr_request,
@@ -55,7 +67,9 @@ chimera_nfs4_readdir_callback(
 
     dbuf_cur = req->encoding->dbuf->used - dbuf_before;
 
-    if (cursor->count + dbuf_cur > args->maxcount) {
+    if (cursor->count + dbuf_cur > args->maxcount ||
+        req->encoding->dbuf->used + 8192 > (uint32_t) req->encoding->dbuf->size) {
+        req->encoding->dbuf->used = dbuf_before;
         return -1;
     }
 
