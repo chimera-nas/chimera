@@ -2164,6 +2164,228 @@ memfs_write(
     request->complete(request);
 } /* memfs_write */
 
+
+static void
+memfs_allocate(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct evpl        *evpl = thread->evpl;
+    struct memfs_inode *inode;
+    struct timespec     now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    if (request->allocate.handle->vfs_private) {
+        inode = (struct memfs_inode *) request->allocate.handle->vfs_private;
+        pthread_mutex_lock(&inode->lock);
+    } else {
+        inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
+
+        if (unlikely(!inode)) {
+            request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+    }
+
+    memfs_map_attrs(shared, &request->allocate.r_pre_attr, inode, request->fh);
+
+    if (request->allocate.flags & CHIMERA_VFS_ALLOCATE_DEALLOCATE) {
+        /* DEALLOCATE: punch hole in [offset, offset+length) */
+        uint64_t hole_start = request->allocate.offset;
+        uint64_t hole_end   = hole_start + request->allocate.length;
+        uint64_t first_block, last_block, bi;
+
+        if (hole_end > inode->size) {
+            hole_end = inode->size;
+        }
+
+        if (hole_start < hole_end && inode->file.blocks) {
+            first_block = hole_start >> CHIMERA_MEMFS_BLOCK_SHIFT;
+            last_block  = (hole_end - 1) >> CHIMERA_MEMFS_BLOCK_SHIFT;
+
+            for (bi = first_block; bi <= last_block && bi < inode->file.num_blocks; bi++) {
+                if (!inode->file.blocks[bi]) {
+                    continue;
+                }
+
+                uint64_t block_start = bi << CHIMERA_MEMFS_BLOCK_SHIFT;
+                uint64_t block_end   = block_start + CHIMERA_MEMFS_BLOCK_SIZE;
+
+                if (hole_start <= block_start && hole_end >= block_end) {
+                    /* Entire block is within hole - free it */
+                    memfs_block_free(thread, inode->file.blocks[bi]);
+                    inode->file.blocks[bi] = NULL;
+                } else {
+                    /* Partial block - COW and zero the hole portion */
+                    struct memfs_block      *old_block = inode->file.blocks[bi];
+                    struct memfs_block      *new_block;
+                    struct evpl_iovec_cursor old_cursor;
+                    uint32_t                 zero_start, zero_end;
+
+                    zero_start = (hole_start > block_start) ?
+                        (hole_start - block_start) : 0;
+                    zero_end = (hole_end < block_end) ?
+                        (hole_end - block_start) : CHIMERA_MEMFS_BLOCK_SIZE;
+
+                    new_block = memfs_block_alloc(thread);
+
+                    if (!new_block) {
+                        pthread_mutex_unlock(&inode->lock);
+                        request->status = CHIMERA_VFS_ENOSPC;
+                        request->complete(request);
+                        return;
+                    }
+
+                    new_block->niov = evpl_iovec_alloc(evpl, 4096, 4096,
+                                                       CHIMERA_MEMFS_BLOCK_MAX_IOV,
+                                                       EVPL_IOVEC_FLAG_SHARED,
+                                                       new_block->iov);
+
+                    /* Copy entire old block, then zero the hole portion */
+                    evpl_iovec_cursor_init(&old_cursor, old_block->iov,
+                                           old_block->niov);
+                    evpl_iovec_cursor_copy(&old_cursor,
+                                           new_block->iov[0].data,
+                                           CHIMERA_MEMFS_BLOCK_SIZE);
+
+                    memset(new_block->iov[0].data + zero_start, 0,
+                           zero_end - zero_start);
+
+                    memfs_block_free(thread, old_block);
+                    inode->file.blocks[bi] = new_block;
+                }
+            }
+
+            inode->space_used = 0;
+
+            for (bi = 0; bi < inode->file.num_blocks; bi++) {
+                if (inode->file.blocks[bi]) {
+                    inode->space_used += CHIMERA_MEMFS_BLOCK_SIZE;
+                }
+            }
+        }
+    } else {
+        /* ALLOCATE: extend file size if needed */
+        uint64_t new_end = request->allocate.offset + request->allocate.length;
+
+        if (new_end > inode->size) {
+            inode->size = new_end;
+        }
+    }
+
+    inode->mtime = now;
+    inode->ctime = now;
+
+    memfs_map_attrs(shared, &request->allocate.r_post_attr, inode, request->fh);
+
+    pthread_mutex_unlock(&inode->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_allocate */
+
+static void
+memfs_seek(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct memfs_inode *inode;
+    uint64_t            offset = request->seek.offset;
+    uint64_t            bi, block_start;
+
+    if (request->seek.handle->vfs_private) {
+        inode = (struct memfs_inode *) request->seek.handle->vfs_private;
+        pthread_mutex_lock(&inode->lock);
+    } else {
+        inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
+
+        if (unlikely(!inode)) {
+            request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+    }
+
+    if (offset >= inode->size) {
+        pthread_mutex_unlock(&inode->lock);
+        request->seek.r_eof    = 1;
+        request->seek.r_offset = 0;
+        request->status        = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    if (request->seek.what == 0) {
+        /* SEEK_DATA: find first non-NULL block from offset forward */
+        bi = offset >> CHIMERA_MEMFS_BLOCK_SHIFT;
+
+        while (bi < inode->file.num_blocks) {
+            if (inode->file.blocks && inode->file.blocks[bi]) {
+                block_start = bi << CHIMERA_MEMFS_BLOCK_SHIFT;
+
+                request->seek.r_offset = (block_start > offset) ?
+                    block_start : offset;
+                request->seek.r_eof = 0;
+                pthread_mutex_unlock(&inode->lock);
+                request->status = CHIMERA_VFS_OK;
+                request->complete(request);
+                return;
+            }
+            bi++;
+        }
+
+        /* No data found */
+        pthread_mutex_unlock(&inode->lock);
+        request->seek.r_eof    = 1;
+        request->seek.r_offset = 0;
+        request->status        = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    } else {
+        /* SEEK_HOLE: find first NULL block or past num_blocks from offset */
+        bi = offset >> CHIMERA_MEMFS_BLOCK_SHIFT;
+
+        while (bi < inode->file.num_blocks) {
+            if (!inode->file.blocks || !inode->file.blocks[bi]) {
+                block_start = bi << CHIMERA_MEMFS_BLOCK_SHIFT;
+
+                request->seek.r_offset = (block_start > offset) ?
+                    block_start : offset;
+                request->seek.r_eof = 0;
+                pthread_mutex_unlock(&inode->lock);
+                request->status = CHIMERA_VFS_OK;
+                request->complete(request);
+                return;
+            }
+            bi++;
+        }
+
+        /* Virtual hole at EOF - all blocks are data */
+        request->seek.r_offset = inode->file.num_blocks <<
+            CHIMERA_MEMFS_BLOCK_SHIFT;
+
+        if (request->seek.r_offset < offset) {
+            request->seek.r_offset = offset;
+        }
+
+        if (request->seek.r_offset >= inode->size) {
+            request->seek.r_offset = inode->size;
+        }
+
+        request->seek.r_eof = 0;
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+} /* memfs_seek */
+
 static void
 memfs_symlink(
     struct memfs_thread        *thread,
@@ -2867,12 +3089,10 @@ memfs_dispatch(
             request->complete(request);
             break;
         case CHIMERA_VFS_OP_ALLOCATE:
-            request->status = CHIMERA_VFS_OK;
-            request->complete(request);
+            memfs_allocate(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_SEEK:
-            request->status = CHIMERA_VFS_ENOTSUP;
-            request->complete(request);
+            memfs_seek(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_SYMLINK:
             memfs_symlink(thread, shared, request, private_data);
