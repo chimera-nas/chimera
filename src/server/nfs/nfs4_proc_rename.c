@@ -19,8 +19,20 @@ chimera_nfs4_rename_complete(
 {
     struct nfs_request *req = private_data;
     struct RENAME4res  *res = &req->res_compound.resarray[req->index].oprename;
+    nfsstat4            status;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        status      = chimera_nfs4_errno_to_nfsstat4(error_code);
+        res->status = status;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, status);
+        return;
+    }
 
     res->status = NFS4_OK;
+
+    chimera_nfs4_set_changeinfo(&res->resok4.source_cinfo, fromdir_pre_attr, fromdir_post_attr);
+    chimera_nfs4_set_changeinfo(&res->resok4.target_cinfo, todir_pre_attr, todir_post_attr);
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
@@ -63,8 +75,8 @@ chimera_nfs4_rename_open_callback(
         args->newname.len,
         NULL,
         0,
-        0,
-        0,
+        CHIMERA_VFS_ATTR_MTIME,
+        CHIMERA_VFS_ATTR_MTIME,
         chimera_nfs4_rename_complete,
         req);
 

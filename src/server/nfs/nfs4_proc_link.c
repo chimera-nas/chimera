@@ -18,8 +18,19 @@ chimera_nfs4_link_complete(
 {
     struct nfs_request *req = private_data;
     struct LINK4res    *res = &req->res_compound.resarray[req->index].oplink;
+    nfsstat4            status;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        status      = chimera_nfs4_errno_to_nfsstat4(error_code);
+        res->status = status;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, status);
+        return;
+    }
 
     res->status = NFS4_OK;
+
+    chimera_nfs4_set_changeinfo(&res->resok4.cinfo, r_dir_pre_attr, r_dir_post_attr);
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
@@ -60,8 +71,8 @@ chimera_nfs4_link_open_callback(
         args->newname.len,
         0,
         0,
-        0,
-        0,
+        CHIMERA_VFS_ATTR_MTIME,
+        CHIMERA_VFS_ATTR_MTIME,
         chimera_nfs4_link_complete,
         req);
 
