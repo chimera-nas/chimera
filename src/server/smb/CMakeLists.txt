@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
@@ -8,7 +8,7 @@ add_library(chimera_smb SHARED
     smb_proc_set_info.c smb_proc_tree_disconnect.c smb_proc_logoff.c
     smb_proc_write.c smb_proc_read.c smb_proc_query_info.c
     smb_proc_query_directory.c smb_proc_ioctl.c smb_proc_flush.c smb_proc_echo.c
-    smb_lsarpc.c smb_signing.c smb_proc_set_info_rename.c
+    smb_lsarpc.c smb_signing.c smb_proc_set_info_rename.c smb_proc_security.c
     #idl/ndr_dcerpc.c
 )
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -152,6 +152,9 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     break;
             } /* switch */
             break;
+        case SMB2_INFO_SECURITY:
+            chimera_smb_query_security(request);
+            return;
         default:
             status = SMB2_STATUS_NOT_IMPLEMENTED;
             break;
@@ -178,6 +181,11 @@ chimera_smb_query_info_reply(
     struct chimera_smb_request *request)
 {
     uint16_t namebuf[8];
+
+    if (request->query_info.info_type == SMB2_INFO_SECURITY) {
+        chimera_smb_query_security_reply(reply_cursor, request);
+        return;
+    }
 
     /* Append the query info reply header */
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_QUERY_INFO_REPLY_SIZE);
