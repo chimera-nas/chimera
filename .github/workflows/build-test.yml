@@ -136,12 +136,23 @@ jobs:
           submodules: recursive
 
       - name: Perform clang static analysis
+        id: static-analysis
         run: |
+          mkdir -p "${{ github.workspace }}/scan-report"
           docker run --rm --privileged \
             -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/scan-report:/scan-report" \
             -v /build \
             -w /build \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '\
-              scan-build --status-bugs --exclude /workspace/ext/libsmb2 -o /build/ScanReport \
+              scan-build --status-bugs --exclude /workspace/ext/libsmb2 -o /scan-report \
               sh -c "cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -B /build -S /workspace -G Ninja && ninja -C /build"'
+
+      - name: Upload static analysis report
+        if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-report-${{ matrix.arch }}-${{ matrix.build_type }}
+          path: scan-report/
+          retention-days: 30
