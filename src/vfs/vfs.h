@@ -134,45 +134,50 @@ struct chimera_vfs_attrs {
     uint8_t         va_fh[CHIMERA_VFS_FH_SIZE + 16];
 };
 
-#define CHIMERA_VFS_OP_MOUNT           1
-#define CHIMERA_VFS_OP_UMOUNT          2
-#define CHIMERA_VFS_OP_LOOKUP          3
-#define CHIMERA_VFS_OP_GETATTR         4
-#define CHIMERA_VFS_OP_READDIR         5
-#define CHIMERA_VFS_OP_READLINK        6
-#define CHIMERA_VFS_OP_OPEN            7
-#define CHIMERA_VFS_OP_OPEN_AT         8
-#define CHIMERA_VFS_OP_CLOSE           9
-#define CHIMERA_VFS_OP_READ            10
-#define CHIMERA_VFS_OP_WRITE           11
-#define CHIMERA_VFS_OP_REMOVE          12
-#define CHIMERA_VFS_OP_MKDIR           13
-#define CHIMERA_VFS_OP_COMMIT          14
-#define CHIMERA_VFS_OP_SYMLINK         15
-#define CHIMERA_VFS_OP_RENAME          16
-#define CHIMERA_VFS_OP_SETATTR         17
-#define CHIMERA_VFS_OP_LINK            18
-#define CHIMERA_VFS_OP_CREATE_UNLINKED 19
-#define CHIMERA_VFS_OP_MKNOD           20
-#define CHIMERA_VFS_OP_PUT_KEY         21
-#define CHIMERA_VFS_OP_GET_KEY         22
-#define CHIMERA_VFS_OP_DELETE_KEY      23
-#define CHIMERA_VFS_OP_SEARCH_KEYS     24
-#define CHIMERA_VFS_OP_NUM             25
+#define CHIMERA_VFS_OP_MOUNT            1
+#define CHIMERA_VFS_OP_UMOUNT           2
+#define CHIMERA_VFS_OP_LOOKUP           3
+#define CHIMERA_VFS_OP_GETATTR          4
+#define CHIMERA_VFS_OP_READDIR          5
+#define CHIMERA_VFS_OP_READLINK         6
+#define CHIMERA_VFS_OP_OPEN             7
+#define CHIMERA_VFS_OP_OPEN_AT          8
+#define CHIMERA_VFS_OP_CLOSE            9
+#define CHIMERA_VFS_OP_READ             10
+#define CHIMERA_VFS_OP_WRITE            11
+#define CHIMERA_VFS_OP_REMOVE           12
+#define CHIMERA_VFS_OP_MKDIR            13
+#define CHIMERA_VFS_OP_COMMIT           14
+#define CHIMERA_VFS_OP_SYMLINK          15
+#define CHIMERA_VFS_OP_RENAME           16
+#define CHIMERA_VFS_OP_SETATTR          17
+#define CHIMERA_VFS_OP_LINK             18
+#define CHIMERA_VFS_OP_CREATE_UNLINKED  19
+#define CHIMERA_VFS_OP_MKNOD            20
+#define CHIMERA_VFS_OP_PUT_KEY          21
+#define CHIMERA_VFS_OP_GET_KEY          22
+#define CHIMERA_VFS_OP_DELETE_KEY       23
+#define CHIMERA_VFS_OP_SEARCH_KEYS      24
+#define CHIMERA_VFS_OP_ALLOCATE         25
+#define CHIMERA_VFS_OP_SEEK             26
+#define CHIMERA_VFS_OP_NUM              27
 
-#define CHIMERA_VFS_OPEN_CREATE        (1U << 0)
-#define CHIMERA_VFS_OPEN_PATH          (1U << 1)
-#define CHIMERA_VFS_OPEN_INFERRED      (1U << 2)
-#define CHIMERA_VFS_OPEN_DIRECTORY     (1U << 3)
-#define CHIMERA_VFS_OPEN_READ_ONLY     (1U << 4)
-#define CHIMERA_VFS_OPEN_EXCLUSIVE     (1U << 5)
+#define CHIMERA_VFS_OPEN_CREATE         (1U << 0)
+#define CHIMERA_VFS_OPEN_PATH           (1U << 1)
+#define CHIMERA_VFS_OPEN_INFERRED       (1U << 2)
+#define CHIMERA_VFS_OPEN_DIRECTORY      (1U << 3)
+#define CHIMERA_VFS_OPEN_READ_ONLY      (1U << 4)
+#define CHIMERA_VFS_OPEN_EXCLUSIVE      (1U << 5)
+
+/* Allocate flags */
+#define CHIMERA_VFS_ALLOCATE_DEALLOCATE 0x01
 
 /* Readdir flags */
-#define CHIMERA_VFS_READDIR_EMIT_DOT   (1U << 0) /* Emit "." and ".." entries */
+#define CHIMERA_VFS_READDIR_EMIT_DOT    (1U << 0) /* Emit "." and ".." entries */
 
-#define CHIMERA_VFS_OPEN_ID_SYNTHETIC  0
-#define CHIMERA_VFS_OPEN_ID_PATH       1
-#define CHIMERA_VFS_OPEN_ID_FILE       2
+#define CHIMERA_VFS_OPEN_ID_SYNTHETIC   0
+#define CHIMERA_VFS_OPEN_ID_PATH        1
+#define CHIMERA_VFS_OPEN_ID_FILE        2
 
 struct chimera_vfs_metrics {
     struct prometheus_metrics           *metrics;
@@ -632,6 +637,23 @@ struct chimera_vfs_request {
             uint32_t                           end_key_len;
             chimera_vfs_search_keys_callback_t callback;
         } search_keys;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint64_t                        length;
+            uint32_t                        flags;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
+        } allocate;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        what;
+            int                             r_eof;
+            uint64_t                        r_offset;
+        } seek;
     };
 };
 

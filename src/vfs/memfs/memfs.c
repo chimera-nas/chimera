@@ -2866,6 +2866,14 @@ memfs_dispatch(
             request->status = CHIMERA_VFS_OK;
             request->complete(request);
             break;
+        case CHIMERA_VFS_OP_ALLOCATE:
+            request->status = CHIMERA_VFS_OK;
+            request->complete(request);
+            break;
+        case CHIMERA_VFS_OP_SEEK:
+            request->status = CHIMERA_VFS_ENOTSUP;
+            request->complete(request);
+            break;
         case CHIMERA_VFS_OP_SYMLINK:
             memfs_symlink(thread, shared, request, private_data);
             break;

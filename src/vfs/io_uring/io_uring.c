@@ -1203,6 +1203,70 @@ chimera_io_uring_commit(
 } /* chimera_io_uring_commit */
 
 static void
+chimera_io_uring_allocate(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int fd   = (int) request->allocate.handle->vfs_private;
+    int mode = 0;
+    int rc;
+
+    if (request->allocate.flags & CHIMERA_VFS_ALLOCATE_DEALLOCATE) {
+        mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+    }
+
+    rc = fallocate(fd, mode, request->allocate.offset, request->allocate.length);
+
+    if (rc < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING, &request->allocate.r_post_attr, fd);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+
+} /* chimera_io_uring_allocate */
+
+static void
+chimera_io_uring_seek(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int   fd = (int) request->seek.handle->vfs_private;
+    int   whence;
+    off_t result;
+
+    if (request->seek.what == 0) {
+        whence = SEEK_DATA;
+    } else {
+        whence = SEEK_HOLE;
+    }
+
+    result = lseek(fd, request->seek.offset, whence);
+
+    if (result < 0) {
+        if (errno == ENXIO) {
+            request->seek.r_eof    = 1;
+            request->seek.r_offset = 0;
+            request->status        = CHIMERA_VFS_OK;
+        } else {
+            request->status = chimera_linux_errno_to_status(errno);
+        }
+        request->complete(request);
+        return;
+    }
+
+    request->seek.r_eof    = 0;
+    request->seek.r_offset = result;
+    request->status        = CHIMERA_VFS_OK;
+    request->complete(request);
+
+} /* chimera_io_uring_seek */
+
+static void
 chimera_io_uring_symlink(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -1444,6 +1508,12 @@ chimera_io_uring_dispatch(
             break;
         case CHIMERA_VFS_OP_SETATTR:
             chimera_io_uring_setattr(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_ALLOCATE:
+            chimera_io_uring_allocate(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_SEEK:
+            chimera_io_uring_seek(request, private_data);
             break;
         default:
             chimera_io_uring_error("io_uring_dispatch: unknown operation %d",
