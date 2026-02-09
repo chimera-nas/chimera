@@ -130,6 +130,9 @@ chimera_nfs4_compound_process(
         case OP_SECINFO_NO_NAME:
             chimera_nfs4_secinfo_no_name(thread, req, argop, resop);
             break;
+        case OP_TEST_STATEID:
+            chimera_nfs4_test_stateid(thread, req, argop, resop);
+            break;
         default:
             chimera_nfs_error("Unsupported operation: %d", argop->argop);
             chimera_nfs4_compound_process(req, NFS4ERR_OP_ILLEGAL);
