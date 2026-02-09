@@ -135,7 +135,11 @@ chimera_nfs4_compound_process(
             break;
         default:
             chimera_nfs_error("Unsupported operation: %d", argop->argop);
-            chimera_nfs4_compound_process(req, NFS4ERR_OP_ILLEGAL);
+            if (argop->argop >= OP_ACCESS && argop->argop <= OP_CLONE) {
+                chimera_nfs4_compound_complete(req, NFS4ERR_NOTSUPP);
+            } else {
+                chimera_nfs4_compound_complete(req, NFS4ERR_OP_ILLEGAL);
+            }
             break;
     }     /* switch */
 
