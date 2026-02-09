@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -128,6 +128,9 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
             } /* switch */
             break;
+        case SMB2_INFO_SECURITY:
+            chimera_smb_set_security(request);
+            break;
         default:
             chimera_smb_error("SET_INFO info_type %u not implemented", request->set_info.info_type);
             chimera_smb_open_file_release(request, request->set_info.open_file);
@@ -197,6 +200,18 @@ chimera_smb_parse_set_info(
                     rc              = -1;
                     break;
             } /* switch */
+            break;
+        case SMB2_INFO_SECURITY:
+            if (request->set_info.buffer_length <= sizeof(request->set_info.sec_buf)) {
+                evpl_iovec_cursor_copy(request_cursor, request->set_info.sec_buf,
+                                       request->set_info.buffer_length);
+                request->set_info.sec_buf_len = request->set_info.buffer_length;
+            } else {
+                chimera_smb_error("parse_set_info: security descriptor too large (%u bytes)",
+                                  request->set_info.buffer_length);
+                request->status = SMB2_STATUS_INVALID_PARAMETER;
+                rc              = -1;
+            }
             break;
         default:
             chimera_smb_error("parse_set_info: SET_INFO info_type %u not implemented", request->set_info.info_type);

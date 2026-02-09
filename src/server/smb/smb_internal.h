@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -293,6 +293,9 @@ struct chimera_smb_request {
             struct chimera_vfs_attrs        vfs_attrs;
             /* Rename information */
             struct chimera_smb_rename_info  rename_info;
+            /* Security descriptor buffer for SMB2_INFO_SECURITY */
+            uint8_t                         sec_buf[256];
+            uint32_t                        sec_buf_len;
         } set_info;
 
         struct {

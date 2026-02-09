@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -161,6 +161,16 @@ void chimera_smb_query_directory(
     struct chimera_smb_request *request);
 
 void chimera_smb_set_info(
+    struct chimera_smb_request *request);
+
+void chimera_smb_set_security(
+    struct chimera_smb_request *request);
+
+void chimera_smb_query_security(
+    struct chimera_smb_request *request);
+
+void chimera_smb_query_security_reply(
+    struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request);
 
 int chimera_smb_parse_echo(
