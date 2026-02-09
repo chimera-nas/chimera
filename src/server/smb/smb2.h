@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 // Copyright (C) 2016 by Ronnie Sahlberg <ronniesahlberg@gmail.com>
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -811,6 +811,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FILE_EA_INFO                           0x07
 #define SMB2_FILE_ACCESS_INFO                       0x08
 #define SMB2_FILE_RENAME_INFO                       0x0A
+#define SMB2_FILE_LINK_INFO                         0x0B
 #define SMB2_FILE_DISPOSITION_INFO                  0x0D
 #define SMB2_FILE_POSITION_INFO                     0x0E
 #define SMB2_FILE_FULL_EA_INFO                      0x0F

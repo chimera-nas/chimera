@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -68,6 +68,126 @@ chimera_smb_set_info_open_unlink_callback(
 
 } /* chimera_smb_set_info_open_unlink_callback */
 
+static void
+chimera_smb_set_info_link_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *r_attr,
+    struct chimera_vfs_attrs *r_dir_pre_attr,
+    struct chimera_vfs_attrs *r_dir_post_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    if (request->set_info.parent_handle) {
+        chimera_vfs_release(request->compound->thread->vfs_thread, request->set_info.parent_handle);
+        request->set_info.parent_handle = NULL;
+    }
+
+    if (request->set_info.rename_info.new_parent_handle) {
+        chimera_vfs_release(request->compound->thread->vfs_thread,
+                            request->set_info.rename_info.new_parent_handle);
+        request->set_info.rename_info.new_parent_handle = NULL;
+    }
+
+    chimera_smb_open_file_release(request, request->set_info.open_file);
+
+    chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+} /* chimera_smb_set_info_link_callback */
+
+static void
+chimera_smb_set_info_link_open_dir_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request     *request     = private_data;
+    struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
+    struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
+
+    if (rename_info->new_parent_len) {
+        rename_info->new_parent_handle = oh;
+    } else {
+        request->set_info.parent_handle = oh;
+    }
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, request->set_info.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        return;
+    }
+
+    chimera_vfs_link(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred,
+        open_file->handle->fh,
+        open_file->handle->fh_len,
+        oh->fh,
+        oh->fh_len,
+        rename_info->new_name,
+        rename_info->new_name_len,
+        rename_info->replace_if_exist,
+        0,
+        0,
+        0,
+        chimera_smb_set_info_link_callback,
+        request);
+} /* chimera_smb_set_info_link_open_dir_callback */
+
+static void
+chimera_smb_set_info_link_lookup_parent_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, request->set_info.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_NOT_FOUND);
+        return;
+    }
+
+    chimera_vfs_open(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred,
+        attr->va_fh,
+        attr->va_fh_len,
+        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
+        chimera_smb_set_info_link_open_dir_callback,
+        request);
+} /* chimera_smb_set_info_link_lookup_parent_callback */
+
+static void
+chimera_smb_set_info_link_process(struct chimera_smb_request *request)
+{
+    struct chimera_vfs_thread      *vfs_thread  = request->compound->thread->vfs_thread;
+    struct chimera_smb_tree        *tree        = request->tree;
+    struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
+
+    if (rename_info->new_parent_len) {
+        chimera_vfs_lookup_path(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            tree->fh,
+            tree->fh_len,
+            rename_info->new_parent,
+            rename_info->new_parent_len,
+            CHIMERA_VFS_ATTR_FH,
+            0,
+            chimera_smb_set_info_link_lookup_parent_callback,
+            request);
+    } else {
+        chimera_vfs_open(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            tree->fh,
+            tree->fh_len,
+            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+            chimera_smb_set_info_link_open_dir_callback,
+            request);
+    }
+} /* chimera_smb_set_info_link_process */
+
 void
 chimera_smb_set_info(struct chimera_smb_request *request)
 {
@@ -121,6 +241,9 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     break;
                 case SMB2_FILE_RENAME_INFO:
                     chimera_smb_set_info_rename_process(request);
+                    break;
+                case SMB2_FILE_LINK_INFO:
+                    chimera_smb_set_info_link_process(request);
                     break;
                 default:
                     chimera_smb_error("SET_INFO info_class %u not implemented", request->set_info.info_class);
@@ -187,6 +310,7 @@ chimera_smb_parse_set_info(
                         &request->set_info.attrs);
                     break;
                 case SMB2_FILE_RENAME_INFO:
+                case SMB2_FILE_LINK_INFO:
                     rc = chimera_smb_parse_rename_info(request_cursor, request);
                     break;
 
