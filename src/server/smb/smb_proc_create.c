@@ -613,10 +613,12 @@ chimera_smb_create_reply(
     chimera_smb_append_network_open_info(reply_cursor, &request->create.r_attrs);
 
     /* File Id (persistent) */
-    evpl_iovec_cursor_append_uint64(reply_cursor, request->create.r_open_file->file_id.pid);
+    evpl_iovec_cursor_append_uint64(reply_cursor, request->create.r_open_file ?
+                                    request->create.r_open_file->file_id.pid : 0);
 
     /* File Id (volatile) */
-    evpl_iovec_cursor_append_uint64(reply_cursor, request->create.r_open_file->file_id.vid);
+    evpl_iovec_cursor_append_uint64(reply_cursor, request->create.r_open_file ?
+                                    request->create.r_open_file->file_id.vid : 0);
 
     /* Create Context Offset */
     evpl_iovec_cursor_append_uint32(reply_cursor, 0);
