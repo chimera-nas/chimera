@@ -409,8 +409,8 @@ chimera_nfs4_marshall_attrs(
             memcpy(attrs, attr->va_fh, attr->va_fh_len);
             attrs += attr->va_fh_len;
 
-            if (attr->va_fh_len & 0x7) {
-                uint32_t pad = 8 - (attr->va_fh_len & 0x7);
+            if (attr->va_fh_len & 0x3) {
+                uint32_t pad = 4 - (attr->va_fh_len & 0x3);
                 memset(attrs, 0, pad);
                 attrs += pad;
             }
