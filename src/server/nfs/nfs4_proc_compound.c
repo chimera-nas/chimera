@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -72,6 +72,9 @@ chimera_nfs4_compound_process(
             break;
         case OP_SAVEFH:
             chimera_nfs4_savefh(thread, req, argop, resop);
+            break;
+        case OP_RESTOREFH:
+            chimera_nfs4_restorefh(thread, req, argop, resop);
             break;
         case OP_LINK:
             chimera_nfs4_link(thread, req, argop, resop);
