@@ -123,6 +123,12 @@ chimera_smb_set_info_rename_check_dest_callback(
             /* Destination is a directory - use source filename inside it */
             if (rename_info->new_parent_handle) {
                 /* Already have a new parent handle from earlier lookup */
+                chimera_vfs_release(request->compound->thread->vfs_thread,
+                                    rename_info->new_parent_handle);
+                if (request->set_info.parent_handle) {
+                    chimera_vfs_release(request->compound->thread->vfs_thread,
+                                        request->set_info.parent_handle);
+                }
                 chimera_smb_open_file_release(request, request->set_info.open_file);
                 chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
                 return;
@@ -145,7 +151,8 @@ chimera_smb_set_info_rename_check_dest_callback(
                 if (request->set_info.rename_info.new_parent_handle) {
                     chimera_vfs_release(request->compound->thread->vfs_thread,
                                         request->set_info.rename_info.new_parent_handle);
-                } else if (request->set_info.parent_handle) {
+                }
+                if (request->set_info.parent_handle) {
                     chimera_vfs_release(request->compound->thread->vfs_thread,
                                         request->set_info.parent_handle);
                 }
@@ -158,7 +165,7 @@ chimera_smb_set_info_rename_check_dest_callback(
     }
     /* Destination doesn't exist or we're overwriting - proceed with rename */
     chimera_smb_set_info_rename_do_rename(request);
-} /* chimera_smb_set_info_rename_check_dest_callback */
+} /* chimera_smb_set_info_rename_check_dest_callback */ /* chimera_smb_set_info_rename_check_dest_callback */
 
 static void
 chimera_smb_set_info_rename_open_dest_parent_callback(

@@ -31,10 +31,12 @@ chimera_smb_set_info_remove_callback(
 {
     struct chimera_smb_request *request = private_data;
 
+    chimera_vfs_release(request->compound->thread->vfs_thread, request->set_info.parent_handle);
+
     chimera_smb_open_file_release(request, request->set_info.open_file);
 
     chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
-} /* chimera_smb_set_info_remove_callback */
+} /* chimera_smb_set_info_remove_callback */ /* chimera_smb_set_info_remove_callback */
 
 static void
 chimera_smb_set_info_open_unlink_callback(
