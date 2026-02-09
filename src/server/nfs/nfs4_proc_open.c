@@ -192,6 +192,18 @@ chimera_nfs4_open(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
+    struct OPEN4args *args = &argop->opopen;
+
+    if (!req->session) {
+        req->session = nfs4_session_find_by_clientid(
+            &thread->shared->nfs4_shared_clients,
+            args->owner.clientid);
+
+        if (req->session) {
+            evpl_rpc2_conn_set_private_data(req->conn, req->session);
+        }
+    }
+
     chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,

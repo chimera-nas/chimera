@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -16,8 +16,15 @@ chimera_nfs4_close(
 {
     struct CLOSE4args   *args    = &argop->opclose;
     struct CLOSE4res    *res     = &resop->opclose;
-    struct nfs4_session *session = req->session;
+    struct nfs4_session *session = nfs4_resolve_session(
+        req->session, &args->open_stateid,
+        &thread->shared->nfs4_shared_clients);
     struct nfs4_state   *state;
+
+    if (!req->session && session) {
+        req->session = session;
+        evpl_rpc2_conn_set_private_data(req->conn, session);
+    }
 
     state = nfs4_session_get_state(session, &args->open_stateid);
 
