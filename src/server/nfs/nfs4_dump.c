@@ -275,6 +275,11 @@ _nfs4_dump_compound(
                                   req, i + 1, args->num_argarray);
                 break;
 
+            case OP_TEST_STATEID:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d TestStateId",
+                                  req, i + 1, args->num_argarray);
+                break;
+
             default:
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d Unknown op=%d",
                                   req, i + 1, args->num_argarray,
