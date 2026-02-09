@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -130,9 +130,14 @@ chimera_nfs4_create_open_callback(
                                   req);
                 break;
             case NF4BLK:
-                break;
             case NF4CHR:
-                break;
+            case NF4SOCK:
+            case NF4FIFO:
+            case NF4ATTRDIR:
+            case NF4NAMEDATTR:
+                chimera_nfs4_compound_complete(req, NFS4ERR_NOTSUPP);
+                chimera_vfs_release(thread->vfs_thread, handle);
+                return;
             case NF4LNK:
                 req->handle = handle;
 
@@ -151,18 +156,10 @@ chimera_nfs4_create_open_callback(
                     chimera_nfs4_create_symlink_complete,
                     req);
                 break;
-            case NF4SOCK:
-                break;
-            case NF4FIFO:
-                break;
-            case NF4ATTRDIR:
-                break;
-            case NF4NAMEDATTR:
-                break;
             default:
                 chimera_nfs4_compound_complete(req,
                                                NFS4ERR_BADTYPE);
-                chimera_vfs_release(thread->vfs_thread, req->handle);
+                chimera_vfs_release(thread->vfs_thread, handle);
                 return;
         } /* switch */
     } else {
