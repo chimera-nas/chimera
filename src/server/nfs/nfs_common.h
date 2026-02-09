@@ -60,7 +60,6 @@ struct nfs_request {
         struct FSINFO3args      *args_fsinfo;
         struct WRITE3args       *args_write;
         struct COMMIT3args      *args_commit;
-        struct COMPOUND4args    *args_compound;
         struct RMDIR3args       *args_rmdir;
         struct REMOVE3args      *args_remove;
         struct MKDIR3args       *args_mkdir;
@@ -70,6 +69,7 @@ struct nfs_request {
         struct MKNOD3args       *args_mknod;
         struct WRITE4args       *args_write4;
     };
+    struct COMPOUND4args *args_compound;
     union {
         struct READLINK3res    res_readlink;
         struct READDIR3res     res_readdir;
