@@ -229,6 +229,29 @@ nfs4_session_lookup(
     return session;
 } /* nfs4_session_lookup */
 
+struct nfs4_session *
+nfs4_session_find_by_clientid(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id)
+{
+    struct nfs4_session *session = NULL;
+    struct nfs4_session *cur, *tmp;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, cur, tmp)
+    {
+        if (cur->nfs4_session_clientid == client_id) {
+            session = cur;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+
+    return session;
+} /* nfs4_session_find_by_clientid */
+
 void
 nfs4_destroy_session(
     struct nfs4_client_table *table,

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -25,13 +25,18 @@ chimera_nfs4_setclientid(
         40,
         NULL, NULL);
 
-
-    session = nfs4_create_session(
+    session = nfs4_session_find_by_clientid(
         &shared->nfs4_shared_clients,
-        resop->opsetclientid.resok4.clientid,
-        1,
-        NULL,
-        NULL);
+        resop->opsetclientid.resok4.clientid);
+
+    if (!session) {
+        session = nfs4_create_session(
+            &shared->nfs4_shared_clients,
+            resop->opsetclientid.resok4.clientid,
+            1,
+            NULL,
+            NULL);
+    }
 
     evpl_rpc2_conn_set_private_data(conn, session);
     req->session = session;

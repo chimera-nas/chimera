@@ -102,6 +102,11 @@ nfs4_destroy_session(
     struct nfs4_client_table *table,
     const void               *session_id);
 
+struct nfs4_session *
+nfs4_session_find_by_clientid(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id);
+
 static inline struct nfs4_state *
 nfs4_session_alloc_slot(struct nfs4_session *session)
 {
@@ -115,7 +120,8 @@ nfs4_session_alloc_slot(struct nfs4_session *session)
 
     state->nfs4_state_id.seqid = 1;
 
-    *(uint64_t *) state->nfs4_state_id.other = slot;
+    *(uint32_t *) state->nfs4_state_id.other       = slot;
+    *(uint64_t *) (state->nfs4_state_id.other + 4) = session->nfs4_session_clientid;
 
     state->nfs4_state_active = 1;
 
@@ -127,7 +133,7 @@ nfs4_session_free_slot(
     struct nfs4_session *session,
     struct nfs4_state   *state)
 {
-    uint64_t slot = *(uint64_t *) state->nfs4_state_id.other;
+    uint32_t slot = *(uint32_t *) state->nfs4_state_id.other;
 
     state->nfs4_state_active = 0;
 
@@ -140,7 +146,24 @@ nfs4_session_get_state(
     struct nfs4_session   *session,
     const struct stateid4 *stateid)
 {
-    uint64_t slot = *(uint64_t *) stateid->other;
+    uint32_t slot = *(uint32_t *) stateid->other;
 
     return &session->nfs4_session_state[slot];
 } /* nfs4_session_get_state */
+
+static inline struct nfs4_session *
+nfs4_resolve_session(
+    struct nfs4_session      *session,
+    const struct stateid4    *stateid,
+    struct nfs4_client_table *table)
+{
+    uint64_t client_id;
+
+    if (session) {
+        return session;
+    }
+
+    client_id = *(uint64_t *) (stateid->other + 4);
+
+    return nfs4_session_find_by_clientid(table, client_id);
+} /* nfs4_resolve_session */
