@@ -247,6 +247,10 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                 case SMB2_FILE_LINK_INFO:
                     chimera_smb_set_info_link_process(request);
                     break;
+                case SMB2_FILE_FULL_EA_INFO:
+                    chimera_smb_open_file_release(request, request->set_info.open_file);
+                    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+                    break;
                 default:
                     chimera_smb_error("SET_INFO info_class %u not implemented", request->set_info.info_class);
                     chimera_smb_open_file_release(request, request->set_info.open_file);
@@ -317,6 +321,9 @@ chimera_smb_parse_set_info(
                 case SMB2_FILE_RENAME_INFO:
                 case SMB2_FILE_LINK_INFO:
                     rc = chimera_smb_parse_rename_info(request_cursor, request);
+                    break;
+                case SMB2_FILE_FULL_EA_INFO:
+                    /* EAs not supported, accept and ignore */
                     break;
 
                 default:
