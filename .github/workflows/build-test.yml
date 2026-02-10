@@ -100,7 +100,7 @@ jobs:
               sleep 2 && \
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} /workspace && \
               ninja && \
-              ctest --output-on-failure -j 32'
+              ctest --output-on-failure --timeout 300 -j 32'
 
   static-analysis:
     name: Static Analysis ${{ matrix.platform }} ${{ matrix.build_type }}
