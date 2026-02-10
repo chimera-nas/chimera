@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -335,8 +335,8 @@ chimera_smb_unmarshal_basic_info(
     chimera_nt_to_epoch(smb_attrs->smb_mtime, &attr->va_mtime);
     chimera_nt_to_epoch(smb_attrs->smb_ctime, &attr->va_ctime);
 
-    attr->va_req_mask |= SMB_ATTR_ATIME | SMB_ATTR_MTIME | SMB_ATTR_CTIME;
-    attr->va_set_mask |= SMB_ATTR_ATIME | SMB_ATTR_MTIME | SMB_ATTR_CTIME;
+    attr->va_req_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME | CHIMERA_VFS_ATTR_CTIME;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME | CHIMERA_VFS_ATTR_CTIME;
 } // chimera_smb_unmarshal_basic_info
 
 static inline void
@@ -348,8 +348,8 @@ chimera_smb_unmarshal_end_of_file_info(
     attr->va_set_mask = 0;
 
     attr->va_size      = smb_attrs->smb_size;
-    attr->va_req_mask |= SMB_ATTR_SIZE;
-    attr->va_set_mask |= SMB_ATTR_SIZE;
+    attr->va_req_mask |= CHIMERA_VFS_ATTR_SIZE;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
 } // chimera_smb_unmarshal_end_of_file_info
 
 static inline void
