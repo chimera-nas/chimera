@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -317,13 +317,16 @@ evpl_iovec_cursor_inject_unaligned(
     int                       niov,
     int                       length)
 {
-    struct evpl_iovec saved = *cursor->iov;
+    struct evpl_iovec saved;
     int               i;
+    int               remainder_offset = cursor->offset;
+    int               remainder_length = cursor->iov->length - cursor->offset;
 
+    /* Clone the remainder portion with proper refcounting before truncation */
+    evpl_iovec_clone_segment(&saved, cursor->iov, remainder_offset, remainder_length);
+
+    /* Truncate original iovec to just the consumed portion */
     cursor->iov->length = cursor->offset;
-
-    saved.data   += cursor->offset;
-    saved.length -= cursor->offset;
 
     cursor->offset = 0;
 
@@ -333,10 +336,11 @@ evpl_iovec_cursor_inject_unaligned(
         evpl_iovec_move(&cursor->iov[i], &iov[i]);
     }
 
-    cursor->iov  += niov;
-    cursor->niov += niov;
+    cursor->iov += niov;
+    cursor->niov = (cursor->niov > niov + 1) ? cursor->niov - niov - 1 : 1;
 
-    *cursor->iov = saved;
+    /* Transfer remainder to its final position with proper ownership */
+    evpl_iovec_move(cursor->iov, &saved);
 
 } /* evpl_iovec_cursor_inject */
 
