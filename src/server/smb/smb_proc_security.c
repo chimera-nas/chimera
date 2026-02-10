@@ -120,27 +120,14 @@ chimera_smb_set_security_setattr_callback(
 } /* chimera_smb_set_security_setattr_callback */
 
 void
-chimera_smb_set_security(struct chimera_smb_request *request)
+chimera_smb_parse_sd_to_attrs(
+    const uint8_t            *sd_buf,
+    uint32_t                  sd_len,
+    struct chimera_vfs_attrs *attrs)
 {
-    struct chimera_vfs_attrs *vfs_attrs = &request->set_info.vfs_attrs;
-    uint32_t                  addl_info = request->set_info.addl_info;
-    const uint8_t            *sd_buf;
-    uint32_t                  sd_len;
-    uint32_t                  value;
-
-    vfs_attrs->va_req_mask = 0;
-    vfs_attrs->va_set_mask = 0;
-
-    /*
-     * The raw security descriptor is in the request buffer.
-     * We saved the cursor position and buffer length during parse.
-     */
-    sd_buf = request->set_info.sec_buf;
-    sd_len = request->set_info.sec_buf_len;
+    uint32_t value;
 
     if (sd_len < SD_HEADER_SIZE) {
-        chimera_smb_open_file_release(request, request->set_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
 
@@ -150,26 +137,23 @@ chimera_smb_set_security(struct chimera_smb_request *request)
     uint32_t offset_dacl  = sd_buf[16] | (sd_buf[17] << 8) | (sd_buf[18] << 16) | (sd_buf[19] << 24);
 
     /* Owner SID → uid */
-    if ((addl_info & OWNER_SECURITY_INFORMATION) && offset_owner &&
-        offset_owner + SID_UNIX_SIZE <= sd_len) {
+    if (offset_owner && offset_owner + SID_UNIX_SIZE <= sd_len) {
         if (parse_unix_sid(sd_buf + offset_owner, sd_len - offset_owner, 1, &value) == 0) {
-            vfs_attrs->va_uid       = value;
-            vfs_attrs->va_set_mask |= CHIMERA_VFS_ATTR_UID;
+            attrs->va_uid       = value;
+            attrs->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         }
     }
 
     /* Group SID → gid */
-    if ((addl_info & GROUP_SECURITY_INFORMATION) && offset_group &&
-        offset_group + SID_UNIX_SIZE <= sd_len) {
+    if (offset_group && offset_group + SID_UNIX_SIZE <= sd_len) {
         if (parse_unix_sid(sd_buf + offset_group, sd_len - offset_group, 2, &value) == 0) {
-            vfs_attrs->va_gid       = value;
-            vfs_attrs->va_set_mask |= CHIMERA_VFS_ATTR_GID;
+            attrs->va_gid       = value;
+            attrs->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         }
     }
 
     /* DACL → scan ACEs for mode SID */
-    if ((addl_info & DACL_SECURITY_INFORMATION) && offset_dacl &&
-        offset_dacl + 8 <= sd_len) {
+    if (offset_dacl && offset_dacl + 8 <= sd_len) {
         const uint8_t *acl_buf   = sd_buf + offset_dacl;
         uint16_t       acl_size  = acl_buf[2] | (acl_buf[3] << 8);
         uint16_t       ace_count = acl_buf[4] | (acl_buf[5] << 8);
@@ -184,14 +168,34 @@ chimera_smb_set_security(struct chimera_smb_request *request)
             if (offset_dacl + sid_offset + SID_UNIX_SIZE <= sd_len) {
                 if (parse_unix_sid(acl_buf + sid_offset,
                                    sd_len - offset_dacl - sid_offset, 3, &value) == 0) {
-                    vfs_attrs->va_mode      = value;
-                    vfs_attrs->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+                    attrs->va_mode      = value;
+                    attrs->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
                     break;
                 }
             }
             pos += ace_size;
         }
     }
+} /* chimera_smb_parse_sd_to_attrs */
+
+void
+chimera_smb_set_security(struct chimera_smb_request *request)
+{
+    struct chimera_vfs_attrs *vfs_attrs = &request->set_info.vfs_attrs;
+    const uint8_t            *sd_buf;
+    uint32_t                  sd_len;
+
+    vfs_attrs->va_req_mask = 0;
+    vfs_attrs->va_set_mask = 0;
+
+    /*
+     * The raw security descriptor is in the request buffer.
+     * We saved the cursor position and buffer length during parse.
+     */
+    sd_buf = request->set_info.sec_buf;
+    sd_len = request->set_info.sec_buf_len;
+
+    chimera_smb_parse_sd_to_attrs(sd_buf, sd_len, vfs_attrs);
 
     if (vfs_attrs->va_set_mask == 0) {
         /* Nothing to change */
@@ -209,7 +213,7 @@ chimera_smb_set_security(struct chimera_smb_request *request)
         0,
         chimera_smb_set_security_setattr_callback,
         request);
-} /* chimera_smb_set_security */
+} /* chimera_smb_set_security */ /* chimera_smb_set_security */
 
 /* ------------------------------------------------------------------ */
 /* QUERY_INFO handler for SMB2_INFO_SECURITY                          */
