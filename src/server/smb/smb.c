@@ -258,10 +258,10 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         reply_hdr->protocol_id[2]          = 0x4D;
         reply_hdr->protocol_id[3]          = 0x42;
         reply_hdr->struct_size             = 64;
-        reply_hdr->credit_charge           = 256;//request->smb2_hdr.credit_charge;
+        reply_hdr->credit_charge           = request->smb2_hdr.credit_charge;
         reply_hdr->status                  = request->status;
         reply_hdr->command                 = request->smb2_hdr.command;
-        reply_hdr->credit_request_response = request->smb2_hdr.credit_request_response;
+        reply_hdr->credit_request_response = 256;
         reply_hdr->flags                   = request->smb2_hdr.flags | SMB2_FLAGS_SERVER_TO_REDIR;
         reply_hdr->next_command            = 0;
         reply_hdr->message_id              = request->smb2_hdr.message_id;
@@ -332,7 +332,11 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
     }
 
-    rc = chimera_smb_sign_compound(thread->signing_ctx, compound, reply_iov, reply_cursor.niov,
+    /* Total iovec count from reply_iov base includes iovecs the cursor
+    * has advanced past (e.g. from inject operations) plus remaining */
+    int total_reply_niov = (int) (reply_cursor.iov - reply_iov) + reply_cursor.niov;
+
+    rc = chimera_smb_sign_compound(thread->signing_ctx, compound, reply_iov, total_reply_niov,
                                    evpl_iovec_cursor_consumed(&reply_cursor) + reply_hdr_len
                                    );
 
@@ -363,12 +367,12 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         direct_hdr->data_offset       = 24;
         direct_hdr->data_length       = chunk;
 
-        evpl_sendv(evpl, conn->bind, reply_iov, reply_cursor.niov, direct_hdr->data_length + 24,
+        evpl_sendv(evpl, conn->bind, reply_iov, total_reply_niov, direct_hdr->data_length + 24,
                    EVPL_SEND_FLAG_TAKE_REF);
 
         left -= direct_hdr->data_length;
 
-        evpl_iovec_cursor_init(&reply_cursor, reply_iov, reply_cursor.niov);
+        evpl_iovec_cursor_init(&reply_cursor, reply_iov, total_reply_niov);
         evpl_iovec_cursor_skip(&reply_cursor, direct_hdr->data_length + 24);
 
         while (left) {
@@ -401,7 +405,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     } else {
         netbios_hdr->word = __builtin_bswap32(reply_payload_length);
 
-        evpl_sendv(evpl, conn->bind, reply_iov, reply_cursor.niov, reply_payload_length + reply_hdr_len,
+        evpl_sendv(evpl, conn->bind, reply_iov, total_reply_niov, reply_payload_length + reply_hdr_len,
                    EVPL_SEND_FLAG_TAKE_REF);
     }
 
@@ -767,7 +771,7 @@ chimera_smb_server_handle_smb2(
                 chimera_smb_error("Received SMB2 message with unimplemented command %u",
                                   request->smb2_hdr.command);
                 request->status = SMB2_STATUS_NOT_IMPLEMENTED;
-                rc              = -1;
+                rc              = 0;
         } /* switch */
 
         if (rc) {
