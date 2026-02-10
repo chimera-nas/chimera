@@ -357,9 +357,6 @@ chimera_smb_create_open_parent_callback(
 
     request->create.parent_handle = oh;
 
-    request->create.set_attr.va_req_mask = 0;
-    request->create.set_attr.va_set_mask = 0;
-
     if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
         request->create.create_disposition == SMB2_FILE_CREATE) {
 
@@ -713,5 +710,53 @@ chimera_smb_parse_create(
         request->create.parent_path_len = 0;
     }
 
+    /* Initialize create-time attributes (may be populated by SD create context) */
+    request->create.set_attr.va_req_mask = 0;
+    request->create.set_attr.va_set_mask = 0;
+
+    /* Parse create contexts for security descriptor (modefromsid) */
+    if (blob_offset > 0 && blob_length > 0 && blob_length <= 1024) {
+        uint8_t  ctx_buf[1024];
+        uint32_t skip = blob_offset - evpl_iovec_cursor_consumed(request_cursor);
+
+        evpl_iovec_cursor_skip(request_cursor, skip);
+
+        if (evpl_iovec_cursor_get_blob(request_cursor, ctx_buf, blob_length) == 0) {
+            uint32_t pos = 0;
+
+            while (pos + 16 <= blob_length) {
+                uint32_t next = ctx_buf[pos]    | (ctx_buf[pos + 1] << 8) |
+                    (ctx_buf[pos + 2] << 16) | (ctx_buf[pos + 3] << 24);
+                uint16_t name_off = ctx_buf[pos + 4] | (ctx_buf[pos + 5] << 8);
+                uint16_t name_len = ctx_buf[pos + 6] | (ctx_buf[pos + 7] << 8);
+                uint16_t data_off = ctx_buf[pos + 10] | (ctx_buf[pos + 11] << 8);
+                uint32_t data_len = ctx_buf[pos + 12] | (ctx_buf[pos + 13] << 8) |
+                    (ctx_buf[pos + 14] << 16) | (ctx_buf[pos + 15] << 24);
+
+                /* Look for SMB2_CREATE_SD_BUFFER ("SecD") */
+                if (name_len == 4 &&
+                    pos + name_off + 4 <= blob_length &&
+                    ctx_buf[pos + name_off]     == 'S' &&
+                    ctx_buf[pos + name_off + 1] == 'e' &&
+                    ctx_buf[pos + name_off + 2] == 'c' &&
+                    ctx_buf[pos + name_off + 3] == 'D' &&
+                    data_off > 0 &&
+                    pos + data_off + data_len <= blob_length) {
+
+                    chimera_smb_parse_sd_to_attrs(
+                        ctx_buf + pos + data_off,
+                        data_len,
+                        &request->create.set_attr);
+                    break;
+                }
+
+                if (next == 0) {
+                    break;
+                }
+                pos += next;
+            }
+        }
+    }
+
     return 0;
-} /* chimera_smb_parse_create */
+} /* chimera_smb_parse_create */ /* chimera_smb_parse_create */
