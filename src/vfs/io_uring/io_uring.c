@@ -885,7 +885,7 @@ chimera_io_uring_open_at(
 
     flags = 0;
 
-    if (request->open_at.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)) {
+    if (request->open_at.flags & (CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)) {
         flags |= O_RDONLY;
     } else {
         flags |= O_RDWR;
