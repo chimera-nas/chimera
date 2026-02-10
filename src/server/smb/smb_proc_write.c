@@ -161,6 +161,7 @@ chimera_smb_parse_write(
 
         if (unlikely(request->write.num_rdma_elements > 8)) {
             chimera_smb_error("Received SMB2 message with too many RDMA elements");
+            request->status = SMB2_STATUS_INVALID_PARAMETER;
             return -1;
         }
 
@@ -176,6 +177,7 @@ chimera_smb_parse_write(
         if (unlikely(total_length != request->write.remaining)) {
             chimera_smb_error("Received SMB2 message with total length (%u) that does not match remaining (%u)",
                               total_length, request->write.remaining);
+            request->status = SMB2_STATUS_INVALID_PARAMETER;
             return -1;
         }
         request->write.length = request->write.remaining;

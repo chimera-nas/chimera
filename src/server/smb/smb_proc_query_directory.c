@@ -332,11 +332,13 @@ chimera_smb_parse_query_directory(
 {
     uint16_t name_offset;
     uint16_t pattern16[SMB_FILENAME_MAX];
+    int      name_size;
 
     if (unlikely(request->request_struct_size != SMB2_QUERY_DIRECTORY_REQUEST_SIZE)) {
         chimera_smb_error("Received SMB2 QUERY_DIRECTORY request with invalid struct size (%u expected %u)",
                           request->smb2_hdr.struct_size,
                           SMB2_QUERY_DIRECTORY_REQUEST_SIZE);
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
 
@@ -356,15 +358,22 @@ chimera_smb_parse_query_directory(
     if (request->query_directory.pattern_length > SMB_FILENAME_MAX) {
         chimera_smb_error("Received SMB2 QUERY_DIRECTORY request with invalid name length (%u > %u)",
                           request->query_directory.pattern_length, SMB_FILENAME_MAX);
+        request->status = SMB2_STATUS_NAME_TOO_LONG;
         return -1;
     }
 
     evpl_iovec_cursor_copy(request_cursor, pattern16, request->query_directory.pattern_length);
-    request->query_directory.pattern_length = chimera_smb_utf16le_to_utf8(&request->compound->thread->iconv_ctx,
-                                                                          pattern16,
-                                                                          request->query_directory.pattern_length,
-                                                                          request->query_directory.pattern,
-                                                                          sizeof(request->query_directory.pattern));
+    name_size = chimera_smb_utf16le_to_utf8(&request->compound->thread->iconv_ctx,
+                                            pattern16,
+                                            request->query_directory.pattern_length,
+                                            request->query_directory.pattern,
+                                            sizeof(request->query_directory.pattern));
+    if (name_size < 0) {
+        chimera_smb_error("Failed to convert QUERY_DIRECTORY pattern from UTF-16LE to UTF-8");
+        request->status = SMB2_STATUS_OBJECT_NAME_INVALID;
+        return -1;
+    }
+    request->query_directory.pattern_length = name_size;
 
     return 0;
 } /* chimera_smb_parse_query_directory */

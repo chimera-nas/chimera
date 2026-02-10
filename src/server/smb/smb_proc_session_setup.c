@@ -241,6 +241,7 @@ chimera_smb_parse_session_setup(
         chimera_smb_error("Received SMB2 SESSION_SETUP request with invalid struct size (%u expected %u)",
                           request->request_struct_size,
                           SMB2_SESSION_SETUP_REQUEST_SIZE);
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
 

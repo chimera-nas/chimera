@@ -14,6 +14,7 @@ chimera_smb_parse_echo(
         chimera_smb_error("Received SMB2 ECHO request with invalid struct size (%u expected %u)",
                           request->request_struct_size,
                           SMB2_ECHO_REQUEST_SIZE);
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
 

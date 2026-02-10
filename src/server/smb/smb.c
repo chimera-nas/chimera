@@ -24,6 +24,8 @@
 #include "smb_signing.h"
 #include "xxhash.h"
 
+static const uint8_t SMB2_PROTOCOL_ID[4] = { 0xFE, 'S', 'M', 'B' };
+
 static inline int
 chimera_smb_is_error_status(unsigned int status)
 {
@@ -608,10 +610,8 @@ chimera_smb_server_handle_smb2(
 
         signature_cursor = *request_cursor;
 
-        if (unlikely((request->smb2_hdr.protocol_id[0] != 0xFE && request->smb2_hdr.protocol_id[0] != 0xFF) ||
-                     request->smb2_hdr.protocol_id[1] != 0x53 ||
-                     request->smb2_hdr.protocol_id[2] != 0x4D ||
-                     request->smb2_hdr.protocol_id[3] != 0x42)) {
+        /* We only need to validate that we are using SMB2 at this point */
+        if (unlikely(memcmp(request->smb2_hdr.protocol_id, SMB2_PROTOCOL_ID, 4) != 0)) {
             chimera_smb_error("Received SMB2 message with invalid protocol header");
             chimera_smb_request_free(thread, request);
             evpl_close(evpl, conn->bind);
@@ -708,7 +708,6 @@ chimera_smb_server_handle_smb2(
                                                   request->smb2_hdr.command != SMB2_ECHO))) {
             chimera_smb_error("Received SMB2 message with invalid command and no session");
             chimera_smb_complete_request(request, SMB2_STATUS_NO_SUCH_LOGON_SESSION);
-            evpl_close(evpl, conn->bind);
             chimera_smb_request_free(thread, request);
             return;
         }
@@ -777,8 +776,11 @@ chimera_smb_server_handle_smb2(
             } else {
                 chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
             }
-            evpl_close(evpl, conn->bind);
             chimera_smb_request_free(thread, request);
+            /* TODO: Should I return here, or should I try to continue parsing the rest of the compound?
+             * SMB2_STATUS_INVALID_PARAMETER will cause the client to drop the connection,
+             * so it may not matter either way
+             */
             return;
         }
 

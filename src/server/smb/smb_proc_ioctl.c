@@ -171,6 +171,7 @@ chimera_smb_parse_ioctl(
         chimera_smb_error("Received SMB2 IOCTL request with invalid struct size (%u expected %u)",
                           request->request_struct_size,
                           SMB2_IOCTL_REQUEST_SIZE);
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
 
@@ -197,6 +198,7 @@ chimera_smb_parse_ioctl(
                 if (request->ioctl.input_count < 24) {
                     chimera_smb_error("VALIDATE_NEGOTIATE_INFO input too small (%u < 24)",
                                       request->ioctl.input_count);
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
                     return -1;
                 }
 
@@ -210,11 +212,13 @@ chimera_smb_parse_ioctl(
                 if (request->ioctl.vni_dialect_count > SMB2_MAX_DIALECTS) {
                     chimera_smb_error("VALIDATE_NEGOTIATE_INFO dialect count too large (%u > %u)",
                                       request->ioctl.vni_dialect_count, SMB2_MAX_DIALECTS);
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
                     return -1;
                 }
 
                 if (request->ioctl.input_count < 24 + (request->ioctl.vni_dialect_count * 2)) {
                     chimera_smb_error("VALIDATE_NEGOTIATE_INFO input too small for dialect count");
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
                     return -1;
                 }
 
@@ -231,6 +235,8 @@ chimera_smb_parse_ioctl(
                 break;
             default:
                 /* Other IOCTLs don't need input parsing yet */
+                chimera_smb_info("Received IOCTL request with unhandled ctl_code 0x%08x, skipping input parsing",
+                                 request->ioctl.ctl_code);
                 break;
         } /* switch */
     }

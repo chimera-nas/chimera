@@ -350,7 +350,7 @@ chimera_smb_parse_rename_info(
 
     if (rename_info->new_parent_len < 0) {
         chimera_smb_error("SET_INFO RENAME_INFO failed to convert new name to UTF-8");
-        request->status = SMB2_STATUS_INVALID_PARAMETER;
+        request->status = SMB2_STATUS_OBJECT_NAME_INVALID;
         return -1;
     }
 
