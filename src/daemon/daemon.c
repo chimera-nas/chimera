@@ -25,7 +25,7 @@ int SigInt = 0;
 void
 signal_handler(int sig)
 {
-    SigInt = 1;
+    SigInt = sig;
 } /* signal_handler */
 
 static int
@@ -500,7 +500,7 @@ main(
         sleep(1);
     }
 
-    chimera_server_info("Shutting down server...");
+    chimera_server_info("Shutting down server (signal=%d)...", SigInt);
 
     chimera_server_destroy(server);
 

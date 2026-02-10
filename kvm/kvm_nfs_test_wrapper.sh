@@ -3,12 +3,12 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-# Usage: kvm_nfs_test_wrapper.sh <vmlinuz> <rootfs.qcow2> <chimera_binary> <backend> <test_cmd>
+# Usage: kvm_nfs_test_wrapper.sh <vmlinuz> <rootfs.qcow2> <chimera_binary> <backend> <nfsver> <test_cmd>
 #
-# Orchestrates a chimera NFS3 server + QEMU VM to run tests over NFS.
+# Orchestrates a chimera NFS server + QEMU VM to run tests over NFS.
 # 1. Generates chimera config for the given backend
 # 2. Creates a network namespace with TAP device
-# 3. Starts chimera daemon in the netns (NFS3 on 10.0.0.1:2049)
+# 3. Starts chimera daemon in the netns (NFS on 10.0.0.1:2049)
 # 4. Boots QEMU VM which mounts NFS and runs the test command
 # 5. Captures exit code and cleans up
 
@@ -18,6 +18,7 @@ VMLINUZ=$1; shift
 ROOTFS=$1; shift
 CHIMERA_BINARY=$1; shift
 BACKEND=$1; shift
+NFS_VERSION=$1; shift
 TEST_CMD_ARG="$*"
 
 NETNS_NAME="kvm_nfs_$$_$(date +%s%N)"
@@ -37,7 +38,25 @@ cleanup() {
     fi
     if [ -n "$CHIMERA_PID" ]; then
         kill "$CHIMERA_PID" 2>/dev/null || true
+        # Give chimera up to 3 seconds to shut down cleanly
+        for i in $(seq 1 30); do
+            kill -0 "$CHIMERA_PID" 2>/dev/null || break
+            sleep 0.1
+        done
+        # Force kill if still alive
+        if kill -0 "$CHIMERA_PID" 2>/dev/null; then
+            echo "=== Chimera shutdown hung, force killing ==="
+            if [ -f "$CHIMERA_LOG" ]; then
+                echo "=== Chimera stderr at shutdown ==="
+                cat "$CHIMERA_LOG"
+            fi
+            kill -9 "$CHIMERA_PID" 2>/dev/null || true
+        fi
         wait "$CHIMERA_PID" 2>/dev/null || true
+    fi
+    if [ -f "$CHIMERA_LOG" ]; then
+        echo "=== Chimera stderr at cleanup ==="
+        tail -100 "$CHIMERA_LOG"
     fi
     ip netns delete "${NETNS_NAME}" 2>/dev/null || true
     rm -f "$LOG_FILE"
@@ -149,7 +168,13 @@ for i in $(seq 1 30); do
 done
 
 # Build the test command to run inside the VM
-TEST_CMD="mount -t nfs -o vers=3,nolock,tcp,nconnect=16 10.0.0.1:/share /mnt && ${TEST_CMD_ARG}"
+# Build mount options based on NFS version
+NFS_MOUNT_OPTS="vers=${NFS_VERSION},tcp,nconnect=16"
+if [ "$NFS_VERSION" = "3" ]; then
+    NFS_MOUNT_OPTS="${NFS_MOUNT_OPTS},nolock"
+fi
+
+TEST_CMD="mount -t nfs -o ${NFS_MOUNT_OPTS} 10.0.0.1:/share /mnt && ${TEST_CMD_ARG}"
 
 # Boot QEMU inside the netns
 ip netns exec "${NETNS_NAME}" qemu-system-x86_64 \
@@ -166,6 +191,14 @@ ip netns exec "${NETNS_NAME}" qemu-system-x86_64 \
     -append "root=/dev/vda rw console=ttyS0 quiet panic=-1 test_cmd=\"${TEST_CMD}\" init=/bin/sh -- /init.sh"
 
 cat "$LOG_FILE"
+
+# Check if chimera is still alive after QEMU exits
+if ! kill -0 "$CHIMERA_PID" 2>/dev/null; then
+    wait "$CHIMERA_PID" 2>/dev/null
+    CHIMERA_EXIT=$?
+    echo "=== Chimera daemon DIED during test (exit code: $CHIMERA_EXIT) ==="
+    CHIMERA_PID=""
+fi
 
 # Show chimera debug output if present
 if [ -f "$CHIMERA_LOG" ]; then

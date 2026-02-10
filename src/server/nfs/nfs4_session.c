@@ -43,6 +43,7 @@ nfs4_client_table_free(struct nfs4_client_table *table)
     HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, sess, sesstmp)
     {
         HASH_DELETE(nfs4_session_hh, table->nfs4_ct_sessions, sess);
+        pthread_mutex_destroy(&sess->nfs4_session_lock);
         free(sess);
     }
 
@@ -166,6 +167,8 @@ nfs4_create_session(
 
         uuid_generate(session->nfs4_session_id);
 
+        pthread_mutex_init(&session->nfs4_session_lock, NULL);
+
         session->nfs4_session_implicit = implicit;
         session->nfs4_session_clientid = client_id;
 
@@ -276,6 +279,7 @@ nfs4_destroy_session(
     pthread_mutex_unlock(&table->nfs4_ct_lock);
 
     if (session) {
+        pthread_mutex_destroy(&session->nfs4_session_lock);
         free(session);
     }
 

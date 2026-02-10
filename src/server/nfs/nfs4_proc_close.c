@@ -14,28 +14,32 @@ chimera_nfs4_close(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct CLOSE4args   *args    = &argop->opclose;
-    struct CLOSE4res    *res     = &resop->opclose;
-    struct nfs4_session *session = nfs4_resolve_session(
+    struct CLOSE4args              *args    = &argop->opclose;
+    struct CLOSE4res               *res     = &resop->opclose;
+    struct nfs4_session            *session = nfs4_resolve_session(
         req->session, &args->open_stateid,
         &thread->shared->nfs4_shared_clients);
-    struct nfs4_state   *state;
+    struct nfs4_state              *state;
+    struct chimera_vfs_open_handle *handle;
 
-    if (!req->session && session) {
+    if (!session) {
+        res->status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
+    if (!req->session) {
         req->session = session;
         evpl_rpc2_conn_set_private_data(req->conn, session);
     }
 
     state = nfs4_session_get_state(session, &args->open_stateid);
 
-    if (state) {
+    handle = nfs4_session_free_slot(session, state);
 
+    if (handle) {
         res->open_stateid = state->nfs4_state_id;
-
-        nfs4_session_free_slot(session, state);
-
-        chimera_vfs_release(thread->vfs_thread, state->nfs4_state_handle);
-
+        chimera_vfs_release(thread->vfs_thread, handle);
         res->status = NFS4_OK;
     } else {
         res->status = NFS4ERR_BAD_STATEID;
