@@ -91,8 +91,9 @@ chimera_smb_negotiate_reply(
     struct chimera_smb_request *request)
 {
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_NEGOTIATE_REPLY_SIZE);
-    evpl_iovec_cursor_append_uint8(reply_cursor, request->negotiate.r_security_mode);
+    evpl_iovec_cursor_append_uint16(reply_cursor, request->negotiate.r_security_mode);
     evpl_iovec_cursor_append_uint16(reply_cursor, request->negotiate.r_dialect);
+    evpl_iovec_cursor_append_uint16(reply_cursor, 0); /* NegotiateContextCount / Reserved */
     evpl_iovec_cursor_append_blob(reply_cursor, request->negotiate.r_server_guid, SMB2_GUID_SIZE);
     evpl_iovec_cursor_append_uint32(reply_cursor, request->negotiate.r_capabilities);
     evpl_iovec_cursor_append_uint32(reply_cursor, request->negotiate.r_max_transact_size);
@@ -102,9 +103,10 @@ chimera_smb_negotiate_reply(
     evpl_iovec_cursor_append_uint64(reply_cursor, request->negotiate.r_server_start_time);
     /* Security Buffer Offset */
     evpl_iovec_cursor_append_uint16(reply_cursor, 0);
-
     /* Security Buffer Length */
     evpl_iovec_cursor_append_uint16(reply_cursor, 0);
+    /* NegotiateContextOffset / Reserved2 */
+    evpl_iovec_cursor_append_uint32(reply_cursor, 0);
 
 } /* chimera_smb_negotiate_reply */
 
