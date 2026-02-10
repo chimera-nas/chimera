@@ -122,7 +122,7 @@ chimera_smb_parse_read(
         }
     }
 
-    request->read.niov = 64;
+    request->read.niov = 256;
 
     return 0;
 } /* chimera_smb_parse_write */

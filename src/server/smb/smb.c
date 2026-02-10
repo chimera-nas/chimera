@@ -205,7 +205,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     struct evpl                      *evpl   = thread->evpl;
     struct chimera_smb_conn          *conn   = compound->conn;
     struct evpl_iovec_cursor          reply_cursor;
-    struct evpl_iovec                 reply_iov[65];
+    struct evpl_iovec                 reply_iov[260];
     struct netbios_header            *netbios_hdr = NULL;
     struct smb2_header               *reply_hdr;
     struct smb_direct_hdr            *direct_hdr = NULL;

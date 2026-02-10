@@ -212,8 +212,8 @@ struct chimera_smb_request {
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_open_file   *open_file;
             struct chimera_smb_rdma_element rdma_elements[8];
-            struct evpl_iovec               iov[64];
-            struct evpl_iovec               chunk_iov[64];
+            struct evpl_iovec               iov[256];
+            struct evpl_iovec               chunk_iov[256];
 
         } write;
 
@@ -232,8 +232,8 @@ struct chimera_smb_request {
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_open_file   *open_file;
             struct chimera_smb_rdma_element rdma_elements[8];
-            struct evpl_iovec               iov[64];
-            struct evpl_iovec               chunk_iov[64];
+            struct evpl_iovec               iov[256];
+            struct evpl_iovec               chunk_iov[256];
         } read;
 
         struct {
