@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -138,11 +138,13 @@ chimera_smb_parse_tree_connect(
     struct chimera_smb_request *request)
 {
     uint16_t path16[SMB_FILENAME_MAX];
+    int      name_size;
 
     if (unlikely(request->request_struct_size != SMB2_TREE_CONNECT_REQUEST_SIZE)) {
         chimera_smb_error("Received SMB2 TREE_CONNECT request with invalid struct size (%u expected %u)",
                           request->request_struct_size,
                           SMB2_TREE_CONNECT_REQUEST_SIZE);
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
 
@@ -154,17 +156,22 @@ chimera_smb_parse_tree_connect(
         chimera_smb_error("Received SMB2 TREE_CONNECT request with invalid path length (%u max %u)",
                           request->tree_connect.path_length,
                           CHIMERA_VFS_PATH_MAX);
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
 
     evpl_iovec_cursor_copy(request_cursor, path16, request->tree_connect.path_length);
 
-    request->tree_connect.path_length = chimera_smb_utf16le_to_utf8(&request->compound->thread->iconv_ctx,
-                                                                    path16,
-                                                                    request->tree_connect.path_length,
-                                                                    request->tree_connect.path,
-                                                                    sizeof(request->tree_connect.path));
-
-
+    name_size = chimera_smb_utf16le_to_utf8(&request->compound->thread->iconv_ctx,
+                                            path16,
+                                            request->tree_connect.path_length,
+                                            request->tree_connect.path,
+                                            sizeof(request->tree_connect.path));
+    if (name_size < 0) {
+        chimera_smb_error("Failed to convert TREE_CONNECT path from UTF-16LE to UTF-8");
+        request->status = SMB2_STATUS_OBJECT_NAME_INVALID;
+        return -1;
+    }
+    request->tree_connect.path_length = name_size;
     return 0;
 } /* chimera_smb_parse_tree_connect */

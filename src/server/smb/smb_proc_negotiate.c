@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -119,6 +119,7 @@ chimera_smb_parse_negotiate(
         chimera_smb_error("Received SMB2 NEGOTIATE request with invalid struct size (%u expected %u)",
                           request->smb2_hdr.struct_size,
                           SMB2_NEGOTIATE_REQUEST_SIZE);
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
     evpl_iovec_cursor_get_uint16(request_cursor, &request->negotiate.dialect_count);
@@ -133,6 +134,7 @@ chimera_smb_parse_negotiate(
         chimera_smb_error("Received SMB2 NEGOTIATE request with invalid dialect count (%u max %u)",
                           request->negotiate.dialect_count,
                           SMB2_MAX_DIALECTS);
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
 

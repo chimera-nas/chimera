@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -88,6 +88,7 @@ chimera_smb_parse_close(
         chimera_smb_error("Received SMB2 CLOSE request with invalid struct size (%u expected %u)",
                           request->smb2_hdr.struct_size,
                           SMB2_CLOSE_REQUEST_SIZE);
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
 

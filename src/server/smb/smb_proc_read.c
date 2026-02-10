@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -111,6 +111,7 @@ chimera_smb_parse_read(
 
         if (unlikely(request->read.num_rdma_elements > 8)) {
             chimera_smb_error("Received SMB2 message with too many RDMA elements");
+            request->status = SMB2_STATUS_INVALID_PARAMETER;
             return -1;
         }
 
