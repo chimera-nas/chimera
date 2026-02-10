@@ -42,13 +42,20 @@ chimera_nfs4_read(
     struct nfs_resop4                *resop)
 {
     struct READ4args    *args    = &argop->opread;
+    struct READ4res     *res     = &resop->opread;
     struct nfs4_session *session = nfs4_resolve_session(
         req->session, &args->stateid,
         &thread->shared->nfs4_shared_clients);
     struct nfs4_state   *state;
     struct evpl_iovec   *iov;
 
-    if (!req->session && session) {
+    if (!session) {
+        res->status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
+    if (!req->session) {
         req->session = session;
         evpl_rpc2_conn_set_private_data(req->conn, session);
     }
