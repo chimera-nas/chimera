@@ -37,6 +37,7 @@ chimera_vfs_op_name(unsigned int opcode)
         case CHIMERA_VFS_OP_SETATTR: return "SetAttr";
         case CHIMERA_VFS_OP_LINK: return "Link";
         case CHIMERA_VFS_OP_CREATE_UNLINKED: return "CreateUnlinked";
+        case CHIMERA_VFS_OP_ALLOCATE: return "Allocate";
         default: return "Unknown";
     } /* switch */
 
@@ -123,6 +124,14 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
         case CHIMERA_VFS_OP_COMMIT:
             chimera_snprintf(argstr, sizeof(argstr), "hdl %lx",
                              req->commit.handle->vfs_private);
+            break;
+        case CHIMERA_VFS_OP_ALLOCATE:
+            chimera_snprintf(argstr, sizeof(argstr),
+                             "hdl %lx offset %lu len %lu flags %u",
+                             req->allocate.handle->vfs_private,
+                             req->allocate.offset,
+                             req->allocate.length,
+                             req->allocate.flags);
             break;
         case CHIMERA_VFS_OP_SYMLINK:
             format_safe_name(namestr, sizeof(namestr),

@@ -466,3 +466,38 @@ chimera_vfs_search_keys(
     chimera_vfs_search_keys_callback_t callback,
     chimera_vfs_search_keys_complete_t complete,
     void                              *private_data);
+
+typedef void (*chimera_vfs_allocate_callback_t)(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data);
+
+void
+chimera_vfs_allocate(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint64_t                        length,
+    uint32_t                        flags,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_allocate_callback_t callback,
+    void                           *private_data);
+
+typedef void (*chimera_vfs_seek_callback_t)(
+    enum chimera_vfs_error error_code,
+    int                    sr_eof,
+    uint64_t               sr_offset,
+    void                  *private_data);
+
+void
+chimera_vfs_seek(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        what,
+    chimera_vfs_seek_callback_t     callback,
+    void                           *private_data);

@@ -2732,6 +2732,254 @@ demofs_write(
     }
 } /* demofs_write */
 
+
+static void
+demofs_allocate(
+    struct demofs_thread       *thread,
+    struct demofs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct demofs_inode *inode;
+    struct timespec      now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
+
+    if (unlikely(!inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    demofs_map_attrs(thread, &request->allocate.r_pre_attr, inode);
+
+    if (request->allocate.flags & CHIMERA_VFS_ALLOCATE_DEALLOCATE) {
+        /* DEALLOCATE: punch hole in [offset, offset+length) */
+        uint64_t              hole_start = request->allocate.offset;
+        uint64_t              hole_end   = hole_start + request->allocate.length;
+        struct demofs_extent *extent, *next_extent;
+
+        if (hole_end > inode->size) {
+            hole_end = inode->size;
+        }
+
+        if (hole_start < hole_end) {
+            rb_tree_query_floor(&inode->file.extents, hole_start, file_offset,
+                                extent);
+
+            if (!extent) {
+                rb_tree_first(&inode->file.extents, extent);
+            }
+
+            while (extent) {
+                uint64_t extent_start = extent->file_offset;
+                uint64_t extent_end   = extent_start + extent->length;
+
+                next_extent = rb_tree_next(&inode->file.extents, extent);
+
+                /* Skip extents entirely before hole */
+                if (extent_end <= hole_start) {
+                    extent = next_extent;
+                    continue;
+                }
+
+                /* Stop if extent starts at or after hole end */
+                if (extent_start >= hole_end) {
+                    break;
+                }
+
+                if (extent_start >= hole_start && extent_end <= hole_end) {
+                    /* Extent is completely inside hole - remove it */
+                    rb_tree_remove(&inode->file.extents, &extent->node);
+                    demofs_extent_free(thread, extent);
+                } else if (extent_start < hole_start &&
+                           extent_end > hole_end) {
+                    /* Extent spans the entire hole - split it */
+                    struct demofs_extent *after_extent =
+                        demofs_extent_alloc(thread);
+                    uint64_t              after_shift = hole_end - extent_start;
+
+                    after_extent->device_id     = extent->device_id;
+                    after_extent->device_offset = extent->device_offset +
+                        after_shift;
+                    after_extent->file_offset = hole_end;
+                    after_extent->length      = extent_end - hole_end;
+                    after_extent->buffer      = NULL;
+
+                    rb_tree_insert(&inode->file.extents, file_offset,
+                                   after_extent);
+
+                    /* Trim original extent to end at hole_start */
+                    extent->length = hole_start - extent_start;
+                } else if (extent_start < hole_start) {
+                    /* Extent overlaps start of hole - trim end */
+                    extent->length = hole_start - extent_start;
+                } else {
+                    /* Extent overlaps end of hole - trim start */
+                    uint64_t shift = hole_end - extent_start;
+
+                    extent->file_offset    = hole_end;
+                    extent->device_offset += shift;
+                    extent->length        -= shift;
+
+                    if (extent->buffer) {
+                        extent->buffer = (char *) extent->buffer + shift;
+                    }
+                }
+
+                extent = next_extent;
+            }
+
+            inode->space_used = (inode->size + 4095) & ~4095;
+        }
+    } else {
+        /* ALLOCATE: extend file size if needed */
+        uint64_t new_end = request->allocate.offset + request->allocate.length;
+
+        if (new_end > inode->size) {
+            inode->size       = new_end;
+            inode->space_used = (inode->size + 4095) & ~4095;
+        }
+    }
+
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+
+    demofs_map_attrs(thread, &request->allocate.r_post_attr, inode);
+
+    pthread_mutex_unlock(&inode->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* demofs_allocate */
+
+static void
+demofs_seek(
+    struct demofs_thread       *thread,
+    struct demofs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct demofs_inode *inode;
+    uint64_t             offset = request->seek.offset;
+
+    inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
+
+    if (unlikely(!inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    if (offset >= inode->size) {
+        pthread_mutex_unlock(&inode->lock);
+        request->seek.r_eof    = 1;
+        request->seek.r_offset = 0;
+        request->status        = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    if (request->seek.what == 0) {
+        /* SEEK_DATA: find first extent covering or after offset */
+        struct demofs_extent *extent;
+
+        rb_tree_query_floor(&inode->file.extents, offset, file_offset, extent);
+
+        if (extent) {
+            uint64_t extent_end = extent->file_offset + extent->length;
+
+            if (extent_end <= offset) {
+                extent = rb_tree_next(&inode->file.extents, extent);
+            }
+        } else {
+            rb_tree_first(&inode->file.extents, extent);
+        }
+
+        /* Find the first extent that ends after offset */
+        while (extent) {
+            uint64_t extent_end = extent->file_offset + extent->length;
+
+            if (extent_end > offset) {
+                request->seek.r_offset = (extent->file_offset > offset) ?
+                    extent->file_offset : offset;
+                request->seek.r_eof = 0;
+                pthread_mutex_unlock(&inode->lock);
+                request->status = CHIMERA_VFS_OK;
+                request->complete(request);
+                return;
+            }
+
+            extent = rb_tree_next(&inode->file.extents, extent);
+        }
+
+        /* No data found */
+        pthread_mutex_unlock(&inode->lock);
+        request->seek.r_eof    = 1;
+        request->seek.r_offset = 0;
+        request->status        = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    } else {
+        /* SEEK_HOLE: find first gap from offset forward */
+        struct demofs_extent *extent;
+        uint64_t              current_pos = offset;
+
+        rb_tree_query_floor(&inode->file.extents, offset, file_offset, extent);
+
+        if (extent) {
+            uint64_t extent_end = extent->file_offset + extent->length;
+
+            if (extent_end <= offset) {
+                extent = rb_tree_next(&inode->file.extents, extent);
+            }
+        } else {
+            rb_tree_first(&inode->file.extents, extent);
+        }
+
+        while (extent) {
+            uint64_t extent_end = extent->file_offset + extent->length;
+
+            /* Skip extents entirely before current_pos */
+            if (extent_end <= current_pos) {
+                extent = rb_tree_next(&inode->file.extents, extent);
+                continue;
+            }
+
+            /* Gap before this extent - that's a hole */
+            if (extent->file_offset > current_pos) {
+                request->seek.r_offset = current_pos;
+                request->seek.r_eof    = 0;
+                pthread_mutex_unlock(&inode->lock);
+                request->status = CHIMERA_VFS_OK;
+                request->complete(request);
+                return;
+            }
+
+            /* This extent covers current_pos, advance past it */
+            current_pos = extent_end;
+            extent      = rb_tree_next(&inode->file.extents, extent);
+        }
+
+        /* Virtual hole at or after all extents */
+        if (current_pos < inode->size) {
+            request->seek.r_offset = current_pos;
+        } else {
+            request->seek.r_offset = inode->size;
+        }
+
+        request->seek.r_eof = 0;
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+} /* demofs_seek */
+
 static void
 demofs_symlink(
     struct demofs_thread       *thread,
@@ -3468,6 +3716,12 @@ demofs_dispatch(
         case CHIMERA_VFS_OP_COMMIT:
             request->status = CHIMERA_VFS_OK;
             request->complete(request);
+            break;
+        case CHIMERA_VFS_OP_ALLOCATE:
+            demofs_allocate(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_SEEK:
+            demofs_seek(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_SYMLINK:
             demofs_symlink(thread, shared, request, private_data);
