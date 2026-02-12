@@ -6,7 +6,15 @@ set(CHIMERA_BINARY ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 set(NFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_test_wrapper.sh)
 set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
 
-set(KVM_BACKENDS memfs linux io_uring demofs_io_uring)
+set(KVM_BACKENDS memfs linux)
+
+if(CHIMERA_VFS_IO_URING)
+    list(APPEND KVM_BACKENDS io_uring)
+endif()
+
+if(IO_URING_ENABLED)
+    list(APPEND KVM_BACKENDS demofs_io_uring)
+endif()
 
 if(HAVE_LIBAIO)
     list(APPEND KVM_BACKENDS demofs_aio)
