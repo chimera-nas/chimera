@@ -240,6 +240,7 @@ main(
     evpl_global_config_set_buffer_size(evpl_global_config, 8 * 1024 * 1024);
     evpl_global_config_set_spin_ns(evpl_global_config, 1000000UL);
     evpl_global_config_set_huge_pages(evpl_global_config, 1);
+    evpl_global_config_set_libaio_max_pending(evpl_global_config, 8192);
 
     /* Configure TLS if HTTPS is enabled */
     if (rest_https_port != 0) {
