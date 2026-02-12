@@ -4,6 +4,7 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
+#include "smb_string.h"
 #include "smb2.h"
 #include "common/misc.h"
 
@@ -62,6 +63,15 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
         case SMB2_FSCTL_QUERY_NETWORK_INTERFACE_INFO:
             chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
             break;
+
+        case SMB2_FSCTL_SET_REPARSE_POINT:
+            chimera_smb_ioctl_set_reparse(request);
+            break;
+
+        case SMB2_FSCTL_GET_REPARSE_POINT:
+            chimera_smb_ioctl_get_reparse(request);
+            break;
+
         default:
             chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
             break;
@@ -91,6 +101,9 @@ chimera_smb_ioctl_reply(
             break;
         case SMB2_FSCTL_QUERY_NETWORK_INTERFACE_INFO:
             output_length = 152 * shared->config.num_nic_info;
+            break;
+        case SMB2_FSCTL_GET_REPARSE_POINT:
+            output_length = request->ioctl.rp_response_len;
             break;
     } /* switch */
 
@@ -153,6 +166,11 @@ chimera_smb_ioctl_reply(
                 }
                 evpl_iovec_cursor_zero(reply_cursor, 120); /* ifname length */
             }
+            break;
+        case SMB2_FSCTL_GET_REPARSE_POINT:
+            evpl_iovec_cursor_append_blob(reply_cursor,
+                                          request->ioctl.rp_response,
+                                          request->ioctl.rp_response_len);
             break;
         default:
             break;
@@ -233,6 +251,172 @@ chimera_smb_parse_ioctl(
                                                                    input_count,
                                                                    1);
                 break;
+            case SMB2_FSCTL_SET_REPARSE_POINT:
+            {
+                uint16_t reparse_data_len;
+                uint16_t reserved;
+
+                if (request->ioctl.input_count < 8) {
+                    chimera_smb_error("SET_REPARSE_POINT input too small (%u < 8)",
+                                      request->ioctl.input_count);
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+
+                evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.rp_reparse_tag);
+                evpl_iovec_cursor_get_uint16(request_cursor, &reparse_data_len);
+                evpl_iovec_cursor_get_uint16(request_cursor, &reserved);
+
+                if (request->ioctl.rp_reparse_tag == SMB2_IO_REPARSE_TAG_NFS) {
+
+                    if (request->ioctl.input_count < 16) {
+                        chimera_smb_error("SET_REPARSE_POINT NFS input too small (%u < 16)",
+                                          request->ioctl.input_count);
+                        request->status = SMB2_STATUS_INVALID_PARAMETER;
+                        return -1;
+                    }
+
+                    evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.rp_nfs_type);
+
+                    switch (request->ioctl.rp_nfs_type) {
+                        case SMB2_NFS_SPECFILE_LNK:
+                        {
+                            int utf16_data_len = reparse_data_len - 8;
+                            int utf8_len;
+
+                            if (utf16_data_len <= 0 || utf16_data_len > (CHIMERA_VFS_PATH_MAX - 1) * 2) {
+                                chimera_smb_error("SET_REPARSE_POINT LNK: invalid target len %d",
+                                                  utf16_data_len);
+                                request->status = SMB2_STATUS_INVALID_PARAMETER;
+                                return -1;
+                            }
+
+                            {
+                                uint16_t                          utf16_buf[CHIMERA_VFS_PATH_MAX];
+                                struct chimera_server_smb_thread *thread = request->compound->thread;
+
+                                evpl_iovec_cursor_copy(request_cursor, utf16_buf, utf16_data_len);
+
+                                utf8_len = chimera_smb_utf16le_to_utf8(
+                                    &thread->iconv_ctx,
+                                    utf16_buf,
+                                    utf16_data_len,
+                                    request->ioctl.rp_target,
+                                    CHIMERA_VFS_PATH_MAX - 1);
+
+                                if (utf8_len < 0) {
+                                    chimera_smb_error("SET_REPARSE_POINT LNK: UTF-16LE conversion failed");
+                                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                                    return -1;
+                                }
+
+                                request->ioctl.rp_target[utf8_len] = '\0';
+                                request->ioctl.rp_target_len       = utf8_len;
+
+                                /* Convert Windows backslashes to Unix forward slashes */
+                                for (i = 0; i < utf8_len; i++) {
+                                    if (request->ioctl.rp_target[i] == '\\') {
+                                        request->ioctl.rp_target[i] = '/';
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        case SMB2_NFS_SPECFILE_CHR:
+                        case SMB2_NFS_SPECFILE_BLK:
+                            if (reparse_data_len < 16) {
+                                chimera_smb_error("SET_REPARSE_POINT CHR/BLK: data too small (%u < 16)",
+                                                  reparse_data_len);
+                                request->status = SMB2_STATUS_INVALID_PARAMETER;
+                                return -1;
+                            }
+                            evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.rp_device_major);
+                            evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.rp_device_minor);
+                            break;
+                        case SMB2_NFS_SPECFILE_FIFO:
+                        case SMB2_NFS_SPECFILE_SOCK:
+                            /* No additional data */
+                            break;
+                        default:
+                            chimera_smb_info("SET_REPARSE_POINT: unsupported NFS type 0x%llx",
+                                             (unsigned long long) request->ioctl.rp_nfs_type);
+                            break;
+                    } /* switch nfs_type */
+
+                } else if (request->ioctl.rp_reparse_tag == SMB2_IO_REPARSE_TAG_SYMLINK) {
+
+                    uint16_t sub_name_offset, sub_name_length;
+                    uint16_t print_name_offset, print_name_length;
+                    uint32_t symlink_flags;
+                    int      utf8_len;
+
+                    if (reparse_data_len < 12) {
+                        chimera_smb_error("SET_REPARSE_POINT SYMLINK: data too small (%u < 12)",
+                                          reparse_data_len);
+                        request->status = SMB2_STATUS_INVALID_PARAMETER;
+                        return -1;
+                    }
+
+                    evpl_iovec_cursor_get_uint16(request_cursor, &sub_name_offset);
+                    evpl_iovec_cursor_get_uint16(request_cursor, &sub_name_length);
+                    evpl_iovec_cursor_get_uint16(request_cursor, &print_name_offset);
+                    evpl_iovec_cursor_get_uint16(request_cursor, &print_name_length);
+                    evpl_iovec_cursor_get_uint32(request_cursor, &symlink_flags);
+
+                    if (sub_name_length == 0 ||
+                        sub_name_length > (CHIMERA_VFS_PATH_MAX - 1) * 2) {
+                        chimera_smb_error("SET_REPARSE_POINT SYMLINK: invalid sub_name_length %u",
+                                          sub_name_length);
+                        request->status = SMB2_STATUS_INVALID_PARAMETER;
+                        return -1;
+                    }
+
+                    /* Skip to SubstituteName within PathBuffer */
+                    if (sub_name_offset > 0) {
+                        evpl_iovec_cursor_skip(request_cursor, sub_name_offset);
+                    }
+
+                    {
+                        uint16_t                          utf16_buf[CHIMERA_VFS_PATH_MAX];
+                        struct chimera_server_smb_thread *thread = request->compound->thread;
+
+                        evpl_iovec_cursor_copy(request_cursor, utf16_buf, sub_name_length);
+
+                        utf8_len = chimera_smb_utf16le_to_utf8(
+                            &thread->iconv_ctx,
+                            utf16_buf,
+                            sub_name_length,
+                            request->ioctl.rp_target,
+                            CHIMERA_VFS_PATH_MAX - 1);
+
+                        if (utf8_len < 0) {
+                            chimera_smb_error("SET_REPARSE_POINT SYMLINK: UTF-16LE conversion failed");
+                            request->status = SMB2_STATUS_INVALID_PARAMETER;
+                            return -1;
+                        }
+
+                        request->ioctl.rp_target[utf8_len] = '\0';
+                        request->ioctl.rp_target_len       = utf8_len;
+
+                        /* Convert Windows backslashes to Unix forward slashes */
+                        for (i = 0; i < utf8_len; i++) {
+                            if (request->ioctl.rp_target[i] == '\\') {
+                                request->ioctl.rp_target[i] = '/';
+                            }
+                        }
+                    }
+
+                    /* Treat as NFS LNK for the handler */
+                    request->ioctl.rp_nfs_type = SMB2_NFS_SPECFILE_LNK;
+
+                } else {
+                    chimera_smb_info("SET_REPARSE_POINT: unsupported tag 0x%08x",
+                                     request->ioctl.rp_reparse_tag);
+                    /* Mark tag as 0 so handler knows to skip */
+                    request->ioctl.rp_reparse_tag = 0;
+                }
+                break;
+            }
             default:
                 /* Other IOCTLs don't need input parsing yet */
                 chimera_smb_info("Received IOCTL request with unhandled ctl_code 0x%08x, skipping input parsing",

@@ -114,11 +114,17 @@ chimera_smb_marshal_basic_attrs(
         smb_attr->smb_attributes |= 0x10; /* FILE_ATTRIBUTE_DIRECTORY */
     }
 
-    if ((attr->va_mode & S_IFMT) == S_IFLNK) {
-        smb_attr->smb_attributes |= 0x400; /* FILE_ATTRIBUTE_REPARSE_POINT */
-        smb_attr->smb_reparse_tag = 0xA000000C; /* IO_REPARSE_TAG_SYMLINK */
-        smb_attr->smb_attr_mask  |= SMB_ATTR_REPARSE_TAG;
-    }
+    switch (attr->va_mode & S_IFMT) {
+        case S_IFLNK:
+        case S_IFCHR:
+        case S_IFBLK:
+        case S_IFIFO:
+        case S_IFSOCK:
+            smb_attr->smb_attributes |= SMB2_FILE_ATTRIBUTE_REPARSE_POINT;
+            smb_attr->smb_reparse_tag = SMB2_IO_REPARSE_TAG_NFS;
+            smb_attr->smb_attr_mask  |= SMB_ATTR_REPARSE_TAG;
+            break;
+    } // switch
 
     /* Set default for normal file if no attributes are set */
     if (smb_attr->smb_attributes == 0 && (attr->va_mode & S_IFMT) == S_IFREG) {

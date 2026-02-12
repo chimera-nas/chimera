@@ -242,30 +242,43 @@ struct chimera_smb_request {
         } flush;
 
         struct {
-            uint32_t                   ctl_code;
-            struct chimera_smb_file_id file_id;
-            uint32_t                   input_offset;
-            uint32_t                   input_count;
-            uint32_t                   max_input_response;
-            uint32_t                   output_offset;
-            uint32_t                   output_count;
-            uint32_t                   max_output_response;
-            uint32_t                   input_niov;
-            uint32_t                   flags;
+            uint32_t                        ctl_code;
+            struct chimera_smb_file_id      file_id;
+            uint32_t                        input_offset;
+            uint32_t                        input_count;
+            uint32_t                        max_input_response;
+            uint32_t                        output_offset;
+            uint32_t                        output_count;
+            uint32_t                        max_output_response;
+            uint32_t                        input_niov;
+            uint32_t                        flags;
             /* Validate Negotiate Info fields */
-            uint32_t                   vni_capabilities;
-            uint8_t                    vni_guid[16];
-            uint8_t                    vni_security_mode;
-            uint16_t                   vni_dialect_count;
-            uint16_t                   vni_dialects[SMB2_MAX_DIALECTS];
+            uint32_t                        vni_capabilities;
+            uint8_t                         vni_guid[16];
+            uint8_t                         vni_security_mode;
+            uint16_t                        vni_dialect_count;
+            uint16_t                        vni_dialects[SMB2_MAX_DIALECTS];
             /* Response fields */
-            uint32_t                   r_capabilities;
-            uint8_t                    r_guid[16];
-            uint8_t                    r_security_mode;
+            uint32_t                        r_capabilities;
+            uint8_t                         r_guid[16];
+            uint8_t                         r_security_mode;
 
-            uint16_t                   r_dialect;
-            struct evpl_iovec          input_iov[64];
-            struct evpl_iovec          output_iov;
+            uint16_t                        r_dialect;
+            struct evpl_iovec               input_iov[64];
+            struct evpl_iovec               output_iov;
+            /* Reparse point fields */
+            struct chimera_smb_open_file   *rp_open_file;
+            struct chimera_vfs_open_handle *rp_parent_handle;
+            uint32_t                        rp_reparse_tag;
+            uint64_t                        rp_nfs_type;
+            uint32_t                        rp_device_major;
+            uint32_t                        rp_device_minor;
+            int                             rp_target_len;
+            char                            rp_target[CHIMERA_VFS_PATH_MAX];
+            struct chimera_vfs_attrs        rp_set_attr;
+            /* GET response buffer */
+            uint8_t                         rp_response[16 + (CHIMERA_VFS_PATH_MAX - 1) * 2];
+            int                             rp_response_len;
         } ioctl;
         struct {
             uint8_t                       info_type;

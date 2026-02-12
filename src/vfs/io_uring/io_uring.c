@@ -236,7 +236,14 @@ chimera_io_uring_complete(
 
                         sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
 
-                        io_uring_prep_statx(sqe, parent_fd, name, 0, AT_STATX_SYNC_AS_STAT, stx);
+                        if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
+                            io_uring_prep_statx(sqe, cqe->res, "",
+                                                AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW,
+                                                AT_STATX_SYNC_AS_STAT, stx);
+                        } else {
+                            io_uring_prep_statx(sqe, parent_fd, name, 0,
+                                                AT_STATX_SYNC_AS_STAT, stx);
+                        }
 
                         sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
 
@@ -253,14 +260,23 @@ chimera_io_uring_complete(
                         stx     = (struct statx *) (dir_stx + 1);
                         name    = (char *) (stx + 1);
 
-                        parent_fd = request->open_at.handle->vfs_private;
+                        if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
+                            chimera_linux_map_child_attrs_statx(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                                                                request,
+                                                                &request->open_at.r_attr,
+                                                                request->open_at.r_vfs_private,
+                                                                "",
+                                                                stx);
+                        } else {
+                            parent_fd = request->open_at.handle->vfs_private;
 
-                        chimera_linux_map_child_attrs_statx(CHIMERA_VFS_FH_MAGIC_IO_URING,
-                                                            request,
-                                                            &request->open_at.r_attr,
-                                                            parent_fd,
-                                                            name,
-                                                            stx);
+                            chimera_linux_map_child_attrs_statx(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                                                                request,
+                                                                &request->open_at.r_attr,
+                                                                parent_fd,
+                                                                name,
+                                                                stx);
+                        }
                     }
 
                 } else if (handle->slot == 2) {
@@ -901,6 +917,10 @@ chimera_io_uring_open_at(
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) {
         flags |= O_CREAT;
+    }
+
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
+        flags = O_PATH | O_NOFOLLOW;
     }
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
