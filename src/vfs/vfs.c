@@ -101,7 +101,6 @@ chimera_vfs_close_thread_callback(
     struct chimera_vfs_close_thread *close_thread = private_data;
 
     close_thread->num_pending--;
-    /* Handle is freed by chimera_vfs_close() */
 } /* chimera_vfs_close_thread_callback */
 
 static uint64_t
@@ -128,7 +127,9 @@ chimera_vfs_close_thread_sweep(
         close_thread->num_pending++;
 
         chimera_vfs_close(thread,
-                          handle,
+                          handle->vfs_module,
+                          handle->vfs_private,
+                          handle->fh_hash,
                           chimera_vfs_close_thread_callback,
                           close_thread);
 

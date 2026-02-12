@@ -10,6 +10,7 @@
 #include "vfs/vfs.h"
 #include "nfs.h"
 #include "nfs_internal.h"
+#include "nfs3_open_state.h"
 #include "common/logging.h"
 #include "common/macros.h"
 #include "evpl/evpl.h"
@@ -241,6 +242,20 @@ chimera_nfs_dispatch(
     } else if (request->opcode == CHIMERA_VFS_OP_UMOUNT) {
         mount   = request->umount.mount_private;
         nfsvers = mount->nfsvers;
+    } else if (request->opcode == CHIMERA_VFS_OP_CLOSE) {
+        /* Close requests get server routing from the open state stored in
+         * vfs_private, since the request may not carry a valid fh. */
+        struct chimera_nfs3_open_state *open_state =
+            (struct chimera_nfs3_open_state *) request->close.vfs_private;
+
+        if (!open_state) {
+            request->status = CHIMERA_VFS_OK;
+            request->complete(request);
+            return;
+        }
+
+        server  = shared->servers[open_state->server_index];
+        nfsvers = server->nfsvers;
     } else {
         fh = request->fh;
 

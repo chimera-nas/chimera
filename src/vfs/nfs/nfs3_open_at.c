@@ -65,6 +65,7 @@ chimera_nfs3_open_at_lookup_callback(
             return;
         }
 
+        state->server_index            = ctx->server->index;
         request->open_at.r_vfs_private = (uint64_t) state;
     } else {
         request->open_at.r_vfs_private = 0;
@@ -124,6 +125,7 @@ chimera_nfs3_open_at_create_callback(
             return;
         }
 
+        state->server_index            = ctx->server->index;
         request->open_at.r_vfs_private = (uint64_t) state;
     } else {
         request->open_at.r_vfs_private = 0;

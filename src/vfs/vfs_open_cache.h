@@ -301,12 +301,14 @@ chimera_vfs_open_cache_release(
                 /* Detached handle: close immediately, do not add to pending_close.
                  * Do not decrement open_handles - the handle was already removed
                  * from the cache when it was detached by insert(). */
-                pthread_mutex_unlock(&shard->lock);
-                chimera_vfs_open_cache_release_blocked(thread, requests, error_code);
-                chimera_vfs_close(thread, handle, NULL, NULL);
-                pthread_mutex_lock(&shard->lock);
+                struct chimera_vfs_module *close_module  = handle->vfs_module;
+                uint64_t                   close_private = handle->vfs_private;
+                uint64_t                   close_hash    = handle->fh_hash;
                 chimera_vfs_open_cache_free(shard, handle);
                 pthread_mutex_unlock(&shard->lock);
+                chimera_vfs_open_cache_release_blocked(thread, requests, error_code);
+                chimera_vfs_close(thread, close_module, close_private,
+                                  close_hash, NULL, NULL);
                 return;
             }
             clock_gettime(CLOCK_MONOTONIC, &handle->timestamp);
@@ -467,19 +469,30 @@ chimera_vfs_open_cache_acquire(
         if (shard->open_handles < shard->max_open_files) {
             shard->open_handles++;
             done = 1;
-        } else {
-            chimera_vfs_abort_if(!shard->pending_close, "open cache exhausted with referenced handles");
-
+        } else if (shard->pending_close) {
             existing = shard->pending_close;
 
             DL_DELETE(shard->pending_close, existing);
             chimera_vfs_open_cache_shard_remove(shard, existing);
 
-            chimera_vfs_close(thread, existing, chimera_vfs_open_cache_close_callback, handle);
+            struct chimera_vfs_module *close_module  = existing->vfs_module;
+            uint64_t                   close_private = existing->vfs_private;
+            uint64_t                   close_hash    = existing->fh_hash;
+
+            prometheus_counter_increment(shard->acquire);
 
             chimera_vfs_open_cache_free(shard, existing);
+            pthread_mutex_unlock(&shard->lock);
 
-            done = 0;
+            chimera_vfs_close(thread, close_module, close_private,
+                              close_hash,
+                              chimera_vfs_open_cache_close_callback, handle);
+
+            return;
+        } else {
+            /* All handles are active; just exceed the limit */
+            shard->open_handles++;
+            done = 1;
         }
 
     }
@@ -492,18 +505,6 @@ chimera_vfs_open_cache_acquire(
         callback(request, handle);
     }
 } /* chimera_vfs_open_cache_acquire */
-
-/* --- Close callback for insert eviction --- */
-
-static void
-chimera_vfs_open_cache_insert_close_callback(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
-{
-    /* Old handle evicted during insert; nothing to do on completion */
-    (void) error_code;
-    (void) private_data;
-} /* chimera_vfs_open_cache_insert_close_callback */
 
 /* --- Insert (always-insert, used by open_at / create_unlinked) --- */
 
@@ -556,8 +557,20 @@ chimera_vfs_open_cache_insert(
             /* On pending_close: remove from both lists, close old, free */
             DL_DELETE(shard->pending_close, existing);
             chimera_vfs_open_cache_shard_remove(shard, existing);
-            chimera_vfs_close(thread, existing, chimera_vfs_open_cache_insert_close_callback, NULL);
+            /* Insert new handle before dropping lock to prevent
+             * concurrent acquires from creating duplicate entries. */
+            chimera_vfs_open_cache_shard_insert(shard, handle);
+
+            struct chimera_vfs_module *close_module  = existing->vfs_module;
+            uint64_t                   close_private = existing->vfs_private;
+            uint64_t                   close_hash    = existing->fh_hash;
+
             chimera_vfs_open_cache_free(shard, existing);
+            pthread_mutex_unlock(&shard->lock);
+            chimera_vfs_close(thread, close_module, close_private,
+                              close_hash, NULL, NULL);
+            callback(request, handle);
+            return;
         } else {
             /* In use: detach. Current holders keep working; on release it closes immediately */
             chimera_vfs_open_cache_shard_remove(shard, existing);
@@ -573,8 +586,20 @@ chimera_vfs_open_cache_insert(
                 struct chimera_vfs_open_handle *victim = shard->pending_close;
                 DL_DELETE(shard->pending_close, victim);
                 chimera_vfs_open_cache_shard_remove(shard, victim);
-                chimera_vfs_close(thread, victim, chimera_vfs_open_cache_insert_close_callback, NULL);
+                /* Insert new handle before dropping lock to prevent
+                 * concurrent acquires from creating duplicate entries. */
+                chimera_vfs_open_cache_shard_insert(shard, handle);
+
+                struct chimera_vfs_module      *close_module  = victim->vfs_module;
+                uint64_t                        close_private = victim->vfs_private;
+                uint64_t                        close_hash    = victim->fh_hash;
+
                 chimera_vfs_open_cache_free(shard, victim);
+                pthread_mutex_unlock(&shard->lock);
+                chimera_vfs_close(thread, close_module, close_private,
+                                  close_hash, NULL, NULL);
+                callback(request, handle);
+                return;
             } else {
                 /* All handles are active; just exceed the limit */
                 shard->open_handles++;
