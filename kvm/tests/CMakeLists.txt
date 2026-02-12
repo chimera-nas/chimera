@@ -4,6 +4,7 @@
 
 set(CHIMERA_BINARY ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 set(NFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_test_wrapper.sh)
+set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
 
 set(KVM_BACKENDS memfs linux io_uring demofs_io_uring)
 
@@ -82,5 +83,54 @@ if(CAIRN_ENABLED)
             set_tests_properties(chimera/kvm/xfstests/${prog}_cairn_nfs${nfsver}
                 PROPERTIES LABELS kvm)
         endforeach()
+    endforeach()
+endif()
+
+# SMB tests
+foreach(category ${CTHON_CATEGORIES})
+    foreach(backend ${KVM_BACKENDS})
+        add_test(NAME chimera/kvm/smb/cthon/${category}_${backend}
+            COMMAND bash ${SMB_WRAPPER}
+                    ${KVM_IMAGE_DIR}/vmlinuz ${KVM_IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} ${backend}
+                    "${CTHON_CMD_${category}}")
+        set_tests_properties(chimera/kvm/smb/cthon/${category}_${backend}
+            PROPERTIES LABELS kvm)
+    endforeach()
+endforeach()
+
+if(CAIRN_ENABLED)
+    foreach(category ${CTHON_CATEGORIES})
+        add_test(NAME chimera/kvm/smb/cthon/${category}_cairn
+            COMMAND bash ${SMB_WRAPPER}
+                    ${KVM_IMAGE_DIR}/vmlinuz ${KVM_IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} cairn
+                    "${CTHON_CMD_${category}}")
+        set_tests_properties(chimera/kvm/smb/cthon/${category}_cairn
+            PROPERTIES LABELS kvm)
+    endforeach()
+endif()
+
+foreach(prog ${XFSTESTS_PROGRAMS})
+    foreach(backend ${KVM_BACKENDS})
+        add_test(NAME chimera/kvm/smb/xfstests/${prog}_${backend}
+            COMMAND bash ${SMB_WRAPPER}
+                    ${KVM_IMAGE_DIR}/vmlinuz ${KVM_IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} ${backend}
+                    "${XFSTESTS_CMD_${prog}}")
+        set_tests_properties(chimera/kvm/smb/xfstests/${prog}_${backend}
+            PROPERTIES LABELS kvm)
+    endforeach()
+endforeach()
+
+if(CAIRN_ENABLED)
+    foreach(prog ${XFSTESTS_PROGRAMS})
+        add_test(NAME chimera/kvm/smb/xfstests/${prog}_cairn
+            COMMAND bash ${SMB_WRAPPER}
+                    ${KVM_IMAGE_DIR}/vmlinuz ${KVM_IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} cairn
+                    "${XFSTESTS_CMD_${prog}}")
+        set_tests_properties(chimera/kvm/smb/xfstests/${prog}_cairn
+            PROPERTIES LABELS kvm)
     endforeach()
 endif()
