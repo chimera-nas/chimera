@@ -3,7 +3,7 @@
         {
             "label": "Scan Build",
             "type": "shell",
-            "command": "rm -rf /build/ScanBuild && scan-build --exclude /chimera/ext/libsmb2 -o /build/ScanReport sh -c 'cmake -D CMAKE_BUILD_TYPE=Debug -B /build/ScanBuild -S /chimera -G Ninja && ninja -C /build/ScanBuild'",
+            "command": "rm -rf /build/ScanBuild && scan-build -o /build/ScanReport sh -c 'cmake -D CMAKE_BUILD_TYPE=Debug -B /build/ScanBuild -S /chimera -G Ninja && ninja -C /build/ScanBuild'",
             "options": {
                 "env": {
                     "LC_ALL": "C",

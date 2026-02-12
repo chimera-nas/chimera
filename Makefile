@@ -73,14 +73,14 @@ syntax:
 build_clang_debug:
 	@rm -rf ${CHIMERA_BUILD_DIR}/ClangDebug
 	@mkdir -p ${CHIMERA_BUILD_DIR}/ClangDebug
-	@LC_ALL=C scan-build --status-bugs --exclude ext/libsmb2 -o ${CHIMERA_BUILD_DIR}/ClangDebug/ScanReport \
+	@LC_ALL=C scan-build --status-bugs -o ${CHIMERA_BUILD_DIR}/ClangDebug/ScanReport \
 		sh -c "cmake ${CMAKE_ARGS} ${CMAKE_ARGS_DEBUG} -S . -B ${CHIMERA_BUILD_DIR}/ClangDebug && ninja -C ${CHIMERA_BUILD_DIR}/ClangDebug"
 
 .PHONY: build_clang_release
 build_clang_release:
 	@rm -rf ${CHIMERA_BUILD_DIR}/ClangRelease
 	@mkdir -p ${CHIMERA_BUILD_DIR}/ClangRelease
-	@LC_ALL=C scan-build --status-bugs --exclude ext/libsmb2 -o ${CHIMERA_BUILD_DIR}/ClangRelease/ScanReport \
+	@LC_ALL=C scan-build --status-bugs -o ${CHIMERA_BUILD_DIR}/ClangRelease/ScanReport \
 		sh -c "cmake ${CMAKE_ARGS} ${CMAKE_ARGS_RELEASE} -S . -B ${CHIMERA_BUILD_DIR}/ClangRelease && ninja -C ${CHIMERA_BUILD_DIR}/ClangRelease"
 
 .PHONY: build_clang

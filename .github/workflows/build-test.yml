@@ -146,7 +146,7 @@ jobs:
             -w /build \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '\
-              scan-build --status-bugs --exclude /workspace/ext/libsmb2 -o /scan-report \
+              scan-build --status-bugs -o /scan-report \
               sh -c "cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -B /build -S /workspace -G Ninja && ninja -C /build"'
 
       - name: Upload static analysis report

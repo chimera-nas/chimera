@@ -168,7 +168,6 @@ endif()
 add_subdirectory(ext)
 
 include_directories(ext/libevpl/include)
-include_directories(ext/libsmb2/include)
 
 add_definitions(-DXDR_CUSTOM_IOVEC=${CHIMERA_EXT_SRC}/libevpl/src/rpc2/xdr_iovec.h)
 add_definitions(-DXDR_CUSTOM_DUMP=1)

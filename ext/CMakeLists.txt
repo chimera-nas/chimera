@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
@@ -11,5 +11,3 @@ set(XDRZCC ${XDRZCC} PARENT_SCOPE)
 remove_definitions(-fvisibility=hidden)
 
 remove_definitions(-Wall)
-
-add_subdirectory(libsmb2)
