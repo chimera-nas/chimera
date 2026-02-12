@@ -1,9 +1,0 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
-# SPDX-License-Identifier: Unlicense
-# Suppress OpenSSL provider leaks from gssntlmssp
-leak:OSSL_PROVIDER_try_load
-leak:OSSL_PROVIDER_load
-leak:OSSL_PROVIDER_add_builtin
-leak:provider_init
-leak:provider_register
-leak:gssntlmssp

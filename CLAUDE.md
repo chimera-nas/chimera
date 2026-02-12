@@ -149,7 +149,7 @@ Chimera uses JSON configuration files. Example:
 - Update CMakeLists.txt for new components
 
 ### Dependencies
-- External dependencies are in `ext/` (libevpl, libsmb2)
+- External dependencies are in `ext/` (libevpl)
 - System libraries: liburing, librdmacm, libjansson, liburcu, librocksdb
 - Optional: CUDA toolkit, FIO
 
