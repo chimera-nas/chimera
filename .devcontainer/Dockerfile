@@ -29,7 +29,8 @@ RUN apt-get -y update && \
     libxxhash-dev liburcu-dev librdmacm-dev liburing-dev libaio-dev libunwind-dev librocksdb-dev libcurl4-openssl-dev clangd uthash-dev libnuma-dev \
     libcurl4-openssl-dev build-essential ruby-full autoconf automake make libtool pkg-config libs3-dev gh npm reuse libssl-dev openssl \
     libkrb5-3 libkrb5-dev libgssapi-krb5-2 libwbclient-dev curl jq \
-    krb5-kdc krb5-admin-server krb5-user && \
+    krb5-kdc krb5-admin-server krb5-user \
+    samba samba-ad-dc samba-ad-provision samba-vfs-modules smbclient && \
     gem install jekyll bundler 
 
 RUN if [ "$ENABLE_CLAUDE" = "1" ] ; then \
