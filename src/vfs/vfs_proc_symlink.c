@@ -74,6 +74,13 @@ chimera_vfs_symlink(
 {
     struct chimera_vfs_request *request;
 
+    /* Validate symlink name and target lengths.
+     * NAME_MAX (255) for names, PATH_MAX (4096) for symlink targets. */
+    if (namelen > 255 || targetlen > 4096) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, private_data);
+        return;
+    }
+
     request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
 
     if (CHIMERA_VFS_IS_ERR(request)) {

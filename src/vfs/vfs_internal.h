@@ -20,6 +20,10 @@
 #include "metrics/metrics.h"
 #include "vfs/vfs_dump.h"
 
+/* Size of the per-request scratch buffer used by VFS modules.
+ * Must be large enough for the largest operation (symlink: name + target + 2 NULs). */
+#define CHIMERA_VFS_PLUGIN_DATA_SIZE 8192
+
 #ifndef container_of
 #define container_of(ptr, type, member) ({            \
         typeof(((type *) 0)->member) * __mptr = (ptr); \
@@ -166,7 +170,7 @@ chimera_vfs_request_alloc_common(
     } else {
         request              = calloc(1, sizeof(struct chimera_vfs_request));
         request->thread      = thread;
-        request->plugin_data = malloc(4096);
+        request->plugin_data = malloc(CHIMERA_VFS_PLUGIN_DATA_SIZE);
     }
     request->status = CHIMERA_VFS_UNSET;
     request->cred   = cred;

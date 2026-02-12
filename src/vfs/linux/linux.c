@@ -20,6 +20,7 @@
 #include <jansson.h>
 #include <linux/version.h>
 #include "vfs/vfs_error.h"
+#include "vfs/vfs_internal.h"
 
 // fchmodat support for AT_SYMLINK_NOFOLLOW was added in Linux 6.6
 #if defined(LINUX_VERSION_CODE) && defined(KERNEL_VERSION)
@@ -985,6 +986,13 @@ chimera_linux_symlink(
 {
     int   fd, rc;
     char *scratch = (char *) request->plugin_data;
+
+    if (request->symlink.namelen + request->symlink.targetlen + 2 >
+        CHIMERA_VFS_PLUGIN_DATA_SIZE) {
+        request->status = CHIMERA_VFS_ENAMETOOLONG;
+        request->complete(request);
+        return;
+    }
 
     TERM_STR(fullname, request->symlink.name, request->symlink.namelen, scratch);
     TERM_STR(target, request->symlink.target, request->symlink.targetlen, scratch);

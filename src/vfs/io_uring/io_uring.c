@@ -24,6 +24,7 @@
 #include <linux/version.h>
 
 #include "vfs/vfs_error.h"
+#include "vfs/vfs_internal.h"
 
 #include "evpl/evpl.h"
 
@@ -1297,6 +1298,12 @@ chimera_io_uring_symlink(
 
     --thread->inflight;
 
+    if (request->symlink.namelen + request->symlink.targetlen + 2 >
+        CHIMERA_VFS_PLUGIN_DATA_SIZE) {
+        request->status = CHIMERA_VFS_ENAMETOOLONG;
+        request->complete(request);
+        return;
+    }
 
     TERM_STR(fullname, request->symlink.name, request->symlink.namelen, scratch);
     TERM_STR(target, request->symlink.target, request->symlink.targetlen, scratch);
