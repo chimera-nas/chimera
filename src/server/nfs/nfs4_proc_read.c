@@ -41,13 +41,13 @@ chimera_nfs4_read(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct READ4args    *args    = &argop->opread;
-    struct READ4res     *res     = &resop->opread;
-    struct nfs4_session *session = nfs4_resolve_session(
+    struct READ4args               *args    = &argop->opread;
+    struct READ4res                *res     = &resop->opread;
+    struct nfs4_session            *session = nfs4_resolve_session(
         req->session, &args->stateid,
         &thread->shared->nfs4_shared_clients);
-    struct nfs4_state   *state;
-    struct evpl_iovec   *iov;
+    struct chimera_vfs_open_handle *handle;
+    struct evpl_iovec              *iov;
 
     if (!session) {
         res->status = NFS4ERR_BAD_STATEID;
@@ -60,13 +60,18 @@ chimera_nfs4_read(
         evpl_rpc2_conn_set_private_data(req->conn, session);
     }
 
-    state = nfs4_session_get_state(session, &args->stateid);
+    handle = nfs4_session_get_open_handle(session, &args->stateid);
+
+    if (!handle) {
+        chimera_nfs4_compound_complete(req, NFS4ERR_BAD_STATEID);
+        return;
+    }
 
     iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
     chimera_vfs_read(thread->vfs_thread, &req->cred,
-                     state->nfs4_state_handle,
+                     handle,
                      args->offset,
                      args->count,
                      iov,

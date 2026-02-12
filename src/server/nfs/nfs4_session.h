@@ -167,8 +167,73 @@ nfs4_session_get_state(
 {
     uint32_t slot = *(uint32_t *) stateid->other;
 
+    if (slot >= NFS4_SESSION_MAX_STATE) {
+        return NULL;
+    }
+
     return &session->nfs4_session_state[slot];
 } /* nfs4_session_get_state */
+
+static inline nfsstat4
+nfs4_session_validate_stateid(
+    struct nfs4_session   *session,
+    const struct stateid4 *stateid)
+{
+    uint32_t           slot     = *(uint32_t *) stateid->other;
+    uint64_t           clientid = *(uint64_t *) (stateid->other + 4);
+    struct nfs4_state *state;
+    nfsstat4           status;
+
+    if (slot >= NFS4_SESSION_MAX_STATE) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    if (clientid != session->nfs4_session_clientid) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    state = &session->nfs4_session_state[slot];
+
+    pthread_mutex_lock(&session->nfs4_session_lock);
+
+    if (!state->nfs4_state_active) {
+        status = NFS4ERR_BAD_STATEID;
+    } else {
+        status = NFS4_OK;
+    }
+
+    pthread_mutex_unlock(&session->nfs4_session_lock);
+
+    return status;
+} /* nfs4_session_validate_stateid */
+
+static inline struct chimera_vfs_open_handle *
+nfs4_session_get_open_handle(
+    struct nfs4_session   *session,
+    const struct stateid4 *stateid)
+{
+    uint32_t                        slot = *(uint32_t *) stateid->other;
+    struct nfs4_state              *state;
+    struct chimera_vfs_open_handle *handle;
+
+    if (slot >= NFS4_SESSION_MAX_STATE) {
+        return NULL;
+    }
+
+    state = &session->nfs4_session_state[slot];
+
+    pthread_mutex_lock(&session->nfs4_session_lock);
+
+    if (!state->nfs4_state_active) {
+        handle = NULL;
+    } else {
+        handle = state->nfs4_state_handle;
+    }
+
+    pthread_mutex_unlock(&session->nfs4_session_lock);
+
+    return handle;
+} /* nfs4_session_get_open_handle */
 
 static inline struct nfs4_session *
 nfs4_resolve_session(

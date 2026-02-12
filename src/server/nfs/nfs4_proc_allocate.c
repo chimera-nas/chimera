@@ -32,14 +32,19 @@ chimera_nfs4_allocate(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct ALLOCATE4args *args    = &argop->opallocate;
-    struct nfs4_session  *session = req->session;
-    struct nfs4_state    *state;
+    struct ALLOCATE4args           *args    = &argop->opallocate;
+    struct nfs4_session            *session = req->session;
+    struct chimera_vfs_open_handle *handle;
 
-    state = nfs4_session_get_state(session, &args->aa_stateid);
+    handle = nfs4_session_get_open_handle(session, &args->aa_stateid);
+
+    if (!handle) {
+        chimera_nfs4_compound_complete(req, NFS4ERR_BAD_STATEID);
+        return;
+    }
 
     chimera_vfs_allocate(thread->vfs_thread, &req->cred,
-                         state->nfs4_state_handle,
+                         handle,
                          args->aa_offset,
                          args->aa_length,
                          0,

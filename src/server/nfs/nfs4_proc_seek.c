@@ -34,14 +34,19 @@ chimera_nfs4_seek(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct SEEK4args    *args    = &argop->opseek;
-    struct nfs4_session *session = req->session;
-    struct nfs4_state   *state;
+    struct SEEK4args               *args    = &argop->opseek;
+    struct nfs4_session            *session = req->session;
+    struct chimera_vfs_open_handle *handle;
 
-    state = nfs4_session_get_state(session, &args->sa_stateid);
+    handle = nfs4_session_get_open_handle(session, &args->sa_stateid);
+
+    if (!handle) {
+        chimera_nfs4_compound_complete(req, NFS4ERR_BAD_STATEID);
+        return;
+    }
 
     chimera_vfs_seek(thread->vfs_thread, &req->cred,
-                     state->nfs4_state_handle,
+                     handle,
                      args->sa_offset,
                      args->sa_what,
                      chimera_nfs4_seek_complete,
