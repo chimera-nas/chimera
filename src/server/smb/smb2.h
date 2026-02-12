@@ -793,9 +793,19 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 
 
 #define SMB2_FSCTL_DFS_GET_REFERRALS                0x00060194
+#define SMB2_FSCTL_SET_REPARSE_POINT                0x000900A4
+#define SMB2_FSCTL_GET_REPARSE_POINT                0x000900A8
 #define SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO          0x00140204
 #define SMB2_FSCTL_TRANSCEIVE_PIPE                  0x0011C017
 #define SMB2_FSCTL_QUERY_NETWORK_INTERFACE_INFO     0x001401FC
+
+#define SMB2_IO_REPARSE_TAG_NFS                     0x80000014
+#define SMB2_IO_REPARSE_TAG_SYMLINK                 0xA000000C
+#define SMB2_NFS_SPECFILE_LNK                       0x0000000000004B4E4CULL
+#define SMB2_NFS_SPECFILE_CHR                       0x0000000000524843ULL
+#define SMB2_NFS_SPECFILE_BLK                       0x00000000004B4C42ULL
+#define SMB2_NFS_SPECFILE_FIFO                      0x000000004F464946ULL
+#define SMB2_NFS_SPECFILE_SOCK                      0x000000004B434F53ULL
 
 #define SMB2_FLUSH_REQUEST_SIZE                     24
 #define SMB2_FLUSH_REPLY_SIZE                       4
@@ -852,6 +862,11 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FILE_FS_ATTRIBUTE_INFO                 5
 #define SMB2_FILE_FS_FULL_SIZE_INFO                 7
 
+/* FileFsAttributeInformation FileSystemAttributes flags */
+#define SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH          0x00000001
+#define SMB2_FS_ATTR_CASE_PRESERVED_NAMES           0x00000002
+#define SMB2_FS_ATTR_UNICODE_ON_DISK                0x00000004
+#define SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS        0x00000080
 
 /*
  * FileAllInformation includes all the following structures:

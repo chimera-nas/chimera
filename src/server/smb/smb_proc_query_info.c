@@ -256,7 +256,11 @@ chimera_smb_query_info_reply(
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0x20); /* Remote Device */
                     break;
                 case SMB2_FILE_FS_ATTRIBUTE_INFO:
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+                    evpl_iovec_cursor_append_uint32(reply_cursor,
+                                                    SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH |
+                                                    SMB2_FS_ATTR_CASE_PRESERVED_NAMES |
+                                                    SMB2_FS_ATTR_UNICODE_ON_DISK |
+                                                    SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 255);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 4);
 

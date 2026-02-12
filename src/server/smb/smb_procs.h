@@ -188,3 +188,9 @@ void chimera_smb_echo_reply(
 
 void chimera_smb_echo(
     struct chimera_smb_request *request);
+
+void chimera_smb_ioctl_set_reparse(
+    struct chimera_smb_request *request);
+
+void chimera_smb_ioctl_get_reparse(
+    struct chimera_smb_request *request);

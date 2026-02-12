@@ -498,6 +498,9 @@ chimera_linux_set_open_flags(uint32_t in_flags)
     if (in_flags & CHIMERA_VFS_OPEN_DIRECTORY) {
         flags |= O_DIRECTORY;
     }
+    if (in_flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
+        flags |= O_NOFOLLOW;
+    }
     return flags;
 } /* chimera_linux_set_open_flags */
 
@@ -551,6 +554,12 @@ chimera_linux_open_at(
 
     flags = chimera_linux_set_open_flags(request->open_at.flags);
     fd    = openat(parent_fd, fullname, flags, mode);
+
+    if (fd < 0 && errno == ELOOP &&
+        (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW)) {
+        /* Symlink with O_NOFOLLOW: retry with O_PATH to get a handle */
+        fd = openat(parent_fd, fullname, O_PATH | O_NOFOLLOW, 0);
+    }
 
     if (fd < 0) {
         chimera_linux_debug("linux_open_at: openat(%d,%s,%d, 0%o) failed: %s",

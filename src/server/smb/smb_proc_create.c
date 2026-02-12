@@ -386,6 +386,11 @@ chimera_smb_create_open_parent_callback(
             flags |= CHIMERA_VFS_OPEN_READ_ONLY;
         }
 
+        if ((request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT) &&
+            request->create.create_disposition == SMB2_FILE_OPEN) {
+            flags |= CHIMERA_VFS_OPEN_NOFOLLOW;
+        }
+
         switch (request->create.create_disposition) {
             case SMB2_FILE_SUPERSEDE:
                 break;

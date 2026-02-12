@@ -168,6 +168,7 @@ struct chimera_vfs_attrs {
 #define CHIMERA_VFS_OPEN_DIRECTORY      (1U << 3)
 #define CHIMERA_VFS_OPEN_READ_ONLY      (1U << 4)
 #define CHIMERA_VFS_OPEN_EXCLUSIVE      (1U << 5)
+#define CHIMERA_VFS_OPEN_NOFOLLOW       (1U << 6)
 
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE 0x01
