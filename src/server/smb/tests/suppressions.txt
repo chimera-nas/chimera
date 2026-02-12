@@ -6,3 +6,9 @@ leak:OSSL_PROVIDER_load
 leak:OSSL_PROVIDER_add_builtin
 leak:provider_init
 leak:provider_register
+# SMB compound/request free lists are per-thread caches freed at thread exit
+leak:chimera_smb_compound_alloc
+# GSSAPI/Kerberos internal allocations
+leak:gss_accept_sec_context
+leak:libgssapi_krb5
+leak:libkrb5

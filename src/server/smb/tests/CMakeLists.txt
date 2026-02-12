@@ -12,3 +12,25 @@ add_test(NAME chimera/server/smb/auth_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_auth_test --mode=local)
 set_tests_properties(chimera/server/smb/auth_test PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt")
+
+# SMB smbclient authentication test
+add_executable(smbclient_auth_test smbclient_auth_test.c)
+target_link_libraries(smbclient_auth_test chimera_server chimera_metrics jansson)
+target_include_directories(smbclient_auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_test(NAME chimera/server/smb/smbclient_ntlm
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=ntlm)
+set_tests_properties(chimera/server/smb/smbclient_ntlm PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt")
+
+add_test(NAME chimera/server/smb/smbclient_kerberos
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/kerberos_test_wrapper.sh
+            ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=kerberos)
+set_tests_properties(chimera/server/smb/smbclient_kerberos PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt")
+
+add_test(NAME chimera/server/smb/smbclient_winbind
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/ad_test_wrapper.sh
+            ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=winbind)
+set_tests_properties(chimera/server/smb/smbclient_winbind PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt")

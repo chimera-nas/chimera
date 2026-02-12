@@ -22,9 +22,10 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEST_NAME="chimera_ad_$$"
-NETNS_NAME="netns_${TEST_NAME}"
-SAMBA_DIR="/tmp/samba_${TEST_NAME}"
+# Use short names to fit 15-char interface limit
+TEST_ID="$$"
+NETNS_NAME="ns_ad_${TEST_ID}"
+SAMBA_DIR="/tmp/samba_ad_${TEST_ID}"
 REALM="TEST.LOCAL"
 DOMAIN="TEST"
 ADMIN_PASS="TestPass123!"
@@ -43,7 +44,7 @@ cleanup() {
     ip netns exec "${NETNS_NAME}" pkill -9 winbindd 2>/dev/null || true
 
     # Remove veth pair
-    ip link delete "veth_${TEST_NAME}" 2>/dev/null || true
+    ip link delete "vad_${TEST_ID}" 2>/dev/null || true
 
     # Remove namespace
     ip netns delete "${NETNS_NAME}" 2>/dev/null || true
@@ -78,18 +79,18 @@ setup_namespace() {
     ip netns add "${NETNS_NAME}"
 
     # Create veth pair
-    ip link add "veth_${TEST_NAME}" type veth peer name "veth_${TEST_NAME}_ns"
+    ip link add "vad_${TEST_ID}" type veth peer name "vad_${TEST_ID}_ns"
 
     # Move one end to namespace
-    ip link set "veth_${TEST_NAME}_ns" netns "${NETNS_NAME}"
+    ip link set "vad_${TEST_ID}_ns" netns "${NETNS_NAME}"
 
     # Configure host side
-    ip addr add "${CLIENT_IP}/24" dev "veth_${TEST_NAME}"
-    ip link set "veth_${TEST_NAME}" up
+    ip addr add "${CLIENT_IP}/24" dev "vad_${TEST_ID}"
+    ip link set "vad_${TEST_ID}" up
 
     # Configure namespace side
-    ip netns exec "${NETNS_NAME}" ip addr add "${DC_IP}/24" dev "veth_${TEST_NAME}_ns"
-    ip netns exec "${NETNS_NAME}" ip link set "veth_${TEST_NAME}_ns" up
+    ip netns exec "${NETNS_NAME}" ip addr add "${DC_IP}/24" dev "vad_${TEST_ID}_ns"
+    ip netns exec "${NETNS_NAME}" ip link set "vad_${TEST_ID}_ns" up
     ip netns exec "${NETNS_NAME}" ip link set lo up
 }
 
@@ -106,6 +107,8 @@ provision_samba_ad() {
     workgroup = ${DOMAIN}
     server role = active directory domain controller
     dns forwarder = 8.8.8.8
+    interfaces = lo ${DC_IP}/24
+    bind interfaces only = yes
 
     private dir = ${SAMBA_DIR}/var/lib/samba/private
     state directory = ${SAMBA_DIR}/var/lib/samba
@@ -147,17 +150,16 @@ start_samba() {
 
     ip netns exec "${NETNS_NAME}" samba \
         --configfile="${SAMBA_DIR}/etc/smb.conf" \
-        --option="private dir = ${SAMBA_DIR}/var/lib/samba/private" \
-        --option="state directory = ${SAMBA_DIR}/var/lib/samba" \
-        --option="interfaces = lo ${DC_IP}/24" \
-        --option="bind interfaces only = yes" \
         --daemon
 
-    # Wait for samba to be ready
+    # Wait for samba to be ready by checking winbind connectivity.
+    # We use wbinfo --ping instead of samba-tool dns query because
+    # the latter requires DCE/RPC (port 135) which is not exposed.
     local retries=30
     while [ $retries -gt 0 ]; do
-        if ip netns exec "${NETNS_NAME}" samba-tool dns query "${DC_IP}" "${REALM,,}" @ ALL \
-            --configfile="${SAMBA_DIR}/etc/smb.conf" &>/dev/null; then
+        if ip netns exec "${NETNS_NAME}" \
+            env WINBINDD_SOCKET_DIR="${SAMBA_DIR}/var/lib/samba/winbindd_privileged" \
+            wbinfo --ping &>/dev/null; then
             log "Samba AD DC is ready"
             return 0
         fi
@@ -174,9 +176,9 @@ create_test_users() {
 
     # Create test users
     ip netns exec "${NETNS_NAME}" samba-tool user create testuser1 "Password1!" \
-        --configfile="${SAMBA_DIR}/etc/smb.conf" --quiet
+        --configfile="${SAMBA_DIR}/etc/smb.conf" 2>/dev/null
     ip netns exec "${NETNS_NAME}" samba-tool user create testuser2 "Password2!" \
-        --configfile="${SAMBA_DIR}/etc/smb.conf" --quiet
+        --configfile="${SAMBA_DIR}/etc/smb.conf" 2>/dev/null
 
     log "Test users created: testuser1, testuser2"
 }
@@ -186,14 +188,16 @@ generate_keytab() {
 
     KEYTAB_FILE="${SAMBA_DIR}/chimera.keytab"
 
-    ip netns exec "${NETNS_NAME}" samba-tool domain exportkeytab "${KEYTAB_FILE}" \
+    if ip netns exec "${NETNS_NAME}" samba-tool domain exportkeytab "${KEYTAB_FILE}" \
         --principal="cifs/dc.${REALM,,}@${REALM}" \
-        --configfile="${SAMBA_DIR}/etc/smb.conf"
-
-    chmod 644 "${KEYTAB_FILE}"
-
-    log "Keytab generated: ${KEYTAB_FILE}"
-    export KRB5_KTNAME="${KEYTAB_FILE}"
+        --configfile="${SAMBA_DIR}/etc/smb.conf" 2>/dev/null && \
+        [ -f "${KEYTAB_FILE}" ]; then
+        chmod 644 "${KEYTAB_FILE}"
+        export KRB5_KTNAME="${KEYTAB_FILE}"
+        log "Keytab generated: ${KEYTAB_FILE}"
+    else
+        log "WARNING: Keytab generation failed (Kerberos tests may not work)"
+    fi
 }
 
 setup_krb5_conf() {
@@ -249,7 +253,7 @@ run_test() {
     export AD_REALM="${REALM}"
     export AD_DOMAIN="${DOMAIN}"
     export AD_ADMIN_PASS="${ADMIN_PASS}"
-    export WINBINDD_SOCKET_DIR="${SAMBA_DIR}/var/run/samba/winbindd"
+    export WINBINDD_SOCKET_DIR="${SAMBA_DIR}/var/lib/samba/winbindd_privileged"
 
     # Run the test command
     "$@"

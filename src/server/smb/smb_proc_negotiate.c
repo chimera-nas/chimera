@@ -5,6 +5,41 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 
+/*
+ * Pre-built SPNEGO negTokenInit advertising available authentication mechanisms.
+ * This is the security blob sent in the SMB2 NEGOTIATE response.
+ *
+ * Structure (ASN.1/DER, RFC 4178 EXPLICIT TAGS):
+ *   APPLICATION [0] {
+ *     OID 1.3.6.1.5.5.2 (SPNEGO)
+ *     [0] {                          -- NegTokenInit (EXPLICIT context tag)
+ *       SEQUENCE {                   -- NegTokenInit fields
+ *         [0] {                      -- mechTypes (EXPLICIT context tag)
+ *           SEQUENCE OF {
+ *             OID 1.2.840.48018.1.2.2   (MS KRB5)
+ *             OID 1.2.840.113554.1.2.2  (KRB5)
+ *             OID 1.3.6.1.4.1.311.2.2.10 (NTLMSSP)
+ *           }
+ *         }
+ *       }
+ *     }
+ *   }
+ */
+static const uint8_t spnego_negotiate_token[] = {
+    0x60, 0x32, /* APPLICATION [0], len 50 */
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,     /* OID: SPNEGO */
+    0xa0, 0x28, /* [0] NegTokenInit, len 40 */
+    0x30, 0x26, /* SEQUENCE, len 38 */
+    0xa0, 0x24, /* [0] mechTypes, len 36 */
+    0x30, 0x22, /* SEQUENCE OF, len 34 */
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12,     /* OID: MS KRB5 */
+    0x01, 0x02, 0x02,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12,     /* OID: KRB5 */
+    0x01, 0x02, 0x02,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82,     /* OID: NTLMSSP */
+    0x37, 0x02, 0x02, 0x0a,
+};
+
 void
 chimera_smb_negotiate(struct chimera_smb_request *request)
 {
@@ -90,6 +125,9 @@ chimera_smb_negotiate_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request)
 {
+    uint16_t security_buffer_offset = sizeof(struct smb2_header) + 64;
+    uint16_t security_buffer_length = sizeof(spnego_negotiate_token);
+
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_NEGOTIATE_REPLY_SIZE);
     evpl_iovec_cursor_append_uint16(reply_cursor, request->negotiate.r_security_mode);
     evpl_iovec_cursor_append_uint16(reply_cursor, request->negotiate.r_dialect);
@@ -101,12 +139,13 @@ chimera_smb_negotiate_reply(
     evpl_iovec_cursor_append_uint32(reply_cursor, request->negotiate.r_max_write_size);
     evpl_iovec_cursor_append_uint64(reply_cursor, request->negotiate.r_system_time);
     evpl_iovec_cursor_append_uint64(reply_cursor, request->negotiate.r_server_start_time);
-    /* Security Buffer Offset */
-    evpl_iovec_cursor_append_uint16(reply_cursor, 0);
-    /* Security Buffer Length */
-    evpl_iovec_cursor_append_uint16(reply_cursor, 0);
+    evpl_iovec_cursor_append_uint16(reply_cursor, security_buffer_offset);
+    evpl_iovec_cursor_append_uint16(reply_cursor, security_buffer_length);
     /* NegotiateContextOffset / Reserved2 */
     evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+    /* SPNEGO security buffer */
+    evpl_iovec_cursor_append_blob(reply_cursor, (void *) spnego_negotiate_token,
+                                  security_buffer_length);
 
 } /* chimera_smb_negotiate_reply */
 
@@ -125,12 +164,17 @@ chimera_smb_parse_negotiate(
         return -1;
     }
     evpl_iovec_cursor_get_uint16(request_cursor, &request->negotiate.dialect_count);
-    evpl_iovec_cursor_get_uint8(request_cursor, &request->negotiate.security_mode);
+    {
+        uint16_t security_mode_wire;
+        evpl_iovec_cursor_get_uint16(request_cursor, &security_mode_wire);
+        request->negotiate.security_mode = (uint8_t) security_mode_wire;
+    }
+    evpl_iovec_cursor_skip(request_cursor, 2); /* Reserved */
     evpl_iovec_cursor_get_uint32(request_cursor, &request->negotiate.capabilities);
     evpl_iovec_cursor_copy(request_cursor, request->negotiate.client_guid, 16);
     evpl_iovec_cursor_get_uint32(request_cursor, &request->negotiate.negotiate_context_offset);
     evpl_iovec_cursor_get_uint16(request_cursor, &request->negotiate.negotiate_context_count);
-    evpl_iovec_cursor_skip(request_cursor, 2);
+    evpl_iovec_cursor_skip(request_cursor, 2); /* Reserved2 */
 
     if (request->negotiate.dialect_count > SMB2_MAX_DIALECTS) {
         chimera_smb_error("Received SMB2 NEGOTIATE request with invalid dialect count (%u max %u)",

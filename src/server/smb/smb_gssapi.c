@@ -23,9 +23,7 @@ smb_gssapi_init(
     struct smb_gssapi_ctx *ctx,
     const char            *keytab)
 {
-    OM_uint32     major, minor;
-    gss_cred_id_t cred  = GSS_C_NO_CREDENTIAL;
-    gss_OID_set   mechs = GSS_C_NO_OID_SET;
+    OM_uint32 major, minor;
 
     memset(ctx, 0, sizeof(*ctx));
     ctx->gss_ctx     = GSS_C_NO_CONTEXT;
@@ -45,42 +43,36 @@ smb_gssapi_init(
         }
     }
 
-    // Create OID set with only Kerberos mechanism
-    // This prevents GSSAPI from loading other mechanisms like gssntlmssp
-    major = gss_create_empty_oid_set(&minor, &mechs);
-    if (GSS_ERROR(major)) {
-        chimera_smb_debug("smb_gssapi: gss_create_empty_oid_set failed");
-        ctx->initialized = 1;
-        return 0;
-    }
+    // Verify keytab is usable by acquiring credentials, but don't store
+    // them. We pass GSS_C_NO_CREDENTIAL to gss_accept_sec_context()
+    // instead, which dynamically looks up the matching principal from
+    // the keytab. This avoids binding to a single service principal
+    // when the keytab contains multiple (e.g. cifs/host1 and cifs/host2).
+    {
+        gss_cred_id_t cred  = GSS_C_NO_CREDENTIAL;
+        gss_OID_set   mechs = GSS_C_NO_OID_SET;
 
-    major = gss_add_oid_set_member(&minor, (gss_OID) gss_mech_krb5, &mechs);
-    if (GSS_ERROR(major)) {
-        chimera_smb_debug("smb_gssapi: gss_add_oid_set_member failed");
-        gss_release_oid_set(&minor, &mechs);
-        ctx->initialized = 1;
-        return 0;
-    }
+        major = gss_create_empty_oid_set(&minor, &mechs);
+        if (!GSS_ERROR(major)) {
+            gss_add_oid_set_member(&minor, (gss_OID) gss_mech_krb5, &mechs);
+            major = gss_acquire_cred(&minor,
+                                     GSS_C_NO_NAME,
+                                     GSS_C_INDEFINITE,
+                                     mechs,
+                                     GSS_C_ACCEPT,
+                                     &cred,
+                                     NULL,
+                                     NULL);
+            gss_release_oid_set(&minor, &mechs);
 
-    // Acquire server credentials for Kerberos only
-    // Use GSS_C_NO_NAME to accept any service principal in the keytab
-    major = gss_acquire_cred(&minor,
-                             GSS_C_NO_NAME,
-                             GSS_C_INDEFINITE,
-                             mechs,
-                             GSS_C_ACCEPT,
-                             &cred,
-                             NULL,
-                             NULL);
-
-    gss_release_oid_set(&minor, &mechs);
-
-    if (GSS_ERROR(major)) {
-        chimera_smb_debug("smb_gssapi: gss_acquire_cred failed: %u.%u", major, minor);
-        // Continue without pre-acquired credentials
-        // gss_accept_sec_context can still work
-    } else {
-        ctx->server_cred = cred;
+            if (GSS_ERROR(major)) {
+                chimera_smb_debug("smb_gssapi: gss_acquire_cred failed: "
+                                  "%u.%u (keytab may be invalid)", major, minor);
+            } else {
+                chimera_smb_debug("smb_gssapi: Keytab credentials verified");
+                gss_release_cred(&minor, &cred);
+            }
+        }
     }
 
     ctx->initialized = 1;

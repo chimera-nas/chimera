@@ -56,7 +56,8 @@ smb_wbclient_auth_ntlm(
     uint32_t      *gid,
     uint32_t      *ngids,
     uint32_t      *gids,
-    char          *sid_out)
+    char          *sid_out,
+    uint8_t       *session_key)
 {
     wbcErr                   wbc_err;
     struct wbcAuthUserParams params;
@@ -141,6 +142,11 @@ smb_wbclient_auth_ntlm(
         wbcFreeMemory(groups_sids);
     } else {
         *ngids = 0;
+    }
+
+    // Copy session key if requested
+    if (session_key) {
+        memcpy(session_key, info->user_session_key, 16);
     }
 
     chimera_smb_info("wbclient auth success: user=%s\\%s uid=%u gid=%u ngids=%u",
@@ -289,7 +295,8 @@ smb_wbclient_auth_ntlm(
     uint32_t      *gid,
     uint32_t      *ngids,
     uint32_t      *gids,
-    char          *sid_out)
+    char          *sid_out,
+    uint8_t       *session_key)
 {
     (void) username;
     (void) domain;
@@ -304,6 +311,7 @@ smb_wbclient_auth_ntlm(
     (void) ngids;
     (void) gids;
     (void) sid_out;
+    (void) session_key;
 
     return -1;
 } // smb_wbclient_auth_ntlm

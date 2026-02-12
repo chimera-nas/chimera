@@ -13,6 +13,7 @@
 // Authenticate a user via winbind using NTLM challenge/response
 // Returns: 0 on success, -1 on failure
 // sid_out should be at least SMB_WBCLIENT_SID_MAX_LEN bytes (can be NULL)
+// session_key should be at least 16 bytes (can be NULL)
 int smb_wbclient_auth_ntlm(
     const char    *username,
     const char    *domain,
@@ -26,7 +27,8 @@ int smb_wbclient_auth_ntlm(
     uint32_t      *gid,
     uint32_t      *ngids,
     uint32_t      *gids,
-    char          *sid_out);
+    char          *sid_out,
+    uint8_t       *session_key);
 
 // Map a Kerberos principal name to Unix credentials via winbind
 // principal format: "user@REALM" or "DOMAIN\user"

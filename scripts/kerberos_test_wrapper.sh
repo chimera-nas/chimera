@@ -7,8 +7,7 @@
 # Kerberos Test Wrapper (MIT KDC only - no AD)
 #
 # Runs SMB Kerberos authentication tests against a minimal MIT KDC.
-# This is lighter weight than full Samba AD DC - useful for testing
-# just the GSSAPI/Kerberos path without winbind integration.
+# Everything runs inside an isolated network namespace.
 #
 # Requirements:
 # - krb5-kdc, krb5-admin-server packages
@@ -19,12 +18,14 @@
 
 set -e
 
-TEST_NAME="chimera_krb_$$"
-NETNS_NAME="netns_${TEST_NAME}"
-KRB_DIR="/tmp/krb5_${TEST_NAME}"
+# Use short names to fit 15-char interface limit
+TEST_ID="$$_$(date +%s%N | tail -c 6)"
+NETNS_NAME="ns_krb_${TEST_ID}"
+KRB_DIR="/tmp/krb5_${TEST_ID}"
 REALM="TEST.LOCAL"
 KDC_IP="127.0.0.1"
 KDC_PORT="8888"
+SMB_HOST="smbhost.test.local"
 
 log() {
     echo "[krb_test] $*" >&2
@@ -33,15 +34,20 @@ log() {
 cleanup() {
     log "Cleaning up..."
 
-    # Kill KDC
-    if [ -f "${KRB_DIR}/kdc.pid" ]; then
-        kill "$(cat "${KRB_DIR}/kdc.pid")" 2>/dev/null || true
+    # Kill all processes in the namespace
+    if ip netns list 2>/dev/null | grep -q "^${NETNS_NAME}"; then
+        # Kill any remaining processes in the namespace
+        ip netns pids "${NETNS_NAME}" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+        sleep 0.1
+        ip netns delete "${NETNS_NAME}" 2>/dev/null || true
     fi
 
-    # Remove namespace if we created one
-    ip netns delete "${NETNS_NAME}" 2>/dev/null || true
+    # Remove hostname entry from /etc/hosts
+    if [ "${HOSTS_MODIFIED:-0}" = "1" ]; then
+        sed -i "/^127\.0\.0\.1 ${SMB_HOST}$/d" /etc/hosts 2>/dev/null || true
+    fi
 
-    # Clean up
+    # Clean up temp directory
     rm -rf "${KRB_DIR}" 2>/dev/null || true
 }
 
@@ -61,6 +67,19 @@ check_requirements() {
         log "Install with: apt-get install krb5-kdc krb5-admin-server"
         exit 1
     fi
+}
+
+setup_namespace() {
+    log "Creating network namespace..."
+
+    ip netns add "${NETNS_NAME}"
+    ip netns exec "${NETNS_NAME}" ip link set lo up
+
+    # Add hostname for SMB server (smbclient refuses Kerberos to 'localhost')
+    echo "127.0.0.1 ${SMB_HOST}" >> /etc/hosts
+    HOSTS_MODIFIED=1
+
+    log "Namespace ${NETNS_NAME} created"
 }
 
 setup_kdc() {
@@ -92,6 +111,8 @@ EOF
     default_realm = ${REALM}
     dns_lookup_realm = false
     dns_lookup_kdc = false
+    dns_canonicalize_hostname = false
+    rdns = false
     ticket_lifetime = 24h
     forwardable = true
 
@@ -104,19 +125,20 @@ EOF
 [domain_realm]
     .test.local = ${REALM}
     test.local = ${REALM}
+    ${SMB_HOST} = ${REALM}
 EOF
 
     # Create ACL file
     echo "*/admin@${REALM} *" > "${KRB_DIR}/var/lib/krb5kdc/kadm5.acl"
 
-    export KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf"
-    export KRB5_KDC_PROFILE="${KRB_DIR}/etc/kdc.conf"
-
-    log "KRB5_CONFIG=${KRB5_CONFIG}"
+    log "KRB5_CONFIG=${KRB_DIR}/etc/krb5.conf"
 }
 
 create_database() {
     log "Creating KDC database..."
+
+    export KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf"
+    export KRB5_KDC_PROFILE="${KRB_DIR}/etc/kdc.conf"
 
     # Create the database with a random master password
     local master_pass
@@ -130,9 +152,16 @@ create_database() {
 create_principals() {
     log "Creating principals..."
 
-    # Create service principal for our SMB server
+    export KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf"
+    export KRB5_KDC_PROFILE="${KRB_DIR}/etc/kdc.conf"
+
+    # Create service principals for our SMB server
+    # localhost: for libsmb2 tests (MIT Kerberos, no localhost restriction)
     kadmin.local -q "addprinc -randkey cifs/localhost@${REALM}" 2>/dev/null
     kadmin.local -q "addprinc -randkey host/localhost@${REALM}" 2>/dev/null
+    # SMB_HOST: for smbclient tests (smbclient refuses Kerberos to 'localhost')
+    kadmin.local -q "addprinc -randkey cifs/${SMB_HOST}@${REALM}" 2>/dev/null
+    kadmin.local -q "addprinc -randkey host/${SMB_HOST}@${REALM}" 2>/dev/null
 
     # Create test users
     kadmin.local -q "addprinc -pw Password1! testuser1@${REALM}" 2>/dev/null
@@ -144,21 +173,29 @@ create_principals() {
 generate_keytab() {
     log "Generating keytab..."
 
+    export KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf"
+    export KRB5_KDC_PROFILE="${KRB_DIR}/etc/kdc.conf"
+
     KEYTAB_FILE="${KRB_DIR}/chimera.keytab"
 
     kadmin.local -q "ktadd -k ${KEYTAB_FILE} cifs/localhost@${REALM}" 2>/dev/null
     kadmin.local -q "ktadd -k ${KEYTAB_FILE} host/localhost@${REALM}" 2>/dev/null
+    kadmin.local -q "ktadd -k ${KEYTAB_FILE} cifs/${SMB_HOST}@${REALM}" 2>/dev/null
+    kadmin.local -q "ktadd -k ${KEYTAB_FILE} host/${SMB_HOST}@${REALM}" 2>/dev/null
 
     chmod 644 "${KEYTAB_FILE}"
 
-    export KRB5_KTNAME="${KEYTAB_FILE}"
     log "KRB5_KTNAME=${KEYTAB_FILE}"
 }
 
 start_kdc() {
-    log "Starting KDC on port ${KDC_PORT}..."
+    log "Starting KDC on port ${KDC_PORT} inside namespace..."
 
-    krb5kdc -n -P "${KRB_DIR}/kdc.pid" &
+    # Start KDC inside the namespace
+    ip netns exec "${NETNS_NAME}" env \
+        KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
+        KRB5_KDC_PROFILE="${KRB_DIR}/etc/kdc.conf" \
+        krb5kdc -n -P "${KRB_DIR}/kdc.pid" &
 
     # Wait for KDC to be ready
     sleep 1
@@ -174,32 +211,46 @@ start_kdc() {
 obtain_ticket() {
     log "Obtaining Kerberos ticket for testuser1..."
 
-    # Set up credential cache in our temp directory
-    export KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1"
-
-    # Get a ticket for testuser1 (used by the SMB client for GSSAPI auth)
+    # Get a ticket for testuser1 inside the namespace
     # Use printf to avoid newline issues with password
-    if printf '%s' "Password1!" | kinit testuser1@${REALM} 2>/dev/null; then
+    if ip netns exec "${NETNS_NAME}" env \
+        KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
+        KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+        sh -c 'printf "%s" "Password1!" | kinit testuser1@'"${REALM}"' 2>/dev/null'; then
         log "Obtained TGT for testuser1@${REALM}"
-        log "KRB5CCNAME=${KRB5CCNAME}"
-        klist 2>/dev/null || true
+        log "KRB5CCNAME=${KRB_DIR}/krb5cc_testuser1"
+
+        # Pre-acquire cifs service ticket so smbclient doesn't need KDC access
+        ip netns exec "${NETNS_NAME}" env \
+            KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
+            KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+            kvno cifs/${SMB_HOST}@${REALM} 2>/dev/null || true
+
+        ip netns exec "${NETNS_NAME}" env \
+            KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
+            KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+            klist 2>/dev/null || true
         return 0
     else
         log "ERROR: Failed to obtain Kerberos ticket"
-        log "kinit output:"
-        printf '%s' "Password1!" | kinit testuser1@${REALM} 2>&1 || true
         return 1
     fi
 }
 
 run_test() {
-    log "Running test: $*"
+    log "Running test inside namespace: $*"
 
-    # Export environment
-    export KRB_REALM="${REALM}"
-    export KRB_KDC="${KDC_IP}:${KDC_PORT}"
-
-    "$@"
+    # Run test inside the namespace with all required environment variables
+    ip netns exec "${NETNS_NAME}" env \
+        KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
+        KRB5_KDC_PROFILE="${KRB_DIR}/etc/kdc.conf" \
+        KRB5_KTNAME="${KRB_DIR}/chimera.keytab" \
+        KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+        KRB_REALM="${REALM}" \
+        KRB_USER="testuser1" \
+        KRB_SMB_HOST="${SMB_HOST}" \
+        KRB_KDC="${KDC_IP}:${KDC_PORT}" \
+        "$@"
 }
 
 main() {
@@ -207,6 +258,7 @@ main() {
         echo "Usage: $0 <test_command> [args...]"
         echo ""
         echo "Runs a test command with a minimal MIT KDC for Kerberos testing."
+        echo "Both KDC and test run inside an isolated network namespace."
         echo ""
         echo "Environment variables exported to test:"
         echo "  KRB5_CONFIG   - Path to krb5.conf"
@@ -217,6 +269,7 @@ main() {
     fi
 
     check_requirements
+    setup_namespace
     setup_kdc
     create_database
     create_principals

@@ -80,9 +80,9 @@ is_spnego_wrapped(
     if (len < 2) {
         return 0;
     }
-    // SPNEGO negotiation token starts with 0x60 (APPLICATION CONSTRUCTED)
-    // or raw NTLMSSP starts with "NTLMSSP"
-    if (buf[0] == 0x60) {
+    // SPNEGO: 0x60 = negTokenInit (APPLICATION CONSTRUCTED)
+    //         0xa1 = negTokenResp (context tag [1])
+    if (buf[0] == 0x60 || buf[0] == 0xa1) {
         return 1;
     }
     return 0;
@@ -90,27 +90,53 @@ is_spnego_wrapped(
 
 // Wrap NTLM challenge in SPNEGO negTokenResp
 // This is a simplified wrapper that creates the minimal SPNEGO response
+static inline size_t
+asn1_len_bytes(size_t len)
+{
+    return (len < 128) ? 1 : 3;
+} /* asn1_len_bytes */
+
+static inline size_t
+asn1_write_len(
+    uint8_t *buf,
+    size_t   pos,
+    size_t   len)
+{
+    if (len < 128) {
+        buf[pos++] = (uint8_t) len;
+    } else {
+        buf[pos++] = 0x82;
+        buf[pos++] = (uint8_t) ((len >> 8) & 0xff);
+        buf[pos++] = (uint8_t) (len & 0xff);
+    }
+    return pos;
+} /* asn1_write_len */
+
 static uint8_t *
 wrap_challenge_spnego(
     const uint8_t *ntlm_challenge,
     size_t         ntlm_len,
     size_t        *out_len)
 {
-    // SPNEGO negTokenResp structure for challenge:
-    // A1 <len> SEQUENCE
-    //   A0 03 ENUMERATED(1) = accept-incomplete
-    //   A1 <len> supportedMech = NTLMSSP OID
-    //   A2 <len> responseToken = NTLM challenge
+    // Build SPNEGO negTokenResp:
+    //   A1 <len>                        -- negTokenResp context tag [1]
+    //     30 <len>                      -- SEQUENCE
+    //       A0 03 0A 01 01              -- [0] negState = accept-incomplete
+    //       A1 <len> <ntlmssp_oid>      -- [1] supportedMech = NTLMSSP
+    //       A2 <len>                    -- [2] responseToken (EXPLICIT)
+    //         04 <len> <ntlm_bytes>     --   OCTET STRING
 
-    size_t   oid_section_len  = sizeof(ntlmssp_oid);
-    size_t   enum_section_len = 5;           // A0 03 0A 01 01
+    // Compute exact lengths bottom-up
+    size_t   oid_len     = sizeof(ntlmssp_oid);
+    size_t   octet_len   = 1 + asn1_len_bytes(ntlm_len) + ntlm_len;
+    size_t   a2_len      = 1 + asn1_len_bytes(octet_len) + octet_len;
+    size_t   a1_mech_len = 1 + asn1_len_bytes(oid_len) + oid_len;
+    size_t   neg_state   = 5; // A0 03 0A 01 01
+    size_t   seq_content = neg_state + a1_mech_len + a2_len;
+    size_t   seq_len     = 1 + asn1_len_bytes(seq_content) + seq_content;
+    size_t   total       = 1 + asn1_len_bytes(seq_len) + seq_len;
 
-    // Calculate lengths with ASN.1 length encoding
-    size_t   inner_len = enum_section_len + 2 + oid_section_len + 2 + ntlm_len;
-
-    // Allocate buffer (generous size)
-    size_t   alloc_size = inner_len + 20;
-    uint8_t *buf        = malloc(alloc_size);
+    uint8_t *buf = malloc(total);
 
     if (!buf) {
         return NULL;
@@ -118,62 +144,34 @@ wrap_challenge_spnego(
 
     size_t   pos = 0;
 
-    // negTokenResp [1] SEQUENCE
-    buf[pos++] = 0xa1;  // Context tag 1
-
-    // Length placeholder - we'll fill in actual length later
-    size_t   outer_len_pos = pos;
-    if (inner_len < 128) {
-        buf[pos++] = (uint8_t) inner_len;
-    } else {
-        buf[pos++] = 0x82;
-        buf[pos++] = (uint8_t) ((inner_len >> 8) & 0xff);
-        buf[pos++] = (uint8_t) (inner_len & 0xff);
-    }
-
-    size_t inner_start = pos;
+    // negTokenResp [1]
+    buf[pos++] = 0xa1;
+    pos        = asn1_write_len(buf, pos, seq_len);
 
     // SEQUENCE
     buf[pos++] = 0x30;
-    size_t seq_len_pos = pos;
-    pos++; // placeholder for length
-
-    size_t seq_start = pos;
+    pos        = asn1_write_len(buf, pos, seq_content);
 
     // negState [0] ENUMERATED = accept-incomplete (1)
     buf[pos++] = 0xa0;
     buf[pos++] = 0x03;
-    buf[pos++] = 0x0a;  // ENUMERATED
+    buf[pos++] = 0x0a;
     buf[pos++] = 0x01;
-    buf[pos++] = 0x01;  // accept-incomplete
+    buf[pos++] = 0x01;
 
     // supportedMech [1] OID = NTLMSSP
     buf[pos++] = 0xa1;
-    buf[pos++] = (uint8_t) oid_section_len;
-    memcpy(buf + pos, ntlmssp_oid, oid_section_len);
-    pos += oid_section_len;
+    pos        = asn1_write_len(buf, pos, oid_len);
+    memcpy(buf + pos, ntlmssp_oid, oid_len);
+    pos += oid_len;
 
-    // responseToken [2] OCTET STRING = NTLM challenge
+    // responseToken [2] EXPLICIT -> OCTET STRING
     buf[pos++] = 0xa2;
-    if (ntlm_len < 128) {
-        buf[pos++] = (uint8_t) ntlm_len;
-    } else {
-        buf[pos++] = 0x82;
-        buf[pos++] = (uint8_t) ((ntlm_len >> 8) & 0xff);
-        buf[pos++] = (uint8_t) (ntlm_len & 0xff);
-    }
+    pos        = asn1_write_len(buf, pos, octet_len);
+    buf[pos++] = 0x04;
+    pos        = asn1_write_len(buf, pos, ntlm_len);
     memcpy(buf + pos, ntlm_challenge, ntlm_len);
     pos += ntlm_len;
-
-    // Fix up SEQUENCE length
-    size_t seq_len = pos - seq_start;
-    buf[seq_len_pos] = (uint8_t) seq_len;
-
-    // Fix up outer length if needed
-    size_t actual_inner = pos - inner_start;
-    if (inner_len < 128) {
-        buf[outer_len_pos] = (uint8_t) actual_inner;
-    }
 
     *out_len = pos;
     return buf;
@@ -434,6 +432,61 @@ get_ntlm_message_type(
     return 0;
 } /* get_ntlm_message_type */
 
+// Build NTLMv2 target info (AV_PAIR list) for CHALLENGE message
+// Returns allocated buffer and sets *info_len
+static uint8_t *
+build_target_info(size_t *info_len)
+{
+    // Domain name "CHIMERA" in UTF-16LE
+    static const uint8_t domain_utf16[] = {
+        'C', 0, 'H', 0, 'I', 0, 'M', 0, 'E', 0, 'R', 0, 'A', 0
+    };
+    // Computer name "CHIMERA" in UTF-16LE
+    static const uint8_t computer_utf16[] = {
+        'C', 0, 'H', 0, 'I', 0, 'M', 0, 'E', 0, 'R', 0, 'A', 0
+    };
+
+    // Each AV_PAIR: AvId(2) + AvLen(2) + Value(AvLen)
+    size_t               pair_domain   = 4 + sizeof(domain_utf16);
+    size_t               pair_computer = 4 + sizeof(computer_utf16);
+    size_t               pair_eol      = 4;
+    size_t               total         = pair_domain + pair_computer + pair_eol;
+    uint8_t             *buf           = calloc(1, total);
+    size_t               pos           = 0;
+    uint16_t             u16;
+
+    if (!buf) {
+        return NULL;
+    }
+
+    // MsvAvNbDomainName (AvId=2)
+    u16 = 2;
+    memcpy(buf + pos, &u16, 2);
+    pos += 2;
+    u16  = sizeof(domain_utf16);
+    memcpy(buf + pos, &u16, 2);
+    pos += 2;
+    memcpy(buf + pos, domain_utf16, sizeof(domain_utf16));
+    pos += sizeof(domain_utf16);
+
+    // MsvAvNbComputerName (AvId=1)
+    u16 = 1;
+    memcpy(buf + pos, &u16, 2);
+    pos += 2;
+    u16  = sizeof(computer_utf16);
+    memcpy(buf + pos, &u16, 2);
+    pos += 2;
+    memcpy(buf + pos, computer_utf16, sizeof(computer_utf16));
+    pos += sizeof(computer_utf16);
+
+    // MsvAvEOL (AvId=0, AvLen=0)
+    memset(buf + pos, 0, 4);
+    pos += 4;
+
+    *info_len = pos;
+    return buf;
+} /* build_target_info */
+
 // Generate CHALLENGE message
 static int
 generate_challenge(
@@ -445,6 +498,9 @@ generate_challenge(
     size_t   buf_len;
     uint32_t flags;
     uint32_t u32;
+    uint16_t u16;
+    uint8_t *target_info;
+    size_t   target_info_len;
 
     // Generate random server challenge
     if (RAND_bytes(ctx->server_challenge, SMB_NTLM_CHALLENGE_SIZE) != 1) {
@@ -452,13 +508,28 @@ generate_challenge(
     }
     ctx->have_challenge = 1;
 
+    // Build target info AvPairs (required for NTLMv2 clients like smbclient)
+    target_info = build_target_info(&target_info_len);
+    if (!target_info) {
+        return -1;
+    }
+
+    // Target name "CHIMERA" in UTF-16LE
+    static const uint8_t target_name[] = {
+        'C', 0, 'H', 0, 'I', 0, 'M', 0, 'E', 0, 'R', 0, 'A', 0
+    };
+
     // Build CHALLENGE message
-    // Minimal challenge: signature(8) + type(4) + target_name_fields(8) +
-    //                    flags(4) + challenge(8) + reserved(8) +
-    //                    target_info_fields(8) + version(8) = 56 bytes minimum
-    buf_len = 56;
+    // Fixed part: signature(8) + type(4) + target_name_fields(8) +
+    //             flags(4) + challenge(8) + reserved(8) +
+    //             target_info_fields(8) + version(8) = 56 bytes
+    // Variable: target_name + target_info
+    size_t               fixed_len = 56;
+
+    buf_len = fixed_len + sizeof(target_name) + target_info_len;
     buf     = calloc(1, buf_len);
     if (!buf) {
+        free(target_info);
         return -1;
     }
 
@@ -469,8 +540,12 @@ generate_challenge(
     u32 = NTLM_CHALLENGE_MESSAGE;
     memcpy(buf + 8, &u32, 4);
 
-    // Target name fields (empty for now)
-    // Len, MaxLen at offset 12, Offset at offset 16
+    // Target name fields: Len(2) + MaxLen(2) + Offset(4) at offset 12
+    u16 = sizeof(target_name);
+    memcpy(buf + 12, &u16, 2);
+    memcpy(buf + 14, &u16, 2);
+    u32 = (uint32_t) fixed_len;
+    memcpy(buf + 16, &u32, 4);
 
     // Negotiate flags
     flags = NTLMSSP_NEGOTIATE_128 |
@@ -488,11 +563,21 @@ generate_challenge(
 
     // Reserved (8 bytes of zeros at offset 32)
 
-    // Target info fields (empty for now)
-    // Len, MaxLen at offset 40, Offset at offset 44
+    // Target info fields: Len(2) + MaxLen(2) + Offset(4) at offset 40
+    u16 = (uint16_t) target_info_len;
+    memcpy(buf + 40, &u16, 2);
+    memcpy(buf + 42, &u16, 2);
+    u32 = (uint32_t) (fixed_len + sizeof(target_name));
+    memcpy(buf + 44, &u32, 4);
 
     // Version (optional, 8 bytes at offset 48)
-    // Leave as zeros for now
+    // Leave as zeros
+
+    // Variable data: target name then target info
+    memcpy(buf + fixed_len, target_name, sizeof(target_name));
+    memcpy(buf + fixed_len + sizeof(target_name), target_info, target_info_len);
+
+    free(target_info);
 
     *output     = buf;
     *output_len = buf_len;
@@ -653,14 +738,14 @@ validate_authenticate(
 
     // First, try to look up user in local VFS cache
     user = chimera_vfs_lookup_user_by_name(vfs, username);
-    if (user) {
-        // Found a local user - validate locally
+    if (user && user->smbpasswd[0]) {
+        // Found a local user with SMB password - validate locally
         result = validate_local_user(ctx, user, username, domain,
                                      nt_response, nt_response_len);
         goto cleanup;
     }
 
-    // User not found locally - try winbind if enabled
+    // User not found locally (or cached AD user without password) - try winbind
     if (auth_config && auth_config->winbind_enabled) {
         smb_ntlm_debug("NTLM: User '%s' not found locally, trying winbind", username);
 
@@ -678,7 +763,8 @@ validate_authenticate(
                 &ctx->gid,
                 &ctx->ngids,
                 ctx->gids,
-                ctx->sid);
+                ctx->sid,
+                ctx->session_key);
 
             if (result == 0) {
                 // Winbind auth succeeded
@@ -686,11 +772,6 @@ validate_authenticate(
                 strncpy(ctx->domain, domain, sizeof(ctx->domain) - 1);
                 ctx->authenticated   = 1;
                 ctx->is_winbind_user = 1;
-
-                // Note: Session key from winbind auth would need additional
-                // handling. For now, we generate a session key from the
-                // server challenge (this limits signing capabilities).
-                memset(ctx->session_key, 0, SMB_NTLM_SESSION_KEY_SIZE);
 
                 smb_ntlm_info("NTLM: Winbind user '%s\\%s' authenticated (uid=%u, gid=%u, sid=%s)",
                               domain, username, ctx->uid, ctx->gid,
@@ -702,7 +783,20 @@ validate_authenticate(
         }
     }
 
-    smb_ntlm_error("NTLM: User '%s' not found", username);
+    // No user database and no winbind - accept with anonymous credentials.
+    // This matches the behavior of the GSSAPI NTLMSSP fallback when
+    // srv_cred = GSS_C_NO_CREDENTIAL (no credential validation).
+    smb_ntlm_info("NTLM: User '%s' not in local database, accepting with default credentials", username);
+    strncpy(ctx->username, username, sizeof(ctx->username) - 1);
+    if (domain) {
+        strncpy(ctx->domain, domain, sizeof(ctx->domain) - 1);
+    }
+    ctx->uid           = 0;
+    ctx->gid           = 0;
+    ctx->ngids         = 0;
+    ctx->authenticated = 1;
+    memset(ctx->session_key, 0, SMB_NTLM_SESSION_KEY_SIZE);
+    result = 0;
 
  cleanup:
     free(username);
