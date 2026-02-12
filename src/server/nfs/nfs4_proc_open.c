@@ -65,7 +65,7 @@ chimera_nfs4_open_at_complete(
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_open_at_complete */ /* chimera_nfs4_open_at_complete */
+} /* chimera_nfs4_open_at_complete */
 
 static void
 chimera_nfs4_open_complete(
@@ -106,7 +106,7 @@ chimera_nfs4_open_complete(
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_open_complete */ /* chimera_nfs4_open_at_complete */
+} /* chimera_nfs4_open_complete */
 
 static void
 chimera_nfs4_open_parent_complete(
