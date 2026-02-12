@@ -754,10 +754,11 @@ struct chimera_vfs_module {
     /* Optional
      * Called once at initialization to setup global state
      * Return a pointer to global state structure
+     * Receives module-specific configuration JSON data as an argument.
      */
 
     void      * (*init)(
-        const char *cfgfile);
+        const char *cfgdata);
 
     /* Optional
      * Called once at destruction to clean up global state
@@ -939,7 +940,7 @@ void
 chimera_vfs_register(
     struct chimera_vfs        *vfs,
     struct chimera_vfs_module *module,
-    const char                *cfgfile);
+    const char                *cfgdata);
 
 void
 chimera_vfs_thread_drain(

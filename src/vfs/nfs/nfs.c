@@ -78,7 +78,7 @@ chimera_nfs_get_mount_port(
 } /* chimera_nfs_get_mount_port */
 
 static void *
-chimera_nfs_init(const char *cfgfile)
+chimera_nfs_init(const char *cfgdata)
 {
     struct chimera_nfs_shared *shared = calloc(1, sizeof(*shared));
 

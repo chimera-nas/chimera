@@ -632,7 +632,7 @@ demofs_thread_alloc_space(
 } /* demofs_freespace_alloc */
 
 static void *
-demofs_init(const char *cfgfile)
+demofs_init(const char *cfgdata)
 {
     struct demofs_shared       *shared = calloc(1, sizeof(*shared));
     struct demofs_inode_list   *inode_list;
@@ -647,7 +647,7 @@ demofs_init(const char *cfgfile)
     json_error_t                json_error;
 
 
-    cfg = json_loads(cfgfile, 0, &json_error);
+    cfg = json_loads(cfgdata, 0, &json_error);
 
     chimera_demofs_abort_if(cfg == NULL, "Error parsing config: %s", json_error.text);
 

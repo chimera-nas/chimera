@@ -377,6 +377,8 @@ main(
 
             if (json_is_object(config_obj)) {
                 config_str = json_dumps(config_obj, JSON_COMPACT);
+            } else if (config_obj) {
+                chimera_server_error("VFS module config for module %s is not an object, skipping", module_name);
             }
 
             chimera_server_config_add_module(server_config, module_name, mod_path,

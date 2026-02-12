@@ -95,7 +95,7 @@ struct chimera_io_uring_thread {
 };
 
 static void *
-chimera_io_uring_init(const char *cfgfile)
+chimera_io_uring_init(const char *cfgdata)
 {
     struct chimera_io_uring_shared *shared;
     struct io_uring_params          params = { 0 };
@@ -112,14 +112,14 @@ chimera_io_uring_init(const char *cfgfile)
         return NULL;
     }
 
-    if (cfgfile && cfgfile[0] != '\0') {
+    if (cfgdata && cfgdata[0] != '\0') {
         json_error_t json_error;
-        json_t      *cfg = json_loads(cfgfile, 0, &json_error);
+        json_t      *cfg = json_loads(cfgdata, 0, &json_error);
 
         if (cfg) {
             json_t *verf = json_object_get(cfg, "readdir_verifier");
 
-            if (verf && json_is_boolean(verf)) {
+            if (json_is_boolean(verf)) {
                 shared->readdir_verifier = json_boolean_value(verf);
             }
 
