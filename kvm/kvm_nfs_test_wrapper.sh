@@ -29,7 +29,12 @@ SESSION_DIR=$(mktemp -d "${BUILD_DIR}/kvm_nfs_session_XXXXXX")
 CONFIG_FILE="${SESSION_DIR}/chimera.json"
 CHIMERA_PID=""
 TCPDUMP_PID=""
-PCAP_FILE="${KVM_PCAP_FILE:-}"
+PCAP_DIR="${KVM_PCAP_DIR:-}"
+if [ -n "$PCAP_DIR" ]; then
+    PCAP_FILE="${PCAP_DIR}/${BACKEND}_nfs${NFS_VERSION}_$$.pcap"
+else
+    PCAP_FILE="${KVM_PCAP_FILE:-}"
+fi
 
 cleanup() {
     if [ -n "$TCPDUMP_PID" ]; then
@@ -45,19 +50,16 @@ cleanup() {
         done
         # Force kill if still alive
         if kill -0 "$CHIMERA_PID" 2>/dev/null; then
-            echo "=== Chimera shutdown hung, force killing ==="
-            if [ -f "$CHIMERA_LOG" ]; then
-                echo "=== Chimera stderr at shutdown ==="
-                cat "$CHIMERA_LOG"
-            fi
+            echo "=== Chimera shutdown hung, force killing ===" >&2
             kill -9 "$CHIMERA_PID" 2>/dev/null || true
         fi
         wait "$CHIMERA_PID" 2>/dev/null || true
     fi
-    if [ -f "$CHIMERA_LOG" ]; then
-        echo "=== Chimera stderr at cleanup ==="
-        tail -100 "$CHIMERA_LOG"
+    if [ -f "$LOG_FILE" ]; then
+        echo "=== Guest serial log ==="
+        cat "$LOG_FILE"
     fi
+    # Chimera stderr goes directly to wrapper stderr (captured by ctest)
     ip netns delete "${NETNS_NAME}" 2>/dev/null || true
     rm -f "$LOG_FILE"
     rm -rf "$SESSION_DIR"
@@ -151,8 +153,10 @@ if [ -n "$PCAP_FILE" ]; then
 fi
 
 # Start chimera daemon in the netns
-CHIMERA_LOG="${SESSION_DIR}/chimera_stderr.log"
-ip netns exec "${NETNS_NAME}" "$CHIMERA_BINARY" -c "$CONFIG_FILE" 2>"$CHIMERA_LOG" &
+# Let chimera's stderr flow directly to the wrapper's stderr so ctest captures it
+# immediately with no buffering risk on timeout kills.
+CHIMERA_LOG=""
+ip netns exec "${NETNS_NAME}" "$CHIMERA_BINARY" -c "$CONFIG_FILE" &
 CHIMERA_PID=$!
 
 # Wait for NFS port to be ready
@@ -177,6 +181,9 @@ fi
 TEST_CMD="mount -t nfs -o ${NFS_MOUNT_OPTS} 10.0.0.1:/share /mnt && ${TEST_CMD_ARG}"
 
 # Boot QEMU inside the netns
+# Use -serial stdio so serial output goes to stdout in real-time (captured by ctest).
+# Pipe through tee to also write to LOG_FILE for exit code parsing.
+# This ensures guest output is visible even when ctest kills the process on timeout.
 ip netns exec "${NETNS_NAME}" qemu-system-x86_64 \
     -enable-kvm -smp 4 -m 1G -cpu host \
     -kernel "$VMLINUZ" \
@@ -185,12 +192,11 @@ ip netns exec "${NETNS_NAME}" qemu-system-x86_64 \
     -drive file="$ROOTFS",if=virtio,format=qcow2,snapshot=on \
     -netdev tap,id=net0,ifname="${TAP_NAME}",script=no,downscript=no \
     -device virtio-net-pci,netdev=net0 \
-    -serial file:"$LOG_FILE" \
+    -serial stdio \
     -nographic \
     -no-reboot \
-    -append "root=/dev/vda rw console=ttyS0 quiet panic=-1 test_cmd=\"${TEST_CMD}\" init=/bin/sh -- /init.sh"
-
-cat "$LOG_FILE"
+    -append "root=/dev/vda rw console=ttyS0 quiet panic=-1 test_cmd=\"${TEST_CMD}\" init=/bin/sh -- /init.sh" \
+    2>/dev/null | tee "$LOG_FILE"
 
 # Check if chimera is still alive after QEMU exits
 if ! kill -0 "$CHIMERA_PID" 2>/dev/null; then
@@ -200,11 +206,7 @@ if ! kill -0 "$CHIMERA_PID" 2>/dev/null; then
     CHIMERA_PID=""
 fi
 
-# Show chimera debug output if present
-if [ -f "$CHIMERA_LOG" ]; then
-    echo "=== Chimera stderr (last 100 lines) ==="
-    tail -100 "$CHIMERA_LOG"
-fi
+# Chimera stderr is already flowing to wrapper stderr (captured by ctest)
 
 EXIT_CODE=$(grep -oP 'CHIMERA_KVM_EXIT_CODE=\K[0-9]+' "$LOG_FILE" | tail -1)
 exit ${EXIT_CODE:-1}

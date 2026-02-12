@@ -25,7 +25,7 @@ CMAKE_ARGS := -DCMAKE_EXPORT_COMPILE_COMMANDS=1 -G Ninja
 CMAKE_ARGS_RELEASE := -DCMAKE_BUILD_TYPE=Release
 CMAKE_ARGS_DEBUG := -DCMAKE_BUILD_TYPE=Debug
 CTEST_PARALLEL := $(shell n=$$(nproc); echo $$(( n < 64 ? n : 64 )))
-CTEST_ARGS := --output-on-failure -j $(CTEST_PARALLEL)
+CTEST_ARGS := --output-on-failure --timeout 30 -j $(CTEST_PARALLEL)
 
 default: build_debug
 
