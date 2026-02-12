@@ -14,6 +14,18 @@
 
 set -u
 
+# Detect architecture for QEMU configuration
+ARCH=$(uname -m)
+if [ "$ARCH" = "aarch64" ]; then
+    QEMU_BIN="qemu-system-aarch64"
+    QEMU_MACHINE="-machine virt"
+    QEMU_CONSOLE="ttyAMA0"
+else
+    QEMU_BIN="qemu-system-x86_64"
+    QEMU_MACHINE="-machine q35,usb=off"
+    QEMU_CONSOLE="ttyS0"
+fi
+
 VMLINUZ=$1; shift
 ROOTFS=$1; shift
 CHIMERA_BINARY=$1; shift
@@ -163,10 +175,10 @@ done
 TEST_CMD="mount -t cifs //10.0.0.1/share /mnt -o username=root,password=secret,vers=2.1,nobrl,modefromsid,cache=loose && ${TEST_CMD_ARG}"
 
 # Boot QEMU inside the netns
-ip netns exec "${NETNS_NAME}" qemu-system-x86_64 \
+ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -enable-kvm -smp 4 -m 1G -cpu host \
     -kernel "$VMLINUZ" \
-    -machine q35,usb=off \
+    $QEMU_MACHINE \
     -nodefaults \
     -drive file="$ROOTFS",if=virtio,format=qcow2,snapshot=on \
     -netdev tap,id=net0,ifname="${TAP_NAME}",script=no,downscript=no \
@@ -174,7 +186,7 @@ ip netns exec "${NETNS_NAME}" qemu-system-x86_64 \
     -serial file:"$LOG_FILE" \
     -nographic \
     -no-reboot \
-    -append "root=/dev/vda rw console=ttyS0 quiet panic=-1 test_cmd=\"${TEST_CMD}\" init=/bin/sh -- /init.sh"
+    -append "root=/dev/vda rw console=${QEMU_CONSOLE} quiet panic=-1 test_cmd=\"${TEST_CMD}\" init=/bin/sh -- /init.sh"
 
 cat "$LOG_FILE"
 

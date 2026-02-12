@@ -128,7 +128,14 @@ endif()
 
 # KVM testing detection
 find_program(DOCKER_EXECUTABLE docker)
-find_program(QEMU_EXECUTABLE qemu-system-x86_64)
+
+# Find architecture-appropriate QEMU binary
+execute_process(COMMAND uname -m OUTPUT_VARIABLE HOST_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(HOST_ARCH STREQUAL "aarch64")
+    find_program(QEMU_EXECUTABLE qemu-system-aarch64)
+else()
+    find_program(QEMU_EXECUTABLE qemu-system-x86_64)
+endif()
 
 set(KVM_TESTING_AVAILABLE FALSE)
 
@@ -161,7 +168,7 @@ else()
         message(STATUS "KVM testing: docker not found")
     endif()
     if(NOT QEMU_EXECUTABLE)
-        message(STATUS "KVM testing: qemu-system-x86_64 not found")
+        message(STATUS "KVM testing: QEMU not found for ${HOST_ARCH}")
     endif()
 endif()
 
