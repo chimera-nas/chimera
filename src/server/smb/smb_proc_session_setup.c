@@ -3,86 +3,78 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdio.h>
-#include <gssapi/gssapi_ntlmssp.h>
 
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_signing.h"
+#include "smb_auth.h"
+#include "smb_wbclient.h"
+#include "vfs/vfs.h"
 
+// Process NTLM authentication
 static int
-chimera_smb_gss_display_status(
-    int       type,
-    OM_uint32 err,
-    char     *out,
-    size_t    outmaxlen)
+process_ntlm_auth(
+    struct chimera_smb_request       *request,
+    struct chimera_server_smb_shared *shared,
+    struct chimera_smb_conn          *conn,
+    const uint8_t                    *input,
+    size_t                            input_len)
 {
-    gss_buffer_desc text;
-    OM_uint32       msg_ctx = 0;
-    OM_uint32       maj, min;
-    size_t          written = 0;
+    uint8_t *output     = NULL;
+    size_t   output_len = 0;
+    int      rc;
 
-    if (out == NULL || outmaxlen == 0) {
-        return -1;
-    }
+    rc = smb_ntlm_process(&conn->ntlm_ctx,
+                          shared->vfs,
+                          &shared->config.auth,
+                          input,
+                          input_len,
+                          &output,
+                          &output_len);
 
-    /* ensure the output buffer starts empty */
-    out[0] = '\0';
+    // Store output token for reply
+    conn->ntlm_output     = output;
+    conn->ntlm_output_len = output_len;
 
-    do {
-        maj = gss_display_status(&min,
-                                 err,
-                                 type,
-                                 GSS_C_NO_OID,
-                                 &msg_ctx,
-                                 &text);
+    return rc;
+} // process_ntlm_auth
 
-        if (maj != GSS_S_COMPLETE) {
+// Process Kerberos authentication
+static int
+process_kerberos_auth(
+    struct chimera_smb_request       *request,
+    struct chimera_server_smb_shared *shared,
+    struct chimera_smb_conn          *conn,
+    const uint8_t                    *input,
+    size_t                            input_len)
+{
+    uint8_t *output     = NULL;
+    size_t   output_len = 0;
+    int      rc;
+
+    // Initialize GSSAPI context if not already done
+    if (!conn->gssapi_ctx.initialized) {
+        const char *keytab = shared->config.auth.kerberos_keytab[0] ?
+            shared->config.auth.kerberos_keytab : NULL;
+
+        if (smb_gssapi_init(&conn->gssapi_ctx, keytab) < 0) {
+            chimera_smb_error("Failed to initialize GSSAPI context");
             return -1;
         }
-
-        /* Prefix with comma if this is not the first message */
-        const char *prefix = (written == 0) ? "" : ", ";
-
-        int         needed = snprintf(out + written,
-                                      outmaxlen - written,
-                                      "%s%.*s",
-                                      prefix,
-                                      (int) text.length,
-                                      (char *) text.value);
-
-        gss_release_buffer(&min, &text);
-
-        if (needed < 0 || (size_t) needed >= outmaxlen - written) {
-            /* snprintf would have truncated the buffer */
-            return -1;
-        }
-
-        written += (size_t) needed;
-
-    } while (msg_ctx != 0);
-
-    return (int) written;
-} /* chimera_smb_gss_display_status */
-
-static void
-chimera_smb_gss_error(
-    const char *func,
-    OM_uint32   maj,
-    OM_uint32   min)
-{
-    char err_maj[256];
-    char err_min[256];
-
-    if (chimera_smb_gss_display_status(GSS_C_GSS_CODE, maj, err_maj, sizeof(err_maj)) < 0) {
-        snprintf(err_maj, sizeof(err_maj), "unknown");
     }
 
-    if (chimera_smb_gss_display_status(GSS_C_MECH_CODE, min, err_min, sizeof(err_min)) < 0) {
-        snprintf(err_min, sizeof(err_min), "unknown");
-    }
+    rc = smb_gssapi_process(&conn->gssapi_ctx,
+                            input,
+                            input_len,
+                            &output,
+                            &output_len);
 
-    chimera_smb_error("%s: GSS-API error - Major: %s, Minor: %s", func, err_maj, err_min);
-} /* chimera_smb_gss_error */
+    // Store output token for reply
+    conn->ntlm_output     = output;
+    conn->ntlm_output_len = output_len;
+
+    return rc;
+} // process_kerberos_auth
 
 void
 chimera_smb_session_setup(struct chimera_smb_request *request)
@@ -93,43 +85,60 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
     struct chimera_smb_session        *session;
     struct chimera_smb_session_handle *session_handle;
     struct evpl_iovec_cursor           input_cursor;
-    gss_buffer_desc                    input = GSS_C_EMPTY_BUFFER;
+    uint8_t                           *input = NULL;
+    size_t                             input_len;
+    enum smb_auth_mech                 mech;
+    int                                rc;
+    uint32_t                           uid = 0, gid = 0, ngids = 0;
+    uint32_t                           gids[32];
+
+    // Free any previous output buffer
+    if (conn->ntlm_output) {
+        free(conn->ntlm_output);
+        conn->ntlm_output     = NULL;
+        conn->ntlm_output_len = 0;
+    }
 
     if (request->session_setup.blob_length > 0) {
-        input.length = request->session_setup.blob_length;
-        input.value  = alloca(request->session_setup.blob_length);
+        input_len = request->session_setup.blob_length;
+        input     = alloca(input_len);
 
         evpl_iovec_cursor_init(&input_cursor,
                                request->session_setup.input_iov,
                                request->session_setup.input_niov);
 
-        evpl_iovec_cursor_get_blob(&input_cursor,
-                                   input.value,
-                                   input.length);
+        evpl_iovec_cursor_get_blob(&input_cursor, input, input_len);
     } else {
-        input.length = 0;
-
-    } /* chimera_smb_session_setup */
-
-    // Release any previous GSS output buffer before the next call
-    if (conn->gss_output.value != NULL) {
-        gss_release_buffer(&conn->gss_minor, &conn->gss_output);
-        conn->gss_output.value  = NULL;
-        conn->gss_output.length = 0;
+        input_len = 0;
     }
 
-    conn->gss_major = gss_accept_sec_context(&conn->gss_minor,
-                                             &conn->nascent_ctx,
-                                             shared->srv_cred,
-                                             &input,
-                                             GSS_C_NO_CHANNEL_BINDINGS,
-                                             NULL,
-                                             NULL,
-                                             &conn->gss_output,
-                                             &conn->gss_flags,
-                                             NULL, NULL);
+    // Detect authentication mechanism
+    mech = smb_auth_detect_mechanism(input, input_len);
+    chimera_smb_debug("Session setup: detected mechanism %s", smb_auth_mech_name(mech));
 
-    if (conn->gss_major == GSS_S_COMPLETE) {
+    // Route to appropriate handler
+    switch (mech) {
+        case SMB_AUTH_MECH_NTLM:
+            rc = process_ntlm_auth(request, shared, conn, input, input_len);
+            break;
+
+        case SMB_AUTH_MECH_KERBEROS:
+            if (!shared->config.auth.kerberos_enabled) {
+                chimera_smb_error("Kerberos authentication not enabled");
+                rc = -1;
+            } else {
+                rc = process_kerberos_auth(request, shared, conn, input, input_len);
+            }
+            break;
+
+        default:
+            chimera_smb_error("Unknown authentication mechanism");
+            rc = -1;
+            break;
+    } /* switch */
+
+    if (rc == 0) {
+        // Authentication complete
         if (!request->session_handle) {
             session = chimera_smb_session_alloc(shared);
 
@@ -143,8 +152,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
             HASH_ADD(hh, conn->session_handles, session_id, sizeof(uint64_t), session_handle);
 
-            session_handle->ctx = conn->nascent_ctx;
-            conn->nascent_ctx   = GSS_C_NO_CONTEXT;
+            session_handle->ctx = GSS_C_NO_CONTEXT;
 
             request->compound->conn->last_session_handle = session_handle;
 
@@ -154,52 +162,121 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         session_handle = request->session_handle;
         session        = session_handle->session;
 
-        // Retrieve the session key from the established GSS context
-        gss_buffer_set_t session_key_buffers;
-        OM_uint32        maj_stat, min_stat;
+        // Get session key and set credentials based on mechanism
+        const char *sid        = NULL;
+        const char *username   = NULL;
+        int         is_ad_user = 0;
+        char        sid_buf[SMB_WBCLIENT_SID_MAX_LEN];
 
-        maj_stat = gss_inquire_sec_context_by_oid(
-            &min_stat,
-            session_handle->ctx,
-            GSS_C_INQ_SSPI_SESSION_KEY,
-            &session_key_buffers
-            );
+        if (mech == SMB_AUTH_MECH_NTLM) {
+            uint8_t session_key[SMB_NTLM_SESSION_KEY_SIZE];
 
-        if (maj_stat == GSS_S_COMPLETE && session_key_buffers->count > 0) {
-            chimera_smb_derive_signing_key(conn->dialect,
-                                           session_handle->signing_key,
-                                           session_key_buffers->elements[0].value,
-                                           session_key_buffers->elements[0].length);
-            gss_release_buffer_set(&min_stat, &session_key_buffers);
+            if (smb_ntlm_get_session_key(&conn->ntlm_ctx, session_key, sizeof(session_key)) == 0) {
+                chimera_smb_derive_signing_key(conn->dialect,
+                                               session_handle->signing_key,
+                                               session_key,
+                                               SMB_NTLM_SESSION_KEY_SIZE);
+            }
+
+            uid        = smb_ntlm_get_uid(&conn->ntlm_ctx);
+            gid        = smb_ntlm_get_gid(&conn->ntlm_ctx);
+            ngids      = conn->ntlm_ctx.ngids;
+            username   = smb_ntlm_get_username(&conn->ntlm_ctx);
+            sid        = smb_ntlm_get_sid(&conn->ntlm_ctx);
+            is_ad_user = smb_ntlm_is_winbind_user(&conn->ntlm_ctx);
+
+            if (ngids > 32) {
+                ngids = 32;
+            }
+            memcpy(gids, conn->ntlm_ctx.gids, ngids * sizeof(uint32_t));
+
+            // Synthesize Unix SID for local users
+            if (!sid && !is_ad_user) {
+                smb_ntlm_synthesize_unix_sid(uid, sid_buf, sizeof(sid_buf));
+                sid = sid_buf;
+            }
+
+            chimera_smb_info("NTLM auth complete: user=%s uid=%u gid=%u sid=%s",
+                             username, uid, gid, sid ? sid : "none");
+
+        } else if (mech == SMB_AUTH_MECH_KERBEROS) {
+            uint8_t session_key[SMB_GSSAPI_SESSION_KEY_SIZE];
+
+            if (smb_gssapi_get_session_key(&conn->gssapi_ctx, session_key, sizeof(session_key)) == 0) {
+                chimera_smb_derive_signing_key(conn->dialect,
+                                               session_handle->signing_key,
+                                               session_key,
+                                               SMB_GSSAPI_SESSION_KEY_SIZE);
+            }
+
+            // Map Kerberos principal to Unix credentials via winbind
+            const char *principal = smb_gssapi_get_principal(&conn->gssapi_ctx);
+            username = principal;
+
+            if (shared->config.auth.winbind_enabled && smb_wbclient_available()) {
+                if (smb_wbclient_map_principal(principal, &uid, &gid, &ngids, gids, sid_buf) == 0) {
+                    sid        = sid_buf;
+                    is_ad_user = 1;
+                } else {
+                    chimera_smb_error("Failed to map Kerberos principal to Unix credentials");
+                    // Use anonymous credentials as fallback
+                    uid   = 65534;
+                    gid   = 65534;
+                    ngids = 0;
+                    smb_ntlm_synthesize_unix_sid(uid, sid_buf, sizeof(sid_buf));
+                    sid = sid_buf;
+                }
+            } else {
+                // No winbind - use anonymous credentials
+                chimera_smb_debug("Kerberos auth without winbind - using anonymous credentials");
+                uid   = 65534;
+                gid   = 65534;
+                ngids = 0;
+                smb_ntlm_synthesize_unix_sid(uid, sid_buf, sizeof(sid_buf));
+                sid = sid_buf;
+            }
+
+            chimera_smb_info("Kerberos auth complete: principal=%s uid=%u gid=%u sid=%s",
+                             principal, uid, gid, sid ? sid : "none");
         }
+
+        // Cache AD users in VFS user cache (non-pinned, will expire)
+        if (is_ad_user && username && username[0]) {
+            chimera_vfs_add_user(shared->vfs,
+                                 username,
+                                 NULL,  // No password for AD users
+                                 NULL,  // No SMB password hash
+                                 sid,
+                                 uid, gid, ngids, gids,
+                                 0);    // Not pinned - can expire
+            chimera_smb_debug("Cached AD user '%s' in VFS user cache", username);
+        }
+
+        // Set session credentials
+        chimera_vfs_cred_init_unix(&session->cred, uid, gid, ngids, gids);
 
         if (!(session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
             memcpy(session->signing_key, session_handle->signing_key, sizeof(session_handle->signing_key));
             chimera_smb_session_authorize(shared, session);
         }
+
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    } else if (rc == 1) {
+        // Continue needed
+        chimera_smb_complete_request(request, SMB2_STATUS_MORE_PROCESSING_REQUIRED);
+    } else {
+        // Authentication failed
+        chimera_smb_error("Authentication failed (mechanism: %s)", smb_auth_mech_name(mech));
+        chimera_smb_complete_request(request, SMB2_STATUS_LOGON_FAILURE);
+
+        if (request->session_handle &&
+            (!(request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED))) {
+            chimera_smb_session_release(thread, shared, request->session_handle->session);
+            chimera_smb_session_handle_free(thread, request->session_handle);
+            request->session_handle   = NULL;
+            conn->last_session_handle = NULL;
+        }
     }
-
-    switch (conn->gss_major) {
-        case GSS_S_COMPLETE:
-            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
-            break;
-        case GSS_S_CONTINUE_NEEDED:
-            chimera_smb_complete_request(request, SMB2_STATUS_MORE_PROCESSING_REQUIRED);
-            break;
-        default:
-            chimera_smb_gss_error("gss_accept_sec_context", conn->gss_major, conn->gss_minor);
-            chimera_smb_complete_request(request, SMB2_STATUS_LOGON_FAILURE);
-
-            if (request->session_handle &&
-                (!(request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED))) {
-                chimera_smb_session_release(thread, shared, request->session_handle->session);
-                chimera_smb_session_handle_free(thread, request->session_handle);
-                request->session_handle   = NULL;
-                conn->last_session_handle = NULL;
-            }
-
-            break;
-    } /* switch */
 
     evpl_iovecs_release(thread->evpl, request->session_setup.input_iov, request->session_setup.input_niov);
 
@@ -213,7 +290,7 @@ chimera_smb_session_setup_reply(
 {
     struct chimera_smb_conn *conn                   = request->compound->conn;
     uint16_t                 security_buffer_offset = sizeof(struct smb2_header) + 8;
-    uint16_t                 security_buffer_length = conn->gss_output.length;
+    uint16_t                 security_buffer_length = conn->ntlm_output_len;
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_SESSION_SETUP_REPLY_SIZE);
 
@@ -225,7 +302,7 @@ chimera_smb_session_setup_reply(
 
     if (security_buffer_length > 0) {
         evpl_iovec_cursor_append_blob(reply_cursor,
-                                      conn->gss_output.value,
+                                      conn->ntlm_output,
                                       security_buffer_length);
     }
 } /* chimera_smb_session_setup_reply */

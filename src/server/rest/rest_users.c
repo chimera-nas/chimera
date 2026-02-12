@@ -226,7 +226,7 @@ chimera_rest_handle_users_create(
     }
 
     rc = chimera_server_add_user(thread->shared->server, username, password,
-                                 NULL, uid, gid, ngids, gids, 1);
+                                 NULL, NULL, uid, gid, ngids, gids, 1);
 
     json_decref(root);
 

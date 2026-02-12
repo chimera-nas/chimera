@@ -50,7 +50,7 @@ test_add_and_lookup(void)
     cache = chimera_vfs_user_cache_create(64, 600);
 
     chimera_vfs_user_cache_add(cache, "alice", "$6$salt$hash",
-                               "cleartext", 1000, 1000, 2, gids, 1);
+                               "cleartext", NULL, 1000, 1000, 2, gids, 1);
 
     urcu_memb_read_lock();
 
@@ -87,9 +87,9 @@ test_gid_lookup(void)
 
     cache = chimera_vfs_user_cache_create(64, 600);
 
-    chimera_vfs_user_cache_add(cache, "alice", NULL, NULL,
+    chimera_vfs_user_cache_add(cache, "alice", NULL, NULL, NULL,
                                1000, 1000, 2, alice_gids, 1);
-    chimera_vfs_user_cache_add(cache, "bob", NULL, NULL,
+    chimera_vfs_user_cache_add(cache, "bob", NULL, NULL, NULL,
                                1001, 1001, 2, bob_gids, 1);
 
     urcu_memb_read_lock();
@@ -129,7 +129,7 @@ test_remove(void)
 
     cache = chimera_vfs_user_cache_create(64, 600);
 
-    chimera_vfs_user_cache_add(cache, "alice", NULL, NULL,
+    chimera_vfs_user_cache_add(cache, "alice", NULL, NULL, NULL,
                                1000, 1000, 0, NULL, 1);
 
     rc = chimera_vfs_user_cache_remove(cache, "alice");
@@ -166,7 +166,7 @@ test_ttl_expiration(void)
     /* Create cache with 1 second TTL */
     cache = chimera_vfs_user_cache_create(64, 1);
 
-    chimera_vfs_user_cache_add(cache, "temp_user", NULL, NULL,
+    chimera_vfs_user_cache_add(cache, "temp_user", NULL, NULL, NULL,
                                2000, 2000, 0, NULL, 0);
 
     urcu_memb_read_lock();
@@ -211,7 +211,7 @@ test_pinned_no_expire(void)
     cache = chimera_vfs_user_cache_create(64, 1);
 
     /* Add pinned user */
-    chimera_vfs_user_cache_add(cache, "pinned_user", NULL, NULL,
+    chimera_vfs_user_cache_add(cache, "pinned_user", NULL, NULL, NULL,
                                3000, 3000, 0, NULL, 1);
 
     sleep(2);
@@ -242,7 +242,7 @@ test_is_member(void)
 
     cache = chimera_vfs_user_cache_create(64, 600);
 
-    chimera_vfs_user_cache_add(cache, "alice", NULL, NULL,
+    chimera_vfs_user_cache_add(cache, "alice", NULL, NULL, NULL,
                                1000, 1000, 3, gids, 1);
 
     urcu_memb_read_lock();

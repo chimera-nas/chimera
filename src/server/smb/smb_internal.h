@@ -11,7 +11,8 @@
 #include <time.h>
 #include <utlist.h>
 #include <netinet/in.h>
-#include <gssapi/gssapi_ntlmssp.h>
+#include <gssapi/gssapi.h>
+#include <gssapi/gssapi_krb5.h>
 #include "evpl/evpl.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -20,6 +21,8 @@
 #include "smb_attr.h"
 #include "smb_session.h"
 #include "smb_string.h"
+#include "smb_ntlm.h"
+#include "smb_gssapi.h"
 #include "vfs/vfs_release.h"
 
 #define SMB2_MAX_DIALECTS           16
@@ -71,15 +74,24 @@ struct chimera_smb_rdma_element {
     uint64_t offset;
 };
 
+struct chimera_smb_auth_config {
+    int  winbind_enabled;
+    int  kerberos_enabled;
+    char winbind_domain[256];
+    char kerberos_keytab[256];
+    char kerberos_realm[256];
+};
+
 struct chimera_smb_config {
-    char                        identity[80];
-    int                         port;
-    int                         rdma_port;
-    int                         num_dialects;
-    int                         num_nic_info;
-    uint32_t                    capabilities;
-    uint32_t                    dialects[16];
-    struct chimera_smb_nic_info nic_info[16];
+    char                           identity[80];
+    int                            port;
+    int                            rdma_port;
+    int                            num_dialects;
+    int                            num_nic_info;
+    uint32_t                       capabilities;
+    uint32_t                       dialects[16];
+    struct chimera_smb_nic_info    nic_info[16];
+    struct chimera_smb_auth_config auth;
 };
 
 struct netbios_header {
@@ -360,6 +372,10 @@ struct chimera_smb_conn {
     OM_uint32                          gss_flags;
     gss_ctx_id_t                       nascent_ctx;
     gss_buffer_desc                    gss_output;
+    struct smb_ntlm_ctx                ntlm_ctx;
+    struct smb_gssapi_ctx              gssapi_ctx;
+    uint8_t                           *ntlm_output;
+    size_t                             ntlm_output_len;
     unsigned int                       flags;
     enum evpl_protocol_id              protocol;
     uint16_t                           dialect;
@@ -647,6 +663,15 @@ chimera_smb_conn_free(
         conn->gss_output.value  = NULL;
         conn->gss_output.length = 0;
     }
+
+    if (conn->ntlm_output) {
+        free(conn->ntlm_output);
+        conn->ntlm_output     = NULL;
+        conn->ntlm_output_len = 0;
+    }
+
+    // Cleanup GSSAPI context if initialized
+    smb_gssapi_cleanup(&conn->gssapi_ctx);
 
     LL_PREPEND(thread->free_conns, conn);
 } /* chimera_smb_conn_free */

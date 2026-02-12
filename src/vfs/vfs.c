@@ -706,6 +706,7 @@ chimera_vfs_add_user(
     const char         *username,
     const char         *password,
     const char         *smbpasswd,
+    const char         *sid,
     uint32_t            uid,
     uint32_t            gid,
     uint32_t            ngids,
@@ -713,7 +714,7 @@ chimera_vfs_add_user(
     int                 pinned)
 {
     return chimera_vfs_user_cache_add(vfs->vfs_user_cache,
-                                      username, password, smbpasswd,
+                                      username, password, smbpasswd, sid,
                                       uid, gid, ngids, gids, pinned);
 } /* chimera_vfs_add_user */
 

@@ -169,6 +169,18 @@ add_subdirectory(ext)
 
 include_directories(ext/libevpl/include)
 
+# Find libwbclient (optional - for AD/Winbind integration)
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(WBCLIENT QUIET wbclient)
+    if(WBCLIENT_FOUND)
+        message(STATUS "libwbclient found - Winbind integration enabled")
+        add_definitions(-DHAVE_WBCLIENT=1)
+    else()
+        message(STATUS "libwbclient not found - Winbind integration disabled")
+    endif()
+endif()
+
 add_definitions(-DXDR_CUSTOM_IOVEC=${CHIMERA_EXT_SRC}/libevpl/src/rpc2/xdr_iovec.h)
 add_definitions(-DXDR_CUSTOM_DUMP=1)
 

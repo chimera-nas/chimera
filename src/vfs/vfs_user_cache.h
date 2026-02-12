@@ -14,6 +14,9 @@
 #include "vfs_cred.h"
 #include "vfs_internal.h"
 
+// Maximum length for a Windows SID string (S-1-5-21-xxx-xxx-xxx-rid format)
+#define CHIMERA_VFS_SID_MAX_LEN 80
+
 struct chimera_vfs_user {
     uint32_t                 uid;
     uint32_t                 gid;
@@ -29,6 +32,7 @@ struct chimera_vfs_user {
     char                     username[256];
     char                     password[256];
     char                     smbpasswd[256];
+    char                     sid[CHIMERA_VFS_SID_MAX_LEN];
 };
 
 struct chimera_vfs_user_cache_bucket {
@@ -254,6 +258,7 @@ chimera_vfs_user_cache_add(
     const char                    *username,
     const char                    *password,
     const char                    *smbpasswd,
+    const char                    *sid,
     uint32_t                       uid,
     uint32_t                       gid,
     uint32_t                       ngids,
@@ -279,6 +284,9 @@ chimera_vfs_user_cache_add(
     }
     if (smbpasswd) {
         strncpy(user->smbpasswd, smbpasswd, sizeof(user->smbpasswd) - 1);
+    }
+    if (sid) {
+        strncpy(user->sid, sid, sizeof(user->sid) - 1);
     }
     user->uid    = uid;
     user->gid    = gid;

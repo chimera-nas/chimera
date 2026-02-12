@@ -6,7 +6,8 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <arpa/inet.h>
-#include <gssapi/gssapi_ntlmssp.h>
+#include <gssapi/gssapi.h>
+#include <gssapi/gssapi_krb5.h>
 #include <openssl/hmac.h>
 
 
@@ -99,6 +100,38 @@ chimera_smb_server_init(
     }
 
     snprintf(shared->config.identity, sizeof(shared->config.identity), "chimera");
+
+    // Copy SMB auth config from server config
+    shared->config.auth.winbind_enabled  = chimera_server_config_get_smb_winbind_enabled(config);
+    shared->config.auth.kerberos_enabled = chimera_server_config_get_smb_kerberos_enabled(config);
+
+    const char *winbind_domain = chimera_server_config_get_smb_winbind_domain(config);
+    if (winbind_domain && winbind_domain[0]) {
+        strncpy(shared->config.auth.winbind_domain, winbind_domain,
+                sizeof(shared->config.auth.winbind_domain) - 1);
+    }
+
+    const char *kerberos_keytab = chimera_server_config_get_smb_kerberos_keytab(config);
+    if (kerberos_keytab && kerberos_keytab[0]) {
+        strncpy(shared->config.auth.kerberos_keytab, kerberos_keytab,
+                sizeof(shared->config.auth.kerberos_keytab) - 1);
+    }
+
+    const char *kerberos_realm = chimera_server_config_get_smb_kerberos_realm(config);
+    if (kerberos_realm && kerberos_realm[0]) {
+        strncpy(shared->config.auth.kerberos_realm, kerberos_realm,
+                sizeof(shared->config.auth.kerberos_realm) - 1);
+    }
+
+    if (shared->config.auth.winbind_enabled) {
+        chimera_smb_info("SMB Auth: Winbind integration enabled (domain: %s)",
+                         shared->config.auth.winbind_domain[0] ? shared->config.auth.winbind_domain : "(not set)");
+    }
+    if (shared->config.auth.kerberos_enabled) {
+        chimera_smb_info("SMB Auth: Kerberos enabled (realm: %s, keytab: %s)",
+                         shared->config.auth.kerberos_realm[0] ? shared->config.auth.kerberos_realm : "(not set)",
+                         shared->config.auth.kerberos_keytab[0] ? shared->config.auth.kerberos_keytab : "(default)");
+    }
 
     shared->vfs     = vfs;
     shared->metrics = metrics;
@@ -334,11 +367,13 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
     }
 
-    /* Total iovec count from reply_iov base includes iovecs the cursor
-    * has advanced past (e.g. from inject operations) plus remaining */
-    int total_reply_niov = (int) (reply_cursor.iov - reply_iov) + reply_cursor.niov;
+    /* Calculate actual number of iovecs after potential inject operations.
+     * reply_cursor.niov tracks remaining slots, but after inject the cursor
+     * advances and niov is incremented without accounting for the split.
+     * The correct count is the cursor position (index) plus 1. */
+    int reply_niov = (int) (reply_cursor.iov - reply_iov) + 1;
 
-    rc = chimera_smb_sign_compound(thread->signing_ctx, compound, reply_iov, total_reply_niov,
+    rc = chimera_smb_sign_compound(thread->signing_ctx, compound, reply_iov, reply_niov,
                                    evpl_iovec_cursor_consumed(&reply_cursor) + reply_hdr_len
                                    );
 
@@ -369,12 +404,12 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         direct_hdr->data_offset       = 24;
         direct_hdr->data_length       = chunk;
 
-        evpl_sendv(evpl, conn->bind, reply_iov, total_reply_niov, direct_hdr->data_length + 24,
+        evpl_sendv(evpl, conn->bind, reply_iov, reply_niov, direct_hdr->data_length + 24,
                    EVPL_SEND_FLAG_TAKE_REF);
 
         left -= direct_hdr->data_length;
 
-        evpl_iovec_cursor_init(&reply_cursor, reply_iov, total_reply_niov);
+        evpl_iovec_cursor_init(&reply_cursor, reply_iov, reply_niov);
         evpl_iovec_cursor_skip(&reply_cursor, direct_hdr->data_length + 24);
 
         while (left) {
@@ -407,7 +442,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     } else {
         netbios_hdr->word = __builtin_bswap32(reply_payload_length);
 
-        evpl_sendv(evpl, conn->bind, reply_iov, total_reply_niov, reply_payload_length + reply_hdr_len,
+        evpl_sendv(evpl, conn->bind, reply_iov, reply_niov, reply_payload_length + reply_hdr_len,
                    EVPL_SEND_FLAG_TAKE_REF);
     }
 
@@ -1147,8 +1182,12 @@ chimera_smb_server_accept(
     conn->gss_output.value  = NULL;
     conn->gss_output.length = 0;
     conn->nascent_ctx       = GSS_C_NO_CONTEXT;
-    conn->rdma_niov         = 0;
-    conn->rdma_length       = 0;
+    conn->ntlm_output       = NULL;
+    conn->ntlm_output_len   = 0;
+    smb_ntlm_ctx_init(&conn->ntlm_ctx);
+    memset(&conn->gssapi_ctx, 0, sizeof(conn->gssapi_ctx));
+    conn->rdma_niov   = 0;
+    conn->rdma_length = 0;
 
     evpl_bind_get_local_address(bind, conn->local_addr, sizeof(conn->local_addr));
     evpl_bind_get_remote_address(bind, conn->remote_addr, sizeof(conn->remote_addr));
