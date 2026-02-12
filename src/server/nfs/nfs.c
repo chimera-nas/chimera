@@ -366,6 +366,16 @@ nfs_server_thread_destroy(void *data)
     free(thread);
 } /* nfs_server_thread_destroy */
 
+static void
+nfs_server_watchdog(
+    void    *data,
+    uint64_t timeout_ns)
+{
+    struct chimera_server_nfs_thread *thread = data;
+
+    evpl_rpc2_thread_watchdog(thread->rpc2_thread, timeout_ns);
+} /* nfs_server_watchdog */
+
 SYMBOL_EXPORT void
 chimera_nfs_add_export(
     void       *nfs_shared,
@@ -468,4 +478,5 @@ SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
     .stop           = nfs_server_stop,
     .thread_init    = nfs_server_thread_init,
     .thread_destroy = nfs_server_thread_destroy,
+    .watchdog       = nfs_server_watchdog,
 };

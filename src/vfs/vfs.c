@@ -541,7 +541,9 @@ chimera_vfs_process_completion(
 } /* chimera_vfs_process_completion */
 
 SYMBOL_EXPORT void
-chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
+chimera_vfs_watchdog(
+    struct chimera_vfs_thread *thread,
+    uint64_t                   timeout_ns)
 {
     struct chimera_vfs_request *request;
     struct timespec             now;
@@ -557,12 +559,14 @@ chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
 
     elapsed = chimera_get_elapsed_ns(&now, &request->start_time);
 
-    if (elapsed > 10000000000UL) {
-        chimera_vfs_debug("oldest request has been active for %lu ns", elapsed);
-        chimera_vfs_dump_request(request);
+    if (elapsed > timeout_ns) {
+        chimera_vfs_error("VFS request stuck for %.1fs: opcode=%d num_active=%d",
+                          (double) elapsed / 1e9,
+                          request->opcode,
+                          thread->num_active_requests);
     }
 
-} /* chimera_vfs_watchdog_callback */
+} /* chimera_vfs_watchdog */
 
 SYMBOL_EXPORT struct chimera_vfs_thread *
 chimera_vfs_thread_init(

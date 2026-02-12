@@ -48,6 +48,7 @@ struct chimera_server_config {
     int                                   smb_num_dialects;
     uint32_t                              smb_dialects[16];
     int                                   smb_num_nic_info;
+    int                                   watchdog_timeout_secs;
     uint32_t                              anonuid;
     uint32_t                              anongid;
     char                                  nfs_rdma_hostname[256];
@@ -111,6 +112,8 @@ chimera_server_config_init(void)
 
     config->anonuid = 65534;
     config->anongid = 65534;
+
+    config->watchdog_timeout_secs = 10;
 
     config->cache_ttl = 60;
 
@@ -294,7 +297,7 @@ chimera_server_config_add_module(
         module_cfg->module_path[0] = '\0';
     }
     config->num_modules++;
-} /* chimera_server_config_add_module */ /* chimera_server_config_add_module */
+} /* chimera_server_config_add_module */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_metrics_port(
@@ -422,6 +425,20 @@ chimera_server_config_set_anongid(
     config->anongid = anongid;
 } /* chimera_server_config_set_anongid */
 
+SYMBOL_EXPORT void
+chimera_server_config_set_watchdog_timeout(
+    struct chimera_server_config *config,
+    int                           watchdog_timeout_secs)
+{
+    config->watchdog_timeout_secs = watchdog_timeout_secs;
+} /* chimera_server_config_set_watchdog_timeout */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_watchdog_timeout(const struct chimera_server_config *config)
+{
+    return config->watchdog_timeout_secs;
+} /* chimera_server_config_get_watchdog_timeout */
+
 SYMBOL_EXPORT uint32_t
 chimera_server_config_get_anongid(const struct chimera_server_config *config)
 {
@@ -434,8 +451,19 @@ chimera_server_thread_wake(
     struct evpl_timer *timer)
 {
     struct chimera_thread *thread = container_of(timer, struct chimera_thread, watchdog);
+    uint64_t               timeout_ns;
 
-    chimera_vfs_watchdog(thread->vfs_thread);
+    timeout_ns = (uint64_t) chimera_server_config_get_watchdog_timeout(
+        thread->server->config) * 1000000000ULL;
+
+    chimera_vfs_watchdog(thread->vfs_thread, timeout_ns);
+
+    for (int i = 0; i < thread->server->num_protocols; i++) {
+        if (thread->server->protocols[i]->watchdog) {
+            thread->server->protocols[i]->watchdog(
+                thread->protocol_private[i], timeout_ns);
+        }
+    }
 } /* chimera_server_thread_wake */
 
 static void *
