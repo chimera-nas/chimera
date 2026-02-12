@@ -672,11 +672,11 @@ void
 chimera_vfs_register(
     struct chimera_vfs        *vfs,
     struct chimera_vfs_module *module,
-    const char                *cfgfile)
+    const char                *cfgdata)
 {
     vfs->modules[module->fh_magic] = module;
 
-    vfs->module_private[module->fh_magic] = module->init(cfgfile);
+    vfs->module_private[module->fh_magic] = module->init(cfgdata);
 
     if (vfs->module_private[module->fh_magic] == NULL) {
         chimera_vfs_error("Failed to initialize module %s", module->name);

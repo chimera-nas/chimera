@@ -527,7 +527,7 @@ cairn_remove_file_extents(
 } /* cairn_remove_file_extents */
 
 static void *
-cairn_init(const char *cfgfile)
+cairn_init(const char *cfgdata)
 {
     struct cairn_shared   *shared = calloc(1, sizeof(*shared));
     json_t                *cfg;
@@ -543,7 +543,7 @@ cairn_init(const char *cfgfile)
     int                    compression  = 1; // Default to enabled
     int                    bloom_filter = 1; // Default to enabled
 
-    cfg = json_loads(cfgfile, 0, &json_error);
+    cfg = json_loads(cfgdata, 0, &json_error);
 
     chimera_cairn_abort_if(!cfg, "Failed to parse config: %s\n", json_error.text);
 

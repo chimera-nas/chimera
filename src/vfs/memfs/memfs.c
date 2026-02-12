@@ -540,7 +540,7 @@ memfs_kv_entry_release(
 } /* memfs_kv_entry_release */
 
 static void *
-memfs_init(const char *cfgfile)
+memfs_init(const char *cfgdata)
 {
     struct memfs_shared     *shared = calloc(1, sizeof(*shared));
     struct memfs_inode_list *inode_list;

@@ -53,7 +53,7 @@ static uint8_t  vfs_root_fh[CHIMERA_VFS_MOUNT_ID_SIZE];
 static uint32_t vfs_root_fh_len;
 
 static void *
-chimera_vfs_root_init(const char *cfgfile)
+chimera_vfs_root_init(const char *cfgdata)
 {
     /* Create the root FH using a fixed FSID of all zeros */
     uint8_t fsid[CHIMERA_VFS_FSID_SIZE] = { 0 };
