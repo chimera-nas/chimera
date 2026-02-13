@@ -19,9 +19,10 @@ chimera_vfs_lookup_path_complete(
 
 static void
 chimera_vfs_lookup_path_readlink_complete(
-    enum chimera_vfs_error error_code,
-    int                    target_length,
-    void                  *private_data);
+    enum chimera_vfs_error    error_code,
+    int                       target_length,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data);
 
 static inline void
 chimera_vfs_lookup_path_open_dispatch(
@@ -106,15 +107,17 @@ chimera_vfs_lookup_path_symlink_open_complete(
         oh,
         target,
         CHIMERA_VFS_PATH_MAX,
+        0,
         chimera_vfs_lookup_path_readlink_complete,
         lp_request);
 } /* chimera_vfs_lookup_path_symlink_open_complete */
 
 static void
 chimera_vfs_lookup_path_readlink_complete(
-    enum chimera_vfs_error error_code,
-    int                    target_length,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    int                       target_length,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
 {
     struct chimera_vfs_request *lp_request = private_data;
     struct chimera_vfs_thread  *thread     = lp_request->thread;

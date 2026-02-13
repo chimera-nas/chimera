@@ -9,9 +9,10 @@
 
 static void
 chimera_nfs4_readlink_complete(
-    enum chimera_vfs_error error_code,
-    int                    targetlen,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    int                       targetlen,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
@@ -54,6 +55,7 @@ chimera_nfs4_readlink_open_callback(
                          handle,
                          res->resok4.link.data,
                          res->resok4.link.len,
+                         0,
                          chimera_nfs4_readlink_complete,
                          req);
 } /* chimera_nfs4_readlink_open_callback */

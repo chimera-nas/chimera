@@ -3101,6 +3101,8 @@ demofs_readlink(
            inode->symlink.target->data,
            inode->symlink.target->length);
 
+    demofs_map_attrs(thread, &request->readlink.r_attr, inode);
+
     pthread_mutex_unlock(&inode->lock);
 
     request->status = CHIMERA_VFS_OK;

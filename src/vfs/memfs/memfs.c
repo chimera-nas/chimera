@@ -2499,6 +2499,8 @@ memfs_readlink(
            inode->symlink.target->data,
            inode->symlink.target->length);
 
+    memfs_map_attrs(shared, &request->readlink.r_attr, inode, request->fh);
+
     pthread_mutex_unlock(&inode->lock);
 
     request->status = CHIMERA_VFS_OK;

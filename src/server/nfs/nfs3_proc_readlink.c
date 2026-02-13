@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -11,9 +11,10 @@
 
 static void
 chimera_nfs3_readlink_complete(
-    enum chimera_vfs_error error_code,
-    int                    targetlen,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    int                       targetlen,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
 {
     struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
@@ -27,9 +28,10 @@ chimera_nfs3_readlink_complete(
     res->status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res->status == NFS3_OK) {
-        res->resok.symlink_attributes.attributes_follow = 0;
-
+        chimera_nfs3_set_post_op_attr(&res->resok.symlink_attributes, attr);
         res->resok.data.len = targetlen;
+    } else {
+        chimera_nfs3_set_post_op_attr(&res->resfail.symlink_attributes, attr);
     }
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_READLINK(evpl, NULL, res, req->encoding);
@@ -60,6 +62,7 @@ chimera_nfs3_readlink_open_callback(
                              handle,
                              res->resok.data.str,
                              res->resok.data.len,
+                             CHIMERA_NFS3_ATTR_MASK,
                              chimera_nfs3_readlink_complete,
                              req);
 
