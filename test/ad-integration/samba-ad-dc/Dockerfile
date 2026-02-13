@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: LGPL-2.1-only
 
 # Samba AD DC container for integration testing
-FROM ubuntu:22.04
+ARG DOCKER_MIRROR
+FROM ${DOCKER_MIRROR}ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
