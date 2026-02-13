@@ -35,6 +35,11 @@ chimera_smb_read_callback(
         return;
     }
 
+    if (count == 0 && request->read.length > 0) {
+        chimera_smb_complete_request(private_data, SMB2_STATUS_END_OF_FILE);
+        return;
+    }
+
     if (request->read.channel == SMB2_CHANNEL_RDMA_V1) {
 
         request->read.pending_rdma_writes = request->read.num_rdma_elements;
