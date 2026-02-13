@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -33,7 +33,7 @@ chimera_smb_slash_forward_to_back(
 {
     char *p;
 
-    for (p = path; *p; p++) {
+    for (p = path; p < path + len; p++) {
         if (*p == '/') {
             *p = '\\';
         }
@@ -48,13 +48,13 @@ chimera_smb_slash_back_to_forward(
 {
     char *p;
 
-    for (p = path; *p; p++) {
+    for (p = path; p < path + len; p++) {
         if (*p == '\\') {
             *p = '/';
         }
     }
     return 0;
-} /* chimera_smb_convert_slashes */
+} /* chimera_smb_slash_back_to_forward */
 
 static inline int
 chimera_smb_utf16le_to_utf8(
