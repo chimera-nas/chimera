@@ -25,19 +25,21 @@ chimera_vfs_close_complete(struct chimera_vfs_request *request)
 
 SYMBOL_EXPORT void
 chimera_vfs_close(
-    struct chimera_vfs_thread      *thread,
-    struct chimera_vfs_open_handle *handle,
-    chimera_vfs_close_callback_t    callback,
-    void                           *private_data)
+    struct chimera_vfs_thread   *thread,
+    struct chimera_vfs_module   *vfs_module,
+    uint64_t                     vfs_private,
+    uint64_t                     fh_hash,
+    chimera_vfs_close_callback_t callback,
+    void                        *private_data)
 {
     struct chimera_vfs_request *request;
 
     request = chimera_vfs_request_alloc_with_module(thread,
                                                     NULL,
-                                                    handle->fh,
-                                                    handle->fh_len,
-                                                    handle->fh_hash,
-                                                    handle->vfs_module);
+                                                    NULL,
+                                                    0,
+                                                    fh_hash,
+                                                    vfs_module);
 
     if (CHIMERA_VFS_IS_ERR(request)) {
         if (callback) {
@@ -48,7 +50,7 @@ chimera_vfs_close(
 
     request->opcode             = CHIMERA_VFS_OP_CLOSE;
     request->complete           = chimera_vfs_close_complete;
-    request->close.vfs_private  = handle->vfs_private;
+    request->close.vfs_private  = vfs_private;
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 

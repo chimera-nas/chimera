@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -24,6 +24,7 @@
 struct chimera_nfs3_open_state {
     atomic_int              dirty; /* Count of uncommitted unstable writes */
     int                     silly_renamed; /* File has been silly renamed */
+    uint8_t                 server_index; /* NFS server index for dispatch routing */
     uint8_t                 dir_fh_len; /* Directory fh for silly remove on close */
     uint8_t                 dir_fh[CHIMERA_VFS_FH_SIZE];
 
