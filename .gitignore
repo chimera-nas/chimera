@@ -31,3 +31,4 @@ dist/
 .venv/
 venv/
 .pytest_cache/
+.plan
