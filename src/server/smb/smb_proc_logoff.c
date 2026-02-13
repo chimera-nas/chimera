@@ -26,9 +26,9 @@ chimera_smb_logoff(struct chimera_smb_request *request)
 
     session_handle->session = NULL;
 
-    //chimera_smb_session_handle_free(thread, session_handle);
+    chimera_smb_session_handle_free(thread, session_handle);
 
-    //request->session_handle = NULL;
+    request->session_handle = NULL;
 
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 
