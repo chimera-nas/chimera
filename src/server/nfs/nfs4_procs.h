@@ -256,12 +256,13 @@ chimera_nfs4_compound_complete(
         /* Set the status for the failed operation */
         req->res_compound.resarray[req->index].opillegal.status = status;
 
-        req->index++;
-
-        while (req->index < req->res_compound.num_resarray) {
-            req->res_compound.resarray[req->index].opillegal.status = NFS4ERR_NOTSUPP;
-            req->index++;
-        }
+        /* Per RFC 7530 section 15.2, the response must only include
+         * operations up to and including the one that failed. Truncate
+         * num_resarray so that the XDR encoder does not attempt to
+         * serialize subsequent entries whose resop discriminant is
+         * uninitialized, which produces a malformed response. */
+        req->res_compound.num_resarray = req->index + 1;
+        req->index                     = req->res_compound.num_resarray;
     }
 
     if (thread->active) {
