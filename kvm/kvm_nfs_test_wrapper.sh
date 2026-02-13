@@ -203,7 +203,7 @@ ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -nodefaults \
     -drive file="$ROOTFS",if=virtio,format=qcow2,snapshot=on \
     -netdev tap,id=net0,ifname="${TAP_NAME}",script=no,downscript=no \
-    -device virtio-net-pci,netdev=net0 \
+    -device virtio-net-pci,netdev=net0,romfile="" \
     -serial stdio \
     -nographic \
     -no-reboot \
