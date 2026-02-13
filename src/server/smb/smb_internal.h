@@ -578,6 +578,7 @@ chimera_smb_session_release(
             tree = session->trees[i];
 
             if (tree) {
+                session->trees[i] = NULL;
                 chimera_smb_tree_free(thread, shared, tree);
             }
         }
