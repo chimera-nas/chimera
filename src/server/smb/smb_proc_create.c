@@ -707,7 +707,14 @@ chimera_smb_parse_create(
         return -1;
     }
     request->create.parent_path_len = name_size;
-    slash                           = rindex(request->create.parent_path, '\\');
+
+    /* Reject paths with a leading backslash separator */
+    if (name_size > 0 && request->create.parent_path[0] == '\\') {
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
+        return -1;
+    }
+
+    slash = rindex(request->create.parent_path, '\\');
 
     if (slash) {
         *slash                          = '\0';
