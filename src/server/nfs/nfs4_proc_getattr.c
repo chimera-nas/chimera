@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -27,12 +27,24 @@ chimera_nfs4_getattr_complete(
     res->status = NFS4_OK;
 
     rc = xdr_dbuf_alloc_array(&res->resok4.obj_attributes, attrmask, 3, req->encoding->dbuf);
-    chimera_nfs_abort_if(rc, "Failed to allocate array");
+
+    if (rc) {
+        res->status = NFS4ERR_RESOURCE;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
 
     rc = xdr_dbuf_alloc_opaque(&res->resok4.obj_attributes.attr_vals,
                                4096,
                                req->encoding->dbuf);
-    chimera_nfs_abort_if(rc, "Failed to allocate opaque");
+
+    if (rc) {
+        res->status = NFS4ERR_RESOURCE;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
 
     chimera_nfs4_marshall_attrs(attr,
                                 args->num_attr_request,
