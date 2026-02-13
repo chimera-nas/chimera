@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: Unlicense
 
@@ -115,6 +115,9 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver: docker-container
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["repository.mdh.quantum.com:5001"]
 
       - name: Extract metadata for Docker
         id: meta
