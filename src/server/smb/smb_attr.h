@@ -128,7 +128,7 @@ chimera_smb_marshal_basic_attrs(
 
     /* Set default for normal file if no attributes are set */
     if (smb_attr->smb_attributes == 0 && (attr->va_mode & S_IFMT) == S_IFREG) {
-        smb_attr->smb_attributes = 0x80; /* FILE_ATTRIBUTE_NORMAL */
+        smb_attr->smb_attributes = SMB2_FILE_ATTRIBUTE_ARCHIVE;
     }
     smb_attr->smb_attr_mask |= SMB_ATTR_ATTRIBUTES;
 } /* chimera_smb_marshal_basic_attrs */
