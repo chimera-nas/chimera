@@ -300,7 +300,7 @@ nfs4_client_table_release_handles(
     {
         for (i = 0; i < NFS4_SESSION_MAX_STATE; i++) {
             struct nfs4_state *state = &sess->nfs4_session_state[i];
-            if (state->nfs4_state_active && state->nfs4_state_handle) {
+            if (state->nfs4_state_handle) {
                 chimera_vfs_release(vfs_thread, state->nfs4_state_handle);
                 state->nfs4_state_handle = NULL;
                 state->nfs4_state_active = 0;

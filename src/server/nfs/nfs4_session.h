@@ -17,6 +17,7 @@ struct nfs4_state {
     struct stateid4                 nfs4_state_id;
     uint16_t                        nfs4_state_type;
     uint16_t                        nfs4_state_active;
+    uint32_t                        nfs4_state_refcnt;
     struct chimera_vfs_open_handle *nfs4_state_handle;
 };
 
@@ -127,6 +128,7 @@ nfs4_session_alloc_slot(struct nfs4_session *session)
     *(uint64_t *) (state->nfs4_state_id.other + 4) = session->nfs4_session_clientid;
 
     state->nfs4_state_active = 1;
+    state->nfs4_state_refcnt = 0;
     state->nfs4_state_handle = NULL;
 
     pthread_mutex_unlock(&session->nfs4_session_lock);
@@ -134,30 +136,36 @@ nfs4_session_alloc_slot(struct nfs4_session *session)
     return state;
 } /* nfs4_session_alloc_slot */
 
-static inline struct chimera_vfs_open_handle *
+static inline int
 nfs4_session_free_slot(
-    struct nfs4_session *session,
-    struct nfs4_state   *state)
+    struct nfs4_session             *session,
+    struct nfs4_state               *state,
+    struct chimera_vfs_open_handle **out_handle)
 {
-    struct chimera_vfs_open_handle *handle;
-    uint32_t                        slot = *(uint32_t *) state->nfs4_state_id.other;
+    uint32_t slot = *(uint32_t *) state->nfs4_state_id.other;
+
+    *out_handle = NULL;
 
     pthread_mutex_lock(&session->nfs4_session_lock);
 
     if (!state->nfs4_state_active) {
         pthread_mutex_unlock(&session->nfs4_session_lock);
-        return NULL;
+        return -1;
     }
 
-    handle                   = state->nfs4_state_handle;
-    state->nfs4_state_handle = NULL;
     state->nfs4_state_active = 0;
 
-    session->free_slot[session->num_free_slots++] = slot;
+    if (state->nfs4_state_refcnt == 0) {
+        *out_handle                                   = state->nfs4_state_handle;
+        state->nfs4_state_handle                      = NULL;
+        session->free_slot[session->num_free_slots++] = slot;
+        pthread_mutex_unlock(&session->nfs4_session_lock);
+        return 0;
+    }
 
+    /* refcnt > 0: deferred cleanup by last release_state */
     pthread_mutex_unlock(&session->nfs4_session_lock);
-
-    return handle;
+    return 1;
 } /* nfs4_session_free_slot */
 
 static inline struct nfs4_state *
@@ -169,6 +177,68 @@ nfs4_session_get_state(
 
     return &session->nfs4_session_state[slot];
 } /* nfs4_session_get_state */
+
+static inline nfsstat4
+nfs4_session_acquire_state(
+    struct nfs4_session             *session,
+    const struct stateid4           *stateid,
+    struct nfs4_state              **out_state,
+    struct chimera_vfs_open_handle **out_handle)
+{
+    uint32_t           slot     = *(uint32_t *) stateid->other;
+    uint64_t           clientid = *(uint64_t *) (stateid->other + 4);
+    struct nfs4_state *state;
+
+    *out_state  = NULL;
+    *out_handle = NULL;
+
+    if (slot >= NFS4_SESSION_MAX_STATE) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    if (clientid != session->nfs4_session_clientid) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    state = &session->nfs4_session_state[slot];
+
+    pthread_mutex_lock(&session->nfs4_session_lock);
+
+    if (!state->nfs4_state_active || !state->nfs4_state_handle) {
+        pthread_mutex_unlock(&session->nfs4_session_lock);
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    state->nfs4_state_refcnt++;
+    *out_state  = state;
+    *out_handle = state->nfs4_state_handle;
+
+    pthread_mutex_unlock(&session->nfs4_session_lock);
+    return NFS4_OK;
+} /* nfs4_session_acquire_state */
+
+static inline struct chimera_vfs_open_handle *
+nfs4_session_release_state(
+    struct nfs4_session *session,
+    struct nfs4_state   *state)
+{
+    struct chimera_vfs_open_handle *handle = NULL;
+
+    pthread_mutex_lock(&session->nfs4_session_lock);
+
+    state->nfs4_state_refcnt--;
+
+    if (state->nfs4_state_refcnt == 0 && !state->nfs4_state_active) {
+        /* CLOSE already ran; we are the last user — do deferred cleanup */
+        handle                   = state->nfs4_state_handle;
+        state->nfs4_state_handle = NULL;
+        uint32_t slot = *(uint32_t *) state->nfs4_state_id.other;
+        session->free_slot[session->num_free_slots++] = slot;
+    }
+
+    pthread_mutex_unlock(&session->nfs4_session_lock);
+    return handle;
+} /* nfs4_session_release_state */
 
 static inline nfsstat4
 nfs4_session_validate_stateid(

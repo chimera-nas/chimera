@@ -5,6 +5,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_release.h"
 
 static void
 chimera_nfs4_allocate_complete(
@@ -13,13 +14,19 @@ chimera_nfs4_allocate_complete(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
-    struct nfs_request  *req = private_data;
-    struct ALLOCATE4res *res = &req->res_compound.resarray[req->index].opallocate;
+    struct nfs_request             *req = private_data;
+    struct ALLOCATE4res            *res = &req->res_compound.resarray[req->index].opallocate;
+    struct chimera_vfs_open_handle *deferred;
 
     if (error_code == CHIMERA_VFS_OK) {
         res->ar_status = NFS4_OK;
     } else {
         res->ar_status = chimera_nfs4_errno_to_nfsstat4(error_code);
+    }
+
+    deferred = nfs4_session_release_state(req->session, req->nfs4_state);
+    if (deferred) {
+        chimera_vfs_release(req->thread->vfs_thread, deferred);
     }
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
@@ -32,14 +39,29 @@ chimera_nfs4_allocate(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct ALLOCATE4args *args    = &argop->opallocate;
-    struct nfs4_session  *session = req->session;
-    struct nfs4_state    *state;
+    struct ALLOCATE4args           *args    = &argop->opallocate;
+    struct ALLOCATE4res            *res     = &resop->opallocate;
+    struct nfs4_session            *session = req->session;
+    struct nfs4_state              *state;
+    struct chimera_vfs_open_handle *state_handle;
 
-    state = nfs4_session_get_state(session, &args->aa_stateid);
+    if (!session) {
+        res->ar_status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
+    if (nfs4_session_acquire_state(session, &args->aa_stateid,
+                                   &state, &state_handle) != NFS4_OK) {
+        res->ar_status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
+    req->nfs4_state = state;
 
     chimera_vfs_allocate(thread->vfs_thread, &req->cred,
-                         state->nfs4_state_handle,
+                         state_handle,
                          args->aa_offset,
                          args->aa_length,
                          0,
