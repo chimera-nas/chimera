@@ -54,13 +54,20 @@ chimera_nfs3_readdirplus_callback(
 
     dbuf_cur = req->encoding->dbuf->used - dbuf_before;
 
-    if (cursor->count + dbuf_cur > args->maxcount) {
-        chimera_nfs_debug("readdirplus: cursor->count + dbuf_cur > args->maxcount (%d + %d > %d)", cursor->count,
-                          dbuf_cur, args->maxcount);
+    /* XDR wire size of directory info (fileid + name + cookie) per RFC 1813:
+     * value_follows (4) + fileid3 (8) + filename3 (4 + padded len) + cookie3 (8) */
+    uint32_t dirinfo_cur = 24 + ((namelen + 3) & ~3);
+
+    if (cursor->count + dbuf_cur > args->maxcount ||
+        cursor->dircount + dirinfo_cur > args->dircount) {
+        chimera_nfs_debug("readdirplus: exceeded limits (count %d+%d vs max %d, dircount %d+%d vs max %d)",
+                          (int) cursor->count, dbuf_cur, args->maxcount,
+                          (int) cursor->dircount, dirinfo_cur, args->dircount);
         return -1;
     }
 
-    cursor->count += dbuf_cur;
+    cursor->count    += dbuf_cur;
+    cursor->dircount += dirinfo_cur;
 
     if (cursor->entries) {
         cursor->last->nextentry = entry;
@@ -174,9 +181,10 @@ chimera_nfs3_readdirplus(
 
     cursor = &req->readdirplus3_cursor;
 
-    cursor->count   = 256; /* reserve some space for non-entry serialization */
-    cursor->entries = NULL;
-    cursor->last    = NULL;
+    cursor->count    = 256; /* reserve some space for non-entry serialization */
+    cursor->dircount = 0;
+    cursor->entries  = NULL;
+    cursor->last     = NULL;
 
     chimera_vfs_open(thread->vfs_thread, &req->cred,
                      args->dir.data.data,

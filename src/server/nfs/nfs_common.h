@@ -24,6 +24,7 @@ struct nfs_nfs3_readdir_cursor {
 
 struct nfs_nfs3_readdirplus_cursor {
     uint64_t           count;
+    uint64_t           dircount;
     struct entryplus3 *entries;
     struct entryplus3 *last;
 };
