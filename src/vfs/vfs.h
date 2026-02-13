@@ -578,6 +578,7 @@ struct chimera_vfs_request {
             uint32_t                        target_maxlength;
             uint32_t                        r_target_length;
             void                           *r_target;
+            struct chimera_vfs_attrs        r_attr;
         } readlink;
 
         struct {

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -13,9 +13,10 @@ static void chimera_readlink_open_complete(
 
 static void
 chimera_readlink_complete(
-    enum chimera_vfs_error error_code,
-    int                    targetlen,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    int                       targetlen,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
 {
     struct chimera_client_request  *request        = private_data;
     struct chimera_client_thread   *thread         = request->thread;
@@ -61,6 +62,7 @@ chimera_readlink_open_complete(
         oh,
         request->readlink.target,
         request->readlink.target_maxlength,
+        0,
         chimera_readlink_complete,
         request);
 

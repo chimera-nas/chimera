@@ -254,9 +254,10 @@ chimera_smb_ioctl_set_reparse(struct chimera_smb_request *request)
 
 static void
 chimera_smb_get_reparse_readlink_cb(
-    enum chimera_vfs_error error_code,
-    int                    target_length,
-    void                  *private_data)
+    enum chimera_vfs_error    error_code,
+    int                       target_length,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
 {
     struct chimera_smb_request       *request = private_data;
     struct chimera_server_smb_thread *thread  = request->compound->thread;
@@ -419,6 +420,7 @@ chimera_smb_get_reparse_getattr_cb(
                 request->ioctl.rp_open_file->handle,
                 request->ioctl.rp_target,
                 CHIMERA_VFS_PATH_MAX,
+                0,
                 chimera_smb_get_reparse_readlink_cb,
                 request);
             return;

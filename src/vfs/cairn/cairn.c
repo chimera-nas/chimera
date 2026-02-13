@@ -2744,6 +2744,8 @@ cairn_readlink(
     request->readlink.r_target_length = target_len;
     memcpy(request->readlink.r_target, target, target_len);
 
+    cairn_map_attrs(shared, &request->readlink.r_attr, inode);
+
     rocksdb_pinnableslice_destroy(slice);
     cairn_inode_handle_release(&ih);
 

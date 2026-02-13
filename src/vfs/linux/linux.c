@@ -1045,6 +1045,8 @@ chimera_linux_readlink(
 
     request->readlink.r_target_length = rc;
 
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->readlink.r_attr, fd);
+
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_linux_readlink */

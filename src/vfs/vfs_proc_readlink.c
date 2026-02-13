@@ -17,6 +17,7 @@ chimera_vfs_readlink_complete(struct chimera_vfs_request *request)
 
     callback(request->status,
              request->readlink.r_target_length,
+             &request->readlink.r_attr,
              request->proto_private_data);
 
     chimera_vfs_request_free(thread, request);
@@ -29,6 +30,7 @@ chimera_vfs_readlink(
     struct chimera_vfs_open_handle *handle,
     void                           *target,
     uint32_t                        target_maxlength,
+    uint64_t                        attr_mask,
     chimera_vfs_readlink_callback_t callback,
     void                           *private_data)
 {
@@ -37,17 +39,19 @@ chimera_vfs_readlink(
     request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
 
     if (CHIMERA_VFS_IS_ERR(request)) {
-        callback(CHIMERA_VFS_PTR_ERR(request), 0, private_data);
+        callback(CHIMERA_VFS_PTR_ERR(request), 0, NULL, private_data);
         return;
     }
 
-    request->opcode                    = CHIMERA_VFS_OP_READLINK;
-    request->complete                  = chimera_vfs_readlink_complete;
-    request->readlink.handle           = handle;
-    request->readlink.r_target         = target;
-    request->readlink.target_maxlength = target_maxlength;
-    request->proto_callback            = callback;
-    request->proto_private_data        = private_data;
+    request->opcode                      = CHIMERA_VFS_OP_READLINK;
+    request->complete                    = chimera_vfs_readlink_complete;
+    request->readlink.handle             = handle;
+    request->readlink.r_target           = target;
+    request->readlink.target_maxlength   = target_maxlength;
+    request->readlink.r_attr.va_req_mask = attr_mask;
+    request->readlink.r_attr.va_set_mask = 0;
+    request->proto_callback              = callback;
+    request->proto_private_data          = private_data;
 
     chimera_vfs_dispatch(request);
 
