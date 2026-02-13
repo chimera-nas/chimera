@@ -808,6 +808,8 @@ chimera_smb_server_handle_smb2(
                 rc              = 0;
         } /* switch */
 
+        compound->requests[compound->num_requests++] = request;
+
         if (rc) {
             chimera_smb_error("smb_server_handle_msg: failed to parse command %u", request->smb2_hdr.command);
             if (request->status != SMB2_STATUS_SUCCESS) {
@@ -815,15 +817,9 @@ chimera_smb_server_handle_smb2(
             } else {
                 chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
             }
-            chimera_smb_request_free(thread, request);
-            /* TODO: Should I return here, or should I try to continue parsing the rest of the compound?
-             * SMB2_STATUS_INVALID_PARAMETER will cause the client to drop the connection,
-             * so it may not matter either way
-             */
+            evpl_finish(evpl, conn->bind);
             return;
         }
-
-        compound->requests[compound->num_requests++] = request;
 
         more_requests = request->smb2_hdr.next_command != 0;
 
