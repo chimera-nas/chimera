@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -53,7 +53,7 @@ slab_allocator_create(
     max_bucket_id = ((max_element_size + 7) & ~7) >> 3;
 
     allocator->slabs   = NULL;
-    allocator->buckets = calloc(max_bucket_id, sizeof(struct demofs_bucket));
+    allocator->buckets = calloc(max_bucket_id + 1, sizeof(struct demofs_bucket));
 
     return allocator;
 } /* slab_allocator_create */
