@@ -38,7 +38,7 @@ chimera_smb_close(struct chimera_smb_request *request)
     request->close.open_file = chimera_smb_open_file_close(request, &request->close.file_id);
 
     if (unlikely(!request->close.open_file)) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
         return;
     }
 
