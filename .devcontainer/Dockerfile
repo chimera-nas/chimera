@@ -84,6 +84,13 @@ RUN apt-get -y update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+RUN apt-get -y update && \
+    apt-get -y --no-install-recommends install python3-ply python3-gssapi python3-pip && \
+    pip3 install --break-system-packages xdrlib3 && \
+    git clone --depth 1 https://github.com/chimera-nas/pynfs.git /opt/pynfs && \
+    cd /opt/pynfs && python3 ./setup.py build && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 RUN if [ "$ENABLE_UV" = "1" ] ; then \
     curl -LsSf https://astral.sh/uv/install.sh | sh ; \
     fi
