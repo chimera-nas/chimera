@@ -1851,7 +1851,7 @@ cairn_open_at(
     if (rc) {
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
             cairn_inode_handle_release(&parent_ih);
-            request->status = CHIMERA_VFS_EEXIST;
+            request->status = CHIMERA_VFS_ENOENT;
             request->complete(request);
             return;
         }
