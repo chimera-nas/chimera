@@ -687,6 +687,11 @@ chimera_smb_parse_create(
     evpl_iovec_cursor_get_uint32(request_cursor, &blob_offset);
     evpl_iovec_cursor_get_uint32(request_cursor, &blob_length);
 
+    if (request->create.impersonation_level > SMB2_IMPERSONATION_DELEGATE) {
+        request->status = SMB2_STATUS_BAD_IMPERSONATION_LEVEL;
+        return -1;
+    }
+
     if (request->create.name_len >= SMB_FILENAME_MAX) {
         chimera_smb_error("Create request: UTF-16 name too long (%u bytes)",
                           request->create.name_len);
