@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "nfs4_session.h"
 
 void
 chimera_nfs4_test_stateid(
@@ -11,9 +12,10 @@ chimera_nfs4_test_stateid(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct TEST_STATEID4args  *args  = &argop->optest_stateid;
-    struct TEST_STATEID4res   *res   = &resop->optest_stateid;
-    struct TEST_STATEID4resok *resok = &res->tsr_resok4;
+    struct TEST_STATEID4args  *args    = &argop->optest_stateid;
+    struct TEST_STATEID4res   *res     = &resop->optest_stateid;
+    struct TEST_STATEID4resok *resok   = &res->tsr_resok4;
+    struct nfs4_session       *session = req->session;
     uint32_t                   i;
 
     resok->num_tsr_status_codes = args->num_ts_stateids;
@@ -22,7 +24,12 @@ chimera_nfs4_test_stateid(
         req->encoding->dbuf);
 
     for (i = 0; i < args->num_ts_stateids; i++) {
-        resok->tsr_status_codes[i] = NFS4_OK;
+        if (session) {
+            resok->tsr_status_codes[i] = nfs4_session_validate_stateid(
+                session, &args->ts_stateids[i]);
+        } else {
+            resok->tsr_status_codes[i] = NFS4ERR_BAD_STATEID;
+        }
     }
 
     res->tsr_status = NFS4_OK;
