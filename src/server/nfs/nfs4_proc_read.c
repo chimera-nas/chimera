@@ -5,6 +5,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_release.h"
 
 static void
 chimera_nfs4_read_complete(
@@ -16,8 +17,9 @@ chimera_nfs4_read_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct nfs_request *req = private_data;
-    struct READ4res    *res = &req->res_compound.resarray[req->index].opread;
+    struct nfs_request             *req = private_data;
+    struct READ4res                *res = &req->res_compound.resarray[req->index].opread;
+    struct chimera_vfs_open_handle *deferred;
 
     if (error_code == CHIMERA_VFS_OK) {
         res->status             = NFS4_OK;
@@ -30,9 +32,14 @@ chimera_nfs4_read_complete(
         evpl_iovecs_release(req->thread->evpl, iov, niov);
     }
 
+    deferred = nfs4_session_release_state(req->session, req->nfs4_state);
+    if (deferred) {
+        chimera_vfs_release(req->thread->vfs_thread, deferred);
+    }
+
     chimera_nfs4_compound_complete(req, NFS4_OK);
 
-} /* chimera_nfs3_write_complete */
+} /* chimera_nfs4_read_complete */
 
 void
 chimera_nfs4_read(
@@ -41,13 +48,14 @@ chimera_nfs4_read(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct READ4args    *args    = &argop->opread;
-    struct READ4res     *res     = &resop->opread;
-    struct nfs4_session *session = nfs4_resolve_session(
+    struct READ4args               *args    = &argop->opread;
+    struct READ4res                *res     = &resop->opread;
+    struct nfs4_session            *session = nfs4_resolve_session(
         req->session, &args->stateid,
         &thread->shared->nfs4_shared_clients);
-    struct nfs4_state   *state;
-    struct evpl_iovec   *iov;
+    struct nfs4_state              *state;
+    struct chimera_vfs_open_handle *state_handle;
+    struct evpl_iovec              *iov;
 
     if (!session) {
         res->status = NFS4ERR_BAD_STATEID;
@@ -60,13 +68,20 @@ chimera_nfs4_read(
         evpl_rpc2_conn_set_private_data(req->conn, session);
     }
 
-    state = nfs4_session_get_state(session, &args->stateid);
+    if (nfs4_session_acquire_state(session, &args->stateid,
+                                   &state, &state_handle) != NFS4_OK) {
+        res->status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
+    req->nfs4_state = state;
 
     iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
     chimera_vfs_read(thread->vfs_thread, &req->cred,
-                     state->nfs4_state_handle,
+                     state_handle,
                      args->offset,
                      args->count,
                      iov,

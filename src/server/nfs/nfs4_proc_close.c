@@ -21,6 +21,7 @@ chimera_nfs4_close(
         &thread->shared->nfs4_shared_clients);
     struct nfs4_state              *state;
     struct chimera_vfs_open_handle *handle;
+    int                             rc;
 
     if (!session) {
         res->status = NFS4ERR_BAD_STATEID;
@@ -35,14 +36,16 @@ chimera_nfs4_close(
 
     state = nfs4_session_get_state(session, &args->open_stateid);
 
-    handle = nfs4_session_free_slot(session, state);
+    rc = nfs4_session_free_slot(session, state, &handle);
 
-    if (handle) {
-        res->open_stateid = state->nfs4_state_id;
-        chimera_vfs_release(thread->vfs_thread, handle);
-        res->status = NFS4_OK;
-    } else {
+    if (rc < 0) {
         res->status = NFS4ERR_BAD_STATEID;
+    } else {
+        res->open_stateid = state->nfs4_state_id;
+        if (handle) {
+            chimera_vfs_release(thread->vfs_thread, handle);
+        }
+        res->status = NFS4_OK;
     }
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
