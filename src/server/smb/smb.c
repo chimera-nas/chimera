@@ -476,11 +476,13 @@ chimera_smb_complete_request(
     } else {
 
         if (request->session_handle && request->session_handle->session) {
-            compound->saved_session_id = request->session_handle->session->session_id;
+            compound->saved_session_id     = request->session_handle->session->session_id;
+            compound->saved_session_handle = request->session_handle;
         }
 
         if (request->tree) {
             compound->saved_tree_id = request->tree->tree_id;
+            compound->saved_tree    = request->tree;
         }
 
         chimera_smb_compound_advance(compound);
@@ -502,6 +504,28 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
     }
 
     request = compound->requests[compound->complete_requests];
+
+    /* Propagate session/tree from previous request for compound related operations */
+    if (request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) {
+        if (compound->saved_session_handle) {
+            request->session_handle = compound->saved_session_handle;
+        }
+        if (compound->saved_tree) {
+            request->tree = compound->saved_tree;
+        }
+    }
+
+    /* Reject commands that require a valid tree connection */
+    if (unlikely(!request->tree &&
+                 request->smb2_hdr.command != SMB2_NEGOTIATE &&
+                 request->smb2_hdr.command != SMB2_SESSION_SETUP &&
+                 request->smb2_hdr.command != SMB2_LOGOFF &&
+                 request->smb2_hdr.command != SMB2_TREE_CONNECT &&
+                 request->smb2_hdr.command != SMB2_TREE_DISCONNECT &&
+                 request->smb2_hdr.command != SMB2_ECHO)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_NETWORK_NAME_DELETED);
+        return;
+    }
 
     switch (request->smb2_hdr.command) {
         case SMB2_NEGOTIATE:
@@ -626,10 +650,12 @@ chimera_smb_server_handle_smb2(
     compound->thread = thread;
     compound->conn   = conn;
 
-    compound->saved_session_id  = UINT64_MAX;
-    compound->saved_tree_id     = UINT64_MAX;
-    compound->saved_file_id.pid = UINT64_MAX;
-    compound->saved_file_id.vid = UINT64_MAX;
+    compound->saved_session_id     = UINT64_MAX;
+    compound->saved_tree_id        = UINT64_MAX;
+    compound->saved_file_id.pid    = UINT64_MAX;
+    compound->saved_file_id.vid    = UINT64_MAX;
+    compound->saved_session_handle = NULL;
+    compound->saved_tree           = NULL;
 
     compound->num_requests      = 0;
     compound->complete_requests = 0;
@@ -672,7 +698,10 @@ chimera_smb_server_handle_smb2(
 
 
 
-        if (request->smb2_hdr.session_id) {
+        /* Compound related requests inherit session/tree from previous request */
+        if (request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) {
+            request->session_handle = NULL;
+        } else if (request->smb2_hdr.session_id) {
 
             if (conn->last_session_handle &&
                 conn->last_session_handle->session->session_id == request->smb2_hdr.session_id) {
@@ -743,16 +772,20 @@ chimera_smb_server_handle_smb2(
             }
         }
 
-        if (unlikely(!request->session_handle && (request->smb2_hdr.command != SMB2_NEGOTIATE &&
-                                                  request->smb2_hdr.command != SMB2_SESSION_SETUP &&
-                                                  request->smb2_hdr.command != SMB2_ECHO))) {
+        if (unlikely(!request->session_handle &&
+                     !(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) &&
+                     (request->smb2_hdr.command != SMB2_NEGOTIATE &&
+                      request->smb2_hdr.command != SMB2_SESSION_SETUP &&
+                      request->smb2_hdr.command != SMB2_ECHO))) {
             chimera_smb_error("Received SMB2 message with invalid command and no session");
             chimera_smb_complete_request(request, SMB2_STATUS_NO_SUCH_LOGON_SESSION);
             chimera_smb_request_free(thread, request);
             return;
         }
 
-        if (request->session_handle && request->smb2_hdr.sync.tree_id < request->session_handle->session->max_trees) {
+        if (request->session_handle &&
+            !(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) &&
+            request->smb2_hdr.sync.tree_id < request->session_handle->session->max_trees) {
             request->tree = request->session_handle->session->trees[request->smb2_hdr.sync.tree_id];
         }
 
@@ -939,10 +972,12 @@ chimera_smb_server_handle_smb1(
     compound->thread = thread;
     compound->conn   = conn;
 
-    compound->saved_session_id  = UINT64_MAX;
-    compound->saved_tree_id     = UINT64_MAX;
-    compound->saved_file_id.pid = UINT64_MAX;
-    compound->saved_file_id.vid = UINT64_MAX;
+    compound->saved_session_id     = UINT64_MAX;
+    compound->saved_tree_id        = UINT64_MAX;
+    compound->saved_file_id.pid    = UINT64_MAX;
+    compound->saved_file_id.vid    = UINT64_MAX;
+    compound->saved_session_handle = NULL;
+    compound->saved_tree           = NULL;
 
     compound->num_requests      = 0;
     compound->complete_requests = 0;

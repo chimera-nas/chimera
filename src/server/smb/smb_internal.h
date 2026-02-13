@@ -343,15 +343,17 @@ struct chimera_smb_request {
 
 #define CHIMERA_SMB_COMPOUND_MAX_REQUESTS 64
 struct chimera_smb_compound {
-    int                               num_requests;
-    int                               complete_requests;
-    uint64_t                          saved_session_id;
-    uint64_t                          saved_tree_id;
-    struct chimera_smb_file_id        saved_file_id;
-    struct chimera_server_smb_thread *thread;
-    struct chimera_smb_conn          *conn;
-    struct chimera_smb_compound      *next;
-    struct chimera_smb_request       *requests[CHIMERA_SMB_COMPOUND_MAX_REQUESTS];
+    int                                num_requests;
+    int                                complete_requests;
+    uint64_t                           saved_session_id;
+    uint64_t                           saved_tree_id;
+    struct chimera_smb_file_id         saved_file_id;
+    struct chimera_smb_session_handle *saved_session_handle;
+    struct chimera_smb_tree           *saved_tree;
+    struct chimera_server_smb_thread  *thread;
+    struct chimera_smb_conn           *conn;
+    struct chimera_smb_compound       *next;
+    struct chimera_smb_request        *requests[CHIMERA_SMB_COMPOUND_MAX_REQUESTS];
 };
 
 struct chimera_smb_session_handle {
