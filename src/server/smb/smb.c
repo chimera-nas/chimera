@@ -296,11 +296,12 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         reply_hdr->credit_charge           = request->smb2_hdr.credit_charge;
         reply_hdr->status                  = request->status;
         reply_hdr->command                 = request->smb2_hdr.command;
-        reply_hdr->credit_request_response = 256;
-        reply_hdr->flags                   = request->smb2_hdr.flags | SMB2_FLAGS_SERVER_TO_REDIR;
-        reply_hdr->next_command            = 0;
-        reply_hdr->message_id              = request->smb2_hdr.message_id;
-        reply_hdr->session_id              = request->session_handle && request->session_handle->session ?
+        reply_hdr->credit_request_response = request->smb2_hdr.credit_request_response ?
+            request->smb2_hdr.credit_request_response : 1;
+        reply_hdr->flags        = request->smb2_hdr.flags | SMB2_FLAGS_SERVER_TO_REDIR;
+        reply_hdr->next_command = 0;
+        reply_hdr->message_id   = request->smb2_hdr.message_id;
+        reply_hdr->session_id   = request->session_handle && request->session_handle->session ?
             request->session_handle->session->session_id : 0;
         reply_hdr->sync.process_id = request->smb2_hdr.sync.process_id;
         reply_hdr->sync.tree_id    = request->tree ? request->tree->tree_id : 0;
