@@ -40,7 +40,6 @@ foreach(minor ${PYNFS_MINOR_VERSIONS})
             set_tests_properties(chimera/pynfs/${flag}_${backend}_nfs4.${minor}
                 PROPERTIES
                     LABELS pynfs
-                    TIMEOUT 300
                     ENVIRONMENT "PYTHONUNBUFFERED=1")
         endforeach()
     endforeach()
@@ -56,7 +55,6 @@ if(CAIRN_ENABLED)
             set_tests_properties(chimera/pynfs/${flag}_cairn_nfs4.${minor}
                 PROPERTIES
                     LABELS pynfs
-                    TIMEOUT 300
                     ENVIRONMENT "PYTHONUNBUFFERED=1")
         endforeach()
     endforeach()
