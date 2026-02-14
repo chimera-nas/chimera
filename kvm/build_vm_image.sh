@@ -8,11 +8,20 @@ set -euo pipefail
 OUTDIR=$1
 DOCKERFILE=$2
 SOURCE_DIR=$3
-IMAGE_TAG="chimera-kvm-$(basename "$DOCKERFILE" | sed 's/Dockerfile\.//')"
+shift 3
+
+# Derive Docker image tag from output directory basename
+IMAGE_TAG="chimera-kvm-$(basename "$OUTDIR")"
+
+# Build extra --build-arg flags from remaining KEY=VALUE arguments
+BUILD_ARGS=""
+for arg in "$@"; do
+    BUILD_ARGS="${BUILD_ARGS} --build-arg ${arg}"
+done
 
 echo "Building VM image: ${IMAGE_TAG}"
 
-docker build ${DOCKER_MIRROR:+--build-arg DOCKER_MIRROR=$DOCKER_MIRROR} -t "$IMAGE_TAG" -f "$DOCKERFILE" "$SOURCE_DIR"
+docker build ${DOCKER_MIRROR:+--build-arg DOCKER_MIRROR=$DOCKER_MIRROR} ${BUILD_ARGS} -t "$IMAGE_TAG" -f "$DOCKERFILE" "$SOURCE_DIR"
 
 CONTAINER_ID=$(docker create "$IMAGE_TAG")
 
@@ -31,7 +40,7 @@ docker cp "${CONTAINER_ID}:${VMLINUZ_PATH}" "${OUTDIR}/vmlinuz"
 # Export the filesystem to a qcow2
 docker export "$CONTAINER_ID" > "${OUTDIR}/rootfs.tar"
 
-truncate -s 2G "${OUTDIR}/rootfs.raw"
+truncate -s 4G "${OUTDIR}/rootfs.raw"
 mkfs.ext4 -F "${OUTDIR}/rootfs.raw"
 
 MOUNT_DIR=$(mktemp -d)
