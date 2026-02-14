@@ -45,6 +45,7 @@ chimera_nfs4_open(
         return;
     }
 
+    state->server_index         = request->fh[CHIMERA_VFS_MOUNT_ID_SIZE];
     request->open.r_vfs_private = (uint64_t) state;
     request->status             = CHIMERA_VFS_OK;
     request->complete(request);

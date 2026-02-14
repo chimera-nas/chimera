@@ -23,6 +23,7 @@
  */
 
 struct chimera_nfs4_open_state {
+    uint8_t                 server_index;  /* NFS server index for dispatch routing */
     struct stateid4         stateid;       /* NFS4 stateid for this open */
     uint32_t                seqid;         /* Sequence ID for state operations */
     uint32_t                access;        /* Share access mode */
