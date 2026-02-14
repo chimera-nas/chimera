@@ -36,7 +36,9 @@ chimera_vfs_encode_fh_mount(
     int         fh_fragment_len,
     void       *out_fh)
 {
-    uint8_t       concat_buf[CHIMERA_VFS_FSID_SIZE + 32];
+    /* Extra 16 bytes of padding to avoid GCC -Warray-bounds false positive
+     * when xxhash NEON reads 16-byte aligned chunks near the buffer end */
+    uint8_t       concat_buf[CHIMERA_VFS_FSID_SIZE + 32 + 16];
     XXH128_hash_t hash;
     uint8_t      *fh = out_fh;
 
