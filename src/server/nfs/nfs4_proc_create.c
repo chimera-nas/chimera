@@ -176,6 +176,15 @@ chimera_nfs4_create(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
+    struct CREATE4args *args = &argop->opcreate;
+    struct CREATE4res  *res  = &resop->opcreate;
+
+    if (args->objname.len == 0) {
+        res->status = NFS4ERR_INVAL;
+        chimera_nfs4_compound_complete(req, NFS4ERR_INVAL);
+        return;
+    }
+
     chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,

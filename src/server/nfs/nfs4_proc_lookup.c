@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -66,6 +66,23 @@ chimera_nfs4_lookup(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
+    struct LOOKUP4args *args = &argop->oplookup;
+    struct LOOKUP4res  *res  = &resop->oplookup;
+
+    if (args->objname.len == 0) {
+        res->status = NFS4ERR_INVAL;
+        chimera_nfs4_compound_complete(req, NFS4ERR_INVAL);
+        return;
+    }
+
+    if ((args->objname.len == 1 && ((const char *) args->objname.data)[0] == '.') ||
+        (args->objname.len == 2 && ((const char *) args->objname.data)[0] == '.' &&
+         ((const char *) args->objname.data)[1] == '.')) {
+        res->status = NFS4ERR_BADNAME;
+        chimera_nfs4_compound_complete(req, NFS4ERR_BADNAME);
+        return;
+    }
+
     chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,

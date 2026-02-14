@@ -86,6 +86,23 @@ chimera_nfs4_link(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
+    struct LINK4args *args = &argop->oplink;
+    struct LINK4res  *res  = &resop->oplink;
+
+    if (args->newname.len == 0) {
+        res->status = NFS4ERR_INVAL;
+        chimera_nfs4_compound_complete(req, NFS4ERR_INVAL);
+        return;
+    }
+
+    if ((args->newname.len == 1 && ((const char *) args->newname.data)[0] == '.') ||
+        (args->newname.len == 2 && ((const char *) args->newname.data)[0] == '.' &&
+         ((const char *) args->newname.data)[1] == '.')) {
+        res->status = NFS4ERR_BADNAME;
+        chimera_nfs4_compound_complete(req, NFS4ERR_BADNAME);
+        return;
+    }
+
     chimera_vfs_open(thread->vfs_thread,
                      &req->cred,
                      req->fh,

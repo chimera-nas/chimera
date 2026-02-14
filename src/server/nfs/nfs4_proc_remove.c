@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -68,6 +68,23 @@ chimera_nfs4_remove(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
+    struct REMOVE4args *args = &argop->opremove;
+    struct REMOVE4res  *res  = &resop->opremove;
+
+    if (args->target.len == 0) {
+        res->status = NFS4ERR_INVAL;
+        chimera_nfs4_compound_complete(req, NFS4ERR_INVAL);
+        return;
+    }
+
+    if ((args->target.len == 1 && ((const char *) args->target.data)[0] == '.') ||
+        (args->target.len == 2 && ((const char *) args->target.data)[0] == '.' &&
+         ((const char *) args->target.data)[1] == '.')) {
+        res->status = NFS4ERR_BADNAME;
+        chimera_nfs4_compound_complete(req, NFS4ERR_BADNAME);
+        return;
+    }
+
     chimera_vfs_open(thread->vfs_thread, &req->cred,
                      req->fh,
                      req->fhlen,
