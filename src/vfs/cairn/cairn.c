@@ -1133,7 +1133,7 @@ cairn_umount(
 } /* cairn_umount */
 
 static void
-cairn_lookup(
+cairn_lookup_at(
     struct cairn_thread        *thread,
     struct cairn_shared        *shared,
     struct chimera_vfs_request *request,
@@ -1145,8 +1145,8 @@ cairn_lookup(
     struct cairn_dirent_key    dirent_key;
     struct cairn_dirent_value *dirent_value;
     struct cairn_dirent_handle dh;
-    const char                *name    = request->lookup.component;
-    uint32_t                   namelen = request->lookup.component_len;
+    const char                *name    = request->lookup_at.component;
+    uint32_t                   namelen = request->lookup_at.component_len;
     int                        rc;
 
     txn = cairn_get_transaction(thread);
@@ -1170,8 +1170,8 @@ cairn_lookup(
 
     /* Handle "." - return the directory itself */
     if (namelen == 1 && name[0] == '.') {
-        cairn_map_attrs(shared, &request->lookup.r_dir_attr, inode);
-        cairn_map_attrs(shared, &request->lookup.r_attr, inode);
+        cairn_map_attrs(shared, &request->lookup_at.r_dir_attr, inode);
+        cairn_map_attrs(shared, &request->lookup_at.r_attr, inode);
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_OK;
         DL_APPEND(thread->txn_requests, request);
@@ -1180,7 +1180,7 @@ cairn_lookup(
 
     /* Handle ".." - return the parent directory */
     if (namelen == 2 && name[0] == '.' && name[1] == '.') {
-        cairn_map_attrs(shared, &request->lookup.r_dir_attr, inode);
+        cairn_map_attrs(shared, &request->lookup_at.r_dir_attr, inode);
 
         rc = cairn_inode_get_inum(thread, txn, inode->parent_inum, 0, &child_ih);
 
@@ -1192,7 +1192,7 @@ cairn_lookup(
         }
 
         child = child_ih.inode;
-        cairn_map_attrs(shared, &request->lookup.r_attr, child);
+        cairn_map_attrs(shared, &request->lookup_at.r_attr, child);
         cairn_inode_handle_release(&ih);
         cairn_inode_handle_release(&child_ih);
         request->status = CHIMERA_VFS_OK;
@@ -1202,7 +1202,7 @@ cairn_lookup(
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = inode->inum;
-    dirent_key.hash    = request->lookup.component_hash;
+    dirent_key.hash    = request->lookup_at.component_hash;
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
@@ -1215,7 +1215,7 @@ cairn_lookup(
 
     dirent_value = dh.dirent;
 
-    cairn_map_attrs(shared, &request->lookup.r_dir_attr, inode);
+    cairn_map_attrs(shared, &request->lookup_at.r_dir_attr, inode);
 
     rc = cairn_inode_get_inum(thread, txn, dirent_value->inum, 0, &child_ih);
 
@@ -1229,7 +1229,7 @@ cairn_lookup(
 
     child = child_ih.inode;
 
-    cairn_map_attrs(shared, &request->lookup.r_attr, child);
+    cairn_map_attrs(shared, &request->lookup_at.r_attr, child);
 
     cairn_inode_handle_release(&ih);
     cairn_dirent_handle_release(&dh);
@@ -1238,10 +1238,10 @@ cairn_lookup(
     request->status = CHIMERA_VFS_OK;
 
     DL_APPEND(thread->txn_requests, request);
-} /* cairn_lookup */
+} /* cairn_lookup_at */
 
 static void
-cairn_mkdir(
+cairn_mkdir_at(
     struct cairn_thread        *thread,
     struct cairn_shared        *shared,
     struct chimera_vfs_request *request,
@@ -1279,19 +1279,19 @@ cairn_mkdir(
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
-    dirent_key.hash    = request->mkdir.name_hash;
+    dirent_key.hash    = request->mkdir_at.name_hash;
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
     if (rc == 0) {
-        cairn_map_attrs(shared, &request->mkdir.r_dir_pre_attr, parent_inode);
-        cairn_map_attrs(shared, &request->mkdir.r_dir_post_attr, parent_inode);
+        cairn_map_attrs(shared, &request->mkdir_at.r_dir_pre_attr, parent_inode);
+        cairn_map_attrs(shared, &request->mkdir_at.r_dir_post_attr, parent_inode);
 
         rc = cairn_inode_get_inum(thread, txn, dh.dirent->inum, 0, &existing_ih);
 
         if (rc == 0) {
             existing_inode = existing_ih.inode;
-            cairn_map_attrs(shared, &request->mkdir.r_attr, existing_inode);
+            cairn_map_attrs(shared, &request->mkdir_at.r_attr, existing_inode);
             cairn_inode_handle_release(&existing_ih);
         }
         cairn_inode_handle_release(&parent_ih);
@@ -1314,21 +1314,21 @@ cairn_mkdir(
     inode.mtime       = now;
     inode.ctime       = now;
 
-    cairn_apply_attrs(&inode, request->mkdir.set_attr);
+    cairn_apply_attrs(&inode, request->mkdir_at.set_attr);
 
-    cairn_map_attrs(shared, &request->mkdir.r_attr, &inode);
+    cairn_map_attrs(shared, &request->mkdir_at.r_attr, &inode);
 
     dirent_value.inum     = inode.inum;
-    dirent_value.name_len = request->mkdir.name_len;
-    memcpy(dirent_value.name, request->mkdir.name, request->mkdir.name_len);
+    dirent_value.name_len = request->mkdir_at.name_len;
+    memcpy(dirent_value.name, request->mkdir_at.name, request->mkdir_at.name_len);
 
-    cairn_map_attrs(shared, &request->mkdir.r_dir_pre_attr, parent_inode);
+    cairn_map_attrs(shared, &request->mkdir_at.r_dir_pre_attr, parent_inode);
 
     parent_inode->nlink++;
 
     parent_inode->mtime = now;
 
-    cairn_map_attrs(shared, &request->mkdir.r_dir_post_attr, parent_inode);
+    cairn_map_attrs(shared, &request->mkdir_at.r_dir_post_attr, parent_inode);
 
     cairn_put_dirent(txn, &dirent_key, &dirent_value);
     cairn_put_inode(txn, parent_inode);
@@ -1339,10 +1339,10 @@ cairn_mkdir(
     cairn_inode_handle_release(&parent_ih);
 
     DL_APPEND(thread->txn_requests, request);
-} /* cairn_mkdir */
+} /* cairn_mkdir_at */
 
 static void
-cairn_mknod(
+cairn_mknod_at(
     struct cairn_thread        *thread,
     struct cairn_shared        *shared,
     struct chimera_vfs_request *request,
@@ -1380,19 +1380,19 @@ cairn_mknod(
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
-    dirent_key.hash    = request->mknod.name_hash;
+    dirent_key.hash    = request->mknod_at.name_hash;
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
     if (rc == 0) {
-        cairn_map_attrs(shared, &request->mknod.r_dir_pre_attr, parent_inode);
-        cairn_map_attrs(shared, &request->mknod.r_dir_post_attr, parent_inode);
+        cairn_map_attrs(shared, &request->mknod_at.r_dir_pre_attr, parent_inode);
+        cairn_map_attrs(shared, &request->mknod_at.r_dir_post_attr, parent_inode);
 
         rc = cairn_inode_get_inum(thread, txn, dh.dirent->inum, 0, &existing_ih);
 
         if (rc == 0) {
             existing_inode = existing_ih.inode;
-            cairn_map_attrs(shared, &request->mknod.r_attr, existing_inode);
+            cairn_map_attrs(shared, &request->mknod_at.r_attr, existing_inode);
             cairn_inode_handle_release(&existing_ih);
         }
         cairn_inode_handle_release(&parent_ih);
@@ -1415,29 +1415,29 @@ cairn_mknod(
     inode.ctime       = now;
 
     /* Set mode (including file type bits) and rdev from set_attr */
-    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
-        inode.mode = request->mknod.set_attr->va_mode;
+    if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        inode.mode = request->mknod_at.set_attr->va_mode;
     } else {
         inode.mode = S_IFREG | 0644;
     }
 
-    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
-        inode.rdev = request->mknod.set_attr->va_rdev;
+    if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
+        inode.rdev = request->mknod_at.set_attr->va_rdev;
     }
 
-    cairn_apply_attrs(&inode, request->mknod.set_attr);
+    cairn_apply_attrs(&inode, request->mknod_at.set_attr);
 
-    cairn_map_attrs(shared, &request->mknod.r_attr, &inode);
+    cairn_map_attrs(shared, &request->mknod_at.r_attr, &inode);
 
     dirent_value.inum     = inode.inum;
-    dirent_value.name_len = request->mknod.name_len;
-    memcpy(dirent_value.name, request->mknod.name, request->mknod.name_len);
+    dirent_value.name_len = request->mknod_at.name_len;
+    memcpy(dirent_value.name, request->mknod_at.name, request->mknod_at.name_len);
 
-    cairn_map_attrs(shared, &request->mknod.r_dir_pre_attr, parent_inode);
+    cairn_map_attrs(shared, &request->mknod_at.r_dir_pre_attr, parent_inode);
 
     parent_inode->mtime = now;
 
-    cairn_map_attrs(shared, &request->mknod.r_dir_post_attr, parent_inode);
+    cairn_map_attrs(shared, &request->mknod_at.r_dir_post_attr, parent_inode);
 
     cairn_put_dirent(txn, &dirent_key, &dirent_value);
     cairn_put_inode(txn, parent_inode);
@@ -1448,10 +1448,10 @@ cairn_mknod(
     cairn_inode_handle_release(&parent_ih);
 
     DL_APPEND(thread->txn_requests, request);
-} /* cairn_mknod */
+} /* cairn_mknod_at */
 
 static void
-cairn_remove(
+cairn_remove_at(
     struct cairn_thread        *thread,
     struct cairn_shared        *shared,
     struct chimera_vfs_request *request,
@@ -1488,7 +1488,7 @@ cairn_remove(
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
-    dirent_key.hash    = request->remove.name_hash;
+    dirent_key.hash    = request->remove_at.name_hash;
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
@@ -1525,7 +1525,7 @@ cairn_remove(
         }
     }
 
-    cairn_map_attrs(shared, &request->remove.r_dir_pre_attr, parent_inode);
+    cairn_map_attrs(shared, &request->remove_at.r_dir_pre_attr, parent_inode);
 
     parent_inode->mtime = now;
 
@@ -1538,10 +1538,10 @@ cairn_remove(
     }
 
     if (inode->nlink == 0) {
-        request->remove.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
+        request->remove_at.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
     }
 
-    cairn_map_attrs(shared, &request->remove.r_removed_attr, inode);
+    cairn_map_attrs(shared, &request->remove_at.r_removed_attr, inode);
 
     if (inode->nlink == 0) {
         --inode->refcnt;
@@ -1563,7 +1563,7 @@ cairn_remove(
         cairn_put_inode(txn, inode);
     }
 
-    cairn_map_attrs(shared, &request->remove.r_dir_post_attr, parent_inode);
+    cairn_map_attrs(shared, &request->remove_at.r_dir_post_attr, parent_inode);
 
     cairn_remove_dirent(txn, &dirent_key);
 
@@ -1575,7 +1575,7 @@ cairn_remove(
 
     request->status = CHIMERA_VFS_OK;
     DL_APPEND(thread->txn_requests, request);
-} /* cairn_remove */
+} /* cairn_remove_at */
 
 /*
  * Cookie values for readdir:
@@ -1769,7 +1769,7 @@ cairn_readdir(
 } /* cairn_readdir */
 
 static void
-cairn_open(
+cairn_open_fh(
     struct cairn_thread        *thread,
     struct cairn_shared        *shared,
     struct chimera_vfs_request *request,
@@ -1793,7 +1793,7 @@ cairn_open(
     inode = ih.inode;
     inode->refcnt++;
 
-    request->open.r_vfs_private = (uint64_t) inode->inum;
+    request->open_fh.r_vfs_private = (uint64_t) inode->inum;
 
     cairn_put_inode(txn, inode);
     cairn_inode_handle_release(&ih);
@@ -1801,7 +1801,7 @@ cairn_open(
     request->status = CHIMERA_VFS_OK;
 
     DL_APPEND(thread->txn_requests, request);
-} /* cairn_open */
+} /* cairn_open_fh */
 
 static void
 cairn_open_at(
@@ -2607,7 +2607,7 @@ cairn_seek(
 } /* cairn_seek */
 
 static void
-cairn_symlink(
+cairn_symlink_at(
     struct cairn_thread        *thread,
     struct cairn_shared        *shared,
     struct chimera_vfs_request *request,
@@ -2643,15 +2643,15 @@ cairn_symlink(
         return;
     }
 
-    cairn_map_attrs(shared, &request->symlink.r_dir_pre_attr, parent_inode);
+    cairn_map_attrs(shared, &request->symlink_at.r_dir_pre_attr, parent_inode);
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
-    dirent_key.hash    = request->symlink.name_hash;
+    dirent_key.hash    = request->symlink_at.name_hash;
 
     cairn_alloc_inum(thread, &new_inode);
-    new_inode.size       = request->symlink.targetlen;
-    new_inode.space_used = request->symlink.targetlen;
+    new_inode.size       = request->symlink_at.targetlen;
+    new_inode.space_used = request->symlink_at.targetlen;
     new_inode.uid        = 0;
     new_inode.gid        = 0;
     new_inode.nlink      = 1;
@@ -2662,18 +2662,18 @@ cairn_symlink(
     new_inode.ctime      = now;
 
     dirent_value.inum     = new_inode.inum;
-    dirent_value.name_len = request->symlink.namelen;
-    memcpy(dirent_value.name, request->symlink.name, request->symlink.namelen);
+    dirent_value.name_len = request->symlink_at.namelen;
+    memcpy(dirent_value.name, request->symlink_at.name, request->symlink_at.namelen);
 
     parent_inode->mtime = now;
 
-    cairn_map_attrs(shared, &request->symlink.r_attr, &new_inode);
-    cairn_map_attrs(shared, &request->symlink.r_dir_post_attr, parent_inode);
+    cairn_map_attrs(shared, &request->symlink_at.r_attr, &new_inode);
+    cairn_map_attrs(shared, &request->symlink_at.r_dir_post_attr, parent_inode);
 
     target_key.keytype = CAIRN_KEY_SYMLINK;
     target_key.inum    = new_inode.inum;
     rocksdb_transaction_put(txn, (const char *) &target_key, sizeof(target_key),
-                            request->symlink.target, request->symlink.targetlen,
+                            request->symlink_at.target, request->symlink_at.targetlen,
                             &err);
 
     chimera_cairn_abort_if(err, "Error putting symlink target: %s\n", err);
@@ -2687,7 +2687,7 @@ cairn_symlink(
     request->status = CHIMERA_VFS_OK;
 
     DL_APPEND(thread->txn_requests, request);
-} /* cairn_symlink */
+} /* cairn_symlink_at */
 
 static void
 cairn_readlink(
@@ -2767,7 +2767,7 @@ cairn_fh_compare(
 } /* cairn_fh_compare */
 
 static void
-cairn_rename(
+cairn_rename_at(
     struct cairn_thread        *thread,
     struct cairn_shared        *shared,
     struct chimera_vfs_request *request,
@@ -2790,8 +2790,8 @@ cairn_rename(
 
     cmp = cairn_fh_compare(request->fh,
                            request->fh_len,
-                           request->rename.new_fh,
-                           request->rename.new_fhlen);
+                           request->rename_at.new_fh,
+                           request->rename_at.new_fhlen);
 
     if (cmp == 0) {
         rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &old_parent_ih);
@@ -2823,7 +2823,8 @@ cairn_rename(
                 return;
             }
 
-            rc = cairn_inode_get_fh(thread, txn, request->rename.new_fh, request->rename.new_fhlen, 1, &new_parent_ih);
+            rc = cairn_inode_get_fh(thread, txn, request->rename_at.new_fh, request->rename_at.new_fhlen, 1, &
+                                    new_parent_ih);
             if (rc) {
                 cairn_inode_handle_release(&old_parent_ih);
                 request->status = CHIMERA_VFS_ENOENT;
@@ -2831,7 +2832,8 @@ cairn_rename(
                 return;
             }
         } else {
-            rc = cairn_inode_get_fh(thread, txn, request->rename.new_fh, request->rename.new_fhlen, 1, &new_parent_ih);
+            rc = cairn_inode_get_fh(thread, txn, request->rename_at.new_fh, request->rename_at.new_fhlen, 1, &
+                                    new_parent_ih);
             if (rc) {
                 request->status = CHIMERA_VFS_ENOENT;
                 request->complete(request);
@@ -2869,7 +2871,7 @@ cairn_rename(
 
     old_dirent_key.keytype = CAIRN_KEY_DIRENT;
     old_dirent_key.inum    = old_parent_inode->inum;
-    old_dirent_key.hash    = request->rename.name_hash;
+    old_dirent_key.hash    = request->rename_at.name_hash;
 
     rc = cairn_dirent_get(thread, txn, &old_dirent_key, &old_dh);
     if (rc) {
@@ -2887,7 +2889,7 @@ cairn_rename(
 
     new_dirent_key.keytype = CAIRN_KEY_DIRENT;
     new_dirent_key.inum    = new_parent_inode->inum;
-    new_dirent_key.hash    = request->rename.new_name_hash;
+    new_dirent_key.hash    = request->rename_at.new_name_hash;
 
     rc = cairn_dirent_get(thread, txn, &new_dirent_key, &new_dh);
     if (rc == 0) {
@@ -2949,8 +2951,8 @@ cairn_rename(
 
     // Create new dirent
     new_dirent_value.inum     = old_dirent_value->inum;
-    new_dirent_value.name_len = request->rename.new_namelen;
-    memcpy(new_dirent_value.name, request->rename.new_name, request->rename.new_namelen);
+    new_dirent_value.name_len = request->rename_at.new_namelen;
+    memcpy(new_dirent_value.name, request->rename_at.new_name, request->rename_at.new_namelen);
 
     // Update directory entries and parent inodes
     cairn_remove_dirent(txn, &old_dirent_key);
@@ -2981,10 +2983,10 @@ cairn_rename(
 
     request->status = CHIMERA_VFS_OK;
     DL_APPEND(thread->txn_requests, request);
-} /* cairn_rename */
+} /* cairn_rename_at */
 
 static void
-cairn_link(
+cairn_link_at(
     struct cairn_thread        *thread,
     struct cairn_shared        *shared,
     struct chimera_vfs_request *request,
@@ -3003,7 +3005,7 @@ cairn_link(
 
     txn = cairn_get_transaction(thread);
 
-    rc = cairn_inode_get_fh(thread, txn, request->link.dir_fh, request->link.dir_fhlen, 1, &parent_ih);
+    rc = cairn_inode_get_fh(thread, txn, request->link_at.dir_fh, request->link_at.dir_fhlen, 1, &parent_ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -3041,7 +3043,7 @@ cairn_link(
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
-    dirent_key.hash    = request->link.name_hash;
+    dirent_key.hash    = request->link_at.name_hash;
 
     rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
 
@@ -3055,8 +3057,8 @@ cairn_link(
     }
 
     dirent_value.inum     = target_inode->inum;
-    dirent_value.name_len = request->link.namelen;
-    memcpy(dirent_value.name, request->link.name, request->link.namelen);
+    dirent_value.name_len = request->link_at.namelen;
+    memcpy(dirent_value.name, request->link_at.name, request->link_at.namelen);
 
     target_inode->nlink++;
     target_inode->ctime = now;
@@ -3072,7 +3074,7 @@ cairn_link(
     request->status = CHIMERA_VFS_OK;
 
     DL_APPEND(thread->txn_requests, request);
-} /* cairn_link */
+} /* cairn_link_at */
 
 
 static void
@@ -3299,8 +3301,8 @@ cairn_dispatch(
         case CHIMERA_VFS_OP_UMOUNT:
             cairn_umount(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_LOOKUP:
-            cairn_lookup(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_LOOKUP_AT:
+            cairn_lookup_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_GETATTR:
             cairn_getattr(thread, shared, request, private_data);
@@ -3308,14 +3310,14 @@ cairn_dispatch(
         case CHIMERA_VFS_OP_SETATTR:
             cairn_setattr(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_MKDIR:
-            cairn_mkdir(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_MKDIR_AT:
+            cairn_mkdir_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_MKNOD:
-            cairn_mknod(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_MKNOD_AT:
+            cairn_mknod_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_REMOVE:
-            cairn_remove(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_REMOVE_AT:
+            cairn_remove_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_READDIR:
             cairn_readdir(thread, shared, request, private_data);
@@ -3323,8 +3325,8 @@ cairn_dispatch(
         case CHIMERA_VFS_OP_OPEN_AT:
             cairn_open_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_OPEN:
-            cairn_open(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_OPEN_FH:
+            cairn_open_fh(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_CLOSE:
             cairn_close(thread, shared, request, private_data);
@@ -3345,17 +3347,17 @@ cairn_dispatch(
         case CHIMERA_VFS_OP_SEEK:
             cairn_seek(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_SYMLINK:
-            cairn_symlink(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_SYMLINK_AT:
+            cairn_symlink_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_READLINK:
             cairn_readlink(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_RENAME:
-            cairn_rename(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_RENAME_AT:
+            cairn_rename_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_LINK:
-            cairn_link(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_LINK_AT:
+            cairn_link_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_PUT_KEY:
             cairn_put_key(thread, shared, request, private_data);
@@ -3379,9 +3381,10 @@ cairn_dispatch(
 } /* cairn_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
-    .name           = "cairn",
-    .fh_magic       = CHIMERA_VFS_FH_MAGIC_CAIRN,
-    .capabilities   = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV,
+    .name         = "cairn",
+    .fh_magic     = CHIMERA_VFS_FH_MAGIC_CAIRN,
+    .capabilities = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
+        CHIMERA_VFS_CAP_FS_RELATIVE_OP,
     .init           = cairn_init,
     .destroy        = cairn_destroy,
     .thread_init    = cairn_thread_init,

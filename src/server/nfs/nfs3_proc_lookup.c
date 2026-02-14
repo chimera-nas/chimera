@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -68,14 +68,14 @@ chimera_nfs3_lookup_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        chimera_vfs_lookup(thread->vfs_thread, &req->cred,
-                           handle,
-                           args->what.name.str,
-                           args->what.name.len,
-                           CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
-                           CHIMERA_NFS3_ATTR_MASK,
-                           chimera_nfs3_lookup_complete,
-                           req);
+        chimera_vfs_lookup_at(thread->vfs_thread, &req->cred,
+                              handle,
+                              args->what.name.str,
+                              args->what.name.len,
+                              CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
+                              CHIMERA_NFS3_ATTR_MASK,
+                              chimera_nfs3_lookup_complete,
+                              req);
     } else {
         res.status =
             chimera_vfs_error_to_nfsstat3(error_code);
@@ -107,11 +107,11 @@ chimera_nfs3_lookup(
 
     req->args_lookup = args;
 
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     args->what.dir.data.data,
-                     args->what.dir.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                     chimera_nfs3_lookup_open_callback,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        args->what.dir.data.data,
+                        args->what.dir.data.len,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs3_lookup_open_callback,
+                        req);
 
 } /* chimera_nfs3_lookup */

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -47,8 +47,8 @@ chimera_nfs3_remove_callback(
 
     if (res->status != NFS3_OK) {
 
-        chimera_nfs3_get_wcc_data(&request->remove.r_dir_pre_attr,
-                                  &request->remove.r_dir_post_attr,
+        chimera_nfs3_get_wcc_data(&request->remove_at.r_dir_pre_attr,
+                                  &request->remove_at.r_dir_post_attr,
                                   &res->resfail.dir_wcc);
 
         request->status = nfs3_client_status_to_chimera_vfs_error(res->status);
@@ -56,8 +56,8 @@ chimera_nfs3_remove_callback(
         return;
     }
 
-    chimera_nfs3_get_wcc_data(&request->remove.r_dir_pre_attr,
-                              &request->remove.r_dir_post_attr,
+    chimera_nfs3_get_wcc_data(&request->remove_at.r_dir_pre_attr,
+                              &request->remove_at.r_dir_post_attr,
                               &res->resok.dir_wcc);
 
     request->status = CHIMERA_VFS_OK;
@@ -115,8 +115,8 @@ chimera_nfs3_remove_do_silly_rename(
     /* Rename from original name to silly name in the same directory */
     args.from.dir.data.data = dir_fh;
     args.from.dir.data.len  = dir_fhlen;
-    args.from.name.str      = (char *) request->remove.name;
-    args.from.name.len      = request->remove.namelen;
+    args.from.name.str      = (char *) request->remove_at.name;
+    args.from.name.len      = request->remove_at.namelen;
 
     args.to.dir.data.data = dir_fh;
     args.to.dir.data.len  = dir_fhlen;
@@ -156,8 +156,8 @@ chimera_nfs3_remove_do_remove(
 
     args.object.dir.data.data = dir_fh;
     args.object.dir.data.len  = dir_fhlen;
-    args.object.name.str      = (char *) request->remove.name;
-    args.object.name.len      = request->remove.namelen;
+    args.object.name.str      = (char *) request->remove_at.name;
+    args.object.name.len      = request->remove_at.namelen;
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,
@@ -170,7 +170,7 @@ chimera_nfs3_remove_do_remove(
 } /* chimera_nfs3_remove_do_remove */
 
 void
-chimera_nfs3_remove(
+chimera_nfs3_remove_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -203,7 +203,7 @@ chimera_nfs3_remove(
      * This happens when the caller is an NFS server serving external clients
      * who manage their own silly renames.
      */
-    if (!request->remove.child_fh || request->remove.child_fh_len == 0) {
+    if (!request->remove_at.child_fh || request->remove_at.child_fh_len == 0) {
         chimera_nfs3_remove_do_remove(request, ctx);
         return;
     }
@@ -214,9 +214,9 @@ chimera_nfs3_remove(
      * calling remove, so we can check the open cache directly.
      */
     cache   = request->thread->vfs->vfs_open_file_cache;
-    fh_hash = chimera_vfs_hash(request->remove.child_fh, request->remove.child_fh_len);
-    handle  = chimera_vfs_open_cache_lookup_ref(cache, request->remove.child_fh,
-                                                request->remove.child_fh_len, fh_hash);
+    fh_hash = chimera_vfs_hash(request->remove_at.child_fh, request->remove_at.child_fh_len);
+    handle  = chimera_vfs_open_cache_lookup_ref(cache, request->remove_at.child_fh,
+                                                request->remove_at.child_fh_len, fh_hash);
 
     if (!handle) {
         /* File is not open, proceed with normal remove */
@@ -248,9 +248,9 @@ chimera_nfs3_remove(
     }
 
     /* Successfully marked for silly rename - generate silly name and rename */
-    ctx->silly_name_len = chimera_nfs3_silly_name_from_fh(request->remove.child_fh,
-                                                          request->remove.child_fh_len,
+    ctx->silly_name_len = chimera_nfs3_silly_name_from_fh(request->remove_at.child_fh,
+                                                          request->remove_at.child_fh_len,
                                                           ctx->silly_name, sizeof(ctx->silly_name));
 
     chimera_nfs3_remove_do_silly_rename(request, ctx);
-} /* chimera_nfs3_remove */
+} /* chimera_nfs3_remove_at */

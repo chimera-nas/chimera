@@ -6,7 +6,7 @@
 #include "nfs3_open_state.h"
 
 void
-chimera_nfs3_open(
+chimera_nfs3_open_fh(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -26,9 +26,9 @@ chimera_nfs3_open(
     state->server_index = request->fh[CHIMERA_VFS_MOUNT_ID_SIZE];
 
     /* Store open state pointer for direct access on write/close */
-    request->open.r_vfs_private = (uint64_t) state;
+    request->open_fh.r_vfs_private = (uint64_t) state;
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* chimera_nfs3_open */
+} /* chimera_nfs3_open_fh */
 

@@ -54,7 +54,7 @@ chimera_smb_create_unlink(struct chimera_smb_request *request)
     struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
     struct chimera_smb_open_file *open_file  = request->create.r_open_file;
 
-    chimera_vfs_remove(
+    chimera_vfs_remove_at(
         vfs_thread,
         &request->session_handle->session->cred,
         request->create.parent_handle,
@@ -225,7 +225,7 @@ chimera_smb_create_mkdir_callback(
 
     request->create.r_attrs.smb_attributes |= SMB2_FILE_ATTRIBUTE_DIRECTORY;
 
-    chimera_vfs_open(
+    chimera_vfs_open_fh(
         vfs_thread,
         &request->session_handle->session->cred,
         attr->va_fh,
@@ -360,7 +360,7 @@ chimera_smb_create_open_parent_callback(
     if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
         request->create.create_disposition == SMB2_FILE_CREATE) {
 
-        chimera_vfs_mkdir(
+        chimera_vfs_mkdir_at(
             vfs_thread,
             &request->session_handle->session->cred,
             oh,
@@ -441,7 +441,7 @@ chimera_smb_create_lookup_parent_callback(
         return;
     }
 
-    chimera_vfs_open(
+    chimera_vfs_open_fh(
         vfs_thread,
         &request->session_handle->session->cred,
         attr->va_fh,
@@ -458,7 +458,7 @@ chimera_smb_create_process(struct chimera_smb_request *request)
     struct chimera_smb_tree   *tree       = request->tree;
 
     if (request->create.parent_path_len) {
-        chimera_vfs_lookup_path(
+        chimera_vfs_lookup(
             vfs_thread,
             &request->session_handle->session->cred,
             tree->fh,
@@ -470,7 +470,7 @@ chimera_smb_create_process(struct chimera_smb_request *request)
             chimera_smb_create_lookup_parent_callback,
             request);
     } else if (request->create.name_len) {
-        chimera_vfs_open(
+        chimera_vfs_open_fh(
             vfs_thread,
             &request->session_handle->session->cred,
             request->tree->fh,
@@ -479,7 +479,7 @@ chimera_smb_create_process(struct chimera_smb_request *request)
             chimera_smb_create_open_parent_callback,
             request);
     } else {
-        chimera_vfs_open(
+        chimera_vfs_open_fh(
             vfs_thread,
             &request->session_handle->session->cred,
             request->tree->fh,
@@ -527,7 +527,7 @@ chimera_smb_revalidate_tree(
 
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
 
-    chimera_vfs_lookup_path(
+    chimera_vfs_lookup(
         vfs_thread,
         &request->session_handle->session->cred,
         root_fh,

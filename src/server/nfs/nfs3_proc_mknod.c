@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -108,16 +108,16 @@ chimera_nfs3_mknod_open_callback(
                 return;
         } /* switch */
 
-        chimera_vfs_mknod(thread->vfs_thread, &req->cred,
-                          handle,
-                          args->where.name.str,
-                          args->where.name.len,
-                          attr,
-                          CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
-                          CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
-                          CHIMERA_NFS3_ATTR_MASK,
-                          chimera_nfs3_mknod_complete,
-                          req);
+        chimera_vfs_mknod_at(thread->vfs_thread, &req->cred,
+                             handle,
+                             args->where.name.str,
+                             args->where.name.len,
+                             attr,
+                             CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
+                             CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
+                             CHIMERA_NFS3_ATTR_MASK,
+                             chimera_nfs3_mknod_complete,
+                             req);
     } else {
         res.status = chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
@@ -146,10 +146,10 @@ chimera_nfs3_mknod(
 
     req->args_mknod = args;
 
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     args->where.dir.data.data,
-                     args->where.dir.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                     chimera_nfs3_mknod_open_callback,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        args->where.dir.data.data,
+                        args->where.dir.data.len,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs3_mknod_open_callback,
+                        req);
 } /* chimera_nfs3_mknod */

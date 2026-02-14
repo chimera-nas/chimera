@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -76,7 +76,7 @@ chimera_nfs3_symlink_open_callback(
 
         chimera_nfs3_sattr3_to_va(attr, &args->symlink.symlink_attributes);
 
-        chimera_vfs_symlink(
+        chimera_vfs_symlink_at(
             thread->vfs_thread,
             &req->cred,
             handle,
@@ -117,10 +117,10 @@ chimera_nfs3_symlink(
     nfs3_dump_symlink(req, args);
     req->args_symlink = args;
 
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     args->where.dir.data.data,
-                     args->where.dir.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                     chimera_nfs3_symlink_open_callback,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        args->where.dir.data.data,
+                        args->where.dir.data.len,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs3_symlink_open_callback,
+                        req);
 } /* chimera_nfs3_symlink */

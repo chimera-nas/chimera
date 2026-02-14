@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -16,8 +16,8 @@ chimera_nfs4_dispatch(
         case CHIMERA_VFS_OP_MOUNT:
             chimera_nfs4_mount(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_LOOKUP:
-            chimera_nfs4_lookup(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_LOOKUP_AT:
+            chimera_nfs4_lookup_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_GETATTR:
             chimera_nfs4_getattr(thread, shared, request, private_data);
@@ -25,14 +25,14 @@ chimera_nfs4_dispatch(
         case CHIMERA_VFS_OP_SETATTR:
             chimera_nfs4_setattr(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_MKDIR:
-            chimera_nfs4_mkdir(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_MKDIR_AT:
+            chimera_nfs4_mkdir_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_MKNOD:
-            chimera_nfs4_mknod(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_MKNOD_AT:
+            chimera_nfs4_mknod_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_REMOVE:
-            chimera_nfs4_remove(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_REMOVE_AT:
+            chimera_nfs4_remove_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_READDIR:
             chimera_nfs4_readdir(thread, shared, request, private_data);
@@ -40,8 +40,8 @@ chimera_nfs4_dispatch(
         case CHIMERA_VFS_OP_OPEN_AT:
             chimera_nfs4_open_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_OPEN:
-            chimera_nfs4_open(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_OPEN_FH:
+            chimera_nfs4_open_fh(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_CLOSE:
             chimera_nfs4_close(thread, shared, request, private_data);
@@ -55,17 +55,17 @@ chimera_nfs4_dispatch(
         case CHIMERA_VFS_OP_COMMIT:
             chimera_nfs4_commit(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_SYMLINK:
-            chimera_nfs4_symlink(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_SYMLINK_AT:
+            chimera_nfs4_symlink_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_READLINK:
             chimera_nfs4_readlink(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_RENAME:
-            chimera_nfs4_rename(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_RENAME_AT:
+            chimera_nfs4_rename_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_LINK:
-            chimera_nfs4_link(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_LINK_AT:
+            chimera_nfs4_link_at(thread, shared, request, private_data);
             break;
         default:
             chimera_error("nfs4", __FILE__, __LINE__,

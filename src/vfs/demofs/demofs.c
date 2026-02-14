@@ -1236,7 +1236,7 @@ demofs_umount(
 } /* demofs_umount */
 
 static void
-demofs_lookup(
+demofs_lookup_at(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request,
@@ -1245,10 +1245,10 @@ demofs_lookup(
     struct demofs_inode  *inode, *child;
     struct demofs_dirent *dirent;
     uint64_t              hash;
-    const char           *name    = request->lookup.component;
-    uint32_t              namelen = request->lookup.component_len;
+    const char           *name    = request->lookup_at.component;
+    uint32_t              namelen = request->lookup_at.component_len;
 
-    hash = request->lookup.component_hash;
+    hash = request->lookup_at.component_hash;
 
     inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1265,11 +1265,11 @@ demofs_lookup(
         return;
     }
 
-    demofs_map_attrs(thread, &request->lookup.r_dir_attr, inode);
+    demofs_map_attrs(thread, &request->lookup_at.r_dir_attr, inode);
 
     /* Handle "." - return the directory itself */
     if (namelen == 1 && name[0] == '.') {
-        demofs_map_attrs(thread, &request->lookup.r_attr, inode);
+        demofs_map_attrs(thread, &request->lookup_at.r_attr, inode);
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_OK;
         request->complete(request);
@@ -1285,7 +1285,7 @@ demofs_lookup(
             request->complete(request);
             return;
         }
-        demofs_map_attrs(thread, &request->lookup.r_attr, child);
+        demofs_map_attrs(thread, &request->lookup_at.r_attr, child);
         pthread_mutex_unlock(&child->lock);
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_OK;
@@ -1304,7 +1304,7 @@ demofs_lookup(
 
     child = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
-    demofs_map_attrs(thread, &request->lookup.r_attr, child);
+    demofs_map_attrs(thread, &request->lookup_at.r_attr, child);
 
     pthread_mutex_unlock(&child->lock);
 
@@ -1312,10 +1312,10 @@ demofs_lookup(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* demofs_lookup */
+} /* demofs_lookup_at */
 
 static void
-demofs_mkdir(
+demofs_mkdir_at(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request,
@@ -1328,7 +1328,7 @@ demofs_mkdir(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    hash = request->mkdir.name_hash;
+    hash = request->mkdir_at.name_hash;
 
     /* Optimistically allocate an inode */
     inode = demofs_inode_alloc_thread(thread);
@@ -1350,17 +1350,17 @@ demofs_mkdir(
 
     /* Parent will be set after we validate parent_inode */
 
-    demofs_apply_attrs(inode, request->mkdir.set_attr);
+    demofs_apply_attrs(inode, request->mkdir_at.set_attr);
 
-    demofs_map_attrs(thread, &request->mkdir.r_attr, inode);
+    demofs_map_attrs(thread, &request->mkdir_at.r_attr, inode);
 
     /* Optimistically allocate a dirent */
     dirent = demofs_dirent_alloc(thread,
                                  inode->inum,
                                  inode->gen,
                                  hash,
-                                 request->mkdir.name,
-                                 request->mkdir.name_len);
+                                 request->mkdir_at.name,
+                                 request->mkdir_at.name_len);
 
     parent_inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1381,14 +1381,14 @@ demofs_mkdir(
         return;
     }
 
-    demofs_map_attrs(thread, &request->mkdir.r_dir_pre_attr, parent_inode);
+    demofs_map_attrs(thread, &request->mkdir_at.r_dir_pre_attr, parent_inode);
 
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
 
     if (existing_dirent) {
         existing_inode = demofs_inode_get_inum(shared, existing_dirent->inum, existing_dirent->gen);
-        demofs_map_attrs(thread, &request->mkdir.r_attr, existing_inode);
-        demofs_map_attrs(thread, &request->mkdir.r_dir_post_attr, parent_inode);
+        demofs_map_attrs(thread, &request->mkdir_at.r_attr, existing_inode);
+        demofs_map_attrs(thread, &request->mkdir_at.r_dir_post_attr, parent_inode);
         pthread_mutex_unlock(&existing_inode->lock);
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
@@ -1409,16 +1409,16 @@ demofs_mkdir(
     parent_inode->mtime_sec  = now.tv_sec;
     parent_inode->mtime_nsec = now.tv_nsec;
 
-    demofs_map_attrs(thread, &request->mkdir.r_dir_post_attr, parent_inode);
+    demofs_map_attrs(thread, &request->mkdir_at.r_dir_post_attr, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* demofs_mkdir */
+} /* demofs_mkdir_at */
 
 static void
-demofs_mknod(
+demofs_mknod_at(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request,
@@ -1431,7 +1431,7 @@ demofs_mknod(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    hash = request->mknod.name_hash;
+    hash = request->mknod_at.name_hash;
 
     /* Optimistically allocate an inode */
     inode = demofs_inode_alloc_thread(thread);
@@ -1450,27 +1450,27 @@ demofs_mknod(
     inode->ctime_nsec = now.tv_nsec;
 
     /* Set mode (including file type bits) and rdev from set_attr */
-    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
-        inode->mode = request->mknod.set_attr->va_mode;
+    if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        inode->mode = request->mknod_at.set_attr->va_mode;
     } else {
         inode->mode = S_IFREG | 0644;
     }
 
-    if (request->mknod.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
-        inode->rdev = request->mknod.set_attr->va_rdev;
+    if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
+        inode->rdev = request->mknod_at.set_attr->va_rdev;
     }
 
-    demofs_apply_attrs(inode, request->mknod.set_attr);
+    demofs_apply_attrs(inode, request->mknod_at.set_attr);
 
-    demofs_map_attrs(thread, &request->mknod.r_attr, inode);
+    demofs_map_attrs(thread, &request->mknod_at.r_attr, inode);
 
     /* Optimistically allocate a dirent */
     dirent = demofs_dirent_alloc(thread,
                                  inode->inum,
                                  inode->gen,
                                  hash,
-                                 request->mknod.name,
-                                 request->mknod.name_len);
+                                 request->mknod_at.name,
+                                 request->mknod_at.name_len);
 
     parent_inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1491,14 +1491,14 @@ demofs_mknod(
         return;
     }
 
-    demofs_map_attrs(thread, &request->mknod.r_dir_pre_attr, parent_inode);
+    demofs_map_attrs(thread, &request->mknod_at.r_dir_pre_attr, parent_inode);
 
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
 
     if (existing_dirent) {
         existing_inode = demofs_inode_get_inum(shared, existing_dirent->inum, existing_dirent->gen);
-        demofs_map_attrs(thread, &request->mknod.r_attr, existing_inode);
-        demofs_map_attrs(thread, &request->mknod.r_dir_post_attr, parent_inode);
+        demofs_map_attrs(thread, &request->mknod_at.r_attr, existing_inode);
+        demofs_map_attrs(thread, &request->mknod_at.r_dir_post_attr, parent_inode);
         pthread_mutex_unlock(&existing_inode->lock);
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
@@ -1513,16 +1513,16 @@ demofs_mknod(
     parent_inode->mtime_sec  = now.tv_sec;
     parent_inode->mtime_nsec = now.tv_nsec;
 
-    demofs_map_attrs(thread, &request->mknod.r_dir_post_attr, parent_inode);
+    demofs_map_attrs(thread, &request->mknod_at.r_dir_post_attr, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* demofs_mknod */
+} /* demofs_mknod_at */
 
 static void
-demofs_remove(
+demofs_remove_at(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request,
@@ -1535,7 +1535,7 @@ demofs_remove(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    hash = request->remove.name_hash;
+    hash = request->remove_at.name_hash;
 
     parent_inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -1545,7 +1545,7 @@ demofs_remove(
         return;
     }
 
-    demofs_map_attrs(thread, &request->remove.r_dir_pre_attr, parent_inode);
+    demofs_map_attrs(thread, &request->remove_at.r_dir_pre_attr, parent_inode);
 
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -1596,10 +1596,10 @@ demofs_remove(
     }
 
     if (inode->nlink == 0) {
-        request->remove.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
+        request->remove_at.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
     }
 
-    demofs_map_attrs(thread, &request->remove.r_removed_attr, inode);
+    demofs_map_attrs(thread, &request->remove_at.r_removed_attr, inode);
 
     if (inode->nlink == 0) {
         --inode->refcnt;
@@ -1609,7 +1609,7 @@ demofs_remove(
         }
     }
 
-    demofs_map_attrs(thread, &request->remove.r_dir_post_attr, parent_inode);
+    demofs_map_attrs(thread, &request->remove_at.r_dir_post_attr, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
     pthread_mutex_unlock(&inode->lock);
@@ -1618,7 +1618,7 @@ demofs_remove(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* demofs_remove */
+} /* demofs_remove_at */
 
 /*
  * Cookie values for readdir:
@@ -1780,7 +1780,7 @@ demofs_readdir(
 } /* demofs_readdir */
 
 static void
-demofs_open(
+demofs_open_fh(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request,
@@ -1799,11 +1799,11 @@ demofs_open(
     inode->refcnt++;
     pthread_mutex_unlock(&inode->lock);
 
-    request->open.r_vfs_private = (uint64_t) inode;
+    request->open_fh.r_vfs_private = (uint64_t) inode;
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* demofs_open */
+} /* demofs_open_fh */
 
 static void
 demofs_open_at(
@@ -2981,7 +2981,7 @@ demofs_seek(
 } /* demofs_seek */
 
 static void
-demofs_symlink(
+demofs_symlink_at(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request,
@@ -2994,13 +2994,13 @@ demofs_symlink(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    hash = request->symlink.name_hash;
+    hash = request->symlink_at.name_hash;
 
     /* Optimistically allocate an inode */
     inode = demofs_inode_alloc_thread(thread);
 
-    inode->size       = request->symlink.targetlen;
-    inode->space_used = request->symlink.targetlen;
+    inode->size       = request->symlink_at.targetlen;
+    inode->space_used = request->symlink_at.targetlen;
     inode->uid        = 0;
     inode->gid        = 0;
     inode->nlink      = 1;
@@ -3013,18 +3013,18 @@ demofs_symlink(
     inode->ctime_nsec = now.tv_nsec;
 
     inode->symlink.target = demofs_symlink_target_alloc(thread,
-                                                        request->symlink.target,
-                                                        request->symlink.targetlen);
+                                                        request->symlink_at.target,
+                                                        request->symlink_at.targetlen);
 
-    demofs_map_attrs(thread, &request->symlink.r_attr, inode);
+    demofs_map_attrs(thread, &request->symlink_at.r_attr, inode);
 
     /* Optimistically allocate a dirent */
     dirent = demofs_dirent_alloc(thread,
                                  inode->inum,
                                  inode->gen,
                                  hash,
-                                 request->symlink.name,
-                                 request->symlink.namelen);
+                                 request->symlink_at.name,
+                                 request->symlink_at.namelen);
 
     parent_inode = demofs_inode_get_fh(shared, request->fh, request->fh_len);
 
@@ -3056,20 +3056,20 @@ demofs_symlink(
         return;
     }
 
-    demofs_map_attrs(thread, &request->symlink.r_dir_pre_attr, parent_inode);
+    demofs_map_attrs(thread, &request->symlink_at.r_dir_pre_attr, parent_inode);
 
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
     parent_inode->mtime_sec  = now.tv_sec;
     parent_inode->mtime_nsec = now.tv_nsec;
 
-    demofs_map_attrs(thread, &request->symlink.r_dir_post_attr, parent_inode);
+    demofs_map_attrs(thread, &request->symlink_at.r_dir_post_attr, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* demofs_symlink */
+} /* demofs_symlink_at */
 
 static void
 demofs_readlink(
@@ -3123,7 +3123,7 @@ demofs_fh_compare(
 } /* demofs_fh_compare */
 
 static void
-demofs_rename(
+demofs_rename_at(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request,
@@ -3138,13 +3138,13 @@ demofs_rename(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    hash     = request->rename.name_hash;
-    new_hash = request->rename.new_name_hash;
+    hash     = request->rename_at.name_hash;
+    new_hash = request->rename_at.new_name_hash;
 
     cmp = demofs_fh_compare(request->fh,
                             request->fh_len,
-                            request->rename.new_fh,
-                            request->rename.new_fhlen);
+                            request->rename_at.new_fh,
+                            request->rename_at.new_fhlen);
 
     if (cmp == 0) {
         old_parent_inode = demofs_inode_get_fh(shared,
@@ -3172,12 +3172,12 @@ demofs_rename(
                                                    request->fh_len);
 
             new_parent_inode = demofs_inode_get_fh(shared,
-                                                   request->rename.new_fh,
-                                                   request->rename.new_fhlen);
+                                                   request->rename_at.new_fh,
+                                                   request->rename_at.new_fhlen);
         } else {
             new_parent_inode = demofs_inode_get_fh(shared,
-                                                   request->rename.new_fh,
-                                                   request->rename.new_fhlen);
+                                                   request->rename_at.new_fh,
+                                                   request->rename_at.new_fhlen);
             old_parent_inode = demofs_inode_get_fh(shared,
                                                    request->fh,
                                                    request->fh_len);
@@ -3210,8 +3210,8 @@ demofs_rename(
         }
     }
 
-    demofs_map_attrs(thread, &request->rename.r_fromdir_pre_attr, old_parent_inode);
-    demofs_map_attrs(thread, &request->rename.r_todir_pre_attr, new_parent_inode);
+    demofs_map_attrs(thread, &request->rename_at.r_fromdir_pre_attr, old_parent_inode);
+    demofs_map_attrs(thread, &request->rename_at.r_todir_pre_attr, new_parent_inode);
 
     rb_tree_query_exact(&old_parent_inode->dir.dirents, hash, hash, old_dirent);
 
@@ -3245,8 +3245,8 @@ demofs_rename(
         if (existing_dirent->inum == old_dirent->inum &&
             existing_dirent->gen == old_dirent->gen) {
             /* Same inode - do nothing, just return success */
-            demofs_map_attrs(thread, &request->rename.r_fromdir_post_attr, old_parent_inode);
-            demofs_map_attrs(thread, &request->rename.r_todir_post_attr, new_parent_inode);
+            demofs_map_attrs(thread, &request->rename_at.r_fromdir_post_attr, old_parent_inode);
+            demofs_map_attrs(thread, &request->rename_at.r_todir_post_attr, new_parent_inode);
             pthread_mutex_unlock(&child_inode->lock);
             if (cmp != 0) {
                 pthread_mutex_unlock(&old_parent_inode->lock);
@@ -3305,8 +3305,8 @@ demofs_rename(
                                      old_dirent->inum,
                                      old_dirent->gen,
                                      new_hash,
-                                     request->rename.new_name,
-                                     request->rename.new_namelen);
+                                     request->rename_at.new_name,
+                                     request->rename_at.new_namelen);
 
     rb_tree_insert(&new_parent_inode->dir.dirents, hash, new_dirent);
 
@@ -3322,8 +3322,8 @@ demofs_rename(
     new_parent_inode->mtime_sec  = now.tv_sec;
     new_parent_inode->mtime_nsec = now.tv_nsec;
 
-    demofs_map_attrs(thread, &request->rename.r_fromdir_post_attr, old_parent_inode);
-    demofs_map_attrs(thread, &request->rename.r_todir_post_attr, new_parent_inode);
+    demofs_map_attrs(thread, &request->rename_at.r_fromdir_post_attr, old_parent_inode);
+    demofs_map_attrs(thread, &request->rename_at.r_todir_post_attr, new_parent_inode);
 
     if (cmp != 0) {
         pthread_mutex_unlock(&old_parent_inode->lock);
@@ -3339,10 +3339,10 @@ demofs_rename(
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 
-} /* demofs_rename */
+} /* demofs_rename_at */
 
 static void
-demofs_link(
+demofs_link_at(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request,
@@ -3355,11 +3355,11 @@ demofs_link(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    hash = request->link.name_hash;
+    hash = request->link_at.name_hash;
 
     parent_inode = demofs_inode_get_fh(shared,
-                                       request->link.dir_fh,
-                                       request->link.dir_fhlen);
+                                       request->link_at.dir_fh,
+                                       request->link_at.dir_fhlen);
 
     if (!parent_inode) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -3367,7 +3367,7 @@ demofs_link(
         return;
     }
 
-    demofs_map_attrs(thread, &request->link.r_dir_pre_attr, parent_inode);
+    demofs_map_attrs(thread, &request->link_at.r_dir_pre_attr, parent_inode);
 
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -3398,17 +3398,17 @@ demofs_link(
 
     if (dirent) {
 
-        if (request->link.replace && !S_ISDIR(inode->mode)) {
+        if (request->link_at.replace && !S_ISDIR(inode->mode)) {
 
             existing_inode = demofs_inode_get_inum(shared,
                                                    dirent->inum,
                                                    dirent->gen);
 
-            chimera_demofs_abort_if(!existing_inode, "demofs_link: existing_inode not found");
+            chimera_demofs_abort_if(!existing_inode, "demofs_link_at: existing_inode not found");
 
             existing_inode->nlink--;
 
-            demofs_map_attrs(thread, &request->link.r_replaced_attr, existing_inode);
+            demofs_map_attrs(thread, &request->link_at.r_replaced_attr, existing_inode);
 
             pthread_mutex_unlock(&existing_inode->lock);
 
@@ -3428,8 +3428,8 @@ demofs_link(
                                  inode->inum,
                                  inode->gen,
                                  hash,
-                                 request->link.name,
-                                 request->link.namelen);
+                                 request->link_at.name,
+                                 request->link_at.namelen);
 
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
@@ -3440,8 +3440,8 @@ demofs_link(
     parent_inode->mtime_sec  = now.tv_sec;
     parent_inode->mtime_nsec = now.tv_nsec;
 
-    demofs_map_attrs(thread, &request->link.r_attr, inode);
-    demofs_map_attrs(thread, &request->link.r_dir_post_attr, parent_inode);
+    demofs_map_attrs(thread, &request->link_at.r_attr, inode);
+    demofs_map_attrs(thread, &request->link_at.r_dir_post_attr, parent_inode);
 
     pthread_mutex_unlock(&parent_inode->lock);
     pthread_mutex_unlock(&inode->lock);
@@ -3449,7 +3449,7 @@ demofs_link(
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 
-} /* demofs_link */
+} /* demofs_link_at */
 
 
 static void
@@ -3676,8 +3676,8 @@ demofs_dispatch(
         case CHIMERA_VFS_OP_UMOUNT:
             demofs_umount(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_LOOKUP:
-            demofs_lookup(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_LOOKUP_AT:
+            demofs_lookup_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_GETATTR:
             demofs_getattr(thread, shared, request, private_data);
@@ -3685,14 +3685,14 @@ demofs_dispatch(
         case CHIMERA_VFS_OP_SETATTR:
             demofs_setattr(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_MKDIR:
-            demofs_mkdir(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_MKDIR_AT:
+            demofs_mkdir_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_MKNOD:
-            demofs_mknod(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_MKNOD_AT:
+            demofs_mknod_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_REMOVE:
-            demofs_remove(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_REMOVE_AT:
+            demofs_remove_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_READDIR:
             demofs_readdir(thread, shared, request, private_data);
@@ -3700,8 +3700,8 @@ demofs_dispatch(
         case CHIMERA_VFS_OP_OPEN_AT:
             demofs_open_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_OPEN:
-            demofs_open(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_OPEN_FH:
+            demofs_open_fh(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_CREATE_UNLINKED:
             demofs_create_unlinked(thread, shared, request, private_data);
@@ -3725,17 +3725,17 @@ demofs_dispatch(
         case CHIMERA_VFS_OP_SEEK:
             demofs_seek(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_SYMLINK:
-            demofs_symlink(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_SYMLINK_AT:
+            demofs_symlink_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_READLINK:
             demofs_readlink(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_RENAME:
-            demofs_rename(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_RENAME_AT:
+            demofs_rename_at(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_LINK:
-            demofs_link(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_LINK_AT:
+            demofs_link_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_PUT_KEY:
             demofs_put_key(thread, shared, request, private_data);
@@ -3759,9 +3759,10 @@ demofs_dispatch(
 } /* demofs_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_demofs = {
-    .name           = "demofs",
-    .fh_magic       = CHIMERA_VFS_FH_MAGIC_DEMOFS,
-    .capabilities   = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV,
+    .name         = "demofs",
+    .fh_magic     = CHIMERA_VFS_FH_MAGIC_DEMOFS,
+    .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
+        CHIMERA_VFS_CAP_FS_RELATIVE_OP,
     .init           = demofs_init,
     .destroy        = demofs_destroy,
     .thread_init    = demofs_thread_init,

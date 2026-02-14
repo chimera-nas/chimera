@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -6,20 +6,20 @@
 #include "nfs_common/nfs3_attr.h"
 #include "nfs_common/nfs3_status.h"
 
-struct chimera_nfs3_symlink_ctx {
+struct chimera_nfs3_mkdir_ctx {
     struct chimera_nfs_client_server *server;
 };
 
 static void
-chimera_nfs3_symlink_callback(
+chimera_nfs3_mkdir_callback(
     struct evpl                 *evpl,
     const struct evpl_rpc2_verf *verf,
-    struct SYMLINK3res          *res,
+    struct MKDIR3res            *res,
     int                          status,
     void                        *private_data)
 {
-    struct chimera_vfs_request      *request = private_data;
-    struct chimera_nfs3_symlink_ctx *ctx     = request->plugin_data;
+    struct chimera_vfs_request    *request = private_data;
+    struct chimera_nfs3_mkdir_ctx *ctx     = request->plugin_data;
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -29,31 +29,30 @@ chimera_nfs3_symlink_callback(
 
     if (res->status != NFS3_OK) {
 
-        chimera_nfs3_get_wcc_data(&request->symlink.r_dir_pre_attr, &request->symlink.r_dir_post_attr, &res->resfail.
-                                  dir_wcc);
+        chimera_nfs3_get_wcc_data(&request->mkdir_at.r_dir_pre_attr,
+                                  &request->mkdir_at.r_dir_post_attr,
+                                  &res->resfail.dir_wcc);
 
         request->status = nfs3_client_status_to_chimera_vfs_error(res->status);
         request->complete(request);
         return;
     }
 
-    chimera_nfs3_get_wcc_data(&request->symlink.r_dir_pre_attr, &request->symlink.r_dir_post_attr, &res->resok.dir_wcc);
-
-    if (res->resok.obj.handle_follows) {
-        chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, request->fh, &request->symlink.r_attr);
-    }
+    chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, request->fh, &request->mkdir_at.r_attr);
 
     if (res->resok.obj_attributes.attributes_follow) {
-        chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->symlink.r_attr);
+        chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->mkdir_at.r_attr);
     }
+
+    chimera_nfs3_get_wcc_data(&request->mkdir_at.r_dir_pre_attr, &request->mkdir_at.r_dir_post_attr, &res->resok.dir_wcc
+                              );
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* chimera_nfs3_symlink_callback */
-
+} /* chimera_nfs3_mkdir_callback */
 
 void
-chimera_nfs3_symlink(
+chimera_nfs3_mkdir_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -61,8 +60,8 @@ chimera_nfs3_symlink(
 {
     struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
                                                                                                   request->fh_len);
-    struct SYMLINK3args                      args;
-    struct chimera_nfs3_symlink_ctx         *ctx;
+    struct chimera_nfs3_mkdir_ctx           *ctx;
+    struct MKDIR3args                        args;
     struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
@@ -73,27 +72,23 @@ chimera_nfs3_symlink(
         return;
     }
 
+    ctx         = request->plugin_data;
+    ctx->server = server_thread->server;
+
     chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
     args.where.dir.data.data = fh;
     args.where.dir.data.len  = fhlen;
-    args.where.name.str      = (char *) request->symlink.name;
-    args.where.name.len      = request->symlink.namelen;
+    args.where.name.str      = (char *) request->mkdir_at.name;
+    args.where.name.len      = request->mkdir_at.name_len;
 
-    args.symlink.symlink_data.str = (char *) request->symlink.target;
-    args.symlink.symlink_data.len = request->symlink.targetlen;
-
-    chimera_nfs_va_to_sattr3(&args.symlink.symlink_attributes, request->symlink.set_attr);
-
-    ctx         = request->plugin_data;
-    ctx->server = server_thread->server;
+    chimera_nfs_va_to_sattr3(&args.attributes, request->mkdir_at.set_attr);
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,
                                request->thread->vfs->machine_name_len);
 
-    shared->nfs_v3.send_call_NFSPROC3_SYMLINK(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
-                                              &args, 0, 0, 0,
-                                              chimera_nfs3_symlink_callback, request);
-} /* chimera_nfs3_symlink */
+    shared->nfs_v3.send_call_NFSPROC3_MKDIR(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
+                                            &args, 0, 0, 0, chimera_nfs3_mkdir_callback, request);
+} /* chimera_nfs3_mkdir_at */
 

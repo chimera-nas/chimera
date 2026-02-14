@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -30,7 +30,6 @@ chimera_symlink(
     request->symlink.callback     = callback;
     request->symlink.private_data = private_data;
     request->symlink.path_len     = path_len;
-    request->symlink.parent_len   = slash ? slash - path : path_len;
     request->symlink.target_len   = target_len;
 
     while (slash && *slash == '/') {

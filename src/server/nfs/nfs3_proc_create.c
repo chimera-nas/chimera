@@ -206,10 +206,10 @@ chimera_nfs3_create(
 
     req->args_create = args;
 
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     args->where.dir.data.data,
-                     args->where.dir.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                     chimera_nfs3_create_open_at_parent_complete,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        args->where.dir.data.data,
+                        args->where.dir.data.len,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs3_create_open_at_parent_complete,
+                        req);
 } /* chimera_nfs3_create */
