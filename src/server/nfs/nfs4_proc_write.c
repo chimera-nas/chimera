@@ -66,6 +66,7 @@ chimera_nfs4_write(
 
     if (!session) {
         res->status = NFS4ERR_BAD_STATEID;
+        evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
         chimera_nfs4_compound_complete(req, NFS4_OK);
         return;
     }
@@ -75,6 +76,7 @@ chimera_nfs4_write(
     if (nfs4_session_acquire_state(session, &args->stateid,
                                    &state, &state_handle) != NFS4_OK) {
         res->status = NFS4ERR_BAD_STATEID;
+        evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
         chimera_nfs4_compound_complete(req, NFS4_OK);
         return;
     }
