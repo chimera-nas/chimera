@@ -519,7 +519,7 @@ chimera_io_uring_setattr(
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 #else  /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
         // Fall back to fchmod on older kernels (AT_SYMLINK_NOFOLLOW not supported)
-        rc = fchmod(fd, attr->va_mode);
+        rc = fchmod(fd, request->setattr.set_attr->va_mode);
 #endif /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
 
         if (rc) {

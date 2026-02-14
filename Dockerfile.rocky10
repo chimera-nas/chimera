@@ -13,9 +13,9 @@ RUN dnf install -y epel-release && \
 RUN dnf -y update && \
     dnf -y install gcc gcc-c++ clang clang-tools-extra cmake ninja-build git flex bison llvm \
     libuuid-devel uthash-devel krb5-devel krb5-libs \
-    rdma-core-devel jansson-devel xxhash-devel userspace-rcu-devel liburing-devel libunwind-devel \
+    rdma-core-devel jansson-devel xxhash-devel userspace-rcu-devel liburing-devel libunwind-devel libasan \
     rocksdb-devel openssl-devel openssl numactl-devel libcurl-devel libaio-devel \
-    autoconf automake libtool pkgconfig ca-certificates uncrustify iproute curl libnl3-devel \
+    autoconf automake libtool pkgconfig ca-certificates uncrustify clang-analyzer iproute curl libnl3-devel \
     libwbclient-devel samba-client krb5-server krb5-workstation samba samba-winbind samba-winbind-clients && \
     dnf clean all
 
