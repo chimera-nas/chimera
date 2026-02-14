@@ -49,6 +49,22 @@ chimera_nfs4_compound_process(
      * rather than letting individual procs abort on allocation failure */
     if (req->encoding->dbuf->size - req->encoding->dbuf->used < 8192) {
         chimera_nfs4_compound_complete(req, NFS4ERR_RESOURCE);
+    } else if (req->fhlen == 0 &&
+               argop->argop >= OP_ACCESS &&
+               argop->argop <= OP_CLONE &&
+               argop->argop != OP_PUTFH &&
+               argop->argop != OP_PUTROOTFH &&
+               argop->argop != OP_PUTPUBFH &&
+               argop->argop != OP_RESTOREFH &&
+               argop->argop != OP_SETCLIENTID &&
+               argop->argop != OP_SETCLIENTID_CONFIRM &&
+               argop->argop != OP_EXCHANGE_ID &&
+               argop->argop != OP_CREATE_SESSION &&
+               argop->argop != OP_DESTROY_SESSION &&
+               argop->argop != OP_DESTROY_CLIENTID &&
+               argop->argop != OP_SEQUENCE &&
+               argop->argop != OP_RECLAIM_COMPLETE) {
+        chimera_nfs4_compound_complete(req, NFS4ERR_NOFILEHANDLE);
     } else {
         switch (argop->argop) {
             case OP_ACCESS:
@@ -155,6 +171,7 @@ chimera_nfs4_compound_process(
                 if (argop->argop >= OP_ACCESS && argop->argop <= OP_CLONE) {
                     chimera_nfs4_compound_complete(req, NFS4ERR_NOTSUPP);
                 } else {
+                    resop->resop = OP_ILLEGAL;
                     chimera_nfs4_compound_complete(req, NFS4ERR_OP_ILLEGAL);
                 }
                 break;
