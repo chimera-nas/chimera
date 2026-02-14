@@ -135,6 +135,10 @@ EOF
 
 generate_config
 
+# Raise system limits for high-parallelism testing
+ulimit -l unlimited
+sysctl -q -w fs.aio-max-nr=2097152 2>/dev/null || true
+
 # Create network namespace
 ip netns add "${NETNS_NAME}"
 ip netns exec "${NETNS_NAME}" ip link set lo up
