@@ -33,9 +33,11 @@ trap cleanup EXIT
 
 mkdir -p "$OUTDIR"
 
-# Extract the kernel (resolve symlink inside the container)
+# Extract the kernel and initrd (resolve symlinks inside the container)
 VMLINUZ_PATH=$(docker run --rm "$IMAGE_TAG" readlink -f /boot/vmlinuz)
 docker cp "${CONTAINER_ID}:${VMLINUZ_PATH}" "${OUTDIR}/vmlinuz"
+INITRD_PATH=$(docker run --rm "$IMAGE_TAG" readlink -f /boot/initrd)
+docker cp "${CONTAINER_ID}:${INITRD_PATH}" "${OUTDIR}/initrd"
 
 # Export the filesystem to a qcow2
 docker export "$CONTAINER_ID" > "${OUTDIR}/rootfs.tar"
