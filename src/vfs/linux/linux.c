@@ -624,13 +624,15 @@ chimera_linux_mkdir(
 
     rc = mkdirat(fd, fullname, mode);
 
+    int mkdirat_errno = errno;
+
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                             &request->mkdir.r_dir_post_attr,
                             fd);
 
     if (rc < 0) {
 
-        if (errno == EEXIST) {
+        if (mkdirat_errno == EEXIST) {
             chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                                           request,
                                           &request->mkdir.r_attr,
@@ -638,7 +640,7 @@ chimera_linux_mkdir(
                                           fullname);
         }
 
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(mkdirat_errno);
         request->complete(request);
         return;
     }
@@ -692,13 +694,15 @@ chimera_linux_mknod(
 
     rc = mknodat(fd, fullname, mode, dev);
 
+    int mknodat_errno = errno;
+
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                             &request->mknod.r_dir_post_attr,
                             fd);
 
     if (rc < 0) {
 
-        if (errno == EEXIST) {
+        if (mknodat_errno == EEXIST) {
             chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                                           request,
                                           &request->mknod.r_attr,
@@ -706,7 +710,7 @@ chimera_linux_mknod(
                                           fullname);
         }
 
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(mknodat_errno);
         request->complete(request);
         return;
     }

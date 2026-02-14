@@ -30,11 +30,14 @@ add_test(NAME chimera/server/smb/smbclient_kerberos
 set_tests_properties(chimera/server/smb/smbclient_kerberos PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt")
 
-add_test(NAME chimera/server/smb/smbclient_winbind
-    COMMAND ${CMAKE_SOURCE_DIR}/scripts/ad_test_wrapper.sh
-            ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=winbind)
-set_tests_properties(chimera/server/smb/smbclient_winbind PROPERTIES
-    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt")
+find_program(SAMBA_TOOL samba-tool)
+if(SAMBA_TOOL)
+    add_test(NAME chimera/server/smb/smbclient_winbind
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/ad_test_wrapper.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=winbind)
+    set_tests_properties(chimera/server/smb/smbclient_winbind PROPERTIES
+        ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt")
+endif()
 
 # REST API user/share manipulation test
 add_executable(rest_user_manip_test rest_user_manip_test.c)

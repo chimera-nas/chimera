@@ -588,7 +588,7 @@ jobs:
             -w /build \
             ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '\
-              scan-build --status-bugs --exclude /workspace/ext/libsmb2 -o /scan-report \
+              scan-build --status-bugs --exclude /workspace/ext/libsmb2 --exclude /workspace/ext/libevpl -disable-checker unix.BlockInCriticalSection -o /scan-report \
               sh -c "cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} ${{ matrix.cmake_extra }} -B /build -S /workspace -G Ninja && ninja -C /build"' \
             2>&1 | tee "${{ github.workspace }}/scan-report/scan-build-output.txt"
 

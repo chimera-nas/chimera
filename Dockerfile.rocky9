@@ -17,7 +17,7 @@ RUN dnf -y update && \
     rocksdb-devel openssl-devel openssl numactl-devel libcurl-devel libaio-devel \
     autoconf automake libtool pkgconfig ca-certificates uncrustify clang-analyzer iproute curl libnl3-devel \
     libwbclient-devel samba-client krb5-server krb5-workstation samba samba-winbind samba-winbind-clients \
-    python3-boto3 && \
+    python3-boto3 which && \
     dnf clean all
 
 RUN if [ "$ENABLE_FIO" = "1" ] ; then \
