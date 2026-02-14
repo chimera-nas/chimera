@@ -29,6 +29,14 @@ VMLINUZ=$1; shift
 ROOTFS=$1; shift
 TEST_CMD="$*"
 
+# Use initrd if present alongside vmlinuz
+INITRD="$(dirname "$VMLINUZ")/initrd"
+if [ -f "$INITRD" ]; then
+    QEMU_INITRD="-initrd $INITRD"
+else
+    QEMU_INITRD=""
+fi
+
 NETNS_NAME="kvm_test_$$_$(date +%s%N)"
 TAP_NAME="tap_$$"
 LOG_FILE=$(mktemp /tmp/kvm_test_XXXXXX.log)
@@ -56,6 +64,7 @@ ip netns exec "${NETNS_NAME}" ip link set "${TAP_NAME}" up
 ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -enable-kvm -smp 2 -m 1G -cpu host \
     -kernel "$VMLINUZ" \
+    $QEMU_INITRD \
     $QEMU_MACHINE \
     -nodefaults \
     -drive file="$ROOTFS",if=virtio,format=qcow2,snapshot=on \
@@ -64,7 +73,7 @@ ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -serial file:"$LOG_FILE" \
     -nographic \
     -no-reboot \
-    -append "root=/dev/vda rw console=${QEMU_CONSOLE} panic=-1 test_cmd=\"${TEST_CMD}\" init=/bin/sh -- /init.sh"
+    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh"
 
 cat "$LOG_FILE"
 

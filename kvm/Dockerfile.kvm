@@ -3,20 +3,23 @@
 # SPDX-License-Identifier: Unlicense
 
 ARG DOCKER_MIRROR
-FROM ${DOCKER_MIRROR}ubuntu:24.04
+ARG UBUNTU_VERSION=24.04
+FROM ${DOCKER_MIRROR}ubuntu:${UBUNTU_VERSION}
 
+ARG KERNEL_PACKAGE=linux-image-generic
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install \
-    nfs-common cifs-utils iputils-ping \
-    linux-image-generic kmod iproute2 \
+    nfs-common cifs-utils iputils-ping netbase \
+    ${KERNEL_PACKAGE} initramfs-tools kmod iproute2 \
     build-essential git ca-certificates libnsl-dev \
     time \
     autoconf automake libtool pkg-config \
     libaio-dev libacl1-dev liburing-dev \
     uuid-dev xfslibs-dev libattr1-dev && \
+    update-initramfs -c -k all && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc /usr/share/man
 
@@ -41,4 +44,5 @@ RUN seq 1 100 | awk '{printf "xfstest_name_%04d\n", $1}' > /opt/xfstests/nametes
 COPY kvm/init.sh /init.sh
 RUN chmod +x /init.sh
 
-RUN ln -sf $(ls /boot/vmlinuz-* | head -1) /boot/vmlinuz
+RUN ln -sf $(ls /boot/vmlinuz-* | head -1) /boot/vmlinuz && \
+    ln -sf $(ls /boot/initrd.img-* | head -1) /boot/initrd
