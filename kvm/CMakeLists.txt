@@ -22,7 +22,7 @@ foreach(image_spec ${KVM_IMAGES})
     set(IMAGE_DIR ${BUILD_ROOT}/kvm/${IMAGE_NAME})
 
     add_custom_command(
-        OUTPUT ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+        OUTPUT ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/initrd ${IMAGE_DIR}/rootfs.qcow2
         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/build_vm_image.sh
                 ${IMAGE_DIR}
                 ${CMAKE_CURRENT_SOURCE_DIR}/Dockerfile.kvm
@@ -35,7 +35,7 @@ foreach(image_spec ${KVM_IMAGES})
     )
 
     add_custom_target(kvm_${IMAGE_NAME}_image ALL
-        DEPENDS ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+        DEPENDS ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/initrd ${IMAGE_DIR}/rootfs.qcow2
     )
 endforeach()
 
