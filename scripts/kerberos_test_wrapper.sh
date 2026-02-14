@@ -213,22 +213,25 @@ obtain_ticket() {
 
     # Get a ticket for testuser1 inside the namespace
     # Use printf to avoid newline issues with password
+    # Use FILE: prefix for MIT Kerberos compatibility (RHEL/Rocky smbclient)
+    CCACHE="FILE:${KRB_DIR}/krb5cc_testuser1"
+
     if ip netns exec "${NETNS_NAME}" env \
         KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
-        KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+        KRB5CCNAME="${CCACHE}" \
         sh -c 'printf "%s" "Password1!" | kinit testuser1@'"${REALM}"' 2>/dev/null'; then
         log "Obtained TGT for testuser1@${REALM}"
-        log "KRB5CCNAME=${KRB_DIR}/krb5cc_testuser1"
+        log "KRB5CCNAME=${CCACHE}"
 
         # Pre-acquire cifs service ticket so smbclient doesn't need KDC access
         ip netns exec "${NETNS_NAME}" env \
             KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
-            KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+            KRB5CCNAME="${CCACHE}" \
             kvno cifs/${SMB_HOST}@${REALM} 2>/dev/null || true
 
         ip netns exec "${NETNS_NAME}" env \
             KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
-            KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+            KRB5CCNAME="${CCACHE}" \
             klist 2>/dev/null || true
         return 0
     else
@@ -245,7 +248,7 @@ run_test() {
         KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
         KRB5_KDC_PROFILE="${KRB_DIR}/etc/kdc.conf" \
         KRB5_KTNAME="${KRB_DIR}/chimera.keytab" \
-        KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+        KRB5CCNAME="${CCACHE}" \
         KRB_REALM="${REALM}" \
         KRB_USER="testuser1" \
         KRB_SMB_HOST="${SMB_HOST}" \

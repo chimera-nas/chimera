@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: Unlicense
+
+ARG DOCKER_MIRROR=""
+FROM ${DOCKER_MIRROR}rockylinux/rockylinux:10
+ARG ENABLE_XLIO=1
+ARG ENABLE_FIO=1
+
+RUN dnf install -y epel-release && \
+    dnf config-manager --set-enabled crb
+
+RUN dnf -y update && \
+    dnf -y install gcc gcc-c++ clang clang-tools-extra cmake ninja-build git flex bison llvm \
+    libuuid-devel uthash-devel krb5-devel krb5-libs \
+    rdma-core-devel jansson-devel xxhash-devel userspace-rcu-devel liburing-devel libunwind-devel libasan \
+    rocksdb-devel openssl-devel openssl numactl-devel libcurl-devel libaio-devel \
+    autoconf automake libtool pkgconfig ca-certificates uncrustify clang-analyzer iproute curl libnl3-devel \
+    libwbclient-devel samba-client krb5-server krb5-workstation samba samba-winbind samba-winbind-clients \
+    python3-boto3 which && \
+    dnf clean all
+
+RUN if [ "$ENABLE_FIO" = "1" ] ; then \
+    git clone --depth 1 --branch fio-3.40 https://github.com/axboe/fio.git /fio && \
+    cd /fio && \
+    ./configure --disable-libnfs && \
+    make -j8 && \
+    make install ; \
+    fi
+
+RUN if [ "$ENABLE_XLIO" = "1" ] ; then \
+    git clone --depth 1 https://github.com/Mellanox/libdpcp.git /libdpcp && \
+    cd /libdpcp && \
+    ./autogen.sh && \
+    ./configure && \
+    make -j8 && \
+    make install && \
+    git clone --depth 1 --branch 3.60.2-nlfix https://github.com/benjarvis/libxlio.git /libxlio && \
+    cd /libxlio && \
+    ./autogen.sh && \
+    ./configure --with-dpcp=/usr/local && \
+    make -j8 && \
+    make install ; \
+    fi
+
+RUN dnf -y install qemu-kvm qemu-img && \
+    dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo && \
+    dnf -y install docker-ce docker-ce-cli containerd.io && \
+    dnf clean all
