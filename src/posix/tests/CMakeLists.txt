@@ -85,24 +85,22 @@ endmacro()
 
 # Macro to generate all tests for a backend
 macro(generate_posix_backend_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_posix_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_posix_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_posix_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate tests for each backend
 generate_posix_backend_tests(memfs "")
-generate_posix_backend_tests(demofs_io_uring "")
+generate_posix_backend_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_posix_backend_tests(demofs_aio "")
 endif()
 generate_posix_backend_tests(cairn CAIRN_ENABLED)
 generate_posix_backend_tests(linux "")
-generate_posix_backend_tests(io_uring IO_URING_ENABLED)
+generate_posix_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 Backend Tests
@@ -133,24 +131,22 @@ endmacro()
 
 # Macro to generate all NFS3 tests for a backend with optional condition
 macro(generate_posix_nfs3_backend_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_posix_nfs3_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_posix_nfs3_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_posix_nfs3_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate NFS3 tests for each backend
 generate_posix_nfs3_backend_tests(memfs "")
-generate_posix_nfs3_backend_tests(demofs_io_uring "")
+generate_posix_nfs3_backend_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_posix_nfs3_backend_tests(demofs_aio "")
 endif()
 generate_posix_nfs3_backend_tests(cairn CAIRN_ENABLED)
 generate_posix_nfs3_backend_tests(linux "")
-generate_posix_nfs3_backend_tests(io_uring IO_URING_ENABLED)
+generate_posix_nfs3_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 over TCP-RDMA Backend Tests
@@ -181,24 +177,22 @@ endmacro()
 
 # Macro to generate all NFS3 RDMA tests for a backend with optional condition
 macro(generate_posix_nfs3rdma_backend_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_posix_nfs3rdma_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_posix_nfs3rdma_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_posix_nfs3rdma_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate NFS3 RDMA tests for each backend
 generate_posix_nfs3rdma_backend_tests(memfs "")
-generate_posix_nfs3rdma_backend_tests(demofs_io_uring "")
+generate_posix_nfs3rdma_backend_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_posix_nfs3rdma_backend_tests(demofs_aio "")
 endif()
 generate_posix_nfs3rdma_backend_tests(cairn CAIRN_ENABLED)
 generate_posix_nfs3rdma_backend_tests(linux "")
-generate_posix_nfs3rdma_backend_tests(io_uring IO_URING_ENABLED)
+generate_posix_nfs3rdma_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # FSX tests for each backend
 # Uses run_fsx.sh wrapper to generate config and run fsx
@@ -219,7 +213,9 @@ endmacro()
 
 # Add FSX tests for each backend
 add_fsx_test(memfs)
-add_fsx_test(demofs_io_uring)
+if(IO_URING_ENABLED)
+    add_fsx_test(demofs_io_uring)
+endif()
 if(HAVE_LIBAIO)
     add_fsx_test(demofs_aio)
 endif()
@@ -227,14 +223,16 @@ if(CAIRN_ENABLED)
     add_fsx_test(cairn)
 endif()
 add_fsx_test(linux)
-if(IO_URING_ENABLED)
+if(CHIMERA_VFS_IO_URING)
     add_fsx_test(io_uring)
 endif()
 
 # NFS3 FSX tests
 # These tests run FSX through the NFS3 protocol to an in-process server
 add_fsx_test(nfs3_memfs)
-add_fsx_test(nfs3_demofs_io_uring)
+if(IO_URING_ENABLED)
+    add_fsx_test(nfs3_demofs_io_uring)
+endif()
 if(HAVE_LIBAIO)
     add_fsx_test(nfs3_demofs_aio)
 endif()
@@ -242,14 +240,16 @@ if(CAIRN_ENABLED)
     add_fsx_test(nfs3_cairn)
 endif()
 add_fsx_test(nfs3_linux)
-if(IO_URING_ENABLED)
+if(CHIMERA_VFS_IO_URING)
     add_fsx_test(nfs3_io_uring)
 endif()
 
 # NFS3 RDMA FSX tests
 # These tests run FSX through the NFS3 protocol using TCP-RDMA to an in-process server
 add_fsx_test(nfs3rdma_memfs)
-add_fsx_test(nfs3rdma_demofs_io_uring)
+if(IO_URING_ENABLED)
+    add_fsx_test(nfs3rdma_demofs_io_uring)
+endif()
 if(HAVE_LIBAIO)
     add_fsx_test(nfs3rdma_demofs_aio)
 endif()
@@ -257,7 +257,7 @@ if(CAIRN_ENABLED)
     add_fsx_test(nfs3rdma_cairn)
 endif()
 add_fsx_test(nfs3rdma_linux)
-if(IO_URING_ENABLED)
+if(CHIMERA_VFS_IO_URING)
     add_fsx_test(nfs3rdma_io_uring)
 endif()
 
@@ -351,24 +351,22 @@ endmacro()
 
 # Macro to generate all cthon tests for a backend
 macro(generate_cthon_backend_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_cthon_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_cthon_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_cthon_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate cthon tests for each backend
 generate_cthon_backend_tests(memfs "")
-generate_cthon_backend_tests(demofs_io_uring "")
+generate_cthon_backend_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_cthon_backend_tests(demofs_aio "")
 endif()
 generate_cthon_backend_tests(cairn CAIRN_ENABLED)
 generate_cthon_backend_tests(linux "")
-generate_cthon_backend_tests(io_uring IO_URING_ENABLED)
+generate_cthon_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 Cthon Tests
@@ -398,24 +396,22 @@ endmacro()
 
 # Macro to generate all NFS3 cthon tests for a backend with optional condition
 macro(generate_cthon_nfs3_backend_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_cthon_nfs3_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_cthon_nfs3_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_cthon_nfs3_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate NFS3 cthon tests for each backend
 generate_cthon_nfs3_backend_tests(memfs "")
-generate_cthon_nfs3_backend_tests(demofs_io_uring "")
+generate_cthon_nfs3_backend_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_cthon_nfs3_backend_tests(demofs_aio "")
 endif()
 generate_cthon_nfs3_backend_tests(cairn CAIRN_ENABLED)
 generate_cthon_nfs3_backend_tests(linux "")
-generate_cthon_nfs3_backend_tests(io_uring IO_URING_ENABLED)
+generate_cthon_nfs3_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 RDMA Cthon Tests
@@ -445,24 +441,22 @@ endmacro()
 
 # Macro to generate all NFS3 RDMA cthon tests for a backend with optional condition
 macro(generate_cthon_nfs3rdma_backend_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_cthon_nfs3rdma_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_cthon_nfs3rdma_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_cthon_nfs3rdma_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate NFS3 RDMA cthon tests for each backend
 generate_cthon_nfs3rdma_backend_tests(memfs "")
-generate_cthon_nfs3rdma_backend_tests(demofs_io_uring "")
+generate_cthon_nfs3rdma_backend_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_cthon_nfs3rdma_backend_tests(demofs_aio "")
 endif()
 generate_cthon_nfs3rdma_backend_tests(cairn CAIRN_ENABLED)
 generate_cthon_nfs3rdma_backend_tests(linux "")
-generate_cthon_nfs3rdma_backend_tests(io_uring IO_URING_ENABLED)
+generate_cthon_nfs3rdma_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # Stress Tests ported from xfstests
@@ -527,24 +521,22 @@ endmacro()
 
 # Macro to generate stress tests with optional condition
 macro(generate_stress_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_stress_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_stress_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_stress_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate stress tests for each backend
 generate_stress_tests(memfs "")
-generate_stress_tests(demofs_io_uring "")
+generate_stress_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_stress_tests(demofs_aio "")
 endif()
 generate_stress_tests(cairn CAIRN_ENABLED)
 generate_stress_tests(linux "")
-generate_stress_tests(io_uring IO_URING_ENABLED)
+generate_stress_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 Stress Tests
@@ -588,24 +580,22 @@ endmacro()
 
 # Macro to generate NFS3 stress tests with optional condition
 macro(generate_stress_nfs3_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_stress_nfs3_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_stress_nfs3_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_stress_nfs3_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate NFS3 stress tests for each backend
 generate_stress_nfs3_tests(memfs "")
-generate_stress_nfs3_tests(demofs_io_uring "")
+generate_stress_nfs3_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_stress_nfs3_tests(demofs_aio "")
 endif()
 generate_stress_nfs3_tests(cairn CAIRN_ENABLED)
 generate_stress_nfs3_tests(linux "")
-generate_stress_nfs3_tests(io_uring IO_URING_ENABLED)
+generate_stress_nfs3_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 RDMA Stress Tests
@@ -649,21 +639,19 @@ endmacro()
 
 # Macro to generate NFS3 RDMA stress tests with optional condition
 macro(generate_stress_nfs3rdma_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_stress_nfs3rdma_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_stress_nfs3rdma_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_stress_nfs3rdma_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate NFS3 RDMA stress tests for each backend
 generate_stress_nfs3rdma_tests(memfs "")
-generate_stress_nfs3rdma_tests(demofs_io_uring "")
+generate_stress_nfs3rdma_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_stress_nfs3rdma_tests(demofs_aio "")
 endif()
 generate_stress_nfs3rdma_tests(cairn CAIRN_ENABLED)
 generate_stress_nfs3rdma_tests(linux "")
-generate_stress_nfs3rdma_tests(io_uring IO_URING_ENABLED)
+generate_stress_nfs3rdma_tests(io_uring CHIMERA_VFS_IO_URING)

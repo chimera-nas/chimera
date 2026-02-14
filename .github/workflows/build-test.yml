@@ -10,6 +10,8 @@ on:
 
 env:
   DEV_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-dev
+  U24_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+  U22_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
   DOCKER_MIRROR: repository.mdh.quantum.com/
 
@@ -58,9 +60,8 @@ jobs:
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
-  test:
-    name: Test ${{ matrix.platform }} ${{ matrix.build_type }}
-    needs: build-devcontainer
+  build-ubuntu24:
+    name: Build ubuntu24 ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -71,19 +72,9 @@ jobs:
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
-            build_type: Release
-          - platform: linux/amd64
-            runner: arc-amd64
-            arch: amd64
-            build_type: Debug
           - platform: linux/arm64
             runner: arc-arm64
             arch: arm64
-            build_type: Release
-          - platform: linux/arm64
-            runner: arc-arm64
-            arch: arm64
-            build_type: Debug
 
     steps:
       - name: Checkout repository
@@ -91,24 +82,30 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Configure, build, and test inside the dev container
-        run: |
-          docker run --rm --privileged \
-            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
-            -v "${{ github.workspace }}:/workspace" \
-            -v /build \
-            -w /build \
-            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
-            bash -euxc '\
-              dockerd --storage-driver=vfs --registry-mirror=https://repository.mdh.quantum.com:5001 &>/dev/null &
-              sleep 2 && \
-              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} /workspace && \
-              ninja && \
-              ctest --output-on-failure --timeout 300 -j 32'
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["repository.mdh.quantum.com:5001"]
 
-  static-analysis:
-    name: Static Analysis ${{ matrix.platform }} ${{ matrix.build_type }}
-    needs: build-devcontainer
+      - name: Build and push the ubuntu24 CI image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.ubuntu24.04
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.U24_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
+          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu24:${{ matrix.arch }}
+          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu24:${{ matrix.arch }},mode=max
+          build-args: |
+            APT_MIRROR=${{ env.APT_MIRROR }}
+            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+
+  build-ubuntu22:
+    name: Build ubuntu22 ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -119,19 +116,254 @@ jobs:
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["repository.mdh.quantum.com:5001"]
+
+      - name: Build and push the ubuntu22 CI image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.ubuntu22.04
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.U22_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
+          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu22:${{ matrix.arch }}
+          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu22:${{ matrix.arch }},mode=max
+          build-args: |
+            APT_MIRROR=${{ env.APT_MIRROR }}
+            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+
+  test:
+    name: Test ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
+    needs: [build-devcontainer, build-ubuntu24, build-ubuntu22]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # devcontainer
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
             build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_name: devcontainer
+            cmake_extra: ""
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
             build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_name: devcontainer
+            cmake_extra: ""
           - platform: linux/arm64
             runner: arc-arm64
             arch: arm64
             build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_name: devcontainer
+            cmake_extra: ""
           - platform: linux/arm64
             runner: arc-arm64
             arch: arm64
             build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_name: devcontainer
+            cmake_extra: ""
+          # ubuntu 24
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_name: ubuntu24
+            cmake_extra: ""
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_name: ubuntu24
+            cmake_extra: ""
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_name: ubuntu24
+            cmake_extra: ""
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_name: ubuntu24
+            cmake_extra: ""
+          # ubuntu 22
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_name: ubuntu22
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_name: ubuntu22
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_name: ubuntu22
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_name: ubuntu22
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure, build, and test inside the container
+        run: |
+          docker run --rm --privileged \
+            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
+            -v "${{ github.workspace }}:/workspace" \
+            -v /build \
+            -w /build \
+            ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
+            bash -euxc '\
+              dockerd --storage-driver=vfs --registry-mirror=https://repository.mdh.quantum.com:5001 &>/dev/null &
+              sleep 2 && \
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} ${{ matrix.cmake_extra }} /workspace && \
+              ninja && \
+              ctest --output-on-failure --timeout 300 -j 32'
+
+  static-analysis:
+    name: Static Analysis ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
+    needs: [build-devcontainer, build-ubuntu24, build-ubuntu22]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # devcontainer
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_name: devcontainer
+            cmake_extra: ""
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_name: devcontainer
+            cmake_extra: ""
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_name: devcontainer
+            cmake_extra: ""
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_name: devcontainer
+            cmake_extra: ""
+          # ubuntu 24
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_name: ubuntu24
+            cmake_extra: ""
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_name: ubuntu24
+            cmake_extra: ""
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_name: ubuntu24
+            cmake_extra: ""
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_name: ubuntu24
+            cmake_extra: ""
+          # ubuntu 22
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_name: ubuntu22
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_name: ubuntu22
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_name: ubuntu22
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_name: ubuntu22
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
 
     steps:
       - name: Checkout repository
@@ -142,6 +374,7 @@ jobs:
       - name: Perform clang static analysis
         id: static-analysis
         run: |
+          set -o pipefail
           mkdir -p "${{ github.workspace }}/scan-report"
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
@@ -149,15 +382,17 @@ jobs:
             -v "${{ github.workspace }}/scan-report:/scan-report" \
             -v /build \
             -w /build \
-            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
+            ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '\
-              scan-build --status-bugs -o /scan-report \
-              sh -c "cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -B /build -S /workspace -G Ninja && ninja -C /build"'
+              scan-build --status-bugs --exclude /workspace/ext/libsmb2 -o /scan-report \
+              sh -c "cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} ${{ matrix.cmake_extra }} -B /build -S /workspace -G Ninja && ninja -C /build"' \
+            2>&1 | tee "${{ github.workspace }}/scan-report/scan-build-output.txt"
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
         uses: actions/upload-artifact@v4
         with:
-          name: scan-report-${{ matrix.arch }}-${{ matrix.build_type }}
+          name: scan-report-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}
           path: scan-report/
+          if-no-files-found: warn
           retention-days: 30
