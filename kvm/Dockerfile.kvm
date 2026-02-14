@@ -3,15 +3,17 @@
 # SPDX-License-Identifier: Unlicense
 
 ARG DOCKER_MIRROR
-FROM ${DOCKER_MIRROR}ubuntu:24.04
+ARG UBUNTU_VERSION=24.04
+FROM ${DOCKER_MIRROR}ubuntu:${UBUNTU_VERSION}
 
+ARG KERNEL_PACKAGE=linux-image-generic
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install \
     nfs-common cifs-utils iputils-ping \
-    linux-image-generic kmod iproute2 \
+    ${KERNEL_PACKAGE} kmod iproute2 \
     build-essential git ca-certificates libnsl-dev \
     time \
     autoconf automake libtool pkg-config \
