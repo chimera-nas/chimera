@@ -1310,7 +1310,7 @@ chimera_io_uring_symlink_at(
     TERM_STR(fullname, request->symlink_at.name, request->symlink_at.namelen, scratch);
     TERM_STR(target, request->symlink_at.target, request->symlink_at.targetlen, scratch);
 
-    fd = request->mkdir_at.handle->vfs_private;
+    fd = request->symlink_at.handle->vfs_private;
 
     rc = symlinkat(target, fd, fullname);
 
