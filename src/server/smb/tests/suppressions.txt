@@ -12,3 +12,4 @@ leak:chimera_smb_compound_alloc
 leak:gss_accept_sec_context
 leak:libgssapi_krb5
 leak:libkrb5
+leak:gssntlmssp
