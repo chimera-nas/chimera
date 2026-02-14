@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Unlicense
 
 ARG DOCKER_MIRROR=""
-FROM ${DOCKER_MIRROR}rockylinux:9
+FROM ${DOCKER_MIRROR}rockylinux/rockylinux:9
 ARG ENABLE_XLIO=1
 ARG ENABLE_FIO=0
 
