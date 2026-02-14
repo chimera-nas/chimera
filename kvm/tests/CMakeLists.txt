@@ -45,6 +45,12 @@ set(XFSTESTS_CMD_nametest  "mkdir -p /mnt/test && cd /mnt/test && /opt/xfstests/
 set(XFSTESTS_CMD_fstest    "mkdir -p /mnt/test && /opt/xfstests/src/fstest -p /mnt/test -n 1 -f 2 -l 5 -s 65536")
 set(XFSTESTS_CMD_rewinddir "mkdir -p /mnt/test && /opt/xfstests/src/rewinddir-test /mnt/test")
 
+# =============================================================================
+# Linux KVM tests (NFS + SMB via Linux CIFS client)
+# =============================================================================
+
+if(KVM_TESTING_AVAILABLE)
+
 foreach(image_spec ${KVM_IMAGES})
     string(REPLACE "|" ";" image_parts "${image_spec}")
     list(GET image_parts 0 IMAGE_NAME)
@@ -159,3 +165,71 @@ foreach(image_spec ${KVM_IMAGES})
     endif()
 
 endforeach()
+
+endif() # KVM_TESTING_AVAILABLE
+
+# =============================================================================
+# Windows KVM tests (SMB via Windows native client)
+# =============================================================================
+
+if(KVM_WINDOWS_TESTING_AVAILABLE)
+
+set(SMB_WINDOWS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_windows_test_wrapper.sh)
+
+# Native PowerShell tests over mapped SMB share (Z:\)
+set(WINDOWS_TESTS auth_ntlm file_io dir_ops)
+
+# auth_ntlm: share mapping in wrapper verifies NTLM authentication works
+set(WINDOWS_CMD_auth_ntlm "Get-PSDrive Z")
+
+# file_io: create file, write, read back, verify content, delete
+set(WINDOWS_CMD_file_io [=[
+$f = 'Z:\test_file_io.txt'
+$data = 'hello chimera'
+Set-Content -Path $f -Value $data
+$read = Get-Content -Path $f
+Remove-Item -Path $f
+if ($read -ne $data) { Write-Error "mismatch: expected '$data' got '$read'"; exit 1 }
+]=])
+
+# dir_ops: create directory, add files, enumerate, verify count, cleanup
+set(WINDOWS_CMD_dir_ops [=[
+$d = 'Z:\test_dir_ops'
+New-Item -Path $d -ItemType Directory -Force | Out-Null
+1..5 | ForEach-Object { Set-Content -Path "$d\file_$_.txt" -Value "content $_" }
+$count = (Get-ChildItem -Path $d -File).Count
+Remove-Item -Path $d -Recurse -Force
+if ($count -ne 5) { Write-Error "expected 5 files, got $count"; exit 1 }
+]=])
+
+foreach(test ${WINDOWS_TESTS})
+    foreach(backend ${KVM_BACKENDS})
+        add_test(NAME chimera/kvm/smb-windows/${test}_${backend}
+            COMMAND bash ${SMB_WINDOWS_WRAPPER}
+                    ${KVM_WINDOWS_IMAGE_DIR}/windows.qcow2
+                    ${KVM_WINDOWS_IMAGE_DIR}/OVMF_VARS.fd
+                    ${OVMF_CODE_PATH}
+                    ${KVM_WINDOWS_IMAGE_DIR}/ssh_key
+                    ${CHIMERA_BINARY} ${backend}
+                    "${WINDOWS_CMD_${test}}")
+        set_tests_properties(chimera/kvm/smb-windows/${test}_${backend}
+            PROPERTIES LABELS "kvm;kvm-windows")
+    endforeach()
+endforeach()
+
+if(CAIRN_ENABLED)
+    foreach(test ${WINDOWS_TESTS})
+        add_test(NAME chimera/kvm/smb-windows/${test}_cairn
+            COMMAND bash ${SMB_WINDOWS_WRAPPER}
+                    ${KVM_WINDOWS_IMAGE_DIR}/windows.qcow2
+                    ${KVM_WINDOWS_IMAGE_DIR}/OVMF_VARS.fd
+                    ${OVMF_CODE_PATH}
+                    ${KVM_WINDOWS_IMAGE_DIR}/ssh_key
+                    ${CHIMERA_BINARY} cairn
+                    "${WINDOWS_CMD_${test}}")
+        set_tests_properties(chimera/kvm/smb-windows/${test}_cairn
+            PROPERTIES LABELS "kvm;kvm-windows")
+    endforeach()
+endif()
+
+endif() # KVM_WINDOWS_TESTING_AVAILABLE

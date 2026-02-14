@@ -19,34 +19,62 @@ set(KVM_IMAGES
     "ubuntu2204_hwe|22.04|jammy|linux-image-generic-hwe-22.04"
 )
 
-foreach(image_spec ${KVM_IMAGES})
-    string(REPLACE "|" ";" image_parts "${image_spec}")
-    list(GET image_parts 0 IMAGE_NAME)
-    list(GET image_parts 1 UBUNTU_VERSION)
-    list(GET image_parts 2 UBUNTU_VERSION_CODENAME)
-    list(GET image_parts 3 KERNEL_PACKAGE)
+# Linux VM images (requires Docker)
+if(KVM_TESTING_AVAILABLE)
+    foreach(image_spec ${KVM_IMAGES})
+        string(REPLACE "|" ";" image_parts "${image_spec}")
+        list(GET image_parts 0 IMAGE_NAME)
+        list(GET image_parts 1 UBUNTU_VERSION)
+        list(GET image_parts 2 UBUNTU_VERSION_CODENAME)
+        list(GET image_parts 3 KERNEL_PACKAGE)
 
-    set(IMAGE_DIR ${BUILD_ROOT}/kvm/${IMAGE_NAME})
+        set(IMAGE_DIR ${BUILD_ROOT}/kvm/${IMAGE_NAME})
+
+        add_custom_command(
+            OUTPUT ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/initrd ${IMAGE_DIR}/rootfs.qcow2
+            COMMAND ${CMAKE_COMMAND} -E env
+                    KVM_CACHE_REGISTRY=${KVM_IMAGE_CACHE_REGISTRY}
+                    bash ${CMAKE_CURRENT_SOURCE_DIR}/build_vm_image.sh
+                    ${IMAGE_DIR}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/Dockerfile.kvm
+                    ${CMAKE_SOURCE_DIR}
+                    UBUNTU_VERSION=${UBUNTU_VERSION}
+                    UBUNTU_VERSION_CODENAME=${UBUNTU_VERSION_CODENAME}
+                    KERNEL_PACKAGE=${KERNEL_PACKAGE}
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Dockerfile.kvm
+                    ${CMAKE_CURRENT_SOURCE_DIR}/init.sh
+            COMMENT "Building KVM test image (${IMAGE_NAME})"
+        )
+
+        add_custom_target(kvm_${IMAGE_NAME}_image ALL
+            DEPENDS ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/initrd ${IMAGE_DIR}/rootfs.qcow2
+        )
+    endforeach()
+endif()
+
+# Windows Server 2025 VM image (requires WINDOWS_SERVER_ISO, not part of ALL)
+if(KVM_WINDOWS_TESTING_AVAILABLE)
+    set(KVM_WINDOWS_IMAGE_DIR ${BUILD_ROOT}/kvm/windows2025)
 
     add_custom_command(
-        OUTPUT ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/initrd ${IMAGE_DIR}/rootfs.qcow2
-        COMMAND ${CMAKE_COMMAND} -E env
-                KVM_CACHE_REGISTRY=${KVM_IMAGE_CACHE_REGISTRY}
-                bash ${CMAKE_CURRENT_SOURCE_DIR}/build_vm_image.sh
-                ${IMAGE_DIR}
-                ${CMAKE_CURRENT_SOURCE_DIR}/Dockerfile.kvm
+        OUTPUT ${KVM_WINDOWS_IMAGE_DIR}/windows.qcow2
+               ${KVM_WINDOWS_IMAGE_DIR}/OVMF_VARS.fd
+               ${KVM_WINDOWS_IMAGE_DIR}/ssh_key
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/build_windows_image.sh
+                ${KVM_WINDOWS_IMAGE_DIR}
+                ${WINDOWS_SERVER_ISO}
                 ${CMAKE_SOURCE_DIR}
-                UBUNTU_VERSION=${UBUNTU_VERSION}
-                UBUNTU_VERSION_CODENAME=${UBUNTU_VERSION_CODENAME}
-                KERNEL_PACKAGE=${KERNEL_PACKAGE}
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Dockerfile.kvm
-                ${CMAKE_CURRENT_SOURCE_DIR}/init.sh
-        COMMENT "Building KVM test image (${IMAGE_NAME})"
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/build_windows_image.sh
+                ${CMAKE_CURRENT_SOURCE_DIR}/autounattend.xml
+                ${CMAKE_CURRENT_SOURCE_DIR}/provision_windows.sh
+        COMMENT "Building Windows Server 2025 KVM test image"
     )
 
-    add_custom_target(kvm_${IMAGE_NAME}_image ALL
-        DEPENDS ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/initrd ${IMAGE_DIR}/rootfs.qcow2
+    add_custom_target(kvm_windows2025_image
+        DEPENDS ${KVM_WINDOWS_IMAGE_DIR}/windows.qcow2
+                ${KVM_WINDOWS_IMAGE_DIR}/OVMF_VARS.fd
+                ${KVM_WINDOWS_IMAGE_DIR}/ssh_key
     )
-endforeach()
+endif()
 
 add_subdirectory(tests)
