@@ -24,7 +24,7 @@ RUN apt-get -y update && \
     librdmacm-dev libjansson-dev libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev \
     libssl-dev openssl libnuma-dev libcurl4-openssl-dev libs3-dev libaio-dev \
     build-essential autoconf automake libtool pkg-config ca-certificates uncrustify iproute2 curl \
-    smbclient krb5-kdc krb5-admin-server krb5-user samba samba-ad-dc && \
+    smbclient krb5-kdc krb5-admin-server krb5-user samba samba-ad-dc samba-ad-provision samba-dsdb-modules && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
