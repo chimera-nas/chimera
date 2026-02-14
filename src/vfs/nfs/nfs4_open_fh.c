@@ -22,10 +22,10 @@ chimera_nfs4_open_fh(
      * Similarly, directories don't need NFS4 OPEN - they're accessed via
      * READDIR, LOOKUP etc.
      */
-    if ((request->open.flags & CHIMERA_VFS_OPEN_INFERRED) ||
-        (request->open.flags & CHIMERA_VFS_OPEN_DIRECTORY)) {
-        request->open.r_vfs_private = 0;
-        request->status             = CHIMERA_VFS_OK;
+    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_INFERRED) ||
+        (request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY)) {
+        request->open_fh.r_vfs_private = 0;
+        request->status                = CHIMERA_VFS_OK;
         request->complete(request);
         return;
     }
@@ -45,7 +45,8 @@ chimera_nfs4_open_fh(
         return;
     }
 
-    request->open.r_vfs_private = (uint64_t) state;
-    request->status             = CHIMERA_VFS_OK;
+    state->server_index            = request->fh[CHIMERA_VFS_MOUNT_ID_SIZE];
+    request->open_fh.r_vfs_private = (uint64_t) state;
+    request->status                = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs4_open_fh */

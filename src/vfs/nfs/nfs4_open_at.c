@@ -105,7 +105,8 @@ chimera_nfs4_open_at_callback(
         }
 
         /* Store the stateid from OPEN response */
-        state->stateid = open_res->opopen.resok4.stateid;
+        state->server_index = ctx->server->index;
+        state->stateid      = open_res->opopen.resok4.stateid;
 
         request->open_at.r_vfs_private = (uint64_t) state;
     } else {
