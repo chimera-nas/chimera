@@ -106,6 +106,11 @@ chimera_nfs_destroy(void *private_data)
 
     for (i = 0; i < shared->max_servers; i++) {
         if (shared->servers[i]) {
+            /* Free NFS4 session if present */
+            if (shared->servers[i]->nfs4_session) {
+                free(shared->servers[i]->nfs4_session->slot_seqids);
+                free(shared->servers[i]->nfs4_session);
+            }
             free(shared->servers[i]);
         }
     }
