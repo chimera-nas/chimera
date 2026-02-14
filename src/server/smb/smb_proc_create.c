@@ -215,7 +215,9 @@ chimera_smb_create_mkdir_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_release(vfs_thread, request->create.parent_handle);
-        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+        chimera_smb_complete_request(request, error_code == CHIMERA_VFS_EEXIST ?
+                                     SMB2_STATUS_OBJECT_NAME_COLLISION :
+                                     SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
         return;
     }
 
@@ -252,7 +254,9 @@ chimera_smb_create_open_at_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_release(vfs_thread, request->create.parent_handle);
-        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+        chimera_smb_complete_request(request, error_code == CHIMERA_VFS_EEXIST ?
+                                     SMB2_STATUS_OBJECT_NAME_COLLISION :
+                                     SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
         return;
     }
 
