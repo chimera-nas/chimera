@@ -783,20 +783,9 @@ validate_authenticate(
         }
     }
 
-    // No user database and no winbind - accept with anonymous credentials.
-    // This matches the behavior of the GSSAPI NTLMSSP fallback when
-    // srv_cred = GSS_C_NO_CREDENTIAL (no credential validation).
-    smb_ntlm_info("NTLM: User '%s' not in local database, accepting with default credentials", username);
-    strncpy(ctx->username, username, sizeof(ctx->username) - 1);
-    if (domain) {
-        strncpy(ctx->domain, domain, sizeof(ctx->domain) - 1);
-    }
-    ctx->uid           = 0;
-    ctx->gid           = 0;
-    ctx->ngids         = 0;
-    ctx->authenticated = 1;
-    memset(ctx->session_key, 0, SMB_NTLM_SESSION_KEY_SIZE);
-    result = 0;
+    // User not found in any authentication backend - reject
+    smb_ntlm_error("NTLM: User '%s' not found in any authentication backend", username);
+    result = -1;
 
  cleanup:
     free(username);

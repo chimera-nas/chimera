@@ -90,11 +90,6 @@ generate_config() {
             ;;
     esac
 
-    # Create NTLM credentials file for server-side NTLMSSP authentication
-    cat > "${SESSION_DIR}/ntlm_pass.txt" << 'NTLM'
-WORKGROUP:root:secret
-NTLM
-
     cat > "$CONFIG_FILE" << EOF
 {
     "server": {
@@ -113,7 +108,15 @@ NTLM
         "share": {
             "path": "/share"
         }
-    }
+    },
+    "users": [
+        {
+            "username": "root",
+            "smbpasswd": "secret",
+            "uid": 0,
+            "gid": 0
+        }
+    ]
 }
 EOF
 }
@@ -136,9 +139,9 @@ if [ -n "$PCAP_FILE" ]; then
     sleep 0.5
 fi
 
-# Start chimera daemon in the netns (with NTLM credentials for SMB auth)
+# Start chimera daemon in the netns
 CHIMERA_LOG="${SESSION_DIR}/chimera_stderr.log"
-ip netns exec "${NETNS_NAME}" env NTLM_USER_FILE="${SESSION_DIR}/ntlm_pass.txt" \
+ip netns exec "${NETNS_NAME}" env \
     ASAN_OPTIONS="detect_leaks=0:handle_abort=2:print_cmdline=1" \
     "$CHIMERA_BINARY" ${CHIMERA_DEBUG:+-d} -c "$CONFIG_FILE" \
     2>"$CHIMERA_LOG" &

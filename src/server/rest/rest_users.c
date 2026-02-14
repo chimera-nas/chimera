@@ -214,19 +214,25 @@ chimera_rest_handle_users_create(
     uid      = json_integer_value(json_object_get(root, "uid"));
     gid      = json_integer_value(json_object_get(root, "gid"));
 
-    gids_array = json_object_get(root, "gids");
-    if (gids_array && json_is_array(gids_array)) {
-        ngids = json_array_size(gids_array);
-        if (ngids > 64) {
-            ngids = 64;
-        }
-        for (i = 0; i < ngids; i++) {
-            gids[i] = json_integer_value(json_array_get(gids_array, i));
-        }
-    }
+    {
+        const char *smbpasswd_val;
+        smbpasswd_val = json_string_value(json_object_get(root, "smbpasswd"));
 
-    rc = chimera_server_add_user(thread->shared->server, username, password,
-                                 NULL, NULL, uid, gid, ngids, gids, 1);
+        gids_array = json_object_get(root, "gids");
+        if (gids_array && json_is_array(gids_array)) {
+            ngids = json_array_size(gids_array);
+            if (ngids > 64) {
+                ngids = 64;
+            }
+            for (i = 0; i < ngids; i++) {
+                gids[i] = json_integer_value(json_array_get(gids_array, i));
+            }
+        }
+
+        rc = chimera_server_add_user(thread->shared->server, username,
+                                     password, smbpasswd_val, NULL, uid, gid,
+                                     ngids, gids, 1);
+    }
 
     json_decref(root);
 
