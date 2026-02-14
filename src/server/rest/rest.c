@@ -116,6 +116,20 @@ void chimera_rest_handle_openapi_json(
     struct evpl *,
     struct evpl_http_request *);
 
+/* Deferred POST handler types */
+enum chimera_rest_post_handler {
+    REST_POST_USERS_CREATE,
+    REST_POST_EXPORTS_CREATE,
+    REST_POST_SHARES_CREATE,
+    REST_POST_BUCKETS_CREATE,
+};
+
+#define REST_POST_MAX_BODY 65536
+
+struct chimera_rest_post_ctx {
+    enum chimera_rest_post_handler handler;
+};
+
 static void
 chimera_rest_notify(
     struct evpl                *evpl,
@@ -127,7 +141,62 @@ chimera_rest_notify(
     void                       *notify_data,
     void                       *private_data)
 {
-    /* REST API requests are simple request/response, no streaming needed */
+    struct chimera_rest_post_ctx *ctx    = notify_data;
+    struct chimera_rest_thread   *thread = private_data;
+    uint64_t                      avail;
+    struct evpl_iovec             iov;
+    int                           niov;
+    char                          body[REST_POST_MAX_BODY];
+    int                           body_len = 0;
+
+    if (!ctx) {
+        return;
+    }
+
+    if (notify_type != EVPL_HTTP_NOTIFY_RECEIVE_COMPLETE) {
+        return;
+    }
+
+    avail = evpl_http_request_get_data_avail(request);
+
+    while (avail > 0 && body_len < REST_POST_MAX_BODY) {
+        int chunk = avail;
+
+        if (chunk > REST_POST_MAX_BODY - body_len) {
+            chunk = REST_POST_MAX_BODY - body_len;
+        }
+
+        niov = evpl_http_request_get_datav(evpl, request, &iov, chunk);
+
+        if (niov > 0) {
+            memcpy(body + body_len, evpl_iovec_data(&iov), iov.length);
+            body_len += iov.length;
+            evpl_iovec_release(evpl, &iov);
+        }
+
+        avail = evpl_http_request_get_data_avail(request);
+    }
+
+    switch (ctx->handler) {
+        case REST_POST_USERS_CREATE:
+            chimera_rest_handle_users_create(evpl, request, thread,
+                                             body, body_len);
+            break;
+        case REST_POST_EXPORTS_CREATE:
+            chimera_rest_handle_exports_create(evpl, request, thread,
+                                               body, body_len);
+            break;
+        case REST_POST_SHARES_CREATE:
+            chimera_rest_handle_shares_create(evpl, request, thread,
+                                              body, body_len);
+            break;
+        case REST_POST_BUCKETS_CREATE:
+            chimera_rest_handle_buckets_create(evpl, request, thread,
+                                               body, body_len);
+            break;
+    } /* switch */
+
+    free(ctx);
 } /* chimera_rest_notify */
 
 static void
@@ -314,7 +383,10 @@ chimera_rest_dispatch(
         if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
             chimera_rest_handle_users_list(evpl, request, thread);
         } else if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            chimera_rest_handle_users_create(evpl, request, thread, NULL, 0);
+            struct chimera_rest_post_ctx *ctx;
+            ctx          = calloc(1, sizeof(*ctx));
+            ctx->handler = REST_POST_USERS_CREATE;
+            *notify_data = ctx;
         } else {
             chimera_rest_handle_method_not_allowed(evpl, request);
         }
@@ -340,7 +412,10 @@ chimera_rest_dispatch(
         if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
             chimera_rest_handle_exports_list(evpl, request, thread);
         } else if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            chimera_rest_handle_exports_create(evpl, request, thread, NULL, 0);
+            struct chimera_rest_post_ctx *ctx;
+            ctx          = calloc(1, sizeof(*ctx));
+            ctx->handler = REST_POST_EXPORTS_CREATE;
+            *notify_data = ctx;
         } else {
             chimera_rest_handle_method_not_allowed(evpl, request);
         }
@@ -367,7 +442,10 @@ chimera_rest_dispatch(
         if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
             chimera_rest_handle_shares_list(evpl, request, thread);
         } else if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            chimera_rest_handle_shares_create(evpl, request, thread, NULL, 0);
+            struct chimera_rest_post_ctx *ctx;
+            ctx          = calloc(1, sizeof(*ctx));
+            ctx->handler = REST_POST_SHARES_CREATE;
+            *notify_data = ctx;
         } else {
             chimera_rest_handle_method_not_allowed(evpl, request);
         }
@@ -393,7 +471,10 @@ chimera_rest_dispatch(
         if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
             chimera_rest_handle_buckets_list(evpl, request, thread);
         } else if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            chimera_rest_handle_buckets_create(evpl, request, thread, NULL, 0);
+            struct chimera_rest_post_ctx *ctx;
+            ctx          = calloc(1, sizeof(*ctx));
+            ctx->handler = REST_POST_BUCKETS_CREATE;
+            *notify_data = ctx;
         } else {
             chimera_rest_handle_method_not_allowed(evpl, request);
         }
