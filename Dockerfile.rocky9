@@ -12,7 +12,7 @@ RUN dnf install -y epel-release && \
 
 RUN dnf -y update && \
     dnf -y install gcc gcc-c++ clang clang-tools-extra cmake ninja-build git flex bison llvm \
-    libuuid-devel uthash-devel krb5-devel krb5-libs gssntlmssp \
+    libuuid-devel uthash-devel krb5-devel krb5-libs \
     rdma-core-devel jansson-devel xxhash-devel userspace-rcu-devel liburing-devel libunwind-devel \
     rocksdb-devel openssl-devel openssl numactl-devel libcurl-devel libaio-devel \
     autoconf automake libtool pkgconfig ca-certificates uncrustify iproute curl \
