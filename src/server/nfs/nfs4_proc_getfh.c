@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -18,7 +18,12 @@ chimera_nfs4_getfh(
                               req->fh,
                               req->fhlen,
                               req->encoding->dbuf);
-    chimera_nfs_abort_if(rc, "Failed to copy opaque");
+
+    if (rc) {
+        res->status = NFS4ERR_RESOURCE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
 
     res->status = NFS4_OK;
 
