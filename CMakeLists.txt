@@ -165,6 +165,15 @@ else()
     message(STATUS "KVM testing disabled")
 endif()
 
+# PyNFS testing detection
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND AND EXISTS "/opt/pynfs/nfs4.0/testserver.py")
+    message(STATUS "PyNFS testing enabled")
+    add_subdirectory(pynfs)
+else()
+    message(STATUS "PyNFS testing disabled")
+endif()
+
 add_subdirectory(ext)
 
 include_directories(ext/libevpl/include)
