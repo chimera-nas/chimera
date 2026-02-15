@@ -138,6 +138,7 @@ else()
 endif()
 
 set(KVM_TESTING_AVAILABLE FALSE)
+set(KVM_WINDOWS_TESTING_AVAILABLE FALSE)
 
 if(DOCKER_EXECUTABLE AND QEMU_EXECUTABLE)
     execute_process(
@@ -172,8 +173,30 @@ else()
     endif()
 endif()
 
-if(KVM_TESTING_AVAILABLE)
-    message(STATUS "KVM testing enabled")
+# Windows KVM tests require QEMU + KVM + WINDOWS_SERVER_ISO + OVMF
+if(WINDOWS_SERVER_ISO AND QEMU_EXECUTABLE AND KVM_AVAILABLE)
+    # Detect OVMF firmware for UEFI boot
+    find_file(OVMF_CODE_PATH
+        NAMES OVMF_CODE_4M.fd OVMF_CODE.fd
+        PATHS /usr/share/OVMF /usr/share/edk2/ovmf /usr/share/qemu
+        NO_DEFAULT_PATH
+    )
+    if(OVMF_CODE_PATH)
+        set(KVM_WINDOWS_TESTING_AVAILABLE TRUE)
+        message(STATUS "KVM Windows testing: OVMF found at ${OVMF_CODE_PATH}")
+    else()
+        message(STATUS "KVM Windows testing: OVMF firmware not found")
+    endif()
+endif()
+
+# Enter kvm subdir if any KVM testing is available
+if(KVM_TESTING_AVAILABLE OR KVM_WINDOWS_TESTING_AVAILABLE)
+    if(KVM_TESTING_AVAILABLE)
+        message(STATUS "KVM testing enabled (Linux)")
+    endif()
+    if(KVM_WINDOWS_TESTING_AVAILABLE)
+        message(STATUS "KVM testing enabled (Windows)")
+    endif()
     add_subdirectory(kvm)
 else()
     message(STATUS "KVM testing disabled")
