@@ -382,6 +382,18 @@ chimera_smb_parse_disposition_info(
 } /* chimera_smb_parse_disposition_info */
 
 static inline void
+chimera_smb_parse_disposition_info_ex(
+    struct evpl_iovec_cursor *cursor,
+    struct chimera_smb_attrs *attrs)
+{
+    uint32_t flags;
+
+    evpl_iovec_cursor_get_uint32(cursor, &flags);
+    attrs->smb_disposition = (flags & 0x01) ? 1 : 0;
+    attrs->smb_attr_mask  |= SMB_ATTR_DISPOSITION;
+} /* chimera_smb_parse_disposition_info_ex */
+
+static inline void
 chimera_smb_parse_end_of_file_info(
     struct evpl_iovec_cursor *cursor,
     struct chimera_smb_attrs *attrs)

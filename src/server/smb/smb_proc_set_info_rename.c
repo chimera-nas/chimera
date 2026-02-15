@@ -23,19 +23,39 @@ chimera_smb_set_info_rename_callback(
     struct chimera_vfs_attrs *todir_post_attr,
     void                     *private_data)
 {
-    struct chimera_smb_request *request = private_data;
+    struct chimera_smb_request     *request     = private_data;
+    struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
+    struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
+
+    if (!error_code) {
+        /* Update the open file's name and parent to reflect the rename,
+         * so subsequent compound operations (e.g. disposition delete)
+         * use the correct path. */
+        struct chimera_vfs_open_handle *new_parent = rename_info->new_parent_handle
+                                                     ? rename_info->new_parent_handle
+                                                     : request->set_info.parent_handle;
+
+        if (new_parent) {
+            memcpy(open_file->parent_fh, new_parent->fh, new_parent->fh_len);
+            open_file->parent_fh_len = new_parent->fh_len;
+        }
+
+        memcpy(open_file->name, rename_info->new_name, rename_info->new_name_len);
+        open_file->name[rename_info->new_name_len] = '\0';
+        open_file->name_len                        = rename_info->new_name_len;
+    }
 
     if (request->set_info.parent_handle) {
         chimera_vfs_release(request->compound->thread->vfs_thread, request->set_info.parent_handle);
         request->set_info.parent_handle = NULL;
     }
 
-    if (request->set_info.rename_info.new_parent_handle) {
-        chimera_vfs_release(request->compound->thread->vfs_thread, request->set_info.rename_info.new_parent_handle);
-        request->set_info.rename_info.new_parent_handle = NULL;
+    if (rename_info->new_parent_handle) {
+        chimera_vfs_release(request->compound->thread->vfs_thread, rename_info->new_parent_handle);
+        rename_info->new_parent_handle = NULL;
     }
 
-    chimera_smb_open_file_release(request, request->set_info.open_file);
+    chimera_smb_open_file_release(request, open_file);
 
     chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_info_rename_callback */

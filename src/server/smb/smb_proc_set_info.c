@@ -227,6 +227,7 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         request);
                     break;
                 case SMB2_FILE_DISPOSITION_INFO:
+                case SMB2_FILE_DISPOSITION_INFO_EX:
                     if (request->set_info.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) {
                         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
                     } else {
@@ -312,6 +313,9 @@ chimera_smb_parse_set_info(
                     break;
                 case SMB2_FILE_DISPOSITION_INFO:
                     chimera_smb_parse_disposition_info(request_cursor, &request->set_info.attrs);
+                    break;
+                case SMB2_FILE_DISPOSITION_INFO_EX:
+                    chimera_smb_parse_disposition_info_ex(request_cursor, &request->set_info.attrs);
                     break;
                 case SMB2_FILE_ENDOFFILE_INFO:
                     chimera_smb_parse_end_of_file_info(
