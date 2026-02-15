@@ -14,6 +14,12 @@ chimera_nfs4_getfh(
     struct GETFH4res *res = &resop->opgetfh;
     int               rc;
 
+    if (req->fhlen == 0) {
+        res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, NFS4ERR_NOFILEHANDLE);
+        return;
+    }
+
     rc = xdr_dbuf_opaque_copy(&res->resok4.object,
                               req->fh,
                               req->fhlen,

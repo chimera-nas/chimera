@@ -123,8 +123,12 @@ chimera_vfs_get_module(
     struct chimera_vfs_mount  *mount;
     struct chimera_vfs_module *module;
 
+    if (fhlen == 0) {
+        return CHIMERA_VFS_ERR_PTR(CHIMERA_VFS_ENOHANDLE);
+    }
+
     if (fhlen < CHIMERA_VFS_MOUNT_ID_SIZE) {
-        return NULL;
+        return CHIMERA_VFS_ERR_PTR(CHIMERA_VFS_EBADF);
     }
 
     urcu_memb_read_lock();
@@ -134,6 +138,10 @@ chimera_vfs_get_module(
     module = mount ? mount->module : NULL;
 
     urcu_memb_read_unlock();
+
+    if (!module) {
+        return CHIMERA_VFS_ERR_PTR(CHIMERA_VFS_ESTALE);
+    }
 
     return module;
 } /* chimera_vfs_get_module */
@@ -201,6 +209,10 @@ chimera_vfs_request_alloc_by_hash(
     uint64_t                       fh_hash)
 {
     struct chimera_vfs_module *module = chimera_vfs_get_module(thread, fh, fhlen);
+
+    if (CHIMERA_VFS_IS_ERR(module)) {
+        return (struct chimera_vfs_request *) module;
+    }
 
     return chimera_vfs_request_alloc_common(thread, cred, module, fh, fhlen,
                                             fh_hash, CHIMERA_VFS_CAP_FS);

@@ -27,10 +27,11 @@ enum chimera_vfs_error {
     CHIMERA_VFS_ENOTEMPTY    = 39,     /* Directory not empty */
     CHIMERA_VFS_ELOOP        = 40,    /* Too many levels of symbolic links */
     CHIMERA_VFS_EOVERFLOW    = 75,         /* Value too large for defined data type */
-    CHIMERA_VFS_EBADF        = 77,     /* Bad file descriptor */
+    CHIMERA_VFS_EBADF        = 77,     /* Bad file handle */
     CHIMERA_VFS_ENOTSUP      = 95,     /* Operation not supported */
     CHIMERA_VFS_EDQUOT       = 122,    /* Quota exceeded */
     CHIMERA_VFS_ESTALE       = 116,    /* Stale file handle */
     CHIMERA_VFS_EBADCOOKIE   = 200,    /* Bad readdir cookie/verifier */
+    CHIMERA_VFS_ENOHANDLE    = 201,   /* No file handle provided */
     CHIMERA_VFS_UNSET        = 100000  /* Unset error code */
 };
