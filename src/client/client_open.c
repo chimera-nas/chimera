@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -14,9 +14,6 @@ chimera_open(
     void                         *private_data)
 {
     struct chimera_client_request *request;
-    const char                    *slash;
-
-    slash = rindex(path, '/');
 
     request = chimera_client_request_alloc(thread);
 
@@ -25,13 +22,6 @@ chimera_open(
     request->open.private_data = private_data;
     request->open.flags        = flags;
     request->open.path_len     = path_len;
-    request->open.parent_len   = slash ? slash - path : path_len;
-
-    while (slash && *slash == '/') {
-        slash++;
-    }
-
-    request->open.name_offset = slash ? slash - path : -1;
 
     memcpy(request->open.path, path, path_len);
 

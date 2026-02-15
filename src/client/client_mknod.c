@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -25,7 +25,6 @@ chimera_mknod(
     request->mknod.callback     = callback;
     request->mknod.private_data = private_data;
     request->mknod.path_len     = path_len;
-    request->mknod.parent_len   = slash ? slash - path : path_len;
 
     while (slash && *slash == '/') {
         slash++;

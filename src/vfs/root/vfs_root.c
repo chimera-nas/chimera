@@ -173,7 +173,7 @@ chimera_vfs_root_lookup_getattr_callback(
 {
     struct chimera_vfs_request         *lookup_request = private_data;
     struct chimera_vfs                 *vfs            = lookup_request->thread->vfs;
-    chimera_vfs_lookup_callback_t       callback       = lookup_request->proto_callback;
+    chimera_vfs_lookup_at_callback_t    callback       = lookup_request->proto_callback;
     struct chimera_vfs_attrs           *dir_attr;
     int                                 num_mounts;
     struct chimera_vfs_root_lookup_ctx *ctx = lookup_request->plugin_data;
@@ -186,7 +186,7 @@ chimera_vfs_root_lookup_getattr_callback(
         memcpy(attr->va_fh, ctx->mount_id, ctx->mount_id_len);
         attr->va_fh_len = ctx->mount_id_len;
 
-        dir_attr = &lookup_request->lookup.r_dir_attr;
+        dir_attr = &lookup_request->lookup_at.r_dir_attr;
 
 
         num_mounts = chimera_vfs_mount_table_count(vfs->mount_table);
@@ -224,7 +224,7 @@ chimera_vfs_root_lookup_open_callback(
     void                           *private_data)
 {
     struct chimera_vfs_request         *lookup_request = private_data;
-    chimera_vfs_lookup_callback_t       callback       = lookup_request->proto_callback;
+    chimera_vfs_lookup_at_callback_t    callback       = lookup_request->proto_callback;
     struct chimera_vfs_root_lookup_ctx *ctx;
 
     if (error_code) {
@@ -240,7 +240,7 @@ chimera_vfs_root_lookup_open_callback(
         lookup_request->thread,
         lookup_request->cred,
         oh,
-        lookup_request->lookup.r_attr.va_req_mask,
+        lookup_request->lookup_at.r_attr.va_req_mask,
         chimera_vfs_root_lookup_getattr_callback,
         lookup_request);
 
@@ -248,14 +248,14 @@ chimera_vfs_root_lookup_open_callback(
 } /* chimera_vfs_root_lookup_open_callback */
 
 static void
-chimera_vfs_root_lookup(
+chimera_vfs_root_lookup_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
     struct chimera_vfs_thread          *thread  = request->thread;
     struct chimera_vfs                 *vfs     = thread->vfs;
-    const char                         *name    = request->lookup.component;
-    int                                 namelen = request->lookup.component_len;
+    const char                         *name    = request->lookup_at.component;
+    int                                 namelen = request->lookup_at.component_len;
     struct chimera_vfs_root_lookup_ctx *ctx     = request->plugin_data;
     int                                 rc;
 
@@ -268,7 +268,7 @@ chimera_vfs_root_lookup(
         return;
     }
 
-    chimera_vfs_open(
+    chimera_vfs_open_fh(
         thread,
         request->cred,
         ctx->mount_id,
@@ -277,7 +277,7 @@ chimera_vfs_root_lookup(
         chimera_vfs_root_lookup_open_callback,
         request);
 
-} /* chimera_vfs_root_lookup */
+} /* chimera_vfs_root_lookup_at */
 
 static void
 chimera_vfs_root_mount(
@@ -507,7 +507,7 @@ chimera_vfs_root_readdir(
     for (i = 0; i < ctx->num_entries; i++) {
         entry = &ctx->entries[i];
 
-        chimera_vfs_open(
+        chimera_vfs_open_fh(
             thread,
             request->cred,
             entry->mount_id,
@@ -526,14 +526,14 @@ chimera_vfs_root_readdir(
 } /* chimera_vfs_root_readdir */
 
 static void
-chimera_vfs_root_open(
+chimera_vfs_root_open_fh(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    request->open.r_vfs_private = 0;
-    request->status             = CHIMERA_VFS_OK;
+    request->open_fh.r_vfs_private = 0;
+    request->status                = CHIMERA_VFS_OK;
     request->complete(request);
-} /* chimera_vfs_root_open */
+} /* chimera_vfs_root_open_fh */
 
 static void
 chimera_vfs_root_close(
@@ -556,11 +556,11 @@ chimera_vfs_root_dispatch(
         case CHIMERA_VFS_OP_UMOUNT:
             chimera_vfs_root_umount(request, private_data);
             break;
-        case CHIMERA_VFS_OP_LOOKUP:
-            chimera_vfs_root_lookup(request, private_data);
+        case CHIMERA_VFS_OP_LOOKUP_AT:
+            chimera_vfs_root_lookup_at(request, private_data);
             break;
-        case CHIMERA_VFS_OP_OPEN:
-            chimera_vfs_root_open(request, private_data);
+        case CHIMERA_VFS_OP_OPEN_FH:
+            chimera_vfs_root_open_fh(request, private_data);
             break;
         case CHIMERA_VFS_OP_CLOSE:
             chimera_vfs_root_close(request, private_data);
@@ -584,7 +584,7 @@ chimera_vfs_root_dispatch(
 SYMBOL_EXPORT struct chimera_vfs_module vfs_root = {
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_ROOT,
     .name           = "root",
-    .capabilities   = CHIMERA_VFS_CAP_FS,
+    .capabilities   = CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP,
     .init           = chimera_vfs_root_init,
     .destroy        = chimera_vfs_root_destroy,
     .thread_init    = chimera_vfs_root_thread_init,

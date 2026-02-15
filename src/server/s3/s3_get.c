@@ -172,12 +172,12 @@ chimera_s3_get_lookup_callback(
     if (evpl_http_request_type(request->http_request) == EVPL_HTTP_REQUEST_TYPE_HEAD) {
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
     } else {
-        chimera_vfs_open(thread->vfs, NULL,
-                         attr->va_fh,
-                         attr->va_fh_len,
-                         0,
-                         chimera_s3_get_open_callback,
-                         request);
+        chimera_vfs_open_fh(thread->vfs, NULL,
+                            attr->va_fh,
+                            attr->va_fh_len,
+                            0,
+                            chimera_s3_get_open_callback,
+                            request);
     }
 }  /* chimera_s3_get_lookup_callback */
 
@@ -189,13 +189,13 @@ chimera_s3_get(
 {
     request->io_pending = 0;
 
-    chimera_vfs_lookup_path(thread->vfs, NULL,
-                            request->bucket_fh,
-                            request->bucket_fhlen,
-                            request->path,
-                            request->path_len,
-                            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                            CHIMERA_VFS_LOOKUP_FOLLOW,
-                            chimera_s3_get_lookup_callback,
-                            request);
+    chimera_vfs_lookup(thread->vfs, NULL,
+                       request->bucket_fh,
+                       request->bucket_fhlen,
+                       request->path,
+                       request->path_len,
+                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                       CHIMERA_VFS_LOOKUP_FOLLOW,
+                       chimera_s3_get_lookup_callback,
+                       request);
 } /* chimera_s3_get */

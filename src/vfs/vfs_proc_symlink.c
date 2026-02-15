@@ -2,109 +2,197 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include "common/macros.h"
 #include <string.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
-#include "vfs_name_cache.h"
-#include "vfs_attr_cache.h"
+#include "vfs_release.h"
 #include "common/misc.h"
+#include "common/macros.h"
 
 static void
-chimera_vfs_symlink_complete(struct chimera_vfs_request *request)
+chimera_vfs_symlink_op_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr,
+    void                     *private_data)
 {
-    struct chimera_vfs_thread     *thread     = request->thread;
-    struct chimera_vfs_name_cache *name_cache = thread->vfs->vfs_name_cache;
-    struct chimera_vfs_attr_cache *attr_cache = thread->vfs->vfs_attr_cache;
-    chimera_vfs_symlink_callback_t callback   = request->proto_callback;
+    struct chimera_vfs_request    *request  = private_data;
+    struct chimera_vfs_thread     *thread   = request->thread;
+    chimera_vfs_symlink_callback_t callback = request->symlink.callback;
+    void                          *priv     = request->symlink.private_data;
 
+    chimera_vfs_release(thread, request->symlink.parent_handle);
+    chimera_vfs_request_free(thread, request);
 
-    if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_name_cache_insert(name_cache,
-                                      request->fh_hash,
-                                      request->fh,
-                                      request->fh_len,
-                                      request->symlink.name_hash,
-                                      request->symlink.name,
-                                      request->symlink.namelen,
-                                      request->symlink.r_attr.va_fh,
-                                      request->symlink.r_attr.va_fh_len);
+    callback(error_code, attr, priv);
+} /* chimera_vfs_symlink_op_complete */
 
-        chimera_vfs_attr_cache_insert(attr_cache,
-                                      request->fh_hash,
-                                      request->fh,
-                                      request->fh_len,
-                                      &request->symlink.r_dir_post_attr);
+static void
+chimera_vfs_symlink_parent_open_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+    struct chimera_vfs_thread  *thread  = request->thread;
 
-        chimera_vfs_attr_cache_insert(attr_cache,
-                                      chimera_vfs_hash(request->symlink.r_attr.va_fh, request->symlink.r_attr.
-                                                       va_fh_len),
-                                      request->symlink.r_attr.va_fh,
-                                      request->symlink.r_attr.va_fh_len,
-                                      &request->symlink.r_attr);
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_symlink_callback_t callback = request->symlink.callback;
+        void                          *priv     = request->symlink.private_data;
+
+        chimera_vfs_request_free(thread, request);
+        callback(error_code, NULL, priv);
+        return;
     }
 
+    request->symlink.parent_handle = oh;
 
-    chimera_vfs_complete(request);
+    chimera_vfs_symlink_at(
+        thread,
+        request->cred,
+        oh,
+        request->symlink.path + request->symlink.name_offset,
+        request->symlink.pathlen - request->symlink.name_offset,
+        request->symlink.target,
+        request->symlink.targetlen,
+        request->symlink.set_attr,
+        request->symlink.attr_mask,
+        0,
+        0,
+        chimera_vfs_symlink_op_complete,
+        request);
+} /* chimera_vfs_symlink_parent_open_complete */
 
-    callback(request->status,
-             &request->symlink.r_attr,
-             &request->symlink.r_dir_pre_attr,
-             &request->symlink.r_dir_post_attr,
-             request->proto_private_data);
+static void
+chimera_vfs_symlink_parent_lookup_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+    struct chimera_vfs_thread  *thread  = request->thread;
 
-    chimera_vfs_request_free(request->thread, request);
-} /* chimera_vfs_symlink_complete */
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_symlink_callback_t callback = request->symlink.callback;
+        void                          *priv     = request->symlink.private_data;
+
+        chimera_vfs_request_free(thread, request);
+        callback(error_code, NULL, priv);
+        return;
+    }
+
+    memcpy(request->symlink.parent_fh, attr->va_fh, attr->va_fh_len);
+    request->symlink.parent_fh_len = attr->va_fh_len;
+
+    chimera_vfs_open_fh(
+        thread,
+        request->cred,
+        request->symlink.parent_fh,
+        request->symlink.parent_fh_len,
+        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
+        chimera_vfs_symlink_parent_open_complete,
+        request);
+} /* chimera_vfs_symlink_parent_lookup_complete */
 
 SYMBOL_EXPORT void
 chimera_vfs_symlink(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_open_handle *handle,
-    const char                     *name,
-    int                             namelen,
-    const char                     *target,
-    int                             targetlen,
-    struct chimera_vfs_attrs       *set_attr,
-    uint64_t                        attr_mask,
-    uint64_t                        pre_attr_mask,
-    uint64_t                        post_attr_mask,
-    chimera_vfs_symlink_callback_t  callback,
-    void                           *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    const char                    *path,
+    int                            pathlen,
+    const char                    *target,
+    int                            targetlen,
+    struct chimera_vfs_attrs      *set_attr,
+    uint64_t                       attr_mask,
+    chimera_vfs_symlink_callback_t callback,
+    void                          *private_data)
 {
     struct chimera_vfs_request *request;
+    const char                 *slash;
 
-    /* Validate symlink name and target lengths.
-     * NAME_MAX (255) for names, PATH_MAX (4096) for symlink targets. */
-    if (namelen > 255 || targetlen > 4096) {
-        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, private_data);
+    while (pathlen > 0 && *path == '/') {
+        path++;
+        pathlen--;
+    }
+
+    while (pathlen > 0 && path[pathlen - 1] == '/') {
+        pathlen--;
+    }
+
+    if (pathlen > CHIMERA_VFS_PATH_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
         return;
     }
 
-    request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
+    if (pathlen == 0) {
+        callback(CHIMERA_VFS_EINVAL, NULL, private_data);
+        return;
+    }
+
+    /* Validate symlink target length.
+     * PATH_MAX (4096) for symlink targets. */
+    if (targetlen > CHIMERA_VFS_PATH_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
+        return;
+    }
+
+    request = chimera_vfs_request_alloc(thread, cred, fh, fhlen);
 
     if (CHIMERA_VFS_IS_ERR(request)) {
-        callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, NULL, private_data);
+        callback(CHIMERA_VFS_PTR_ERR(request), NULL, private_data);
         return;
     }
 
-    request->opcode                              = CHIMERA_VFS_OP_SYMLINK;
-    request->complete                            = chimera_vfs_symlink_complete;
-    request->symlink.handle                      = handle;
-    request->symlink.name                        = name;
-    request->symlink.namelen                     = namelen;
-    request->symlink.name_hash                   = chimera_vfs_hash(name, namelen);
-    request->symlink.target                      = target;
-    request->symlink.targetlen                   = targetlen;
-    request->symlink.set_attr                    = set_attr;
-    request->symlink.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
-    request->symlink.r_attr.va_set_mask          = 0;
-    request->symlink.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
-    request->symlink.r_dir_pre_attr.va_set_mask  = 0;
-    request->symlink.r_dir_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
-    request->symlink.r_dir_post_attr.va_set_mask = 0;
-    request->proto_callback                      = callback;
-    request->proto_private_data                  = private_data;
+    memcpy(request->plugin_data, path, pathlen);
+    ((char *) request->plugin_data)[pathlen] = '\0';
 
-    chimera_vfs_dispatch(request);
+    request->symlink.path         = request->plugin_data;
+    request->symlink.pathlen      = pathlen;
+    request->symlink.target       = target;
+    request->symlink.targetlen    = targetlen;
+    request->symlink.set_attr     = set_attr;
+    request->symlink.attr_mask    = attr_mask;
+    request->symlink.callback     = callback;
+    request->symlink.private_data = private_data;
+
+    if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
+        request->symlink.name_offset = 0;
+
+        memcpy(request->symlink.parent_fh, fh, fhlen);
+        request->symlink.parent_fh_len = fhlen;
+
+        chimera_vfs_open_fh(
+            thread,
+            cred,
+            request->symlink.parent_fh,
+            request->symlink.parent_fh_len,
+            CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
+            chimera_vfs_symlink_parent_open_complete,
+            request);
+    } else {
+        slash = strrchr(request->symlink.path, '/');
+
+        if (slash) {
+            request->symlink.parent_len  = slash - request->symlink.path;
+            request->symlink.name_offset = (slash + 1) - request->symlink.path;
+        } else {
+            request->symlink.parent_len  = 0;
+            request->symlink.name_offset = 0;
+        }
+
+        chimera_vfs_lookup(
+            thread,
+            cred,
+            fh,
+            fhlen,
+            request->symlink.path,
+            request->symlink.parent_len,
+            CHIMERA_VFS_ATTR_FH,
+            CHIMERA_VFS_LOOKUP_FOLLOW,
+            chimera_vfs_symlink_parent_lookup_complete,
+            request);
+    }
 } /* chimera_vfs_symlink */

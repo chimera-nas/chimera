@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -98,10 +98,10 @@ chimera_nfs3_fsstat(
 
     req->args_fsstat = args;
 
-    chimera_vfs_open(thread->vfs_thread, &req->cred,
-                     args->fsroot.data.data,
-                     args->fsroot.data.len,
-                     CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                     chimera_nfs3_fsstat_open_callback,
-                     req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        args->fsroot.data.data,
+                        args->fsroot.data.len,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs3_fsstat_open_callback,
+                        req);
 } /* chimera_nfs3_fsstat */

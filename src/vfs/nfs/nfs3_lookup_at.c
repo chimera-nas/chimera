@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -30,7 +30,7 @@ chimera_nfs3_lookup_callback(
 
     if (res->status != NFS3_OK) {
         if (res->resfail.dir_attributes.attributes_follow) {
-            chimera_nfs3_unmarshall_attrs(&res->resfail.dir_attributes.attributes, &request->lookup.r_dir_attr);
+            chimera_nfs3_unmarshall_attrs(&res->resfail.dir_attributes.attributes, &request->lookup_at.r_dir_attr);
         }
 
         request->status = nfs3_client_status_to_chimera_vfs_error(res->status);
@@ -38,14 +38,14 @@ chimera_nfs3_lookup_callback(
         return;
     }
 
-    chimera_nfs3_unmarshall_fh(&res->resok.object, ctx->server->index, request->fh, &request->lookup.r_attr);
+    chimera_nfs3_unmarshall_fh(&res->resok.object, ctx->server->index, request->fh, &request->lookup_at.r_attr);
 
     if (res->resok.obj_attributes.attributes_follow) {
-        chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->lookup.r_attr);
+        chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->lookup_at.r_attr);
     }
 
     if (res->resok.dir_attributes.attributes_follow) {
-        chimera_nfs3_unmarshall_attrs(&res->resok.dir_attributes.attributes, &request->lookup.r_dir_attr);
+        chimera_nfs3_unmarshall_attrs(&res->resok.dir_attributes.attributes, &request->lookup_at.r_dir_attr);
     }
 
     request->status = CHIMERA_VFS_OK;
@@ -53,7 +53,7 @@ chimera_nfs3_lookup_callback(
 } /* chimera_nfs3_lookup_callback */
 
 void
-chimera_nfs3_lookup(
+chimera_nfs3_lookup_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -80,8 +80,8 @@ chimera_nfs3_lookup(
 
     args.what.dir.data.data = fh;
     args.what.dir.data.len  = fhlen;
-    args.what.name.str      = (char *) request->lookup.component;
-    args.what.name.len      = request->lookup.component_len;
+    args.what.name.str      = (char *) request->lookup_at.component;
+    args.what.name.len      = request->lookup_at.component_len;
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,
@@ -89,5 +89,5 @@ chimera_nfs3_lookup(
 
     shared->nfs_v3.send_call_NFSPROC3_LOOKUP(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
                                              &args, 0, 0, 0, chimera_nfs3_lookup_callback, request);
-} /* chimera_nfs3_lookup */
+} /* chimera_nfs3_lookup_at */
 

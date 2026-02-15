@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -281,7 +281,7 @@ void chimera_nfs3_umount(
     struct chimera_vfs_request *,
     void *);
 
-void chimera_nfs3_lookup(
+void chimera_nfs3_lookup_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -296,12 +296,12 @@ void chimera_nfs3_setattr(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_mkdir(
+void chimera_nfs3_mkdir_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_remove(
+void chimera_nfs3_remove_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -311,7 +311,7 @@ void chimera_nfs3_readdir(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_open(
+void chimera_nfs3_open_fh(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -341,7 +341,7 @@ void chimera_nfs3_commit(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_symlink(
+void chimera_nfs3_symlink_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -351,17 +351,17 @@ void chimera_nfs3_readlink(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_rename(
+void chimera_nfs3_rename_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_mknod(
+void chimera_nfs3_mknod_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_link(
+void chimera_nfs3_link_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -372,7 +372,7 @@ void chimera_nfs4_mount(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_lookup(
+void chimera_nfs4_lookup_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -387,12 +387,12 @@ void chimera_nfs4_setattr(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_mkdir(
+void chimera_nfs4_mkdir_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_remove(
+void chimera_nfs4_remove_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -402,7 +402,7 @@ void chimera_nfs4_readdir(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_open(
+void chimera_nfs4_open_fh(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -432,7 +432,7 @@ void chimera_nfs4_commit(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_symlink(
+void chimera_nfs4_symlink_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -442,17 +442,17 @@ void chimera_nfs4_readlink(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_rename(
+void chimera_nfs4_rename_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_mknod(
+void chimera_nfs4_mknod_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_link(
+void chimera_nfs4_link_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
