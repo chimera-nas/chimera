@@ -303,9 +303,14 @@ chimera_vfs_lookup(
 {
     struct chimera_vfs_request *lp_request;
 
-    while (*path == '/') {
+    while (pathlen > 0 && *path == '/') {
         path++;
         pathlen--;
+    }
+
+    if (pathlen > CHIMERA_VFS_PATH_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
+        return;
     }
 
     if (pathlen == 0) {

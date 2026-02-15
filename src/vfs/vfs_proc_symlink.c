@@ -122,6 +122,11 @@ chimera_vfs_symlink(
         pathlen--;
     }
 
+    if (pathlen > CHIMERA_VFS_PATH_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
+        return;
+    }
+
     if (pathlen == 0) {
         callback(CHIMERA_VFS_EINVAL, NULL, private_data);
         return;
@@ -129,7 +134,7 @@ chimera_vfs_symlink(
 
     /* Validate symlink target length.
      * PATH_MAX (4096) for symlink targets. */
-    if (targetlen > 4096) {
+    if (targetlen > CHIMERA_VFS_PATH_MAX) {
         callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
         return;
     }

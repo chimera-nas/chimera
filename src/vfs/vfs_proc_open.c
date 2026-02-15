@@ -192,6 +192,11 @@ chimera_vfs_open(
         pathlen--;
     }
 
+    if (pathlen > CHIMERA_VFS_PATH_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, private_data);
+        return;
+    }
+
     request = chimera_vfs_request_alloc(thread, cred, fh, fhlen);
 
     if (CHIMERA_VFS_IS_ERR(request)) {

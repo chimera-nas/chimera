@@ -119,6 +119,11 @@ chimera_vfs_mkdir(
         pathlen--;
     }
 
+    if (pathlen > CHIMERA_VFS_PATH_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
+        return;
+    }
+
     if (pathlen == 0) {
         callback(CHIMERA_VFS_EEXIST, NULL, private_data);
         return;

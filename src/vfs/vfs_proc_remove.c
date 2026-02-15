@@ -154,6 +154,11 @@ chimera_vfs_remove(
         pathlen--;
     }
 
+    if (pathlen > CHIMERA_VFS_PATH_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, private_data);
+        return;
+    }
+
     if (pathlen == 0) {
         callback(CHIMERA_VFS_EINVAL, private_data);
         return;

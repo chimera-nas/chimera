@@ -171,6 +171,16 @@ chimera_vfs_link(
         new_pathlen--;
     }
 
+    if (old_pathlen > CHIMERA_VFS_PATH_MAX || new_pathlen > CHIMERA_VFS_PATH_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
+        return;
+    }
+
+    if (old_pathlen + 1 + new_pathlen + 1 > CHIMERA_VFS_PLUGIN_DATA_SIZE) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
+        return;
+    }
+
     if (old_pathlen == 0 || new_pathlen == 0) {
         callback(CHIMERA_VFS_EINVAL, NULL, private_data);
         return;

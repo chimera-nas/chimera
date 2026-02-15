@@ -63,10 +63,9 @@ EXIT_CODE=$?
 kill $WATCHDOG_PID 2>/dev/null
 wait $WATCHDOG_PID 2>/dev/null
 
-echo "CHIMERA_KVM_EXIT_CODE=${EXIT_CODE}"
-
-# Flush all kernel buffers (including serial console) before power off
-sync
+# Write exit code via kmsg so it goes through the kernel console driver
+# synchronously, guaranteeing it reaches the serial log before power off
+echo "CHIMERA_KVM_EXIT_CODE=${EXIT_CODE}" > /dev/kmsg
 
 # Tell kernel to power off; QEMU with -no-reboot will exit
 echo o > /proc/sysrq-trigger
