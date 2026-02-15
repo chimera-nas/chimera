@@ -155,6 +155,7 @@ chimera_nfs4_compound_process(
                 if (argop->argop >= OP_ACCESS && argop->argop <= OP_CLONE) {
                     chimera_nfs4_compound_complete(req, NFS4ERR_NOTSUPP);
                 } else {
+                    resop->resop = OP_ILLEGAL;
                     chimera_nfs4_compound_complete(req, NFS4ERR_OP_ILLEGAL);
                 }
                 break;

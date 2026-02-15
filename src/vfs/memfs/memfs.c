@@ -3040,6 +3040,12 @@ memfs_dispatch(
     struct memfs_thread *thread = private_data;
     struct memfs_shared *shared = thread->shared;
 
+    if (request->fh_len > 0 && request->fh_len <= CHIMERA_VFS_MOUNT_ID_SIZE) {
+        request->status = CHIMERA_VFS_EBADF;
+        request->complete(request);
+        return;
+    }
+
     switch (request->opcode) {
         case CHIMERA_VFS_OP_MOUNT:
             memfs_mount(thread, shared, request, private_data);

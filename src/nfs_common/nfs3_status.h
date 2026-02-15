@@ -48,6 +48,8 @@ chimera_vfs_error_to_nfsstat3(enum chimera_vfs_error err)
             return NFS3ERR_DQUOT;
         case CHIMERA_VFS_ESTALE:
             return NFS3ERR_STALE;
+        case CHIMERA_VFS_ENOHANDLE:
+            return NFS3ERR_STALE;
         case CHIMERA_VFS_EBADCOOKIE:
             return NFS3ERR_BAD_COOKIE;
         case CHIMERA_VFS_EBADF:

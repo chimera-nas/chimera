@@ -87,8 +87,8 @@ chimera_vfs_open(
 
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
-    if (!module) {
-        callback(CHIMERA_VFS_ESTALE, NULL, private_data);
+    if (CHIMERA_VFS_IS_ERR(module)) {
+        callback(CHIMERA_VFS_PTR_ERR(module), NULL, private_data);
         return;
     }
 

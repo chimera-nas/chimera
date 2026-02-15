@@ -3665,6 +3665,12 @@ demofs_dispatch(
     struct demofs_thread *thread = private_data;
     struct demofs_shared *shared = thread->shared;
 
+    if (request->fh_len > 0 && request->fh_len <= CHIMERA_VFS_MOUNT_ID_SIZE) {
+        request->status = CHIMERA_VFS_EBADF;
+        request->complete(request);
+        return;
+    }
+
     if (unlikely(shared->root_fhlen == 0)) {
         demofs_bootstrap(thread);
     }

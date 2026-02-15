@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -12,6 +12,12 @@ chimera_nfs4_savefh(
     struct nfs_resop4                *resop)
 {
     struct  SAVEFH4res *res = &resop->opsavefh;
+
+    if (req->fhlen == 0) {
+        res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, NFS4ERR_NOFILEHANDLE);
+        return;
+    }
 
     res->status = NFS4_OK;
 
