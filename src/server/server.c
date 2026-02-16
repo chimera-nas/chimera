@@ -76,6 +76,7 @@ struct chimera_server_config {
     int                                   rest_http_port;
     int                                   rest_https_port;
     int                                   rest_debug_fsops;
+    int                                   rest_auth_enabled;
     int                                   smb_num_dialects;
     uint32_t                              smb_dialects[16];
     int                                   smb_persistent_handles;
@@ -155,6 +156,7 @@ chimera_server_config_init(void)
     config->portmap_hostname[0]      = '\0';
     config->soft_fail_bad_req        = 0;
     config->rest_debug_fsops         = 0;
+    config->rest_auth_enabled        = 1;
     config->tcp_flavor               = CHIMERA_TCP_FLAVOR_PLAIN;
 
     config->smb_num_dialects = 5;
@@ -1017,6 +1019,20 @@ chimera_server_config_get_rest_debug_fsops(const struct chimera_server_config *c
 {
     return config->rest_debug_fsops;
 } /* chimera_server_config_get_rest_debug_fsops */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_rest_auth_enabled(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->rest_auth_enabled = enable;
+} /* chimera_server_config_set_rest_auth_enabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_rest_auth_enabled(const struct chimera_server_config *config)
+{
+    return config->rest_auth_enabled;
+} /* chimera_server_config_get_rest_auth_enabled */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_rest_https_port(

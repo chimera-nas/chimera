@@ -96,10 +96,13 @@ generate_config() {
     local rest_section=""
 
     # For delegation runs, expose the test-only debug fsop endpoint so the
-    # pynfs serverhelper can drive out-of-band recalls (DELEG16-20).
+    # pynfs serverhelper can drive out-of-band recalls (DELEG16-20).  The
+    # serverhelper sends no credentials, so disable REST auth for these runs
+    # rather than carving out a per-endpoint exemption.
     if [ "$DELEG_ENABLE" = "true" ]; then
         rest_section="\"rest_http_port\": $REST_PORT,
-        \"rest_debug_fsops\": true,"
+        \"rest_debug_fsops\": true,
+        \"rest_auth_enabled\": false,"
     fi
 
     case "$BACKEND" in

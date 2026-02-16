@@ -731,6 +731,14 @@ main(
         chimera_server_config_set_rest_debug_fsops(server_config, 1);
     }
 
+    /* REST API authentication is enabled by default; it can be turned off
+     * explicitly with "rest_auth_enabled": false. */
+    json_t *rest_auth_enabled_value = json_object_get(server_params, "rest_auth_enabled");
+    if (rest_auth_enabled_value && json_is_boolean(rest_auth_enabled_value)) {
+        chimera_server_config_set_rest_auth_enabled(server_config,
+                                                    json_is_true(rest_auth_enabled_value) ? 1 : 0);
+    }
+
     if (rest_https_port != 0) {
         chimera_server_config_set_rest_https_port(server_config, rest_https_port);
         if (rest_ssl_cert) {
