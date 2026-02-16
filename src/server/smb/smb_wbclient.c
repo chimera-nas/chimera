@@ -271,6 +271,97 @@ smb_wbclient_map_principal(
     return 0;
 } // smb_wbclient_map_principal
 
+int
+smb_wbclient_auth_password(
+    const char *username,
+    const char *domain,
+    const char *password,
+    uint32_t   *uid,
+    uint32_t   *gid,
+    uint32_t   *ngids,
+    uint32_t   *gids,
+    char       *sid_out)
+{
+    wbcErr                   wbc_err;
+    struct wbcAuthUserParams params;
+    struct wbcAuthUserInfo  *info  = NULL;
+    struct wbcAuthErrorInfo *error = NULL;
+    struct wbcDomainSid      user_sid;
+    uint32_t                 unix_uid, unix_gid;
+    struct wbcDomainSid     *groups_sids = NULL;
+    uint32_t                 num_groups  = 0;
+    uint32_t                 i;
+
+    memset(&params, 0, sizeof(params));
+
+    params.level              = WBC_AUTH_USER_LEVEL_PLAIN;
+    params.account_name       = username;
+    params.domain_name        = domain ? domain : "";
+    params.password.plaintext = password;
+
+    wbc_err = wbcAuthenticateUserEx(&params, &info, &error);
+
+    if (wbc_err != WBC_ERR_SUCCESS) {
+        chimera_smb_debug("wbcAuthenticateUserEx (plain) failed: %s",
+                          error ? error->display_string : wbcErrorString(
+                              wbc_err));
+        if (error) {
+            wbcFreeMemory(error);
+        }
+        return -1;
+    }
+
+    user_sid = info->sids[0].sid;
+
+    if (sid_out) {
+        if (wbc_sid_to_string(&user_sid, sid_out,
+                              SMB_WBCLIENT_SID_MAX_LEN) < 0) {
+            sid_out[0] = '\0';
+        }
+    }
+
+    wbc_err = wbcSidToUid(&user_sid, &unix_uid);
+    if (wbc_err != WBC_ERR_SUCCESS) {
+        chimera_smb_error("wbcSidToUid failed: %s", wbcErrorString(wbc_err));
+        wbcFreeMemory(info);
+        return -1;
+    }
+
+    if (info->num_sids > 1) {
+        wbc_err = wbcSidToGid(&info->sids[1].sid, &unix_gid);
+        if (wbc_err != WBC_ERR_SUCCESS) {
+            unix_gid = unix_uid;
+        }
+    } else {
+        unix_gid = unix_uid;
+    }
+
+    *uid = unix_uid;
+    *gid = unix_gid;
+
+    wbc_err = wbcLookupUserSids(&user_sid, 0, &num_groups, &groups_sids);
+    if (wbc_err == WBC_ERR_SUCCESS && num_groups > 0) {
+        *ngids = 0;
+        for (i = 0; i < num_groups && *ngids < SMB_WBCLIENT_MAX_GROUPS; i++) {
+            uint32_t group_gid;
+            wbc_err = wbcSidToGid(&groups_sids[i], &group_gid);
+            if (wbc_err == WBC_ERR_SUCCESS) {
+                gids[(*ngids)++] = group_gid;
+            }
+        }
+        wbcFreeMemory(groups_sids);
+    } else {
+        *ngids = 0;
+    }
+
+    chimera_smb_info(
+        "wbclient plain auth success: user=%s\\%s uid=%u gid=%u ngids=%u",
+        domain ? domain : "", username, *uid, *gid, *ngids);
+
+    wbcFreeMemory(info);
+    return 0;
+} // smb_wbclient_auth_password
+
 #else // HAVE_WBCLIENT
 
 // Stub implementations when libwbclient is not available
@@ -334,5 +425,28 @@ smb_wbclient_map_principal(
 
     return -1;
 } // smb_wbclient_map_principal
+
+int
+smb_wbclient_auth_password(
+    const char *username,
+    const char *domain,
+    const char *password,
+    uint32_t   *uid,
+    uint32_t   *gid,
+    uint32_t   *ngids,
+    uint32_t   *gids,
+    char       *sid_out)
+{
+    (void) username;
+    (void) domain;
+    (void) password;
+    (void) uid;
+    (void) gid;
+    (void) ngids;
+    (void) gids;
+    (void) sid_out;
+
+    return -1;
+} // smb_wbclient_auth_password
 
 #endif // HAVE_WBCLIENT

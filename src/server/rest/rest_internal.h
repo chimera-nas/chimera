@@ -21,7 +21,13 @@ struct chimera_rest_server {
     struct evpl_listener  *https_listener;
     struct chimera_server *server;
     int                    debug_fsops;
+    unsigned char          jwt_secret[32];
+    int                    winbind_enabled;
+    char                   winbind_domain[256];
 };
+
+struct evpl;
+struct evpl_http_request;
 
 struct chimera_rest_thread {
     struct evpl                *evpl;
@@ -31,3 +37,10 @@ struct chimera_rest_thread {
     struct evpl_http_server    *https_server;
     struct chimera_vfs_thread  *vfs_thread;
 };
+
+void
+chimera_rest_send_json_response(
+    struct evpl              *evpl,
+    struct evpl_http_request *request,
+    int                       status,
+    const char               *json_body);
