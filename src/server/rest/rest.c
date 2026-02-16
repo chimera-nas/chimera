@@ -12,6 +12,7 @@
 #include "server/server.h"
 #include "rest.h"
 #include "rest_internal.h"
+#include "rest_auth.h"
 
 /* External handlers from rest_users.c */
 void chimera_rest_handle_users_list(
@@ -122,6 +123,7 @@ enum chimera_rest_post_handler {
     REST_POST_EXPORTS_CREATE,
     REST_POST_SHARES_CREATE,
     REST_POST_BUCKETS_CREATE,
+    REST_POST_AUTH_LOGIN,
 };
 
 #define REST_POST_MAX_BODY 65536
@@ -194,12 +196,16 @@ chimera_rest_notify(
             chimera_rest_handle_buckets_create(evpl, request, thread,
                                                body, body_len);
             break;
+        case REST_POST_AUTH_LOGIN:
+            chimera_rest_handle_auth_login(evpl, request, thread,
+                                           body, body_len);
+            break;
     } /* switch */
 
     free(ctx);
 } /* chimera_rest_notify */
 
-static void
+void
 chimera_rest_send_json_response(
     struct evpl              *evpl,
     struct evpl_http_request *request,
@@ -378,6 +384,33 @@ chimera_rest_dispatch(
         return;
     }
 
+    /* Auth login endpoint: /api/v1/auth/login (public, no auth required) */
+    if (url_len == 18 && strncmp(url, "/api/v1/auth/login", 18) == 0) {
+        if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
+            struct chimera_rest_post_ctx *ctx;
+            ctx          = calloc(1, sizeof(*ctx));
+            ctx->handler = REST_POST_AUTH_LOGIN;
+            *notify_data = ctx;
+        } else {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        }
+        return;
+    }
+
+    /* Auth middleware: all /api/v1/ routes require Bearer token */
+    if (chimera_rest_url_starts_with(url, url_len, "/api/v1/", 8)) {
+        struct chimera_rest_jwt_claims claims;
+
+        if (chimera_rest_auth_check_bearer(
+                thread->shared, request, &claims) != 0) {
+            chimera_rest_send_json_response(evpl, request, 401,
+                                            "{\"error\":\"Unauthorized\","
+                                            "\"message\":\"Valid Bearer token "
+                                            "required\"}");
+            return;
+        }
+    }
+
     /* Users API: /api/v1/users */
     if (url_len == 13 && strncmp(url, "/api/v1/users", 13) == 0) {
         if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
@@ -523,6 +556,20 @@ chimera_rest_init(
     rest->http_port  = http_port;
     rest->https_port = https_port;
     rest->server     = server;
+
+    chimera_rest_auth_init_secret(rest);
+
+    rest->winbind_enabled = chimera_server_config_get_smb_winbind_enabled(
+        config);
+    {
+        const char *domain = chimera_server_config_get_smb_winbind_domain(
+            config);
+        if (domain) {
+            strncpy(rest->winbind_domain, domain,
+                    sizeof(rest->winbind_domain) - 1);
+            rest->winbind_domain[sizeof(rest->winbind_domain) - 1] = '\0';
+        }
+    }
 
     if (http_port != 0) {
         rest->http_endpoint = evpl_endpoint_create("0.0.0.0", http_port);
