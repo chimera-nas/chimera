@@ -21,7 +21,7 @@ RUN apt-get -y update && \
     apt-get -y --no-install-recommends install gcc g++ clang-tools cmake ninja-build ccache git flex bison \
     uuid-dev uthash-dev libkrb5-dev libgssapi-krb5-2 gss-ntlmssp-dev \
     librdmacm-dev libjansson-dev libxxhash-dev liburcu-dev liburing-dev libunwind-dev \
-    librocksdb-dev libssl-dev openssl libnuma-dev libcurl4-openssl-dev libs3-dev libaio-dev \
+    librocksdb-dev libssl-dev openssl libnuma-dev libcurl4-openssl-dev libs3-dev libaio-dev libcrypt-dev \
     build-essential autoconf automake libtool pkg-config ca-certificates uncrustify iproute2 curl \
     libwbclient-dev smbclient krb5-kdc krb5-admin-server krb5-user samba winbind samba-dsdb-modules samba-vfs-modules && \
     apt-get clean && \

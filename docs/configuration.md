@@ -125,6 +125,7 @@ the canonical place to set them.
 | `rest_https_port` | int | `0` | HTTPS port for the REST API (`0` = disabled). |
 | `rest_ssl_cert` | string | — | TLS certificate path. Auto-generated (self-signed) if HTTPS is enabled and this is unset. |
 | `rest_ssl_key` | string | — | TLS private-key path. Auto-generated alongside the cert if unset. |
+| `rest_auth_enabled` | bool | `true` | Require authentication (JWT Bearer token or HTTP Basic credentials) on all `/api/v1/*` endpoints. Set to `false` to disable auth entirely — only safe on a trusted/loopback-only management network. |
 | `soft_fail_bad_req` | bool | `false` | Return a soft error on a malformed REST request instead of dropping the connection. |
 
 See [Advanced and testing options](#advanced-and-testing-options) for a small set

@@ -450,6 +450,15 @@ chimera_server_config_get_rest_debug_fsops(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_rest_auth_enabled(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_rest_auth_enabled(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_rest_ssl_cert(
     struct chimera_server_config *config,
     const char                   *cert_path);
