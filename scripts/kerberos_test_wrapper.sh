@@ -67,6 +67,17 @@ check_requirements() {
         log "Install with: apt-get install krb5-kdc krb5-admin-server"
         exit 1
     fi
+
+    # Skip on systems where smbclient is built with MIT Kerberos (RHEL/Rocky/CentOS).
+    # Samba's gensec_gse module fails to resolve ccache credentials on MIT Kerberos
+    # builds, causing NT_STATUS_WRONG_CREDENTIAL_HANDLE during SPNEGO negotiation.
+    # See: https://github.com/chimera-nas/chimera/issues/195
+    local smbclient_path
+    smbclient_path=$(command -v smbclient 2>/dev/null) || true
+    if [ -n "$smbclient_path" ] && ldd "$smbclient_path" 2>/dev/null | grep -q libgssapi_krb5; then
+        log "SKIP: smbclient uses MIT Kerberos (known ccache issue, see GH #195)"
+        exit 77
+    fi
 }
 
 setup_namespace() {
@@ -213,22 +224,25 @@ obtain_ticket() {
 
     # Get a ticket for testuser1 inside the namespace
     # Use printf to avoid newline issues with password
+    # Use FILE: prefix for MIT Kerberos compatibility (RHEL/Rocky smbclient)
+    CCACHE="FILE:${KRB_DIR}/krb5cc_testuser1"
+
     if ip netns exec "${NETNS_NAME}" env \
         KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
-        KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+        KRB5CCNAME="${CCACHE}" \
         sh -c 'printf "%s" "Password1!" | kinit testuser1@'"${REALM}"' 2>/dev/null'; then
         log "Obtained TGT for testuser1@${REALM}"
-        log "KRB5CCNAME=${KRB_DIR}/krb5cc_testuser1"
+        log "KRB5CCNAME=${CCACHE}"
 
         # Pre-acquire cifs service ticket so smbclient doesn't need KDC access
         ip netns exec "${NETNS_NAME}" env \
             KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
-            KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+            KRB5CCNAME="${CCACHE}" \
             kvno cifs/${SMB_HOST}@${REALM} 2>/dev/null || true
 
         ip netns exec "${NETNS_NAME}" env \
             KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
-            KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+            KRB5CCNAME="${CCACHE}" \
             klist 2>/dev/null || true
         return 0
     else
@@ -245,7 +259,7 @@ run_test() {
         KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
         KRB5_KDC_PROFILE="${KRB_DIR}/etc/kdc.conf" \
         KRB5_KTNAME="${KRB_DIR}/chimera.keytab" \
-        KRB5CCNAME="${KRB_DIR}/krb5cc_testuser1" \
+        KRB5CCNAME="${CCACHE}" \
         KRB_REALM="${REALM}" \
         KRB_USER="testuser1" \
         KRB_SMB_HOST="${SMB_HOST}" \

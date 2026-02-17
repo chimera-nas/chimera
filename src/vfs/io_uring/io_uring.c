@@ -520,8 +520,13 @@ chimera_io_uring_setattr(
         rc = fchmodat(fd, "", request->setattr.set_attr->va_mode,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 #else  /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
-        // Fall back to fchmod on older kernels (AT_SYMLINK_NOFOLLOW not supported)
-        rc = fchmod(fd, attr->va_mode);
+        // Fall back to chmod via /proc/self/fd on older kernels
+        // (fchmod doesn't work on O_PATH file descriptors)
+        {
+            char procpath[64];
+            snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
+            rc = chmod(procpath, request->setattr.set_attr->va_mode);
+        }
 #endif /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
 
         if (rc) {
@@ -1025,13 +1030,15 @@ chimera_io_uring_mknod_at(
 
     rc = mknodat(fd, fullname, mode, dev);
 
+    int mknodat_errno = errno;
+
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
                             &request->mknod_at.r_dir_post_attr,
                             fd);
 
     if (rc < 0) {
 
-        if (errno == EEXIST) {
+        if (mknodat_errno == EEXIST) {
             chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
                                           request,
                                           &request->mknod_at.r_attr,
@@ -1039,7 +1046,7 @@ chimera_io_uring_mknod_at(
                                           fullname);
         }
 
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(mknodat_errno);
         request->complete(request);
         return;
     }

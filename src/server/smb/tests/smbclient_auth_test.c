@@ -370,17 +370,17 @@ verify_kerberos_environment(void)
     fprintf(stderr, "  KRB5_CONFIG: %s\n", krb5_config);
     fprintf(stderr, "  KRB5CCNAME:  %s\n", ccache);
 
-    /* smbclient uses Samba's bundled Heimdal which needs --use-krb5-ccache
-     * to find the credential cache (it doesn't honor KRB5CCNAME directly).
-     * We also need -U user@REALM so smbclient matches the ccache principal
+    /* smbclient picks up the credential cache via the KRB5CCNAME
+     * environment variable (works with both MIT and Heimdal backends).
+     * We need -U user@REALM so smbclient matches the ccache principal
      * instead of defaulting to the Unix username (root). */
     if (krb_user && krb_realm) {
         snprintf(kerberos_auth_args, sizeof(kerberos_auth_args),
-                 "--use-kerberos=required --use-krb5-ccache=%s -U %s@%s -N",
-                 ccache, krb_user, krb_realm);
+                 "--use-kerberos=required -U %s@%s -N",
+                 krb_user, krb_realm);
     } else {
         snprintf(kerberos_auth_args, sizeof(kerberos_auth_args),
-                 "--use-kerberos=required --use-krb5-ccache=%s -N", ccache);
+                 "--use-kerberos=required -N");
     }
 
     return 0;
