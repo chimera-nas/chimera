@@ -602,8 +602,8 @@ chimera_smb_create_reply(
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_CREATE_REPLY_SIZE);
 
-    /* Oplock level*/
-    evpl_iovec_cursor_append_uint8(reply_cursor, 0);
+    /* Oplock level */
+    evpl_iovec_cursor_append_uint8(reply_cursor, SMB2_OPLOCK_LEVEL_NONE);
 
     /* Flags */
     evpl_iovec_cursor_append_uint8(reply_cursor, 0);

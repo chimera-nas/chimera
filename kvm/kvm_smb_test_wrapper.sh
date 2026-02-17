@@ -52,7 +52,8 @@ PCAP_FILE="${KVM_PCAP_FILE:-}"
 
 cleanup() {
     if [ -n "$TCPDUMP_PID" ]; then
-        kill "$TCPDUMP_PID" 2>/dev/null || true
+        # Use SIGINT so tcpdump flushes its capture buffer before exiting
+        kill -INT "$TCPDUMP_PID" 2>/dev/null || true
         wait "$TCPDUMP_PID" 2>/dev/null || true
     fi
     if [ -n "$CHIMERA_PID" ]; then
@@ -158,7 +159,7 @@ ip netns exec "${NETNS_NAME}" ip link set "${TAP_NAME}" up
 
 # Optionally start tcpdump to capture traffic (set KVM_PCAP_FILE to enable)
 if [ -n "$PCAP_FILE" ]; then
-    ip netns exec "${NETNS_NAME}" tcpdump -i "${TAP_NAME}" -w "$PCAP_FILE" -s 0 &
+    ip netns exec "${NETNS_NAME}" tcpdump -U -i "${TAP_NAME}" -w "$PCAP_FILE" -s 0 &
     TCPDUMP_PID=$!
     sleep 0.5
 fi

@@ -58,7 +58,8 @@ fi
 
 cleanup() {
     if [ -n "$TCPDUMP_PID" ]; then
-        kill "$TCPDUMP_PID" 2>/dev/null || true
+        # Use SIGINT so tcpdump flushes its capture buffer before exiting
+        kill -INT "$TCPDUMP_PID" 2>/dev/null || true
         wait "$TCPDUMP_PID" 2>/dev/null || true
     fi
     if [ -n "$CHIMERA_PID" ]; then

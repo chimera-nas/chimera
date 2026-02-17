@@ -28,6 +28,13 @@ set(CTHON_CMD_basic   "cd /opt/cthon04 && ./runtests -b -f /mnt/test")
 set(CTHON_CMD_general "cd /opt/cthon04 && ./runtests -g -f /mnt/test")
 set(CTHON_CMD_special "cd /opt/cthon04 && ./runtests -s -f /mnt/test")
 
+# SMB cthon04 commands set CIFS=yes so the test suite skips NFS-specific
+# sub-tests (e.g. nfsidem duplicate request check, NFS-style op_ren).
+# MNTOPTIONS is checked by runtests.wrk to detect SMB version.
+set(SMB_CTHON_CMD_basic   "cd /opt/cthon04 && CIFS=yes MNTOPTIONS=vers=2.1 ./runtests -b -f /mnt/test")
+set(SMB_CTHON_CMD_general "cd /opt/cthon04 && CIFS=yes MNTOPTIONS=vers=2.1 ./runtests -g -f /mnt/test")
+set(SMB_CTHON_CMD_special "cd /opt/cthon04 && CIFS=yes MNTOPTIONS=vers=2.1 ./runtests -s -f /mnt/test")
+
 # xfstests programs
 set(XFSTESTS_PROGRAMS fsstress fsx dirstress nametest fstest rewinddir)
 
@@ -108,7 +115,7 @@ foreach(image_spec ${KVM_IMAGES})
                 COMMAND bash ${SMB_WRAPPER}
                         ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
                         ${CHIMERA_BINARY} ${backend}
-                        "${CTHON_CMD_${category}}")
+                        "${SMB_CTHON_CMD_${category}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_${backend}
                 PROPERTIES LABELS "kvm;${IMAGE_NAME}")
         endforeach()
@@ -120,7 +127,7 @@ foreach(image_spec ${KVM_IMAGES})
                 COMMAND bash ${SMB_WRAPPER}
                         ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
                         ${CHIMERA_BINARY} cairn
-                        "${CTHON_CMD_${category}}")
+                        "${SMB_CTHON_CMD_${category}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_cairn
                 PROPERTIES LABELS "kvm;${IMAGE_NAME}")
         endforeach()
