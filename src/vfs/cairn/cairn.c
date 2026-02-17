@@ -1326,6 +1326,7 @@ cairn_mkdir(
     parent_inode->nlink++;
 
     parent_inode->mtime = now;
+    parent_inode->ctime = now;
 
     cairn_map_attrs(shared, &request->mkdir.r_dir_post_attr, parent_inode);
 
@@ -1435,6 +1436,7 @@ cairn_mknod(
     cairn_map_attrs(shared, &request->mknod.r_dir_pre_attr, parent_inode);
 
     parent_inode->mtime = now;
+    parent_inode->ctime = now;
 
     cairn_map_attrs(shared, &request->mknod.r_dir_post_attr, parent_inode);
 
@@ -1527,6 +1529,7 @@ cairn_remove(
     cairn_map_attrs(shared, &request->remove.r_dir_pre_attr, parent_inode);
 
     parent_inode->mtime = now;
+    parent_inode->ctime = now;
 
     if (S_ISDIR(inode->mode)) {
         inode->nlink = 0;
@@ -1880,6 +1883,7 @@ cairn_open_at(
         cairn_put_dirent(txn, &dirent_key, &new_dirent_value);
 
         parent_inode->mtime = now;
+        parent_inode->ctime = now;
 
         inode = &new_inode;
     } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
@@ -2345,6 +2349,7 @@ cairn_write(
     // Update space used to track actual extent sizes
     inode->space_used += total_space;
     inode->mtime       = now;
+    inode->ctime       = now;
 
     cairn_map_attrs(shared, &request->write.r_post_attr, inode);
 
@@ -2665,6 +2670,7 @@ cairn_symlink(
     memcpy(dirent_value.name, request->symlink.name, request->symlink.namelen);
 
     parent_inode->mtime = now;
+    parent_inode->ctime = now;
 
     cairn_map_attrs(shared, &request->symlink.r_attr, &new_inode);
     cairn_map_attrs(shared, &request->symlink.r_dir_post_attr, parent_inode);
@@ -2956,7 +2962,9 @@ cairn_rename(
     cairn_put_dirent(txn, &new_dirent_key, &new_dirent_value);
 
     old_parent_inode->mtime = now;
+    old_parent_inode->ctime = now;
     new_parent_inode->mtime = now;
+    new_parent_inode->ctime = now;
 
     if (cmp != 0) {
         /* XXX only if dir */
@@ -3060,6 +3068,7 @@ cairn_link(
     target_inode->nlink++;
     target_inode->ctime = now;
     parent_inode->mtime = now;
+    parent_inode->ctime = now;
 
     cairn_put_dirent(txn, &dirent_key, &dirent_value);
     cairn_put_inode(txn, parent_inode);

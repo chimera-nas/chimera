@@ -1408,6 +1408,8 @@ demofs_mkdir(
 
     parent_inode->mtime_sec  = now.tv_sec;
     parent_inode->mtime_nsec = now.tv_nsec;
+    parent_inode->ctime_sec  = now.tv_sec;
+    parent_inode->ctime_nsec = now.tv_nsec;
 
     demofs_map_attrs(thread, &request->mkdir.r_dir_post_attr, parent_inode);
 
@@ -1512,6 +1514,8 @@ demofs_mknod(
 
     parent_inode->mtime_sec  = now.tv_sec;
     parent_inode->mtime_nsec = now.tv_nsec;
+    parent_inode->ctime_sec  = now.tv_sec;
+    parent_inode->ctime_nsec = now.tv_nsec;
 
     demofs_map_attrs(thread, &request->mknod.r_dir_post_attr, parent_inode);
 
@@ -1586,6 +1590,8 @@ demofs_remove(
 
     parent_inode->mtime_sec  = now.tv_sec;
     parent_inode->mtime_nsec = now.tv_nsec;
+    parent_inode->ctime_sec  = now.tv_sec;
+    parent_inode->ctime_nsec = now.tv_nsec;
 
     rb_tree_remove(&parent_inode->dir.dirents, &dirent->node);
 
@@ -1881,6 +1887,8 @@ demofs_open_at(
 
         parent_inode->mtime_sec  = now.tv_sec;
         parent_inode->mtime_nsec = now.tv_nsec;
+        parent_inode->ctime_sec  = now.tv_sec;
+        parent_inode->ctime_nsec = now.tv_nsec;
 
     } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
         pthread_mutex_unlock(&parent_inode->lock);
@@ -2669,6 +2677,8 @@ demofs_write(
 
     inode->mtime_sec  = now.tv_sec;
     inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
 
     demofs_map_attrs(thread, &request->write.r_post_attr, inode);
 
@@ -3062,6 +3072,8 @@ demofs_symlink(
 
     parent_inode->mtime_sec  = now.tv_sec;
     parent_inode->mtime_nsec = now.tv_nsec;
+    parent_inode->ctime_sec  = now.tv_sec;
+    parent_inode->ctime_nsec = now.tv_nsec;
 
     demofs_map_attrs(thread, &request->symlink.r_dir_post_attr, parent_inode);
 
@@ -3317,10 +3329,14 @@ demofs_rename(
         new_parent_inode->nlink++;
     }
 
+    old_parent_inode->mtime_sec  = now.tv_sec;
+    old_parent_inode->mtime_nsec = now.tv_nsec;
     old_parent_inode->ctime_sec  = now.tv_sec;
     old_parent_inode->ctime_nsec = now.tv_nsec;
     new_parent_inode->mtime_sec  = now.tv_sec;
     new_parent_inode->mtime_nsec = now.tv_nsec;
+    new_parent_inode->ctime_sec  = now.tv_sec;
+    new_parent_inode->ctime_nsec = now.tv_nsec;
 
     demofs_map_attrs(thread, &request->rename.r_fromdir_post_attr, old_parent_inode);
     demofs_map_attrs(thread, &request->rename.r_todir_post_attr, new_parent_inode);
@@ -3439,6 +3455,8 @@ demofs_link(
     inode->ctime_nsec        = now.tv_nsec;
     parent_inode->mtime_sec  = now.tv_sec;
     parent_inode->mtime_nsec = now.tv_nsec;
+    parent_inode->ctime_sec  = now.tv_sec;
+    parent_inode->ctime_nsec = now.tv_nsec;
 
     demofs_map_attrs(thread, &request->link.r_attr, inode);
     demofs_map_attrs(thread, &request->link.r_dir_post_attr, parent_inode);
