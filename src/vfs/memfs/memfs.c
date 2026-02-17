@@ -1291,6 +1291,7 @@ memfs_mkdir_at(
     parent_inode->nlink++;
 
     parent_inode->mtime = now;
+    parent_inode->ctime = now;
 
     memfs_map_attrs(shared, r_dir_post_attr, parent_inode, request->fh);
 
@@ -1403,6 +1404,7 @@ memfs_mknod_at(
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
     parent_inode->mtime = now;
+    parent_inode->ctime = now;
 
     memfs_map_attrs(shared, r_dir_post_attr, parent_inode, request->fh);
 
@@ -1475,6 +1477,7 @@ memfs_remove_at(
         parent_inode->nlink--;
     }
     parent_inode->mtime = now;
+    parent_inode->ctime = now;
 
     rb_tree_remove(&parent_inode->dir.dirents, &dirent->node);
 
@@ -1771,6 +1774,7 @@ memfs_open_at(
         rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
         parent_inode->mtime = now;
+        parent_inode->ctime = now;
     } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
@@ -2152,6 +2156,7 @@ memfs_write(
     }
 
     inode->mtime = now;
+    inode->ctime = now;
 
     memfs_map_attrs(shared, &request->write.r_post_attr, inode, request->fh);
 
@@ -2467,6 +2472,7 @@ memfs_symlink_at(
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
     parent_inode->mtime = now;
+    parent_inode->ctime = now;
 
     memfs_map_attrs(shared, &request->symlink_at.r_dir_post_attr, parent_inode, request->fh);
 
@@ -2717,8 +2723,10 @@ memfs_rename_at(
         new_parent_inode->nlink++;
     }
 
+    old_parent_inode->mtime = now;
     old_parent_inode->ctime = now;
     new_parent_inode->mtime = now;
+    new_parent_inode->ctime = now;
 
     memfs_map_attrs(shared, &request->rename_at.r_fromdir_post_attr, old_parent_inode, request->fh);
     memfs_map_attrs(shared, &request->rename_at.r_todir_post_attr, new_parent_inode, request->rename_at.new_fh);
@@ -2814,6 +2822,7 @@ memfs_link_at(
 
     inode->ctime        = now;
     parent_inode->mtime = now;
+    parent_inode->ctime = now;
 
     memfs_map_attrs(shared, &request->link_at.r_dir_post_attr, parent_inode, request->link_at.dir_fh);
     memfs_map_attrs(shared, &request->link_at.r_attr, inode, request->fh);
