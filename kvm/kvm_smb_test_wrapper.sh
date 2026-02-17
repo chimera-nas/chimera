@@ -137,7 +137,7 @@ generate_config
 
 # Raise system limits for high-parallelism testing
 ulimit -l unlimited
-sysctl -q -w fs.aio-max-nr=2097152 2>/dev/null || true
+echo 2097152 > /proc/sys/fs/aio-max-nr
 
 # Create network namespace
 ip netns add "${NETNS_NAME}"

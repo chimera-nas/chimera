@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -36,7 +36,7 @@ chimera_vfs_encode_fh_mount(
     int         fh_fragment_len,
     void       *out_fh)
 {
-    uint8_t       concat_buf[CHIMERA_VFS_FSID_SIZE + 32];
+    uint8_t       concat_buf[CHIMERA_VFS_FSID_SIZE + 48];
     XXH128_hash_t hash;
     uint8_t      *fh = out_fh;
 

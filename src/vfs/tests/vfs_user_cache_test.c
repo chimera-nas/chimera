@@ -178,7 +178,10 @@ test_ttl_expiration(void)
      * The expiry thread sleeps up to 60s, so we manually trigger
      * expiration by destroying and checking. Instead, we just verify
      * the expiration field is set correctly. */
+#ifndef __clang_analyzer__
+    /* Suppress: clang analyzer falsely thinks urcu read lock is held */
     sleep(2);
+#endif /* ifndef __clang_analyzer__ */
 
     /* Signal the expiry thread to wake up and do a sweep */
     pthread_mutex_lock(&cache->expiry_lock);
@@ -214,7 +217,10 @@ test_pinned_no_expire(void)
     chimera_vfs_user_cache_add(cache, "pinned_user", NULL, NULL, NULL,
                                3000, 3000, 0, NULL, 1);
 
+#ifndef __clang_analyzer__
+    /* Suppress: clang analyzer falsely thinks urcu read lock is held */
     sleep(2);
+#endif /* ifndef __clang_analyzer__ */
 
     /* Signal the expiry thread */
     pthread_mutex_lock(&cache->expiry_lock);
