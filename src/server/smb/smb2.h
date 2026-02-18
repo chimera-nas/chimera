@@ -836,6 +836,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FILE_COMPRESSION_INFO                  0x0C
 #define SMB2_FILE_NETWORK_OPEN_INFO                 0x22
 #define SMB2_FILE_ATTRIBUTE_TAG_INFO                0x23
+#define SMB2_FILE_DISPOSITION_INFO_EX               0x40
 
 /* SMB2 information types */
 #define SMB2_INFO_FILE                              0x01

@@ -90,9 +90,9 @@ chimera_server_config_init(void)
 
     config = calloc(1, sizeof(struct chimera_server_config));
 
-    config->core_threads       = 16;
+    config->core_threads       = 8;
     config->max_open_files     = 65535;
-    config->delegation_threads = 64;
+    config->delegation_threads = 8;
     config->nfs_rdma           = 0;
     config->external_portmap   = 0;
 

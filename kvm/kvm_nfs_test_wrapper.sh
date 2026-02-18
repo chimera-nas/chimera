@@ -33,6 +33,14 @@ BACKEND=$1; shift
 NFS_VERSION=$1; shift
 TEST_CMD_ARG="$*"
 
+# Use initrd if present alongside vmlinuz
+INITRD="$(dirname "$VMLINUZ")/initrd"
+if [ -f "$INITRD" ]; then
+    QEMU_INITRD="-initrd $INITRD"
+else
+    QEMU_INITRD=""
+fi
+
 NETNS_NAME="kvm_nfs_$$_$(date +%s%N)"
 TAP_NAME="tap_$$"
 LOG_FILE=$(mktemp /tmp/kvm_nfs_test_XXXXXX.log)
@@ -50,7 +58,8 @@ fi
 
 cleanup() {
     if [ -n "$TCPDUMP_PID" ]; then
-        kill "$TCPDUMP_PID" 2>/dev/null || true
+        # Use SIGINT so tcpdump flushes its capture buffer before exiting
+        kill -INT "$TCPDUMP_PID" 2>/dev/null || true
         wait "$TCPDUMP_PID" 2>/dev/null || true
     fi
     if [ -n "$CHIMERA_PID" ]; then
@@ -150,7 +159,7 @@ generate_config
 
 # Raise system limits for high-parallelism testing
 ulimit -l unlimited
-echo 2097152 > /proc/sys/fs/aio-max-nr
+echo 16777216 > /proc/sys/fs/aio-max-nr
 
 # Create network namespace
 ip netns add "${NETNS_NAME}"
@@ -163,7 +172,7 @@ ip netns exec "${NETNS_NAME}" ip link set "${TAP_NAME}" up
 
 # Optionally start tcpdump to capture traffic (set KVM_PCAP_FILE to enable)
 if [ -n "$PCAP_FILE" ]; then
-    ip netns exec "${NETNS_NAME}" tcpdump -i "${TAP_NAME}" -w "$PCAP_FILE" -s 0 &
+    ip netns exec "${NETNS_NAME}" tcpdump -U -i "${TAP_NAME}" -w "$PCAP_FILE" -s 0 &
     TCPDUMP_PID=$!
     sleep 0.5
 fi
@@ -203,6 +212,7 @@ TEST_CMD="mount -t nfs -o ${NFS_MOUNT_OPTS} 10.0.0.1:/share /mnt && ${TEST_CMD_A
 ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -enable-kvm -smp 4 -m 1G -cpu host \
     -kernel "$VMLINUZ" \
+    $QEMU_INITRD \
     $QEMU_MACHINE \
     -nodefaults \
     -drive file="$ROOTFS",if=virtio,format=qcow2,snapshot=on \
@@ -211,7 +221,7 @@ ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -serial stdio \
     -nographic \
     -no-reboot \
-    -append "root=/dev/vda rw console=${QEMU_CONSOLE} quiet panic=-1 test_cmd=\"${TEST_CMD}\" init=/bin/sh -- /init.sh" \
+    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 quiet panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh" \
     2>/dev/null | tee "$LOG_FILE"
 
 # Check if chimera is still alive after QEMU exits
