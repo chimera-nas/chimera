@@ -32,7 +32,7 @@ ip netns add "${NETNS_NAME}"
 ip netns exec "${NETNS_NAME}" ip link set lo up
 
 ulimit -l unlimited
-echo 2097152 > /proc/sys/fs/aio-max-nr
+echo 16777216 > /proc/sys/fs/aio-max-nr
 
 # Run the test command inside the namespace, restoring LD_PRELOAD only for
 # the test process (not for the ip binary itself, which ASAN would break)

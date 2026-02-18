@@ -60,7 +60,7 @@ foreach(image_spec ${KVM_IMAGES})
                             ${CHIMERA_BINARY} ${backend} ${nfsver}
                             "${CTHON_CMD_${category}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/cthon/${category}_${backend}_nfs${nfsver}
-                    PROPERTIES LABELS "kvm;${IMAGE_NAME}")
+                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
             endforeach()
         endforeach()
     endforeach()
@@ -74,7 +74,7 @@ foreach(image_spec ${KVM_IMAGES})
                             ${CHIMERA_BINARY} cairn ${nfsver}
                             "${CTHON_CMD_${category}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/cthon/${category}_cairn_nfs${nfsver}
-                    PROPERTIES LABELS "kvm;${IMAGE_NAME}")
+                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
             endforeach()
         endforeach()
     endif()
@@ -89,7 +89,7 @@ foreach(image_spec ${KVM_IMAGES})
                             ${CHIMERA_BINARY} ${backend} ${nfsver}
                             "${XFSTESTS_CMD_${prog}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/xfstests/${prog}_${backend}_nfs${nfsver}
-                    PROPERTIES LABELS "kvm;${IMAGE_NAME}")
+                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
             endforeach()
         endforeach()
     endforeach()
@@ -103,7 +103,7 @@ foreach(image_spec ${KVM_IMAGES})
                             ${CHIMERA_BINARY} cairn ${nfsver}
                             "${XFSTESTS_CMD_${prog}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/xfstests/${prog}_cairn_nfs${nfsver}
-                    PROPERTIES LABELS "kvm;${IMAGE_NAME}")
+                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
             endforeach()
         endforeach()
     endif()
@@ -117,7 +117,7 @@ foreach(image_spec ${KVM_IMAGES})
                         ${CHIMERA_BINARY} ${backend}
                         "${SMB_CTHON_CMD_${category}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_${backend}
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}")
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
         endforeach()
     endforeach()
 
@@ -129,7 +129,7 @@ foreach(image_spec ${KVM_IMAGES})
                         ${CHIMERA_BINARY} cairn
                         "${SMB_CTHON_CMD_${category}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_cairn
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}")
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
         endforeach()
     endif()
 
@@ -142,7 +142,7 @@ foreach(image_spec ${KVM_IMAGES})
                         ${CHIMERA_BINARY} ${backend}
                         "${XFSTESTS_CMD_${prog}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/xfstests/${prog}_${backend}
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}")
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
         endforeach()
     endforeach()
 
@@ -154,7 +154,7 @@ foreach(image_spec ${KVM_IMAGES})
                         ${CHIMERA_BINARY} cairn
                         "${XFSTESTS_CMD_${prog}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/xfstests/${prog}_cairn
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}")
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
         endforeach()
     endif()
 

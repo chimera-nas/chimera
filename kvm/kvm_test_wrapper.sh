@@ -49,7 +49,7 @@ trap cleanup EXIT
 
 # Raise system limits for high-parallelism testing
 ulimit -l unlimited
-echo 2097152 > /proc/sys/fs/aio-max-nr
+echo 16777216 > /proc/sys/fs/aio-max-nr
 
 # Create network namespace
 ip netns add "${NETNS_NAME}"
