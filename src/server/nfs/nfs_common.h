@@ -108,6 +108,7 @@ struct chimera_server_nfs_shared {
 
     struct chimera_nfs_export          *exports;
     pthread_mutex_t                     exports_lock;
+    int                                 num_exports;
     struct evpl_endpoint               *nfs_endpoint;
     struct evpl_endpoint               *mount_endpoint;
     struct evpl_endpoint               *portmap_endpoint;

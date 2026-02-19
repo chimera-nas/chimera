@@ -16,7 +16,7 @@ chimera_nfs4_putrootfh(
     struct PUTROOTFH4res *res = &resop->opputrootfh;
     uint32_t              fhlen;
 
-    chimera_vfs_get_root_fh(req->fh, &fhlen);
+    nfs4_root_get_fh(req->fh, &fhlen);
     req->fhlen = fhlen;
 
     res->status = NFS4_OK;
