@@ -280,6 +280,8 @@ nfs_server_destroy(void *data)
     while (shared->exports) {
         export = shared->exports;
         LL_DELETE(shared->exports, export);
+        shared->num_exports--;
+        chimera_nfs_abort_if(shared->num_exports < 0, "num_exports went negative");
         free(export);
     }
 
@@ -299,12 +301,12 @@ chimera_nfs_server_notify(
         case EVPL_RPC2_NOTIFY_CONNECTED:
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
             evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
-            chimera_nfs_info("Client connected from %s to %s", remote_addr, local_addr);
+            chimera_nfs_debug("Client connected from %s to %s", remote_addr, local_addr);
             break;
         case EVPL_RPC2_NOTIFY_DISCONNECTED:
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
             evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
-            chimera_nfs_info("Client disconnected from %s to %s", remote_addr, local_addr);
+            chimera_nfs_debug("Client disconnected from %s to %s", remote_addr, local_addr);
             break;
     } /* switch */
 } /* chimera_nfs_server_notify */
@@ -380,6 +382,7 @@ chimera_nfs_add_export(
 
     pthread_mutex_lock(&shared->exports_lock);
     LL_PREPEND(shared->exports, export);
+    shared->num_exports++;
     pthread_mutex_unlock(&shared->exports_lock);
 
 } /* chimera_nfs_add_export */
@@ -399,6 +402,8 @@ chimera_nfs_remove_export(
     {
         if (strcmp(export->name, name) == 0) {
             LL_DELETE(shared->exports, export);
+            shared->num_exports--;
+            chimera_nfs_abort_if(shared->num_exports < 0, "num_exports went negative");
             free(export);
             found = 1;
             break;
@@ -408,6 +413,120 @@ chimera_nfs_remove_export(
 
     return found ? 0 : -1;
 } /* chimera_nfs_remove_export */
+
+SYMBOL_EXPORT int
+chimera_nfs_export_count(void *nfs_shared)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+    int                               count;
+
+    pthread_mutex_lock(&shared->exports_lock);
+    count = shared->num_exports;
+    pthread_mutex_unlock(&shared->exports_lock);
+
+    return count;
+} /* chimera_nfs_export_counts */
+
+SYMBOL_EXPORT int
+chimera_nfs_find_export_path(
+    void       *nfs_shared,
+    const char *path,
+    uint32_t    path_len,
+    char      **out_full_path)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+    struct chimera_nfs_export        *export = NULL, *cur_export;
+    const char                       *suffix = NULL;
+    size_t                            export_name_len, suffix_offset, pos;
+    char                             *full_path, *export_name, *export_path;
+    size_t                            fullpath_len, suffix_len, export_path_len;
+    int                               need_slash, missing_leading_slash;
+
+    // check if path is missing leading slash
+    // (NFS clients may or may not include leading slash in lookup)
+    if (path_len > 0 && path[0] != '/') {
+        missing_leading_slash = 1;
+    } else {
+        missing_leading_slash = 0;
+    }
+    pthread_mutex_lock(&shared->exports_lock);
+    LL_FOREACH(shared->exports, cur_export)
+    {
+        export_name     = cur_export->name;
+        export_name_len = strlen(export_name);
+        if (missing_leading_slash) {
+            // Ignore leading slash in export name for matching if path is missing leading slash
+            export_name_len--;
+            export_name += 1;
+        }
+        // Only compare if the export name fits within the export_path buffer
+        if (path_len < export_name_len) {
+            // path is shorter than export name, cannot match
+            continue;
+        }
+        if (strncasecmp(export_name, path, export_name_len) == 0) {
+            export = cur_export;
+            // Check if this is a valid prefix match (at path boundary)
+            if (path_len == export_name_len) {
+                // Exact match, no suffix
+                suffix = NULL;
+                break;
+            }
+            if (path[export_name_len] == '/') {
+                // Valid match - determine suffix after export name
+                suffix_offset = export_name_len;
+                if (path[suffix_offset] == '/') {
+                    suffix_offset++;
+                }
+                if (suffix_offset >= path_len) {
+                    suffix = NULL;
+                } else {
+                    suffix = path + suffix_offset;
+                }
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
+    if (!export) {
+        *out_full_path = NULL;
+        chimera_nfs_info("No export found matching path '%.*s'", path_len, path);
+        return 1; // Export not found
+    }
+
+    // Construct full path: export->path + suffix (suffix may not be null-terminated)
+    export_path     = export->path;
+    export_path_len = strlen(export->path);
+    while (export_path_len > 0 && *export_path == '/') {
+        export_path++;
+        export_path_len--;
+    }
+    if (suffix) {
+        suffix_len   = path_len - (suffix - (const char *) path);
+        need_slash   = (suffix_len > 0 && export_path[export_path_len - 1] != '/');
+        fullpath_len = export_path_len + need_slash + suffix_len;
+        full_path    = malloc(fullpath_len + 1);
+        chimera_nfs_abort_if(full_path == NULL, "Failed to allocate path");
+        memcpy(full_path, export_path, export_path_len);
+        pos = export_path_len;
+        // Add slash if needed
+        if (need_slash) {
+            full_path[pos++] = '/';
+        }
+        // Copy suffix (may not be null-terminated)
+        if (suffix_len > 0) {
+            memcpy(full_path + pos, suffix, suffix_len);
+            pos += suffix_len;
+        }
+        full_path[pos] = '\0';
+    } else {
+        full_path = strdup(export_path);
+        chimera_nfs_abort_if(full_path == NULL, "Failed to allocate path");
+    }
+    *out_full_path = full_path;
+    return 0; // Success
+} /* chimera_nfs_get_export_path */
+
 
 SYMBOL_EXPORT const struct chimera_nfs_export *
 chimera_nfs_get_export(

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <utlist.h>
 
+#include "nfs.h"
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "nfs_mount.h"
@@ -80,61 +81,27 @@ chimera_nfs_mount_mnt(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
-    struct chimera_nfs_export        *export = NULL, *cur_export;
-    char                             *full_path;
-    const char                       *suffix = NULL;
-    size_t                            export_name_len, path_len;
+    int                               rc;
+    char                             *full_path = NULL;
     uint8_t                           root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                          root_fh_len;
-
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
 
     req = nfs_request_alloc(thread, conn, encoding);
 
     chimera_nfs_map_cred(&req->cred, cred);
 
-    // Map the nfs export to a path lookup
-    pthread_mutex_lock(&shared->exports_lock);
-    LL_FOREACH(shared->exports, cur_export)
-    {
-        export_name_len = strlen(cur_export->name);
-        chimera_nfs_info("checking export '%s' against '%s'", cur_export->name, args->path.str);
-        if (strncasecmp(cur_export->name, args->path.str, export_name_len) == 0) {
-            // Check if this is a valid prefix match (at path boundary)
-            if (args->path.str[export_name_len] == '\0' ||
-                args->path.str[export_name_len] == '/') {
-                export = cur_export;
-                suffix = args->path.str + export_name_len;
-                // Skip leading slash and check if empty
-                if (*suffix == '/') {
-                    suffix++;
-                }
-                if (*suffix == '\0') {
-                    suffix = NULL;
-                }
-                break;
-            }
-        }
-    }
-    pthread_mutex_unlock(&shared->exports_lock);
-    if (!export) {
+    rc = chimera_nfs_find_export_path(shared, args->path.str, args->path.len, &full_path);
+    if (rc) {
         // Export not found, return error
         chimera_nfs_debug("NFS mount request for unknown export '%s'", args->path.str);
+        if (full_path) {
+            free(full_path);
+        }
         chimera_nfs_mount_lookup_complete(CHIMERA_VFS_ENOENT, NULL, req);
         return;
     }
 
-    // Construct full path: export->path + suffix
-    if (suffix && *suffix != '\0') {
-        path_len  = strlen(export->path) + strlen(suffix) + 1;
-        full_path = malloc(path_len + 1);
-        chimera_nfs_abort_if(full_path == NULL, "Failed to allocate path");
-        snprintf(full_path, path_len + 1, "%s/%s", export->path, suffix);
-    } else {
-        full_path = strdup(export->path);
-        chimera_nfs_abort_if(full_path == NULL, "Failed to allocate path");
-    }
-
+    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
     chimera_vfs_lookup(thread->vfs_thread,
                        &req->cred,
                        root_fh,
@@ -145,8 +112,9 @@ chimera_nfs_mount_mnt(
                        CHIMERA_VFS_LOOKUP_FOLLOW,
                        chimera_nfs_mount_lookup_complete,
                        req);
-
-    free(full_path);
+    if (full_path) {
+        free(full_path);
+    }
 
 } /* chimera_nfs_mount_mnt */
 

@@ -113,7 +113,7 @@ chimera_nfs4_readdir_complete(
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
     chimera_nfs4_compound_complete(req, status);
-} /* chimera_nfs4_readdir_complete */ /* chimera_nfs4_readdir_complete */
+} /* chimera_nfs4_readdir_complete */
 
 static void
 chimera_nfs4_readdir_open_callback(
@@ -159,6 +159,13 @@ chimera_nfs4_readdir(
 {
     struct READDIR4res             *res = &req->res_compound.resarray[req->index].opreaddir;
     struct nfs_nfs4_readdir_cursor *cursor;
+
+
+    if (fh_is_nfs4_root(req->fh, req->fhlen)) {
+        nfs4_root_readdir(thread, req);
+        return;
+    }
+
 
     cursor = &req->readdir4_cursor;
 

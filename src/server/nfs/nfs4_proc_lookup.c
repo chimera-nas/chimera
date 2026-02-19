@@ -83,6 +83,12 @@ chimera_nfs4_lookup(
         return;
     }
 
+    if (fh_is_nfs4_root(req->fh, req->fhlen)) {
+        nfs4_root_lookup(thread, req);
+        return;
+    }
+
+    // For non-root lookups, we can just open the directory and let the VFS handle the lookup
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                         req->fh,
                         req->fhlen,

@@ -30,7 +30,9 @@ chimera_nfs4_getattr_complete(
 
     if (rc) {
         res->status = NFS4ERR_RESOURCE;
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        if (req->handle) {
+            chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        }
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
@@ -41,7 +43,9 @@ chimera_nfs4_getattr_complete(
 
     if (rc) {
         res->status = NFS4ERR_RESOURCE;
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        if (req->handle) {
+            chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        }
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
@@ -55,7 +59,9 @@ chimera_nfs4_getattr_complete(
                                 res->resok4.obj_attributes.attr_vals.data,
                                 &res->resok4.obj_attributes.attr_vals.len);
 
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    if (req->handle) {
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    }
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_getattr_complete */
@@ -92,6 +98,19 @@ chimera_nfs4_getattr(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
+    struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
+
+    if (fh_is_nfs4_root(req->fh, req->fhlen)) {
+        struct chimera_vfs_attrs attr;
+        uint64_t                 attr_mask;
+        attr_mask = chimera_nfs4_attr2mask(args->attr_request,
+                                           args->num_attr_request);
+        nfs4_root_getattr(thread, &attr, attr_mask);
+        req->handle = NULL; /* No handle since root attributes are synthetic */
+        chimera_nfs4_getattr_complete(CHIMERA_VFS_OK, &attr, req);
+        return;
+    }
+
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                         req->fh,
                         req->fhlen,
