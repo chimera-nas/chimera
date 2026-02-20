@@ -20,7 +20,7 @@ chimera_smb_query_info_getattr_callback(
         case SMB2_INFO_FILE:
             /* Marshal attributes based on the requested info class */
             switch (request->query_info.info_class) {
-                case SMB2_INFO_FILE:
+                case SMB2_FILE_BASIC_INFO:
                     chimera_smb_marshal_basic_info(attr, &request->query_info.r_attrs);
                     break;
                 case SMB2_FILE_STANDARD_INFO:
@@ -47,7 +47,7 @@ chimera_smb_query_info_getattr_callback(
                     break;
                 default:
                     chimera_smb_abort("Unsupported info class %d",
-                                      request->query_info.info_type);
+                                      request->query_info.info_class);
                     break;
             } /* switch */
             break;
