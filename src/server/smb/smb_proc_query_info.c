@@ -196,7 +196,7 @@ chimera_smb_query_info_reply(
         case SMB2_INFO_FILE:
             /* Append the attributes based on the info class */
             switch (request->query_info.info_class) {
-                case SMB2_INFO_FILE:
+                case SMB2_FILE_BASIC_INFO:
                     chimera_smb_append_basic_info(reply_cursor, &request->query_info.r_attrs);
                     break;
                 case SMB2_FILE_STANDARD_INFO:
@@ -224,6 +224,10 @@ chimera_smb_query_info_reply(
                 case SMB2_FILE_FULL_EA_INFO:
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+                    break;
+                default:
+                    chimera_smb_abort("%s: unsupported file information class: %d",
+                                      __FUNCTION__, request->query_info.info_class);
                     break;
             } /* switch */
             break;
@@ -282,6 +286,10 @@ chimera_smb_query_info_reply(
                     evpl_iovec_cursor_append_uint32(reply_cursor, request->query_info.r_fs_attrs.
                                                     smb_sectors_per_allocation_unit);
                     evpl_iovec_cursor_append_uint32(reply_cursor, request->query_info.r_fs_attrs.smb_bytes_per_sector);
+                    break;
+                default:
+                    chimera_smb_abort("%s: unsupported filesystem information class: %d",
+                                      __FUNCTION__, request->query_info.info_class);
                     break;
             } /* switch */
             break;
