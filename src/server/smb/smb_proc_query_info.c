@@ -227,7 +227,7 @@ chimera_smb_query_info_reply(
                     break;
                 default:
                     chimera_smb_abort("%s: unsupported file information class: %d",
-                                    __FUNCTION__, request->query_info.info_class);
+                                      __FUNCTION__, request->query_info.info_class);
                     break;
             } /* switch */
             break;
@@ -289,7 +289,7 @@ chimera_smb_query_info_reply(
                     break;
                 default:
                     chimera_smb_abort("%s: unsupported filesystem information class: %d",
-                                            __FUNCTION__, request->query_info.info_class);
+                                      __FUNCTION__, request->query_info.info_class);
                     break;
             } /* switch */
             break;
