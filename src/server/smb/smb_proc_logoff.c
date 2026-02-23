@@ -18,6 +18,8 @@ chimera_smb_logoff(struct chimera_smb_request *request)
     chimera_smb_abort_if(!session_handle,
                          "Received SMB2 LOGOFF request for unknown session, should have been caught by session setup");
 
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+
     chimera_smb_session_release(thread, thread->shared, session_handle->session);
 
     HASH_DELETE(hh, conn->session_handles, session_handle);
@@ -29,8 +31,6 @@ chimera_smb_logoff(struct chimera_smb_request *request)
     chimera_smb_session_handle_free(thread, session_handle);
 
     request->session_handle = NULL;
-
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 
 } /* chimera_smb_tree_disconnect */
 
