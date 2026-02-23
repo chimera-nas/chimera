@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -29,15 +29,16 @@ chimera_rand64(void)
     return v;
 } /* chimera_rand64 */
 
-#define NT_EPOCH_DELTA 11644473600ULL
+#define HUNDREDS_OF_NS_PER_SEC 10000000ULL
+#define NT_EPOCH_DELTA_SECS    11644473600ULL
 
 static inline uint64_t
 chimera_nt_time(const struct timespec *ts)
 {
     uint64_t nt_now = ts->tv_sec;
 
-    nt_now += NT_EPOCH_DELTA;
-    nt_now *= 10000000ULL;
+    nt_now += NT_EPOCH_DELTA_SECS;
+    nt_now *= HUNDREDS_OF_NS_PER_SEC;
     nt_now += ts->tv_nsec / 100ULL;
 
     return nt_now;
@@ -48,8 +49,9 @@ chimera_nt_to_epoch(
     uint64_t         nt_now,
     struct timespec *ts)
 {
-    ts->tv_sec  = (nt_now - NT_EPOCH_DELTA) / 10000000ULL;
-    ts->tv_nsec = (nt_now % 10000000ULL) * 100ULL;
+    ts->tv_sec  = (nt_now / HUNDREDS_OF_NS_PER_SEC) - NT_EPOCH_DELTA_SECS;
+    ts->tv_nsec = (nt_now % HUNDREDS_OF_NS_PER_SEC) * 100ULL;
+
 } /* chimera_nt_to_epoch */
 
 static inline uint64_t
