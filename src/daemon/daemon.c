@@ -297,6 +297,12 @@ main(
         chimera_server_config_set_delegation_threads(server_config, int_value);
     }
 
+    json_value = json_object_get(server_params, "watchdog_timeout");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_watchdog_timeout(server_config, int_value);
+    }
+
     json_value = json_object_get(server_params, "external_portmap");
     if (json_is_true(json_value)) {
         chimera_server_info("Enabling external portmap/rpcbind support");

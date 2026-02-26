@@ -1147,4 +1147,5 @@ chimera_vfs_iterate_builtin_users(
     void                       *data);
 void
 chimera_vfs_watchdog(
-    struct chimera_vfs_thread *thread);
+    struct chimera_vfs_thread *thread,
+    uint64_t                   timeout_ns);

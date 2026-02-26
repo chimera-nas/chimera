@@ -204,6 +204,15 @@ uint32_t
 chimera_server_config_get_anongid(
     const struct chimera_server_config *config);
 
+void
+chimera_server_config_set_watchdog_timeout(
+    struct chimera_server_config *config,
+    int                           watchdog_timeout_secs);
+
+int
+chimera_server_config_get_watchdog_timeout(
+    const struct chimera_server_config *config);
+
 static void
 chimera_server_thread_wake(
     struct evpl       *evpl,
