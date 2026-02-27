@@ -37,6 +37,7 @@ struct chimera_server_config {
     int                                   nfs_rdma_port;
     int                                   nfs_tcp_rdma_port;
     int                                   external_portmap;
+    int                                   soft_fail_bad_req;
     rlim_t                                max_open_files;
     int                                   core_threads;
     int                                   delegation_threads;
@@ -95,6 +96,7 @@ chimera_server_config_init(void)
     config->delegation_threads = 8;
     config->nfs_rdma           = 0;
     config->external_portmap   = 0;
+    config->soft_fail_bad_req  = 0;
 
     config->smb_num_dialects = 2;
     config->smb_dialects[0]  = SMB2_DIALECT_2_1;
@@ -427,6 +429,20 @@ chimera_server_config_get_anongid(const struct chimera_server_config *config)
 {
     return config->anongid;
 } /* chimera_server_config_get_anongid */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_soft_fail_bad_req(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->soft_fail_bad_req = enable;
+} /* chimera_server_config_set_soft_fail_bad_req */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_soft_fail_bad_req(const struct chimera_server_config *config)
+{
+    return config->soft_fail_bad_req;
+} /* chimera_server_config_get_soft_fail_bad_req */
 
 static void
 chimera_server_thread_wake(

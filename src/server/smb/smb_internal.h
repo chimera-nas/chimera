@@ -88,6 +88,7 @@ struct chimera_smb_config {
     int                            rdma_port;
     int                            num_dialects;
     int                            num_nic_info;
+    int                            soft_fail_bad_req;
     uint32_t                       capabilities;
     uint32_t                       dialects[16];
     struct chimera_smb_nic_info    nic_info[16];
