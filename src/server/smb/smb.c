@@ -133,6 +133,8 @@ chimera_smb_server_init(
                          shared->config.auth.kerberos_keytab[0] ? shared->config.auth.kerberos_keytab : "(default)");
     }
 
+    shared->config.soft_fail_bad_req = chimera_server_config_get_soft_fail_bad_req(config);
+
     shared->vfs     = vfs;
     shared->metrics = metrics;
 
@@ -851,7 +853,11 @@ chimera_smb_server_handle_smb2(
             } else {
                 chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
             }
-            evpl_finish(evpl, conn->bind);
+
+            if (thread->shared->config.soft_fail_bad_req == 0) {
+                evpl_finish(evpl, conn->bind);
+            }
+
             return;
         }
 

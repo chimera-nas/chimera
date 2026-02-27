@@ -78,6 +78,15 @@ chimera_server_config_set_external_portmap(
     struct chimera_server_config *config,
     int                           enable);
 
+uint32_t
+chimera_server_config_get_soft_fail_bad_req(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_soft_fail_bad_req(
+    struct chimera_server_config *config,
+    int                           enable);
+
 void
 chimera_server_config_set_nfs_rdma(
     struct chimera_server_config *config,

@@ -342,6 +342,11 @@ main(
         }
     }
 
+    json_value = json_object_get(server_params, "soft_fail_bad_req");
+    if (json_is_true(json_value)) {
+        chimera_server_config_set_soft_fail_bad_req(server_config, 1);
+    }
+
     // Parse SMB auth configuration
     json_t *smb_auth = json_object_get(server_params, "smb_auth");
     if (smb_auth && json_is_object(smb_auth)) {
