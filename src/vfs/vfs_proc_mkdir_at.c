@@ -141,7 +141,6 @@ chimera_vfs_mkdir_at(
     request->mkdir_at.name_len                    = namelen;
     request->mkdir_at.name_hash                   = name_hash;
     request->mkdir_at.set_attr                    = attr;
-    request->mkdir_at.set_attr->va_set_mask       = 0;
     request->mkdir_at.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->mkdir_at.r_attr.va_set_mask          = 0;
     request->mkdir_at.r_dir_pre_attr.va_req_mask  = pre_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
