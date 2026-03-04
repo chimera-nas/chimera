@@ -544,15 +544,6 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, attr->va_atime.tv_nsec);
         }
 
-        if ((req_mask[1] & (1 << (FATTR4_TIME_MODIFY - 32))) &&
-            (attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
-            rsp_mask[1]  |= (1 << (FATTR4_TIME_MODIFY - 32));
-            *num_rsp_mask = 2;
-
-            chimera_nfs4_attr_append_uint64(&attrs, attr->va_mtime.tv_sec);
-            chimera_nfs4_attr_append_uint32(&attrs, attr->va_mtime.tv_nsec);
-        }
-
         if ((req_mask[1] & (1 << (FATTR4_TIME_METADATA - 32))) &&
             (attr->va_set_mask & CHIMERA_VFS_ATTR_CTIME)) {
             rsp_mask[1]  |= (1 << (FATTR4_TIME_METADATA - 32));
@@ -560,6 +551,15 @@ chimera_nfs4_marshall_attrs(
 
             chimera_nfs4_attr_append_uint64(&attrs, attr->va_ctime.tv_sec);
             chimera_nfs4_attr_append_uint32(&attrs, attr->va_ctime.tv_nsec);
+        }
+
+        if ((req_mask[1] & (1 << (FATTR4_TIME_MODIFY - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+            rsp_mask[1]  |= (1 << (FATTR4_TIME_MODIFY - 32));
+            *num_rsp_mask = 2;
+
+            chimera_nfs4_attr_append_uint64(&attrs, attr->va_mtime.tv_sec);
+            chimera_nfs4_attr_append_uint32(&attrs, attr->va_mtime.tv_nsec);
         }
     }
 
