@@ -1305,8 +1305,8 @@ cairn_mkdir_at(
     inode.parent_inum = parent_inode->inum; /* Set parent for ".." lookup */
     inode.size        = 4096;
     inode.space_used  = 4096;
-    inode.uid         = 0;
-    inode.gid         = 0;
+    inode.uid         = request->cred->uid;
+    inode.gid         = request->cred->gid;
     inode.nlink       = 2;
     inode.rdev        = 0;
     inode.mode        = S_IFDIR | 0755;
@@ -1407,8 +1407,8 @@ cairn_mknod_at(
     inode.parent_inum = parent_inode->inum;
     inode.size        = 0;
     inode.space_used  = 0;
-    inode.uid         = 0;
-    inode.gid         = 0;
+    inode.uid         = request->cred->uid;
+    inode.gid         = request->cred->gid;
     inode.nlink       = 1;
     inode.rdev        = 0;
     inode.atime       = now;
@@ -1865,8 +1865,8 @@ cairn_open_at(
         cairn_alloc_inum(thread, &new_inode);
         new_inode.size       = 0;
         new_inode.space_used = 0;
-        new_inode.uid        = 0;
-        new_inode.gid        = 0;
+        new_inode.uid        = request->cred->uid;
+        new_inode.gid        = request->cred->gid;
         new_inode.nlink      = 1;
         new_inode.rdev       = 0;
         new_inode.mode       = S_IFREG |  0644;
@@ -2657,8 +2657,8 @@ cairn_symlink_at(
     cairn_alloc_inum(thread, &new_inode);
     new_inode.size       = request->symlink_at.targetlen;
     new_inode.space_used = request->symlink_at.targetlen;
-    new_inode.uid        = 0;
-    new_inode.gid        = 0;
+    new_inode.uid        = request->cred->uid;
+    new_inode.gid        = request->cred->gid;
     new_inode.nlink      = 1;
     new_inode.rdev       = 0;
     new_inode.mode       = S_IFLNK | 0755;

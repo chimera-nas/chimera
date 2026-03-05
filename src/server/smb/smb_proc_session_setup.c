@@ -253,7 +253,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         }
 
         // Set session credentials
-        chimera_vfs_cred_init_unix(&session->cred, uid, gid, ngids, gids);
+        chimera_vfs_cred_init_attr(&session->cred, uid, gid, ngids, gids);
 
         if (!(session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
             memcpy(session->signing_key, session_handle->signing_key, sizeof(session_handle->signing_key));

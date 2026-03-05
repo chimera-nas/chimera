@@ -9,17 +9,17 @@ macro(add_client_testprog name)
         TEST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/${name}.c")
 endmacro()
 
-macro(add_client_test testname prog backend)
-    add_test(NAME chimera/client/${testname} COMMAND ${CMAKE_CURRENT_BINARY_DIR}/${prog} -b ${backend})
+macro(add_client_test testname prog backend user)
+    add_test(NAME chimera/client/${testname} COMMAND ${CMAKE_CURRENT_BINARY_DIR}/${prog} -b ${backend} -U ${user})
     get_target_property(test_file ${prog} TEST_FILE)
-    set_tests_properties(chimera/client/${testname} PROPERTIES 
+    set_tests_properties(chimera/client/${testname} PROPERTIES
         ENVIRONMENT "TEST_FILE=${test_file}")
 endmacro()
 
-macro(add_client_nfs_test testname prog backend)
-    add_test(NAME chimera/client/${testname} COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh ${CMAKE_CURRENT_BINARY_DIR}/${prog} -v 3 -b ${backend})
+macro(add_client_nfs_test testname prog backend user)
+    add_test(NAME chimera/client/${testname} COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh ${CMAKE_CURRENT_BINARY_DIR}/${prog} -v 3 -b ${backend} -U ${user})
     get_target_property(test_file ${prog} TEST_FILE)
-    set_tests_properties(chimera/client/${testname} PROPERTIES 
+    set_tests_properties(chimera/client/${testname} PROPERTIES
         ENVIRONMENT "TEST_FILE=${test_file}")
 endmacro()
 
@@ -43,18 +43,20 @@ foreach(prog ${CLIENT_TEST_PROGRAMS})
     add_client_testprog(${prog})
 endforeach()
 
-# Helper macro to generate tests for a backend
+# Helper macro to generate tests for a backend and all test users
 macro(_generate_tests_for_backend backend)
-    # Generate direct backend tests
-    foreach(prog ${CLIENT_TEST_PROGRAMS})
-        string(REGEX REPLACE "^test_" "" test_name ${prog})
-        add_client_test(${test_name}_${backend} ${prog} ${backend})
-    endforeach()
+    foreach(user root myuser)
+        # Generate direct backend tests
+        foreach(prog ${CLIENT_TEST_PROGRAMS})
+            string(REGEX REPLACE "^test_" "" test_name ${prog})
+            add_client_test(${test_name}_${backend}_${user} ${prog} ${backend} ${user})
+        endforeach()
 
-    # Generate NFS3 tests
-    foreach(prog ${CLIENT_TEST_PROGRAMS})
-        string(REGEX REPLACE "^test_" "" test_name ${prog})
-        add_client_nfs_test(${test_name}_nfs3_${backend} ${prog} ${backend})
+        # Generate NFS3 tests
+        foreach(prog ${CLIENT_TEST_PROGRAMS})
+            string(REGEX REPLACE "^test_" "" test_name ${prog})
+            add_client_nfs_test(${test_name}_nfs3_${backend}_${user} ${prog} ${backend} ${user})
+        endforeach()
     endforeach()
 endmacro()
 

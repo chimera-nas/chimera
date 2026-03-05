@@ -166,7 +166,7 @@ chimera_nfs4_create_open_callback(
         chimera_nfs4_compound_complete(req,
                                        chimera_nfs4_errno_to_nfsstat4(error_code));
     }
-} /* chimera_nfs3_mkdir_open_callback */
+} /* chimera_nfs4_create_open_callback */
 
 
 void

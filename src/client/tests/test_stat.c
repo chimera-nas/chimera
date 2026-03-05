@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -31,6 +31,23 @@ struct open_ctx {
     enum chimera_vfs_error status;
     struct chimera_vfs_open_handle *handle;
 };
+
+struct mkdir_ctx {
+    int done;
+    enum chimera_vfs_error status;
+};
+
+static void
+mkdir_complete(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data)
+{
+    struct mkdir_ctx *ctx = private_data;
+
+    ctx->status = status;
+    ctx->done   = 1;
+} /* mkdir_complete */
 
 static void
 open_complete(
@@ -84,6 +101,7 @@ main(
     struct mount_ctx mount_ctx = { 0 };
     struct stat_ctx  stat_ctx  = { 0 };
     struct open_ctx  open_ctx  = { 0 };
+    struct mkdir_ctx mkdir_ctx = { 0 };
 
     client_test_init(&env, argv, argc);
 
@@ -98,6 +116,42 @@ main(
         client_test_fail(&env);
     }
 
+    /* Create directory and verify ownership matches credential */
+    chimera_mkdir(env.client_thread, "/test/testdir", 13, mkdir_complete, &mkdir_ctx);
+
+    while (!mkdir_ctx.done) {
+        evpl_continue(env.evpl);
+    }
+
+    if (mkdir_ctx.status != 0) {
+        fprintf(stderr, "Failed to mkdir /test/testdir: %d\n", mkdir_ctx.status);
+        client_test_fail(&env);
+    }
+
+    chimera_stat(env.client_thread, "/test/testdir", 13, stat_callback, &stat_ctx);
+
+    while (!stat_ctx.done) {
+        evpl_continue(env.evpl);
+    }
+
+    if (stat_ctx.status != 0) {
+        fprintf(stderr, "Failed to stat /test/testdir: %d\n", stat_ctx.status);
+        client_test_fail(&env);
+    }
+
+    if (stat_ctx.st.st_uid != env.cred.uid || stat_ctx.st.st_gid != env.cred.gid) {
+        fprintf(stderr, "/test/testdir: expected uid=%u gid=%u, got uid=%lu gid=%lu\n",
+                env.cred.uid, env.cred.gid,
+                (unsigned long) stat_ctx.st.st_uid,
+                (unsigned long) stat_ctx.st.st_gid);
+        client_test_fail(&env);
+    }
+
+    fprintf(stderr, "/test/testdir: uid=%lu gid=%lu (ok)\n",
+            (unsigned long) stat_ctx.st.st_uid,
+            (unsigned long) stat_ctx.st.st_gid);
+
+    /* Create file and verify ownership matches credential */
     memset(&open_ctx, 0, sizeof(open_ctx));
 
     chimera_open(env.client_thread, "/test/testfile", 14, CHIMERA_VFS_OPEN_CREATE,
@@ -127,14 +181,17 @@ main(
         client_test_fail(&env);
     }
 
-    fprintf(stderr, "Stat successful:\n");
-    fprintf(stderr, "  st_dev: %lu\n", (unsigned long) stat_ctx.st.st_dev);
-    fprintf(stderr, "  st_ino: %lu\n", (unsigned long) stat_ctx.st.st_ino);
-    fprintf(stderr, "  st_mode: %lo\n", (unsigned long) stat_ctx.st.st_mode);
-    fprintf(stderr, "  st_nlink: %lu\n", (unsigned long) stat_ctx.st.st_nlink);
-    fprintf(stderr, "  st_uid: %lu\n", (unsigned long) stat_ctx.st.st_uid);
-    fprintf(stderr, "  st_gid: %lu\n", (unsigned long) stat_ctx.st.st_gid);
-    fprintf(stderr, "  st_size: %lu\n", (unsigned long) stat_ctx.st.st_size);
+    if (stat_ctx.st.st_uid != env.cred.uid || stat_ctx.st.st_gid != env.cred.gid) {
+        fprintf(stderr, "/test/testfile: expected uid=%u gid=%u, got uid=%lu gid=%lu\n",
+                env.cred.uid, env.cred.gid,
+                (unsigned long) stat_ctx.st.st_uid,
+                (unsigned long) stat_ctx.st.st_gid);
+        client_test_fail(&env);
+    }
+
+    fprintf(stderr, "/test/testfile: uid=%lu gid=%lu (ok)\n",
+            (unsigned long) stat_ctx.st.st_uid,
+            (unsigned long) stat_ctx.st.st_gid);
 
     if (stat_ctx.st.st_ino == 0) {
         fprintf(stderr, "Warning: st_ino is 0\n");
