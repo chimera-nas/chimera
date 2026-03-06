@@ -99,7 +99,7 @@ client_test_init(
              "/build/test/session_%d_%lu_%lu",
              getpid(), tv.tv_sec, tv.tv_nsec);
 
-    fprintf(stderr, "Creeeeeating session directory %s\n", env->session_dir);
+    fprintf(stderr, "Creating session directory %s\n", env->session_dir);
 
     (void) mkdir("/build/test", 0755);
     (void) mkdir(env->session_dir, 0755);
