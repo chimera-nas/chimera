@@ -4,7 +4,10 @@
 
 #pragma once
 
+#include <stdio.h>
+#include <string.h>
 #include <jansson.h>
+#include "vfs/vfs_cred.h"
 
 /* Note: include "server/server.h" before including this header */
 
@@ -20,6 +23,43 @@
 
 #define CHIMERA_TEST_USER_SMBPASSWD        "secret"
 #define CHIMERA_TEST_USER_MYUSER_SMBPASSWD "mypassword"
+
+// Resolve a user spec ("root", "johndoe", "myuser", or "uid:gid") to a VFS
+// credential.  Returns 1 on success, 0 if the spec is unrecognized.
+static inline int
+chimera_test_parse_user(
+    const char              *user_spec,
+    struct chimera_vfs_cred *cred)
+{
+    unsigned int uid, gid;
+
+    if (strcmp(user_spec, "root") == 0) {
+        chimera_vfs_cred_init_unix(cred,
+                                   CHIMERA_TEST_USER_ROOT_UID,
+                                   CHIMERA_TEST_USER_ROOT_GID,
+                                   0, NULL);
+        return 1;
+    }
+    if (strcmp(user_spec, "johndoe") == 0) {
+        chimera_vfs_cred_init_unix(cred,
+                                   CHIMERA_TEST_USER_JOHNDOE_UID,
+                                   CHIMERA_TEST_USER_JOHNDOE_GID,
+                                   0, NULL);
+        return 1;
+    }
+    if (strcmp(user_spec, "myuser") == 0) {
+        chimera_vfs_cred_init_unix(cred,
+                                   CHIMERA_TEST_USER_MYUSER_UID,
+                                   CHIMERA_TEST_USER_MYUSER_GID,
+                                   0, NULL);
+        return 1;
+    }
+    if (sscanf(user_spec, "%u:%u", &uid, &gid) == 2) {
+        chimera_vfs_cred_init_unix(cred, uid, gid, 0, NULL);
+        return 1;
+    }
+    return 0;
+} // chimera_test_parse_user
 
 static inline void
 chimera_test_add_server_users(struct chimera_server *server)

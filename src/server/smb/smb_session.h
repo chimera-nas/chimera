@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -118,7 +118,7 @@ chimera_smb_session_create()
     /* Initialize credentials to root for now.
      * TODO: Map authenticated SMB user to appropriate UID/GID
      */
-    chimera_vfs_cred_init_unix(&session->cred, 0, 0, 0, NULL);
+    chimera_vfs_cred_init_attr(&session->cred, 0, 0, 0, NULL);
 
     return session;
 } /* chimera_smb_session_create */

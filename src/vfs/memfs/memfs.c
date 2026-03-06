@@ -1216,8 +1216,8 @@ memfs_mkdir_at(
 
     inode->size       = 4096;
     inode->space_used = 4096;
-    inode->uid        = 0;
-    inode->gid        = 0;
+    inode->uid        = request->cred->uid;
+    inode->gid        = request->cred->gid;
     inode->nlink      = 2;
     inode->mode       = S_IFDIR | 0755;
     inode->atime      = now;
@@ -1325,8 +1325,8 @@ memfs_mknod_at(
 
     inode->size       = 0;
     inode->space_used = 0;
-    inode->uid        = 0;
-    inode->gid        = 0;
+    inode->uid        = request->cred->uid;
+    inode->gid        = request->cred->gid;
     inode->nlink      = 1;
     inode->rdev       = 0;
     inode->atime      = now;
@@ -1751,8 +1751,8 @@ memfs_open_at(
 
         inode->size            = 0;
         inode->space_used      = 0;
-        inode->uid             = 0;
-        inode->gid             = 0;
+        inode->uid             = request->cred->uid;
+        inode->gid             = request->cred->gid;
         inode->nlink           = 1;
         inode->mode            = S_IFREG |  0644;
         inode->atime           = now;
@@ -1833,8 +1833,8 @@ memfs_create_unlinked(
 
     inode->size            = 0;
     inode->space_used      = 0;
-    inode->uid             = 0;
-    inode->gid             = 0;
+    inode->uid             = request->cred->uid;
+    inode->gid             = request->cred->gid;
     inode->nlink           = 0;
     inode->mode            = S_IFREG |  0644;
     inode->atime           = now;
@@ -2412,8 +2412,8 @@ memfs_symlink_at(
 
     inode->size       = request->symlink_at.targetlen;
     inode->space_used = request->symlink_at.targetlen;
-    inode->uid        = 0;
-    inode->gid        = 0;
+    inode->uid        = request->cred->uid;
+    inode->gid        = request->cred->gid;
     inode->nlink      = 1;
     inode->mode       = S_IFLNK | 0755;
     inode->atime      = now;

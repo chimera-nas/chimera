@@ -396,6 +396,10 @@ chimera_io_uring_complete(
         --request->token_count;
 
         if (request->token_count == 0) {
+            if (request->opcode == CHIMERA_VFS_OP_OPEN_AT ||
+                request->opcode == CHIMERA_VFS_OP_MKDIR_AT) {
+                chimera_restore_privilege(request->cred);
+            }
             thread->inflight--;
             request->complete(request);
         }
@@ -513,6 +517,12 @@ chimera_io_uring_setattr(
 
     fd = request->setattr.handle->vfs_private;
 
+    rc = chimera_setup_credential(request->cred, request->setattr.set_attr);
+    if (rc != 0) {
+        request->status = chimera_linux_errno_to_status(rc);
+        request->complete(request);
+        return;
+    }
 
     if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
 #ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW
@@ -534,6 +544,7 @@ chimera_io_uring_setattr(
                                    request->setattr.set_attr->va_mode,
                                    strerror(errno));
 
+            chimera_restore_privilege(request->cred);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -554,6 +565,7 @@ chimera_io_uring_setattr(
                                    request->setattr.set_attr->va_gid,
                                    strerror(errno));
 
+            chimera_restore_privilege(request->cred);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -570,6 +582,7 @@ chimera_io_uring_setattr(
                                    request->setattr.set_attr->va_uid,
                                    strerror(errno));
 
+            chimera_restore_privilege(request->cred);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -586,6 +599,7 @@ chimera_io_uring_setattr(
                                    request->setattr.set_attr->va_gid,
                                    strerror(errno));
 
+            chimera_restore_privilege(request->cred);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -606,6 +620,7 @@ chimera_io_uring_setattr(
                                    request->setattr.set_attr->va_size,
                                    strerror(errno));
 
+            chimera_restore_privilege(request->cred);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -647,6 +662,7 @@ chimera_io_uring_setattr(
             chimera_io_uring_error("io_uring_setattr: utimensat() failed: %s",
                                    strerror(errno));
 
+            chimera_restore_privilege(request->cred);
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -657,6 +673,7 @@ chimera_io_uring_setattr(
                             &request->setattr.r_post_attr,
                             fd);
 
+    chimera_restore_privilege(request->cred);
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* io_uring_setattr */
@@ -761,6 +778,13 @@ chimera_io_uring_readdir(
 
     fd = request->readdir.handle->vfs_private;
 
+    rc = chimera_setup_credential(request->cred, NULL);
+    if (rc != 0) {
+        request->status = chimera_linux_errno_to_status(rc);
+        request->complete(request);
+        return;
+    }
+
     if (thread->readdir_verifier) {
         struct stat st;
 
@@ -771,6 +795,7 @@ chimera_io_uring_readdir(
 
             if (request->readdir.verifier &&
                 request->readdir.verifier != mtime_verf) {
+                chimera_restore_privilege(request->cred);
                 request->status = CHIMERA_VFS_EBADCOOKIE;
                 request->complete(request);
                 return;
@@ -785,6 +810,7 @@ chimera_io_uring_readdir(
     if (dup_fd < 0) {
         chimera_io_uring_error("io_uring_readdir: openat() failed: %s",
                                strerror(errno));
+        chimera_restore_privilege(request->cred);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -796,6 +822,7 @@ chimera_io_uring_readdir(
         chimera_io_uring_error("io_uring_readdir: fdopendir() failed: %s",
                                strerror(errno));
         close(dup_fd);
+        chimera_restore_privilege(request->cred);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -842,6 +869,7 @@ chimera_io_uring_readdir(
     request->readdir.r_eof    = eof;
 
     closedir(dir);
+    chimera_restore_privilege(request->cred);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -896,7 +924,7 @@ chimera_io_uring_open_at(
 {
     struct chimera_io_uring_thread *thread = private_data;
     int                             parent_fd;
-    int                             flags;
+    int                             flags, rc;
     uint32_t                        mode;
     char                           *scratch = (char *) request->plugin_data;
     struct io_uring_sqe            *sqe;
@@ -933,6 +961,14 @@ chimera_io_uring_open_at(
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
         flags |= O_EXCL;
+    }
+
+    rc = chimera_setup_credential(request->cred, request->open_at.set_attr);
+    if (rc != 0) {
+        --thread->inflight;
+        request->status = chimera_linux_errno_to_status(rc);
+        request->complete(request);
+        return;
     }
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
@@ -972,9 +1008,10 @@ chimera_io_uring_mkdir_at(
     void                       *private_data)
 {
     struct chimera_io_uring_thread *thread = private_data;
-    int                             fd;
+    int                             fd, rc;
     uint32_t                        mode;
-    char                           *scratch = (char *) request->plugin_data;
+    char                           *scratch  = (char *) request->plugin_data;
+    struct chimera_vfs_attrs       *set_attr = request->mkdir_at.set_attr;
     struct io_uring_sqe            *sqe;
 
     scratch += sizeof(struct statx) * 2;
@@ -983,10 +1020,18 @@ chimera_io_uring_mkdir_at(
 
     fd = request->mkdir_at.handle->vfs_private;
 
+    rc = chimera_setup_credential(request->cred, set_attr);
+    if (rc != 0) {
+        --thread->inflight;
+        request->status = chimera_linux_errno_to_status(rc);
+        request->complete(request);
+        return;
+    }
+
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    if (request->mkdir_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
-        mode = request->mkdir_at.set_attr->va_mode;
+    if (set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        mode = set_attr->va_mode;
     } else {
         mode = S_IRWXU;
     }
@@ -1028,6 +1073,13 @@ chimera_io_uring_mknod_at(
                             &request->mknod_at.r_dir_pre_attr,
                             fd);
 
+    rc = chimera_setup_credential(request->cred, request->mknod_at.set_attr);
+    if (rc != 0) {
+        request->status = chimera_linux_errno_to_status(rc);
+        request->complete(request);
+        return;
+    }
+
     rc = mknodat(fd, fullname, mode, dev);
 
     int mknodat_errno = errno;
@@ -1037,6 +1089,7 @@ chimera_io_uring_mknod_at(
                             fd);
 
     if (rc < 0) {
+        chimera_restore_privilege(request->cred);
 
         if (mknodat_errno == EEXIST) {
             chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
@@ -1057,6 +1110,7 @@ chimera_io_uring_mknod_at(
                                   fd,
                                   fullname);
 
+    chimera_restore_privilege(request->cred);
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_io_uring_mknod_at */
@@ -1085,14 +1139,24 @@ chimera_io_uring_remove_at(
                                   fd,
                                   fullname);
 
+    rc = chimera_setup_credential(request->cred, NULL);
+    if (rc != 0) {
+        request->status = chimera_linux_errno_to_status(rc);
+        request->complete(request);
+        return;
+    }
+
     rc = unlinkat(fd, fullname, 0);
 
     if (rc == -1 && errno == EISDIR) {
         rc = unlinkat(fd, fullname, AT_REMOVEDIR);
     }
 
+    int unlinkat_errno = errno;
+    chimera_restore_privilege(request->cred);
+
     if (rc) {
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(unlinkat_errno);
     } else {
         request->status = CHIMERA_VFS_OK;
     }
@@ -1303,7 +1367,8 @@ chimera_io_uring_symlink_at(
 {
     struct chimera_io_uring_thread *thread = private_data;
     int                             fd, rc;
-    char                           *scratch = (char *) request->plugin_data;
+    char                           *scratch  = (char *) request->plugin_data;
+    struct chimera_vfs_attrs       *set_attr = request->symlink_at.set_attr;
 
     --thread->inflight;
 
@@ -1319,13 +1384,38 @@ chimera_io_uring_symlink_at(
 
     fd = request->symlink_at.handle->vfs_private;
 
+    /* symlinks do not support chmod, remove mode from attr set mask */
+    set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
+
+    rc = chimera_setup_credential(request->cred, set_attr);
+    if (rc != 0) {
+        request->status = chimera_linux_errno_to_status(rc);
+        request->complete(request);
+        return;
+    }
+
     rc = symlinkat(target, fd, fullname);
 
     if (rc < 0) {
+        chimera_restore_privilege(request->cred);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
+
+    /* Set ownership on the symlink if requested */
+    if (set_attr->va_set_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+        uid_t uid = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ? (uid_t) set_attr->va_uid : (uid_t) -1;
+        gid_t gid = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_GID) ? (gid_t) set_attr->va_gid : (gid_t) -1;
+        rc = fchownat(fd, fullname, uid, gid, AT_SYMLINK_NOFOLLOW);
+        if (rc < 0) {
+            chimera_restore_privilege(request->cred);
+            request->status = chimera_linux_errno_to_status(errno);
+            request->complete(request);
+            return;
+        }
+    }
+    chimera_restore_privilege(request->cred);
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
                             &request->symlink_at.r_dir_post_attr,
@@ -1409,6 +1499,15 @@ chimera_io_uring_rename_at(
         return;
     }
 
+    rc = chimera_setup_credential(request->cred, NULL);
+    if (rc != 0) {
+        close(old_fd);
+        close(new_fd);
+        request->status = chimera_linux_errno_to_status(rc);
+        request->complete(request);
+        return;
+    }
+
     rc = renameat(old_fd, fullname, new_fd, full_newname);
 
     if (rc < 0) {
@@ -1417,6 +1516,7 @@ chimera_io_uring_rename_at(
         request->status = CHIMERA_VFS_OK;
     }
 
+    chimera_restore_privilege(request->cred);
     close(old_fd);
     close(new_fd);
 

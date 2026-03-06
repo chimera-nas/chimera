@@ -30,6 +30,7 @@ struct test_env {
     const char                   *backend;
     int                           use_nfs;
     int                           nfsvers;
+    struct chimera_vfs_cred       cred;          // Credential used to initialize the client
 };
 
 static inline void
@@ -56,7 +57,13 @@ client_test_init(
 
     env->session_dir[0] = '\0';
 
-    while ((opt = getopt(argc, argv, "b:v:")) != -1) {
+    /* Default credential: root */
+    chimera_vfs_cred_init_unix(&env->cred,
+                               CHIMERA_TEST_USER_ROOT_UID,
+                               CHIMERA_TEST_USER_ROOT_GID,
+                               0, NULL);
+
+    while ((opt = getopt(argc, argv, "b:v:U:")) != -1) {
         switch (opt) {
             case 'b':
                 backend = optarg;
@@ -65,6 +72,13 @@ client_test_init(
                 nfsvers      = atoi(optarg);
                 env->use_nfs = 1;
                 env->nfsvers = nfsvers;
+                break;
+            case 'U':
+                if (!chimera_test_parse_user(optarg, &env->cred)) {
+                    fprintf(stderr, "Unknown user spec '%s'. "
+                            "Use: root, johndoe, myuser, or uid:gid\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
                 break;
         } /* switch */
     }
@@ -89,7 +103,11 @@ client_test_init(
 
     (void) mkdir("/build/test", 0755);
     (void) mkdir(env->session_dir, 0755);
-
+    rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
+    if (rc < 0) {
+        fprintf(stderr, "to set session_dir uid/gid: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
     if (env->use_nfs) {
         server_config = chimera_server_config_init();
 
@@ -277,9 +295,7 @@ client_test_init(
         json_dump_file(client_json_root, client_json_path, 0);
         json_decref(client_json_root);
 
-        struct chimera_vfs_cred root_cred;
-        chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
-        env->client = chimera_client_init_json(client_json_path, &root_cred, env->client_metrics);
+        env->client = chimera_client_init_json(client_json_path, &env->cred, env->client_metrics);
     }
 
     env->client_thread = chimera_client_thread_init(env->evpl, env->client);
