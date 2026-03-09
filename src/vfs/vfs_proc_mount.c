@@ -121,6 +121,7 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
 
     if (request->status != CHIMERA_VFS_OK) {
         callback(thread, request->status, request->proto_private_data);
+        chimera_vfs_request_free(thread, request);
         return;
     }
 

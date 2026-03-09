@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "nfs_internal.h"
 #include "vfs/vfs_error.h"
 
 static inline nfsstat4
@@ -59,6 +60,7 @@ chimera_nfs4_errno_to_nfsstat4(enum chimera_vfs_error err)
         case CHIMERA_VFS_EFAULT:
             return NFS4ERR_SERVERFAULT;
         default:
+            chimera_nfs_error("Unknown VFS error code: %d", err);
             abort();
     } /* switch */
 } /* chimera_nfs4_errno_to_nfsstat4 */

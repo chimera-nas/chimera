@@ -104,6 +104,33 @@ chimera_linux_thread_destroy(void *private_data)
     free(thread);
 } /* linux_thread_destroy */
 
+/**
+ * @brief Apply VFS attribute changes to a Linux filesystem object.
+ *
+ * Sets one or more attributes on the file or directory identified by
+ * @p dirfd and @p path according to the mask in @p attr->va_set_mask.
+ * Supported attributes:
+ *  - @c CHIMERA_VFS_ATTR_MODE  – file permission bits (fchmodat)
+ *  - @c CHIMERA_VFS_ATTR_UID   – owner user ID (fchownat)
+ *  - @c CHIMERA_VFS_ATTR_GID   – owner group ID (fchownat)
+ *  - @c CHIMERA_VFS_ATTR_SIZE  – file size / truncation (truncate via /proc)
+ *  - @c CHIMERA_VFS_ATTR_ATIME – access time (utimensat; CHIMERA_VFS_TIME_NOW sets to current time)
+ *  - @c CHIMERA_VFS_ATTR_MTIME – modification time (utimensat; CHIMERA_VFS_TIME_NOW sets to current time)
+ *
+ * On success the corresponding bits in @p attr->va_set_mask are set to
+ * confirm which attributes were applied.
+ *
+ * @param dirfd  Open directory file descriptor used as the base for relative
+ *               path operations (AT_EMPTY_PATH semantics).  May be an O_PATH
+ *               descriptor; size changes are handled via /proc/self/fd.
+ * @param path   Relative path beneath @p dirfd, or an empty string ("") to
+ *               operate directly on @p dirfd itself.
+ * @param attr   Pointer to a chimera_vfs_attrs structure.  @c va_set_mask
+ *               selects which fields to apply; individual @c va_* fields
+ *               carry the desired values.
+ *
+ * @return 0 on success, or a negative @c errno value on failure.
+ */
 static inline int
 chimera_linux_set_attrs(
     int                       dirfd,
@@ -286,7 +313,7 @@ chimera_linux_setattr(
                             &request->setattr.r_post_attr,
                             fd);
 
-    request->status = chimera_linux_errno_to_status(rc);
+    request->status = chimera_linux_errno_to_status(-rc);
     request->complete(request);
 } /* linux_setattr */
 
@@ -379,7 +406,7 @@ chimera_linux_lookup_at(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* linux_lookup */
+} /* linux_lookup_at */
 
 static void
 chimera_linux_readdir(
@@ -686,7 +713,7 @@ chimera_linux_mkdir_at(
     rc = chimera_linux_set_attrs(fd, fullname, request->mkdir_at.set_attr);
     chimera_restore_privilege(request->cred);
     if (rc < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(-rc);
         request->complete(request);
         return;
     }
