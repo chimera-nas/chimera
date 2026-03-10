@@ -9,6 +9,72 @@
 #include "vfs/vfs_release.h"
 
 static void
+chimera_nfs4_open_exclusive_verify(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
+    void                           *private_data)
+{
+    struct nfs_request             *req           = private_data;
+    struct nfs4_session            *session       = req->session;
+    struct OPEN4args               *args          = &req->args_compound->argarray[req->index].opopen;
+    struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
+    struct chimera_vfs_open_handle *parent_handle = req->handle;
+    struct nfs4_state              *state;
+    const uint8_t                  *verf;
+    uint32_t                        verf_atime, verf_mtime;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    if (args->openhow.how.mode == EXCLUSIVE4) {
+        verf = args->openhow.how.createverf;
+    } else {
+        verf = args->openhow.how.ch_createboth.cva_verf;
+    }
+
+    memcpy(&verf_atime, verf, sizeof(verf_atime));
+    memcpy(&verf_mtime, verf + sizeof(verf_atime), sizeof(verf_mtime));
+
+    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME) ||
+        !(attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME) ||
+        attr->va_atime.tv_sec != verf_atime ||
+        attr->va_mtime.tv_sec != verf_mtime) {
+        chimera_vfs_release(req->thread->vfs_thread, handle);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        res->status = NFS4ERR_EXIST;
+        chimera_nfs4_compound_complete(req, NFS4ERR_EXIST);
+        return;
+    }
+
+    /* Verifier matches - this is a retry, treat as success */
+    state                    = nfs4_session_alloc_slot(session);
+    state->nfs4_state_handle = handle;
+
+    res->status                            = NFS4_OK;
+    res->resok4.stateid                    = state->nfs4_state_id;
+    res->resok4.cinfo.atomic               = 0;
+    res->resok4.cinfo.before               = 0;
+    res->resok4.cinfo.after                = 0;
+    res->resok4.rflags                     = 0;
+    res->resok4.num_attrset                = 0;
+    res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+
+    memcpy(req->fh, handle->fh, handle->fh_len);
+    req->fhlen = handle->fh_len;
+
+    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_open_exclusive_verify */
+
+static void
 chimera_nfs4_open_at_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
@@ -27,6 +93,25 @@ chimera_nfs4_open_at_complete(
     int                             rc;
 
     if (error_code != CHIMERA_VFS_OK) {
+        if (error_code == CHIMERA_VFS_EEXIST &&
+            args->openhow.opentype == OPEN4_CREATE &&
+            (args->openhow.how.mode == EXCLUSIVE4 ||
+             args->openhow.how.mode == EXCLUSIVE4_1)) {
+            set_attr->va_set_mask = 0;
+            set_attr->va_req_mask = 0;
+            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                                parent_handle,
+                                args->claim.file.data,
+                                args->claim.file.len,
+                                CHIMERA_VFS_OPEN_INFERRED,
+                                set_attr,
+                                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME,
+                                0,
+                                0,
+                                chimera_nfs4_open_exclusive_verify,
+                                req);
+            return;
+        }
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_vfs_release(req->thread->vfs_thread, parent_handle);
         chimera_nfs4_compound_complete(req, res->status);
@@ -52,6 +137,14 @@ chimera_nfs4_open_at_complete(
         res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
                                                          args->openhow.how.createattrs.num_attrmask,
                                                          args->openhow.how.createattrs.attrmask,
+                                                         res->resok4.attrset);
+    } else if (args->openhow.opentype == OPEN4_CREATE &&
+               args->openhow.how.mode == EXCLUSIVE4_1) {
+        rc = xdr_dbuf_alloc_array(&res->resok4, attrset, 4, req->encoding->dbuf);
+        chimera_nfs_abort_if(rc, "Failed to allocate array");
+        res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
+                                                         args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
+                                                         args->openhow.how.ch_createboth.cva_attrs.attrmask,
                                                          res->resok4.attrset);
     } else {
         res->resok4.num_attrset = 0;
@@ -149,8 +242,31 @@ chimera_nfs4_open_parent_complete(
                                               args->openhow.how.createattrs.attr_vals.data,
                                               args->openhow.how.createattrs.attr_vals.len);
                 break;
-            case EXCLUSIVE4:
             case EXCLUSIVE4_1:
+                flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
+                chimera_nfs4_unmarshall_attrs(attr,
+                                              args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
+                                              args->openhow.how.ch_createboth.cva_attrs.attrmask,
+                                              args->openhow.how.ch_createboth.cva_attrs.attr_vals.data,
+                                              args->openhow.how.ch_createboth.cva_attrs.attr_vals.len);
+                /* TODO: Store verifier in a server-private xattr (e.g. trusted.nfs4_excl_verf)
+                 * once the VFS layer exposes setxattr/getxattr.  That would remove the
+                 * restriction on clients setting time_access_set/time_modify_set in cva_attrs.
+                 * For now encode the verifier in atime.tv_sec (bytes 0-3) and mtime.tv_sec
+                 * (bytes 4-7), which is the same strategy used by Linux nfsd. */
+                attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
+                memcpy(&attr->va_atime.tv_sec, args->openhow.how.ch_createboth.cva_verf, 4);
+                attr->va_atime.tv_nsec = 0;
+                memcpy(&attr->va_mtime.tv_sec, args->openhow.how.ch_createboth.cva_verf + 4, 4);
+                attr->va_mtime.tv_nsec = 0;
+                break;
+            case EXCLUSIVE4:
+                flags            |= CHIMERA_VFS_OPEN_EXCLUSIVE;
+                attr->va_set_mask = CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
+                memcpy(&attr->va_atime.tv_sec, args->openhow.how.createverf, 4);
+                attr->va_atime.tv_nsec = 0;
+                memcpy(&attr->va_mtime.tv_sec, args->openhow.how.createverf + 4, 4);
+                attr->va_mtime.tv_nsec = 0;
                 break;
         } /* switch */
     }
