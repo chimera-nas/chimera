@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <fcntl.h>
+
 #include "nfs4_procs.h"
 #include "nfs4_attr.h"
 #include "vfs/vfs_procs.h"
@@ -133,6 +135,39 @@ chimera_nfs4_create_open_callback(
             case NF4CHR:
             case NF4SOCK:
             case NF4FIFO:
+                req->handle        = handle;
+                attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
+                switch (args->objtype.type) {
+                    case NF4BLK:
+                        attr->va_mode = (attr->va_mode & ~S_IFMT) | S_IFBLK;
+                        attr->va_rdev = ((uint64_t) args->objtype.devdata.specdata1 << 32) |
+                            (uint64_t) args->objtype.devdata.specdata2;
+                        break;
+                    case NF4CHR:
+                        attr->va_mode = (attr->va_mode & ~S_IFMT) | S_IFCHR;
+                        attr->va_rdev = ((uint64_t) args->objtype.devdata.specdata1 << 32) |
+                            (uint64_t) args->objtype.devdata.specdata2;
+                        break;
+                    case NF4SOCK:
+                        attr->va_mode = (attr->va_mode & ~S_IFMT) | S_IFSOCK;
+                        attr->va_rdev = 0;
+                        break;
+                    default: /* NF4FIFO */
+                        attr->va_mode = (attr->va_mode & ~S_IFMT) | S_IFIFO;
+                        attr->va_rdev = 0;
+                        break;
+                } /* switch */
+                chimera_vfs_mknod_at(thread->vfs_thread, &req->cred,
+                                     handle,
+                                     args->objname.data,
+                                     args->objname.len,
+                                     attr,
+                                     CHIMERA_VFS_ATTR_FH,
+                                     CHIMERA_VFS_ATTR_MTIME,
+                                     CHIMERA_VFS_ATTR_MTIME,
+                                     chimera_nfs4_create_complete,
+                                     req);
+                break;
             case NF4ATTRDIR:
             case NF4NAMEDATTR:
                 chimera_nfs4_compound_complete(req, NFS4ERR_NOTSUPP);
