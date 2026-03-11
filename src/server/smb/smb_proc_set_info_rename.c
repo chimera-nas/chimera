@@ -28,6 +28,13 @@ chimera_smb_set_info_rename_callback(
     struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
 
     if (!error_code) {
+        /* Release the sharemode entry keyed by the old name before
+         * updating the path, then re-acquire under the new name.
+         * Without this, close would hash the new name and fail to
+         * find the entry registered under the old name, leaking it. */
+        chimera_smb_sharemode_release(&request->tree->share->sharemode,
+                                      open_file);
+
         /* Update the open file's name and parent to reflect the rename,
          * so subsequent compound operations (e.g. disposition delete)
          * use the correct path. */
@@ -43,6 +50,18 @@ chimera_smb_set_info_rename_callback(
         memcpy(open_file->name, rename_info->new_name, rename_info->new_name_len);
         open_file->name[rename_info->new_name_len] = '\0';
         open_file->name_len                        = rename_info->new_name_len;
+
+        /* Re-acquire sharemode entry under the new name */
+        if (open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE &&
+            request->tree->share &&
+            (open_file->desired_access & SMB2_SHAREMODE_ACCESS_MASK)) {
+            chimera_smb_sharemode_acquire(
+                &request->tree->share->sharemode,
+                open_file->parent_fh, open_file->parent_fh_len,
+                open_file->name, open_file->name_len,
+                open_file->desired_access, open_file->share_access,
+                open_file);
+        }
     }
 
     if (request->set_info.parent_handle) {

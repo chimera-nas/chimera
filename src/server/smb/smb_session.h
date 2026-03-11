@@ -47,6 +47,8 @@ struct chimera_smb_open_file {
     struct UT_hash_handle           hh;
     struct chimera_smb_file_id      file_id;
     struct chimera_vfs_open_handle *handle;
+    uint32_t                        desired_access;
+    uint32_t                        share_access;
     uint32_t                        name_len;
     uint32_t                        flags;
     uint64_t                        position;

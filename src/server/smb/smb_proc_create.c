@@ -99,6 +99,8 @@ chimera_smb_create_gen_open_file(
     open_file->file_id.pid     = pid;
     open_file->file_id.vid     = chimera_rand64();
     open_file->handle          = oh;
+    open_file->desired_access  = request->create.desired_access;
+    open_file->share_access    = request->create.share_access;
     open_file->flags           = delete_on_close ? CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE : 0;
     open_file->position        = 0;
     open_file->pipe_transceive = transceive;
@@ -106,6 +108,27 @@ chimera_smb_create_gen_open_file(
 
     open_file->name_len = name_len;
     memcpy(open_file->name, name, open_file->name_len);
+
+    /* Check share mode conflicts for regular file opens.
+     * Attribute-only opens (READ_ATTRIBUTES, SYNCHRONIZE, etc.)
+     * bypass share mode enforcement, matching Windows/NTFS behavior.
+     * Generic rights (MAXIMUM_ALLOWED, GENERIC_READ, etc.) expand to
+     * data-level access inside acquire and must participate. */
+    if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share &&
+        (open_file->desired_access & SMB2_SHAREMODE_ACCESS_MASK)) {
+
+        if (chimera_smb_sharemode_acquire(
+                &tree->share->sharemode,
+                parent_fh, parent_fh_len,
+                name, name_len,
+                open_file->desired_access,
+                open_file->share_access,
+                open_file) < 0) {
+            open_file->handle = NULL;
+            chimera_smb_open_file_free(thread, open_file);
+            return NULL;
+        }
+    }
 
     open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
@@ -185,6 +208,13 @@ chimera_smb_create_mkdir_open_callback(
                                                         request->create.name_len,
                                                         request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE,
                                                         oh);
+
+    if (!open_file) {
+        chimera_vfs_release(vfs_thread, oh);
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
+        return;
+    }
 
     request->create.r_open_file = open_file;
 
@@ -267,6 +297,13 @@ chimera_smb_create_open_at_callback(
                                                         request->create.name_len,
                                                         request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE, oh);
 
+    if (!open_file) {
+        chimera_vfs_release(vfs_thread, oh);
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
+        return;
+    }
+
     request->create.r_open_file = open_file;
 
     chimera_smb_marshal_attrs(
@@ -329,6 +366,12 @@ chimera_smb_create_open_callback(
                                                         request->create.name,
                                                         request->create.name_len * 2,
                                                         request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE, oh);
+
+    if (!open_file) {
+        chimera_vfs_release(vfs_thread, oh);
+        chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
+        return;
+    }
 
     request->create.r_open_file = open_file;
 
