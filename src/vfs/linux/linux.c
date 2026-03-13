@@ -594,7 +594,7 @@ chimera_linux_open_at(
 
     if (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         mode                                    = request->open_at.set_attr->va_mode;
-        request->open_at.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+        request->open_at.set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
     } else {
         mode = 0600;
     }

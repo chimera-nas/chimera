@@ -974,9 +974,8 @@ chimera_io_uring_open_at(
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     if (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
-        mode = request->open_at.set_attr->va_mode;
-
-        request->open_at.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+        mode                                    = request->open_at.set_attr->va_mode;
+        request->open_at.set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
     } else {
         mode = 0600;
     }
