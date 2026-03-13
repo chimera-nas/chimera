@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -20,6 +20,11 @@
 #define AT_SYMLINK_NOFOLLOW 0x100
 #endif /* ifndef AT_SYMLINK_NOFOLLOW */
 
+struct chimera_posix_faccessat_state {
+    struct chimera_posix_completion comp;
+    int                             access_mode;
+};
+
 static void
 chimera_posix_faccessat_callback(
     struct chimera_client_thread *thread,
@@ -27,9 +32,61 @@ chimera_posix_faccessat_callback(
     const struct chimera_stat    *st,
     void                         *private_data)
 {
-    struct chimera_posix_completion *comp = private_data;
+    struct chimera_posix_faccessat_state *state = private_data;
+    int                                   r, w, x;
+    uid_t                                 proc_uid;
+    gid_t                                 proc_gid;
+    mode_t                                mode;
 
-    chimera_posix_complete(comp, status);
+    if (status != CHIMERA_VFS_OK) {
+        chimera_posix_complete(&state->comp, status);
+        return;
+    }
+
+    if (state->access_mode == F_OK) {
+        chimera_posix_complete(&state->comp, CHIMERA_VFS_OK);
+        return;
+    }
+
+    proc_uid = getuid();
+    proc_gid = getgid();
+    mode     = st->st_mode;
+
+    if (proc_uid == 0) {
+        /* Root can read/write anything; execute requires at least one x bit */
+        r = 1;
+        w = 1;
+        x = !!(mode & (S_IXUSR | S_IXGRP | S_IXOTH));
+    } else if ((uint64_t) proc_uid == st->st_uid) {
+        r = !!(mode & S_IRUSR);
+        w = !!(mode & S_IWUSR);
+        x = !!(mode & S_IXUSR);
+    } else if ((uint64_t) proc_gid == st->st_gid) {
+        r = !!(mode & S_IRGRP);
+        w = !!(mode & S_IWGRP);
+        x = !!(mode & S_IXGRP);
+    } else {
+        r = !!(mode & S_IROTH);
+        w = !!(mode & S_IWOTH);
+        x = !!(mode & S_IXOTH);
+    }
+
+    if ((state->access_mode & R_OK) && !r) {
+        chimera_posix_complete(&state->comp, CHIMERA_VFS_EACCES);
+        return;
+    }
+
+    if ((state->access_mode & W_OK) && !w) {
+        chimera_posix_complete(&state->comp, CHIMERA_VFS_EACCES);
+        return;
+    }
+
+    if ((state->access_mode & X_OK) && !x) {
+        chimera_posix_complete(&state->comp, CHIMERA_VFS_EACCES);
+        return;
+    }
+
+    chimera_posix_complete(&state->comp, CHIMERA_VFS_OK);
 } /* chimera_posix_faccessat_callback */
 
 static void
@@ -47,16 +104,13 @@ chimera_posix_faccessat(
     int         mode,
     int         flags)
 {
-    struct chimera_posix_client    *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request   req;
-    struct chimera_posix_completion comp;
-    int                             path_len;
+    struct chimera_posix_client         *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker         *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request        req;
+    struct chimera_posix_faccessat_state state;
+    int                                  path_len;
 
-    // Note: We only check for file existence, not actual access permissions
-    // Full implementation would require checking uid/gid against file mode
-    // Also AT_EACCESS and AT_SYMLINK_NOFOLLOW are not implemented
-    (void) mode;
+    // AT_EACCESS and AT_SYMLINK_NOFOLLOW are not implemented
     (void) flags;
 
     // For now, only support AT_FDCWD
@@ -65,7 +119,8 @@ chimera_posix_faccessat(
         return -1;
     }
 
-    chimera_posix_completion_init(&comp, &req);
+    chimera_posix_completion_init(&state.comp, &req);
+    state.access_mode = mode;
 
     // Build path
     if (pathname[0] == '/') {
@@ -80,21 +135,19 @@ chimera_posix_faccessat(
 
     req.opcode            = CHIMERA_CLIENT_OP_STAT;
     req.stat.callback     = chimera_posix_faccessat_callback;
-    req.stat.private_data = &comp;
+    req.stat.private_data = &state;
     req.stat.path_len     = path_len;
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_faccessat_exec);
 
-    int err = chimera_posix_wait(&comp);
+    int err = chimera_posix_wait(&state.comp);
 
-    chimera_posix_completion_destroy(&comp);
+    chimera_posix_completion_destroy(&state.comp);
 
     if (err) {
         errno = err;
         return -1;
     }
 
-    // If we got here, file exists and is accessible
-    // Note: We don't actually check R_OK/W_OK/X_OK permissions
     return 0;
 } /* chimera_posix_faccessat */
