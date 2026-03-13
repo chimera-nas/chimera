@@ -215,7 +215,7 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[0]  |= (1 << FATTR4_SUPPORTED_ATTRS);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, 2);
+            chimera_nfs4_attr_append_uint32(&attrs, 3);
             chimera_nfs4_attr_append_uint32(&attrs,
                                             (1 << FATTR4_SUPPORTED_ATTRS) |
                                             (1 << FATTR4_TYPE) |
@@ -264,6 +264,9 @@ chimera_nfs4_marshall_attrs(
                                             (1UL << (FATTR4_SPACE_AVAIL - 32)) |
                                             (1UL << (FATTR4_SPACE_FREE - 32)) |
                                             (1UL << (FATTR4_SPACE_TOTAL - 32)));
+
+            chimera_nfs4_attr_append_uint32(&attrs,
+                                            (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64)));
         }
 
         if (req_mask[0] & (1 << FATTR4_TYPE) &&
@@ -560,6 +563,24 @@ chimera_nfs4_marshall_attrs(
 
             chimera_nfs4_attr_append_uint64(&attrs, attr->va_mtime.tv_sec);
             chimera_nfs4_attr_append_uint32(&attrs, attr->va_mtime.tv_nsec);
+        }
+    }
+
+    if (num_req_mask >= 3) {
+        if (req_mask[2] & (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64))) {
+            rsp_mask[2]  |= (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64));
+            *num_rsp_mask = 3;
+
+            /* Return bitmap4 of attributes safe for EXCLUSIVE4_1 cva_attrs.
+            * Exclude time_access_set and time_modify_set because Chimera
+            * encodes the verifier into atime/mtime (same as Linux nfsd). */
+            chimera_nfs4_attr_append_uint32(&attrs, 2);
+            chimera_nfs4_attr_append_uint32(&attrs,
+                                            (1 << FATTR4_SIZE));
+            chimera_nfs4_attr_append_uint32(&attrs,
+                                            (1UL << (FATTR4_MODE - 32)) |
+                                            (1UL << (FATTR4_OWNER - 32)) |
+                                            (1UL << (FATTR4_OWNER_GROUP - 32)));
         }
     }
 
