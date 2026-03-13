@@ -23,6 +23,7 @@
 #include "smb_string.h"
 #include "smb_ntlm.h"
 #include "smb_gssapi.h"
+#include "smb_sharemode.h"
 #include "vfs/vfs_release.h"
 
 #define SMB2_MAX_DIALECTS           16
@@ -100,10 +101,11 @@ struct netbios_header {
 } __attribute__((packed));
 
 struct chimera_smb_share {
-    char                      name[81];
-    char                      path[CHIMERA_VFS_PATH_MAX];
-    struct chimera_smb_share *prev;
-    struct chimera_smb_share *next;
+    char                               name[81];
+    char                               path[CHIMERA_VFS_PATH_MAX];
+    struct chimera_smb_share          *prev;
+    struct chimera_smb_share          *next;
+    struct chimera_smb_sharemode_table sharemode;
 };
 
 struct chimera_smb_conn;
@@ -726,6 +728,13 @@ chimera_smb_tree_free(
             chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at tree destruction");
             open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
             HASH_DELETE(hh, tree->open_files[i], open_file);
+
+            if (open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE &&
+                tree->share) {
+                chimera_smb_sharemode_release(&tree->share->sharemode,
+                                              open_file);
+            }
+
             open_file->refcnt--;
 
             if (open_file->refcnt == 0) {

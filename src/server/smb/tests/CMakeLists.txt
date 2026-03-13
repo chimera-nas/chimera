@@ -33,6 +33,14 @@ if(SAMBA_TOOL)
                 ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=winbind)
 endif()
 
+# SMB share mode test
+add_executable(smb_sharemode_test smb_sharemode_test.c)
+target_link_libraries(smb_sharemode_test chimera_server chimera_smb)
+target_include_directories(smb_sharemode_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_test(NAME chimera/server/smb/sharemode_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_sharemode_test)
+
 # REST API user/share manipulation test
 add_executable(rest_user_manip_test rest_user_manip_test.c)
 target_link_libraries(rest_user_manip_test chimera_server chimera_metrics jansson)

@@ -201,6 +201,7 @@ chimera_smb_server_destroy(void *data)
     while (shared->shares) {
         share = shared->shares;
         LL_DELETE(shared->shares, share);
+        chimera_smb_sharemode_destroy(&share->sharemode);
         free(share);
     }
 
@@ -1346,6 +1347,7 @@ chimera_smb_add_share(
 
     snprintf(share->name, sizeof(share->name), "%s", name);
     snprintf(share->path, sizeof(share->path), "%s", path);
+    chimera_smb_sharemode_init(&share->sharemode);
 
     pthread_mutex_lock(&shared->shares_lock);
     LL_PREPEND(shared->shares, share);
@@ -1368,6 +1370,7 @@ chimera_smb_remove_share(
     {
         if (strcmp(share->name, name) == 0) {
             LL_DELETE(shared->shares, share);
+            chimera_smb_sharemode_destroy(&share->sharemode);
             free(share);
             found = 1;
             break;

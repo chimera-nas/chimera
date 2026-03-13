@@ -4,6 +4,7 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
+#include "smb_sharemode.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
 
@@ -40,6 +41,13 @@ chimera_smb_close(struct chimera_smb_request *request)
     if (unlikely(!request->close.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
         return;
+    }
+
+    /* Release share mode entry for regular file opens */
+    if (request->close.open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE &&
+        request->tree->share) {
+        chimera_smb_sharemode_release(&request->tree->share->sharemode,
+                                      request->close.open_file);
     }
 
     if (request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) {
