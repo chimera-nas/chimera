@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -30,6 +30,7 @@ int
 chimera_smb_verify_signature(
     struct chimera_smb_signing_ctx *ctx,
     struct chimera_smb_request     *request,
+    const uint8_t                  *signing_key,
     struct evpl_iovec_cursor       *cursor,
     int                             length);
 
