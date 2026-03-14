@@ -647,9 +647,6 @@ chimera_smb_server_handle_smb2(
     struct chimera_smb_session        *session;
     struct evpl_iovec_cursor           signature_cursor;
     int                                more_requests, rc, left = length, payload_length;
-    uint64_t                           req_session_id;
-    uint64_t                           saved_session_id;
-    int                                session_id_was_saved = 0;
 
     compound = chimera_smb_compound_alloc(thread);
 
@@ -701,42 +698,22 @@ chimera_smb_server_handle_smb2(
                                &request->request_struct_size,
                                sizeof(request->request_struct_size));
 
-
-
-
         /* Compound related requests inherit session/tree from previous request */
         if (request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) {
-            if (session_id_was_saved) {
-                req_session_id = saved_session_id;
-            } else {
-                chimera_smb_error("Received invalid SMB message: "
-                                  "SMB2_FLAGS_RELATED_OPERATIONS set in first request of "
-                                  "compound message");
-                chimera_smb_request_free(thread, request);
-                evpl_close(evpl, conn->bind);
-                return;
-            }
-        } else {
-            req_session_id = request->smb2_hdr.session_id;
-            if (!session_id_was_saved) {
-                saved_session_id     = req_session_id;
-                session_id_was_saved = 1;
-            }
-        }
-
-        if (req_session_id) {
+            request->session_handle = NULL;
+        } else if (request->smb2_hdr.session_id) {
 
             if (conn->last_session_handle &&
-                conn->last_session_handle->session->session_id == req_session_id) {
+                conn->last_session_handle->session->session_id == request->smb2_hdr.session_id) {
                 request->session_handle = conn->last_session_handle;
             } else {
-                HASH_FIND(hh, conn->session_handles, &req_session_id, sizeof(uint64_t), session_handle);
+                HASH_FIND(hh, conn->session_handles, &request->smb2_hdr.session_id, sizeof(uint64_t), session_handle);
 
                 if (session_handle) {
                     request->session_handle = session_handle;
                 } else {
 
-                    session = chimera_smb_session_lookup(thread->shared, req_session_id);
+                    session = chimera_smb_session_lookup(thread->shared, request->smb2_hdr.session_id);
 
                     if (session) {
                         session_handle = chimera_smb_session_handle_alloc(thread);
@@ -755,8 +732,8 @@ chimera_smb_server_handle_smb2(
                                sizeof(request->session_handle->signing_key));
 
                     } else {
-                        chimera_smb_error("Received SMB2 message with invalid session id %lx",
-                                          req_session_id);
+                        chimera_smb_error("Received SMB2 message with invalid session id %lx", request->smb2_hdr.
+                                          session_id);
                         chimera_smb_request_free(thread, request);
                         evpl_close(evpl, conn->bind);
                         return;
@@ -768,6 +745,7 @@ chimera_smb_server_handle_smb2(
         }
 
         if (request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) {
+            uint8_t *signing_key;
 
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
 
@@ -777,15 +755,27 @@ chimera_smb_server_handle_smb2(
                 payload_length = left;
             }
 
-            if (unlikely(request->session_handle == NULL)) {
-                chimera_smb_error("Received signed SMB2 message with missing/invalid session id %x",
-                                  req_session_id);
-                chimera_smb_request_free(thread, request);
-                evpl_close(evpl, conn->bind);
-                return;
+            if (request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) {
+                if (unlikely(conn->last_session_handle == NULL)) {
+                    chimera_smb_error("Message contains RELATED_OPERATIONS flag but no last session handle exists");
+                    chimera_smb_request_free(thread, request);
+                    evpl_close(evpl, conn->bind);
+                    return;
+                }
+                signing_key = conn->last_session_handle->signing_key;
+            } else {
+                if (unlikely(request->session_handle == NULL)) {
+                    chimera_smb_error("Received signed SMB2 message with missing/invalid session id %x",
+                                      request->smb2_hdr.session_id);
+                    chimera_smb_request_free(thread, request);
+                    evpl_close(evpl, conn->bind);
+                    return;
+                }
+                signing_key = request->session_handle->signing_key;
             }
 
-            rc = chimera_smb_verify_signature(thread->signing_ctx, request, &signature_cursor, payload_length);
+            rc = chimera_smb_verify_signature(thread->signing_ctx, request, signing_key, &signature_cursor,
+                                              payload_length);
 
             if (unlikely(rc != 0)) {
                 chimera_smb_error("Received SMB2 message with invalid signature");

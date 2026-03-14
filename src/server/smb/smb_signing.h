@@ -30,6 +30,7 @@ int
 chimera_smb_verify_signature(
     struct chimera_smb_signing_ctx *ctx,
     struct chimera_smb_request     *request,
+    const uint8_t                  *signing_key,
     struct evpl_iovec_cursor       *cursor,
     int                             length);
 
