@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <jansson.h>
 #include <openssl/pem.h>
@@ -207,6 +208,8 @@ main(
         } /* switch */
     }
 
+    /* first we need to clear the umask to make sure file are created with porper mode.*/
+    umask(0);
     /* Load config file early to get TLS settings before evpl_init */
     config = json_load_file(config_path, 0, &error);
 
