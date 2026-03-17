@@ -1574,6 +1574,76 @@ chimera_io_uring_link_at(
 } /* chimera_io_uring_link_at */
 
 static void
+chimera_io_uring_lock(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd     = (int) request->lock.handle->vfs_private;
+    int                             cmd;
+    struct flock                    fl = { 0 };
+    int                             rc;
+
+    --thread->inflight;
+
+    switch (request->lock.lock_type) {
+        case CHIMERA_VFS_LOCK_READ:
+            fl.l_type = F_RDLCK;
+            break;
+        case CHIMERA_VFS_LOCK_WRITE:
+            fl.l_type = F_WRLCK;
+            break;
+        case CHIMERA_VFS_LOCK_UNLOCK:
+            fl.l_type = F_UNLCK;
+            break;
+        default:
+            request->status = chimera_linux_errno_to_status(EINVAL);
+            request->complete(request);
+            return;
+    } /* switch */
+
+    fl.l_whence = SEEK_SET;
+    fl.l_start  = request->lock.offset;
+    fl.l_len    = request->lock.length; /* 0 = to EOF */
+    fl.l_pid    = 0;
+
+    if (request->lock.flags & CHIMERA_VFS_LOCK_TEST) {
+        cmd = F_GETLK;
+    } else if (request->lock.flags & CHIMERA_VFS_LOCK_WAIT) {
+        cmd = F_SETLKW;
+    } else {
+        cmd = F_SETLK;
+    }
+
+    rc = fcntl(fd, cmd, &fl);
+
+    if (rc < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    if (request->lock.flags & CHIMERA_VFS_LOCK_TEST) {
+        if (fl.l_type == F_UNLCK) {
+            request->lock.r_conflict_type   = CHIMERA_VFS_LOCK_UNLOCK;
+            request->lock.r_conflict_offset = 0;
+            request->lock.r_conflict_length = 0;
+            request->lock.r_conflict_pid    = 0;
+        } else {
+            request->lock.r_conflict_type = (fl.l_type == F_RDLCK)
+                ? CHIMERA_VFS_LOCK_READ
+                : CHIMERA_VFS_LOCK_WRITE;
+            request->lock.r_conflict_offset = fl.l_start;
+            request->lock.r_conflict_length = fl.l_len;
+            request->lock.r_conflict_pid    = fl.l_pid;
+        }
+    }
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_io_uring_lock */
+
+static void
 chimera_io_uring_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -1652,6 +1722,9 @@ chimera_io_uring_dispatch(
         case CHIMERA_VFS_OP_SEEK:
             chimera_io_uring_seek(request, private_data);
             break;
+        case CHIMERA_VFS_OP_LOCK:
+            chimera_io_uring_lock(request, private_data);
+            break;
         default:
             chimera_io_uring_error("io_uring_dispatch: unknown operation %d",
                                    request->opcode);
@@ -1666,7 +1739,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_io_uring = {
     .name         = "io_uring",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_IO_URING,
     .capabilities = CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED | CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS |
-        CHIMERA_VFS_CAP_FS_PATH_OP,
+        CHIMERA_VFS_CAP_FS_PATH_OP | CHIMERA_VFS_CAP_FS_LOCK,
     .init           = chimera_io_uring_init,
     .destroy        = chimera_io_uring_destroy,
     .thread_init    = chimera_io_uring_thread_init,
