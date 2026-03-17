@@ -70,7 +70,8 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_SEARCH_KEYS      24
 #define CHIMERA_VFS_OP_ALLOCATE         25
 #define CHIMERA_VFS_OP_SEEK             26
-#define CHIMERA_VFS_OP_NUM              27
+#define CHIMERA_VFS_OP_LOCK             27
+#define CHIMERA_VFS_OP_NUM              28
 
 #define CHIMERA_VFS_OPEN_CREATE         (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH           (1U << 1)
@@ -82,6 +83,15 @@ struct chimera_vfs_mount_options {
 
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE 0x01
+
+/* Lock types */
+#define CHIMERA_VFS_LOCK_READ           0 /* shared / read lock */
+#define CHIMERA_VFS_LOCK_WRITE          1 /* exclusive / write lock */
+#define CHIMERA_VFS_LOCK_UNLOCK         2 /* release lock */
+
+/* Lock flags */
+#define CHIMERA_VFS_LOCK_WAIT           (1U << 0) /* block until lock is acquired (F_SETLKW) */
+#define CHIMERA_VFS_LOCK_TEST           (1U << 1) /* probe only, do not acquire (F_GETLK) */
 
 /* Readdir flags */
 #define CHIMERA_VFS_READDIR_EMIT_DOT    (1U << 0) /* Emit "." and ".." entries */
@@ -711,6 +721,19 @@ struct chimera_vfs_request {
             int                             r_eof;
             uint64_t                        r_offset;
         } seek;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;      /* first byte of locked range */
+            uint64_t                        length;      /* 0 = to EOF */
+            uint32_t                        lock_type;   /* CHIMERA_VFS_LOCK_{READ,WRITE,UNLOCK} */
+            uint32_t                        flags;       /* CHIMERA_VFS_LOCK_{WAIT,TEST} */
+            /* Result fields: populated when CHIMERA_VFS_LOCK_TEST is set */
+            uint32_t                        r_conflict_type;
+            uint64_t                        r_conflict_offset;
+            uint64_t                        r_conflict_length;
+            pid_t                           r_conflict_pid;
+        } lock;
     };
 };
 
@@ -799,6 +822,9 @@ enum CHIMERA_FS_FH_MAGIC {
  * path components one at a time using FH-relative operations.
  */
 #define CHIMERA_VFS_CAP_FS_PATH_OP         (1U << 7)
+
+/* If set, module supports byte-range file locking via chimera_vfs_lock(). */
+#define CHIMERA_VFS_CAP_FS_LOCK            (1U << 8)
 
 struct chimera_vfs_module {
     /* Required

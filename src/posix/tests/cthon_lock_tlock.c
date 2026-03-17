@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -7,9 +7,6 @@
 //
 // Tests POSIX record locking functionality using fcntl() and lockf()
 //
-// NOTE: This test is currently DISABLED because chimera does not yet
-// support the lock APIs (chimera_posix_fcntl, chimera_posix_lockf).
-// Once lock support is added, enable this test in CMakeLists.txt.
 
 #include "cthon_common.h"
 #include <signal.h>
@@ -78,8 +75,14 @@ initialize(const char *basepath)
     snprintf(testfile, sizeof(testfile), "%s/lockfile%d", basepath, parentpid);
 
     fprintf(stdout, "Creating parent/child synchronization pipes.\n");
-    pipe(parentpipe);
-    pipe(childpipe);
+    if (pipe(parentpipe) != 0) {
+        perror("tlock: parent pipe");
+        exit(1);
+    }
+    if (pipe(childpipe) != 0) {
+        perror("tlock: child pipe");
+        exit(1);
+    }
 
     fflush(stdout);
 } /* initialize */
@@ -330,10 +333,6 @@ close_testfile(int cleanup)
     }
 } /* close_testfile */
 
-// NOTE: The following functions use chimera_posix_lockf which does not exist yet.
-// When lock support is added, implement chimera_posix_lockf() or chimera_posix_fcntl()
-// with F_SETLK/F_SETLKW/F_GETLK support.
-
 static void
 test(
     int   num,
@@ -346,31 +345,16 @@ test(
 {
     int result = PASS;
 
-    // Seek to the lock position
     if (chimera_posix_lseek(testfd, offset, SEEK_SET) < 0) {
         result = errno;
     }
 
-    if (result == 0) {
-        // NOTE: chimera_posix_lockf() does not exist yet
-        // When implemented, uncomment the following:
-        // if ((result = chimera_posix_lockf(testfd, func, length)) != 0) {
-        //     if (result != -1) {
-        //         fprintf(stderr, "tlock: lockf() returned %d.\n", result);
-        //         testexit(1);
-        //     }
-        //     result = errno;
-        // }
-
-        // For now, just simulate success for non-blocking operations
-        // This allows the test to be compiled but won't actually test locking
-        if (func == F_TLOCK || func == F_ULOCK || func == F_TEST) {
-            result = PASS;
-        } else if (func == F_LOCK) {
-            // F_LOCK is blocking - simulate success
-            result = PASS;
+    if (result == PASS) {
+        if (chimera_posix_lockf(testfd, func, length) != 0) {
+            result = errno;
         }
     }
+
     report(num, sec, tfunstr(func), offset, length, pass, result, fail);
 } /* test */
 
@@ -528,16 +512,20 @@ main(
     int    argc,
     char **argv)
 {
-    struct posix_test_env env;
-    int                   rc;
-    int                   opt;
+    struct posix_test_env   env;
+    struct chimera_vfs_cred root_cred;
+    struct timespec         tv;
+    json_t                 *posix_json_root, *posix_json_config;
+    char                    posix_json_path[300];
+    int                     rc;
+    int                     opt;
 
     cthon_Myname = "cthon_lock_tlock";
 
-    posix_test_init(&env, argv, argc);
-
-    optind  = 1;
     passcnt = 1;
+
+    /* Parse all options before fork so both processes share the same settings. */
+    optind = 1;
     while ((opt = getopt(argc, argv, "hb:p:t:w:")) != -1) {
         switch (opt) {
             case 'b': break;
@@ -554,30 +542,101 @@ main(
         } /* switch */
     }
 
-    rc = posix_test_mount(&env);
-    if (rc != 0) {
-        fprintf(stderr, "Failed to mount: %s\n", strerror(errno));
-        posix_test_fail(&env);
+    /*
+     * Pre-fork setup: create session directory and config file.
+     * Chimera client threads must NOT be started before fork() because
+     * after fork() only the calling thread survives - the worker threads
+     * would be dead in the child and chimera_posix_wait() would block
+     * forever.  Each process initialises its own client after fork.
+     */
+    memset(&env, 0, sizeof(env));
+    env.metrics     = prometheus_metrics_create(NULL, NULL, 0);
+    env.nfs_version = 0;
+    env.server      = NULL;
+
+    /* Pick up the -b backend option */
+    {
+        int saved_optind = optind;
+        int saved_opterr = opterr;
+        opterr = 0;
+        optind = 1;
+        while ((opt = getopt(argc, argv, "+b:")) != -1) {
+            if (opt == 'b') {
+                env.backend = optarg;
+            }
+        }
+        opterr = saved_opterr;
+        optind = saved_optind;
     }
 
-    cthon_testdir(NULL);
+    if (!env.backend) {
+        env.backend = "linux";
+    }
+
+    chimera_log_init();
+    ChimeraLogLevel = CHIMERA_LOG_DEBUG;
+
+    clock_gettime(CLOCK_MONOTONIC, &tv);
+    snprintf(env.session_dir, sizeof(env.session_dir),
+             "/build/test/posix_session_%d_%lu_%lu",
+             getpid(), (unsigned long) tv.tv_sec, (unsigned long) tv.tv_nsec);
+
+    fprintf(stderr, "Creating session directory %s\n", env.session_dir);
+    (void) mkdir("/build/test", 0755);
+    (void) mkdir(env.session_dir, 0755);
+
+    /* Write posix.json config (no VFS-specific section needed for linux backend). */
+    posix_json_root   = json_object();
+    posix_json_config = json_object();
+    json_object_set_new(posix_json_root, "config", posix_json_config);
+    chimera_test_write_users_json(posix_json_root);
+    snprintf(posix_json_path, sizeof(posix_json_path), "%s/posix.json", env.session_dir);
+    json_dump_file(posix_json_root, posix_json_path, 0);
+    json_decref(posix_json_root);
+
+    chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
 
     fprintf(stdout, "%s: record locking test\n", cthon_Myname);
-    fprintf(stdout, "NOTE: Lock APIs not yet implemented - test is placeholder only\n");
 
-    initialize(cthon_getcwd());
+    /*
+     * initialize() only sets up parentpid, testfile path, and pipes -
+     * no chimera calls.  Call it before fork so both processes share
+     * the same testfile path and pipe endpoints.
+     */
+    initialize("/test/nfstestdir");
 
-    // Fork child
+    /* Fork BEFORE starting chimera client threads. */
     if ((childpid = fork()) == 0) {
         who = CHILD;
-        signal(SIGINT, parentsig);
+        signal(SIGINT, childsig);
     } else {
         who = PARENT;
-        signal(SIGINT, childsig);
+        signal(SIGINT, parentsig);
         signal(SIGCHLD, SIG_DFL);
     }
 
-    // Run tests for count passes
+    /*
+     * Each process (parent and child) starts its own chimera client
+     * independently after the fork.
+     */
+    env.posix = chimera_posix_init_json(posix_json_path, &root_cred, env.metrics);
+    if (!env.posix) {
+        fprintf(stderr, "%s: Failed to initialize POSIX client\n",
+                (who == PARENT) ? "Parent" : "Child");
+        exit(EXIT_FAILURE);
+    }
+
+    rc = posix_test_mount(&env);
+    if (rc != 0) {
+        fprintf(stderr, "%s: Failed to mount: %s\n",
+                (who == PARENT) ? "Parent" : "Child", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    /* Create the shared test directory (chimera call, requires client running). */
+    cthon_testdir(NULL);
+
+    /* Run tests for count passes. */
     for (passnum = 1; passnum <= passcnt; passnum++) {
         runtests();
         if (who == CHILD) {
@@ -598,7 +657,6 @@ main(
     }
 
     if (who == PARENT) {
-        fprintf(stdout, "\tlock test completed (placeholder)\n");
         cthon_complete();
         posix_test_umount();
         posix_test_success(&env);

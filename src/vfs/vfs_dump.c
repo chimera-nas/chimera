@@ -38,6 +38,8 @@ chimera_vfs_op_name(unsigned int opcode)
         case CHIMERA_VFS_OP_LINK_AT: return "Link";
         case CHIMERA_VFS_OP_CREATE_UNLINKED: return "CreateUnlinked";
         case CHIMERA_VFS_OP_ALLOCATE: return "Allocate";
+        case CHIMERA_VFS_OP_SEEK: return "Seek";
+        case CHIMERA_VFS_OP_LOCK: return "Lock";
         default: return "Unknown";
     } /* switch */
 

@@ -63,6 +63,8 @@ chimera_linux_errno_to_status(int err)
             return CHIMERA_VFS_EIO;
         case ENXIO:
             return CHIMERA_VFS_ENXIO;
+        case EAGAIN:
+            return CHIMERA_VFS_EAGAIN;
         case EACCES:
             return CHIMERA_VFS_EACCES;
         case EFAULT:
