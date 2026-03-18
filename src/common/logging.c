@@ -187,6 +187,18 @@ chimera_log_flush_signal(int signum)
 } /* chimera_log_flush */
 
 static void
+chimera_log_atfork_child(void)
+{
+    /*
+     * After fork() only the calling thread survives.  The log thread from
+     * the parent does not exist in the child, so clear ChimeraLogRun so
+     * that the inherited atexit handler does not attempt to pthread_join()
+     * the parent's (now-invalid) thread handle.
+     */
+    ChimeraLogRun = 0;
+} /* chimera_log_atfork_child */
+
+static void
 chimera_log_thread_init(void)
 {
     int i;
@@ -204,6 +216,7 @@ chimera_log_thread_init(void)
     sa.sa_flags = 0;
     sigaction(SIGABRT, &sa, NULL);
 
+    pthread_atfork(NULL, NULL, chimera_log_atfork_child);
     pthread_create(&ChimeraLogThread, NULL, chimera_log_thread, NULL);
     atexit(chimera_log_thread_exit);
 
