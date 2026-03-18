@@ -126,7 +126,7 @@ char              *ChimeraLogBuffers[2];
 int                ChimeraLogIndex   = 0;
 char              *ChimeraLogBuf     = NULL;
 char              *ChimeraLogBufPtr  = NULL;
-int                ChimeraLogRun     = 1;
+volatile int       ChimeraLogRun     = 1;
 SYMBOL_EXPORT int  ChimeraLogLevel   = CHIMERA_LOG_INFO;
 pthread_mutex_t    ChimeraLogBufLock = PTHREAD_MUTEX_INITIALIZER;
 pthread_t          ChimeraLogThread;
@@ -187,14 +187,30 @@ chimera_log_flush_signal(int signum)
 } /* chimera_log_flush */
 
 static void
+chimera_log_atfork_prepare(void)
+{
+    pthread_mutex_lock(&ChimeraLogBufLock);
+} /* chimera_log_atfork_prepare */
+
+static void
+chimera_log_atfork_parent(void)
+{
+    pthread_mutex_unlock(&ChimeraLogBufLock);
+} /* chimera_log_atfork_parent */
+
+static void
 chimera_log_atfork_child(void)
 {
     /*
-     * After fork() only the calling thread survives.  The log thread from
-     * the parent does not exist in the child, so clear ChimeraLogRun so
-     * that the inherited atexit handler does not attempt to pthread_join()
-     * the parent's (now-invalid) thread handle.
+     * Reinitialize the mutex regardless of its state at fork time: if the
+     * parent held it when fork() was called, the child inherits it locked
+     * and no thread in the child will ever release it.  Re-initializing is
+     * safe in both cases.  Also clear ChimeraLogRun so the inherited atexit
+     * handler does not attempt to pthread_join() the parent's (now-invalid)
+     * thread handle.  Any log data buffered by the parent at fork time is
+     * discarded in the child.
      */
+    pthread_mutex_init(&ChimeraLogBufLock, NULL);
     ChimeraLogRun = 0;
 } /* chimera_log_atfork_child */
 
@@ -216,7 +232,8 @@ chimera_log_thread_init(void)
     sa.sa_flags = 0;
     sigaction(SIGABRT, &sa, NULL);
 
-    pthread_atfork(NULL, NULL, chimera_log_atfork_child);
+    pthread_atfork(chimera_log_atfork_prepare, chimera_log_atfork_parent,
+                   chimera_log_atfork_child);
     pthread_create(&ChimeraLogThread, NULL, chimera_log_thread, NULL);
     atexit(chimera_log_thread_exit);
 

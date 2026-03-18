@@ -173,7 +173,7 @@ main(
     int                     rc;
     int                     opt;
     struct timespec         tv;
-    json_t                 *posix_json_root, *posix_json_config;
+    json_t                 *posix_json_root;
 
     /*
      * Pre-fork setup: create session directory and write posix.json.
@@ -217,9 +217,8 @@ main(
     (void) mkdir("/build/test", 0755);
     (void) mkdir(env.session_dir, 0755);
 
-    posix_json_root   = json_object();
-    posix_json_config = json_object();
-    json_object_set_new(posix_json_root, "config", posix_json_config);
+    posix_json_root = json_object();
+    json_object_set_new(posix_json_root, "config", json_object());
     chimera_test_write_users_json(posix_json_root);
     snprintf(posix_json_path, sizeof(posix_json_path),
              "%s/posix.json", env.session_dir);

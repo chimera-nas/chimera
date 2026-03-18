@@ -321,6 +321,7 @@ struct chimera_client_request {
             uint64_t                        length;
             uint32_t                        lock_type;    /* CHIMERA_VFS_LOCK_{READ,WRITE,UNLOCK} */
             uint32_t                        flags;        /* CHIMERA_VFS_LOCK_{WAIT,TEST} */
+            int32_t                         whence;       /* SEEK_SET or SEEK_END */
             chimera_lock_callback_t         callback;
             void                           *private_data;
             /* Result fields populated by VFS callback */

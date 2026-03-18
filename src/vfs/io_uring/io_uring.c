@@ -1602,14 +1602,27 @@ chimera_io_uring_lock(
             return;
     } /* switch */
 
-    fl.l_whence = SEEK_SET;
-    fl.l_start  = request->lock.offset;
-    fl.l_len    = request->lock.length; /* 0 = to EOF */
-    fl.l_pid    = 0;
+    fl.l_whence = request->lock.whence;
+    if (request->lock.whence == SEEK_END) {
+        fl.l_start = (off_t) (int64_t) request->lock.offset;
+        fl.l_len   = (off_t) (int64_t) request->lock.length;
+    } else {
+        fl.l_start = (off_t) request->lock.offset;
+        fl.l_len   = (off_t) request->lock.length; /* 0 = to EOF */
+    }
+    fl.l_pid = 0;
 
     if (request->lock.flags & CHIMERA_VFS_LOCK_TEST) {
         cmd = F_GETLK;
     } else if (request->lock.flags & CHIMERA_VFS_LOCK_WAIT) {
+        /*
+         * NOTE: F_SETLKW is a blocking syscall.  Unlike lseek or fallocate,
+         * which complete quickly, this call can block indefinitely until the
+         * contending lock is released.  While blocked here, this io_uring
+         * thread cannot process any other requests.  A proper async fix would
+         * offload the wait to a dedicated thread and deliver the completion
+         * via the evpl doorbell.
+         */
         cmd = F_SETLKW;
     } else {
         cmd = F_SETLK;

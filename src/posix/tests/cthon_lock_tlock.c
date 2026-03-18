@@ -515,7 +515,7 @@ main(
     struct posix_test_env   env;
     struct chimera_vfs_cred root_cred;
     struct timespec         tv;
-    json_t                 *posix_json_root, *posix_json_config;
+    json_t                 *posix_json_root;
     char                    posix_json_path[300];
     int                     rc;
     int                     opt;
@@ -586,9 +586,8 @@ main(
     (void) mkdir(env.session_dir, 0755);
 
     /* Write posix.json config (no VFS-specific section needed for linux backend). */
-    posix_json_root   = json_object();
-    posix_json_config = json_object();
-    json_object_set_new(posix_json_root, "config", posix_json_config);
+    posix_json_root = json_object();
+    json_object_set_new(posix_json_root, "config", json_object());
     chimera_test_write_users_json(posix_json_root);
     snprintf(posix_json_path, sizeof(posix_json_path), "%s/posix.json", env.session_dir);
     json_dump_file(posix_json_root, posix_json_path, 0);

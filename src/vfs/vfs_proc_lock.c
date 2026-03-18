@@ -28,6 +28,7 @@ chimera_vfs_lock(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
+    int32_t                         whence,
     uint64_t                        offset,
     uint64_t                        length,
     uint32_t                        lock_type,
@@ -52,6 +53,7 @@ chimera_vfs_lock(
     request->opcode             = CHIMERA_VFS_OP_LOCK;
     request->complete           = chimera_vfs_lock_complete;
     request->lock.handle        = handle;
+    request->lock.whence        = whence;
     request->lock.offset        = offset;
     request->lock.length        = length;
     request->lock.lock_type     = lock_type;

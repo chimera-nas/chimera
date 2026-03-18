@@ -21,13 +21,13 @@ chimera_lock_complete(
     void                          *callback_arg   = request->lock.private_data;
     int                            heap_allocated = request->heap_allocated;
 
-    request->lock.r_conflict_type   = conflict_type;
-    request->lock.r_conflict_offset = conflict_offset;
-    request->lock.r_conflict_length = conflict_length;
-    request->lock.r_conflict_pid    = conflict_pid;
-
     if (heap_allocated) {
         chimera_client_request_free(client_thread, request);
+    } else {
+        request->lock.r_conflict_type   = conflict_type;
+        request->lock.r_conflict_offset = conflict_offset;
+        request->lock.r_conflict_length = conflict_length;
+        request->lock.r_conflict_pid    = conflict_pid;
     }
 
     callback(client_thread, error_code,
@@ -44,6 +44,7 @@ chimera_dispatch_lock(
         thread->vfs_thread,
         &thread->client->cred,
         request->lock.handle,
+        request->lock.whence,
         request->lock.offset,
         request->lock.length,
         request->lock.lock_type,

@@ -47,7 +47,9 @@ chimera_posix_fcntl(
     struct flock                   *fl;
     uint32_t                        lock_type;
     uint32_t                        flags = 0;
+    int32_t                         whence;
     uint64_t                        offset;
+    uint64_t                        length;
     va_list                         args;
 
     switch (cmd) {
@@ -91,11 +93,38 @@ chimera_posix_fcntl(
     }
 
     switch (fl->l_whence) {
-        case SEEK_SET:
+        case SEEK_SET: {
+            if (fl->l_start < 0) {
+                chimera_posix_fd_release(entry, 0);
+                errno = EINVAL;
+                return -1;
+            }
+            whence = SEEK_SET;
             offset = (uint64_t) fl->l_start;
             break;
-        case SEEK_CUR:
-            offset = entry->offset + (uint64_t) fl->l_start;
+        }
+        case SEEK_CUR: {
+            int64_t abs_offset = (int64_t) entry->offset + (int64_t) fl->l_start;
+
+            if (abs_offset < 0) {
+                chimera_posix_fd_release(entry, 0);
+                errno = EINVAL;
+                return -1;
+            }
+            whence = SEEK_SET;
+            offset = (uint64_t) abs_offset;
+            break;
+        }
+        case SEEK_END:
+            /*
+             * Pass SEEK_END through to the backend so the kernel resolves
+             * the offset relative to EOF atomically, avoiding a TOCTOU race
+             * between a separate fstat and the subsequent fcntl call.
+             * offset and length are stored as bit-casts of the signed values;
+             * the backends cast them back to off_t when whence == SEEK_END.
+             */
+            whence = SEEK_END;
+            offset = (uint64_t) (int64_t) fl->l_start;
             break;
         default:
             chimera_posix_fd_release(entry, 0);
@@ -103,12 +132,37 @@ chimera_posix_fcntl(
             return -1;
     } /* switch */
 
+    /*
+     * Normalize negative l_len for pre-resolved (SEEK_SET) cases.
+     * A negative l_len means the region extends backwards from the start:
+     * the actual range is [start + l_len, start - 1].  Reject if that
+     * would place the start before byte 0.
+     * For SEEK_END the raw l_len is passed through to the backend as a
+     * bit-cast; the kernel handles negative l_len natively.
+     */
+    if (whence == SEEK_END) {
+        length = (uint64_t) (int64_t) fl->l_len;
+    } else if (fl->l_len < 0) {
+        int64_t signed_offset = (int64_t) offset + (int64_t) fl->l_len;
+
+        if (signed_offset < 0) {
+            chimera_posix_fd_release(entry, 0);
+            errno = EINVAL;
+            return -1;
+        }
+        offset = (uint64_t) signed_offset;
+        length = (uint64_t) (-(int64_t) fl->l_len);
+    } else {
+        length = (uint64_t) fl->l_len;   /* 0 = lock to EOF (POSIX) */
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
     req.opcode            = CHIMERA_CLIENT_OP_LOCK;
     req.lock.handle       = entry->handle;
+    req.lock.whence       = whence;
     req.lock.offset       = offset;
-    req.lock.length       = (uint64_t) fl->l_len;
+    req.lock.length       = length;
     req.lock.lock_type    = lock_type;
     req.lock.flags        = flags;
     req.lock.callback     = chimera_posix_fcntl_lock_callback;

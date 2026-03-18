@@ -184,7 +184,7 @@ main(
     int                     rc;
     int                     opt;
     struct timespec         tv;
-    json_t                 *posix_json_root, *posix_json_config;
+    json_t                 *posix_json_root;
 
     /*
      * Pre-fork setup: create session directory and write posix.json.
@@ -228,9 +228,8 @@ main(
     (void) mkdir("/build/test", 0755);
     (void) mkdir(env.session_dir, 0755);
 
-    posix_json_root   = json_object();
-    posix_json_config = json_object();
-    json_object_set_new(posix_json_root, "config", posix_json_config);
+    posix_json_root = json_object();
+    json_object_set_new(posix_json_root, "config", json_object());
     chimera_test_write_users_json(posix_json_root);
     snprintf(posix_json_path, sizeof(posix_json_path),
              "%s/posix.json", env.session_dir);
@@ -366,6 +365,97 @@ main(
     fl.l_type = F_UNLCK;
     chimera_posix_fcntl(fd, F_SETLK, &fl);
     fprintf(stderr, "  F_SETLK SEEK_CUR: PASS\n");
+
+    /* F_SETLK SEEK_END - write 20 bytes so the file has a known size, then
+     * lock the last 10 bytes using a negative SEEK_END offset. */
+    {
+        char buf[20];
+
+        memset(buf, 0, sizeof(buf));
+        chimera_posix_lseek(fd, 0, SEEK_SET);
+        chimera_posix_write(fd, buf, sizeof(buf));
+    }
+
+    fl.l_type   = F_WRLCK;
+    fl.l_whence = SEEK_END;
+    fl.l_start  = -10;
+    fl.l_len    = 10;
+    rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
+
+    if (rc != 0) {
+        fprintf(stderr, "F_SETLK SEEK_END failed: %s\n", strerror(errno));
+        posix_test_fail(&env);
+    }
+
+    fl.l_type   = F_UNLCK;
+    fl.l_whence = SEEK_END;
+    fl.l_start  = -10;
+    fl.l_len    = 10;
+    chimera_posix_fcntl(fd, F_SETLK, &fl);
+    fprintf(stderr, "  F_SETLK SEEK_END: PASS\n");
+
+    /* SEEK_SET negative l_start -> EINVAL */
+    fl.l_type   = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start  = -1;
+    fl.l_len    = 10;
+    rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
+
+    if (rc != -1 || errno != EINVAL) {
+        fprintf(stderr, "SEEK_SET negative: expected -1/EINVAL "
+                "(rc=%d errno=%d)\n", rc, errno);
+        posix_test_fail(&env);
+    }
+
+    fprintf(stderr, "  SEEK_SET negative l_start -> EINVAL: PASS\n");
+
+    /* SEEK_CUR negative result -> EINVAL (seek to 0 then l_start=-1) */
+    chimera_posix_lseek(fd, 0, SEEK_SET);
+    fl.l_type   = F_WRLCK;
+    fl.l_whence = SEEK_CUR;
+    fl.l_start  = -1;
+    fl.l_len    = 10;
+    rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
+
+    if (rc != -1 || errno != EINVAL) {
+        fprintf(stderr, "SEEK_CUR negative: expected -1/EINVAL "
+                "(rc=%d errno=%d)\n", rc, errno);
+        posix_test_fail(&env);
+    }
+
+    fprintf(stderr, "  SEEK_CUR negative result -> EINVAL: PASS\n");
+
+    /* SEEK_END offset before file start -> EINVAL (file=20 bytes, l_start=-100) */
+    fl.l_type   = F_WRLCK;
+    fl.l_whence = SEEK_END;
+    fl.l_start  = -100;
+    fl.l_len    = 10;
+    rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
+
+    if (rc != -1 || errno != EINVAL) {
+        fprintf(stderr, "SEEK_END before file start: expected -1/EINVAL "
+                "(rc=%d errno=%d)\n", rc, errno);
+        posix_test_fail(&env);
+    }
+
+    fprintf(stderr, "  SEEK_END offset before file start -> EINVAL: PASS\n");
+
+    /* F_SETLK l_len=0 (lock to EOF) */
+    fl.l_type   = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start  = 0;
+    fl.l_len    = 0;
+    rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
+
+    if (rc != 0) {
+        fprintf(stderr, "F_SETLK l_len=0 (to EOF) failed: %s\n", strerror(errno));
+        posix_test_fail(&env);
+    }
+
+    fprintf(stderr, "  F_SETLK l_len=0 (to EOF): PASS\n");
+
+    fl.l_type = F_UNLCK;
+    chimera_posix_fcntl(fd, F_SETLK, &fl);
 
     /* Invalid cmd -> EINVAL */
     rc = chimera_posix_fcntl(fd, 9999, NULL);

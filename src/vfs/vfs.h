@@ -724,10 +724,11 @@ struct chimera_vfs_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
-            uint64_t                        offset;      /* first byte of locked range */
-            uint64_t                        length;      /* 0 = to EOF */
+            uint64_t                        offset;      /* first byte of range (raw l_start for SEEK_END) */
+            uint64_t                        length;      /* 0 = to EOF (raw l_len for SEEK_END) */
             uint32_t                        lock_type;   /* CHIMERA_VFS_LOCK_{READ,WRITE,UNLOCK} */
             uint32_t                        flags;       /* CHIMERA_VFS_LOCK_{WAIT,TEST} */
+            int32_t                         whence;      /* SEEK_SET or SEEK_END */
             /* Result fields: populated when CHIMERA_VFS_LOCK_TEST is set */
             uint32_t                        r_conflict_type;
             uint64_t                        r_conflict_offset;

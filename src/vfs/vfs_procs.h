@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -615,6 +615,7 @@ chimera_vfs_lock(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
+    int32_t                         whence,
     uint64_t                        offset,
     uint64_t                        length,
     uint32_t                        lock_type,

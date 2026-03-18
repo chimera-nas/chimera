@@ -1294,10 +1294,15 @@ chimera_linux_lock(
             return;
     } /* switch */
 
-    fl.l_whence = SEEK_SET;
-    fl.l_start  = request->lock.offset;
-    fl.l_len    = request->lock.length; /* 0 = to EOF */
-    fl.l_pid    = 0;
+    fl.l_whence = request->lock.whence;
+    if (request->lock.whence == SEEK_END) {
+        fl.l_start = (off_t) (int64_t) request->lock.offset;
+        fl.l_len   = (off_t) (int64_t) request->lock.length;
+    } else {
+        fl.l_start = (off_t) request->lock.offset;
+        fl.l_len   = (off_t) request->lock.length; /* 0 = to EOF */
+    }
+    fl.l_pid = 0;
 
     if (request->lock.flags & CHIMERA_VFS_LOCK_TEST) {
         cmd = F_GETLK;
