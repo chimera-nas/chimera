@@ -13,12 +13,16 @@
 
 #define NFS4_SESSION_MAX_STATE 1024
 
+#define NFS4_STATE_TYPE_OPEN   0
+#define NFS4_STATE_TYPE_LOCK   1
+
 struct nfs4_state {
     struct stateid4                 nfs4_state_id;
     uint16_t                        nfs4_state_type;
     uint16_t                        nfs4_state_active;
     uint32_t                        nfs4_state_refcnt;
     struct chimera_vfs_open_handle *nfs4_state_handle;
+    uint32_t                        nfs4_state_parent_slot; /* open slot index for LOCK states */
 };
 
 struct nfs4_client {
@@ -127,9 +131,11 @@ nfs4_session_alloc_slot(struct nfs4_session *session)
     *(uint32_t *) state->nfs4_state_id.other       = slot;
     *(uint64_t *) (state->nfs4_state_id.other + 4) = session->nfs4_session_clientid;
 
-    state->nfs4_state_active = 1;
-    state->nfs4_state_refcnt = 0;
-    state->nfs4_state_handle = NULL;
+    state->nfs4_state_type        = NFS4_STATE_TYPE_OPEN;
+    state->nfs4_state_active      = 1;
+    state->nfs4_state_refcnt      = 0;
+    state->nfs4_state_handle      = NULL;
+    state->nfs4_state_parent_slot = NFS4_SESSION_MAX_STATE;
 
     pthread_mutex_unlock(&session->nfs4_session_lock);
 
@@ -156,7 +162,9 @@ nfs4_session_free_slot(
     state->nfs4_state_active = 0;
 
     if (state->nfs4_state_refcnt == 0) {
-        *out_handle                                   = state->nfs4_state_handle;
+        if (state->nfs4_state_type != NFS4_STATE_TYPE_LOCK) {
+            *out_handle = state->nfs4_state_handle;
+        }
         state->nfs4_state_handle                      = NULL;
         session->free_slot[session->num_free_slots++] = slot;
         pthread_mutex_unlock(&session->nfs4_session_lock);
@@ -167,6 +175,26 @@ nfs4_session_free_slot(
     pthread_mutex_unlock(&session->nfs4_session_lock);
     return 1;
 } /* nfs4_session_free_slot */
+
+static inline void
+nfs4_session_free_lock_states(
+    struct nfs4_session *session,
+    uint32_t             open_slot)
+{
+    struct chimera_vfs_open_handle *unused;
+    uint32_t                        i;
+
+    for (i = 0; i < NFS4_SESSION_MAX_STATE; i++) {
+        struct nfs4_state *s = &session->nfs4_session_state[i];
+
+        if (s->nfs4_state_type        == NFS4_STATE_TYPE_LOCK &&
+            s->nfs4_state_active      == 1 &&
+            s->nfs4_state_parent_slot == open_slot) {
+            s->nfs4_state_handle = NULL;
+            nfs4_session_free_slot(session, s, &unused);
+        }
+    }
+} /* nfs4_session_free_lock_states */
 
 static inline struct nfs4_state *
 nfs4_session_get_state(
@@ -229,8 +257,10 @@ nfs4_session_release_state(
     state->nfs4_state_refcnt--;
 
     if (state->nfs4_state_refcnt == 0 && !state->nfs4_state_active) {
-        /* CLOSE already ran; we are the last user — do deferred cleanup */
-        handle                   = state->nfs4_state_handle;
+        /* CLOSE already ran; we are the last user - do deferred cleanup */
+        if (state->nfs4_state_type != NFS4_STATE_TYPE_LOCK) {
+            handle = state->nfs4_state_handle;
+        }
         state->nfs4_state_handle = NULL;
         uint32_t slot = *(uint32_t *) state->nfs4_state_id.other;
         session->free_slot[session->num_free_slots++] = slot;

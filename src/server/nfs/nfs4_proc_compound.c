@@ -150,6 +150,15 @@ chimera_nfs4_compound_process(
             case OP_SEEK:
                 chimera_nfs4_seek(thread, req, argop, resop);
                 break;
+            case OP_LOCK:
+                chimera_nfs4_lock(thread, req, argop, resop);
+                break;
+            case OP_LOCKT:
+                chimera_nfs4_lockt(thread, req, argop, resop);
+                break;
+            case OP_LOCKU:
+                chimera_nfs4_locku(thread, req, argop, resop);
+                break;
             default:
                 chimera_nfs_error("Unsupported operation: %d", argop->argop);
                 if (argop->argop >= OP_ACCESS && argop->argop <= OP_CLONE) {

@@ -34,14 +34,29 @@ chimera_nfs4_close(
         evpl_rpc2_conn_set_private_data(req->conn, session);
     }
 
+    if (*(uint32_t *) args->open_stateid.other >= NFS4_SESSION_MAX_STATE) {
+        res->status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
     state = nfs4_session_get_state(session, &args->open_stateid);
+
+    if (state->nfs4_state_type != NFS4_STATE_TYPE_OPEN) {
+        res->status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
+    nfs4_session_free_lock_states(session, *(uint32_t *) state->nfs4_state_id.other);
+
+    res->open_stateid = state->nfs4_state_id;
 
     rc = nfs4_session_free_slot(session, state, &handle);
 
     if (rc < 0) {
         res->status = NFS4ERR_BAD_STATEID;
     } else {
-        res->open_stateid = state->nfs4_state_id;
         if (handle) {
             chimera_vfs_release(thread->vfs_thread, handle);
         }
