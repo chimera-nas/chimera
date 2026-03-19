@@ -76,11 +76,13 @@ nfs4_root_lookup_complete(
     res->status = status;
 
     if (error_code == CHIMERA_VFS_OK) {
-        chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
-                             "NFS4 lookup: no file handle was returned");
-
-        memcpy(req->fh, attr->va_fh, attr->va_fh_len);
-        req->fhlen = attr->va_fh_len;
+        if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+            res->status = NFS4ERR_SERVERFAULT;
+            status      = NFS4ERR_SERVERFAULT;
+        } else {
+            memcpy(req->fh, attr->va_fh, attr->va_fh_len);
+            req->fhlen = attr->va_fh_len;
+        }
     }
 
     chimera_nfs4_compound_complete(req, status);

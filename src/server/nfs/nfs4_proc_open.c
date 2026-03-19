@@ -312,6 +312,13 @@ chimera_nfs4_open(
     struct nfs_resop4                *resop)
 {
     struct OPEN4args *args = &argop->opopen;
+    struct OPEN4res  *res  = &resop->opopen;
+
+    if (req->fhlen == 0) {
+        res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
 
     if (!req->session) {
         req->session = nfs4_session_find_by_clientid(

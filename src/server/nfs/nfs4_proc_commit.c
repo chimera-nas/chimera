@@ -65,6 +65,14 @@ chimera_nfs4_commit(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
+    struct COMMIT4res *res = &resop->opcommit;
+
+    if (req->fhlen == 0) {
+        res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                         req->fh,
                         req->fhlen,
