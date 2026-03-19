@@ -89,6 +89,12 @@ chimera_nfs4_link(
     struct LINK4args *args = &argop->oplink;
     struct LINK4res  *res  = &resop->oplink;
 
+    if (req->fhlen == 0 || req->saved_fhlen == 0) {
+        res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     if (args->newname.len == 0) {
         res->status = NFS4ERR_INVAL;
         chimera_nfs4_compound_complete(req, NFS4ERR_INVAL);

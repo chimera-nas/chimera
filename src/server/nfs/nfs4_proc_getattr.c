@@ -99,6 +99,13 @@ chimera_nfs4_getattr(
     struct nfs_resop4                *resop)
 {
     struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
+    struct GETATTR4res  *res  = &resop->opgetattr;
+
+    if (req->fhlen == 0) {
+        res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
 
     if (fh_is_nfs4_root(req->fh, req->fhlen)) {
         struct chimera_vfs_attrs attr;

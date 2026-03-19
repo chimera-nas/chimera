@@ -71,6 +71,12 @@ chimera_nfs4_remove(
     struct REMOVE4args *args = &argop->opremove;
     struct REMOVE4res  *res  = &resop->opremove;
 
+    if (req->fhlen == 0) {
+        res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     if (args->target.len == 0) {
         res->status = NFS4ERR_INVAL;
         chimera_nfs4_compound_complete(req, NFS4ERR_INVAL);

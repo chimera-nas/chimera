@@ -110,6 +110,12 @@ chimera_nfs4_rename(
     struct RENAME4res  *res  = &resop->oprename;
     nfsstat4            status;
 
+    if (req->fhlen == 0 || req->saved_fhlen == 0) {
+        res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     status = chimera_nfs4_check_name(&args->oldname);
 
     if (status == NFS4_OK) {
