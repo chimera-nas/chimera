@@ -601,3 +601,24 @@ chimera_vfs_seek(
     uint32_t                        what,
     chimera_vfs_seek_callback_t     callback,
     void                           *private_data);
+
+typedef void (*chimera_vfs_lock_callback_t)(
+    enum chimera_vfs_error error_code,
+    uint32_t               conflict_type,
+    uint64_t               conflict_offset,
+    uint64_t               conflict_length,
+    pid_t                  conflict_pid,
+    void                  *private_data);
+
+void
+chimera_vfs_lock(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    int32_t                         whence,
+    uint64_t                        offset,
+    uint64_t                        length,
+    uint32_t                        lock_type,
+    uint32_t                        flags,
+    chimera_vfs_lock_callback_t     callback,
+    void                           *private_data);

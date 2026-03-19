@@ -518,6 +518,19 @@ chimera_posix_ftruncate(
     int   fd,
     off_t length);
 
+// File locking
+int
+chimera_posix_fcntl(
+    int fd,
+    int cmd,
+    ...);
+
+int
+chimera_posix_lockf(
+    int   fd,
+    int   cmd,
+    off_t len);
+
 // Sync functions
 int
 chimera_posix_fsync(

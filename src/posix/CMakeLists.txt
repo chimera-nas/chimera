@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
@@ -61,6 +61,8 @@ add_library(chimera_posix SHARED
             posix_fchownat.c
             posix_truncate.c
             posix_ftruncate.c
+            posix_fcntl.c
+            posix_lockf.c
             posix_fsync.c
             posix_fdatasync.c
             posix_dup.c

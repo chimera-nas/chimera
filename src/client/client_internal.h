@@ -52,6 +52,7 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_STATFS,
     CHIMERA_CLIENT_OP_FSTATFS,
     CHIMERA_CLIENT_OP_MKNOD,
+    CHIMERA_CLIENT_OP_LOCK,
 };
 
 struct chimera_client_request;
@@ -313,6 +314,22 @@ struct chimera_client_request {
             chimera_fstatfs_callback_t      callback;
             void                           *private_data;
         } fstatfs;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint64_t                        length;
+            uint32_t                        lock_type;    /* CHIMERA_VFS_LOCK_{READ,WRITE,UNLOCK} */
+            uint32_t                        flags;        /* CHIMERA_VFS_LOCK_{WAIT,TEST} */
+            int32_t                         whence;       /* SEEK_SET or SEEK_END */
+            chimera_lock_callback_t         callback;
+            void                           *private_data;
+            /* Result fields populated by VFS callback */
+            uint32_t                        r_conflict_type;
+            uint64_t                        r_conflict_offset;
+            uint64_t                        r_conflict_length;
+            pid_t                           r_conflict_pid;
+        } lock;
     };
 } __attribute__((aligned(64)));
 

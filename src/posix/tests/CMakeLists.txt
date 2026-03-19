@@ -325,11 +325,6 @@ set(CTHON_SPECIAL_TEST_PROGRAMS
     cthon_special_stat2
 )
 
-# List of cthon lock test programs (disabled - lock APIs not yet implemented)
-# When lock support is added, move these to CTHON_LOCK_TEST_PROGRAMS and enable
-# set(CTHON_LOCK_TEST_PROGRAMS
-#     cthon_lock_tlock
-# )
 
 # All cthon test programs
 set(CTHON_TEST_PROGRAMS
@@ -367,6 +362,29 @@ endif()
 generate_cthon_backend_tests(cairn CAIRN_ENABLED)
 generate_cthon_backend_tests(linux "")
 generate_cthon_backend_tests(io_uring CHIMERA_VFS_IO_URING)
+
+# Cthon lock test programs (backends with CHIMERA_VFS_CAP_FS_LOCK)
+set(CTHON_LOCK_TEST_PROGRAMS
+    cthon_lock_tlock
+)
+
+foreach(prog ${CTHON_LOCK_TEST_PROGRAMS})
+    add_cthon_testprog(${prog})
+endforeach()
+add_cthon_test(cthon_lock_tlock_linux cthon_lock_tlock linux)
+if(CHIMERA_VFS_IO_URING)
+    add_cthon_test(cthon_lock_tlock_io_uring cthon_lock_tlock io_uring)
+endif()
+
+# Independent POSIX fcntl/lockf tests: backends with CHIMERA_VFS_CAP_FS_LOCK
+foreach(prog test_fcntl test_lockf)
+    add_posix_testprog(${prog})
+    string(REGEX REPLACE "^test_" "" test_name ${prog})
+    add_posix_test(${test_name}_linux ${prog} linux)
+    if(CHIMERA_VFS_IO_URING)
+        add_posix_test(${test_name}_io_uring ${prog} io_uring)
+    endif()
+endforeach()
 
 # ============================================================================
 # NFS3 Cthon Tests
