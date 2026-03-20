@@ -906,7 +906,26 @@ chimera_io_uring_open_fh(
                               flags);
 
     if (fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+        if (errno == ENOTDIR && (request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY)) {
+            int         probe_fd = linux_open_by_handle(&thread->mount_table,
+                                                        request->fh,
+                                                        request->fh_len,
+                                                        O_PATH | O_NOFOLLOW);
+            struct stat st;
+
+            if (probe_fd >= 0) {
+                if (fstat(probe_fd, &st) == 0 && S_ISLNK(st.st_mode)) {
+                    request->status = CHIMERA_VFS_ESYMLINK;
+                } else {
+                    request->status = CHIMERA_VFS_ENOTDIR;
+                }
+                close(probe_fd);
+            } else {
+                request->status = CHIMERA_VFS_ENOTDIR;
+            }
+        } else {
+            request->status = chimera_linux_errno_to_status(errno);
+        }
         request->complete(request);
         return;
     }
@@ -1561,7 +1580,17 @@ chimera_io_uring_link_at(
     rc = linkat(fd, "", dir_fd, fullname, AT_EMPTY_PATH);
 
     if (rc < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+        if (errno == EPERM) {
+            struct stat st;
+
+            if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
+                request->status = CHIMERA_VFS_EISDIR;
+            } else {
+                request->status = CHIMERA_VFS_EPERM;
+            }
+        } else {
+            request->status = chimera_linux_errno_to_status(errno);
+        }
     } else {
         request->status = CHIMERA_VFS_OK;
     }

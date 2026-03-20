@@ -182,6 +182,13 @@ chimera_nfs4_create_open_callback(
                 chimera_vfs_release(thread->vfs_thread, handle);
                 return;
             case NF4LNK:
+                if (args->objtype.linkdata.len == 0) {
+                    struct CREATE4res *res = &req->res_compound.resarray[req->index].opcreate;
+                    res->status = NFS4ERR_INVAL;
+                    chimera_nfs4_compound_complete(req, NFS4ERR_INVAL);
+                    chimera_vfs_release(thread->vfs_thread, handle);
+                    return;
+                }
                 req->handle = handle;
 
                 chimera_vfs_symlink_at(
@@ -228,9 +235,18 @@ chimera_nfs4_create(
         return;
     }
 
-    if (args->objname.len == 0) {
-        res->status = NFS4ERR_INVAL;
-        chimera_nfs4_compound_complete(req, NFS4ERR_INVAL);
+    res->status = chimera_nfs4_validate_name(&args->objname);
+
+    if (res->status != NFS4_OK) {
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    res->status = chimera_nfs4_validate_createattrs(args->createattrs.num_attrmask,
+                                                    args->createattrs.attrmask);
+
+    if (res->status != NFS4_OK) {
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 

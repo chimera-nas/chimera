@@ -1259,8 +1259,9 @@ demofs_lookup_at(
     }
 
     if (unlikely(!S_ISDIR(inode->mode))) {
+        enum chimera_vfs_error err = S_ISLNK(inode->mode) ? CHIMERA_VFS_ESYMLINK : CHIMERA_VFS_ENOTDIR;
         pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_ENOTDIR;
+        request->status = err;
         request->complete(request);
         return;
     }
@@ -1553,7 +1554,7 @@ demofs_remove_at(
 
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
         return;
     }
@@ -3439,7 +3440,7 @@ demofs_link_at(
     if (unlikely(S_ISDIR(inode->mode))) {
         pthread_mutex_unlock(&parent_inode->lock);
         pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_EPERM;
+        request->status = CHIMERA_VFS_EISDIR;
         request->complete(request);
         return;
     }
