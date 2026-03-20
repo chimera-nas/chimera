@@ -731,6 +731,99 @@ chimera_nfs4_unmarshall_attrs(
     return (attrs <= attrsend) ? 0 : -1;
 } /* chimera_nfs4_unmarshall_attrs */
 
+static inline nfsstat4
+chimera_nfs4_validate_createattrs(
+    uint32_t        num_attrmask,
+    const uint32_t *attrmask)
+{
+    static const uint32_t supported_word0 =
+        (1 << FATTR4_SUPPORTED_ATTRS) |
+        (1 << FATTR4_TYPE) |
+        (1 << FATTR4_FH_EXPIRE_TYPE) |
+        (1 << FATTR4_CHANGE) |
+        (1 << FATTR4_SIZE) |
+        (1 << FATTR4_LINK_SUPPORT) |
+        (1 << FATTR4_SYMLINK_SUPPORT) |
+        (1 << FATTR4_NAMED_ATTR) |
+        (1 << FATTR4_FSID) |
+        (1 << FATTR4_UNIQUE_HANDLES) |
+        (1 << FATTR4_LEASE_TIME) |
+        (1 << FATTR4_RDATTR_ERROR) |
+        /* no FATTR4_ACL = 12 */
+        (1 << FATTR4_ACLSUPPORT) |
+        (1 << FATTR4_ARCHIVE) |
+        (1 << FATTR4_CANSETTIME) |
+        (1 << FATTR4_CASE_INSENSITIVE) |
+        (1 << FATTR4_CASE_PRESERVING) |
+        (1 << FATTR4_CHOWN_RESTRICTED) |
+        (1 << FATTR4_FILEHANDLE) |
+        (1 << FATTR4_FILEID) |
+        (1 << FATTR4_FILES_AVAIL) |
+        (1 << FATTR4_FILES_FREE) |
+        (1 << FATTR4_FILES_TOTAL) |
+        /* no fs_locations=24, hidden=25, homogeneous=26, maxfilesize=27, maxlink=28 */
+        (1 << FATTR4_MAXNAME) |
+        (1 << FATTR4_MAXREAD) |
+        (1U << FATTR4_MAXWRITE);
+
+    static const uint32_t supported_word1 =
+        (1 << (FATTR4_MODE - 32)) |
+        (1 << (FATTR4_NUMLINKS - 32)) |
+        (1 << (FATTR4_OWNER - 32)) |
+        (1 << (FATTR4_OWNER_GROUP - 32)) |
+        (1 << (FATTR4_SPACE_AVAIL - 32)) |
+        (1 << (FATTR4_SPACE_FREE - 32)) |
+        (1 << (FATTR4_SPACE_TOTAL - 32)) |
+        (1 << (FATTR4_SPACE_USED - 32)) |
+        (1 << (FATTR4_TIME_ACCESS - 32)) |
+        (1 << (FATTR4_TIME_ACCESS_SET - 32)) |
+        (1 << (FATTR4_TIME_METADATA - 32)) |
+        (1 << (FATTR4_TIME_MODIFY - 32)) |
+        (1 << (FATTR4_TIME_MODIFY_SET - 32));
+
+    static const uint32_t writable_word0 =
+        (1 << FATTR4_SIZE);
+
+    static const uint32_t writable_word1 =
+        (1 << (FATTR4_MODE - 32)) |
+        (1 << (FATTR4_OWNER - 32)) |
+        (1 << (FATTR4_OWNER_GROUP - 32)) |
+        (1 << (FATTR4_TIME_ACCESS_SET - 32)) |
+        (1 << (FATTR4_TIME_MODIFY_SET - 32));
+
+    uint32_t              w;
+
+    if (num_attrmask >= 1) {
+        w = attrmask[0];
+
+        if (w & ~supported_word0) {
+            return NFS4ERR_ATTRNOTSUPP;
+        }
+
+        if (w & supported_word0 & ~writable_word0) {
+            return NFS4ERR_INVAL;
+        }
+    }
+
+    if (num_attrmask >= 2) {
+        w = attrmask[1];
+
+        if (w & ~supported_word1) {
+            return NFS4ERR_ATTRNOTSUPP;
+        }
+
+        if (w & supported_word1 & ~writable_word1) {
+            return NFS4ERR_INVAL;
+        }
+    }
+
+    if (num_attrmask >= 3 && attrmask[2] != 0) {
+        return NFS4ERR_ATTRNOTSUPP;
+    }
+
+    return NFS4_OK;
+} /* chimera_nfs4_validate_createattrs */
+
 static void
 chimera_nfs4_set_changeinfo(
     struct change_info4      *cinfo,

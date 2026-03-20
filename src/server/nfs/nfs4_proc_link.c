@@ -95,17 +95,10 @@ chimera_nfs4_link(
         return;
     }
 
-    if (args->newname.len == 0) {
-        res->status = NFS4ERR_INVAL;
-        chimera_nfs4_compound_complete(req, NFS4ERR_INVAL);
-        return;
-    }
+    res->status = chimera_nfs4_validate_name(&args->newname);
 
-    if ((args->newname.len == 1 && ((const char *) args->newname.data)[0] == '.') ||
-        (args->newname.len == 2 && ((const char *) args->newname.data)[0] == '.' &&
-         ((const char *) args->newname.data)[1] == '.')) {
-        res->status = NFS4ERR_BADNAME;
-        chimera_nfs4_compound_complete(req, NFS4ERR_BADNAME);
+    if (res->status != NFS4_OK) {
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 

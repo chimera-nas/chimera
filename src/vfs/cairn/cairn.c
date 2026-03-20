@@ -1162,8 +1162,9 @@ cairn_lookup_at(
     inode = ih.inode;
 
     if (unlikely(!S_ISDIR(inode->mode))) {
+        enum chimera_vfs_error err = S_ISLNK(inode->mode) ? CHIMERA_VFS_ESYMLINK : CHIMERA_VFS_ENOTDIR;
         cairn_inode_handle_release(&ih);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = err;
         request->complete(request);
         return;
     }
@@ -1483,7 +1484,7 @@ cairn_remove_at(
 
     if (!S_ISDIR(parent_inode->mode)) {
         cairn_inode_handle_release(&parent_ih);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
         return;
     }
@@ -2618,15 +2619,16 @@ cairn_symlink_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t    *txn;
-    struct cairn_inode_handle parent_ih;
-    struct cairn_inode       *parent_inode, new_inode;
-    struct cairn_dirent_key   dirent_key;
-    struct cairn_dirent_value dirent_value;
-    struct cairn_symlink_key  target_key;
-    char                     *err = NULL;
-    int                       rc;
-    struct timespec           now;
+    rocksdb_transaction_t     *txn;
+    struct cairn_inode_handle  parent_ih;
+    struct cairn_dirent_handle dh;
+    struct cairn_inode        *parent_inode, new_inode;
+    struct cairn_dirent_key    dirent_key;
+    struct cairn_dirent_value  dirent_value;
+    struct cairn_symlink_key   target_key;
+    char                      *err = NULL;
+    int                        rc;
+    struct timespec            now;
 
     clock_gettime(CLOCK_REALTIME, &now);
     txn = cairn_get_transaction(thread);
@@ -2653,6 +2655,16 @@ cairn_symlink_at(
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->symlink_at.name_hash;
+
+    rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
+
+    if (rc == 0) {
+        cairn_inode_handle_release(&parent_ih);
+        cairn_dirent_handle_release(&dh);
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
+    }
 
     cairn_alloc_inum(thread, &new_inode);
     new_inode.size       = request->symlink_at.targetlen;
@@ -3044,7 +3056,7 @@ cairn_link_at(
     if (S_ISDIR(target_inode->mode)) {
         cairn_inode_handle_release(&parent_ih);
         cairn_inode_handle_release(&target_ih);
-        request->status = CHIMERA_VFS_EPERM;
+        request->status = CHIMERA_VFS_EISDIR;
         request->complete(request);
         return;
     }

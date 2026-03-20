@@ -331,6 +331,99 @@ chimera_nfs4_compound_process(
     struct nfs_request *req,
     nfsstat4            status);
 
+static inline nfsstat4
+chimera_nfs4_validate_name(const xdr_opaque *name)
+{
+    const char *p;
+    uint32_t    i;
+
+    if (name->len == 0) {
+        return NFS4ERR_INVAL;
+    }
+
+    if (name->len > 255) {
+        return NFS4ERR_NAMETOOLONG;
+    }
+
+    if ((name->len == 1 && ((const char *) name->data)[0] == '.') ||
+        (name->len == 2 && ((const char *) name->data)[0] == '.' &&
+         ((const char *) name->data)[1] == '.')) {
+        return NFS4ERR_BADNAME;
+    }
+
+    p = (const char *) name->data;
+
+    for (i = 0; i < name->len; ) {
+        unsigned char c     = (unsigned char) p[i];
+        uint32_t      extra = 0;
+
+        if (c == '/' || c == '\0') {
+            return NFS4ERR_BADCHAR;
+        }
+
+        if (c < 0x80) {
+            i++;
+            continue;
+        } else if (c < 0xC2) {
+            /* 0x80-0xBF: stray continuation byte; 0xC0-0xC1: overlong encoding */
+            return NFS4ERR_INVAL;
+        } else if (c < 0xE0) {
+            extra = 1;
+        } else if (c < 0xF0) {
+            unsigned char c2;
+            /* 3-byte sequence: need at least one more byte to range-check */
+            if (i + 1 >= name->len || ((unsigned char) p[i + 1] & 0xC0) != 0x80) {
+                return NFS4ERR_INVAL;
+            }
+            c2    = (unsigned char) p[i + 1];
+            extra = 2;
+            /* 0xE0 0x80-0x9F: overlong (encodes U+0000-U+07FF in 3 bytes) */
+            if (c == 0xE0 && c2 < 0xA0) {
+                return NFS4ERR_INVAL;
+            }
+            /* 0xED 0xA0-0xBF: surrogate (U+D800-U+DFFF) */
+            if (c == 0xED && c2 >= 0xA0) {
+                return NFS4ERR_INVAL;
+            }
+            /* 0xEF 0xBF 0xBE/0xBF: U+FFFE and U+FFFF are non-characters */
+            if (c == 0xEF && c2 == 0xBF && i + 2 < name->len) {
+                unsigned char c3 = (unsigned char) p[i + 2];
+                if (c3 == 0xBE || c3 == 0xBF) {
+                    return NFS4ERR_INVAL;
+                }
+            }
+        } else if (c <= 0xF4) {
+            unsigned char c2;
+            /* 4-byte sequence: need at least one more byte to range-check */
+            if (i + 1 >= name->len || ((unsigned char) p[i + 1] & 0xC0) != 0x80) {
+                return NFS4ERR_INVAL;
+            }
+            c2    = (unsigned char) p[i + 1];
+            extra = 3;
+            /* 0xF0 0x80-0x8F: overlong (encodes U+0000-U+FFFF in 4 bytes) */
+            if (c == 0xF0 && c2 < 0x90) {
+                return NFS4ERR_INVAL;
+            }
+            /* 0xF4 0x90-0xBF: above U+10FFFF */
+            if (c == 0xF4 && c2 > 0x8F) {
+                return NFS4ERR_INVAL;
+            }
+        } else {
+            return NFS4ERR_INVAL;
+        }
+
+        i++;
+        while (extra--) {
+            if (i >= name->len || ((unsigned char) p[i] & 0xC0) != 0x80) {
+                return NFS4ERR_INVAL;
+            }
+            i++;
+        }
+    }
+
+    return NFS4_OK;
+} /* chimera_nfs4_validate_name */
+
 static inline void
 chimera_nfs4_compound_complete(
     struct nfs_request *req,
