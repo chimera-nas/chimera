@@ -23,7 +23,8 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs_mount.c nfs_portmap.c nf
             nfs4_proc_exchange_id.c nfs4_proc_create_session.c nfs4_proc_destroy_session.c
             nfs4_proc_destroy_clientid.c nfs4_proc_sequence.c nfs4_proc_reclaim_complete.c
             nfs4_proc_secinfo_no_name.c nfs4_proc_test_stateid.c nfs4_root.c
-            nfs4_proc_allocate.c nfs4_proc_deallocate.c nfs4_proc_seek.c)
+            nfs4_proc_allocate.c nfs4_proc_deallocate.c nfs4_proc_seek.c
+            nfs4_proc_lock.c nfs4_proc_lockt.c nfs4_proc_locku.c)
 
 target_compile_definitions(chimera_nfs PRIVATE XXH_INLINE_ALL)
 target_link_libraries(chimera_nfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid urcu urcu-common)

@@ -58,12 +58,13 @@ chimera_nfs4_open_exclusive_verify(
     state                    = nfs4_session_alloc_slot(session);
     state->nfs4_state_handle = handle;
 
-    res->status                            = NFS4_OK;
-    res->resok4.stateid                    = state->nfs4_state_id;
-    res->resok4.cinfo.atomic               = 0;
-    res->resok4.cinfo.before               = 0;
-    res->resok4.cinfo.after                = 0;
-    res->resok4.rflags                     = 0;
+    res->status              = NFS4_OK;
+    res->resok4.stateid      = state->nfs4_state_id;
+    res->resok4.cinfo.atomic = 0;
+    res->resok4.cinfo.before = 0;
+    res->resok4.cinfo.after  = 0;
+    res->resok4.rflags       = (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_LOCK) ?
+        OPEN4_RESULT_LOCKTYPE_POSIX : 0;
     res->resok4.num_attrset                = 0;
     res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
 
@@ -121,12 +122,13 @@ chimera_nfs4_open_at_complete(
     state                    = nfs4_session_alloc_slot(session);
     state->nfs4_state_handle = handle;
 
-    res->status                            = NFS4_OK;
-    res->resok4.stateid                    = state->nfs4_state_id;
-    res->resok4.cinfo.atomic               = 0;
-    res->resok4.cinfo.before               = 0;
-    res->resok4.cinfo.after                = 0;
-    res->resok4.rflags                     = 0;
+    res->status              = NFS4_OK;
+    res->resok4.stateid      = state->nfs4_state_id;
+    res->resok4.cinfo.atomic = 0;
+    res->resok4.cinfo.before = 0;
+    res->resok4.cinfo.after  = 0;
+    res->resok4.rflags       = (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_LOCK) ?
+        OPEN4_RESULT_LOCKTYPE_POSIX : 0;
     res->resok4.num_attrset                = 0;
     res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
 
@@ -182,12 +184,13 @@ chimera_nfs4_open_complete(
     state                    = nfs4_session_alloc_slot(session);
     state->nfs4_state_handle = handle;
 
-    res->status                            = NFS4_OK;
-    res->resok4.stateid                    = state->nfs4_state_id;
-    res->resok4.cinfo.atomic               = 0;
-    res->resok4.cinfo.before               = 0;
-    res->resok4.cinfo.after                = 0;
-    res->resok4.rflags                     = 0;
+    res->status              = NFS4_OK;
+    res->resok4.stateid      = state->nfs4_state_id;
+    res->resok4.cinfo.atomic = 0;
+    res->resok4.cinfo.before = 0;
+    res->resok4.cinfo.after  = 0;
+    res->resok4.rflags       = (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_LOCK) ?
+        OPEN4_RESULT_LOCKTYPE_POSIX : 0;
     res->resok4.num_attrset                = 0;
     res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
 
