@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: LGPL-2.1-only
 
 find_package(PkgConfig REQUIRED)
+find_package(OpenSSL REQUIRED)
 pkg_check_modules(JANSSON REQUIRED jansson)
 
 add_library(chimera_rest SHARED
@@ -10,9 +11,11 @@ add_library(chimera_rest SHARED
     rest_users.c
     rest_shares.c
     rest_swagger.c
+    rest_auth.c
 )
 target_include_directories(chimera_rest PRIVATE ${JANSSON_INCLUDE_DIRS})
-target_link_libraries(chimera_rest evpl_http evpl ${JANSSON_LIBRARIES})
+target_link_libraries(chimera_rest evpl_http evpl ${JANSSON_LIBRARIES}
+                      OpenSSL::Crypto crypt)
 
 # Embed Swagger UI files at build time
 set(SWAGGER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/swagger)
@@ -35,4 +38,13 @@ add_custom_command(
 
 target_sources(chimera_rest PRIVATE ${SWAGGER_EMBEDDED_C})
 
+if(WBCLIENT_FOUND)
+    target_include_directories(chimera_rest PRIVATE ${WBCLIENT_INCLUDE_DIRS})
+    target_link_libraries(chimera_rest ${WBCLIENT_LIBRARIES})
+endif()
+
 install(TARGETS chimera_rest DESTINATION lib)
+
+if(NOT DISABLE_TESTS)
+    add_subdirectory(tests)
+endif()
