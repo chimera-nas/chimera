@@ -6,6 +6,7 @@
 #include "smb_procs.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_release.h"
 
 /* Forward declaration */
 static void chimera_smb_set_info_rename_check_dest_callback(
@@ -50,6 +51,19 @@ chimera_smb_set_info_rename_callback(
         memcpy(open_file->name, rename_info->new_name, rename_info->new_name_len);
         open_file->name[rename_info->new_name_len] = '\0';
         open_file->name_len                        = rename_info->new_name_len;
+
+        /* Update VFS handle DOC path so close deletes the new name */
+        if ((open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) &&
+            open_file->handle) {
+            chimera_vfs_set_delete_on_close(
+                request->compound->thread->vfs_thread,
+                open_file->handle,
+                open_file->parent_fh,
+                open_file->parent_fh_len,
+                open_file->name,
+                open_file->name_len,
+                &request->session_handle->session->cred);
+        }
 
         /* Re-acquire sharemode entry under the new name */
         if (open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE &&
