@@ -59,6 +59,83 @@ chimera_vfs_dup_handle(
     }
 } /* chimera_vfs_dup_handle */
 
+static inline struct vfs_open_cache *
+chimera_vfs_get_cache_for_handle(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle)
+{
+    if (handle->cache_id == CHIMERA_VFS_OPEN_ID_PATH) {
+        return thread->vfs->vfs_open_path_cache;
+    } else if (handle->cache_id == CHIMERA_VFS_OPEN_ID_FILE) {
+        return thread->vfs->vfs_open_file_cache;
+    }
+
+    return NULL;
+} /* chimera_vfs_get_cache_for_handle */
+
+/* Mark a VFS handle for delete-on-close. */
+static inline void
+chimera_vfs_set_delete_on_close(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    const uint8_t                  *parent_fh,
+    uint16_t                        parent_fh_len,
+    const char                     *name,
+    uint16_t                        name_len,
+    const struct chimera_vfs_cred  *cred)
+{
+    struct vfs_open_cache *cache = chimera_vfs_get_cache_for_handle(thread,
+                                                                    handle);
+
+    if (cache) {
+        chimera_vfs_open_cache_set_doc(cache, handle,
+                                       parent_fh, parent_fh_len,
+                                       name, name_len, cred);
+    }
+} /* chimera_vfs_set_delete_on_close */
+
+/* Clear the delete-on-close flag on a VFS handle. */
+static inline void
+chimera_vfs_clear_delete_on_close(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle)
+{
+    struct vfs_open_cache *cache = chimera_vfs_get_cache_for_handle(thread,
+                                                                    handle);
+
+    if (cache) {
+        chimera_vfs_open_cache_clear_doc(cache, handle);
+    }
+} /* chimera_vfs_clear_delete_on_close */
+
+/*
+ * Release a VFS handle and atomically check for delete-on-close.
+ * Returns 1 if this was the last reference and DOC was set (caller
+ * must perform the unlink using info in doc_out).  Returns 0 otherwise.
+ */
+static inline int
+chimera_vfs_release_doc(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_doc_info    *doc_out)
+{
+    if (handle->cache_id == CHIMERA_VFS_OPEN_ID_PATH) {
+        return chimera_vfs_open_cache_release_doc(
+            thread, thread->vfs->vfs_open_path_cache, handle, doc_out);
+    } else if (handle->cache_id == CHIMERA_VFS_OPEN_ID_FILE) {
+        return chimera_vfs_open_cache_release_doc(
+            thread, thread->vfs->vfs_open_file_cache, handle, doc_out);
+    }
+
+    /* Synthetic or unknown handle — no DOC possible, do normal release */
+    if (handle->cache_id == CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
+        chimera_vfs_synth_handle_free(thread, handle);
+    } else {
+        chimera_vfs_abort("invalid cache id for release_doc");
+    }
+    return 0;
+} /* chimera_vfs_release_doc */
+
 static inline void
 chimera_vfs_release_failed(
     struct chimera_vfs_thread      *thread,

@@ -6,6 +6,7 @@
 #include "smb_procs.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_release.h"
 
 static void
 chimera_smb_set_info_callback(
@@ -21,54 +22,6 @@ chimera_smb_set_info_callback(
 
     chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_info_callback */
-
-static void
-chimera_smb_set_info_remove_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request *request = private_data;
-
-    chimera_vfs_release(request->compound->thread->vfs_thread, request->set_info.parent_handle);
-
-    chimera_smb_open_file_release(request, request->set_info.open_file);
-
-    chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
-} /* chimera_smb_set_info_remove_callback */ /* chimera_smb_set_info_remove_callback */
-
-static void
-chimera_smb_set_info_open_unlink_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_smb_request   *request   = private_data;
-    struct chimera_smb_open_file *open_file = request->set_info.open_file;
-
-    request->set_info.parent_handle = oh;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_open_file_release(request, request->set_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    chimera_vfs_remove_at(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        oh,
-        open_file->name,
-        open_file->name_len,
-        NULL,
-        0,
-        0,
-        0,
-        chimera_smb_set_info_remove_callback,
-        request);
-
-} /* chimera_smb_set_info_open_unlink_callback */
 
 static void
 chimera_smb_set_info_link_callback(
@@ -228,19 +181,27 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     break;
                 case SMB2_FILE_DISPOSITION_INFO:
                 case SMB2_FILE_DISPOSITION_INFO_EX:
-                    if (request->set_info.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) {
-                        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
-                    } else {
-                        chimera_vfs_open_fh(
+                    if (request->set_info.attrs.smb_disposition) {
+                        request->set_info.open_file->flags |=
+                            CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE;
+                        /* Propagate to VFS handle for final-close deletion */
+                        chimera_vfs_set_delete_on_close(
                             request->compound->thread->vfs_thread,
-                            &request->session_handle->session->cred,
+                            request->set_info.open_file->handle,
                             request->set_info.open_file->parent_fh,
                             request->set_info.open_file->parent_fh_len,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                            chimera_smb_set_info_open_unlink_callback,
-                            request);
-
+                            request->set_info.open_file->name,
+                            request->set_info.open_file->name_len,
+                            &request->session_handle->session->cred);
+                    } else {
+                        request->set_info.open_file->flags &=
+                            ~CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE;
+                        chimera_vfs_clear_delete_on_close(
+                            request->compound->thread->vfs_thread,
+                            request->set_info.open_file->handle);
                     }
+                    chimera_smb_open_file_release(request, request->set_info.open_file);
+                    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
                     break;
                 case SMB2_FILE_RENAME_INFO:
                     chimera_smb_set_info_rename_process(request);
