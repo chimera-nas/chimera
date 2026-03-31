@@ -139,6 +139,15 @@ struct chimera_vfs_open_handle {
     struct chimera_vfs_open_handle *next;
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE + 16];
 
+    /* Delete-on-close state: when doc_delete_on_close is set and opencnt
+     * drops to zero, the file at (doc_parent_fh, doc_name) is removed
+     * before the handle is recycled. */
+    uint8_t                         doc_delete_on_close;
+    uint16_t                        doc_parent_fh_len;
+    uint16_t                        doc_name_len;
+    struct chimera_vfs_cred         doc_cred;
+    uint8_t                         doc_parent_fh[CHIMERA_VFS_FH_SIZE];
+    char                            doc_name[CHIMERA_VFS_NAME_MAX];
 };
 
 

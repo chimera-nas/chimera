@@ -29,45 +29,6 @@
                          SMB2_GENERIC_WRITE | \
                          SMB2_GENERIC_ALL)
 
-static inline void
-chimera_smb_create_unlink_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request *request    = private_data;
-    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
-
-    /* XXX We will ignore any error because there's nothing sane to do */
-
-    chimera_vfs_release(vfs_thread, request->create.parent_handle);
-    chimera_smb_open_file_release(request, request->create.r_open_file);
-
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
-} /* chimera_smb_create_unlink_callback */
-
-
-static inline void
-chimera_smb_create_unlink(struct chimera_smb_request *request)
-{
-    struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
-    struct chimera_smb_open_file *open_file  = request->create.r_open_file;
-
-    chimera_vfs_remove_at(
-        vfs_thread,
-        &request->session_handle->session->cred,
-        request->create.parent_handle,
-        open_file->name,
-        open_file->name_len,
-        NULL,
-        0,
-        0,
-        0,
-        chimera_smb_create_unlink_callback,
-        request);
-} /* chimera_smb_create_unlink */
-
 static inline struct chimera_smb_open_file *
 chimera_smb_create_gen_open_file(
     struct chimera_smb_request     *request,
@@ -128,6 +89,15 @@ chimera_smb_create_gen_open_file(
             chimera_smb_open_file_free(thread, open_file);
             return NULL;
         }
+    }
+
+    /* Propagate delete-on-close to the VFS handle so the file is
+    * removed when the last reference (opencnt) drops to zero. */
+    if (delete_on_close && oh) {
+        chimera_vfs_set_delete_on_close(thread->vfs_thread, oh,
+                                        parent_fh, parent_fh_len,
+                                        name, name_len,
+                                        &request->session_handle->session->cred);
     }
 
     open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
@@ -218,15 +188,11 @@ chimera_smb_create_mkdir_open_callback(
 
     request->create.r_open_file = open_file;
 
-    if (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) {
-        chimera_smb_create_unlink(request);
-    } else {
-        chimera_vfs_release(vfs_thread, request->create.parent_handle);
-        chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
-    }
+    chimera_vfs_release(vfs_thread, request->create.parent_handle);
+    chimera_smb_open_file_release(request, open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 
-} /* chimera_smb_create_open_parent_callback */
+} /* chimera_smb_create_mkdir_open_callback */
 
 static inline void
 chimera_smb_create_mkdir_callback(
@@ -310,13 +276,9 @@ chimera_smb_create_open_at_callback(
         attr,
         &request->create.r_attrs);
 
-    if (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) {
-        chimera_smb_create_unlink(request);
-    } else {
-        chimera_vfs_release(vfs_thread, request->create.parent_handle);
-        chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
-    }
+    chimera_vfs_release(vfs_thread, request->create.parent_handle);
+    chimera_smb_open_file_release(request, open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_create_open_at_callback */
 
 static inline void
