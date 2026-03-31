@@ -24,14 +24,20 @@
 #include <time.h>
 #include <unistd.h>
 
-#define REST_PORT 18080
-#define REST_USER "restuser"
-#define REST_PASS "restpassword"
-#define REST_UID  2000
-#define REST_GID  2000
+#define REST_PORT  18080
+#define REST_USER  "restuser"
+#define REST_PASS  "restpassword"
+#define REST_UID   2000
+#define REST_GID   2000
 
-static int tests_passed = 0;
-static int tests_failed = 0;
+#define ADMIN_USER "admin"
+#define ADMIN_PASS "adminpass"
+#define ADMIN_HASH \
+        "$6$testsalt$eBXKG..hXMuMyU2qJeRwFHrphEZTnovHazyD.YLjz/QKAbAvZj7z8MGdfCgwsM3n3k6pWpuGnuW/58UHKaWzL0"
+
+static int  tests_passed = 0;
+static int  tests_failed = 0;
+static char auth_token[4096];
 
 static void
 test_pass(const char *name)
@@ -77,24 +83,35 @@ run_curl(
     const char *method,
     const char *path,
     const char *body,
+    const char *bearer_token,
     long       *http_code)
 {
-    char  cmd[4096];
+    char  cmd[8192];
     char  output[4096];
     FILE *fp;
     int   rc;
+    char  auth_header[4200];
+
+    if (bearer_token && bearer_token[0]) {
+        snprintf(auth_header, sizeof(auth_header),
+                 "-H 'Authorization: Bearer %s' ", bearer_token);
+    } else {
+        auth_header[0] = '\0';
+    }
 
     if (body) {
         snprintf(cmd, sizeof(cmd),
                  "curl -s -o /dev/null -w '%%{http_code}' "
                  "-X %s -H 'Content-Type: application/json' "
+                 "%s"
                  "-d '%s' http://localhost:%d%s 2>&1",
-                 method, body, REST_PORT, path);
+                 method, auth_header, body, REST_PORT, path);
     } else {
         snprintf(cmd, sizeof(cmd),
                  "curl -s -o /dev/null -w '%%{http_code}' "
-                 "-X %s http://localhost:%d%s 2>&1",
-                 method, REST_PORT, path);
+                 "-X %s %s"
+                 "http://localhost:%d%s 2>&1",
+                 method, auth_header, REST_PORT, path);
     }
 
     fprintf(stderr, "    Running: curl -X %s http://localhost:%d%s\n",
@@ -119,6 +136,66 @@ run_curl(
 
     return -1;
 } /* run_curl */
+
+static int
+get_auth_token(void)
+{
+    char  cmd[4096];
+    char  output[8192];
+    FILE *fp;
+    int   rc;
+    char *token_start, *token_end;
+
+    snprintf(cmd, sizeof(cmd),
+             "curl -s -X POST -H 'Content-Type: application/json' "
+             "-d '{\"username\":\"%s\",\"password\":\"%s\"}' "
+             "http://localhost:%d/api/v1/auth/login 2>&1",
+             ADMIN_USER, ADMIN_PASS, REST_PORT);
+
+    fprintf(stderr, "    Authenticating as %s...\n", ADMIN_USER);
+
+    fp = popen(cmd, "r");
+    if (!fp) {
+        return -1;
+    }
+
+    output[0] = '\0';
+    if (fgets(output, sizeof(output), fp) == NULL) {
+        output[0] = '\0';
+    }
+
+    rc = pclose(fp);
+
+    if (!WIFEXITED(rc) || WEXITSTATUS(rc) != 0) {
+        fprintf(stderr, "    curl failed\n");
+        return -1;
+    }
+
+    /* Extract token from {"token":"...","expires_in":...} */
+    token_start = strstr(output, "\"token\":\"");
+    if (!token_start) {
+        fprintf(stderr, "    No token in response: %s\n", output);
+        return -1;
+    }
+    token_start += 9; /* skip "token":" */
+
+    token_end = strchr(token_start, '"');
+    if (!token_end) {
+        fprintf(stderr, "    Malformed token response\n");
+        return -1;
+    }
+
+    if (token_end - token_start >= (int) sizeof(auth_token)) {
+        fprintf(stderr, "    Token too long\n");
+        return -1;
+    }
+
+    memcpy(auth_token, token_start, token_end - token_start);
+    auth_token[token_end - token_start] = '\0';
+
+    fprintf(stderr, "    Got auth token (%zu bytes)\n", strlen(auth_token));
+    return 0;
+} /* get_auth_token */
 
 /* ============================================================================
  * User Lifecycle Tests
@@ -157,7 +234,7 @@ run_user_tests(void)
                  "\"uid\":%d,\"gid\":%d}",
                  REST_USER, REST_PASS, REST_UID, REST_GID);
 
-        rc = run_curl("POST", "/api/v1/users", body, &http_code);
+        rc = run_curl("POST", "/api/v1/users", body, auth_token, &http_code);
         if (rc == 0 && http_code == 201) {
             test_pass("REST create user");
         } else {
@@ -184,7 +261,7 @@ run_user_tests(void)
         char path[256];
         snprintf(path, sizeof(path), "/api/v1/users/%s", REST_USER);
 
-        rc = run_curl("DELETE", path, NULL, &http_code);
+        rc = run_curl("DELETE", path, NULL, auth_token, &http_code);
         if (rc == 0 && http_code == 204) {
             test_pass("REST delete user");
         } else {
@@ -246,7 +323,7 @@ run_share_tests(struct chimera_server *server)
         const char *body =
             "{\"name\":\"restshare\",\"path\":\"testvfs\"}";
 
-        rc = run_curl("POST", "/api/v1/shares", body, &http_code);
+        rc = run_curl("POST", "/api/v1/shares", body, auth_token, &http_code);
         if (rc == 0 && http_code == 201) {
             test_pass("REST create share");
         } else {
@@ -269,7 +346,8 @@ run_share_tests(struct chimera_server *server)
 
     /* Step 4: Delete share via REST API */
     fprintf(stderr, "\n  Deleting share via REST API...\n");
-    rc = run_curl("DELETE", "/api/v1/shares/restshare", NULL, &http_code);
+    rc = run_curl("DELETE", "/api/v1/shares/restshare", NULL,
+                  auth_token, &http_code);
     if (rc == 0 && http_code == 204) {
         test_pass("REST delete share");
     } else {
@@ -357,13 +435,25 @@ main(
     /* Create the "share" SMB share for user tests */
     chimera_server_create_share(server, "share", "share");
 
-    /* Start server (SMB + REST) - no users added initially */
+    /* Add admin user for REST API authentication */
+    chimera_server_add_user(server, ADMIN_USER, ADMIN_HASH, NULL,
+                            NULL, 0, 0, 0, NULL, 1);
+
+    /* Start server (SMB + REST) - no regular users added initially */
     chimera_server_start(server);
 
     fprintf(stderr, "Server started (REST on port %d)\n", REST_PORT);
 
     /* Give server a moment to be ready */
     usleep(200000);
+
+    /* Authenticate to get a JWT token */
+    if (get_auth_token() != 0) {
+        fprintf(stderr, "\nERROR: Failed to authenticate to REST API\n");
+        chimera_server_destroy(server);
+        prometheus_metrics_destroy(metrics);
+        return EXIT_FAILURE;
+    }
 
     /* Run tests */
     failures += run_user_tests();
