@@ -213,6 +213,7 @@ chimera_nfs4_open_parent_complete(
     struct nfs_request       *req   = private_data;
     struct OPEN4args         *args  = &req->args_compound->argarray[req->index].opopen;
     unsigned int              flags = 0;
+    nfsstat4                  status;
     struct chimera_vfs_attrs *attr;
 
     req->handle = parent_handle;
@@ -239,6 +240,16 @@ chimera_nfs4_open_parent_complete(
                 flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
             /* fallthrough */
             case UNCHECKED4:
+                status = chimera_nfs4_validate_createattrs(
+                    args->openhow.how.createattrs.num_attrmask,
+                    args->openhow.how.createattrs.attrmask);
+                if (status != NFS4_OK) {
+                    struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+                    res->status = status;
+                    chimera_nfs4_compound_complete(req, status);
+                    return;
+                }
                 chimera_nfs4_unmarshall_attrs(attr,
                                               args->openhow.how.createattrs.num_attrmask,
                                               args->openhow.how.createattrs.attrmask,
@@ -247,6 +258,16 @@ chimera_nfs4_open_parent_complete(
                 break;
             case EXCLUSIVE4_1:
                 flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
+                status = chimera_nfs4_validate_createattrs(
+                    args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
+                    args->openhow.how.ch_createboth.cva_attrs.attrmask);
+                if (status != NFS4_OK) {
+                    struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+                    res->status = status;
+                    chimera_nfs4_compound_complete(req, status);
+                    return;
+                }
                 chimera_nfs4_unmarshall_attrs(attr,
                                               args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
                                               args->openhow.how.ch_createboth.cva_attrs.attrmask,
@@ -280,6 +301,16 @@ chimera_nfs4_open_parent_complete(
 
     switch (args->claim.claim) {
         case CLAIM_NULL:
+            status = chimera_nfs4_validate_name(&args->claim.file);
+
+            if (status != NFS4_OK) {
+                struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+                res->status = status;
+                chimera_nfs4_compound_complete(req, status);
+                return;
+            }
+
             chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
                                 parent_handle,
                                 args->claim.file.data,

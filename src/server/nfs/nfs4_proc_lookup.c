@@ -77,17 +77,10 @@ chimera_nfs4_lookup(
         return;
     }
 
-    if (args->objname.len == 0) {
-        res->status = NFS4ERR_INVAL;
-        chimera_nfs4_compound_complete(req, NFS4ERR_INVAL);
-        return;
-    }
+    res->status = chimera_nfs4_validate_name(&args->objname);
 
-    if ((args->objname.len == 1 && ((const char *) args->objname.data)[0] == '.') ||
-        (args->objname.len == 2 && ((const char *) args->objname.data)[0] == '.' &&
-         ((const char *) args->objname.data)[1] == '.')) {
-        res->status = NFS4ERR_BADNAME;
-        chimera_nfs4_compound_complete(req, NFS4ERR_BADNAME);
+    if (res->status != NFS4_OK) {
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
