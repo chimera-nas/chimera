@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -32,4 +32,8 @@ struct chimera_server_protocol {
         void                      *data);
     void  (*thread_destroy)(
         void *data);
+
+    void  (*watchdog)(
+        void    *thread_private,
+        uint64_t timeout_ns);
 };
