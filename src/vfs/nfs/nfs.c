@@ -94,6 +94,7 @@ chimera_nfs_init(const char *cfgdata)
     NFS_V3_init(&shared->nfs_v3);
     NFS_V4_init(&shared->nfs_v4);
     NFS_V4_CB_init(&shared->nfs_v4_cb);
+    NLM_V4_init(&shared->nlm_v4);
 
     return shared;
 } /* chimera_nfs_init */
@@ -174,7 +175,7 @@ chimera_nfs_thread_init(
 {
     struct chimera_nfs_shared *shared = private_data;
     struct chimera_nfs_thread *thread = calloc(1, sizeof(*thread));
-    struct evpl_rpc2_program  *programs[5];
+    struct evpl_rpc2_program  *programs[6];
 
     thread->shared = shared;
     thread->evpl   = evpl;
@@ -184,8 +185,9 @@ chimera_nfs_thread_init(
     programs[2] = &shared->nfs_v3.rpc2;
     programs[3] = &shared->nfs_v4.rpc2;
     programs[4] = &shared->nfs_v4_cb.rpc2;
+    programs[5] = &shared->nlm_v4.rpc2;
 
-    thread->rpc2_thread = evpl_rpc2_thread_init(evpl, programs, 5, chimera_nfs_notify, thread);
+    thread->rpc2_thread = evpl_rpc2_thread_init(evpl, programs, 6, chimera_nfs_notify, thread);
 
     thread->max_server_threads = shared->max_servers;
     thread->server_threads     = calloc(thread->max_server_threads, sizeof(*thread->server_threads));
@@ -294,9 +296,10 @@ chimera_nfs_dispatch(
 } /* chimera_nfs_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_nfs = {
-    .name           = "nfs",
-    .fh_magic       = CHIMERA_VFS_FH_MAGIC_NFS,
-    .capabilities   = CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP,
+    .name         = "nfs",
+    .fh_magic     = CHIMERA_VFS_FH_MAGIC_NFS,
+    .capabilities = CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
+        CHIMERA_VFS_CAP_FS_LOCK,
     .init           = chimera_nfs_init,
     .destroy        = chimera_nfs_destroy,
     .thread_init    = chimera_nfs_thread_init,

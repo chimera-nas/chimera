@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -191,7 +191,7 @@ unregister_service(
 } /* unregister_service */
 
 void
-register_nfs_rpc_services(void)
+register_nfs_rpc_services(int lockmgr_port)
 {
     struct portmap_reg_ctx ctx;
 
@@ -203,6 +203,10 @@ register_nfs_rpc_services(void)
     /* Register NFS and MOUNT services */
     register_service(&ctx, NFS_RPC_PROGRAM, NFS_VERSION, NFS_PORT, "NFS over TCP");
     register_service(&ctx, NFS_MOUNT_PROGRAM, NFS_MOUNT_VERSION, NFS_MOUNT_PORT, "NFS mountd over TCP");
+
+    if (lockmgr_port > 0) {
+        register_service(&ctx, NFS_NLM_PROGRAM, 4, lockmgr_port, "NLM v4 over TCP");
+    }
 
     /* Wait for all registrations to complete */
     while (!ctx.complete) {
@@ -219,7 +223,7 @@ register_nfs_rpc_services(void)
 } /* register_nfs_rpc_services */
 
 void
-unregister_nfs_rpc_services(void)
+unregister_nfs_rpc_services(int lockmgr_port)
 {
     struct portmap_reg_ctx ctx;
 
@@ -231,6 +235,10 @@ unregister_nfs_rpc_services(void)
     /* Unregister NFS and MOUNT services */
     unregister_service(&ctx, NFS_RPC_PROGRAM, NFS_VERSION, "NFS over TCP");
     unregister_service(&ctx, NFS_MOUNT_PROGRAM, NFS_MOUNT_VERSION, "NFS mountd over TCP");
+
+    if (lockmgr_port > 0) {
+        unregister_service(&ctx, NFS_NLM_PROGRAM, 4, "NLM v4 over TCP");
+    }
 
     /* Wait for all unregistrations to complete */
     while (!ctx.complete) {

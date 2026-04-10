@@ -18,6 +18,7 @@
 #include "common/misc.h"
 #include "vfs/vfs_fh.h"
 #include "evpl/evpl_rpc2.h"
+#include "nlm4_xdr.h"
 
 #define chimera_nfsclient_debug(...) chimera_debug("nfsclient", \
                                                    __FILE__, \
@@ -66,6 +67,7 @@ struct chimera_nfs_client_server_thread {
     struct evpl_rpc2_conn            *portmap_conn;
     struct evpl_rpc2_conn            *mount_conn;
     struct evpl_rpc2_conn            *nfs_conn;
+    struct evpl_rpc2_conn            *nlm_conn;
 };
 
 struct chimera_nfs_client_server {
@@ -80,9 +82,11 @@ struct chimera_nfs_client_server {
     struct evpl_endpoint       *portmap_endpoint;
     struct evpl_endpoint       *mount_endpoint;
     struct evpl_endpoint       *nfs_endpoint;
+    struct evpl_endpoint       *nlm_endpoint;
 
     uint16_t                    mount_port;
     uint16_t                    nfs_port;
+    uint16_t                    nlm_port;
 
     struct chimera_vfs_request *pending_mounts;
 
@@ -118,6 +122,7 @@ struct chimera_nfs_shared {
     struct NFS_V3                      nfs_v3;
     struct NFS_V4                      nfs_v4;
     struct NFS_V4_CB                   nfs_v4_cb;
+    struct NLM_V4                      nlm_v4;
 
     struct prometheus_histogram       *op_histogram;
     struct prometheus_metrics         *metrics;
@@ -196,6 +201,13 @@ chimera_nfs_thread_get_server_thread(
         server_thread->nfs_conn = evpl_rpc2_client_connect(thread->rpc2_thread,
                                                            proto,
                                                            server_thread->server->nfs_endpoint,
+                                                           NULL, 0, NULL);
+    }
+
+    if (unlikely(!server_thread->nlm_conn && server_thread->server->nlm_endpoint)) {
+        server_thread->nlm_conn = evpl_rpc2_client_connect(thread->rpc2_thread,
+                                                           EVPL_STREAM_SOCKET_TCP,
+                                                           server_thread->server->nlm_endpoint,
                                                            NULL, 0, NULL);
     }
 
@@ -362,6 +374,11 @@ void chimera_nfs3_mknod_at(
     struct chimera_vfs_request *,
     void *);
 void chimera_nfs3_link_at(
+    struct chimera_nfs_thread *,
+    struct chimera_nfs_shared *,
+    struct chimera_vfs_request *,
+    void *);
+void chimera_nfs3_lock(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,

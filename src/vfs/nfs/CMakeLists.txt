@@ -19,6 +19,7 @@ add_library(chimera_vfs_nfs SHARED
     nfs3_mknod_at.c
     nfs3_open_at.c
     nfs3_open_fh.c
+    nfs3_lock.c
     nfs3_read.c
     nfs3_readdir.c
     nfs3_readlink.c

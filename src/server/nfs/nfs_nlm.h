@@ -4,210 +4,191 @@
 
 #pragma once
 
-#include <stdint.h>
-#include "evpl/evpl_rpc2.h"
-#include "portmap_xdr.h"
+#include "nlm4_xdr.h"
 
-void portmap_set_nlm_port(
-    uint32_t port);
-
-void chimera_portmap_null_v2(
+void chimera_nfs_nlm4_null(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_getport_v2(
+void chimera_nfs_nlm4_test(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct mapping            *args,
+    struct nlm4_testargs      *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_set_v2(
+void chimera_nfs_nlm4_lock(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct mapping            *args,
+    struct nlm4_lockargs      *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_unset_v2(
+void chimera_nfs_nlm4_cancel(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct mapping            *args,
+    struct nlm4_cancargs      *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_dump_v2(
+void chimera_nfs_nlm4_unlock(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
+    struct nlm4_unlockargs    *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_callit_v2(
+void chimera_nfs_nlm4_granted(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct call_args          *args,
+    struct nlm4_testargs      *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_set_v3(
+void chimera_nfs_nlm4_test_msg(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct rpcb               *args,
+    struct nlm4_testargs      *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_unset_v3(
+void chimera_nfs_nlm4_lock_msg(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct rpcb               *args,
+    struct nlm4_lockargs      *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_getaddr_v3(
+void chimera_nfs_nlm4_cancel_msg(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct rpcb               *args,
+    struct nlm4_cancargs      *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_dump_v3(
+void chimera_nfs_nlm4_unlock_msg(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
+    struct nlm4_unlockargs    *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_callit_v3(
+void chimera_nfs_nlm4_granted_msg(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct rpcb_rmtcallargs   *args,
+    struct nlm4_testargs      *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_gettime_v3(
+void chimera_nfs_nlm4_test_res(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
+    struct nlm4_testres       *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_uaddr2taddr_v3(
+void chimera_nfs_nlm4_lock_res(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    xdr_string                *args,
+    struct nlm4_res           *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_taddr2uaddr_v3(
+void chimera_nfs_nlm4_cancel_res(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct netbuf             *args,
+    struct nlm4_res           *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_set_v4(
+void chimera_nfs_nlm4_unlock_res(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct rpcb               *args,
+    struct nlm4_res           *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_unset_v4(
+void chimera_nfs_nlm4_granted_res(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct rpcb               *args,
+    struct nlm4_res           *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_getaddr_v4(
-    struct evpl               *evpl,
-    struct evpl_rpc2_conn     *conn,
-    struct evpl_rpc2_cred     *cred,
-    struct rpcb               *args,
-    struct evpl_rpc2_encoding *encoding,
-    void                      *private_data);
-
-void chimera_portmap_dump_v4(
+void chimera_nfs_nlm4_reserved_16(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_callit_v4(
-    struct evpl               *evpl,
-    struct evpl_rpc2_conn     *conn,
-    struct evpl_rpc2_cred     *cred,
-    struct rpcb_rmtcallargs   *args,
-    struct evpl_rpc2_encoding *encoding,
-    void                      *private_data);
-
-void chimera_portmap_gettime_v4(
+void chimera_nfs_nlm4_reserved_17(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_uaddr2taddr_v4(
+void chimera_nfs_nlm4_reserved_18(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    xdr_string                *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_taddr2uaddr_v4(
+void chimera_nfs_nlm4_reserved_19(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct netbuf             *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_getversaddr_v4(
+void chimera_nfs_nlm4_share(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct rpcb               *args,
+    struct nlm4_shareargs     *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_indirect_v4(
+void chimera_nfs_nlm4_unshare(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct rpcb_rmtcallargs   *args,
+    struct nlm4_shareargs     *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_getaddrlist_v4(
+void chimera_nfs_nlm4_nm_lock(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
-    struct rpcb               *args,
+    struct nlm4_lockargs      *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-void chimera_portmap_getstat_v4(
+void chimera_nfs_nlm4_free_all(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
+    struct nlm4_notify        *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);

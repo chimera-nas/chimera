@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -20,7 +20,9 @@ struct portmap_service {
     uint32_t port;    /* Port number */
 };
 
-static const struct portmap_service portmap_services[] = {
+#define num_portmap_services_MAX 8
+
+static struct portmap_service portmap_services[num_portmap_services_MAX] = {
     /* Portmap/rpcbind - program 100000 */
     { 100000, 2, 6, 111   },
     { 100000, 3, 6, 111   },
@@ -32,7 +34,7 @@ static const struct portmap_service portmap_services[] = {
     { 100005, 3, 6, 20048 },
 };
 
-#define NUM_PORTMAP_SERVICES (sizeof(portmap_services) / sizeof(portmap_services[0]))
+static int                    num_portmap_services = 6;
 
 /*
  * Convert local address from "ip:port" format to universal address format.
@@ -76,7 +78,7 @@ portmap_make_uaddr(
 static unsigned int
 portmap_lookup_port(uint32_t prog)
 {
-    for (unsigned int i = 0; i < NUM_PORTMAP_SERVICES; i++) {
+    for (unsigned int i = 0; i < num_portmap_services; i++) {
         if (portmap_services[i].prog == prog) {
             return portmap_services[i].port;
         }
@@ -95,7 +97,7 @@ portmap_build_pmaplist(struct xdr_dbuf *dbuf)
     struct pmaplist *tail = NULL;
     struct pmaplist *entry;
 
-    for (unsigned int i = 0; i < NUM_PORTMAP_SERVICES; i++) {
+    for (unsigned int i = 0; i < num_portmap_services; i++) {
         entry = xdr_dbuf_alloc_space(sizeof(*entry), dbuf);
         if (!entry) {
             return head;
@@ -132,7 +134,7 @@ portmap_build_rpcblist(
     struct rp__list *entry;
     char            *uaddr;
 
-    for (unsigned int i = 0; i < NUM_PORTMAP_SERVICES; i++) {
+    for (unsigned int i = 0; i < num_portmap_services; i++) {
         entry = xdr_dbuf_alloc_space(sizeof(*entry), dbuf);
         if (!entry) {
             return head;
@@ -165,6 +167,19 @@ portmap_build_rpcblist(
 
     return head;
 } /* portmap_build_rpcblist */
+
+void
+portmap_set_nlm_port(uint32_t port)
+{
+    if (port == 0) {
+        return;
+    }
+    if (num_portmap_services >= num_portmap_services_MAX) {
+        chimera_nfs_error("portmap_set_nlm_port: no room in portmap_services table");
+        return;
+    }
+    portmap_services[num_portmap_services++] = (struct portmap_service) { 100021, 4, 6, port };
+} /* portmap_set_nlm_port */
 
 void
 chimera_portmap_null_v2(

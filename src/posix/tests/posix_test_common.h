@@ -29,32 +29,30 @@ struct posix_test_env {
     int                          use_nfs_rdma; // 1 if using NFS over RDMA (TCP-RDMA)
 };
 
-// Helper to parse backend string for NFS backends (e.g., "nfs3_memfs" -> version=3, backend="memfs")
-// Returns 1 if NFS backend, 0 otherwise. Also sets use_rdma if backend is nfs3rdma_*
+// Helper to parse env->backend for NFS backends (e.g., "nfs3_memfs" -> version=3, backend="memfs")
+// Sets env->nfs_version, env->nfs_backend, env->use_nfs_rdma. Returns 1 if NFS backend, 0 otherwise.
 static inline int
-posix_test_parse_nfs_backend(
-    const char  *backend,
-    int         *nfs_version,
-    const char **nfs_backend,
-    int         *use_rdma)
+posix_test_parse_nfs_backend(struct posix_test_env *env)
 {
-    *use_rdma = 0;
+    const char *backend = env->backend;
+
+    env->use_nfs_rdma = 0;
     if (strncmp(backend, "nfs3rdma_", 9) == 0) {
-        *nfs_version = 3;
-        *nfs_backend = backend + 9;
-        *use_rdma    = 1;
+        env->nfs_version  = 3;
+        env->nfs_backend  = backend + 9;
+        env->use_nfs_rdma = 1;
         return 1;
     } else if (strncmp(backend, "nfs3_", 5) == 0) {
-        *nfs_version = 3;
-        *nfs_backend = backend + 5;
+        env->nfs_version = 3;
+        env->nfs_backend = backend + 5;
         return 1;
     } else if (strncmp(backend, "nfs4_", 5) == 0) {
-        *nfs_version = 4;
-        *nfs_backend = backend + 5;
+        env->nfs_version = 4;
+        env->nfs_backend = backend + 5;
         return 1;
     }
-    *nfs_version = 0;
-    *nfs_backend = NULL;
+    env->nfs_version = 0;
+    env->nfs_backend = NULL;
     return 0;
 } // posix_test_parse_nfs_backend
 
@@ -141,7 +139,59 @@ posix_test_configure_cairn(
     snprintf(cairn_cfg, cairn_cfg_size, "%s", json_str);
     free(json_str);
     json_decref(cfg);
-} // posix_test_configure_cairn // posix_test_configure_cairn
+} // posix_test_configure_cairn
+
+// Helper to start NFS server with the given backend and mount it as "share"
+static inline void
+posix_test_start_nfs_server(struct posix_test_env *env)
+{
+    char                          config_data[4096];
+    struct chimera_server_config *server_config;
+    const char                   *nfs_backend_name = env->nfs_backend;
+    int                           use_nfs_rdma     = env->use_nfs_rdma;
+
+    server_config = chimera_server_config_init();
+    chimera_server_config_set_state_dir(server_config, env->session_dir);
+
+    if (posix_test_is_demofs(nfs_backend_name)) {
+        posix_test_configure_demofs(env->session_dir,
+                                    posix_test_demofs_device_type(nfs_backend_name),
+                                    config_data, sizeof(config_data));
+        chimera_server_config_add_module(server_config, "demofs", NULL, config_data);
+    } else if (strcmp(nfs_backend_name, "cairn") == 0) {
+        posix_test_configure_cairn(env->session_dir, config_data, sizeof(config_data));
+        chimera_server_config_add_module(server_config, "cairn", NULL, config_data);
+    }
+
+    if (use_nfs_rdma) {
+        fprintf(stderr, "Enabling NFS3 over TCP-RDMA on port 20049\n");
+        chimera_server_config_set_nfs_rdma_hostname(server_config, "127.0.0.1");
+        chimera_server_config_set_nfs_tcp_rdma_port(server_config, 20049);
+    }
+
+    env->server = chimera_server_init(server_config, env->metrics);
+
+    if (strcmp(nfs_backend_name, "linux") == 0) {
+        chimera_server_mount(env->server, "share", "linux", env->session_dir);
+    } else if (strcmp(nfs_backend_name, "io_uring") == 0) {
+        chimera_server_mount(env->server, "share", "io_uring", env->session_dir);
+    } else if (strcmp(nfs_backend_name, "memfs") == 0) {
+        chimera_server_mount(env->server, "share", "memfs", "/");
+    } else if (posix_test_is_demofs(nfs_backend_name)) {
+        chimera_server_mount(env->server, "share", "demofs", "/");
+    } else if (strcmp(nfs_backend_name, "cairn") == 0) {
+        chimera_server_mount(env->server, "share", "cairn", "/");
+    } else {
+        fprintf(stderr, "Unknown NFS backend: %s\n", nfs_backend_name);
+        exit(EXIT_FAILURE);
+    }
+
+    chimera_server_create_export(env->server, "/share", "/share");
+
+    chimera_server_start(env->server);
+
+    chimera_test_add_server_users(env->server);
+} /* posix_test_start_nfs_server */
 
 static inline void
 posix_test_init(
@@ -149,15 +199,11 @@ posix_test_init(
     char                 **argv,
     int                    argc)
 {
-    int                           opt;
-    extern char                  *optarg;
-    const char                   *backend = "memfs";
-    struct chimera_server_config *server_config;
-    struct timespec               tv;
-    int                           is_nfs;
-    const char                   *nfs_backend_name;
-    int                           nfs_version;
-    int                           use_nfs_rdma;
+    int             opt;
+    extern char    *optarg;
+    const char     *backend = "memfs";
+    struct timespec tv;
+    int             is_nfs;
 
     env->metrics = prometheus_metrics_create(NULL, NULL, 0);
     env->server  = NULL;
@@ -184,10 +230,7 @@ posix_test_init(
     env->backend = backend;
 
     // Check if this is an NFS backend (e.g., "nfs3_memfs" or "nfs3rdma_memfs")
-    is_nfs            = posix_test_parse_nfs_backend(backend, &nfs_version, &nfs_backend_name, &use_nfs_rdma);
-    env->nfs_version  = nfs_version;
-    env->nfs_backend  = nfs_backend_name;
-    env->use_nfs_rdma = use_nfs_rdma;
+    is_nfs = posix_test_parse_nfs_backend(env);
 
     chimera_log_init();
 
@@ -211,52 +254,7 @@ posix_test_init(
     (void) mkdir(env->session_dir, 0755);
 
     if (is_nfs) {
-        // NFS backend: Start server with the actual backend, then connect via NFS client
-        char config_data[4096];
-
-        server_config = chimera_server_config_init();
-
-        if (posix_test_is_demofs(nfs_backend_name)) {
-            posix_test_configure_demofs(env->session_dir,
-                                        posix_test_demofs_device_type(nfs_backend_name),
-                                        config_data, sizeof(config_data));
-            chimera_server_config_add_module(server_config, "demofs", NULL, config_data);
-        } else if (strcmp(nfs_backend_name, "cairn") == 0) {
-            posix_test_configure_cairn(env->session_dir, config_data, sizeof(config_data));
-            chimera_server_config_add_module(server_config, "cairn", NULL, config_data);
-        }
-
-        // Enable TCP-RDMA if using RDMA backend
-        if (use_nfs_rdma) {
-            fprintf(stderr, "Enabling NFS3 over TCP-RDMA on port 20049\n");
-            chimera_server_config_set_nfs_rdma_hostname(server_config, "127.0.0.1");
-            chimera_server_config_set_nfs_tcp_rdma_port(server_config, 20049);
-        }
-
-        env->server = chimera_server_init(server_config, env->metrics);
-
-        // Mount the backend on the server as "share"
-        if (strcmp(nfs_backend_name, "linux") == 0) {
-            chimera_server_mount(env->server, "share", "linux", env->session_dir);
-        } else if (strcmp(nfs_backend_name, "io_uring") == 0) {
-            chimera_server_mount(env->server, "share", "io_uring", env->session_dir);
-        } else if (strcmp(nfs_backend_name, "memfs") == 0) {
-            chimera_server_mount(env->server, "share", "memfs", "/");
-        } else if (posix_test_is_demofs(nfs_backend_name)) {
-            chimera_server_mount(env->server, "share", "demofs", "/");
-        } else if (strcmp(nfs_backend_name, "cairn") == 0) {
-            chimera_server_mount(env->server, "share", "cairn", "/");
-        } else {
-            fprintf(stderr, "Unknown NFS backend: %s\n", nfs_backend_name);
-            exit(EXIT_FAILURE);
-        }
-
-        // Create NFSv3 server export entry
-        chimera_server_create_export(env->server, "/share", "/share");
-
-        chimera_server_start(env->server);
-
-        chimera_test_add_server_users(env->server);
+        posix_test_start_nfs_server(env);
     }
 
     {
@@ -371,6 +369,7 @@ posix_test_mount(struct posix_test_env *env)
         } else {
             snprintf(nfs_mount_options, sizeof(nfs_mount_options), "vers=%d", env->nfs_version);
         }
+        fprintf(stderr, "Mounting NFS backend path %s with options: %s\n", nfs_mount_path, nfs_mount_options);
         return chimera_posix_mount_with_options("/test", "nfs", nfs_mount_path, nfs_mount_options);
     }
 
