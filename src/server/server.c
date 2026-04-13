@@ -36,6 +36,7 @@ struct chimera_server_config {
     int                                   nfs_rdma;
     int                                   nfs_rdma_port;
     int                                   nfs_tcp_rdma_port;
+    int                                   nfs_lockmgr_port;
     int                                   external_portmap;
     int                                   soft_fail_bad_req;
     rlim_t                                max_open_files;
@@ -53,6 +54,7 @@ struct chimera_server_config {
     uint32_t                              anongid;
     char                                  nfs_rdma_hostname[256];
     char                                  kv_module[64];
+    char                                  state_dir[256];
     char                                  rest_ssl_cert[256];
     char                                  rest_ssl_key[256];
     struct chimera_vfs_module_cfg         modules[CHIMERA_SERVER_MAX_MODULES];
@@ -117,7 +119,10 @@ chimera_server_config_init(void)
     config->cache_ttl = 60;
 
     strncpy(config->nfs_rdma_hostname, "0.0.0.0", sizeof(config->nfs_rdma_hostname));
-    config->nfs_rdma_port = 20049;
+    config->nfs_rdma_port    = 20049;
+    config->nfs_lockmgr_port = 32803;
+
+    snprintf(config->state_dir, sizeof(config->state_dir), "%s", CHIMERA_STATE_DIR);
 
     strncpy(config->modules[0].module_name, "root", sizeof(config->modules[0].module_name));
     config->modules[0].config_data[0] = '\0';
@@ -269,6 +274,34 @@ chimera_server_config_get_nfs_tcp_rdma_port(const struct chimera_server_config *
 {
     return config->nfs_tcp_rdma_port;
 } /* chimera_server_config_get_nfs_tcp_rdma_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_lockmgr_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->nfs_lockmgr_port = port;
+} /* chimera_server_config_set_nfs_lockmgr_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_lockmgr_port(const struct chimera_server_config *config)
+{
+    return config->nfs_lockmgr_port;
+} /* chimera_server_config_get_nfs_lockmgr_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_state_dir(
+    struct chimera_server_config *config,
+    const char                   *dir)
+{
+    snprintf(config->state_dir, sizeof(config->state_dir), "%s", dir);
+} /* chimera_server_config_set_state_dir */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_state_dir(const struct chimera_server_config *config)
+{
+    return config->state_dir;
+} /* chimera_server_config_get_state_dir */
 
 SYMBOL_EXPORT int
 chimera_server_config_get_external_portmap(const struct chimera_server_config *config)

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
@@ -18,6 +18,10 @@ set(PORTMAP_XDR_H ${CMAKE_CURRENT_BINARY_DIR}/portmap_xdr.h)
 set(NFS_MOUNT_XDR_X ${CMAKE_CURRENT_SOURCE_DIR}/mount.x)
 set(NFS_MOUNT_XDR_C ${CMAKE_CURRENT_BINARY_DIR}/nfs_mount_xdr.c)
 set(NFS_MOUNT_XDR_H ${CMAKE_CURRENT_BINARY_DIR}/nfs_mount_xdr.h)
+
+set(NLM4_XDR_X ${CMAKE_CURRENT_SOURCE_DIR}/nlm4.x)
+set(NLM4_XDR_C ${CMAKE_CURRENT_BINARY_DIR}/nlm4_xdr.c)
+set(NLM4_XDR_H ${CMAKE_CURRENT_BINARY_DIR}/nlm4_xdr.h)
 
 add_custom_command(
     OUTPUT ${NFS3_XDR_C} ${NFS3_XDR_H}
@@ -47,24 +51,32 @@ add_custom_command(
     COMMENT "Compiling ${PORTMAP_XDR_X}"
 )
 
+add_custom_command(
+    OUTPUT ${NLM4_XDR_C} ${NLM4_XDR_H}
+    COMMAND ${XDRZCC} -r ${NLM4_XDR_X} ${NLM4_XDR_C} ${NLM4_XDR_H}
+    DEPENDS ${NLM4_XDR_X} ${XDRZCC}
+    COMMENT "Compiling ${NLM4_XDR_X}"
+)
+
 set(NFS_COMMON_INCLUDE_DIR ${CMAKE_CURRENT_BINARY_DIR} PARENT_SCOPE)
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 # Suppress warnings for the generated source files
 set_source_files_properties(
-    ${NFS3_XDR_C} ${NFS4_XDR_C} ${NFS_MOUNT_XDR_C} ${PORTMAP_XDR_C} PROPERTIES COMPILE_OPTIONS "-Wno-unused;-Wno-switch;-Wno-format-truncation"
+    ${NFS3_XDR_C} ${NFS4_XDR_C} ${NFS_MOUNT_XDR_C} ${PORTMAP_XDR_C} ${NLM4_XDR_C} PROPERTIES COMPILE_OPTIONS "-Wno-unused;-Wno-switch;-Wno-format-truncation"
 )
 
 add_definitions(-fvisibility=default)
 
 
 # Create libraries for NFSv3 and NFSv4
-add_library(chimera_nfs_common  SHARED 
+add_library(chimera_nfs_common  SHARED
             ${NFS3_XDR_C} ${NFS3_XDR_H}
             ${NFS4_XDR_C} ${NFS4_XDR_H}
             ${NFS_MOUNT_XDR_C} ${NFS_MOUNT_XDR_H}
-            ${PORTMAP_XDR_C} ${PORTMAP_XDR_H})
+            ${PORTMAP_XDR_C} ${PORTMAP_XDR_H}
+            ${NLM4_XDR_C} ${NLM4_XDR_H})
 
 target_link_libraries(chimera_nfs_common chimera_common evpl evpl_rpc2)
 

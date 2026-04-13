@@ -58,6 +58,7 @@ child_main(
     close(p2c[1]);
     close(c2p[0]);
 
+    fprintf(stderr, "child: Testing chimera_posix_fcntl()...\n");
     env->posix = chimera_posix_init_json(posix_json_path, cred, env->metrics);
 
     if (!env->posix) {
@@ -65,13 +66,13 @@ child_main(
         return 1;
     }
 
+    /* Wait for parent to create + lock the file. optional start NFS server */
+    recv_sig(p2c[0]);
+
     if (posix_test_mount(env) != 0) {
         fprintf(stderr, "child: mount failed: %s\n", strerror(errno));
         return 1;
     }
-
-    /* Wait for parent to create + lock the file. */
-    recv_sig(p2c[0]);
 
     fd = chimera_posix_open(TEST_FILE, O_RDWR, 0);
 
@@ -104,7 +105,7 @@ child_main(
         return 1;
     }
 
-    fprintf(stderr, "  cross-proc F_GETLK detects conflict: PASS\n");
+    fprintf(stderr, "child:  cross-proc F_GETLK detects conflict: PASS\n");
 
     /* --- test: F_SETLK on locked range fails with EAGAIN/EACCES --- */
     fl.l_type   = F_WRLCK;
@@ -119,7 +120,7 @@ child_main(
         return 1;
     }
 
-    fprintf(stderr, "  cross-proc F_SETLK conflict -> EAGAIN/EACCES: PASS\n");
+    fprintf(stderr, "child:  cross-proc F_SETLK conflict -> EAGAIN/EACCES: PASS\n");
 
     /* --- test: F_SETLK on non-overlapping range succeeds --- */
     fl.l_type   = F_WRLCK;
@@ -134,7 +135,7 @@ child_main(
         return 1;
     }
 
-    fprintf(stderr, "  cross-proc F_SETLK non-overlapping range: PASS\n");
+    fprintf(stderr, "child:  cross-proc F_SETLK non-overlapping range: PASS\n");
 
     fl.l_type = F_UNLCK;
     chimera_posix_fcntl(fd, F_SETLK, &fl);
@@ -158,14 +159,17 @@ child_main(
         return 1;
     }
 
-    fprintf(stderr, "  cross-proc F_SETLKW after parent unlock: PASS\n");
+    fprintf(stderr, "child:  cross-proc F_SETLKW after parent unlock: PASS\n");
 
     fl.l_type = F_UNLCK;
     chimera_posix_fcntl(fd, F_SETLK, &fl);
+    fprintf(stderr, "child:  final unlock: PASS\n");
 
     chimera_posix_close(fd);
+    fprintf(stderr, "child: All chimera_posix_fcntl() tests PASSED\n");
     posix_test_umount();
     chimera_posix_shutdown();
+    fprintf(stderr, "child: chimera_posix_shutdown() completed\n");
     return 0;
 } /* child_main */
 
@@ -185,6 +189,7 @@ main(
     int                     opt;
     struct timespec         tv;
     json_t                 *posix_json_root;
+    int                     is_nfs;
 
     /*
      * Pre-fork setup: create session directory and write posix.json.
@@ -197,6 +202,7 @@ main(
     env.metrics     = prometheus_metrics_create(NULL, NULL, 0);
     env.nfs_version = 0;
     env.server      = NULL;
+    clock_gettime(CLOCK_MONOTONIC, &tv);
 
     /* Pick up the -b backend option. */
     {
@@ -217,10 +223,12 @@ main(
         env.backend = "linux";
     }
 
+    // Check if this is an NFS backend (e.g., "nfs3_memfs" or "nfs3rdma_memfs")
+    is_nfs = posix_test_parse_nfs_backend(&env);
+
     chimera_log_init();
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 
-    clock_gettime(CLOCK_MONOTONIC, &tv);
     snprintf(env.session_dir, sizeof(env.session_dir),
              "/build/test/posix_session_%d_%lu_%lu",
              getpid(), (unsigned long) tv.tv_sec, (unsigned long) tv.tv_nsec);
@@ -257,8 +265,12 @@ main(
     close(p2c[0]);
     close(c2p[1]);
 
-    env.posix = chimera_posix_init_json(posix_json_path, &root_cred, env.metrics);
+    fprintf(stderr, "parent: Testing chimera_posix_fcntl()...\n");
+    if (is_nfs) {
+        posix_test_start_nfs_server(&env);
+    }
 
+    env.posix = chimera_posix_init_json(posix_json_path, &root_cred, env.metrics);
     if (!env.posix) {
         fprintf(stderr, "parent: chimera init failed\n");
         posix_test_fail(&env);
@@ -269,12 +281,10 @@ main(
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "Testing chimera_posix_fcntl()...\n");
-
     fd = chimera_posix_open(TEST_FILE, O_CREAT | O_RDWR | O_TRUNC, 0644);
 
     if (fd < 0) {
-        fprintf(stderr, "open failed: %s\n", strerror(errno));
+        fprintf(stderr, "parent: open failed: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
 
@@ -288,12 +298,12 @@ main(
     rc          = chimera_posix_fcntl(fd, F_GETLK, &fl);
 
     if (rc != 0 || fl.l_type != F_UNLCK) {
-        fprintf(stderr, "F_GETLK unlocked: expected F_UNLCK "
+        fprintf(stderr, "parent: F_GETLK unlocked: expected F_UNLCK "
                 "(rc=%d type=%d errno=%d)\n", rc, fl.l_type, errno);
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  F_GETLK on unlocked region -> F_UNLCK: PASS\n");
+    fprintf(stderr, "parent: F_GETLK on unlocked region -> F_UNLCK: PASS\n");
 
     /* F_SETLK WRLCK */
     fl.l_type = F_WRLCK;
@@ -301,7 +311,7 @@ main(
 
     if (rc != 0) {
         if (errno == EOPNOTSUPP) {
-            fprintf(stderr, "  locking not supported by backend - SKIPPED\n");
+            fprintf(stderr, "parent: locking not supported by backend - SKIPPED\n");
             chimera_posix_close(fd);
             chimera_posix_unlink(TEST_FILE);
             send_sig(p2c[1]);   /* unblock child */
@@ -310,44 +320,44 @@ main(
             posix_test_success(&env);
         }
 
-        fprintf(stderr, "F_SETLK WRLCK failed: %s\n", strerror(errno));
+        fprintf(stderr, "parent: F_SETLK WRLCK failed: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  F_SETLK write lock: PASS\n");
+    fprintf(stderr, "parent: F_SETLK write lock: PASS\n");
 
     /* F_SETLK UNLCK */
     fl.l_type = F_UNLCK;
     rc        = chimera_posix_fcntl(fd, F_SETLK, &fl);
 
     if (rc != 0) {
-        fprintf(stderr, "F_SETLK UNLCK failed: %s\n", strerror(errno));
+        fprintf(stderr, "parent: F_SETLK UNLCK failed: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  F_SETLK unlock: PASS\n");
+    fprintf(stderr, "parent: F_SETLK unlock: PASS\n");
 
     /* F_SETLK RDLCK */
     fl.l_type = F_RDLCK;
     rc        = chimera_posix_fcntl(fd, F_SETLK, &fl);
 
     if (rc != 0) {
-        fprintf(stderr, "F_SETLK RDLCK failed: %s\n", strerror(errno));
+        fprintf(stderr, "parent: F_SETLK RDLCK failed: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  F_SETLK read lock: PASS\n");
+    fprintf(stderr, "parent: F_SETLK read lock: PASS\n");
 
     /* F_SETLKW UNLCK */
     fl.l_type = F_UNLCK;
     rc        = chimera_posix_fcntl(fd, F_SETLKW, &fl);
 
     if (rc != 0) {
-        fprintf(stderr, "F_SETLKW UNLCK failed: %s\n", strerror(errno));
+        fprintf(stderr, "parent: F_SETLKW UNLCK failed: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  F_SETLKW unlock: PASS\n");
+    fprintf(stderr, "parent: F_SETLKW unlock: PASS\n");
 
     /* F_SETLK SEEK_CUR */
     chimera_posix_lseek(fd, 50, SEEK_SET);
@@ -358,13 +368,13 @@ main(
     rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
 
     if (rc != 0) {
-        fprintf(stderr, "F_SETLK SEEK_CUR failed: %s\n", strerror(errno));
+        fprintf(stderr, "parent: F_SETLK SEEK_CUR failed: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
 
     fl.l_type = F_UNLCK;
     chimera_posix_fcntl(fd, F_SETLK, &fl);
-    fprintf(stderr, "  F_SETLK SEEK_CUR: PASS\n");
+    fprintf(stderr, "parent:  F_SETLK SEEK_CUR: PASS\n");
 
     /* F_SETLK SEEK_END - write 20 bytes so the file has a known size, then
      * lock the last 10 bytes using a negative SEEK_END offset. */
@@ -383,7 +393,7 @@ main(
     rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
 
     if (rc != 0) {
-        fprintf(stderr, "F_SETLK SEEK_END failed: %s\n", strerror(errno));
+        fprintf(stderr, "parent: F_SETLK SEEK_END failed: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
 
@@ -392,7 +402,7 @@ main(
     fl.l_start  = -10;
     fl.l_len    = 10;
     chimera_posix_fcntl(fd, F_SETLK, &fl);
-    fprintf(stderr, "  F_SETLK SEEK_END: PASS\n");
+    fprintf(stderr, "parent: F_SETLK SEEK_END: PASS\n");
 
     /* SEEK_SET negative l_start -> EINVAL */
     fl.l_type   = F_WRLCK;
@@ -402,12 +412,12 @@ main(
     rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
 
     if (rc != -1 || errno != EINVAL) {
-        fprintf(stderr, "SEEK_SET negative: expected -1/EINVAL "
+        fprintf(stderr, "parent: SEEK_SET negative: expected -1/EINVAL "
                 "(rc=%d errno=%d)\n", rc, errno);
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  SEEK_SET negative l_start -> EINVAL: PASS\n");
+    fprintf(stderr, "parent: SEEK_SET negative l_start -> EINVAL: PASS\n");
 
     /* SEEK_CUR negative result -> EINVAL (seek to 0 then l_start=-1) */
     chimera_posix_lseek(fd, 0, SEEK_SET);
@@ -418,12 +428,12 @@ main(
     rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
 
     if (rc != -1 || errno != EINVAL) {
-        fprintf(stderr, "SEEK_CUR negative: expected -1/EINVAL "
+        fprintf(stderr, "parent: SEEK_CUR negative: expected -1/EINVAL "
                 "(rc=%d errno=%d)\n", rc, errno);
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  SEEK_CUR negative result -> EINVAL: PASS\n");
+    fprintf(stderr, "parent: SEEK_CUR negative result -> EINVAL: PASS\n");
 
     /* SEEK_END offset before file start -> EINVAL (file=20 bytes, l_start=-100) */
     fl.l_type   = F_WRLCK;
@@ -433,12 +443,12 @@ main(
     rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
 
     if (rc != -1 || errno != EINVAL) {
-        fprintf(stderr, "SEEK_END before file start: expected -1/EINVAL "
+        fprintf(stderr, "parent: SEEK_END before file start: expected -1/EINVAL "
                 "(rc=%d errno=%d)\n", rc, errno);
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  SEEK_END offset before file start -> EINVAL: PASS\n");
+    fprintf(stderr, "parent: SEEK_END offset before file start -> EINVAL: PASS\n");
 
     /* F_SETLK l_len=0 (lock to EOF) */
     fl.l_type   = F_WRLCK;
@@ -448,11 +458,11 @@ main(
     rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
 
     if (rc != 0) {
-        fprintf(stderr, "F_SETLK l_len=0 (to EOF) failed: %s\n", strerror(errno));
+        fprintf(stderr, "parent: F_SETLK l_len=0 (to EOF) failed: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  F_SETLK l_len=0 (to EOF): PASS\n");
+    fprintf(stderr, "parent: F_SETLK l_len=0 (to EOF): PASS\n");
 
     fl.l_type = F_UNLCK;
     chimera_posix_fcntl(fd, F_SETLK, &fl);
@@ -461,12 +471,12 @@ main(
     rc = chimera_posix_fcntl(fd, 9999, NULL);
 
     if (rc != -1 || errno != EINVAL) {
-        fprintf(stderr, "invalid cmd: expected -1/EINVAL (rc=%d errno=%d)\n",
+        fprintf(stderr, "parent: invalid cmd: expected -1/EINVAL (rc=%d errno=%d)\n",
                 rc, errno);
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  invalid cmd -> EINVAL: PASS\n");
+    fprintf(stderr, "parent: invalid cmd -> EINVAL: PASS\n");
 
     /* Invalid fd -> EBADF */
     fl.l_type   = F_RDLCK;
@@ -476,12 +486,12 @@ main(
     rc          = chimera_posix_fcntl(9999, F_SETLK, &fl);
 
     if (rc != -1 || errno != EBADF) {
-        fprintf(stderr, "invalid fd: expected -1/EBADF (rc=%d errno=%d)\n",
+        fprintf(stderr, "parent: invalid fd: expected -1/EBADF (rc=%d errno=%d)\n",
                 rc, errno);
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  invalid fd -> EBADF: PASS\n");
+    fprintf(stderr, "parent: invalid fd -> EBADF: PASS\n");
 
     /* ---- cross-process tests ---- */
 
@@ -493,11 +503,11 @@ main(
     rc          = chimera_posix_fcntl(fd, F_SETLK, &fl);
 
     if (rc != 0) {
-        fprintf(stderr, "cross-proc F_SETLK WRLCK failed: %s\n", strerror(errno));
+        fprintf(stderr, "parent: cross-proc F_SETLK WRLCK failed: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
 
-    fprintf(stderr, "  cross-proc parent acquires write lock: PASS\n");
+    fprintf(stderr, "parent: cross-proc parent acquires write lock: PASS\n");
 
     send_sig(p2c[1]); /* child can now open + test */
 
@@ -507,7 +517,7 @@ main(
     /* Release the lock. */
     fl.l_type = F_UNLCK;
     chimera_posix_fcntl(fd, F_SETLK, &fl);
-    fprintf(stderr, "  cross-proc parent releases lock: PASS\n");
+    fprintf(stderr, "parent: cross-proc parent releases lock: PASS\n");
 
     send_sig(p2c[1]); /* child can now acquire */
 
@@ -518,15 +528,15 @@ main(
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         if (WIFEXITED(status) && WEXITSTATUS(status) == 2) {
-            fprintf(stderr, "  child: locking not supported - SKIPPED\n");
+            fprintf(stderr, "parent: child: locking not supported - SKIPPED\n");
         } else {
-            fprintf(stderr, "child process failed (status=%d)\n",
+            fprintf(stderr, "parent: child process failed (status=%d)\n",
                     WEXITSTATUS(status));
             posix_test_fail(&env);
         }
     }
 
-    fprintf(stderr, "All chimera_posix_fcntl() tests PASSED\n");
+    fprintf(stderr, "parent: All chimera_posix_fcntl() tests PASSED\n");
 
     posix_test_umount();
     posix_test_success(&env);

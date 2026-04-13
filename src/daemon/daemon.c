@@ -329,6 +329,17 @@ main(
         chimera_server_config_set_nfs_rdma_port(server_config, int_value);
     }
 
+    json_value = json_object_get(server_params, "lockmgr_port");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_nfs_lockmgr_port(server_config, int_value);
+    }
+
+    json_value = json_object_get(server_params, "state_dir");
+    if (json_is_string(json_value)) {
+        chimera_server_config_set_state_dir(server_config, json_string_value(json_value));
+    }
+
     json_t *rest_http_port_value = json_object_get(server_params, "rest_http_port");
     if (rest_http_port_value && json_is_integer(rest_http_port_value)) {
         int rest_http_port = json_integer_value(rest_http_port_value);

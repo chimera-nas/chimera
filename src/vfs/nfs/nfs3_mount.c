@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -206,6 +206,30 @@ chimera_nfs3_mount_discover_callback(
 } /* chimera_nfs3_mount_discover_callback */
 
 static void
+chimera_portmap_getport_nlm_callback(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    unsigned int                 port,
+    int                          status,
+    void                        *private_data)
+{
+    struct chimera_nfs_client_server_thread *server_thread = private_data;
+    struct chimera_nfs_client_server        *server        = server_thread->server;
+
+    if (status != 0 || port == 0) {
+        chimera_nfsclient_info("NLM portmap lookup failed or not registered for %s, "
+                               "locking unavailable", server->hostname);
+        server->nlm_port     = 0;
+        server->nlm_endpoint = NULL;
+    } else {
+        server->nlm_port     = port;
+        server->nlm_endpoint = evpl_endpoint_create(server->hostname, port);
+    }
+
+    chimera_nfs3_mount_discover_callback(server_thread, 0);
+} /* chimera_portmap_getport_nlm_callback */
+
+static void
 chimera_nfs3_mount_nfs_null_callback(
     struct evpl                 *evpl,
     const struct evpl_rpc2_verf *verf,
@@ -213,8 +237,27 @@ chimera_nfs3_mount_nfs_null_callback(
     void                        *private_data)
 {
     struct chimera_nfs_client_server_thread *server_thread = private_data;
+    struct chimera_nfs_shared               *shared        = server_thread->shared;
+    struct mapping                           mapping;
 
-    chimera_nfs3_mount_discover_callback(server_thread, status);
+    if (status != 0) {
+        chimera_nfs3_mount_discover_callback(server_thread, status);
+        return;
+    }
+
+    /* Query portmap for NLM port (program 100021, version 4, TCP) */
+    mapping.prog = 100021;
+    mapping.vers = 4;
+    mapping.prot = 6;
+    mapping.port = 0;
+
+    shared->portmap_v2.send_call_PMAPPROC_GETPORT(&shared->portmap_v2.rpc2,
+                                                  server_thread->thread->evpl,
+                                                  server_thread->portmap_conn,
+                                                  NULL,
+                                                  &mapping,
+                                                  0, 0, 0,
+                                                  chimera_portmap_getport_nlm_callback, server_thread);
 } /* chimera_nfs3_mount_nfs_null_callback */
 
 static void
