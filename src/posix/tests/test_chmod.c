@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -34,6 +34,29 @@ main(
     }
 
     chimera_posix_close(fd);
+
+    // Change mode to 0000
+    rc = chimera_posix_chmod("/test/chmod_test", 0000);
+
+    if (rc != 0) {
+        fprintf(stderr, "chmod to 0000 failed: %s\n", strerror(errno));
+        posix_test_fail(&env);
+    }
+
+    // Verify the mode changed to 0000
+    rc = chimera_posix_stat("/test/chmod_test", &st);
+
+    if (rc != 0) {
+        fprintf(stderr, "stat failed: %s\n", strerror(errno));
+        posix_test_fail(&env);
+    }
+
+    if ((st.st_mode & 0777) != 0000) {
+        fprintf(stderr, "chmod: expected mode 0000, got %03o\n", st.st_mode & 0777);
+        posix_test_fail(&env);
+    }
+
+    fprintf(stderr, "chmod 0000 test passed\n");
 
     // Change mode to 0755
     rc = chimera_posix_chmod("/test/chmod_test", 0755);

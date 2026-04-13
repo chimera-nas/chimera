@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -15,6 +15,12 @@ main(
     struct stat           st;
 
     posix_test_init(&env, argv, argc);
+
+    if (env.cred.uid != 0) {
+        fprintf(stderr, "Skipping fchown test: requires root credential\n");
+        posix_test_cleanup(&env, 1);
+        return 77;
+    }
 
     rc = posix_test_mount(&env);
 

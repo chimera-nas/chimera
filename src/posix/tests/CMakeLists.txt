@@ -675,3 +675,56 @@ endif()
 generate_stress_nfs3rdma_tests(cairn CAIRN_ENABLED)
 generate_stress_nfs3rdma_tests(linux "")
 generate_stress_nfs3rdma_tests(io_uring CHIMERA_VFS_IO_URING)
+
+# ============================================================================
+# Non-root user tests
+# Run all POSIX tests as 'myuser' against the linux, nfs3_linux, and
+# nfs3rdma_linux backends to catch permission errors that only surface for
+# non-root callers (e.g. chmod on mode-0000 files).
+# ============================================================================
+
+macro(add_posix_test_myuser testname prog backend)
+    add_test(NAME chimera/posix/${testname}_myuser COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_${prog} -b ${backend} -U myuser)
+    get_target_property(test_file posix_${prog} TEST_FILE)
+    set_tests_properties(chimera/posix/${testname}_myuser PROPERTIES
+        ENVIRONMENT "TEST_FILE=${test_file}"
+        SKIP_RETURN_CODE 77)
+endmacro()
+
+macro(add_posix_nfs3_test_myuser testname prog nfs_backend)
+    add_test(NAME chimera/posix/${testname}_nfs3_${nfs_backend}_myuser
+        COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_${prog} -b nfs3_${nfs_backend} -U myuser
+    )
+    get_target_property(test_file posix_${prog} TEST_FILE)
+    set_tests_properties(chimera/posix/${testname}_nfs3_${nfs_backend}_myuser PROPERTIES
+        ENVIRONMENT "TEST_FILE=${test_file}"
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77
+    )
+endmacro()
+
+macro(add_posix_nfs3rdma_test_myuser testname prog nfs_backend)
+    add_test(NAME chimera/posix/${testname}_nfs3rdma_${nfs_backend}_myuser
+        COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_${prog} -b nfs3rdma_${nfs_backend} -U myuser
+    )
+    get_target_property(test_file posix_${prog} TEST_FILE)
+    set_tests_properties(chimera/posix/${testname}_nfs3rdma_${nfs_backend}_myuser PROPERTIES
+        ENVIRONMENT "TEST_FILE=${test_file}"
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77
+    )
+endmacro()
+
+foreach(prog ${POSIX_TEST_PROGRAMS})
+    string(REGEX REPLACE "^test_" "" test_name ${prog})
+    add_posix_test_myuser(${test_name}_linux    ${prog} linux)
+    add_posix_nfs3_test_myuser(${test_name}     ${prog} linux)
+    add_posix_nfs3rdma_test_myuser(${test_name} ${prog} linux)
+endforeach()
+
+foreach(prog test_fcntl test_lockf)
+    string(REGEX REPLACE "^test_" "" test_name ${prog})
+    add_posix_test_myuser(${test_name}_linux    ${prog} linux)
+    add_posix_nfs3_test_myuser(${test_name}     ${prog} linux)
+    add_posix_nfs3rdma_test_myuser(${test_name} ${prog} linux)
+endforeach()
