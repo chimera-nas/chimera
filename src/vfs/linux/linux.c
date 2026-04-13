@@ -148,17 +148,11 @@ chimera_linux_set_attrs(
         if (strlen(path) != 0) {
             rc = fchmodat(dirfd, path, attr->va_mode, 0);
         } else {
-            // dirfd might be O_PATH, reopen without O_PATH via /proc/self/fd
+            // dirfd may be O_PATH; chmod via /proc symlink avoids needing
+            // read/write permission on the file (chmod only requires ownership)
             char procpath[64];
             snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", dirfd);
-            int  reopen_fd = open(procpath, O_RDONLY);
-            if (reopen_fd < 0) {
-                chimera_linux_error("linux_setattr: reopen via /proc for fchmod failed: %s",
-                                    strerror(errno));
-                return -errno;
-            }
-            rc = fchmod(reopen_fd, attr->va_mode);
-            close(reopen_fd);
+            rc = chmod(procpath, attr->va_mode);
         }
 #endif /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
         if (rc) {
