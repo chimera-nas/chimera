@@ -21,7 +21,13 @@ done
 
 echo "Building VM image: ${IMAGE_TAG}"
 
-docker build ${DOCKER_MIRROR:+--build-arg DOCKER_MIRROR=$DOCKER_MIRROR} ${BUILD_ARGS} -t "$IMAGE_TAG" -f "$DOCKERFILE" "$SOURCE_DIR"
+docker build \
+    ${DOCKER_MIRROR:+--build-arg DOCKER_MIRROR=$DOCKER_MIRROR} \
+    ${APT_MIRROR:+--build-arg APT_MIRROR=$APT_MIRROR} \
+    ${BUILD_ARGS} \
+    -t "$IMAGE_TAG" \
+    -f "$DOCKERFILE" \
+    "$SOURCE_DIR"
 
 CONTAINER_ID=$(docker create "$IMAGE_TAG")
 
