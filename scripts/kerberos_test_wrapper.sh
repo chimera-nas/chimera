@@ -262,6 +262,7 @@ run_test() {
         KRB5CCNAME="${CCACHE}" \
         KRB_REALM="${REALM}" \
         KRB_USER="testuser1" \
+        KRB_PASSWORD="Password1!" \
         KRB_SMB_HOST="${SMB_HOST}" \
         KRB_KDC="${KDC_IP}:${KDC_PORT}" \
         "$@"

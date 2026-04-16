@@ -1,7 +1,11 @@
 {
         "name": "chimera",
         "build": {
-                "dockerfile": "Dockerfile"
+                "dockerfile": "Dockerfile",
+                "args": {
+                        "DOCKER_MIRROR": "${localEnv:DOCKER_MIRROR}",
+                        "APT_MIRROR": "${localEnv:APT_MIRROR}"
+                }
         },
         "initializeCommand": "mkdir -p \"${localEnv:HOME}${localEnv:USERPROFILE}/.claude\"",
         "containerEnv": {

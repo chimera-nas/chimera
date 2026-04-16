@@ -38,8 +38,8 @@ chimera_s3_parse_range(
     int64_t    *offset,
     int64_t    *length)
 {
-    char *dash;
-    char *end;
+    const char *dash;
+    char       *end;
 
     if (strncmp(range_str, "bytes=", 6) != 0) {
         return -1;

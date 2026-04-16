@@ -3,14 +3,15 @@
 # SPDX-License-Identifier: Unlicense
 
 ARG DOCKER_MIRROR
-FROM ${DOCKER_MIRROR}ubuntu:24.04 AS build
+FROM ${DOCKER_MIRROR}ubuntu:26.04 AS build
 ARG BUILD_TYPE=Release
 ARG APT_MIRROR
+ARG ENABLE_XLIO=0
 
 RUN if [ -n "$APT_MIRROR" ]; then \
-    echo "deb $APT_MIRROR noble main universe" > /etc/apt/sources.list.d/local-mirror.list && \
-    echo "deb $APT_MIRROR noble-updates main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
-    echo "deb $APT_MIRROR noble-security main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
+    echo "deb $APT_MIRROR resolute main universe" > /etc/apt/sources.list.d/local-mirror.list && \
+    echo "deb $APT_MIRROR resolute-updates main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
+    echo "deb $APT_MIRROR resolute-security main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
     rm -f /etc/apt/sources.list.d/ubuntu.sources; \
     fi
 
@@ -25,7 +26,7 @@ RUN apt-get -y update && \
 # Note: We use our own NTLM implementation instead of gss-ntlmssp
 
 RUN if [ "$ENABLE_XLIO" = "1" ] ; then \
-git clone https://github.com/Mellanox/libdpcp.git /libdpcp && \
+git clone --depth 1 --branch gcc_15.2.0_build_fix https://github.com/arenaud16/libdpcp.git /libdpcp && \
 cd /libdpcp && \
 ./autogen.sh && \
 ./configure && \
@@ -49,12 +50,12 @@ RUN cmake -G Ninja -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DDISABLE_TESTS=ON /chimera 
     ninja && \
     ninja install
 
-FROM ${DOCKER_MIRROR}ubuntu:24.04
+FROM ${DOCKER_MIRROR}ubuntu:26.04
 ARG BUILD_TYPE=Release
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install libuuid1 librdmacm1 libjansson4 liburcu8t64 ibverbs-providers \
-    libasan8 liburing2 libunwind8 librocksdb8.9 libkrb5-3 libgssapi-krb5-2 openssl libnuma1 libwbclient0 \
+    libasan8 liburing2 libunwind8 librocksdb9.11 libkrb5-3 libgssapi-krb5-2 openssl libnuma1 libwbclient0 \
     python3 python3-requests && \
     if [ "${BUILD_TYPE}" = "Debug" ]; then \
     apt-get -y --no-install-recommends install llvm gdb ; \
