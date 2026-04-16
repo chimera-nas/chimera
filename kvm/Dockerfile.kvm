@@ -4,7 +4,6 @@
 
 ARG DOCKER_MIRROR
 ARG UBUNTU_VERSION=24.04
-ARG UBUNTU_VERSION_CODENAME=noble
 FROM ${DOCKER_MIRROR}ubuntu:${UBUNTU_VERSION}
 
 ARG KERNEL_PACKAGE=linux-image-generic
@@ -13,7 +12,7 @@ ARG APT_MIRROR
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN if [ -n "$APT_MIRROR" ]; then \
+RUN if [ -n "${APT_MIRROR}" -a -n "${UBUNTU_VERSION_CODENAME}" ]; then \
     echo "deb ${APT_MIRROR} ${UBUNTU_VERSION_CODENAME} main universe" > /etc/apt/sources.list.d/local-mirror.list && \
     echo "deb ${APT_MIRROR} ${UBUNTU_VERSION_CODENAME}-updates main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
     echo "deb ${APT_MIRROR} ${UBUNTU_VERSION_CODENAME}-security main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
