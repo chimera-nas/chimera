@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -33,16 +33,42 @@ main(
         posix_test_fail(&env);
     }
 
-    // Change mode to 0755 using fchmod
-    rc = chimera_posix_fchmod(fd, 0755);
+    // Change mode to 0000 using fchmod
+    rc = chimera_posix_fchmod(fd, 0000);
 
     if (rc != 0) {
-        fprintf(stderr, "fchmod failed: %s\n", strerror(errno));
+        fprintf(stderr, "fchmod to 0000 failed: %s\n", strerror(errno));
         chimera_posix_close(fd);
         posix_test_fail(&env);
     }
 
-    // Verify the mode changed using fstat
+    // Verify the mode changed to 0000 using fstat
+    rc = chimera_posix_fstat(fd, &st);
+
+    if (rc != 0) {
+        fprintf(stderr, "fstat failed: %s\n", strerror(errno));
+        chimera_posix_close(fd);
+        posix_test_fail(&env);
+    }
+
+    if ((st.st_mode & 0777) != 0000) {
+        fprintf(stderr, "fchmod: expected mode 0000, got %03o\n", st.st_mode & 0777);
+        chimera_posix_close(fd);
+        posix_test_fail(&env);
+    }
+
+    fprintf(stderr, "fchmod 0000 test passed\n");
+
+    // Change mode to 0755 using fchmod
+    rc = chimera_posix_fchmod(fd, 0755);
+
+    if (rc != 0) {
+        fprintf(stderr, "fchmod to 0755 failed: %s\n", strerror(errno));
+        chimera_posix_close(fd);
+        posix_test_fail(&env);
+    }
+
+    // Verify the mode changed to 0755 using fstat
     rc = chimera_posix_fstat(fd, &st);
 
     if (rc != 0) {

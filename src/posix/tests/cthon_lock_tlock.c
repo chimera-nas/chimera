@@ -512,13 +512,12 @@ main(
     int    argc,
     char **argv)
 {
-    struct posix_test_env   env;
-    struct chimera_vfs_cred root_cred;
-    struct timespec         tv;
-    json_t                 *posix_json_root;
-    char                    posix_json_path[300];
-    int                     rc;
-    int                     opt;
+    struct posix_test_env env;
+    struct timespec       tv;
+    json_t               *posix_json_root;
+    char                  posix_json_path[300];
+    int                   rc;
+    int                   opt;
 
     cthon_Myname = "cthon_lock_tlock";
 
@@ -560,9 +559,15 @@ main(
         int saved_opterr = opterr;
         opterr = 0;
         optind = 1;
-        while ((opt = getopt(argc, argv, "+b:")) != -1) {
+        while ((opt = getopt(argc, argv, "+b:U:")) != -1) {
             if (opt == 'b') {
                 env.backend = optarg;
+            } else if (opt == 'U') {
+                if (!chimera_test_parse_user(optarg, &env.cred)) {
+                    fprintf(stderr, "Unknown user spec '%s'. "
+                            "Use: root, johndoe, myuser, or uid:gid\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
             }
         }
         opterr = saved_opterr;
@@ -585,6 +590,12 @@ main(
     (void) mkdir("/build/test", 0755);
     (void) mkdir(env.session_dir, 0755);
 
+    rc = chown(env.session_dir, env.cred.uid, env.cred.gid);
+    if (rc < 0) {
+        fprintf(stderr, "Failed to set session_dir uid/gid: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
     /* Write posix.json config (no VFS-specific section needed for linux backend). */
     posix_json_root = json_object();
     json_object_set_new(posix_json_root, "config", json_object());
@@ -593,7 +604,10 @@ main(
     json_dump_file(posix_json_root, posix_json_path, 0);
     json_decref(posix_json_root);
 
-    chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+    chimera_vfs_cred_init_unix(&env.cred,
+                               CHIMERA_TEST_USER_ROOT_UID,
+                               CHIMERA_TEST_USER_ROOT_GID,
+                               0, NULL);
 
     fprintf(stdout, "%s: record locking test\n", cthon_Myname);
 
@@ -618,7 +632,7 @@ main(
      * Each process (parent and child) starts its own chimera client
      * independently after the fork.
      */
-    env.posix = chimera_posix_init_json(posix_json_path, &root_cred, env.metrics);
+    env.posix = chimera_posix_init_json(posix_json_path, &env.cred, env.metrics);
     if (!env.posix) {
         fprintf(stderr, "%s: Failed to initialize POSIX client\n",
                 (who == PARENT) ? "Parent" : "Child");

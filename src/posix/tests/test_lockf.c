@@ -164,17 +164,16 @@ main(
     int    argc,
     char **argv)
 {
-    struct posix_test_env   env;
-    struct chimera_vfs_cred root_cred;
-    char                    posix_json_path[300];
-    int                     fd;
-    pid_t                   child;
-    int                     status;
-    int                     rc;
-    int                     opt;
-    struct timespec         tv;
-    json_t                 *posix_json_root;
-    int                     is_nfs;
+    struct posix_test_env env;
+    char                  posix_json_path[300];
+    int                   fd;
+    pid_t                 child;
+    int                   status;
+    int                   rc;
+    int                   opt;
+    struct timespec       tv;
+    json_t               *posix_json_root;
+    int                   is_nfs;
 
     /*
      * Pre-fork setup: create session directory and write posix.json.
@@ -195,9 +194,15 @@ main(
 
         opterr = 0;
         optind = 1;
-        while ((opt = getopt(argc, argv, "+b:")) != -1) {
+        while ((opt = getopt(argc, argv, "+b:U:")) != -1) {
             if (opt == 'b') {
                 env.backend = optarg;
+            } else if (opt == 'U') {
+                if (!chimera_test_parse_user(optarg, &env.cred)) {
+                    fprintf(stderr, "Unknown user spec '%s'. "
+                            "Use: root, johndoe, myuser, or uid:gid\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
             }
         }
         opterr = saved_opterr;
@@ -221,6 +226,12 @@ main(
     (void) mkdir("/build/test", 0755);
     (void) mkdir(env.session_dir, 0755);
 
+    rc = chown(env.session_dir, env.cred.uid, env.cred.gid);
+    if (rc < 0) {
+        fprintf(stderr, "Failed to set session_dir uid/gid: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
     posix_json_root = json_object();
     json_object_set_new(posix_json_root, "config", json_object());
     chimera_test_write_users_json(posix_json_root);
@@ -229,7 +240,10 @@ main(
     json_dump_file(posix_json_root, posix_json_path, 0);
     json_decref(posix_json_root);
 
-    chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+    chimera_vfs_cred_init_unix(&env.cred,
+                               CHIMERA_TEST_USER_ROOT_UID,
+                               CHIMERA_TEST_USER_ROOT_GID,
+                               0, NULL);
 
     if (pipe(p2c) != 0) {
         perror("tlock: parent pipe");
@@ -243,7 +257,7 @@ main(
     child = fork();
 
     if (child == 0) {
-        exit(child_main(&env, posix_json_path, &root_cred));
+        exit(child_main(&env, posix_json_path, &env.cred));
     }
 
     /* ---- parent ---- */
@@ -254,7 +268,7 @@ main(
         posix_test_start_nfs_server(&env);
     }
 
-    env.posix = chimera_posix_init_json(posix_json_path, &root_cred, env.metrics);
+    env.posix = chimera_posix_init_json(posix_json_path, &env.cred, env.metrics);
     if (!env.posix) {
         fprintf(stderr, "parent: chimera init failed\n");
         posix_test_fail(&env);
