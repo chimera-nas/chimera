@@ -402,6 +402,7 @@ jobs:
         run: |
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
+            -e APT_MIRROR=${{ env.APT_MIRROR }} \
             -v "${{ github.workspace }}:/workspace" \
             -v /build \
             -w /build \
@@ -583,6 +584,7 @@ jobs:
           mkdir -p "${{ github.workspace }}/scan-report"
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
+            -e APT_MIRROR=${{ env.APT_MIRROR }} \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/scan-report:/scan-report" \
             -v /build \
