@@ -7,8 +7,6 @@
 get_filename_component(BUILD_ROOT ${CMAKE_BINARY_DIR} DIRECTORY)
 
 set(KVM_IMAGES
-    "ubuntu2604|26.04|resolute|linux-image-generic"
-    "ubuntu2604_hwe|26.04|resolute|linux-image-generic-hwe-26.04"
     "ubuntu2404|24.04|noble|linux-image-generic"
     "ubuntu2404_hwe|24.04|noble|linux-image-generic-hwe-24.04"
     "ubuntu2204|22.04|jammy|linux-image-generic"
