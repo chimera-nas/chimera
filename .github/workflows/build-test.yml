@@ -10,6 +10,7 @@ on:
 
 env:
   DEV_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-dev
+  U26_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
   U24_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
   U22_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
   R9_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-rocky9
@@ -58,6 +59,50 @@ jobs:
           tags: ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-dev:${{ matrix.arch }}
           cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-dev:${{ matrix.arch }},mode=max
+          build-args: |
+            APT_MIRROR=${{ env.APT_MIRROR }}
+            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+
+  build-ubuntu26:
+    name: Build ubuntu26 ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["repository.mdh.quantum.com:5001"]
+
+      - name: Build and push the ubuntu26 CI image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.ubuntu26.04
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.U26_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
+          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu26:${{ matrix.arch }}
+          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu26:${{ matrix.arch }},mode=max
           build-args: |
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
@@ -238,7 +283,7 @@ jobs:
 
   test:
     name: Test ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
-    needs: [build-devcontainer, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
+    needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -274,6 +319,35 @@ jobs:
             build_type: Debug
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
             image_name: devcontainer
+            cmake_extra: ""
+          # ubuntu 26
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_name: ubuntu26
+            cmake_extra: ""
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_name: ubuntu26
+            cmake_extra: ""
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_name: ubuntu26
+            cmake_extra: ""
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_name: ubuntu26
             cmake_extra: ""
           # ubuntu 24
           - platform: linux/amd64
@@ -417,7 +491,7 @@ jobs:
 
   static-analysis:
     name: Static Analysis ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
-    needs: [build-devcontainer, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
+    needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -453,6 +527,35 @@ jobs:
             build_type: Debug
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
             image_name: devcontainer
+            cmake_extra: ""
+          # ubuntu 26
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_name: ubuntu26
+            cmake_extra: ""
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_name: ubuntu26
+            cmake_extra: ""
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_name: ubuntu26
+            cmake_extra: ""
+          - platform: linux/arm64
+            runner: arc-arm64
+            arch: arm64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_name: ubuntu26
             cmake_extra: ""
           # ubuntu 24
           - platform: linux/amd64
