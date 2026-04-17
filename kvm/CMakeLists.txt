@@ -7,17 +7,18 @@
 get_filename_component(BUILD_ROOT ${CMAKE_BINARY_DIR} DIRECTORY)
 
 set(KVM_IMAGES
-    "ubuntu2404|24.04|linux-image-generic"
-    "ubuntu2404_hwe|24.04|linux-image-generic-hwe-24.04"
-    "ubuntu2204|22.04|linux-image-generic"
-    "ubuntu2204_hwe|22.04|linux-image-generic-hwe-22.04"
+    "ubuntu2404|24.04|noble|linux-image-generic"
+    "ubuntu2404_hwe|24.04|noble|linux-image-generic-hwe-24.04"
+    "ubuntu2204|22.04|jammy|linux-image-generic"
+    "ubuntu2204_hwe|22.04|jammy|linux-image-generic-hwe-22.04"
 )
 
 foreach(image_spec ${KVM_IMAGES})
     string(REPLACE "|" ";" image_parts "${image_spec}")
     list(GET image_parts 0 IMAGE_NAME)
     list(GET image_parts 1 UBUNTU_VERSION)
-    list(GET image_parts 2 KERNEL_PACKAGE)
+    list(GET image_parts 2 UBUNTU_VERSION_CODENAME)
+    list(GET image_parts 3 KERNEL_PACKAGE)
 
     set(IMAGE_DIR ${BUILD_ROOT}/kvm/${IMAGE_NAME})
 
@@ -28,6 +29,7 @@ foreach(image_spec ${KVM_IMAGES})
                 ${CMAKE_CURRENT_SOURCE_DIR}/Dockerfile.kvm
                 ${CMAKE_SOURCE_DIR}
                 UBUNTU_VERSION=${UBUNTU_VERSION}
+                UBUNTU_VERSION_CODENAME=${UBUNTU_VERSION_CODENAME}
                 KERNEL_PACKAGE=${KERNEL_PACKAGE}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Dockerfile.kvm
                 ${CMAKE_CURRENT_SOURCE_DIR}/init.sh
