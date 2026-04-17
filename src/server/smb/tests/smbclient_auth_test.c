@@ -370,17 +370,29 @@ verify_kerberos_environment(void)
     fprintf(stderr, "  KRB5_CONFIG: %s\n", krb5_config);
     fprintf(stderr, "  KRB5CCNAME:  %s\n", ccache);
 
-    /* smbclient picks up the credential cache via the KRB5CCNAME
-     * environment variable (works with both MIT and Heimdal backends).
-     * We need -U user@REALM so smbclient matches the ccache principal
-     * instead of defaulting to the Unix username (root). */
-    if (krb_user && krb_realm) {
-        snprintf(kerberos_auth_args, sizeof(kerberos_auth_args),
-                 "--use-kerberos=required -U %s@%s -N",
-                 krb_user, krb_realm);
-    } else {
-        snprintf(kerberos_auth_args, sizeof(kerberos_auth_args),
-                 "--use-kerberos=required -N");
+    /* Samba 4.23+ ships a private Heimdal that cannot read credential
+    * caches created by the system MIT kinit.  When a password is
+    * available (KRB_PASSWORD), pass it directly so smbclient's
+    * bundled Heimdal acquires its own ticket from the KDC.
+    * Fall back to ccache-only for environments without a password. */
+    {
+        const char *krb_pass = getenv("KRB_PASSWORD");
+
+        if (krb_user && krb_realm && krb_pass) {
+            snprintf(kerberos_auth_args, sizeof(kerberos_auth_args),
+                     "--use-kerberos=required -U %s@%s%%%s",
+                     krb_user, krb_realm, krb_pass);
+        } else if (krb_user && krb_realm) {
+            snprintf(kerberos_auth_args, sizeof(kerberos_auth_args),
+                     "--use-kerberos=required"
+                     " --use-krb5-ccache=%s -U %s@%s -N",
+                     ccache, krb_user, krb_realm);
+        } else {
+            snprintf(kerberos_auth_args, sizeof(kerberos_auth_args),
+                     "--use-kerberos=required"
+                     " --use-krb5-ccache=%s -N",
+                     ccache);
+        }
     }
 
     return 0;
