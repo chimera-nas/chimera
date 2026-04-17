@@ -7,7 +7,17 @@ ARG UBUNTU_VERSION=24.04
 FROM ${DOCKER_MIRROR}ubuntu:${UBUNTU_VERSION}
 
 ARG KERNEL_PACKAGE=linux-image-generic
+ARG UBUNTU_VERSION_CODENAME
+ARG APT_MIRROR
+
 ENV DEBIAN_FRONTEND=noninteractive
+
+RUN if [ -n "${APT_MIRROR}" -a -n "${UBUNTU_VERSION_CODENAME}" ]; then \
+    echo "deb ${APT_MIRROR} ${UBUNTU_VERSION_CODENAME} main universe" > /etc/apt/sources.list.d/local-mirror.list && \
+    echo "deb ${APT_MIRROR} ${UBUNTU_VERSION_CODENAME}-updates main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
+    echo "deb ${APT_MIRROR} ${UBUNTU_VERSION_CODENAME}-security main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
+    rm -f /etc/apt/sources.list.d/ubuntu.sources; \
+    fi
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
