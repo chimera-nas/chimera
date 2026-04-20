@@ -15,7 +15,59 @@
       "description": "Chimera NAS REST API v1"
     }
   ],
+  "security": [{"bearerAuth": []}],
   "paths": {
+    "/auth/login": {
+      "post": {
+        "summary": "Authenticate",
+        "description": "Authenticate with username and password to obtain a JWT token.",
+        "operationId": "login",
+        "tags": ["Authentication"],
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authentication successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/users": {
       "get": {
         "summary": "List builtin users",
@@ -35,6 +87,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           }
         }
       },
@@ -73,6 +128,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           }
         }
       }
@@ -104,6 +162,9 @@
               }
             }
           },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
+          },
           "404": {
             "description": "User not found",
             "content": {
@@ -134,6 +195,9 @@
         "responses": {
           "204": {
             "description": "User deleted"
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           },
           "404": {
             "description": "User not found",
@@ -167,6 +231,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           }
         }
       },
@@ -205,6 +272,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           }
         }
       }
@@ -236,6 +306,9 @@
               }
             }
           },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
+          },
           "404": {
             "description": "Export not found",
             "content": {
@@ -266,6 +339,9 @@
         "responses": {
           "204": {
             "description": "Export deleted"
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           },
           "404": {
             "description": "Export not found",
@@ -299,6 +375,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           }
         }
       },
@@ -337,6 +416,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           }
         }
       }
@@ -368,6 +450,9 @@
               }
             }
           },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
+          },
           "404": {
             "description": "Share not found",
             "content": {
@@ -398,6 +483,9 @@
         "responses": {
           "204": {
             "description": "Share deleted"
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           },
           "404": {
             "description": "Share not found",
@@ -431,6 +519,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           }
         }
       },
@@ -469,6 +560,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           }
         }
       }
@@ -499,6 +593,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
           },
           "404": {
             "description": "Bucket not found",
@@ -531,6 +628,9 @@
           "204": {
             "description": "Bucket deleted"
           },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
+          },
           "404": {
             "description": "Bucket not found",
             "content": {
@@ -546,7 +646,41 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
     "schemas": {
+      "LoginRequest": {
+        "type": "object",
+        "required": ["username", "password"],
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "Username"
+          },
+          "password": {
+            "type": "string",
+            "description": "Password"
+          }
+        }
+      },
+      "LoginResponse": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "JWT token"
+          },
+          "expires_in": {
+            "type": "integer",
+            "description": "Token expiry in seconds"
+          }
+        }
+      },
       "User": {
         "type": "object",
         "properties": {
