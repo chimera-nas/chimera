@@ -148,11 +148,17 @@ chimera_linux_set_attrs(
         if (strlen(path) != 0) {
             rc = fchmodat(dirfd, path, attr->va_mode, 0);
         } else {
-            // dirfd may be O_PATH; chmod via /proc symlink avoids needing
-            // read/write permission on the file (chmod only requires ownership)
+            // dirfd might be O_PATH, reopen without O_PATH via /proc/self/fd
             char procpath[64];
             snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", dirfd);
-            rc = chmod(procpath, attr->va_mode);
+            int  reopen_fd = open(procpath, O_RDONLY);
+            if (reopen_fd < 0) {
+                chimera_linux_error("linux_setattr: reopen via /proc for fchmod failed: %s",
+                                    strerror(errno));
+                return -errno;
+            }
+            rc = fchmod(reopen_fd, attr->va_mode);
+            close(reopen_fd);
         }
 #endif /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
         if (rc) {
@@ -553,8 +559,6 @@ chimera_linux_open_fh(
     struct chimera_linux_thread *thread = private_data;
     int                          flags;
     int                          fd;
-    int                          probe_fd;
-    struct stat                  st;
 
     flags = chimera_linux_set_open_flags(request->open_fh.flags);
 
@@ -564,25 +568,7 @@ chimera_linux_open_fh(
                               flags);
 
     if (fd < 0) {
-        if (errno == ENOTDIR && (request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY)) {
-            probe_fd = linux_open_by_handle(&thread->mount_table,
-                                            request->fh,
-                                            request->fh_len,
-                                            O_PATH | O_NOFOLLOW);
-
-            if (probe_fd >= 0) {
-                if (fstat(probe_fd, &st) == 0 && S_ISLNK(st.st_mode)) {
-                    request->status = CHIMERA_VFS_ESYMLINK;
-                } else {
-                    request->status = CHIMERA_VFS_ENOTDIR;
-                }
-                close(probe_fd);
-            } else {
-                request->status = CHIMERA_VFS_ENOTDIR;
-            }
-        } else {
-            request->status = chimera_linux_errno_to_status(errno);
-        }
+        request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
@@ -1273,17 +1259,7 @@ chimera_linux_link_at(
     rc = linkat(fd, "", dir_fd, fullname, AT_EMPTY_PATH);
 
     if (rc < 0) {
-        if (errno == EPERM) {
-            struct stat st;
-
-            if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
-                request->status = CHIMERA_VFS_EISDIR;
-            } else {
-                request->status = CHIMERA_VFS_EPERM;
-            }
-        } else {
-            request->status = chimera_linux_errno_to_status(errno);
-        }
+        request->status = chimera_linux_errno_to_status(errno);
     } else {
         request->status = CHIMERA_VFS_OK;
     }
@@ -1457,7 +1433,7 @@ chimera_linux_getparent(
         }
         memcpy(request->getparent.r_name, de->d_name, nlen);
         request->getparent.r_name_len = (uint16_t) nlen;
-        found                          = 1;
+        found                         = 1;
         break;
     }
 

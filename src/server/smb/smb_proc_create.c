@@ -17,18 +17,18 @@
 #include "smb_attr.h"
 #include "smb_lsarpc.h"
 
-#define SMB2_WRITE_MASK (SMB2_FILE_WRITE_DATA | \
-                         SMB2_FILE_APPEND_DATA | \
-                         SMB2_FILE_WRITE_EA | \
-                         SMB2_FILE_WRITE_ATTRIBUTES | \
-                         SMB2_FILE_DELETE_CHILD | \
-                         SMB2_FILE_ADD_FILE | \
-                         SMB2_FILE_ADD_SUBDIRECTORY | \
-                         SMB2_DELETE | \
-                         SMB2_WRITE_DACL | \
-                         SMB2_WRITE_OWNER | \
-                         SMB2_GENERIC_WRITE | \
-                         SMB2_GENERIC_ALL)
+#define SMB2_WRITE_MASK       (SMB2_FILE_WRITE_DATA | \
+                               SMB2_FILE_APPEND_DATA | \
+                               SMB2_FILE_WRITE_EA | \
+                               SMB2_FILE_WRITE_ATTRIBUTES | \
+                               SMB2_FILE_DELETE_CHILD | \
+                               SMB2_FILE_ADD_FILE | \
+                               SMB2_FILE_ADD_SUBDIRECTORY | \
+                               SMB2_DELETE | \
+                               SMB2_WRITE_DACL | \
+                               SMB2_WRITE_OWNER | \
+                               SMB2_GENERIC_WRITE | \
+                               SMB2_GENERIC_ALL)
 
 /* Bits in DesiredAccess that imply the caller will read or write file
  * data.  Without any of these set, the open is metadata-only — common
@@ -66,8 +66,8 @@ chimera_smb_create_error_status(enum chimera_vfs_error error_code)
         case CHIMERA_VFS_ENAMETOOLONG: return SMB2_STATUS_NAME_TOO_LONG;
         case CHIMERA_VFS_EROFS:        return SMB2_STATUS_MEDIA_WRITE_PROTECTED;
         default:                       return SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
-    }
-}
+    } /* switch */
+} /* chimera_smb_create_error_status */
 
 static inline struct chimera_smb_open_file *
 chimera_smb_create_gen_open_file(
