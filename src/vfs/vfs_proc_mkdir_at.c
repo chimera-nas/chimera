@@ -7,6 +7,7 @@
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"
+#include "vfs_notify.h"
 #include "common/misc.h"
 #include "common/macros.h"
 static void
@@ -17,6 +18,14 @@ chimera_vfs_mkdir_at_complete(struct chimera_vfs_request *request)
     chimera_vfs_mkdir_at_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
+        chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                request->mkdir_at.handle->fh,
+                                request->mkdir_at.handle->fh_len,
+                                CHIMERA_VFS_NOTIFY_DIR_ADDED,
+                                request->mkdir_at.name,
+                                request->mkdir_at.name_len,
+                                NULL, 0);
+
         chimera_vfs_name_cache_insert(cache,
                                       request->mkdir_at.handle->fh_hash,
                                       request->mkdir_at.handle->fh,

@@ -194,3 +194,21 @@ void chimera_smb_ioctl_set_reparse(
 
 void chimera_smb_ioctl_get_reparse(
     struct chimera_smb_request *request);
+
+int chimera_smb_parse_change_notify(
+    struct evpl_iovec_cursor   *request_cursor,
+    struct chimera_smb_request *request);
+
+void chimera_smb_change_notify(
+    struct chimera_smb_request *request);
+
+void chimera_smb_change_notify_reply(
+    struct evpl_iovec_cursor   *reply_cursor,
+    struct chimera_smb_request *request);
+
+int chimera_smb_parse_cancel(
+    struct evpl_iovec_cursor   *request_cursor,
+    struct chimera_smb_request *request);
+
+void chimera_smb_cancel(
+    struct chimera_smb_request *request);

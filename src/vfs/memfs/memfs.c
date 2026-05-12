@@ -1488,10 +1488,12 @@ memfs_remove_at(
         inode->nlink--;
     }
 
-    if (inode->nlink == 0) {
-        request->remove_at.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
-    }
-
+    /* Don't drop the caller's requested attrs even when the inode is
+     * about to be freed.  The inode is still intact at this point, so
+     * mapping the full requested mask is safe — and downstream
+     * consumers (notify dispatch, attr cache) rely on at least
+     * va_mode being available to distinguish file vs directory
+     * removals. */
     memfs_map_attrs(shared, &request->remove_at.r_removed_attr, inode, request->fh);
 
     if (inode->nlink == 0) {

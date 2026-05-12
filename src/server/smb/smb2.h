@@ -621,6 +621,37 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 
 #define SMB2_ERROR_REPLY_SIZE                       9
 
+/* CHANGE_NOTIFY constants */
+#define SMB2_CHANGE_NOTIFY_REQUEST_SIZE             32
+#define SMB2_CHANGE_NOTIFY_REPLY_SIZE               9
+
+#define SMB2_WATCH_TREE                             0x0001
+
+/* CompletionFilter flags */
+#define SMB2_NOTIFY_CHANGE_FILE_NAME                0x00000001
+#define SMB2_NOTIFY_CHANGE_DIR_NAME                 0x00000002
+#define SMB2_NOTIFY_CHANGE_ATTRIBUTES               0x00000004
+#define SMB2_NOTIFY_CHANGE_SIZE                     0x00000008
+#define SMB2_NOTIFY_CHANGE_LAST_WRITE               0x00000010
+#define SMB2_NOTIFY_CHANGE_LAST_ACCESS              0x00000020
+#define SMB2_NOTIFY_CHANGE_CREATION                 0x00000040
+#define SMB2_NOTIFY_CHANGE_EA                       0x00000080
+#define SMB2_NOTIFY_CHANGE_SECURITY                 0x00000100
+#define SMB2_NOTIFY_CHANGE_STREAM_NAME              0x00000200
+#define SMB2_NOTIFY_CHANGE_STREAM_SIZE              0x00000400
+#define SMB2_NOTIFY_CHANGE_STREAM_WRITE             0x00000800
+
+/* FILE_ACTION constants for FILE_NOTIFY_INFORMATION */
+#define FILE_ACTION_ADDED                           0x00000001
+#define FILE_ACTION_REMOVED                         0x00000002
+#define FILE_ACTION_MODIFIED                        0x00000003
+#define FILE_ACTION_RENAMED_OLD_NAME                0x00000004
+#define FILE_ACTION_RENAMED_NEW_NAME                0x00000005
+
+/* Notify-related status */
+#define SMB2_STATUS_NOTIFY_CLEANUP                  0x0000010B
+#define SMB2_STATUS_NOTIFY_ENUM_DIR                 0x0000010C
+
 #define SMB2_NEGOTIATE_REQUEST_SIZE                 36
 #define SMB2_NEGOTIATE_REPLY_SIZE                   65
 
