@@ -1357,11 +1357,10 @@ chimera_linux_getparent(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_linux_thread *thread     = private_data;
-    int                          child_fd   = -1;
-    int                          parent_fd  = -1;
-    int                          parent_dup = -1;
-    DIR                         *dir        = NULL;
+    struct chimera_linux_thread *thread    = private_data;
+    int                          child_fd  = -1;
+    int                          parent_fd = -1;
+    DIR                         *dir       = NULL;
     struct dirent               *de;
     struct stat                  child_st;
     uint32_t                     parent_fh_len = 0;
@@ -1405,13 +1404,12 @@ chimera_linux_getparent(
     }
     request->getparent.r_parent_fh_len = (uint16_t) parent_fh_len;
 
-    /* fdopendir takes ownership of the fd, so we have to dup if we want
-     * to keep parent_fd usable elsewhere.  Here we just hand it off. */
-    parent_dup = parent_fd;
-    parent_fd  = -1;
-    dir        = fdopendir(parent_dup);
+    /* fdopendir takes ownership of parent_fd on success; closedir(dir)
+     * below closes it.  On failure we still own the fd and must close
+     * it ourselves. */
+    dir = fdopendir(parent_fd);
     if (!dir) {
-        close(parent_dup);
+        close(parent_fd);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
