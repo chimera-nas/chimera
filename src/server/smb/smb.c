@@ -21,17 +21,24 @@
 #include "evpl/evpl.h"
 #include "smb_internal.h"
 #include "smb_procs.h"
+#include "smb_notify.h"
 #include "smb_dump.h"
 #include "smb_signing.h"
 #include "xxhash.h"
 
 static const uint8_t SMB2_PROTOCOL_ID[4] = { 0xFE, 'S', 'M', 'B' };
 
+/* STATUS_NOTIFY_ENUM_DIR is a CHANGE_NOTIFY-specific warning meaning
+ * "client should rescan the directory".  It is NOT a real error and
+ * MUST be returned with the regular CHANGE_NOTIFY response body, not
+ * the SMB2 error body.  Treat it like SUCCESS for compound dispatch
+ * and reply formatting. */
 static inline int
 chimera_smb_is_error_status(unsigned int status)
 {
     return status != SMB2_STATUS_SUCCESS &&
-           status != SMB2_STATUS_MORE_PROCESSING_REQUIRED;
+           status != SMB2_STATUS_MORE_PROCESSING_REQUIRED &&
+           status != SMB2_STATUS_NOTIFY_ENUM_DIR;
 } /* chimera_smb_is_error_status */
 
 static inline int
@@ -39,7 +46,8 @@ chimera_smb_status_should_abort(unsigned int status)
 {
     return status != SMB2_STATUS_SUCCESS &&
            status != SMB2_STATUS_MORE_PROCESSING_REQUIRED &&
-           status != SMB2_STATUS_NO_MORE_FILES;
+           status != SMB2_STATUS_NO_MORE_FILES &&
+           status != SMB2_STATUS_NOTIFY_ENUM_DIR;
 } /* chimera_smb_status_should_abort */
 
 static void *
@@ -274,6 +282,12 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     for (i = 0; i < compound->num_requests; i++) {
         request = compound->requests[i];
 
+        /* Skip requests that were handled asynchronously — their interim
+         * response was already sent directly by the handler. */
+        if (request->status == SMB2_STATUS_PENDING) {
+            continue;
+        }
+
         if ((conn->flags & CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED) &&
             request->session_handle) {
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
@@ -306,8 +320,14 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         reply_hdr->message_id   = request->smb2_hdr.message_id;
         reply_hdr->session_id   = request->session_handle && request->session_handle->session ?
             request->session_handle->session->session_id : 0;
-        reply_hdr->sync.process_id = request->smb2_hdr.sync.process_id;
-        reply_hdr->sync.tree_id    = request->tree ? request->tree->tree_id : 0;
+
+        if (request->async_id) {
+            reply_hdr->flags         |= SMB2_FLAGS_ASYNC_COMMAND;
+            reply_hdr->async.async_id = request->async_id;
+        } else {
+            reply_hdr->sync.process_id = request->smb2_hdr.sync.process_id;
+            reply_hdr->sync.tree_id    = request->tree ? request->tree->tree_id : 0;
+        }
 
         memset(reply_hdr->signature, 0, sizeof(reply_hdr->signature));
 
@@ -364,6 +384,12 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
                 case SMB2_SET_INFO:
                     chimera_smb_set_info_reply(&reply_cursor, request);
                     break;
+                case SMB2_CHANGE_NOTIFY:
+                    chimera_smb_change_notify_reply(&reply_cursor, request);
+                    break;
+                    /* SMB2_CANCEL never reaches this switch: chimera_smb_cancel
+                     * always completes with STATUS_PENDING so the slot is
+                     * skipped above. */
             } /* switch */
         }
 
@@ -389,6 +415,13 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     }
 
     reply_payload_length = evpl_iovec_cursor_consumed(&reply_cursor);
+
+    /* If all requests were handled asynchronously, there is nothing to send */
+    if (reply_payload_length == 0) {
+        evpl_iovec_release(evpl, &reply_iov[0]);
+        chimera_smb_compound_free(thread, compound);
+        return;
+    }
 
     if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
 
@@ -456,8 +489,26 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 static inline void
 chimera_smb_compound_abort(struct chimera_smb_compound *compound)
 {
+    struct chimera_smb_request *next;
+
     if (compound->complete_requests < compound->num_requests) {
-        chimera_smb_complete_request(compound->requests[compound->complete_requests], SMB2_STATUS_REQUEST_ABORTED);
+        next = compound->requests[compound->complete_requests];
+
+        /* Propagate session/tree from prior request for related operations,
+         * even on the abort path.  Otherwise an aborted related Close (for
+         * example, after a failed Create in a Create+Close compound) will
+         * have a NULL session_handle and the signing pass will fail,
+         * causing the entire connection to be torn down. */
+        if (next->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) {
+            if (!next->session_handle && compound->saved_session_handle) {
+                next->session_handle = compound->saved_session_handle;
+            }
+            if (!next->tree && compound->saved_tree) {
+                next->tree = compound->saved_tree;
+            }
+        }
+
+        chimera_smb_complete_request(next, SMB2_STATUS_REQUEST_ABORTED);
     } else {
         chimera_smb_compound_reply(compound);
     }
@@ -474,20 +525,23 @@ chimera_smb_complete_request(
 
     compound->complete_requests++;
 
+    /* Update saved session/tree state regardless of success/failure so that
+     * subsequent related operations in the compound — including aborted
+     * ones taken via the abort path — can inherit the session_handle that
+     * the original first request resolved. */
+    if (request->session_handle && request->session_handle->session) {
+        compound->saved_session_id     = request->session_handle->session->session_id;
+        compound->saved_session_handle = request->session_handle;
+    }
+
+    if (request->tree) {
+        compound->saved_tree_id = request->tree->tree_id;
+        compound->saved_tree    = request->tree;
+    }
+
     if (chimera_smb_status_should_abort(status)) {
         chimera_smb_compound_abort(compound);
     } else {
-
-        if (request->session_handle && request->session_handle->session) {
-            compound->saved_session_id     = request->session_handle->session->session_id;
-            compound->saved_session_handle = request->session_handle;
-        }
-
-        if (request->tree) {
-            compound->saved_tree_id = request->tree->tree_id;
-            compound->saved_tree    = request->tree;
-        }
-
         chimera_smb_compound_advance(compound);
     }
 } /* chimera_smb_complete_request */
@@ -575,6 +629,12 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
             break;
         case SMB2_SET_INFO:
             chimera_smb_set_info(request);
+            break;
+        case SMB2_CHANGE_NOTIFY:
+            chimera_smb_change_notify(request);
+            break;
+        case SMB2_CANCEL:
+            chimera_smb_cancel(request);
             break;
         default:
             chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
@@ -847,6 +907,12 @@ chimera_smb_server_handle_smb2(
                 break;
             case SMB2_SET_INFO:
                 rc = chimera_smb_parse_set_info(request_cursor, request);
+                break;
+            case SMB2_CHANGE_NOTIFY:
+                rc = chimera_smb_parse_change_notify(request_cursor, request);
+                break;
+            case SMB2_CANCEL:
+                rc = chimera_smb_parse_cancel(request_cursor, request);
                 break;
             default:
                 chimera_smb_error("Received SMB2 message with unimplemented command %u",
@@ -1267,6 +1333,7 @@ chimera_smb_server_thread_init(
     thread->signing_ctx = chimera_smb_signing_ctx_create();
 
     chimera_smb_iconv_init(&thread->iconv_ctx);
+    chimera_smb_notify_thread_init(thread);
 
     thread->binding = evpl_listener_attach(
         evpl,
@@ -1318,6 +1385,7 @@ chimera_smb_server_thread_destroy(void *data)
     }
 
     evpl_listener_detach(thread->evpl, thread->binding);
+    chimera_smb_notify_thread_destroy(thread);
 
     chimera_smb_iconv_destroy(&thread->iconv_ctx);
     chimera_smb_signing_ctx_destroy(thread->signing_ctx);

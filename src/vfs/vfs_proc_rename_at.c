@@ -5,6 +5,7 @@
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
+#include "vfs_notify.h"
 #include "common/macros.h"
 
 static void
@@ -15,6 +16,44 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
     chimera_vfs_rename_at_callback_t callback   = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
+        int cross_dir = (request->fh_len != request->rename_at.new_fhlen) ||
+            memcmp(request->fh, request->rename_at.new_fh,
+                   request->fh_len) != 0;
+
+        if (!cross_dir) {
+            /* Intra-directory rename: a single RENAMED event on the
+             * directory carrying both old and new names.  The SMB
+             * serializer expands this to FILE_ACTION_RENAMED_OLD_NAME
+             * followed by FILE_ACTION_RENAMED_NEW_NAME per MS-FSCC. */
+            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                    request->fh,
+                                    request->fh_len,
+                                    CHIMERA_VFS_NOTIFY_RENAMED,
+                                    request->rename_at.new_name,
+                                    request->rename_at.new_namelen,
+                                    request->rename_at.name,
+                                    request->rename_at.namelen);
+        } else {
+            /* Cross-directory rename: source dir sees the OLD name
+             * only (RENAMED_OLD_NAME record), destination sees the
+             * NEW name only (RENAMED_NEW_NAME record).  Matches
+             * Windows behavior and avoids reporting a name on the
+             * source dir that exists in a different directory. */
+            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                    request->fh,
+                                    request->fh_len,
+                                    CHIMERA_VFS_NOTIFY_RENAMED,
+                                    NULL, 0,
+                                    request->rename_at.name,
+                                    request->rename_at.namelen);
+            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                    request->rename_at.new_fh,
+                                    request->rename_at.new_fhlen,
+                                    CHIMERA_VFS_NOTIFY_RENAMED,
+                                    request->rename_at.new_name,
+                                    request->rename_at.new_namelen,
+                                    NULL, 0);
+        }
 
         /* Remove cache entries for both old and new paths.
          * We don't insert a negative entry for the old path because

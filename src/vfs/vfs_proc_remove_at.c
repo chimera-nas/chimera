@@ -2,10 +2,13 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <sys/stat.h>
+
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_name_cache.h"
 #include "vfs/vfs_attr_cache.h"
+#include "vfs/vfs_notify.h"
 #include "common/macros.h"
 
 static void
@@ -17,6 +20,40 @@ chimera_vfs_remove_at_complete(struct chimera_vfs_request *request)
     chimera_vfs_remove_at_callback_t callback   = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
+        /* Pick FILE_REMOVED vs DIR_REMOVED based on the removed
+         * object's mode.  Clients filtering only SMB2_NOTIFY_CHANGE_DIR_NAME
+         * would otherwise miss rmdir entirely, since the SMB
+         * filter→VFS mapping routes DIR_NAME only to DIR_ADDED /
+         * DIR_REMOVED / RENAMED.  va_mode is in MASK_STAT which is
+         * included in MASK_CACHEABLE requested below. */
+        uint32_t action = CHIMERA_VFS_NOTIFY_FILE_REMOVED;
+        if ((request->remove_at.r_removed_attr.va_set_mask &
+             CHIMERA_VFS_ATTR_MODE) &&
+            S_ISDIR(request->remove_at.r_removed_attr.va_mode)) {
+            action = CHIMERA_VFS_NOTIFY_DIR_REMOVED;
+        }
+
+        /* Strip STAT from the removed-object attrs before the cache
+         * insert below.  We requested STAT from the backend purely to
+         * learn va_mode for the notify dispatch — but inserting the
+         * pre-unlink STAT into the attr cache pollutes hardlink
+         * survivors: file.0 and newfile.0 share an inode (and thus an
+         * FH), so a cached pre-unlink nlink=2 entry on newfile.0's FH
+         * is also returned for file.0 lookups even though file.0's
+         * actual nlink is now 1.  The attr_cache_insert path skips
+         * insertion when STAT bits are not all present, so clearing
+         * them effectively invalidates any prior entry for this FH —
+         * which is exactly what we want post-remove. */
+        request->remove_at.r_removed_attr.va_set_mask &=
+            ~CHIMERA_VFS_ATTR_MASK_STAT;
+
+        chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                request->remove_at.handle->fh,
+                                request->remove_at.handle->fh_len,
+                                action,
+                                request->remove_at.name,
+                                request->remove_at.namelen,
+                                NULL, 0);
 
         chimera_vfs_name_cache_insert(name_cache,
                                       request->remove_at.handle->fh_hash,

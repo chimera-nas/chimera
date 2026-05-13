@@ -5,6 +5,7 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_sharemode.h"
+#include "smb_notify.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
@@ -169,6 +170,13 @@ chimera_smb_close(struct chimera_smb_request *request)
     if (unlikely(!request->close.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
         return;
+    }
+
+    /* Clean up any notify watches on this open file */
+    if (request->close.open_file->notify_state) {
+        chimera_smb_notify_close(thread->shared->vfs->vfs_notify,
+                                 request->close.open_file->notify_state);
+        request->close.open_file->notify_state = NULL;
     }
 
     /* Release share mode entry for regular file opens */

@@ -25,6 +25,7 @@
 #include "smb_gssapi.h"
 #include "smb_sharemode.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_notify.h"
 
 #define SMB2_MAX_DIALECTS           16
 #define SMB2_MAX_NEGOTIATE_CONTEXTS 16
@@ -134,6 +135,7 @@ struct chimera_smb_request {
     uint32_t                           status;
     uint16_t                           request_struct_size;
     uint16_t                           flags;
+    uint64_t                           async_id; /* non-zero if async/parked */
     union {
         struct smb1_header smb1_hdr;
         struct smb2_header smb2_hdr;
@@ -343,6 +345,18 @@ struct chimera_smb_request {
             uint32_t                     *last_file_offset;
             char                          pattern[SMB_FILENAME_MAX];
         } query_directory;
+
+        struct {
+            uint32_t                        completion_filter;
+            uint16_t                        flags;
+            uint32_t                        output_buffer_length;
+            int                             watch_tree;
+            struct chimera_smb_file_id      file_id;
+            struct chimera_smb_open_file   *open_file;
+            int                             nevents;
+            int                             overflowed;
+            struct chimera_vfs_notify_event events[16];
+        } change_notify;
     };
 };
 
@@ -373,6 +387,8 @@ struct chimera_smb_session_handle {
 #define CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED      0x01
 #define CHIMERA_SMB_CONN_FLAG_SMB_DIRECT_NEGOTIATED 0x02
 
+struct chimera_smb_notify_request;
+
 struct chimera_smb_conn {
     OM_uint32                          gss_major;
     OM_uint32                          gss_minor;
@@ -395,6 +411,7 @@ struct chimera_smb_conn {
     struct chimera_smb_session_handle *last_session_handle;
     struct chimera_smb_tree           *last_tree;
     struct chimera_smb_session_handle *session_handles;
+    struct chimera_smb_notify_request *parked_notifies;  /* parked CHANGE_NOTIFY requests */
     struct chimera_server_smb_thread  *thread;
     struct evpl_bind                  *bind;
     struct chimera_smb_conn           *prev;
@@ -436,6 +453,12 @@ struct chimera_server_smb_thread {
     struct chimera_smb_open_file      *free_open_files;
     struct chimera_smb_signing_ctx    *signing_ctx;
     struct chimera_smb_iconv_ctx       iconv_ctx;
+
+    /* Notify doorbell: VFS callbacks push ready notify requests here,
+     * then ring the doorbell so the SMB thread processes them. */
+    struct evpl_doorbell               notify_doorbell;
+    struct chimera_smb_notify_request *notify_ready;
+    pthread_mutex_t                    notify_ready_lock;
 };
 
 
@@ -478,9 +501,10 @@ chimera_smb_request_alloc(struct chimera_server_smb_thread *thread)
         request = calloc(1, sizeof(*request));
     }
 
-    request->status = SMB2_STATUS_SUCCESS;
-    request->flags  = 0;
-    request->tree   = NULL;
+    request->status   = SMB2_STATUS_SUCCESS;
+    request->flags    = 0;
+    request->async_id = 0;
+    request->tree     = NULL;
 
     return request;
 } /* chimera_smb_request_alloc */
@@ -635,12 +659,25 @@ chimera_smb_conn_alloc(struct chimera_server_smb_thread *thread)
     return conn;
 } /* chimera_smb_conn_alloc */
 
+/* Defined in smb_notify.c */
+void chimera_smb_notify_cancel(
+    struct chimera_smb_notify_request *nr);
+void chimera_smb_notify_drop(
+    struct chimera_smb_notify_request *nr);
+
 static inline void
 chimera_smb_conn_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_conn          *conn)
 {
     struct chimera_smb_session_handle *session_handle, *tmp;
+
+    /* Drop all parked CHANGE_NOTIFY requests silently — the bind is
+     * being torn down so a CANCELLED reply would race the destroy and
+     * the client is already gone. */
+    while (conn->parked_notifies) {
+        chimera_smb_notify_drop(conn->parked_notifies);
+    }
 
     HASH_ITER(hh, conn->session_handles, session_handle, tmp)
     {
@@ -865,6 +902,42 @@ chimera_smb_open_file_release(
         chimera_smb_open_file_free(request->compound->thread, open_file_to_free);
     }
 } // chimera_smb_open_file_release
+
+/*
+ * Release an open_file reference without a request context.
+ * Used by parked notify requests which outlive their original request.
+ */
+static inline void
+chimera_smb_open_file_release_nr(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_tree          *tree,
+    struct chimera_smb_open_file     *open_file)
+{
+    struct chimera_smb_open_file *open_file_to_free = NULL;
+    int                           open_file_bucket;
+
+    open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+
+    pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
+
+    chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at release");
+
+    open_file->refcnt--;
+
+    if (open_file->refcnt == 0) {
+        if (open_file->handle) {
+            chimera_vfs_release(thread->vfs_thread, open_file->handle);
+        }
+
+        open_file_to_free = open_file;
+    }
+
+    pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+
+    if (open_file_to_free) {
+        chimera_smb_open_file_free(thread, open_file_to_free);
+    }
+} // chimera_smb_open_file_release_nr
 
 static inline struct chimera_smb_open_file *
 chimera_smb_open_file_close(

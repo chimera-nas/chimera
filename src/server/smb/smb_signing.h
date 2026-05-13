@@ -42,3 +42,17 @@ chimera_smb_sign_compound(
     int                             niov,
     int                             length);
 
+/*
+ * Sign a single contiguous SMB2 message in place (for standalone async
+ * responses such as CHANGE_NOTIFY).  smb2_buf must point at the SMB2
+ * header (not the NetBIOS framing).  Sets SMB2_FLAGS_SIGNED and writes
+ * the signature into hdr->signature.
+ */
+int
+chimera_smb_sign_message(
+    struct chimera_smb_signing_ctx *ctx,
+    int                             dialect,
+    const uint8_t                  *signing_key,
+    uint8_t                        *smb2_buf,
+    int                             smb2_len);
+
