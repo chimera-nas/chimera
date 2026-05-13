@@ -1455,7 +1455,7 @@ chimera_linux_getparent(
         }
         memcpy(request->getparent.r_name, de->d_name, nlen);
         request->getparent.r_name_len = (uint16_t) nlen;
-        found                          = 1;
+        found                         = 1;
         break;
     }
 
