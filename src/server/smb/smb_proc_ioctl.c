@@ -19,7 +19,8 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
 
     switch (request->ioctl.ctl_code) {
         case SMB2_FSCTL_DFS_GET_REFERRALS:
-            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+            /* No DFS support; tell the client to stop asking. */
+            chimera_smb_complete_request(request, SMB2_STATUS_FS_DRIVER_REQUIRED);
             break;
 
         case SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO:
@@ -212,6 +213,9 @@ chimera_smb_parse_ioctl(
                                request->ioctl.input_offset - evpl_iovec_cursor_consumed(request_cursor));
 
         switch (request->ioctl.ctl_code) {
+            case SMB2_FSCTL_DFS_GET_REFERRALS:
+                /* Handled in the dispatcher; no input parsing needed. */
+                break;
             case SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO:
                 if (request->ioctl.input_count < 24) {
                     chimera_smb_error("VALIDATE_NEGOTIATE_INFO input too small (%u < 24)",

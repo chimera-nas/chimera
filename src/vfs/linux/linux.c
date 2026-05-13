@@ -833,8 +833,10 @@ chimera_linux_remove_at(
 
     fd = request->remove_at.handle->vfs_private;
 
-    request->remove_at.r_removed_attr.va_req_mask = CHIMERA_VFS_ATTR_FH;
-
+    /* Honor the caller's requested attrs; in particular notify
+     * dispatch in vfs_proc_remove_at needs va_mode to distinguish
+     * file vs directory removals.  The fstatat happens BEFORE
+     * unlinkat below, so the path is still resolvable. */
     chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                                   request,
                                   &request->remove_at.r_removed_attr,
@@ -1364,6 +1366,114 @@ chimera_linux_lock(
     request->complete(request);
 } /* chimera_linux_lock */
 
+/* Reverse path lookup: given a file's FH, return the parent's FH and
+ * the entry name inside the parent.  Used by the notify resolver to
+ * walk up from an event's parent dir toward subtree-watched ancestors.
+ *
+ * Strategy: open the FH O_PATH, fstatat to read its inode number, then
+ * openat("..") for the parent and getdents the parent looking for the
+ * entry whose d_ino matches.  Hardlinked regular files have multiple
+ * names — we return the first match, which is acceptable for change
+ * notifications.  Directories have a single parent on Linux so this is
+ * unambiguous for the dirs the resolver actually walks.  */
+static void
+chimera_linux_getparent(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_linux_thread *thread    = private_data;
+    int                          child_fd  = -1;
+    int                          parent_fd = -1;
+    DIR                         *dir       = NULL;
+    struct dirent               *de;
+    struct stat                  child_st;
+    uint32_t                     parent_fh_len = 0;
+    int                          rc;
+    int                          found = 0;
+
+    child_fd = linux_open_by_handle(&thread->mount_table,
+                                    request->fh, request->fh_len,
+                                    O_PATH | O_NOFOLLOW);
+    if (child_fd < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    rc = fstatat(child_fd, "", &child_st, AT_EMPTY_PATH);
+    if (rc < 0) {
+        close(child_fd);
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    parent_fd = openat(child_fd, "..", O_RDONLY | O_DIRECTORY);
+    close(child_fd);
+    if (parent_fd < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    /* Encode the parent FH using the child FH's mount_id (same mount). */
+    rc = linux_get_fh(request->fh, parent_fd, "",
+                      request->getparent.r_parent_fh,
+                      &parent_fh_len);
+    if (rc < 0) {
+        close(parent_fd);
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+    request->getparent.r_parent_fh_len = (uint16_t) parent_fh_len;
+
+    /* fdopendir takes ownership of parent_fd on success; closedir(dir)
+     * below closes it.  On failure we still own the fd and must close
+     * it ourselves. */
+    dir = fdopendir(parent_fd);
+    if (!dir) {
+        close(parent_fd);
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    while ((de = readdir(dir)) != NULL) {
+        if (de->d_ino != child_st.st_ino) {
+            continue;
+        }
+        if (de->d_name[0] == '.' &&
+            (de->d_name[1] == '\0' ||
+             (de->d_name[1] == '.' && de->d_name[2] == '\0'))) {
+            /* Skip "." and ".." — never the answer we want. */
+            continue;
+        }
+        size_t nlen = strlen(de->d_name);
+        if (nlen > sizeof(request->getparent.r_name)) {
+            nlen = sizeof(request->getparent.r_name);
+        }
+        memcpy(request->getparent.r_name, de->d_name, nlen);
+        request->getparent.r_name_len = (uint16_t) nlen;
+        found                         = 1;
+        break;
+    }
+
+    closedir(dir);
+
+    if (!found) {
+        /* Race: child was unlinked between getparent dispatch and our
+         * readdir, or the inode resides under a different name we
+         * cannot see (mount namespace boundary, etc.). */
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_linux_getparent */
+
 static void
 chimera_linux_dispatch(
     struct chimera_vfs_request *request,
@@ -1436,6 +1546,9 @@ chimera_linux_dispatch(
         case CHIMERA_VFS_OP_LOCK:
             chimera_linux_lock(request, private_data);
             break;
+        case CHIMERA_VFS_OP_GETPARENT:
+            chimera_linux_getparent(request, private_data);
+            break;
         default:
             chimera_linux_error("linux_dispatch: unknown operation %d",
                                 request->opcode);
@@ -1450,7 +1563,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_linux = {
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_LINUX,
     .capabilities = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED | CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED |
         CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_FS_PATH_OP |
-        CHIMERA_VFS_CAP_FS_LOCK
+        CHIMERA_VFS_CAP_FS_LOCK | CHIMERA_VFS_CAP_RPL
     ,
     .init           = chimera_linux_init,
     .destroy        = chimera_linux_destroy,

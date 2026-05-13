@@ -71,7 +71,8 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_ALLOCATE         25
 #define CHIMERA_VFS_OP_SEEK             26
 #define CHIMERA_VFS_OP_LOCK             27
-#define CHIMERA_VFS_OP_NUM              28
+#define CHIMERA_VFS_OP_GETPARENT        28
+#define CHIMERA_VFS_OP_NUM              29
 
 #define CHIMERA_VFS_OPEN_CREATE         (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH           (1U << 1)
@@ -744,6 +745,13 @@ struct chimera_vfs_request {
             uint64_t                        r_conflict_length;
             pid_t                           r_conflict_pid;
         } lock;
+
+        struct {
+            uint8_t  r_parent_fh[CHIMERA_VFS_FH_SIZE];
+            uint16_t r_parent_fh_len;
+            char     r_name[CHIMERA_VFS_NAME_MAX];
+            uint16_t r_name_len;
+        } getparent;
     };
 };
 
@@ -835,6 +843,11 @@ enum CHIMERA_FS_FH_MAGIC {
 
 /* If set, module supports byte-range file locking via chimera_vfs_lock(). */
 #define CHIMERA_VFS_CAP_FS_LOCK            (1U << 8)
+
+/* If set, module supports reverse path lookup: given a directory FH,
+ * resolve (parent_fh, name_in_parent).  Enables precise subtree
+ * change notifications via CHIMERA_VFS_OP_GETPARENT. */
+#define CHIMERA_VFS_CAP_RPL                (1U << 9)
 
 struct chimera_vfs_module {
     /* Required
@@ -970,6 +983,8 @@ struct chimera_vfs_close_thread {
 
 struct chimera_vfs_mount_table;
 
+struct chimera_vfs_notify;
+
 struct chimera_vfs {
     struct chimera_vfs_module            *modules[CHIMERA_VFS_FH_MAGIC_MAX];
     void                                 *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
@@ -979,6 +994,7 @@ struct chimera_vfs {
     struct chimera_vfs_name_cache        *vfs_name_cache;
     struct chimera_vfs_attr_cache        *vfs_attr_cache;
     struct chimera_vfs_user_cache        *vfs_user_cache;
+    struct chimera_vfs_notify            *vfs_notify;
     struct chimera_vfs_mount_table       *mount_table;
     int                                   num_delegation_threads;
     struct chimera_vfs_delegation_thread *delegation_threads;

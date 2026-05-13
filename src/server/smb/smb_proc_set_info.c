@@ -7,6 +7,7 @@
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_notify.h"
 
 static void
 chimera_smb_set_info_callback(
@@ -17,6 +18,18 @@ chimera_smb_set_info_callback(
     void                     *private_data)
 {
     struct chimera_smb_request *request = private_data;
+
+    if (!error_code && request->set_info.open_file->parent_fh_len > 0) {
+        struct chimera_server_smb_thread *thread = request->compound->thread;
+
+        chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
+                                request->set_info.open_file->parent_fh,
+                                request->set_info.open_file->parent_fh_len,
+                                CHIMERA_VFS_NOTIFY_ATTRS_CHANGED,
+                                request->set_info.open_file->name,
+                                request->set_info.open_file->name_len,
+                                NULL, 0);
+    }
 
     chimera_smb_open_file_release(request, request->set_info.open_file);
 

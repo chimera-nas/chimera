@@ -40,24 +40,27 @@ typedef int (*chimera_smb_pipe_transceive_t)(
     int                         input_niov,
     struct evpl_iovec          *output_iov);
 
+struct chimera_smb_notify_state;
+
 struct chimera_smb_open_file {
-    enum chimera_smb_open_file_type type;
-    enum chimera_smb_pipe_magic     pipe_magic;
-    chimera_smb_pipe_transceive_t   pipe_transceive;
-    struct UT_hash_handle           hh;
-    struct chimera_smb_file_id      file_id;
-    struct chimera_vfs_open_handle *handle;
-    uint32_t                        desired_access;
-    uint32_t                        share_access;
-    uint32_t                        name_len;
-    uint32_t                        flags;
-    uint64_t                        position;
-    uint32_t                        parent_fh_len;
-    uint32_t                        refcnt;
-    struct chimera_smb_open_file   *next;
-    uint8_t                         parent_fh[CHIMERA_VFS_FH_SIZE];
-    char                            name[SMB_FILENAME_MAX];
-    uint16_t                        pattern[SMB_FILENAME_MAX];
+    enum chimera_smb_open_file_type  type;
+    enum chimera_smb_pipe_magic      pipe_magic;
+    chimera_smb_pipe_transceive_t    pipe_transceive;
+    struct UT_hash_handle            hh;
+    struct chimera_smb_file_id       file_id;
+    struct chimera_vfs_open_handle  *handle;
+    uint32_t                         desired_access;
+    uint32_t                         share_access;
+    uint32_t                         name_len;
+    uint32_t                         flags;
+    uint64_t                         position;
+    uint32_t                         parent_fh_len;
+    uint32_t                         refcnt;
+    struct chimera_smb_open_file    *next;
+    struct chimera_smb_notify_state *notify_state;
+    uint8_t                          parent_fh[CHIMERA_VFS_FH_SIZE];
+    char                             name[SMB_FILENAME_MAX];
+    uint16_t                         pattern[SMB_FILENAME_MAX];
 };
 
 #define CHIMERA_SMB_OPEN_FILE_BUCKETS     256

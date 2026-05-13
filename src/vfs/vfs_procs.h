@@ -622,3 +622,20 @@ chimera_vfs_lock(
     uint32_t                        flags,
     chimera_vfs_lock_callback_t     callback,
     void                           *private_data);
+
+typedef void (*chimera_vfs_getparent_callback_t)(
+    enum chimera_vfs_error error_code,
+    const uint8_t         *parent_fh,
+    uint16_t               parent_fh_len,
+    const char            *name,
+    uint16_t               name_len,
+    void                  *private_data);
+
+void
+chimera_vfs_getparent(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    const void                      *fh,
+    int                              fhlen,
+    chimera_vfs_getparent_callback_t callback,
+    void                            *private_data);

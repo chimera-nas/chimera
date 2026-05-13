@@ -12,22 +12,62 @@
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_notify.h"
 #include "vfs/vfs_release.h"
 #include "smb_attr.h"
 #include "smb_lsarpc.h"
 
-#define SMB2_WRITE_MASK (SMB2_FILE_WRITE_DATA | \
-                         SMB2_FILE_APPEND_DATA | \
-                         SMB2_FILE_WRITE_EA | \
-                         SMB2_FILE_WRITE_ATTRIBUTES | \
-                         SMB2_FILE_DELETE_CHILD | \
-                         SMB2_FILE_ADD_FILE | \
-                         SMB2_FILE_ADD_SUBDIRECTORY | \
-                         SMB2_DELETE | \
-                         SMB2_WRITE_DACL | \
-                         SMB2_WRITE_OWNER | \
-                         SMB2_GENERIC_WRITE | \
-                         SMB2_GENERIC_ALL)
+#define SMB2_WRITE_MASK       (SMB2_FILE_WRITE_DATA | \
+                               SMB2_FILE_APPEND_DATA | \
+                               SMB2_FILE_WRITE_EA | \
+                               SMB2_FILE_WRITE_ATTRIBUTES | \
+                               SMB2_FILE_DELETE_CHILD | \
+                               SMB2_FILE_ADD_FILE | \
+                               SMB2_FILE_ADD_SUBDIRECTORY | \
+                               SMB2_DELETE | \
+                               SMB2_WRITE_DACL | \
+                               SMB2_WRITE_OWNER | \
+                               SMB2_GENERIC_WRITE | \
+                               SMB2_GENERIC_ALL)
+
+/* Bits in DesiredAccess that imply the caller will read or write file
+ * data.  Without any of these set, the open is metadata-only — common
+ * for tools probing for rename/delete — and is satisfiable with an
+ * O_PATH-style handle on both files and directories. */
+#define SMB2_DATA_ACCESS_MASK (SMB2_FILE_READ_DATA | \
+                               SMB2_FILE_WRITE_DATA | \
+                               SMB2_FILE_APPEND_DATA | \
+                               SMB2_FILE_READ_EA | \
+                               SMB2_FILE_WRITE_EA | \
+                               SMB2_FILE_EXECUTE | \
+                               SMB2_GENERIC_READ | \
+                               SMB2_GENERIC_WRITE | \
+                               SMB2_GENERIC_EXECUTE | \
+                               SMB2_GENERIC_ALL | \
+                               SMB2_MAXIMUM_ALLOWED)
+
+/* Map a VFS error from an open-or-create path to the SMB2 status that
+ * Windows clients expect.  EISDIR/ENOTDIR are critical here: cmd.exe and
+ * other tools probe with FILE_NON_DIRECTORY_FILE first and retry with
+ * FILE_DIRECTORY_FILE on STATUS_FILE_IS_A_DIRECTORY — collapsing both to
+ * STATUS_OBJECT_NAME_NOT_FOUND breaks directory rename. */
+static inline uint32_t
+chimera_smb_create_error_status(enum chimera_vfs_error error_code)
+{
+    switch (error_code) {
+        case CHIMERA_VFS_OK:           return SMB2_STATUS_SUCCESS;
+        case CHIMERA_VFS_EISDIR:       return SMB2_STATUS_FILE_IS_A_DIRECTORY;
+        case CHIMERA_VFS_ENOTDIR:      return SMB2_STATUS_NOT_A_DIRECTORY;
+        case CHIMERA_VFS_EEXIST:       return SMB2_STATUS_OBJECT_NAME_COLLISION;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:        return SMB2_STATUS_ACCESS_DENIED;
+        case CHIMERA_VFS_ENOSPC:
+        case CHIMERA_VFS_EDQUOT:       return SMB2_STATUS_DISK_FULL;
+        case CHIMERA_VFS_ENAMETOOLONG: return SMB2_STATUS_NAME_TOO_LONG;
+        case CHIMERA_VFS_EROFS:        return SMB2_STATUS_MEDIA_WRITE_PROTECTED;
+        default:                       return SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    } /* switch */
+} /* chimera_smb_create_error_status */
 
 static inline struct chimera_smb_open_file *
 chimera_smb_create_gen_open_file(
@@ -122,17 +162,26 @@ chimera_smb_create_gen_open_file_normal(
     const char                     *name,
     int                             name_len,
     int                             delete_on_close,
+    int                             is_directory,
     struct chimera_vfs_open_handle *oh)
 {
-    return chimera_smb_create_gen_open_file(request,
-                                            CHIMERA_SMB_OPEN_FILE_TYPE_FILE,
-                                            NULL,
-                                            ++request->tree->next_file_id,
-                                            parent_fh,
-                                            parent_fh_len,
-                                            name,
-                                            name_len,
-                                            delete_on_close, oh);
+    struct chimera_smb_open_file *open_file;
+
+    open_file = chimera_smb_create_gen_open_file(request,
+                                                 CHIMERA_SMB_OPEN_FILE_TYPE_FILE,
+                                                 NULL,
+                                                 ++request->tree->next_file_id,
+                                                 parent_fh,
+                                                 parent_fh_len,
+                                                 name,
+                                                 name_len,
+                                                 delete_on_close, oh);
+
+    if (open_file && is_directory) {
+        open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY;
+    }
+
+    return open_file;
 } /* chimera_smb_create_gen_open_file_normal */
 
 static inline struct chimera_smb_open_file *
@@ -177,6 +226,7 @@ chimera_smb_create_mkdir_open_callback(
                                                         request->create.name,
                                                         request->create.name_len,
                                                         request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE,
+                                                        1,
                                                         oh);
 
     if (!open_file) {
@@ -195,6 +245,16 @@ chimera_smb_create_mkdir_open_callback(
 } /* chimera_smb_create_mkdir_open_callback */
 
 static inline void
+chimera_smb_create_open_at_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
+    void                           *private_data);
+
+static inline void
 chimera_smb_create_mkdir_callback(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *set_attr,
@@ -210,6 +270,24 @@ chimera_smb_create_mkdir_callback(
     struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
 
     if (error_code != CHIMERA_VFS_OK) {
+        if (error_code == CHIMERA_VFS_EEXIST &&
+            request->create.create_disposition == SMB2_FILE_OPEN_IF) {
+            /* Directory already exists — fall through to open it */
+            chimera_vfs_open_at(
+                vfs_thread,
+                &request->session_handle->session->cred,
+                request->create.parent_handle,
+                request->create.name,
+                request->create.name_len,
+                CHIMERA_VFS_OPEN_DIRECTORY,
+                &request->create.set_attr,
+                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                0,
+                0,
+                chimera_smb_create_open_at_callback,
+                request);
+            return;
+        }
         chimera_vfs_release(vfs_thread, request->create.parent_handle);
         chimera_smb_complete_request(request, error_code == CHIMERA_VFS_EEXIST ?
                                      SMB2_STATUS_OBJECT_NAME_COLLISION :
@@ -250,9 +328,7 @@ chimera_smb_create_open_at_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_release(vfs_thread, request->create.parent_handle);
-        chimera_smb_complete_request(request, error_code == CHIMERA_VFS_EEXIST ?
-                                     SMB2_STATUS_OBJECT_NAME_COLLISION :
-                                     SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+        chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
         return;
     }
 
@@ -261,7 +337,9 @@ chimera_smb_create_open_at_callback(
                                                         request->create.parent_handle->fh_len,
                                                         request->create.name,
                                                         request->create.name_len,
-                                                        request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE, oh);
+                                                        request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE,
+                                                        S_ISDIR(attr->va_mode),
+                                                        oh);
 
     if (!open_file) {
         chimera_vfs_release(vfs_thread, oh);
@@ -276,6 +354,36 @@ chimera_smb_create_open_at_callback(
         attr,
         &request->create.r_attrs);
 
+    /* Emit notification on parent directory for any disposition that can
+     * create a new file.  OPEN never creates; CREATE always creates;
+     * OPEN_IF / OVERWRITE_IF / SUPERSEDE may create or may open/truncate
+     * an existing file.  We emit ADDED for all create-capable
+     * dispositions — this can yield a spurious ADDED when an existing
+     * file was opened or truncated, but that is preferable to missing
+     * notifications for newly-created files (Windows CREATE_ALWAYS maps
+     * to OVERWRITE_IF and is the common case).
+     *
+     * Pick FILE_ADDED vs DIR_ADDED based on the result attrs.  A
+     * directory creation (FILE_DIRECTORY_FILE create option) must
+     * emit DIR_ADDED so SMB clients filtering on DIR_NAME only
+     * receive the event. */
+    if (request->create.create_disposition == SMB2_FILE_CREATE        ||
+        request->create.create_disposition == SMB2_FILE_OPEN_IF       ||
+        request->create.create_disposition == SMB2_FILE_OVERWRITE_IF  ||
+        request->create.create_disposition == SMB2_FILE_SUPERSEDE) {
+        struct chimera_server_smb_thread *thread = request->compound->thread;
+        uint32_t                          action = S_ISDIR(attr->va_mode) ?
+            CHIMERA_VFS_NOTIFY_DIR_ADDED : CHIMERA_VFS_NOTIFY_FILE_ADDED;
+
+        chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
+                                request->create.parent_handle->fh,
+                                request->create.parent_handle->fh_len,
+                                action,
+                                request->create.name,
+                                request->create.name_len,
+                                NULL, 0);
+    }
+
     chimera_vfs_release(vfs_thread, request->create.parent_handle);
     chimera_smb_open_file_release(request, open_file);
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
@@ -289,14 +397,18 @@ chimera_smb_create_open_getattr_callback(
 {
     struct chimera_smb_request *request = private_data;
 
-    chimera_smb_open_file_release(request, request->create.r_open_file);
-
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, request->create.r_open_file);
         /* XXX open file */
         chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
         return;
     }
 
+    if (S_ISDIR(attr->va_mode)) {
+        request->create.r_open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY;
+    }
+
+    chimera_smb_open_file_release(request, request->create.r_open_file);
 
     chimera_smb_marshal_attrs(
         attr,
@@ -319,7 +431,7 @@ chimera_smb_create_open_callback(
     struct chimera_smb_open_file     *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+        chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
         return;
     }
 
@@ -327,7 +439,9 @@ chimera_smb_create_open_callback(
                                                         NULL, 0,
                                                         request->create.name,
                                                         request->create.name_len * 2,
-                                                        request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE, oh);
+                                                        request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE,
+                                                        request->create.create_options & SMB2_FILE_DIRECTORY_FILE,
+                                                        oh);
 
     if (!open_file) {
         chimera_vfs_release(vfs_thread, oh);
@@ -367,7 +481,8 @@ chimera_smb_create_open_parent_callback(
     request->create.parent_handle = oh;
 
     if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
-        request->create.create_disposition == SMB2_FILE_CREATE) {
+        (request->create.create_disposition == SMB2_FILE_CREATE ||
+         request->create.create_disposition == SMB2_FILE_OPEN_IF)) {
 
         chimera_vfs_mkdir_at(
             vfs_thread,
@@ -387,7 +502,15 @@ chimera_smb_create_open_parent_callback(
             flags |= CHIMERA_VFS_OPEN_DIRECTORY;
         }
 
-        if (request->create.desired_access == SMB2_FILE_READ_ATTRIBUTES) {
+        /* Metadata-only open: when the caller doesn't request any
+         * data-access bits, satisfy the open with an O_PATH-style
+         * handle.  This lets tools (e.g. cmd.exe `ren`, Explorer) open
+         * a directory with DELETE | READ_ATTRIBUTES | SYNCHRONIZE plus
+         * FILE_NON_DIRECTORY_FILE — Windows servers honor this opening
+         * pattern for metadata operations like rename and delete-on-
+         * close, and refusing it breaks directory rename over SMB. */
+        if (!(request->create.desired_access & SMB2_DATA_ACCESS_MASK) &&
+            request->create.create_disposition == SMB2_FILE_OPEN) {
             flags |= CHIMERA_VFS_OPEN_PATH;
         }
 

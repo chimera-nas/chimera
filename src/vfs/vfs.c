@@ -21,6 +21,7 @@
 #include "vfs/vfs_name_cache.h"
 #include "vfs/vfs_attr_cache.h"
 #include "vfs/vfs_user_cache.h"
+#include "vfs/vfs_notify.h"
 #include "vfs/vfs_mount_table.h"
 #include "vfs/memfs/memfs.h"
 #include "vfs/linux/linux.h"
@@ -353,6 +354,8 @@ chimera_vfs_init(
 
     vfs->vfs_user_cache = chimera_vfs_user_cache_create(8192, 600);
 
+    vfs->vfs_notify = chimera_vfs_notify_init(vfs);
+
     /* Register the root pseudo-filesystem module */
     chimera_vfs_register(vfs, &vfs_root, NULL);
     /* Create the root mount entry in the mount table */
@@ -483,6 +486,10 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
         }
 
         module->destroy(vfs->module_private[i]);
+    }
+
+    if (vfs->vfs_notify) {
+        chimera_vfs_notify_destroy(vfs->vfs_notify);
     }
 
     if (vfs->vfs_user_cache) {
