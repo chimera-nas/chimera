@@ -36,6 +36,12 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
 
             open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
 
+            if (unlikely(!open_file)) {
+                evpl_iovecs_release(thread->evpl, request->ioctl.input_iov, request->ioctl.input_niov);
+                chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+                return;
+            }
+
             evpl_iovec_alloc(
                 thread->evpl,
                 65535,

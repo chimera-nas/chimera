@@ -80,7 +80,7 @@ chimera_smb_query_info(struct chimera_smb_request *request)
     request->query_info.r_attrs.smb_attr_mask = 0;
 
     if (unlikely(!request->query_info.open_file)) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
         return;
     }
 

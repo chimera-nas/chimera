@@ -29,6 +29,11 @@ chimera_smb_flush(struct chimera_smb_request *request)
 
     request->flush.open_file = chimera_smb_open_file_resolve(request, &request->flush.file_id);
 
+    if (unlikely(!request->flush.open_file)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
+    }
+
     chimera_vfs_commit(
         thread->vfs_thread,
         &request->session_handle->session->cred,

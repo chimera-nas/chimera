@@ -232,7 +232,7 @@ chimera_smb_ioctl_set_reparse(struct chimera_smb_request *request)
     open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
 
     if (!open_file) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_HANDLE);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
         return;
     }
 
@@ -463,7 +463,7 @@ chimera_smb_ioctl_get_reparse(struct chimera_smb_request *request)
     open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
 
     if (!open_file) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_HANDLE);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
         return;
     }
 

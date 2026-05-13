@@ -863,9 +863,6 @@ chimera_smb_open_file_resolve(
 
     pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
 
-    chimera_smb_abort_if(!open_file, "open request for file id %lx.%lx did not match an open file",
-                         file_id->pid, file_id->vid);
-
     return open_file;
 } /* chimera_smb_open_file_resolve */
 

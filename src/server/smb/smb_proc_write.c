@@ -102,6 +102,11 @@ chimera_smb_write(struct chimera_smb_request *request)
 
     request->write.open_file = chimera_smb_open_file_resolve(request, &request->write.file_id);
 
+    if (unlikely(!request->write.open_file)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
+    }
+
     if (request->write.channel == SMB2_CHANNEL_RDMA_V1) {
         /* We need to read in the data we're supposed to be writing first */
 
