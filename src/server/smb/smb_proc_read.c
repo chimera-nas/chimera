@@ -76,6 +76,11 @@ chimera_smb_read(struct chimera_smb_request *request)
 
     request->read.open_file = chimera_smb_open_file_resolve(request, &request->read.file_id);
 
+    if (unlikely(!request->read.open_file)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
+    }
+
     chimera_vfs_read(
         thread->vfs_thread,
         &request->session_handle->session->cred,

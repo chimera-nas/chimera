@@ -271,7 +271,7 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
     request->query_directory.open_file = chimera_smb_open_file_resolve(request, &request->query_directory.file_id);
 
     if (unlikely(!request->query_directory.open_file)) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
         return;
     }
 

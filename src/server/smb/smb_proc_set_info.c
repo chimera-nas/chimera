@@ -162,6 +162,11 @@ chimera_smb_set_info(struct chimera_smb_request *request)
     request->set_info.open_file     = chimera_smb_open_file_resolve(request, &request->set_info.file_id);
     request->set_info.parent_handle = NULL;
 
+    if (unlikely(!request->set_info.open_file)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
+    }
+
     switch (request->set_info.info_type) {
         case SMB2_INFO_FILE:
             switch (request->set_info.info_class) {
@@ -180,6 +185,11 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         request);
                     break;
                 case SMB2_FILE_ENDOFFILE_INFO:
+                case SMB2_FILE_ALLOCATION_INFO:
+                    /* AllocationInfo strictly only truncates when alloc <
+                     * EOF (MS-FSCC §2.4.4).  We collapse it to setattr(size)
+                     * because Windows always follows up with set-EOF in the
+                     * save flow, and a stand-alone shrink still truncates. */
                     chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
                     chimera_vfs_setattr(
@@ -292,6 +302,7 @@ chimera_smb_parse_set_info(
                     chimera_smb_parse_disposition_info_ex(request_cursor, &request->set_info.attrs);
                     break;
                 case SMB2_FILE_ENDOFFILE_INFO:
+                case SMB2_FILE_ALLOCATION_INFO:
                     chimera_smb_parse_end_of_file_info(
                         request_cursor,
                         &request->set_info.attrs);
