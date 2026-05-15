@@ -609,6 +609,33 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_GLOBAL_CAP_DIRECTORY_LEASING           0x00000020 // Supports directory leasing (SMB 3.0+)
 #define SMB2_GLOBAL_CAP_ENCRYPTION                  0x00000040 // Supports encryption (SMB 3.0+)
 
+/* SMB2 3.1.1 negotiate context types (MS-SMB2 §2.2.3.1) */
+#define SMB2_PREAUTH_INTEGRITY_CAPABILITIES         0x0001
+#define SMB2_ENCRYPTION_CAPABILITIES                0x0002
+#define SMB2_COMPRESSION_CAPABILITIES               0x0003
+#define SMB2_NETNAME_NEGOTIATE_CONTEXT_ID           0x0005
+#define SMB2_TRANSPORT_CAPABILITIES                 0x0006
+#define SMB2_RDMA_TRANSFORM_CAPABILITIES            0x0007
+#define SMB2_SIGNING_CAPABILITIES                   0x0008
+
+/* SMB2_PREAUTH_INTEGRITY_CAPABILITIES HashAlgorithm IDs */
+#define SMB2_PREAUTH_HASH_SHA_512                   0x0001
+
+/* SMB2_ENCRYPTION_CAPABILITIES Cipher IDs */
+#define SMB2_ENCRYPTION_AES_128_CCM                 0x0001
+#define SMB2_ENCRYPTION_AES_128_GCM                 0x0002
+#define SMB2_ENCRYPTION_AES_256_CCM                 0x0003
+#define SMB2_ENCRYPTION_AES_256_GCM                 0x0004
+
+/* SMB2_SIGNING_CAPABILITIES Algorithm IDs */
+#define SMB2_SIGNING_HMAC_SHA256                    0x0000
+#define SMB2_SIGNING_AES_CMAC                       0x0001
+#define SMB2_SIGNING_AES_GMAC                       0x0002
+
+/* SMB2_COMPRESSION_CAPABILITIES Flags */
+#define SMB2_COMPRESSION_FLAG_NONE                  0x00000000
+#define SMB2_COMPRESSION_FLAG_CHAINED               0x00000001
+
 #define SMB2_NEGOTIATE_MAX_DIALECTS                 10
 
 #define SMB2_FLAGS_SERVER_TO_REDIR                  0x00000001

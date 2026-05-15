@@ -107,6 +107,18 @@ chimera_smb_create_gen_open_file(
     open_file->pipe_transceive = transceive;
     open_file->refcnt          = 2;
 
+    /* Phase-0 plumbing state: zeroed; Phases 1/3 will populate from CREATE contexts. */
+    open_file->ctx_present_mask   = 0;
+    open_file->oplock_level       = 0;
+    open_file->lease_state        = 0;
+    open_file->lease_epoch        = 0;
+    open_file->lease_flags        = 0;
+    open_file->durable_flags      = 0;
+    open_file->durable_timeout_ms = 0;
+    memset(open_file->lease_key,        0, sizeof(open_file->lease_key));
+    memset(open_file->parent_lease_key, 0, sizeof(open_file->parent_lease_key));
+    memset(open_file->create_guid,      0, sizeof(open_file->create_guid));
+
     open_file->name_len = name_len;
     memcpy(open_file->name, name, open_file->name_len);
 
@@ -722,11 +734,197 @@ chimera_smb_create(struct chimera_smb_request *request)
     }
 } /* chimera_smb_create */
 
+/* CREATE-context response emit helpers.
+ *
+ * Each response context on the wire has this 16-byte header (mirroring 2.2.13.2):
+ *   Next(4) NameOffset(2) NameLength(2) Reserved(2) DataOffset(2) DataLength(4)
+ * followed by the 4-byte name at offset 16, 4 bytes of zero padding (to 8-byte
+ * align the data), then the data at offset 24. Chain advance = 24 + data_len
+ * rounded up to 8 bytes. Last context has Next = 0. */
+
+static const uint32_t SMB2_CREATE_CTX_FIXED_OVERHEAD = 24;
+
+static inline uint32_t
+smb_create_ctx_chain_advance(uint32_t data_len)
+{
+    uint32_t total = SMB2_CREATE_CTX_FIXED_OVERHEAD + data_len;
+
+    return (total + 7u) & ~7u;
+} /* smb_create_ctx_chain_advance */
+
+static uint32_t
+emit_create_response_context(
+    uint8_t       *buf,
+    uint32_t       buf_size,
+    uint32_t       pos,
+    const char     tag[4],
+    const uint8_t *data,
+    uint32_t       data_len)
+{
+    uint32_t advance = smb_create_ctx_chain_advance(data_len);
+
+    if (pos + advance > buf_size) {
+        return 0;
+    }
+
+    /* Header. Next is filled in later (or zeroed for the last entry); write
+     * the advance value for now so chained reads work as we go, and the caller
+     * zeroes the field on the final context. */
+    buf[pos + 0]  = advance & 0xff;
+    buf[pos + 1]  = (advance >> 8) & 0xff;
+    buf[pos + 2]  = (advance >> 16) & 0xff;
+    buf[pos + 3]  = (advance >> 24) & 0xff;
+    buf[pos + 4]  = 16; buf[pos + 5]  = 0;                  /* NameOffset = 16 */
+    buf[pos + 6]  = 4;  buf[pos + 7]  = 0;                  /* NameLength = 4 */
+    buf[pos + 8]  = 0;  buf[pos + 9]  = 0;                  /* Reserved */
+    buf[pos + 10] = 24; buf[pos + 11] = 0;                  /* DataOffset = 24 */
+    buf[pos + 12] = data_len & 0xff;
+    buf[pos + 13] = (data_len >> 8) & 0xff;
+    buf[pos + 14] = (data_len >> 16) & 0xff;
+    buf[pos + 15] = (data_len >> 24) & 0xff;
+    buf[pos + 16] = (uint8_t) tag[0];
+    buf[pos + 17] = (uint8_t) tag[1];
+    buf[pos + 18] = (uint8_t) tag[2];
+    buf[pos + 19] = (uint8_t) tag[3];
+    buf[pos + 20] = 0; buf[pos + 21] = 0; buf[pos + 22] = 0; buf[pos + 23] = 0;
+    if (data_len > 0) {
+        memcpy(buf + pos + 24, data, data_len);
+    }
+    /* Zero any trailing pad bytes so we never leak stack contents. */
+    if (advance > SMB2_CREATE_CTX_FIXED_OVERHEAD + data_len) {
+        memset(buf + pos + SMB2_CREATE_CTX_FIXED_OVERHEAD + data_len,
+               0,
+               advance - SMB2_CREATE_CTX_FIXED_OVERHEAD - data_len);
+    }
+    return advance;
+} /* emit_create_response_context */
+
+/* Build the MxAc response body. 8 bytes: QueryStatus(4) | MaximalAccess(4).
+ *
+ * Spec semantics: MaximalAccess is the user's effective rights against the
+ * file's DACL — what the user *could* obtain, not what they happened to ask
+ * for. Computing that properly needs ACL evaluation we don't yet have, so
+ * Phase 0 only emits MxAc when the client opened with MAXIMUM_ALLOWED — that
+ * is the case where the granted desired_access (post-expansion in the create
+ * path) approximates the effective rights closely enough to be useful. For
+ * specific-access opens we omit the reply: the client already knows what it
+ * asked for, and returning that same mask back as "maximal" would be
+ * misleading. Phase 1's DACL evaluation will lift the gate. */
+static int
+build_mxac_response(
+    struct chimera_smb_request *request,
+    uint8_t                    *out,
+    uint32_t                    out_size)
+{
+    uint32_t max_access;
+
+    if (out_size < 8) {
+        return -1;
+    }
+
+    if ((request->create.desired_access & SMB2_MAXIMUM_ALLOWED) == 0) {
+        return -1;  /* not a MAXIMUM_ALLOWED open — omit the reply */
+    }
+
+    max_access = request->create.r_open_file ?
+        request->create.r_open_file->desired_access :
+        request->create.desired_access;
+
+    out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;  /* QueryStatus = STATUS_SUCCESS */
+    out[4] = max_access & 0xff;
+    out[5] = (max_access >> 8) & 0xff;
+    out[6] = (max_access >> 16) & 0xff;
+    out[7] = (max_access >> 24) & 0xff;
+    return 8;
+} /* build_mxac_response */
+
+struct chimera_smb_create_response_emitter {
+    uint32_t need_mask_bit;
+    char     tag[4];
+    int      (*build)(
+        struct chimera_smb_request *r,
+        uint8_t                    *out,
+        uint32_t                    out_size);
+};
+
+static const struct chimera_smb_create_response_emitter smb_create_response_emitters[] = {
+    { CHIMERA_SMB_CREATE_CTX_MXAC,
+            { 'M',
+            'x',
+            'A', 'c'       }, build_mxac_response },
+    /* Phase 1: + RqLs (lease grant)
+     * Phase 3: + DH2Q (durable handle grant), DHnQ
+     * Phase 8: + QFid (32-byte on-disk id) */
+    { 0,
+            { 0,                          0, 0,
+            0                         }, NULL   }
+};
+
+/* Returns total bytes written into ctx_buf. Zero if no contexts to emit.
+ * Exposed for unit tests in tests/phase0_contexts_test.c. */
+SYMBOL_EXPORT uint32_t
+chimera_smb_build_create_response_contexts(
+    struct chimera_smb_request *request,
+    uint8_t                    *ctx_buf,
+    uint32_t                    ctx_buf_size)
+{
+    uint32_t                                          pos      = 0;
+    uint32_t                                          last_pos = 0;
+    int                                               emitted  = 0;
+    const struct chimera_smb_create_response_emitter *e;
+
+    if (!request->create.r_open_file) {
+        return 0;
+    }
+
+    for (e = smb_create_response_emitters; e->need_mask_bit != 0; e++) {
+        uint8_t  data_buf[64];
+        int      data_len;
+        uint32_t advance;
+
+        if ((request->create.ctx_present_mask & e->need_mask_bit) == 0) {
+            continue;
+        }
+        data_len = e->build(request, data_buf, sizeof(data_buf));
+        if (data_len < 0) {
+            continue;
+        }
+        advance = emit_create_response_context(ctx_buf, ctx_buf_size, pos,
+                                               e->tag, data_buf, (uint32_t) data_len);
+        if (advance == 0) {
+            /* Out of buffer room. Drop this and subsequent contexts. */
+            break;
+        }
+        last_pos = pos;
+        pos     += advance;
+        emitted++;
+    }
+
+    if (emitted > 0) {
+        /* Patch the last context's Next field to zero. */
+        ctx_buf[last_pos + 0] = 0;
+        ctx_buf[last_pos + 1] = 0;
+        ctx_buf[last_pos + 2] = 0;
+        ctx_buf[last_pos + 3] = 0;
+    }
+
+    return pos;
+} /* chimera_smb_build_create_response_contexts */
+
 void
 chimera_smb_create_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request)
 {
+    uint8_t  ctx_buf[256];
+    uint32_t ctx_len;
+    uint32_t ctx_off;
+
+    ctx_len = chimera_smb_build_create_response_contexts(request, ctx_buf, sizeof(ctx_buf));
+    /* Absolute offset from the start of the SMB2 header. CREATE reply fixed body
+     * is 88 bytes; contexts start in the Buffer field immediately after. The
+     * sum (header + 88) is naturally 8-byte aligned for the standard header. */
+    ctx_off = (ctx_len > 0) ? (uint32_t) (sizeof(struct smb2_header) + 88) : 0;
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_CREATE_REPLY_SIZE);
 
@@ -754,16 +952,262 @@ chimera_smb_create_reply(
     evpl_iovec_cursor_append_uint64(reply_cursor, request->create.r_open_file ?
                                     request->create.r_open_file->file_id.vid : 0);
 
-    /* Create Context Offset */
-    evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+    /* Create Context Offset / Length */
+    evpl_iovec_cursor_append_uint32(reply_cursor, ctx_off);
+    evpl_iovec_cursor_append_uint32(reply_cursor, ctx_len);
 
-    /* Create Context Length */
-    evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+    if (ctx_len > 0) {
+        evpl_iovec_cursor_append_blob(reply_cursor, ctx_buf, ctx_len);
+    } else {
+        /* Preserve the 4-byte zero pad that the original implementation emitted
+         * here so the Buffer field is non-empty (StructureSize encodes +1). */
+        evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+    }
 
-    /* Ea Error Offset */
-    evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+    /* Phase-0 housekeeping: propagate which CREATE contexts the client supplied
+     * onto the open file so later phases (lease/durable break, reconnect) can
+     * tell which contracts the client expects. */
+    if (request->create.r_open_file) {
+        request->create.r_open_file->ctx_present_mask = request->create.ctx_present_mask;
+    }
 
 } /* chimera_smb_create_reply */
+
+/* CREATE-context request handlers. Each fills typed fields in request->create.
+ * NULL handler = presence-only (the bit in ctx_present_mask is all that matters
+ * for Phase 0; Phase 1/3 will add real semantics for the open-after-CREATE step). */
+
+static void
+parse_ctx_secd(
+    const uint8_t              *data,
+    uint32_t                    data_len,
+    struct chimera_smb_request *request)
+{
+    chimera_smb_parse_sd_to_attrs(data, data_len, &request->create.set_attr);
+} /* parse_ctx_secd */
+
+static void
+parse_ctx_dhnc(
+    const uint8_t              *data,
+    uint32_t                    data_len,
+    struct chimera_smb_request *request)
+{
+    /* DHnC body: 16-byte SMB2_FILEID (persistent | volatile) + 16 reserved bytes. */
+    if (data_len < 16) {
+        return;
+    }
+    request->create.dhnc.persistent  = smb_wire_le64(data);
+    request->create.dhnc.volatile_id = smb_wire_le64(data + 8);
+} /* parse_ctx_dhnc */
+
+static void
+parse_ctx_dh2q(
+    const uint8_t              *data,
+    uint32_t                    data_len,
+    struct chimera_smb_request *request)
+{
+    /* DH2Q body: Timeout(4) | Flags(4) | Reserved(8) | CreateGuid(16) = 32 bytes. */
+    if (data_len < 32) {
+        return;
+    }
+    request->create.dh2q.timeout_ms = smb_wire_le32(data);
+    request->create.dh2q.flags      = smb_wire_le32(data + 4);
+    memcpy(request->create.dh2q.create_guid, data + 16, 16);
+} /* parse_ctx_dh2q */
+
+static void
+parse_ctx_dh2c(
+    const uint8_t              *data,
+    uint32_t                    data_len,
+    struct chimera_smb_request *request)
+{
+    /* DH2C body: FileId(16) | CreateGuid(16) | Flags(4) = 36 bytes. */
+    if (data_len < 36) {
+        return;
+    }
+    request->create.dh2c.persistent  = smb_wire_le64(data);
+    request->create.dh2c.volatile_id = smb_wire_le64(data + 8);
+    memcpy(request->create.dh2c.create_guid, data + 16, 16);
+    request->create.dh2c.flags = smb_wire_le32(data + 32);
+} /* parse_ctx_dh2c */
+
+static void
+parse_ctx_rqls(
+    const uint8_t              *data,
+    uint32_t                    data_len,
+    struct chimera_smb_request *request)
+{
+    /* RqLs v1 body (32 bytes): LeaseKey(16) | LeaseState(4) | LeaseFlags(4) | LeaseDuration(8 reserved).
+     * RqLs v2 body (52 bytes): adds ParentLeaseKey(16) | Epoch(2) | Reserved(2).
+     * Differentiate by data_len. Other sizes: malformed; skip without setting fields. */
+    if (data_len != 32 && data_len != 52) {
+        return;
+    }
+    memcpy(request->create.rqls.key, data, 16);
+    request->create.rqls.state = smb_wire_le32(data + 16);
+    request->create.rqls.flags = smb_wire_le32(data + 20);
+    if (data_len == 52) {
+        request->create.rqls.is_v2 = 1;
+        memcpy(request->create.rqls.parent_key, data + 32, 16);
+        request->create.rqls.epoch = smb_wire_le16(data + 48);
+    } else {
+        request->create.rqls.is_v2 = 0;
+    }
+} /* parse_ctx_rqls */
+
+static void
+parse_ctx_alsi(
+    const uint8_t              *data,
+    uint32_t                    data_len,
+    struct chimera_smb_request *request)
+{
+    if (data_len < 8) {
+        return;
+    }
+    request->create.alsi_alloc_size = smb_wire_le64(data);
+} /* parse_ctx_alsi */
+
+static void
+parse_ctx_twrp(
+    const uint8_t              *data,
+    uint32_t                    data_len,
+    struct chimera_smb_request *request)
+{
+    if (data_len < 8) {
+        return;
+    }
+    request->create.twrp_timestamp = smb_wire_le64(data);
+} /* parse_ctx_twrp */
+
+typedef void (*chimera_smb_create_ctx_handler_t)(
+    const uint8_t              *data,
+    uint32_t                    data_len,
+    struct chimera_smb_request *request);
+
+struct chimera_smb_create_ctx_parser {
+    const char                       tag[4];
+    uint32_t                         mask_bit;
+    chimera_smb_create_ctx_handler_t handler;
+};
+
+/* Dispatch table for 4-byte tagged CREATE contexts. 16-byte GUID-named contexts
+ * (AppInstanceId, AppInstanceVersion, SVHDX_*) are silently skipped in Phase 0. */
+static const struct chimera_smb_create_ctx_parser smb_create_ctx_parsers[] = {
+    { { 'S', 'e', 'c', 'D'                                        }, CHIMERA_SMB_CREATE_CTX_SECD, parse_ctx_secd
+    },
+    { { 'E', 'x', 't', 'A'                                        }, CHIMERA_SMB_CREATE_CTX_EXTA, NULL
+    },
+    { { 'D', 'H', 'n', 'Q'                                        }, CHIMERA_SMB_CREATE_CTX_DHNQ, NULL
+    },
+    { { 'D', 'H', 'n', 'C'                                        }, CHIMERA_SMB_CREATE_CTX_DHNC, parse_ctx_dhnc
+    },
+    { { 'D', 'H', '2', 'Q'                                        }, CHIMERA_SMB_CREATE_CTX_DH2Q, parse_ctx_dh2q
+    },
+    { { 'D', 'H', '2', 'C'                                        }, CHIMERA_SMB_CREATE_CTX_DH2C, parse_ctx_dh2c
+    },
+    { { 'A', 'l', 'S', 'i'                                        }, CHIMERA_SMB_CREATE_CTX_ALSI, parse_ctx_alsi
+    },
+    { { 'M', 'x', 'A', 'c'                                        }, CHIMERA_SMB_CREATE_CTX_MXAC, NULL
+    },
+    { { 'T', 'W', 'r', 'p'                                        }, CHIMERA_SMB_CREATE_CTX_TWRP, parse_ctx_twrp
+    },
+    { { 'Q', 'F', 'i', 'd'                                        }, CHIMERA_SMB_CREATE_CTX_QFID, NULL
+    },
+    { { 'R', 'q', 'L', 's'                                        }, CHIMERA_SMB_CREATE_CTX_RQLS, parse_ctx_rqls
+    },
+    { {  0,  0,   0,   0                                          }, 0,                           NULL
+    },
+};
+
+/* Exposed for unit tests in tests/phase0_contexts_test.c. */
+SYMBOL_EXPORT int
+chimera_smb_parse_create_contexts(
+    const uint8_t              *buf,
+    uint32_t                    buf_len,
+    struct chimera_smb_request *request)
+{
+    uint32_t pos = 0;
+
+    while (pos < buf_len) {
+        uint32_t       next, data_len;
+        uint16_t       name_off, name_len, data_off;
+        const uint8_t *name;
+        const uint8_t *data = NULL;
+
+        if (buf_len - pos < 16) {
+            chimera_smb_error("CREATE-context chain truncated before header (pos=%u, remaining=%u)",
+                              pos, buf_len - pos);
+            request->status = SMB2_STATUS_INVALID_PARAMETER;
+            return -1;
+        }
+
+        next     = smb_wire_le32(buf + pos);
+        name_off = smb_wire_le16(buf + pos + 4);
+        name_len = smb_wire_le16(buf + pos + 6);
+        /* buf[pos+8..pos+10] is the 2-byte Reserved */
+        data_off = smb_wire_le16(buf + pos + 10);
+        data_len = smb_wire_le32(buf + pos + 12);
+
+        if ((uint32_t) name_off + name_len > buf_len - pos) {
+            chimera_smb_error("CREATE-context name out of bounds (pos=%u, name_off=%u, name_len=%u)",
+                              pos, name_off, name_len);
+            request->status = SMB2_STATUS_INVALID_PARAMETER;
+            return -1;
+        }
+
+        if (data_len > 0) {
+            if (data_off == 0 || (uint32_t) data_off + data_len > buf_len - pos) {
+                chimera_smb_error("CREATE-context data out of bounds (pos=%u, data_off=%u, data_len=%u)",
+                                  pos, data_off, data_len);
+                request->status = SMB2_STATUS_INVALID_PARAMETER;
+                return -1;
+            }
+            data = buf + pos + data_off;
+        }
+
+        name = buf + pos + name_off;
+
+        /* Dispatch on 4-byte tags only. 16-byte GUID-named contexts
+         * (AppInstanceId, AppInstanceVersion, SVHDX_*) fall through. */
+        if (name_len == 4) {
+            const struct chimera_smb_create_ctx_parser *p;
+            for (p = smb_create_ctx_parsers; p->mask_bit != 0; p++) {
+                if (name[0] == (uint8_t) p->tag[0] &&
+                    name[1] == (uint8_t) p->tag[1] &&
+                    name[2] == (uint8_t) p->tag[2] &&
+                    name[3] == (uint8_t) p->tag[3]) {
+
+                    /* Tag-aware special case: RqLs v2 (52-byte body) sets a
+                     * distinct mask bit so the response emit can tell which
+                     * lease variant the client requested. */
+                    if (p->mask_bit == CHIMERA_SMB_CREATE_CTX_RQLS && data_len == 52) {
+                        request->create.ctx_present_mask |= CHIMERA_SMB_CREATE_CTX_RQLS_V2;
+                    } else {
+                        request->create.ctx_present_mask |= p->mask_bit;
+                    }
+                    if (p->handler) {
+                        p->handler(data, data_len, request);
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (next == 0) {
+            break;
+        }
+
+        if (next < 16 || (next & 0x7) != 0 || pos + next > buf_len) {
+            chimera_smb_error("CREATE-context Next field invalid (pos=%u, next=%u, buf_len=%u)",
+                              pos, next, buf_len);
+            request->status = SMB2_STATUS_INVALID_PARAMETER;
+            return -1;
+        }
+        pos += next;
+    }
+
+    return 0;
+} /* chimera_smb_parse_create_contexts */
 
 /*
  * Parse SMB2 CREATE request
@@ -869,8 +1313,8 @@ chimera_smb_parse_create(
     /* Initialize create-time attributes (may be populated by SD create context) */
     request->create.set_attr.va_req_mask = 0;
     request->create.set_attr.va_set_mask = 0;
+    request->create.ctx_present_mask     = 0;
 
-    /* Parse create contexts for security descriptor (modefromsid) */
     if (blob_offset > 0 && blob_length > 0 && blob_length <= 1024) {
         uint8_t  ctx_buf[1024];
         uint32_t skip = blob_offset - evpl_iovec_cursor_consumed(request_cursor);
@@ -878,41 +1322,11 @@ chimera_smb_parse_create(
         evpl_iovec_cursor_skip(request_cursor, skip);
 
         if (evpl_iovec_cursor_get_blob(request_cursor, ctx_buf, blob_length) == 0) {
-            uint32_t pos = 0;
-
-            while (pos + 16 <= blob_length) {
-                uint32_t next = ctx_buf[pos]    | (ctx_buf[pos + 1] << 8) |
-                    (ctx_buf[pos + 2] << 16) | (ctx_buf[pos + 3] << 24);
-                uint16_t name_off = ctx_buf[pos + 4] | (ctx_buf[pos + 5] << 8);
-                uint16_t name_len = ctx_buf[pos + 6] | (ctx_buf[pos + 7] << 8);
-                uint16_t data_off = ctx_buf[pos + 10] | (ctx_buf[pos + 11] << 8);
-                uint32_t data_len = ctx_buf[pos + 12] | (ctx_buf[pos + 13] << 8) |
-                    (ctx_buf[pos + 14] << 16) | (ctx_buf[pos + 15] << 24);
-
-                /* Look for SMB2_CREATE_SD_BUFFER ("SecD") */
-                if (name_len == 4 &&
-                    pos + name_off + 4 <= blob_length &&
-                    ctx_buf[pos + name_off]     == 'S' &&
-                    ctx_buf[pos + name_off + 1] == 'e' &&
-                    ctx_buf[pos + name_off + 2] == 'c' &&
-                    ctx_buf[pos + name_off + 3] == 'D' &&
-                    data_off > 0 &&
-                    pos + data_off + data_len <= blob_length) {
-
-                    chimera_smb_parse_sd_to_attrs(
-                        ctx_buf + pos + data_off,
-                        data_len,
-                        &request->create.set_attr);
-                    break;
-                }
-
-                if (next == 0) {
-                    break;
-                }
-                pos += next;
+            if (chimera_smb_parse_create_contexts(ctx_buf, blob_length, request) < 0) {
+                return -1;
             }
         }
     }
 
     return 0;
-} /* chimera_smb_parse_create */ /* chimera_smb_parse_create */
+} /* chimera_smb_parse_create */

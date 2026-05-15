@@ -41,6 +41,14 @@ target_include_directories(smb_sharemode_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/sharemode_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_sharemode_test)
 
+# Phase 0: negotiate-context and CREATE-context dispatch
+add_executable(phase0_contexts_test phase0_contexts_test.c)
+target_link_libraries(phase0_contexts_test chimera_server chimera_smb)
+target_include_directories(phase0_contexts_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_test(NAME chimera/server/smb/phase0_contexts_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/phase0_contexts_test)
+
 # REST API user/share manipulation test
 add_executable(rest_user_manip_test rest_user_manip_test.c)
 target_link_libraries(rest_user_manip_test chimera_server chimera_metrics jansson)
