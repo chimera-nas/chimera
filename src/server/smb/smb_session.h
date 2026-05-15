@@ -23,6 +23,31 @@ struct chimera_smb_file_id {
 #define CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE 0x00000002
 #define CHIMERA_SMB_OPEN_FILE_CLOSED               0x00000004
 
+/* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
+ * from request->create.ctx_present_mask into the open file so later phases
+ * (lease break, durable reconnect) can tell which contracts the client expects. */
+#define CHIMERA_SMB_CREATE_CTX_SECD                (1u << 0)
+#define CHIMERA_SMB_CREATE_CTX_EXTA                (1u << 1)
+#define CHIMERA_SMB_CREATE_CTX_DHNQ                (1u << 2)
+#define CHIMERA_SMB_CREATE_CTX_DHNC                (1u << 3)
+#define CHIMERA_SMB_CREATE_CTX_DH2Q                (1u << 4)
+#define CHIMERA_SMB_CREATE_CTX_DH2C                (1u << 5)
+#define CHIMERA_SMB_CREATE_CTX_RQLS                (1u << 6)
+#define CHIMERA_SMB_CREATE_CTX_RQLS_V2             (1u << 7)
+#define CHIMERA_SMB_CREATE_CTX_MXAC                (1u << 8)
+#define CHIMERA_SMB_CREATE_CTX_TWRP                (1u << 9)
+#define CHIMERA_SMB_CREATE_CTX_QFID                (1u << 10)
+#define CHIMERA_SMB_CREATE_CTX_ALSI                (1u << 11)
+/* App-instance contexts (SMB2_CREATE_APP_INSTANCE_ID / *_VERSION) use 16-byte
+ * GUID names and so are not reachable from the 4-byte tag dispatch. Phase 3
+ * (durable / app-instance handle replacement) will add a GUID-name match path
+ * and re-introduce a CHIMERA_SMB_CREATE_CTX_APP bit at that point. */
+
+/* Bits for chimera_smb_open_file.durable_flags */
+#define CHIMERA_SMB_DURABLE_V1                     (1u << 0)
+#define CHIMERA_SMB_DURABLE_V2                     (1u << 1)
+#define CHIMERA_SMB_DURABLE_PERSISTENT             (1u << 2)
+
 enum chimera_smb_open_file_type {
     CHIMERA_SMB_OPEN_FILE_TYPE_FILE,
     CHIMERA_SMB_OPEN_FILE_TYPE_PIPE,
@@ -56,6 +81,17 @@ struct chimera_smb_open_file {
     uint64_t                         position;
     uint32_t                         parent_fh_len;
     uint32_t                         refcnt;
+    /* Phase-0 plumbing: fields populated by later phases. Zeroed on alloc. */
+    uint32_t                         ctx_present_mask;
+    uint8_t                          oplock_level;
+    uint8_t                          lease_state;
+    uint16_t                         lease_epoch;
+    uint32_t                         lease_flags;
+    uint32_t                         durable_flags;
+    uint64_t                         durable_timeout_ms;
+    uint8_t                          lease_key[16];
+    uint8_t                          parent_lease_key[16];
+    uint8_t                          create_guid[16];
     struct chimera_smb_open_file    *next;
     struct chimera_smb_notify_state *notify_state;
     uint8_t                          parent_fh[CHIMERA_VFS_FH_SIZE];
