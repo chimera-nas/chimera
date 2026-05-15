@@ -35,11 +35,12 @@ RUN apt-get -y update && \
 
 RUN git clone https://github.com/chimera-nas/cthon04.git /opt/cthon04 && \
     cd /opt/cthon04 && \
-    make domount getopt && \
-    make -C basic && \
-    make -C general && \
-    make -C special && \
-    make -C lock && \
+    CTHON_CFLAGS="CFLAGS=-DLINUX -DHAVE_SOCKLEN_T -DGLIBC=22 -DMMAP -DSTDARG -std=gnu89" && \
+    make domount getopt "$CTHON_CFLAGS" && \
+    make -C basic "$CTHON_CFLAGS" && \
+    make -C general "$CTHON_CFLAGS" && \
+    make -C special "$CTHON_CFLAGS" && \
+    make -C lock "$CTHON_CFLAGS" && \
     chmod a+x runtests
 
 RUN git clone https://github.com/chimera-nas/xfstests.git /opt/xfstests && \
