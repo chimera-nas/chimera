@@ -18,6 +18,10 @@ Chimera is currently in an experimental state of development.  The focus so far 
 
 Currently, there is none beyond this README.   More to come.
 
+# Community
+
+Join the conversation on [Discord](https://discord.gg/hnRkvQFecq) to ask questions, share what you're building, or follow along with development.
+
 # License
 
 Chimera is licensed under LGPL-2.1. See [LICENSE](LICENSE) for details.
