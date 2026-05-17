@@ -245,7 +245,9 @@ nfs_server_start(void *arg)
     struct chimera_server_nfs_shared *shared = arg;
     enum evpl_protocol_id             rdma_protocol;
 
-    evpl_rpc2_server_start(shared->nfs_server, EVPL_STREAM_SOCKET_TCP, shared->nfs_endpoint);
+    evpl_rpc2_server_start(shared->nfs_server,
+                           chimera_server_config_get_tcp_stream_protocol(shared->config),
+                           shared->nfs_endpoint);
 
     if (shared->nfs_rdma_endpoint) {
         /* Use TCP-RDMA emulation when nfs_tcp_rdma_port > 0, otherwise use native RDMA */
