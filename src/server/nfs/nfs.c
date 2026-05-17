@@ -304,13 +304,12 @@ nfs_server_destroy(void *data)
     chimera_vfs_thread_destroy(vfs_thread);
     evpl_destroy(evpl);
 
-    /* Close out all the nfs4 session state */
-    nfs4_client_table_free(&shared->nfs4_shared_clients);
-
-    if (shared->op_histogram) {
-        prometheus_histogram_destroy(shared->metrics, shared->op_histogram);
-    }
-
+    /* evpl_destroy(evpl) above already drained the conns and fired
+     * NOTIFY_DISCONNECTED for each one, which dropped every conn's
+     * nfs4_session ref via nfs4_session_unbind_conn.  Free the rpc2
+     * servers and then drop the hash table's refs -- with no conn refs
+     * outstanding, refcount reaches zero and the sessions are freed in
+     * nfs4_client_table_free. */
     evpl_rpc2_server_destroy(shared->mount_server);
     evpl_rpc2_server_destroy(shared->nfs_server);
     evpl_rpc2_server_destroy(shared->nlm_server);
@@ -320,6 +319,13 @@ nfs_server_destroy(void *data)
         free(shared->portmap_v2.rpc2.metrics);
         free(shared->portmap_v3.rpc2.metrics);
         free(shared->portmap_v4.rpc2.metrics);
+    }
+
+    /* Close out all the nfs4 session state */
+    nfs4_client_table_free(&shared->nfs4_shared_clients);
+
+    if (shared->op_histogram) {
+        prometheus_histogram_destroy(shared->metrics, shared->op_histogram);
     }
     free(shared->mount_v3.rpc2.metrics);
     free(shared->nfs_v3.rpc2.metrics);
@@ -349,6 +355,8 @@ chimera_nfs_server_notify(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
+    void                             *priv;
+    uint32_t                          magic;
     struct nlm_client                *nlm_cli;
     struct chimera_vfs_cred           anon_cred;
     char                              local_addr[80], remote_addr[80];
@@ -364,10 +372,20 @@ chimera_nfs_server_notify(
             evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
             chimera_nfs_debug("Client disconnected from %s to %s", remote_addr, local_addr);
 
-            nlm_cli = evpl_rpc2_conn_get_private_data(conn);
-            if (nlm_cli && nlm_cli->magic == NLM_CLIENT_MAGIC) {
+            priv = evpl_rpc2_conn_get_private_data(conn);
+            if (!priv) {
+                break;
+            }
+
+            /* The private_data slot is multiplexed between nlm_client and
+             * nfs4_session.  Both layouts begin with a uint32_t magic at
+             * offset 0; read it with memcpy to avoid strict-aliasing UB. */
+            memcpy(&magic, priv, sizeof(magic));
+
+            if (magic == NLM_CLIENT_MAGIC) {
                 bool release_locks = false;
 
+                nlm_cli = priv;
                 chimera_vfs_cred_init_anonymous(&anon_cred,
                                                 CHIMERA_VFS_ANON_UID,
                                                 CHIMERA_VFS_ANON_GID);
@@ -387,6 +405,8 @@ chimera_nfs_server_notify(
                     nlm_state_remove_client_file(&shared->nlm_state,
                                                  nlm_cli->hostname);
                 }
+            } else if (magic == NFS4_SESSION_MAGIC) {
+                nfs4_session_unbind_conn(conn);
             }
             break;
     } /* switch */

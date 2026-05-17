@@ -103,9 +103,9 @@ chimera_nfs4_lock(
     if (args->locker.new_lock_owner) {
         /* First lock for this open - validate open stateid, allocate lock state */
         session = nfs4_resolve_session(
-            req->session,
-            &args->locker.open_owner.open_stateid,
-            &thread->shared->nfs4_shared_clients);
+            req->session, req->conn,
+            &thread->shared->nfs4_shared_clients,
+            &args->locker.open_owner.open_stateid);
 
         if (!session) {
             res->status = NFS4ERR_BAD_STATEID;
@@ -113,10 +113,7 @@ chimera_nfs4_lock(
             return;
         }
 
-        if (!req->session) {
-            req->session = session;
-            evpl_rpc2_conn_set_private_data(req->conn, session);
-        }
+        req->session = session;
 
         if (nfs4_session_acquire_state(session,
                                        &args->locker.open_owner.open_stateid,
@@ -148,9 +145,9 @@ chimera_nfs4_lock(
     } else {
         /* Subsequent lock - use existing lock stateid */
         session = nfs4_resolve_session(
-            req->session,
-            &args->locker.lock_owner.lock_stateid,
-            &thread->shared->nfs4_shared_clients);
+            req->session, req->conn,
+            &thread->shared->nfs4_shared_clients,
+            &args->locker.lock_owner.lock_stateid);
 
         if (!session) {
             res->status = NFS4ERR_BAD_STATEID;
@@ -158,10 +155,7 @@ chimera_nfs4_lock(
             return;
         }
 
-        if (!req->session) {
-            req->session = session;
-            evpl_rpc2_conn_set_private_data(req->conn, session);
-        }
+        req->session = session;
 
         if (nfs4_session_acquire_state(session,
                                        &args->locker.lock_owner.lock_stateid,
