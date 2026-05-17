@@ -536,6 +536,7 @@ struct chimera_smb_conn {
 struct chimera_server_smb_shared {
     struct chimera_smb_config   config;
     int                         rdma;
+    enum evpl_protocol_id       tcp_protocol;
     uint8_t                     guid[SMB2_GUID_SIZE];
     gss_name_t                  svc;
     gss_cred_id_t               srv_cred;

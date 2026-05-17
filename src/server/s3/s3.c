@@ -9,6 +9,7 @@
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
 #include "server/protocol.h"
+#include "server/server.h"
 #include "common/macros.h"
 #include "common/misc.h"
 #include "s3_internal.h"
@@ -571,6 +572,8 @@ s3_server_init(
 
     shared->config = calloc(1, sizeof(*shared->config));
 
+    shared->tcp_protocol = chimera_server_config_get_tcp_stream_protocol(config);
+
     shared->config->port    = 5000;
     shared->config->io_size = 128 * 1024;
 
@@ -619,7 +622,7 @@ s3_server_start(void *data)
 {
     struct chimera_server_s3_shared *shared = data;
 
-    evpl_listen(shared->listener, EVPL_STREAM_SOCKET_TCP, shared->endpoint);
+    evpl_listen(shared->listener, shared->tcp_protocol, shared->endpoint);
 } /* s3_server_start */
 
 static void *

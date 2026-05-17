@@ -52,6 +52,7 @@ struct chimera_server_config {
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
+    enum chimera_tcp_flavor               tcp_flavor;
     char                                  nfs_rdma_hostname[256];
     char                                  kv_module[64];
     char                                  state_dir[256];
@@ -99,6 +100,7 @@ chimera_server_config_init(void)
     config->nfs_rdma           = 0;
     config->external_portmap   = 0;
     config->soft_fail_bad_req  = 0;
+    config->tcp_flavor         = CHIMERA_TCP_FLAVOR_PLAIN;
 
     config->smb_num_dialects = 2;
     config->smb_dialects[0]  = SMB2_DIALECT_2_1;
@@ -476,6 +478,34 @@ chimera_server_config_get_soft_fail_bad_req(const struct chimera_server_config *
 {
     return config->soft_fail_bad_req;
 } /* chimera_server_config_get_soft_fail_bad_req */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_tcp_flavor(
+    struct chimera_server_config *config,
+    enum chimera_tcp_flavor       flavor)
+{
+    config->tcp_flavor = flavor;
+} /* chimera_server_config_set_tcp_flavor */
+
+SYMBOL_EXPORT enum chimera_tcp_flavor
+chimera_server_config_get_tcp_flavor(const struct chimera_server_config *config)
+{
+    return config->tcp_flavor;
+} /* chimera_server_config_get_tcp_flavor */
+
+SYMBOL_EXPORT enum evpl_protocol_id
+chimera_server_config_get_tcp_stream_protocol(const struct chimera_server_config *config)
+{
+    switch (config->tcp_flavor) {
+        case CHIMERA_TCP_FLAVOR_IO_URING:
+            return EVPL_STREAM_IO_URING_TCP;
+        case CHIMERA_TCP_FLAVOR_XLIO:
+            return EVPL_STREAM_XLIO_TCP;
+        case CHIMERA_TCP_FLAVOR_PLAIN:
+        default:
+            return EVPL_STREAM_SOCKET_TCP;
+    } /* switch */
+} /* chimera_server_config_get_tcp_stream_protocol */
 
 static void
 chimera_server_thread_wake(
