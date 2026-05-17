@@ -16,6 +16,9 @@ chimera_nfs4_dispatch(
         case CHIMERA_VFS_OP_MOUNT:
             chimera_nfs4_mount(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_UMOUNT:
+            chimera_nfs4_umount(thread, shared, request, private_data);
+            break;
         case CHIMERA_VFS_OP_LOOKUP_AT:
             chimera_nfs4_lookup_at(thread, shared, request, private_data);
             break;
