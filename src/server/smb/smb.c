@@ -67,6 +67,8 @@ chimera_smb_server_init(
         return NULL;
     }
 
+    shared->tcp_protocol = chimera_server_config_get_tcp_stream_protocol(config);
+
     shared->config.port      = 445;
     shared->config.rdma_port = 445;
 
@@ -231,7 +233,7 @@ chimera_smb_server_start(void *data)
 {
     struct chimera_server_smb_shared *shared = data;
 
-    evpl_listen(shared->listener, EVPL_STREAM_SOCKET_TCP, shared->endpoint);
+    evpl_listen(shared->listener, shared->tcp_protocol, shared->endpoint);
 
     if (shared->endpoint_rdma) {
         evpl_listen(shared->listener, EVPL_DATAGRAM_RDMACM_RC, shared->endpoint_rdma);

@@ -115,6 +115,7 @@ struct chimera_server_s3_shared {
     struct chimera_s3_cred_cache *cred_cache;
     struct evpl_endpoint         *endpoint;
     struct evpl_listener         *listener;
+    enum evpl_protocol_id         tcp_protocol;
     struct chimera_vfs_cred       cred;
     uint32_t                      root_fh_len;
     uint8_t                       root_fh[CHIMERA_VFS_FH_SIZE];
