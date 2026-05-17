@@ -51,8 +51,9 @@ chimera_nfs4_read(
     struct READ4args               *args    = &argop->opread;
     struct READ4res                *res     = &resop->opread;
     struct nfs4_session            *session = nfs4_resolve_session(
-        req->session, &args->stateid,
-        &thread->shared->nfs4_shared_clients);
+        req->session, req->conn,
+        &thread->shared->nfs4_shared_clients,
+        &args->stateid);
     struct nfs4_state              *state;
     struct chimera_vfs_open_handle *state_handle;
     struct evpl_iovec              *iov;
@@ -63,10 +64,7 @@ chimera_nfs4_read(
         return;
     }
 
-    if (!req->session) {
-        req->session = session;
-        evpl_rpc2_conn_set_private_data(req->conn, session);
-    }
+    req->session = session;
 
     if (nfs4_session_acquire_state(session, &args->stateid,
                                    &state, &state_handle) != NFS4_OK) {

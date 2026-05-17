@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <uthash.h>
 
 #include "nfs3_xdr.h"
@@ -11,10 +13,18 @@
 #include "nfs_internal.h"
 #include "vfs/vfs.h"
 
+struct evpl_rpc2_conn;
+
 #define NFS4_SESSION_MAX_STATE 1024
 
 #define NFS4_STATE_TYPE_OPEN   0
 #define NFS4_STATE_TYPE_LOCK   1
+
+/* Magic stored in nfs4_session.magic so that a connection's private_data
+ * (which may hold either an nlm_client* or an nfs4_session*) can be safely
+ * type-checked in the disconnect handler.  Must match the layout of
+ * nlm_client (uint32_t magic at offset 0). */
+#define NFS4_SESSION_MAGIC     0x4E465353U /* "NFSS" */
 
 struct nfs4_state {
     struct stateid4                 nfs4_state_id;
@@ -39,6 +49,10 @@ struct nfs4_client {
 };
 
 struct nfs4_session {
+    /* magic MUST be the first member -- see NFS4_SESSION_MAGIC comment. */
+    uint32_t              magic;
+    _Atomic uint32_t      refcount;
+    _Atomic bool          destroyed;
     uint8_t               nfs4_session_id[NFS4_SESSIONID_SIZE];
     uint64_t              nfs4_session_clientid;
     pthread_mutex_t       nfs4_session_lock;
@@ -112,6 +126,42 @@ struct nfs4_session *
 nfs4_session_find_by_clientid(
     struct nfs4_client_table *table,
     uint64_t                  client_id);
+
+/*
+ * Reference counting for nfs4_session.
+ *
+ * A session is referenced by:
+ *   - the client table (1 ref, dropped by nfs4_destroy_session or
+ *     nfs4_client_table_free)
+ *   - every evpl_rpc2_conn whose private_data points to it (1 ref each,
+ *     installed by nfs4_session_bind_conn, dropped by
+ *     nfs4_session_unbind_conn from the disconnect notify)
+ *
+ * nfs4_session_lookup() and nfs4_session_find_by_clientid() both return
+ * a session with +1 ref.  Callers must release that ref with
+ * nfs4_session_put() (either directly, or by binding it to a conn and then
+ * putting the lookup ref).
+ *
+ * nfs4_session_bind_conn() takes its own +1 ref; it does NOT consume the
+ * caller's ref.
+ */
+void nfs4_session_get(
+    struct nfs4_session *session);
+void nfs4_session_put(
+    struct nfs4_session *session);
+void nfs4_session_bind_conn(
+    struct evpl_rpc2_conn *conn,
+    struct nfs4_session   *session);
+void nfs4_session_unbind_conn(
+    struct evpl_rpc2_conn *conn);
+
+static inline bool
+nfs4_session_is_live(struct nfs4_session *session)
+{
+    return session &&
+           session->magic == NFS4_SESSION_MAGIC &&
+           !atomic_load_explicit(&session->destroyed, memory_order_acquire);
+} // nfs4_session_is_live
 
 static inline struct nfs4_state *
 nfs4_session_alloc_slot(struct nfs4_session *session)
@@ -303,19 +353,40 @@ nfs4_session_validate_stateid(
     return status;
 } /* nfs4_session_validate_stateid */
 
+/*
+ * Resolve the session for the current request.
+ *
+ * If `session` is non-NULL it is already borrowed via the conn's bind
+ * (compound entry transitively holds a ref through evpl_rpc2_conn private_data)
+ * and is returned as-is.
+ *
+ * Otherwise look up the session by the clientid embedded in `stateid`.  If
+ * found, bind it to `conn` (taking a ref on the conn's behalf) and drop the
+ * lookup's ref; the returned pointer is then borrowed via that conn ref.
+ *
+ * Returns NULL if no session exists for this client.
+ */
 static inline struct nfs4_session *
 nfs4_resolve_session(
     struct nfs4_session      *session,
-    const struct stateid4    *stateid,
-    struct nfs4_client_table *table)
+    struct evpl_rpc2_conn    *conn,
+    struct nfs4_client_table *table,
+    const struct stateid4    *stateid)
 {
-    uint64_t client_id;
+    uint64_t             client_id;
+    struct nfs4_session *found;
 
     if (session) {
         return session;
     }
 
     client_id = *(uint64_t *) (stateid->other + 4);
+    found     = nfs4_session_find_by_clientid(table, client_id);
 
-    return nfs4_session_find_by_clientid(table, client_id);
+    if (found) {
+        nfs4_session_bind_conn(conn, found);
+        nfs4_session_put(found);
+    }
+
+    return found;
 } /* nfs4_resolve_session */

@@ -8,6 +8,8 @@
 #include <uuid/uuid.h>
 #include "nfs4_session.h"
 #include "nfs_internal.h"
+#include "nfs_nlm_state.h"
+#include "evpl/evpl_rpc2.h"
 #include "vfs/vfs_release.h"
 
 void
@@ -43,8 +45,12 @@ nfs4_client_table_free(struct nfs4_client_table *table)
     HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, sess, sesstmp)
     {
         HASH_DELETE(nfs4_session_hh, table->nfs4_ct_sessions, sess);
-        pthread_mutex_destroy(&sess->nfs4_session_lock);
-        free(sess);
+        atomic_store_explicit(&sess->destroyed, true, memory_order_release);
+        /* Drop the table's ref.  By this point in shutdown evpl_destroy()
+         * has already drained all conns and fired NOTIFY_DISCONNECTED for
+         * each, so no conns hold refs and refcount is exactly 1 -- the
+         * session is freed here. */
+        nfs4_session_put(sess);
     }
 
 #endif /* ifndef __clang_analyzer__ */
@@ -165,6 +171,13 @@ nfs4_create_session(
     if (client) {
         session = calloc(1, sizeof(*session));
 
+        session->magic = NFS4_SESSION_MAGIC;
+        /* refcount: 1 for the hash table, 1 for the caller (so the session
+         * cannot be destroyed by another thread before the caller binds it
+         * to a conn). */
+        atomic_init(&session->refcount, 2);
+        atomic_init(&session->destroyed, false);
+
         uuid_generate(session->nfs4_session_id);
 
         pthread_mutex_init(&session->nfs4_session_lock, NULL);
@@ -227,6 +240,13 @@ nfs4_session_lookup(
     HASH_FIND(nfs4_session_hh, table->nfs4_ct_sessions,
               sessionid, NFS4_SESSIONID_SIZE, session);
 
+    if (session) {
+        /* take a +1 ref for the caller while holding the table lock so a
+         * concurrent nfs4_destroy_session cannot race the free. */
+        atomic_fetch_add_explicit(&session->refcount, 1,
+                                  memory_order_acq_rel);
+    }
+
     pthread_mutex_unlock(&table->nfs4_ct_lock);
 
     return session;
@@ -248,6 +268,12 @@ nfs4_session_find_by_clientid(
             session = cur;
             break;
         }
+    }
+
+    if (session) {
+        /* take a +1 ref for the caller while holding the table lock. */
+        atomic_fetch_add_explicit(&session->refcount, 1,
+                                  memory_order_acq_rel);
     }
 
     pthread_mutex_unlock(&table->nfs4_ct_lock);
@@ -274,13 +300,17 @@ nfs4_destroy_session(
 
     if (session) {
         HASH_DELETE(nfs4_session_hh, table->nfs4_ct_sessions, session);
+        atomic_store_explicit(&session->destroyed, true,
+                              memory_order_release);
     }
 
     pthread_mutex_unlock(&table->nfs4_ct_lock);
 
     if (session) {
-        pthread_mutex_destroy(&session->nfs4_session_lock);
-        free(session);
+        /* Drop the hash table's ref.  The session is freed only when the
+         * last conn that still caches it in private_data also drops its
+         * ref (in the disconnect notify). */
+        nfs4_session_put(session);
     }
 
 } /* nfs4_destroy_session */
@@ -311,3 +341,85 @@ nfs4_client_table_release_handles(
     pthread_mutex_unlock(&table->nfs4_ct_lock);
 #endif /* ifndef __clang_analyzer__ */
 } /* nfs4_client_table_release_handles */
+
+void
+nfs4_session_get(struct nfs4_session *session)
+{
+    atomic_fetch_add_explicit(&session->refcount, 1, memory_order_acq_rel);
+} /* nfs4_session_get */
+
+void
+nfs4_session_put(struct nfs4_session *session)
+{
+    uint32_t prev;
+
+    prev = atomic_fetch_sub_explicit(&session->refcount, 1,
+                                     memory_order_acq_rel);
+
+    chimera_nfs_abort_if(prev == 0,
+                         "nfs4_session_put: refcount underflow on session %p",
+                         session);
+
+    if (prev == 1) {
+        /* Last ref -- safe to tear down. */
+        pthread_mutex_destroy(&session->nfs4_session_lock);
+        session->magic = 0;
+        free(session);
+    }
+} /* nfs4_session_put */
+
+void
+nfs4_session_bind_conn(
+    struct evpl_rpc2_conn *conn,
+    struct nfs4_session   *session)
+{
+    void    *existing;
+    uint32_t magic = 0;
+
+    existing = evpl_rpc2_conn_get_private_data(conn);
+
+    if (existing) {
+        memcpy(&magic, existing, sizeof(magic));
+    }
+
+    if (magic == NFS4_SESSION_MAGIC) {
+        if (existing == session) {
+            /* Already bound to this session. */
+            return;
+        }
+        /* Bound to a different session -- unbind the old one. */
+        nfs4_session_put((struct nfs4_session *) existing);
+    } else if (magic == NLM_CLIENT_MAGIC) {
+        /* NLM and NFS4 should never share a conn (different ports). */
+        chimera_nfs_abort(
+            "nfs4_session_bind_conn: conn %p already holds an NLM client",
+            conn);
+    }
+
+    nfs4_session_get(session);
+    evpl_rpc2_conn_set_private_data(conn, session);
+} /* nfs4_session_bind_conn */
+
+void
+nfs4_session_unbind_conn(struct evpl_rpc2_conn *conn)
+{
+    void                *existing;
+    uint32_t             magic = 0;
+    struct nfs4_session *session;
+
+    existing = evpl_rpc2_conn_get_private_data(conn);
+
+    if (!existing) {
+        return;
+    }
+
+    memcpy(&magic, existing, sizeof(magic));
+
+    if (magic != NFS4_SESSION_MAGIC) {
+        return;
+    }
+
+    session = (struct nfs4_session *) existing;
+    evpl_rpc2_conn_set_private_data(conn, NULL);
+    nfs4_session_put(session);
+} /* nfs4_session_unbind_conn */

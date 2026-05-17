@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
-#include "evpl/evpl_rpc2.h"
+#include "nfs4_session.h"
 
 void
 chimera_nfs4_sequence(
@@ -24,6 +24,12 @@ chimera_nfs4_sequence(
         chimera_nfs4_compound_complete(req, NFS4ERR_BADSESSION);
         return;
     }
+
+    /* Bind this session to the conn (idempotent if already bound) and drop
+     * the +1 ref returned by nfs4_session_lookup -- the conn's ref keeps
+     * the session alive for the rest of this compound. */
+    nfs4_session_bind_conn(req->conn, session);
+    nfs4_session_put(session);
 
     /* Store session in request for use by subsequent operations */
     req->session = session;

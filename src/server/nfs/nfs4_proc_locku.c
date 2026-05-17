@@ -58,9 +58,9 @@ chimera_nfs4_locku(
     }
 
     session = nfs4_resolve_session(
-        req->session,
-        &args->lock_stateid,
-        &thread->shared->nfs4_shared_clients);
+        req->session, req->conn,
+        &thread->shared->nfs4_shared_clients,
+        &args->lock_stateid);
 
     if (!session) {
         res->status = NFS4ERR_BAD_STATEID;
@@ -68,10 +68,7 @@ chimera_nfs4_locku(
         return;
     }
 
-    if (!req->session) {
-        req->session = session;
-        evpl_rpc2_conn_set_private_data(req->conn, session);
-    }
+    req->session = session;
 
     if (nfs4_session_acquire_state(session,
                                    &args->lock_stateid,

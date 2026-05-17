@@ -1,9 +1,9 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
-#include "evpl/evpl_rpc2.h"
+#include "nfs4_session.h"
 
 void
 chimera_nfs4_create_session(
@@ -36,7 +36,7 @@ chimera_nfs4_create_session(
         return;
     }
 
-    evpl_rpc2_conn_set_private_data(conn, session);
+    nfs4_session_bind_conn(conn, session);
     req->session = session;
 
     res->csr_status = NFS4_OK;
@@ -46,6 +46,10 @@ chimera_nfs4_create_session(
 
     res->csr_resok4.csr_fore_chan_attrs = session->nfs4_session_fore_attrs;
     res->csr_resok4.csr_back_chan_attrs = session->nfs4_session_back_attrs;
+
+    /* Drop the +1 ref returned by nfs4_create_session; the conn now holds
+     * its own ref via bind_conn, and the hash holds the other ref. */
+    nfs4_session_put(session);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_setclientid */

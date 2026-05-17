@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
-#include "evpl/evpl_rpc2.h"
+#include "nfs4_session.h"
 
 void
 chimera_nfs4_setclientid(
@@ -38,7 +38,7 @@ chimera_nfs4_setclientid(
             NULL);
     }
 
-    evpl_rpc2_conn_set_private_data(conn, session);
+    nfs4_session_bind_conn(conn, session);
     req->session = session;
 
     resop->opsetclientid.status = NFS4_OK;
@@ -46,6 +46,10 @@ chimera_nfs4_setclientid(
     memcpy(&resop->opsetclientid.resok4.setclientid_confirm,
            session->nfs4_session_id,
            sizeof(session->nfs4_session_id));
+
+    /* Drop the +1 ref returned by find_by_clientid / create_session; the
+     * conn now holds its own ref via bind_conn. */
+    nfs4_session_put(session);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_setclientid */

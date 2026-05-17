@@ -17,8 +17,9 @@ chimera_nfs4_close(
     struct CLOSE4args              *args    = &argop->opclose;
     struct CLOSE4res               *res     = &resop->opclose;
     struct nfs4_session            *session = nfs4_resolve_session(
-        req->session, &args->open_stateid,
-        &thread->shared->nfs4_shared_clients);
+        req->session, req->conn,
+        &thread->shared->nfs4_shared_clients,
+        &args->open_stateid);
     struct nfs4_state              *state;
     struct chimera_vfs_open_handle *handle;
     int                             rc;
@@ -29,10 +30,7 @@ chimera_nfs4_close(
         return;
     }
 
-    if (!req->session) {
-        req->session = session;
-        evpl_rpc2_conn_set_private_data(req->conn, session);
-    }
+    req->session = session;
 
     if (*(uint32_t *) args->open_stateid.other >= NFS4_SESSION_MAX_STATE) {
         res->status = NFS4ERR_BAD_STATEID;

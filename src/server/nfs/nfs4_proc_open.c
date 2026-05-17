@@ -355,12 +355,15 @@ chimera_nfs4_open(
     }
 
     if (!req->session) {
-        req->session = nfs4_session_find_by_clientid(
+        struct nfs4_session *found = nfs4_session_find_by_clientid(
             &thread->shared->nfs4_shared_clients,
             args->owner.clientid);
 
-        if (req->session) {
-            evpl_rpc2_conn_set_private_data(req->conn, req->session);
+        if (found) {
+            nfs4_session_bind_conn(req->conn, found);
+            req->session = found;
+            /* Drop the +1 ref returned by find_by_clientid; conn owns it. */
+            nfs4_session_put(found);
         }
     }
 

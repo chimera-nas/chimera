@@ -198,7 +198,18 @@ chimera_nfs4_compound(
 
     nfs4_dump_compound(req, args);
 
-    req->session              = evpl_rpc2_conn_get_private_data(conn);
+    /* The conn caches its bound nfs4_session in private_data.  The conn
+     * holds a refcount on it (set up by nfs4_session_bind_conn) so the
+     * memory is valid for the duration of this request.  However the
+     * session may already have been destroyed by a prior DESTROY_SESSION
+     * compound -- in that case treat the cache as empty so that the
+     * lookup-by-id paths produce the appropriate BADSESSION/BAD_STATEID
+     * errors. */
+    {
+        struct nfs4_session *cached = evpl_rpc2_conn_get_private_data(conn);
+
+        req->session = nfs4_session_is_live(cached) ? cached : NULL;
+    }
     req->args_compound        = args;
     req->res_compound.status  = NFS4_OK;
     req->res_compound.tag.len = 0;
