@@ -41,16 +41,11 @@
 
 
 static void
-chimera_vfs_delegation_thread_wake(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell)
+chimera_vfs_delegation_drain(struct chimera_vfs_delegation_thread *delegation_thread)
 {
-    struct chimera_vfs_delegation_thread *delegation_thread = container_of(doorbell, struct
-                                                                           chimera_vfs_delegation_thread,
-                                                                           doorbell);
-    struct chimera_vfs_thread            *thread = delegation_thread->vfs_thread;
-    struct chimera_vfs_request           *requests, *request;
-    struct chimera_vfs_module            *module;
+    struct chimera_vfs_thread  *thread = delegation_thread->vfs_thread;
+    struct chimera_vfs_request *requests, *request;
+    struct chimera_vfs_module  *module;
 
     pthread_mutex_lock(&delegation_thread->lock);
     requests                    = delegation_thread->requests;
@@ -64,7 +59,29 @@ chimera_vfs_delegation_thread_wake(
         module = request->module;
         module->dispatch(request, thread->module_private[module->fh_magic]);
     }
+} /* chimera_vfs_delegation_drain */
+
+static void
+chimera_vfs_delegation_thread_wake(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct chimera_vfs_delegation_thread *delegation_thread = container_of(doorbell, struct
+                                                                           chimera_vfs_delegation_thread,
+                                                                           doorbell);
+
+    chimera_vfs_delegation_drain(delegation_thread);
 } /* chimera_vfs_delegation_thread_wake */
+
+static void
+chimera_vfs_delegation_thread_poll(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct chimera_vfs_delegation_thread *delegation_thread = private_data;
+
+    chimera_vfs_delegation_drain(delegation_thread);
+} /* chimera_vfs_delegation_thread_poll */
 
 static void *
 chimera_vfs_delegation_thread_init(
@@ -79,6 +96,14 @@ chimera_vfs_delegation_thread_init(
     evpl_add_doorbell(evpl, &delegation_thread->doorbell,
                       chimera_vfs_delegation_thread_wake);
 
+    if (delegation_thread->mode == CHIMERA_VFS_DELEGATION_ASYNC) {
+        delegation_thread->poll = evpl_add_poll(evpl,
+                                                NULL,
+                                                NULL,
+                                                chimera_vfs_delegation_thread_poll,
+                                                delegation_thread);
+    }
+
     return private_data;
 } /* chimera_vfs_delegation_thread_init */
 
@@ -88,6 +113,11 @@ chimera_vfs_delegation_thread_shutdown(
     void        *private_data)
 {
     struct chimera_vfs_delegation_thread *delegation_thread = private_data;
+
+    if (delegation_thread->poll) {
+        evpl_remove_poll(evpl, delegation_thread->poll);
+        delegation_thread->poll = NULL;
+    }
 
     evpl_remove_doorbell(evpl, &delegation_thread->doorbell);
 
@@ -303,9 +333,39 @@ chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
     chimera_vfs_info("Machine name: %.*s", vfs->machine_name_len, vfs->machine_name);
 } /* chimera_vfs_synthesize_machine_name */
 
+static struct chimera_vfs_delegation_thread *
+chimera_vfs_spawn_delegation_pool(
+    struct chimera_vfs              *vfs,
+    int                              count,
+    enum chimera_vfs_delegation_mode mode)
+{
+    struct chimera_vfs_delegation_thread *pool;
+
+    if (count <= 0) {
+        return NULL;
+    }
+
+    pool = calloc(count, sizeof(struct chimera_vfs_delegation_thread));
+
+    for (int i = 0; i < count; i++) {
+        pool[i].vfs  = vfs;
+        pool[i].mode = mode;
+        pthread_mutex_init(&pool[i].lock, NULL);
+
+        pool[i].evpl_thread = evpl_thread_create(
+            NULL,
+            chimera_vfs_delegation_thread_init,
+            chimera_vfs_delegation_thread_shutdown,
+            &pool[i]);
+    }
+
+    return pool;
+} /* chimera_vfs_spawn_delegation_pool */
+
 SYMBOL_EXPORT struct chimera_vfs *
 chimera_vfs_init(
-    int                                  num_delegation_threads,
+    int                                  num_sync_delegation_threads,
+    int                                  num_async_delegation_threads,
     const struct chimera_vfs_module_cfg *module_cfgs,
     int                                  num_modules,
     const char                          *kv_module_name,
@@ -417,19 +477,13 @@ chimera_vfs_init(
 
     chimera_vfs_info("Using '%s' as KV backend", effective_kv_module);
 
-    vfs->num_delegation_threads = num_delegation_threads;
-    vfs->delegation_threads     = calloc(num_delegation_threads, sizeof(struct chimera_vfs_delegation_thread));
+    vfs->num_sync_delegation_threads = num_sync_delegation_threads;
+    vfs->sync_delegation_threads     = chimera_vfs_spawn_delegation_pool(
+        vfs, num_sync_delegation_threads, CHIMERA_VFS_DELEGATION_SYNC);
 
-    for (int i = 0; i < vfs->num_delegation_threads; i++) {
-        vfs->delegation_threads[i].vfs = vfs;
-        pthread_mutex_init(&vfs->delegation_threads[i].lock, NULL);
-
-        vfs->delegation_threads[i].evpl_thread = evpl_thread_create(
-            NULL,
-            chimera_vfs_delegation_thread_init,
-            chimera_vfs_delegation_thread_shutdown,
-            &vfs->delegation_threads[i]);
-    }
+    vfs->num_async_delegation_threads = num_async_delegation_threads;
+    vfs->async_delegation_threads     = chimera_vfs_spawn_delegation_pool(
+        vfs, num_async_delegation_threads, CHIMERA_VFS_DELEGATION_ASYNC);
 
     pthread_mutex_init(&vfs->close_thread.lock, NULL);
     pthread_cond_init(&vfs->close_thread.cond, NULL);
@@ -465,10 +519,15 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
      * in-flight delegated close operations finish and their completion
      * doorbell rings execute before the close thread's vfs_thread
      * (and its doorbell) is freed. */
-    for (i = 0; i < vfs->num_delegation_threads; i++) {
-        evpl_thread_destroy(vfs->delegation_threads[i].evpl_thread);
+    for (i = 0; i < vfs->num_sync_delegation_threads; i++) {
+        evpl_thread_destroy(vfs->sync_delegation_threads[i].evpl_thread);
     }
-    free(vfs->delegation_threads);
+    free(vfs->sync_delegation_threads);
+
+    for (i = 0; i < vfs->num_async_delegation_threads; i++) {
+        evpl_thread_destroy(vfs->async_delegation_threads[i].evpl_thread);
+    }
+    free(vfs->async_delegation_threads);
 
     evpl_thread_destroy(vfs->close_thread.evpl_thread);
 

@@ -335,7 +335,9 @@ struct chimera_client_request {
 
 struct chimera_client_config {
     int                           core_threads;
-    int                           delegation_threads;
+    int                           sync_delegation_threads;
+    int                           async_delegation;
+    int                           async_delegation_threads;
     int                           cache_ttl;
     int                           max_fds;
     char                          kv_module[64];

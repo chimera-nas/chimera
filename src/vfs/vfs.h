@@ -957,6 +957,11 @@ struct chimera_vfs_mount {
     uint8_t                        root_fh[CHIMERA_VFS_FH_SIZE + 16];
 };
 
+enum chimera_vfs_delegation_mode {
+    CHIMERA_VFS_DELEGATION_SYNC,
+    CHIMERA_VFS_DELEGATION_ASYNC,
+};
+
 struct chimera_vfs_delegation_thread {
     struct evpl                *evpl;
     struct chimera_vfs         *vfs;
@@ -965,6 +970,8 @@ struct chimera_vfs_delegation_thread {
     struct chimera_vfs_request *requests;
     pthread_mutex_t             lock;
     struct evpl_doorbell        doorbell;
+    enum chimera_vfs_delegation_mode mode;
+    struct evpl_poll           *poll;
 };
 
 struct chimera_vfs_close_thread {
@@ -996,8 +1003,10 @@ struct chimera_vfs {
     struct chimera_vfs_user_cache        *vfs_user_cache;
     struct chimera_vfs_notify            *vfs_notify;
     struct chimera_vfs_mount_table       *mount_table;
-    int                                   num_delegation_threads;
-    struct chimera_vfs_delegation_thread *delegation_threads;
+    int                                   num_sync_delegation_threads;
+    struct chimera_vfs_delegation_thread *sync_delegation_threads;
+    int                                   num_async_delegation_threads;
+    struct chimera_vfs_delegation_thread *async_delegation_threads;
     struct chimera_vfs_close_thread       close_thread;
     struct chimera_vfs_metrics            metrics;
     int                                   machine_name_len;
@@ -1031,7 +1040,8 @@ struct chimera_vfs_module_cfg {
 
 struct chimera_vfs *
 chimera_vfs_init(
-    int                                  num_delegation_threads,
+    int                                  num_sync_delegation_threads,
+    int                                  num_async_delegation_threads,
     const struct chimera_vfs_module_cfg *module_cfgs,
     int                                  num_modules,
     const char                          *kv_module_name,

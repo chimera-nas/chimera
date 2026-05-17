@@ -374,7 +374,8 @@ main(
 
     /* Initialize VFS with memfs as KV module (default) */
     ctx.vfs = chimera_vfs_init(
-        4,              /* num_delegation_threads */
+        4,              /* num_sync_delegation_threads */
+        0,              /* num_async_delegation_threads */
         module_cfgs,
         1,              /* num_modules */
         "",             /* kv_module_name - empty means use default (memfs) */
