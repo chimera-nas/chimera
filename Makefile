@@ -2,23 +2,14 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-# CHIMERA_BUILD_IN_WORKTREE: If 1 (default), worktrees use local ./build
-# and ignore CHIMERA_BUILD_DIR. If 0, CHIMERA_BUILD_DIR is respected.
-CHIMERA_BUILD_IN_WORKTREE ?= 1
-
-# Determine build directory based on source location:
-# - Worktrees in /worktrees use local ./build subdirectory (unless CHIMERA_BUILD_IN_WORKTREE=0)
-# - Main tree (/chimera) uses /build or CHIMERA_BUILD_DIR if set
-ifneq ($(filter /worktrees/%,$(CURDIR)),)
-  # In a worktree
-  ifeq ($(CHIMERA_BUILD_IN_WORKTREE),1)
-    override CHIMERA_BUILD_DIR := build
-  else
-    CHIMERA_BUILD_DIR ?= /build
-  endif
-else
-  # Not in a worktree
+# Default build directory:
+# - /chimera (devcontainer) uses /build
+# - anywhere else uses local ./build
+# Override by setting CHIMERA_BUILD_DIR explicitly.
+ifeq ($(CURDIR),/chimera)
   CHIMERA_BUILD_DIR ?= /build
+else
+  CHIMERA_BUILD_DIR ?= build
 endif
 
 CMAKE_ARGS := -DCMAKE_EXPORT_COMPILE_COMMANDS=1 -G Ninja
