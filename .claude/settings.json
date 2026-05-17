@@ -3,6 +3,9 @@
     "commit": "",
     "pr": ""
   },
+  "enabledPlugins": {
+    "clangd-lsp@claude-plugins-official": true
+  },
   "permissions": {
     "allow": [
       "Bash(ctest:*)",
@@ -15,8 +18,7 @@
       "Bash(reuse:*)",
       "Read(/build/**)",
       "Write(/build/**)",
-      "Edit(/build/**)",
-      "mcp__serena__*"
+      "Edit(/build/**)"
     ]
   }
 }
