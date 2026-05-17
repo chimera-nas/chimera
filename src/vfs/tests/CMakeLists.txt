@@ -10,6 +10,10 @@ add_executable(vfs_kv_test vfs_kv_test.c)
 target_link_libraries(vfs_kv_test chimera_vfs chimera_vfs_memfs evpl)
 add_test(chimera/vfs/kv_test vfs_kv_test)
 
+add_executable(vfs_async_delegation_test vfs_async_delegation_test.c)
+target_link_libraries(vfs_async_delegation_test chimera_vfs chimera_vfs_memfs evpl)
+add_test(chimera/vfs/async_delegation_test vfs_async_delegation_test)
+
 add_executable(vfs_notify_test vfs_notify_test.c)
 target_link_libraries(vfs_notify_test chimera_vfs urcu)
 add_test(chimera/vfs/notify_test vfs_notify_test)

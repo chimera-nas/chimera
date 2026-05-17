@@ -294,10 +294,21 @@ main(
         chimera_server_config_set_max_open_files(server_config, int_value);
     }
 
-    json_value = json_object_get(server_params, "delegation_threads");
+    json_value = json_object_get(server_params, "sync_delegation_threads");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);
-        chimera_server_config_set_delegation_threads(server_config, int_value);
+        chimera_server_config_set_sync_delegation_threads(server_config, int_value);
+    }
+
+    json_value = json_object_get(server_params, "async_delegation");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_async_delegation(server_config, json_is_true(json_value));
+    }
+
+    json_value = json_object_get(server_params, "async_delegation_threads");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_async_delegation_threads(server_config, int_value);
     }
 
     json_value = json_object_get(server_params, "external_portmap");

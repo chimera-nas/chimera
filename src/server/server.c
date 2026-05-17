@@ -41,7 +41,9 @@ struct chimera_server_config {
     int                                   soft_fail_bad_req;
     rlim_t                                max_open_files;
     int                                   core_threads;
-    int                                   delegation_threads;
+    int                                   sync_delegation_threads;
+    int                                   async_delegation;
+    int                                   async_delegation_threads;
     int                                   cache_ttl;
     int                                   num_modules;
     int                                   metrics_port;
@@ -93,12 +95,14 @@ chimera_server_config_init(void)
 
     config = calloc(1, sizeof(struct chimera_server_config));
 
-    config->core_threads       = 8;
-    config->max_open_files     = 65535;
-    config->delegation_threads = 8;
-    config->nfs_rdma           = 0;
-    config->external_portmap   = 0;
-    config->soft_fail_bad_req  = 0;
+    config->core_threads             = 8;
+    config->max_open_files           = 65535;
+    config->sync_delegation_threads  = 8;
+    config->async_delegation         = 0;
+    config->async_delegation_threads = 8;
+    config->nfs_rdma                 = 0;
+    config->external_portmap         = 0;
+    config->soft_fail_bad_req        = 0;
 
     config->smb_num_dialects = 2;
     config->smb_dialects[0]  = SMB2_DIALECT_2_1;
@@ -162,12 +166,28 @@ chimera_server_config_set_core_threads(
 } /* chimera_server_config_set_core_threads */
 
 SYMBOL_EXPORT void
-chimera_server_config_set_delegation_threads(
+chimera_server_config_set_sync_delegation_threads(
     struct chimera_server_config *config,
     int                           threads)
 {
-    config->delegation_threads = threads;
-} /* chimera_server_config_set_delegation_threads */
+    config->sync_delegation_threads = threads;
+} /* chimera_server_config_set_sync_delegation_threads */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_async_delegation(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->async_delegation = enable;
+} /* chimera_server_config_set_async_delegation */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_async_delegation_threads(
+    struct chimera_server_config *config,
+    int                           threads)
+{
+    config->async_delegation_threads = threads;
+} /* chimera_server_config_set_async_delegation_threads */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_max_open_files(
@@ -682,7 +702,8 @@ chimera_server_init(
     pthread_cond_init(&server->all_threads_online, NULL);
 
     chimera_server_info("Initializing VFS...");
-    server->vfs = chimera_vfs_init(config->delegation_threads,
+    server->vfs = chimera_vfs_init(config->sync_delegation_threads,
+                                   config->async_delegation ? config->async_delegation_threads : 0,
                                    config->modules,
                                    config->num_modules,
                                    config->kv_module,
