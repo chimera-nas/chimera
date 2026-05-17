@@ -35,7 +35,7 @@ The work spans three layers:
    watches   (RPL resolve)              │
         │         │                     │
         │         ▼                     │
-        │    delegation_threads[0]      │
+        │ sync_delegation_threads[0]    │
         │    chimera_vfs_getparent      │
         │         │                     │
         └────┬────┘                     │
@@ -85,7 +85,7 @@ The work spans three layers:
   - Walks `walk_fh → parent → grandparent → ...` toward the mount root.
   - At each step, all dereferences of the mount entry (subtree iteration AND the at-root check using `root_fh_len`/`root_fh`) happen inside the `mount_entries_lock` critical section, so the entry can be safely GC'd by `watch_destroy` when its last subtree watch is removed.
   - Skips subtree iteration at `depth==1` because that's the event's parent dir, already covered by the exact-watch dispatch.
-  - Tries RPL cache first (`chimera_vfs_rpl_cache_lookup`); on hit, prepends the component synchronously and continues. On miss, calls async `chimera_vfs_getparent` via `delegation_threads[0]` and returns; the callback resumes the walk.
+  - Tries RPL cache first (`chimera_vfs_rpl_cache_lookup`); on hit, prepends the component synchronously and continues. On miss, calls async `chimera_vfs_getparent` via `sync_delegation_threads[0]` and returns; the callback resumes the walk.
   - Builds the relative path right-to-left in `pev->path_buf[CHIMERA_VFS_PATH_MAX]`.
   - At the mount root or on error/overflow/depth-cap, frees the pev and signals overflow to subtree watches on the mount where appropriate.
 
@@ -204,7 +204,7 @@ Documented in code; load-bearing for safety.
 ## Known limitations (documented in code)
 
 - Spurious `FILE_ADDED` for `OPEN_IF`/`OVERWRITE_IF`/`SUPERSEDE` + pre-existing file — needs `create_action` plumbed through `chimera_vfs_open_at`.
-- Subtree resolver funnels through `delegation_threads[0]` — perf bottleneck under heavy subtree-watch + mutation load.
+- Subtree resolver funnels through `sync_delegation_threads[0]` — perf bottleneck under heavy subtree-watch + mutation load.
 - `chimera_vfs_notify_destroy` blocks indefinitely if a delegation thread wedges (with progress logs); contract documented as "callers must quiesce frontends first."
 - SMB 3.1.1 signing falls through to AES-CMAC-AES-128 instead of the preauth-integrity-derived key derivation (chimera doesn't yet implement 3.1.1 fully).
 - Subtree `CHANGE_NOTIFY` on linux backend currently uses the coarse `!has_rpl` overflow path because the linux module doesn't advertise `CHIMERA_VFS_CAP_RPL`.

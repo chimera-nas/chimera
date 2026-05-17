@@ -486,7 +486,7 @@ chimera_vfs_notify_resolve(struct chimera_vfs_notify_pending_event *pev)
 
         /* Cache miss — issue async getparent.
          * The callback will continue the resolve loop. */
-        chimera_vfs_getparent(notify->vfs->delegation_threads[0].vfs_thread,
+        chimera_vfs_getparent(notify->vfs->sync_delegation_threads[0].vfs_thread,
                               NULL, /* cred — internal operation */
                               pev->walk_fh,
                               pev->walk_fh_len,

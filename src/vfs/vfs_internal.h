@@ -350,6 +350,21 @@ chimera_vfs_complete_delegate(struct chimera_vfs_request *request)
 } /* chimera_vfs_complete_delegate */
 
 static inline void
+chimera_vfs_post_to_delegation(
+    struct chimera_vfs_request           *request,
+    struct chimera_vfs_delegation_thread *delegation_thread)
+{
+    request->complete_delegate = request->complete;
+    request->complete          = chimera_vfs_complete_delegate;
+
+    pthread_mutex_lock(&delegation_thread->lock);
+    DL_APPEND(delegation_thread->requests, request);
+    pthread_mutex_unlock(&delegation_thread->lock);
+
+    evpl_ring_doorbell(&delegation_thread->doorbell);
+} /* chimera_vfs_post_to_delegation */
+
+static inline void
 chimera_vfs_dispatch(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread            *thread = request->thread;
@@ -367,19 +382,13 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
     }
 
     if (module->capabilities & CHIMERA_VFS_CAP_BLOCKING) {
-        thread_id = request->fh_hash % vfs->num_delegation_threads;
-
-        request->complete_delegate = request->complete;
-        request->complete          = chimera_vfs_complete_delegate;
-
-        delegation_thread = &vfs->delegation_threads[thread_id];
-
-        pthread_mutex_lock(&delegation_thread->lock);
-        DL_APPEND(delegation_thread->requests, request);
-        pthread_mutex_unlock(&delegation_thread->lock);
-
-        evpl_ring_doorbell(&delegation_thread->doorbell);
-
+        thread_id         = request->fh_hash % vfs->num_sync_delegation_threads;
+        delegation_thread = &vfs->sync_delegation_threads[thread_id];
+        chimera_vfs_post_to_delegation(request, delegation_thread);
+    } else if (vfs->num_async_delegation_threads > 0) {
+        thread_id         = request->fh_hash % vfs->num_async_delegation_threads;
+        delegation_thread = &vfs->async_delegation_threads[thread_id];
+        chimera_vfs_post_to_delegation(request, delegation_thread);
     } else {
         module->dispatch(request, thread->module_private[module->fh_magic]);
     }

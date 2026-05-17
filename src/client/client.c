@@ -25,10 +25,12 @@ chimera_client_config_init(void)
 
     config = calloc(1, sizeof(struct chimera_client_config));
 
-    config->core_threads       = 16;
-    config->delegation_threads = 64;
-    config->cache_ttl          = 60;
-    config->max_fds            = 1024;
+    config->core_threads             = 16;
+    config->sync_delegation_threads  = 64;
+    config->async_delegation         = 0;
+    config->async_delegation_threads = 8;
+    config->cache_ttl                = 60;
+    config->max_fds                  = 1024;
 
     strncpy(config->modules[0].module_name, "root", sizeof(config->modules[0].module_name));
     config->modules[0].config_data[0] = '\0';
@@ -139,7 +141,8 @@ chimera_client_init(
 
     chimera_client_info("Initializing VFS...");
 
-    client->vfs = chimera_vfs_init(config->delegation_threads,
+    client->vfs = chimera_vfs_init(config->sync_delegation_threads,
+                                   config->async_delegation ? config->async_delegation_threads : 0,
                                    config->modules,
                                    config->num_modules,
                                    config->kv_module,
@@ -204,9 +207,19 @@ chimera_client_init_json(
             config->core_threads = json_integer_value(val);
         }
 
-        val = json_object_get(config_section, "delegation_threads");
+        val = json_object_get(config_section, "sync_delegation_threads");
         if (val && json_is_integer(val)) {
-            config->delegation_threads = json_integer_value(val);
+            config->sync_delegation_threads = json_integer_value(val);
+        }
+
+        val = json_object_get(config_section, "async_delegation");
+        if (val && json_is_boolean(val)) {
+            config->async_delegation = json_is_true(val);
+        }
+
+        val = json_object_get(config_section, "async_delegation_threads");
+        if (val && json_is_integer(val)) {
+            config->async_delegation_threads = json_integer_value(val);
         }
 
         val = json_object_get(config_section, "cache_ttl");

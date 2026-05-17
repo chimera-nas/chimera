@@ -140,7 +140,9 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
 {
     "server": {
         "threads": 16,
-        "delegation_threads": 64,
+        "sync_delegation_threads": 64,
+        "async_delegation": false,
+        "async_delegation_threads": 8,
         "rdma": true,
         "smb_multichannel": [
             {
