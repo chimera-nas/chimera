@@ -428,9 +428,16 @@ main(
     send_sig(p2c[1]); /* tell child lock is released */
 
     chimera_posix_close(fd);
-    chimera_posix_unlink(TEST_FILE);
 
+    /*
+     * Wait for child to finish its post-unlock F_TEST/F_TLOCK/F_ULOCK
+     * sequence before unlinking. Otherwise the unlink races with the
+     * child's NLM LOCK, which opens the file by fh on the server and
+     * fails with NLM4_STALE_FH once the file has been removed.
+     */
     waitpid(child, &status, 0);
+
+    chimera_posix_unlink(TEST_FILE);
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         if (WIFEXITED(status) && WEXITSTATUS(status) == 2) {
