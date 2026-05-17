@@ -220,18 +220,6 @@ setup_worktree_pr() {
     echo "$worktree_path"
 }
 
-setup_serena() {
-    local worktree_path="$1"
-
-    echo "Configuring Serena MCP server for $worktree_path..." >&2
-    (cd "$worktree_path" && claude mcp add \
-        --scope local \
-        serena \
-        -- \
-        uvx --from git+https://github.com/oraios/serena \
-        serena start-mcp-server --project "$worktree_path") >&2
-}
-
 setup_claude_permissions() {
     local worktree_path="$1"
     local claude_dir="$worktree_path/.claude"
@@ -289,9 +277,8 @@ case "$MODE" in
         ;;
 esac
 
-# Configure Claude Code permissions and Serena MCP server for the worktree
+# Configure Claude Code permissions for the worktree
 setup_claude_permissions "$WORKTREE_PATH"
-setup_serena "$WORKTREE_PATH"
 
 # Launch Claude Code in the worktree
 # Note: Claude will show a one-time trust dialog for new worktrees
