@@ -507,12 +507,17 @@ main(
     if (mounts) {
         json_object_foreach(mounts, name, mount)
         {
-            module = json_string_value(json_object_get(mount, "module"));
-            path   = json_string_value(json_object_get(mount, "path"));
+            const char *mount_options;
 
-            chimera_server_info("Mounting %s://%s to /%s...",
-                                module, path, name);
-            chimera_server_mount(server, name, module, path);
+            module        = json_string_value(json_object_get(mount, "module"));
+            path          = json_string_value(json_object_get(mount, "path"));
+            mount_options = json_string_value(json_object_get(mount, "options"));
+
+            chimera_server_info("Mounting %s://%s to /%s%s%s...",
+                                module, path, name,
+                                mount_options ? " options=" : "",
+                                mount_options ? mount_options : "");
+            chimera_server_mount(server, name, module, path, mount_options);
         }
     }
 

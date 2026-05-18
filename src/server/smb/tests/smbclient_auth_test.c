@@ -802,9 +802,9 @@ main(
 
     /* Mount filesystem */
     if (strcmp(backend, "memfs") == 0) {
-        chimera_server_mount(env.server, "share", "memfs", "/");
+        chimera_server_mount(env.server, "share", "memfs", "/", NULL);
     } else if (strcmp(backend, "linux") == 0) {
-        chimera_server_mount(env.server, "share", "linux", env.session_dir);
+        chimera_server_mount(env.server, "share", "linux", env.session_dir, NULL);
     } else {
         fprintf(stderr, "Unknown backend: %s\n", backend);
         test_cleanup(&env, 0);

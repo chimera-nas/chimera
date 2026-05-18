@@ -351,8 +351,8 @@ main(
     /* Mount VFS backends:
      * - "share" for user tests (pre-existing share)
      * - "testvfs" for share tests (shares created dynamically via REST) */
-    chimera_server_mount(server, "share", "memfs", "/");
-    chimera_server_mount(server, "testvfs", "memfs", "/");
+    chimera_server_mount(server, "share", "memfs", "/", NULL);
+    chimera_server_mount(server, "testvfs", "memfs", "/", NULL);
 
     /* Create the "share" SMB share for user tests */
     chimera_server_create_share(server, "share", "share");

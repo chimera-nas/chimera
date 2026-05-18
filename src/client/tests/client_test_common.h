@@ -175,20 +175,20 @@ client_test_init(
         env->server = chimera_server_init(server_config, env->server_metrics);
 
         if (strcmp(backend, "linux") == 0) {
-            chimera_server_mount(env->server, "share", "linux", env->session_dir);
+            chimera_server_mount(env->server, "share", "linux", env->session_dir, NULL);
 
         } else if (strcmp(backend, "io_uring") == 0) {
-            chimera_server_mount(env->server, "share", "io_uring", env->session_dir);
+            chimera_server_mount(env->server, "share", "io_uring", env->session_dir, NULL);
 
         } else if (strcmp(backend, "memfs") == 0) {
-            chimera_server_mount(env->server, "share", "memfs", "/");
+            chimera_server_mount(env->server, "share", "memfs", "/", NULL);
 
         } else if (strcmp(backend, "demofs_io_uring") == 0 ||
                    strcmp(backend, "demofs_aio") == 0) {
-            chimera_server_mount(env->server, "share", "demofs", "/");
+            chimera_server_mount(env->server, "share", "demofs", "/", NULL);
 
         } else if (strcmp(backend, "cairn") == 0) {
-            chimera_server_mount(env->server, "share", "cairn", "/");
+            chimera_server_mount(env->server, "share", "cairn", "/", NULL);
         } else {
             fprintf(stderr, "Unknown backend: %s\n", backend);
             exit(EXIT_FAILURE);
