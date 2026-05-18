@@ -12,4 +12,6 @@ target_compile_definitions(chimera_vfs_memfs PRIVATE
     $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>>:XXH_VECTOR=XXH_AVX2>
 )
 
+target_link_libraries(chimera_vfs_memfs jansson)
+
 install(TARGETS chimera_vfs_memfs DESTINATION lib)
