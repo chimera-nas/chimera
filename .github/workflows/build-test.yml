@@ -37,12 +37,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
           buildkitd-config-inline: |
@@ -50,7 +50,7 @@ jobs:
               mirrors = ["repository.mdh.quantum.com:5001"]
 
       - name: Build and push the dev container image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .devcontainer
           file: .devcontainer/Dockerfile
@@ -81,12 +81,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
           buildkitd-config-inline: |
@@ -94,7 +94,7 @@ jobs:
               mirrors = ["repository.mdh.quantum.com:5001"]
 
       - name: Build and push the ubuntu26 CI image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.ubuntu26.04
@@ -125,12 +125,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
           buildkitd-config-inline: |
@@ -138,7 +138,7 @@ jobs:
               mirrors = ["repository.mdh.quantum.com:5001"]
 
       - name: Build and push the ubuntu24 CI image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.ubuntu24.04
@@ -169,12 +169,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
           buildkitd-config-inline: |
@@ -182,7 +182,7 @@ jobs:
               mirrors = ["repository.mdh.quantum.com:5001"]
 
       - name: Build and push the ubuntu22 CI image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.ubuntu22.04
@@ -213,12 +213,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
           buildkitd-config-inline: |
@@ -226,7 +226,7 @@ jobs:
               mirrors = ["repository.mdh.quantum.com:5001"]
 
       - name: Build and push the rocky9 CI image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.rocky9
@@ -256,12 +256,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
           buildkitd-config-inline: |
@@ -269,7 +269,7 @@ jobs:
               mirrors = ["repository.mdh.quantum.com:5001"]
 
       - name: Build and push the rocky10 CI image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.rocky10
@@ -468,7 +468,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -676,7 +676,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -700,7 +700,7 @@ jobs:
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: scan-report-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}
           path: scan-report/
