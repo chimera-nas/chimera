@@ -113,6 +113,59 @@ base64_encode(
 } /* base64_encode */
 
 /*
+ * Collected x-amz-* header for V2 canonical headers section.
+ * Name is stored lowercased; value points into the request's header storage.
+ */
+struct amz_header_entry {
+    char        name[64];
+    const char *value;
+};
+
+#define V2_MAX_AMZ_HEADERS 64
+
+struct amz_header_collector {
+    struct amz_header_entry entries[V2_MAX_AMZ_HEADERS];
+    int                     count;
+};
+
+static void
+collect_amz_header(
+    const char *name,
+    const char *value,
+    void       *private_data)
+{
+    struct amz_header_collector *c = private_data;
+    struct amz_header_entry     *e;
+    int                          i;
+
+    if (strncasecmp(name, "x-amz-", 6) != 0) {
+        return;
+    }
+    if (c->count >= V2_MAX_AMZ_HEADERS) {
+        return;
+    }
+
+    e = &c->entries[c->count++];
+
+    for (i = 0; name[i] && i < (int) sizeof(e->name) - 1; i++) {
+        e->name[i] = tolower((unsigned char) name[i]);
+    }
+    e->name[i] = '\0';
+    e->value   = value;
+} /* collect_amz_header */
+
+static int
+amz_header_compare(
+    const void *a,
+    const void *b)
+{
+    const struct amz_header_entry *ha = a;
+    const struct amz_header_entry *hb = b;
+
+    return strcmp(ha->name, hb->name);
+} /* amz_header_compare */
+
+/*
  * Parse AWS Signature V2 Authorization header
  * Format: AWS AWSAccessKeyId:Signature
  */
@@ -229,10 +282,30 @@ build_string_to_sign_v2(
                            date ? date : "");
     }
 
-    /* Canonicalized AMZ Headers - include x-amz-date if present */
-    if (amz_date) {
-        offset += snprintf(string_to_sign + offset, max_len - offset,
-                           "x-amz-date:%s\n", amz_date);
+    /*
+     * CanonicalizedAmzHeaders: every x-amz-* request header, lowercased,
+     * sorted lexicographically by name, emitted as "name:value\n".
+     *
+     * Recent boto3 (>= 1.36) adds x-amz-checksum-* and
+     * x-amz-sdk-checksum-algorithm headers on PUT/POST by default and
+     * includes them in the signing string, so we must canonicalize all
+     * x-amz-* headers rather than only the ones we recognize.
+     */
+    {
+        struct amz_header_collector amz = { .count = 0 };
+
+        evpl_http_request_header_iterate(request, collect_amz_header, &amz);
+
+        if (amz.count > 1) {
+            qsort(amz.entries, amz.count, sizeof(amz.entries[0]),
+                  amz_header_compare);
+        }
+
+        for (int i = 0; i < amz.count; i++) {
+            offset += snprintf(string_to_sign + offset, max_len - offset,
+                               "%s:%s\n",
+                               amz.entries[i].name, amz.entries[i].value);
+        }
     }
 
     /* Canonicalized Resource */
