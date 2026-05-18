@@ -363,72 +363,122 @@ def test_list(client, bucket):
     print("LIST tests passed!")
 
 
-def test_multipart(client, bucket):
-    """Test multipart upload operations.
+def _multipart_upload_and_verify(client, bucket, key, part_sizes):
+    """Helper: run a full multipart upload and verify the assembled bytes
+    match the concatenation of the part bodies. Exercises whichever
+    backend assembly path (move/copy/read+write) is active."""
+    init = client.create_multipart_upload(Bucket=bucket, Key=key)
+    upload_id = init['UploadId']
+    assert upload_id, "no UploadId returned"
 
-    Phase 1: CompleteMultipartUpload discards the accumulated parts and
-    materializes the final object as 0 bytes. This test asserts that
-    behavior; it should flip when phase 2 adds real part assembly.
+    parts = []
+    expected = b''
+    for part_number, size in enumerate(part_sizes, start=1):
+        # Each part filled with a distinct byte so a misordered or
+        # truncated assembly is immediately visible.
+        body = bytes([part_number]) * size
+        expected += body
+        resp = client.upload_part(
+            Bucket=bucket, Key=key,
+            PartNumber=part_number, UploadId=upload_id,
+            Body=body,
+        )
+        parts.append({'PartNumber': part_number, 'ETag': resp['ETag']})
+
+    client.complete_multipart_upload(
+        Bucket=bucket, Key=key, UploadId=upload_id,
+        MultipartUpload={'Parts': parts},
+    )
+
+    head = client.head_object(Bucket=bucket, Key=key)
+    assert head['ContentLength'] == len(expected), \
+        f"size mismatch: expected {len(expected)}, got {head['ContentLength']}"
+
+    resp = client.get_object(Bucket=bucket, Key=key)
+    actual = resp['Body'].read()
+    assert actual == expected, \
+        f"content mismatch: {len(actual)} bytes, first diff at offset " \
+        f"{next((i for i, (a, b) in enumerate(zip(actual, expected)) if a != b), -1)}"
+
+    return upload_id
+
+
+def test_multipart(client, bucket):
+    """Test multipart upload operations end-to-end.
+
+    Verifies the full upload lifecycle (Create / UploadPart / ListParts /
+    ListMultipartUploads / Complete / Abort) and that the assembled object
+    matches the concatenation of part bodies. The same test exercises
+    different VFS assembly paths depending on backend capabilities:
+    move_range (memfs), copy_range (linux/io_uring), or read+write
+    (cairn/demofs).
     """
     print("Testing multipart upload operations...")
 
     key = 'mpdir/myobject'
-    part_size = 5 * 1024 * 1024  # 5MB minimum required by boto3
+    part_size = 5 * 1024 * 1024  # 5MiB: boto3's per-part minimum
     part_count = 3
 
-    # Initiate
+    # Initiate, upload, list, complete — also verifies final bytes match
     init = client.create_multipart_upload(Bucket=bucket, Key=key)
     upload_id = init['UploadId']
     assert upload_id, "no UploadId returned"
     print(f"  CreateMultipartUpload -> {upload_id}")
 
-    # Upload parts
     parts = []
+    expected = b''
     for part_number in range(1, part_count + 1):
         body = bytes([part_number]) * part_size
+        expected += body
         resp = client.upload_part(
-            Bucket=bucket,
-            Key=key,
-            PartNumber=part_number,
-            UploadId=upload_id,
+            Bucket=bucket, Key=key,
+            PartNumber=part_number, UploadId=upload_id,
             Body=body,
         )
         parts.append({'PartNumber': part_number, 'ETag': resp['ETag']})
         print(f"  UploadPart #{part_number} ({part_size} bytes) -> {resp['ETag']}")
 
-    # ListParts
     listed = client.list_parts(Bucket=bucket, Key=key, UploadId=upload_id)
-    assert len(listed.get('Parts', [])) == part_count, \
-        f"expected {part_count} parts, got {len(listed.get('Parts', []))}"
+    assert len(listed.get('Parts', [])) == part_count
     print(f"  ListParts -> {part_count} parts visible")
 
-    # ListMultipartUploads
     uploads = client.list_multipart_uploads(Bucket=bucket)
     upload_ids = [u['UploadId'] for u in uploads.get('Uploads', [])]
-    assert upload_id in upload_ids, \
-        f"upload {upload_id} not visible in ListMultipartUploads: {upload_ids}"
+    assert upload_id in upload_ids
     print(f"  ListMultipartUploads -> {len(upload_ids)} in-progress upload(s)")
 
-    # Complete
     complete = client.complete_multipart_upload(
         Bucket=bucket, Key=key, UploadId=upload_id,
         MultipartUpload={'Parts': parts},
     )
     print(f"  CompleteMultipartUpload -> {complete.get('ETag', '')}")
 
-    # Phase 1 behavior: final object is 0 bytes
     head = client.head_object(Bucket=bucket, Key=key)
-    assert head['ContentLength'] == 0, \
-        f"phase 1 expects 0-byte final object, got {head['ContentLength']}"
-    print(f"  HEAD final object -> {head['ContentLength']} bytes (phase 1 expected)")
+    assert head['ContentLength'] == len(expected), \
+        f"size mismatch: expected {len(expected)}, got {head['ContentLength']}"
+    print(f"  HEAD final object -> {head['ContentLength']} bytes")
 
-    # After Complete, the upload should no longer appear in the list
+    resp = client.get_object(Bucket=bucket, Key=key)
+    actual = resp['Body'].read()
+    assert actual == expected, "assembled content does not match parts"
+    print(f"  GET final object -> {len(actual)} bytes, content matches")
+
+    # After Complete the upload disappears from ListMultipartUploads
     uploads = client.list_multipart_uploads(Bucket=bucket)
     upload_ids = [u['UploadId'] for u in uploads.get('Uploads', [])]
-    assert upload_id not in upload_ids, \
-        f"completed upload {upload_id} should be gone, still in: {upload_ids}"
+    assert upload_id not in upload_ids
 
-    # Now test Abort
+    # Multi-part roundtrip with varied sizes (block-aligned to keep
+    # memfs move_range happy; backends without alignment requirements
+    # are not picky).
+    _multipart_upload_and_verify(
+        client, bucket, 'mpdir/varied',
+        part_sizes=[5 * 1024 * 1024, 6 * 1024 * 1024, 5 * 1024 * 1024],
+    )
+    print("  Varied-size multipart roundtrip -> content matches")
+
+    # Abort path: starts an upload, uploads a part, aborts, then verifies
+    # nothing was materialized
     init = client.create_multipart_upload(Bucket=bucket, Key='mpdir/aborted')
     abort_id = init['UploadId']
     client.upload_part(
@@ -440,7 +490,6 @@ def test_multipart(client, bucket):
         Bucket=bucket, Key='mpdir/aborted', UploadId=abort_id,
     )
     print(f"  AbortMultipartUpload -> ok")
-
     try:
         client.head_object(Bucket=bucket, Key='mpdir/aborted')
         raise AssertionError("aborted upload should not have created an object")
