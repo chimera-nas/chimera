@@ -32,6 +32,10 @@ chimera_s3_status_to_string(enum chimera_s3_status status)
             return "Signature Does Not Match";
         case CHIMERA_S3_STATUS_MISSING_AUTH_HEADER:
             return "Missing Security Header";
+        case CHIMERA_S3_STATUS_NO_SUCH_UPLOAD:
+            return "No Such Upload";
+        case CHIMERA_S3_STATUS_INVALID_PART:
+            return "Invalid Part";
         default:
             return "Internal Error";
     } /* switch */
@@ -80,6 +84,16 @@ chimera_s3_prepare_error_response(
         case CHIMERA_S3_STATUS_MISSING_AUTH_HEADER:
             bp  += sprintf(bp, "  <Code>MissingSecurityHeader</Code>\n");
             bp  += sprintf(bp, "  <Message>Your request is missing a required header.</Message>\n");
+            code = 400;
+            break;
+        case CHIMERA_S3_STATUS_NO_SUCH_UPLOAD:
+            bp  += sprintf(bp, "  <Code>NoSuchUpload</Code>\n");
+            bp  += sprintf(bp, "  <Message>The specified upload does not exist.</Message>\n");
+            code = 404;
+            break;
+        case CHIMERA_S3_STATUS_INVALID_PART:
+            bp  += sprintf(bp, "  <Code>InvalidPart</Code>\n");
+            bp  += sprintf(bp, "  <Message>One or more of the specified parts could not be found.</Message>\n");
             code = 400;
             break;
         default:

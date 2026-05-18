@@ -363,12 +363,113 @@ def test_list(client, bucket):
     print("LIST tests passed!")
 
 
+def test_multipart(client, bucket):
+    """Test multipart upload operations.
+
+    Phase 1: CompleteMultipartUpload discards the accumulated parts and
+    materializes the final object as 0 bytes. This test asserts that
+    behavior; it should flip when phase 2 adds real part assembly.
+    """
+    print("Testing multipart upload operations...")
+
+    key = 'mpdir/myobject'
+    part_size = 5 * 1024 * 1024  # 5MB minimum required by boto3
+    part_count = 3
+
+    # Initiate
+    init = client.create_multipart_upload(Bucket=bucket, Key=key)
+    upload_id = init['UploadId']
+    assert upload_id, "no UploadId returned"
+    print(f"  CreateMultipartUpload -> {upload_id}")
+
+    # Upload parts
+    parts = []
+    for part_number in range(1, part_count + 1):
+        body = bytes([part_number]) * part_size
+        resp = client.upload_part(
+            Bucket=bucket,
+            Key=key,
+            PartNumber=part_number,
+            UploadId=upload_id,
+            Body=body,
+        )
+        parts.append({'PartNumber': part_number, 'ETag': resp['ETag']})
+        print(f"  UploadPart #{part_number} ({part_size} bytes) -> {resp['ETag']}")
+
+    # ListParts
+    listed = client.list_parts(Bucket=bucket, Key=key, UploadId=upload_id)
+    assert len(listed.get('Parts', [])) == part_count, \
+        f"expected {part_count} parts, got {len(listed.get('Parts', []))}"
+    print(f"  ListParts -> {part_count} parts visible")
+
+    # ListMultipartUploads
+    uploads = client.list_multipart_uploads(Bucket=bucket)
+    upload_ids = [u['UploadId'] for u in uploads.get('Uploads', [])]
+    assert upload_id in upload_ids, \
+        f"upload {upload_id} not visible in ListMultipartUploads: {upload_ids}"
+    print(f"  ListMultipartUploads -> {len(upload_ids)} in-progress upload(s)")
+
+    # Complete
+    complete = client.complete_multipart_upload(
+        Bucket=bucket, Key=key, UploadId=upload_id,
+        MultipartUpload={'Parts': parts},
+    )
+    print(f"  CompleteMultipartUpload -> {complete.get('ETag', '')}")
+
+    # Phase 1 behavior: final object is 0 bytes
+    head = client.head_object(Bucket=bucket, Key=key)
+    assert head['ContentLength'] == 0, \
+        f"phase 1 expects 0-byte final object, got {head['ContentLength']}"
+    print(f"  HEAD final object -> {head['ContentLength']} bytes (phase 1 expected)")
+
+    # After Complete, the upload should no longer appear in the list
+    uploads = client.list_multipart_uploads(Bucket=bucket)
+    upload_ids = [u['UploadId'] for u in uploads.get('Uploads', [])]
+    assert upload_id not in upload_ids, \
+        f"completed upload {upload_id} should be gone, still in: {upload_ids}"
+
+    # Now test Abort
+    init = client.create_multipart_upload(Bucket=bucket, Key='mpdir/aborted')
+    abort_id = init['UploadId']
+    client.upload_part(
+        Bucket=bucket, Key='mpdir/aborted',
+        PartNumber=1, UploadId=abort_id,
+        Body=b'x' * part_size,
+    )
+    client.abort_multipart_upload(
+        Bucket=bucket, Key='mpdir/aborted', UploadId=abort_id,
+    )
+    print(f"  AbortMultipartUpload -> ok")
+
+    try:
+        client.head_object(Bucket=bucket, Key='mpdir/aborted')
+        raise AssertionError("aborted upload should not have created an object")
+    except ClientError as e:
+        if e.response['Error']['Code'] != '404':
+            raise
+
+    # NoSuchUpload error path
+    try:
+        client.list_parts(
+            Bucket=bucket, Key=key,
+            UploadId='0' * 32,
+        )
+        raise AssertionError("ListParts on bogus upload should fail")
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'NoSuchUpload':
+            raise
+    print("  ListParts on nonexistent upload -> NoSuchUpload (ok)")
+
+    print("multipart tests passed!")
+
+
 TESTS = {
     'put': test_put,
     'get': test_get,
     'head': test_head,
     'delete': test_delete,
     'list': test_list,
+    'multipart': test_multipart,
 }
 
 

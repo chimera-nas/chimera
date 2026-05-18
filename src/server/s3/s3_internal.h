@@ -30,9 +30,13 @@ enum chimera_s3_http_state {
     CHIMERA_S3_HTTP_STATE_COMPLETE,
 };
 
-#define CHIMERA_S3_IOV_MAX 256
+#define CHIMERA_S3_IOV_MAX       256
+
+#define CHIMERA_S3_UPLOAD_ID_LEN 32
 
 struct chimera_server_s3_thread;
+struct chimera_s3_multipart_table;
+struct chimera_s3_multipart_upload;
 
 struct chimera_s3_config {
     int      port;
@@ -57,6 +61,12 @@ struct chimera_s3_request {
     int                              name_len;
     int                              path_len;
     int                              is_list;
+    int                              has_uploads;
+    int                              has_upload_id;
+    int                              has_part_number;
+    int                              query_upload_idlen;
+    int                              query_part_number;
+    char                             query_upload_id[CHIMERA_S3_UPLOAD_ID_LEN + 1];
     int64_t                          file_offset;
     int64_t                          file_cur_offset;
     int64_t                          file_length;
@@ -96,6 +106,18 @@ struct chimera_s3_request {
             char              base_path[256];
             char              filter[256];
         } list;
+
+        struct {
+            int                                 tmp_name_len;
+            int                                 part_number;
+            int                                 upload_idlen;
+            struct chimera_s3_multipart_upload *upload;
+            char                               *rp;
+            struct evpl_iovec                   response;
+            char                                upload_id[CHIMERA_S3_UPLOAD_ID_LEN + 1];
+            char                                tmp_name[64];
+            char                                path_buf[1024];
+        } multipart;
     };
 };
 
@@ -110,15 +132,16 @@ struct chimera_server_s3_thread {
 };
 
 struct chimera_server_s3_shared {
-    struct chimera_s3_config     *config;
-    struct s3_bucket_map         *bucket_map;
-    struct chimera_s3_cred_cache *cred_cache;
-    struct evpl_endpoint         *endpoint;
-    struct evpl_listener         *listener;
-    enum evpl_protocol_id         tcp_protocol;
-    struct chimera_vfs_cred       cred;
-    uint32_t                      root_fh_len;
-    uint8_t                       root_fh[CHIMERA_VFS_FH_SIZE];
+    struct chimera_s3_config          *config;
+    struct s3_bucket_map              *bucket_map;
+    struct chimera_s3_cred_cache      *cred_cache;
+    struct chimera_s3_multipart_table *multipart_table;
+    struct evpl_endpoint              *endpoint;
+    struct evpl_listener              *listener;
+    enum evpl_protocol_id              tcp_protocol;
+    struct chimera_vfs_cred            cred;
+    uint32_t                           root_fh_len;
+    uint8_t                            root_fh[CHIMERA_VFS_FH_SIZE];
 };
 
 static inline struct chimera_s3_io *
