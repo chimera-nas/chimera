@@ -33,5 +33,6 @@ jobs:
         reuse lint
 
     - name: Check copyright years
+      if: github.event_name == 'pull_request'
       run: |
         bash etc/copyright-year.sh --check --base origin/${{ github.base_ref }}
