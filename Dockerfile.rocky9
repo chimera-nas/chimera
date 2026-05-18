@@ -43,7 +43,3 @@ RUN if [ "$ENABLE_XLIO" = "1" ] ; then \
     make install ; \
     fi
 
-RUN dnf -y install qemu-kvm qemu-img && \
-    dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo && \
-    dnf -y install docker-ce docker-ce-cli containerd.io && \
-    dnf clean all
