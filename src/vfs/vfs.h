@@ -72,7 +72,10 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_SEEK             26
 #define CHIMERA_VFS_OP_LOCK             27
 #define CHIMERA_VFS_OP_GETPARENT        28
-#define CHIMERA_VFS_OP_NUM              29
+#define CHIMERA_VFS_OP_COPY_RANGE       29
+#define CHIMERA_VFS_OP_CLONE_RANGE      30
+#define CHIMERA_VFS_OP_MOVE_RANGE       31
+#define CHIMERA_VFS_OP_NUM              32
 
 #define CHIMERA_VFS_OPEN_CREATE         (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH           (1U << 1)
@@ -725,6 +728,38 @@ struct chimera_vfs_request {
         } allocate;
 
         struct {
+            struct chimera_vfs_open_handle *src_handle;
+            struct chimera_vfs_open_handle *dst_handle;
+            uint64_t                        src_offset;
+            uint64_t                        dst_offset;
+            uint64_t                        length;
+            uint64_t                        r_length;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
+        } copy_range;
+
+        struct {
+            struct chimera_vfs_open_handle *src_handle;
+            struct chimera_vfs_open_handle *dst_handle;
+            uint64_t                        src_offset;
+            uint64_t                        dst_offset;
+            uint64_t                        length;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
+        } clone_range;
+
+        struct {
+            struct chimera_vfs_open_handle *src_handle;
+            struct chimera_vfs_open_handle *dst_handle;
+            uint64_t                        src_offset;
+            uint64_t                        dst_offset;
+            uint64_t                        length;
+            struct chimera_vfs_attrs        r_src_post_attr;
+            struct chimera_vfs_attrs        r_dst_pre_attr;
+            struct chimera_vfs_attrs        r_dst_post_attr;
+        } move_range;
+
+        struct {
             struct chimera_vfs_open_handle *handle;
             uint64_t                        offset;
             uint32_t                        what;
@@ -848,6 +883,23 @@ enum CHIMERA_FS_FH_MAGIC {
  * resolve (parent_fh, name_in_parent).  Enables precise subtree
  * change notifications via CHIMERA_VFS_OP_GETPARENT. */
 #define CHIMERA_VFS_CAP_RPL                (1U << 9)
+
+/* If set, module supports server-side byte-range copy between two
+ * open handles served by the same module (chimera_vfs_copy_range). */
+#define CHIMERA_VFS_CAP_COPY_RANGE         (1U << 10)
+
+/* If set, module supports reflink/COW share of a byte range between
+ * two open handles served by the same module (chimera_vfs_clone_range).
+ * Modules backed by filesystems without reflink support should leave
+ * this unset; the VFS layer will surface ENOTSUP. */
+#define CHIMERA_VFS_CAP_CLONE_RANGE        (1U << 11)
+
+/* If set, module supports zero-copy move of a byte range between two
+ * open handles served by the same module (chimera_vfs_move_range): block
+ * references are transferred from source to destination and the source
+ * range becomes a hole. Not exposed over NFS; intended for server-internal
+ * use (e.g. S3 multipart-upload completion). */
+#define CHIMERA_VFS_CAP_MOVE_RANGE         (1U << 12)
 
 struct chimera_vfs_module {
     /* Required

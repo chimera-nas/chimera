@@ -17,6 +17,8 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
 #include <liburing.h>
 #include <uthash.h>
 #include <utlist.h>
@@ -1343,6 +1345,103 @@ chimera_io_uring_allocate(
 } /* chimera_io_uring_allocate */
 
 static void
+chimera_io_uring_copy_range(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             src_fd, dst_fd;
+    loff_t                          src_off, dst_off;
+    uint64_t                        remaining;
+    uint64_t                        copied = 0;
+    ssize_t                         rc;
+
+    --thread->inflight;
+
+    if (request->copy_range.src_handle->vfs_module !=
+        request->copy_range.dst_handle->vfs_module) {
+        request->status = CHIMERA_VFS_ENOTSUP;
+        request->complete(request);
+        return;
+    }
+
+    src_fd    = (int) request->copy_range.src_handle->vfs_private;
+    dst_fd    = (int) request->copy_range.dst_handle->vfs_private;
+    src_off   = (loff_t) request->copy_range.src_offset;
+    dst_off   = (loff_t) request->copy_range.dst_offset;
+    remaining = request->copy_range.length;
+
+    while (remaining > 0) {
+        rc = copy_file_range(src_fd, &src_off, dst_fd, &dst_off, remaining, 0);
+
+        if (rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            request->status = chimera_linux_errno_to_status(errno);
+            request->complete(request);
+            return;
+        }
+
+        if (rc == 0) {
+            break;
+        }
+
+        copied    += (uint64_t) rc;
+        remaining -= (uint64_t) rc;
+    }
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->copy_range.r_post_attr, dst_fd);
+
+    request->copy_range.r_length = copied;
+    request->status              = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_io_uring_copy_range */
+
+static void
+chimera_io_uring_clone_range(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             src_fd, dst_fd;
+    struct file_clone_range         args;
+    int                             rc;
+
+    --thread->inflight;
+
+    if (request->clone_range.src_handle->vfs_module !=
+        request->clone_range.dst_handle->vfs_module) {
+        request->status = CHIMERA_VFS_ENOTSUP;
+        request->complete(request);
+        return;
+    }
+
+    src_fd = (int) request->clone_range.src_handle->vfs_private;
+    dst_fd = (int) request->clone_range.dst_handle->vfs_private;
+
+    args.src_fd      = src_fd;
+    args.src_offset  = request->clone_range.src_offset;
+    args.src_length  = request->clone_range.length;
+    args.dest_offset = request->clone_range.dst_offset;
+
+    rc = ioctl(dst_fd, FICLONERANGE, &args);
+
+    if (rc < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->clone_range.r_post_attr, dst_fd);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_io_uring_clone_range */
+
+static void
 chimera_io_uring_seek(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -1761,6 +1860,12 @@ chimera_io_uring_dispatch(
         case CHIMERA_VFS_OP_ALLOCATE:
             chimera_io_uring_allocate(request, private_data);
             break;
+        case CHIMERA_VFS_OP_COPY_RANGE:
+            chimera_io_uring_copy_range(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_CLONE_RANGE:
+            chimera_io_uring_clone_range(request, private_data);
+            break;
         case CHIMERA_VFS_OP_SEEK:
             chimera_io_uring_seek(request, private_data);
             break;
@@ -1781,7 +1886,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_io_uring = {
     .name         = "io_uring",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_IO_URING,
     .capabilities = CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED | CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS |
-        CHIMERA_VFS_CAP_FS_PATH_OP | CHIMERA_VFS_CAP_FS_LOCK,
+        CHIMERA_VFS_CAP_FS_PATH_OP | CHIMERA_VFS_CAP_FS_LOCK |
+        CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE,
     .init           = chimera_io_uring_init,
     .destroy        = chimera_io_uring_destroy,
     .thread_init    = chimera_io_uring_thread_init,

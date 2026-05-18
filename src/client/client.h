@@ -202,6 +202,46 @@ chimera_close(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *oh);
 
+typedef void (*chimera_copy_range_callback_t)(
+    struct chimera_client_thread *thread,
+    enum chimera_vfs_error        status,
+    uint64_t                      bytes_copied,
+    void                         *private_data);
+
+/* Server-side byte-range copy. Both handles must be served by a backend
+ * that advertises CHIMERA_VFS_CAP_COPY_RANGE (and currently must be the
+ * same backend).
+ */
+void
+chimera_copy_range(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *src_handle,
+    uint64_t                        src_offset,
+    struct chimera_vfs_open_handle *dst_handle,
+    uint64_t                        dst_offset,
+    uint64_t                        length,
+    chimera_copy_range_callback_t   callback,
+    void                           *private_data);
+
+typedef void (*chimera_clone_range_callback_t)(
+    struct chimera_client_thread *thread,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+/* Reflink-style share of a byte range. Requires CHIMERA_VFS_CAP_CLONE_RANGE
+ * on the destination backend; will surface ENOTSUP otherwise.
+ */
+void
+chimera_clone_range(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *src_handle,
+    uint64_t                        src_offset,
+    struct chimera_vfs_open_handle *dst_handle,
+    uint64_t                        dst_offset,
+    uint64_t                        length,
+    chimera_clone_range_callback_t  callback,
+    void                           *private_data);
+
 typedef void (*chimera_symlink_callback_t)(
     struct chimera_client_thread *client,
     enum chimera_vfs_error        status,

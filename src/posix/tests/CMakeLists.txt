@@ -68,6 +68,7 @@ set(POSIX_TEST_PROGRAMS
     test_fdatasync
     test_dup
     test_fdopen
+    test_copy_range
 )
 
 # Create test programs
