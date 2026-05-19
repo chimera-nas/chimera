@@ -38,7 +38,7 @@ chimera_nfs4_setattr_complete(
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
 
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_setattr_complete */
 
 static void
@@ -94,10 +94,29 @@ chimera_nfs4_setattr(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct SETATTR4res *res = &resop->opsetattr;
+    struct SETATTR4args *args = &argop->opsetattr;
+    struct SETATTR4res  *res  = &resop->opsetattr;
+
+    /* The XDR marshaller emits num_attrsset and the attrsset array
+     * unconditionally; resarray slots come from a bump allocator that does
+     * not zero memory, so any early-error return must initialize these or
+     * the marshaller dereferences garbage. */
+    res->num_attrsset = 0;
+    res->attrsset     = NULL;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    /* Reject requests for unsupported / non-writable attributes before
+     * touching the VFS. Same validation as CREATE: returns ATTRNOTSUPP for
+     * unknown attrs and INVAL for read-only attrs. */
+    res->status = chimera_nfs4_validate_createattrs(
+        args->obj_attributes.num_attrmask,
+        args->obj_attributes.attrmask);
+    if (res->status != NFS4_OK) {
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }

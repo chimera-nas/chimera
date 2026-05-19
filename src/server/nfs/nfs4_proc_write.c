@@ -59,7 +59,7 @@ chimera_nfs4_write_complete(
         req->handle = NULL;
     }
 
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_write_complete */
 
 static void
@@ -150,7 +150,7 @@ chimera_nfs4_write(
     if (!session) {
         res->status = NFS4ERR_BAD_STATEID;
         evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
-        chimera_nfs4_compound_complete(req, NFS4_OK);
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
@@ -160,7 +160,7 @@ chimera_nfs4_write(
                                    &state, &state_handle) != NFS4_OK) {
         res->status = NFS4ERR_BAD_STATEID;
         evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
-        chimera_nfs4_compound_complete(req, NFS4_OK);
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 

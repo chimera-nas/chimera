@@ -107,6 +107,13 @@ chimera_nfs4_getattr(
         return;
     }
 
+    res->status = chimera_nfs4_validate_getattr_request(args->num_attr_request,
+                                                        args->attr_request);
+    if (res->status != NFS4_OK) {
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     if (fh_is_nfs4_root(req->fh, req->fhlen)) {
         struct chimera_vfs_attrs attr;
         uint64_t                 attr_mask;

@@ -26,7 +26,7 @@ chimera_nfs4_close(
 
     if (!session) {
         res->status = NFS4ERR_BAD_STATEID;
-        chimera_nfs4_compound_complete(req, NFS4_OK);
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
@@ -34,7 +34,7 @@ chimera_nfs4_close(
 
     if (*(uint32_t *) args->open_stateid.other >= NFS4_SESSION_MAX_STATE) {
         res->status = NFS4ERR_BAD_STATEID;
-        chimera_nfs4_compound_complete(req, NFS4_OK);
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
@@ -42,7 +42,7 @@ chimera_nfs4_close(
 
     if (state->nfs4_state_type != NFS4_STATE_TYPE_OPEN) {
         res->status = NFS4ERR_BAD_STATEID;
-        chimera_nfs4_compound_complete(req, NFS4_OK);
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
@@ -61,5 +61,5 @@ chimera_nfs4_close(
         res->status = NFS4_OK;
     }
 
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_close */
