@@ -663,6 +663,8 @@ main(
 
     if (who == CHILD) {
         childwait();
+        posix_test_umount();
+        chimera_posix_shutdown();
     } else {
         signal(SIGCHLD, SIG_DFL);
         childfree(0);
