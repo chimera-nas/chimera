@@ -110,6 +110,27 @@ chimera_nfs4_nverify(
     struct nfs_resop4                *resop);
 
 void
+chimera_nfs4_putpubfh(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_renew(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_release_lockowner(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
 chimera_nfs4_putfh(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
