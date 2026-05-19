@@ -25,6 +25,7 @@
 /* Security descriptor control flags */
 #define SE_SELF_RELATIVE           0x8000
 #define SE_DACL_PRESENT            0x0004
+#define SE_DACL_AUTO_INHERITED     0x0400
 
 /* Size of a SID with 3 sub-authorities: S-1-5-88-X-Y */
 #define SID_UNIX_SIZE              20 /* 1+1+6+3*4 */
@@ -279,7 +280,7 @@ chimera_smb_query_security_reply(
     memset(sd, 0, sizeof(sd));
 
     if (has_dacl) {
-        control |= SE_DACL_PRESENT;
+        control |= SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED;
     }
 
     /* Build security descriptor: header, then DACL, owner, group */
