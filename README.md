@@ -107,7 +107,9 @@ A minimal example that exports a single in-memory filesystem over NFS at
 {
     "server": {
         "threads": 32,
-        "delegation_threads": 32,
+        "sync_delegation_threads": 32,
+        "async_delegation": false,
+        "async_delegation_threads": 8,
         "preallocate_slabs": 8,
         "preallocate_threads": 4,
         "max_open_files": 262144,
