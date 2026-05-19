@@ -1065,6 +1065,48 @@ chimera_s3_parse_complete_body(
 } /* chimera_s3_parse_complete_body */
 
 /*
+ * Compare two ETag strings ignoring optional surrounding double-quotes
+ * and ASCII case. The HTTP ETag header carries the value enclosed in
+ * quotes per RFC; some clients echo it back verbatim in the
+ * CompleteMultipartUpload body, others (e.g., some botocore releases)
+ * strip the quotes. Both forms must validate.
+ */
+static int
+chimera_s3_etag_equal(
+    const char *a,
+    const char *b)
+{
+    int alen = strlen(a);
+    int blen = strlen(b);
+
+    if (alen >= 2 && a[0] == '"' && a[alen - 1] == '"') {
+        a++;
+        alen -= 2;
+    }
+    if (blen >= 2 && b[0] == '"' && b[blen - 1] == '"') {
+        b++;
+        blen -= 2;
+    }
+    if (alen != blen) {
+        return 0;
+    }
+    for (int i = 0; i < alen; i++) {
+        char ca = a[i];
+        char cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') {
+            ca = (char) (ca + ('a' - 'A'));
+        }
+        if (cb >= 'A' && cb <= 'Z') {
+            cb = (char) (cb + ('a' - 'A'));
+        }
+        if (ca != cb) {
+            return 0;
+        }
+    }
+    return 1;
+} /* chimera_s3_etag_equal */
+
+/*
  * Validate the client manifest against the upload's part list.
  *
  * Populates *r_server_parts with pointers (in client order) to the matched
@@ -1111,9 +1153,11 @@ chimera_s3_validate_complete_manifest(
             return CHIMERA_S3_STATUS_INVALID_PART;
         }
 
-        /* ETag must match what the server returned for this part. */
+        /* ETag must match what the server returned for this part. Tolerate
+         * the optional surrounding quotes and ASCII case (some clients
+         * strip the quotes from the header before echoing it back). */
         chimera_s3_mp_format_etag(server_etag, sizeof(server_etag), sp->etag);
-        if (strcmp(server_etag, client_parts[i].etag) != 0) {
+        if (!chimera_s3_etag_equal(server_etag, client_parts[i].etag)) {
             free(out);
             return CHIMERA_S3_STATUS_INVALID_PART;
         }
