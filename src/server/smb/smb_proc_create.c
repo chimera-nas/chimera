@@ -693,6 +693,15 @@ chimera_smb_create(struct chimera_smb_request *request)
     enum chimera_smb_pipe_magic   pipe_magic;
     chimera_smb_pipe_transceive_t transceive;
 
+    /* Reject stream-name syntax (file:stream[:$DATA]) — streams unsupported.
+     * Done here rather than in parse so the OBJECT_NAME_INVALID response is
+     * returned to the client instead of triggering a parse-error disconnect. */
+    if (request->create.name_len > 0 &&
+        memchr(request->create.name, ':', request->create.name_len)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_INVALID);
+        return;
+    }
+
     if (request->tree->type == CHIMERA_SMB_TREE_TYPE_PIPE) {
 
         if (strcasecmp(request->create.name, "lsarpc") == 0) {
