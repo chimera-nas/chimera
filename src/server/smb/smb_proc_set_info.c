@@ -236,6 +236,11 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     chimera_smb_open_file_release(request, request->set_info.open_file);
                     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
                     break;
+                case SMB2_FILE_POSITION_INFO:
+                    request->set_info.open_file->position = request->set_info.attrs.smb_position;
+                    chimera_smb_open_file_release(request, request->set_info.open_file);
+                    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+                    break;
                 default:
                     chimera_smb_error("SET_INFO info_class %u not implemented", request->set_info.info_class);
                     chimera_smb_open_file_release(request, request->set_info.open_file);
@@ -313,6 +318,9 @@ chimera_smb_parse_set_info(
                     break;
                 case SMB2_FILE_FULL_EA_INFO:
                     /* EAs not supported, accept and ignore */
+                    break;
+                case SMB2_FILE_POSITION_INFO:
+                    chimera_smb_parse_position_info(request_cursor, &request->set_info.attrs);
                     break;
 
                 default:

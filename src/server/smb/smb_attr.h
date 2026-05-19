@@ -27,6 +27,7 @@
 #define SMB_ATTR_ACCESS_FLAGS       (1ULL << 11)
 #define SMB_ATTR_REPARSE_TAG        (1ULL << 12)
 #define SMB_ATTR_DISPOSITION        (1ULL << 13)
+#define SMB_ATTR_POSITION           (1ULL << 14)
 
 /* Masks for each information class */
 #define SMB_ATTR_MASK_BASIC         ( \
@@ -76,6 +77,9 @@ struct chimera_smb_attrs {
     uint32_t smb_compression_unit_size; /* Compression unit size */
 
     uint8_t  smb_disposition; /* Disposition */
+
+    /* FilePositionInformation fields */
+    uint64_t smb_position;     /* Current byte offset */
 
     /* Bitmap of populated attributes */
     uint64_t smb_attr_mask;
@@ -392,6 +396,15 @@ chimera_smb_parse_disposition_info_ex(
     attrs->smb_disposition = (flags & 0x01) ? 1 : 0;
     attrs->smb_attr_mask  |= SMB_ATTR_DISPOSITION;
 } /* chimera_smb_parse_disposition_info_ex */
+
+static inline void
+chimera_smb_parse_position_info(
+    struct evpl_iovec_cursor *cursor,
+    struct chimera_smb_attrs *attrs)
+{
+    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_position);
+    attrs->smb_attr_mask |= SMB_ATTR_POSITION;
+} /* chimera_smb_parse_position_info */
 
 static inline void
 chimera_smb_parse_end_of_file_info(
