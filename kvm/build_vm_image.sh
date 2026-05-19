@@ -34,10 +34,15 @@ if [ -n "${KVM_CACHE_REGISTRY:-}" ]; then
 
     # cache-to=type=registry,mode=max requires the docker-container driver;
     # the default "docker" driver only supports inline cache. Create the
-    # builder lazily and reuse it across the 4 KVM image targets.
-    if ! docker buildx inspect chimera-kvm-builder >/dev/null 2>&1; then
-        docker buildx create --name chimera-kvm-builder --driver docker-container >/dev/null
-    fi
+    # builder lazily and reuse it across the 4 KVM image targets. Ninja
+    # runs those targets in parallel, so serialize the create with flock to
+    # avoid concurrent `buildx create` calls colliding on the same name.
+    (
+        flock -x 9
+        if ! docker buildx inspect chimera-kvm-builder >/dev/null 2>&1; then
+            docker buildx create --name chimera-kvm-builder --driver docker-container >/dev/null
+        fi
+    ) 9>/tmp/chimera-kvm-builder.lock
 
     set -x
     docker buildx build \
