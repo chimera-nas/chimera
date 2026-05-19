@@ -66,11 +66,13 @@ RUN apt-get -y update && \
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
-COPY --from=build /usr/local/etc/chimera.json /usr/local/etc/chimera.json
 COPY --from=build /usr/local/sbin/chimera /usr/local/sbin/chimera
 COPY --from=build /usr/local/lib/* /usr/local/lib/
 
+COPY /chimera-docker.json /usr/local/etc/chimera.json
 COPY /suppressions.txt /suppressions.txt
+
+RUN mkdir -p /export
 
 ENV LSAN_OPTIONS=suppressions=/suppressions.txt
 
