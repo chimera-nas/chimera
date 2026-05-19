@@ -284,6 +284,46 @@ chimera_nfs4_readdir(
     ctx->thread = thread;
     ctx->server = server;
 
+    /*
+     * Synthesize "." and ".." entries before issuing the server READDIR.
+     * NFSv4 servers do not include them in READDIR responses (RFC 7530
+     * 14.2.30 reserves cookies 0/1/2), so emit them here when the caller
+     * asked for them.  Reserved cookies 1 and 2 are safe to use for the
+     * synthesized entries; real entries from the server start at >= 3.
+     */
+    if (request->readdir.flags & CHIMERA_VFS_READDIR_EMIT_DOT) {
+        struct chimera_vfs_attrs dot_attrs;
+        int                      rc;
+
+        memset(&dot_attrs, 0, sizeof(dot_attrs));
+
+        if (request->readdir.cookie < 1) {
+            rc = request->readdir.callback(0, 1, ".", 1, &dot_attrs,
+                                           request->proto_private_data);
+            request->readdir.r_cookie = 1;
+            if (rc) {
+                request->readdir.r_eof = 0;
+                request->status        = CHIMERA_VFS_OK;
+                request->complete(request);
+                return;
+            }
+            request->readdir.cookie = 1;
+        }
+
+        if (request->readdir.cookie < 2) {
+            rc = request->readdir.callback(0, 2, "..", 2, &dot_attrs,
+                                           request->proto_private_data);
+            request->readdir.r_cookie = 2;
+            if (rc) {
+                request->readdir.r_eof = 0;
+                request->status        = CHIMERA_VFS_OK;
+                request->complete(request);
+                return;
+            }
+            request->readdir.cookie = 2;
+        }
+    }
+
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
     /* Build compound: SEQUENCE + PUTFH + READDIR */
