@@ -214,6 +214,22 @@ endif()
 # Forward result to libevpl so it doesn't probe again.
 set(LIBEVPL_NETNS_TESTING ${CHIMERA_NETNS_TESTING})
 
+# PyNFS testing.  Every suite is registered, but only the combinations known
+# to pass are actually run; the rest are marked DISABLED (see
+# pynfs/CMakeLists.txt) so a normal `ctest` stays green while still listing the
+# whole matrix.  Registration is additionally gated on /opt/pynfs being present
+# so builds without the pynfs checkout (most non-devcontainer images) skip it.
+option(CHIMERA_ENABLE_PYNFS_TESTS "Register PyNFS test suite ctests" ON)
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(CHIMERA_ENABLE_PYNFS_TESTS
+    AND Python3_FOUND
+    AND EXISTS "/opt/pynfs/nfs4.0/testserver.py")
+    message(STATUS "PyNFS testing enabled")
+    add_subdirectory(pynfs)
+else()
+    message(STATUS "PyNFS testing disabled")
+endif()
+
 add_subdirectory(ext)
 
 include_directories(ext/libevpl/include)
