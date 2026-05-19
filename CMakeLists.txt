@@ -7,6 +7,7 @@ cmake_minimum_required(VERSION 3.22)
 option(IO_URING_ENABLED "Enable io_uring support" ON)
 option(CAIRN_ENABLED "Enable cairn support" ON)
 option(CHIMERA_VFS_IO_URING "Enable chimera VFS io_uring backend" ON)
+option(REQUIRE_NETNS_TESTS "Fail configure if network namespace tests cannot be enabled" OFF)
 
 if (EXISTS "/usr/local/cuda")
     set(CUDA_ENABLED true)
@@ -179,6 +180,39 @@ if(KVM_TESTING_AVAILABLE)
 else()
     message(STATUS "KVM testing disabled")
 endif()
+
+# Network namespace testing detection.
+# Many tests run inside an isolated `ip netns` so they can bind well-known
+# ports without colliding with each other or the host. Creating a netns
+# requires CAP_NET_ADMIN, so a non-privileged build/test run would see a
+# pile of failures. Probe whether we can create one; if not, the
+# netns-using tests are silently skipped unless REQUIRE_NETNS_TESTS is ON
+# (which CI should set to prevent accidental coverage loss).
+execute_process(
+    COMMAND bash -c "set -e; n=chimera_netns_probe_$$; ip netns add \"$n\"; ip netns delete \"$n\""
+    RESULT_VARIABLE NETNS_PROBE_RESULT
+    OUTPUT_QUIET
+    ERROR_QUIET
+)
+
+if(NETNS_PROBE_RESULT EQUAL 0)
+    set(CHIMERA_NETNS_TESTING TRUE)
+    message(STATUS "Network namespace testing enabled")
+else()
+    set(CHIMERA_NETNS_TESTING FALSE)
+    if(REQUIRE_NETNS_TESTS)
+        message(FATAL_ERROR
+            "REQUIRE_NETNS_TESTS=ON but `ip netns add` failed "
+            "(need CAP_NET_ADMIN / root). Re-run with sudo, grant the "
+            "capability, or omit -DREQUIRE_NETNS_TESTS=ON.")
+    endif()
+    message(STATUS "Network namespace testing disabled "
+        "(no privileges to create netns; netns-requiring tests will be skipped). "
+        "Pass -DREQUIRE_NETNS_TESTS=ON to make this fatal.")
+endif()
+
+# Forward result to libevpl so it doesn't probe again.
+set(LIBEVPL_NETNS_TESTING ${CHIMERA_NETNS_TESTING})
 
 add_subdirectory(ext)
 

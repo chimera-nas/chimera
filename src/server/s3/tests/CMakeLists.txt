@@ -30,19 +30,21 @@ if(BOTO3_FOUND)
 
     # Macro to add S3 test with specific signature version
     macro(add_s3_test_sigver testname backend sigver)
-        add_test(
-            NAME chimera/server/s3/boto3_${sigver}_${backend}_${testname}
-            COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
-                    ${Python3_EXECUTABLE} ${S3_TEST_SCRIPT}
-                    --test ${testname}
-                    --backend ${backend}
-                    --sigver ${sigver}
-                    --chimera ${CHIMERA_DAEMON}
-        )
-        set_tests_properties(chimera/server/s3/boto3_${sigver}_${backend}_${testname} PROPERTIES
-            ENVIRONMENT "PYTHONUNBUFFERED=1"
-            TIMEOUT 300
-        )
+        if(CHIMERA_NETNS_TESTING)
+            add_test(
+                NAME chimera/server/s3/boto3_${sigver}_${backend}_${testname}
+                COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                        ${Python3_EXECUTABLE} ${S3_TEST_SCRIPT}
+                        --test ${testname}
+                        --backend ${backend}
+                        --sigver ${sigver}
+                        --chimera ${CHIMERA_DAEMON}
+            )
+            set_tests_properties(chimera/server/s3/boto3_${sigver}_${backend}_${testname} PROPERTIES
+                ENVIRONMENT "PYTHONUNBUFFERED=1"
+                TIMEOUT 300
+            )
+        endif()
     endmacro()
 
     # Convenience macro for V4 tests (default)

@@ -486,7 +486,7 @@ jobs:
             bash -euxc '\
               dockerd --storage-driver=vfs --registry-mirror=https://repository.mdh.quantum.com:5001 &>/dev/null &
               sleep 2 && \
-              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DKVM_IMAGE_CACHE_REGISTRY=${{ env.KVM_IMAGE_CACHE_REGISTRY }} ${{ matrix.cmake_extra }} /workspace && \
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_CACHE_REGISTRY=${{ env.KVM_IMAGE_CACHE_REGISTRY }} ${{ matrix.cmake_extra }} /workspace && \
               ninja && \
               /workspace/scripts/cap_ctest_output.sh \
               ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32'
