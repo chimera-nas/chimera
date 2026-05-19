@@ -4,9 +4,13 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 #include <errno.h>
 
 #include "evpl/evpl.h"
@@ -38,6 +42,7 @@ struct chimera_server_config {
     int                                   nfs_tcp_rdma_port;
     int                                   nfs_lockmgr_port;
     int                                   external_portmap;
+    char                                  portmap_hostname[256];
     int                                   soft_fail_bad_req;
     rlim_t                                max_open_files;
     int                                   core_threads;
@@ -103,6 +108,7 @@ chimera_server_config_init(void)
     config->async_delegation_threads = 8;
     config->nfs_rdma                 = 0;
     config->external_portmap         = 0;
+    config->portmap_hostname[0] = '\0';
     config->soft_fail_bad_req        = 0;
     config->tcp_flavor               = CHIMERA_TCP_FLAVOR_PLAIN;
 
@@ -206,6 +212,15 @@ chimera_server_config_set_external_portmap(
 {
     config->external_portmap = enable;
 } /* chimera_server_config_set_external_portmap */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_portmap_hostname(
+    struct chimera_server_config *config,
+    const char                   *hostname)
+{
+    strncpy(config->portmap_hostname, hostname, sizeof(config->portmap_hostname) - 1);
+    config->portmap_hostname[sizeof(config->portmap_hostname) - 1] = '\0';
+} /* chimera_server_config_set_portmap_hostname */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs_rdma(
@@ -330,6 +345,43 @@ chimera_server_config_get_external_portmap(const struct chimera_server_config *c
 {
     return config->external_portmap;
 } /* chimera_server_config_get_external_portmap */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_portmap_hostname(const struct chimera_server_config *config)
+{
+    if (config->portmap_hostname[0] == '\0') {
+        return NULL;
+    }
+    return config->portmap_hostname;
+} /* chimera_server_config_get_portmap_hostname */
+
+SYMBOL_EXPORT void
+chimera_server_resolve_ipv4(
+    const char *hostname,
+    char       *out_buf,
+    size_t      out_size)
+{
+    struct addrinfo  hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM };
+    struct addrinfo *res;
+    int              gai_rc;
+
+    gai_rc = getaddrinfo(hostname, NULL, &hints, &res);
+    chimera_server_fatal_if(gai_rc != 0,
+                            "Failed to resolve hostname '%s': %s",
+                            hostname, gai_strerror(gai_rc));
+
+    inet_ntop(AF_INET,
+              &((struct sockaddr_in *) res->ai_addr)->sin_addr,
+              out_buf,
+              out_size);
+
+    if (res->ai_next != NULL) {
+        chimera_server_info("Hostname '%s' resolved to multiple addresses; using %s",
+                            hostname, out_buf);
+    }
+
+    freeaddrinfo(res);
+} /* chimera_server_resolve_ipv4 */
 
 SYMBOL_EXPORT void
 chimera_server_config_add_module(

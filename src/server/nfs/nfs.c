@@ -5,7 +5,6 @@
 #include <pthread.h>
 #include <utlist.h>
 
-
 #include "nfs.h"
 #include "server/protocol.h"
 #include "server/server.h"
@@ -61,6 +60,7 @@ nfs_server_init(
     int                               nfs_tcp_rdma_port;
     int                               nfs_lockmgr_port;
     int                               external_portmap;
+    const char                       *portmap_hostname;
 
     nfs_rdma          = chimera_server_config_get_nfs_rdma(config);
     nfs_rdma_hostname = chimera_server_config_get_nfs_rdma_hostname(config);
@@ -68,6 +68,7 @@ nfs_server_init(
     nfs_tcp_rdma_port = chimera_server_config_get_nfs_tcp_rdma_port(config);
     nfs_lockmgr_port  = chimera_server_config_get_nfs_lockmgr_port(config);
     external_portmap  = chimera_server_config_get_external_portmap(config);
+    portmap_hostname  = chimera_server_config_get_portmap_hostname(config);
     chimera_nfs_debug("NFS RDMA: %s", nfs_rdma ? "enabled" : "disabled");
     chimera_nfs_debug("NFS TCP-RDMA: %s (port %d)", nfs_tcp_rdma_port > 0 ? "enabled" : "disabled", nfs_tcp_rdma_port);
     chimera_nfs_debug("NFS Lock Manager port: %d", nfs_lockmgr_port);
@@ -78,6 +79,21 @@ nfs_server_init(
     shared = calloc(1, sizeof(*shared));
 
     shared->config = config;
+
+    shared->portmap_hostname[0] = '\0';
+    if (portmap_hostname) {
+        if (external_portmap) {
+            chimera_nfs_info("portmap_hostname '%s' is ignored because "
+                             "external_portmap is enabled",
+                             portmap_hostname);
+        } else {
+            chimera_server_resolve_ipv4(portmap_hostname,
+                                        shared->portmap_hostname,
+                                        sizeof(shared->portmap_hostname));
+            chimera_nfs_debug("Portmap hostname '%s' resolved to %s",
+                              portmap_hostname, shared->portmap_hostname);
+        }
+    }
 
     shared->vfs = vfs;
 
