@@ -7,6 +7,14 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
+static inline int
+chimera_nfs4_stateid_is_anonymous(const struct stateid4 *sid)
+{
+    static const uint8_t zero[12] = { 0 };
+
+    return sid->seqid == 0 && memcmp(sid->other, zero, sizeof(zero)) == 0;
+} /* chimera_nfs4_stateid_is_anonymous */
+
 static void
 chimera_nfs4_read_complete(
     enum chimera_vfs_error    error_code,
@@ -32,14 +40,53 @@ chimera_nfs4_read_complete(
         evpl_iovecs_release(req->thread->evpl, iov, niov);
     }
 
-    deferred = nfs4_session_release_state(req->session, req->nfs4_state);
-    if (deferred) {
-        chimera_vfs_release(req->thread->vfs_thread, deferred);
+    if (req->nfs4_state) {
+        deferred = nfs4_session_release_state(req->session, req->nfs4_state);
+        if (deferred) {
+            chimera_vfs_release(req->thread->vfs_thread, deferred);
+        }
+    } else if (req->handle) {
+        /* Anonymous stateid: release the on-the-fly handle we opened. */
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        req->handle = NULL;
     }
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 
 } /* chimera_nfs4_read_complete */
+
+static void
+chimera_nfs4_read_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req  = private_data;
+    struct READ4args   *args = &req->args_compound->argarray[req->index].opread;
+    struct READ4res    *res  = &req->res_compound.resarray[req->index].opread;
+    struct evpl_iovec  *iov;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
+    req->handle = handle;
+
+    iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
+    chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
+
+    chimera_vfs_read(req->thread->vfs_thread, &req->cred,
+                     handle,
+                     args->offset,
+                     args->count,
+                     iov,
+                     256,
+                     0,
+                     chimera_nfs4_read_complete,
+                     req);
+} /* chimera_nfs4_read_open_callback */
 
 void
 chimera_nfs4_read(
@@ -48,15 +95,41 @@ chimera_nfs4_read(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct READ4args               *args    = &argop->opread;
-    struct READ4res                *res     = &resop->opread;
-    struct nfs4_session            *session = nfs4_resolve_session(
+    struct READ4args               *args = &argop->opread;
+    struct READ4res                *res  = &resop->opread;
+    struct chimera_vfs_open_handle *state_handle;
+    struct nfs4_state              *state;
+    struct nfs4_session            *session;
+    struct evpl_iovec              *iov;
+
+    req->nfs4_state = NULL;
+    req->handle     = NULL;
+
+    /*
+     * RFC 7530 9.1.4.3 / RFC 8881 8.2.3 require READ to honor the
+     * anonymous stateid (all zeros).  Open the current FH on the fly
+     * instead of consulting per-session state.
+     */
+    if (chimera_nfs4_stateid_is_anonymous(&args->stateid)) {
+        if (req->fhlen == 0) {
+            res->status = NFS4ERR_NOFILEHANDLE;
+            chimera_nfs4_compound_complete(req, NFS4_OK);
+            return;
+        }
+
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            req->fh,
+                            req->fhlen,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_READ_ONLY,
+                            chimera_nfs4_read_open_callback,
+                            req);
+        return;
+    }
+
+    session = nfs4_resolve_session(
         req->session, req->conn,
         &thread->shared->nfs4_shared_clients,
         &args->stateid);
-    struct nfs4_state              *state;
-    struct chimera_vfs_open_handle *state_handle;
-    struct evpl_iovec              *iov;
 
     if (!session) {
         res->status = NFS4ERR_BAD_STATEID;

@@ -22,9 +22,9 @@
  */
 
 struct chimera_nfs3_open_state {
+    uint8_t                 server_index; /* NFS server index for dispatch routing */
     atomic_int              dirty; /* Count of uncommitted unstable writes */
     int                     silly_renamed; /* File has been silly renamed */
-    uint8_t                 server_index; /* NFS server index for dispatch routing */
     uint8_t                 dir_fh_len; /* Directory fh for silly remove on close */
     uint8_t                 dir_fh[CHIMERA_VFS_FH_SIZE];
 

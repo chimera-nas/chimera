@@ -61,8 +61,10 @@ chimera_nfs4_errno_to_nfsstat4(enum chimera_vfs_error err)
             return NFS4ERR_SERVERFAULT;
         case CHIMERA_VFS_ESYMLINK:
             return NFS4ERR_SYMLINK;
+        case CHIMERA_VFS_ELOOP:
+            return NFS4ERR_SERVERFAULT;
         default:
             chimera_nfs_error("Unknown VFS error code: %d", err);
-            abort();
+            return NFS4ERR_SERVERFAULT;
     } /* switch */
 } /* chimera_nfs4_errno_to_nfsstat4 */

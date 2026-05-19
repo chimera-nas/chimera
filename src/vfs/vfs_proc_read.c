@@ -63,6 +63,9 @@ chimera_vfs_read(
     request->read.length             = count;
     request->read.iov                = iov;
     request->read.niov               = niov;
+    request->read.r_length           = 0;
+    request->read.r_niov             = 0;
+    request->read.r_eof              = 0;
     request->read.r_attr.va_req_mask = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->read.r_attr.va_set_mask = 0;
     request->proto_callback          = callback;
