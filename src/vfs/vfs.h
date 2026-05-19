@@ -1043,6 +1043,7 @@ struct chimera_vfs_close_thread {
 struct chimera_vfs_mount_table;
 
 struct chimera_vfs_notify;
+struct chimera_vfs_state;
 
 struct chimera_vfs {
     struct chimera_vfs_module            *modules[CHIMERA_VFS_FH_MAGIC_MAX];
@@ -1054,6 +1055,7 @@ struct chimera_vfs {
     struct chimera_vfs_attr_cache        *vfs_attr_cache;
     struct chimera_vfs_user_cache        *vfs_user_cache;
     struct chimera_vfs_notify            *vfs_notify;
+    struct chimera_vfs_state             *vfs_state;
     struct chimera_vfs_mount_table       *mount_table;
     int                                   num_sync_delegation_threads;
     struct chimera_vfs_delegation_thread *sync_delegation_threads;
