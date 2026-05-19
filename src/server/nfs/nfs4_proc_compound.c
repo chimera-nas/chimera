@@ -72,6 +72,9 @@ chimera_nfs4_compound_process(
             case OP_LOOKUP:
                 chimera_nfs4_lookup(thread, req, argop, resop);
                 break;
+            case OP_LOOKUPP:
+                chimera_nfs4_lookupp(thread, req, argop, resop);
+                break;
             case OP_PUTFH:
                 chimera_nfs4_putfh(thread, req, argop, resop);
                 break;
