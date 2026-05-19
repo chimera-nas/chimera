@@ -4001,19 +4001,19 @@ main(
                 char fsx_dir[512];
                 snprintf(fsx_dir, sizeof(fsx_dir), "%s/fsx", chimera_session_dir);
                 (void) mkdir(fsx_dir, 0755);
-                chimera_server_mount(chimera_server, "share", "linux", chimera_session_dir);
+                chimera_server_mount(chimera_server, "share", "linux", chimera_session_dir, NULL);
             } else if (strcmp(chimera_nfs_backend, "io_uring") == 0) {
                 char fsx_dir[512];
                 snprintf(fsx_dir, sizeof(fsx_dir), "%s/fsx", chimera_session_dir);
                 (void) mkdir(fsx_dir, 0755);
-                chimera_server_mount(chimera_server, "share", "io_uring", chimera_session_dir);
+                chimera_server_mount(chimera_server, "share", "io_uring", chimera_session_dir, NULL);
             } else if (strcmp(chimera_nfs_backend, "memfs") == 0) {
-                chimera_server_mount(chimera_server, "share", "memfs", "/");
+                chimera_server_mount(chimera_server, "share", "memfs", "/", NULL);
             } else if (strcmp(chimera_nfs_backend, "demofs_io_uring") == 0 ||
                        strcmp(chimera_nfs_backend, "demofs_aio") == 0) {
-                chimera_server_mount(chimera_server, "share", "demofs", "/");
+                chimera_server_mount(chimera_server, "share", "demofs", "/", NULL);
             } else if (strcmp(chimera_nfs_backend, "cairn") == 0) {
-                chimera_server_mount(chimera_server, "share", "cairn", "/");
+                chimera_server_mount(chimera_server, "share", "cairn", "/", NULL);
             } else {
                 fprintf(stderr, "Unknown NFS backend: %s\n", chimera_nfs_backend);
                 exit(100);

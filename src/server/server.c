@@ -594,7 +594,8 @@ chimera_server_mount(
     struct chimera_server *server,
     const char            *mount_path,
     const char            *module_name,
-    const char            *module_path)
+    const char            *module_path,
+    const char            *options)
 {
     struct evpl               *evpl;
     struct chimera_vfs_thread *thread;
@@ -604,7 +605,7 @@ chimera_server_mount(
 
     thread = chimera_vfs_thread_init(evpl, server->vfs);
 
-    chimera_vfs_mount(thread, NULL, mount_path, module_name, module_path, NULL, chimera_server_mount_callback, &ctx);
+    chimera_vfs_mount(thread, NULL, mount_path, module_name, module_path, options, chimera_server_mount_callback, &ctx);
 
     while (!ctx.done) {
         evpl_continue(evpl);

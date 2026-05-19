@@ -173,15 +173,15 @@ posix_test_start_nfs_server(struct posix_test_env *env)
     env->server = chimera_server_init(server_config, env->metrics);
 
     if (strcmp(nfs_backend_name, "linux") == 0) {
-        chimera_server_mount(env->server, "share", "linux", env->session_dir);
+        chimera_server_mount(env->server, "share", "linux", env->session_dir, NULL);
     } else if (strcmp(nfs_backend_name, "io_uring") == 0) {
-        chimera_server_mount(env->server, "share", "io_uring", env->session_dir);
+        chimera_server_mount(env->server, "share", "io_uring", env->session_dir, NULL);
     } else if (strcmp(nfs_backend_name, "memfs") == 0) {
-        chimera_server_mount(env->server, "share", "memfs", "/");
+        chimera_server_mount(env->server, "share", "memfs", "/", NULL);
     } else if (posix_test_is_demofs(nfs_backend_name)) {
-        chimera_server_mount(env->server, "share", "demofs", "/");
+        chimera_server_mount(env->server, "share", "demofs", "/", NULL);
     } else if (strcmp(nfs_backend_name, "cairn") == 0) {
-        chimera_server_mount(env->server, "share", "cairn", "/");
+        chimera_server_mount(env->server, "share", "cairn", "/", NULL);
     } else {
         fprintf(stderr, "Unknown NFS backend: %s\n", nfs_backend_name);
         exit(EXIT_FAILURE);
