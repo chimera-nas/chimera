@@ -1854,6 +1854,14 @@ memfs_open_at(
         }
     }
 
+    if ((flags & CHIMERA_VFS_OPEN_DIRECTORY) && !S_ISDIR(inode->mode)) {
+        pthread_mutex_unlock(&inode->lock);
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
     if (flags & CHIMERA_VFS_OPEN_INFERRED) {
         /* If this is an inferred open (ie an NFS3 create)
          * then we aren't returning a handle so we don't need
