@@ -8,6 +8,14 @@
 #include "vfs/vfs_release.h"
 #include "evpl/evpl.h"
 
+static inline int
+chimera_nfs4_write_stateid_is_anonymous(const struct stateid4 *sid)
+{
+    static const uint8_t zero[12] = { 0 };
+
+    return sid->seqid == 0 && memcmp(sid->other, zero, sizeof(zero)) == 0;
+} /* chimera_nfs4_write_stateid_is_anonymous */
+
 static void
 chimera_nfs4_write_complete(
     enum chimera_vfs_error    error_code,
@@ -40,13 +48,52 @@ chimera_nfs4_write_complete(
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
     }
 
-    deferred = nfs4_session_release_state(req->session, req->nfs4_state);
-    if (deferred) {
-        chimera_vfs_release(req->thread->vfs_thread, deferred);
+    if (req->nfs4_state) {
+        deferred = nfs4_session_release_state(req->session, req->nfs4_state);
+        if (deferred) {
+            chimera_vfs_release(req->thread->vfs_thread, deferred);
+        }
+    } else if (req->handle) {
+        /* Anonymous stateid: release the on-the-fly handle we opened. */
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        req->handle = NULL;
     }
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_write_complete */
+
+static void
+chimera_nfs4_write_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req  = private_data;
+    struct WRITE4args  *args = &req->args_compound->argarray[req->index].opwrite;
+    struct WRITE4res   *res  = &req->res_compound.resarray[req->index].opwrite;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        evpl_iovecs_release(req->thread->evpl, args->data.iov, args->data.niov);
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
+    req->handle      = handle;
+    req->args_write4 = args;
+
+    chimera_vfs_write(req->thread->vfs_thread, &req->cred,
+                      handle,
+                      args->offset,
+                      args->data.length,
+                      (args->stable != UNSTABLE4),
+                      0,
+                      0,
+                      args->data.iov,
+                      args->data.niov,
+                      chimera_nfs4_write_complete,
+                      req);
+} /* chimera_nfs4_write_open_callback */
 
 void
 chimera_nfs4_write(
@@ -55,14 +102,50 @@ chimera_nfs4_write(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct WRITE4args              *args    = &argop->opwrite;
-    struct WRITE4res               *res     = &resop->opwrite;
-    struct nfs4_session            *session = nfs4_resolve_session(
+    struct WRITE4args              *args = &argop->opwrite;
+    struct WRITE4res               *res  = &resop->opwrite;
+    struct nfs4_session            *session;
+    struct nfs4_state              *state;
+    struct chimera_vfs_open_handle *state_handle;
+
+    req->nfs4_state = NULL;
+    req->handle     = NULL;
+
+    /*
+     * Transfer ownership of write iovecs from the RPC2 message to prevent
+     * msg_free from double-releasing (args->data.iov points to msg->read_chunk.iov
+     * via XDR zerocopy).  The iovecs will be released in the write completion
+     * callback on this server thread, not in the VFS backend (which may run on
+     * a different delegation thread).
+     */
+    evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL, NULL);
+
+    /*
+     * RFC 7530 9.1.4.3 / RFC 8881 8.2.3 require WRITE to honor the
+     * anonymous stateid (all zeros).  Open the current FH on the fly
+     * instead of consulting per-session state.
+     */
+    if (chimera_nfs4_write_stateid_is_anonymous(&args->stateid)) {
+        if (req->fhlen == 0) {
+            res->status = NFS4ERR_NOFILEHANDLE;
+            evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
+            chimera_nfs4_compound_complete(req, NFS4_OK);
+            return;
+        }
+
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            req->fh,
+                            req->fhlen,
+                            CHIMERA_VFS_OPEN_INFERRED,
+                            chimera_nfs4_write_open_callback,
+                            req);
+        return;
+    }
+
+    session = nfs4_resolve_session(
         req->session, req->conn,
         &thread->shared->nfs4_shared_clients,
         &args->stateid);
-    struct nfs4_state              *state;
-    struct chimera_vfs_open_handle *state_handle;
 
     if (!session) {
         res->status = NFS4ERR_BAD_STATEID;
@@ -84,14 +167,6 @@ chimera_nfs4_write(
     req->nfs4_state  = state;
     req->args_write4 = args;
 
-    /* Transfer ownership of write iovecs from the RPC2 message to prevent
-     * msg_free from double-releasing (args->data.iov points to msg->read_chunk.iov
-     * via XDR zerocopy). The iovecs will be released in the write completion
-     * callback on this server thread, not in the VFS backend (which may run on
-     * a different delegation thread).
-     */
-    evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL, NULL);
-
     chimera_vfs_write(thread->vfs_thread, &req->cred,
                       state_handle,
                       args->offset,
@@ -104,4 +179,3 @@ chimera_nfs4_write(
                       chimera_nfs4_write_complete,
                       req);
 } /* chimera_nfs4_write */
-
