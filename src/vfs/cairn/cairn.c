@@ -623,6 +623,13 @@ cairn_init(const char *cfgdata)
     shared->read_options  = rocksdb_readoptions_create();
     shared->txn_options   = rocksdb_transaction_options_create();
 
+    /* RocksDB's default per-key lock timeout is 1s. Under contended workloads
+     * (e.g. many threads touching the same parent directory inode) a holder
+     * can easily slip past 1s during compactions or slow fsyncs, causing
+     * waiters to fail with "Timeout waiting to lock key" — which cairn treats
+     * as fatal. Raise the ceiling so contention stalls briefly instead. */
+    rocksdb_transactiondb_options_set_transaction_lock_timeout(shared->txndb_options, 30000);
+
     shared->db_txn = rocksdb_transactiondb_open(shared->options, shared->txndb_options, db_path, &err);
 
     chimera_cairn_abort_if(err, "Failed to open database: %s\n", err);
