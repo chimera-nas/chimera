@@ -1,0 +1,257 @@
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
+#pragma once
+
+#include <stdint.h>
+#include <pthread.h>
+
+#include "common/rbtree.h"
+
+/*
+ * Space map allocator for demofs.
+ *
+ * Each block device is divided into fixed-size allocation groups (AGs).
+ * Each AG owns an in-memory red-black tree of free extents keyed by
+ * device offset, protected by its own mutex.  Allocations come from a
+ * per-thread reservation cache that is refilled in chunks from an AG,
+ * so the per-allocation common case is lock-free.
+ *
+ * All state is in memory.  Mutating operations call
+ * sm_journal_record_alloc / sm_journal_record_free stubs that the future
+ * intent log will replace; this is where on-disk durability hooks in.
+ */
+
+#define SM_BLOCK_SHIFT       12
+#define SM_BLOCK_SIZE        (1ULL << SM_BLOCK_SHIFT)
+#define SM_BLOCK_MASK        (SM_BLOCK_SIZE - 1)
+
+#define SM_AG_SIZE_LOG2      30                             /* 1 GiB */
+#define SM_AG_SIZE           (1ULL << SM_AG_SIZE_LOG2)
+#define SM_AG_OFFSET_MASK    (SM_AG_SIZE - 1)
+
+#define SM_SUPERBLOCK_OFFSET 0
+#define SM_SUPERBLOCK_SIZE   4096
+#define SM_SUPERBLOCK_MAGIC  0x4D5346534B534944ULL          /* "DISKSFSM" */
+#define SM_FORMAT_VERSION    1
+
+#define SM_RESERVATION_MIN   (1ULL << 20)                   /* 1 MiB */
+
+#define SM_ALIGN_UP(x) (((x) + SM_BLOCK_MASK) & ~SM_BLOCK_MASK)
+
+/*
+ * Inode-number encoding.  A 64-bit inum is a (disk, ag, block_idx) tuple
+ * that locates a 4 KiB inode block on storage with no further indirection.
+ *
+ *     bits 63..56  disk_id    (256 disks max)
+ *     bits 55..32  ag_index   (16 M AGs / disk)
+ *     bits 31.. 0  block_idx  (1-based offset into the AG's data region)
+ *
+ * block_idx == 0 (i.e. the entire inum == 0) is reserved as "invalid".
+ * The first usable inode in any AG is at block_idx == 1; for AG 0 of disk
+ * 0 we reserve block_idx == 1 at format time so the very first allocation
+ * lands at block_idx == 2 (= inum 2 = the root inode).
+ */
+#define SM_INUM_INDEX_BITS   32
+#define SM_INUM_AG_BITS      24
+#define SM_INUM_DISK_BITS    8
+
+#define SM_INUM_INDEX_MASK   ((1ULL << SM_INUM_INDEX_BITS) - 1)
+#define SM_INUM_AG_MASK      ((1ULL << SM_INUM_AG_BITS)    - 1)
+#define SM_INUM_DISK_MASK    ((1ULL << SM_INUM_DISK_BITS)  - 1)
+
+#define SM_INUM_AG_SHIFT     SM_INUM_INDEX_BITS
+#define SM_INUM_DISK_SHIFT   (SM_INUM_INDEX_BITS + SM_INUM_AG_BITS)
+
+/*
+ * Each AG carves a fixed prefix off the front of its data range for its
+ * own space-map log.  The log is double-buffered (slot A + slot B) so
+ * condensation can ping-pong atomically.  Sized for the worst-case
+ * fragmentation of a 1 GiB AG with 4 KiB blocks (~2 MiB per snapshot) with
+ * comfortable headroom.
+ */
+#define SM_AG_LOG_SLOT_SIZE  (4ULL << 20)                   /* 4 MiB */
+#define SM_AG_LOG_SLOT_COUNT 2
+#define SM_AG_LOG_SIZE       (SM_AG_LOG_SLOT_SIZE * SM_AG_LOG_SLOT_COUNT)
+
+/*
+ * Statically-reserved intent log region.  Lives on device 0 right after
+ * the superblock; its exact location is also recorded in the superblock
+ * so future format versions can move it.  Carved out of AG 0 of device 0.
+ */
+#define SM_INTENT_LOG_DEVICE 0
+#define SM_INTENT_LOG_OFFSET SM_SUPERBLOCK_SIZE
+#define SM_INTENT_LOG_SIZE   (64ULL << 20)                  /* 64 MiB */
+
+struct sm_superblock {
+    uint64_t magic;
+    uint32_t version;
+    uint32_t block_size;
+    uint64_t ag_size;
+    uint64_t ag_log_size;
+    uint64_t fsid;
+    uint32_t num_devices;
+    uint32_t intent_log_device;
+    uint64_t intent_log_offset;
+    uint64_t intent_log_size;
+    uint32_t crc32;
+    /* Remainder of the 4 KiB block is implicit zero padding. */
+};
+
+struct sm_extent {
+    struct rb_node node;
+    uint64_t       offset;
+    uint64_t       length;
+};
+
+struct sm_ag {
+    uint32_t        device_id;
+    uint32_t        ag_index;
+    uint64_t        base_offset;
+    uint64_t        size;
+    uint64_t        log_offset;      /* absolute device offset of this AG's log */
+    uint64_t        log_size;        /* total log bytes (both slots) */
+    uint64_t        free_bytes;
+    struct rb_tree  free_by_offset;
+    pthread_mutex_t lock;
+};
+
+struct sm_device {
+    uint32_t      device_id;
+    uint64_t      size;
+    uint32_t      num_ags;
+    uint32_t      ag_rotor;
+    struct sm_ag *ags;
+};
+
+struct space_map {
+    struct sm_device *devices;
+    uint32_t          num_devices;
+    uint32_t          device_rotor;
+    uint64_t          total_capacity;
+    uint64_t          used_bytes;     /* atomic accounting for statfs */
+    pthread_mutex_t   lock;           /* protects rotors and journaled writes */
+};
+
+struct sm_thread_cache {
+    uint32_t device_id;
+    uint64_t offset;
+    uint64_t length;
+    int      valid;
+};
+
+struct space_map *
+space_map_create(
+    const uint64_t *device_sizes,
+    uint32_t        num_devices);
+
+void
+space_map_destroy(
+    struct space_map *sm);
+
+int
+space_map_alloc(
+    struct space_map       *sm,
+    struct sm_thread_cache *cache,
+    uint64_t                size,
+    uint32_t               *r_device_id,
+    uint64_t               *r_device_offset);
+
+void
+space_map_free(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint64_t          device_offset,
+    uint64_t          length);
+
+void
+space_map_thread_cache_return(
+    struct space_map       *sm,
+    struct sm_thread_cache *cache);
+
+/*
+ * Synchronously write a stub superblock to offset 0 of `device_path` by
+ * opening the file directly with pwrite + fsync.  Done at format time
+ * (before evpl claims the device) so we avoid any reentrancy with the
+ * VFS dispatch loop.
+ */
+int
+space_map_write_superblock_path(
+    struct space_map *sm,
+    const char       *device_path,
+    uint64_t          fsid);
+
+static inline uint64_t
+space_map_total_capacity(const struct space_map *sm)
+{
+    return sm->total_capacity;
+} // space_map_total_capacity
+
+static inline uint64_t
+space_map_used_bytes(const struct space_map *sm)
+{
+    return __atomic_load_n(&sm->used_bytes, __ATOMIC_RELAXED);
+} // space_map_used_bytes
+
+static inline uint64_t
+sm_inum_make(
+    uint32_t disk,
+    uint32_t ag,
+    uint32_t idx)
+{
+    return ((uint64_t) (disk & SM_INUM_DISK_MASK) << SM_INUM_DISK_SHIFT) |
+           ((uint64_t) (ag   & SM_INUM_AG_MASK) << SM_INUM_AG_SHIFT)   |
+           ((uint64_t) (idx  & SM_INUM_INDEX_MASK));
+} // sm_inum_make
+
+static inline void
+sm_inum_decode(
+    uint64_t  inum,
+    uint32_t *r_disk,
+    uint32_t *r_ag,
+    uint32_t *r_idx)
+{
+    *r_idx  = (uint32_t) (inum & SM_INUM_INDEX_MASK);
+    *r_ag   = (uint32_t) ((inum >> SM_INUM_AG_SHIFT)   & SM_INUM_AG_MASK);
+    *r_disk = (uint32_t) ((inum >> SM_INUM_DISK_SHIFT) & SM_INUM_DISK_MASK);
+} // sm_inum_decode
+
+/*
+ * Resolve an inum to its on-disk location.  Returns the device offset of
+ * the inode's 4 KiB block and stores the disk id in *r_disk.  The caller
+ * must ensure inum != 0.
+ */
+static inline uint64_t
+sm_inum_to_device_offset(
+    const struct space_map *sm,
+    uint64_t                inum,
+    uint32_t               *r_disk)
+{
+    uint32_t            disk, ag_idx, block_idx;
+    const struct sm_ag *ag;
+
+    sm_inum_decode(inum, &disk, &ag_idx, &block_idx);
+    ag      = &sm->devices[disk].ags[ag_idx];
+    *r_disk = disk;
+    return ag->log_offset + ag->log_size +
+           (uint64_t) (block_idx - 1) * SM_BLOCK_SIZE;
+} // sm_inum_to_device_offset
+
+/*
+ * Inverse of sm_inum_to_device_offset: given a freshly-allocated block at
+ * (disk, offset), compute the inum that addresses it.
+ */
+static inline uint64_t
+sm_inum_from_device_offset(
+    const struct space_map *sm,
+    uint32_t                disk,
+    uint64_t                offset)
+{
+    uint32_t            ag_idx    = (uint32_t) (offset >> SM_AG_SIZE_LOG2);
+    const struct sm_ag *ag        = &sm->devices[disk].ags[ag_idx];
+    uint64_t            data_base = ag->log_offset + ag->log_size;
+    uint32_t            block_idx = (uint32_t) ((offset - data_base) / SM_BLOCK_SIZE) + 1;
+
+    return sm_inum_make(disk, ag_idx, block_idx);
+} // sm_inum_from_device_offset
