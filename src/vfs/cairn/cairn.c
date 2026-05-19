@@ -218,6 +218,12 @@ struct cairn_thread {
     rocksdb_transaction_t      *meta_txn;
     rocksdb_writebatch_t       *data_batch;
     int                         data_needs_sync;
+    /* Set by the NFS COMMIT op handler so cairn_thread_commit issues an
+     * explicit rocksdb_flush_wal(datadb, sync=1) after the cycle.  This
+     * covers UNSTABLE writes from prior cycles whose WAL append never got
+     * fsynced (data_needs_sync was 0 then); for writes in the same cycle
+     * as the COMMIT, the sync data commit's fsync already covers them. */
+    int                         needs_data_wal_flush;
     /* Set when evpl_defer(&thread->commit) has been called this cycle.
      * Cleared inside cairn_thread_commit before its handler returns.
      * Read-only op handlers DL_APPEND to txn_requests and rely on the
@@ -1068,15 +1074,21 @@ cairn_meta_txn_begin(
  * in_commit is set across the whole function so the CAIRN_BATCH_MAX_OPS
  * force-commit in cairn_dispatch doesn't recurse into us during replay.
  *
- * If conflicts exceed CAIRN_MAX_COMMIT_RETRIES (pathological contention),
- * we abort the process — same as the old TransactionDB code did on commit
- * errors.  In practice this should never fire.
+ * Error handling:
+ *   - Conflicts (Busy / TryAgain) drive replay, up to CAIRN_MAX_COMMIT_RETRIES.
+ *   - Any other commit error (real I/O failure, retry budget exhausted, WAL
+ *     flush failure) is logged once and surfaced to every queued request as
+ *     CHIMERA_VFS_EIO instead of aborting the server.  The cycle's pending
+ *     state is discarded (batch destroyed, transaction rolled back), the
+ *     thread reverts to a clean state, and subsequent ops can proceed (or
+ *     also fail, depending on whether the underlying DB is still usable).
  *
- * Cross-DB note: data is committed BEFORE metadata as before.  If we end
- * up retrying metadata many times, data writes from this cycle stay
- * committed in datadb.  If the final metadata commit succeeds, the same
- * data is now referenced.  If it fails permanently (we abort), data rows
- * remain as orphans, but the process is aborting anyway.
+ * Cross-DB note: data is committed BEFORE metadata.  On metadata retry,
+ * data writes have already been committed; replay rebuilds an idempotent
+ * data_batch (same keys/values) which gets re-committed each iteration.
+ * On final EIO, prior data writes may remain in datadb without referencing
+ * metadata — these are orphan rows; they're harmless until / unless a
+ * future compactor GC pass picks them up.
  */
 static void
 cairn_thread_commit(
@@ -1109,6 +1121,8 @@ cairn_thread_commit(
      * recreated data_batch, the replayed extents would otherwise sit
      * un-committed until the next cycle's commit.
      */
+    int commit_status = CHIMERA_VFS_OK;
+
     while (1) {
         if (thread->data_batch) {
             if (rocksdb_writebatch_count(thread->data_batch) > 0) {
@@ -1117,7 +1131,24 @@ cairn_thread_commit(
                     : shared->data_write_opts_async;
 
                 rocksdb_write(shared->datadb, wo, thread->data_batch, &err);
-                chimera_cairn_abort_if(err, "Error committing data batch: %s\n", err);
+                if (err) {
+                    chimera_cairn_error("Error committing data batch: %s", err);
+                    free(err);
+                    err           = NULL;
+                    commit_status = CHIMERA_VFS_EIO;
+                    rocksdb_writebatch_destroy(thread->data_batch);
+                    thread->data_batch      = NULL;
+                    thread->data_needs_sync = 0;
+                    if (thread->meta_txn) {
+                        rocksdb_transaction_rollback(thread->meta_txn, &err);
+                        if (err) {
+                            free(err); err = NULL;
+                        }
+                        rocksdb_transaction_destroy(thread->meta_txn);
+                        thread->meta_txn = NULL;
+                    }
+                    break;
+                }
             }
             rocksdb_writebatch_destroy(thread->data_batch);
             thread->data_batch      = NULL;
@@ -1139,18 +1170,38 @@ cairn_thread_commit(
          * RocksDB stringifies optimistic-transaction conflicts as
          * "Resource busy: ..." (Status::Busy) or "Operation timed out: ..."
          * (Status::TryAgain).  Treat either as the retry signal; any other
-         * status string is fatal as before.
+         * status string is surfaced to clients as CHIMERA_VFS_EIO rather
+         * than aborting the server — the DB-level error is logged so it
+         * isn't silent.
          */
         if (!(strstr(err, "busy") || strstr(err, "Busy") ||
               strstr(err, "timed out") || strstr(err, "TryAgain"))) {
-            chimera_cairn_abort("Error committing meta transaction: %s\n", err);
+            chimera_cairn_error("Error committing meta transaction: %s", err);
+            free(err);
+            err           = NULL;
+            commit_status = CHIMERA_VFS_EIO;
+            rocksdb_transaction_rollback(thread->meta_txn, &err);
+            if (err) {
+                free(err); err = NULL;
+            }
+            rocksdb_transaction_destroy(thread->meta_txn);
+            thread->meta_txn = NULL;
+            break;
         }
         free(err);
         err = NULL;
 
         if (++retries > CAIRN_MAX_COMMIT_RETRIES) {
-            chimera_cairn_abort("metadb commit conflicted %d times in a row; giving up",
+            chimera_cairn_error("metadb commit conflicted %d times in a row; giving up",
                                 CAIRN_MAX_COMMIT_RETRIES);
+            commit_status = CHIMERA_VFS_EIO;
+            rocksdb_transaction_rollback(thread->meta_txn, &err);
+            if (err) {
+                free(err); err = NULL;
+            }
+            rocksdb_transaction_destroy(thread->meta_txn);
+            thread->meta_txn = NULL;
+            break;
         }
 
         rocksdb_transaction_rollback(thread->meta_txn, &err);
@@ -1180,9 +1231,31 @@ cairn_thread_commit(
         }
     }
 
+    /*
+     * NFS COMMIT semantics: explicitly fsync datadb's WAL so prior cycles'
+     * UNSTABLE writes (sync=0 then) become durable.  In-cycle data writes
+     * already got fsynced above via data_needs_sync; this covers the gap
+     * for everything written before the current cycle started.  Skip on
+     * commit error — we're already returning EIO and the WAL state is
+     * unclear.
+     */
+    if (thread->needs_data_wal_flush && commit_status == CHIMERA_VFS_OK) {
+        rocksdb_flush_wal(shared->datadb, 1, &err);
+        if (err) {
+            chimera_cairn_error("Error flushing data WAL: %s", err);
+            free(err);
+            err           = NULL;
+            commit_status = CHIMERA_VFS_EIO;
+        }
+    }
+    thread->needs_data_wal_flush = 0;
+
     while (thread->txn_requests) {
         request = thread->txn_requests;
         DL_DELETE(thread->txn_requests, request);
+        if (commit_status != CHIMERA_VFS_OK) {
+            request->status = commit_status;
+        }
         request->complete(request);
     }
 
@@ -3498,6 +3571,36 @@ cairn_link_at(
 } /* cairn_link_at */
 
 
+/*
+ * NFS COMMIT semantics: "make all my UNSTABLE writes up to this point
+ * durable."  In the two-DB model, UNSTABLE writes appended to datadb's
+ * WAL with sync=0 and committed metadata to metadb with sync=1 (metadata
+ * is always sync).  The metadata fsync only flushes metadb's WAL — it
+ * does not touch datadb's WAL fd, so unsynced extent bytes in datadb's
+ * OS page cache survive only by luck on power loss.
+ *
+ * Mark needs_data_wal_flush so cairn_thread_commit issues an explicit
+ * rocksdb_flush_wal(datadb, sync=1) after the current cycle.  Also set
+ * data_needs_sync so any pending data writes in this same cycle commit
+ * with sync=true (which would already fsync the WAL on its own; the
+ * separate flush_wal handles the case where this cycle has no data
+ * writes of its own).
+ */
+static void
+cairn_commit_op(
+    struct cairn_thread        *thread,
+    struct cairn_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    (void) shared;
+    (void) private_data;
+    thread->data_needs_sync      = 1;
+    thread->needs_data_wal_flush = 1;
+    request->status              = CHIMERA_VFS_OK;
+    cairn_queue_request(thread, request);
+} /* cairn_commit_op */
+
 static void
 cairn_put_key(
     struct cairn_thread        *thread,
@@ -3764,8 +3867,7 @@ cairn_dispatch(
             cairn_write(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_COMMIT:
-            request->status = CHIMERA_VFS_OK;
-            request->complete(request);
+            cairn_commit_op(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_ALLOCATE:
             cairn_allocate(thread, shared, request, private_data);
