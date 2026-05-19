@@ -18,6 +18,7 @@
 #include "s3_dump.h"
 #include "s3_bucket_map.h"
 #include "s3_auth.h"
+#include "s3_multipart.h"
 #include "s3.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
@@ -137,6 +138,9 @@ s3_server_respond(
             evpl_http_server_set_response_length(request->http_request, request->file_length);
             evpl_http_server_dispatch_default(request->http_request, 200);
         }
+    } else if (request->status == CHIMERA_S3_STATUS_NO_CONTENT) {
+        evpl_http_server_set_response_length(request->http_request, 0);
+        evpl_http_server_dispatch_default(request->http_request, 204);
     } else {
         evpl_iovec_alloc(evpl, 1024, 0, 1, 0, &iov);
 
@@ -153,6 +157,22 @@ s3_server_respond(
 } /* s3_server_respond */
 
 static void
+s3_server_drain_body(
+    struct evpl               *evpl,
+    struct chimera_s3_request *request)
+{
+    struct evpl_iovec iov[CHIMERA_S3_IOV_MAX];
+    uint64_t          avail;
+    int               niov;
+
+    while ((avail = evpl_http_request_get_data_avail(request->http_request)) > 0) {
+        niov = evpl_http_request_get_datav(evpl, request->http_request,
+                                           iov, avail);
+        evpl_iovecs_release(evpl, iov, niov);
+    }
+} /* s3_server_drain_body */
+
+static void
 s3_server_notify(
     struct evpl                *evpl,
     struct evpl_http_agent     *agent,
@@ -165,12 +185,28 @@ s3_server_notify(
 {
     struct chimera_s3_request       *s3_request = notify_data;
     struct chimera_server_s3_thread *thread     = private_data;
+    int                              is_upload_part;
+    int                              is_complete_mpu;
+
+    is_upload_part  = s3_request->has_upload_id && s3_request->has_part_number;
+    is_complete_mpu = (request_type == EVPL_HTTP_REQUEST_TYPE_POST &&
+                       s3_request->has_upload_id);
 
     switch (notify_type) {
         case EVPL_HTTP_NOTIFY_RECEIVE_DATA:
             if (request_type == EVPL_HTTP_REQUEST_TYPE_PUT &&
                 s3_request->vfs_state == CHIMERA_S3_VFS_STATE_RECV) {
-                chimera_s3_put_recv(evpl, s3_request);
+                if (is_upload_part) {
+                    chimera_s3_upload_part_recv(evpl, s3_request);
+                } else {
+                    chimera_s3_put_recv(evpl, s3_request);
+                }
+            } else if (is_complete_mpu) {
+                /* Accumulate the client's part manifest. */
+                chimera_s3_complete_multipart_upload_recv(evpl, s3_request);
+            } else if (request_type == EVPL_HTTP_REQUEST_TYPE_POST) {
+                /* CreateMultipartUpload: body is empty in practice. */
+                s3_server_drain_body(evpl, s3_request);
             }
             break;
         case EVPL_HTTP_NOTIFY_RECEIVE_COMPLETE:
@@ -179,7 +215,17 @@ s3_server_notify(
 
             if (request_type == EVPL_HTTP_REQUEST_TYPE_PUT &&
                 s3_request->vfs_state == CHIMERA_S3_VFS_STATE_RECV) {
-                chimera_s3_put_recv(evpl, s3_request);
+                if (is_upload_part) {
+                    chimera_s3_upload_part_recv(evpl, s3_request);
+                } else {
+                    chimera_s3_put_recv(evpl, s3_request);
+                }
+            } else if (is_complete_mpu) {
+                chimera_s3_complete_multipart_upload_recv(evpl, s3_request);
+                /* Body fully in hand: parse + validate + assemble. */
+                chimera_s3_complete_multipart_upload_body_done(evpl, s3_request);
+            } else if (request_type == EVPL_HTTP_REQUEST_TYPE_POST) {
+                s3_server_drain_body(evpl, s3_request);
             }
 
             if (s3_request->vfs_state == CHIMERA_S3_VFS_STATE_SEND ||
@@ -237,20 +283,43 @@ chimera_s3_dispatch_callback(
             chimera_s3_get(evpl, thread, s3_request);
             break;
         case EVPL_HTTP_REQUEST_TYPE_GET:
-            if (s3_request->is_list) {
+            if (s3_request->has_uploads && s3_request->path_len == 0) {
+                chimera_s3_list_multipart_uploads(evpl, thread, s3_request);
+            } else if (s3_request->has_upload_id) {
+                chimera_s3_list_parts(evpl, thread, s3_request);
+            } else if (s3_request->is_list) {
                 chimera_s3_list(evpl, thread, s3_request);
             } else {
                 chimera_s3_get(evpl, thread, s3_request);
             }
             break;
         case EVPL_HTTP_REQUEST_TYPE_PUT:
-            chimera_s3_put(evpl, thread, s3_request);
+            if (s3_request->has_upload_id && s3_request->has_part_number) {
+                chimera_s3_upload_part(evpl, thread, s3_request);
+            } else {
+                chimera_s3_put(evpl, thread, s3_request);
+            }
+            break;
+        case EVPL_HTTP_REQUEST_TYPE_POST:
+            if (s3_request->has_uploads) {
+                chimera_s3_create_multipart_upload(evpl, thread, s3_request);
+            } else if (s3_request->has_upload_id) {
+                chimera_s3_complete_multipart_upload(evpl, thread, s3_request);
+            } else {
+                s3_request->status    = CHIMERA_S3_STATUS_NOT_IMPLEMENTED;
+                s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            }
             break;
         case EVPL_HTTP_REQUEST_TYPE_DELETE:
-            chimera_s3_delete(evpl, thread, s3_request);
+            if (s3_request->has_upload_id) {
+                chimera_s3_abort_multipart_upload(evpl, thread, s3_request);
+            } else {
+                chimera_s3_delete(evpl, thread, s3_request);
+            }
             break;
         default:
-            s3_request->status = CHIMERA_S3_STATUS_NOT_IMPLEMENTED;
+            s3_request->status    = CHIMERA_S3_STATUS_NOT_IMPLEMENTED;
+            s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
             break;
     } /* switch */
 
@@ -278,12 +347,17 @@ s3_server_dispatch(
 
     clock_gettime(CLOCK_MONOTONIC, &s3_request->start_time);
 
-    s3_request->status       = CHIMERA_S3_STATUS_OK;
-    s3_request->vfs_state    = CHIMERA_S3_VFS_STATE_INIT;
-    s3_request->http_state   = CHIMERA_S3_HTTP_STATE_INIT;
-    s3_request->io_pending   = 0;
-    s3_request->is_list      = 0;
-    s3_request->http_request = request;
+    s3_request->status             = CHIMERA_S3_STATUS_OK;
+    s3_request->vfs_state          = CHIMERA_S3_VFS_STATE_INIT;
+    s3_request->http_state         = CHIMERA_S3_HTTP_STATE_INIT;
+    s3_request->io_pending         = 0;
+    s3_request->is_list            = 0;
+    s3_request->has_uploads        = 0;
+    s3_request->has_upload_id      = 0;
+    s3_request->has_part_number    = 0;
+    s3_request->query_upload_idlen = 0;
+    s3_request->query_part_number  = 0;
+    s3_request->http_request       = request;
 
     *notify_callback = s3_server_notify;
     *notify_data     = s3_request;
@@ -385,50 +459,113 @@ s3_server_dispatch(
         }
     }
 
-    if (*s3_request->path == '?') {
-        const char *key_start, *value_start;
-        const char *p;
-        int         key_len, value_len;
+    {
+        const char *qmark = NULL;
+        if (s3_request->path_len > 0) {
+            qmark = memchr(s3_request->path, '?', s3_request->path_len);
+        }
+        if (qmark != NULL) {
+            const char *key_start, *value_start;
+            const char *p;
+            int         key_len, value_len;
+            /* Staging buffers; we don't know yet whether this is a LIST or a
+             * multipart request, and they share a union. */
+            char        prefix_buf[256];
+            int         prefix_len = 0;
+            int         max_keys   = 1000;
 
-        s3_request->is_list         = 1;
-        s3_request->list.prefix_len = 0;
-        s3_request->list.max_keys   = 1000;
+            p = qmark + 1;
 
-        p = s3_request->path + 1;
+            while (*p) {
+                key_start = p;
+                while (*p && *p != '=' && *p != '&') {
+                    p++;
+                }
+                key_len = p - key_start;
 
-        while (*p) {
-            key_start = p;
-            while (*p && *p != '=') {
-                p++;
+                if (*p == '=') {
+                    value_start = ++p;
+                    while (*p && *p != '&') {
+                        p++;
+                    }
+                    value_len = p - value_start;
+                } else {
+                    /* Bare key (no value): e.g. ?uploads */
+                    value_start = p;
+                    value_len   = 0;
+                }
+
+                if (key_len == 7 && memcmp(key_start, "uploads", 7) == 0) {
+                    s3_request->has_uploads = 1;
+                } else if (key_len == 8 && memcmp(key_start, "uploadId", 8) == 0) {
+                    int copy = value_len;
+                    if (copy > CHIMERA_S3_UPLOAD_ID_LEN) {
+                        copy = CHIMERA_S3_UPLOAD_ID_LEN;
+                    }
+                    memcpy(s3_request->query_upload_id, value_start, copy);
+                    s3_request->query_upload_id[copy] = '\0';
+                    s3_request->query_upload_idlen    = copy;
+                    s3_request->has_upload_id         = 1;
+                } else if (key_len == 10 && memcmp(key_start, "partNumber", 10) == 0) {
+                    s3_request->query_part_number = atoi(value_start);
+                    s3_request->has_part_number   = 1;
+                } else if (key_len == 6 && memcmp(key_start, "prefix", 6) == 0) {
+                    if (value_len > (int) sizeof(prefix_buf) - 1) {
+                        value_len = sizeof(prefix_buf) - 1;
+                    }
+                    memcpy(prefix_buf, value_start, value_len);
+                    prefix_buf[value_len] = '\0';
+                    prefix_len            = value_len;
+                } else if (key_len == 8 && memcmp(key_start, "max-keys", 8) == 0) {
+                    max_keys = atoi(value_start);
+                }
+
+                if (*p == '&') {
+                    p++;
+                }
             }
-            if (!*p) {
-                break;
-            }
 
-            value_start = ++p;
-            while (*p && *p != '&') {
-                p++;
-            }
-
-            key_len   = value_start - key_start - 1;
-            value_len = p - value_start;
-
-            if (key_len == 6 && memcmp(key_start, "prefix", 6) == 0) {
-                s3_request->list.prefix_len = value_len;
-                memcpy(s3_request->list.prefix, value_start, value_len);
-                s3_request->list.prefix[value_len] = '\0';
-            }
-
-            if (key_len == 8 && memcmp(key_start, "max-keys", 8) == 0) {
-                s3_request->list.max_keys = atoi(value_start);
-            }
-
-            if (*p) {
-                p++;
+            if (s3_request->has_uploads || s3_request->has_upload_id) {
+                /* Multipart request: strip query from path so handlers see the
+                 * raw key. Copy into request-owned storage so consumers can
+                 * treat it as a null-terminated string. */
+                int new_len = qmark - s3_request->path;
+                if (new_len >= (int) sizeof(s3_request->multipart.path_buf)) {
+                    new_len = sizeof(s3_request->multipart.path_buf) - 1;
+                }
+                memcpy(s3_request->multipart.path_buf, s3_request->path, new_len);
+                s3_request->multipart.path_buf[new_len] = '\0';
+                s3_request->path                        = s3_request->multipart.path_buf;
+                s3_request->path_len                    = new_len;
+                if (s3_request->has_upload_id) {
+                    memcpy(s3_request->multipart.upload_id,
+                           s3_request->query_upload_id,
+                           s3_request->query_upload_idlen + 1);
+                    s3_request->multipart.upload_idlen =
+                        s3_request->query_upload_idlen;
+                }
+                if (s3_request->has_part_number) {
+                    s3_request->multipart.part_number =
+                        s3_request->query_part_number;
+                }
+            } else if (qmark == s3_request->path) {
+                /* Path starts with '?': bucket-level LIST query. */
+                s3_request->is_list         = 1;
+                s3_request->list.prefix_len = prefix_len;
+                if (prefix_len > 0) {
+                    memcpy(s3_request->list.prefix, prefix_buf, prefix_len);
+                    s3_request->list.prefix[prefix_len] = '\0';
+                }
+                s3_request->list.max_keys = max_keys;
+                chimera_s3_sterilize_path(s3_request,
+                                          s3_request->list.prefix,
+                                          s3_request->list.prefix_len);
+            } else {
+                /* Path has '?' mid-string but no recognized subresource: strip
+                 * the query suffix and treat as a regular object request. */
+                s3_request->path_len = qmark - s3_request->path;
             }
         }
-
-        chimera_s3_sterilize_path(s3_request, s3_request->list.prefix, s3_request->list.prefix_len);
     }
 
     range_str = evpl_http_request_header(request, "Range");
@@ -586,6 +723,8 @@ s3_server_init(
     /* Create S3 credential cache with 64 buckets and 1 hour TTL */
     shared->cred_cache = chimera_s3_cred_cache_create(64, 3600);
 
+    shared->multipart_table = chimera_s3_multipart_table_create(256);
+
     /* Initialize root credentials for now - TODO: proper credential mapping */
     chimera_vfs_cred_init_unix(&shared->cred, 0, 0, 0, NULL);
 
@@ -611,6 +750,8 @@ s3_server_destroy(void *data)
     s3_bucket_map_destroy(shared->bucket_map);
 
     chimera_s3_cred_cache_destroy(shared->cred_cache);
+
+    chimera_s3_multipart_table_destroy(shared->multipart_table);
 
     free(shared->config);
 

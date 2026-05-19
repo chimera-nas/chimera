@@ -718,7 +718,8 @@ canonicalize_query_string(
     /* Sort parameters alphabetically */
     qsort(params, param_count, sizeof(char *), query_param_compare);
 
-    /* Reconstruct sorted query string */
+    /* Reconstruct sorted query string. Per AWS V4 spec: bare keys (no value)
+     * must be canonicalized as "key=". */
     for (int i = 0; i < param_count && offset < out_max - 1; i++) {
         if (i > 0) {
             out[offset++] = '&';
@@ -729,6 +730,9 @@ canonicalize_query_string(
         }
         memcpy(out + offset, params[i], len);
         offset += len;
+        if (memchr(params[i], '=', len) == NULL && offset < out_max - 1) {
+            out[offset++] = '=';
+        }
     }
     out[offset] = '\0';
 

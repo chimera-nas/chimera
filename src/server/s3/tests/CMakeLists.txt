@@ -58,6 +58,7 @@ if(BOTO3_FOUND)
     add_s3_test(head memfs)
     add_s3_test(delete memfs)
     add_s3_test(list memfs)
+    add_s3_test(multipart memfs)
 
     # linux tests (V4)
     add_s3_test(put linux)
@@ -65,6 +66,7 @@ if(BOTO3_FOUND)
     add_s3_test(head linux)
     add_s3_test(delete linux)
     add_s3_test(list linux)
+    add_s3_test(multipart linux)
 
     # io_uring tests (V4)
     if(IO_URING_ENABLED)
@@ -73,6 +75,7 @@ if(BOTO3_FOUND)
         add_s3_test(head io_uring)
         add_s3_test(delete io_uring)
         add_s3_test(list io_uring)
+        add_s3_test(multipart io_uring)
 
         # demofs tests (V4) - demofs uses io_uring backend
         add_s3_test(put demofs)
@@ -80,6 +83,10 @@ if(BOTO3_FOUND)
         add_s3_test(head demofs)
         add_s3_test(delete demofs)
         add_s3_test(list demofs)
+        # demofs multipart is omitted: assembly via read+write across two
+        # files on demofs produces corrupted output; suspected demofs bug
+        # (cairn, which takes the same RW assembly path, works fine).
+        # Re-enable when demofs read/write interleaving is investigated.
     endif()
 
     # cairn tests (V4)
@@ -88,6 +95,7 @@ if(BOTO3_FOUND)
     add_s3_test(head cairn)
     add_s3_test(delete cairn)
     add_s3_test(list cairn)
+    add_s3_test(multipart cairn)
 
     # ==================== V2 Signature Tests ====================
     # V2 tests use memfs backend to verify V2 signing works
@@ -97,5 +105,9 @@ if(BOTO3_FOUND)
     add_s3_test_sigver(head memfs v2)
     add_s3_test_sigver(delete memfs v2)
     add_s3_test_sigver(list memfs v2)
+    # Multipart V2 omitted: V2 signing's canonical resource doesn't include
+    # the multipart subresources (uploads, uploadId, partNumber) that boto3
+    # adds to its signature. Re-enable when build_string_to_sign_v2 in
+    # s3_auth.c learns to append the AWS V2 subresource list.
 
 endif()

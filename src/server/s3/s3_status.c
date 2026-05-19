@@ -32,6 +32,20 @@ chimera_s3_status_to_string(enum chimera_s3_status status)
             return "Signature Does Not Match";
         case CHIMERA_S3_STATUS_MISSING_AUTH_HEADER:
             return "Missing Security Header";
+        case CHIMERA_S3_STATUS_NO_SUCH_UPLOAD:
+            return "No Such Upload";
+        case CHIMERA_S3_STATUS_INVALID_PART:
+            return "Invalid Part";
+        case CHIMERA_S3_STATUS_INVALID_PART_ORDER:
+            return "Invalid Part Order";
+        case CHIMERA_S3_STATUS_INVALID_PART_NUMBER:
+            return "Invalid Part Number";
+        case CHIMERA_S3_STATUS_ENTITY_TOO_SMALL:
+            return "Entity Too Small";
+        case CHIMERA_S3_STATUS_MALFORMED_XML:
+            return "Malformed XML";
+        case CHIMERA_S3_STATUS_NO_CONTENT:
+            return "No Content";
         default:
             return "Internal Error";
     } /* switch */
@@ -80,6 +94,40 @@ chimera_s3_prepare_error_response(
         case CHIMERA_S3_STATUS_MISSING_AUTH_HEADER:
             bp  += sprintf(bp, "  <Code>MissingSecurityHeader</Code>\n");
             bp  += sprintf(bp, "  <Message>Your request is missing a required header.</Message>\n");
+            code = 400;
+            break;
+        case CHIMERA_S3_STATUS_NO_SUCH_UPLOAD:
+            bp  += sprintf(bp, "  <Code>NoSuchUpload</Code>\n");
+            bp  += sprintf(bp, "  <Message>The specified upload does not exist.</Message>\n");
+            code = 404;
+            break;
+        case CHIMERA_S3_STATUS_INVALID_PART:
+            bp  += sprintf(bp, "  <Code>InvalidPart</Code>\n");
+            bp  += sprintf(bp, "  <Message>One or more of the specified parts could not be found.</Message>\n");
+            code = 400;
+            break;
+        case CHIMERA_S3_STATUS_INVALID_PART_ORDER:
+            bp += sprintf(bp, "  <Code>InvalidPartOrder</Code>\n");
+            bp += sprintf(bp,
+                          "  <Message>The list of parts was not in ascending order. Parts must be in ascending order by part number.</Message>\n");
+            code = 400;
+            break;
+        case CHIMERA_S3_STATUS_INVALID_PART_NUMBER:
+            bp += sprintf(bp, "  <Code>InvalidArgument</Code>\n");
+            bp += sprintf(bp,
+                          "  <Message>Part number must be an integer between 1 and 10000, inclusive.</Message>\n");
+            code = 400;
+            break;
+        case CHIMERA_S3_STATUS_ENTITY_TOO_SMALL:
+            bp += sprintf(bp, "  <Code>EntityTooSmall</Code>\n");
+            bp += sprintf(bp,
+                          "  <Message>Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part.</Message>\n");
+            code = 400;
+            break;
+        case CHIMERA_S3_STATUS_MALFORMED_XML:
+            bp += sprintf(bp, "  <Code>MalformedXML</Code>\n");
+            bp += sprintf(bp,
+                          "  <Message>The XML you provided was not well-formed or did not validate against our published schema.</Message>\n");
             code = 400;
             break;
         default:

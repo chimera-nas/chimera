@@ -19,6 +19,7 @@ import tempfile
 import time
 
 import boto3
+import botocore.exceptions
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
@@ -363,12 +364,308 @@ def test_list(client, bucket):
     print("LIST tests passed!")
 
 
+def _multipart_upload_and_verify(client, bucket, key, part_sizes):
+    """Helper: run a full multipart upload and verify the assembled bytes
+    match the concatenation of the part bodies. Exercises whichever
+    backend assembly path (move/copy/read+write) is active."""
+    init = client.create_multipart_upload(Bucket=bucket, Key=key)
+    upload_id = init['UploadId']
+    assert upload_id, "no UploadId returned"
+
+    parts = []
+    expected = b''
+    for part_number, size in enumerate(part_sizes, start=1):
+        # Each part filled with a distinct byte so a misordered or
+        # truncated assembly is immediately visible.
+        body = bytes([part_number]) * size
+        expected += body
+        resp = client.upload_part(
+            Bucket=bucket, Key=key,
+            PartNumber=part_number, UploadId=upload_id,
+            Body=body,
+        )
+        parts.append({'PartNumber': part_number, 'ETag': resp['ETag']})
+
+    client.complete_multipart_upload(
+        Bucket=bucket, Key=key, UploadId=upload_id,
+        MultipartUpload={'Parts': parts},
+    )
+
+    head = client.head_object(Bucket=bucket, Key=key)
+    assert head['ContentLength'] == len(expected), \
+        f"size mismatch: expected {len(expected)}, got {head['ContentLength']}"
+
+    resp = client.get_object(Bucket=bucket, Key=key)
+    actual = resp['Body'].read()
+    assert actual == expected, \
+        f"content mismatch: {len(actual)} bytes, first diff at offset " \
+        f"{next((i for i, (a, b) in enumerate(zip(actual, expected)) if a != b), -1)}"
+
+    return upload_id
+
+
+def test_multipart(client, bucket):
+    """Test multipart upload operations end-to-end.
+
+    Verifies the full upload lifecycle (Create / UploadPart / ListParts /
+    ListMultipartUploads / Complete / Abort) and that the assembled object
+    matches the concatenation of part bodies. The same test exercises
+    different VFS assembly paths depending on backend capabilities:
+    move_range (memfs), copy_range (linux/io_uring), or read+write
+    (cairn/demofs).
+    """
+    print("Testing multipart upload operations...")
+
+    key = 'mpdir/myobject'
+    part_size = 5 * 1024 * 1024  # 5MiB: boto3's per-part minimum
+    part_count = 3
+
+    # Initiate, upload, list, complete — also verifies final bytes match
+    init = client.create_multipart_upload(Bucket=bucket, Key=key)
+    upload_id = init['UploadId']
+    assert upload_id, "no UploadId returned"
+    print(f"  CreateMultipartUpload -> {upload_id}")
+
+    parts = []
+    expected = b''
+    for part_number in range(1, part_count + 1):
+        body = bytes([part_number]) * part_size
+        expected += body
+        resp = client.upload_part(
+            Bucket=bucket, Key=key,
+            PartNumber=part_number, UploadId=upload_id,
+            Body=body,
+        )
+        parts.append({'PartNumber': part_number, 'ETag': resp['ETag']})
+        print(f"  UploadPart #{part_number} ({part_size} bytes) -> {resp['ETag']}")
+
+    listed = client.list_parts(Bucket=bucket, Key=key, UploadId=upload_id)
+    assert len(listed.get('Parts', [])) == part_count
+    print(f"  ListParts -> {part_count} parts visible")
+
+    uploads = client.list_multipart_uploads(Bucket=bucket)
+    upload_ids = [u['UploadId'] for u in uploads.get('Uploads', [])]
+    assert upload_id in upload_ids
+    print(f"  ListMultipartUploads -> {len(upload_ids)} in-progress upload(s)")
+
+    complete = client.complete_multipart_upload(
+        Bucket=bucket, Key=key, UploadId=upload_id,
+        MultipartUpload={'Parts': parts},
+    )
+    print(f"  CompleteMultipartUpload -> {complete.get('ETag', '')}")
+
+    head = client.head_object(Bucket=bucket, Key=key)
+    assert head['ContentLength'] == len(expected), \
+        f"size mismatch: expected {len(expected)}, got {head['ContentLength']}"
+    print(f"  HEAD final object -> {head['ContentLength']} bytes")
+
+    resp = client.get_object(Bucket=bucket, Key=key)
+    actual = resp['Body'].read()
+    assert actual == expected, "assembled content does not match parts"
+    print(f"  GET final object -> {len(actual)} bytes, content matches")
+
+    # After Complete the upload disappears from ListMultipartUploads
+    uploads = client.list_multipart_uploads(Bucket=bucket)
+    upload_ids = [u['UploadId'] for u in uploads.get('Uploads', [])]
+    assert upload_id not in upload_ids
+
+    # Multi-part roundtrip with varied sizes (block-aligned to keep
+    # memfs move_range happy; backends without alignment requirements
+    # are not picky).
+    _multipart_upload_and_verify(
+        client, bucket, 'mpdir/varied',
+        part_sizes=[5 * 1024 * 1024, 6 * 1024 * 1024, 5 * 1024 * 1024],
+    )
+    print("  Varied-size multipart roundtrip -> content matches")
+
+    # Abort path: starts an upload, uploads a part, aborts, then verifies
+    # nothing was materialized
+    init = client.create_multipart_upload(Bucket=bucket, Key='mpdir/aborted')
+    abort_id = init['UploadId']
+    client.upload_part(
+        Bucket=bucket, Key='mpdir/aborted',
+        PartNumber=1, UploadId=abort_id,
+        Body=b'x' * part_size,
+    )
+    client.abort_multipart_upload(
+        Bucket=bucket, Key='mpdir/aborted', UploadId=abort_id,
+    )
+    print(f"  AbortMultipartUpload -> ok")
+    try:
+        client.head_object(Bucket=bucket, Key='mpdir/aborted')
+        raise AssertionError("aborted upload should not have created an object")
+    except ClientError as e:
+        if e.response['Error']['Code'] != '404':
+            raise
+
+    # NoSuchUpload error path
+    try:
+        client.list_parts(
+            Bucket=bucket, Key=key,
+            UploadId='0' * 32,
+        )
+        raise AssertionError("ListParts on bogus upload should fail")
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'NoSuchUpload':
+            raise
+    print("  ListParts on nonexistent upload -> NoSuchUpload (ok)")
+
+    # --- Manifest validation: subset / wrong-etag / out-of-order / missing ---
+
+    # Subset completion: upload 3 parts, complete with [1, 3] only.
+    # The result must contain only parts 1 and 3 concatenated.
+    init = client.create_multipart_upload(Bucket=bucket, Key='mpdir/subset')
+    sub_id = init['UploadId']
+    sub_parts = []
+    sub_bodies = []
+    for n in range(1, 4):
+        body = bytes([n]) * part_size
+        sub_bodies.append(body)
+        r = client.upload_part(Bucket=bucket, Key='mpdir/subset',
+                               PartNumber=n, UploadId=sub_id, Body=body)
+        sub_parts.append({'PartNumber': n, 'ETag': r['ETag']})
+    client.complete_multipart_upload(
+        Bucket=bucket, Key='mpdir/subset', UploadId=sub_id,
+        MultipartUpload={'Parts': [sub_parts[0], sub_parts[2]]},
+    )
+    head = client.head_object(Bucket=bucket, Key='mpdir/subset')
+    assert head['ContentLength'] == 2 * part_size, \
+        f"subset: expected {2*part_size}, got {head['ContentLength']}"
+    actual = client.get_object(Bucket=bucket, Key='mpdir/subset')['Body'].read()
+    assert actual == sub_bodies[0] + sub_bodies[2], \
+        "subset: assembled content does not match parts 1+3"
+    print("  Subset completion (parts [1,3] of 3) -> content matches")
+
+    # Wrong ETag: upload should be rejected, upload remains for retry.
+    init = client.create_multipart_upload(Bucket=bucket, Key='mpdir/wrongetag')
+    we_id = init['UploadId']
+    we_parts = []
+    for n in range(1, 3):
+        r = client.upload_part(Bucket=bucket, Key='mpdir/wrongetag',
+                               PartNumber=n, UploadId=we_id,
+                               Body=bytes([n]) * part_size)
+        we_parts.append({'PartNumber': n, 'ETag': r['ETag']})
+    bad_parts = list(we_parts)
+    bad_parts[1] = {'PartNumber': 2, 'ETag': '"' + 'f' * 32 + '"'}
+    try:
+        client.complete_multipart_upload(
+            Bucket=bucket, Key='mpdir/wrongetag', UploadId=we_id,
+            MultipartUpload={'Parts': bad_parts},
+        )
+        raise AssertionError("Complete with wrong ETag should fail")
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'InvalidPart':
+            raise
+    # Upload must still be listable (retry possible)
+    listed = client.list_parts(Bucket=bucket, Key='mpdir/wrongetag',
+                               UploadId=we_id)
+    assert len(listed.get('Parts', [])) == 2, "upload should survive wrong-ETag rejection"
+    client.abort_multipart_upload(Bucket=bucket, Key='mpdir/wrongetag',
+                                  UploadId=we_id)
+    print("  Wrong ETag -> InvalidPart, upload retained (ok)")
+
+    # Out-of-order parts in the manifest.
+    init = client.create_multipart_upload(Bucket=bucket, Key='mpdir/order')
+    o_id = init['UploadId']
+    o_parts = []
+    for n in range(1, 3):
+        r = client.upload_part(Bucket=bucket, Key='mpdir/order',
+                               PartNumber=n, UploadId=o_id,
+                               Body=bytes([n]) * part_size)
+        o_parts.append({'PartNumber': n, 'ETag': r['ETag']})
+    try:
+        client.complete_multipart_upload(
+            Bucket=bucket, Key='mpdir/order', UploadId=o_id,
+            MultipartUpload={'Parts': [o_parts[1], o_parts[0]]},
+        )
+        raise AssertionError("Complete with out-of-order parts should fail")
+    except ClientError as e:
+        # boto3 sometimes sorts internally; either InvalidPartOrder or
+        # silently sorted are both acceptable. If sorted, no error -> fail loud.
+        if e.response['Error']['Code'] != 'InvalidPartOrder':
+            raise
+        print("  Out-of-order parts -> InvalidPartOrder (ok)")
+    client.abort_multipart_upload(Bucket=bucket, Key='mpdir/order',
+                                  UploadId=o_id)
+
+    # Reference a nonexistent part number.
+    init = client.create_multipart_upload(Bucket=bucket, Key='mpdir/missing')
+    m_id = init['UploadId']
+    r1 = client.upload_part(Bucket=bucket, Key='mpdir/missing',
+                            PartNumber=1, UploadId=m_id,
+                            Body=b'x' * part_size)
+    try:
+        client.complete_multipart_upload(
+            Bucket=bucket, Key='mpdir/missing', UploadId=m_id,
+            MultipartUpload={'Parts': [
+                {'PartNumber': 1, 'ETag': r1['ETag']},
+                {'PartNumber': 7, 'ETag': '"' + 'a' * 32 + '"'},
+            ]},
+        )
+        raise AssertionError("Complete with nonexistent part should fail")
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'InvalidPart':
+            raise
+    client.abort_multipart_upload(Bucket=bucket, Key='mpdir/missing',
+                                  UploadId=m_id)
+    print("  Nonexistent part_number -> InvalidPart (ok)")
+
+    # EntityTooSmall: two 1-MiB parts, complete with both.
+    small_size = 1 * 1024 * 1024
+    init = client.create_multipart_upload(Bucket=bucket, Key='mpdir/small')
+    s_id = init['UploadId']
+    s_parts = []
+    for n in range(1, 3):
+        r = client.upload_part(Bucket=bucket, Key='mpdir/small',
+                               PartNumber=n, UploadId=s_id,
+                               Body=b'q' * small_size)
+        s_parts.append({'PartNumber': n, 'ETag': r['ETag']})
+    try:
+        client.complete_multipart_upload(
+            Bucket=bucket, Key='mpdir/small', UploadId=s_id,
+            MultipartUpload={'Parts': s_parts},
+        )
+        raise AssertionError("Complete with sub-5MiB non-final part should fail")
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'EntityTooSmall':
+            raise
+    client.abort_multipart_upload(Bucket=bucket, Key='mpdir/small',
+                                  UploadId=s_id)
+    print("  Sub-5MiB non-final part -> EntityTooSmall (ok)")
+
+    # Part-number out of range. boto3 passes the int through to the URL
+    # query string; the server is the one that rejects.
+    init = client.create_multipart_upload(Bucket=bucket, Key='mpdir/pnrange')
+    pn_id = init['UploadId']
+    for bad_pn in (0, 10001):
+        try:
+            client.upload_part(Bucket=bucket, Key='mpdir/pnrange',
+                               PartNumber=bad_pn, UploadId=pn_id,
+                               Body=b'x' * 1024)
+            raise AssertionError(f"PartNumber={bad_pn} should fail")
+        except ClientError as e:
+            code = e.response['Error']['Code']
+            if code != 'InvalidArgument':
+                raise AssertionError(
+                    f"PartNumber={bad_pn}: expected InvalidArgument, got {code}")
+        except botocore.exceptions.ParamValidationError:
+            # boto3 may filter client-side for some out-of-range values; that's
+            # acceptable evidence that the spec is honored end-to-end.
+            pass
+    client.abort_multipart_upload(Bucket=bucket, Key='mpdir/pnrange',
+                                  UploadId=pn_id)
+    print("  PartNumber=0 and PartNumber=10001 rejected (ok)")
+
+    print("multipart tests passed!")
+
+
 TESTS = {
     'put': test_put,
     'get': test_get,
     'head': test_head,
     'delete': test_delete,
     'list': test_list,
+    'multipart': test_multipart,
 }
 
 
