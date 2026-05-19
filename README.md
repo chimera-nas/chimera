@@ -35,10 +35,99 @@ The project uses CMake and there is a makefile wrapper at the root of the tree f
 
 # Using Docker
 
-The latest chimera build is published by CI to ghcr.io:
+The latest chimera build is published by CI to ghcr.io. The image ships with a
+default config that exports two filesystems:
+
+* `/export` — `linux` backend, bound to the container path `/export`. Mount a
+  host directory there to serve files from disk.
+* `/memfs` — `memfs` backend, an in-memory filesystem useful for smoke tests
+  and benchmarking.
+
+Each is published as an NFS export, an SMB share, and an S3 bucket.
+
+> **Warning:** Chimera binds the standard NFS, SMB, and Sun RPC portmap ports.
+> If the host is already running `rpcbind`, `nfs-server`, `smbd`, or any other
+> service on ports 111, 2049, or 445, either stop them or remap chimera to
+> different host ports (e.g. `-p 12049:2049`).
 
 ```bash
-docker run -v /path/to/config:/etc/chimera.json ghcr.io/chimera-nas/chimera:latest
+mkdir -p ./export
+docker run --rm -it \
+    -v "$(pwd)/export":/export \
+    -p 111:111 -p 2049:2049 \
+    -p 445:445 \
+    -p 5000:5000 \
+    -p 8080:8080 \
+    -p 9000:9000 \
+    ghcr.io/chimera-nas/chimera:latest
+```
+
+| Port | Protocol |
+|------|----------|
+| 111  | Sun RPC portmap (required for NFSv3 mounts) |
+| 2049 | NFSv3 / NFSv4 |
+| 445  | SMB2 / SMB3 |
+| 5000 | S3 |
+| 8080 | Admin REST API |
+| 9000 | Prometheus metrics |
+
+From the host:
+
+```bash
+mount -t nfs localhost:/export /mnt/export
+mount -t nfs localhost:/memfs  /mnt/memfs
+
+mount -t cifs //localhost/export /mnt/export -o guest
+mount -t cifs //localhost/memfs  /mnt/memfs  -o guest
+
+aws --endpoint-url http://localhost:5000 s3 ls s3://export/
+aws --endpoint-url http://localhost:5000 s3 ls s3://memfs/
+
+curl http://localhost:8080/api/v1/exports
+curl http://localhost:9000/metrics
+```
+
+## Overriding the bundled config
+
+To run with a custom configuration, bind-mount your own file over
+`/usr/local/etc/chimera.json`:
+
+```bash
+docker run --rm -it \
+    -v "$(pwd)/chimera.json":/usr/local/etc/chimera.json:ro \
+    -v "$(pwd)/export":/export \
+    -p 111:111 -p 2049:2049 -p 445:445 -p 5000:5000 -p 8080:8080 -p 9000:9000 \
+    ghcr.io/chimera-nas/chimera:latest
+```
+
+A minimal example that exports a single in-memory filesystem over NFS at
+`/mnt`, with RDMA enabled:
+
+```json
+{
+    "server": {
+        "threads": 32,
+        "delegation_threads": 32,
+        "preallocate_slabs": 8,
+        "preallocate_threads": 4,
+        "max_open_files": 262144,
+        "external_portmap": 0,
+        "rdma": true,
+        "rdma_hostname": "0.0.0.0",
+        "rdma_port": 20049
+    },
+    "mounts": {
+        "memfs": {
+            "module": "memfs",
+            "path": "/"
+        }
+    },
+    "exports": {
+        "/mnt": {
+            "path": "/memfs"
+        }
+    }
+}
 ```
 
 The Dockerfile used to generate this image is in the root of the tree.
@@ -104,3 +193,7 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
     }
 }
 ```
+
+# Questions or feedback?
+
+Come say hi on [Discord](https://discord.gg/hnRkvQFecq) — it's the best place to ask questions, share what you're building, or follow along with development.
