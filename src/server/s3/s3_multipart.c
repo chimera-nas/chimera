@@ -821,6 +821,17 @@ chimera_s3_upload_part(
     const char                         *dirpath = request->path;
     int                                 dirpathlen;
 
+    /* AWS spec: part numbers must be in [1, 10000]. */
+    if (request->multipart.part_number < 1 ||
+        request->multipart.part_number > 10000) {
+        request->status    = CHIMERA_S3_STATUS_INVALID_PART_NUMBER;
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
+    }
+
     upload = chimera_s3_multipart_table_lookup(
         shared->multipart_table,
         request->multipart.upload_id,
@@ -870,7 +881,257 @@ chimera_s3_upload_part(
         request);
 } /* chimera_s3_upload_part */
 
-/* ----- CompleteMultipartUpload ----- */
+/* ----- CompleteMultipartUpload body accumulation + parser ----- */
+
+#define CHIMERA_S3_MP_BODY_HARD_CAP (16 * 1024 * 1024)
+#define CHIMERA_S3_MP_MIN_PART_SIZE (5 * 1024 * 1024)
+#define CHIMERA_S3_MP_BODY_OVERFLOW (-1)
+
+struct chimera_s3_client_part {
+    int  part_number;
+    char etag[80]; /* with surrounding quotes */
+};
+
+void
+chimera_s3_complete_multipart_upload_recv(
+    struct evpl               *evpl,
+    struct chimera_s3_request *request)
+{
+    struct evpl_iovec iov[CHIMERA_S3_IOV_MAX];
+    uint64_t          avail, total;
+    int               niov, i;
+
+    while ((avail = evpl_http_request_get_data_avail(request->http_request)) > 0) {
+        niov = evpl_http_request_get_datav(evpl, request->http_request,
+                                           iov, avail);
+        total = 0;
+        for (i = 0; i < niov; i++) {
+            total += iov[i].length;
+        }
+
+        if (request->multipart.body_len == CHIMERA_S3_MP_BODY_OVERFLOW) {
+            /* Already over the hard cap; keep draining to release iovs. */
+        } else if (request->multipart.body_len + total > CHIMERA_S3_MP_BODY_HARD_CAP) {
+            /* Body too large; mark and drain remainder. */
+            free(request->multipart.body_buf);
+            request->multipart.body_buf = NULL;
+            request->multipart.body_cap = 0;
+            request->multipart.body_len = CHIMERA_S3_MP_BODY_OVERFLOW;
+        } else {
+            if (request->multipart.body_len + total > request->multipart.body_cap) {
+                int new_cap = request->multipart.body_cap ?
+                    request->multipart.body_cap * 2 : 4096;
+                while ((uint64_t) new_cap < request->multipart.body_len + total) {
+                    new_cap *= 2;
+                }
+                request->multipart.body_buf = realloc(request->multipart.body_buf,
+                                                      new_cap);
+                request->multipart.body_cap = new_cap;
+            }
+            for (i = 0; i < niov; i++) {
+                memcpy(request->multipart.body_buf + request->multipart.body_len,
+                       iov[i].data, iov[i].length);
+                request->multipart.body_len += iov[i].length;
+            }
+        }
+
+        evpl_iovecs_release(evpl, iov, niov);
+    }
+} /* chimera_s3_complete_multipart_upload_recv */
+
+/* Locate `tag` between [start, end) and return pointer past its end. */
+static const char *
+chimera_s3_xml_find(
+    const char *start,
+    const char *end,
+    const char *tag)
+{
+    size_t tag_len = strlen(tag);
+
+    if ((size_t) (end - start) < tag_len) {
+        return NULL;
+    }
+    for (const char *p = start; p <= end - tag_len; p++) {
+        if (memcmp(p, tag, tag_len) == 0) {
+            return p + tag_len;
+        }
+    }
+    return NULL;
+} /* chimera_s3_xml_find */
+
+/*
+ * Parse a CompleteMultipartUpload body into an array of client_parts.
+ * Caller frees *r_parts. Returns CHIMERA_S3_STATUS_OK or MALFORMED_XML.
+ */
+static enum chimera_s3_status
+chimera_s3_parse_complete_body(
+    const char                     *body,
+    int                             body_len,
+    struct chimera_s3_client_part **r_parts,
+    int                            *r_n_parts)
+{
+    const char *end = body + body_len;
+    const char *cursor;
+    struct chimera_s3_client_part *parts = NULL;
+    int n_parts = 0;
+    int cap     = 0;
+
+    *r_parts   = NULL;
+    *r_n_parts = 0;
+
+    cursor = body;
+
+    while (cursor < end) {
+        const char *part_open = chimera_s3_xml_find(cursor, end, "<Part>");
+        const char *part_close;
+        const char *pn_open, *pn_close, *etag_open, *etag_close;
+
+        if (!part_open) {
+            break;
+        }
+        part_close = chimera_s3_xml_find(part_open, end, "</Part>");
+        if (!part_close) {
+            free(parts);
+            return CHIMERA_S3_STATUS_MALFORMED_XML;
+        }
+
+        pn_open    = chimera_s3_xml_find(part_open, part_close, "<PartNumber>");
+        pn_close   = pn_open ? chimera_s3_xml_find(pn_open, part_close, "</PartNumber>") : NULL;
+        etag_open  = chimera_s3_xml_find(part_open, part_close, "<ETag>");
+        etag_close = etag_open ? chimera_s3_xml_find(etag_open, part_close, "</ETag>") : NULL;
+
+        if (!pn_open || !pn_close || !etag_open || !etag_close) {
+            free(parts);
+            return CHIMERA_S3_STATUS_MALFORMED_XML;
+        }
+
+        if (n_parts == cap) {
+            cap = cap ? cap * 2 : 16;
+            if (cap > 10000) {
+                cap = 10000;
+            }
+            parts = realloc(parts, cap * sizeof(*parts));
+        }
+        if (n_parts >= 10000) {
+            free(parts);
+            return CHIMERA_S3_STATUS_MALFORMED_XML;
+        }
+
+        /* PartNumber: digits between pn_open and pn_close - strlen("</PartNumber>") */
+        {
+            const char *pn_value_end = pn_close - strlen("</PartNumber>");
+            int pn                   = 0;
+            const char *p            = pn_open;
+
+            while (p < pn_value_end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) {
+                p++;
+            }
+            while (p < pn_value_end && *p >= '0' && *p <= '9') {
+                pn = pn * 10 + (*p - '0');
+                p++;
+            }
+            parts[n_parts].part_number = pn;
+        }
+
+        /* ETag: copy verbatim (keep quotes) */
+        {
+            const char *etag_value_end = etag_close - strlen("</ETag>");
+            int len;
+            const char *p = etag_open;
+
+            while (p < etag_value_end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) {
+                p++;
+            }
+            len = etag_value_end - p;
+            while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t' ||
+                               p[len - 1] == '\n' || p[len - 1] == '\r')) {
+                len--;
+            }
+            if (len >= (int) sizeof(parts[n_parts].etag)) {
+                free(parts);
+                return CHIMERA_S3_STATUS_MALFORMED_XML;
+            }
+            memcpy(parts[n_parts].etag, p, len);
+            parts[n_parts].etag[len] = '\0';
+        }
+
+        n_parts++;
+        cursor = part_close;
+    }
+
+    *r_parts   = parts;
+    *r_n_parts = n_parts;
+    return CHIMERA_S3_STATUS_OK;
+} /* chimera_s3_parse_complete_body */
+
+/*
+ * Validate the client manifest against the upload's part list.
+ *
+ * Populates *r_server_parts with pointers (in client order) to the matched
+ * server-side parts on success. Caller frees that array. upload->lock must
+ * be held by caller.
+ */
+static enum chimera_s3_status
+chimera_s3_validate_complete_manifest(
+    const struct chimera_s3_client_part *client_parts,
+    int                                  n_client_parts,
+    struct chimera_s3_multipart_upload  *upload,
+    struct chimera_s3_part            ***r_server_parts)
+{
+    struct chimera_s3_part **out;
+    int prev_pn = 0;
+
+    *r_server_parts = NULL;
+
+    if (n_client_parts == 0) {
+        return CHIMERA_S3_STATUS_MALFORMED_XML;
+    }
+
+    out = calloc(n_client_parts, sizeof(*out));
+
+    for (int i = 0; i < n_client_parts; i++) {
+        struct chimera_s3_part *sp;
+        char server_etag[80];
+
+        /* Ascending part-number order. */
+        if (client_parts[i].part_number <= prev_pn) {
+            free(out);
+            return CHIMERA_S3_STATUS_INVALID_PART_ORDER;
+        }
+        prev_pn = client_parts[i].part_number;
+
+        /* Locate matching server part. */
+        for (sp = upload->parts; sp; sp = sp->next) {
+            if (sp->part_number == client_parts[i].part_number) {
+                break;
+            }
+        }
+        if (!sp) {
+            free(out);
+            return CHIMERA_S3_STATUS_INVALID_PART;
+        }
+
+        /* ETag must match what the server returned for this part. */
+        chimera_s3_mp_format_etag(server_etag, sizeof(server_etag), sp->etag);
+        if (strcmp(server_etag, client_parts[i].etag) != 0) {
+            free(out);
+            return CHIMERA_S3_STATUS_INVALID_PART;
+        }
+
+        /* EntityTooSmall: every non-final part must be >= 5 MiB. */
+        if (i < n_client_parts - 1 && sp->size < CHIMERA_S3_MP_MIN_PART_SIZE) {
+            free(out);
+            return CHIMERA_S3_STATUS_ENTITY_TOO_SMALL;
+        }
+
+        out[i] = sp;
+    }
+
+    *r_server_parts = out;
+    return CHIMERA_S3_STATUS_OK;
+} /* chimera_s3_validate_complete_manifest */
+
+/* ----- CompleteMultipartUpload assembly ----- */
 
 static void
 chimera_s3_complete_send_response(
@@ -921,7 +1182,8 @@ struct chimera_s3_complete_ctx {
     struct chimera_s3_multipart_upload *upload;
     int                                 part_count;
     uint64_t                            combined_etag[2];
-    struct chimera_s3_part             *current_part;
+    struct chimera_s3_part            **client_parts; /* pointers into upload->parts */
+    int                                 client_idx;
     int64_t                             write_offset;
     int64_t                             part_offset;
     enum chimera_s3_assemble_mode       assemble_mode;
@@ -944,8 +1206,8 @@ static void chimera_s3_complete_finish_common(
 static void
 chimera_s3_complete_assemble_done_part(struct chimera_s3_complete_ctx *ctx)
 {
-    ctx->current_part = ctx->current_part->next;
-    ctx->part_offset  = 0;
+    ctx->client_idx++;
+    ctx->part_offset = 0;
     chimera_s3_complete_assemble_next(ctx);
 } /* chimera_s3_complete_assemble_done_part */
 
@@ -964,7 +1226,7 @@ chimera_s3_complete_move_callback(
         return;
     }
 
-    ctx->write_offset += ctx->current_part->size - ctx->part_offset;
+    ctx->write_offset += ctx->client_parts[ctx->client_idx]->size - ctx->part_offset;
     chimera_s3_complete_assemble_done_part(ctx);
 } /* chimera_s3_complete_move_callback */
 
@@ -986,7 +1248,7 @@ chimera_s3_complete_copy_callback(
     ctx->write_offset += length;
     ctx->part_offset  += length;
 
-    if (ctx->part_offset >= ctx->current_part->size) {
+    if (ctx->part_offset >= ctx->client_parts[ctx->client_idx]->size) {
         chimera_s3_complete_assemble_done_part(ctx);
     } else {
         /* Short copy: continue with the same part. */
@@ -1018,7 +1280,7 @@ chimera_s3_complete_rw_write_callback(
     ctx->write_offset += length;
     ctx->part_offset  += length;
 
-    if (ctx->part_offset >= ctx->current_part->size) {
+    if (ctx->part_offset >= ctx->client_parts[ctx->client_idx]->size) {
         chimera_s3_complete_assemble_done_part(ctx);
     } else {
         chimera_s3_complete_assemble_next(ctx);
@@ -1068,7 +1330,7 @@ chimera_s3_complete_assemble_rw(struct chimera_s3_complete_ctx *ctx)
 {
     struct chimera_s3_request       *request = ctx->request;
     struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_s3_part          *part    = ctx->current_part;
+    struct chimera_s3_part          *part    = ctx->client_parts[ctx->client_idx];
     uint64_t                         chunk   = thread->shared->config->io_size;
     uint64_t                         remaining;
 
@@ -1104,18 +1366,19 @@ chimera_s3_complete_assemble_next(struct chimera_s3_complete_ctx *ctx)
     uint64_t                         remaining;
 
     /* Skip any zero-byte parts. */
-    while (ctx->current_part && ctx->current_part->size == 0) {
-        ctx->current_part = ctx->current_part->next;
-        ctx->part_offset  = 0;
+    while (ctx->client_idx < ctx->part_count &&
+           ctx->client_parts[ctx->client_idx]->size == 0) {
+        ctx->client_idx++;
+        ctx->part_offset = 0;
     }
 
-    if (ctx->current_part == NULL) {
+    if (ctx->client_idx >= ctx->part_count) {
         /* All parts processed; finalize (link/rename into place). */
         chimera_s3_complete_finalize(ctx);
         return;
     }
 
-    part      = ctx->current_part;
+    part      = ctx->client_parts[ctx->client_idx];
     remaining = part->size - ctx->part_offset;
 
     switch (ctx->assemble_mode) {
@@ -1180,7 +1443,13 @@ chimera_s3_complete_finish_common(
         ctx->upload = NULL;
     }
 
+    free(ctx->client_parts);
     free(ctx);
+
+    free(request->multipart.body_buf);
+    request->multipart.body_buf = NULL;
+    request->multipart.body_len = 0;
+    request->multipart.body_cap = 0;
 
     if (error_code) {
         request->status    = CHIMERA_S3_STATUS_INTERNAL_ERROR;
@@ -1283,7 +1552,7 @@ chimera_s3_complete_start_assembly(struct chimera_s3_complete_ctx *ctx)
         ctx->assemble_mode = CHIMERA_S3_ASSEMBLE_RW;
     }
 
-    ctx->current_part = ctx->upload->parts;
+    ctx->client_idx   = 0;
     ctx->write_offset = 0;
     ctx->part_offset  = 0;
 
@@ -1413,33 +1682,83 @@ chimera_s3_complete_create_root_callback(
         ctx);
 } /* chimera_s3_complete_create_root_callback */
 
+/*
+ * Phase 1: dispatcher entry. Just initialize the body buffer so the
+ * notifier can accumulate the manifest. All real work waits for the
+ * full body to arrive.
+ */
 void
 chimera_s3_complete_multipart_upload(
     struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
+    (void) evpl;
+    (void) thread;
+
+    request->multipart.body_buf = NULL;
+    request->multipart.body_len = 0;
+    request->multipart.body_cap = 0;
+    request->vfs_state          = CHIMERA_S3_VFS_STATE_INIT;
+} /* chimera_s3_complete_multipart_upload */
+
+/*
+ * Phase 2: full body in hand. Parse the manifest, validate against the
+ * server's recorded parts, detach the upload, and kick off assembly.
+ */
+void
+chimera_s3_complete_multipart_upload_body_done(
+    struct evpl               *evpl,
+    struct chimera_s3_request *request)
+{
+    struct chimera_server_s3_thread    *thread = request->thread;
     struct chimera_server_s3_shared    *shared = thread->shared;
     struct chimera_s3_multipart_upload *upload;
     struct chimera_s3_complete_ctx     *ctx;
     struct chimera_s3_part             *part;
+    struct chimera_s3_part            **server_parts = NULL;
+    struct chimera_s3_client_part      *client_parts = NULL;
+    int                                 n_client     = 0;
+    enum chimera_s3_status              err;
 
     struct {
         uint64_t etag[2];
-    } *etag_buf                                    = NULL;
-    int                                 part_count = 0;
-    int                                 i          = 0;
+    } *etag_buf = NULL;
     XXH128_hash_t                       h;
     const char                         *slash;
     const char                         *dirpath = request->path;
     int                                 dirpathlen;
+    int                                 i;
 
-    upload = chimera_s3_multipart_table_detach(
-        shared->multipart_table,
-        request->multipart.upload_id,
-        request->multipart.upload_idlen);
+    if (request->multipart.body_len == CHIMERA_S3_MP_BODY_OVERFLOW) {
+        request->status    = CHIMERA_S3_STATUS_MALFORMED_XML;
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
+    }
 
+    /* Parse the client's manifest first; cheaper to fail before lookup. */
+    err = chimera_s3_parse_complete_body(request->multipart.body_buf,
+                                         request->multipart.body_len,
+                                         &client_parts, &n_client);
+    if (err != CHIMERA_S3_STATUS_OK) {
+        request->status    = err;
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
+    }
+
+    /* Lookup (not detach yet) so we can validate the manifest. If
+     * validation fails, the upload stays in the table for retry. */
+    upload = chimera_s3_multipart_table_lookup(shared->multipart_table,
+                                               request->multipart.upload_id,
+                                               request->multipart.upload_idlen);
     if (!upload) {
+        free(client_parts);
         request->status    = CHIMERA_S3_STATUS_NO_SUCH_UPLOAD;
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
@@ -1448,36 +1767,56 @@ chimera_s3_complete_multipart_upload(
         return;
     }
 
-    /* Count parts and compute combined fake ETag = XXH3_128 of concat of
-     * per-part etags (8 bytes per slot, two slots per part = 16 bytes). */
-    for (part = upload->parts; part; part = part->next) {
-        part_count++;
+    pthread_mutex_lock(&upload->lock);
+    err = chimera_s3_validate_complete_manifest(client_parts, n_client,
+                                                upload, &server_parts);
+    pthread_mutex_unlock(&upload->lock);
+    free(client_parts);
+
+    if (err != CHIMERA_S3_STATUS_OK) {
+        /* Drop our lookup ref; upload remains in the table. */
+        chimera_s3_multipart_upload_release(thread, upload);
+        request->status    = err;
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
     }
 
+    /* Manifest valid. Detach upload so concurrent ops can't grab it,
+    * then drop our lookup ref. The implicit table ref (from insert)
+    * is what ctx->upload now owns; finish_common will release it. */
+    chimera_s3_multipart_table_detach(shared->multipart_table,
+                                      request->multipart.upload_id,
+                                      request->multipart.upload_idlen);
+    chimera_s3_multipart_upload_release(thread, upload);
+
+    /* Build ctx. Combined ETag = XXH3_128 over the etags of the parts the
+     * client selected (in client order), formatted "<hex>-<count>". */
     ctx                   = calloc(1, sizeof(*ctx));
     ctx->request          = request;
     ctx->upload           = upload;
-    ctx->part_count       = part_count;
+    ctx->part_count       = n_client;
+    ctx->client_parts     = server_parts;
     ctx->combined_etag[0] = 0;
     ctx->combined_etag[1] = 0;
 
-    if (part_count > 0) {
-        etag_buf = malloc(part_count * sizeof(*etag_buf));
-        for (part = upload->parts; part; part = part->next) {
-            etag_buf[i].etag[0] = part->etag[0];
-            etag_buf[i].etag[1] = part->etag[1];
-            i++;
+    if (n_client > 0) {
+        etag_buf = malloc(n_client * sizeof(*etag_buf));
+        for (i = 0; i < n_client; i++) {
+            etag_buf[i].etag[0] = server_parts[i]->etag[0];
+            etag_buf[i].etag[1] = server_parts[i]->etag[1];
         }
         h = XXH3_128bits((const void *) etag_buf,
-                         part_count * sizeof(*etag_buf));
+                         n_client * sizeof(*etag_buf));
         ctx->combined_etag[0] = h.low64;
         ctx->combined_etag[1] = h.high64;
         free(etag_buf);
     }
 
-    /* Note: upload is held on ctx and released via chimera_s3_complete_finish_common
-     * after the final object is assembled and linked into place. The async part
-     * cleanup (close handles + unlink tmp files) fires when refcount hits zero. */
+    /* Suppress unused warning when zero parts had no contribution. */
+    (void) part;
 
     /* Create the final object using the same dir-open + create pattern as
      * PUT. Compute parent dir from object key. */
@@ -1505,7 +1844,7 @@ chimera_s3_complete_multipart_upload(
         CHIMERA_VFS_ATTR_FH,
         chimera_s3_complete_create_root_callback,
         ctx);
-} /* chimera_s3_complete_multipart_upload */
+} /* chimera_s3_complete_multipart_upload_body_done */
 
 /* ----- AbortMultipartUpload ----- */
 
@@ -1535,7 +1874,7 @@ chimera_s3_abort_multipart_upload(
     /* Drop our table reference; async cleanup of parts fires on last ref. */
     chimera_s3_multipart_upload_release(thread, upload);
 
-    request->status    = CHIMERA_S3_STATUS_OK;
+    request->status    = CHIMERA_S3_STATUS_NO_CONTENT;
     request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
 
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {

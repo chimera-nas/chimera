@@ -138,6 +138,9 @@ s3_server_respond(
             evpl_http_server_set_response_length(request->http_request, request->file_length);
             evpl_http_server_dispatch_default(request->http_request, 200);
         }
+    } else if (request->status == CHIMERA_S3_STATUS_NO_CONTENT) {
+        evpl_http_server_set_response_length(request->http_request, 0);
+        evpl_http_server_dispatch_default(request->http_request, 204);
     } else {
         evpl_iovec_alloc(evpl, 1024, 0, 1, 0, &iov);
 
@@ -183,8 +186,11 @@ s3_server_notify(
     struct chimera_s3_request       *s3_request = notify_data;
     struct chimera_server_s3_thread *thread     = private_data;
     int                              is_upload_part;
+    int                              is_complete_mpu;
 
-    is_upload_part = s3_request->has_upload_id && s3_request->has_part_number;
+    is_upload_part  = s3_request->has_upload_id && s3_request->has_part_number;
+    is_complete_mpu = (request_type == EVPL_HTTP_REQUEST_TYPE_POST &&
+                       s3_request->has_upload_id);
 
     switch (notify_type) {
         case EVPL_HTTP_NOTIFY_RECEIVE_DATA:
@@ -195,8 +201,11 @@ s3_server_notify(
                 } else {
                     chimera_s3_put_recv(evpl, s3_request);
                 }
+            } else if (is_complete_mpu) {
+                /* Accumulate the client's part manifest. */
+                chimera_s3_complete_multipart_upload_recv(evpl, s3_request);
             } else if (request_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-                /* Phase 1: drain CompleteMultipartUpload body. */
+                /* CreateMultipartUpload: body is empty in practice. */
                 s3_server_drain_body(evpl, s3_request);
             }
             break;
@@ -211,6 +220,10 @@ s3_server_notify(
                 } else {
                     chimera_s3_put_recv(evpl, s3_request);
                 }
+            } else if (is_complete_mpu) {
+                chimera_s3_complete_multipart_upload_recv(evpl, s3_request);
+                /* Body fully in hand: parse + validate + assemble. */
+                chimera_s3_complete_multipart_upload_body_done(evpl, s3_request);
             } else if (request_type == EVPL_HTTP_REQUEST_TYPE_POST) {
                 s3_server_drain_body(evpl, s3_request);
             }

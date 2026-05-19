@@ -114,6 +114,10 @@ struct chimera_s3_request {
             struct chimera_s3_multipart_upload *upload;
             char                               *rp;
             struct evpl_iovec                   response;
+            /* CompleteMultipartUpload request body accumulator. */
+            char                               *body_buf;
+            int                                 body_len;
+            int                                 body_cap;
             char                                upload_id[CHIMERA_S3_UPLOAD_ID_LEN + 1];
             char                                tmp_name[64];
             char                                path_buf[1024];

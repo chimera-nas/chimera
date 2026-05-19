@@ -111,6 +111,21 @@ chimera_s3_complete_multipart_upload(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request);
 
+/* Accumulate CompleteMultipartUpload body bytes from the wire into the
+ * request's body buffer. Called repeatedly from the HTTP notifier as data
+ * arrives. */
+void
+chimera_s3_complete_multipart_upload_recv(
+    struct evpl               *evpl,
+    struct chimera_s3_request *request);
+
+/* Called once the full body is in hand. Parses the XML manifest,
+ * validates it against the server's part list, and kicks off assembly. */
+void
+chimera_s3_complete_multipart_upload_body_done(
+    struct evpl               *evpl,
+    struct chimera_s3_request *request);
+
 void
 chimera_s3_abort_multipart_upload(
     struct evpl                     *evpl,
