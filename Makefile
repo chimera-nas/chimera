@@ -18,7 +18,9 @@ CMAKE_ARGS_DEBUG := -DCMAKE_BUILD_TYPE=Debug
 CTEST_PARALLEL := $(shell n=$$(nproc); echo $$(( n < 64 ? n : 64 )))
 CTEST_ARGS := --output-on-failure --timeout 30 -j $(CTEST_PARALLEL)
 
-default: build_debug
+# Plain `make` produces a debug build only. Use `make debug`/`make release`
+# to also run the test suite, or `make check` for the full CI sweep.
+.DEFAULT_GOAL := build_debug
 
 .PHONY: build_release
 build_release: 

@@ -16,9 +16,11 @@ add_executable(smbclient_auth_test smbclient_auth_test.c)
 target_link_libraries(smbclient_auth_test chimera_server chimera_metrics jansson)
 target_include_directories(smbclient_auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-add_test(NAME chimera/server/smb/smbclient_ntlm
-    COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
-            ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=ntlm)
+if(CHIMERA_NETNS_TESTING)
+    add_test(NAME chimera/server/smb/smbclient_ntlm
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=ntlm)
+endif()
 
 add_test(NAME chimera/server/smb/smbclient_kerberos
     COMMAND ${CMAKE_SOURCE_DIR}/scripts/kerberos_test_wrapper.sh
@@ -54,6 +56,8 @@ add_executable(rest_user_manip_test rest_user_manip_test.c)
 target_link_libraries(rest_user_manip_test chimera_server chimera_metrics jansson)
 target_include_directories(rest_user_manip_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-add_test(NAME chimera/server/smb/rest_user_manip
-    COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
-            ${CMAKE_CURRENT_BINARY_DIR}/rest_user_manip_test)
+if(CHIMERA_NETNS_TESTING)
+    add_test(NAME chimera/server/smb/rest_user_manip
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/rest_user_manip_test)
+endif()

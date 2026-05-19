@@ -17,10 +17,12 @@ macro(add_client_test testname prog backend user)
 endmacro()
 
 macro(add_client_nfs_test testname prog backend user)
-    add_test(NAME chimera/client/${testname} COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh ${CMAKE_CURRENT_BINARY_DIR}/${prog} -v 3 -b ${backend} -U ${user})
-    get_target_property(test_file ${prog} TEST_FILE)
-    set_tests_properties(chimera/client/${testname} PROPERTIES
-        ENVIRONMENT "TEST_FILE=${test_file}")
+    if(CHIMERA_NETNS_TESTING)
+        add_test(NAME chimera/client/${testname} COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh ${CMAKE_CURRENT_BINARY_DIR}/${prog} -v 3 -b ${backend} -U ${user})
+        get_target_property(test_file ${prog} TEST_FILE)
+        set_tests_properties(chimera/client/${testname} PROPERTIES
+            ENVIRONMENT "TEST_FILE=${test_file}")
+    endif()
 endmacro()
 
 # Keep basic test as-is for now
