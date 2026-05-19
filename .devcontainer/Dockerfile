@@ -80,7 +80,7 @@ RUN apt-get -y update && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu resolute stable" \
         > /etc/apt/sources.list.d/docker.list && \
     apt-get -y update && \
-    apt-get -y --no-install-recommends install docker-ce docker-ce-cli containerd.io && \
+    apt-get -y --no-install-recommends install docker-ce docker-ce-cli containerd.io docker-buildx-plugin && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

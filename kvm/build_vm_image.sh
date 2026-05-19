@@ -21,15 +21,53 @@ done
 
 echo "Building VM image: ${IMAGE_TAG}"
 
-set -x
-docker build \
-    ${DOCKER_MIRROR:+--build-arg DOCKER_MIRROR=$DOCKER_MIRROR} \
-    ${APT_MIRROR:+--build-arg APT_MIRROR=$APT_MIRROR} \
-    ${BUILD_ARGS} \
-    -t "$IMAGE_TAG" \
-    -f "$DOCKERFILE" \
-    "$SOURCE_DIR"
-set +x
+# If KVM_CACHE_REGISTRY is set, use docker buildx with a registry-backed
+# cache so the (expensive) inner Dockerfile.kvm build can share layers across
+# CI jobs. Without it, fall back to a plain local-cache `docker build`.
+if [ -n "${KVM_CACHE_REGISTRY:-}" ]; then
+    case "$(uname -m)" in
+        x86_64)  CACHE_ARCH=amd64 ;;
+        aarch64) CACHE_ARCH=arm64 ;;
+        *)       CACHE_ARCH=$(uname -m) ;;
+    esac
+    CACHE_REF="${KVM_CACHE_REGISTRY}/${IMAGE_TAG}:${CACHE_ARCH}"
+
+    # cache-to=type=registry,mode=max requires the docker-container driver;
+    # the default "docker" driver only supports inline cache. Create the
+    # builder lazily and reuse it across the 4 KVM image targets. Ninja
+    # runs those targets in parallel, so serialize the create with flock to
+    # avoid concurrent `buildx create` calls colliding on the same name.
+    (
+        flock -x 9
+        if ! docker buildx inspect chimera-kvm-builder >/dev/null 2>&1; then
+            docker buildx create --name chimera-kvm-builder --driver docker-container >/dev/null
+        fi
+    ) 9>/tmp/chimera-kvm-builder.lock
+
+    set -x
+    docker buildx build \
+        --builder chimera-kvm-builder \
+        ${DOCKER_MIRROR:+--build-arg DOCKER_MIRROR=$DOCKER_MIRROR} \
+        ${APT_MIRROR:+--build-arg APT_MIRROR=$APT_MIRROR} \
+        ${BUILD_ARGS} \
+        --cache-from "type=registry,ref=${CACHE_REF}" \
+        --cache-to "type=registry,ref=${CACHE_REF},mode=max,image-manifest=true,ignore-error=true" \
+        --load \
+        -t "$IMAGE_TAG" \
+        -f "$DOCKERFILE" \
+        "$SOURCE_DIR"
+    set +x
+else
+    set -x
+    docker build \
+        ${DOCKER_MIRROR:+--build-arg DOCKER_MIRROR=$DOCKER_MIRROR} \
+        ${APT_MIRROR:+--build-arg APT_MIRROR=$APT_MIRROR} \
+        ${BUILD_ARGS} \
+        -t "$IMAGE_TAG" \
+        -f "$DOCKERFILE" \
+        "$SOURCE_DIR"
+    set +x
+fi
 
 CONTAINER_ID=$(docker create "$IMAGE_TAG")
 

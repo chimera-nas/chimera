@@ -6,6 +6,12 @@
 # above the per-configuration build dirs (e.g. build/kvm/ alongside build/Release/).
 get_filename_component(BUILD_ROOT ${CMAKE_BINARY_DIR} DIRECTORY)
 
+# Optional registry root used as cache-from/cache-to for the inner
+# Dockerfile.kvm docker buildx build. When empty, build_vm_image.sh falls
+# back to a plain `docker build` (local cache only).
+set(KVM_IMAGE_CACHE_REGISTRY "" CACHE STRING
+    "Registry root (e.g. host:port/path) for sharing the inner KVM image buildx cache. Empty disables it.")
+
 set(KVM_IMAGES
     "ubuntu2404|24.04|noble|linux-image-generic"
     "ubuntu2404_hwe|24.04|noble|linux-image-generic-hwe-24.04"
@@ -24,7 +30,9 @@ foreach(image_spec ${KVM_IMAGES})
 
     add_custom_command(
         OUTPUT ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/initrd ${IMAGE_DIR}/rootfs.qcow2
-        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/build_vm_image.sh
+        COMMAND ${CMAKE_COMMAND} -E env
+                KVM_CACHE_REGISTRY=${KVM_IMAGE_CACHE_REGISTRY}
+                bash ${CMAKE_CURRENT_SOURCE_DIR}/build_vm_image.sh
                 ${IMAGE_DIR}
                 ${CMAKE_CURRENT_SOURCE_DIR}/Dockerfile.kvm
                 ${CMAKE_SOURCE_DIR}
