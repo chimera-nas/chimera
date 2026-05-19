@@ -138,20 +138,19 @@ nlm_state_destroy(struct nlm_state *state)
 void
 nlm_state_load(struct nlm_state *state)
 {
+    /* Persistence is intentionally out of scope in this pass.  All lease
+    * state lives in memory and is lost on server restart.  We still
+    * remove any stale .nlm files from the legacy state directory so
+    * they don't accumulate, but we do not honor a grace period based
+    * on them (the in-memory state is empty, so there is nothing to
+    * reclaim).  See plan: "all the lease related metadata should be
+    * tracked only in memory even when its supposed to be persistent". */
     DIR           *dir;
     struct dirent *ent;
-    int            found = 0;
     struct stat    sb;
     char           path[NLM_CLIENT_PATH_MAX];
 
-    /* Ensure state directory exists */
     if (stat(state->state_dir, &sb) != 0) {
-        if (errno == ENOENT) {
-            if (mkdir_p(state->state_dir, 0700) != 0) {
-                chimera_nfs_debug("NLM: failed to create state directory %s: %s",
-                                  state->state_dir, strerror(errno));
-            }
-        }
         return;
     }
 
@@ -163,37 +162,12 @@ nlm_state_load(struct nlm_state *state)
     while ((ent = readdir(dir)) != NULL) {
         size_t nlen = strlen(ent->d_name);
         if (nlen > 4 && strcmp(ent->d_name + nlen - 4, ".nlm") == 0) {
-            found++;
+            snprintf(path, sizeof(path), "%s/%s",
+                     state->state_dir, ent->d_name);
+            unlink(path);
         }
     }
     closedir(dir);
-
-    if (found == 0) {
-        chimera_nfs_debug("NLM: no state files found, no grace period");
-    }
-
-    if (found > 0) {
-        state->in_grace  = 1;
-        state->grace_end = time(NULL) + NLM_GRACE_PERIOD_SECS;
-        chimera_nfs_debug("NLM: found %d state file(s), grace period active for %d seconds",
-                          found, NLM_GRACE_PERIOD_SECS);
-
-        /* Scan again and delete stale files from a previous crash.
-         * On restart the VFS locks are gone; clients must reclaim them.
-         * We keep no in-memory state for them -- the grace period is enough. */
-        dir = opendir(state->state_dir);
-        if (dir) {
-            while ((ent = readdir(dir)) != NULL) {
-                size_t nlen = strlen(ent->d_name);
-                if (nlen > 4 && strcmp(ent->d_name + nlen - 4, ".nlm") == 0) {
-                    snprintf(path, sizeof(path), "%s/%s",
-                             state->state_dir, ent->d_name);
-                    unlink(path);
-                }
-            }
-            closedir(dir);
-        }
-    }
 } /* nlm_state_load */
 
 struct nlm_client *
@@ -220,8 +194,25 @@ nlm_client_lookup_or_create(
     return client;
 } /* nlm_client_lookup_or_create */
 
+/* In-memory only: persistence is deliberately deferred.  These functions
+ * remain as no-op stubs so existing call sites do not need to be touched. */
+void
+nlm_state_persist_client_disabled(
+    struct nlm_state  *state,
+    struct nlm_client *client);
+
 void
 nlm_state_persist_client(
+    struct nlm_state  *state,
+    struct nlm_client *client)
+{
+    (void) state;
+    (void) client;
+} /* nlm_state_persist_client */
+
+#if 0
+static void
+nlm_state_persist_client_disabled(
     struct nlm_state  *state,
     struct nlm_client *client)
 {
@@ -327,18 +318,17 @@ nlm_state_persist_client(
                           tmp_path, path, strerror(errno));
         unlink(tmp_path);
     }
-} /* nlm_state_persist_client */
+} /* nlm_state_persist_client_disabled */
+#endif /* if 0 */
 
 void
 nlm_state_remove_client_file(
     struct nlm_state *state,
     const char       *hostname)
 {
-    char path[NLM_CLIENT_PATH_MAX];
-
-    nlm_state_client_file_path(state, hostname, path, sizeof(path));
-    chimera_nfs_debug("NLM: removing state file for '%s'", hostname);
-    unlink(path);
+    /* No-op in this pass — persistence deferred (see nlm_state_load). */
+    (void) state;
+    (void) hostname;
 } /* nlm_state_remove_client_file */
 
 void
@@ -346,10 +336,14 @@ nlm_client_release_all_locks(
     struct nlm_state          *state,
     struct nlm_client         *client,
     struct chimera_vfs_thread *vfs_thread,
+    struct chimera_vfs_state  *vfs_state,
     struct chimera_vfs_cred   *cred)
 {
     struct nlm_lock_entry *entry, *tmp;
     int                    count = 0;
+
+    (void) state;
+    (void) cred;
 
     DL_FOREACH(client->locks, entry)
     {
@@ -360,20 +354,21 @@ nlm_client_release_all_locks(
 
     DL_FOREACH_SAFE(client->locks, entry, tmp)
     {
-        /* Releasing the handle closes the underlying FD, which in turn
-         * releases all POSIX advisory locks held by this process on that file.
-         * Pending entries (handle == NULL) are in-flight VFS operations;
-         * skip releasing them here -- the VFS callback will clean up. */
+        /* Drop the vfs_state lease (if granted) and put the file_state
+         * ref.  Pending entries (lease_inserted == false) skip the
+         * release; their VFS callback will clean up when it fires. */
+        if (entry->lease_inserted) {
+            chimera_vfs_lease_release(vfs_state, entry->file_state, &entry->lease);
+            entry->lease_inserted = false;
+        }
+        if (entry->file_state) {
+            chimera_vfs_state_put(vfs_state, entry->file_state);
+            entry->file_state = NULL;
+        }
         if (entry->handle) {
             chimera_vfs_release(vfs_thread, entry->handle);
         }
         nlm_lock_entry_free(entry);
     }
     client->locks = NULL;
-
-    /* NOTE: the on-disk state file is NOT removed here.  Callers must call
-     * nlm_state_remove_client_file() after releasing the mutex so that
-     * blocking file I/O does not occur while the mutex is held.  The client
-     * object itself is kept in the hash table; it is freed in
-     * nlm_state_destroy() when the server shuts down. */
 } /* nlm_client_release_all_locks */

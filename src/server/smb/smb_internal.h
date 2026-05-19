@@ -347,6 +347,32 @@ struct chimera_smb_request {
         } flush;
 
         struct {
+            struct chimera_smb_file_id     file_id;
+            struct chimera_smb_open_file  *open_file;
+            uint16_t                       lock_count;
+            uint32_t                       lock_sequence;
+            /* Single-lock parse for Stage B (LockCount==1).  Multi-lock
+             * requests fall back to STATUS_INVALID_PARAMETER. */
+            uint64_t                       l_offset;
+            uint64_t                       l_length;
+            uint32_t                       l_flags;
+            struct chimera_smb_lock_entry *entry;  /* live for the in-flight acquire */
+        } lock;
+
+        struct {
+            /* Discriminated by request_struct_size: 24 = legacy oplock
+             * ack (§2.2.24.1); 36 = lease ack (§2.2.24.2). */
+            bool                       is_lease;
+            /* Legacy oplock ack fields. */
+            uint8_t                    oplock_level;
+            struct chimera_smb_file_id file_id;
+            /* Lease ack fields. */
+            uint8_t                    lease_key[16];
+            uint8_t                    lease_state;
+            uint32_t                   lease_flags;
+        } oplock_break;
+
+        struct {
             uint32_t                        ctl_code;
             struct chimera_smb_file_id      file_id;
             uint32_t                        input_offset;
@@ -570,6 +596,13 @@ struct chimera_server_smb_shared {
     struct chimera_smb_tree    *free_trees;
     pthread_mutex_t             trees_lock;
 };
+
+/* Forward decl so the inline open_file release paths can call into
+ * smb_proc_lock.c without including smb_procs.h here. */
+void
+chimera_smb_open_file_drain_locks(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file);
 
 struct chimera_server_smb_thread {
     struct evpl                       *evpl;
@@ -842,6 +875,41 @@ chimera_smb_conn_free(
         chimera_smb_notify_drop(conn->parked_notifies);
     }
 
+    /* Clear create_conn pointers on every open_file that references
+     * this conn.  When the session refcount drops to zero below, the
+     * trees and their opens get torn down — but if multi-channel keeps
+     * the session alive past this conn, the opens persist with stale
+     * create_conn pointers that the OPLOCK_BREAK path would dereference. */
+    HASH_ITER(hh, conn->session_handles, session_handle, tmp)
+    {
+        struct chimera_smb_session *s = session_handle->session;
+        int                         i;
+
+        if (!s) {
+            continue;
+        }
+        for (i = 0; i < s->max_trees; i++) {
+            struct chimera_smb_tree      *t = s->trees[i];
+            struct chimera_smb_open_file *of;
+            struct chimera_smb_open_file *tmp_of;
+            int                           b;
+
+            if (!t) {
+                continue;
+            }
+            for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS; b++) {
+                pthread_mutex_lock(&t->open_files_lock[b]);
+                HASH_ITER(hh, t->open_files[b], of, tmp_of)
+                {
+                    if (of->create_conn == conn) {
+                        of->create_conn = NULL;
+                    }
+                }
+                pthread_mutex_unlock(&t->open_files_lock[b]);
+            }
+        }
+    }
+
     HASH_ITER(hh, conn->session_handles, session_handle, tmp)
     {
         HASH_DELETE(hh, conn->session_handles, session_handle);
@@ -940,6 +1008,7 @@ chimera_smb_tree_free(
             open_file->refcnt--;
 
             if (open_file->refcnt == 0) {
+                chimera_smb_open_file_drain_locks(thread, open_file);
                 if (open_file->handle) {
                     chimera_vfs_release(thread->vfs_thread, open_file->handle);
                 }
@@ -1049,6 +1118,7 @@ chimera_smb_open_file_release(
     open_file->refcnt--;
 
     if (open_file->refcnt == 0) {
+        chimera_smb_open_file_drain_locks(request->compound->thread, open_file);
         if (open_file->handle) {
             chimera_vfs_release(request->compound->thread->vfs_thread, open_file->handle);
         }
@@ -1085,6 +1155,7 @@ chimera_smb_open_file_release_nr(
     open_file->refcnt--;
 
     if (open_file->refcnt == 0) {
+        chimera_smb_open_file_drain_locks(thread, open_file);
         if (open_file->handle) {
             chimera_vfs_release(thread->vfs_thread, open_file->handle);
         }

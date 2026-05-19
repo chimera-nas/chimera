@@ -126,20 +126,216 @@ chimera_smb_create_gen_open_file(
      * Attribute-only opens (READ_ATTRIBUTES, SYNCHRONIZE, etc.)
      * bypass share mode enforcement, matching Windows/NTFS behavior.
      * Generic rights (MAXIMUM_ALLOWED, GENERIC_READ, etc.) expand to
-     * data-level access inside acquire and must participate. */
+     * data-level access inside the conflict check and must participate.
+     *
+     * Stage C: route through the unified vfs_state SHARE layer.  The
+     * legacy per-tree sharemode table is bypassed entirely — its
+     * behavior matrix is preserved by chimera_vfs_share_conflict in
+     * vfs_state.c. */
     if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share &&
-        (open_file->desired_access & SMB2_SHAREMODE_ACCESS_MASK)) {
+        (open_file->desired_access & SMB2_SHAREMODE_ACCESS_MASK) && oh) {
+        struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
+        struct chimera_vfs_file_state *file_state;
+        uint32_t                       da = open_file->desired_access;
+        uint32_t                       sa = open_file->share_access;
+        uint8_t                        granted = 0, denied = 0;
+        struct chimera_vfs_lease      *conflict = NULL;
+        enum chimera_vfs_lease_result  result;
 
-        if (chimera_smb_sharemode_acquire(
-                &tree->share->sharemode,
-                parent_fh, parent_fh_len,
-                name, name_len,
-                open_file->desired_access,
-                open_file->share_access,
-                open_file) < 0) {
+        /* Map desired_access -> RWH grant.  Generic + maximum_allowed
+         * bits imply both R and W, matching the expansion that
+         * smb_sharemode_expand_access used to perform. */
+        if (da & (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE |
+                  SMB2_FILE_READ_EA |
+                  SMB2_GENERIC_READ | SMB2_GENERIC_EXECUTE |
+                  SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
+            granted |= CHIMERA_VFS_LEASE_MODE_R;
+        }
+        if (da & (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
+                  SMB2_FILE_WRITE_EA |
+                  SMB2_GENERIC_WRITE |
+                  SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
+            granted |= CHIMERA_VFS_LEASE_MODE_W;
+        }
+        if (da & SMB2_DELETE) {
+            granted |= CHIMERA_VFS_LEASE_MODE_D;
+        }
+
+        /* Map share_access -> RWH deny.  Each access bit NOT shared
+         * becomes a deny on the corresponding bit. */
+        if (!(sa & SMB2_FILE_SHARE_READ)) {
+            denied |= CHIMERA_VFS_LEASE_MODE_R;
+        }
+        if (!(sa & SMB2_FILE_SHARE_WRITE)) {
+            denied |= CHIMERA_VFS_LEASE_MODE_W;
+        }
+        if (!(sa & SMB2_FILE_SHARE_DELETE)) {
+            denied |= CHIMERA_VFS_LEASE_MODE_D;
+        }
+
+        file_state = chimera_vfs_state_get(vfs_state,
+                                           oh->fh, oh->fh_len,
+                                           oh->fh_hash, true);
+        if (!file_state) {
             open_file->handle = NULL;
             chimera_smb_open_file_free(thread, open_file);
             return NULL;
+        }
+
+        open_file->share_lease.kind             = CHIMERA_VFS_LEASE_SHARE;
+        open_file->share_lease.mode.granted     = granted;
+        open_file->share_lease.mode.denied      = denied;
+        open_file->share_lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
+        open_file->share_lease.owner.client_key = request->session_handle->session->session_id;
+        /* The open itself is the owner — different opens, even by the
+         * same client, must satisfy share-mode constraints between
+         * themselves. */
+        open_file->share_lease.owner.owner_lo = open_file->file_id.pid;
+        open_file->share_lease.owner.owner_hi = open_file->file_id.vid;
+
+        result = chimera_vfs_state_try_insert(vfs_state, file_state,
+                                              &open_file->share_lease, &conflict);
+        if (result != CHIMERA_VFS_LEASE_GRANTED) {
+            chimera_vfs_state_put(vfs_state, file_state);
+            open_file->handle = NULL;
+            chimera_smb_open_file_free(thread, open_file);
+            return NULL;
+        }
+
+        open_file->share_file_state     = file_state;
+        open_file->share_lease_inserted = true;
+    }
+
+    /* Acquire a CACHING lease (SMB2 lease via RqLs, or legacy oplock
+     * via requested_oplock_level).  This is opportunistic — failure to
+     * grant just means the open succeeds with no lease.  Conflicts are
+     * resolved by vfs_state's conflict matrix; without break_cb wired
+     * (next task in Stage D), conflicting other-client leases force
+     * DENIED here, so we silently end up with no lease. */
+    if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && oh) {
+        struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
+        struct chimera_vfs_file_state *file_state;
+        uint8_t                        req_smb  = 0;
+        uint8_t                        req_vfs  = 0;
+        bool                           via_rqls = false;
+        struct chimera_vfs_lease      *conflict = NULL;
+        enum chimera_vfs_lease_result  result;
+
+        if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
+            via_rqls = true;
+            req_smb  = (uint8_t) (request->create.rqls.state & 0x07);
+        } else {
+            switch (request->create.requested_oplock_level) {
+                case SMB2_OPLOCK_LEVEL_II:
+                    req_smb = SMB2_LEASE_READ_CACHING;
+                    break;
+                case SMB2_OPLOCK_LEVEL_EXCLUSIVE:
+                    req_smb = SMB2_LEASE_READ_CACHING |
+                        SMB2_LEASE_WRITE_CACHING;
+                    break;
+                case SMB2_OPLOCK_LEVEL_BATCH:
+                    req_smb = SMB2_LEASE_READ_CACHING |
+                        SMB2_LEASE_WRITE_CACHING |
+                        SMB2_LEASE_HANDLE_CACHING;
+                    break;
+                default:
+                    req_smb = 0;
+                    break;
+            } /* switch */
+        }
+
+        /* SMB lease bits use R=0x01, H=0x02, W=0x04 — different layout
+         * from vfs_state's R/W/H mask, so map field-by-field. */
+        if (req_smb & SMB2_LEASE_READ_CACHING) {
+            req_vfs |= CHIMERA_VFS_LEASE_MODE_R;
+        }
+        if (req_smb & SMB2_LEASE_HANDLE_CACHING) {
+            req_vfs |= CHIMERA_VFS_LEASE_MODE_H;
+        }
+        if (req_smb & SMB2_LEASE_WRITE_CACHING) {
+            req_vfs |= CHIMERA_VFS_LEASE_MODE_W;
+        }
+
+        if (req_vfs != 0) {
+            file_state = chimera_vfs_state_get(vfs_state,
+                                               oh->fh, oh->fh_len,
+                                               oh->fh_hash, true);
+            if (file_state) {
+                open_file->caching_lease.kind             = CHIMERA_VFS_LEASE_CACHING;
+                open_file->caching_lease.mode.granted     = req_vfs;
+                open_file->caching_lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
+                open_file->caching_lease.owner.client_key = request->session_handle->session->session_id;
+                /* For RqLs, owner identity is the lease_key (so multiple
+                 * opens with the same key by the same client coalesce —
+                 * the Samba locking.tdb rule).  For legacy oplocks,
+                 * each open is its own owner (use file_id). */
+                if (via_rqls) {
+                    memcpy(&open_file->caching_lease.owner.owner_lo,
+                           request->create.rqls.key, 8);
+                    memcpy(&open_file->caching_lease.owner.owner_hi,
+                           request->create.rqls.key + 8, 8);
+                    /* Mirror the lease_key onto the open_file for the
+                     * break notification builder. */
+                    memcpy(open_file->lease_key, request->create.rqls.key, 16);
+                    if (request->create.rqls.is_v2) {
+                        memcpy(open_file->parent_lease_key,
+                               request->create.rqls.parent_key, 16);
+                        open_file->lease_epoch = request->create.rqls.epoch;
+                    }
+                } else {
+                    open_file->caching_lease.owner.owner_lo = open_file->file_id.pid;
+                    open_file->caching_lease.owner.owner_hi = open_file->file_id.vid;
+                }
+                /* Wire the break callback so vfs_state can notify the
+                 * client when another acquirer needs this lease. */
+                open_file->caching_lease.owner.break_cb   = chimera_smb_lease_break_cb;
+                open_file->caching_lease.owner.cb_private = open_file;
+                open_file->create_conn                    = request->compound->conn;
+
+                result = chimera_vfs_state_try_insert(vfs_state, file_state,
+                                                      &open_file->caching_lease,
+                                                      &conflict);
+                if (result == CHIMERA_VFS_LEASE_GRANTED) {
+                    open_file->caching_file_state     = file_state;
+                    open_file->caching_lease_inserted = true;
+                    /* Record granted SMB-side state on the open_file.
+                     * lease_state stores the SMB lease bits, which is
+                     * what the response context emitter wants. */
+                    open_file->lease_state = 0;
+                    if (req_vfs & CHIMERA_VFS_LEASE_MODE_R) {
+                        open_file->lease_state |= SMB2_LEASE_READ_CACHING;
+                    }
+                    if (req_vfs & CHIMERA_VFS_LEASE_MODE_H) {
+                        open_file->lease_state |= SMB2_LEASE_HANDLE_CACHING;
+                    }
+                    if (req_vfs & CHIMERA_VFS_LEASE_MODE_W) {
+                        open_file->lease_state |= SMB2_LEASE_WRITE_CACHING;
+                    }
+                    if (via_rqls) {
+                        open_file->oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
+                    } else {
+                        /* Translate granted RWH back to legacy oplock
+                         * level.  Without H, the closest legacy match
+                         * is EXCLUSIVE for RW or II for R only. */
+                        if ((req_vfs & (CHIMERA_VFS_LEASE_MODE_R |
+                                        CHIMERA_VFS_LEASE_MODE_W |
+                                        CHIMERA_VFS_LEASE_MODE_H)) ==
+                            (CHIMERA_VFS_LEASE_MODE_R |
+                             CHIMERA_VFS_LEASE_MODE_W |
+                             CHIMERA_VFS_LEASE_MODE_H)) {
+                            open_file->oplock_level = SMB2_OPLOCK_LEVEL_BATCH;
+                        } else if (req_vfs & CHIMERA_VFS_LEASE_MODE_W) {
+                            open_file->oplock_level = SMB2_OPLOCK_LEVEL_EXCLUSIVE;
+                        } else {
+                            open_file->oplock_level = SMB2_OPLOCK_LEVEL_II;
+                        }
+                    }
+                } else {
+                    chimera_vfs_state_put(vfs_state, file_state);
+                    open_file->lease_state  = 0;
+                    open_file->oplock_level = SMB2_OPLOCK_LEVEL_NONE;
+                }
+            }
         }
     }
 
@@ -856,11 +1052,54 @@ struct chimera_smb_create_response_emitter {
         uint32_t                    out_size);
 };
 
+/* Build the RqLs response body.  v1 = 32 bytes, v2 = 52 bytes.  The
+ * granted state was decided at CREATE time and stored on the open_file
+ * by chimera_smb_create_gen_open_file. */
+static int
+build_rqls_response(
+    struct chimera_smb_request *request,
+    uint8_t                    *out,
+    uint32_t                    out_size)
+{
+    struct chimera_smb_open_file *of = request->create.r_open_file;
+    bool                          v2 = request->create.rqls.is_v2 != 0;
+    int                           needed;
+
+    if (!of) {
+        return -1;
+    }
+
+    needed = v2 ? SMB2_CREATE_REQUEST_LEASE_V2_SIZE
+                : SMB2_CREATE_REQUEST_LEASE_SIZE;
+    if (out_size < (uint32_t) needed) {
+        return -1;
+    }
+
+    /* LeaseKey (16) */
+    memcpy(out, of->lease_key, 16);
+    /* LeaseState (4) — lo byte from open_file->lease_state, upper bytes 0. */
+    out[16] = of->lease_state;
+    out[17] = 0;
+    out[18] = 0;
+    out[19] = 0;
+    /* LeaseFlags (4) — reserved at CREATE response time. */
+    out[20] = 0; out[21] = 0; out[22] = 0; out[23] = 0;
+    /* LeaseDuration (8) — reserved. */
+    memset(out + 24, 0, 8);
+    if (v2) {
+        memcpy(out + 32, of->parent_lease_key, 16);
+        out[48] = of->lease_epoch & 0xff;
+        out[49] = (of->lease_epoch >> 8) & 0xff;
+        out[50] = 0; out[51] = 0;
+    }
+    return needed;
+} /* build_rqls_response */
+
 /* *INDENT-OFF* */ /* uncrustify oscillates on aligned struct-init tables */
 static const struct chimera_smb_create_response_emitter smb_create_response_emitters[] = {
-    { CHIMERA_SMB_CREATE_CTX_MXAC, "MxAc", build_mxac_response },
-    /* Phase 1: + RqLs (lease grant)
-     * Phase 3: + DH2Q (durable handle grant), DHnQ
+    { CHIMERA_SMB_CREATE_CTX_MXAC, "MxAc", build_mxac_response  },
+    { CHIMERA_SMB_CREATE_CTX_RQLS, "RqLs", build_rqls_response  },
+    /* Phase 3: + DH2Q (durable handle grant), DHnQ
      * Phase 8: + QFid (32-byte on-disk id) */
     { 0,                           NULL,   NULL                },
 };
@@ -941,8 +1180,12 @@ chimera_smb_create_reply(
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_CREATE_REPLY_SIZE);
 
-    /* Oplock level */
-    evpl_iovec_cursor_append_uint8(reply_cursor, SMB2_OPLOCK_LEVEL_NONE);
+    /* Oplock level — granted at CREATE time and stored on the open_file
+     * by the CACHING acquire above; defaults to NONE if no lease. */
+    evpl_iovec_cursor_append_uint8(reply_cursor,
+                                   request->create.r_open_file
+                                   ? request->create.r_open_file->oplock_level
+                                   : SMB2_OPLOCK_LEVEL_NONE);
 
     /* Flags */
     evpl_iovec_cursor_append_uint8(reply_cursor, 0);

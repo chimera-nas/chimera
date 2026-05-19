@@ -519,7 +519,9 @@ chimera_nfs_server_notify(
                 if (nlm_cli->conn_count == 0) {
                     /* Last connection for this hostname -- release locks */
                     nlm_client_release_all_locks(&shared->nlm_state, nlm_cli,
-                                                 thread->vfs_thread, &anon_cred);
+                                                 thread->vfs_thread,
+                                                 thread->vfs->vfs_state,
+                                                 &anon_cred);
                     release_locks = true;
                 }
                 pthread_mutex_unlock(&shared->nlm_state.mutex);
