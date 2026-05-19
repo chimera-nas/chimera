@@ -25,6 +25,10 @@ chimera_smb_read_callback(
     int                               chunk_niov;
     int                               i;
 
+    if (!error_code) {
+        request->read.open_file->position = request->read.offset + count;
+    }
+
     chimera_smb_open_file_release(request, request->read.open_file);
 
     request->read.niov     = niov;
@@ -36,6 +40,13 @@ chimera_smb_read_callback(
     }
 
     if (count == 0 && request->read.length > 0) {
+        chimera_smb_complete_request(private_data, SMB2_STATUS_END_OF_FILE);
+        return;
+    }
+
+    /* MS-SMB2 §3.3.5.12: if MinimumCount is set and the actual bytes read
+     * is less than MinimumCount, return STATUS_END_OF_FILE. */
+    if (request->read.minimum > 0 && count < request->read.minimum) {
         chimera_smb_complete_request(private_data, SMB2_STATUS_END_OF_FILE);
         return;
     }
@@ -78,6 +89,39 @@ chimera_smb_read(struct chimera_smb_request *request)
 
     if (unlikely(!request->read.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
+    }
+
+    if (request->read.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) {
+        chimera_smb_open_file_release(request, request->read.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_DEVICE_REQUEST);
+        return;
+    }
+
+    /* Reject only when the open carries no access mask at all that could
+     * authorize a read.  Real clients commonly hold opens via the generic
+     * GENERIC_READ / GENERIC_EXECUTE / GENERIC_ALL bits or MAXIMUM_ALLOWED
+     * without explicit FILE_READ_DATA; only an open lacking all of these
+     * (which is what smbtorture's read.access test deliberately constructs)
+     * should be denied here. */
+    if (!(request->read.open_file->desired_access &
+          (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE |
+           SMB2_GENERIC_READ | SMB2_GENERIC_EXECUTE |
+           SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED))) {
+        chimera_smb_open_file_release(request, request->read.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
+    /* MS-SMB2: FileOffset > 0x7FFFFFFFFFFFFFFF, offset+length overflows,
+     * length exceeds MaxReadSize, or MinimumCount > Length must fail with
+     * INVALID_PARAMETER. */
+    if (request->read.offset > 0x7FFFFFFFFFFFFFFFULL ||
+        request->read.offset + request->read.length < request->read.offset ||
+        request->read.length > (8 * 1024 * 1024) ||
+        request->read.minimum > request->read.length) {
+        chimera_smb_open_file_release(request, request->read.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
 
