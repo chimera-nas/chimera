@@ -30,10 +30,14 @@ chimera_nfs4_setclientid(
         resop->opsetclientid.resok4.clientid);
 
     if (!session) {
+        /* Implicit (NFS4.0) session -- no SEQUENCE op, so no replay slot
+         * table.  Pass zeros for the slot caps. */
         session = nfs4_create_session(
             &shared->nfs4_shared_clients,
             resop->opsetclientid.resok4.clientid,
             1,
+            0,
+            0,
             NULL,
             NULL);
     }

@@ -14,6 +14,8 @@
 #include "nfs4_xdr.h"
 #include "nlm4_xdr.h"
 #include "nfs4_session.h"
+#include "nfs4_state.h"
+#include "nfs4_recovery.h"
 #include "nfs_nlm_state.h"
 
 struct chimera_server_nfs_thread;
@@ -40,7 +42,6 @@ struct nfs_nfs4_readdir_cursor {
 struct nfs_request {
     struct chimera_server_nfs_thread *thread;
     struct nfs4_session              *session;
-    struct nfs4_state                *nfs4_state;
     struct chimera_vfs_cred           cred;
     uint8_t                           fh[NFS4_FHSIZE];
     int                               fhlen;
@@ -48,9 +49,37 @@ struct nfs_request {
     int                               saved_fhlen;
     struct chimera_vfs_open_handle   *handle;
     int                               index;
+    uint8_t                           minorversion;     /* COMPOUND4args.minorversion */
+    bool                              seen_sequence;    /* set once OP_SEQUENCE has run in this compound */
+    /* In-flight state ref for ops that acquire from the unified state table.
+     * Released by the completion handler.  Phase 2.  Type is one of
+     * NFS4_SLOT_TYPE_OPEN / NFS4_SLOT_TYPE_LOCK. */
+    void                             *nfs_state_ref;
+    uint8_t                           nfs_state_type;
+    /* Per-owner seqid bookkeeping for the 4.0 OPEN flow.  Populated at
+     * entry to chimera_nfs4_open after the seqid is classified NEW; nil on
+     * 4.1+ and on replay/bad-seqid short-circuits.  All OPEN response
+     * paths route through chimera_nfs4_open_complete, which advances the
+     * owner seqid + caches the reply iff this is non-NULL and the status
+     * is in nfs4_seqid_should_advance(). */
+    struct nfs_open_owner            *open_4_0_owner;
+    /* Per-owner seqid bookkeeping for the 4.0 LOCK flow.  For
+     * new_lock_owner=true both open_owner (open_seqid) and lock_owner
+     * (lock_seqid) advance; for new_lock_owner=false only the lock_owner
+     * advances.  Set in chimera_nfs4_lock after classification; consumed
+     * by chimera_nfs4_lock_finish. */
+    struct nfs_open_owner            *lock_4_0_open_owner;
+    struct nfs_lock_owner            *lock_4_0_lock_owner;
     struct evpl_rpc2_conn            *conn;
     struct evpl_rpc2_encoding        *encoding;
     struct nlm_lock_entry            *nlm_pending_entry; /* in-flight NLM lock/test */
+    /* NFS4.1 SEQUENCE replay slot tracking.  Set by chimera_nfs4_sequence
+     * when a SEQUENCE op is processed; consumed by the compound dispatcher
+     * at completion time (nfs4_replay_slot_finalize) and on replay
+     * short-circuit. */
+    struct nfs4_replay_slot          *replay_slot;
+    uint32_t                          replay_slot_id;
+    uint8_t                           replay_action;
     struct nfs_request               *next;
     union {
         struct mountargs3       *args_mount;
@@ -96,6 +125,24 @@ struct chimera_nfs_export {
     struct chimera_nfs_export *next;
 };
 
+/* Prometheus instances for the NFS4.1 SEQUENCE replay cache.  All
+ * counters are best-effort (not atomic); contention is low because
+ * SEQUENCE handling is per-session under that session's lock. */
+struct nfs4_replay_metrics {
+    struct prometheus_counter          *counter;
+    struct prometheus_counter_series   *hit_series;
+    struct prometheus_counter_series   *seq_misordered_series;
+    struct prometheus_counter_series   *bad_slot_series;
+    struct prometheus_counter_series   *retry_uncached_series;
+    struct prometheus_counter_instance *hit;
+    struct prometheus_counter_instance *seq_misordered;
+    struct prometheus_counter_instance *bad_slot;
+    struct prometheus_counter_instance *retry_uncached;
+    struct prometheus_gauge            *bytes_gauge;
+    struct prometheus_gauge_series     *bytes_series;
+    struct prometheus_gauge_instance   *bytes_in_use;
+};
+
 struct chimera_server_nfs_shared {
 
     const struct chimera_server_config *config;
@@ -130,11 +177,22 @@ struct chimera_server_nfs_shared {
 
     uint64_t                            nfs_verifier;
 
+    /* Lease management (Phase 3).  Set from defaults at init; future
+     * config knobs would override these in nfs_server_init. */
+    uint32_t                            nfs_lease_time_s;
+    uint32_t                            nfs_grace_time_s;
+
     struct nfs4_client_table            nfs4_shared_clients;
+    struct nfs_state_table              nfs4_state_table;
+    struct nfs_recovery                 nfs4_recovery;
 
     struct prometheus_histogram        *op_histogram;
     struct prometheus_metrics          *metrics;
+    struct nfs4_replay_metrics          replay_metrics;
 };
+
+/* Forward decl for the per-thread lease sweeper (defined in nfs4_lease.h). */
+struct nfs_lease_sweeper;
 
 struct chimera_server_nfs_thread {
     struct evpl_rpc2_thread          *rpc2_thread;
@@ -142,6 +200,7 @@ struct chimera_server_nfs_thread {
     struct chimera_vfs_thread        *vfs_thread;
     struct chimera_vfs               *vfs;
     struct evpl                      *evpl;
+    struct nfs_lease_sweeper         *lease_sweeper;
     struct evpl_rpc2_thread          *nfs_server_thread;
     struct evpl_rpc2_thread          *mount_server_thread;
     struct evpl_rpc2_thread          *portmap_server_thread;
@@ -170,6 +229,10 @@ nfs_request_alloc(
 
     req->conn     = conn;
     req->encoding = encoding;
+
+    req->replay_slot    = NULL;
+    req->replay_slot_id = 0;
+    req->replay_action  = NFS4_REPLAY_ACTION_NONE;
 
     thread->active_requests++;
 

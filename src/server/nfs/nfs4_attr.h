@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 
 #include "vfs/vfs.h"
+#include "nfs4_lease.h"
 
 static inline uint64_t
 chimera_nfs4_attr2mask(
@@ -358,7 +359,7 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[0]  |= (1 << FATTR4_LEASE_TIME);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, 600);
+            chimera_nfs4_attr_append_uint32(&attrs, NFS4_LEASE_TIME_DEFAULT_S);
         }
 
         if (req_mask[0] & (1 << FATTR4_ACLSUPPORT)) {

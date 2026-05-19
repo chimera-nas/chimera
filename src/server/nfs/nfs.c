@@ -17,6 +17,7 @@
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "nfs4_session.h"
+#include "nfs4_lease.h"
 #include "nfs_nlm.h"
 #include "prometheus-c.h"
 #include "nfs_external_portmap.h"
@@ -112,6 +113,41 @@ nfs_server_init(
     shared->op_histogram = prometheus_metrics_create_histogram_exponential(metrics, "chimera_nfs_op_latency",
                                                                            "The latency of NFS operations", 24);
 
+    /* NFS4.1 SEQUENCE replay cache metrics.  One counter with an "op"
+     * label distinguishes outcomes; a gauge tracks total bytes held in
+     * the cache across all sessions. */
+    {
+        struct nfs4_replay_metrics *rm = &shared->replay_metrics;
+
+        rm->counter = prometheus_metrics_create_counter(
+            metrics, "chimera_nfs4_replay_cache",
+            "NFS4.1 SEQUENCE replay cache outcomes");
+        rm->hit_series = prometheus_counter_create_series(
+            rm->counter,
+            (const char *[]) { "op" }, (const char *[]) { "hit" }, 1);
+        rm->seq_misordered_series = prometheus_counter_create_series(
+            rm->counter,
+            (const char *[]) { "op" }, (const char *[]) { "seq_misordered" }, 1);
+        rm->bad_slot_series = prometheus_counter_create_series(
+            rm->counter,
+            (const char *[]) { "op" }, (const char *[]) { "bad_slot" }, 1);
+        rm->retry_uncached_series = prometheus_counter_create_series(
+            rm->counter,
+            (const char *[]) { "op" }, (const char *[]) { "retry_uncached" }, 1);
+
+        rm->hit            = prometheus_counter_series_create_instance(rm->hit_series);
+        rm->seq_misordered = prometheus_counter_series_create_instance(rm->seq_misordered_series);
+        rm->bad_slot       = prometheus_counter_series_create_instance(rm->bad_slot_series);
+        rm->retry_uncached = prometheus_counter_series_create_instance(rm->retry_uncached_series);
+
+        rm->bytes_gauge = prometheus_metrics_create_gauge(
+            metrics, "chimera_nfs4_replay_cache_bytes",
+            "Bytes currently held in the NFS4.1 SEQUENCE replay cache");
+        rm->bytes_series = prometheus_gauge_create_series(
+            rm->bytes_gauge, NULL, NULL, 0);
+        rm->bytes_in_use = prometheus_gauge_series_create_instance(rm->bytes_series);
+    }
+
     if (!external_portmap) {
         /* PORTMAP V2 */
         PORTMAP_V2_init(&shared->portmap_v2);
@@ -198,6 +234,22 @@ nfs_server_init(
     shared->nlm_v4.recv_call_NLMPROC4_FREE_ALL    = chimera_nfs_nlm4_free_all;
 
     nfs4_client_table_init(&shared->nfs4_shared_clients);
+    nfs_state_table_init(&shared->nfs4_state_table);
+
+    /* Phase 3: lease defaults.  Per RFC 7530 §10.2.3, the lease_time
+     * attribute reported via FATTR4_LEASE_TIME governs how often 4.0 clients
+     * send RENEW. */
+    shared->nfs_lease_time_s = NFS4_LEASE_TIME_DEFAULT_S;
+    shared->nfs_grace_time_s = NFS4_GRACE_TIME_DEFAULT_S;
+
+    /* Phase 5: server-reboot recovery / grace window.  Persistence is
+     * stubbed in this phase -- nfs_recovery_load loads zero records, so
+     * nfs_recovery_begin_grace short-circuits to in_grace=false. */
+    nfs_recovery_load(&shared->nfs4_recovery,
+                      chimera_server_config_get_state_dir(config),
+                      NULL);
+    nfs_recovery_begin_grace(&shared->nfs4_recovery,
+                             shared->nfs_grace_time_s);
 
     nlm_state_init(&shared->nlm_state,
                    chimera_server_config_get_state_dir(config));
@@ -311,8 +363,12 @@ nfs_server_destroy(void *data)
     evpl       = evpl_create(NULL);
     vfs_thread = chimera_vfs_thread_init(evpl, shared->vfs);
 
-    /* Release all open handles from NFS4 sessions */
-    nfs4_client_table_release_handles(&shared->nfs4_shared_clients, vfs_thread);
+    /* Tear down every client's unified state hierarchy.  This walks
+     * owners → states → locks, releasing the dup'd VFS handles and freeing
+     * the structs and slot table entries. */
+    nfs4_client_table_destroy_unified(&shared->nfs4_shared_clients,
+                                      &shared->nfs4_state_table,
+                                      vfs_thread);
 
     /* Drain all in-flight VFS operations before destroying the thread.
      * This ensures delegation threads complete before we free the thread. */
@@ -342,8 +398,57 @@ nfs_server_destroy(void *data)
     /* Close out all the nfs4 session state */
     nfs4_client_table_free(&shared->nfs4_shared_clients);
 
+    /* All unified state slots have been freed via destroy_unified above;
+     * this just frees the shard arrays and per-shard locks. */
+    nfs_state_table_free(&shared->nfs4_state_table, NULL);
+
+    nfs_recovery_free(&shared->nfs4_recovery);
+
     if (shared->op_histogram) {
         prometheus_histogram_destroy(shared->metrics, shared->op_histogram);
+    }
+
+    {
+        struct nfs4_replay_metrics *rm = &shared->replay_metrics;
+
+        if (rm->bytes_in_use) {
+            prometheus_gauge_series_destroy_instance(rm->bytes_series, rm->bytes_in_use);
+        }
+        if (rm->bytes_series) {
+            prometheus_gauge_destroy_series(rm->bytes_gauge, rm->bytes_series);
+        }
+        if (rm->bytes_gauge) {
+            prometheus_gauge_destroy(shared->metrics, rm->bytes_gauge);
+        }
+
+        if (rm->hit) {
+            prometheus_counter_series_destroy_instance(rm->hit_series, rm->hit);
+        }
+        if (rm->seq_misordered) {
+            prometheus_counter_series_destroy_instance(rm->seq_misordered_series, rm->seq_misordered);
+        }
+        if (rm->bad_slot) {
+            prometheus_counter_series_destroy_instance(rm->bad_slot_series, rm->bad_slot);
+        }
+        if (rm->retry_uncached) {
+            prometheus_counter_series_destroy_instance(rm->retry_uncached_series, rm->retry_uncached);
+        }
+
+        if (rm->hit_series) {
+            prometheus_counter_destroy_series(rm->counter, rm->hit_series);
+        }
+        if (rm->seq_misordered_series) {
+            prometheus_counter_destroy_series(rm->counter, rm->seq_misordered_series);
+        }
+        if (rm->bad_slot_series) {
+            prometheus_counter_destroy_series(rm->counter, rm->bad_slot_series);
+        }
+        if (rm->retry_uncached_series) {
+            prometheus_counter_destroy_series(rm->counter, rm->retry_uncached_series);
+        }
+        if (rm->counter) {
+            prometheus_counter_destroy(shared->metrics, rm->counter);
+        }
     }
     free(shared->mount_v3.rpc2.metrics);
     free(shared->nfs_v3.rpc2.metrics);
@@ -455,6 +560,12 @@ nfs_server_thread_init(
         evpl_rpc2_server_attach(thread->rpc2_thread, shared->portmap_server, thread);
     }
 
+    /* Phase 3: per-thread lease sweeper.  Each thread arms its own timer;
+     * sweepers serialize on the existing client-table mutex, so redundant
+     * passes converge harmlessly. */
+    thread->lease_sweeper = calloc(1, sizeof(*thread->lease_sweeper));
+    nfs_lease_sweeper_init(thread->lease_sweeper, thread);
+
     return thread;
 } /* nfs_server_thread_init */
 
@@ -463,6 +574,12 @@ nfs_server_thread_destroy(void *data)
 {
     struct chimera_server_nfs_thread *thread = data;
     struct nfs_request               *req;
+
+    if (thread->lease_sweeper) {
+        nfs_lease_sweeper_destroy(thread->lease_sweeper);
+        free(thread->lease_sweeper);
+        thread->lease_sweeper = NULL;
+    }
 
     evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->mount_server);
     evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->nfs_server);

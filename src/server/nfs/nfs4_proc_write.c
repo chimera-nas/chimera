@@ -4,6 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
+#include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "evpl/evpl.h"
@@ -25,10 +26,9 @@ chimera_nfs4_write_complete(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
-    struct nfs_request             *req  = private_data;
-    struct WRITE4args              *args = req->args_write4;
-    struct WRITE4res               *res  = &req->res_compound.resarray[req->index].opwrite;
-    struct chimera_vfs_open_handle *deferred;
+    struct nfs_request *req  = private_data;
+    struct WRITE4args  *args = req->args_write4;
+    struct WRITE4res   *res  = &req->res_compound.resarray[req->index].opwrite;
 
     /* Release write iovecs here on the server thread, not in VFS backend.
      * The iovecs were allocated on this thread and must be released here
@@ -48,11 +48,11 @@ chimera_nfs4_write_complete(
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
     }
 
-    if (req->nfs4_state) {
-        deferred = nfs4_session_release_state(req->session, req->nfs4_state);
-        if (deferred) {
-            chimera_vfs_release(req->thread->vfs_thread, deferred);
-        }
+    if (req->nfs_state_ref) {
+        nfs_state_table_release(&req->thread->shared->nfs4_state_table,
+                                req->nfs_state_ref, req->nfs_state_type,
+                                req->thread->vfs_thread);
+        req->nfs_state_ref = NULL;
     } else if (req->handle) {
         /* Anonymous stateid: release the on-the-fly handle we opened. */
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
@@ -102,14 +102,16 @@ chimera_nfs4_write(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct WRITE4args              *args = &argop->opwrite;
-    struct WRITE4res               *res  = &resop->opwrite;
-    struct nfs4_session            *session;
-    struct nfs4_state              *state;
+    struct WRITE4args              *args  = &argop->opwrite;
+    struct WRITE4res               *res   = &resop->opwrite;
+    struct nfs_state_table         *table = &thread->shared->nfs4_state_table;
+    void                           *state_void;
+    uint8_t                         state_type;
     struct chimera_vfs_open_handle *state_handle;
+    nfsstat4                        status;
 
-    req->nfs4_state = NULL;
-    req->handle     = NULL;
+    req->nfs_state_ref = NULL;
+    req->handle        = NULL;
 
     /*
      * Transfer ownership of write iovecs from the RPC2 message to prevent
@@ -123,7 +125,7 @@ chimera_nfs4_write(
     /*
      * RFC 7530 9.1.4.3 / RFC 8881 8.2.3 require WRITE to honor the
      * anonymous stateid (all zeros).  Open the current FH on the fly
-     * instead of consulting per-session state.
+     * instead of consulting the state table.
      */
     if (chimera_nfs4_write_stateid_is_anonymous(&args->stateid)) {
         if (req->fhlen == 0) {
@@ -142,30 +144,24 @@ chimera_nfs4_write(
         return;
     }
 
-    session = nfs4_resolve_session(
-        req->session, req->conn,
-        &thread->shared->nfs4_shared_clients,
-        &args->stateid);
-
-    if (!session) {
-        res->status = NFS4ERR_BAD_STATEID;
+    status = nfs_state_table_acquire(table, &args->stateid, 0,
+                                     &state_void, &state_type);
+    if (status != NFS4_OK) {
+        res->status = status;
         evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
-    req->session = session;
-
-    if (nfs4_session_acquire_state(session, &args->stateid,
-                                   &state, &state_handle) != NFS4_OK) {
-        res->status = NFS4ERR_BAD_STATEID;
-        evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
+    if (state_type == NFS4_SLOT_TYPE_OPEN) {
+        state_handle = ((struct nfs_open_state *) state_void)->handle;
+    } else {
+        state_handle = ((struct nfs_lock_state *) state_void)->handle;
     }
 
-    req->nfs4_state  = state;
-    req->args_write4 = args;
+    req->nfs_state_ref  = state_void;
+    req->nfs_state_type = state_type;
+    req->args_write4    = args;
 
     chimera_vfs_write(thread->vfs_thread, &req->cred,
                       state_handle,

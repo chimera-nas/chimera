@@ -264,6 +264,34 @@ chimera_nfs4_setclientid(
     struct nfs_resop4                *resop);
 
 void
+chimera_nfs4_renew(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_open_confirm(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_open_downgrade(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_release_lockowner(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
 chimera_nfs4_setclientid_confirm(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
@@ -478,6 +506,23 @@ chimera_nfs4_compound_complete(
 
         /* Set the status for the failed operation */
         req->res_compound.resarray[req->index].opillegal.status = status;
+
+        /* XDR unmarshall of any WRITE4args in the compound clones the data
+         * iovecs (via xdr_iovec_copy_private / evpl_iovec_clone), taking a
+         * +1 refcount that is normally dropped by chimera_nfs4_write_complete.
+         * When a prior op fails and the compound is truncated, those
+         * WRITE ops never dispatch and their clones would leak.  Release
+         * the unmarshalled iovecs of every WRITE past the failed op. */
+        for (uint32_t i = req->index + 1; i < req->args_compound->num_argarray;
+             i++) {
+            struct nfs_argop4 *ap = &req->args_compound->argarray[i];
+            if (ap->argop == OP_WRITE && ap->opwrite.data.niov) {
+                evpl_iovecs_release(thread->evpl,
+                                    ap->opwrite.data.iov,
+                                    ap->opwrite.data.niov);
+                ap->opwrite.data.niov = 0;
+            }
+        }
 
         /* Per RFC 7530 section 15.2, the response must only include
          * operations up to and including the one that failed. Truncate

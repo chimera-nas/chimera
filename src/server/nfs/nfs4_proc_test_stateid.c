@@ -4,6 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
+#include "nfs4_state.h"
 
 void
 chimera_nfs4_test_stateid(
@@ -12,10 +13,10 @@ chimera_nfs4_test_stateid(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct TEST_STATEID4args  *args    = &argop->optest_stateid;
-    struct TEST_STATEID4res   *res     = &resop->optest_stateid;
-    struct TEST_STATEID4resok *resok   = &res->tsr_resok4;
-    struct nfs4_session       *session = req->session;
+    struct TEST_STATEID4args  *args  = &argop->optest_stateid;
+    struct TEST_STATEID4res   *res   = &resop->optest_stateid;
+    struct TEST_STATEID4resok *resok = &res->tsr_resok4;
+    struct nfs_state_table    *table = &thread->shared->nfs4_state_table;
     uint32_t                   i;
 
     resok->num_tsr_status_codes = args->num_ts_stateids;
@@ -24,12 +25,8 @@ chimera_nfs4_test_stateid(
         req->encoding->dbuf);
 
     for (i = 0; i < args->num_ts_stateids; i++) {
-        if (session) {
-            resok->tsr_status_codes[i] = nfs4_session_validate_stateid(
-                session, &args->ts_stateids[i]);
-        } else {
-            resok->tsr_status_codes[i] = NFS4ERR_BAD_STATEID;
-        }
+        resok->tsr_status_codes[i] = nfs_state_table_validate(
+            table, &args->ts_stateids[i]);
     }
 
     res->tsr_status = NFS4_OK;
