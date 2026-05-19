@@ -53,6 +53,8 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_FSTATFS,
     CHIMERA_CLIENT_OP_MKNOD,
     CHIMERA_CLIENT_OP_LOCK,
+    CHIMERA_CLIENT_OP_COPY_RANGE,
+    CHIMERA_CLIENT_OP_CLONE_RANGE,
 };
 
 struct chimera_client_request;
@@ -330,6 +332,27 @@ struct chimera_client_request {
             uint64_t                        r_conflict_length;
             pid_t                           r_conflict_pid;
         } lock;
+
+        struct {
+            struct chimera_vfs_open_handle *src_handle;
+            struct chimera_vfs_open_handle *dst_handle;
+            uint64_t                        src_offset;
+            uint64_t                        dst_offset;
+            uint64_t                        length;
+            uint64_t                        r_length;
+            chimera_copy_range_callback_t   callback;
+            void                           *private_data;
+        } copy_range;
+
+        struct {
+            struct chimera_vfs_open_handle *src_handle;
+            struct chimera_vfs_open_handle *dst_handle;
+            uint64_t                        src_offset;
+            uint64_t                        dst_offset;
+            uint64_t                        length;
+            chimera_clone_range_callback_t  callback;
+            void                           *private_data;
+        } clone_range;
     };
 } __attribute__((aligned(64)));
 

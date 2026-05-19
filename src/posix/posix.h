@@ -531,6 +531,29 @@ chimera_posix_lockf(
     int   cmd,
     off_t len);
 
+// Server-side byte-range copy. Mirrors Linux copy_file_range(2).
+// If off_in / off_out are NULL the corresponding fd's current offset is used
+// and updated; otherwise *off_in / *off_out are updated by the number of
+// bytes copied. `flags` must be 0.
+ssize_t
+chimera_posix_copy_file_range(
+    int          fd_in,
+    off_t       *off_in,
+    int          fd_out,
+    off_t       *off_out,
+    size_t       len,
+    unsigned int flags);
+
+// Reflink/COW clone of a byte range. Backend must advertise
+// CHIMERA_VFS_CAP_CLONE_RANGE; otherwise returns -1 with errno=EOPNOTSUPP.
+int
+chimera_posix_clone_file_range(
+    int    dst_fd,
+    off_t  dst_offset,
+    int    src_fd,
+    off_t  src_offset,
+    size_t len);
+
 // Sync functions
 int
 chimera_posix_fsync(

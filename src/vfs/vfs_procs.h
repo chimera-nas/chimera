@@ -586,6 +586,69 @@ chimera_vfs_allocate(
     chimera_vfs_allocate_callback_t callback,
     void                           *private_data);
 
+typedef void (*chimera_vfs_copy_range_callback_t)(
+    enum chimera_vfs_error    error_code,
+    uint64_t                  length,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data);
+
+void
+chimera_vfs_copy_range(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *src_handle,
+    uint64_t                          src_offset,
+    struct chimera_vfs_open_handle   *dst_handle,
+    uint64_t                          dst_offset,
+    uint64_t                          length,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    chimera_vfs_copy_range_callback_t callback,
+    void                             *private_data);
+
+typedef void (*chimera_vfs_clone_range_callback_t)(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data);
+
+void
+chimera_vfs_clone_range(
+    struct chimera_vfs_thread         *thread,
+    const struct chimera_vfs_cred     *cred,
+    struct chimera_vfs_open_handle    *src_handle,
+    uint64_t                           src_offset,
+    struct chimera_vfs_open_handle    *dst_handle,
+    uint64_t                           dst_offset,
+    uint64_t                           length,
+    uint64_t                           pre_attr_mask,
+    uint64_t                           post_attr_mask,
+    chimera_vfs_clone_range_callback_t callback,
+    void                              *private_data);
+
+typedef void (*chimera_vfs_move_range_callback_t)(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *src_post_attr,
+    struct chimera_vfs_attrs *dst_pre_attr,
+    struct chimera_vfs_attrs *dst_post_attr,
+    void                     *private_data);
+
+void
+chimera_vfs_move_range(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *src_handle,
+    uint64_t                          src_offset,
+    struct chimera_vfs_open_handle   *dst_handle,
+    uint64_t                          dst_offset,
+    uint64_t                          length,
+    uint64_t                          src_post_attr_mask,
+    uint64_t                          dst_pre_attr_mask,
+    uint64_t                          dst_post_attr_mask,
+    chimera_vfs_move_range_callback_t callback,
+    void                             *private_data);
+
 typedef void (*chimera_vfs_seek_callback_t)(
     enum chimera_vfs_error error_code,
     int                    sr_eof,

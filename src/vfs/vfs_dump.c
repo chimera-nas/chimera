@@ -40,6 +40,9 @@ chimera_vfs_op_name(unsigned int opcode)
         case CHIMERA_VFS_OP_ALLOCATE: return "Allocate";
         case CHIMERA_VFS_OP_SEEK: return "Seek";
         case CHIMERA_VFS_OP_LOCK: return "Lock";
+        case CHIMERA_VFS_OP_COPY_RANGE: return "CopyRange";
+        case CHIMERA_VFS_OP_CLONE_RANGE: return "CloneRange";
+        case CHIMERA_VFS_OP_MOVE_RANGE: return "MoveRange";
         default: return "Unknown";
     } /* switch */
 
@@ -134,6 +137,33 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                              req->allocate.offset,
                              req->allocate.length,
                              req->allocate.flags);
+            break;
+        case CHIMERA_VFS_OP_COPY_RANGE:
+            chimera_snprintf(argstr, sizeof(argstr),
+                             "src_hdl %lx src_off %lu dst_hdl %lx dst_off %lu len %lu",
+                             req->copy_range.src_handle->vfs_private,
+                             req->copy_range.src_offset,
+                             req->copy_range.dst_handle->vfs_private,
+                             req->copy_range.dst_offset,
+                             req->copy_range.length);
+            break;
+        case CHIMERA_VFS_OP_CLONE_RANGE:
+            chimera_snprintf(argstr, sizeof(argstr),
+                             "src_hdl %lx src_off %lu dst_hdl %lx dst_off %lu len %lu",
+                             req->clone_range.src_handle->vfs_private,
+                             req->clone_range.src_offset,
+                             req->clone_range.dst_handle->vfs_private,
+                             req->clone_range.dst_offset,
+                             req->clone_range.length);
+            break;
+        case CHIMERA_VFS_OP_MOVE_RANGE:
+            chimera_snprintf(argstr, sizeof(argstr),
+                             "src_hdl %lx src_off %lu dst_hdl %lx dst_off %lu len %lu",
+                             req->move_range.src_handle->vfs_private,
+                             req->move_range.src_offset,
+                             req->move_range.dst_handle->vfs_private,
+                             req->move_range.dst_offset,
+                             req->move_range.length);
             break;
         case CHIMERA_VFS_OP_SYMLINK_AT:
             format_safe_name(namestr, sizeof(namestr),
@@ -269,6 +299,10 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
         case CHIMERA_VFS_OP_WRITE:
             chimera_snprintf(argstr, sizeof(argstr), "r_len %u",
                              req->write.r_length);
+            break;
+        case CHIMERA_VFS_OP_COPY_RANGE:
+            chimera_snprintf(argstr, sizeof(argstr), "r_len %lu",
+                             req->copy_range.r_length);
             break;
         default:
             break;

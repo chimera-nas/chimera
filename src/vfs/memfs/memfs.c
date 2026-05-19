@@ -2349,6 +2349,620 @@ memfs_allocate(
     request->complete(request);
 } /* memfs_allocate */
 
+/* Copy `len` bytes starting at `src_pos` from src inode into the flat buffer
+ * `dst`. Reads from src blocks; holes and past-EOF read as zeros.
+ * Returns the number of bytes within file bounds; the caller's view of
+ * how much was logically copied is min(len, src->size - src_pos).
+ */
+static void
+memfs_copy_from_inode(
+    struct memfs_shared *shared,
+    struct memfs_inode  *src,
+    uint64_t             src_pos,
+    void                *dst,
+    uint32_t             len)
+{
+    const uint32_t block_size  = shared->block_size;
+    const uint32_t block_shift = shared->block_shift;
+    const uint32_t block_mask  = shared->block_mask;
+    uint8_t       *out         = dst;
+
+    while (len > 0) {
+        uint64_t            src_bi  = src_pos >> block_shift;
+        uint32_t            src_off = src_pos & block_mask;
+        uint32_t            chunk   = block_size - src_off;
+        struct memfs_block *sb;
+
+        if (chunk > len) {
+            chunk = len;
+        }
+
+        if (src->file.blocks && src_bi < src->file.num_blocks) {
+            sb = src->file.blocks[src_bi];
+        } else {
+            sb = NULL;
+        }
+
+        if (sb) {
+            memcpy(out, (uint8_t *) sb->iov[0].data + src_off, chunk);
+        } else {
+            memset(out, 0, chunk);
+        }
+
+        out     += chunk;
+        src_pos += chunk;
+        len     -= chunk;
+    }
+} /* memfs_copy_from_inode */
+
+static void
+memfs_recompute_space_used(
+    struct memfs_shared *shared,
+    struct memfs_inode  *inode)
+{
+    const uint32_t block_size = shared->block_size;
+    uint64_t       bi;
+
+    inode->space_used = 0;
+
+    if (!inode->file.blocks) {
+        return;
+    }
+
+    for (bi = 0; bi < inode->file.num_blocks; bi++) {
+        if (inode->file.blocks[bi]) {
+            inode->space_used += block_size;
+        }
+    }
+} /* memfs_recompute_space_used */
+
+static int
+memfs_grow_blocks(
+    struct memfs_inode *inode,
+    uint64_t            last_block)
+{
+    struct memfs_block **new_blocks;
+    unsigned int         new_max_blocks;
+
+    if (inode->file.blocks && inode->file.max_blocks > last_block) {
+        return 0;
+    }
+
+    new_max_blocks = inode->file.max_blocks ? inode->file.max_blocks : 1024;
+
+    while (new_max_blocks <= last_block) {
+        new_max_blocks <<= 1;
+    }
+
+    new_blocks = malloc(new_max_blocks * sizeof(struct memfs_block *));
+
+    if (!new_blocks) {
+        return -1;
+    }
+
+    if (inode->file.blocks) {
+        memcpy(new_blocks, inode->file.blocks,
+               inode->file.num_blocks * sizeof(struct memfs_block *));
+        free(inode->file.blocks);
+    }
+
+    memset(new_blocks + inode->file.num_blocks, 0,
+           (new_max_blocks - inode->file.num_blocks) *
+           sizeof(struct memfs_block *));
+
+    inode->file.blocks     = new_blocks;
+    inode->file.max_blocks = new_max_blocks;
+    return 0;
+} /* memfs_grow_blocks */
+
+static void
+memfs_copy_range(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct evpl        *evpl        = thread->evpl;
+    const uint32_t      block_size  = shared->block_size;
+    const uint32_t      block_shift = shared->block_shift;
+    const uint32_t      block_mask  = shared->block_mask;
+    struct memfs_inode *src_inode, *dst_inode;
+    struct memfs_block *old_block, *new_block;
+    uint64_t            src_offset, dst_offset, length, src_eof_len;
+    uint64_t            first_block, last_block, bi;
+    uint32_t            block_offset, left, block_len;
+    uint64_t            copied = 0;
+    struct timespec     now;
+
+    if (request->copy_range.src_handle->vfs_module !=
+        request->copy_range.dst_handle->vfs_module) {
+        request->status = CHIMERA_VFS_ENOTSUP;
+        request->complete(request);
+        return;
+    }
+
+    src_inode = (struct memfs_inode *) request->copy_range.src_handle->vfs_private;
+    dst_inode = (struct memfs_inode *) request->copy_range.dst_handle->vfs_private;
+
+    if (!src_inode || !dst_inode) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    src_offset = request->copy_range.src_offset;
+    dst_offset = request->copy_range.dst_offset;
+    length     = request->copy_range.length;
+
+    if (length == 0) {
+        request->status              = CHIMERA_VFS_OK;
+        request->copy_range.r_length = 0;
+        request->complete(request);
+        return;
+    }
+
+    /* Same file: reject overlap (POSIX copy_file_range semantics) */
+    if (src_inode == dst_inode) {
+        uint64_t s_end = src_offset + length;
+        uint64_t d_end = dst_offset + length;
+        if (src_offset < d_end && dst_offset < s_end) {
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
+    }
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    /* Lock in deterministic order to avoid AB/BA deadlock */
+    if (src_inode == dst_inode) {
+        pthread_mutex_lock(&src_inode->lock);
+    } else if (src_inode < dst_inode) {
+        pthread_mutex_lock(&src_inode->lock);
+        pthread_mutex_lock(&dst_inode->lock);
+    } else {
+        pthread_mutex_lock(&dst_inode->lock);
+        pthread_mutex_lock(&src_inode->lock);
+    }
+
+    memfs_map_attrs(shared, &request->copy_range.r_pre_attr, dst_inode,
+                    request->copy_range.dst_handle->fh);
+
+    /* Clamp length to what's available in source */
+    if (src_offset >= src_inode->size) {
+        src_eof_len = 0;
+    } else {
+        src_eof_len = src_inode->size - src_offset;
+        if (src_eof_len > length) {
+            src_eof_len = length;
+        }
+    }
+
+    if (src_eof_len == 0) {
+        memfs_map_attrs(shared, &request->copy_range.r_post_attr, dst_inode,
+                        request->copy_range.dst_handle->fh);
+        if (src_inode != dst_inode) {
+            pthread_mutex_unlock(&src_inode->lock);
+        }
+        pthread_mutex_unlock(&dst_inode->lock);
+        request->status              = CHIMERA_VFS_OK;
+        request->copy_range.r_length = 0;
+        request->complete(request);
+        return;
+    }
+
+    length       = src_eof_len;
+    first_block  = dst_offset >> block_shift;
+    block_offset = dst_offset & block_mask;
+    last_block   = (dst_offset + length - 1) >> block_shift;
+    left         = length;
+
+    if (memfs_grow_blocks(dst_inode, last_block) != 0) {
+        if (src_inode != dst_inode) {
+            pthread_mutex_unlock(&src_inode->lock);
+        }
+        pthread_mutex_unlock(&dst_inode->lock);
+        request->status = CHIMERA_VFS_ENOSPC;
+        request->complete(request);
+        return;
+    }
+
+    if (last_block + 1 > dst_inode->file.num_blocks) {
+        dst_inode->file.num_blocks = last_block + 1;
+    }
+
+    for (bi = first_block; bi <= last_block; bi++) {
+        block_len = block_size - block_offset;
+        if (left < block_len) {
+            block_len = left;
+        }
+
+        old_block = dst_inode->file.blocks[bi];
+        new_block = memfs_block_alloc(thread);
+
+        if (!new_block) {
+            if (src_inode != dst_inode) {
+                pthread_mutex_unlock(&src_inode->lock);
+            }
+            pthread_mutex_unlock(&dst_inode->lock);
+            request->status = CHIMERA_VFS_ENOSPC;
+            request->complete(request);
+            return;
+        }
+
+        new_block->niov = evpl_iovec_alloc(evpl, block_size, 4096,
+                                           CHIMERA_MEMFS_BLOCK_MAX_IOV,
+                                           EVPL_IOVEC_FLAG_SHARED,
+                                           new_block->iov);
+
+        /* Preserve edges of the destination block outside [block_offset, +block_len) */
+        if (block_offset || block_len < block_size) {
+            if (old_block) {
+                if (block_offset) {
+                    memcpy(new_block->iov[0].data,
+                           old_block->iov[0].data, block_offset);
+                }
+                uint32_t tail_off = block_offset + block_len;
+                if (tail_off < block_size) {
+                    memcpy((uint8_t *) new_block->iov[0].data + tail_off,
+                           (uint8_t *) old_block->iov[0].data + tail_off,
+                           block_size - tail_off);
+                }
+            } else {
+                memset(new_block->iov[0].data, 0, block_offset);
+                uint32_t tail_off = block_offset + block_len;
+                if (tail_off < block_size) {
+                    memset((uint8_t *) new_block->iov[0].data + tail_off, 0,
+                           block_size - tail_off);
+                }
+            }
+        }
+
+        memfs_copy_from_inode(shared, src_inode, src_offset + copied,
+                              (uint8_t *) new_block->iov[0].data + block_offset,
+                              block_len);
+
+        if (old_block) {
+            memfs_block_free(thread, old_block);
+        }
+        dst_inode->file.blocks[bi] = new_block;
+
+        copied      += block_len;
+        left        -= block_len;
+        block_offset = 0;
+    }
+
+    if (dst_inode->size < dst_offset + length) {
+        dst_inode->size = dst_offset + length;
+    }
+
+    memfs_recompute_space_used(shared, dst_inode);
+
+    dst_inode->mtime = now;
+    dst_inode->ctime = now;
+    src_inode->atime = now;
+
+    memfs_map_attrs(shared, &request->copy_range.r_post_attr, dst_inode,
+                    request->copy_range.dst_handle->fh);
+
+    if (src_inode != dst_inode) {
+        pthread_mutex_unlock(&src_inode->lock);
+    }
+    pthread_mutex_unlock(&dst_inode->lock);
+
+    request->status              = CHIMERA_VFS_OK;
+    request->copy_range.r_length = copied;
+    request->complete(request);
+} /* memfs_copy_range */
+
+static void
+memfs_move_range(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    const uint32_t      block_shift = shared->block_shift;
+    const uint32_t      block_mask  = shared->block_mask;
+    struct memfs_inode *src_inode, *dst_inode;
+    uint64_t            src_offset, dst_offset, length;
+    uint64_t            first_block, last_block, bi;
+    uint64_t            src_first_block, n_blocks;
+    struct timespec     now;
+
+    if (request->move_range.src_handle->vfs_module !=
+        request->move_range.dst_handle->vfs_module) {
+        request->status = CHIMERA_VFS_ENOTSUP;
+        request->complete(request);
+        return;
+    }
+
+    src_offset = request->move_range.src_offset;
+    dst_offset = request->move_range.dst_offset;
+    length     = request->move_range.length;
+
+    /* Move is zero-copy at block granularity */
+    if ((src_offset & block_mask) ||
+        (dst_offset & block_mask) ||
+        (length     & block_mask)) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    if (length == 0) {
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    src_inode = (struct memfs_inode *) request->move_range.src_handle->vfs_private;
+    dst_inode = (struct memfs_inode *) request->move_range.dst_handle->vfs_private;
+
+    if (!src_inode || !dst_inode) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    if (src_inode == dst_inode) {
+        uint64_t s_end = src_offset + length;
+        uint64_t d_end = dst_offset + length;
+        if (src_offset < d_end && dst_offset < s_end) {
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
+    }
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    if (src_inode == dst_inode) {
+        pthread_mutex_lock(&src_inode->lock);
+    } else if (src_inode < dst_inode) {
+        pthread_mutex_lock(&src_inode->lock);
+        pthread_mutex_lock(&dst_inode->lock);
+    } else {
+        pthread_mutex_lock(&dst_inode->lock);
+        pthread_mutex_lock(&src_inode->lock);
+    }
+
+    memfs_map_attrs(shared, &request->move_range.r_dst_pre_attr, dst_inode,
+                    request->move_range.dst_handle->fh);
+
+    first_block     = dst_offset >> block_shift;
+    last_block      = (dst_offset + length - 1) >> block_shift;
+    src_first_block = src_offset >> block_shift;
+    n_blocks        = length >> block_shift;
+
+    if (memfs_grow_blocks(dst_inode, last_block) != 0) {
+        if (src_inode != dst_inode) {
+            pthread_mutex_unlock(&src_inode->lock);
+        }
+        pthread_mutex_unlock(&dst_inode->lock);
+        request->status = CHIMERA_VFS_ENOSPC;
+        request->complete(request);
+        return;
+    }
+
+    if (last_block + 1 > dst_inode->file.num_blocks) {
+        dst_inode->file.num_blocks = last_block + 1;
+    }
+
+    for (bi = 0; bi < n_blocks; bi++) {
+        uint64_t            si = src_first_block + bi;
+        uint64_t            di = first_block + bi;
+        struct memfs_block *src_block;
+
+        if (src_inode->file.blocks && si < src_inode->file.num_blocks) {
+            src_block                  = src_inode->file.blocks[si];
+            src_inode->file.blocks[si] = NULL;
+        } else {
+            src_block = NULL;
+        }
+
+        /* Free anything currently at the destination slot before overwriting */
+        if (dst_inode->file.blocks[di]) {
+            memfs_block_free(thread, dst_inode->file.blocks[di]);
+        }
+
+        dst_inode->file.blocks[di] = src_block;
+    }
+
+    if (dst_inode->size < dst_offset + length) {
+        dst_inode->size = dst_offset + length;
+    }
+
+    memfs_recompute_space_used(shared, dst_inode);
+    memfs_recompute_space_used(shared, src_inode);
+
+    dst_inode->mtime = now;
+    dst_inode->ctime = now;
+    src_inode->mtime = now;
+    src_inode->ctime = now;
+
+    memfs_map_attrs(shared, &request->move_range.r_dst_post_attr, dst_inode,
+                    request->move_range.dst_handle->fh);
+    memfs_map_attrs(shared, &request->move_range.r_src_post_attr, src_inode,
+                    request->move_range.src_handle->fh);
+
+    if (src_inode != dst_inode) {
+        pthread_mutex_unlock(&src_inode->lock);
+    }
+    pthread_mutex_unlock(&dst_inode->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_move_range */
+
+static void
+memfs_clone_range(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    const uint32_t      block_shift = shared->block_shift;
+    const uint32_t      block_mask  = shared->block_mask;
+    struct memfs_inode *src_inode, *dst_inode;
+    uint64_t            src_offset, dst_offset, length;
+    uint64_t            first_block, last_block, bi;
+    uint64_t            src_first_block, n_blocks;
+    struct timespec     now;
+
+    if (request->clone_range.src_handle->vfs_module !=
+        request->clone_range.dst_handle->vfs_module) {
+        request->status = CHIMERA_VFS_ENOTSUP;
+        request->complete(request);
+        return;
+    }
+
+    src_offset = request->clone_range.src_offset;
+    dst_offset = request->clone_range.dst_offset;
+    length     = request->clone_range.length;
+
+    /* Block-aligned only: matches memfs_move_range and POSIX FICLONERANGE
+     * semantics on filesystems with reflink support. Sub-block edges would
+     * require copy-on-write and defeat the zero-copy benefit. */
+    if ((src_offset & block_mask) ||
+        (dst_offset & block_mask) ||
+        (length & block_mask)) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    if (length == 0) {
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    src_inode = (struct memfs_inode *) request->clone_range.src_handle->vfs_private;
+    dst_inode = (struct memfs_inode *) request->clone_range.dst_handle->vfs_private;
+
+    if (!src_inode || !dst_inode) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    if (src_inode == dst_inode) {
+        uint64_t s_end = src_offset + length;
+        uint64_t d_end = dst_offset + length;
+        if (src_offset < d_end && dst_offset < s_end) {
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
+    }
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    if (src_inode == dst_inode) {
+        pthread_mutex_lock(&src_inode->lock);
+    } else if (src_inode < dst_inode) {
+        pthread_mutex_lock(&src_inode->lock);
+        pthread_mutex_lock(&dst_inode->lock);
+    } else {
+        pthread_mutex_lock(&dst_inode->lock);
+        pthread_mutex_lock(&src_inode->lock);
+    }
+
+    memfs_map_attrs(shared, &request->clone_range.r_pre_attr, dst_inode,
+                    request->clone_range.dst_handle->fh);
+
+    first_block     = dst_offset >> block_shift;
+    last_block      = (dst_offset + length - 1) >> block_shift;
+    src_first_block = src_offset >> block_shift;
+    n_blocks        = length >> block_shift;
+
+    if (memfs_grow_blocks(dst_inode, last_block) != 0) {
+        if (src_inode != dst_inode) {
+            pthread_mutex_unlock(&src_inode->lock);
+        }
+        pthread_mutex_unlock(&dst_inode->lock);
+        request->status = CHIMERA_VFS_ENOSPC;
+        request->complete(request);
+        return;
+    }
+
+    if (last_block + 1 > dst_inode->file.num_blocks) {
+        dst_inode->file.num_blocks = last_block + 1;
+    }
+
+    for (bi = 0; bi < n_blocks; bi++) {
+        uint64_t            si = src_first_block + bi;
+        uint64_t            di = first_block + bi;
+        struct memfs_block *src_block;
+        struct memfs_block *new_block;
+
+        if (src_inode->file.blocks && si < src_inode->file.num_blocks) {
+            src_block = src_inode->file.blocks[si];
+        } else {
+            src_block = NULL;
+        }
+
+        /* Free anything currently at the destination slot before overwriting */
+        if (dst_inode->file.blocks[di]) {
+            memfs_block_free(thread, dst_inode->file.blocks[di]);
+            dst_inode->file.blocks[di] = NULL;
+        }
+
+        if (!src_block) {
+            /* Source is a hole - leave destination NULL (reads as zeros) */
+            continue;
+        }
+
+        /* Share underlying buffer via iovec refcount; the new memfs_block
+         * has its own iovec descriptors that hold refs into the same
+         * buffers as the source block. Subsequent writes on either side
+         * COW naturally because memfs_write always allocates a new block. */
+        new_block = memfs_block_alloc(thread);
+
+        if (!new_block) {
+            if (src_inode != dst_inode) {
+                pthread_mutex_unlock(&src_inode->lock);
+            }
+            pthread_mutex_unlock(&dst_inode->lock);
+            request->status = CHIMERA_VFS_ENOSPC;
+            request->complete(request);
+            return;
+        }
+
+        new_block->niov = src_block->niov;
+        for (int j = 0; j < src_block->niov; j++) {
+            evpl_iovec_clone_segment(&new_block->iov[j],
+                                     &src_block->iov[j],
+                                     0,
+                                     src_block->iov[j].length);
+        }
+
+        dst_inode->file.blocks[di] = new_block;
+    }
+
+    if (dst_inode->size < dst_offset + length) {
+        dst_inode->size = dst_offset + length;
+    }
+
+    memfs_recompute_space_used(shared, dst_inode);
+
+    dst_inode->mtime = now;
+    dst_inode->ctime = now;
+    src_inode->atime = now;
+
+    memfs_map_attrs(shared, &request->clone_range.r_post_attr, dst_inode,
+                    request->clone_range.dst_handle->fh);
+
+    if (src_inode != dst_inode) {
+        pthread_mutex_unlock(&src_inode->lock);
+    }
+    pthread_mutex_unlock(&dst_inode->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_clone_range */
+
 static void
 memfs_seek(
     struct memfs_thread        *thread,
@@ -3160,6 +3774,15 @@ memfs_dispatch(
         case CHIMERA_VFS_OP_ALLOCATE:
             memfs_allocate(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_COPY_RANGE:
+            memfs_copy_range(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_CLONE_RANGE:
+            memfs_clone_range(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_MOVE_RANGE:
+            memfs_move_range(thread, shared, request, private_data);
+            break;
         case CHIMERA_VFS_OP_SEEK:
             memfs_seek(thread, shared, request, private_data);
             break;
@@ -3200,7 +3823,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
     .name         = "memfs",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_MEMFS,
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
-        CHIMERA_VFS_CAP_FS_RELATIVE_OP,
+        CHIMERA_VFS_CAP_FS_RELATIVE_OP |
+        CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,
