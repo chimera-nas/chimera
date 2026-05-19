@@ -5,8 +5,15 @@
 #include "nfs_internal.h"
 #include "vfs/vfs_error.h"
 
+enum chimera_nfs4_lookup_op_type {
+    LOOKUP_OP_NORMAL,
+    LOOKUP_OP_DOT,
+    LOOKUP_OP_DOTDOT,
+};
+
 struct chimera_nfs4_lookup_ctx {
     struct chimera_nfs_client_server *server;
+    enum chimera_nfs4_lookup_op_type op_type;
 };
 
 static void
@@ -22,6 +29,9 @@ chimera_nfs4_lookup_callback(
     struct nfs_resop4              *getfh_res;
     struct nfs_resop4              *getattr_res;
     xdr_opaque                     *remote_fh;
+    int                             getfh_idx;
+    int                             getattr_idx;
+    nfsstat4                        traverse_status;
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -49,20 +59,41 @@ chimera_nfs4_lookup_callback(
         return;
     }
 
-    /* Check LOOKUP result */
-    if (res->num_resarray < 3 || res->resarray[2].oplookup.status != NFS4_OK) {
-        request->status = chimera_nfs4_status_to_errno(res->resarray[2].oplookup.status);
-        request->complete(request);
-        return;
+    /*
+     * For ".", the compound is SEQUENCE + PUTFH + GETFH + GETATTR (no
+     * traversal op).  For ".." and normal names, there is a LOOKUPP or
+     * LOOKUP at index 2 whose status must be checked.
+     */
+    if (ctx->op_type == LOOKUP_OP_DOT) {
+        getfh_idx   = 2;
+        getattr_idx = 3;
+    } else {
+        if (res->num_resarray < 3) {
+            request->status = CHIMERA_VFS_EIO;
+            request->complete(request);
+            return;
+        }
+        if (ctx->op_type == LOOKUP_OP_DOTDOT) {
+            traverse_status = res->resarray[2].oplookupp.status;
+        } else {
+            traverse_status = res->resarray[2].oplookup.status;
+        }
+        if (traverse_status != NFS4_OK) {
+            request->status = chimera_nfs4_status_to_errno(traverse_status);
+            request->complete(request);
+            return;
+        }
+        getfh_idx   = 3;
+        getattr_idx = 4;
     }
 
     /* Get GETFH result */
-    if (res->num_resarray < 4) {
+    if (res->num_resarray <= (uint32_t) getfh_idx) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
-    getfh_res = &res->resarray[3];
+    getfh_res = &res->resarray[getfh_idx];
     if (getfh_res->opgetfh.status != NFS4_OK) {
         request->status = chimera_nfs4_status_to_errno(getfh_res->opgetfh.status);
         request->complete(request);
@@ -75,8 +106,8 @@ chimera_nfs4_lookup_callback(
     chimera_nfs4_unmarshall_fh(remote_fh, ctx->server->index, request->fh, &request->lookup_at.r_attr);
 
     /* Get GETATTR result */
-    if (res->num_resarray >= 5) {
-        getattr_res = &res->resarray[4];
+    if (res->num_resarray > (uint32_t) getattr_idx) {
+        getattr_res = &res->resarray[getattr_idx];
         if (getattr_res->opgetattr.status == NFS4_OK) {
             chimera_nfs4_unmarshall_fattr(&getattr_res->opgetattr.resok4.obj_attributes,
                                           &request->lookup_at.r_attr);
@@ -105,6 +136,8 @@ chimera_nfs4_lookup_at(
     uint8_t                                 *fh;
     int                                      fhlen;
     struct chimera_nfs4_lookup_ctx          *ctx;
+    enum chimera_nfs4_lookup_op_type         op_type;
+    int                                      getattr_idx;
 
     if (!server_thread) {
         request->status = CHIMERA_VFS_ESTALE;
@@ -121,17 +154,33 @@ chimera_nfs4_lookup_at(
         return;
     }
 
-    ctx         = request->plugin_data;
-    ctx->server = server;
+    /*
+     * NFSv4 OP_LOOKUP rejects "." and ".." with NFS4ERR_BADNAME (RFC 7530
+     * 14.2.15).  For ".", drop the traversal op entirely (current FH is
+     * unchanged after PUTFH).  For "..", use OP_LOOKUPP which moves the
+     * current FH to the parent directory.
+     */
+    if (request->lookup_at.component_len == 1 &&
+        request->lookup_at.component[0] == '.') {
+        op_type = LOOKUP_OP_DOT;
+    } else if (request->lookup_at.component_len == 2 &&
+               request->lookup_at.component[0] == '.' &&
+               request->lookup_at.component[1] == '.') {
+        op_type = LOOKUP_OP_DOTDOT;
+    } else {
+        op_type = LOOKUP_OP_NORMAL;
+    }
+
+    ctx          = request->plugin_data;
+    ctx->server  = server;
+    ctx->op_type = op_type;
 
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
-    /* Build compound: SEQUENCE + PUTFH + LOOKUP + GETFH + GETATTR */
     memset(&args, 0, sizeof(args));
     args.tag.len      = 0;
     args.minorversion = 1;
     args.argarray     = argarray;
-    args.num_argarray = 5;
 
     /* Op 0: SEQUENCE */
     argarray[0].argop = OP_SEQUENCE;
@@ -146,21 +195,35 @@ chimera_nfs4_lookup_at(
     argarray[1].opputfh.object.data = fh;
     argarray[1].opputfh.object.len  = fhlen;
 
-    /* Op 2: LOOKUP - lookup the component name */
-    argarray[2].argop                 = OP_LOOKUP;
-    argarray[2].oplookup.objname.data = (void *) request->lookup_at.component;
-    argarray[2].oplookup.objname.len  = request->lookup_at.component_len;
+    if (op_type == LOOKUP_OP_DOT) {
+        /* No traversal op: GETFH at 2, GETATTR at 3 */
+        argarray[2].argop = OP_GETFH;
+        getattr_idx       = 3;
+        args.num_argarray = 4;
+    } else {
+        if (op_type == LOOKUP_OP_DOTDOT) {
+            /* Op 2: LOOKUPP - move current FH to parent directory */
+            argarray[2].argop = OP_LOOKUPP;
+        } else {
+            /* Op 2: LOOKUP - lookup the component name */
+            argarray[2].argop                 = OP_LOOKUP;
+            argarray[2].oplookup.objname.data = (void *) request->lookup_at.component;
+            argarray[2].oplookup.objname.len  = request->lookup_at.component_len;
+        }
 
-    /* Op 3: GETFH - get file handle for looked up object */
-    argarray[3].argop = OP_GETFH;
+        /* Op 3: GETFH - get file handle for resolved object */
+        argarray[3].argop = OP_GETFH;
+        getattr_idx       = 4;
+        args.num_argarray = 5;
+    }
 
-    /* Op 4: GETATTR - get attributes for looked up object */
-    argarray[4].argop = OP_GETATTR;
-    attr_request[0]   = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) | (1 << FATTR4_FILEID);
-    attr_request[1]   = (1 << (FATTR4_MODE - 32)) | (1 << (FATTR4_NUMLINKS - 32)) |
+    /* GETATTR for the resolved object */
+    argarray[getattr_idx].argop = OP_GETATTR;
+    attr_request[0]             = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) | (1 << FATTR4_FILEID);
+    attr_request[1]             = (1 << (FATTR4_MODE - 32)) | (1 << (FATTR4_NUMLINKS - 32)) |
         (1 << (FATTR4_TIME_ACCESS - 32)) | (1 << (FATTR4_TIME_MODIFY - 32));
-    argarray[4].opgetattr.attr_request     = attr_request;
-    argarray[4].opgetattr.num_attr_request = 2;
+    argarray[getattr_idx].opgetattr.attr_request     = attr_request;
+    argarray[getattr_idx].opgetattr.num_attr_request = 2;
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,
