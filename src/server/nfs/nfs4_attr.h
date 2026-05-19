@@ -824,6 +824,26 @@ chimera_nfs4_validate_createattrs(
     return NFS4_OK;
 } /* chimera_nfs4_validate_createattrs */
 
+/* GETATTR: requested attrs must be supported and readable. The "*_set"
+ * attributes (FATTR4_TIME_ACCESS_SET, FATTR4_TIME_MODIFY_SET) are write-only
+ * — they can be passed to SETATTR but cannot be read. RFC 7530 §5.6 says a
+ * GETATTR for such an attribute MUST return NFS4ERR_INVAL. */
+static inline nfsstat4
+chimera_nfs4_validate_getattr_request(
+    uint32_t        num_attrmask,
+    const uint32_t *attrmask)
+{
+    static const uint32_t writeonly_word1 =
+        (1U << (FATTR4_TIME_ACCESS_SET - 32)) |
+        (1U << (FATTR4_TIME_MODIFY_SET - 32));
+
+    if (num_attrmask >= 2 && (attrmask[1] & writeonly_word1)) {
+        return NFS4ERR_INVAL;
+    }
+
+    return NFS4_OK;
+} /* chimera_nfs4_validate_getattr_request */
+
 static void
 chimera_nfs4_set_changeinfo(
     struct change_info4      *cinfo,

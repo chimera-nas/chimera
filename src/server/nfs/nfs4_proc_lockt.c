@@ -29,8 +29,7 @@ chimera_nfs4_lockt_complete(
         return;
     }
 
-    /* F_GETLK always returns OK; conflict is signalled via conflict_type.
-     * LOCKT NFS4ERR_DENIED is a successful query result - compound stays NFS4_OK. */
+    /* F_GETLK always returns OK; conflict is signalled via conflict_type. */
     if (conflict_type == CHIMERA_VFS_LOCK_UNLOCK) {
         res->status = NFS4_OK;
     } else {
@@ -46,7 +45,7 @@ chimera_nfs4_lockt_complete(
         res->denied.owner.owner.data = NULL;
     }
 
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_lockt_complete */
 
 static void
