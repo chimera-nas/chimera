@@ -178,24 +178,22 @@ endmacro()
 
 # Macro to generate all NFS4 tests for a backend with optional condition
 macro(generate_posix_nfs4_backend_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_posix_nfs4_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_posix_nfs4_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_posix_nfs4_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate NFS4 tests for each backend
 generate_posix_nfs4_backend_tests(memfs "")
-generate_posix_nfs4_backend_tests(demofs_io_uring "")
+generate_posix_nfs4_backend_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_posix_nfs4_backend_tests(demofs_aio "")
 endif()
 generate_posix_nfs4_backend_tests(cairn CAIRN_ENABLED)
 generate_posix_nfs4_backend_tests(linux "")
-generate_posix_nfs4_backend_tests(io_uring IO_URING_ENABLED)
+generate_posix_nfs4_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # NFS3 over TCP-RDMA Backend Tests
@@ -313,7 +311,9 @@ endif()
 # NFS4 FSX tests
 # These tests run FSX through the NFS4 protocol to an in-process server
 add_fsx_test(nfs4_memfs)
-add_fsx_test(nfs4_demofs_io_uring)
+if(IO_URING_ENABLED)
+    add_fsx_test(nfs4_demofs_io_uring)
+endif()
 if(HAVE_LIBAIO)
     add_fsx_test(nfs4_demofs_aio)
 endif()
@@ -321,7 +321,7 @@ if(CAIRN_ENABLED)
     add_fsx_test(nfs4_cairn)
 endif()
 add_fsx_test(nfs4_linux)
-if(IO_URING_ENABLED)
+if(CHIMERA_VFS_IO_URING)
     add_fsx_test(nfs4_io_uring)
 endif()
 
@@ -570,24 +570,22 @@ endmacro()
 
 # Macro to generate all NFS4 cthon tests for a backend with optional condition
 macro(generate_cthon_nfs4_backend_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_cthon_nfs4_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_cthon_nfs4_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_cthon_nfs4_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate NFS4 cthon tests for each backend
 generate_cthon_nfs4_backend_tests(memfs "")
-generate_cthon_nfs4_backend_tests(demofs_io_uring "")
+generate_cthon_nfs4_backend_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_cthon_nfs4_backend_tests(demofs_aio "")
 endif()
 generate_cthon_nfs4_backend_tests(cairn CAIRN_ENABLED)
 generate_cthon_nfs4_backend_tests(linux "")
-generate_cthon_nfs4_backend_tests(io_uring IO_URING_ENABLED)
+generate_cthon_nfs4_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
 # Stress Tests ported from xfstests
@@ -829,18 +827,16 @@ endmacro()
 
 # Macro to generate NFS4 stress tests with optional condition
 macro(generate_stress_nfs4_tests backend condition_var)
-    if(condition_var)
-        if(${condition_var})
-            _generate_stress_nfs4_tests_for_backend(${backend})
-        endif()
-    else()
+    if("${condition_var}" STREQUAL "")
+        _generate_stress_nfs4_tests_for_backend(${backend})
+    elseif(${condition_var})
         _generate_stress_nfs4_tests_for_backend(${backend})
     endif()
 endmacro()
 
 # Generate NFS4 stress tests for each backend
 generate_stress_nfs4_tests(memfs "")
-generate_stress_nfs4_tests(demofs_io_uring "")
+generate_stress_nfs4_tests(demofs_io_uring IO_URING_ENABLED)
 if(HAVE_LIBAIO)
     generate_stress_nfs4_tests(demofs_aio "")
 endif()
