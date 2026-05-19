@@ -27,12 +27,25 @@
 #include "common/macros.h"
 #include "evpl_iovec_cursor.h"
 
-#define CAIRN_KEY_INODE   0
-#define CAIRN_KEY_DIRENT  1
-#define CAIRN_KEY_SYMLINK 2
-#define CAIRN_KEY_EXTENT  3
-#define CAIRN_KEY_SUPER   4
-#define CAIRN_KEY_KV      5
+#define CAIRN_KEY_INODE          0
+#define CAIRN_KEY_DIRENT         1
+#define CAIRN_KEY_SYMLINK        2
+#define CAIRN_KEY_EXTENT         3
+#define CAIRN_KEY_SUPER          4
+#define CAIRN_KEY_KV             5
+
+/*
+ * Storage layout:
+ *   metadb at <path>/meta : inode/dirent/symlink/super/kv keys. WriteBatchWithIndex,
+ *                          committed with sync=true so metadata ops are durable on reply.
+ *   datadb at <path>/data : extent keys. WriteBatchWithIndex, sync flag selected per batch
+ *                          (sync iff any pending op requested durable data).
+ *
+ * Multi-DB ordering invariant: when a thread commits a cycle's batches, the data batch
+ * is written first and the metadata batch second.  This ensures that a recovered metadb
+ * never claims a file size that points at extent data still missing from datadb.
+ */
+#define CAIRN_INODE_LOCK_STRIPES 1024
 
 #define chimera_cairn_debug(...) chimera_debug("cairn", \
                                                __FILE__, \
@@ -102,7 +115,7 @@ struct cairn_dirent_value {
 
 struct cairn_dirent_handle {
     struct cairn_dirent_value *dirent;
-    rocksdb_pinnableslice_t   *slice;
+    char                      *buf;
 };
 
 struct cairn_symlink_target {
@@ -128,32 +141,61 @@ struct cairn_inode {
 };
 
 struct cairn_inode_handle {
-    struct cairn_inode      *inode;
-    rocksdb_pinnableslice_t *slice;
+    struct cairn_inode *inode;
+    char               *buf;
 };
 
 struct cairn_shared {
-    rocksdb_t                           *db;
-    rocksdb_cache_t                     *cache;
-    rocksdb_transactiondb_t             *db_txn;
-    rocksdb_options_t                   *options;
-    rocksdb_transactiondb_options_t     *txndb_options;
-    rocksdb_writeoptions_t              *write_options;
+    rocksdb_t                           *metadb;
+    rocksdb_t                           *datadb;
+    rocksdb_cache_t                     *meta_cache;
+    rocksdb_cache_t                     *data_cache;
+    rocksdb_options_t                   *meta_options;
+    rocksdb_options_t                   *data_options;
+    rocksdb_writeoptions_t              *meta_write_opts;       /* sync=1 */
+    rocksdb_writeoptions_t              *data_write_opts_async; /* sync=0 */
+    rocksdb_writeoptions_t              *data_write_opts_sync;  /* sync=1 */
     rocksdb_readoptions_t               *read_options;
-    rocksdb_transaction_options_t       *txn_options;
-    rocksdb_block_based_table_options_t *table_options;
+    rocksdb_block_based_table_options_t *meta_table_options;
+    rocksdb_block_based_table_options_t *data_table_options;
     int                                  num_active_threads;
     uint8_t                              root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                             root_fhlen;
     uint64_t                             fsid;
     pthread_mutex_t                      lock;
+    /*
+     * Striped per-inode mutexes (used by helpers below for fine-grained
+     * locking on the metadata of a single inode).  Combined with
+     * multi_inode_lock, they prevent cross-thread metadata races between
+     * fh-routed single-inode ops and multi-inode ops (rename_at / link_at).
+     *
+     * NOTE (follow-up): only rename_at and link_at currently take these.
+     * Single-inode ops (setattr, write inode-side, etc.) still rely on
+     * fh-hash routing alone, which is unsafe against a concurrent
+     * cross-thread rename/link that touches their inode.  Wrapping every
+     * metadata-mutating op with the appropriate stripe locks is tracked
+     * as Phase A.2.
+     */
+    pthread_mutex_t                      multi_inode_lock;
+    pthread_mutex_t                      inode_mutexes[CAIRN_INODE_LOCK_STRIPES];
     int                                  noatime;
 };
 
 struct cairn_thread {
     struct evpl                *evpl;
     struct cairn_shared        *shared;
-    rocksdb_transaction_t      *txn;
+    /* Per-cycle write batches, lazily created.  meta_batch goes to metadb,
+     * data_batch to datadb.  data_needs_sync is set when any op in this batch
+     * asked for durable data (NFS FILE_SYNC write or NFS COMMIT). */
+    rocksdb_writebatch_wi_t    *meta_batch;
+    rocksdb_writebatch_wi_t    *data_batch;
+    int                         data_needs_sync;
+    /* Set when evpl_defer(&thread->commit) has been called this cycle.
+     * Cleared inside cairn_thread_commit before its handler returns.
+     * Read-only op handlers DL_APPEND to txn_requests and rely on the
+     * deferred commit to drain that list and call request->complete(); if we
+     * forgot to schedule the deferral those requests would hang forever. */
+    int                         commit_scheduled;
     struct chimera_vfs_request *txn_requests;
     struct evpl_deferral        commit;
     int                         thread_id;
@@ -168,6 +210,12 @@ cairn_punch_hole(
     struct cairn_inode  *inode,
     uint64_t             offset,
     uint64_t             length);
+
+/* Forward declarations for batch acquisition (defined after cairn_thread_commit). */
+static rocksdb_writebatch_wi_t * cairn_get_meta_batch(
+    struct cairn_thread *thread);
+static rocksdb_writebatch_wi_t * cairn_get_data_batch(
+    struct cairn_thread *thread);
 
 static inline uint32_t
 cairn_inum_to_fh(
@@ -192,19 +240,108 @@ cairn_fh_to_inum(
 static inline void
 cairn_inode_handle_release(struct cairn_inode_handle *ih)
 {
-    rocksdb_pinnableslice_destroy(ih->slice);
+    free(ih->buf);
 } /* cairn_inode_handle_release */
+
+static inline pthread_mutex_t *
+cairn_inode_stripe(
+    struct cairn_shared *shared,
+    uint64_t             inum)
+{
+    return &shared->inode_mutexes[inum % CAIRN_INODE_LOCK_STRIPES];
+} /* cairn_inode_stripe */
+
+static inline void
+cairn_lock_inode(
+    struct cairn_shared *shared,
+    uint64_t             inum)
+{
+    pthread_mutex_lock(cairn_inode_stripe(shared, inum));
+} /* cairn_lock_inode */
+
+static inline void
+cairn_unlock_inode(
+    struct cairn_shared *shared,
+    uint64_t             inum)
+{
+    pthread_mutex_unlock(cairn_inode_stripe(shared, inum));
+} /* cairn_unlock_inode */
+
+/*
+ * Acquire multiple striped inode locks in inum-sorted order to avoid deadlock.
+ * Duplicate inums (and inums mapping to the same stripe) are de-duplicated so we
+ * never double-lock a non-recursive mutex.
+ */
+static inline void
+cairn_lock_inodes(
+    struct cairn_shared *shared,
+    uint64_t            *inums,
+    int                  n)
+{
+    pthread_mutex_t *stripes[8];
+    int              ns = 0, i, j;
+
+    for (i = 0; i < n; i++) {
+        pthread_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
+        int              dup = 0;
+        for (j = 0; j < ns; j++) {
+            if (stripes[j] == s) {
+                dup = 1; break;
+            }
+        }
+        if (!dup) {
+            /* Insertion sort by pointer to enforce a global lock order. */
+            int k = ns;
+            while (k > 0 && stripes[k - 1] > s) {
+                stripes[k] = stripes[k - 1];
+                k--;
+            }
+            stripes[k] = s;
+            ns++;
+        }
+    }
+
+    for (i = 0; i < ns; i++) {
+        pthread_mutex_lock(stripes[i]);
+    }
+} /* cairn_lock_inodes */
+
+static inline void
+cairn_unlock_inodes(
+    struct cairn_shared *shared,
+    uint64_t            *inums,
+    int                  n)
+{
+    pthread_mutex_t *stripes[8];
+    int              ns = 0, i, j;
+
+    for (i = 0; i < n; i++) {
+        pthread_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
+        int              dup = 0;
+        for (j = 0; j < ns; j++) {
+            if (stripes[j] == s) {
+                dup = 1; break;
+            }
+        }
+        if (!dup) {
+            stripes[ns++] = s;
+        }
+    }
+
+    for (i = 0; i < ns; i++) {
+        pthread_mutex_unlock(stripes[i]);
+    }
+} /* cairn_unlock_inodes */
 
 static inline void
 cairn_dirent_handle_release(struct cairn_dirent_handle *dh)
 {
-    rocksdb_pinnableslice_destroy(dh->slice);
+    free(dh->buf);
 } /* cairn_dirent_handle_release */
 
 static inline int
 cairn_dirent_get(
     struct cairn_thread        *thread,
-    rocksdb_transaction_t      *txn,
     struct cairn_dirent_key    *key,
     struct cairn_dirent_handle *dh)
 {
@@ -212,32 +349,66 @@ cairn_dirent_get(
     char                *err    = NULL;
     size_t               len;
 
-    dh->slice = rocksdb_transaction_get_pinned(txn, shared->read_options,
-                                               (const char *) key, sizeof(*key),
-                                               &err);
+    if (thread->meta_batch) {
+        dh->buf = rocksdb_writebatch_wi_get_from_batch_and_db(
+            thread->meta_batch, shared->metadb, shared->read_options,
+            (const char *) key, sizeof(*key), &len, &err);
+    } else {
+        dh->buf = rocksdb_get(shared->metadb, shared->read_options,
+                              (const char *) key, sizeof(*key), &len, &err);
+    }
 
     chimera_cairn_abort_if(err, "Error getting dirent: %s\n", err);
 
-    if (!dh->slice) {
+    if (!dh->buf) {
         dh->dirent = NULL;
         return -1;
     }
 
-    dh->dirent = (struct cairn_dirent_value *) rocksdb_pinnableslice_value(dh->slice, &len);
+    dh->dirent = (struct cairn_dirent_value *) dh->buf;
 
     return 0;
 } /* cairn_dirent_get */
 
+/*
+ * Build an iterator over metadb that merges the thread's pending meta_batch
+ * (if any) with the on-disk state, so that previously-batched mutations are
+ * visible to scans within the same cycle.
+ */
+static inline rocksdb_iterator_t *
+cairn_meta_iterator(struct cairn_thread *thread)
+{
+    struct cairn_shared *shared = thread->shared;
+    rocksdb_iterator_t  *base   = rocksdb_create_iterator(shared->metadb,
+                                                          shared->read_options);
+
+    if (thread->meta_batch) {
+        return rocksdb_writebatch_wi_create_iterator_with_base(thread->meta_batch, base);
+    }
+    return base;
+} /* cairn_meta_iterator */
+
+static inline rocksdb_iterator_t *
+cairn_data_iterator(struct cairn_thread *thread)
+{
+    struct cairn_shared *shared = thread->shared;
+    rocksdb_iterator_t  *base   = rocksdb_create_iterator(shared->datadb,
+                                                          shared->read_options);
+
+    if (thread->data_batch) {
+        return rocksdb_writebatch_wi_create_iterator_with_base(thread->data_batch, base);
+    }
+    return base;
+} /* cairn_data_iterator */
+
 static inline int
 cairn_dirent_scan(
     struct cairn_thread *thread,
-    rocksdb_transaction_t *txn,
     uint64_t inum,
     uint64_t start_hash,
     int ( *callback )(struct cairn_dirent_key *key, struct cairn_dirent_value *dirent, void *private_data),
     void *private_data)
 {
-    struct cairn_shared       *shared = thread->shared;
     rocksdb_iterator_t        *iter;
     struct cairn_dirent_key    start_key, *dirent_key;
     struct cairn_dirent_value *dirent_value;
@@ -247,7 +418,7 @@ cairn_dirent_scan(
     start_key.inum    = inum;
     start_key.hash    = start_hash;
 
-    iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
+    iter = cairn_meta_iterator(thread);
 
     rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
 
@@ -273,9 +444,7 @@ cairn_dirent_scan(
 static inline int
 cairn_inode_get_inum(
     struct cairn_thread       *thread,
-    rocksdb_transaction_t     *txn,
     uint64_t                   inum,
-    int                        write,
     struct cairn_inode_handle *ih)
 {
     struct cairn_shared   *shared = thread->shared;
@@ -286,24 +455,23 @@ cairn_inode_get_inum(
     key.keytype = CAIRN_KEY_INODE;
     key.inum    = inum;
 
-    if (write) {
-        ih->slice = rocksdb_transaction_get_pinned_for_update(txn, shared->read_options,
-                                                              (const char *) &key, sizeof(key),
-                                                              1, &err);
+    if (thread->meta_batch) {
+        ih->buf = rocksdb_writebatch_wi_get_from_batch_and_db(
+            thread->meta_batch, shared->metadb, shared->read_options,
+            (const char *) &key, sizeof(key), &len, &err);
     } else {
-        ih->slice = rocksdb_transaction_get_pinned(txn, shared->read_options,
-                                                   (const char *) &key, sizeof(key),
-                                                   &err);
+        ih->buf = rocksdb_get(shared->metadb, shared->read_options,
+                              (const char *) &key, sizeof(key), &len, &err);
     }
 
     chimera_cairn_abort_if(err, "Error getting inode: %s\n", err);
 
-    if (!ih->slice) {
+    if (!ih->buf) {
         ih->inode = NULL;
         return -1;
     }
 
-    ih->inode = (struct cairn_inode *) rocksdb_pinnableslice_value(ih->slice, &len);
+    ih->inode = (struct cairn_inode *) ih->buf;
 
     return 0;
 } /* cairn_inode_get_inum */
@@ -311,10 +479,8 @@ cairn_inode_get_inum(
 static inline int
 cairn_inode_get_fh(
     struct cairn_thread       *thread,
-    rocksdb_transaction_t     *txn,
     const uint8_t             *fh,
     int                        fhlen,
-    int                        write,
     struct cairn_inode_handle *ih)
 {
     uint64_t inum;
@@ -323,7 +489,7 @@ cairn_inode_get_fh(
 
     cairn_fh_to_inum(&inum, &gen, fh, fhlen);
 
-    rc = cairn_inode_get_inum(thread, txn, inum, write, ih);
+    rc = cairn_inode_get_inum(thread, inum, ih);
 
     if (rc == 0 && ih->inode->gen != gen) {
         cairn_inode_handle_release(ih);
@@ -335,97 +501,79 @@ cairn_inode_get_fh(
 
 static inline void
 cairn_put_dirent(
-    rocksdb_transaction_t     *txn,
+    struct cairn_thread       *thread,
     struct cairn_dirent_key   *key,
     struct cairn_dirent_value *value)
 {
-    char *err = NULL;
-    int   len;
+    rocksdb_writebatch_wi_t *batch = cairn_get_meta_batch(thread);
+    int                      len;
 
     len = sizeof(value->inum) + sizeof(value->name_len) + value->name_len;
 
-    rocksdb_transaction_put(txn,
-                            (const char *) key, sizeof(*key),
-                            (const char *) value, len, &err);
-
-    chimera_cairn_abort_if(err, "Error putting dirent: %s\n", err);
+    rocksdb_writebatch_wi_put(batch,
+                              (const char *) key, sizeof(*key),
+                              (const char *) value, len);
 } /* cairn_put_dirent */
 
 static inline void
 cairn_put_inode(
-    rocksdb_transaction_t *txn,
-    struct cairn_inode    *inode)
+    struct cairn_thread *thread,
+    struct cairn_inode  *inode)
 {
-    char                  *err = NULL;
-    struct cairn_inode_key key;
+    rocksdb_writebatch_wi_t *batch = cairn_get_meta_batch(thread);
+    struct cairn_inode_key   key;
 
     key.keytype = CAIRN_KEY_INODE;
     key.inum    = inode->inum;
 
-    rocksdb_transaction_put(txn,
-                            (const char *) &key, sizeof(key),
-                            (const char *) inode, sizeof(*inode), &err);
-
-    chimera_cairn_abort_if(err, "Error putting root inode: %s\n", err);
+    rocksdb_writebatch_wi_put(batch,
+                              (const char *) &key, sizeof(key),
+                              (const char *) inode, sizeof(*inode));
 } /* cairn_put_inode */
 
 static inline void
 cairn_remove_dirent(
-    rocksdb_transaction_t   *txn,
+    struct cairn_thread     *thread,
     struct cairn_dirent_key *key)
 {
-    char *err = NULL;
+    rocksdb_writebatch_wi_t *batch = cairn_get_meta_batch(thread);
 
-    rocksdb_transaction_delete(txn,
-                               (const char *) key, sizeof(*key),
-                               &err);
-
-    chimera_cairn_abort_if(err, "Error deleting dirent: %s\n", err);
+    rocksdb_writebatch_wi_delete(batch, (const char *) key, sizeof(*key));
 } /* cairn_remove_dirent */
 
 static inline void
 cairn_remove_inode(
-    rocksdb_transaction_t *txn,
-    struct cairn_inode    *inode)
+    struct cairn_thread *thread,
+    struct cairn_inode  *inode)
 {
-    char                  *err = NULL;
-    struct cairn_inode_key key;
+    rocksdb_writebatch_wi_t *batch = cairn_get_meta_batch(thread);
+    struct cairn_inode_key   key;
 
     key.keytype = CAIRN_KEY_INODE;
     key.inum    = inode->inum;
 
-    rocksdb_transaction_delete(txn,
-                               (const char *) &key, sizeof(key),
-                               &err);
-
-    chimera_cairn_abort_if(err, "Error deleting inode: %s\n", err);
+    rocksdb_writebatch_wi_delete(batch, (const char *) &key, sizeof(key));
 } /* cairn_remove_inode */
 
 static inline void
 cairn_remove_symlink_target(
-    rocksdb_transaction_t *txn,
-    uint64_t               inum)
+    struct cairn_thread *thread,
+    uint64_t             inum)
 {
-    char                    *err = NULL;
+    rocksdb_writebatch_wi_t *batch = cairn_get_meta_batch(thread);
     struct cairn_symlink_key key;
 
     key.keytype = CAIRN_KEY_SYMLINK;
     key.inum    = inum;
 
-    rocksdb_transaction_delete(txn,
-                               (const char *) &key, sizeof(key),
-                               &err);
-
-    chimera_cairn_abort_if(err, "Error deleting symlink target: %s\n", err);
+    rocksdb_writebatch_wi_delete(batch, (const char *) &key, sizeof(key));
 } /* cairn_remove_symlink_target */
 
 static inline void
 cairn_remove_directory_contents(
-    struct cairn_thread   *thread,
-    rocksdb_transaction_t *txn,
-    uint64_t               dir_inum)
+    struct cairn_thread *thread,
+    uint64_t             dir_inum)
 {
-    struct cairn_shared    *shared = thread->shared;
     rocksdb_iterator_t     *iter;
     struct cairn_dirent_key start_key, *dirent_key;
     size_t                  klen;
@@ -434,7 +582,7 @@ cairn_remove_directory_contents(
     start_key.inum    = dir_inum;
     start_key.hash    = 0;
 
-    iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
+    iter = cairn_meta_iterator(thread);
 
     rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
 
@@ -446,7 +594,7 @@ cairn_remove_directory_contents(
             break;
         }
 
-        cairn_remove_dirent(txn, dirent_key);
+        cairn_remove_dirent(thread, dirent_key);
         rocksdb_iter_next(iter);
     }
 
@@ -455,11 +603,9 @@ cairn_remove_directory_contents(
 
 static inline int
 cairn_directory_is_empty(
-    struct cairn_thread   *thread,
-    rocksdb_transaction_t *txn,
-    uint64_t               dir_inum)
+    struct cairn_thread *thread,
+    uint64_t             dir_inum)
 {
-    struct cairn_shared    *shared = thread->shared;
     rocksdb_iterator_t     *iter;
     struct cairn_dirent_key start_key, *dirent_key;
     size_t                  klen;
@@ -469,7 +615,7 @@ cairn_directory_is_empty(
     start_key.inum    = dir_inum;
     start_key.hash    = 0;
 
-    iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
+    iter = cairn_meta_iterator(thread);
 
     rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
 
@@ -489,21 +635,21 @@ cairn_directory_is_empty(
 
 static inline void
 cairn_remove_file_extents(
-    struct cairn_thread   *thread,
-    rocksdb_transaction_t *txn,
-    uint64_t               file_inum)
+    struct cairn_thread *thread,
+    uint64_t             file_inum)
 {
-    struct cairn_shared    *shared = thread->shared;
-    rocksdb_iterator_t     *iter;
-    struct cairn_extent_key start_key, *extent_key;
-    char                   *err = NULL;
-    size_t                  klen;
+    rocksdb_writebatch_wi_t *batch;
+    rocksdb_iterator_t      *iter;
+    struct cairn_extent_key  start_key, *extent_key;
+    size_t                   klen;
+
+    batch = cairn_get_data_batch(thread);
 
     start_key.keytype = CAIRN_KEY_EXTENT;
     start_key.inum    = file_inum;
     start_key.offset  = htobe64(0);
 
-    iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
+    iter = cairn_data_iterator(thread);
 
     rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
 
@@ -515,11 +661,7 @@ cairn_remove_file_extents(
             break;
         }
 
-        rocksdb_transaction_delete(txn,
-                                   (const char *) extent_key, sizeof(*extent_key),
-                                   &err);
-
-        chimera_cairn_abort_if(err, "Error deleting extent: %s\n", err);
+        rocksdb_writebatch_wi_delete(batch, (const char *) extent_key, sizeof(*extent_key));
 
         rocksdb_iter_next(iter);
     }
@@ -530,25 +672,32 @@ cairn_remove_file_extents(
 static void *
 cairn_init(const char *cfgdata)
 {
-    struct cairn_shared   *shared = calloc(1, sizeof(*shared));
-    json_t                *cfg;
-    json_error_t           json_error;
-    const char            *db_path;
-    struct cairn_inode     inode;
-    struct cairn_inode_key inode_key;
-    rocksdb_transaction_t *txn;
-    int                    initialize;
-    struct timespec        now;
-    char                  *err          = NULL;
-    size_t                 cache_mb     = 64;
-    int                    compression  = 1; // Default to enabled
-    int                    bloom_filter = 1; // Default to enabled
+    struct cairn_shared *shared = calloc(1, sizeof(*shared));
+    json_t              *cfg;
+    json_error_t         json_error;
+    const char          *base_path;
+    char                 meta_path[PATH_MAX];
+    char                 data_path[PATH_MAX];
+    struct cairn_inode   inode;
+    int                  initialize;
+    struct timespec      now;
+    char                *err          = NULL;
+    size_t               cache_mb     = 64;
+    int                  compression  = 1; // Default to enabled
+    int                  bloom_filter = 1; // Default to enabled
+    int                  statistics   = 0; // Opt-in for diagnostics
+    int                  i;
 
     cfg = json_loads(cfgdata, 0, &json_error);
 
     chimera_cairn_abort_if(!cfg, "Failed to parse config: %s\n", json_error.text);
 
-    db_path = json_string_value(json_object_get(cfg, "path"));
+    base_path = json_string_value(json_object_get(cfg, "path"));
+
+    chimera_cairn_abort_if(!base_path, "cairn: 'path' missing in config\n");
+
+    snprintf(meta_path, sizeof(meta_path), "%s/meta", base_path);
+    snprintf(data_path, sizeof(data_path), "%s/data", base_path);
 
     // Get cache sizes, compression and bloom filter settings from config
     json_t *cache_obj = json_object_get(cfg, "cache");
@@ -566,6 +715,11 @@ cairn_init(const char *cfgdata)
         bloom_filter = json_boolean_value(bloom_filter_obj);
     }
 
+    json_t *statistics_obj = json_object_get(cfg, "statistics");
+    if (statistics_obj && json_is_boolean(statistics_obj)) {
+        statistics = json_boolean_value(statistics_obj);
+    }
+
     // Get noatime setting from config
     json_t *noatime_obj = json_object_get(cfg, "noatime");
     if (noatime_obj && json_is_boolean(noatime_obj)) {
@@ -574,65 +728,111 @@ cairn_init(const char *cfgdata)
         shared->noatime = 0; // Default to false
     }
 
-    shared->cache = rocksdb_cache_create_lru(cache_mb * 1024 * 1024);
-
-    shared->options = rocksdb_options_create();
-
-    rocksdb_options_set_compression(shared->options, compression ? rocksdb_lz4_compression : rocksdb_no_compression);
-
-    rocksdb_options_set_write_buffer_size(shared->options, 1024 * 1024 * 1024);
-    rocksdb_options_set_max_write_buffer_number(shared->options, 64);
-    rocksdb_options_set_max_background_jobs(shared->options, 64);
-    rocksdb_options_increase_parallelism(shared->options, 64);
-    //rocksdb_options_set_unordered_write(shared->options, 1);
-    rocksdb_options_set_memtable_huge_page_size(shared->options, 1024 * 1024 * 1024);
-    rocksdb_options_set_allow_concurrent_memtable_write(shared->options, 1);
-    rocksdb_options_set_enable_write_thread_adaptive_yield(shared->options, 1);
-    ////rocksdb_options_set_disable_auto_compactions(shared->options, 1);
-    rocksdb_options_set_max_background_compactions(shared->options, 64);
-    rocksdb_options_set_max_background_flushes(shared->options, 64);
-    //rocksdb_options_set_level0_file_num_compaction_trigger(shared->options, 1000000);
-    //rocksdb_options_set_level0_slowdown_writes_trigger(shared->options, 1000000);
-    //rocksdb_options_set_level0_stop_writes_trigger(shared->options, 1000000);
-
-    // Create and configure block based table options
-    shared->table_options = rocksdb_block_based_options_create();
-    rocksdb_block_based_options_set_block_cache(shared->table_options, shared->cache);
-
-    if (bloom_filter) {
-        // Create a bloom filter with 10 bits per key
-        rocksdb_filterpolicy_t *bloom = rocksdb_filterpolicy_create_bloom(10);
-        rocksdb_block_based_options_set_filter_policy(shared->table_options, bloom);
+    pthread_mutex_init(&shared->lock, NULL);
+    pthread_mutex_init(&shared->multi_inode_lock, NULL);
+    for (i = 0; i < CAIRN_INODE_LOCK_STRIPES; i++) {
+        pthread_mutex_init(&shared->inode_mutexes[i], NULL);
     }
 
-    // Attach table options to the main options
-    rocksdb_options_set_block_based_table_factory(shared->options, shared->table_options);
+    /*
+     * Two independent RocksDB instances:
+     *   metadb: small block cache reserves ~1/4 of the configured cache budget
+     *           (metadata is the hot working set; uncompressed for speed).
+     *   datadb: gets the remainder; compressed when enabled.
+     */
+    {
+        size_t meta_cache_mb = cache_mb / 4;
+        if (meta_cache_mb < 16) {
+            meta_cache_mb = (cache_mb < 16 ? cache_mb : 16);
+        }
+        shared->meta_cache = rocksdb_cache_create_lru(meta_cache_mb * 1024 * 1024);
+        shared->data_cache = rocksdb_cache_create_lru((cache_mb - meta_cache_mb) * 1024 * 1024);
+    }
+
+    /* metadb options: small writes, no compression, tuned for low latency.
+     * pipelined_write lets the WAL append and memtable insert overlap, which
+     * raises commit throughput when several threads commit concurrently. */
+    shared->meta_options = rocksdb_options_create();
+    rocksdb_options_set_compression(shared->meta_options, rocksdb_no_compression);
+    rocksdb_options_set_write_buffer_size(shared->meta_options, 64 * 1024 * 1024);
+    rocksdb_options_set_max_write_buffer_number(shared->meta_options, 8);
+    rocksdb_options_set_max_background_jobs(shared->meta_options, 8);
+    rocksdb_options_increase_parallelism(shared->meta_options, 8);
+    rocksdb_options_set_allow_concurrent_memtable_write(shared->meta_options, 1);
+    rocksdb_options_set_enable_write_thread_adaptive_yield(shared->meta_options, 1);
+    rocksdb_options_set_enable_pipelined_write(shared->meta_options, 1);
+
+    if (statistics) {
+        rocksdb_options_enable_statistics(shared->meta_options);
+    }
+
+    shared->meta_table_options = rocksdb_block_based_options_create();
+    rocksdb_block_based_options_set_block_cache(shared->meta_table_options, shared->meta_cache);
+    rocksdb_block_based_options_set_block_size(shared->meta_table_options, 4 * 1024);
+
+    if (bloom_filter) {
+        rocksdb_filterpolicy_t *bloom = rocksdb_filterpolicy_create_bloom(10);
+        rocksdb_block_based_options_set_filter_policy(shared->meta_table_options, bloom);
+    }
+    rocksdb_options_set_block_based_table_factory(shared->meta_options, shared->meta_table_options);
+
+    /* datadb options: large blocks, configurable compression, big memtable for bulk writes. */
+    shared->data_options = rocksdb_options_create();
+    rocksdb_options_set_compression(shared->data_options,
+                                    compression ? rocksdb_lz4_compression : rocksdb_no_compression);
+    rocksdb_options_set_write_buffer_size(shared->data_options, 1024 * 1024 * 1024);
+    rocksdb_options_set_max_write_buffer_number(shared->data_options, 64);
+    rocksdb_options_set_max_background_jobs(shared->data_options, 64);
+    rocksdb_options_increase_parallelism(shared->data_options, 64);
+    rocksdb_options_set_memtable_huge_page_size(shared->data_options, 1024 * 1024 * 1024);
+    rocksdb_options_set_allow_concurrent_memtable_write(shared->data_options, 1);
+    rocksdb_options_set_enable_write_thread_adaptive_yield(shared->data_options, 1);
+    rocksdb_options_set_enable_pipelined_write(shared->data_options, 1);
+    rocksdb_options_set_max_background_compactions(shared->data_options, 64);
+    rocksdb_options_set_max_background_flushes(shared->data_options, 64);
+
+    if (statistics) {
+        rocksdb_options_enable_statistics(shared->data_options);
+    }
+
+    shared->data_table_options = rocksdb_block_based_options_create();
+    rocksdb_block_based_options_set_block_cache(shared->data_table_options, shared->data_cache);
+    rocksdb_block_based_options_set_block_size(shared->data_table_options, 64 * 1024);
+    rocksdb_options_set_block_based_table_factory(shared->data_options, shared->data_table_options);
 
     initialize = json_boolean_value(json_object_get(cfg, "initialize"));
 
     if (initialize) {
-        rocksdb_destroy_db(shared->options, db_path, &err);
-        chimera_cairn_abort_if(err, "Failed to destroy database: %s\n", err);
+        rocksdb_destroy_db(shared->meta_options, meta_path, &err);
+        chimera_cairn_abort_if(err, "Failed to destroy metadb: %s\n", err);
+        rocksdb_destroy_db(shared->data_options, data_path, &err);
+        chimera_cairn_abort_if(err, "Failed to destroy datadb: %s\n", err);
 
-        rocksdb_options_set_create_if_missing(shared->options, 1);
-        rocksdb_options_set_create_missing_column_families(shared->options, 1);
+        rocksdb_options_set_create_if_missing(shared->meta_options, 1);
+        rocksdb_options_set_create_if_missing(shared->data_options, 1);
     }
 
-    shared->txndb_options = rocksdb_transactiondb_options_create();
-    shared->write_options = rocksdb_writeoptions_create();
-    shared->read_options  = rocksdb_readoptions_create();
-    shared->txn_options   = rocksdb_transaction_options_create();
+    /* Write options:
+     *   meta_write_opts: always sync (metadata durability == POSIX expectation).
+     *   data_write_opts_async: no sync (used for NFS UNSTABLE writes).
+     *   data_write_opts_sync: sync (used for FILE_SYNC writes or NFS COMMIT).
+     */
+    shared->meta_write_opts = rocksdb_writeoptions_create();
+    rocksdb_writeoptions_set_sync(shared->meta_write_opts, 1);
 
-    /* RocksDB's default per-key lock timeout is 1s. Under contended workloads
-     * (e.g. many threads touching the same parent directory inode) a holder
-     * can easily slip past 1s during compactions or slow fsyncs, causing
-     * waiters to fail with "Timeout waiting to lock key" — which cairn treats
-     * as fatal. Raise the ceiling so contention stalls briefly instead. */
-    rocksdb_transactiondb_options_set_transaction_lock_timeout(shared->txndb_options, 30000);
+    shared->data_write_opts_async = rocksdb_writeoptions_create();
+    rocksdb_writeoptions_set_sync(shared->data_write_opts_async, 0);
 
-    shared->db_txn = rocksdb_transactiondb_open(shared->options, shared->txndb_options, db_path, &err);
+    shared->data_write_opts_sync = rocksdb_writeoptions_create();
+    rocksdb_writeoptions_set_sync(shared->data_write_opts_sync, 1);
 
-    chimera_cairn_abort_if(err, "Failed to open database: %s\n", err);
+    shared->read_options = rocksdb_readoptions_create();
+
+    shared->metadb = rocksdb_open(shared->meta_options, meta_path, &err);
+    chimera_cairn_abort_if(err, "Failed to open metadb at %s: %s\n", meta_path, err);
+
+    shared->datadb = rocksdb_open(shared->data_options, data_path, &err);
+    chimera_cairn_abort_if(err, "Failed to open datadb at %s: %s\n", data_path, err);
 
     json_decref(cfg);
 
@@ -641,13 +841,14 @@ cairn_init(const char *cfgdata)
     if (initialize) {
         struct cairn_super_key super_key;
         struct cairn_super     super;
+        struct cairn_inode_key inode_key;
+        rocksdb_writebatch_t  *init_batch;
 
         inode.inum        = 2;
         inode.parent_inum = 2; /* Root directory's parent is itself */
         inode.gen         = 1;
         inode.size        = 4096;
         inode.space_used  = 4096;
-        inode.gen         = 1;
         inode.refcnt      = 1;
         inode.uid         = 0;
         inode.gid         = 0;
@@ -658,37 +859,22 @@ cairn_init(const char *cfgdata)
         inode.mtime       = now;
         inode.ctime       = now;
 
-        /* Generate a random 64-bit filesystem ID */
         super.fsid = chimera_rand64();
-
-        txn = rocksdb_transaction_begin(shared->db_txn, shared->write_options, shared->txn_options, NULL);
-
-        chimera_cairn_abort_if(err, "Error starting transaction: %s\n", err);
 
         inode_key.keytype = CAIRN_KEY_INODE;
         inode_key.inum    = inode.inum;
-
-        rocksdb_transaction_put(txn,
-                                (const char *) &inode_key, sizeof(inode_key),
-                                (const char *) &inode, sizeof(inode), &err);
-
-        chimera_cairn_abort_if(err, "Error putting root inode: %s\n", err);
-
-        /* Store the super block with FSID */
         super_key.keytype = CAIRN_KEY_SUPER;
 
-        rocksdb_transaction_put(txn,
-                                (const char *) &super_key, sizeof(super_key),
-                                (const char *) &super, sizeof(super), &err);
-
-        chimera_cairn_abort_if(err, "Error putting super block: %s\n", err);
-
-        rocksdb_transaction_commit(txn, &err);
-
-        chimera_cairn_abort_if(err, "Error committing initialization transaction: %s\n", err);
-
-        rocksdb_transaction_destroy(txn);
-
+        init_batch = rocksdb_writebatch_create();
+        rocksdb_writebatch_put(init_batch,
+                               (const char *) &inode_key, sizeof(inode_key),
+                               (const char *) &inode, sizeof(inode));
+        rocksdb_writebatch_put(init_batch,
+                               (const char *) &super_key, sizeof(super_key),
+                               (const char *) &super, sizeof(super));
+        rocksdb_write(shared->metadb, shared->meta_write_opts, init_batch, &err);
+        chimera_cairn_abort_if(err, "Error initializing metadb: %s\n", err);
+        rocksdb_writebatch_destroy(init_batch);
     }
 
     /* Load the super block to get the persisted FSID */
@@ -699,14 +885,14 @@ cairn_init(const char *cfgdata)
 
         super_key.keytype = CAIRN_KEY_SUPER;
 
-        super = (struct cairn_super *) rocksdb_transactiondb_get(
-            shared->db_txn,
+        super = (struct cairn_super *) rocksdb_get(
+            shared->metadb,
             shared->read_options,
             (const char *) &super_key, sizeof(super_key),
             &super_len, &err);
 
         chimera_cairn_abort_if(err, "Error reading super block: %s\n", err);
-        chimera_cairn_abort_if(!super, "Super block not found in database\n");
+        chimera_cairn_abort_if(!super, "Super block not found in metadb\n");
 
         shared->fsid = super->fsid;
         free(super);
@@ -727,35 +913,94 @@ static void
 cairn_destroy(void *private_data)
 {
     struct cairn_shared *shared = private_data;
+    int                  i;
 
-    rocksdb_transactiondb_close(shared->db_txn);
-    rocksdb_writeoptions_destroy(shared->write_options);
+    rocksdb_close(shared->metadb);
+    rocksdb_close(shared->datadb);
+    rocksdb_writeoptions_destroy(shared->meta_write_opts);
+    rocksdb_writeoptions_destroy(shared->data_write_opts_async);
+    rocksdb_writeoptions_destroy(shared->data_write_opts_sync);
     rocksdb_readoptions_destroy(shared->read_options);
-    rocksdb_options_destroy(shared->options);
-    rocksdb_transactiondb_options_destroy(shared->txndb_options);
-    rocksdb_transaction_options_destroy(shared->txn_options);
-    rocksdb_cache_destroy(shared->cache);
-    rocksdb_block_based_options_destroy(shared->table_options);
+    rocksdb_options_destroy(shared->meta_options);
+    rocksdb_options_destroy(shared->data_options);
+    rocksdb_cache_destroy(shared->meta_cache);
+    rocksdb_cache_destroy(shared->data_cache);
+    rocksdb_block_based_options_destroy(shared->meta_table_options);
+    rocksdb_block_based_options_destroy(shared->data_table_options);
+    for (i = 0; i < CAIRN_INODE_LOCK_STRIPES; i++) {
+        pthread_mutex_destroy(&shared->inode_mutexes[i]);
+    }
+    pthread_mutex_destroy(&shared->multi_inode_lock);
+    pthread_mutex_destroy(&shared->lock);
     free(shared);
 } /* cairn_destroy */
 
+/*
+ * Schedule cairn_thread_commit to fire at the end of this event loop cycle.
+ *
+ * Every op handler — including pure-read ones that DL_APPEND to txn_requests —
+ * must call this before queueing its request, otherwise the deferred drain
+ * never runs and the request hangs.  We guard with commit_scheduled so the
+ * underlying evpl_defer is invoked at most once per cycle (libevpl deferrals
+ * are not idempotent).
+ */
+static inline void
+cairn_ensure_commit_scheduled(struct cairn_thread *thread)
+{
+    if (!thread->commit_scheduled) {
+        evpl_defer(thread->evpl, &thread->commit);
+        thread->commit_scheduled = 1;
+    }
+} /* cairn_ensure_commit_scheduled */
+
+/*
+ * Ordered two-stage commit:
+ *   1. datadb batch (sync iff any pending op requested durable data)
+ *   2. metadb batch (always sync)
+ *   3. complete all batched requests
+ *
+ * Step ordering preserves the invariant that durable metadata never refers to
+ * extent data that isn't on disk: if we crash between (1) and (2), nothing has
+ * been acknowledged and the metadata batch is rolled back along with the request
+ * replies.  Once (2) returns successfully, both halves are durable and the
+ * replies are safe to send.
+ *
+ * Empty batches are skipped so read-only cycles don't pay an unnecessary fsync.
+ */
 static void
 cairn_thread_commit(
     struct evpl *evpl,
     void        *private_data)
 {
     struct cairn_thread        *thread = private_data;
+    struct cairn_shared        *shared = thread->shared;
     struct chimera_vfs_request *request;
     char                       *err = NULL;
 
-    if (thread->txn) {
-        rocksdb_transaction_commit(thread->txn, &err);
+    (void) evpl;
 
-        chimera_cairn_abort_if(err, "Error committing transaction: %s\n", err);
+    if (thread->data_batch) {
+        if (rocksdb_writebatch_wi_count(thread->data_batch) > 0) {
+            rocksdb_writeoptions_t *wo = thread->data_needs_sync
+                ? shared->data_write_opts_sync
+                : shared->data_write_opts_async;
 
-        rocksdb_transaction_destroy(thread->txn);
+            rocksdb_write_writebatch_wi(shared->datadb, wo, thread->data_batch, &err);
+            chimera_cairn_abort_if(err, "Error committing data batch: %s\n", err);
+        }
+        rocksdb_writebatch_wi_destroy(thread->data_batch);
+        thread->data_batch      = NULL;
+        thread->data_needs_sync = 0;
+    }
 
-        thread->txn = NULL;
+    if (thread->meta_batch) {
+        if (rocksdb_writebatch_wi_count(thread->meta_batch) > 0) {
+            rocksdb_write_writebatch_wi(shared->metadb, shared->meta_write_opts,
+                                        thread->meta_batch, &err);
+            chimera_cairn_abort_if(err, "Error committing meta batch: %s\n", err);
+        }
+        rocksdb_writebatch_wi_destroy(thread->meta_batch);
+        thread->meta_batch = NULL;
     }
 
     while (thread->txn_requests) {
@@ -763,7 +1008,32 @@ cairn_thread_commit(
         DL_DELETE(thread->txn_requests, request);
         request->complete(request);
     }
+
+    thread->commit_scheduled = 0;
 } /* cairn_thread_commit */
+
+static rocksdb_writebatch_wi_t *
+cairn_get_meta_batch(struct cairn_thread *thread)
+{
+    if (!thread->meta_batch) {
+        /* reserved_bytes=0; overwrite_keys=1 so repeated puts to the same key
+         * within a cycle collapse to the latest value (matches our read-modify-write
+         * pattern on inodes). */
+        thread->meta_batch = rocksdb_writebatch_wi_create(0, 1);
+    }
+    cairn_ensure_commit_scheduled(thread);
+    return thread->meta_batch;
+} /* cairn_get_meta_batch */
+
+static rocksdb_writebatch_wi_t *
+cairn_get_data_batch(struct cairn_thread *thread)
+{
+    if (!thread->data_batch) {
+        thread->data_batch = rocksdb_writebatch_wi_create(0, 1);
+    }
+    cairn_ensure_commit_scheduled(thread);
+    return thread->data_batch;
+} /* cairn_get_data_batch */
 
 static void *
 cairn_thread_init(
@@ -908,19 +1178,6 @@ cairn_apply_attrs(
 
 } /* cairn_apply_attrs */
 
-static rocksdb_transaction_t *
-cairn_get_transaction(struct cairn_thread *thread)
-{
-    if (!thread->txn) {
-        thread->txn = rocksdb_transaction_begin(thread->shared->db_txn, thread->shared->write_options, thread->shared->
-                                                txn_options, NULL);
-
-        evpl_defer(thread->evpl, &thread->commit);
-    }
-
-    return thread->txn;
-} /* cairn_get_transaction */
-
 static void
 cairn_getattr(
     struct cairn_thread        *thread,
@@ -930,12 +1187,9 @@ cairn_getattr(
 {
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
-    rocksdb_transaction_t    *txn;
     int                       rc;
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 0, &ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -961,14 +1215,11 @@ cairn_setattr(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t    *txn;
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
     int                       rc;
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -995,7 +1246,7 @@ cairn_setattr(
 
     cairn_map_attrs(shared, &request->setattr.r_post_attr, inode);
 
-    cairn_put_inode(txn, inode);
+    cairn_put_inode(thread, inode);
     cairn_inode_handle_release(&ih);
 
     request->status = CHIMERA_VFS_OK;
@@ -1007,7 +1258,6 @@ static inline int
 cairn_lookup_path(
     struct cairn_thread       *thread,
     struct cairn_shared       *shared,
-    rocksdb_transaction_t     *txn,
     const char                *path,
     int                        pathlen,
     struct cairn_inode_handle *ih)
@@ -1024,7 +1274,7 @@ cairn_lookup_path(
     uint64_t                   hash;
     int                        rc;
 
-    rc = cairn_inode_get_fh(thread, txn, shared->root_fh, shared->root_fhlen, 0, &parent_ih);
+    rc = cairn_inode_get_fh(thread, shared->root_fh, shared->root_fhlen, &parent_ih);
 
     if (unlikely(rc)) {
         return -1;
@@ -1065,7 +1315,7 @@ cairn_lookup_path(
         dirent_key.inum    = inode->inum;
         dirent_key.hash    = hash;
 
-        rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
+        rc = cairn_dirent_get(thread, &dirent_key, &dh);
 
         if (rc) {
             cairn_inode_handle_release(&parent_ih);
@@ -1076,7 +1326,7 @@ cairn_lookup_path(
 
         cairn_inode_handle_release(&parent_ih);
 
-        rc = cairn_inode_get_inum(thread, txn, dirent_value->inum, 0, &parent_ih);
+        rc = cairn_inode_get_inum(thread, dirent_value->inum, &parent_ih);
 
         cairn_dirent_handle_release(&dh);
 
@@ -1101,14 +1351,11 @@ cairn_mount(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t    *txn;
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
     int                       rc;
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_lookup_path(thread, shared, txn, request->mount.path, request->mount.pathlen, &ih);
+    rc = cairn_lookup_path(thread, shared, request->mount.path, request->mount.pathlen, &ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1146,7 +1393,6 @@ cairn_lookup_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t     *txn;
     struct cairn_inode_handle  ih, child_ih;
     struct cairn_inode        *inode, *child;
     struct cairn_dirent_key    dirent_key;
@@ -1156,9 +1402,7 @@ cairn_lookup_at(
     uint32_t                   namelen = request->lookup_at.component_len;
     int                        rc;
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 0, &ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1190,7 +1434,7 @@ cairn_lookup_at(
     if (namelen == 2 && name[0] == '.' && name[1] == '.') {
         cairn_map_attrs(shared, &request->lookup_at.r_dir_attr, inode);
 
-        rc = cairn_inode_get_inum(thread, txn, inode->parent_inum, 0, &child_ih);
+        rc = cairn_inode_get_inum(thread, inode->parent_inum, &child_ih);
 
         if (unlikely(rc)) {
             cairn_inode_handle_release(&ih);
@@ -1212,7 +1456,7 @@ cairn_lookup_at(
     dirent_key.inum    = inode->inum;
     dirent_key.hash    = request->lookup_at.component_hash;
 
-    rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
+    rc = cairn_dirent_get(thread, &dirent_key, &dh);
 
     if (rc) {
         cairn_inode_handle_release(&ih);
@@ -1225,7 +1469,7 @@ cairn_lookup_at(
 
     cairn_map_attrs(shared, &request->lookup_at.r_dir_attr, inode);
 
-    rc = cairn_inode_get_inum(thread, txn, dirent_value->inum, 0, &child_ih);
+    rc = cairn_inode_get_inum(thread, dirent_value->inum, &child_ih);
 
     if (rc) {
         cairn_inode_handle_release(&ih);
@@ -1260,15 +1504,12 @@ cairn_mkdir_at(
     struct cairn_dirent_key    dirent_key;
     struct cairn_dirent_value  dirent_value;
     struct cairn_dirent_handle dh;
-    rocksdb_transaction_t     *txn;
     int                        rc;
     struct timespec            now;
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &parent_ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &parent_ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1289,13 +1530,13 @@ cairn_mkdir_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->mkdir_at.name_hash;
 
-    rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
+    rc = cairn_dirent_get(thread, &dirent_key, &dh);
 
     if (rc == 0) {
         cairn_map_attrs(shared, &request->mkdir_at.r_dir_pre_attr, parent_inode);
         cairn_map_attrs(shared, &request->mkdir_at.r_dir_post_attr, parent_inode);
 
-        rc = cairn_inode_get_inum(thread, txn, dh.dirent->inum, 0, &existing_ih);
+        rc = cairn_inode_get_inum(thread, dh.dirent->inum, &existing_ih);
 
         if (rc == 0) {
             existing_inode = existing_ih.inode;
@@ -1339,9 +1580,9 @@ cairn_mkdir_at(
 
     cairn_map_attrs(shared, &request->mkdir_at.r_dir_post_attr, parent_inode);
 
-    cairn_put_dirent(txn, &dirent_key, &dirent_value);
-    cairn_put_inode(txn, parent_inode);
-    cairn_put_inode(txn, &inode);
+    cairn_put_dirent(thread, &dirent_key, &dirent_value);
+    cairn_put_inode(thread, parent_inode);
+    cairn_put_inode(thread, &inode);
 
     request->status = CHIMERA_VFS_OK;
 
@@ -1362,15 +1603,12 @@ cairn_mknod_at(
     struct cairn_dirent_key    dirent_key;
     struct cairn_dirent_value  dirent_value;
     struct cairn_dirent_handle dh;
-    rocksdb_transaction_t     *txn;
     int                        rc;
     struct timespec            now;
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &parent_ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &parent_ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1391,13 +1629,13 @@ cairn_mknod_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->mknod_at.name_hash;
 
-    rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
+    rc = cairn_dirent_get(thread, &dirent_key, &dh);
 
     if (rc == 0) {
         cairn_map_attrs(shared, &request->mknod_at.r_dir_pre_attr, parent_inode);
         cairn_map_attrs(shared, &request->mknod_at.r_dir_post_attr, parent_inode);
 
-        rc = cairn_inode_get_inum(thread, txn, dh.dirent->inum, 0, &existing_ih);
+        rc = cairn_inode_get_inum(thread, dh.dirent->inum, &existing_ih);
 
         if (rc == 0) {
             existing_inode = existing_ih.inode;
@@ -1449,9 +1687,9 @@ cairn_mknod_at(
 
     cairn_map_attrs(shared, &request->mknod_at.r_dir_post_attr, parent_inode);
 
-    cairn_put_dirent(txn, &dirent_key, &dirent_value);
-    cairn_put_inode(txn, parent_inode);
-    cairn_put_inode(txn, &inode);
+    cairn_put_dirent(thread, &dirent_key, &dirent_value);
+    cairn_put_inode(thread, parent_inode);
+    cairn_put_inode(thread, &inode);
 
     request->status = CHIMERA_VFS_OK;
 
@@ -1467,7 +1705,6 @@ cairn_remove_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t     *txn;
     struct cairn_inode_handle  parent_ih, child_ih;
     struct cairn_inode        *parent_inode, *inode;
     struct cairn_dirent_key    dirent_key;
@@ -1477,9 +1714,7 @@ cairn_remove_at(
     struct timespec            now;
 
     clock_gettime(CLOCK_REALTIME, &now);
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &parent_ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &parent_ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1500,7 +1735,7 @@ cairn_remove_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->remove_at.name_hash;
 
-    rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
+    rc = cairn_dirent_get(thread, &dirent_key, &dh);
 
     if (rc) {
         cairn_inode_handle_release(&parent_ih);
@@ -1511,7 +1746,7 @@ cairn_remove_at(
 
     dirent_value = dh.dirent;
 
-    rc = cairn_inode_get_inum(thread, txn, dirent_value->inum, 1, &child_ih);
+    rc = cairn_inode_get_inum(thread, dirent_value->inum, &child_ih);
 
     if (rc) {
         cairn_inode_handle_release(&parent_ih);
@@ -1525,7 +1760,7 @@ cairn_remove_at(
 
     if (S_ISDIR(inode->mode)) {
         /* Check if directory is empty (proper rmdir semantics) */
-        if (!cairn_directory_is_empty(thread, txn, inode->inum)) {
+        if (!cairn_directory_is_empty(thread, inode->inum)) {
             cairn_inode_handle_release(&parent_ih);
             cairn_inode_handle_release(&child_ih);
             cairn_dirent_handle_release(&dh);
@@ -1560,25 +1795,25 @@ cairn_remove_at(
         if (inode->refcnt == 0) {
             // Remove type-specific data before removing inode
             if (S_ISREG(inode->mode)) {
-                cairn_remove_file_extents(thread, txn, inode->inum);
+                cairn_remove_file_extents(thread, inode->inum);
             } else if (S_ISLNK(inode->mode)) {
-                cairn_remove_symlink_target(txn, inode->inum);
+                cairn_remove_symlink_target(thread, inode->inum);
             }
 
-            cairn_remove_inode(txn, inode);
+            cairn_remove_inode(thread, inode);
         } else {
-            cairn_put_inode(txn, inode);
+            cairn_put_inode(thread, inode);
         }
     } else {
         // nlink > 0: file still has other hard links, persist the decremented nlink
-        cairn_put_inode(txn, inode);
+        cairn_put_inode(thread, inode);
     }
 
     cairn_map_attrs(shared, &request->remove_at.r_dir_post_attr, parent_inode);
 
-    cairn_remove_dirent(txn, &dirent_key);
+    cairn_remove_dirent(thread, &dirent_key);
 
-    cairn_put_inode(txn, parent_inode);
+    cairn_put_inode(thread, parent_inode);
 
     cairn_inode_handle_release(&parent_ih);
     cairn_inode_handle_release(&child_ih);
@@ -1606,7 +1841,6 @@ cairn_readdir(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t     *txn;
     struct cairn_inode_handle  ih, dirent_ih, parent_ih;
     struct cairn_inode        *inode, *dirent_inode, *parent_inode;
     uint64_t                   cookie      = request->readdir.cookie;
@@ -1618,9 +1852,7 @@ cairn_readdir(
     struct cairn_dirent_value *dirent_value;
     size_t                     len;
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 0, &ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1664,7 +1896,7 @@ cairn_readdir(
 
         /* Handle ".." entry (cookie 1 -> 2) */
         if (cookie < CAIRN_COOKIE_DOTDOT) {
-            rc = cairn_inode_get_inum(thread, txn, inode->parent_inum, 0, &parent_ih);
+            rc = cairn_inode_get_inum(thread, inode->parent_inum, &parent_ih);
 
             if (rc == 0) {
                 parent_inode = parent_ih.inode;
@@ -1709,7 +1941,7 @@ cairn_readdir(
         start_key.hash = cookie - CAIRN_COOKIE_FIRST;
     }
 
-    iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
+    iter = cairn_meta_iterator(thread);
 
     rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
 
@@ -1728,7 +1960,7 @@ cairn_readdir(
 
         dirent_value = (struct cairn_dirent_value *) rocksdb_iter_value(iter, &len);
 
-        rc = cairn_inode_get_inum(thread, txn, dirent_value->inum, 0, &dirent_ih);
+        rc = cairn_inode_get_inum(thread, dirent_value->inum, &dirent_ih);
 
         if (rc) {
             rocksdb_iter_next(iter);
@@ -1786,14 +2018,11 @@ cairn_open_fh(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t    *txn;
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
     int                       rc;
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1806,7 +2035,7 @@ cairn_open_fh(
 
     request->open_fh.r_vfs_private = (uint64_t) inode->inum;
 
-    cairn_put_inode(txn, inode);
+    cairn_put_inode(thread, inode);
     cairn_inode_handle_release(&ih);
 
     request->status = CHIMERA_VFS_OK;
@@ -1821,7 +2050,6 @@ cairn_open_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t     *txn;
     struct cairn_inode_handle  parent_ih, child_ih;
     struct cairn_inode        *parent_inode, *inode = NULL, new_inode;
     struct cairn_dirent_key    dirent_key;
@@ -1833,9 +2061,7 @@ cairn_open_at(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &parent_ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &parent_ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1858,7 +2084,7 @@ cairn_open_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->open_at.name_hash;
 
-    rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
+    rc = cairn_dirent_get(thread, &dirent_key, &dh);
 
     if (rc) {
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
@@ -1889,7 +2115,7 @@ cairn_open_at(
         new_dirent_value.name_len = request->open_at.namelen;
         memcpy(new_dirent_value.name, request->open_at.name, request->open_at.namelen);
 
-        cairn_put_dirent(txn, &dirent_key, &new_dirent_value);
+        cairn_put_dirent(thread, &dirent_key, &new_dirent_value);
 
         parent_inode->mtime = now;
         parent_inode->ctime = now;
@@ -1905,7 +2131,7 @@ cairn_open_at(
 
         dirent_value = dh.dirent;
 
-        rc = cairn_inode_get_inum(thread, txn, dirent_value->inum, 1, &child_ih);
+        rc = cairn_inode_get_inum(thread, dirent_value->inum, &child_ih);
 
         if (rc) {
             cairn_inode_handle_release(&parent_ih);
@@ -1935,8 +2161,8 @@ cairn_open_at(
     cairn_map_attrs(shared, &request->open_at.r_dir_post_attr, parent_inode);
     cairn_map_attrs(shared, &request->open_at.r_attr, inode);
 
-    cairn_put_inode(txn, parent_inode);
-    cairn_put_inode(txn, inode);
+    cairn_put_inode(thread, parent_inode);
+    cairn_put_inode(thread, inode);
 
     cairn_inode_handle_release(&parent_ih);
 
@@ -1955,14 +2181,11 @@ cairn_close(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t    *txn;
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
     int                       rc;
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -1976,14 +2199,14 @@ cairn_close(
     if (inode->refcnt == 0 && inode->nlink == 0) {
         // Remove type-specific data before removing inode
         if (S_ISREG(inode->mode)) {
-            cairn_remove_file_extents(thread, txn, inode->inum);
+            cairn_remove_file_extents(thread, inode->inum);
         } else if (S_ISLNK(inode->mode)) {
-            cairn_remove_symlink_target(txn, inode->inum);
+            cairn_remove_symlink_target(thread, inode->inum);
         }
 
-        cairn_remove_inode(txn, inode);
+        cairn_remove_inode(thread, inode);
     } else {
-        cairn_put_inode(txn, inode);
+        cairn_put_inode(thread, inode);
     }
 
     cairn_inode_handle_release(&ih);
@@ -2000,7 +2223,6 @@ cairn_read(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t    *txn;
     rocksdb_iterator_t       *iter;
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
@@ -2029,9 +2251,7 @@ cairn_read(
         return;
     }
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, need_atime, &ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -2064,7 +2284,7 @@ cairn_read(
     start_key.inum    = inode->inum;
     start_key.offset  = htobe64(offset);
 
-    iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
+    iter = cairn_data_iterator(thread);
 
     rocksdb_iter_seek_for_prev(iter, (const char *) &start_key, sizeof(start_key));
 
@@ -2153,7 +2373,7 @@ cairn_read(
 
     if (need_atime) {
         inode->atime = now;
-        cairn_put_inode(txn, inode);
+        cairn_put_inode(thread, inode);
     }
 
     cairn_map_attrs(shared, &request->read.r_attr, inode);
@@ -2177,21 +2397,22 @@ cairn_punch_hole(
     uint64_t             offset,
     uint64_t             length)
 {
-    rocksdb_transaction_t  *txn;
-    rocksdb_iterator_t     *iter;
-    struct cairn_extent_key start_key, *extent_key;
-    uint64_t                hole_end    = offset + length;
-    uint64_t                space_freed = 0;
-    char                   *err         = NULL;
-    size_t                  klen;
+    rocksdb_writebatch_wi_t *batch;
+    rocksdb_iterator_t      *iter;
+    struct cairn_extent_key  start_key, *extent_key;
+    uint64_t                 hole_end    = offset + length;
+    uint64_t                 space_freed = 0;
+    size_t                   klen;
 
-    txn = cairn_get_transaction(thread);
+    (void) shared;
+
+    batch = cairn_get_data_batch(thread);
 
     start_key.keytype = CAIRN_KEY_EXTENT;
     start_key.inum    = inode->inum;
     start_key.offset  = htobe64(offset);
 
-    iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
+    iter = cairn_data_iterator(thread);
 
     // Find first extent less than or equal to our start offset
     rocksdb_iter_seek_for_prev(iter, (const char *) &start_key, sizeof(start_key));
@@ -2214,16 +2435,16 @@ cairn_punch_hole(
 
     while (rocksdb_iter_valid(iter)) {
         extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
-        uint64_t extent_length;
-        void    *extent_data = (void *) rocksdb_iter_value(iter, &extent_length);
+        uint64_t    extent_length;
+        const char *extent_data = rocksdb_iter_value(iter, &extent_length);
 
         // Stop if we've moved past this inode
         if (extent_key->keytype != CAIRN_KEY_EXTENT || extent_key->inum != inode->inum) {
             break;
         }
 
-        uint64_t extent_start = be64toh(extent_key->offset);
-        uint64_t extent_end   = extent_start + extent_length;
+        uint64_t    extent_start = be64toh(extent_key->offset);
+        uint64_t    extent_end   = extent_start + extent_length;
 
         // Stop if extent starts after hole
         if (extent_start >= hole_end) {
@@ -2236,9 +2457,7 @@ cairn_punch_hole(
             space_freed += extent_length;
 
             // Delete the original extent
-            rocksdb_transaction_delete(txn, (const char *) extent_key, sizeof(*extent_key),
-                                       &err);
-            chimera_cairn_abort_if(err, "Error deleting extent: %s\n", err);
+            rocksdb_writebatch_wi_delete(batch, (const char *) extent_key, sizeof(*extent_key));
 
             // If there's data before the hole, create a new extent
             if (extent_start < offset) {
@@ -2248,10 +2467,8 @@ cairn_punch_hole(
                     .offset  = htobe64(extent_start),
                 };
 
-                rocksdb_transaction_put(txn, (const char *) &new_key, sizeof(new_key),
-                                        extent_data, offset - extent_start,
-                                        &err);
-                chimera_cairn_abort_if(err, "Error putting extent: %s\n", err);
+                rocksdb_writebatch_wi_put(batch, (const char *) &new_key, sizeof(new_key),
+                                          extent_data, offset - extent_start);
 
                 // Add back space for the preserved portion
                 space_freed -= offset - extent_start;
@@ -2265,11 +2482,9 @@ cairn_punch_hole(
                     .offset  = htobe64(hole_end),
                 };
 
-                rocksdb_transaction_put(txn, (const char *) &new_key, sizeof(new_key),
-                                        extent_data + (hole_end - extent_start),
-                                        extent_end - hole_end,
-                                        &err);
-                chimera_cairn_abort_if(err, "Error putting extent: %s\n", err);
+                rocksdb_writebatch_wi_put(batch, (const char *) &new_key, sizeof(new_key),
+                                          extent_data + (hole_end - extent_start),
+                                          extent_end - hole_end);
 
                 // Add back space for the preserved portion
                 space_freed -= extent_end - hole_end;
@@ -2294,20 +2509,16 @@ cairn_write(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t    *txn;
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
     uint64_t                  current_offset;
     uint64_t                  total_space = 0;
-    char                     *err         = NULL;
     int                       rc, i;
     struct timespec           now;
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         /* Note: Write iovecs are NOT released here. They were allocated on the
@@ -2330,24 +2541,25 @@ cairn_write(
     // Write each iovec as a new extent
     current_offset = request->write.offset;
 
-    for (i = 0; i < request->write.niov; i++) {
-        const struct evpl_iovec *iov = &request->write.iov[i];
+    {
+        rocksdb_writebatch_wi_t *data_batch = cairn_get_data_batch(thread);
 
-        struct cairn_extent_key  key = {
-            .keytype = CAIRN_KEY_EXTENT,
-            .inum    = inode->inum,
-            .offset  = htobe64(current_offset),
-        };
+        for (i = 0; i < request->write.niov; i++) {
+            const struct evpl_iovec *iov = &request->write.iov[i];
 
-        // Store the extent with just the data
-        rocksdb_transaction_put(txn, (const char *) &key, sizeof(key),
-                                iov->data, iov->length,
-                                &err);
+            struct cairn_extent_key  key = {
+                .keytype = CAIRN_KEY_EXTENT,
+                .inum    = inode->inum,
+                .offset  = htobe64(current_offset),
+            };
 
-        chimera_cairn_abort_if(err, "Error putting extent: %s\n", err);
+            rocksdb_writebatch_wi_put(data_batch,
+                                      (const char *) &key, sizeof(key),
+                                      iov->data, iov->length);
 
-        total_space    += iov->length;
-        current_offset += iov->length;
+            total_space    += iov->length;
+            current_offset += iov->length;
+        }
     }
 
     // Update inode size if needed
@@ -2362,7 +2574,7 @@ cairn_write(
 
     cairn_map_attrs(shared, &request->write.r_post_attr, inode);
 
-    cairn_put_inode(txn, inode);
+    cairn_put_inode(thread, inode);
     cairn_inode_handle_release(&ih);
 
     request->status         = CHIMERA_VFS_OK;
@@ -2385,7 +2597,6 @@ cairn_allocate(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t    *txn;
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
     int                       rc;
@@ -2393,9 +2604,7 @@ cairn_allocate(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -2425,7 +2634,7 @@ cairn_allocate(
 
     cairn_map_attrs(shared, &request->allocate.r_post_attr, inode);
 
-    cairn_put_inode(txn, inode);
+    cairn_put_inode(thread, inode);
     cairn_inode_handle_release(&ih);
 
     request->status = CHIMERA_VFS_OK;
@@ -2440,7 +2649,6 @@ cairn_seek(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t    *txn;
     rocksdb_iterator_t       *iter;
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
@@ -2449,9 +2657,7 @@ cairn_seek(
     int                       rc;
     size_t                    klen;
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 0, &ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -2474,7 +2680,7 @@ cairn_seek(
     start_key.inum    = inode->inum;
     start_key.offset  = htobe64(offset);
 
-    iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
+    iter = cairn_data_iterator(thread);
 
     if (request->seek.what == 0) {
         /* SEEK_DATA: find first extent covering or after offset */
@@ -2626,21 +2832,17 @@ cairn_symlink_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t     *txn;
     struct cairn_inode_handle  parent_ih;
     struct cairn_dirent_handle dh;
     struct cairn_inode        *parent_inode, new_inode;
     struct cairn_dirent_key    dirent_key;
     struct cairn_dirent_value  dirent_value;
     struct cairn_symlink_key   target_key;
-    char                      *err = NULL;
     int                        rc;
     struct timespec            now;
 
     clock_gettime(CLOCK_REALTIME, &now);
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &parent_ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &parent_ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -2663,7 +2865,7 @@ cairn_symlink_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->symlink_at.name_hash;
 
-    rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
+    rc = cairn_dirent_get(thread, &dirent_key, &dh);
 
     if (rc == 0) {
         cairn_inode_handle_release(&parent_ih);
@@ -2697,15 +2899,14 @@ cairn_symlink_at(
 
     target_key.keytype = CAIRN_KEY_SYMLINK;
     target_key.inum    = new_inode.inum;
-    rocksdb_transaction_put(txn, (const char *) &target_key, sizeof(target_key),
-                            request->symlink_at.target, request->symlink_at.targetlen,
-                            &err);
+    rocksdb_writebatch_wi_put(cairn_get_meta_batch(thread),
+                              (const char *) &target_key, sizeof(target_key),
+                              request->symlink_at.target,
+                              request->symlink_at.targetlen);
 
-    chimera_cairn_abort_if(err, "Error putting symlink target: %s\n", err);
-
-    cairn_put_dirent(txn, &dirent_key, &dirent_value);
-    cairn_put_inode(txn, parent_inode);
-    cairn_put_inode(txn, &new_inode);
+    cairn_put_dirent(thread, &dirent_key, &dirent_value);
+    cairn_put_inode(thread, parent_inode);
+    cairn_put_inode(thread, &new_inode);
 
     cairn_inode_handle_release(&parent_ih);
 
@@ -2721,17 +2922,15 @@ cairn_readlink(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t    *txn;
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
     struct cairn_symlink_key  target_key;
     char                     *err = NULL;
+    char                     *target_buf;
     size_t                    target_len;
     int                       rc;
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 0, &ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -2751,28 +2950,32 @@ cairn_readlink(
     target_key.keytype = CAIRN_KEY_SYMLINK;
     target_key.inum    = inode->inum;
 
-    rocksdb_pinnableslice_t *slice = rocksdb_transaction_get_pinned(
-        txn, shared->read_options,
-        (const char *) &target_key, sizeof(target_key),
-        &err);
+    if (thread->meta_batch) {
+        target_buf = rocksdb_writebatch_wi_get_from_batch_and_db(
+            thread->meta_batch, shared->metadb, shared->read_options,
+            (const char *) &target_key, sizeof(target_key),
+            &target_len, &err);
+    } else {
+        target_buf = rocksdb_get(shared->metadb, shared->read_options,
+                                 (const char *) &target_key, sizeof(target_key),
+                                 &target_len, &err);
+    }
 
     chimera_cairn_abort_if(err, "Error getting symlink target: %s\n", err);
 
-    if (!slice) {
+    if (!target_buf) {
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
     }
 
-    const char *target = rocksdb_pinnableslice_value(slice, &target_len);
-
     request->readlink.r_target_length = target_len;
-    memcpy(request->readlink.r_target, target, target_len);
+    memcpy(request->readlink.r_target, target_buf, target_len);
 
     cairn_map_attrs(shared, &request->readlink.r_attr, inode);
 
-    rocksdb_pinnableslice_destroy(slice);
+    free(target_buf);
     cairn_inode_handle_release(&ih);
 
     request->status = CHIMERA_VFS_OK;
@@ -2798,7 +3001,6 @@ cairn_rename_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t     *txn;
     struct cairn_inode_handle  old_parent_ih, new_parent_ih = { 0 };
     struct cairn_inode        *old_parent_inode, *new_parent_inode;
     struct cairn_dirent_key    old_dirent_key, new_dirent_key;
@@ -2810,16 +3012,29 @@ cairn_rename_at(
     int                        cmp, rc, have_new_parent_ih = 0;
     struct timespec            now;
 
-    clock_gettime(CLOCK_REALTIME, &now);
-    txn = cairn_get_transaction(thread);
+    /*
+     * TODO(phase-A.2): cross-thread races.  When old_parent and new_parent
+     * (or the moved / overwritten inode) live on different delegation
+     * threads from each other or from a concurrent single-inode op, the
+     * per-thread WriteBatchWithIndex isolates each thread's pending
+     * mutations until commit, so one thread can overwrite another's
+     * in-flight changes.  TransactionDB's row locks previously covered
+     * this; replacing them needs either routing-based delegation of the
+     * secondary inode writes back to the secondary's home thread, or a
+     * hold-through-commit lock protocol that also covers the deferred
+     * commit window.  Neither is in this change; for now we rely on the
+     * fh-hash routing for correctness and document the gap.
+     */
+    (void) shared;
 
+    clock_gettime(CLOCK_REALTIME, &now);
     cmp = cairn_fh_compare(request->fh,
                            request->fh_len,
                            request->rename_at.new_fh,
                            request->rename_at.new_fhlen);
 
     if (cmp == 0) {
-        rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &old_parent_ih);
+        rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &old_parent_ih);
 
         if (unlikely(rc)) {
             request->status = CHIMERA_VFS_ENOENT;
@@ -2841,14 +3056,14 @@ cairn_rename_at(
         have_new_parent_ih = 1;
 
         if (cmp < 0) {
-            rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &old_parent_ih);
+            rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &old_parent_ih);
             if (rc) {
                 request->status = CHIMERA_VFS_ENOENT;
                 request->complete(request);
                 return;
             }
 
-            rc = cairn_inode_get_fh(thread, txn, request->rename_at.new_fh, request->rename_at.new_fhlen, 1, &
+            rc = cairn_inode_get_fh(thread, request->rename_at.new_fh, request->rename_at.new_fhlen, &
                                     new_parent_ih);
             if (rc) {
                 cairn_inode_handle_release(&old_parent_ih);
@@ -2857,7 +3072,7 @@ cairn_rename_at(
                 return;
             }
         } else {
-            rc = cairn_inode_get_fh(thread, txn, request->rename_at.new_fh, request->rename_at.new_fhlen, 1, &
+            rc = cairn_inode_get_fh(thread, request->rename_at.new_fh, request->rename_at.new_fhlen, &
                                     new_parent_ih);
             if (rc) {
                 request->status = CHIMERA_VFS_ENOENT;
@@ -2865,7 +3080,7 @@ cairn_rename_at(
                 return;
             }
 
-            rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &old_parent_ih);
+            rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &old_parent_ih);
             if (rc) {
                 cairn_inode_handle_release(&new_parent_ih);
                 request->status = CHIMERA_VFS_ENOENT;
@@ -2898,7 +3113,7 @@ cairn_rename_at(
     old_dirent_key.inum    = old_parent_inode->inum;
     old_dirent_key.hash    = request->rename_at.name_hash;
 
-    rc = cairn_dirent_get(thread, txn, &old_dirent_key, &old_dh);
+    rc = cairn_dirent_get(thread, &old_dirent_key, &old_dh);
     if (rc) {
         cairn_inode_handle_release(&old_parent_ih);
 
@@ -2916,7 +3131,7 @@ cairn_rename_at(
     new_dirent_key.inum    = new_parent_inode->inum;
     new_dirent_key.hash    = request->rename_at.new_name_hash;
 
-    rc = cairn_dirent_get(thread, txn, &new_dirent_key, &new_dh);
+    rc = cairn_dirent_get(thread, &new_dirent_key, &new_dh);
     if (rc == 0) {
         // Target exists
         // Per POSIX: if old and new refer to same file, return success with no action
@@ -2936,7 +3151,7 @@ cairn_rename_at(
         struct cairn_inode_handle existing_ih;
         struct cairn_inode       *existing_inode;
 
-        rc = cairn_inode_get_inum(thread, txn, new_dh.dirent->inum, 1, &existing_ih);
+        rc = cairn_inode_get_inum(thread, new_dh.dirent->inum, &existing_ih);
         if (rc == 0) {
             existing_inode = existing_ih.inode;
             existing_inode->nlink--;
@@ -2947,17 +3162,17 @@ cairn_rename_at(
                 if (existing_inode->refcnt == 0) {
                     // Remove type-specific data before removing inode
                     if (S_ISREG(existing_inode->mode)) {
-                        cairn_remove_file_extents(thread, txn, existing_inode->inum);
+                        cairn_remove_file_extents(thread, existing_inode->inum);
                     } else if (S_ISLNK(existing_inode->mode)) {
-                        cairn_remove_symlink_target(txn, existing_inode->inum);
+                        cairn_remove_symlink_target(thread, existing_inode->inum);
                     }
 
-                    cairn_remove_inode(txn, existing_inode);
+                    cairn_remove_inode(thread, existing_inode);
                 } else {
-                    cairn_put_inode(txn, existing_inode);
+                    cairn_put_inode(thread, existing_inode);
                 }
             } else {
-                cairn_put_inode(txn, existing_inode);
+                cairn_put_inode(thread, existing_inode);
             }
 
             cairn_inode_handle_release(&existing_ih);
@@ -2966,11 +3181,11 @@ cairn_rename_at(
     }
 
     // Get the target inode to update its ctime
-    rc = cairn_inode_get_inum(thread, txn, old_dirent_value->inum, 1, &target_ih);
+    rc = cairn_inode_get_inum(thread, old_dirent_value->inum, &target_ih);
     if (rc == 0) {
         target_inode        = target_ih.inode;
         target_inode->ctime = now;
-        cairn_put_inode(txn, target_inode);
+        cairn_put_inode(thread, target_inode);
         cairn_inode_handle_release(&target_ih);
     }
 
@@ -2980,8 +3195,8 @@ cairn_rename_at(
     memcpy(new_dirent_value.name, request->rename_at.new_name, request->rename_at.new_namelen);
 
     // Update directory entries and parent inodes
-    cairn_remove_dirent(txn, &old_dirent_key);
-    cairn_put_dirent(txn, &new_dirent_key, &new_dirent_value);
+    cairn_remove_dirent(thread, &old_dirent_key);
+    cairn_put_dirent(thread, &new_dirent_key, &new_dirent_value);
 
     old_parent_inode->mtime = now;
     old_parent_inode->ctime = now;
@@ -2994,9 +3209,9 @@ cairn_rename_at(
         new_parent_inode->nlink++;
     }
 
-    cairn_put_inode(txn, old_parent_inode);
+    cairn_put_inode(thread, old_parent_inode);
     if (cmp != 0) {
-        cairn_put_inode(txn, new_parent_inode);
+        cairn_put_inode(thread, new_parent_inode);
     }
 
     // Cleanup
@@ -3019,7 +3234,6 @@ cairn_link_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t     *txn;
     struct cairn_inode_handle  parent_ih, target_ih;
     struct cairn_inode        *parent_inode, *target_inode;
     struct cairn_dirent_key    dirent_key;
@@ -3030,9 +3244,7 @@ cairn_link_at(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    txn = cairn_get_transaction(thread);
-
-    rc = cairn_inode_get_fh(thread, txn, request->link_at.dir_fh, request->link_at.dir_fhlen, 1, &parent_ih);
+    rc = cairn_inode_get_fh(thread, request->link_at.dir_fh, request->link_at.dir_fhlen, &parent_ih);
 
     if (unlikely(rc)) {
         request->status = CHIMERA_VFS_ENOENT;
@@ -3049,7 +3261,7 @@ cairn_link_at(
         return;
     }
 
-    rc = cairn_inode_get_fh(thread, txn, request->fh, request->fh_len, 1, &target_ih);
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &target_ih);
 
     if (rc) {
         cairn_inode_handle_release(&parent_ih);
@@ -3072,7 +3284,7 @@ cairn_link_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->link_at.name_hash;
 
-    rc = cairn_dirent_get(thread, txn, &dirent_key, &dh);
+    rc = cairn_dirent_get(thread, &dirent_key, &dh);
 
     if (rc == 0) {
         cairn_inode_handle_release(&parent_ih);
@@ -3092,9 +3304,9 @@ cairn_link_at(
     parent_inode->mtime = now;
     parent_inode->ctime = now;
 
-    cairn_put_dirent(txn, &dirent_key, &dirent_value);
-    cairn_put_inode(txn, parent_inode);
-    cairn_put_inode(txn, target_inode);
+    cairn_put_dirent(thread, &dirent_key, &dirent_value);
+    cairn_put_inode(thread, parent_inode);
+    cairn_put_inode(thread, target_inode);
 
     cairn_inode_handle_release(&parent_ih);
     cairn_inode_handle_release(&target_ih);
@@ -3112,10 +3324,12 @@ cairn_put_key(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t *txn;
-    char                  *err = NULL;
-    uint8_t                kv_key[1 + CAIRN_KV_KEY_MAX];
-    size_t                 kv_key_len;
+    rocksdb_writebatch_wi_t *batch;
+    uint8_t                  kv_key[1 + CAIRN_KV_KEY_MAX];
+    size_t                   kv_key_len;
+
+    (void) shared;
+    (void) private_data;
 
     if (request->put_key.key_len > CAIRN_KV_KEY_MAX) {
         request->status = CHIMERA_VFS_EINVAL;
@@ -3123,20 +3337,16 @@ cairn_put_key(
         return;
     }
 
-    txn = cairn_get_transaction(thread);
-
     /* Build RocksDB key: keytype + user key */
     kv_key[0]  = CAIRN_KEY_KV;
     kv_key_len = 1 + request->put_key.key_len;
     memcpy(kv_key + 1, request->put_key.key, request->put_key.key_len);
 
-    rocksdb_transaction_put(txn,
-                            (const char *) kv_key, kv_key_len,
-                            (const char *) request->put_key.value,
-                            request->put_key.value_len,
-                            &err);
-
-    chimera_cairn_abort_if(err, "Error putting KV: %s\n", err);
+    batch = cairn_get_meta_batch(thread);
+    rocksdb_writebatch_wi_put(batch,
+                              (const char *) kv_key, kv_key_len,
+                              (const char *) request->put_key.value,
+                              request->put_key.value_len);
 
     request->status = CHIMERA_VFS_OK;
 
@@ -3150,12 +3360,13 @@ cairn_get_key(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t *txn;
-    char                  *err = NULL;
-    uint8_t                kv_key[1 + CAIRN_KV_KEY_MAX];
-    size_t                 kv_key_len;
-    char                  *value;
-    size_t                 value_len;
+    char   *err = NULL;
+    uint8_t kv_key[1 + CAIRN_KV_KEY_MAX];
+    size_t  kv_key_len;
+    char   *value;
+    size_t  value_len;
+
+    (void) private_data;
 
     if (request->get_key.key_len > CAIRN_KV_KEY_MAX) {
         request->status = CHIMERA_VFS_EINVAL;
@@ -3163,18 +3374,20 @@ cairn_get_key(
         return;
     }
 
-    txn = cairn_get_transaction(thread);
-
     /* Build RocksDB key: keytype + user key */
     kv_key[0]  = CAIRN_KEY_KV;
     kv_key_len = 1 + request->get_key.key_len;
     memcpy(kv_key + 1, request->get_key.key, request->get_key.key_len);
 
-    value = rocksdb_transaction_get(txn,
-                                    shared->read_options,
-                                    (const char *) kv_key, kv_key_len,
-                                    &value_len,
-                                    &err);
+    if (thread->meta_batch) {
+        value = rocksdb_writebatch_wi_get_from_batch_and_db(
+            thread->meta_batch, shared->metadb, shared->read_options,
+            (const char *) kv_key, kv_key_len, &value_len, &err);
+    } else {
+        value = rocksdb_get(shared->metadb, shared->read_options,
+                            (const char *) kv_key, kv_key_len,
+                            &value_len, &err);
+    }
 
     chimera_cairn_abort_if(err, "Error getting KV: %s\n", err);
 
@@ -3202,10 +3415,12 @@ cairn_delete_key(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t *txn;
-    char                  *err = NULL;
-    uint8_t                kv_key[1 + CAIRN_KV_KEY_MAX];
-    size_t                 kv_key_len;
+    rocksdb_writebatch_wi_t *batch;
+    uint8_t                  kv_key[1 + CAIRN_KV_KEY_MAX];
+    size_t                   kv_key_len;
+
+    (void) shared;
+    (void) private_data;
 
     if (request->delete_key.key_len > CAIRN_KV_KEY_MAX) {
         request->status = CHIMERA_VFS_EINVAL;
@@ -3213,18 +3428,13 @@ cairn_delete_key(
         return;
     }
 
-    txn = cairn_get_transaction(thread);
-
     /* Build RocksDB key: keytype + user key */
     kv_key[0]  = CAIRN_KEY_KV;
     kv_key_len = 1 + request->delete_key.key_len;
     memcpy(kv_key + 1, request->delete_key.key, request->delete_key.key_len);
 
-    rocksdb_transaction_delete(txn,
-                               (const char *) kv_key, kv_key_len,
-                               &err);
-
-    chimera_cairn_abort_if(err, "Error deleting KV: %s\n", err);
+    batch = cairn_get_meta_batch(thread);
+    rocksdb_writebatch_wi_delete(batch, (const char *) kv_key, kv_key_len);
 
     request->status = CHIMERA_VFS_OK;
 
@@ -3238,7 +3448,6 @@ cairn_search_keys(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t             *txn;
     rocksdb_iterator_t                *iter;
     uint8_t                            start_kv_key[1 + CAIRN_KV_KEY_MAX];
     uint8_t                            end_kv_key[1 + CAIRN_KV_KEY_MAX];
@@ -3254,8 +3463,6 @@ cairn_search_keys(
         request->complete(request);
         return;
     }
-
-    txn = cairn_get_transaction(thread);
 
     /* Build start key: keytype + user start key */
     start_kv_key[0]  = CAIRN_KEY_KV;
@@ -3273,7 +3480,7 @@ cairn_search_keys(
                request->search_keys.end_key_len);
     }
 
-    iter = rocksdb_transaction_create_iterator(txn, shared->read_options);
+    iter = cairn_meta_iterator(thread);
 
     rocksdb_iter_seek(iter, (const char *) start_kv_key, start_kv_key_len);
 
@@ -3321,6 +3528,14 @@ cairn_dispatch(
 {
     struct cairn_thread *thread = private_data;
     struct cairn_shared *shared = thread->shared;
+
+    /*
+     * Ensure cairn_thread_commit runs at the end of this event loop cycle.
+     * Write paths get this for free via cairn_get_meta_batch/data_batch, but
+     * read-only handlers DL_APPEND to txn_requests without touching a batch
+     * and would otherwise leave their requests un-completed.
+     */
+    cairn_ensure_commit_scheduled(thread);
 
     switch (request->opcode) {
         case CHIMERA_VFS_OP_MOUNT:
