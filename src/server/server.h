@@ -107,6 +107,27 @@ chimera_server_config_set_external_portmap(
     struct chimera_server_config *config,
     int                           enable);
 
+void
+chimera_server_config_set_portmap_hostname(
+    struct chimera_server_config *config,
+    const char                   *hostname);
+
+const char *
+chimera_server_config_get_portmap_hostname(
+    const struct chimera_server_config *config);
+
+/*
+ * Resolve a hostname or IPv4 dotted-quad string to an IPv4 dotted-quad string.
+ * Writes the result (NUL-terminated) into out_buf. out_size must be at least
+ * INET_ADDRSTRLEN (16). Aborts startup with a clear error on resolution
+ * failure.
+ */
+void
+chimera_server_resolve_ipv4(
+    const char *hostname,
+    char       *out_buf,
+    size_t      out_size);
+
 uint32_t
 chimera_server_config_get_soft_fail_bad_req(
     const struct chimera_server_config *config);

@@ -101,6 +101,8 @@ struct chimera_server_nfs_shared {
     const struct chimera_server_config *config;
     struct chimera_vfs                 *vfs;
 
+    char                                portmap_hostname[16];
+
     struct PORTMAP_V2                   portmap_v2;
     struct PORTMAP_V3                   portmap_v3;
     struct PORTMAP_V4                   portmap_v4;

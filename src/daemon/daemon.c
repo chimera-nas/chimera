@@ -360,6 +360,13 @@ main(
         chimera_server_config_set_external_portmap(server_config, 1);
     }
 
+    json_value = json_object_get(server_params, "portmap_hostname");
+    if (json_is_string(json_value)) {
+        str_value = json_string_value(json_value);
+        chimera_server_info("Setting portmap hostname to %s", str_value);
+        chimera_server_config_set_portmap_hostname(server_config, str_value);
+    }
+
     json_value = json_object_get(server_params, "kv_module");
     if (json_is_string(json_value)) {
         str_value = json_string_value(json_value);
