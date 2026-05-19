@@ -108,7 +108,7 @@ chimera_server_config_init(void)
     config->async_delegation_threads = 8;
     config->nfs_rdma                 = 0;
     config->external_portmap         = 0;
-    config->portmap_hostname[0] = '\0';
+    config->portmap_hostname[0]      = '\0';
     config->soft_fail_bad_req        = 0;
     config->tcp_flavor               = CHIMERA_TCP_FLAVOR_PLAIN;
 
