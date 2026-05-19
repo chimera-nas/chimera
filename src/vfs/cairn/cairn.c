@@ -47,6 +47,15 @@
  */
 #define CAIRN_INODE_LOCK_STRIPES 1024
 
+/*
+ * Upper bound on requests batched into a single commit.  Natural batching
+ * already happens because a delegation thread is blocked in rocksdb_write
+ * while its inbox fills up; this cap is purely to bound tail latency when
+ * load is high and commits are slow — the inbox could otherwise accumulate
+ * far more requests than any single op would tolerate waiting on.
+ */
+#define CAIRN_BATCH_MAX_OPS 16
+
 #define chimera_cairn_debug(...) chimera_debug("cairn", \
                                                __FILE__, \
                                                __LINE__, \
@@ -196,6 +205,9 @@ struct cairn_thread {
      * deferred commit to drain that list and call request->complete(); if we
      * forgot to schedule the deferral those requests would hang forever. */
     int                         commit_scheduled;
+    /* Count of requests queued into txn_requests since the last commit.
+     * Used to bound batch size via CAIRN_BATCH_MAX_OPS. */
+    int                         request_count;
     struct chimera_vfs_request *txn_requests;
     struct evpl_deferral        commit;
     int                         thread_id;
@@ -954,6 +966,20 @@ cairn_ensure_commit_scheduled(struct cairn_thread *thread)
 } /* cairn_ensure_commit_scheduled */
 
 /*
+ * Append a request that will be completed when the current cycle's batch
+ * commits.  Bumps the per-thread request_count; cairn_dispatch checks this
+ * after the op handler returns and force-commits if we're at the cap.
+ */
+static inline void
+cairn_queue_request(
+    struct cairn_thread        *thread,
+    struct chimera_vfs_request *request)
+{
+    DL_APPEND(thread->txn_requests, request);
+    thread->request_count++;
+} /* cairn_queue_request */
+
+/*
  * Ordered two-stage commit:
  *   1. datadb batch (sync iff any pending op requested durable data)
  *   2. metadb batch (always sync)
@@ -1009,6 +1035,7 @@ cairn_thread_commit(
         request->complete(request);
     }
 
+    thread->request_count    = 0;
     thread->commit_scheduled = 0;
 } /* cairn_thread_commit */
 
@@ -1205,7 +1232,7 @@ cairn_getattr(
 
     request->status = CHIMERA_VFS_OK;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_getattr */
 
 static void
@@ -1251,7 +1278,7 @@ cairn_setattr(
 
     request->status = CHIMERA_VFS_OK;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_setattr */
 
 static inline int
@@ -1371,7 +1398,7 @@ cairn_mount(
 
     request->status = CHIMERA_VFS_OK;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_mount */
 
 static void
@@ -1426,7 +1453,7 @@ cairn_lookup_at(
         cairn_map_attrs(shared, &request->lookup_at.r_attr, inode);
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_OK;
-        DL_APPEND(thread->txn_requests, request);
+        cairn_queue_request(thread, request);
         return;
     }
 
@@ -1448,7 +1475,7 @@ cairn_lookup_at(
         cairn_inode_handle_release(&ih);
         cairn_inode_handle_release(&child_ih);
         request->status = CHIMERA_VFS_OK;
-        DL_APPEND(thread->txn_requests, request);
+        cairn_queue_request(thread, request);
         return;
     }
 
@@ -1489,7 +1516,7 @@ cairn_lookup_at(
 
     request->status = CHIMERA_VFS_OK;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_lookup_at */
 
 static void
@@ -1588,7 +1615,7 @@ cairn_mkdir_at(
 
     cairn_inode_handle_release(&parent_ih);
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_mkdir_at */
 
 static void
@@ -1695,7 +1722,7 @@ cairn_mknod_at(
 
     cairn_inode_handle_release(&parent_ih);
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_mknod_at */
 
 static void
@@ -1820,7 +1847,7 @@ cairn_remove_at(
     cairn_dirent_handle_release(&dh);
 
     request->status = CHIMERA_VFS_OK;
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_remove_at */
 
 /*
@@ -2008,7 +2035,7 @@ cairn_readdir(
     request->readdir.r_cookie = next_cookie;
     request->readdir.r_eof    = eof;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_readdir */
 
 static void
@@ -2040,7 +2067,7 @@ cairn_open_fh(
 
     request->status = CHIMERA_VFS_OK;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_open_fh */
 
 static void
@@ -2171,7 +2198,7 @@ cairn_open_at(
     }
 
     request->status = CHIMERA_VFS_OK;
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_open_at */
 
 static void
@@ -2213,7 +2240,7 @@ cairn_close(
 
     request->status = CHIMERA_VFS_OK;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_close */
 
 static void
@@ -2386,7 +2413,7 @@ cairn_read(
     request->read.iov      = iov;
     iov[0].length          = length;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_read */
 
 static inline void
@@ -2586,7 +2613,7 @@ cairn_write(
      * callback handles the release after this request completes via doorbell.
      */
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_write */
 
 
@@ -2639,7 +2666,7 @@ cairn_allocate(
 
     request->status = CHIMERA_VFS_OK;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_allocate */
 
 static void
@@ -2672,7 +2699,7 @@ cairn_seek(
         request->seek.r_eof    = 1;
         request->seek.r_offset = 0;
         request->status        = CHIMERA_VFS_OK;
-        DL_APPEND(thread->txn_requests, request);
+        cairn_queue_request(thread, request);
         return;
     }
 
@@ -2730,7 +2757,7 @@ cairn_seek(
                 rocksdb_iter_destroy(iter);
                 cairn_inode_handle_release(&ih);
                 request->status = CHIMERA_VFS_OK;
-                DL_APPEND(thread->txn_requests, request);
+                cairn_queue_request(thread, request);
                 return;
             }
 
@@ -2743,7 +2770,7 @@ cairn_seek(
         request->seek.r_eof    = 1;
         request->seek.r_offset = 0;
         request->status        = CHIMERA_VFS_OK;
-        DL_APPEND(thread->txn_requests, request);
+        cairn_queue_request(thread, request);
         return;
     } else {
         /* SEEK_HOLE: find first gap from offset forward */
@@ -2800,7 +2827,7 @@ cairn_seek(
                 rocksdb_iter_destroy(iter);
                 cairn_inode_handle_release(&ih);
                 request->status = CHIMERA_VFS_OK;
-                DL_APPEND(thread->txn_requests, request);
+                cairn_queue_request(thread, request);
                 return;
             }
 
@@ -2820,7 +2847,7 @@ cairn_seek(
         rocksdb_iter_destroy(iter);
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_OK;
-        DL_APPEND(thread->txn_requests, request);
+        cairn_queue_request(thread, request);
         return;
     }
 } /* cairn_seek */
@@ -2912,7 +2939,7 @@ cairn_symlink_at(
 
     request->status = CHIMERA_VFS_OK;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_symlink_at */
 
 static void
@@ -2979,7 +3006,7 @@ cairn_readlink(
     cairn_inode_handle_release(&ih);
 
     request->status = CHIMERA_VFS_OK;
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_readlink */
 
 static inline int
@@ -3224,7 +3251,7 @@ cairn_rename_at(
     }
 
     request->status = CHIMERA_VFS_OK;
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_rename_at */
 
 static void
@@ -3313,7 +3340,7 @@ cairn_link_at(
 
     request->status = CHIMERA_VFS_OK;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_link_at */
 
 
@@ -3350,7 +3377,7 @@ cairn_put_key(
 
     request->status = CHIMERA_VFS_OK;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_put_key */
 
 static void
@@ -3438,7 +3465,7 @@ cairn_delete_key(
 
     request->status = CHIMERA_VFS_OK;
 
-    DL_APPEND(thread->txn_requests, request);
+    cairn_queue_request(thread, request);
 } /* cairn_delete_key */
 
 static void
@@ -3621,6 +3648,19 @@ cairn_dispatch(
             request->complete(request);
             break;
     } /* switch */
+
+    /*
+     * Bound the batch size.  Natural batching happens for free: while we
+     * block in rocksdb_write, requests pile up in our delegation inbox and
+     * the next event-loop wake processes them as one batch.  But under high
+     * load with slow commits that batch can grow arbitrarily large, and a
+     * request near the tail would wait for every commit ahead of it.
+     * Force an early commit once the queue reaches CAIRN_BATCH_MAX_OPS so
+     * tail latency stays bounded.
+     */
+    if (thread->request_count >= CAIRN_BATCH_MAX_OPS) {
+        cairn_thread_commit(thread->evpl, thread);
+    }
 } /* cairn_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
