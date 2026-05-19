@@ -273,6 +273,21 @@ main(
                                             flavor == CHIMERA_TCP_FLAVOR_XLIO);
     }
 
+    if (server_params) {
+        json_t *prealloc_slabs_value   = json_object_get(server_params, "preallocate_slabs");
+        json_t *prealloc_threads_value = json_object_get(server_params, "preallocate_threads");
+
+        if (prealloc_slabs_value && json_is_integer(prealloc_slabs_value)) {
+            evpl_global_config_set_preallocate_slabs(evpl_global_config,
+                                                     json_integer_value(prealloc_slabs_value));
+        }
+
+        if (prealloc_threads_value && json_is_integer(prealloc_threads_value)) {
+            evpl_global_config_set_preallocate_threads(evpl_global_config,
+                                                       json_integer_value(prealloc_threads_value));
+        }
+    }
+
     /* Configure TLS if HTTPS is enabled */
     if (rest_https_port != 0) {
         if (rest_ssl_cert && rest_ssl_key) {
