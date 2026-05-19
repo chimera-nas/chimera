@@ -913,6 +913,23 @@ memfs_setattr(
         return;
     }
 
+    /* SETATTR(SIZE) is only meaningful for regular files. RFC 7530 §5.7:
+     * directories must report ISDIR; symlinks should report SYMLINK or
+     * INVAL; other non-regular file types report INVAL. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        !S_ISREG(inode->mode)) {
+        enum chimera_vfs_error err;
+        if (S_ISDIR(inode->mode)) {
+            err = CHIMERA_VFS_EISDIR;
+        } else {
+            err = CHIMERA_VFS_EINVAL;
+        }
+        pthread_mutex_unlock(&inode->lock);
+        request->status = err;
+        request->complete(request);
+        return;
+    }
+
     memfs_map_attrs(shared, &request->setattr.r_pre_attr, inode, request->fh);
 
     /* Handle truncation: free blocks past new EOF and zero partial block */
@@ -3171,6 +3188,13 @@ memfs_readlink(
         return;
     }
 
+    if (!S_ISLNK(inode->mode)) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
     request->readlink.r_target_length = inode->symlink.target->length;
 
     memcpy(request->readlink.r_target,
@@ -3259,7 +3283,14 @@ memfs_rename_at(
                                                   request->fh_len);
         }
 
+        /* Cross-directory rename: both parent inodes are locked at this
+         * point (or NULL on lookup miss). Every early-return below must
+         * release whichever locks are still held, or the next request
+         * touching the unreleased inode will deadlock. */
         if (!old_parent_inode) {
+            if (new_parent_inode) {
+                pthread_mutex_unlock(&new_parent_inode->lock);
+            }
             request->status = CHIMERA_VFS_ENOENT;
             request->complete(request);
             return;
@@ -3267,12 +3298,16 @@ memfs_rename_at(
 
         if (!S_ISDIR(old_parent_inode->mode)) {
             pthread_mutex_unlock(&old_parent_inode->lock);
+            if (new_parent_inode) {
+                pthread_mutex_unlock(&new_parent_inode->lock);
+            }
             request->status = CHIMERA_VFS_ENOTDIR;
             request->complete(request);
             return;
         }
 
         if (!new_parent_inode) {
+            pthread_mutex_unlock(&old_parent_inode->lock);
             request->status = CHIMERA_VFS_ENOENT;
             request->complete(request);
             return;
@@ -3280,6 +3315,7 @@ memfs_rename_at(
 
         if (!S_ISDIR(new_parent_inode->mode)) {
             pthread_mutex_unlock(&new_parent_inode->lock);
+            pthread_mutex_unlock(&old_parent_inode->lock);
             request->status = CHIMERA_VFS_ENOTDIR;
             request->complete(request);
             return;
