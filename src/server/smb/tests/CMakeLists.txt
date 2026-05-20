@@ -22,17 +22,21 @@ if(CHIMERA_NETNS_TESTING)
                 ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=ntlm)
 endif()
 
-add_test(NAME chimera/server/smb/smbclient_kerberos
-    COMMAND ${CMAKE_SOURCE_DIR}/scripts/kerberos_test_wrapper.sh
-            ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=kerberos)
-set_tests_properties(chimera/server/smb/smbclient_kerberos PROPERTIES
-    SKIP_RETURN_CODE 77)
+# kerberos_test_wrapper.sh and ad_test_wrapper.sh both set up an isolated
+# netns internally, so they need the same privilege as the netns wrapper.
+if(CHIMERA_NETNS_TESTING)
+    add_test(NAME chimera/server/smb/smbclient_kerberos
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/kerberos_test_wrapper.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=kerberos)
+    set_tests_properties(chimera/server/smb/smbclient_kerberos PROPERTIES
+        SKIP_RETURN_CODE 77)
 
-find_program(SAMBA_TOOL samba-tool)
-if(SAMBA_TOOL)
-    add_test(NAME chimera/server/smb/smbclient_winbind
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/ad_test_wrapper.sh
-                ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=winbind)
+    find_program(SAMBA_TOOL samba-tool)
+    if(SAMBA_TOOL)
+        add_test(NAME chimera/server/smb/smbclient_winbind
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/ad_test_wrapper.sh
+                    ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=winbind)
+    endif()
 endif()
 
 # SMB share mode test
