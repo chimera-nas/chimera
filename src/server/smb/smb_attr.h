@@ -29,6 +29,14 @@
 #define SMB_ATTR_DISPOSITION        (1ULL << 13)
 #define SMB_ATTR_POSITION           (1ULL << 14)
 
+/* DOS attribute bits a client may set/clear via SET_INFO FileBasicInformation
+ * and that the VFS persists.  DIRECTORY/REPARSE/etc. are derived from the
+ * inode type, not stored, so they are excluded here. */
+#define SMB_DOS_ATTR_SETTABLE       (SMB2_FILE_ATTRIBUTE_READONLY | \
+                                     SMB2_FILE_ATTRIBUTE_HIDDEN |   \
+                                     SMB2_FILE_ATTRIBUTE_SYSTEM |   \
+                                     SMB2_FILE_ATTRIBUTE_ARCHIVE)
+
 /* Masks for each information class */
 #define SMB_ATTR_MASK_BASIC         ( \
             SMB_ATTR_CRTTIME | SMB_ATTR_ATIME | SMB_ATTR_MTIME | \
@@ -114,6 +122,14 @@ chimera_smb_marshal_basic_attrs(
 
     /* File attributes */
     smb_attr->smb_attributes = 0;
+
+    /* Settable DOS attribute bits persisted by the VFS (READONLY, HIDDEN,
+     * SYSTEM, ARCHIVE).  Only honored when the backend reports it actually
+     * stores them; otherwise we fall back to synthesizing from the mode. */
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) {
+        smb_attr->smb_attributes |= attr->va_dos_attributes & SMB_DOS_ATTR_SETTABLE;
+    }
+
     if ((attr->va_mode & S_IFMT) == S_IFDIR) {
         smb_attr->smb_attributes |= 0x10; /* FILE_ATTRIBUTE_DIRECTORY */
     }
@@ -347,6 +363,14 @@ chimera_smb_unmarshal_basic_info(
 
     attr->va_req_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME | CHIMERA_VFS_ATTR_CTIME;
     attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME | CHIMERA_VFS_ATTR_CTIME;
+
+    /* A FileAttributes value of 0 means "no change" (MS-FSCC 2.4.7); any
+     * non-zero value replaces the persisted DOS attribute set. */
+    if (smb_attrs->smb_attributes != 0) {
+        attr->va_dos_attributes = smb_attrs->smb_attributes & SMB_DOS_ATTR_SETTABLE;
+        attr->va_req_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        attr->va_set_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+    }
 } // chimera_smb_unmarshal_basic_info
 
 static inline void
