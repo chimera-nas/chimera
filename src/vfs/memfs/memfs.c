@@ -895,6 +895,36 @@ memfs_getattr(
     request->complete(request);
 } /* memfs_getattr */
 
+/* memfs holds all data in memory, so COMMIT is a no-op for durability.
+ * It still returns the requested pre/post attributes so callers (e.g. the
+ * NFSv4 server) can validate the target's file type without an extra
+ * round-trip. */
+static void
+memfs_commit(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct memfs_inode *inode;
+
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
+
+    if (unlikely(!inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    memfs_map_attrs(shared, &request->commit.r_pre_attr, inode, request->fh);
+    memfs_map_attrs(shared, &request->commit.r_post_attr, inode, request->fh);
+
+    pthread_mutex_unlock(&inode->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_commit */
+
 static void
 memfs_setattr(
     struct memfs_thread        *thread,
@@ -3812,8 +3842,7 @@ memfs_dispatch(
             memfs_write(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_COMMIT:
-            request->status = CHIMERA_VFS_OK;
-            request->complete(request);
+            memfs_commit(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_ALLOCATE:
             memfs_allocate(thread, shared, request, private_data);

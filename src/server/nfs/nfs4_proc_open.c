@@ -245,6 +245,17 @@ chimera_nfs4_open_at_complete(
         return;
     }
 
+    /* RFC 7530 §16.16.5: OPEN targets a regular file. A directory yields
+     * NFS4ERR_ISDIR; any other non-regular object (symlink, socket, fifo,
+     * block/char device) yields NFS4ERR_SYMLINK. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISREG(attr->va_mode)) {
+        res->status = S_ISDIR(attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_SYMLINK;
+        chimera_vfs_release(req->thread->vfs_thread, handle);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
     {
         uint32_t lock_caps      = handle->vfs_module->capabilities;
         uint32_t install_rflags = 0;
@@ -467,7 +478,7 @@ chimera_nfs4_open_parent_complete(
                                 args->claim.file.len,
                                 flags,
                                 attr,
-                                CHIMERA_VFS_ATTR_FH,
+                                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
                                 CHIMERA_VFS_ATTR_MTIME,
                                 CHIMERA_VFS_ATTR_MTIME,
                                 chimera_nfs4_open_at_complete,
