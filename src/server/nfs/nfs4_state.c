@@ -699,7 +699,21 @@ open_state_cleanup(
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread)
 {
+    struct chimera_vfs_state *vfs_state = vfs_thread ? vfs_thread->vfs->vfs_state : NULL;
+
     (void) table;
+
+    /* Release the cross-protocol SHARE reservation, if held. */
+    if (vfs_state && state->share_lease_held) {
+        chimera_vfs_lease_release(vfs_state, state->share_file_state,
+                                  &state->share_lease);
+        state->share_lease_held = false;
+    }
+    if (vfs_state && state->share_file_state) {
+        chimera_vfs_state_put(vfs_state, state->share_file_state);
+        state->share_file_state = NULL;
+    }
+
     if (state->handle && vfs_thread) {
         chimera_vfs_release(vfs_thread, state->handle);
         state->handle = NULL;
@@ -816,7 +830,25 @@ lock_state_cleanup(
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread)
 {
+    struct chimera_vfs_state *vfs_state = vfs_thread ? vfs_thread->vfs->vfs_state : NULL;
+    struct nfs4_range_lease  *rl, *tmp;
+
     (void) table;
+
+    /* Drain any byte-range leases still held (ranges not explicitly
+     * released by LOCKU before CLOSE / lock-owner teardown). */
+    rl                  = state->range_leases;
+    state->range_leases = NULL;
+    while (rl) {
+        tmp = rl->next;
+        if (vfs_state) {
+            chimera_vfs_lease_release(vfs_state, rl->file_state, &rl->lease);
+            chimera_vfs_state_put(vfs_state, rl->file_state);
+        }
+        free(rl);
+        rl = tmp;
+    }
+
     if (state->handle && vfs_thread) {
         chimera_vfs_release(vfs_thread, state->handle);
         state->handle = NULL;

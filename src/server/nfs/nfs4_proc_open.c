@@ -2,12 +2,84 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <xxhash.h>
+
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
 #include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_state.h"
+
+/*
+ * Acquire a cross-protocol SHARE reservation in vfs_state for a freshly
+ * created open_state.  Upstream's nfs_client_check_share_conflict already
+ * enforces share-mode conflicts *among NFSv4 owners of the same client*;
+ * this adds the NLM/SMB dimension so an NFSv4 OPEN that denies read/write
+ * collides with an SMB open holding that access (and vice versa).
+ *
+ * Returns NFS4_OK on success (lease stored on the state, released at
+ * open_state_cleanup), NFS4ERR_SHARE_DENIED on cross-protocol conflict.
+ */
+static nfsstat4
+chimera_nfs4_open_acquire_share(
+    struct nfs_request    *req,
+    struct nfs_open_state *state)
+{
+    struct OPEN4args               *args      = &req->args_compound->argarray[req->index].opopen;
+    struct chimera_vfs_state       *vfs_state = req->thread->vfs->vfs_state;
+    struct chimera_vfs_open_handle *handle    = state->handle;
+    struct chimera_vfs_file_state  *file_state;
+    struct chimera_vfs_lease       *conflict = NULL;
+    enum chimera_vfs_lease_result   result;
+    uint8_t                         granted = 0;
+    uint8_t                         denied  = 0;
+
+    if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
+        granted |= CHIMERA_VFS_LEASE_MODE_R;
+    }
+    if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
+        granted |= CHIMERA_VFS_LEASE_MODE_W;
+    }
+    if (args->share_deny & OPEN4_SHARE_DENY_READ) {
+        denied |= CHIMERA_VFS_LEASE_MODE_R;
+    }
+    if (args->share_deny & OPEN4_SHARE_DENY_WRITE) {
+        denied |= CHIMERA_VFS_LEASE_MODE_W;
+    }
+
+    if (granted == 0 && denied == 0) {
+        return NFS4_OK;
+    }
+
+    file_state = chimera_vfs_state_get(vfs_state,
+                                       handle->fh, handle->fh_len,
+                                       handle->fh_hash, true);
+    if (!file_state) {
+        return NFS4ERR_SERVERFAULT;
+    }
+
+    state->share_lease.kind             = CHIMERA_VFS_LEASE_SHARE;
+    state->share_lease.mode.granted     = granted;
+    state->share_lease.mode.denied      = denied;
+    state->share_lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4;
+    state->share_lease.owner.client_key = state->owner->client->client_id;
+    state->share_lease.owner.owner_lo   = XXH3_64bits(state->owner->owner,
+                                                      state->owner->owner_len);
+    state->share_lease.owner.owner_hi = 0;
+
+    result = chimera_vfs_state_try_insert(vfs_state, file_state,
+                                          &state->share_lease, &conflict);
+    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+        chimera_vfs_state_put(vfs_state, file_state);
+        return NFS4ERR_SHARE_DENIED;
+    }
+
+    state->share_file_state = file_state;
+    state->share_lease_held = true;
+    return NFS4_OK;
+} /* chimera_nfs4_open_acquire_share */
 
 /*
  * Install a freshly-opened VFS handle into the unified state model, returning
@@ -67,14 +139,31 @@ chimera_nfs4_open_install_state(
                                 (uint32_t) client->client_id,
                                 out_stateid);
         chimera_vfs_release(req->thread->vfs_thread, handle);
+        /* The SHARE reservation acquired on the first OPEN of this
+         * (owner, fh) stays in force.  Broadening share bits on
+         * coalesce is not re-checked cross-protocol in this pass —
+         * upstream's intra-client check is likewise coalesce-exempt. */
     } else {
-        nfs_open_state_create(owner,
-                              handle->fh, handle->fh_len,
-                              args->share_access, args->share_deny,
-                              handle,
-                              (uint32_t) client->client_id,
-                              &req->thread->shared->nfs4_state_table,
-                              out_stateid);
+        struct nfs_open_state *new_state;
+        nfsstat4               share_status;
+
+        new_state = nfs_open_state_create(owner,
+                                          handle->fh, handle->fh_len,
+                                          args->share_access, args->share_deny,
+                                          handle,
+                                          (uint32_t) client->client_id,
+                                          &req->thread->shared->nfs4_state_table,
+                                          out_stateid);
+
+        /* Cross-protocol SHARE coordination.  On conflict, tear the
+         * just-created state back down (releasing the handle) and fail. */
+        share_status = chimera_nfs4_open_acquire_share(req, new_state);
+        if (share_status != NFS4_OK) {
+            nfs_open_state_destroy(new_state,
+                                   &req->thread->shared->nfs4_state_table,
+                                   req->thread->vfs_thread);
+            return share_status;
+        }
     }
 
     /* RFC 7530 §16.18.5: signal OPEN4_RESULT_CONFIRM for an unconfirmed
