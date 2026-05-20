@@ -1638,8 +1638,10 @@ memfs_readdir(
     }
 
     if (!S_ISDIR(inode->mode)) {
+        enum chimera_vfs_error err = S_ISLNK(inode->mode) ?
+            CHIMERA_VFS_ESYMLINK : CHIMERA_VFS_ENOTDIR;
         pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = err;
         request->complete(request);
         return;
     }
