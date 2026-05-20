@@ -12,6 +12,16 @@
 #include <endian.h>
 #include <rocksdb/c.h>
 #include "rocksdb_compat.h"
+
+#ifdef CHIMERA_DECLARE_FLUSH_WAL
+/* librocksdb exports rocksdb_flush_wal but this distro's rocksdb/c.h omits
+ * the declaration (see CMakeLists.txt).  Declare it ourselves. */
+void rocksdb_flush_wal(
+    rocksdb_t    *db,
+    unsigned char sync,
+    char        **errptr);
+#endif /* ifdef CHIMERA_DECLARE_FLUSH_WAL */
+
 #include <jansson.h>
 #include <limits.h>
 #include <utlist.h>
@@ -874,7 +884,14 @@ cairn_init(const char *cfgdata)
     rocksdb_writeoptions_set_sync(shared->meta_write_opts, 1);
 
     shared->data_write_opts_async = rocksdb_writeoptions_create();
+#ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL
     rocksdb_writeoptions_set_sync(shared->data_write_opts_async, 0);
+#else  /* ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL */
+    /* No on-demand WAL flush available on this RocksDB; make every extent
+     * write durable so NFS COMMIT's guarantee holds without flush_wal.
+     * Costs UNSTABLE-write throughput, but only on ancient RocksDB. */
+    rocksdb_writeoptions_set_sync(shared->data_write_opts_async, 1);
+#endif /* ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL */
 
     shared->data_write_opts_sync = rocksdb_writeoptions_create();
     rocksdb_writeoptions_set_sync(shared->data_write_opts_sync, 1);
@@ -1240,6 +1257,7 @@ cairn_thread_commit(
      * unclear.
      */
     if (thread->needs_data_wal_flush && commit_status == CHIMERA_VFS_OK) {
+#ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL
         rocksdb_flush_wal(shared->datadb, 1, &err);
         if (err) {
             chimera_cairn_error("Error flushing data WAL: %s", err);
@@ -1247,6 +1265,12 @@ cairn_thread_commit(
             err           = NULL;
             commit_status = CHIMERA_VFS_EIO;
         }
+#endif /* ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL */
+        /*
+         * Without rocksdb_flush_wal, cairn_init forces data_write_opts_async
+         * to sync=1, so all extent writes are already durable here and there
+         * is nothing extra to flush.
+         */
     }
     thread->needs_data_wal_flush = 0;
 
