@@ -50,6 +50,7 @@ struct chimera_server_config {
     int                                   async_delegation;
     int                                   async_delegation_threads;
     int                                   cache_ttl;
+    int                                   nfs4_session_slots;
     int                                   num_modules;
     int                                   metrics_port;
     int                                   rest_http_port;
@@ -129,6 +130,11 @@ chimera_server_config_init(void)
     config->anongid = 65534;
 
     config->cache_ttl = 60;
+
+    /* Default NFSv4.1 fore-channel session slots (server cap on the number
+     * of concurrent SEQUENCE requests a client may have outstanding per
+     * session).  Mirrors NFS4_MAX_REPLY_CACHE_SLOTS in the NFS server. */
+    config->nfs4_session_slots = 64;
 
     strncpy(config->nfs_rdma_hostname, "0.0.0.0", sizeof(config->nfs_rdma_hostname));
     config->nfs_rdma_port    = 20049;
@@ -243,6 +249,20 @@ chimera_server_config_get_cache_ttl(const struct chimera_server_config *config)
 {
     return config->cache_ttl;
 } /* chimera_server_config_get_cache_ttl */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs4_session_slots(
+    struct chimera_server_config *config,
+    int                           slots)
+{
+    config->nfs4_session_slots = slots;
+} /* chimera_server_config_set_nfs4_session_slots */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs4_session_slots(const struct chimera_server_config *config)
+{
+    return config->nfs4_session_slots;
+} /* chimera_server_config_get_nfs4_session_slots */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_kv_module(

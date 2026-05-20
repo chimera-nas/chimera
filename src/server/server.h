@@ -85,6 +85,15 @@ chimera_server_config_get_cache_ttl(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_nfs4_session_slots(
+    struct chimera_server_config *config,
+    int                           slots);
+
+int
+chimera_server_config_get_nfs4_session_slots(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_kv_module(
     struct chimera_server_config *config,
     const char                   *kv_module);
