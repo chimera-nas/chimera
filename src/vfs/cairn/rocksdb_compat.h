@@ -73,6 +73,30 @@ cairn_compat_transaction_get_pinned_for_update(
     return s;
 } // cairn_compat_transaction_get_pinned_for_update
 
+static inline struct cairn_compat_slice *
+cairn_compat_get_pinned(
+    rocksdb_t                   *db,
+    const rocksdb_readoptions_t *options,
+    const char                  *key,
+    size_t                       klen,
+    char                       **errptr)
+{
+    struct cairn_compat_slice *s;
+    size_t                     vlen;
+    char                      *val;
+
+    val = rocksdb_get(db, options, key, klen, &vlen, errptr);
+
+    if (!val) {
+        return NULL;
+    }
+
+    s       = malloc(sizeof(*s));
+    s->data = val;
+    s->len  = vlen;
+    return s;
+} // cairn_compat_get_pinned
+
 static inline const char *
 cairn_compat_slice_value(
     const struct cairn_compat_slice *s,
@@ -97,6 +121,16 @@ cairn_compat_slice_destroy(struct cairn_compat_slice *s)
 #define rocksdb_transaction_get_pinned_for_update(txn, opts, key, klen, excl, errptr) \
         ((rocksdb_pinnableslice_t *) cairn_compat_transaction_get_pinned_for_update((txn), (opts), (key), (klen), (excl) \
                                                                                     , (errptr)))
+
+/*
+ * Snapshot reads on the base DB also return our wrapper slice so that the
+ * pinnableslice_value / pinnableslice_destroy macros below operate on a
+ * cairn_compat_slice consistently — otherwise a real rocksdb_get_pinned slice
+ * (allocated with new) would be freed via cairn_compat_slice_destroy (free),
+ * which AddressSanitizer flags as alloc-dealloc-mismatch.
+ */
+#define rocksdb_get_pinned(db, opts, key, klen, errptr) \
+        ((rocksdb_pinnableslice_t *) cairn_compat_get_pinned((db), (opts), (key), (klen), (errptr)))
 
 #define rocksdb_pinnableslice_value(s, vlen) \
         cairn_compat_slice_value((const struct cairn_compat_slice *) (s), (vlen))
