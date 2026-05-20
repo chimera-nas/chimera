@@ -154,7 +154,8 @@ nfs4_root_readdir_lookup_callback(
                                 entry->attrs.attrmask,
                                 3,
                                 entry->attrs.attr_vals.data,
-                                &entry->attrs.attr_vals.len);
+                                &entry->attrs.attr_vals.len,
+                                0);
 } /* nfs4_root_readdir_lookup_callback */
 
 struct nfs4_root_readdir_itr_ctx {

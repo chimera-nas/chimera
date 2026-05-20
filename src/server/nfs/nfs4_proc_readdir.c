@@ -63,7 +63,8 @@ chimera_nfs4_readdir_callback(
                                 entry->attrs.attrmask,
                                 3,
                                 entry->attrs.attr_vals.data,
-                                &entry->attrs.attr_vals.len);
+                                &entry->attrs.attr_vals.len,
+                                req->minorversion);
 
     dbuf_cur = req->encoding->dbuf->used - dbuf_before;
 

@@ -83,7 +83,8 @@ chimera_nfs4_verify_complete(
                                 out_mask,
                                 3,
                                 out_buf,
-                                &out_len);
+                                &out_len,
+                                req->minorversion);
 
     bool match = (num_out_mask == args->num_attrmask) &&
         (memcmp(out_mask, args->attrmask,
