@@ -590,7 +590,7 @@ chimera_nfs4_marshall_attrs(
     return 0;
 } /* chimera_nfs4_marshall_attrs */
 
-static int
+static nfsstat4
 chimera_nfs4_unmarshall_attrs(
     struct chimera_vfs_attrs *attr,
     uint32_t                  num_req_mask,
@@ -607,7 +607,7 @@ chimera_nfs4_unmarshall_attrs(
         if (req_mask[0] & (1 << FATTR4_SIZE)) {
 
             if (unlikely(attrs + sizeof(uint64_t) > attrsend)) {
-                return -1;
+                return NFS4ERR_BADXDR;
             }
 
             attr->va_size      = chimera_nfs_ntoh64(*(uint64_t *) attrs);
@@ -620,7 +620,7 @@ chimera_nfs4_unmarshall_attrs(
         if (req_mask[1] & (1 << (FATTR4_MODE - 32))) {
 
             if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
-                return -1;
+                return NFS4ERR_BADXDR;
             }
 
             attr->va_mode      = chimera_nfs_ntoh32(*(uint32_t *) attrs);
@@ -633,7 +633,7 @@ chimera_nfs4_unmarshall_attrs(
             uint32_t owner_padded_len;
 
             if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
-                return -1;
+                return NFS4ERR_BADXDR;
             }
 
             owner_len        = chimera_nfs_ntoh32(*(uint32_t *) attrs);
@@ -641,7 +641,12 @@ chimera_nfs4_unmarshall_attrs(
             owner_padded_len = (owner_len + 3) & ~3;
 
             if (unlikely(attrs + owner_padded_len > attrsend)) {
-                return -1;
+                return NFS4ERR_BADXDR;
+            }
+
+            /* RFC 7530 §5.9: owner is a non-empty utf8str_mixed. */
+            if (unlikely(owner_len == 0)) {
+                return NFS4ERR_INVAL;
             }
 
             /* Convert string to numeric uid */
@@ -655,7 +660,7 @@ chimera_nfs4_unmarshall_attrs(
             uint32_t group_padded_len;
 
             if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
-                return -1;
+                return NFS4ERR_BADXDR;
             }
 
             group_len        = chimera_nfs_ntoh32(*(uint32_t *) attrs);
@@ -663,7 +668,12 @@ chimera_nfs4_unmarshall_attrs(
             group_padded_len = (group_len + 3) & ~3;
 
             if (unlikely(attrs + group_padded_len > attrsend)) {
-                return -1;
+                return NFS4ERR_BADXDR;
+            }
+
+            /* RFC 7530 §5.9: owner_group is a non-empty utf8str_mixed. */
+            if (unlikely(group_len == 0)) {
+                return NFS4ERR_INVAL;
             }
 
             /* Convert string to numeric gid */
@@ -675,7 +685,7 @@ chimera_nfs4_unmarshall_attrs(
         if (req_mask[1] & (1 << (FATTR4_TIME_ACCESS_SET - 32))) {
 
             if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
-                return -1;
+                return NFS4ERR_BADXDR;
             }
 
             set_it = chimera_nfs_ntoh32(*(uint32_t *) attrs);
@@ -684,13 +694,18 @@ chimera_nfs4_unmarshall_attrs(
             if (set_it) {
 
                 if (unlikely(attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
-                    return -1;
+                    return NFS4ERR_BADXDR;
                 }
 
                 attr->va_atime.tv_sec  = chimera_nfs_ntoh64(*(uint64_t *) attrs);
                 attrs                 += sizeof(uint64_t);
                 attr->va_atime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
                 attrs                 += sizeof(uint32_t);
+
+                /* RFC 7530 §5.7: nseconds must be < 1,000,000,000. */
+                if (unlikely(attr->va_atime.tv_nsec >= 1000000000)) {
+                    return NFS4ERR_INVAL;
+                }
             } else {
                 attr->va_atime.tv_sec  = 0;
                 attr->va_atime.tv_nsec = CHIMERA_VFS_TIME_NOW;
@@ -702,7 +717,7 @@ chimera_nfs4_unmarshall_attrs(
         if (req_mask[1] & (1 << (FATTR4_TIME_MODIFY_SET - 32))) {
 
             if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
-                return -1;
+                return NFS4ERR_BADXDR;
             }
 
             set_it = chimera_nfs_ntoh32(*(uint32_t *) attrs);
@@ -711,13 +726,18 @@ chimera_nfs4_unmarshall_attrs(
             if (set_it) {
 
                 if (unlikely(attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
-                    return -1;
+                    return NFS4ERR_BADXDR;
                 }
 
                 attr->va_mtime.tv_sec  = chimera_nfs_ntoh64(*(uint64_t *) attrs);
                 attrs                 += sizeof(uint64_t);
                 attr->va_mtime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
                 attrs                 += sizeof(uint32_t);
+
+                /* RFC 7530 §5.7: nseconds must be < 1,000,000,000. */
+                if (unlikely(attr->va_mtime.tv_nsec >= 1000000000)) {
+                    return NFS4ERR_INVAL;
+                }
             } else {
                 attr->va_mtime.tv_sec  = 0;
                 attr->va_mtime.tv_nsec = CHIMERA_VFS_TIME_NOW;
@@ -729,7 +749,9 @@ chimera_nfs4_unmarshall_attrs(
 
     }
 
-    return (attrs <= attrsend) ? 0 : -1;
+    /* RFC 7530 §5: the attr_vals opaque must be consumed exactly. Leftover
+     * bytes (or an overrun) are a malformed fattr4 -> NFS4ERR_BADXDR. */
+    return (attrs == attrsend) ? NFS4_OK : NFS4ERR_BADXDR;
 } /* chimera_nfs4_unmarshall_attrs */
 
 static inline nfsstat4
