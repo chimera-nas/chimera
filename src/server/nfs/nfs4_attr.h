@@ -202,7 +202,8 @@ chimera_nfs4_marshall_attrs(
     uint32_t                       *rsp_mask,
     uint32_t                        max_rsp_mask,
     void                           *attrs,
-    uint32_t                       *attrvals_len)
+    uint32_t                       *attrvals_len,
+    uint8_t                         minorversion)
 {
     void    *attrbase = attrs;
     uint64_t v64;
@@ -216,7 +217,10 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[0]  |= (1 << FATTR4_SUPPORTED_ATTRS);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, 3);
+            /* The supported_attrs value is itself a bitmap4. FATTR4_SUPPATTR_
+             * EXCLCREAT lives in word 2 and is only defined for NFSv4.1+, so a
+             * v4.0 reply advertises just the two 4.0 words. */
+            chimera_nfs4_attr_append_uint32(&attrs, minorversion >= 1 ? 3 : 2);
             chimera_nfs4_attr_append_uint32(&attrs,
                                             (1 << FATTR4_SUPPORTED_ATTRS) |
                                             (1 << FATTR4_TYPE) |
@@ -266,8 +270,10 @@ chimera_nfs4_marshall_attrs(
                                             (1UL << (FATTR4_SPACE_FREE - 32)) |
                                             (1UL << (FATTR4_SPACE_TOTAL - 32)));
 
-            chimera_nfs4_attr_append_uint32(&attrs,
-                                            (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64)));
+            if (minorversion >= 1) {
+                chimera_nfs4_attr_append_uint32(&attrs,
+                                                (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64)));
+            }
         }
 
         if (req_mask[0] & (1 << FATTR4_TYPE) &&

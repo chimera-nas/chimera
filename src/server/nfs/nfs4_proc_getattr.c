@@ -57,7 +57,8 @@ chimera_nfs4_getattr_complete(
                                 res->resok4.obj_attributes.attrmask,
                                 3,
                                 res->resok4.obj_attributes.attr_vals.data,
-                                &res->resok4.obj_attributes.attr_vals.len);
+                                &res->resok4.obj_attributes.attr_vals.len,
+                                req->minorversion);
 
     if (req->handle) {
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
