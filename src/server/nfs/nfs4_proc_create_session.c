@@ -4,6 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
+#include "server/server.h"
 
 void
 chimera_nfs4_create_session(
@@ -21,6 +22,7 @@ chimera_nfs4_create_session(
     uint32_t                          flags = 0;
     uint32_t                          replay_max_slots;
     uint32_t                          replay_maxresp_cached;
+    uint32_t                          server_max_slots;
 
     if (args->csa_flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) {
         flags |= CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
@@ -31,10 +33,17 @@ chimera_nfs4_create_session(
      * to the client. */
     clamped_fore = args->csa_fore_chan_attrs;
 
+    /* Server cap on fore-channel slots is configurable (server.nfs4_session_slots);
+     * fall back to the compiled-in default if it is unset/invalid. */
+    server_max_slots = (uint32_t) chimera_server_config_get_nfs4_session_slots(shared->config);
+    if (server_max_slots == 0) {
+        server_max_slots = NFS4_MAX_REPLY_CACHE_SLOTS;
+    }
+
     replay_max_slots = clamped_fore.ca_maxrequests;
     if (replay_max_slots == 0 ||
-        replay_max_slots > NFS4_MAX_REPLY_CACHE_SLOTS) {
-        replay_max_slots = NFS4_MAX_REPLY_CACHE_SLOTS;
+        replay_max_slots > server_max_slots) {
+        replay_max_slots = server_max_slots;
     }
     clamped_fore.ca_maxrequests = replay_max_slots;
 
