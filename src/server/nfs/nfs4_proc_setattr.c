@@ -5,6 +5,8 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
+#include "nfs4_state.h"
+#include "nfs4_stateid.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
@@ -119,6 +121,41 @@ chimera_nfs4_setattr(
     if (res->status != NFS4_OK) {
         chimera_nfs4_compound_complete(req, res->status);
         return;
+    }
+
+    /* RFC 7530 §16.32.3: when SETATTR carries FATTR4_SIZE the supplied
+     * stateid must identify an open with write access.  Special stateids
+     * (all-zero / all-ones) are exempt -- treated as anonymous, like the
+     * pre-Phase-2 behavior. */
+    if (args->obj_attributes.num_attrmask >= 1 &&
+        (args->obj_attributes.attrmask[0] & (1 << FATTR4_SIZE)) &&
+        !nfs4_stateid_is_special(&args->stateid)) {
+        struct nfs_state_table *table = &thread->shared->nfs4_state_table;
+        void                   *state_void;
+        uint8_t                 state_type;
+        nfsstat4                status;
+
+        status = nfs_state_table_acquire(table, &args->stateid,
+                                         NFS4_SLOT_TYPE_OPEN,
+                                         &state_void, &state_type);
+        if (status != NFS4_OK) {
+            res->status = status;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+
+        struct nfs_open_state *open_state = state_void;
+        bool                   has_write  = (open_state->share_access &
+                                             OPEN4_SHARE_ACCESS_WRITE) != 0;
+
+        nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                thread->vfs_thread);
+
+        if (!has_write) {
+            res->status = NFS4ERR_OPENMODE;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
     }
 
     chimera_vfs_open_fh(thread->vfs_thread,

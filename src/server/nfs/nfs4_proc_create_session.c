@@ -17,17 +17,40 @@ chimera_nfs4_create_session(
     struct CREATE_SESSION4args       *args   = &argop->opcreate_session;
     struct CREATE_SESSION4res        *res    = &resop->opcreate_session;
     struct nfs4_session              *session;
+    struct channel_attrs4             clamped_fore;
     uint32_t                          flags = 0;
+    uint32_t                          replay_max_slots;
+    uint32_t                          replay_maxresp_cached;
 
     if (args->csa_flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) {
         flags |= CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
     }
 
+    /* RFC 5661 18.36.4: the server may negotiate ca_maxrequests and
+     * ca_maxresponsesize_cached downward and return the effective values
+     * to the client. */
+    clamped_fore = args->csa_fore_chan_attrs;
+
+    replay_max_slots = clamped_fore.ca_maxrequests;
+    if (replay_max_slots == 0 ||
+        replay_max_slots > NFS4_MAX_REPLY_CACHE_SLOTS) {
+        replay_max_slots = NFS4_MAX_REPLY_CACHE_SLOTS;
+    }
+    clamped_fore.ca_maxrequests = replay_max_slots;
+
+    replay_maxresp_cached = clamped_fore.ca_maxresponsesize_cached;
+    if (replay_maxresp_cached > NFS4_MAX_CACHED_RESPONSE_SIZE) {
+        replay_maxresp_cached = NFS4_MAX_CACHED_RESPONSE_SIZE;
+    }
+    clamped_fore.ca_maxresponsesize_cached = replay_maxresp_cached;
+
     session = nfs4_create_session(
         &shared->nfs4_shared_clients,
         args->csa_clientid,
         0,
-        &args->csa_fore_chan_attrs,
+        replay_max_slots,
+        replay_maxresp_cached,
+        &clamped_fore,
         &args->csa_back_chan_attrs);
 
     if (!session) {

@@ -3,8 +3,12 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "nfs4_session.h"
+#include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
+#include "evpl/evpl_bind.h"
 #include "nfs4_dump.h"
+#include "nfs4_op_matrix.h"
 void
 chimera_nfs4_compound_process(
     struct nfs_request *req,
@@ -15,6 +19,34 @@ chimera_nfs4_compound_process(
     struct nfs_argop4                *argop;
     struct nfs_resop4                *resop;
     int                               rc;
+
+    /* SEQUENCE replay short-circuit: the SEQUENCE op detected a
+     * retransmit on a CACHED slot.  Send the cached reply bytes
+     * verbatim and free the request -- skip compound execution
+     * entirely.  The cached buf is alive because the slot stays
+     * CACHED until the next seqid+1 advances it. */
+    if (req->replay_action == NFS4_REPLAY_ACTION_FROM_CACHE &&
+        req->replay_slot && req->replay_slot->cached_buf) {
+        /* XDR clones a +1 ref on every WRITE4args.data; the retransmit
+         * we are about to discard had its args unmarshalled but will
+         * never dispatch, so release any cloned iovecs here. */
+        for (uint32_t i = 0; i < req->args_compound->num_argarray; i++) {
+            struct nfs_argop4 *ap = &req->args_compound->argarray[i];
+            if (ap->argop == OP_WRITE && ap->opwrite.data.niov) {
+                evpl_iovecs_release(thread->evpl,
+                                    ap->opwrite.data.iov,
+                                    ap->opwrite.data.niov);
+                ap->opwrite.data.niov = 0;
+            }
+        }
+        evpl_send(thread->evpl,
+                  req->conn->bind,
+                  req->replay_slot->cached_buf,
+                  req->replay_slot->cached_len);
+        req->replay_slot = NULL;
+        nfs_request_free(thread, req);
+        return;
+    }
 
  again:
 
@@ -34,6 +66,14 @@ chimera_nfs4_compound_process(
             req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
+        /* Advance the SEQUENCE replay slot to CACHED/COMPLETED.  Must
+         * run *after* send_reply because the reply-capture callback
+         * (armed in nfs4_replay_slot_acquire when sa_cachethis was set)
+         * fires from inside send_reply and writes the captured bytes
+         * onto slot->cached_buf, which finalize then promotes to
+         * CACHED state. */
+        nfs4_replay_slot_finalize(req);
+
         nfs_request_free(thread, req);
         return;
     }
@@ -50,143 +90,159 @@ chimera_nfs4_compound_process(
     if (req->encoding->dbuf->size - req->encoding->dbuf->used < 8192) {
         chimera_nfs4_compound_complete(req, NFS4ERR_RESOURCE);
     } else {
-        switch (argop->argop) {
-            case OP_ACCESS:
-                chimera_nfs4_access(thread, req, argop, resop);
-                break;
-            case OP_GETFH:
-                chimera_nfs4_getfh(thread, req, argop, resop);
-                break;
-            case OP_PUTROOTFH:
-                chimera_nfs4_putrootfh(thread, req, argop, resop);
-                break;
-            case OP_GETATTR:
-                chimera_nfs4_getattr(thread, req, argop, resop);
-                break;
-            case OP_SETATTR:
-                chimera_nfs4_setattr(thread, req, argop, resop);
-                break;
-            case OP_CREATE:
-                chimera_nfs4_create(thread, req, argop, resop);
-                break;
-            case OP_LOOKUP:
-                chimera_nfs4_lookup(thread, req, argop, resop);
-                break;
-            case OP_LOOKUPP:
-                chimera_nfs4_lookupp(thread, req, argop, resop);
-                break;
-            case OP_PUTFH:
-                chimera_nfs4_putfh(thread, req, argop, resop);
-                break;
-            case OP_SAVEFH:
-                chimera_nfs4_savefh(thread, req, argop, resop);
-                break;
-            case OP_RESTOREFH:
-                chimera_nfs4_restorefh(thread, req, argop, resop);
-                break;
-            case OP_LINK:
-                chimera_nfs4_link(thread, req, argop, resop);
-                break;
-            case OP_RENAME:
-                chimera_nfs4_rename(thread, req, argop, resop);
-                break;
-            case OP_OPEN:
-                chimera_nfs4_open(thread, req, argop, resop);
-                break;
-            case OP_READDIR:
-                chimera_nfs4_readdir(thread, req, argop, resop);
-                break;
-            case OP_READ:
-                chimera_nfs4_read(thread, req, argop, resop);
-                break;
-            case OP_WRITE:
-                chimera_nfs4_write(thread, req, argop, resop);
-                break;
-            case OP_COMMIT:
-                chimera_nfs4_commit(thread, req, argop, resop);
-                break;
-            case OP_CLOSE:
-                chimera_nfs4_close(thread, req, argop, resop);
-                break;
-            case OP_REMOVE:
-                chimera_nfs4_remove(thread, req, argop, resop);
-                break;
-            case OP_READLINK:
-                chimera_nfs4_readlink(thread, req, argop, resop);
-                break;
-            case OP_SETCLIENTID:
-                chimera_nfs4_setclientid(thread, req, argop, resop);
-                break;
-            case OP_SETCLIENTID_CONFIRM:
-                chimera_nfs4_setclientid_confirm(thread, req, argop, resop);
-                break;
-            case OP_EXCHANGE_ID:
-                chimera_nfs4_exchange_id(thread, req, argop, resop);
-                break;
-            case OP_CREATE_SESSION:
-                chimera_nfs4_create_session(thread, req, argop, resop);
-                break;
-            case OP_DESTROY_SESSION:
-                chimera_nfs4_destroy_session(thread, req, argop, resop);
-                break;
-            case OP_DESTROY_CLIENTID:
-                chimera_nfs4_destroy_clientid(thread, req, argop, resop);
-                break;
-            case OP_SEQUENCE:
-                chimera_nfs4_sequence(thread, req, argop, resop);
-                break;
-            case OP_RECLAIM_COMPLETE:
-                chimera_nfs4_reclaim_complete(thread, req, argop, resop);
-                break;
-            case OP_SECINFO_NO_NAME:
-                chimera_nfs4_secinfo_no_name(thread, req, argop, resop);
-                break;
-            case OP_TEST_STATEID:
-                chimera_nfs4_test_stateid(thread, req, argop, resop);
-                break;
-            case OP_ALLOCATE:
-                chimera_nfs4_allocate(thread, req, argop, resop);
-                break;
-            case OP_DEALLOCATE:
-                chimera_nfs4_deallocate(thread, req, argop, resop);
-                break;
-            case OP_SEEK:
-                chimera_nfs4_seek(thread, req, argop, resop);
-                break;
-            case OP_LOCK:
-                chimera_nfs4_lock(thread, req, argop, resop);
-                break;
-            case OP_LOCKT:
-                chimera_nfs4_lockt(thread, req, argop, resop);
-                break;
-            case OP_LOCKU:
-                chimera_nfs4_locku(thread, req, argop, resop);
-                break;
-            case OP_VERIFY:
-                chimera_nfs4_verify(thread, req, argop, resop);
-                break;
-            case OP_NVERIFY:
-                chimera_nfs4_nverify(thread, req, argop, resop);
-                break;
-            case OP_PUTPUBFH:
-                chimera_nfs4_putpubfh(thread, req, argop, resop);
-                break;
-            case OP_RENEW:
-                chimera_nfs4_renew(thread, req, argop, resop);
-                break;
-            case OP_RELEASE_LOCKOWNER:
-                chimera_nfs4_release_lockowner(thread, req, argop, resop);
-                break;
-            default:
-                chimera_nfs_error("Unsupported operation: %d", argop->argop);
-                if (argop->argop >= OP_ACCESS && argop->argop <= OP_CLONE) {
-                    chimera_nfs4_compound_complete(req, NFS4ERR_NOTSUPP);
-                } else {
-                    chimera_nfs4_compound_complete(req, NFS4ERR_OP_ILLEGAL);
-                }
-                break;
-        } /* switch */
+        nfsstat4 gate = nfs4_op_check_minor(argop->argop,
+                                            req->minorversion,
+                                            (uint32_t) req->index,
+                                            req->seen_sequence);
 
+        if (gate != NFS4_OK) {
+            chimera_nfs4_compound_complete(req, gate);
+        } else {
+            switch (argop->argop) {
+                case OP_ACCESS:
+                    chimera_nfs4_access(thread, req, argop, resop);
+                    break;
+                case OP_GETFH:
+                    chimera_nfs4_getfh(thread, req, argop, resop);
+                    break;
+                case OP_PUTROOTFH:
+                    chimera_nfs4_putrootfh(thread, req, argop, resop);
+                    break;
+                case OP_PUTPUBFH:
+                    chimera_nfs4_putpubfh(thread, req, argop, resop);
+                    break;
+                case OP_GETATTR:
+                    chimera_nfs4_getattr(thread, req, argop, resop);
+                    break;
+                case OP_SETATTR:
+                    chimera_nfs4_setattr(thread, req, argop, resop);
+                    break;
+                case OP_CREATE:
+                    chimera_nfs4_create(thread, req, argop, resop);
+                    break;
+                case OP_LOOKUP:
+                    chimera_nfs4_lookup(thread, req, argop, resop);
+                    break;
+                case OP_LOOKUPP:
+                    chimera_nfs4_lookupp(thread, req, argop, resop);
+                    break;
+                case OP_PUTFH:
+                    chimera_nfs4_putfh(thread, req, argop, resop);
+                    break;
+                case OP_SAVEFH:
+                    chimera_nfs4_savefh(thread, req, argop, resop);
+                    break;
+                case OP_RESTOREFH:
+                    chimera_nfs4_restorefh(thread, req, argop, resop);
+                    break;
+                case OP_LINK:
+                    chimera_nfs4_link(thread, req, argop, resop);
+                    break;
+                case OP_RENAME:
+                    chimera_nfs4_rename(thread, req, argop, resop);
+                    break;
+                case OP_OPEN:
+                    chimera_nfs4_open(thread, req, argop, resop);
+                    break;
+                case OP_READDIR:
+                    chimera_nfs4_readdir(thread, req, argop, resop);
+                    break;
+                case OP_READ:
+                    chimera_nfs4_read(thread, req, argop, resop);
+                    break;
+                case OP_WRITE:
+                    chimera_nfs4_write(thread, req, argop, resop);
+                    break;
+                case OP_COMMIT:
+                    chimera_nfs4_commit(thread, req, argop, resop);
+                    break;
+                case OP_CLOSE:
+                    chimera_nfs4_close(thread, req, argop, resop);
+                    break;
+                case OP_REMOVE:
+                    chimera_nfs4_remove(thread, req, argop, resop);
+                    break;
+                case OP_READLINK:
+                    chimera_nfs4_readlink(thread, req, argop, resop);
+                    break;
+                case OP_SETCLIENTID:
+                    chimera_nfs4_setclientid(thread, req, argop, resop);
+                    break;
+                case OP_SETCLIENTID_CONFIRM:
+                    chimera_nfs4_setclientid_confirm(thread, req, argop, resop);
+                    break;
+                case OP_RENEW:
+                    chimera_nfs4_renew(thread, req, argop, resop);
+                    break;
+                case OP_OPEN_CONFIRM:
+                    chimera_nfs4_open_confirm(thread, req, argop, resop);
+                    break;
+                case OP_OPEN_DOWNGRADE:
+                    chimera_nfs4_open_downgrade(thread, req, argop, resop);
+                    break;
+                case OP_RELEASE_LOCKOWNER:
+                    chimera_nfs4_release_lockowner(thread, req, argop, resop);
+                    break;
+                case OP_EXCHANGE_ID:
+                    chimera_nfs4_exchange_id(thread, req, argop, resop);
+                    break;
+                case OP_CREATE_SESSION:
+                    chimera_nfs4_create_session(thread, req, argop, resop);
+                    break;
+                case OP_DESTROY_SESSION:
+                    chimera_nfs4_destroy_session(thread, req, argop, resop);
+                    break;
+                case OP_DESTROY_CLIENTID:
+                    chimera_nfs4_destroy_clientid(thread, req, argop, resop);
+                    break;
+                case OP_SEQUENCE:
+                    req->seen_sequence = true;
+                    chimera_nfs4_sequence(thread, req, argop, resop);
+                    break;
+                case OP_RECLAIM_COMPLETE:
+                    chimera_nfs4_reclaim_complete(thread, req, argop, resop);
+                    break;
+                case OP_SECINFO_NO_NAME:
+                    chimera_nfs4_secinfo_no_name(thread, req, argop, resop);
+                    break;
+                case OP_TEST_STATEID:
+                    chimera_nfs4_test_stateid(thread, req, argop, resop);
+                    break;
+                case OP_ALLOCATE:
+                    chimera_nfs4_allocate(thread, req, argop, resop);
+                    break;
+                case OP_DEALLOCATE:
+                    chimera_nfs4_deallocate(thread, req, argop, resop);
+                    break;
+                case OP_SEEK:
+                    chimera_nfs4_seek(thread, req, argop, resop);
+                    break;
+                case OP_LOCK:
+                    chimera_nfs4_lock(thread, req, argop, resop);
+                    break;
+                case OP_LOCKT:
+                    chimera_nfs4_lockt(thread, req, argop, resop);
+                    break;
+                case OP_LOCKU:
+                    chimera_nfs4_locku(thread, req, argop, resop);
+                    break;
+                case OP_VERIFY:
+                    chimera_nfs4_verify(thread, req, argop, resop);
+                    break;
+                case OP_NVERIFY:
+                    chimera_nfs4_nverify(thread, req, argop, resop);
+                    break;
+                default:
+                    chimera_nfs_error("Unsupported operation: %d", argop->argop);
+                    if (argop->argop >= OP_ACCESS && argop->argop <= OP_CLONE) {
+                        chimera_nfs4_compound_complete(req, NFS4ERR_NOTSUPP);
+                    } else {
+                        chimera_nfs4_compound_complete(req, NFS4ERR_OP_ILLEGAL);
+                    }
+                    break;
+            } /* switch */
+
+        }
     }
     thread->active = 0;
 
@@ -233,9 +289,14 @@ chimera_nfs4_compound(
     /* RFC 7530 §16.2.4: the server MUST echo the request tag back to the
      * client unchanged. xdr_opaque .data is owned by the request msg buffer
      * which lives until the response is sent. */
-    req->res_compound.tag = args->tag;
-    req->fhlen            = 0;
-    req->saved_fhlen      = 0;
+    req->res_compound.tag    = args->tag;
+    req->fhlen               = 0;
+    req->saved_fhlen         = 0;
+    req->minorversion        = (uint8_t) args->minorversion;
+    req->seen_sequence       = false;
+    req->open_4_0_owner      = NULL;
+    req->lock_4_0_open_owner = NULL;
+    req->lock_4_0_lock_owner = NULL;
 
     /* Chimera implements NFS v4.0, v4.1 and v4.2 (minorversions 0–2).
      * Reject unknown minor versions with NFS4ERR_MINOR_VERS_MISMATCH per

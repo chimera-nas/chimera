@@ -5,8 +5,124 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
+#include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+
+/*
+ * Install a freshly-opened VFS handle into the unified state model, returning
+ * the stateid to send back to the client.  Handles same-owner re-OPEN
+ * coalescing per RFC 7530 §9.1.2: if an open_state already exists for
+ * (open_owner, fh), share bits are merged and stateid.seqid is bumped; the
+ * caller's incoming handle ref is released and the existing handle is reused.
+ *
+ * On entry, `handle` must be a +1 reference returned by chimera_vfs_open_at
+ * or chimera_vfs_open_fh.  On create, ownership transfers to the new
+ * open_state; on coalesce, the function calls chimera_vfs_release on it.
+ */
+static nfsstat4
+chimera_nfs4_open_install_state(
+    struct nfs_request             *req,
+    struct chimera_vfs_open_handle *handle,
+    struct stateid4                *out_stateid,
+    uint32_t                       *out_rflags)
+{
+    struct OPEN4args      *args   = &req->args_compound->argarray[req->index].opopen;
+    struct nfs_client     *client = req->session ? req->session->client_unified : NULL;
+    struct nfs_open_owner *owner;
+    struct nfs_open_state *existing;
+    bool                   created = false;
+
+    *out_rflags = 0;
+
+    if (!client) {
+        chimera_vfs_release(req->thread->vfs_thread, handle);
+        return NFS4ERR_STALE_CLIENTID;
+    }
+
+    owner = nfs_open_owner_find_or_create(client,
+                                          args->owner.owner.data,
+                                          args->owner.owner.len,
+                                          &created);
+
+    /* RFC 7530 §9.10: check share-mode conflict against opens by *other*
+     * owners on this client.  Same-owner OPEN coalesces via the
+     * find_state path below and is exempt. */
+    {
+        nfsstat4 conflict = nfs_client_check_share_conflict(
+            client, owner,
+            handle->fh, handle->fh_len,
+            args->share_access, args->share_deny);
+        if (conflict != NFS4_OK) {
+            chimera_vfs_release(req->thread->vfs_thread, handle);
+            return conflict;
+        }
+    }
+
+    existing = nfs_open_owner_find_state(owner, handle->fh, handle->fh_len);
+
+    if (existing) {
+        nfs_open_state_coalesce(existing,
+                                args->share_access, args->share_deny,
+                                (uint32_t) client->client_id,
+                                out_stateid);
+        chimera_vfs_release(req->thread->vfs_thread, handle);
+    } else {
+        nfs_open_state_create(owner,
+                              handle->fh, handle->fh_len,
+                              args->share_access, args->share_deny,
+                              handle,
+                              (uint32_t) client->client_id,
+                              &req->thread->shared->nfs4_state_table,
+                              out_stateid);
+    }
+
+    /* RFC 7530 §16.18.5: signal OPEN4_RESULT_CONFIRM for an unconfirmed
+     * open_owner on a 4.0 client.  The client must then send OPEN_CONFIRM
+     * before issuing any further state-modifying op against this owner. */
+    if (req->minorversion == 0 && !owner->confirmed) {
+        *out_rflags |= OPEN4_RESULT_CONFIRM;
+    }
+
+    return NFS4_OK;
+} /* chimera_nfs4_open_install_state */
+
+/*
+ * RFC 7530 §9.1.7 OPEN completion: advance open_owner.seqid and cache the
+ * reply for every outcome that nfs4_seqid_should_advance() reports as
+ * advancing (NFS4_OK plus most logical errors -- everything except the
+ * "infrastructure" set documented on that helper).  No-op on 4.1+ and on
+ * the 4.0 path when req->open_4_0_owner is NULL (entry never classified
+ * NEW, e.g. NOFILEHANDLE before the owner was even looked up).
+ *
+ * Then hands off to the regular compound dispatcher.  Every chimera_nfs4
+ * OPEN response path in this file calls this wrapper instead of
+ * chimera_nfs4_compound_complete directly.
+ */
+static void
+chimera_nfs4_open_complete(
+    struct nfs_request *req,
+    nfsstat4            status)
+{
+    if (req->minorversion == 0 &&
+        req->open_4_0_owner &&
+        nfs4_seqid_should_advance(status)) {
+
+        struct nfs_open_owner *owner = req->open_4_0_owner;
+        struct OPEN4args      *args  =
+            &req->args_compound->argarray[req->index].opopen;
+        struct OPEN4res       *res =
+            &req->res_compound.resarray[req->index].opopen;
+
+        pthread_mutex_lock(&owner->lock);
+        owner->seqid = args->seqid;
+        nfs4_replay_record(&owner->replay, args->seqid, OP_OPEN, status,
+                           status == NFS4_OK ? &res->resok4.stateid : NULL);
+        pthread_mutex_unlock(&owner->lock);
+    }
+
+    chimera_nfs4_compound_complete(req, status);
+} /* chimera_nfs4_open_complete */
 
 static void
 chimera_nfs4_open_exclusive_verify(
@@ -19,18 +135,18 @@ chimera_nfs4_open_exclusive_verify(
     void                           *private_data)
 {
     struct nfs_request             *req           = private_data;
-    struct nfs4_session            *session       = req->session;
     struct OPEN4args               *args          = &req->args_compound->argarray[req->index].opopen;
     struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
     struct chimera_vfs_open_handle *parent_handle = req->handle;
-    struct nfs4_state              *state;
     const uint8_t                  *verf;
     uint32_t                        verf_atime, verf_mtime;
+    uint32_t                        lock_caps;
+    nfsstat4                        status;
 
     if (error_code != CHIMERA_VFS_OK) {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_vfs_release(req->thread->vfs_thread, parent_handle);
-        chimera_nfs4_compound_complete(req, res->status);
+        chimera_nfs4_open_complete(req, res->status);
         return;
     }
 
@@ -50,29 +166,41 @@ chimera_nfs4_open_exclusive_verify(
         chimera_vfs_release(req->thread->vfs_thread, handle);
         chimera_vfs_release(req->thread->vfs_thread, parent_handle);
         res->status = NFS4ERR_EXIST;
-        chimera_nfs4_compound_complete(req, NFS4ERR_EXIST);
+        chimera_nfs4_open_complete(req, NFS4ERR_EXIST);
         return;
     }
 
-    /* Verifier matches - this is a retry, treat as success */
-    state                    = nfs4_session_alloc_slot(session);
-    state->nfs4_state_handle = handle;
+    /* Verifier matches - this is a retry, treat as success.  Capture FH and
+     * lock capabilities before install_state may release the handle. */
+    {
+        uint32_t install_rflags = 0;
+        lock_caps = handle->vfs_module->capabilities;
+        memcpy(req->fh, handle->fh, handle->fh_len);
+        req->fhlen = handle->fh_len;
 
-    res->status              = NFS4_OK;
-    res->resok4.stateid      = state->nfs4_state_id;
-    res->resok4.cinfo.atomic = 0;
-    res->resok4.cinfo.before = 0;
-    res->resok4.cinfo.after  = 0;
-    res->resok4.rflags       = (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_LOCK) ?
-        OPEN4_RESULT_LOCKTYPE_POSIX : 0;
+        status = chimera_nfs4_open_install_state(req, handle,
+                                                 &res->resok4.stateid,
+                                                 &install_rflags);
+        if (status != NFS4_OK) {
+            res->status = status;
+            chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+            chimera_nfs4_open_complete(req, status);
+            return;
+        }
+
+        res->status              = NFS4_OK;
+        res->resok4.cinfo.atomic = 0;
+        res->resok4.cinfo.before = 0;
+        res->resok4.cinfo.after  = 0;
+        res->resok4.rflags       = install_rflags |
+            ((lock_caps & CHIMERA_VFS_CAP_FS_LOCK) ?
+             OPEN4_RESULT_LOCKTYPE_POSIX : 0);
+    }
     res->resok4.num_attrset                = 0;
     res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
 
-    memcpy(req->fh, handle->fh, handle->fh_len);
-    req->fhlen = handle->fh_len;
-
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_open_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_exclusive_verify */
 
 static void
@@ -86,11 +214,9 @@ chimera_nfs4_open_at_complete(
     void                           *private_data)
 {
     struct nfs_request             *req           = private_data;
-    struct nfs4_session            *session       = req->session;
     struct OPEN4args               *args          = &req->args_compound->argarray[req->index].opopen;
     struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
     struct chimera_vfs_open_handle *parent_handle = req->handle;
-    struct nfs4_state              *state;
     int                             rc;
 
     if (error_code != CHIMERA_VFS_OK) {
@@ -115,20 +241,37 @@ chimera_nfs4_open_at_complete(
         }
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_vfs_release(req->thread->vfs_thread, parent_handle);
-        chimera_nfs4_compound_complete(req, res->status);
+        chimera_nfs4_open_complete(req, res->status);
         return;
     }
 
-    state                    = nfs4_session_alloc_slot(session);
-    state->nfs4_state_handle = handle;
+    {
+        uint32_t lock_caps      = handle->vfs_module->capabilities;
+        uint32_t install_rflags = 0;
+        nfsstat4 status;
 
-    res->status              = NFS4_OK;
-    res->resok4.stateid      = state->nfs4_state_id;
-    res->resok4.cinfo.atomic = 0;
-    res->resok4.cinfo.before = 0;
-    res->resok4.cinfo.after  = 0;
-    res->resok4.rflags       = (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_LOCK) ?
-        OPEN4_RESULT_LOCKTYPE_POSIX : 0;
+        /* Capture FH before install_state may release the handle (coalesce). */
+        memcpy(req->fh, handle->fh, handle->fh_len);
+        req->fhlen = handle->fh_len;
+
+        status = chimera_nfs4_open_install_state(req, handle,
+                                                 &res->resok4.stateid,
+                                                 &install_rflags);
+        if (status != NFS4_OK) {
+            res->status = status;
+            chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+            chimera_nfs4_open_complete(req, status);
+            return;
+        }
+
+        res->status              = NFS4_OK;
+        res->resok4.cinfo.atomic = 0;
+        res->resok4.cinfo.before = 0;
+        res->resok4.cinfo.after  = 0;
+        res->resok4.rflags       = install_rflags |
+            ((lock_caps & CHIMERA_VFS_CAP_FS_LOCK) ?
+             OPEN4_RESULT_LOCKTYPE_POSIX : 0);
+    }
     res->resok4.num_attrset                = 0;
     res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
 
@@ -152,57 +295,64 @@ chimera_nfs4_open_at_complete(
         res->resok4.num_attrset = 0;
     }
 
-    memcpy(req->fh, handle->fh, handle->fh_len);
-    req->fhlen = handle->fh_len;
-
     chimera_nfs4_set_changeinfo(&res->resok4.cinfo, dir_pre_attr, dir_post_attr);
 
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
 
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_open_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_at_complete */
 
 static void
-chimera_nfs4_open_complete(
+chimera_nfs4_open_claim_fh_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
     void                           *private_data)
 {
     struct nfs_request             *req           = private_data;
-    struct nfs4_session            *session       = req->session;
     struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
     struct chimera_vfs_open_handle *parent_handle = req->handle;
-    struct nfs4_state              *state;
+    uint32_t                        lock_caps;
+    nfsstat4                        status;
 
     if (error_code != CHIMERA_VFS_OK) {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_vfs_release(req->thread->vfs_thread, parent_handle);
-        chimera_nfs4_compound_complete(req, res->status);
+        chimera_nfs4_open_complete(req, res->status);
         return;
     }
 
-    state                    = nfs4_session_alloc_slot(session);
-    state->nfs4_state_handle = handle;
+    /* CLAIM_FH/CLAIM_PREVIOUS: req->fh already carries the FH that was put
+     * on the wire; no need to overwrite from handle->fh.  Capture lock caps
+     * before install_state may release the handle. */
+    {
+        uint32_t install_rflags = 0;
+        lock_caps = handle->vfs_module->capabilities;
 
-    res->status              = NFS4_OK;
-    res->resok4.stateid      = state->nfs4_state_id;
-    res->resok4.cinfo.atomic = 0;
-    res->resok4.cinfo.before = 0;
-    res->resok4.cinfo.after  = 0;
-    res->resok4.rflags       = (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_LOCK) ?
-        OPEN4_RESULT_LOCKTYPE_POSIX : 0;
+        status = chimera_nfs4_open_install_state(req, handle,
+                                                 &res->resok4.stateid,
+                                                 &install_rflags);
+        if (status != NFS4_OK) {
+            res->status = status;
+            chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+            chimera_nfs4_open_complete(req, status);
+            return;
+        }
+
+        res->status              = NFS4_OK;
+        res->resok4.cinfo.atomic = 0;
+        res->resok4.cinfo.before = 0;
+        res->resok4.cinfo.after  = 0;
+        res->resok4.rflags       = install_rflags |
+            ((lock_caps & CHIMERA_VFS_CAP_FS_LOCK) ?
+             OPEN4_RESULT_LOCKTYPE_POSIX : 0);
+    }
     res->resok4.num_attrset                = 0;
     res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
 
-    /* XXX Not sure what to do here since there is no directory */
-    res->resok4.cinfo.atomic = 0;
-    res->resok4.cinfo.before = 0;
-    res->resok4.cinfo.after  = 0;
-
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
 
-    chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_open_complete */
+    chimera_nfs4_open_complete(req, NFS4_OK);
+} /* chimera_nfs4_open_claim_fh_complete */
 
 static void
 chimera_nfs4_open_parent_complete(
@@ -221,7 +371,7 @@ chimera_nfs4_open_parent_complete(
     if (error_code != CHIMERA_VFS_OK) {
         struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
+        chimera_nfs4_open_complete(req, res->status);
         return;
     }
 
@@ -247,7 +397,7 @@ chimera_nfs4_open_parent_complete(
                     struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
                     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
                     res->status = status;
-                    chimera_nfs4_compound_complete(req, status);
+                    chimera_nfs4_open_complete(req, status);
                     return;
                 }
                 chimera_nfs4_unmarshall_attrs(attr,
@@ -265,7 +415,7 @@ chimera_nfs4_open_parent_complete(
                     struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
                     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
                     res->status = status;
-                    chimera_nfs4_compound_complete(req, status);
+                    chimera_nfs4_open_complete(req, status);
                     return;
                 }
                 chimera_nfs4_unmarshall_attrs(attr,
@@ -307,7 +457,7 @@ chimera_nfs4_open_parent_complete(
                 struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
                 chimera_vfs_release(req->thread->vfs_thread, parent_handle);
                 res->status = status;
-                chimera_nfs4_compound_complete(req, status);
+                chimera_nfs4_open_complete(req, status);
                 return;
             }
 
@@ -329,7 +479,7 @@ chimera_nfs4_open_parent_complete(
                                 req->fh,
                                 req->fhlen,
                                 flags,
-                                chimera_nfs4_open_complete,
+                                chimera_nfs4_open_claim_fh_complete,
                                 req);
             break;
         default:
@@ -350,7 +500,7 @@ chimera_nfs4_open(
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
-        chimera_nfs4_compound_complete(req, res->status);
+        chimera_nfs4_open_complete(req, res->status);
         return;
     }
 
@@ -364,6 +514,79 @@ chimera_nfs4_open(
             req->session = found;
             /* Drop the +1 ref returned by find_by_clientid; conn owns it. */
             nfs4_session_put(found);
+        }
+    }
+
+    /* RFC 7530 §9.1.7 entry-time seqid classification for the 4.0 path.
+     * Done BEFORE any VFS work so a replay short-circuits without
+     * re-executing the open.  On NEW, the resolved owner is stashed on
+     * req for chimera_nfs4_open_complete to advance + cache the reply. */
+    if (req->minorversion == 0) {
+        struct nfs_client *client =
+            req->session ? req->session->client_unified : NULL;
+
+        if (!client) {
+            /* NFS4ERR_STALE_CLIENTID is in the no-advance set; we don't
+             * touch any owner state. */
+            res->status = NFS4ERR_STALE_CLIENTID;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+
+        bool                   created;
+        struct nfs_open_owner *owner = nfs_open_owner_find_or_create(
+            client, args->owner.owner.data, args->owner.owner.len,
+            &created);
+
+        pthread_mutex_lock(&owner->lock);
+        int                    cls = nfs4_owner_seqid_classify(owner->seqid, &owner->replay,
+                                                               args->seqid);
+
+        if (cls == NFS4_SEQID_REPLAY) {
+            /* Return the cached reply.  Simplified replay (status +
+             * stateid only); cinfo/attrset/rflags/delegation are
+             * reconstructed as zero/none.  Linux clients tolerate this
+             * since they re-fetch attrs via GETATTR after OPEN. */
+            res->status                            = owner->replay.status;
+            res->resok4.stateid                    = owner->replay.stateid;
+            res->resok4.cinfo.atomic               = 0;
+            res->resok4.cinfo.before               = 0;
+            res->resok4.cinfo.after                = 0;
+            res->resok4.rflags                     = 0;
+            res->resok4.num_attrset                = 0;
+            res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+            pthread_mutex_unlock(&owner->lock);
+            chimera_nfs4_compound_complete(req, NFS4_OK);
+            return;
+        }
+
+        if (cls != NFS4_SEQID_NEW) {
+            /* NFS4ERR_BAD_SEQID is in the no-advance set; do not touch
+             * owner state. */
+            pthread_mutex_unlock(&owner->lock);
+            res->status = NFS4ERR_BAD_SEQID;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+
+        pthread_mutex_unlock(&owner->lock);
+        req->open_4_0_owner = owner;
+    }
+
+    /* Phase 5: gate non-reclaim OPENs during the grace window.  Stubbed
+     * persistence makes this a no-op in practice today (to_reclaim is empty
+     * at boot so begin_grace short-circuits in_grace=false). */
+    {
+        bool     is_reclaim = (args->claim.claim == CLAIM_PREVIOUS);
+        nfsstat4 g_status   = nfs_recovery_open_check(
+            &thread->shared->nfs4_recovery,
+            req->session ? req->session->client_unified : NULL,
+            is_reclaim);
+
+        if (g_status != NFS4_OK) {
+            res->status = g_status;
+            chimera_nfs4_open_complete(req, g_status);
+            return;
         }
     }
 

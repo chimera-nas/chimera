@@ -1,8 +1,11 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "nfs4_recovery.h"
+#include "nfs4_session.h"
+#include "nfs4_state.h"
 #include "evpl/evpl_rpc2.h"
 
 void
@@ -30,6 +33,25 @@ chimera_nfs4_exchange_id(
         *(uint64_t *) args->eia_clientowner.co_verifier,
         40,
         NULL, NULL);
+
+    /* Phase 5: 4.1+ EXCHANGE_ID is the moment of identity establishment;
+     * stub-persist the unified client so a future stable-storage backend
+     * can pick it up after a restart. */
+    {
+        struct nfs4_client *c  = NULL;
+        struct nfs_client  *uc = NULL;
+        pthread_mutex_lock(&thread->shared->nfs4_shared_clients.nfs4_ct_lock);
+        HASH_FIND(nfs4_client_hh_by_id,
+                  thread->shared->nfs4_shared_clients.nfs4_ct_clients_by_id,
+                  &client_id, sizeof(client_id), c);
+        if (c) {
+            uc = c->unified;
+        }
+        pthread_mutex_unlock(&thread->shared->nfs4_shared_clients.nfs4_ct_lock);
+        if (uc) {
+            nfs_recovery_persist(&thread->shared->nfs4_recovery, uc);
+        }
+    }
 
     res->eir_status                           = NFS4_OK;
     res->eir_resok4.eir_clientid              = client_id;
