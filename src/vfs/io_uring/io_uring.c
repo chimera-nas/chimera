@@ -88,6 +88,7 @@ struct chimera_io_uring_shared {
 struct chimera_io_uring_thread {
     struct evpl                     *evpl;
     struct evpl_doorbell             doorbell;
+    struct evpl_poll                *poll;
     struct evpl_deferral             deferral;
     struct io_uring                  ring;
     uint64_t                         inflight;
@@ -172,11 +173,10 @@ chimera_io_uring_get_sqe(
 } /* chimera_io_uring_get_sqe */
 
 static void
-chimera_io_uring_complete(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell)
+chimera_io_uring_reap(
+    struct evpl                    *evpl,
+    struct chimera_io_uring_thread *thread)
 {
-    struct chimera_io_uring_thread    *thread;
     struct io_uring_cqe               *cqe;
     int                                parent_fd;
     struct chimera_vfs_request        *request;
@@ -185,8 +185,6 @@ chimera_io_uring_complete(
     const char                        *name;
     struct io_uring_sqe               *sqe;
     void                              *scratch;
-
-    thread = container_of(doorbell, struct chimera_io_uring_thread, doorbell);
 
     while (io_uring_peek_cqe(&thread->ring, &cqe) == 0) {
 
@@ -408,14 +406,66 @@ chimera_io_uring_complete(
 
         io_uring_cqe_seen(&thread->ring, cqe);
 
-    } /* chimera_io_uring_complete */
+    } /* while peek_cqe */
 
     while (thread->pending_requests && thread->inflight < thread->max_inflight) {
         request = thread->pending_requests;
         DL_DELETE(thread->pending_requests, request);
         chimera_io_uring_dispatch(request, thread);
     }
-} /* chimera_io_uring_complete */ /* chimera_io_uring_complete */ /* chimera_io_uring_complete */
+} /* chimera_io_uring_reap */
+
+/*
+ * Doorbell callback: used while the evpl loop is sleeping in epoll.  The ring's
+ * eventfd is registered in that state, so a completion wakes the loop here.
+ */
+static void
+chimera_io_uring_complete(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct chimera_io_uring_thread *thread =
+        container_of(doorbell, struct chimera_io_uring_thread, doorbell);
+
+    chimera_io_uring_reap(evpl, thread);
+} /* chimera_io_uring_complete */
+
+/*
+ * Poll callbacks: while the evpl loop is in busy-poll (spin) mode it calls
+ * chimera_io_uring_poll every iteration to drain the CQ with no syscall.  The
+ * enter/exit callbacks unregister/re-register the ring eventfd so the kernel
+ * does not bother signaling it during the spin phase (mirrors libevpl's own
+ * io_uring framework in ext/libevpl/src/core/io_uring/io_uring.c).
+ */
+static void
+chimera_io_uring_poll(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    chimera_io_uring_reap(evpl, private_data);
+} /* chimera_io_uring_poll */
+
+static void
+chimera_io_uring_poll_enter(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct chimera_io_uring_thread *thread = private_data;
+
+    io_uring_unregister_eventfd(&thread->ring);
+    chimera_io_uring_reap(evpl, thread);
+} /* chimera_io_uring_poll_enter */
+
+static void
+chimera_io_uring_poll_exit(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct chimera_io_uring_thread *thread = private_data;
+
+    io_uring_register_eventfd(&thread->ring, evpl_doorbell_fd(&thread->doorbell));
+    chimera_io_uring_reap(evpl, thread);
+} /* chimera_io_uring_poll_exit */
 
 static void
 chimera_io_uring_flush(
@@ -469,6 +519,12 @@ chimera_io_uring_thread_init(
                        chimera_io_uring_flush,
                        thread);
 
+    thread->poll = evpl_add_poll(evpl,
+                                 chimera_io_uring_poll_enter,
+                                 chimera_io_uring_poll_exit,
+                                 chimera_io_uring_poll,
+                                 thread);
+
     return thread;
 } /* io_uring_thread_init */ /* io_uring_thread_init */
 
@@ -479,6 +535,7 @@ chimera_io_uring_thread_destroy(void *private_data)
 
     linux_mount_table_destroy(&thread->mount_table);
 
+    evpl_remove_poll(thread->evpl, thread->poll);
     io_uring_queue_exit(&thread->ring);
     evpl_remove_doorbell(thread->evpl, &thread->doorbell);
 
@@ -1207,9 +1264,15 @@ chimera_io_uring_read(
         request->read.r_niov   = 0;
         request->read.r_length = 0;
         request->read.r_eof    = 1;
-        sqe                    = chimera_io_uring_get_sqe(thread, request, 1, 0);
-        io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
-        evpl_defer(thread->evpl, &thread->deferral);
+        if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+            sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
+            io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
+            evpl_defer(thread->evpl, &thread->deferral);
+        } else {
+            /* No attrs requested and no readv to submit: complete inline. */
+            --thread->inflight;
+            request->complete(request);
+        }
         return;
     }
 
@@ -1242,9 +1305,10 @@ chimera_io_uring_read(
 
     io_uring_prep_readv(sqe, fd, iov, request->read.r_niov, request->read.offset);
 
-    sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
-
-    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
+    if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+        sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
+        io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
+    }
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_read */
