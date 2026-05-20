@@ -95,12 +95,18 @@ chimera_nfs4_close(
         pthread_mutex_unlock(&owner->lock);
     }
 
-    /* Drop the acquire ref, then destroy.  If concurrent READ/WRITE still
-     * hold an acquire-ref, destroy marks the state and cleanup runs on the
-     * last release; otherwise destroy releases the handle here. */
+    /* Destroy while we still hold the acquire-ref, then drop the ref.  The
+     * acquire-ref pins the state across destroy so it cannot be freed under
+     * us; destroy unhashes it (no new acquire can find it) and marks it
+     * destroyed.  Dropping the acquire-ref last performs final cleanup -- or,
+     * if a concurrent READ/WRITE still holds an acquire-ref, cleanup runs when
+     * that last ref is released.  Releasing before destroy would leave the
+     * state findable with destroyed=0, letting a racing destroyer (e.g. a
+     * retransmitted CLOSE on another nconnect connection, or lease teardown)
+     * free it before we dereference open_state below. */
+    nfs_open_state_destroy(open_state, table, thread->vfs_thread);
     nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                             thread->vfs_thread);
-    nfs_open_state_destroy(open_state, table, thread->vfs_thread);
 
     res->status = NFS4_OK;
     chimera_nfs4_compound_complete(req, NFS4_OK);
