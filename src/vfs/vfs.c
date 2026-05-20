@@ -499,6 +499,15 @@ chimera_vfs_init(
     return vfs;
 } /* chimera_vfs_init */
 
+SYMBOL_EXPORT int
+chimera_vfs_fh_is_plausible(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen)
+{
+    return chimera_vfs_get_module(thread, fh, fhlen) != NULL;
+} /* chimera_vfs_fh_is_plausible */
+
 SYMBOL_EXPORT void
 chimera_vfs_destroy(struct chimera_vfs *vfs)
 {
