@@ -337,6 +337,11 @@ main(
         chimera_server_config_set_max_open_files(server_config, int_value);
     }
 
+    json_value = json_object_get(server_params, "sync_delegation");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_sync_delegation(server_config, json_is_true(json_value));
+    }
+
     json_value = json_object_get(server_params, "sync_delegation_threads");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);

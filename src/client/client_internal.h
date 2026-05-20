@@ -358,6 +358,7 @@ struct chimera_client_request {
 
 struct chimera_client_config {
     int                           core_threads;
+    int                           sync_delegation;
     int                           sync_delegation_threads;
     int                           async_delegation;
     int                           async_delegation_threads;

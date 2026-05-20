@@ -1,6 +1,7 @@
 {
     "server": {
 	"threads": 16,
+	"sync_delegation": true,
 	"sync_delegation_threads": 1,
 	"async_delegation": false,
 	"async_delegation_threads": 8
