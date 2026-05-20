@@ -72,8 +72,8 @@ chimera_nfs4_setattr_open_callback(
                                        args->obj_attributes.attr_vals.data,
                                        args->obj_attributes.attr_vals.len);
 
-    if (rc != 0) {
-        res->status = NFS4ERR_BADXDR;
+    if (rc != NFS4_OK) {
+        res->status = rc;
         chimera_vfs_release(req->thread->vfs_thread, handle);
         chimera_nfs4_compound_complete(req, res->status);
         return;
