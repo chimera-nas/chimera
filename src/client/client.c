@@ -268,6 +268,15 @@ chimera_client_init_json(
         return NULL;
     }
 
+#ifdef __clang_analyzer__
+    /* On success, ownership of config transfers to the client (stored in
+     * client->config and freed by chimera_destroy()). The static analyzer
+     * cannot follow that escape through chimera_client_init() and reports a
+     * false leak here, so mark config as released for analysis only; this
+     * block is never compiled into a real build. */
+    free(config);
+#endif /* ifdef __clang_analyzer__ */
+
     users = json_object_get(root, "users");
     if (users && json_is_array(users)) {
         json_t *user_entry;
