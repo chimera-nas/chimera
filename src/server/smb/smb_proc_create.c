@@ -1315,6 +1315,14 @@ chimera_smb_parse_create(
     request->create.set_attr.va_set_mask = 0;
     request->create.ctx_present_mask     = 0;
 
+    /* Persist any settable DOS attribute bits supplied at create time. */
+    if (request->create.file_attributes & SMB_DOS_ATTR_SETTABLE) {
+        request->create.set_attr.va_dos_attributes =
+            request->create.file_attributes & SMB_DOS_ATTR_SETTABLE;
+        request->create.set_attr.va_req_mask |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        request->create.set_attr.va_set_mask |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+    }
+
     if (blob_offset > 0 && blob_length > 0 && blob_length <= 1024) {
         uint8_t  ctx_buf[1024];
         uint32_t skip = blob_offset - evpl_iovec_cursor_consumed(request_cursor);

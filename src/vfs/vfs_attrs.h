@@ -32,6 +32,10 @@
 #define CHIMERA_VFS_ATTR_ATOMIC         (1UL << 19)
 #define CHIMERA_VFS_ATTR_FSID           (1UL << 20)
 
+/* Windows/SMB DOS attribute bits (FILE_ATTRIBUTE_*).  Optional: a backend
+ * sets this bit in va_set_mask only if it actually persists the value. */
+#define CHIMERA_VFS_ATTR_DOS_ATTRIBUTES (1UL << 21)
+
 #define CHIMERA_VFS_ATTR_MASK_STAT      ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \
@@ -85,6 +89,8 @@ struct chimera_vfs_attrs {
     uint64_t        va_fs_files_free;
     uint64_t        va_fs_files_avail;
     uint64_t        va_fsid;
+
+    uint32_t        va_dos_attributes;
 
     uint32_t        va_fh_len;
     uint64_t        va_fh_hash;

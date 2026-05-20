@@ -120,6 +120,7 @@ struct memfs_inode {
     uint32_t            uid;
     uint32_t            gid;
     uint64_t            rdev;
+    uint32_t            dos_attributes;
     struct timespec     atime;
     struct timespec     mtime;
     struct timespec     ctime;
@@ -376,8 +377,9 @@ memfs_inode_alloc(
     pthread_mutex_unlock(&inode_list->lock);
 
     inode->gen++;
-    inode->refcnt = 1;
-    inode->mode   = 0;
+    inode->refcnt         = 1;
+    inode->mode           = 0;
+    inode->dos_attributes = 0;
 
     return inode;
 
@@ -796,6 +798,10 @@ memfs_map_attrs(
         attr->va_ino        = inode->inum;
         attr->va_dev        = (42UL << 32) | 42;
         attr->va_rdev       = inode->rdev;
+
+        /* memfs persists DOS attributes, so report them alongside stat. */
+        attr->va_set_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        attr->va_dos_attributes = inode->dos_attributes;
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
@@ -846,6 +852,11 @@ memfs_apply_attrs(
     if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         inode->size        = attr->va_size;
+    }
+
+    if (set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) {
+        attr->va_set_mask    |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        inode->dos_attributes = attr->va_dos_attributes;
     }
 
     if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
@@ -1132,6 +1143,10 @@ memfs_mount(
         attr->va_ino        = inode->inum;
         attr->va_dev        = (42UL << 32) | 42;
         attr->va_rdev       = inode->rdev;
+
+        /* memfs persists DOS attributes, so report them alongside stat. */
+        attr->va_set_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        attr->va_dos_attributes = inode->dos_attributes;
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
