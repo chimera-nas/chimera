@@ -536,9 +536,16 @@ main(
     send_sig(p2c[1]); /* child can now acquire */
 
     chimera_posix_close(fd);
-    chimera_posix_unlink(TEST_FILE);
 
+    /*
+     * Wait for the child to finish its final F_SETLKW test before removing
+     * the file. Unlinking earlier races the child's blocking lock: the NLM
+     * handler re-opens the file by handle, which becomes stale once the link
+     * is gone, intermittently failing the child with ESTALE.
+     */
     waitpid(child, &status, 0);
+
+    chimera_posix_unlink(TEST_FILE);
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         if (WIFEXITED(status) && WEXITSTATUS(status) == 2) {
