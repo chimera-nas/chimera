@@ -128,6 +128,7 @@ Chimera uses JSON configuration files. Example:
         }
     },
     "core_threads": 4,
+    "sync_delegation": true,
     "sync_delegation_threads": 16,
     "async_delegation": false,
     "async_delegation_threads": 8,

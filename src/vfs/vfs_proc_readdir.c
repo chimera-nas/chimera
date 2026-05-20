@@ -147,10 +147,15 @@ chimera_vfs_readdir(
     request->readdir.orig_callback = NULL;
 
     /* If this module is blocking then we need to bounce the results into the original thread
-     * before making the caller provided result callback
+     * before making the caller provided result callback.  This only applies when the request
+     * will actually be dispatched to a delegation thread; if the sync delegation pool is
+     * disabled and there is no async pool, the blocking module runs inline on this thread and
+     * its result callback can safely target the original buffers directly.
      */
 
-    if (module->capabilities & CHIMERA_VFS_CAP_BLOCKING) {
+    if ((module->capabilities & CHIMERA_VFS_CAP_BLOCKING) &&
+        (thread->vfs->num_sync_delegation_threads > 0 ||
+         thread->vfs->num_async_delegation_threads > 0)) {
 
         evpl_iovec_alloc(thread->evpl, 64 * 1024, 8, 1, 0, &request->readdir.bounce_iov);
 

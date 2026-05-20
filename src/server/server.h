@@ -61,6 +61,11 @@ chimera_server_config_set_core_threads(
     int                           threads);
 
 void
+chimera_server_config_set_sync_delegation(
+    struct chimera_server_config *config,
+    int                           enable);
+
+void
 chimera_server_config_set_sync_delegation_threads(
     struct chimera_server_config *config,
     int                           threads);

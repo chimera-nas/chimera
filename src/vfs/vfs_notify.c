@@ -380,6 +380,7 @@ chimera_vfs_notify_resolve(struct chimera_vfs_notify_pending_event *pev)
     struct chimera_vfs_notify             *notify = pev->notify;
     struct chimera_vfs_notify_mount_entry *me;
     struct chimera_vfs_notify_watch       *watch;
+    struct chimera_vfs_thread             *worker_thread;
     uint8_t                                r_parent_fh[CHIMERA_VFS_FH_SIZE];
     uint16_t                               r_parent_fh_len;
     char                                   r_name[CHIMERA_VFS_NAME_MAX];
@@ -485,8 +486,14 @@ chimera_vfs_notify_resolve(struct chimera_vfs_notify_pending_event *pev)
         }
 
         /* Cache miss — issue async getparent.
-         * The callback will continue the resolve loop. */
-        chimera_vfs_getparent(notify->vfs->sync_delegation_threads[0].vfs_thread,
+         * The callback will continue the resolve loop.  Run it on the first
+         * sync delegation thread when available, otherwise fall back to the
+         * always-present close thread (the sync pool may be disabled). */
+        worker_thread = notify->vfs->num_sync_delegation_threads > 0 ?
+            notify->vfs->sync_delegation_threads[0].vfs_thread :
+            notify->vfs->close_thread.vfs_thread;
+
+        chimera_vfs_getparent(worker_thread,
                               NULL, /* cred — internal operation */
                               pev->walk_fh,
                               pev->walk_fh_len,
