@@ -8,6 +8,16 @@
 
 struct evpl_iovec;
 
+/* Synchronous, no-I/O check that a file handle is structurally valid and
+ * resolves to a currently-mounted VFS module. Returns 1 if the handle could
+ * name an object on this server, 0 if it is malformed or names an unknown
+ * mount (the caller should map 0 to NFS4ERR_BADHANDLE / NFS3ERR_BADHANDLE).
+ * It does NOT verify that the target object still exists. */
+int
+chimera_vfs_fh_is_plausible(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen);
 
 typedef void (*chimera_vfs_mount_callback_t)(
     struct chimera_vfs_thread *thread,
