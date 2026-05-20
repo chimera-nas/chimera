@@ -78,6 +78,7 @@ chimera_nfs4_access_complete(
     struct ACCESS4args *args   = &req->args_compound->argarray[req->index].opaccess;
     struct ACCESS4res  *res    = &req->res_compound.resarray[req->index].opaccess;
     uint32_t            access = 0;
+    uint32_t            meaningful, requested;
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
@@ -87,38 +88,51 @@ chimera_nfs4_access_complete(
         return;
     }
 
-    if ((args->access & ACCESS4_READ) &&
+    /* RFC 7530 §16.1.4: ACCESS4_LOOKUP and ACCESS4_DELETE only have meaning
+    * for a directory; ACCESS4_EXECUTE only for a non-directory. The server
+    * reports in `supported` exactly the requested bits it evaluated, never
+    * undefined bits or bits that are not meaningful for the object type. */
+    meaningful = ACCESS4_READ | ACCESS4_MODIFY | ACCESS4_EXTEND;
+    if (S_ISDIR(attr->va_mode)) {
+        meaningful |= ACCESS4_LOOKUP | ACCESS4_DELETE;
+    } else {
+        meaningful |= ACCESS4_EXECUTE;
+    }
+
+    requested = args->access & meaningful;
+
+    if ((requested & ACCESS4_READ) &&
         chimera_nfs4_check_access(attr, &req->cred, 1, 0, 0)) {
         access |= ACCESS4_READ;
     }
 
-    if ((args->access & ACCESS4_LOOKUP) &&
+    if ((requested & ACCESS4_LOOKUP) &&
         chimera_nfs4_check_access(attr, &req->cred, 0, 0, 1)) {
         access |= ACCESS4_LOOKUP;
     }
 
-    if ((args->access & ACCESS4_MODIFY) &&
+    if ((requested & ACCESS4_MODIFY) &&
         chimera_nfs4_check_access(attr, &req->cred, 0, 1, 0)) {
         access |= ACCESS4_MODIFY;
     }
 
-    if ((args->access & ACCESS4_EXTEND) &&
+    if ((requested & ACCESS4_EXTEND) &&
         chimera_nfs4_check_access(attr, &req->cred, 0, 1, 0)) {
         access |= ACCESS4_EXTEND;
     }
 
-    if ((args->access & ACCESS4_DELETE) &&
+    if ((requested & ACCESS4_DELETE) &&
         chimera_nfs4_check_access(attr, &req->cred, 0, 1, 0)) {
         access |= ACCESS4_DELETE;
     }
 
-    if ((args->access & ACCESS4_EXECUTE) &&
+    if ((requested & ACCESS4_EXECUTE) &&
         chimera_nfs4_check_access(attr, &req->cred, 0, 0, 1)) {
         access |= ACCESS4_EXECUTE;
     }
 
     res->status           = NFS4_OK;
-    res->resok4.supported = args->access;
+    res->resok4.supported = requested;
     res->resok4.access    = access;
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
@@ -163,9 +177,14 @@ chimera_nfs4_access(
     }
 
     if (fh_is_nfs4_root(req->fh, req->fhlen)) {
+        /* The pseudo-root is a directory: report only the directory-meaningful
+         * bits the client asked for, and grant them all. */
+        uint32_t meaningful = ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_MODIFY |
+            ACCESS4_EXTEND | ACCESS4_DELETE;
+
         res->status           = NFS4_OK;
-        res->resok4.supported = args->access;
-        res->resok4.access    = args->access;
+        res->resok4.supported = args->access & meaningful;
+        res->resok4.access    = args->access & meaningful;
         chimera_nfs4_compound_complete(req, NFS4_OK);
         return;
     }
