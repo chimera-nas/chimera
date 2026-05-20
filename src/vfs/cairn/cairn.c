@@ -215,8 +215,8 @@ struct cairn_shared {
 };
 
 struct cairn_thread {
-    struct evpl                *evpl;
-    struct cairn_shared        *shared;
+    struct evpl                 *evpl;
+    struct cairn_shared         *shared;
     /* Per-cycle metadata transaction, lazily begun on first metadata op.
      * Reads and writes go through this; on commit any key it read that has
      * since been modified by another committed transaction triggers a Busy
@@ -225,32 +225,45 @@ struct cairn_thread {
      *
      * data_batch stays a plain WriteBatch since there is no cross-thread
      * write contention to detect on extents. */
-    rocksdb_transaction_t      *meta_txn;
-    rocksdb_writebatch_t       *data_batch;
-    int                         data_needs_sync;
+    rocksdb_transaction_t       *meta_txn;
+    rocksdb_writebatch_t        *data_batch;
+    int                          data_needs_sync;
     /* Set by the NFS COMMIT op handler so cairn_thread_commit issues an
      * explicit rocksdb_flush_wal(datadb, sync=1) after the cycle.  This
      * covers UNSTABLE writes from prior cycles whose WAL append never got
      * fsynced (data_needs_sync was 0 then); for writes in the same cycle
      * as the COMMIT, the sync data commit's fsync already covers them. */
-    int                         needs_data_wal_flush;
+    int                          needs_data_wal_flush;
     /* Set when evpl_defer(&thread->commit) has been called this cycle.
      * Cleared inside cairn_thread_commit before its handler returns.
      * Read-only op handlers DL_APPEND to txn_requests and rely on the
      * deferred commit to drain that list and call request->complete(); if we
      * forgot to schedule the deferral those requests would hang forever. */
-    int                         commit_scheduled;
+    int                          commit_scheduled;
     /* Set while cairn_thread_commit is running (including during replay).
      * Suppresses the CAIRN_BATCH_MAX_OPS force-commit in cairn_dispatch so
      * a replay can't recurse into cairn_thread_commit. */
-    int                         in_commit;
+    int                          in_commit;
     /* Count of requests queued into txn_requests since the last commit.
      * Used to bound batch size via CAIRN_BATCH_MAX_OPS. */
-    int                         request_count;
-    struct chimera_vfs_request *txn_requests;
-    struct evpl_deferral        commit;
-    int                         thread_id;
-    uint64_t                    next_inum;
+    int                          request_count;
+    /*
+     * Read view for the currently-executing read-only op.  When non-NULL,
+     * metadata/extent reads hit the committed base DB at a consistent
+     * snapshot instead of going through meta_txn — so a read sees a stable
+     * multi-key view, doesn't bloat the optimistic read-set, and isn't part
+     * of the retriable write transaction (no replay, no leaked iovecs / no
+     * double-emitted readdir entries on conflict).  Set by cairn_read_begin,
+     * cleared by cairn_read_end.  NULL during writer ops, which read through
+     * meta_txn for read-your-writes + conflict detection. */
+    const rocksdb_readoptions_t *read_meta_opts;
+    const rocksdb_snapshot_t    *read_meta_snap;
+    const rocksdb_readoptions_t *read_data_opts;
+    const rocksdb_snapshot_t    *read_data_snap;
+    struct chimera_vfs_request  *txn_requests;
+    struct evpl_deferral         commit;
+    int                          thread_id;
+    uint64_t                     next_inum;
 };
 
 /* Forward declaration for truncation handling */
@@ -394,20 +407,84 @@ cairn_dirent_handle_release(struct cairn_dirent_handle *dh)
     rocksdb_pinnableslice_destroy(dh->slice);
 } /* cairn_dirent_handle_release */
 
+/*
+ * Enter a read-only op's snapshot view.  Pins a consistent point-in-time
+ * view of metadb (and datadb when with_data) so all of the op's reads are
+ * mutually consistent without touching the write transaction.  Must be
+ * paired with cairn_read_end before the op completes.
+ */
+static inline void
+cairn_read_begin(
+    struct cairn_thread *thread,
+    int                  with_data)
+{
+    struct cairn_shared   *shared = thread->shared;
+    rocksdb_readoptions_t *mopts  = rocksdb_readoptions_create();
+
+    thread->read_meta_snap = rocksdb_create_snapshot(shared->meta_base_db);
+    rocksdb_readoptions_set_snapshot(mopts, thread->read_meta_snap);
+    thread->read_meta_opts = mopts;
+
+    if (with_data) {
+        rocksdb_readoptions_t *dopts = rocksdb_readoptions_create();
+        thread->read_data_snap = rocksdb_create_snapshot(shared->datadb);
+        rocksdb_readoptions_set_snapshot(dopts, thread->read_data_snap);
+        thread->read_data_opts = dopts;
+    }
+} /* cairn_read_begin */
+
+static inline void
+cairn_read_end(struct cairn_thread *thread)
+{
+    struct cairn_shared *shared = thread->shared;
+
+    if (thread->read_meta_opts) {
+        rocksdb_readoptions_destroy((rocksdb_readoptions_t *) thread->read_meta_opts);
+        rocksdb_release_snapshot(shared->meta_base_db, thread->read_meta_snap);
+        thread->read_meta_opts = NULL;
+        thread->read_meta_snap = NULL;
+    }
+    if (thread->read_data_opts) {
+        rocksdb_readoptions_destroy((rocksdb_readoptions_t *) thread->read_data_opts);
+        rocksdb_release_snapshot(shared->datadb, thread->read_data_snap);
+        thread->read_data_opts = NULL;
+        thread->read_data_snap = NULL;
+    }
+} /* cairn_read_end */
+
+/*
+ * Metadata point read.  Reader ops (read_meta_opts set) read the committed
+ * base DB at their pinned snapshot; writer ops read through meta_txn for
+ * read-your-writes and optimistic conflict tracking.
+ */
+static inline rocksdb_pinnableslice_t *
+cairn_meta_get_pinned(
+    struct cairn_thread *thread,
+    const void          *key,
+    size_t               klen,
+    char               **err)
+{
+    struct cairn_shared *shared = thread->shared;
+
+    if (thread->read_meta_opts) {
+        return rocksdb_get_pinned(shared->meta_base_db, thread->read_meta_opts,
+                                  (const char *) key, klen, err);
+    }
+    return rocksdb_transaction_get_pinned(cairn_get_meta_txn(thread),
+                                          shared->read_options,
+                                          (const char *) key, klen, err);
+} /* cairn_meta_get_pinned */
+
 static inline int
 cairn_dirent_get(
     struct cairn_thread        *thread,
     struct cairn_dirent_key    *key,
     struct cairn_dirent_handle *dh)
 {
-    struct cairn_shared   *shared = thread->shared;
-    rocksdb_transaction_t *txn    = cairn_get_meta_txn(thread);
-    char                  *err    = NULL;
-    size_t                 len;
+    char  *err = NULL;
+    size_t len;
 
-    dh->slice = rocksdb_transaction_get_pinned(txn, shared->read_options,
-                                               (const char *) key, sizeof(*key),
-                                               &err);
+    dh->slice = cairn_meta_get_pinned(thread, key, sizeof(*key), &err);
 
     chimera_cairn_abort_if(err, "Error getting dirent: %s\n", err);
 
@@ -429,10 +506,13 @@ cairn_dirent_get(
 static inline rocksdb_iterator_t *
 cairn_meta_iterator(struct cairn_thread *thread)
 {
-    struct cairn_shared   *shared = thread->shared;
-    rocksdb_transaction_t *txn    = cairn_get_meta_txn(thread);
+    struct cairn_shared *shared = thread->shared;
 
-    return rocksdb_transaction_create_iterator(txn, shared->read_options);
+    if (thread->read_meta_opts) {
+        return rocksdb_create_iterator(shared->meta_base_db, thread->read_meta_opts);
+    }
+    return rocksdb_transaction_create_iterator(cairn_get_meta_txn(thread),
+                                               shared->read_options);
 } /* cairn_meta_iterator */
 
 /*
@@ -453,9 +533,12 @@ cairn_meta_iterator(struct cairn_thread *thread)
 static inline rocksdb_iterator_t *
 cairn_data_iterator(struct cairn_thread *thread)
 {
-    struct cairn_shared *shared = thread->shared;
+    struct cairn_shared         *shared = thread->shared;
+    const rocksdb_readoptions_t *ropts  = thread->read_data_opts
+        ? thread->read_data_opts
+        : shared->read_options;
 
-    return rocksdb_create_iterator(shared->datadb, shared->read_options);
+    return rocksdb_create_iterator(shared->datadb, ropts);
 } /* cairn_data_iterator */
 
 static inline int
@@ -504,18 +587,14 @@ cairn_inode_get_inum(
     uint64_t                   inum,
     struct cairn_inode_handle *ih)
 {
-    struct cairn_shared   *shared = thread->shared;
-    rocksdb_transaction_t *txn    = cairn_get_meta_txn(thread);
-    char                  *err    = NULL;
+    char                  *err = NULL;
     size_t                 len;
     struct cairn_inode_key key;
 
     key.keytype = CAIRN_KEY_INODE;
     key.inum    = inum;
 
-    ih->slice = rocksdb_transaction_get_pinned(txn, shared->read_options,
-                                               (const char *) &key, sizeof(key),
-                                               &err);
+    ih->slice = cairn_meta_get_pinned(thread, &key, sizeof(key), &err);
 
     chimera_cairn_abort_if(err, "Error getting inode: %s\n", err);
 
@@ -1040,6 +1119,9 @@ cairn_queue_request(
     struct cairn_thread        *thread,
     struct chimera_vfs_request *request)
 {
+    /* Queued requests are completed by the deferred commit, so ensure it's
+     * scheduled.  (Read-only ops complete inline and never come here.) */
+    cairn_ensure_commit_scheduled(thread);
     DL_APPEND(thread->txn_requests, request);
     thread->request_count++;
 } /* cairn_queue_request */
@@ -1478,7 +1560,7 @@ cairn_getattr(
 
     request->status = CHIMERA_VFS_OK;
 
-    cairn_queue_request(thread, request);
+    request->complete(request);
 } /* cairn_getattr */
 
 static void
@@ -1644,7 +1726,7 @@ cairn_mount(
 
     request->status = CHIMERA_VFS_OK;
 
-    cairn_queue_request(thread, request);
+    request->complete(request);
 } /* cairn_mount */
 
 static void
@@ -1699,7 +1781,7 @@ cairn_lookup_at(
         cairn_map_attrs(shared, &request->lookup_at.r_attr, inode);
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_OK;
-        cairn_queue_request(thread, request);
+        request->complete(request);
         return;
     }
 
@@ -1721,7 +1803,7 @@ cairn_lookup_at(
         cairn_inode_handle_release(&ih);
         cairn_inode_handle_release(&child_ih);
         request->status = CHIMERA_VFS_OK;
-        cairn_queue_request(thread, request);
+        request->complete(request);
         return;
     }
 
@@ -1762,7 +1844,7 @@ cairn_lookup_at(
 
     request->status = CHIMERA_VFS_OK;
 
-    cairn_queue_request(thread, request);
+    request->complete(request);
 } /* cairn_lookup_at */
 
 static void
@@ -2281,7 +2363,7 @@ cairn_readdir(
     request->readdir.r_cookie = next_cookie;
     request->readdir.r_eof    = eof;
 
-    cairn_queue_request(thread, request);
+    request->complete(request);
 } /* cairn_readdir */
 
 static void
@@ -2524,9 +2606,17 @@ cairn_read(
         return;
     }
 
+    /*
+     * cairn_read self-manages its snapshot view (it is not wrapped by
+     * cairn_dispatch) because the best-effort atime stamp below has to run
+     * after the snapshot is released, against the write transaction.
+     */
+    cairn_read_begin(thread, 1);
+
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
+        cairn_read_end(thread);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -2537,6 +2627,7 @@ cairn_read(
     if (offset >= inode->size) {
         cairn_map_attrs(shared, &request->read.r_attr, inode);
         cairn_inode_handle_release(&ih);
+        cairn_read_end(thread);
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;
         request->read.r_length = 0;
@@ -2644,14 +2735,30 @@ cairn_read(
 
     rocksdb_iter_destroy(iter);
 
-    if (need_atime) {
-        inode->atime = now;
-        cairn_put_inode(thread, inode);
-    }
-
     cairn_map_attrs(shared, &request->read.r_attr, inode);
 
     cairn_inode_handle_release(&ih);
+
+    /* Done with the snapshot view. */
+    cairn_read_end(thread);
+
+    /*
+     * Best-effort atime stamp through the write transaction.  We re-read the
+     * inode through the txn (read-your-writes) so we don't clobber a
+     * concurrent same-cycle inode update, set atime, and write it back.  This
+     * is decoupled from the read's completion: the read already returned its
+     * data, and if the cycle's commit conflicts the read is not replayed, so
+     * the atime update is simply lost (acceptable — atime is advisory).
+     */
+    if (need_atime) {
+        struct cairn_inode_handle aih;
+
+        if (cairn_inode_get_fh(thread, request->fh, request->fh_len, &aih) == 0) {
+            aih.inode->atime = now;
+            cairn_put_inode(thread, aih.inode);
+            cairn_inode_handle_release(&aih);
+        }
+    }
 
     request->status        = CHIMERA_VFS_OK;
     request->read.r_length = length;
@@ -2659,7 +2766,7 @@ cairn_read(
     request->read.iov      = iov;
     iov[0].length          = length;
 
-    cairn_queue_request(thread, request);
+    request->complete(request);
 } /* cairn_read */
 
 static inline void
@@ -2945,7 +3052,7 @@ cairn_seek(
         request->seek.r_eof    = 1;
         request->seek.r_offset = 0;
         request->status        = CHIMERA_VFS_OK;
-        cairn_queue_request(thread, request);
+        request->complete(request);
         return;
     }
 
@@ -3003,7 +3110,7 @@ cairn_seek(
                 rocksdb_iter_destroy(iter);
                 cairn_inode_handle_release(&ih);
                 request->status = CHIMERA_VFS_OK;
-                cairn_queue_request(thread, request);
+                request->complete(request);
                 return;
             }
 
@@ -3016,7 +3123,7 @@ cairn_seek(
         request->seek.r_eof    = 1;
         request->seek.r_offset = 0;
         request->status        = CHIMERA_VFS_OK;
-        cairn_queue_request(thread, request);
+        request->complete(request);
         return;
     } else {
         /* SEEK_HOLE: find first gap from offset forward */
@@ -3073,7 +3180,7 @@ cairn_seek(
                 rocksdb_iter_destroy(iter);
                 cairn_inode_handle_release(&ih);
                 request->status = CHIMERA_VFS_OK;
-                cairn_queue_request(thread, request);
+                request->complete(request);
                 return;
             }
 
@@ -3093,7 +3200,7 @@ cairn_seek(
         rocksdb_iter_destroy(iter);
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_OK;
-        cairn_queue_request(thread, request);
+        request->complete(request);
         return;
     }
 } /* cairn_seek */
@@ -3231,9 +3338,7 @@ cairn_readlink(
         rocksdb_pinnableslice_t *slice;
         const char              *target_data;
 
-        slice = rocksdb_transaction_get_pinned(
-            cairn_get_meta_txn(thread), shared->read_options,
-            (const char *) &target_key, sizeof(target_key), &err);
+        slice = cairn_meta_get_pinned(thread, &target_key, sizeof(target_key), &err);
 
         chimera_cairn_abort_if(err, "Error getting symlink target: %s\n", err);
 
@@ -3257,7 +3362,7 @@ cairn_readlink(
     cairn_inode_handle_release(&ih);
 
     request->status = CHIMERA_VFS_OK;
-    cairn_queue_request(thread, request);
+    request->complete(request);
 } /* cairn_readlink */
 
 static inline int
@@ -3690,12 +3795,9 @@ cairn_get_key(
 
     {
         rocksdb_pinnableslice_t *slice;
-        rocksdb_transaction_t   *txn = cairn_get_meta_txn(thread);
         const char              *vp;
 
-        slice = rocksdb_transaction_get_pinned(txn, shared->read_options,
-                                               (const char *) kv_key, kv_key_len,
-                                               &err);
+        slice = cairn_meta_get_pinned(thread, kv_key, kv_key_len, &err);
         chimera_cairn_abort_if(err, "Error getting KV: %s\n", err);
 
         if (!slice) {
@@ -3840,25 +3942,32 @@ cairn_dispatch(
     struct cairn_shared *shared = thread->shared;
 
     /*
-     * Ensure cairn_thread_commit runs at the end of this event loop cycle.
-     * Write paths get this for free via cairn_get_meta_batch/data_batch, but
-     * read-only handlers DL_APPEND to txn_requests without touching a batch
-     * and would otherwise leave their requests un-completed.
+     * Read-only ops run under a snapshot view (cairn_read_begin/end) and
+     * complete inline; they never touch the write transaction or get queued,
+     * so they're never replayed on optimistic conflict (no leaked iovecs, no
+     * double-emitted readdir entries) and don't bloat the conflict read-set.
+     * Writer ops read through meta_txn and queue their request; the deferred
+     * commit (scheduled by cairn_queue_request / the write helpers) drains
+     * and completes them.
      */
-    cairn_ensure_commit_scheduled(thread);
-
     switch (request->opcode) {
         case CHIMERA_VFS_OP_MOUNT:
+            cairn_read_begin(thread, 0);
             cairn_mount(thread, shared, request, private_data);
+            cairn_read_end(thread);
             break;
         case CHIMERA_VFS_OP_UMOUNT:
             cairn_umount(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP_AT:
+            cairn_read_begin(thread, 0);
             cairn_lookup_at(thread, shared, request, private_data);
+            cairn_read_end(thread);
             break;
         case CHIMERA_VFS_OP_GETATTR:
+            cairn_read_begin(thread, 0);
             cairn_getattr(thread, shared, request, private_data);
+            cairn_read_end(thread);
             break;
         case CHIMERA_VFS_OP_SETATTR:
             cairn_setattr(thread, shared, request, private_data);
@@ -3873,7 +3982,9 @@ cairn_dispatch(
             cairn_remove_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_READDIR:
+            cairn_read_begin(thread, 0);
             cairn_readdir(thread, shared, request, private_data);
+            cairn_read_end(thread);
             break;
         case CHIMERA_VFS_OP_OPEN_AT:
             cairn_open_at(thread, shared, request, private_data);
@@ -3897,13 +4008,17 @@ cairn_dispatch(
             cairn_allocate(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_SEEK:
+            cairn_read_begin(thread, 1);
             cairn_seek(thread, shared, request, private_data);
+            cairn_read_end(thread);
             break;
         case CHIMERA_VFS_OP_SYMLINK_AT:
             cairn_symlink_at(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_READLINK:
+            cairn_read_begin(thread, 0);
             cairn_readlink(thread, shared, request, private_data);
+            cairn_read_end(thread);
             break;
         case CHIMERA_VFS_OP_RENAME_AT:
             cairn_rename_at(thread, shared, request, private_data);
@@ -3915,13 +4030,17 @@ cairn_dispatch(
             cairn_put_key(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_GET_KEY:
+            cairn_read_begin(thread, 0);
             cairn_get_key(thread, shared, request, private_data);
+            cairn_read_end(thread);
             break;
         case CHIMERA_VFS_OP_DELETE_KEY:
             cairn_delete_key(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_SEARCH_KEYS:
+            cairn_read_begin(thread, 0);
             cairn_search_keys(thread, shared, request, private_data);
+            cairn_read_end(thread);
             break;
         default:
             chimera_cairn_error("cairn_dispatch: unknown operation %d",
@@ -3938,9 +4057,11 @@ cairn_dispatch(
      * load with slow commits that batch can grow arbitrarily large, and a
      * request near the tail would wait for every commit ahead of it.
      * Force an early commit once the queue reaches CAIRN_BATCH_MAX_OPS so
-     * tail latency stays bounded.
+     * tail latency stays bounded.  Suppressed while in_commit is set so a
+     * replay (which re-dispatches queued requests) can't recurse into
+     * cairn_thread_commit.
      */
-    if (thread->request_count >= CAIRN_BATCH_MAX_OPS) {
+    if (!thread->in_commit && thread->request_count >= CAIRN_BATCH_MAX_OPS) {
         cairn_thread_commit(thread->evpl, thread);
     }
 } /* cairn_dispatch */
