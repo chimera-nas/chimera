@@ -13,7 +13,15 @@ chimera_vfs_read_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_read_callback_t callback = request->proto_callback;
 
-    if (request->status == CHIMERA_VFS_OK) {
+    /* Only refresh the attr cache when the caller actually requested stat
+     * attributes (e.g. NFSv3 READ, which carries post_op_attr).  READ is
+     * never a mutating operation, so it has no role in keeping the cache
+     * coherent for WCC -- mutating ops insert their own post-op attrs.  For
+     * callers that don't want attrs (NFSv4/SMB/S3 READ pass attr_mask 0) the
+     * backend skips the stat entirely, so there is nothing to cache and
+     * inserting here would only evict a valid entry. */
+    if (request->status == CHIMERA_VFS_OK &&
+        (request->read.r_attr.va_set_mask & CHIMERA_VFS_ATTR_MASK_STAT) == CHIMERA_VFS_ATTR_MASK_STAT) {
         chimera_vfs_attr_cache_insert(request->thread->vfs->vfs_attr_cache,
                                       request->read.handle->fh_hash,
                                       request->read.handle->fh,
@@ -66,7 +74,7 @@ chimera_vfs_read(
     request->read.r_length           = 0;
     request->read.r_niov             = 0;
     request->read.r_eof              = 0;
-    request->read.r_attr.va_req_mask = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
+    request->read.r_attr.va_req_mask = attr_mask;
     request->read.r_attr.va_set_mask = 0;
     request->proto_callback          = callback;
     request->proto_private_data      = private_data;
