@@ -81,12 +81,12 @@ chimera_nfs4_lookupp(
     }
 
     /*
-     * LOOKUPP at the namespace root returns the root again (RFC 7530
-     * 14.2.16).  No need to descend into VFS for the synthetic NFS4 root.
+     * RFC 7530 §16.10.5: LOOKUPP with the current filehandle at the root of
+     * the namespace has no parent to return, so it fails with NFS4ERR_NOENT.
      */
     if (fh_is_nfs4_root(req->fh, req->fhlen)) {
-        res->status = NFS4_OK;
-        chimera_nfs4_compound_complete(req, NFS4_OK);
+        res->status = NFS4ERR_NOENT;
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 

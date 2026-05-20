@@ -317,6 +317,25 @@ chimera_nfs4_compound(
         return;
     }
 
+    /* RFC 7530 §16.2.3: the COMPOUND tag is a utf8str_cs; a malformed tag
+     * is rejected with NFS4ERR_INVAL before any operation runs. */
+    if (args->tag.len &&
+        !chimera_nfs4_utf8_valid(args->tag.data, args->tag.len)) {
+        req->res_compound.status       = NFS4ERR_INVAL;
+        req->res_compound.num_resarray = 0;
+        req->res_compound.resarray     = NULL;
+
+        rc = thread->shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
+            thread->evpl,
+            NULL,
+            &req->res_compound,
+            req->encoding);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+
+        nfs_request_free(thread, req);
+        return;
+    }
+
     rc = xdr_dbuf_alloc_array(&req->res_compound, resarray, args->num_argarray, req->encoding->dbuf);
 
     if (rc) {
