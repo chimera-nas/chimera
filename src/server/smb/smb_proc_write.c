@@ -4,8 +4,10 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
+#include "smb_session.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_notify.h"
+#include "vfs/vfs_state.h"
 
 static void
 chimera_smb_write_callback(
@@ -105,6 +107,29 @@ chimera_smb_write(struct chimera_smb_request *request)
     if (unlikely(!request->write.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
         return;
+    }
+
+    /* Mandatory byte-range lock enforcement: a shared lock denies writes from
+     * everyone, an exclusive lock denies writes from other opens. */
+    {
+        struct chimera_vfs_lease_owner io_owner = {
+            .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
+            .client_key = request->session_handle->session->session_id,
+            .owner_lo   = request->write.open_file->file_id.pid,
+            .owner_hi   = request->write.open_file->file_id.vid,
+        };
+
+        if (chimera_vfs_state_range_io_conflict(
+                thread->vfs_thread->vfs->vfs_state,
+                request->write.open_file->handle->fh,
+                request->write.open_file->handle->fh_len,
+                request->write.open_file->handle->fh_hash,
+                request->write.offset, request->write.length,
+                true, &io_owner)) {
+            chimera_smb_open_file_release(request, request->write.open_file);
+            chimera_smb_complete_request(request, SMB2_STATUS_FILE_LOCK_CONFLICT);
+            return;
+        }
     }
 
     if (request->write.channel == SMB2_CHANNEL_RDMA_V1) {

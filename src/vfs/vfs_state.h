@@ -326,6 +326,24 @@ chimera_vfs_lease_test(
     const struct chimera_vfs_lease *probe,
     struct chimera_vfs_lease      **conflict_out);
 
+/* SMB mandatory byte-range lock enforcement for an I/O.  Returns true if an
+ * I/O of the given direction over [offset, offset+length) (length==0 means
+ * to EOF) conflicts with a byte-range lock held on the file:
+ *   - a shared lock denies writes from all owners (including the lock owner);
+ *   - an exclusive lock denies reads and writes from any other owner.
+ * `owner` identifies the open performing the I/O.  Looks up file state by FH;
+ * a file with no state (no locks) never conflicts. */
+bool
+chimera_vfs_state_range_io_conflict(
+    struct chimera_vfs_state             *state,
+    const uint8_t                        *fh,
+    uint8_t                               fh_len,
+    uint64_t                              fh_hash,
+    uint64_t                              offset,
+    uint64_t                              length,
+    bool                                  is_write,
+    const struct chimera_vfs_lease_owner *owner);
+
 /* -------------------------------------------------------------------- */
 /* Break orchestration                                                  */
 /* -------------------------------------------------------------------- */

@@ -752,6 +752,54 @@ chimera_vfs_lease_test(
     return result;
 } /* chimera_vfs_lease_test */
 
+SYMBOL_EXPORT bool
+chimera_vfs_state_range_io_conflict(
+    struct chimera_vfs_state             *state,
+    const uint8_t                        *fh,
+    uint8_t                               fh_len,
+    uint64_t                              fh_hash,
+    uint64_t                              offset,
+    uint64_t                              length,
+    bool                                  is_write,
+    const struct chimera_vfs_lease_owner *owner)
+{
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease      *cur;
+    bool                           conflict = false;
+
+    /* Fast path: with no per-file state there are no byte-range locks. */
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return false;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->range_locks; cur; cur = cur->next) {
+        if (!chimera_vfs_range_overlap(cur->offset, cur->length, offset, length)) {
+            continue;
+        }
+        if (cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W) {
+            /* Exclusive lock: blocks all I/O from other owners; the lock
+             * owner may still read and write within its own range. */
+            if (!chimera_vfs_lease_owner_equal(&cur->owner, owner)) {
+                conflict = true;
+                break;
+            }
+        } else {
+            /* Shared lock: reads are permitted for everyone, but writes are
+             * denied for everyone — including the lock owner (MS-FSA). */
+            if (is_write) {
+                conflict = true;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    chimera_vfs_state_put(state, file);
+    return conflict;
+} /* chimera_vfs_state_range_io_conflict */
+
 /* -------------------------------------------------------------------- */
 /* Break orchestration                                                  */
 /* -------------------------------------------------------------------- */
