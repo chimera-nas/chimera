@@ -63,6 +63,17 @@ chimera_nfs4_sequence(
         return;
     }
 
+    /* RFC 8881 §2.10.6.4: a COMPOUND with more operations than the session's
+     * negotiated fore-channel ca_maxoperations (SEQUENCE counts as one) is
+     * rejected with NFS4ERR_TOO_MANY_OPS. */
+    if (session->nfs4_session_fore_attrs.ca_maxoperations &&
+        req->args_compound->num_argarray >
+        session->nfs4_session_fore_attrs.ca_maxoperations) {
+        res->sr_status = NFS4ERR_TOO_MANY_OPS;
+        chimera_nfs4_compound_complete(req, NFS4ERR_TOO_MANY_OPS);
+        return;
+    }
+
     res->sr_status = NFS4_OK;
     memcpy(res->sr_resok4.sr_sessionid, session->nfs4_session_id,
            NFS4_SESSIONID_SIZE);

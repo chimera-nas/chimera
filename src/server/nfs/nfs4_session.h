@@ -145,6 +145,9 @@ struct nfs4_client {
      * preserved across a CREATE_SESSION retransmit, which no client relies on. */
     struct channel_attrs4 nfs4_client_cs_reply_fore;
     struct channel_attrs4 nfs4_client_cs_reply_back;
+    /* Set once the client has issued RECLAIM_COMPLETE; a second one is
+     * NFS4ERR_COMPLETE_ALREADY (RFC 8881 §18.51.4). */
+    uint8_t               nfs4_client_reclaim_complete;
     /* Unified state hierarchy.  Created when this nfs4_client is first
      * registered; freed when the nfs4_client is unregistered or the table
      * is torn down.  See nfs4_state.h. */
@@ -288,6 +291,14 @@ nfs4_client_create_session_cache(
     uint32_t                     flags,
     const struct channel_attrs4 *fore,
     const struct channel_attrs4 *back);
+
+/* Mark a client's RECLAIM_COMPLETE.  Returns true if the client had already
+ * completed reclaim (caller returns NFS4ERR_COMPLETE_ALREADY), false on the
+ * first call (now recorded). */
+bool
+nfs4_client_mark_reclaim_complete(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id);
 
 /* DESTROY_CLIENTID (RFC 8881 §18.50): returns NFS4ERR_STALE_CLIENTID if no
  * such client, NFS4ERR_CLIENTID_BUSY if it still owns sessions, else removes
