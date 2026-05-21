@@ -157,11 +157,15 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
 
     # SMB3 durable / persistent handle cases.  These need the daemon run with
     # smb_persistent_handles enabled (the wrapper sets it from CHIMERA_SMB_PERSISTENT,
-    # which also flips the persistent-handle / CA-share ptfconfig capabilities).
-    # Allowlist = the durable/persistent BVT + reconnect cases confirmed green
-    # against the current server.  Negative cases still gated by the lax grant
-    # policy (durable granted without a handle-caching lease) and the global
-    # CA-share flag are intentionally left out until those are tightened.
+    # which also flips the persistent-handle / CA-share ptfconfig capabilities and
+    # marks FileShare as the CA share).  Allowlist = the durable/persistent BVT +
+    # reconnect + reconnect-validation cases confirmed green against the current
+    # server.  Left out (known gaps): the *_WithoutHandleCaching / LeaseIsNull /
+    # NoPersistenceGrantedOnNonCAShare negatives require a strict durable grant
+    # (only with a batch oplock or HANDLE-caching lease), which is blocked on the
+    # lease/oplock backend honestly producing oplock_level==BATCH; and
+    # AfterServerDisconnect needs negotiate-after-negotiate to drop the connection
+    # (an unrelated protocol gap).
     set(WPTS_SMB2_PERSISTENT_ALLOWLIST
         BVT_DurableHandleV1_Reconnect_WithBatchOplock
         BVT_DurableHandleV1_Reconnect_WithLeaseV1
@@ -169,12 +173,19 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_DurableHandleV2_Reconnect_WithLeaseV1
         BVT_PersistentHandle_Reconnect
         DurableHandleV1_Reconnect_IncludeCreateDurableHandle
+        DurableHandleV1_Reconnect_IncludeReconnectV2
+        DurableHandleV1_Reconnect_IncludeRequestV2
         DurableHandleV1_Reconnect_SessionIsNotNull
         DurableHandleV1_Reconnect_WithDifferentClientGuid
+        DurableHandleV1_Reconnect_WithDifferentLeaseKey
+        DurableHandleV1_Reconnect_WithLeaseV1_WithDifferentFileName
         DurableHandleV1_Reconnect_WithoutDurableHandle
         DurableHandleV1_Reconnect_WithoutFileIdPersistent
         DurableHandleV1_Reconnect_WithoutLogoffOrDisconnect_WithoutPreviousSessionIdSet
+        DurableHandleV1_Reconnect_WithoutRequestLease
+        DurableHandleV2_Reconnect_WithLeaseV1_WithDifferentFileName
         DurableHandleV2_Reconnect_WithoutPersistence
+        DurableHandleV2_WithLeaseV1AndV2_WithDifferentLeaseKey
         PersistentHandle_ReOpenFromDiffClient)
 
     foreach(tc ${WPTS_SMB2_PERSISTENT_ALLOWLIST})

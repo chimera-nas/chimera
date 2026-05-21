@@ -377,7 +377,8 @@ int
 chimera_server_create_share(
     struct chimera_server *server,
     const char            *share_name,
-    const char            *share_path);
+    const char            *share_path,
+    int                    continuous_availability);
 
 int
 chimera_server_create_export(

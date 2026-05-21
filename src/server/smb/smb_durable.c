@@ -194,17 +194,26 @@ chimera_smb_durable_claim(
     const uint8_t                    *client_guid,
     const char                       *name,
     uint32_t                          name_len,
+    bool                              has_lease_ctx,
+    const uint8_t                    *lease_key,
     bool                             *r_cold,
     uint32_t                         *status)
 {
     struct chimera_smb_durable_entry *entry;
     struct chimera_smb_open_file     *open_file = NULL;
+    bool                              had_lease;
 
     *r_cold = false;
 
     pthread_mutex_lock(&shared->durable.lock);
 
     HASH_FIND(hh, shared->durable.by_pid, &persistent_id, sizeof(persistent_id), entry);
+
+    /* Did the surviving open hold a lease (vs a plain oplock / nothing)?  The
+     * lease-key / lease-context reconnect checks below only apply to leases.
+     * Cold (recovered) entries have no live open, so treat as no lease. */
+    had_lease = entry && entry->open_file &&
+        entry->open_file->oplock_level == SMB2_OPLOCK_LEVEL_LEASE;
 
     if (!entry) {
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
@@ -219,8 +228,18 @@ chimera_smb_durable_claim(
          * mismatch must fail with STATUS_OBJECT_NAME_NOT_FOUND (the handle is
          * simply not visible to this client), not ACCESS_DENIED. */
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
-    } else if (entry->name_len != name_len || memcmp(entry->name, name, name_len) != 0) {
+    } else if (had_lease && !has_lease_ctx) {
+        /* 3.3.5.9.7: open holds a lease but the reconnect omitted the lease
+         * create context — OBJECT_NAME_NOT_FOUND. */
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    } else if (had_lease && has_lease_ctx && lease_key &&
+               memcmp(entry->open_file->lease_key, lease_key, 16) != 0) {
+        /* 3.3.5.9.7: lease key in the reconnect does not match the open's. */
+        *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    } else if (entry->name_len != name_len || memcmp(entry->name, name, name_len) != 0) {
+        /* Filename mismatch: with a lease this is INVALID_PARAMETER (3.3.5.9.7),
+         * otherwise the handle simply isn't found under that name. */
+        *status = had_lease ? SMB2_STATUS_INVALID_PARAMETER : SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (entry->cold) {
         /* Recovered-after-restart entry: there is no live open to re-home.
          * Remove it and tell the caller to re-open the file (cold reclaim);

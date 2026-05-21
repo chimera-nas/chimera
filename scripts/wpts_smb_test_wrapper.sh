@@ -73,7 +73,14 @@ generate_config() {
                 ;;
         esac
         mounts="${mounts}${sep}\"${share}\": {\"module\": \"${BACKEND}\", \"path\": \"${mpath}\"}"
-        shares="${shares}${sep}\"${share}\": {\"path\": \"/${share}\"}"
+        # FileShare is the designated continuous-availability share (matches
+        # CAShareName in the ptfconfig); mark it CA so persistent handles are
+        # granted there but not on the other (non-CA) shares.
+        local share_ca=""
+        if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ] && [ "$share" = "FileShare" ]; then
+            share_ca=', "continuous_availability": true'
+        fi
+        shares="${shares}${sep}\"${share}\": {\"path\": \"/${share}\"${share_ca}}"
         sep=",
         "
     done

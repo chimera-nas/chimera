@@ -684,9 +684,12 @@ main(
     if (shares) {
         json_object_foreach(shares, name, share)
         {
+            json_t *ca = json_object_get(share, "continuous_availability");
+
             path = json_string_value(json_object_get(share, "path"));
             chimera_server_info("Adding SMB share %s -> %s", name, path);
-            chimera_server_create_share(server, name, path);
+            chimera_server_create_share(server, name, path,
+                                        json_is_true(ca) ? 1 : 0);
         }
     }
 

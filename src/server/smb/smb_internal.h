@@ -750,6 +750,8 @@ chimera_smb_durable_claim(
     const uint8_t                    *client_guid,
     const char                       *name,
     uint32_t                          name_len,
+    bool                              has_lease_ctx,
+    const uint8_t                    *lease_key,
     bool                             *r_cold,
     uint32_t                         *status);
 void

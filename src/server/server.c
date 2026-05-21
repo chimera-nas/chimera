@@ -901,13 +901,15 @@ SYMBOL_EXPORT int
 chimera_server_create_share(
     struct chimera_server *server,
     const char            *share_name,
-    const char            *share_path)
+    const char            *share_path,
+    int                    continuous_availability)
 {
     if (!server->smb_shared) {
         return -1;
     }
 
-    chimera_smb_add_share(server->smb_shared, share_name, share_path);
+    chimera_smb_add_share(server->smb_shared, share_name, share_path,
+                          continuous_availability);
 
     return 0;
 } /* chimera_server_create_share */

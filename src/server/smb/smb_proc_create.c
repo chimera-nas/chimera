@@ -426,11 +426,14 @@ chimera_smb_create_gen_open_file(
                                         &request->session_handle->session->cred);
     }
 
-    /* Durable / persistent handle grant.  Initial in-memory pass with a lax
-     * policy: granted whenever the client asks and the feature is enabled,
-     * independent of the oplock/lease actually held.  Persistent (vs merely
-     * durable) additionally requires a continuous-availability share; absent
-     * that we silently downgrade to durable-v2, which is spec-legal. */
+    /* Durable / persistent handle grant.  NOTE: MS-SMB2 3.3.5.9 only grants a
+     * durable handle when the open also holds a batch oplock or a HANDLE-caching
+     * lease.  We use a lax policy (grant on request) for now because the legacy
+     * batch-oplock grant does not yet reliably produce oplock_level==BATCH; once
+     * the lease/oplock backend honors that, gate this on
+     * (oplock_level == SMB2_OPLOCK_LEVEL_BATCH ||
+     *  (lease_state & SMB2_LEASE_HANDLE_CACHING)).  See the WPTS
+     * *_WithoutHandleCaching / LeaseIsNull failures. */
     if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share &&
         thread->shared->config.persistent_handles) {
         uint32_t ctx = request->create.ctx_present_mask;
@@ -1198,20 +1201,37 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
     struct chimera_smb_open_file     *open_file;
     const uint8_t                    *create_guid = NULL;
     uint64_t                          persistent_id;
-    uint32_t                          status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
-    bool                              cold   = false;
+    uint32_t                          status    = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    uint32_t                          ctx       = request->create.ctx_present_mask;
+    const uint8_t                    *lease_key = NULL;
+    bool                              has_lease_ctx;
+    bool                              cold = false;
     int                               bucket;
 
-    if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2C) {
+    /* MS-SMB2 3.3.5.9.7: a v1 durable reconnect (DHnC) that also carries a v2
+     * durable request/reconnect context is malformed. */
+    if ((ctx & CHIMERA_SMB_CREATE_CTX_DHNC) &&
+        (ctx & (CHIMERA_SMB_CREATE_CTX_DH2Q | CHIMERA_SMB_CREATE_CTX_DH2C))) {
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    if (ctx & CHIMERA_SMB_CREATE_CTX_DH2C) {
         persistent_id = request->create.dh2c.persistent;
         create_guid   = request->create.dh2c.create_guid;
     } else {
         persistent_id = request->create.dhnc.persistent;
     }
 
+    has_lease_ctx = (ctx & CHIMERA_SMB_CREATE_CTX_RQLS) != 0;
+    if (has_lease_ctx) {
+        lease_key = request->create.rqls.key;
+    }
+
     open_file = chimera_smb_durable_claim(shared, persistent_id, create_guid,
                                           request->compound->conn->client_guid,
                                           request->create.name, request->create.name_len,
+                                          has_lease_ctx, lease_key,
                                           &cold, &status);
 
     if (cold) {

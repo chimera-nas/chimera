@@ -1520,7 +1520,8 @@ SYMBOL_EXPORT void
 chimera_smb_add_share(
     void       *smb_shared,
     const char *name,
-    const char *path)
+    const char *path,
+    int         continuous_availability)
 {
     struct chimera_server_smb_shared *shared = smb_shared;
     struct chimera_smb_share         *share  = calloc(1, sizeof(*share));
@@ -1529,10 +1530,10 @@ chimera_smb_add_share(
     snprintf(share->path, sizeof(share->path), "%s", path);
     chimera_smb_sharemode_init(&share->sharemode);
 
-    /* Initial pass: every share inherits continuous-availability from the
-     * global persistent-handles flag.  A per-share config knob will refine
-     * this later. */
-    share->continuous_availability = shared->config.persistent_handles;
+    /* A share is continuously available (and thus eligible to grant persistent
+     * handles) only when the feature is enabled AND the share opts in. */
+    share->continuous_availability = shared->config.persistent_handles &&
+        continuous_availability;
 
     pthread_mutex_lock(&shared->shares_lock);
     LL_PREPEND(shared->shares, share);
