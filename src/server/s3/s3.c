@@ -355,6 +355,7 @@ s3_server_dispatch(
     s3_request->has_uploads        = 0;
     s3_request->has_upload_id      = 0;
     s3_request->has_part_number    = 0;
+    s3_request->chunked            = 0;
     s3_request->query_upload_idlen = 0;
     s3_request->query_part_number  = 0;
     s3_request->http_request       = request;
@@ -387,6 +388,19 @@ s3_server_dispatch(
             s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
             return;
     } /* switch */
+
+    /* SigV4 streaming uploads (aws-chunked) carry the object body wrapped in
+     * chunk framing rather than as raw bytes. The sentinel lives in
+     * x-amz-content-sha256; flag the request so the PUT / UploadPart body
+     * handlers de-chunk before writing to the VFS. */
+    {
+        const char *content_sha256 = evpl_http_request_header(request, "x-amz-content-sha256");
+
+        if (content_sha256 && strncmp(content_sha256, "STREAMING-", 10) == 0) {
+            s3_request->chunked = 1;
+            s3_chunk_decoder_init(&s3_request->chunk);
+        }
+    }
 
     host_header = evpl_http_request_header(request, "Host");
 

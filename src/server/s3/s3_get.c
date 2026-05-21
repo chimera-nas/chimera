@@ -155,6 +155,7 @@ chimera_s3_get_lookup_callback(
     }
 
     chimera_s3_attach_etag(request->http_request, attr);
+    chimera_s3_attach_last_modified(request->http_request, attr);
 
     request->file_real_length = attr->va_size;
 

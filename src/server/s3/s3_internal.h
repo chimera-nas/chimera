@@ -13,6 +13,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_cred.h"
 #include "s3_cred_cache.h"
+#include "s3_chunk.h"
 
 enum chimera_s3_vfs_state {
     CHIMERA_S3_VFS_STATE_INIT,
@@ -64,6 +65,7 @@ struct chimera_s3_request {
     int                              has_uploads;
     int                              has_upload_id;
     int                              has_part_number;
+    int                              chunked;
     int                              query_upload_idlen;
     int                              query_part_number;
     char                             query_upload_id[CHIMERA_S3_UPLOAD_ID_LEN + 1];
@@ -85,6 +87,7 @@ struct chimera_s3_request {
     struct chimera_s3_request       *prev;
     struct chimera_s3_request       *next;
     struct chimera_vfs_attrs         set_attr;
+    struct s3_chunk_decoder          chunk;
     uint8_t                          bucket_fh[CHIMERA_VFS_FH_SIZE];
 
     union {
@@ -191,6 +194,28 @@ chimera_s3_format_date(
     return ret;
 
 } /* chimera_s3_format_date */
+
+/*
+ * Attach an HTTP Last-Modified header from an object's mtime. The AWS CLI
+ * (unlike boto3) requires this header on GET/HEAD responses; without it
+ * `aws s3 cp s3://...` aborts with a KeyError on 'LastModified'.
+ */
+static inline void
+chimera_s3_attach_last_modified(
+    struct evpl_http_request       *request,
+    const struct chimera_vfs_attrs *attr)
+{
+    char      buf[64];
+    struct tm tm;
+
+    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+        return;
+    }
+
+    gmtime_r(&attr->va_mtime.tv_sec, &tm);
+    strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", &tm);
+    evpl_http_request_add_header(request, "Last-Modified", buf);
+} /* chimera_s3_attach_last_modified */
 
 void
 s3_server_respond(

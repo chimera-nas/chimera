@@ -9,6 +9,10 @@ Starts chimera daemon as a subprocess and runs tests against it.
 """
 
 import argparse
+import datetime
+import hashlib
+import hmac
+import http.client
 import json
 import os
 import shutil
@@ -659,6 +663,313 @@ def test_multipart(client, bucket):
     print("multipart tests passed!")
 
 
+def _sign(key, msg):
+    return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
+
+
+def _sha256_hex(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _canonical_query(query):
+    """Replicate the server's query canonicalization: split on '&', sort, and
+    append '=' to bare keys."""
+    if not query:
+        return ''
+    params = sorted(query.split('&'))
+    return '&'.join(p if '=' in p else p + '=' for p in params)
+
+
+def streaming_put(host, port, access_key, secret_key, region, bucket, key,
+                  data, chunk_size, query=None):
+    """Perform a SigV4 streaming (aws-chunked) PUT by hand.
+
+    Mirrors what the AWS CLI / SDKs send when they default to
+    STREAMING-AWS4-HMAC-SHA256-PAYLOAD: the seed signature is computed over a
+    canonical request whose hashed-payload is the literal streaming sentinel,
+    and the body is wrapped in signed chunk framing. boto3 will not emit this
+    encoding for an in-memory body, so we build it directly to exercise the
+    server's de-chunking path. An optional raw query string (e.g. the
+    partNumber/uploadId of an UploadPart) is included in the URL and signature.
+    Returns (http_status, etag).
+    """
+    service = 's3'
+    host_header = f'{host}:{port}'
+    canonical_uri = f'/{bucket}/{key}'
+    request_target = canonical_uri + (f'?{query}' if query else '')
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    amz_date = now.strftime('%Y%m%dT%H%M%SZ')
+    date_stamp = now.strftime('%Y%m%d')
+    scope = f'{date_stamp}/{region}/{service}/aws4_request'
+
+    seed_sha = 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD'
+
+    # Split the payload into chunks; build the chunk stream and its signature
+    # chain after we have the seed signature.
+    chunks = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
+    if not chunks:
+        chunks = []  # zero-length object: only the terminating chunk
+
+    # Derive the signing key (identical to the server's derive_signing_key_v4).
+    k_date = _sign(('AWS4' + secret_key).encode('utf-8'), date_stamp)
+    k_region = hmac.new(k_date, region.encode('utf-8'), hashlib.sha256).digest()
+    k_service = hmac.new(k_region, service.encode('utf-8'), hashlib.sha256).digest()
+    signing_key = hmac.new(k_service, b'aws4_request', hashlib.sha256).digest()
+
+    # Compute the encoded content-length so it can be signed. Each data chunk
+    # is "<hexsize>;chunk-signature=<64hex>\r\n<data>\r\n"; the final chunk is
+    # "0;chunk-signature=<64hex>\r\n\r\n".
+    def chunk_overhead(size):
+        return len(f'{size:x}') + len(';chunk-signature=') + 64 + 2 + 2
+
+    content_length = sum(chunk_overhead(len(c)) + len(c) for c in chunks)
+    content_length += chunk_overhead(0)  # terminating zero chunk
+
+    headers = {
+        'content-encoding': 'aws-chunked',
+        'content-length': str(content_length),
+        'host': host_header,
+        'x-amz-content-sha256': seed_sha,
+        'x-amz-date': amz_date,
+        'x-amz-decoded-content-length': str(len(data)),
+    }
+    signed_headers = ';'.join(sorted(headers))
+    canonical_headers = ''.join(f'{n}:{headers[n]}\n' for n in sorted(headers))
+
+    canonical_request = (
+        f'PUT\n{canonical_uri}\n{_canonical_query(query)}\n{canonical_headers}\n'
+        f'{signed_headers}\n{seed_sha}'
+    )
+    string_to_sign = (
+        f'AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n'
+        f'{_sha256_hex(canonical_request.encode("utf-8"))}'
+    )
+    seed_signature = hmac.new(signing_key, string_to_sign.encode('utf-8'),
+                              hashlib.sha256).hexdigest()
+
+    authorization = (
+        f'AWS4-HMAC-SHA256 Credential={access_key}/{scope}, '
+        f'SignedHeaders={signed_headers}, Signature={seed_signature}'
+    )
+
+    # Build the chunk-signed body.
+    empty_hash = _sha256_hex(b'')
+    prev_sig = seed_signature
+    body = b''
+
+    def chunk_signature(chunk_bytes):
+        chunk_sts = (
+            f'AWS4-HMAC-SHA256-PAYLOAD\n{amz_date}\n{scope}\n{prev_sig}\n'
+            f'{empty_hash}\n{_sha256_hex(chunk_bytes)}'
+        )
+        return hmac.new(signing_key, chunk_sts.encode('utf-8'),
+                        hashlib.sha256).hexdigest()
+
+    for c in chunks:
+        sig = chunk_signature(c)
+        prev_sig = sig
+        body += f'{len(c):x};chunk-signature={sig}\r\n'.encode('utf-8')
+        body += c + b'\r\n'
+
+    final_sig = chunk_signature(b'')
+    body += f'0;chunk-signature={final_sig}\r\n\r\n'.encode('utf-8')
+
+    assert len(body) == content_length, \
+        f'content-length mismatch: declared {content_length}, body {len(body)}'
+
+    conn = http.client.HTTPConnection(host, port, timeout=30)
+    send_headers = dict(headers)
+    send_headers['Authorization'] = authorization
+    conn.request('PUT', request_target, body=body, headers=send_headers)
+    resp = conn.getresponse()
+    etag = resp.getheader('ETag')
+    resp.read()
+    conn.close()
+    return resp.status, etag
+
+
+def test_streaming(client, bucket):
+    """Test SigV4 streaming (aws-chunked) uploads.
+
+    This is the AWS CLI / SDK default upload encoding. The server must strip
+    the chunk framing before storing the object; otherwise the chunk size and
+    signature lines are written into the object and the data is silently
+    corrupted. We upload by hand and read back through boto3 to confirm the
+    stored bytes are exactly the payload.
+    """
+    print("Testing SigV4 streaming (aws-chunked) uploads...")
+
+    cases = [
+        ('streamdir/small', b'hello streaming world', 8 * 1024),
+        # Multi-chunk payload that also crosses the server's internal 128 KiB
+        # read boundary, so the decoder must resume across reads.
+        ('streamdir/multi', bytes((i * 7) & 0xff for i in range(300000)), 64 * 1024),
+        ('streamdir/empty', b'', 64 * 1024),
+    ]
+
+    for key, data, chunk_size in cases:
+        status, _ = streaming_put('localhost', 5000, 'myaccessid', 'mysecretkey',
+                                  'us-east-1', bucket, key, data, chunk_size)
+        assert status == 200, f"streaming PUT {key} returned HTTP {status}"
+
+        head = client.head_object(Bucket=bucket, Key=key)
+        assert head['ContentLength'] == len(data), \
+            f"{key}: size mismatch, expected {len(data)}, got {head['ContentLength']}"
+
+        actual = client.get_object(Bucket=bucket, Key=key)['Body'].read()
+        assert actual == data, (
+            f"{key}: content corrupted; {len(actual)} bytes stored, "
+            f"first diff at offset "
+            f"{next((i for i, (a, b) in enumerate(zip(actual, data)) if a != b), -1)}"
+        )
+        print(f"  streaming PUT {key} ({len(data)} bytes, "
+              f"{chunk_size} chunk) -> content matches")
+
+    # Multipart UploadPart also defaults to aws-chunked in the AWS CLI/SDKs for
+    # large files. Initiate via boto3, stream the parts by hand, complete via
+    # boto3, and verify the assembled object.
+    mp_key = 'streamdir/multipart'
+    part_size = 5 * 1024 * 1024  # boto3's per-part minimum for non-final parts
+    init = client.create_multipart_upload(Bucket=bucket, Key=mp_key)
+    upload_id = init['UploadId']
+    parts = []
+    expected = b''
+    for part_number in range(1, 3):
+        body = bytes([part_number]) * part_size
+        expected += body
+        query = f'partNumber={part_number}&uploadId={upload_id}'
+        status, etag = streaming_put('localhost', 5000, 'myaccessid', 'mysecretkey',
+                                     'us-east-1', bucket, mp_key, body,
+                                     64 * 1024, query=query)
+        assert status == 200, \
+            f"streaming UploadPart #{part_number} returned HTTP {status}"
+        assert etag, f"streaming UploadPart #{part_number} returned no ETag"
+        parts.append({'PartNumber': part_number, 'ETag': etag})
+        print(f"  streaming UploadPart #{part_number} ({part_size} bytes) -> {etag}")
+
+    client.complete_multipart_upload(
+        Bucket=bucket, Key=mp_key, UploadId=upload_id,
+        MultipartUpload={'Parts': parts},
+    )
+    actual = client.get_object(Bucket=bucket, Key=mp_key)['Body'].read()
+    assert actual == expected, "streaming multipart: assembled content mismatch"
+    print(f"  streaming multipart upload ({len(expected)} bytes) -> content matches")
+
+    print("streaming tests passed!")
+
+
+def test_awscli(client, bucket):
+    """Real AWS CLI (`aws s3 cp`) interop smoke test.
+
+    Drives the actual AWS CLI against the daemon to catch real-client
+    regressions that boto3 doesn't surface. Note this is NOT the de-chunking
+    test: the modern AWS CLI (v2 / CRT) precomputes payload checksums and does
+    not emit aws-chunked streaming for `cp`, so it cannot exercise the
+    de-chunking path -- that is covered by test_streaming. What this guards:
+
+      * basic object PUT and GET through the CLI,
+      * the Last-Modified response header the CLI requires for downloads
+        (boto3 tolerates its absence; the CLI aborts without it), and
+      * multipart upload + assembly with the CLI's natural, non-block-aligned
+        part sizes (which the boto3 multipart test deliberately avoids).
+
+    The CLI's parallel ranged download of large objects is a separate known
+    gap, so the large multipart object is verified via boto3 rather than a CLI
+    download.
+    """
+    aws = shutil.which('aws')
+    if not aws:
+        raise RuntimeError("aws CLI not found on PATH")
+
+    print("Testing AWS CLI (aws s3 cp) interop...")
+
+    # localhost may resolve to ::1 first; the daemon listens on IPv4 only.
+    endpoint = 'http://127.0.0.1:5000'
+    workdir = tempfile.mkdtemp(prefix='chimera_awscli_')
+    cfg_path = os.path.join(workdir, 'awsconfig')
+
+    env = os.environ.copy()
+    # In debug builds the daemon runs under ASan via LD_PRELOAD (set for the
+    # test process by the netns wrapper); the standalone `aws` binary exits
+    # non-zero under ASan, so strip it for the CLI subprocess.
+    env.pop('LD_PRELOAD', None)
+    env.update({
+        'HOME': workdir,
+        'AWS_CONFIG_FILE': cfg_path,
+        'AWS_ACCESS_KEY_ID': 'myaccessid',
+        'AWS_SECRET_ACCESS_KEY': 'mysecretkey',
+        'AWS_DEFAULT_REGION': 'us-east-1',
+        'AWS_EC2_METADATA_DISABLED': 'true',
+    })
+
+    def write_cfg(extra=''):
+        # Path-style addressing: the CLI defaults to virtual-host style, which
+        # can't work against a bare host:port endpoint.
+        with open(cfg_path, 'w') as f:
+            f.write('[default]\ns3 =\n    addressing_style = path\n' + extra)
+
+    def aws_cp(src, dst, timeout=120):
+        r = subprocess.run(
+            [aws, '--endpoint-url', endpoint,
+             '--cli-connect-timeout', '15', '--cli-read-timeout', '60',
+             's3', 'cp', src, dst],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=timeout)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"aws s3 cp {src} {dst} failed (rc={r.returncode}): "
+                f"{r.stdout.decode(errors='replace')}")
+
+    try:
+        # --- Single-object roundtrip: PUT and GET both via the CLI. Kept under
+        #     the CLI's 8 MiB multipart threshold so the download is a single
+        #     GET (exercises the Last-Modified header). ---
+        write_cfg()
+        small = os.urandom(1024 * 1024 + 7)
+        src = os.path.join(workdir, 'small.bin')
+        dst = os.path.join(workdir, 'small.out')
+        with open(src, 'wb') as f:
+            f.write(small)
+
+        aws_cp(src, f's3://{bucket}/awscli/small.bin')
+        head = client.head_object(Bucket=bucket, Key='awscli/small.bin')
+        assert head['ContentLength'] == len(small), \
+            f"size mismatch: expected {len(small)}, got {head['ContentLength']}"
+
+        aws_cp(f's3://{bucket}/awscli/small.bin', dst)
+        with open(dst, 'rb') as f:
+            assert f.read() == small, "CLI upload+download roundtrip mismatch"
+        print(f"  aws s3 cp upload+download ({len(small)} bytes) -> roundtrip matches")
+
+        # --- Multipart upload with the CLI's natural part sizes. 9,000,000
+        #     bytes at an 8 MiB chunk size splits into 8 MiB + 611,392 B; the
+        #     trailing part is not block-aligned, exercising the assembly
+        #     fallback. Verified via boto3 (the CLI's parallel ranged download
+        #     of large objects is a separate known gap). ---
+        write_cfg('    multipart_threshold = 8MB\n    multipart_chunksize = 8MB\n')
+        big = os.urandom(9_000_000)
+        bsrc = os.path.join(workdir, 'big.bin')
+        with open(bsrc, 'wb') as f:
+            f.write(big)
+
+        aws_cp(bsrc, f's3://{bucket}/awscli/big.bin')
+        head = client.head_object(Bucket=bucket, Key='awscli/big.bin')
+        assert head['ContentLength'] == len(big), \
+            f"multipart size mismatch: expected {len(big)}, got {head['ContentLength']}"
+        got = client.get_object(Bucket=bucket, Key='awscli/big.bin')['Body'].read()
+        assert got == big, (
+            f"multipart upload content mismatch: {len(got)} vs {len(big)} bytes, "
+            f"first diff @ "
+            f"{next((i for i, (a, b) in enumerate(zip(got, big)) if a != b), -1)}")
+        print(f"  aws s3 cp multipart upload ({len(big)} bytes, unaligned parts) "
+              f"-> content matches")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    print("AWS CLI tests passed!")
+
+
 TESTS = {
     'put': test_put,
     'get': test_get,
@@ -666,6 +977,8 @@ TESTS = {
     'delete': test_delete,
     'list': test_list,
     'multipart': test_multipart,
+    'streaming': test_streaming,
+    'awscli': test_awscli,
 }
 
 
