@@ -252,12 +252,6 @@ struct demofs_inode {
     /* Directory only: parent for ".." resolution (also persisted in dinode). */
     uint64_t                    parent_inum;
     uint32_t                    parent_gen;
-
-    /* TODO(phase 1c): extents move into the b+tree; until then regular
-     * files keep their extents in this in-memory rb-tree. */
-    struct {
-        struct rb_tree extents;
-    } file;
 };
 
 struct demofs_inode_shard {
@@ -381,6 +375,7 @@ struct demofs_bt_node_hdr {
     uint32_t free_end;     /* leaf heap top (records occupy [free_end, capacity)) */
     uint32_t reserved;
     uint64_t next_leaf;    /* leaf only: bptr of next leaf in key order (0 = none) */
+    uint64_t prev_leaf;    /* leaf only: bptr of prev leaf in key order (0 = none) */
 };
 
 struct demofs_bt_islot {          /* interior slot, 24 B */
@@ -1289,6 +1284,7 @@ demofs_bt_node_init(
     h->free_end  = capacity;
     h->reserved  = 0;
     h->next_leaf = 0;
+    h->prev_leaf = 0;
 } /* demofs_bt_node_init */
 
 /* Free bytes available in a leaf for one more (slot + record). */
@@ -1447,6 +1443,7 @@ demofs_bt_leaf_split(
     void                       *buf,
     uint32_t                    base,
     uint32_t                    cap,
+    uint64_t                    self_bptr,
     int                         insert_idx,
     const struct demofs_bt_key *nkey,
     const void                 *nrec,
@@ -1469,7 +1466,7 @@ demofs_bt_leaf_split(
     int                        i, oi, split_i;
     struct demofs_block       *right;
     void                      *rbuf;
-    uint64_t                   old_next;
+    uint64_t                   old_next, old_prev;
 
     items   = malloc(total * sizeof(*items));
     scratch = malloc(cap + nreclen);
@@ -1508,11 +1505,13 @@ demofs_bt_leaf_split(
     }
 
     old_next = h->next_leaf;
+    old_prev = h->prev_leaf;
 
     right = demofs_bt_alloc_node(thread, txn, 0, sep_bptr);
     rbuf  = right->buffer;
 
-    /* Rebuild the left node in place from scratch (no aliasing). */
+    /* Rebuild the left node in place from scratch (no aliasing).  node_init
+     * clears the leaf links, so they are restored explicitly below. */
     demofs_bt_node_init(buf, base, cap, 0);
     for (i = 0; i < split_i; i++) {
         demofs_bt_leaf_append(buf, base, &items[i].key,
@@ -1523,8 +1522,19 @@ demofs_bt_leaf_split(
                               scratch + items[i].scratch_off, items[i].len);
     }
 
+    /* Splice the new right sibling into the doubly-linked leaf chain:
+     *   self <-> right <-> old_next
+     * (self keeps its own bptr; for the embedded-root-grow case the caller
+     * fixes right->prev_leaf to the new left block afterward.) */
     demofs_bt_hdr(rbuf, 0)->next_leaf = old_next;
+    demofs_bt_hdr(rbuf, 0)->prev_leaf = self_bptr;
     h->next_leaf                      = *sep_bptr;
+    h->prev_leaf                      = old_prev;
+
+    if (old_next) {
+        void *nbuf = demofs_bt_node_for_write(thread, txn, old_next);
+        demofs_bt_hdr(nbuf, 0)->prev_leaf = *sep_bptr;
+    }
 
     *sep_key = items[split_i].key;
 
@@ -1544,6 +1554,7 @@ demofs_bt_leaf_insert(
     void                       *buf,
     uint32_t                    base,
     uint32_t                    cap,
+    uint64_t                    self_bptr,
     const struct demofs_bt_key *key,
     const void                 *rec,
     uint32_t                    reclen,
@@ -1571,8 +1582,8 @@ demofs_bt_leaf_insert(
         return 0;
     }
 
-    demofs_bt_leaf_split(thread, txn, buf, base, cap, idx, key, rec, reclen,
-                         sep_key, sep_bptr);
+    demofs_bt_leaf_split(thread, txn, buf, base, cap, self_bptr, idx, key, rec,
+                         reclen, sep_key, sep_bptr);
     return 1;
 } /* demofs_bt_leaf_insert */
 
@@ -1656,6 +1667,7 @@ demofs_bt_insert_rec(
     void                       *buf,
     uint32_t                    base,
     uint32_t                    cap,
+    uint64_t                    self_bptr,
     const struct demofs_bt_key *key,
     const void                 *rec,
     uint32_t                    reclen,
@@ -1671,8 +1683,8 @@ demofs_bt_insert_rec(
     uint64_t                   cbptr;
 
     if (h->level == 0) {
-        return demofs_bt_leaf_insert(thread, txn, buf, base, cap, key, rec, reclen,
-                                     sep_key, sep_bptr);
+        return demofs_bt_leaf_insert(thread, txn, buf, base, cap, self_bptr, key,
+                                     rec, reclen, sep_key, sep_bptr);
     }
 
     ci         = demofs_bt_interior_search(buf, base, key);
@@ -1681,7 +1693,7 @@ demofs_bt_insert_rec(
     child_buf  = demofs_bt_node_for_write(thread, txn, child_bptr);
 
     csplit = demofs_bt_insert_rec(thread, txn, child_buf, 0, DEMOFS_BT_NODE_CAP,
-                                  key, rec, reclen, &csep, &cbptr);
+                                  child_bptr, key, rec, reclen, &csep, &cbptr);
     if (!csplit) {
         return 0;
     }
@@ -1709,7 +1721,8 @@ demofs_bt_insert(
     int                  split;
 
     split = demofs_bt_insert_rec(thread, txn, root, DEMOFS_BT_ROOT_BASE,
-                                 DEMOFS_BT_ROOT_CAP, key, rec, reclen, &sep, &sep_bptr);
+                                 DEMOFS_BT_ROOT_CAP, inode->inum, key, rec, reclen,
+                                 &sep, &sep_bptr);
     if (!split) {
         return;
     }
@@ -1747,6 +1760,14 @@ demofs_bt_insert(
         isl[0].child = left_bptr;
         isl[1].key   = sep;
         isl[1].child = sep_bptr;
+
+        if (old_level == 0) {
+            /* The lower half migrated from the (now interior) embedded root
+             * into the new left block, so the right sibling's back-link must
+             * point at the left block rather than the inode's own bptr. */
+            void *rbuf = demofs_bt_node_for_write(thread, txn, sep_bptr);
+            demofs_bt_hdr(rbuf, 0)->prev_leaf = left_bptr;
+        }
     }
 } /* demofs_bt_insert */
 
@@ -1920,35 +1941,33 @@ demofs_bt_lookup_ge(
             next_leaf = h->next_leaf;
             urcu_memb_read_unlock();
 
-            if (next_leaf == 0) {
-                return -1;     /* no key >= search */
-            }
-            /* Successor is the first slot of the next leaf. */
-            bptr     = next_leaf;
-            use_root = 0;
-            {
+            /* The successor is the first slot of the nearest non-empty leaf to
+             * the right.  Lazy deletion can leave emptied leaves in the chain,
+             * so walk next_leaf until a populated leaf is found. */
+            while (next_leaf) {
                 uint32_t cdev;
-                uint64_t coff = sm_inum_to_device_offset(thread->shared->space_map, bptr, &cdev);
+                uint64_t coff = sm_inum_to_device_offset(thread->shared->space_map, next_leaf, &cdev);
 
                 urcu_memb_read_lock();
                 blk = demofs_block_lookup_rcu(thread, cdev, coff);
                 chimera_demofs_abort_if(!blk, "b+tree read: next leaf not resident");
                 h = demofs_bt_hdr(blk->buffer, 0);
-                if (h->nitems == 0) {
+                if (h->nitems > 0) {
+                    struct demofs_bt_lslot *sl  = demofs_bt_lslots(blk->buffer, 0);
+                    uint32_t                len = sl[0].len;
+                    *r_key = sl[0].key;
+                    if (len > out_cap) {
+                        len = out_cap;
+                    }
+                    memcpy(out, (char *) blk->buffer + sl[0].off, len);
+                    len = sl[0].len;
                     urcu_memb_read_unlock();
-                    return -1;
+                    return (int) len;
                 }
-                struct demofs_bt_lslot *sl  = demofs_bt_lslots(blk->buffer, 0);
-                uint32_t                len = sl[0].len;
-                *r_key = sl[0].key;
-                if (len > out_cap) {
-                    len = out_cap;
-                }
-                memcpy(out, (char *) blk->buffer + sl[0].off, len);
-                len = sl[0].len;
+                next_leaf = h->next_leaf;
                 urcu_memb_read_unlock();
-                return (int) len;
             }
+            return -1;     /* no key >= search */
         } else {
             int ci = demofs_bt_interior_search(buf, base, key);
             bptr = demofs_bt_islots(buf, base)[ci].child;
@@ -1999,20 +2018,12 @@ demofs_bt_lookup_le(
         h    = demofs_bt_hdr(buf, base);
 
         if (h->level == 0) {
-            int exact;
-            int idx = demofs_bt_leaf_search(buf, base, key, &exact);
-            int fidx;
+            int      exact = 0;
+            int      idx   = h->nitems ? demofs_bt_leaf_search(buf, base, key, &exact) : 0;
+            int      fidx  = h->nitems ? (exact ? idx : idx - 1) : -1;
+            uint64_t prev;
 
-            if (h->nitems == 0) {
-                urcu_memb_read_unlock();
-                return -1;
-            }
-            fidx = exact ? idx : idx - 1;
-            if (fidx < 0) {
-                urcu_memb_read_unlock();
-                return -1;     /* no key <= search in this (leftmost) leaf */
-            }
-            {
+            if (fidx >= 0) {
                 struct demofs_bt_lslot *sl  = demofs_bt_lslots(buf, base);
                 uint32_t                len = sl[fidx].len;
 
@@ -2025,6 +2036,45 @@ demofs_bt_lookup_le(
                 urcu_memb_read_unlock();
                 return (int) len;
             }
+
+            /* No key <= search in this leaf.  Lazy deletion can leave a
+             * parent separator pointing below a leaf's true minimum (or at an
+             * emptied leaf), so the floor may be the last key of a leaf to the
+             * left.  Walk the prev chain, skipping empties. */
+            prev = h->prev_leaf;
+            urcu_memb_read_unlock();
+
+            while (prev) {
+                uint32_t                   pdev;
+                uint64_t                   poff;
+                struct demofs_block       *pblk;
+                struct demofs_bt_node_hdr *ph;
+
+                poff = sm_inum_to_device_offset(thread->shared->space_map, prev, &pdev);
+
+                urcu_memb_read_lock();
+                pblk = demofs_block_lookup_rcu(thread, pdev, poff);
+                chimera_demofs_abort_if(!pblk, "b+tree read: prev leaf not resident");
+                ph = demofs_bt_hdr(pblk->buffer, 0);
+
+                if (ph->nitems > 0) {
+                    struct demofs_bt_lslot *sl  = demofs_bt_lslots(pblk->buffer, 0);
+                    int                     li  = ph->nitems - 1;
+                    uint32_t                len = sl[li].len;
+
+                    *r_key = sl[li].key;
+                    if (len > out_cap) {
+                        len = out_cap;
+                    }
+                    memcpy(out, (char *) pblk->buffer + sl[li].off, len);
+                    len = sl[li].len;
+                    urcu_memb_read_unlock();
+                    return (int) len;
+                }
+                prev = ph->prev_leaf;
+                urcu_memb_read_unlock();
+            }
+            return -1;
         } else {
             int ci = demofs_bt_interior_search(buf, base, key);
             bptr = demofs_bt_islots(buf, base)[ci].child;
@@ -2163,6 +2213,113 @@ demofs_symlink_get(
 
     return demofs_bt_lookup_exact(thread, inode, &key, out, cap);
 } /* demofs_symlink_get */
+
+/* ------------------------------------------------------------------ */
+/* File extents over the inode b+tree                                  */
+/* ------------------------------------------------------------------ */
+
+static inline struct demofs_bt_key
+demofs_extent_key(uint64_t file_offset)
+{
+    struct demofs_bt_key k = { .type = DEMOFS_REC_EXTENT, .subkey = file_offset };
+
+    return k;
+} /* demofs_extent_key */
+
+static void
+demofs_ext_insert(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *inode,
+    uint64_t              file_offset,
+    uint64_t              length,
+    uint32_t              device_id,
+    uint64_t              device_offset)
+{
+    struct demofs_extent_rec rec = {
+        .length        = length,
+        .device_id     = device_id,
+        .pad           = 0,
+        .device_offset = device_offset,
+    };
+    struct demofs_bt_key     key = demofs_extent_key(file_offset);
+
+    demofs_bt_insert(thread, txn, inode, &key, &rec, sizeof(rec));
+} /* demofs_ext_insert */
+
+static int
+demofs_ext_remove(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *inode,
+    uint64_t              file_offset)
+{
+    struct demofs_bt_key key = demofs_extent_key(file_offset);
+
+    return demofs_bt_remove(thread, txn, inode, &key);
+} /* demofs_ext_remove */
+
+/* Fill *out with the extent whose file_offset is the largest <= the given
+ * offset; returns 1 if found, 0 otherwise.  The node/next/buffer fields of
+ * *out are left untouched (callers only read the on-disk fields). */
+static int
+demofs_ext_floor(
+    struct demofs_thread *thread,
+    struct demofs_inode  *inode,
+    uint64_t              file_offset,
+    struct demofs_extent *out)
+{
+    struct demofs_bt_key     key = demofs_extent_key(file_offset);
+    struct demofs_bt_key     found;
+    struct demofs_extent_rec rec;
+    int                      len;
+
+    len = demofs_bt_lookup_le(thread, inode, &key, &found, &rec, sizeof(rec));
+    if (len < 0 || found.type != DEMOFS_REC_EXTENT) {
+        return 0;
+    }
+    out->file_offset   = found.subkey;
+    out->length        = (uint32_t) rec.length;
+    out->device_id     = rec.device_id;
+    out->device_offset = rec.device_offset;
+    return 1;
+} /* demofs_ext_floor */
+
+/* Fill *out with the extent whose file_offset is the smallest >= the given
+ * offset; returns 1 if found, 0 otherwise. */
+static int
+demofs_ext_ceil(
+    struct demofs_thread *thread,
+    struct demofs_inode  *inode,
+    uint64_t              file_offset,
+    struct demofs_extent *out)
+{
+    struct demofs_bt_key     key = demofs_extent_key(file_offset);
+    struct demofs_bt_key     found;
+    struct demofs_extent_rec rec;
+    int                      len;
+
+    len = demofs_bt_lookup_ge(thread, inode, &key, &found, &rec, sizeof(rec));
+    if (len < 0 || found.type != DEMOFS_REC_EXTENT) {
+        return 0;
+    }
+    out->file_offset   = found.subkey;
+    out->length        = (uint32_t) rec.length;
+    out->device_id     = rec.device_id;
+    out->device_offset = rec.device_offset;
+    return 1;
+} /* demofs_ext_ceil */
+
+/* Next extent strictly after after_file_offset. */
+static inline int
+demofs_ext_next(
+    struct demofs_thread *thread,
+    struct demofs_inode  *inode,
+    uint64_t              after_file_offset,
+    struct demofs_extent *out)
+{
+    return demofs_ext_ceil(thread, inode, after_file_offset + 1, out);
+} /* demofs_ext_next */
 
 static inline struct demofs_extent *
 demofs_extent_alloc(struct demofs_thread *thread)
@@ -2318,12 +2475,12 @@ demofs_inode_free(
     struct demofs_thread *thread,
     struct demofs_inode  *inode)
 {
-    if (S_ISREG(inode->mode)) {
-        rb_tree_destroy(&inode->file.extents, demofs_extent_release, thread);
-        rb_tree_init(&inode->file.extents);
-    }
-    /* Directory / symlink contents live in the inode's b+tree blocks, which
-     * are leaked for now (no space reclaim yet). */
+    (void) thread;
+
+    /* All inode contents (dirents, extents, symlink target) live in the
+     * inode's b+tree blocks, which are leaked for now (no space reclaim
+     * yet); the device ranges backing file extents are returned to the
+     * space map by truncate/deallocate before this point. */
 
     inode->gen++;
     inode->refcnt = 0;
@@ -3099,14 +3256,8 @@ demofs_inode_cache_release(
 
     (void) private_data;
 
-    /* Process is exiting; thread slab allocators are already gone, so the
-     * extent release callback no-ops with a NULL thread.  Directory/symlink
-     * b+tree blocks are freed via the block cache.  We still own and must
-     * free the inode struct itself (heap-allocated). */
-    if (S_ISREG(inode->mode)) {
-        rb_tree_destroy(&inode->file.extents, demofs_extent_release, NULL);
-    }
-
+    /* All inode contents live in b+tree blocks freed via the block cache;
+     * we only own and must free the inode struct itself (heap-allocated). */
     free(inode);
 } /* demofs_inode_cache_release */
 
@@ -3496,26 +3647,25 @@ demofs_setattr_inode_cb(
         request->setattr.set_attr->va_size < inode->size) {
 
         uint64_t              new_size = request->setattr.set_attr->va_size;
-        struct demofs_extent *extent, *next_extent;
+        struct demofs_extent  ext_buf;
+        struct demofs_extent *extent = &ext_buf;
+        int                   have;
 
-        rb_tree_query_floor(&inode->file.extents, new_size, file_offset, extent);
-
-        if (!extent) {
-            rb_tree_first(&inode->file.extents, extent);
+        have = demofs_ext_floor(thread, inode, new_size, extent);
+        if (!have) {
+            have = demofs_ext_ceil(thread, inode, 0, extent);
         }
 
-        while (extent) {
+        while (have) {
             uint64_t extent_start = extent->file_offset;
             uint64_t extent_end   = extent_start + extent->length;
-
-            next_extent = rb_tree_next(&inode->file.extents, extent);
+            uint64_t cur_fo       = extent->file_offset;
 
             if (extent_start >= new_size) {
                 demofs_thread_free_space(thread, extent->device_id,
                                          extent->device_offset,
                                          SM_ALIGN_UP(extent->length));
-                rb_tree_remove(&inode->file.extents, &extent->node);
-                demofs_extent_free(thread, extent);
+                demofs_ext_remove(thread, p->txn, inode, cur_fo);
             } else if (extent_end > new_size) {
                 uint64_t old_aligned = SM_ALIGN_UP(extent->length);
                 uint64_t new_logical = new_size - extent_start;
@@ -3526,10 +3676,13 @@ demofs_setattr_inode_cb(
                                              extent->device_offset + new_aligned,
                                              old_aligned - new_aligned);
                 }
-                extent->length = new_logical;
+                /* Trim in place by rewriting the record with the new length. */
+                demofs_ext_remove(thread, p->txn, inode, cur_fo);
+                demofs_ext_insert(thread, p->txn, inode, cur_fo, new_logical,
+                                  extent->device_id, extent->device_offset);
             }
 
-            extent = next_extent;
+            have = demofs_ext_next(thread, inode, cur_fo, extent);
         }
     }
 
@@ -4527,7 +4680,6 @@ demofs_open_at_alloc_cb(
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
 
-    rb_tree_init(&inode->file.extents);
     demofs_apply_attrs(inode, request->open_at.set_attr);
 
     demofs_dir_insert(thread, p->txn, parent, request->open_at.name_hash,
@@ -4640,8 +4792,6 @@ demofs_create_unlinked_alloc_cb(
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
-
-    rb_tree_init(&inode->file.extents);
 
     demofs_apply_attrs(inode, request->create_unlinked.set_attr);
 
@@ -4806,7 +4956,9 @@ demofs_read_inode_cb(
     struct demofs_thread          *thread         = demofs_private->thread;
     struct demofs_shared          *shared         = thread->shared;
     struct evpl                   *evpl           = thread->evpl;
-    struct demofs_extent          *extent;
+    struct demofs_extent           ext_buf;
+    struct demofs_extent          *extent = &ext_buf;
+    int                            have;
     uint64_t                       offset, length, read_offset, read_left;
     uint64_t                       extent_end, overlap_start, overlap_length;
     uint64_t                       aligned_offset, aligned_length, chunk;
@@ -4860,17 +5012,17 @@ demofs_read_inode_cb(
     evpl_iovec_cursor_init(&cursor, request->read.iov, request->read.r_niov);
 
     // Find first extent that could contain our offset
-    rb_tree_query_floor(&inode->file.extents, read_offset, file_offset, extent);
+    have = demofs_ext_floor(thread, inode, read_offset, extent);
 
-    if (!extent) {
+    if (!have) {
         /* No extent at or before read_offset - get the first extent
          * in case there's one that starts within our range */
-        rb_tree_first(&inode->file.extents, extent);
+        have = demofs_ext_ceil(thread, inode, 0, extent);
     } else if (extent->file_offset + extent->length <= read_offset) {
-        extent = rb_tree_next(&inode->file.extents, extent);
+        have = demofs_ext_next(thread, inode, extent->file_offset, extent);
     }
 
-    while (read_left && extent && extent->file_offset < aligned_offset + aligned_length) {
+    while (read_left && have && extent->file_offset < aligned_offset + aligned_length) {
 
         if (read_offset < extent->file_offset) {
             chunk = extent->file_offset - read_offset;
@@ -4949,7 +5101,7 @@ demofs_read_inode_cb(
             read_left   -= chunk;
         }
 
-        extent = rb_tree_next(&inode->file.extents, extent);
+        have = demofs_ext_next(thread, inode, extent->file_offset, extent);
     }
 
     if (read_left) {
@@ -5180,20 +5332,20 @@ demofs_write_phase2(
 
 } /* demofs_write_phase2 */
 
-// Find extent covering a specific file offset
+// Find the extent covering a specific file offset; fills *buf and returns
+// it, or NULL if no extent covers the offset.
 static struct demofs_extent *
 demofs_find_extent_at(
-    struct demofs_inode *inode,
-    uint64_t             file_offset)
+    struct demofs_thread *thread,
+    struct demofs_inode  *inode,
+    uint64_t              file_offset,
+    struct demofs_extent *buf)
 {
-    struct demofs_extent *extent;
+    if (demofs_ext_floor(thread, inode, file_offset, buf)) {
+        uint64_t extent_end = buf->file_offset + buf->length;
 
-    rb_tree_query_floor(&inode->file.extents, file_offset, file_offset, extent);
-
-    if (extent) {
-        uint64_t extent_end = extent->file_offset + extent->length;
-        if (file_offset >= extent->file_offset && file_offset < extent_end) {
-            return extent;
+        if (file_offset >= buf->file_offset && file_offset < extent_end) {
+            return buf;
         }
     }
 
@@ -5211,7 +5363,10 @@ demofs_write_inode_cb(
     struct demofs_thread          *thread         = demofs_private->thread;
     struct demofs_shared          *shared         = thread->shared;
     struct evpl                   *evpl           = thread->evpl;
-    struct demofs_extent          *extent, *next_extent, *new_extent;
+    struct demofs_extent           ext_buf;
+    struct demofs_extent          *extent = &ext_buf;
+    struct demofs_extent           prefix_buf, suffix_buf;
+    int                            have;
     uint64_t                       write_start = request->write.offset;
     uint64_t                       write_end   = write_start + request->write.length;
     uint64_t                       aligned_start, aligned_end, aligned_length;
@@ -5267,7 +5422,7 @@ demofs_write_inode_cb(
 
     if (prefix_len > 0) {
         // Check if there's an existing extent covering the prefix region
-        prefix_extent = demofs_find_extent_at(inode, aligned_start);
+        prefix_extent = demofs_find_extent_at(thread, inode, aligned_start, &prefix_buf);
         if (prefix_extent) {
             uint64_t extent_end = prefix_extent->file_offset + prefix_extent->length;
 
@@ -5293,7 +5448,7 @@ demofs_write_inode_cb(
     if (suffix_len > 0) {
         // Check if there's an existing extent covering the suffix region
         // The suffix starts at write_end
-        suffix_extent = demofs_find_extent_at(inode, write_end);
+        suffix_extent = demofs_find_extent_at(thread, inode, write_end, &suffix_buf);
         if (suffix_extent) {
             // The block containing write_end
             uint64_t suffix_block = write_end & ~4095ULL;
@@ -5332,81 +5487,64 @@ demofs_write_inode_cb(
     }
 
     // Remove/trim extents that overlap with the aligned write region
-    rb_tree_query_floor(&inode->file.extents, aligned_start, file_offset, extent);
-
-    if (!extent) {
+    have = demofs_ext_floor(thread, inode, aligned_start, extent);
+    if (!have) {
         /* No extent at or before aligned_start - get the first extent
          * in case there's one that starts within our write range */
-        rb_tree_first(&inode->file.extents, extent);
+        have = demofs_ext_ceil(thread, inode, 0, extent);
     }
 
-    while (extent) {
+    while (have) {
+        uint64_t cur_fo = extent->file_offset;
+
         extent_start = extent->file_offset;
         extent_end   = extent_start + extent->length;
-
-        next_extent = rb_tree_next(&inode->file.extents, extent);
 
         if (extent_start >= aligned_end) {
             break;
         }
 
-        // Check if extent is completely inside aligned region - remove it
         if (extent_start >= aligned_start && extent_end <= aligned_end) {
-            rb_tree_remove(&inode->file.extents, &extent->node);
-            demofs_extent_free(thread, extent);
-            extent = next_extent;
-            continue;
-        }
+            // Completely inside the aligned region - remove it.
+            demofs_ext_remove(thread, demofs_private->txn, inode, cur_fo);
+        } else if (extent_start < aligned_start && extent_end > aligned_end) {
+            // Spans the whole region - split into a before part (trimmed)
+            // and an after part, then we're done (extents are disjoint).
+            uint64_t after_shift = aligned_end - extent_start;
 
-        // Check if extent completely spans the write region - need to split
-        if (extent_start < aligned_start && extent_end > aligned_end) {
-            // Create new extent for the portion after aligned_end
-            struct demofs_extent *after_extent = demofs_extent_alloc(thread);
-            uint64_t              after_shift  = aligned_end - extent_start;
-
-            after_extent->device_id     = extent->device_id;
-            after_extent->device_offset = extent->device_offset + after_shift;
-            after_extent->file_offset   = aligned_end;
-            after_extent->length        = extent_end - aligned_end;
-            after_extent->buffer        = NULL;
-
-            rb_tree_insert(&inode->file.extents, file_offset, after_extent);
-
-            // Trim original extent to end at aligned_start
-            extent->length = aligned_start - extent_start;
+            demofs_ext_insert(thread, demofs_private->txn, inode, aligned_end,
+                              extent_end - aligned_end, extent->device_id,
+                              extent->device_offset + after_shift);
+            demofs_ext_remove(thread, demofs_private->txn, inode, cur_fo);
+            demofs_ext_insert(thread, demofs_private->txn, inode, cur_fo,
+                              aligned_start - extent_start, extent->device_id,
+                              extent->device_offset);
+            break;
         } else if (extent_start < aligned_start && extent_end > aligned_start) {
-            // Trim extent that extends before aligned_start AND overlaps
-            extent->length = aligned_start - extent_start;
+            // Overlaps the left edge - trim to end at aligned_start
+            // (file_offset key unchanged).
+            demofs_ext_remove(thread, demofs_private->txn, inode, cur_fo);
+            demofs_ext_insert(thread, demofs_private->txn, inode, cur_fo,
+                              aligned_start - extent_start, extent->device_id,
+                              extent->device_offset);
         } else if (extent_start < aligned_end && extent_end > aligned_end) {
-            // Trim extent that starts within write region but extends past.
-            // Must remove/re-insert because file_offset is the rb-tree key.
+            // Starts within the write region but extends past - move its
+            // front to aligned_end (the key changes), then we're done.
             uint64_t shift = aligned_end - extent_start;
 
-            rb_tree_remove(&inode->file.extents, &extent->node);
-
-            extent->file_offset    = aligned_end;
-            extent->device_offset += shift;
-            extent->length        -= shift;
-            if (extent->buffer) {
-                extent->buffer = (char *) extent->buffer + shift;
-            }
-
-            rb_tree_insert(&inode->file.extents, file_offset, extent);
+            demofs_ext_remove(thread, demofs_private->txn, inode, cur_fo);
+            demofs_ext_insert(thread, demofs_private->txn, inode, aligned_end,
+                              extent_end - aligned_end, extent->device_id,
+                              extent->device_offset + shift);
+            break;
         }
 
-        extent = next_extent;
+        have = demofs_ext_next(thread, inode, cur_fo, extent);
     }
 
     // Create new extent for the aligned write
-    new_extent = demofs_extent_alloc(thread);
-
-    new_extent->device_id     = device_id;
-    new_extent->device_offset = device_offset;
-    new_extent->file_offset   = aligned_start;
-    new_extent->length        = aligned_length;
-    new_extent->buffer        = NULL;
-
-    rb_tree_insert(&inode->file.extents, file_offset, new_extent);
+    demofs_ext_insert(thread, demofs_private->txn, inode, aligned_start,
+                      aligned_length, device_id, device_offset);
 
     // Update inode metadata
     if (inode->size < write_end) {
@@ -5544,29 +5682,28 @@ demofs_allocate_inode_cb(
         /* DEALLOCATE: punch hole in [offset, offset+length) */
         uint64_t              hole_start = request->allocate.offset;
         uint64_t              hole_end   = hole_start + request->allocate.length;
-        struct demofs_extent *extent, *next_extent;
+        struct demofs_extent  ext_buf;
+        struct demofs_extent *extent = &ext_buf;
+        int                   have;
 
         if (hole_end > inode->size) {
             hole_end = inode->size;
         }
 
         if (hole_start < hole_end) {
-            rb_tree_query_floor(&inode->file.extents, hole_start, file_offset,
-                                extent);
-
-            if (!extent) {
-                rb_tree_first(&inode->file.extents, extent);
+            have = demofs_ext_floor(thread, inode, hole_start, extent);
+            if (!have) {
+                have = demofs_ext_ceil(thread, inode, 0, extent);
             }
 
-            while (extent) {
+            while (have) {
                 uint64_t extent_start = extent->file_offset;
                 uint64_t extent_end   = extent_start + extent->length;
-
-                next_extent = rb_tree_next(&inode->file.extents, extent);
+                uint64_t cur_fo       = extent_start;
 
                 /* Skip extents entirely before hole */
                 if (extent_end <= hole_start) {
-                    extent = next_extent;
+                    have = demofs_ext_next(thread, inode, cur_fo, extent);
                     continue;
                 }
 
@@ -5582,51 +5719,38 @@ demofs_allocate_inode_cb(
                     demofs_thread_free_space(thread, extent->device_id,
                                              extent->device_offset,
                                              SM_ALIGN_UP(extent->length));
-                    rb_tree_remove(&inode->file.extents, &extent->node);
-                    demofs_extent_free(thread, extent);
+                    demofs_ext_remove(thread, p->txn, inode, cur_fo);
                 } else if (extent_start < hole_start &&
                            extent_end > hole_end) {
-                    /* Extent spans the entire hole - split it */
-                    struct demofs_extent *after_extent =
-                        demofs_extent_alloc(thread);
-                    uint64_t              after_shift = hole_end - extent_start;
+                    /* Extent spans the entire hole - split it. */
+                    uint64_t after_shift = hole_end - extent_start;
 
-                    after_extent->device_id     = extent->device_id;
-                    after_extent->device_offset = extent->device_offset +
-                        after_shift;
-                    after_extent->file_offset = hole_end;
-                    after_extent->length      = extent_end - hole_end;
-                    after_extent->buffer      = NULL;
-
-                    rb_tree_insert(&inode->file.extents, file_offset,
-                                   after_extent);
-
-                    /* Trim original extent to end at hole_start */
-                    extent->length = hole_start - extent_start;
+                    demofs_ext_insert(thread, p->txn, inode, hole_end,
+                                      extent_end - hole_end, extent->device_id,
+                                      extent->device_offset + after_shift);
+                    demofs_ext_remove(thread, p->txn, inode, cur_fo);
+                    demofs_ext_insert(thread, p->txn, inode, cur_fo,
+                                      hole_start - extent_start, extent->device_id,
+                                      extent->device_offset);
+                    break;
                 } else if (extent_start < hole_start) {
-                    /* Extent overlaps start of hole - trim end */
-                    extent->length = hole_start - extent_start;
+                    /* Extent overlaps start of hole - trim end. */
+                    demofs_ext_remove(thread, p->txn, inode, cur_fo);
+                    demofs_ext_insert(thread, p->txn, inode, cur_fo,
+                                      hole_start - extent_start, extent->device_id,
+                                      extent->device_offset);
                 } else {
-                    /* Extent overlaps end of hole - trim start.
-                     * Must remove/re-insert because file_offset is
-                     * the rb-tree key. */
+                    /* Extent overlaps end of hole - trim start (key moves). */
                     uint64_t shift = hole_end - extent_start;
 
-                    rb_tree_remove(&inode->file.extents, &extent->node);
-
-                    extent->file_offset    = hole_end;
-                    extent->device_offset += shift;
-                    extent->length        -= shift;
-
-                    if (extent->buffer) {
-                        extent->buffer = (char *) extent->buffer + shift;
-                    }
-
-                    rb_tree_insert(&inode->file.extents, file_offset,
-                                   extent);
+                    demofs_ext_remove(thread, p->txn, inode, cur_fo);
+                    demofs_ext_insert(thread, p->txn, inode, hole_end,
+                                      extent_end - hole_end, extent->device_id,
+                                      extent->device_offset + shift);
+                    break;
                 }
 
-                extent = next_extent;
+                have = demofs_ext_next(thread, inode, cur_fo, extent);
             }
 
             inode->space_used = (inode->size + 4095) & ~4095;
@@ -5680,6 +5804,7 @@ demofs_seek_inode_cb(
 {
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
     uint64_t                       offset  = request->seek.offset;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -5696,20 +5821,22 @@ demofs_seek_inode_cb(
 
     if (request->seek.what == 0) {
         /* SEEK_DATA: find first extent covering or after offset */
-        struct demofs_extent *extent;
+        struct demofs_extent  ext_buf;
+        struct demofs_extent *extent = &ext_buf;
+        int                   have;
 
-        rb_tree_query_floor(&inode->file.extents, offset, file_offset, extent);
+        have = demofs_ext_floor(thread, inode, offset, extent);
 
-        if (extent) {
+        if (have) {
             uint64_t extent_end = extent->file_offset + extent->length;
             if (extent_end <= offset) {
-                extent = rb_tree_next(&inode->file.extents, extent);
+                have = demofs_ext_next(thread, inode, extent->file_offset, extent);
             }
         } else {
-            rb_tree_first(&inode->file.extents, extent);
+            have = demofs_ext_ceil(thread, inode, 0, extent);
         }
 
-        while (extent) {
+        while (have) {
             uint64_t extent_end = extent->file_offset + extent->length;
 
             if (extent_end > offset) {
@@ -5720,7 +5847,7 @@ demofs_seek_inode_cb(
                 return;
             }
 
-            extent = rb_tree_next(&inode->file.extents, extent);
+            have = demofs_ext_next(thread, inode, extent->file_offset, extent);
         }
 
         request->seek.r_eof    = 1;
@@ -5729,25 +5856,27 @@ demofs_seek_inode_cb(
         return;
     } else {
         /* SEEK_HOLE: find first gap from offset forward */
-        struct demofs_extent *extent;
+        struct demofs_extent  ext_buf;
+        struct demofs_extent *extent = &ext_buf;
+        int                   have;
         uint64_t              current_pos = offset;
 
-        rb_tree_query_floor(&inode->file.extents, offset, file_offset, extent);
+        have = demofs_ext_floor(thread, inode, offset, extent);
 
-        if (extent) {
+        if (have) {
             uint64_t extent_end = extent->file_offset + extent->length;
             if (extent_end <= offset) {
-                extent = rb_tree_next(&inode->file.extents, extent);
+                have = demofs_ext_next(thread, inode, extent->file_offset, extent);
             }
         } else {
-            rb_tree_first(&inode->file.extents, extent);
+            have = demofs_ext_ceil(thread, inode, 0, extent);
         }
 
-        while (extent) {
+        while (have) {
             uint64_t extent_end = extent->file_offset + extent->length;
 
             if (extent_end <= current_pos) {
-                extent = rb_tree_next(&inode->file.extents, extent);
+                have = demofs_ext_next(thread, inode, extent->file_offset, extent);
                 continue;
             }
 
@@ -5759,7 +5888,7 @@ demofs_seek_inode_cb(
             }
 
             current_pos = extent_end;
-            extent      = rb_tree_next(&inode->file.extents, extent);
+            have        = demofs_ext_next(thread, inode, extent->file_offset, extent);
         }
 
         if (current_pos < inode->size) {
