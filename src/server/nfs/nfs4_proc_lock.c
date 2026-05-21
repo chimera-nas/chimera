@@ -104,7 +104,6 @@ chimera_nfs4_lock_complete(
     struct nfs_lock_state    *lock_state = req->nfs_state_ref;
     struct nfs4_range_lease  *rl         = req->nfs_inflight_range;
     struct chimera_vfs_state *vfs_state  = req->thread->vfs->vfs_state;
-    uint32_t                  client_short_id;
 
     (void) granted;
 
@@ -122,11 +121,10 @@ chimera_nfs4_lock_complete(
             lock_state->seqid += 1;
         }
 
-        client_short_id = (uint32_t) lock_state->lock_owner->client->client_id;
         nfs4_stateid_encode(&res->resok4.lock_stateid, lock_state->seqid,
                             NFS4_STATEID_TYPE_LOCK,
                             lock_state->shard, lock_state->slot_idx,
-                            lock_state->generation, client_short_id);
+                            lock_state->generation, table->epoch);
 
         res->status = NFS4_OK;
 
@@ -292,7 +290,6 @@ chimera_nfs4_lock(
         chimera_vfs_dup_handle(thread->vfs_thread, handle);
 
         lock_state = nfs_lock_state_create(lock_owner, open_state, handle,
-                                           (uint32_t) client->client_id,
                                            table, &res->resok4.lock_stateid);
 
         /* Release the open_state acquire ref.  The lock_state holds its
@@ -309,7 +306,7 @@ chimera_nfs4_lock(
                             NFS4_STATEID_TYPE_LOCK,
                             lock_state->shard, lock_state->slot_idx,
                             lock_state->generation,
-                            (uint32_t) client->client_id);
+                            table->epoch);
         status = nfs_state_table_acquire(table, &lock_stateid_for_acquire,
                                          NFS4_SLOT_TYPE_LOCK,
                                          &state_void, &state_type);

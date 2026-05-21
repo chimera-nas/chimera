@@ -22,7 +22,6 @@ chimera_nfs4_close(
     void                   *state_void;
     uint8_t                 state_type;
     nfsstat4                status;
-    uint32_t                client_short_id;
 
     status = nfs_state_table_acquire(table,
                                      &args->open_stateid,
@@ -76,12 +75,11 @@ chimera_nfs4_close(
      * stateid before destroying.  Destroy cascades through any lock_states
      * rooted on this open. */
     open_state->seqid += 1;
-    client_short_id    = owner ? (uint32_t) owner->client->client_id : 0;
 
     nfs4_stateid_encode(&res->open_stateid, open_state->seqid,
                         NFS4_STATEID_TYPE_OPEN,
                         open_state->shard, open_state->slot_idx,
-                        open_state->generation, client_short_id);
+                        open_state->generation, table->epoch);
 
     /* Record reply BEFORE destroying the state -- after destroy, the owner
      * may also be torn down by client teardown.  In practice the owner
