@@ -156,8 +156,15 @@ if [ -n "${TEST_FILTER}" ]; then
     FILTER_ARGS=(--TestCaseFilter:"${TEST_FILTER}")
 fi
 
-# Run the suite from inside the netns so it can reach the SUT IP
+# Run the suite from inside the netns so it can reach the SUT IP.
+# Suppress the .NET first-run experience (telemetry notice + dev-cert
+# generation): it pollutes output and writes to HOME, which may be unset or
+# read-only under ctest/CI.
 ip netns exec "${NETNS_NAME}" env \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_NOLOGO=1 \
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
+    HOME="${SESSION_DIR}" \
     "$DOTNET" vstest "${WPTS_BIN_DIR}/MS-SMB2_ServerTestSuite.dll" \
         "${FILTER_ARGS[@]}" \
         --logger:"trx;LogFileName=SMB2TestResult.trx" \
