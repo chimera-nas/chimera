@@ -331,6 +331,71 @@ def test_delete(client, bucket):
     print("DELETE tests passed!")
 
 
+def test_delete_objects(client, bucket):
+    """Test batch DeleteObjects (POST /bucket?delete) used by `aws s3 rm
+    --recursive` and the delete phase of `aws s3 sync`."""
+    print("Testing batch DeleteObjects operations...")
+
+    data = b'y' * 1024
+    keys = [
+        'batch/a/key1',
+        'batch/a/key2',
+        'batch/b/key3',
+        'batch/key4',
+    ]
+    for k in keys:
+        client.put_object(Bucket=bucket, Key=k, Body=data)
+    print(f"  Put {len(keys)} objects")
+
+    # Batch-delete a subset plus a nonexistent key. DeleteObjects is
+    # idempotent, so the missing key is reported as deleted, not an error.
+    to_delete = keys[:3] + ['batch/does-not-exist']
+    response = client.delete_objects(
+        Bucket=bucket,
+        Delete={'Objects': [{'Key': k} for k in to_delete]},
+    )
+
+    deleted = sorted(d['Key'] for d in response.get('Deleted', []))
+    errors = response.get('Errors', [])
+    assert not errors, f"Unexpected errors: {errors}"
+    assert deleted == sorted(to_delete), f"Deleted mismatch: {deleted}"
+    print("  Batch delete reported all keys deleted (incl. nonexistent) - OK")
+
+    # Deleted keys are gone.
+    for k in keys[:3]:
+        try:
+            client.head_object(Bucket=bucket, Key=k)
+            raise AssertionError(f"{k} should have been deleted")
+        except ClientError as e:
+            if e.response['Error']['Code'] != '404':
+                raise
+    print("  Verified deleted keys are gone - OK")
+
+    # The untouched key survives.
+    resp = client.head_object(Bucket=bucket, Key='batch/key4')
+    assert resp['ContentLength'] == 1024
+    print("  Verified untouched key survives - OK")
+
+    # Quiet mode: successful deletes are not echoed back in the result.
+    response = client.delete_objects(
+        Bucket=bucket,
+        Delete={'Objects': [{'Key': 'batch/key4'}], 'Quiet': True},
+    )
+    assert not response.get('Deleted'), "Quiet mode should omit Deleted entries"
+    assert not response.get('Errors'), f"Unexpected errors: {response.get('Errors')}"
+    print("  Quiet mode suppressed Deleted entries - OK")
+
+    try:
+        client.head_object(Bucket=bucket, Key='batch/key4')
+        raise AssertionError("batch/key4 should have been deleted")
+    except ClientError as e:
+        if e.response['Error']['Code'] != '404':
+            raise
+    print("  Verified quiet-mode delete removed the key - OK")
+
+    print("Batch DeleteObjects tests passed!")
+
+
 def test_list(client, bucket):
     """Test LIST operations."""
     print("Testing LIST operations...")
@@ -664,6 +729,7 @@ TESTS = {
     'get': test_get,
     'head': test_head,
     'delete': test_delete,
+    'delete_objects': test_delete_objects,
     'list': test_list,
     'multipart': test_multipart,
 }

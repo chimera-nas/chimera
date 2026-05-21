@@ -46,6 +46,8 @@ chimera_s3_status_to_string(enum chimera_s3_status status)
             return "Malformed XML";
         case CHIMERA_S3_STATUS_NO_CONTENT:
             return "No Content";
+        case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
+            return "Not Implemented";
         default:
             return "Internal Error";
     } /* switch */
@@ -129,6 +131,13 @@ chimera_s3_prepare_error_response(
             bp += sprintf(bp,
                           "  <Message>The XML you provided was not well-formed or did not validate against our published schema.</Message>\n");
             code = 400;
+            break;
+        case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
+            bp += sprintf(bp, "  <Code>NotImplemented</Code>\n");
+            bp += sprintf(bp,
+                          "  <Message>A header you provided implies functionality that is not implemented.</Message>\n")
+            ;
+            code = 501;
             break;
         default:
             bp  += sprintf(bp, "  <Code>InternalError</Code>\n");

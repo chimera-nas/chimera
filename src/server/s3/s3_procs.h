@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -45,3 +45,19 @@ chimera_s3_list(
     struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request);
+
+void
+chimera_s3_delete_objects(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request);
+
+void
+chimera_s3_delete_objects_recv(
+    struct evpl               *evpl,
+    struct chimera_s3_request *request);
+
+void
+chimera_s3_delete_objects_body_done(
+    struct evpl               *evpl,
+    struct chimera_s3_request *request);
