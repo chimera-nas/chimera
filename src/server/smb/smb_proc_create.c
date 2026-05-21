@@ -2028,10 +2028,9 @@ chimera_smb_parse_create(
     evpl_iovec_cursor_get_uint32(request_cursor, &blob_offset);
     evpl_iovec_cursor_get_uint32(request_cursor, &blob_length);
 
-    if (request->create.impersonation_level > SMB2_IMPERSONATION_DELEGATE) {
-        request->status = SMB2_STATUS_BAD_IMPERSONATION_LEVEL;
-        return -1;
-    }
+    /* ImpersonationLevel is advisory and Windows servers do not validate it
+     * (a durable reconnect, for one, fills it with a don't-care sentinel) — so
+     * accept any value rather than returning STATUS_BAD_IMPERSONATION_LEVEL. */
 
     if (request->create.name_len >= SMB_FILENAME_MAX) {
         chimera_smb_error("Create request: UTF-16 name too long (%u bytes)",
