@@ -195,6 +195,260 @@ nfs4_client_register(
     return id;
 } /* nfs4_client_register */
 
+static int
+nfs4_principal_matches(
+    const struct nfs4_client           *c,
+    const struct nfs4_client_principal *p)
+{
+    if (c->nfs4_client_princ_flavor != p->flavor ||
+        c->nfs4_client_princ_uid != p->uid ||
+        c->nfs4_client_princ_gid != p->gid ||
+        c->nfs4_client_princ_mach_len != p->machinename_len) {
+        return 0;
+    }
+    return p->machinename_len == 0 ||
+           memcmp(c->nfs4_client_princ_mach, p->machinename,
+                  p->machinename_len) == 0;
+} /* nfs4_principal_matches */
+
+/* Caller must hold table->nfs4_ct_lock.  Allocates a fresh (unconfirmed)
+ * client record, brings up its unified state hierarchy, and inserts it into
+ * both hash tables. */
+static struct nfs4_client *
+nfs4_client_new_locked(
+    struct nfs4_client_table           *table,
+    const void                         *owner,
+    int                                 owner_len,
+    uint64_t                            verifier,
+    const struct nfs4_client_principal *p,
+    uint8_t                             minorversion)
+{
+    struct nfs4_client *c = calloc(1, sizeof(*c));
+
+    c->nfs4_client_id            = table->nfs4_ct_next_client_id++;
+    c->nfs4_client_owner_len     = owner_len;
+    c->nfs4_client_verifier      = verifier;
+    c->nfs4_client_refcnt        = 1;
+    c->nfs4_client_confirmed     = 0;
+    c->nfs4_client_supersedes_id = 0;
+    memcpy(c->nfs4_client_owner, owner, owner_len);
+
+    c->nfs4_client_princ_flavor   = p->flavor;
+    c->nfs4_client_princ_uid      = p->uid;
+    c->nfs4_client_princ_gid      = p->gid;
+    c->nfs4_client_princ_mach_len = p->machinename_len > NFS4_OPAQUE_LIMIT ?
+        NFS4_OPAQUE_LIMIT : p->machinename_len;
+    if (c->nfs4_client_princ_mach_len) {
+        memcpy(c->nfs4_client_princ_mach, p->machinename,
+               c->nfs4_client_princ_mach_len);
+    }
+
+    strncpy(c->nfs4_client_domain, "unidentified", NFS4_OPAQUE_LIMIT);
+    strncpy(c->nfs4_client_name, "unidentified", NFS4_OPAQUE_LIMIT);
+
+    c->unified = nfs_client_alloc(c->nfs4_client_id, owner, owner_len,
+                                  verifier, minorversion);
+
+    HASH_ADD(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+             nfs4_client_owner, c->nfs4_client_owner_len, c);
+    HASH_ADD(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+             nfs4_client_id, sizeof(c->nfs4_client_id), c);
+
+    return c;
+} /* nfs4_client_new_locked */
+
+/* Caller must hold table->nfs4_ct_lock.  Unhashes a record from both tables
+ * and frees the bookkeeping struct, returning its unified state hierarchy for
+ * the caller to tear down once the lock is dropped.  The record must be
+ * present in both hash tables (i.e. not a superseded record, which has
+ * already left the by-owner table). */
+static struct nfs_client *
+nfs4_client_remove_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c)
+{
+    struct nfs_client *unified = c->unified;
+
+    HASH_DELETE(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner, c);
+    HASH_DELETE(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, c);
+    c->unified = NULL;
+    free(c);
+    return unified;
+} /* nfs4_client_remove_locked */
+
+/* Caller must hold table->nfs4_ct_lock. */
+static int
+nfs4_client_has_session_locked(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id)
+{
+    struct nfs4_session *s, *tmp;
+
+    HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, s, tmp)
+    {
+        if (s->nfs4_session_clientid == client_id) {
+            return 1;
+        }
+    }
+    return 0;
+} /* nfs4_client_has_session_locked */
+
+void
+nfs4_client_exchange_id(
+    struct nfs4_client_table           *table,
+    const void                         *owner,
+    int                                 owner_len,
+    uint64_t                            verifier,
+    const struct nfs4_client_principal *principal,
+    bool                                update,
+    uint8_t                             minorversion,
+    struct nfs4_exchange_id_result     *out)
+{
+    struct nfs4_client *existing, *nc;
+
+    out->status          = NFS4_OK;
+    out->clientid        = 0;
+    out->confirmed       = 0;
+    out->destroy_unified = NULL;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+              owner, owner_len, existing);
+
+    if (update) {
+        /* EXCHGID4_FLAG_UPD_CONFIRMED_REC_A: an update targets an existing
+         * *confirmed* record (RFC 8881 §18.35.4 cases 6/8/9). */
+        if (!existing || !existing->nfs4_client_confirmed) {
+            out->status = NFS4ERR_NOENT;
+        } else if (!nfs4_principal_matches(existing, principal)) {
+            out->status = NFS4ERR_PERM;
+        } else if (existing->nfs4_client_verifier != verifier) {
+            out->status = NFS4ERR_NOT_SAME;
+        } else {
+            out->clientid  = existing->nfs4_client_id;
+            out->confirmed = 1;
+        }
+        goto out_unlock;
+    }
+
+    if (!existing) {
+        /* Case 1: brand-new owner. */
+        nc = nfs4_client_new_locked(table, owner, owner_len,
+                                    verifier, principal, minorversion);
+        out->clientid = nc->nfs4_client_id;
+        goto out_unlock;
+    }
+
+    if (!existing->nfs4_client_confirmed) {
+        /* Case 4: an unconfirmed record is always replaced -- the client
+         * never proved ownership of its clientid, so a fresh one is issued. */
+        out->destroy_unified = nfs4_client_remove_locked(table, existing);
+        nc                   = nfs4_client_new_locked(table, owner, owner_len,
+                                                      verifier, principal, minorversion);
+        out->clientid = nc->nfs4_client_id;
+        goto out_unlock;
+    }
+
+    /* Confirmed record below. */
+    if (nfs4_principal_matches(existing, principal)) {
+        if (existing->nfs4_client_verifier == verifier) {
+            /* Case 2: identical owner+verifier+principal -- return the same
+             * clientid, leaving existing state intact. */
+            out->clientid  = existing->nfs4_client_id;
+            out->confirmed = 1;
+            goto out_unlock;
+        }
+
+        /* Case 5: same principal, new boot verifier -- the client rebooted.
+         * Issue a new clientid via a superseding unconfirmed record but keep
+         * the old record (and its sessions) live until the new one is
+         * confirmed at CREATE_SESSION. */
+        HASH_DELETE(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+                    existing);
+        nc = nfs4_client_new_locked(table, owner, owner_len, verifier,
+                                    principal, minorversion);
+        nc->nfs4_client_supersedes_id = existing->nfs4_client_id;
+        out->clientid                 = nc->nfs4_client_id;
+        goto out_unlock;
+    }
+
+    /* Confirmed record owned by a different principal (RFC 8881 §18.35.4
+     * case 3).  If the old client still holds session state this is a
+     * collision (CLID_INUSE); otherwise the stale record is replaced. */
+    if (nfs4_client_has_session_locked(table, existing->nfs4_client_id)) {
+        out->status = NFS4ERR_CLID_INUSE;
+        goto out_unlock;
+    }
+
+    out->destroy_unified = nfs4_client_remove_locked(table, existing);
+    nc                   = nfs4_client_new_locked(table, owner, owner_len,
+                                                  verifier, principal, minorversion);
+    out->clientid = nc->nfs4_client_id;
+
+ out_unlock:
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+} /* nfs4_client_exchange_id */
+
+bool
+nfs4_client_confirm(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    struct nfs_client       **destroy_unified)
+{
+    struct nfs4_client *c, *old;
+
+    *destroy_unified = NULL;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), c);
+
+    if (!c) {
+        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        return false;
+    }
+
+    c->nfs4_client_confirmed = 1;
+
+    if (c->nfs4_client_supersedes_id) {
+        uint64_t oldid = c->nfs4_client_supersedes_id;
+
+        c->nfs4_client_supersedes_id = 0;
+
+        HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+                  &oldid, sizeof(oldid), old);
+
+        if (old) {
+            struct nfs4_session *s, *tmp;
+
+            /* Tear down the superseded client's sessions so a stale-session
+             * reference returns NFS4ERR_BADSESSION. */
+            HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, s, tmp)
+            {
+                if (s->nfs4_session_clientid == oldid) {
+                    HASH_DELETE(nfs4_session_hh, table->nfs4_ct_sessions, s);
+                    atomic_store_explicit(&s->destroyed, true,
+                                          memory_order_release);
+                    nfs4_session_put(s);
+                }
+            }
+
+            /* The superseded record already left the by-owner table at reboot
+            * time; drop it from by-id and hand its state out for teardown. */
+            HASH_DELETE(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+                        old);
+            *destroy_unified = old->unified;
+            old->unified     = NULL;
+            free(old);
+        }
+    }
+
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    return true;
+} /* nfs4_client_confirm */
+
 void
 nfs4_client_unregister(
     struct nfs4_client_table  *table,

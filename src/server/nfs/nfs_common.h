@@ -43,6 +43,14 @@ struct nfs_request {
     struct chimera_server_nfs_thread *thread;
     struct nfs4_session              *session;
     struct chimera_vfs_cred           cred;
+    /* RPC principal of the caller, captured at compound entry for EXCHANGE_ID
+     * client-record matching (RFC 8881 §18.35.4).  machinename points into the
+     * request message buffer, valid for the lifetime of the request. */
+    uint32_t                          principal_flavor;
+    uint32_t                          principal_uid;
+    uint32_t                          principal_gid;
+    const char                       *principal_machinename;
+    uint32_t                          principal_machinename_len;
     uint8_t                           fh[NFS4_FHSIZE];
     int                               fhlen;
     uint8_t                           saved_fh[NFS4_FHSIZE];

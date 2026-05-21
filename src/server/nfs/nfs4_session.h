@@ -91,6 +91,17 @@ nfs4_slot_seqid(struct nfs4_replay_slot *slot)
  * nlm_client (uint32_t magic at offset 0). */
 #define NFS4_SESSION_MAGIC 0x4E465353U /* "NFSS" */
 
+/* Identity of the RPC principal that established a client record, captured at
+ * EXCHANGE_ID time.  Used for the RFC 8881 §18.35.4 record-matching cases,
+ * which distinguish callers by principal as well as by boot verifier. */
+struct nfs4_client_principal {
+    uint32_t    flavor;
+    uint32_t    uid;
+    uint32_t    gid;
+    const char *machinename;
+    uint32_t    machinename_len;
+};
+
 struct nfs4_client {
     uint64_t              nfs4_client_id;
     uint32_t              nfs4_client_owner_len;
@@ -102,10 +113,39 @@ struct nfs4_client {
     uint8_t               nfs4_client_owner[NFS4_OPAQUE_LIMIT];
     char                  nfs4_client_domain[NFS4_OPAQUE_LIMIT];
     char                  nfs4_client_name[NFS4_OPAQUE_LIMIT];
+    /* RFC 8881 §18.35: a record is "unconfirmed" until the client proves
+     * possession of the clientid via a successful CREATE_SESSION; only then
+     * is it "confirmed". */
+    uint8_t               nfs4_client_confirmed;
+    /* Principal that created the record (see nfs4_client_principal). */
+    uint32_t              nfs4_client_princ_flavor;
+    uint32_t              nfs4_client_princ_uid;
+    uint32_t              nfs4_client_princ_gid;
+    uint32_t              nfs4_client_princ_mach_len;
+    char                  nfs4_client_princ_mach[NFS4_OPAQUE_LIMIT];
+    /* Client-reboot (RFC 8881 §18.35.4 case 5): when a confirmed record is
+     * replaced by a new EXCHANGE_ID from the same principal with a new boot
+     * verifier, the new (unconfirmed) record records the old clientid here.
+     * The old record stays live until this new one is confirmed at
+     * CREATE_SESSION, at which point the old record and its sessions are torn
+     * down.  0 means "supersedes nothing". */
+    uint64_t              nfs4_client_supersedes_id;
     /* Unified state hierarchy.  Created when this nfs4_client is first
      * registered; freed when the nfs4_client is unregistered or the table
      * is torn down.  See nfs4_state.h. */
     struct nfs_client    *unified;
+};
+
+/* Outcome of the EXCHANGE_ID record-matching state machine.  The handler acts
+ * on `status`; on NFS4_OK it returns `clientid`/`confirmed` to the client.
+ * `destroy_unified`, if non-NULL, is a superseded client's state hierarchy the
+ * caller must tear down with nfs_client_destroy AFTER dropping the table lock
+ * (nfs4_client_exchange_id only unhashes/frees the bookkeeping struct). */
+struct nfs4_exchange_id_result {
+    nfsstat4           status;
+    uint64_t           clientid;
+    uint32_t           confirmed;
+    struct nfs_client *destroy_unified;
 };
 
 struct nfs4_session {
@@ -172,6 +212,31 @@ nfs4_client_register(
     uint32_t                  proto,
     const char               *nii_domain,
     const char               *nii_name);
+
+/* RFC 8881 §18.35.4 EXCHANGE_ID client-record matching state machine.  Runs
+ * entirely under the table lock and fills *out (see nfs4_exchange_id_result).
+ * `update` reflects EXCHGID4_FLAG_UPD_CONFIRMED_REC_A. */
+void
+nfs4_client_exchange_id(
+    struct nfs4_client_table           *table,
+    const void                         *owner,
+    int                                 owner_len,
+    uint64_t                            verifier,
+    const struct nfs4_client_principal *principal,
+    bool                                update,
+    uint8_t                             minorversion,
+    struct nfs4_exchange_id_result     *out);
+
+/* Mark a client record confirmed (first successful CREATE_SESSION).  If the
+ * record supersedes an older one (client reboot), the older record and its
+ * sessions are torn down and its state hierarchy is returned via
+ * *destroy_unified for teardown outside the table lock.  Returns false when no
+ * such client exists (caller maps to NFS4ERR_STALE_CLIENTID). */
+bool
+nfs4_client_confirm(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    struct nfs_client       **destroy_unified);
 
 /* Unregister a client and tear down its unified state hierarchy.
  *

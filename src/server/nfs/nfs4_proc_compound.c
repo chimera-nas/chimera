@@ -273,6 +273,22 @@ chimera_nfs4_compound(
 
     chimera_nfs_map_cred(&req->cred, cred);
 
+    /* Capture the RPC principal for EXCHANGE_ID record-matching. */
+    if (cred && cred->flavor == EVPL_RPC2_AUTH_SYS) {
+        req->principal_flavor          = cred->flavor;
+        req->principal_uid             = cred->authsys.uid;
+        req->principal_gid             = cred->authsys.gid;
+        req->principal_machinename     = cred->authsys.machinename;
+        req->principal_machinename_len = cred->authsys.machinename_len > 0 ?
+            (uint32_t) cred->authsys.machinename_len : 0;
+    } else {
+        req->principal_flavor          = cred ? cred->flavor : EVPL_RPC2_AUTH_NONE;
+        req->principal_uid             = 0;
+        req->principal_gid             = 0;
+        req->principal_machinename     = NULL;
+        req->principal_machinename_len = 0;
+    }
+
     nfs4_dump_compound(req, args);
 
     /* The conn caches its bound nfs4_session in private_data.  The conn
