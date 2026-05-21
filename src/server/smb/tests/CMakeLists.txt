@@ -109,6 +109,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_Negotiate_Compatible_Wildcard
         BVT_Negotiate_SMB21
         BVT_Negotiate_SMB30
+        BVT_Negotiate_SMB302
         BVT_Negotiate_SigningEnabled
         BVT_SMB2Basic_ChangeNotify_ChangeAttributes
         BVT_SMB2Basic_ChangeNotify_ChangeCreation
