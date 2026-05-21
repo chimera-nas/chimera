@@ -195,6 +195,19 @@ chimera_smb_create_gen_open_file(
         open_file->share_lease.owner.owner_lo = open_file->file_id.pid;
         open_file->share_lease.owner.owner_hi = open_file->file_id.vid;
 
+        /* If this open also requests a lease, a handle-caching lease already
+         * held under the same key is its own (a second open under one lease
+         * key) and must coalesce, not be broken by this share acquire. */
+        if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
+            open_file->share_lease.has_break_skip_key = 1;
+            memcpy(&open_file->share_lease.break_skip_lo,
+                   request->create.rqls.key, 8);
+            memcpy(&open_file->share_lease.break_skip_hi,
+                   request->create.rqls.key + 8, 8);
+        } else {
+            open_file->share_lease.has_break_skip_key = 0;
+        }
+
         result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                               &open_file->share_lease, &conflict);
 

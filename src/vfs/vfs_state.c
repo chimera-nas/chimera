@@ -443,6 +443,14 @@ chimera_vfs_state_would_conflict(
                     if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
                         continue;
                     }
+                    /* Same client + same lease key: the requester's own lease
+                     * (a second open under one lease key). It coalesces; do
+                     * not break it. */
+                    if (probe->has_break_skip_key &&
+                        cur->owner.owner_lo == probe->break_skip_lo &&
+                        cur->owner.owner_hi == probe->break_skip_hi) {
+                        continue;
+                    }
                     if (!cur->owner.break_cb) {
                         continue;
                     }
@@ -473,7 +481,7 @@ chimera_vfs_state_would_conflict(
                     }
 
                     /* SMB handle-cache: break only an IDLE holder (existing
-                    * optimistic-after-break semantics retained for SMB). */
+                     * optimistic-after-break semantics retained for SMB). */
                     if (want_break_h &&
                         cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
                         has_breakable_conflict = true;
