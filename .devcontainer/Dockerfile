@@ -11,6 +11,9 @@ ARG ENABLE_FIO=1
 ARG ENABLE_CLAUDE=1
 ARG ENABLE_CODEX=1
 ARG ENABLE_UV=1
+ARG ENABLE_WPTS=1
+# Pinned Microsoft Windows Protocol Test Suites (WPTS) FileServer release.
+ARG WPTS_VERSION=4.26.3.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -29,7 +32,7 @@ RUN apt-get -y update && \
     net-tools tshark tcpdump uuid-dev iproute2 man-db manpages-dev ca-certificates ssh libjansson-dev libclang-rt-18-dev llvm wget \
     libxxhash-dev liburcu-dev librdmacm-dev liburing-dev libaio-dev libunwind-dev librocksdb-dev libcurl4-openssl-dev clangd uthash-dev libnuma-dev \
     libcurl4-openssl-dev build-essential ruby-full autoconf automake make libtool pkg-config libs3-dev gh npm reuse libssl-dev openssl \
-    libkrb5-3 libkrb5-dev libgssapi-krb5-2 libwbclient-dev curl jq \
+    libkrb5-3 libkrb5-dev libgssapi-krb5-2 libwbclient-dev curl jq libicu-dev \
     krb5-kdc krb5-admin-server krb5-user python3-pip python3-setuptools \
     samba samba-ad-dc samba-ad-provision samba-vfs-modules smbclient && \
     gem install jekyll bundler
@@ -86,4 +89,20 @@ RUN apt-get -y update && \
 
 RUN if [ "$ENABLE_UV" = "1" ] ; then \
     curl -LsSf https://astral.sh/uv/install.sh | sh ; \
+    fi
+
+# .NET 8 + Microsoft Windows Protocol Test Suites (WPTS) FileServer suite, used
+# by the MS-SMB2 server conformance ctests (src/server/smb/tests). WPTS speaks
+# SMB2 from its own managed stack, so it runs host-side in a netns against the
+# chimera daemon -- no VM needed. CMake auto-detects /opt/dotnet and /opt/wpts.
+ENV DOTNET_ROOT=/opt/dotnet
+RUN if [ "$ENABLE_WPTS" = "1" ] ; then \
+    curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh && \
+    bash /tmp/dotnet-install.sh --channel 8.0 --install-dir /opt/dotnet && \
+    ln -sf /opt/dotnet/dotnet /usr/local/bin/dotnet && \
+    rm -f /tmp/dotnet-install.sh && \
+    mkdir -p /opt/wpts && \
+    curl -sSL "https://github.com/microsoft/WindowsProtocolTestSuites/releases/download/${WPTS_VERSION}/FileServer-TestSuite-ServerEP.tar.gz" -o /tmp/wpts.tar.gz && \
+    tar -C /opt/wpts -xzf /tmp/wpts.tar.gz && \
+    rm -f /tmp/wpts.tar.gz ; \
     fi
