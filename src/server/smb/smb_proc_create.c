@@ -931,6 +931,17 @@ chimera_smb_create(struct chimera_smb_request *request)
 
     } else {
 
+        /* MS-SMB2 3.3.5.9: if FILE_DELETE_ON_CLOSE is set in CreateOptions,
+         * the create must also request DELETE access (DELETE, GENERIC_ALL, or
+         * MAXIMUM_ALLOWED, which resolves to a superset). Otherwise fail with
+         * STATUS_ACCESS_DENIED rather than silently honoring delete-on-close. */
+        if ((request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) &&
+            !(request->create.desired_access &
+              (SMB2_DELETE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED))) {
+            chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+            return;
+        }
+
         clock_gettime(CLOCK_MONOTONIC, &now);
 
         if (chimera_timespec_cmp(&now, &request->tree->fh_expiration) > 0) {
