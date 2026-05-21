@@ -18,6 +18,7 @@
 #include "nfs_internal.h"
 #include "nfs4_session.h"
 #include "nfs4_lease.h"
+#include "nfs4_callback.h"
 #include "nfs_nlm.h"
 #include "prometheus-c.h"
 #include "nfs_external_portmap.h"
@@ -568,6 +569,9 @@ nfs_server_thread_init(
     thread->lease_sweeper = calloc(1, sizeof(*thread->lease_sweeper));
     nfs_lease_sweeper_init(thread->lease_sweeper, thread);
 
+    /* Delegation callback recall doorbell + queue. */
+    nfs4_cb_thread_init(thread);
+
     return thread;
 } /* nfs_server_thread_init */
 
@@ -582,6 +586,8 @@ nfs_server_thread_destroy(void *data)
         free(thread->lease_sweeper);
         thread->lease_sweeper = NULL;
     }
+
+    nfs4_cb_thread_destroy(thread);
 
     evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->mount_server);
     evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->nfs_server);

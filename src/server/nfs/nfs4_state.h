@@ -59,7 +59,36 @@ struct nfs_open_state;
 struct nfs_lock_owner;
 struct nfs_lock_state;
 struct nfs_state_table;
+struct nfs_delegation;
+struct nfs4_cb_client;
 struct chimera_vfs_thread;
+
+/*
+ * NFSv4 delegation callback path (RFC 7530 §10 / RFC 8881 §20).
+ *
+ * The server reaches the client's callback service to deliver CB_RECALL.
+ * For 4.0 this is a separate connection to the address the client gave in
+ * SETCLIENTID (cb_client4); for 4.1+ it rides the session backchannel on the
+ * fore connection.  cb_state gates delegation grants on a successful CB_NULL
+ * probe -- the server does not hand out a delegation until it has confirmed
+ * the path is usable (RFC 7530 §10.1).
+ */
+#define NFS4_CB_UNINIT  0 /* no callback path captured yet            */
+#define NFS4_CB_PROBING 1 /* CB_NULL probe in flight                  */
+#define NFS4_CB_UP      2  /* probe succeeded; delegations may issue   */
+#define NFS4_CB_DOWN    3  /* probe/recall failed; do not delegate     */
+
+struct nfs4_cb_path {
+    uint32_t               cb_program;       /* client's callback program number */
+    uint32_t               cb_ident;         /* 4.0 callback_ident               */
+    uint8_t                cb_minorversion;  /* 0 for 4.0, 1 for 4.1+            */
+    char                   cb_netid[8];      /* "tcp" / "tcp6"                   */
+    char                   cb_addr[64];      /* universal address h.h.h.h.p.p    */
+    _Atomic uint8_t        cb_state;         /* NFS4_CB_*                        */
+    /* Lazily-established outbound channel (4.0) or borrowed backchannel (4.1).
+     * Owned/serviced by a single NFS thread; see nfs4_callback.c. */
+    struct nfs4_cb_client *cb_client;
+};
 
 /*
  * Per-owner replay cache.  RFC 7530 §9.1.7: when an owner-sequenced op is
@@ -151,6 +180,12 @@ nfs4_seqid_should_advance(nfsstat4 status)
         case NFS4ERR_RESOURCE:
         case NFS4ERR_NOFILEHANDLE:
         case NFS4ERR_MOVED:
+        case NFS4ERR_DELAY:
+            /* RFC 7530 §9.1.7: NFS4ERR_DELAY (like the other "infrastructure"
+             * errors) leaves the owner seqid untouched -- the client retries
+             * the same seqid.  Recording it would make the retry replay the
+             * cached DELAY instead of re-executing (e.g. a recall in progress
+             * during OPEN). */
             return false;
         default:
             return true;
@@ -173,6 +208,15 @@ struct nfs_client {
     /* Owners are hashed by their byte string. */
     struct nfs_open_owner *open_owners_by_str;
     struct nfs_lock_owner *lock_owners_by_str;
+
+    /* Delegations granted to this client (utlist via next_in_client),
+     * protected by client->lock.  Walked at client teardown to revoke
+     * every outstanding delegation. */
+    struct nfs_delegation *delegations;
+
+    /* Callback path for delegation recalls.  Populated at SETCLIENTID
+     * (4.0) / CREATE_SESSION (4.1); see struct nfs4_cb_path. */
+    struct nfs4_cb_path    cb_path;
 
     UT_hash_handle         hh_by_owner;
     UT_hash_handle         hh_by_id;
@@ -263,6 +307,55 @@ struct nfs_lock_state {
     _Atomic uint8_t                 destroyed;
 };
 
+/* Delegation recall lifecycle (cb_recall_state). */
+#define NFS4_DELEG_ACTIVE    0  /* granted, no recall in progress           */
+#define NFS4_DELEG_RECALLING 1  /* CB_RECALL queued/sent, awaiting return    */
+#define NFS4_DELEG_RETURNED  2  /* DELEGRETURN'd or revoked; being torn down */
+
+/*
+ * An NFSv4 OPEN delegation (RFC 7530 §10).  Modeled as a CACHING lease in
+ * vfs_state so conflicting opens/IO from any protocol drive a recall through
+ * the shared break machinery.  Created during OPEN when delegations are
+ * enabled and the callback path is up; carries its own stateid (slot type
+ * NFS4_SLOT_TYPE_DELEG) returned to the client and presented back at
+ * DELEGRETURN.
+ *
+ * Lifetime: created with refcount 1 (its slot's lifetime ref).  The break_cb
+ * may take a transient ref while a recall is in flight.  destroy() flips
+ * `destroyed` and drops the lifetime ref; the last release frees the struct
+ * after releasing the vfs_state lease.
+ */
+struct nfs_delegation {
+    struct nfs_client             *client;        /* borrowed; lists this deleg */
+    uint8_t                        type;          /* OPEN_DELEGATE_READ / WRITE */
+
+    uint8_t                        fh[NFS4_FHSIZE];
+    uint16_t                       fh_len;
+    uint64_t                       fh_hash;
+
+    /* Slot identity (decoded from stateid.other). */
+    uint8_t                        shard;
+    uint32_t                       slot_idx;
+    uint32_t                       generation;
+    uint32_t                       seqid;          /* stateid.seqid */
+
+    /* vfs_state CACHING lease that backs the delegation; conflicting
+     * acquirers break it, invoking nfs4_delegation_break_cb. */
+    struct chimera_vfs_lease       lease;
+    struct chimera_vfs_file_state *file_state;
+    bool                           lease_held;
+
+    _Atomic uint8_t                cb_recall_state;  /* NFS4_DELEG_* */
+
+    struct nfs_delegation         *next_in_client;  /* utlist on client->delegations */
+    /* Single-link queue for cross-thread recall marshalling (owner thread's
+     * doorbell drains it); see nfs4_callback.c. */
+    struct nfs_delegation         *recall_qnext;
+
+    _Atomic uint32_t               refcount;
+    _Atomic uint8_t                destroyed;
+};
+
 /*
  * Slot table.
  *
@@ -280,6 +373,8 @@ struct nfs_lock_state {
  * NFS4ERR_BAD_STATEID (RFC 7530 §8.1.3).  The slot is on the free list and
  * reverts to a normal type when reallocated. */
 #define NFS4_SLOT_TYPE_EXPIRED 3
+/* An OPEN/WRITE delegation's stateid slot. */
+#define NFS4_SLOT_TYPE_DELEG   4
 
 struct nfs_state_slot {
     void    *state;
@@ -482,6 +577,29 @@ nfs_lock_state_create(
 SYMBOL_EXPORT void
 nfs_lock_state_destroy(
     struct nfs_lock_state     *state,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread);
+
+/* Create a delegation for `client` on `fh` of type OPEN_DELEGATE_READ/WRITE.
+ * Allocates a NFS4_SLOT_TYPE_DELEG slot, links the deleg onto the client, and
+ * writes the encoded stateid to `out_stateid`.  The vfs_state CACHING lease is
+ * the caller's responsibility (so the break_cb closure is wired before the
+ * lease becomes visible to conflicting acquirers).  Returns refcount-1. */
+SYMBOL_EXPORT struct nfs_delegation *
+nfs_delegation_create(
+    struct nfs_client      *client,
+    uint8_t                 deleg_type,
+    const uint8_t          *fh,
+    uint16_t                fh_len,
+    uint64_t                fh_hash,
+    struct nfs_state_table *table,
+    struct stateid4        *out_stateid);
+
+/* Mark a delegation destroyed, unlink it from its client, free its slot, and
+ * release the backing vfs_state lease on the last ref.  Idempotent. */
+SYMBOL_EXPORT void
+nfs_delegation_destroy(
+    struct nfs_delegation     *deleg,
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread);
 

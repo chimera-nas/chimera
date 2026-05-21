@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "nfs4_state.h"
+#include "nfs4_callback.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_release.h"
 
@@ -339,6 +340,10 @@ state_table_lookup_locked(
                 atomic_fetch_add_explicit(
                     &((struct nfs_lock_state *) slot->state)->refcount, 1,
                     memory_order_acq_rel);
+            } else if (slot->type == NFS4_SLOT_TYPE_DELEG) {
+                atomic_fetch_add_explicit(
+                    &((struct nfs_delegation *) slot->state)->refcount, 1,
+                    memory_order_acq_rel);
             }
         }
         status = NFS4_OK;
@@ -372,6 +377,9 @@ nfs_state_table_acquire(
             if (ls->lock_owner) {
                 nfs_client_touch(ls->lock_owner->client);
             }
+        } else if (*out_type == NFS4_SLOT_TYPE_DELEG) {
+            struct nfs_delegation *d = *out_state;
+            nfs_client_touch(d->client);
         }
     }
 
@@ -389,6 +397,17 @@ lock_state_cleanup(
     struct nfs_lock_state     *state,
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread);
+static void
+delegation_cleanup(
+    struct nfs_delegation     *deleg,
+    struct chimera_vfs_thread *vfs_thread);
+static void
+delegation_destroy_common(
+    struct nfs_delegation     *deleg,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread,
+    bool                       expire,
+    bool                       unlink_client);
 
 void
 nfs_state_table_release(
@@ -418,6 +437,16 @@ nfs_state_table_release(
         if (prev == 1 && atomic_load_explicit(&s->destroyed,
                                               memory_order_acquire)) {
             lock_state_cleanup(s, table, vfs_thread);
+        }
+    } else if (type == NFS4_SLOT_TYPE_DELEG) {
+        struct nfs_delegation *d = state;
+        prev = atomic_fetch_sub_explicit(&d->refcount, 1,
+                                         memory_order_acq_rel);
+        chimera_nfs_abort_if(prev == 0,
+                             "delegation refcount underflow on %p", d);
+        if (prev == 1 && atomic_load_explicit(&d->destroyed,
+                                              memory_order_acquire)) {
+            delegation_cleanup(d, vfs_thread);
         }
     }
 } /* nfs_state_table_release */
@@ -576,6 +605,20 @@ nfs_client_destroy(
         free(lo);
     }
 #endif /* ifndef __clang_analyzer__ */
+
+    /* Revoke every outstanding delegation.  Slots are marked EXPIRED (the
+     * client is going away) so a stateid still naming one resolves to
+     * NFS4ERR_EXPIRED.  We already hold client->lock, so destroy with
+     * unlink_client=false and splice the list head ourselves. */
+    while (client->delegations) {
+        struct nfs_delegation *deleg = client->delegations;
+        LL_DELETE2(client->delegations, deleg, next_in_client);
+        delegation_destroy_common(deleg, table, vfs_thread, true, false);
+    }
+
+    /* Free the delegation callback channel (and disconnect its outbound 4.0
+     * connection) before the client struct goes away. */
+    nfs4_cb_path_teardown(&client->cb_path);
 
     pthread_mutex_unlock(&client->lock);
     pthread_mutex_destroy(&client->lock);
@@ -959,3 +1002,124 @@ nfs_lock_state_destroy(
         lock_state_cleanup(state, table, vfs_thread);
     }
 } /* nfs_lock_state_destroy */
+
+/* ---------------------------------------------------------------------- *
+*  Lifecycle: delegations
+* ---------------------------------------------------------------------- */
+
+struct nfs_delegation *
+nfs_delegation_create(
+    struct nfs_client      *client,
+    uint8_t                 deleg_type,
+    const uint8_t          *fh,
+    uint16_t                fh_len,
+    uint64_t                fh_hash,
+    struct nfs_state_table *table,
+    struct stateid4        *out_stateid)
+{
+    struct nfs_delegation *deleg;
+    uint8_t                shard;
+    uint32_t               slot_idx, gen;
+    int                    rc;
+
+    chimera_nfs_abort_if(fh_len > NFS4_FHSIZE,
+                         "delegation_create fh_len %u", fh_len);
+
+    deleg = calloc(1, sizeof(*deleg));
+    chimera_nfs_abort_if(deleg == NULL, "delegation alloc OOM");
+
+    rc = nfs_state_table_alloc(table, NFS4_SLOT_TYPE_DELEG, &shard, &slot_idx, &gen);
+    chimera_nfs_abort_if(rc != 0, "state table exhausted");
+
+    deleg->client = client;
+    deleg->type   = deleg_type;
+    memcpy(deleg->fh, fh, fh_len);
+    deleg->fh_len     = fh_len;
+    deleg->fh_hash    = fh_hash;
+    deleg->shard      = shard;
+    deleg->slot_idx   = slot_idx;
+    deleg->generation = gen;
+    deleg->seqid      = 1;
+    deleg->lease_held = false;
+    atomic_init(&deleg->cb_recall_state, NFS4_DELEG_ACTIVE);
+    atomic_init(&deleg->refcount, 1);
+    atomic_init(&deleg->destroyed, 0);
+
+    nfs_state_table_install(table, shard, slot_idx, NFS4_SLOT_TYPE_DELEG, deleg);
+
+    pthread_mutex_lock(&client->lock);
+    LL_PREPEND2(client->delegations, deleg, next_in_client);
+    pthread_mutex_unlock(&client->lock);
+
+    nfs4_stateid_encode(out_stateid, deleg->seqid,
+                        NFS4_STATEID_TYPE_DELEG, shard, slot_idx, gen,
+                        table->epoch);
+    return deleg;
+} /* nfs_delegation_create */
+
+static void
+delegation_cleanup(
+    struct nfs_delegation     *deleg,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    struct chimera_vfs_state *vfs_state =
+        vfs_thread ? vfs_thread->vfs->vfs_state : NULL;
+
+    if (vfs_state && deleg->lease_held) {
+        chimera_vfs_lease_release(vfs_state, deleg->file_state, &deleg->lease);
+        deleg->lease_held = false;
+    }
+    if (vfs_state && deleg->file_state) {
+        chimera_vfs_state_put(vfs_state, deleg->file_state);
+        deleg->file_state = NULL;
+    }
+    free(deleg);
+} /* delegation_cleanup */
+
+/* Mark a delegation for destruction and drop its lifetime ref.  Unlinks it
+ * from the owning client first so no new lookup finds it.  `expire` marks the
+ * slot EXPIRED (client purge) rather than FREE.  Idempotent via the destroyed
+ * CAS. */
+static void
+delegation_destroy_common(
+    struct nfs_delegation     *deleg,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread,
+    bool                       expire,
+    bool                       unlink_client)
+{
+    uint8_t  prev_destroyed;
+    uint32_t prev;
+
+    prev_destroyed = atomic_exchange_explicit(&deleg->destroyed, 1,
+                                              memory_order_acq_rel);
+    if (prev_destroyed != 0) {
+        return;
+    }
+
+    if (unlink_client && deleg->client) {
+        pthread_mutex_lock(&deleg->client->lock);
+        LL_DELETE2(deleg->client->delegations, deleg, next_in_client);
+        pthread_mutex_unlock(&deleg->client->lock);
+    }
+
+    if (expire) {
+        nfs_state_table_expire_slot(table, deleg->shard, deleg->slot_idx);
+    } else {
+        nfs_state_table_free_slot(table, deleg->shard, deleg->slot_idx);
+    }
+
+    prev = atomic_fetch_sub_explicit(&deleg->refcount, 1, memory_order_acq_rel);
+    if (prev == 1) {
+        delegation_cleanup(deleg, vfs_thread);
+    }
+} /* delegation_destroy_common */
+
+void
+nfs_delegation_destroy(
+    struct nfs_delegation     *deleg,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    delegation_destroy_common(deleg, table, vfs_thread, false, true);
+} /* nfs_delegation_destroy */

@@ -182,6 +182,23 @@ chimera_nfs4_create_session(
     nfs4_session_bind_conn(conn, session);
     req->session = session;
 
+    /* RFC 8881 §18.36: when the client asks to use this connection as the
+     * backchannel, record it together with the callback program number so the
+     * server can deliver CB_RECALL for delegations over the fore conn.  Also
+     * stamp the callback path on the unified client (minorversion 1, no
+     * separate netid/addr -- the backchannel is the fore conn). */
+    if (args->csa_flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) {
+        session->nfs4_session_cb_program       = args->csa_cb_program;
+        session->nfs4_session_backchannel_conn = conn;
+
+        nfs4_client_set_cb_path(&shared->nfs4_shared_clients,
+                                args->csa_clientid,
+                                args->csa_cb_program,
+                                0,
+                                1,
+                                NULL, 0, NULL, 0);
+    }
+
     res->csr_status = NFS4_OK;
     memcpy(res->csr_resok4.csr_sessionid, session->nfs4_session_id, sizeof(res->csr_resok4.csr_sessionid));
     /* RFC 8881 §18.36.4: csr_sequence MUST equal the request's csa_sequence. */

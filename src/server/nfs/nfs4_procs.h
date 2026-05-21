@@ -257,6 +257,20 @@ chimera_nfs4_close(
     struct nfs_resop4                *resop);
 
 void
+chimera_nfs4_delegreturn(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_delegpurge(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
 chimera_nfs4_setclientid(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,

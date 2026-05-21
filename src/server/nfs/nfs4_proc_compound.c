@@ -277,6 +277,12 @@ chimera_nfs4_compound_process(
                 case OP_NVERIFY:
                     chimera_nfs4_nverify(thread, req, argop, resop);
                     break;
+                case OP_DELEGRETURN:
+                    chimera_nfs4_delegreturn(thread, req, argop, resop);
+                    break;
+                case OP_DELEGPURGE:
+                    chimera_nfs4_delegpurge(thread, req, argop, resop);
+                    break;
                 default:
                     chimera_nfs_error("Unsupported operation: %d", argop->argop);
                     if (argop->argop >= OP_ACCESS && argop->argop <= OP_REMOVEXATTR) {

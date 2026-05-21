@@ -365,6 +365,11 @@ main(
         chimera_server_config_set_nfs4_session_slots(server_config, int_value);
     }
 
+    json_value = json_object_get(server_params, "nfs4_delegations");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_nfs4_delegations(server_config, json_is_true(json_value));
+    }
+
     json_value = json_object_get(server_params, "external_portmap");
     if (json_is_true(json_value)) {
         chimera_server_info("Enabling external portmap/rpcbind support");

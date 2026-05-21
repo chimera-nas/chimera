@@ -52,6 +52,7 @@ struct chimera_server_config {
     int                                   async_delegation_threads;
     int                                   cache_ttl;
     int                                   nfs4_session_slots;
+    int                                   nfs4_delegations;
     int                                   num_modules;
     int                                   metrics_port;
     int                                   rest_http_port;
@@ -138,6 +139,12 @@ chimera_server_config_init(void)
      * of concurrent SEQUENCE requests a client may have outstanding per
      * session).  Mirrors NFS4_MAX_REPLY_CACHE_SLOTS in the NFS server. */
     config->nfs4_session_slots = 64;
+
+    /* NFSv4 protocol delegations (OPEN_DELEGATE_READ/WRITE) are disabled by
+     * default.  When off, every OPEN returns OPEN_DELEGATE_NONE and the
+     * callback channel is never established.  Distinct from the VFS
+     * sync_delegation/async_delegation thread-pool knobs above. */
+    config->nfs4_delegations = 0;
 
     strncpy(config->nfs_rdma_hostname, "0.0.0.0", sizeof(config->nfs_rdma_hostname));
     config->nfs_rdma_port    = 20049;
@@ -274,6 +281,20 @@ chimera_server_config_get_nfs4_session_slots(const struct chimera_server_config 
 {
     return config->nfs4_session_slots;
 } /* chimera_server_config_get_nfs4_session_slots */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs4_delegations(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->nfs4_delegations = enable;
+} /* chimera_server_config_set_nfs4_delegations */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs4_delegations(const struct chimera_server_config *config)
+{
+    return config->nfs4_delegations;
+} /* chimera_server_config_get_nfs4_delegations */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_kv_module(

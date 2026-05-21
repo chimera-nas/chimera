@@ -18,10 +18,11 @@ endif()
 
 # NFSv4.0 test flags
 set(PYNFS_FLAGS_0
-    access acl close commit compound create getattr getfh link lock lockt locku
-    lookup lookupp nverify open openconfirm opendowngrade putfh putpubfh putrootfh
-    read readdir readlink releaselockowner remove rename renew replay restorefh
-    savefh secinfo setattr setclientid setclientidconfirm verify write)
+    access acl close commit compound create delegations getattr getfh link lock
+    lockt locku lookup lookupp nverify open openconfirm opendowngrade putfh
+    putpubfh putrootfh read readdir readlink releaselockowner remove rename renew
+    replay restorefh savefh secinfo setattr setclientid setclientidconfirm verify
+    write)
 
 # NFSv4.1 test flags
 set(PYNFS_FLAGS_1
