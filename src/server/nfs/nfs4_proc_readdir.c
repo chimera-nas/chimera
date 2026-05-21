@@ -203,6 +203,16 @@ chimera_nfs4_readdir(
         return;
     }
 
+    /* RFC 7530 §16.24: cookie values 1 and 2 are reserved and must never be
+     * sent by a client (0 means "start of directory"). The VFS backends emit
+     * only cookie 0 or values >= 3 for regular directories, so a reserved
+     * cookie here is a client error. The pseudo-root, handled above, uses its
+     * own export-index cookie space and is intentionally exempt. */
+    if (args->cookie == 1 || args->cookie == 2) {
+        res->status = NFS4ERR_BAD_COOKIE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
 
     cursor = &req->readdir4_cursor;
 

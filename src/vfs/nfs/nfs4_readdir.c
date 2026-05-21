@@ -348,12 +348,23 @@ chimera_nfs4_readdir(
 
     /* Op 2: READDIR */
     argarray[2].argop              = OP_READDIR;
-    argarray[2].opreaddir.cookie   = request->readdir.cookie;
     argarray[2].opreaddir.dircount = 8192;
     argarray[2].opreaddir.maxcount = 8192;
 
-    /* Copy cookie verifier */
-    memcpy(argarray[2].opreaddir.cookieverf, &request->readdir.verifier, sizeof(argarray[2].opreaddir.cookieverf));
+    /* Cookies 1 and 2 are consumed locally by the synthesized "." and ".."
+     * entries above; they are reserved on the wire (RFC 7530 14.2.30) and a
+     * conformant server rejects them with NFS4ERR_BAD_COOKIE. When the caller
+     * is still within that reserved range, ask the server to start from the
+     * beginning (cookie 0); real server entries carry cookies >= 3. A zero
+     * cookie must be paired with a zero verifier. */
+    if (request->readdir.cookie < 3) {
+        argarray[2].opreaddir.cookie = 0;
+        memset(argarray[2].opreaddir.cookieverf, 0, sizeof(argarray[2].opreaddir.cookieverf));
+    } else {
+        argarray[2].opreaddir.cookie = request->readdir.cookie;
+        memcpy(argarray[2].opreaddir.cookieverf, &request->readdir.verifier,
+               sizeof(argarray[2].opreaddir.cookieverf));
+    }
 
     /* Request attributes: TYPE, SIZE, FILEHANDLE, FILEID, MODE, NUMLINKS */
     ctx->attr_request[0] = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) |
