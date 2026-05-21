@@ -59,6 +59,7 @@ if(BOTO3_FOUND)
     add_s3_test(get memfs)
     add_s3_test(head memfs)
     add_s3_test(delete memfs)
+    add_s3_test(delete_objects memfs)
     add_s3_test(list memfs)
     add_s3_test(multipart memfs)
 
@@ -67,6 +68,7 @@ if(BOTO3_FOUND)
     add_s3_test(get linux)
     add_s3_test(head linux)
     add_s3_test(delete linux)
+    add_s3_test(delete_objects linux)
     add_s3_test(list linux)
     add_s3_test(multipart linux)
 
@@ -76,6 +78,7 @@ if(BOTO3_FOUND)
         add_s3_test(get io_uring)
         add_s3_test(head io_uring)
         add_s3_test(delete io_uring)
+        add_s3_test(delete_objects io_uring)
         add_s3_test(list io_uring)
         add_s3_test(multipart io_uring)
 
@@ -84,6 +87,7 @@ if(BOTO3_FOUND)
         add_s3_test(get demofs)
         add_s3_test(head demofs)
         add_s3_test(delete demofs)
+        add_s3_test(delete_objects demofs)
         add_s3_test(list demofs)
         # demofs multipart is omitted: assembly via read+write across two
         # files on demofs produces corrupted output; suspected demofs bug
@@ -96,6 +100,7 @@ if(BOTO3_FOUND)
     add_s3_test(get cairn)
     add_s3_test(head cairn)
     add_s3_test(delete cairn)
+    add_s3_test(delete_objects cairn)
     add_s3_test(list cairn)
     add_s3_test(multipart cairn)
 
@@ -107,9 +112,9 @@ if(BOTO3_FOUND)
     add_s3_test_sigver(head memfs v2)
     add_s3_test_sigver(delete memfs v2)
     add_s3_test_sigver(list memfs v2)
-    # Multipart V2 omitted: V2 signing's canonical resource doesn't include
-    # the multipart subresources (uploads, uploadId, partNumber) that boto3
-    # adds to its signature. Re-enable when build_string_to_sign_v2 in
-    # s3_auth.c learns to append the AWS V2 subresource list.
+    # Multipart and DeleteObjects V2 omitted: V2 signing's canonical resource
+    # doesn't include the subresources (uploads, uploadId, partNumber, delete)
+    # that boto3 adds to its signature. Re-enable when build_string_to_sign_v2
+    # in s3_auth.c learns to append the AWS V2 subresource list.
 
 endif()

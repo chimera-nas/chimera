@@ -38,6 +38,16 @@ struct chimera_server_s3_thread;
 struct chimera_s3_multipart_table;
 struct chimera_s3_multipart_upload;
 
+/* One <Object> entry from a DeleteObjects (POST /bucket?delete) request.
+ * key points into the accumulated request body (unescaped in place). */
+struct chimera_s3_delete_entry {
+    char       *key;
+    int         key_len;
+    int         deleted;     /* 1 once the key is resolved as removed/absent */
+    const char *err_code;    /* NULL on success, else S3 error code string   */
+    const char *err_msg;
+};
+
 struct chimera_s3_config {
     int      port;
     uint64_t io_size;
@@ -63,6 +73,7 @@ struct chimera_s3_request {
     int                              is_list;
     int                              has_uploads;
     int                              has_upload_id;
+    int                              has_delete;
     int                              has_part_number;
     int                              query_upload_idlen;
     int                              query_part_number;
@@ -122,6 +133,28 @@ struct chimera_s3_request {
             char                                tmp_name[64];
             char                                path_buf[1024];
         } multipart;
+
+        struct {
+            /* Request body (the <Delete> document) accumulator. */
+            char                           *body_buf;
+            int                             body_len;
+            int                             body_cap;
+            int                             quiet;
+            /* Parsed object keys and the sequential delete cursor. */
+            struct chimera_s3_delete_entry *entries;
+            int                             n_keys;
+            int                             cur;
+            /* Trampoline flags so inline VFS completions don't recurse. */
+            int                             pending;
+            int                             synchronous;
+            /* Working state for the key currently being removed. */
+            const char                     *cur_name;
+            int                             cur_name_len;
+            /* Response (<DeleteResult>) builder. */
+            char                           *resp_buf;
+            int                             resp_len;
+            int                             resp_cap;
+        } del;
     };
 };
 
