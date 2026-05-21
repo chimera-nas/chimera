@@ -255,6 +255,21 @@ chimera_nfs4_lock(
                 return;
             }
             pthread_mutex_unlock(&oo->lock);
+
+            /* RFC 7530 §9.1.4.2: the supplied open stateid must not be a
+             * superseded (old) or never-issued seqid. */
+            status = nfs4_stateid_check_seqid(
+                open_state->seqid,
+                args->locker.open_owner.open_stateid.seqid);
+            if (status != NFS4_OK) {
+                nfs_state_table_release(table, open_state,
+                                        NFS4_SLOT_TYPE_OPEN,
+                                        thread->vfs_thread);
+                res->status = status;
+                chimera_nfs4_compound_complete(req, res->status);
+                return;
+            }
+
             req->lock_4_0_open_owner = oo;
             req->lock_4_0_lock_owner = lock_owner;
         }
@@ -338,6 +353,22 @@ chimera_nfs4_lock(
                 return;
             }
             pthread_mutex_unlock(&lo->lock);
+
+            /* RFC 7530 §9.1.4.2: the supplied lock stateid must not be a
+             * superseded (old) or never-issued seqid. */
+            status = nfs4_stateid_check_seqid(
+                lock_state->seqid,
+                args->locker.lock_owner.lock_stateid.seqid);
+            if (status != NFS4_OK) {
+                nfs_state_table_release(table, lock_state,
+                                        NFS4_SLOT_TYPE_LOCK,
+                                        thread->vfs_thread);
+                req->nfs_state_ref = NULL;
+                res->status        = status;
+                chimera_nfs4_compound_complete(req, res->status);
+                return;
+            }
+
             req->lock_4_0_lock_owner = lo;
         }
     }

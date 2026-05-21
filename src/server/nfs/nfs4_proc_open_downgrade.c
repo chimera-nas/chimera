@@ -75,6 +75,19 @@ chimera_nfs4_open_downgrade(
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
+
+        /* RFC 7530 §9.1.4.2: reject a superseded (old) or never-issued
+         * stateid seqid. */
+        status = nfs4_stateid_check_seqid(open_state->seqid,
+                                          args->open_stateid.seqid);
+        if (status != NFS4_OK) {
+            pthread_mutex_unlock(&owner->lock);
+            nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                    thread->vfs_thread);
+            res->status = status;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
     }
 
     /* RFC 7530 §16.19.4: new bits must be a non-empty subset of current. */
