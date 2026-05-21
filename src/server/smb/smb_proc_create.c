@@ -440,30 +440,43 @@ chimera_smb_create_gen_open_file(
                     open_file->oplock_level = SMB2_OPLOCK_LEVEL_NONE;
                 }
             }
-        } else if ((request->create.desired_access &
-                    (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
-                     SMB2_GENERIC_WRITE | SMB2_GENERIC_ALL |
-                     SMB2_DELETE | SMB2_MAXIMUM_ALLOWED)) ||
-                   (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
-                   request->create.create_disposition == SMB2_FILE_OVERWRITE ||
-                   request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
-                   request->create.create_disposition == SMB2_FILE_SUPERSEDE) {
-            /* This open does not request a caching lease of its own, but it
-             * modifies or deletes the file, so it must break any caching
-             * oplock/lease another open holds — otherwise that holder keeps a
-             * stale cache.  Concretely, the delete-on-close open that cifs.ko
-             * issues to unlink a file held open under a batch oplock would
-             * otherwise leave the oplock unbroken, and the client fails the
-             * unlink with EBUSY (cthon special op_unlk). */
-            struct chimera_vfs_lease_owner io_owner = {
-                .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-                .client_key = request->session_handle->session->session_id,
-                .owner_lo   = open_file->file_id.pid,
-                .owner_hi   = open_file->file_id.vid,
-            };
+        } else {
+            if (via_rqls) {
+                /* A lease was requested with no caching bits (LEASE_NONE). It
+                 * is still a lease: report OPLOCK_LEVEL_LEASE and echo the
+                 * lease key / epoch in the response context, but acquire no
+                 * caching lease in vfs_state. */
+                memcpy(open_file->lease_key, request->create.rqls.key, 16);
+                if (request->create.rqls.is_v2) {
+                    memcpy(open_file->parent_lease_key,
+                           request->create.rqls.parent_key, 16);
+                    open_file->lease_epoch = request->create.rqls.epoch + 1;
+                }
+                open_file->lease_state  = 0;
+                open_file->oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
+            }
 
-            chimera_vfs_state_break_on_write(vfs_state, oh->fh, oh->fh_len,
-                                             oh->fh_hash, &io_owner);
+            if ((request->create.desired_access &
+                 (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
+                  SMB2_GENERIC_WRITE | SMB2_GENERIC_ALL |
+                  SMB2_DELETE | SMB2_MAXIMUM_ALLOWED)) ||
+                (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
+                request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+                request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
+                request->create.create_disposition == SMB2_FILE_SUPERSEDE) {
+                /* This open does not request a caching lease of its own, but
+                 * it modifies or deletes the file, so it must break any
+                 * caching oplock/lease another open holds. */
+                struct chimera_vfs_lease_owner io_owner = {
+                    .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
+                    .client_key = request->session_handle->session->session_id,
+                    .owner_lo   = open_file->file_id.pid,
+                    .owner_hi   = open_file->file_id.vid,
+                };
+
+                chimera_vfs_state_break_on_write(vfs_state, oh->fh, oh->fh_len,
+                                                 oh->fh_hash, &io_owner);
+            }
         }
     }
 
