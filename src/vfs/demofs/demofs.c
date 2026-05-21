@@ -5144,6 +5144,20 @@ demofs_mknod_at_existing_cb(
 } /* demofs_mknod_at_existing_cb */
 
 static void
+demofs_mknod_at_inserted_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    demofs_bt_op_free(p->thread, op);
+    demofs_op_ok(request, p->txn);
+} /* demofs_mknod_at_inserted_cb */
+
+static void
 demofs_mknod_at_alloc_cb(
     struct demofs_inode *inode,
     int                  status,
@@ -5153,6 +5167,7 @@ demofs_mknod_at_alloc_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     struct demofs_inode           *parent  = p->inode_stash[0];
+    struct demofs_bt_op           *op;
     struct timespec                now;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -5187,10 +5202,6 @@ demofs_mknod_at_alloc_cb(
     demofs_apply_attrs(inode, request->mknod_at.set_attr);
     demofs_map_attrs(thread, &request->mknod_at.r_attr, inode);
 
-    demofs_dir_insert(thread, p->txn, parent, request->mknod_at.name_hash,
-                      request->mknod_at.name, request->mknod_at.name_len,
-                      inode->inum, inode->gen);
-
     parent->mtime_sec  = now.tv_sec;
     parent->mtime_nsec = now.tv_nsec;
     parent->ctime_sec  = now.tv_sec;
@@ -5198,8 +5209,37 @@ demofs_mknod_at_alloc_cb(
 
     demofs_map_attrs(thread, &request->mknod_at.r_dir_post_attr, parent);
 
-    demofs_op_ok(request, p->txn);
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_dir_insert_async(op, thread, p->txn, parent,
+                                request->mknod_at.name_hash, request->mknod_at.name,
+                                request->mknod_at.name_len, inode->inum, inode->gen,
+                                demofs_mknod_at_inserted_cb, request)) {
+        demofs_mknod_at_inserted_cb(op, op->result, request);
+    }
 } /* demofs_mknod_at_alloc_cb */
+
+static void
+demofs_mknod_at_check_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+
+    demofs_bt_op_free(thread, op);
+
+    if (result >= 0) {
+        struct demofs_dirent_rec *rec = (struct demofs_dirent_rec *) p->rec_scratch;
+
+        demofs_inode_get_inum_async(thread, p->txn, rec->inum, rec->gen,
+                                    demofs_mknod_at_existing_cb, request);
+        return;
+    }
+
+    demofs_inode_alloc_async(thread, p->txn, demofs_mknod_at_alloc_cb, request);
+} /* demofs_mknod_at_check_cb */
 
 static void
 demofs_mknod_at_parent_cb(
@@ -5211,8 +5251,7 @@ demofs_mknod_at_parent_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     uint64_t                       hash    = request->mknod_at.name_hash;
-    uint64_t                       existing_inum;
-    uint32_t                       existing_gen;
+    struct demofs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -5228,15 +5267,12 @@ demofs_mknod_at_parent_cb(
 
     p->inode_stash[0] = parent;
 
-    if (demofs_dir_lookup(thread, parent, hash, &existing_inum, &existing_gen) == 0) {
-        demofs_inode_get_inum_async(thread, p->txn,
-                                    existing_inum, existing_gen,
-                                    demofs_mknod_at_existing_cb, request);
-        return;
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_dir_lookup_async(op, thread, parent, hash, p->rec_scratch,
+                                sizeof(p->rec_scratch), demofs_mknod_at_check_cb,
+                                request)) {
+        demofs_mknod_at_check_cb(op, op->result, request);
     }
-
-    demofs_inode_alloc_async(thread, p->txn,
-                             demofs_mknod_at_alloc_cb, request);
 } /* demofs_mknod_at_parent_cb */
 
 static void
@@ -5712,6 +5748,20 @@ demofs_open_at_existing_cb(
 } /* demofs_open_at_existing_cb */
 
 static void
+demofs_open_at_inserted_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    demofs_bt_op_free(p->thread, op);
+    demofs_open_at_finish(request, p->inode_stash[0], p->inode_stash[1]);
+} /* demofs_open_at_inserted_cb */
+
+static void
 demofs_open_at_alloc_cb(
     struct demofs_inode *inode,
     int                  status,
@@ -5721,6 +5771,7 @@ demofs_open_at_alloc_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     struct demofs_inode           *parent  = p->inode_stash[0];
+    struct demofs_bt_op           *op;
     struct timespec                now;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -5745,17 +5796,56 @@ demofs_open_at_alloc_cb(
 
     demofs_apply_attrs(inode, request->open_at.set_attr);
 
-    demofs_dir_insert(thread, p->txn, parent, request->open_at.name_hash,
-                      request->open_at.name, request->open_at.namelen,
-                      inode->inum, inode->gen);
-
     parent->mtime_sec  = now.tv_sec;
     parent->mtime_nsec = now.tv_nsec;
     parent->ctime_sec  = now.tv_sec;
     parent->ctime_nsec = now.tv_nsec;
 
-    demofs_open_at_finish(request, parent, inode);
+    p->inode_stash[1] = inode;
+
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_dir_insert_async(op, thread, p->txn, parent,
+                                request->open_at.name_hash, request->open_at.name,
+                                request->open_at.namelen, inode->inum, inode->gen,
+                                demofs_open_at_inserted_cb, request)) {
+        demofs_open_at_inserted_cb(op, op->result, request);
+    }
 } /* demofs_open_at_alloc_cb */
+
+static void
+demofs_open_at_check_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    unsigned int                   flags   = request->open_at.flags;
+
+    demofs_bt_op_free(thread, op);
+
+    if (result < 0) {
+        if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
+            demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+            return;
+        }
+        demofs_inode_alloc_async(thread, p->txn, demofs_open_at_alloc_cb, request);
+        return;
+    }
+
+    if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+        demofs_op_fail(request, p->txn, CHIMERA_VFS_EEXIST);
+        return;
+    }
+
+    {
+        struct demofs_dirent_rec *rec = (struct demofs_dirent_rec *) p->rec_scratch;
+
+        demofs_inode_get_inum_async(thread, p->txn, rec->inum, rec->gen,
+                                    demofs_open_at_existing_cb, request);
+    }
+} /* demofs_open_at_check_cb */
 
 static void
 demofs_open_at_parent_cb(
@@ -5766,10 +5856,8 @@ demofs_open_at_parent_cb(
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
-    unsigned int                   flags   = request->open_at.flags;
     uint64_t                       hash    = request->open_at.name_hash;
-    uint64_t                       child_inum;
-    uint32_t                       child_gen;
+    struct demofs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -5785,23 +5873,12 @@ demofs_open_at_parent_cb(
 
     p->inode_stash[0] = parent;
 
-    if (demofs_dir_lookup(thread, parent, hash, &child_inum, &child_gen) != 0) {
-        if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
-            demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
-            return;
-        }
-        demofs_inode_alloc_async(thread, p->txn,
-                                 demofs_open_at_alloc_cb, request);
-        return;
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_dir_lookup_async(op, thread, parent, hash, p->rec_scratch,
+                                sizeof(p->rec_scratch), demofs_open_at_check_cb,
+                                request)) {
+        demofs_open_at_check_cb(op, op->result, request);
     }
-
-    if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
-        demofs_op_fail(request, p->txn, CHIMERA_VFS_EEXIST);
-        return;
-    }
-
-    demofs_inode_get_inum_async(thread, p->txn, child_inum, child_gen,
-                                demofs_open_at_existing_cb, request);
 } /* demofs_open_at_parent_cb */
 
 static void
