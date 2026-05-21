@@ -6452,6 +6452,186 @@ demofs_io_callback(
     }
 } /* demofs_io_callback */
 
+/*
+ * Read extent walk (async).  The data reads themselves are already async
+ * (demofs_io_callback completes the request once pending hits 0); here the
+ * extent iteration is also async.  Hoisted state: inode_stash[0] = inode,
+ * loop_off = read_offset, loop_left = read_left, loop_pos = aligned end,
+ * rd_cursor = result-buffer assembly cursor, ext_iter = current extent.
+ */
+static void demofs_read_process(
+    struct chimera_vfs_request *request);
+
+static void
+demofs_read_finish(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_inode           *inode  = p->inode_stash[0];
+
+    if (p->loop_left) {
+        evpl_iovec_cursor_zero(&p->rd_cursor, p->loop_left);
+    }
+
+    demofs_map_attrs(thread, &request->read.r_attr, inode);
+
+    if (p->pending == 0) {
+        demofs_read_adjust_iovecs(request, p);
+        demofs_op_ok(request, p->txn);
+    } else {
+        /* I/O is in flight; drop the inode lock so other ops proceed.  The
+         * txn commits from demofs_io_callback once all reads complete. */
+        demofs_txn_unlock_inode(p->txn, inode);
+    }
+} /* demofs_read_finish */
+
+static void
+demofs_read_walk_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+
+    p->loop_have = demofs_ext_from_op(op, result, &p->ext_iter);
+    demofs_bt_op_free(p->thread, op);
+    demofs_read_process(request);
+} /* demofs_read_walk_cb */
+
+static void
+demofs_read_advance(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_bt_op           *op     = demofs_bt_op_alloc(thread);
+
+    if (demofs_ext_next_async(op, thread, p->inode_stash[0], p->ext_iter.file_offset,
+                              p->rec_scratch, sizeof(p->rec_scratch),
+                              demofs_read_walk_cb, request)) {
+        demofs_read_walk_cb(op, op->result, request);
+    }
+} /* demofs_read_advance */
+
+static void
+demofs_read_process(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p           = request->plugin_data;
+    struct demofs_thread          *thread      = p->thread;
+    struct demofs_shared          *shared      = thread->shared;
+    struct evpl                   *evpl        = thread->evpl;
+    struct demofs_extent          *extent      = &p->ext_iter;
+    uint64_t                       read_offset = p->loop_off;
+    uint64_t                       read_left   = p->loop_left;
+    uint64_t                       aligned_end = p->loop_pos;
+    uint64_t                       extent_end, overlap_start, overlap_length, chunk;
+    uint32_t                       chunk_niov;
+    struct evpl_iovec             *chunk_iov;
+
+    if (!(read_left && p->loop_have && extent->file_offset < aligned_end)) {
+        demofs_read_finish(request);
+        return;
+    }
+
+    if (read_offset < extent->file_offset) {
+        chunk = extent->file_offset - read_offset;
+        evpl_iovec_cursor_zero(&p->rd_cursor, chunk);
+        read_offset += chunk;
+        read_left   -= chunk;
+    }
+
+    extent_end     = extent->file_offset + extent->length;
+    overlap_start  = read_offset - extent->file_offset;
+    overlap_length = extent_end - read_offset;
+    if (overlap_length > read_left) {
+        overlap_length = read_left;
+    }
+
+    while (overlap_length) {
+        uint64_t dev_offset;
+        uint32_t dev_pad, total;
+        int      pad_niov = 0;
+
+        if (overlap_length > shared->devices[extent->device_id].max_request_size) {
+            chunk = shared->devices[extent->device_id].max_request_size;
+        } else {
+            chunk = overlap_length;
+        }
+
+        chunk_iov  = &p->iov[p->niov];
+        dev_offset = extent->device_offset + overlap_start;
+        dev_pad    = (uint32_t) (dev_offset & 4095ULL);
+
+        if (dev_pad) {
+            evpl_iovec_clone_segment(&chunk_iov[0], &thread->pad, 0, dev_pad);
+            pad_niov    = 1;
+            dev_offset -= dev_pad;
+        }
+
+        chunk_niov = evpl_iovec_cursor_move(&p->rd_cursor, &chunk_iov[pad_niov],
+                                            32, chunk, 1);
+        chunk_niov += pad_niov;
+
+        total = dev_pad + chunk;
+        if (total & 4095) {
+            evpl_iovec_clone_segment(&chunk_iov[chunk_niov], &thread->pad, 0,
+                                     4096 - (total & 4095));
+            chunk_niov++;
+        }
+
+        p->niov += chunk_niov;
+        p->pending++;
+        thread->pending_io++;
+
+        evpl_block_read(evpl, thread->queue[extent->device_id], chunk_iov,
+                        chunk_niov, dev_offset, demofs_io_callback, request);
+
+        overlap_length -= chunk;
+        overlap_start  += chunk;
+        read_offset    += chunk;
+        read_left      -= chunk;
+    }
+
+    p->loop_off  = read_offset;
+    p->loop_left = read_left;
+
+    demofs_read_advance(request);
+} /* demofs_read_process */
+
+/* First-extent selection for read: floor(read_offset), advancing if it ends
+ * at/before read_offset, or the first extent if none. */
+static void
+demofs_read_first_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request     = private_data;
+    struct demofs_request_private *p           = request->plugin_data;
+    struct demofs_thread          *thread      = p->thread;
+    uint64_t                       read_offset = p->loop_off;
+    int                            have        = demofs_ext_from_op(op, result, &p->ext_iter);
+
+    demofs_bt_op_free(thread, op);
+
+    if (have && p->ext_iter.file_offset + p->ext_iter.length <= read_offset) {
+        demofs_read_advance(request);
+        return;
+    }
+    if (!have) {
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_ceil_async(op, thread, p->inode_stash[0], 0, p->rec_scratch,
+                                  sizeof(p->rec_scratch), demofs_read_walk_cb,
+                                  request)) {
+            demofs_read_walk_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    p->loop_have = 1;
+    demofs_read_process(request);
+} /* demofs_read_first_cb */
+
 static void
 demofs_read_inode_cb(
     struct demofs_inode *inode,
@@ -6461,17 +6641,11 @@ demofs_read_inode_cb(
     struct chimera_vfs_request    *request        = private_data;
     struct demofs_request_private *demofs_private = request->plugin_data;
     struct demofs_thread          *thread         = demofs_private->thread;
-    struct demofs_shared          *shared         = thread->shared;
     struct evpl                   *evpl           = thread->evpl;
-    struct demofs_extent           ext_buf;
-    struct demofs_extent          *extent = &ext_buf;
-    int                            have;
-    uint64_t                       offset, length, read_offset, read_left;
-    uint64_t                       extent_end, overlap_start, overlap_length;
-    uint64_t                       aligned_offset, aligned_length, chunk;
-    uint32_t                       eof = 0, chunk_niov;
-    struct evpl_iovec             *chunk_iov;
-    struct evpl_iovec_cursor       cursor;
+    uint64_t                       offset, length;
+    uint64_t                       aligned_offset, aligned_length;
+    uint32_t                       eof = 0;
+    struct demofs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, demofs_private->txn, status);
@@ -6509,123 +6683,22 @@ demofs_read_inode_cb(
     request->read.r_length = length;
     request->read.r_eof    = eof;
 
-    // Allocate iovec for full aligned size
     request->read.r_niov = evpl_iovec_alloc(evpl, aligned_length, 4096, 1,
                                             0, request->read.iov);
 
-    read_offset = aligned_offset;
-    read_left   = aligned_length;
+    evpl_iovec_cursor_init(&demofs_private->rd_cursor, request->read.iov,
+                           request->read.r_niov);
 
-    evpl_iovec_cursor_init(&cursor, request->read.iov, request->read.r_niov);
+    demofs_private->inode_stash[0] = inode;
+    demofs_private->loop_off       = aligned_offset;
+    demofs_private->loop_left      = aligned_length;
+    demofs_private->loop_pos       = aligned_offset + aligned_length;
 
-    // Find first extent that could contain our offset
-    have = demofs_ext_floor(thread, inode, read_offset, extent);
-
-    if (!have) {
-        /* No extent at or before read_offset - get the first extent
-         * in case there's one that starts within our range */
-        have = demofs_ext_ceil(thread, inode, 0, extent);
-    } else if (extent->file_offset + extent->length <= read_offset) {
-        have = demofs_ext_next(thread, inode, extent->file_offset, extent);
-    }
-
-    while (read_left && have && extent->file_offset < aligned_offset + aligned_length) {
-
-        if (read_offset < extent->file_offset) {
-            chunk = extent->file_offset - read_offset;
-            evpl_iovec_cursor_zero(&cursor, chunk);
-            read_offset += chunk;
-            read_left   -= chunk;
-        }
-
-
-        extent_end = extent->file_offset + extent->length;
-
-        // Calculate overlap with current extent
-        overlap_start  = read_offset - extent->file_offset;
-        overlap_length = extent_end - read_offset;
-
-        if (overlap_length > read_left) {
-            overlap_length = read_left;
-        }
-
-        while (overlap_length) {
-
-            if (overlap_length > shared->devices[extent->device_id].max_request_size) {
-                chunk = shared->devices[extent->device_id].max_request_size;
-            } else {
-                chunk = overlap_length;
-            }
-
-            chunk_iov = &demofs_private->iov[demofs_private->niov];
-
-            uint64_t dev_offset = extent->device_offset + overlap_start;
-            uint32_t dev_pad    = (uint32_t) (dev_offset & 4095ULL);
-            int      pad_niov   = 0;
-
-            if (dev_pad) {
-                /* Device offset is not 4K-aligned (can happen after
-                 * DEALLOCATE trims an extent at a non-block boundary).
-                 * Prepend a discard buffer so the block-device read
-                 * starts at an aligned offset. */
-                evpl_iovec_clone_segment(&chunk_iov[0], &thread->pad,
-                                         0, dev_pad);
-                pad_niov    = 1;
-                dev_offset -= dev_pad;
-            }
-
-            chunk_niov = evpl_iovec_cursor_move(&cursor,
-                                                &chunk_iov[pad_niov],
-                                                32, chunk, 1);
-            chunk_niov += pad_niov;
-
-            uint32_t total = dev_pad + chunk;
-
-            if (total & 4095) {
-                evpl_iovec_clone_segment(&chunk_iov[chunk_niov],
-                                         &thread->pad, 0,
-                                         4096 - (total & 4095));
-                chunk_niov++;
-            }
-
-            demofs_private->niov += chunk_niov;
-
-            demofs_private->pending++;
-            thread->pending_io++;
-
-            evpl_block_read(evpl,
-                            thread->queue[extent->device_id],
-                            chunk_iov,
-                            chunk_niov,
-                            dev_offset,
-                            demofs_io_callback,
-                            request);
-
-            overlap_length -= chunk;
-            overlap_start  += chunk;
-
-            read_offset += chunk;
-            read_left   -= chunk;
-        }
-
-        have = demofs_ext_next(thread, inode, extent->file_offset, extent);
-    }
-
-    if (read_left) {
-        evpl_iovec_cursor_zero(&cursor, read_left);
-    }
-
-    demofs_map_attrs(thread, &request->read.r_attr, inode);
-
-
-    if (demofs_private->pending == 0) {
-        demofs_read_adjust_iovecs(request, demofs_private);
-        demofs_op_ok(request, demofs_private->txn);
-    } else {
-        /* I/O is in flight.  Drop the inode lock now so other ops on this
-         * worker thread can proceed; the txn will be committed (with no
-         * remaining refs to unlock) from demofs_io_callback. */
-        demofs_txn_unlock_inode(demofs_private->txn, inode);
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_floor_async(op, thread, inode, aligned_offset, demofs_private->rec_scratch,
+                               sizeof(demofs_private->rec_scratch), demofs_read_first_cb,
+                               request)) {
+        demofs_read_first_cb(op, op->result, request);
     }
 } /* demofs_read_inode_cb */
 
