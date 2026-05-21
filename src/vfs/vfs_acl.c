@@ -88,6 +88,9 @@ ace_applies(
                     return cred_in_group(cred, owner_gid);
                 case CHIMERA_WHO_EVERYONE:
                     return 1;
+                case CHIMERA_WHO_OWNER_RIGHTS:
+                    /* OWNER RIGHTS matches the caller when it is the owner. */
+                    return (uint64_t) cred->uid == owner_uid;
                 default:
                     /* INTERACTIVE@/NETWORK@/... -- no session-class signal yet.
                      * CREATOR_OWNER@/CREATOR_GROUP@ are inheritance-template
@@ -167,7 +170,18 @@ chimera_acl_access_check(
         return mode_access_check(mode, owner_uid, owner_gid, cred, requested);
     }
 
-    uint32_t denied = 0;
+    uint32_t denied               = 0;
+    int      owner_rights_present = 0;
+
+    /* An OWNER_RIGHTS ACE anywhere in the DACL disables the implicit owner
+     * rights -- the owner's access is then defined solely by the ACEs. */
+    for (unsigned i = 0; i < acl->num_aces; i++) {
+        if (acl->aces[i].who.type == CHIMERA_PRINCIPAL_SPECIAL &&
+            acl->aces[i].who.special == CHIMERA_WHO_OWNER_RIGHTS) {
+            owner_rights_present = 1;
+            break;
+        }
+    }
 
     for (unsigned i = 0; i < acl->num_aces && remaining; i++) {
         const struct chimera_ace *ace = &acl->aces[i];
@@ -204,7 +218,7 @@ chimera_acl_access_check(
     {
         uint32_t implicit = ACE_BASELINE;
 
-        if ((uint64_t) cred->uid == owner_uid) {
+        if ((uint64_t) cred->uid == owner_uid && !owner_rights_present) {
             implicit |= ACE_OWNER_IMPLICIT;
         }
 

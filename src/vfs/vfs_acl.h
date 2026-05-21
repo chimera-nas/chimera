@@ -94,6 +94,10 @@ enum chimera_special_who {
      * so SMB clients see the owner+SYSTEM full-control default they expect; it
      * matches no Unix caller during access evaluation. */
     CHIMERA_WHO_SYSTEM        = 9,
+    /* OWNER RIGHTS (S-1-3-4): matches the object's current owner, but its mere
+     * presence in a DACL suppresses the otherwise-implicit owner rights so the
+     * owner's access is defined entirely by the ACEs. */
+    CHIMERA_WHO_OWNER_RIGHTS  = 10,
 };
 
 struct chimera_principal {
