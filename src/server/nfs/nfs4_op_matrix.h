@@ -10,7 +10,7 @@
 #include "nfs4_xdr.h"
 
 #define NFS4_OP_MIN                 3 /* OP_ACCESS */
-#define NFS4_OP_MAX                 71 /* OP_CLONE */
+#define NFS4_OP_MAX                 75 /* OP_REMOVEXATTR */
 
 /* Per-minor-version support bits. */
 #define NFS4_OP_V40                 0x1
@@ -171,6 +171,16 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     [OP_WRITE_SAME] =           { NFS4_OP_V42,                             0
     },
     [OP_CLONE] =                { NFS4_OP_V42,                             0
+    },
+
+    /* RFC 8276 extended attribute ops (NFSv4.2 only) */
+    [OP_GETXATTR] =             { NFS4_OP_V42,                             0
+    },
+    [OP_SETXATTR] =             { NFS4_OP_V42,                             0
+    },
+    [OP_LISTXATTRS] =           { NFS4_OP_V42,                             0
+    },
+    [OP_REMOVEXATTR] =          { NFS4_OP_V42,                             0
     },
 };
 

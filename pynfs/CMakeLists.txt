@@ -44,7 +44,7 @@ set(PYNFS_PASS_0
 set(PYNFS_PASS_1
     currentstateid destroy_clientid getfh lookup putfh rename verify xattr)
 set(PYNFS_PASS_2
-    destroy_clientid getfh lookup rename sparse verify)
+    destroy_clientid getfh lookup rename sparse verify xattr)
 
 # Backends on which the pass-lists above have been validated.  Other backends
 # register the same suites but leave them DISABLED until validated.
