@@ -465,6 +465,16 @@ chimera_smb_create_open_at_callback(
     struct chimera_vfs_attrs       *dir_post_attr,
     void                           *private_data);
 
+static inline uint32_t
+chimera_smb_create_check_access(
+    struct chimera_smb_request     *request,
+    const struct chimera_vfs_attrs *attr);
+
+static inline uint32_t
+chimera_smb_create_granted_access(
+    struct chimera_smb_request     *request,
+    const struct chimera_vfs_attrs *attr);
+
 static inline void
 chimera_smb_create_mkdir_callback(
     enum chimera_vfs_error    error_code,
@@ -543,6 +553,20 @@ chimera_smb_create_open_at_callback(
         return;
     }
 
+    /* Enforce the requested access against the object's ACL for every
+     * disposition that can open an existing object.  Pure FILE_CREATE always
+     * makes a new object (and fails with a collision otherwise), so the creator
+     * implicitly holds it and we do not gate it here.  A newly-created object
+     * reached via OPEN_IF/OVERWRITE_IF/SUPERSEDE carries the owner-full-control
+     * default (or inherited) ACL, so the creator passes this check naturally. */
+    if (request->create.create_disposition != SMB2_FILE_CREATE &&
+        chimera_smb_create_check_access(request, attr) != SMB2_STATUS_SUCCESS) {
+        chimera_vfs_release(vfs_thread, oh);
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
     open_file = chimera_smb_create_gen_open_file_normal(request,
                                                         request->create.parent_handle->fh,
                                                         request->create.parent_handle->fh_len,
@@ -560,6 +584,11 @@ chimera_smb_create_open_at_callback(
     }
 
     request->create.r_open_file = open_file;
+
+    open_file->granted_access = chimera_smb_create_granted_access(request, attr);
+    open_file->maximal_access =
+        chimera_vfs_access_check(attr, &request->session_handle->session->cred,
+                                 CHIMERA_ACE_MASK_ALL);
 
     chimera_smb_marshal_attrs(
         attr,
@@ -600,6 +629,83 @@ chimera_smb_create_open_at_callback(
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_create_open_at_callback */
 
+/*
+ * Map the CREATE DesiredAccess to canonical access-mask bits and evaluate it
+ * against the opened object's ACL via the shared engine.  Returns
+ * SMB2_STATUS_SUCCESS when every requested right is granted, otherwise
+ * SMB2_STATUS_ACCESS_DENIED.  The SMB2 specific + standard access bits share
+ * the canonical ACE mask layout exactly, so they map straight through; the four
+ * NT generic bits are expanded.  MAXIMUM_ALLOWED / ACCESS_SYSTEM_SECURITY are
+ * not gated here.  `attr` must carry the ACL (request CHIMERA_VFS_ATTR_ACL).
+ */
+static inline uint32_t
+chimera_smb_create_check_access(
+    struct chimera_smb_request     *request,
+    const struct chimera_vfs_attrs *attr)
+{
+    uint32_t da = request->create.desired_access;
+    uint32_t req;
+    uint32_t granted;
+
+    /* Requested rights, with the four NT generic bits expanded to their
+     * specific rights and the generic bits themselves dropped.  MAXIMUM_ALLOWED
+     * and ACCESS_SYSTEM_SECURITY are not gated here.  Any other requested bit
+     * (including reserved/undefined ones) stays in `req`, so an open asking for
+     * a right the object does not grant is denied -- the SMB2 specific+standard
+     * bits share the canonical ACE mask layout exactly. */
+    req = da & ~(SMB2_MAXIMUM_ALLOWED | SMB2_ACCESS_SYSTEM_SECURITY |
+                 SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
+                 SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL);
+
+    if (da & SMB2_GENERIC_READ) {
+        req |= 0x00120089; /* READ_DATA|READ_NAMED_ATTRS|READ_ATTRS|READ_ACL|SYNC */
+    }
+    if (da & SMB2_GENERIC_WRITE) {
+        req |= 0x00120116; /* WRITE_DATA|APPEND|WRITE_NAMED_ATTRS|WRITE_ATTRS|READ_ACL|SYNC */
+    }
+    if (da & SMB2_GENERIC_EXECUTE) {
+        req |= 0x001200a0; /* EXECUTE|READ_ATTRS|READ_ACL|SYNC */
+    }
+    if (da & SMB2_GENERIC_ALL) {
+        req |= CHIMERA_ACE_MASK_ALL;
+    }
+
+    if (!req) {
+        return SMB2_STATUS_SUCCESS;
+    }
+
+    /* Evaluate the full grantable universe and require every requested bit to
+     * be present; a requested right outside what the ACL grants (e.g. an
+     * undefined specific bit) is therefore denied. */
+    granted = chimera_vfs_access_check(
+        attr, &request->session_handle->session->cred, CHIMERA_ACE_MASK_ALL);
+
+    return (req & ~granted) == 0 ?
+           SMB2_STATUS_SUCCESS : SMB2_STATUS_ACCESS_DENIED;
+} /* chimera_smb_create_check_access */
+
+/*
+ * Resolve the access mask granted on a successful open, for the open handle's
+ * FileAccessInformation / MxAc reporting.  A MAXIMUM_ALLOWED open is granted the
+ * full set the caller's ACL evaluation yields; a specific-bits open is granted
+ * exactly the bits it asked for (the open already passed the access check).
+ */
+static inline uint32_t
+chimera_smb_create_granted_access(
+    struct chimera_smb_request     *request,
+    const struct chimera_vfs_attrs *attr)
+{
+    uint32_t da = request->create.desired_access;
+
+    if (da & SMB2_MAXIMUM_ALLOWED) {
+        return chimera_vfs_access_check(
+            attr, &request->session_handle->session->cred,
+            CHIMERA_ACE_MASK_ALL);
+    }
+
+    return da & ~SMB2_MAXIMUM_ALLOWED;
+} /* chimera_smb_create_granted_access */
+
 static inline void
 chimera_smb_create_open_getattr_callback(
     enum chimera_vfs_error    error_code,
@@ -619,45 +725,17 @@ chimera_smb_create_open_getattr_callback(
         request->create.r_open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY;
     }
 
-    /* Enforce the requested access against the object's ACL via the shared
-     * engine, so a Windows ACL (stored over SMB or NFSv4) is honoured here.
-     * Only the data/exec/delete classes are checked; metadata and control
-     * rights are granted by the engine baseline. */
-    {
-        uint32_t da  = request->create.desired_access;
-        uint32_t req = 0;
-
-        if (da & (SMB2_FILE_READ_DATA | SMB2_GENERIC_READ)) {
-            req |= CHIMERA_ACE_READ_DATA;
-        }
-        if (da & (SMB2_FILE_WRITE_DATA | SMB2_GENERIC_WRITE)) {
-            req |= CHIMERA_ACE_WRITE_DATA;
-        }
-        if (da & SMB2_FILE_APPEND_DATA) {
-            req |= CHIMERA_ACE_APPEND_DATA;
-        }
-        if (da & (SMB2_FILE_EXECUTE | SMB2_GENERIC_EXECUTE)) {
-            req |= CHIMERA_ACE_EXECUTE;
-        }
-        if (da & SMB2_DELETE) {
-            req |= CHIMERA_ACE_DELETE;
-        }
-        if (da & SMB2_GENERIC_ALL) {
-            req |= CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA |
-                CHIMERA_ACE_EXECUTE;
-        }
-
-        if (req) {
-            uint32_t granted = chimera_vfs_access_check(
-                attr, &request->session_handle->session->cred, req);
-
-            if ((granted & req) != req) {
-                chimera_smb_open_file_release(request, request->create.r_open_file);
-                chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
-                return;
-            }
-        }
+    if (chimera_smb_create_check_access(request, attr) != SMB2_STATUS_SUCCESS) {
+        chimera_smb_open_file_release(request, request->create.r_open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
     }
+
+    request->create.r_open_file->granted_access =
+        chimera_smb_create_granted_access(request, attr);
+    request->create.r_open_file->maximal_access =
+        chimera_vfs_access_check(attr, &request->session_handle->session->cred,
+                                 CHIMERA_ACE_MASK_ALL);
 
     chimera_smb_open_file_release(request, request->create.r_open_file);
 
@@ -802,7 +880,8 @@ chimera_smb_create_open_parent_callback(
             request->create.name_len,
             flags,
             &request->create.set_attr,
-            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
+            CHIMERA_VFS_ATTR_ACL,
             0,
             0,
             chimera_smb_create_open_at_callback,
@@ -1061,15 +1140,9 @@ emit_create_response_context(
 
 /* Build the MxAc response body. 8 bytes: QueryStatus(4) | MaximalAccess(4).
  *
- * Spec semantics: MaximalAccess is the user's effective rights against the
- * file's DACL — what the user *could* obtain, not what they happened to ask
- * for. Computing that properly needs ACL evaluation we don't yet have, so
- * Phase 0 only emits MxAc when the client opened with MAXIMUM_ALLOWED — that
- * is the case where the granted desired_access (post-expansion in the create
- * path) approximates the effective rights closely enough to be useful. For
- * specific-access opens we omit the reply: the client already knows what it
- * asked for, and returning that same mask back as "maximal" would be
- * misleading. Phase 1's DACL evaluation will lift the gate. */
+ * MaximalAccess is the caller's effective rights against the object's DACL --
+ * what the user *could* obtain, independent of what was requested.  It was
+ * computed from the ACL at open and stored on the open handle. */
 static int
 build_mxac_response(
     struct chimera_smb_request *request,
@@ -1082,13 +1155,11 @@ build_mxac_response(
         return -1;
     }
 
-    if ((request->create.desired_access & SMB2_MAXIMUM_ALLOWED) == 0) {
-        return -1;  /* not a MAXIMUM_ALLOWED open — omit the reply */
+    if (!request->create.r_open_file) {
+        return -1;
     }
 
-    max_access = request->create.r_open_file ?
-        request->create.r_open_file->desired_access :
-        request->create.desired_access;
+    max_access = request->create.r_open_file->maximal_access;
 
     out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;  /* QueryStatus = STATUS_SUCCESS */
     out[4] = max_access & 0xff;

@@ -9,15 +9,20 @@
 #include "common/macros.h"
 
 /* Bits everyone is granted regardless of rwx (attribute/acl reads, sync). */
-#define ACE_BASELINE    (CHIMERA_ACE_READ_ATTRIBUTES | \
-                         CHIMERA_ACE_READ_ACL | \
-                         CHIMERA_ACE_SYNCHRONIZE)
+#define ACE_BASELINE       (CHIMERA_ACE_READ_ATTRIBUTES | \
+                            CHIMERA_ACE_READ_ACL | \
+                            CHIMERA_ACE_SYNCHRONIZE)
 
 /* Extra bits the owner always holds (it owns the object). */
-#define ACE_OWNER_EXTRA (CHIMERA_ACE_WRITE_ATTRIBUTES | \
-                         CHIMERA_ACE_WRITE_ACL | \
-                         CHIMERA_ACE_WRITE_OWNER | \
-                         CHIMERA_ACE_READ_ACL)
+#define ACE_OWNER_EXTRA    (CHIMERA_ACE_WRITE_ATTRIBUTES | \
+                            CHIMERA_ACE_WRITE_ACL | \
+                            CHIMERA_ACE_WRITE_OWNER | \
+                            CHIMERA_ACE_READ_ACL)
+
+/* Owner-implied rights under an explicit ACL (Windows "owner rights"): the
+ * object owner always holds READ_CONTROL and WRITE_DAC, but NOT, for example,
+ * WRITE_ATTRIBUTES or WRITE_OWNER -- those must be granted by an ACE. */
+#define ACE_OWNER_IMPLICIT (CHIMERA_ACE_READ_ACL | CHIMERA_ACE_WRITE_ACL)
 
 /* Translate the rwx bits of one POSIX permission class into a canonical mask. */
 static uint32_t
@@ -82,8 +87,9 @@ ace_applies(
                 case CHIMERA_WHO_EVERYONE:
                     return 1;
                 default:
-                    /* INTERACTIVE@/NETWORK@/... -- treat as non-matching for
-                    * authorization (we have no session-class signal yet). */
+                    /* INTERACTIVE@/NETWORK@/... -- no session-class signal yet.
+                     * CREATOR_OWNER@/CREATOR_GROUP@ are inheritance-template
+                     * placeholders and match no caller on the object itself. */
                     return 0;
             } /* switch */
         case CHIMERA_PRINCIPAL_USER:
@@ -159,6 +165,8 @@ chimera_acl_access_check(
         return mode_access_check(mode, owner_uid, owner_gid, cred, requested);
     }
 
+    uint32_t denied = 0;
+
     for (unsigned i = 0; i < acl->num_aces && remaining; i++) {
         const struct chimera_ace *ace = &acl->aces[i];
 
@@ -182,8 +190,23 @@ chimera_acl_access_check(
             remaining &= ~ace->access_mask;
         } else { /* DENIED */
             /* Denied bits drop out of consideration and are never granted. */
+            denied    |= ace->access_mask;
             remaining &= ~ace->access_mask;
         }
+    }
+
+    /* Implicit rights (Windows): metadata-read/sync are available to anyone,
+     * and the object's owner additionally always holds the attribute/ACL/owner
+     * write rights -- unless an explicit DENY ACE removed them.  These fill in
+     * bits a minimal explicit ALLOW ACE would otherwise leave ungranted. */
+    {
+        uint32_t implicit = ACE_BASELINE;
+
+        if ((uint64_t) cred->uid == owner_uid) {
+            implicit |= ACE_OWNER_IMPLICIT;
+        }
+
+        granted |= implicit & requested & ~denied;
     }
 
     return granted;
@@ -238,6 +261,51 @@ chimera_acl_from_mode(
     out->ctrl_flags = 0;
     return n;
 } /* chimera_acl_from_mode */
+
+SYMBOL_EXPORT int
+chimera_acl_default_acl(
+    uint32_t            mode,
+    struct chimera_acl *out,
+    unsigned            max_aces)
+{
+    uint32_t group_p = perm_class_to_mask(!!(mode & S_IRGRP),
+                                          !!(mode & S_IWGRP),
+                                          !!(mode & S_IXGRP));
+    uint32_t other_p = perm_class_to_mask(!!(mode & S_IROTH),
+                                          !!(mode & S_IWOTH),
+                                          !!(mode & S_IXOTH));
+    uint32_t group_deny = other_p & ~group_p;
+    unsigned n          = 0;
+
+#define EMIT(t, m, sp) \
+        do { \
+            if (n >= max_aces) { return -1; } \
+            out->aces[n].type        = (t); \
+            out->aces[n].flags       = 0; \
+            out->aces[n].access_mask = (m); \
+            out->aces[n].who.type    = CHIMERA_PRINCIPAL_SPECIAL; \
+            out->aces[n].who.special = (sp); \
+            out->aces[n].who.id      = 0; \
+            n++; \
+        } while (0)
+
+    /* Windows-style default DACL: the owner gets full control; group and other
+     * track the POSIX mode.  Used for objects created over SMB with neither an
+     * explicit security descriptor nor an inheritable parent ACE, so a Windows
+     * client sees the owner-full-control it expects (POSIX mode alone would, for
+     * example, deny the owner FILE_EXECUTE on a 0644 file). */
+    EMIT(CHIMERA_ACE_ALLOWED, CHIMERA_ACE_MASK_ALL, CHIMERA_WHO_OWNER);
+    EMIT(CHIMERA_ACE_ALLOWED, group_p | ACE_BASELINE, CHIMERA_WHO_GROUP);
+    if (group_deny) {
+        EMIT(CHIMERA_ACE_DENIED, group_deny, CHIMERA_WHO_GROUP);
+    }
+    EMIT(CHIMERA_ACE_ALLOWED, other_p | ACE_BASELINE, CHIMERA_WHO_EVERYONE);
+#undef EMIT
+
+    out->num_aces   = n;
+    out->ctrl_flags = 0;
+    return n;
+} /* chimera_acl_default_acl */
 
 /*
  * Accumulate the effective allowed mask for one POSIX class, walking the ACL in

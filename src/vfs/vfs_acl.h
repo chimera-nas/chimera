@@ -84,6 +84,12 @@ enum chimera_special_who {
     CHIMERA_WHO_NETWORK       = 4,
     CHIMERA_WHO_AUTHENTICATED = 5,
     CHIMERA_WHO_ANONYMOUS     = 6,
+    /* Inheritance-template placeholders (Windows CREATOR OWNER / CREATOR GROUP,
+     * SIDs S-1-3-0 / S-1-3-1).  These match no caller on the object they sit on;
+     * during inheritance they are substituted with the new object's OWNER@ /
+     * GROUP@ for the effective inherited ACE. */
+    CHIMERA_WHO_CREATOR_OWNER = 7,
+    CHIMERA_WHO_CREATOR_GROUP = 8,
 };
 
 struct chimera_principal {
@@ -143,6 +149,18 @@ uint32_t chimera_acl_access_check(
  * too small.
  */
 int chimera_acl_from_mode(
+    uint32_t            mode,
+    struct chimera_acl *out,
+    unsigned            max_aces);
+
+/*
+ * Build a Windows-style default DACL from POSIX mode: the OWNER@ gets full
+ * control; GROUP@/EVERYONE@ track the mode bits.  Used to seed objects created
+ * over SMB with no explicit SD and no inheritable parent ACE, so a Windows
+ * client sees owner-full-control (plain mode would deny e.g. FILE_EXECUTE on a
+ * 0644 file).  Writes up to 4 ACEs into `out`; returns the ACE count, or -1.
+ */
+int chimera_acl_default_acl(
     uint32_t            mode,
     struct chimera_acl *out,
     unsigned            max_aces);

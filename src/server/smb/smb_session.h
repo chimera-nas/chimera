@@ -79,6 +79,13 @@ struct chimera_smb_open_file {
     struct chimera_smb_file_id       file_id;
     struct chimera_vfs_open_handle  *handle;
     uint32_t                         desired_access;
+    /* Access mask actually granted on this handle (FileAccessInformation).
+     * Resolved from the object ACL at open: equals desired_access for a
+     * specific-bits open, or the maximal available set for MAXIMUM_ALLOWED. */
+    uint32_t                         granted_access;
+    /* The caller's full effective rights against the object's ACL, regardless
+     * of what was requested -- reported in the MxAc create-context response. */
+    uint32_t                         maximal_access;
     uint32_t                         share_access;
     uint32_t                         name_len;
     uint32_t                         flags;

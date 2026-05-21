@@ -444,11 +444,24 @@ chimera_smb_acl_to_sd(
         if (acl && acl->num_aces) {
             for (unsigned i = 0; i < acl->num_aces; i++) {
                 const struct chimera_ace *ace = &acl->aces[i];
+                struct chimera_principal  who = ace->who;
                 char                      sidstr[CHIMERA_IDMAP_SID_MAX];
                 int                       sidlen;
                 uint16_t                  ace_size;
 
-                if (chimera_idmap_principal_to_sid(&ace->who, sidstr,
+                /* OWNER@/GROUP@ denote the object's current owner/group: emit
+                 * the concrete owner/group SID rather than a special SID. */
+                if (who.type == CHIMERA_PRINCIPAL_SPECIAL) {
+                    if (who.special == CHIMERA_WHO_OWNER) {
+                        who.type = CHIMERA_PRINCIPAL_USER;
+                        who.id   = uid;
+                    } else if (who.special == CHIMERA_WHO_GROUP) {
+                        who.type = CHIMERA_PRINCIPAL_GROUP;
+                        who.id   = gid;
+                    }
+                }
+
+                if (chimera_idmap_principal_to_sid(&who, sidstr,
                                                    sizeof(sidstr)) < 0) {
                     continue;
                 }

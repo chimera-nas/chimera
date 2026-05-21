@@ -960,51 +960,63 @@ memfs_apply_attrs(
 } /* memfs_apply_attrs */
 
 /*
- * Apply Windows/NFSv4 create-time ACL inheritance to a freshly-created child.
- * When the child carries no explicit ACL (none supplied at create) and the
- * parent directory holds ACEs marked inheritable for this child's type, compute
- * the inherited ACL via the shared engine and store it, re-deriving the mode.
- * Otherwise the child is left mode-derived (acl == NULL) -- matching the legacy
- * and mode-only-backend behaviour.  Both inodes are held locked by the caller.
+ * Seed a freshly-created child's ACL.  Precedence:
+ *   1. An explicit ACL supplied at create (e.g. an SMB SD) is kept as-is.
+ *   2. Otherwise, if the parent holds ACEs inheritable for the child's type,
+ *      compute the inherited ACL via the shared engine and store it, re-deriving
+ *      the mode from it (Windows inheritance defines the child's access).
+ *   3. Otherwise, for an SMB-originated create (`windows_default`), store a
+ *      Windows-style default DACL granting the owner full control while leaving
+ *      the POSIX mode intact, so a Windows client sees owner-full-control (plain
+ *      mode would deny e.g. FILE_EXECUTE on a 0644 file).
+ *   4. Otherwise (NFS/POSIX create, no inheritance) the child stays mode-derived
+ *      (acl == NULL) -- matching legacy and mode-only-backend behaviour.
+ * Both inodes are held locked by the caller.
  */
 static void
 memfs_inherit_acl(
     struct memfs_inode *child,
-    struct memfs_inode *parent)
+    struct memfs_inode *parent,
+    int                 windows_default)
 {
-    int                 is_dir = S_ISDIR(child->mode);
-    uint16_t            want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
+    int      is_dir = S_ISDIR(child->mode);
+    uint16_t want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
         (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
-    int                 has_inh = 0;
-    unsigned            cap;
-    struct chimera_acl *tmp;
-    int                 n;
+    int      has_inh = 0;
 
-    if (child->acl || !parent->acl) {
+    if (child->acl) {
         return;
     }
 
-    for (unsigned i = 0; i < parent->acl->num_aces; i++) {
-        if (parent->acl->aces[i].flags & want) {
-            has_inh = 1;
-            break;
+    if (parent->acl) {
+        for (unsigned i = 0; i < parent->acl->num_aces; i++) {
+            if (parent->acl->aces[i].flags & want) {
+                has_inh = 1;
+                break;
+            }
         }
     }
 
-    if (!has_inh) {
-        return;
+    if (has_inh) {
+        unsigned            cap = parent->acl->num_aces;
+        struct chimera_acl *tmp = malloc(chimera_acl_size(cap));
+        int                 n   = chimera_acl_inherit(parent->acl, is_dir,
+                                                      child->mode & 07777, tmp, cap);
+
+        if (n > 0) {
+            memfs_inode_set_acl(child, tmp);
+            child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(child->acl);
+        }
+        free(tmp);
+    } else if (windows_default) {
+        uint8_t             buf[sizeof(struct chimera_acl) +
+                                4 * sizeof(struct chimera_ace)];
+        struct chimera_acl *def = (struct chimera_acl *) buf;
+
+        if (chimera_acl_default_acl(child->mode & 07777, def, 4) > 0) {
+            memfs_inode_set_acl(child, def);
+        }
     }
-
-    cap = parent->acl->num_aces;
-    tmp = malloc(chimera_acl_size(cap));
-    n   = chimera_acl_inherit(parent->acl, is_dir, child->mode & 07777, tmp, cap);
-
-    if (n > 0) {
-        memfs_inode_set_acl(child, tmp);
-        child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(child->acl);
-    }
-
-    free(tmp);
 } /* memfs_inherit_acl */
 
 static void
@@ -1493,9 +1505,10 @@ memfs_mkdir_at(
     inode->dir.parent_inum = parent_inode->inum;
     inode->dir.parent_gen  = parent_inode->gen;
 
-    /* Inherit the parent's inheritable ACEs (no-op when none); refresh the
-     * child's returned attrs since the mode may have been re-derived. */
-    memfs_inherit_acl(inode, parent_inode);
+    /* Inherit the parent's inheritable ACEs (or seed a Windows default DACL for
+     * SMB creates); refresh the child's attrs since the mode may have changed. */
+    memfs_inherit_acl(inode, parent_inode,
+                      request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
     memfs_map_attrs(shared, r_attr, inode, request->fh);
 
     memfs_map_attrs(shared, r_dir_pre_attr, parent_inode, request->fh);
@@ -2005,7 +2018,8 @@ memfs_open_at(
 
         memfs_apply_attrs(inode, request->open_at.set_attr);
 
-        memfs_inherit_acl(inode, parent_inode);
+        memfs_inherit_acl(inode, parent_inode,
+                          request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
 
         dirent = memfs_dirent_alloc(thread,
                                     inode->inum,

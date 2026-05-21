@@ -45,13 +45,13 @@ who_string_to_special(
         const char *name;
         uint8_t     special;
     } table[] = {
-        { "OWNER@",         CHIMERA_WHO_OWNER                 },
-        { "GROUP@",         CHIMERA_WHO_GROUP                 },
-        { "EVERYONE@",      CHIMERA_WHO_EVERYONE              },
-        { "INTERACTIVE@",   CHIMERA_WHO_INTERACTIVE           },
-        { "NETWORK@",       CHIMERA_WHO_NETWORK               },
-        { "AUTHENTICATED@", CHIMERA_WHO_AUTHENTICATED         },
-        { "ANONYMOUS@",     CHIMERA_WHO_ANONYMOUS             },
+        { "OWNER@",         CHIMERA_WHO_OWNER                         },
+        { "GROUP@",         CHIMERA_WHO_GROUP                         },
+        { "EVERYONE@",      CHIMERA_WHO_EVERYONE                      },
+        { "INTERACTIVE@",   CHIMERA_WHO_INTERACTIVE                   },
+        { "NETWORK@",       CHIMERA_WHO_NETWORK                       },
+        { "AUTHENTICATED@", CHIMERA_WHO_AUTHENTICATED                 },
+        { "ANONYMOUS@",     CHIMERA_WHO_ANONYMOUS                     },
     };
 
     for (unsigned i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
@@ -225,8 +225,12 @@ chimera_idmap_principal_to_sid(
 
     if (p->type == CHIMERA_PRINCIPAL_SPECIAL) {
         switch (p->special) {
-            case CHIMERA_WHO_OWNER:         s = SID_CREATOR_OWNER; break;
-            case CHIMERA_WHO_GROUP:         s = SID_CREATOR_GROUP; break;
+            /* OWNER@/GROUP@ have no standalone SID -- they denote the object's
+             * current owner/owning-group and the SD emitter substitutes the
+             * concrete owner SID.  Only the CREATOR placeholders map to the
+             * S-1-3 well-known SIDs. */
+            case CHIMERA_WHO_CREATOR_OWNER: s = SID_CREATOR_OWNER; break;
+            case CHIMERA_WHO_CREATOR_GROUP: s = SID_CREATOR_GROUP; break;
             case CHIMERA_WHO_EVERYONE:      s = SID_EVERYONE; break;
             case CHIMERA_WHO_INTERACTIVE:   s = SID_INTERACTIVE; break;
             case CHIMERA_WHO_NETWORK:       s = SID_NETWORK; break;
@@ -266,11 +270,11 @@ chimera_idmap_sid_to_principal(
         return 0;
     }
     if (strcmp(sid, SID_CREATOR_OWNER) == 0) {
-        *p = chimera_idmap_special_principal(CHIMERA_WHO_OWNER);
+        *p = chimera_idmap_special_principal(CHIMERA_WHO_CREATOR_OWNER);
         return 0;
     }
     if (strcmp(sid, SID_CREATOR_GROUP) == 0) {
-        *p = chimera_idmap_special_principal(CHIMERA_WHO_GROUP);
+        *p = chimera_idmap_special_principal(CHIMERA_WHO_CREATOR_GROUP);
         return 0;
     }
     if (strcmp(sid, SID_AUTHENTICATED) == 0) {
