@@ -2012,11 +2012,12 @@ demofs_bt_insert_rec(
 } /* demofs_bt_insert_rec */
 
 /*
- * Insert a record into an inode's b+tree.  The inode must be write-locked
- * and its root block pinned (true for any write op that acquired it).
+ * Insert a record into an inode's b+tree.  The inode must be write-locked and
+ * its root block pinned, and the descent path must already be resident (the
+ * async driver faults it in first).  Synchronous structural modify.
  */
 static void
-demofs_bt_insert(
+demofs_bt_insert_locked(
     struct demofs_thread       *thread,
     struct demofs_txn          *txn,
     struct demofs_inode        *inode,
@@ -2070,7 +2071,7 @@ demofs_bt_insert(
         isl[1].key   = sep;
         isl[1].child = sep_bptr;
 
-        if (old_level == 0) {
+        if (old_level == 0) {     /* leaf-root grow: fix right sibling back-link */
             /* The lower half migrated from the (now interior) embedded root
              * into the new left block, so the right sibling's back-link must
              * point at the left block rather than the inode's own bptr. */
@@ -2078,7 +2079,7 @@ demofs_bt_insert(
             demofs_bt_hdr(rbuf, 0)->prev_leaf = left_bptr;
         }
     }
-} /* demofs_bt_insert */
+} /* demofs_bt_insert_locked */
 
 /* A node (other than the root) is too empty and must borrow/merge once it
  * holds less than half its capacity: leaves measured in bytes (slots +
@@ -2460,10 +2461,11 @@ demofs_bt_collapse_root(
  * Remove a key from an inode's b+tree, maintaining the B+tree invariants:
  * the leaf heap is compacted, parent separators are kept exact, and
  * underflowing non-root nodes borrow/merge with a sibling (propagating up).
- * Returns 1 if removed, 0 if not found.
+ * Returns 1 if removed, 0 if not found.  The descent path and rebalance
+ * siblings must already be resident (the async driver faults them in).
  */
 static int
-demofs_bt_remove(
+demofs_bt_remove_locked(
     struct demofs_thread       *thread,
     struct demofs_txn          *txn,
     struct demofs_inode        *inode,
@@ -2547,7 +2549,7 @@ demofs_bt_remove(
 
     demofs_bt_collapse_root(thread, txn, inode);
     return 1;
-} /* demofs_bt_remove */
+} /* demofs_bt_remove_locked */
 
 /* ------------------------------------------------------------------ */
 /* Async b+tree operation driver                                       */
@@ -2602,18 +2604,60 @@ demofs_bt_run(struct demofs_bt_op *op)
     uint32_t              dev;
     uint64_t              off;
 
-    switch (op->opcode) {
-        case DEMOFS_BT_OP_LOOKUP_EXACT:
-        case DEMOFS_BT_OP_LOOKUP_GE:
-        case DEMOFS_BT_OP_LOOKUP_LE:
-            break;
-        default:
-            chimera_demofs_abort("demofs_bt_run: opcode %d not async yet", op->opcode);
-            return;
-    } /* switch */
-
     for (;; ) {
         struct demofs_bt_node_hdr *h;
+
+        /*
+         * Remove rebalance can touch the immediate siblings of every node on
+         * the descent path; fault them all in here, then run the synchronous
+         * modify which is guaranteed not to miss.
+         */
+        if (op->phase == DEMOFS_BT_PHASE_REBALANCE) {
+            while (op->reb_level < op->depth) {
+                struct demofs_bt_path_ent *pe = &op->path[op->reb_level];
+                struct demofs_bt_node_hdr *ph;
+                int                        ci, pn;
+                void                      *pbuf;
+
+                off = (pe->bptr == 0)
+                ? sm_inum_to_device_offset(thread->shared->space_map, inode->inum, &dev)
+                : sm_inum_to_device_offset(thread->shared->space_map, pe->bptr, &dev);
+                blk = demofs_bt_block_get(op, dev, off);
+                if (!blk) {
+                    return;
+                }
+                pbuf = blk->buffer;
+                ph   = demofs_bt_hdr(pbuf, pe->base);
+                ci   = pe->ci;
+                pn   = ph->nitems;
+
+                if (op->removed_idx == 0) {
+                    if (ci - 1 >= 0) {
+                        uint64_t sb = demofs_bt_islots(pbuf, pe->base)[ci - 1].child;
+                        off = sm_inum_to_device_offset(thread->shared->space_map, sb, &dev);
+                        if (!demofs_bt_block_get(op, dev, off)) {
+                            return;
+                        }
+                    }
+                    op->removed_idx = 1;
+                }
+                if (op->removed_idx == 1) {
+                    if (ci + 1 < pn) {
+                        uint64_t sb = demofs_bt_islots(pbuf, pe->base)[ci + 1].child;
+                        off = sm_inum_to_device_offset(thread->shared->space_map, sb, &dev);
+                        if (!demofs_bt_block_get(op, dev, off)) {
+                            return;
+                        }
+                    }
+                    op->removed_idx = 2;
+                }
+                op->reb_level++;
+                op->removed_idx = 0;
+            }
+
+            demofs_bt_complete(op, demofs_bt_remove_locked(thread, op->txn, inode, &op->key));
+            return;
+        }
 
         if (op->phase == DEMOFS_BT_PHASE_DESCEND && op->use_root) {
             off  = sm_inum_to_device_offset(thread->shared->space_map, inode->inum, &dev);
@@ -2634,13 +2678,33 @@ demofs_bt_run(struct demofs_bt_op *op)
             if (h->level > 0) {
                 int ci = demofs_bt_interior_search(buf, base, &op->key);
 
+                if (op->opcode == DEMOFS_BT_OP_INSERT ||
+                    op->opcode == DEMOFS_BT_OP_REMOVE) {
+                    chimera_demofs_abort_if(op->depth >= DEMOFS_BT_MAX_DEPTH,
+                                            "b+tree op: path too deep");
+                    op->path[op->depth].bptr = op->use_root ? 0 : op->cur_bptr;
+                    op->path[op->depth].base = base;
+                    op->path[op->depth].ci   = ci;
+                    op->depth++;
+                }
                 op->cur_bptr = demofs_bt_islots(buf, base)[ci].child;
                 op->use_root = 0;
                 continue;
             }
 
             /* At the leaf. */
-            if (op->opcode == DEMOFS_BT_OP_LOOKUP_EXACT) {
+            if (op->opcode == DEMOFS_BT_OP_INSERT) {
+                demofs_bt_insert_locked(thread, op->txn, inode, &op->key,
+                                        op->recbuf, op->reclen);
+                demofs_bt_complete(op, 0);
+                return;
+            } else if (op->opcode == DEMOFS_BT_OP_REMOVE) {
+                /* Path faulted in; now fault in rebalance siblings. */
+                op->phase       = DEMOFS_BT_PHASE_REBALANCE;
+                op->reb_level   = 0;
+                op->removed_idx = 0;
+                continue;
+            } else if (op->opcode == DEMOFS_BT_OP_LOOKUP_EXACT) {
                 int exact, idx = demofs_bt_leaf_search(buf, base, &op->key, &exact);
 
                 demofs_bt_complete(op, exact ? demofs_bt_op_emit(op, buf, base, idx) : -1);
@@ -2758,6 +2822,71 @@ demofs_bt_lookup_sync(
                             "b+tree lookup suspended on a cache miss (no eviction yet)");
     return s.result;
 } /* demofs_bt_lookup_sync */
+
+/*
+ * Transitional synchronous insert: drive an INSERT op to completion.  The
+ * descent faults in the path through demofs_bt_block_get; with no eviction it
+ * always hits, so the structural modify runs inline before returning.
+ */
+static void
+demofs_bt_insert(
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    struct demofs_inode        *inode,
+    const struct demofs_bt_key *key,
+    const void                 *rec,
+    uint32_t                    reclen)
+{
+    struct demofs_bt_op   op;
+    struct demofs_bt_sync s = { .done = 0, .result = 0 };
+
+    chimera_demofs_abort_if(reclen > sizeof(op.recbuf), "b+tree record too large");
+
+    memset(&op, 0, sizeof(op));
+    op.thread       = thread;
+    op.txn          = txn;
+    op.inode        = inode;
+    op.opcode       = DEMOFS_BT_OP_INSERT;
+    op.phase        = DEMOFS_BT_PHASE_DESCEND;
+    op.key          = *key;
+    op.reclen       = reclen;
+    op.use_root     = 1;
+    op.cb           = demofs_bt_sync_cb;
+    op.private_data = &s;
+    memcpy(op.recbuf, rec, reclen);
+
+    demofs_bt_run(&op);
+    chimera_demofs_abort_if(!s.done,
+                            "b+tree insert suspended on a cache miss (no eviction yet)");
+} /* demofs_bt_insert */
+
+/* Transitional synchronous remove: drive a REMOVE op to completion. */
+static int
+demofs_bt_remove(
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    struct demofs_inode        *inode,
+    const struct demofs_bt_key *key)
+{
+    struct demofs_bt_op   op;
+    struct demofs_bt_sync s = { .done = 0, .result = 0 };
+
+    memset(&op, 0, sizeof(op));
+    op.thread       = thread;
+    op.txn          = txn;
+    op.inode        = inode;
+    op.opcode       = DEMOFS_BT_OP_REMOVE;
+    op.phase        = DEMOFS_BT_PHASE_DESCEND;
+    op.key          = *key;
+    op.use_root     = 1;
+    op.cb           = demofs_bt_sync_cb;
+    op.private_data = &s;
+
+    demofs_bt_run(&op);
+    chimera_demofs_abort_if(!s.done,
+                            "b+tree remove suspended on a cache miss (no eviction yet)");
+    return s.result;
+} /* demofs_bt_remove */
 
 static int
 demofs_bt_lookup_exact(
