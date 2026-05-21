@@ -304,12 +304,28 @@ chimera_s3_dispatch_callback(
             }
             break;
         case EVPL_HTTP_REQUEST_TYPE_PUT:
+        {
+            const char *copy_source = evpl_http_request_header(
+                s3_request->http_request, "x-amz-copy-source");
+
             if (s3_request->has_upload_id && s3_request->has_part_number) {
-                chimera_s3_upload_part(evpl, thread, s3_request);
+                if (copy_source) {
+                    /* UploadPartCopy (copying a byte range of an existing
+                     * object into an in-progress multipart upload) is not
+                     * implemented yet. Reject explicitly rather than treating
+                     * the (empty) body as the part contents. */
+                    s3_request->status    = CHIMERA_S3_STATUS_NOT_IMPLEMENTED;
+                    s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+                } else {
+                    chimera_s3_upload_part(evpl, thread, s3_request);
+                }
+            } else if (copy_source) {
+                chimera_s3_copy(evpl, thread, s3_request);
             } else {
                 chimera_s3_put(evpl, thread, s3_request);
             }
             break;
+        }
         case EVPL_HTTP_REQUEST_TYPE_POST:
             if (s3_request->has_uploads) {
                 chimera_s3_create_multipart_upload(evpl, thread, s3_request);

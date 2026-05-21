@@ -3544,7 +3544,7 @@ memfs_link_at(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct memfs_inode  *parent_inode, *inode;
+    struct memfs_inode  *parent_inode, *inode, *existing_inode;
     struct memfs_dirent *dirent, *existing_dirent;
     struct timespec      now;
     uint64_t             hash;
@@ -3592,11 +3592,64 @@ memfs_link_at(
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
 
     if (existing_dirent) {
-        pthread_mutex_unlock(&parent_inode->lock);
-        pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_EEXIST;
-        request->complete(request);
-        return;
+        /* The name is taken. Without an explicit replace request this is an
+         * error; with one we clobber the existing entry (CIFS rename with
+         * replace-if-exists, S3 PutObject/CopyObject overwrite). */
+        if (!request->link_at.replace) {
+            pthread_mutex_unlock(&parent_inode->lock);
+            pthread_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_EEXIST;
+            request->complete(request);
+            return;
+        }
+
+        /* If the name already points at the link target itself, the link is
+         * already in place — succeed without disturbing it. Guard this before
+         * locking the existing inode, which would otherwise self-deadlock on
+         * the target's mutex. */
+        if (existing_dirent->inum == inode->inum &&
+            existing_dirent->gen == inode->gen) {
+            inode->ctime        = now;
+            parent_inode->mtime = now;
+            parent_inode->ctime = now;
+            memfs_map_attrs(shared, &request->link_at.r_dir_post_attr,
+                            parent_inode, request->link_at.dir_fh);
+            memfs_map_attrs(shared, &request->link_at.r_attr, inode,
+                            request->fh);
+            pthread_mutex_unlock(&parent_inode->lock);
+            pthread_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_OK;
+            request->complete(request);
+            return;
+        }
+
+        existing_inode = memfs_inode_get_inum(shared, existing_dirent->inum,
+                                              existing_dirent->gen);
+
+        /* Refuse to clobber a directory with a file link. */
+        if (existing_inode && S_ISDIR(existing_inode->mode)) {
+            pthread_mutex_unlock(&parent_inode->lock);
+            pthread_mutex_unlock(&inode->lock);
+            pthread_mutex_unlock(&existing_inode->lock);
+            request->status = CHIMERA_VFS_EISDIR;
+            request->complete(request);
+            return;
+        }
+
+        /* Detach the existing entry and release its inode link, freeing the
+         * inode if it now has neither links nor open handles (mirrors
+         * memfs_remove_at). */
+        rb_tree_remove(&parent_inode->dir.dirents, &existing_dirent->node);
+
+        if (existing_inode) {
+            existing_inode->nlink--;
+            if (existing_inode->nlink == 0 && --existing_inode->refcnt == 0) {
+                memfs_inode_free(thread, existing_inode);
+            }
+            pthread_mutex_unlock(&existing_inode->lock);
+        }
+
+        memfs_dirent_free(thread, existing_dirent);
     }
 
     dirent = memfs_dirent_alloc(thread,
