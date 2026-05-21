@@ -40,6 +40,9 @@ chimera_nfs4_open_downgrade(
         return;
     }
 
+    /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
+    chimera_nfs4_resolve_current_stateid(req, &args->open_stateid);
+
     status = nfs_state_table_acquire(table, &args->open_stateid,
                                      NFS4_SLOT_TYPE_OPEN,
                                      &state_void, &state_type);
@@ -125,5 +128,6 @@ chimera_nfs4_open_downgrade(
                             thread->vfs_thread);
 
     res->status = NFS4_OK;
+    chimera_nfs4_set_current_stateid(req, &res->resok4.open_stateid);
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_downgrade */

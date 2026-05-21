@@ -113,6 +113,9 @@ chimera_nfs4_write(
     req->nfs_state_ref = NULL;
     req->handle        = NULL;
 
+    /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
+    chimera_nfs4_resolve_current_stateid(req, &args->stateid);
+
     /*
      * Transfer ownership of write iovecs from the RPC2 message to prevent
      * msg_free from double-releasing (args->data.iov points to msg->read_chunk.iov

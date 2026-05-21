@@ -123,6 +123,9 @@ chimera_nfs4_setattr(
         return;
     }
 
+    /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
+    chimera_nfs4_resolve_current_stateid(req, &args->stateid);
+
     /* RFC 7530 §16.32.3: when SETATTR carries FATTR4_SIZE the supplied
      * stateid must identify an open with write access.  Special stateids
      * (all-zero / all-ones) are exempt -- treated as anonymous, like the

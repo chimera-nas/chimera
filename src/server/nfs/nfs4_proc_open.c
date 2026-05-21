@@ -209,6 +209,13 @@ chimera_nfs4_open_complete(
         pthread_mutex_unlock(&owner->lock);
     }
 
+    /* NFS4.1: a successful OPEN sets the COMPOUND's current stateid. */
+    if (status == NFS4_OK) {
+        struct OPEN4res *res =
+            &req->res_compound.resarray[req->index].opopen;
+        chimera_nfs4_set_current_stateid(req, &res->resok4.stateid);
+    }
+
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_open_complete */
 

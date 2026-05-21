@@ -60,6 +60,15 @@ struct nfs_request {
     int                               index;
     uint8_t                           minorversion;     /* COMPOUND4args.minorversion */
     bool                              seen_sequence;    /* set once OP_SEQUENCE has run in this compound */
+    /* NFS4.1 "current stateid" (RFC 8881 §16.2.3.1.2): a per-COMPOUND value
+     * set by stateid-returning ops (OPEN/LOCK/...) and substituted into
+     * later ops that present the special current-stateid value. */
+    bool                              current_stateid_valid;
+    struct stateid4                   current_stateid;
+    /* SAVEFH/RESTOREFH save and restore the current stateid alongside the
+     * current filehandle (RFC 8881 §16.2.3.1.2). */
+    bool                              saved_current_stateid_valid;
+    struct stateid4                   saved_current_stateid;
     /* In-flight state ref for ops that acquire from the unified state table.
      * Released by the completion handler.  Phase 2.  Type is one of
      * NFS4_SLOT_TYPE_OPEN / NFS4_SLOT_TYPE_LOCK. */
