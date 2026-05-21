@@ -1571,7 +1571,7 @@ memfs_remove_at(
         return;
     }
 
-    if (S_ISDIR(inode->mode) && inode->nlink > 2) {
+    if (S_ISDIR(inode->mode) && !rb_tree_empty(&inode->dir.dirents)) {
         pthread_mutex_unlock(&parent_inode->lock);
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_ENOTEMPTY;
@@ -3474,7 +3474,8 @@ memfs_rename_at(
             }
 
             /* Cannot replace non-empty directory */
-            if (S_ISDIR(existing_inode->mode) && existing_inode->nlink > 2) {
+            if (S_ISDIR(existing_inode->mode) &&
+                !rb_tree_empty(&existing_inode->dir.dirents)) {
                 pthread_mutex_unlock(&existing_inode->lock);
                 pthread_mutex_unlock(&child_inode->lock);
                 pthread_mutex_unlock(&old_parent_inode->lock);
