@@ -136,6 +136,26 @@ chimera_nfs4_read(
         return;
     }
 
+    /* A delegation stateid authorizes the READ but carries no open handle
+     * (only open/lock states do).  Drop the ref and open the current FH on
+     * the fly, as for the anonymous stateid. */
+    if (state_type == NFS4_SLOT_TYPE_DELEG) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        if (req->fhlen == 0) {
+            res->status = NFS4ERR_NOFILEHANDLE;
+            chimera_nfs4_compound_complete(req, NFS4_OK);
+            return;
+        }
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            req->fh,
+                            req->fhlen,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_READ_ONLY,
+                            chimera_nfs4_read_open_callback,
+                            req);
+        return;
+    }
+
     if (state_type == NFS4_SLOT_TYPE_OPEN) {
         state_handle = ((struct nfs_open_state *) state_void)->handle;
     } else {
