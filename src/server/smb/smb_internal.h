@@ -427,6 +427,20 @@ struct chimera_smb_request {
                 uint64_t offset;
                 uint64_t length;
             }                               sp_qar_ranges[CHIMERA_SMB_QAR_MAX];
+            /* SRV_REQUEST_RESUME_KEY / SRV_COPYCHUNK fields */
+            struct chimera_smb_open_file   *cc_src_open_file;
+            struct chimera_smb_open_file   *cc_dst_open_file;
+            struct chimera_smb_file_id      cc_src_file_id;
+            uint32_t                        cc_chunk_count;
+            uint32_t                        cc_chunk_idx;
+            uint32_t                        cc_chunks_written;
+            uint64_t                        cc_total_written;
+#define CHIMERA_SMB_COPYCHUNK_MAX 16
+            struct {
+                uint64_t src_offset;
+                uint64_t dst_offset;
+                uint32_t length;
+            }                               cc_chunks[CHIMERA_SMB_COPYCHUNK_MAX];
         } ioctl;
         struct {
             uint8_t                       info_type;

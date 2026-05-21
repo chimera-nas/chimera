@@ -154,6 +154,15 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             chimera_smb_ioctl_query_allocated_ranges(request);
             break;
 
+        case SMB2_FSCTL_SRV_REQUEST_RESUME_KEY:
+            chimera_smb_ioctl_request_resume_key(request);
+            break;
+
+        case SMB2_FSCTL_SRV_COPYCHUNK:
+        case SMB2_FSCTL_SRV_COPYCHUNK_WRITE:
+            chimera_smb_ioctl_copychunk(request);
+            break;
+
         default:
             chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
             break;
@@ -189,6 +198,13 @@ chimera_smb_ioctl_reply(
             break;
         case SMB2_FSCTL_QUERY_ALLOCATED_RANGES:
             output_length = request->ioctl.sp_qar_count * 16;
+            break;
+        case SMB2_FSCTL_SRV_REQUEST_RESUME_KEY:
+            output_length = 32; /* ResumeKey(24) + ContextLength(4) + Context(pad 4) */
+            break;
+        case SMB2_FSCTL_SRV_COPYCHUNK:
+        case SMB2_FSCTL_SRV_COPYCHUNK_WRITE:
+            output_length = 12; /* ChunksWritten + ChunkBytesWritten + TotalBytesWritten */
             break;
     } /* switch */
 
@@ -262,6 +278,21 @@ chimera_smb_ioctl_reply(
                 evpl_iovec_cursor_append_uint64(reply_cursor, request->ioctl.sp_qar_ranges[qi].offset);
                 evpl_iovec_cursor_append_uint64(reply_cursor, request->ioctl.sp_qar_ranges[qi].length);
             }
+            break;
+        case SMB2_FSCTL_SRV_REQUEST_RESUME_KEY:
+            /* ResumeKey (24): encode the source open's FileId; the client
+             * treats it opaquely and echoes it back in COPYCHUNK. */
+            evpl_iovec_cursor_append_uint64(reply_cursor, request->ioctl.file_id.pid);
+            evpl_iovec_cursor_append_uint64(reply_cursor, request->ioctl.file_id.vid);
+            evpl_iovec_cursor_append_uint64(reply_cursor, 0);
+            evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* ContextLength */
+            evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* Context (pad) */
+            break;
+        case SMB2_FSCTL_SRV_COPYCHUNK:
+        case SMB2_FSCTL_SRV_COPYCHUNK_WRITE:
+            evpl_iovec_cursor_append_uint32(reply_cursor, request->ioctl.cc_chunks_written);
+            evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* ChunkBytesWritten */
+            evpl_iovec_cursor_append_uint32(reply_cursor, (uint32_t) request->ioctl.cc_total_written);
             break;
         default:
             break;
@@ -540,6 +571,39 @@ chimera_smb_parse_ioctl(
                 evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.sp_qar_offset);
                 evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.sp_qar_length);
                 break;
+            case SMB2_FSCTL_SRV_COPYCHUNK:
+            case SMB2_FSCTL_SRV_COPYCHUNK_WRITE: {
+                /* SRV_COPYCHUNK_COPY: SourceKey(24) + ChunkCount(4) +
+                 * Reserved(4) + ChunkCount * SRV_COPYCHUNK{ SourceOffset(8),
+                 * TargetOffset(8), Length(4), Reserved(4) }. */
+                uint32_t reserved, cc, i;
+
+                if (request->ioctl.input_count < 32) {
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+                /* The 24-byte SourceKey encodes the source open's FileId. */
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.cc_src_file_id.pid);
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.cc_src_file_id.vid);
+                evpl_iovec_cursor_skip(request_cursor, 8); /* remainder of resume key */
+                evpl_iovec_cursor_get_uint32(request_cursor, &cc);
+                evpl_iovec_cursor_get_uint32(request_cursor, &reserved);
+
+                if (cc > CHIMERA_SMB_COPYCHUNK_MAX ||
+                    request->ioctl.input_count < 32 + (uint64_t) cc * 24) {
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+
+                request->ioctl.cc_chunk_count = cc;
+                for (i = 0; i < cc; i++) {
+                    evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.cc_chunks[i].src_offset);
+                    evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.cc_chunks[i].dst_offset);
+                    evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.cc_chunks[i].length);
+                    evpl_iovec_cursor_get_uint32(request_cursor, &reserved);
+                }
+                break;
+            }
             default:
                 /* Other IOCTLs don't need input parsing yet */
                 chimera_smb_info("Received IOCTL request with unhandled ctl_code 0x%08x, skipping input parsing",

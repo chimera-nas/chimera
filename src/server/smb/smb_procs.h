@@ -223,6 +223,12 @@ void chimera_smb_ioctl_set_zero_data(
 void chimera_smb_ioctl_query_allocated_ranges(
     struct chimera_smb_request *request);
 
+void chimera_smb_ioctl_request_resume_key(
+    struct chimera_smb_request *request);
+
+void chimera_smb_ioctl_copychunk(
+    struct chimera_smb_request *request);
+
 int chimera_smb_parse_change_notify(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request);
