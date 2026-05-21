@@ -385,3 +385,15 @@ chimera_vfs_lease_revoke(
 int
 chimera_vfs_state_check_io(
     struct chimera_vfs_request *request);
+
+/* Break (to NONE) every read-caching lease invalidated by a write to the
+ * file identified by (fh, fh_hash), except the writer's own write-caching
+ * lease.  Drives the SMB2 oplock "self break to none" and cross-holder
+ * read-cache invalidation.  `writer` is the issuing open's lease owner. */
+void
+chimera_vfs_state_break_on_write(
+    struct chimera_vfs_state             *state,
+    const uint8_t                        *fh,
+    uint8_t                               fh_len,
+    uint64_t                              fh_hash,
+    const struct chimera_vfs_lease_owner *writer);

@@ -918,3 +918,63 @@ chimera_vfs_state_check_io(struct chimera_vfs_request *request)
     (void) request;
     return 0;
 } /* chimera_vfs_state_check_io */
+
+/* Upper bound on caching leases broken by a single write.  A file with
+ * more concurrent caching holders than this is pathological; any excess
+ * is left for a subsequent write to break. */
+#define CHIMERA_VFS_STATE_MAX_BREAK_BATCH 64
+
+/* A write invalidates every read-caching (R) lease on the file: those
+ * holders can no longer trust their cached data, so each must break down
+ * to NONE.  The one exception is the writer's own write-caching (W) lease
+ * — an exclusive/batch holder is allowed to write through its own cache
+ * without breaking it.  A read-only (LEVEL_II) lease held by the writer
+ * itself DOES break (a II oplock caches reads only, so writing through it
+ * stales that cache) — this is the SMB2 "self break to none".
+ *
+ * Breaks are dispatched via begin_break with needed_mode==0, which the
+ * SMB break callback interprets as "break to NONE" (the open-conflict
+ * path always passes a non-zero retained mask, so 0 is an unambiguous
+ * write-invalidation signal). */
+SYMBOL_EXPORT void
+chimera_vfs_state_break_on_write(
+    struct chimera_vfs_state             *state,
+    const uint8_t                        *fh,
+    uint8_t                               fh_len,
+    uint64_t                              fh_hash,
+    const struct chimera_vfs_lease_owner *writer)
+{
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease      *cur;
+    struct chimera_vfs_lease      *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    int                            n = 0;
+    int                            i;
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        if ((cur->mode.granted & CHIMERA_VFS_LEASE_MODE_R) == 0) {
+            continue;
+        }
+        if ((cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W) &&
+            chimera_vfs_lease_owner_equal(&cur->owner, writer)) {
+            continue;
+        }
+        if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
+            to_break[n++] = cur;
+        }
+    }
+
+    pthread_mutex_unlock(&file->lock);
+
+    for (i = 0; i < n; i++) {
+        chimera_vfs_lease_begin_break(state, to_break[i], 0, 0);
+    }
+
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_state_break_on_write */

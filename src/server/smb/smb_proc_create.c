@@ -258,7 +258,30 @@ chimera_smb_create_gen_open_file(
             req_vfs |= CHIMERA_VFS_LEASE_MODE_W;
         }
 
-        if (req_vfs != 0) {
+        /* Oplocks are about data caching: an attribute-only open (no
+         * read/write/execute data access) neither acquires nor breaks an
+         * oplock — UNLESS its disposition replaces the file's data
+         * (OVERWRITE / OVERWRITE_IF / SUPERSEDE all truncate), which is a
+         * data-modifying open and does break.  So gate on data access OR a
+         * data-replacing disposition; a plain READ_ATTRIBUTES|SYNCHRONIZE
+         * probe with OPEN/OPEN_IF leaves an existing holder's oplock intact. */
+        bool caching_touches_data =
+            (request->create.desired_access & SMB2_DATA_ACCESS_MASK) ||
+            request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+            request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
+            request->create.create_disposition == SMB2_FILE_SUPERSEDE;
+
+        /* Oplocks/leases are parsed and the break machinery is in place, but
+         * granting them is not yet advertised: a real cifs.ko client caches
+         * aggressively under an oplock and keeps deferred-close handles, which
+         * makes open-then-unlink fail with EBUSY until delete-of-open-file
+         * (break-before-sharing-violation + delete-pending) semantics land.
+         * Until then, leave caching oplocks ungranted so the server matches
+         * its no-oplock behavior for interop (cthon special / fsx).  Flip this
+         * to true once those semantics are implemented and verified via KVM. */
+        bool advertise_oplocks = false;
+
+        if (req_vfs != 0 && caching_touches_data && advertise_oplocks) {
             file_state = chimera_vfs_state_get(vfs_state,
                                                oh->fh, oh->fh_len,
                                                oh->fh_hash, true);
@@ -297,6 +320,21 @@ chimera_smb_create_gen_open_file(
                 result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                                       &open_file->caching_lease,
                                                       &conflict);
+
+                /* A breakable conflict means another handle already holds a
+                 * caching oplock/lease.  try_insert has kicked off the break
+                 * (downgrading that holder to a shared read / LEVEL_II).  We
+                 * cannot keep an exclusive/write cache, but we can settle for
+                 * a shared read lease, which coexists with the downgraded
+                 * holder — this is how a 2nd open ends up with LEVEL_II. */
+                if (result == CHIMERA_VFS_LEASE_BREAKING) {
+                    req_vfs                               = CHIMERA_VFS_LEASE_MODE_R;
+                    open_file->caching_lease.mode.granted = req_vfs;
+                    result                                = chimera_vfs_state_try_insert(vfs_state, file_state,
+                                                                                         &open_file->caching_lease,
+                                                                                         &conflict);
+                }
+
                 if (result == CHIMERA_VFS_LEASE_GRANTED) {
                     open_file->caching_file_state     = file_state;
                     open_file->caching_lease_inserted = true;
@@ -1505,6 +1543,7 @@ chimera_smb_parse_create(
         return -1;
     }
 
+    evpl_iovec_cursor_skip(request_cursor, 1); /* SecurityFlags (reserved) */
     evpl_iovec_cursor_get_uint8(request_cursor, &request->create.requested_oplock_level);
     evpl_iovec_cursor_get_uint32(request_cursor, &request->create.impersonation_level);
     evpl_iovec_cursor_get_uint64(request_cursor, &request->create.flags);
