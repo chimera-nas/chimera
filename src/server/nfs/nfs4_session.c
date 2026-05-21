@@ -80,6 +80,7 @@ nfs4_client_table_init(struct nfs4_client_table *table)
     table->nfs4_ct_clients_by_id    = NULL;
     table->nfs4_ct_sessions         = NULL;
     table->nfs4_ct_next_client_id   = 1;
+    table->nfs4_ct_next_confirm     = 1;
 
     pthread_mutex_init(&table->nfs4_ct_lock, NULL);
 } /* nfs4_client_table_init */
@@ -221,7 +222,8 @@ nfs4_client_new_locked(
     int                                 owner_len,
     uint64_t                            verifier,
     const struct nfs4_client_principal *p,
-    uint8_t                             minorversion)
+    uint8_t                             minorversion,
+    bool                                add_to_owner)
 {
     struct nfs4_client *c = calloc(1, sizeof(*c));
 
@@ -249,8 +251,13 @@ nfs4_client_new_locked(
     c->unified = nfs_client_alloc(c->nfs4_client_id, owner, owner_len,
                                   verifier, minorversion);
 
-    HASH_ADD(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
-             nfs4_client_owner, c->nfs4_client_owner_len, c);
+    /* A by-id-only record (add_to_owner=false) is an unconfirmed SETCLIENTID
+     * reboot record that coexists with a still-confirmed record holding the
+     * by-owner slot; it joins the by-owner table when it is confirmed. */
+    if (add_to_owner) {
+        HASH_ADD(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+                 nfs4_client_owner, c->nfs4_client_owner_len, c);
+    }
     HASH_ADD(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
              nfs4_client_id, sizeof(c->nfs4_client_id), c);
 
@@ -335,7 +342,7 @@ nfs4_client_exchange_id(
     if (!existing) {
         /* Case 1: brand-new owner. */
         nc = nfs4_client_new_locked(table, owner, owner_len,
-                                    verifier, principal, minorversion);
+                                    verifier, principal, minorversion, true);
         out->clientid = nc->nfs4_client_id;
         goto out_unlock;
     }
@@ -345,7 +352,7 @@ nfs4_client_exchange_id(
          * never proved ownership of its clientid, so a fresh one is issued. */
         out->destroy_unified = nfs4_client_remove_locked(table, existing);
         nc                   = nfs4_client_new_locked(table, owner, owner_len,
-                                                      verifier, principal, minorversion);
+                                                      verifier, principal, minorversion, true);
         out->clientid = nc->nfs4_client_id;
         goto out_unlock;
     }
@@ -367,7 +374,7 @@ nfs4_client_exchange_id(
         HASH_DELETE(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
                     existing);
         nc = nfs4_client_new_locked(table, owner, owner_len, verifier,
-                                    principal, minorversion);
+                                    principal, minorversion, true);
         nc->nfs4_client_supersedes_id = existing->nfs4_client_id;
         out->clientid                 = nc->nfs4_client_id;
         goto out_unlock;
@@ -383,12 +390,228 @@ nfs4_client_exchange_id(
 
     out->destroy_unified = nfs4_client_remove_locked(table, existing);
     nc                   = nfs4_client_new_locked(table, owner, owner_len,
-                                                  verifier, principal, minorversion);
+                                                  verifier, principal, minorversion, true);
     out->clientid = nc->nfs4_client_id;
 
  out_unlock:
     pthread_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_exchange_id */
+
+/* Caller holds the table lock.  Remove a record that lives in the by-id table
+ * only (an in-flight superseding SETCLIENTID record), returning its unified
+ * hierarchy for teardown outside the lock. */
+static struct nfs_client *
+nfs4_client_remove_byid_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c)
+{
+    struct nfs_client *unified = c->unified;
+
+    HASH_DELETE(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, c);
+    c->unified = NULL;
+    free(c);
+    return unified;
+} /* nfs4_client_remove_byid_locked */
+
+/* Caller holds the table lock.  Stamp a fresh, unique setclientid_confirm
+ * verifier onto a record and mark a confirm pending. */
+static void
+nfs4_scid_set_confirm(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c)
+{
+    uint64_t v = table->nfs4_ct_next_confirm++;
+
+    memcpy(c->nfs4_client_scid_confirm, &v, NFS4_VERIFIER_SIZE);
+    c->nfs4_client_scid_confirm_valid = 1;
+} /* nfs4_scid_set_confirm */
+
+/* Does the client hold any open/lock-owner state?  Used for the SETCLIENTID
+ * CLID_INUSE rule (RFC 7530 §16.33.5). */
+static int
+nfs4_client_has_state(const struct nfs4_client *c)
+{
+    return c->unified &&
+           (c->unified->open_owners_by_str != NULL ||
+            c->unified->lock_owners_by_str != NULL);
+} /* nfs4_client_has_state */
+
+void
+nfs4_client_setclientid(
+    struct nfs4_client_table           *table,
+    const void                         *owner,
+    int                                 owner_len,
+    uint64_t                            verifier,
+    const struct nfs4_client_principal *principal,
+    uint8_t                             minorversion,
+    struct nfs4_setclientid_result     *out)
+{
+    struct nfs4_client *existing, *nc, *pending;
+
+    out->status          = NFS4_OK;
+    out->clientid        = 0;
+    out->destroy_unified = NULL;
+    memset(out->confirm, 0, NFS4_VERIFIER_SIZE);
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+              owner, owner_len, existing);
+
+    if (!existing) {
+        /* No record for this owner: create an unconfirmed one. */
+        nc = nfs4_client_new_locked(table, owner, owner_len, verifier,
+                                    principal, minorversion, true);
+        nfs4_scid_set_confirm(table, nc);
+        out->clientid = nc->nfs4_client_id;
+        memcpy(out->confirm, nc->nfs4_client_scid_confirm, NFS4_VERIFIER_SIZE);
+        goto out_unlock;
+    }
+
+    if (!existing->nfs4_client_confirmed) {
+        /* The by-owner record is itself unconfirmed (no confirmed record for
+         * this owner yet) -- RFC 7530 §16.33.5: any unconfirmed record is
+         * replaced by a fresh one with a new clientid. */
+        out->destroy_unified = nfs4_client_remove_locked(table, existing);
+        nc                   = nfs4_client_new_locked(table, owner, owner_len,
+                                                      verifier, principal,
+                                                      minorversion, true);
+        nfs4_scid_set_confirm(table, nc);
+        out->clientid = nc->nfs4_client_id;
+        memcpy(out->confirm, nc->nfs4_client_scid_confirm, NFS4_VERIFIER_SIZE);
+        goto out_unlock;
+    }
+
+    /* A confirmed record exists for this owner. */
+
+    /* Different principal while the confirmed client still holds state is a
+     * collision (RFC 7530 §16.33.5 -- NFS4ERR_CLID_INUSE). */
+    if (!nfs4_principal_matches(existing, principal) &&
+        nfs4_client_has_state(existing)) {
+        out->status = NFS4ERR_CLID_INUSE;
+        goto out_unlock;
+    }
+
+    /* A new SETCLIENTID supersedes any earlier in-flight unconfirmed record
+     * for this owner (RFC 7530 §16.33.5 cases 4c/4d/4e). */
+    if (existing->nfs4_client_scid_pending_id) {
+        HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+                  &existing->nfs4_client_scid_pending_id,
+                  sizeof(existing->nfs4_client_scid_pending_id), pending);
+        existing->nfs4_client_scid_pending_id = 0;
+        if (pending) {
+            out->destroy_unified = nfs4_client_remove_byid_locked(table,
+                                                                  pending);
+        }
+    }
+
+    if (nfs4_principal_matches(existing, principal) &&
+        existing->nfs4_client_verifier == verifier) {
+        /* Same verifier + principal: a callback-info update of the confirmed
+         * record.  Same clientid, a fresh confirm verifier; the confirmed
+         * record stays usable until (if ever) the update is confirmed. */
+        nfs4_scid_set_confirm(table, existing);
+        out->clientid = existing->nfs4_client_id;
+        memcpy(out->confirm, existing->nfs4_client_scid_confirm,
+               NFS4_VERIFIER_SIZE);
+        goto out_unlock;
+    }
+
+    /* Different verifier (client reboot) or different principal with no state:
+     * issue a new clientid via a superseding unconfirmed record kept in the
+     * by-id table only.  The confirmed record remains live and usable until
+     * this one is confirmed. */
+    nc = nfs4_client_new_locked(table, owner, owner_len, verifier,
+                                principal, minorversion, false);
+    nc->nfs4_client_supersedes_id = existing->nfs4_client_id;
+    nfs4_scid_set_confirm(table, nc);
+    existing->nfs4_client_scid_pending_id = nc->nfs4_client_id;
+    out->clientid                         = nc->nfs4_client_id;
+    memcpy(out->confirm, nc->nfs4_client_scid_confirm, NFS4_VERIFIER_SIZE);
+
+ out_unlock:
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+} /* nfs4_client_setclientid */
+
+nfsstat4
+nfs4_client_setclientid_confirm(
+    struct nfs4_client_table *table,
+    uint64_t                  clientid,
+    const uint8_t            *confirm,
+    struct nfs_client       **destroy_unified)
+{
+    struct nfs4_client *r, *old;
+    nfsstat4            status;
+
+    *destroy_unified = NULL;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &clientid, sizeof(clientid), r);
+
+    if (!r) {
+        status = NFS4ERR_STALE_CLIENTID;
+        goto out_unlock;
+    }
+
+    if (!r->nfs4_client_scid_confirm_valid ||
+        memcmp(confirm, r->nfs4_client_scid_confirm, NFS4_VERIFIER_SIZE) != 0) {
+        /* The (clientid, verifier) pair does not name a record awaiting
+         * confirmation (RFC 7530 §16.34.5). */
+        status = NFS4ERR_STALE_STATEID;
+        goto out_unlock;
+    }
+
+    if (!r->nfs4_client_confirmed) {
+        /* Promote the unconfirmed record.  If it superseded a confirmed one
+         * (client reboot), tear that record and its sessions down now and move
+         * this record into the by-owner table. */
+        if (r->nfs4_client_supersedes_id) {
+            uint64_t oldid = r->nfs4_client_supersedes_id;
+
+            r->nfs4_client_supersedes_id = 0;
+
+            HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+                      &oldid, sizeof(oldid), old);
+            if (old) {
+                struct nfs4_session *s, *stmp;
+
+                HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, s, stmp)
+                {
+                    if (s->nfs4_session_clientid == oldid) {
+                        HASH_DELETE(nfs4_session_hh, table->nfs4_ct_sessions, s);
+                        atomic_store_explicit(&s->destroyed, true,
+                                              memory_order_release);
+                        nfs4_session_put(s);
+                    }
+                }
+
+                old->nfs4_client_scid_pending_id = 0;
+                HASH_DELETE(nfs4_client_hh_by_owner,
+                            table->nfs4_ct_clients_by_owner, old);
+                HASH_DELETE(nfs4_client_hh_by_id,
+                            table->nfs4_ct_clients_by_id, old);
+                *destroy_unified = old->unified;
+                old->unified     = NULL;
+                free(old);
+            }
+
+            HASH_ADD(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+                     nfs4_client_owner, r->nfs4_client_owner_len, r);
+        }
+        r->nfs4_client_confirmed = 1;
+    }
+
+    /* The confirm verifier stays valid so a retransmitted SETCLIENTID_CONFIRM
+     * with the same {clientid, verifier} is idempotent (NFS4_OK); a later
+     * SETCLIENTID overwrites it. */
+    status = NFS4_OK;
+
+ out_unlock:
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    return status;
+} /* nfs4_client_setclientid_confirm */
 
 void
 nfs4_client_create_session_classify(

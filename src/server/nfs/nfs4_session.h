@@ -148,6 +148,15 @@ struct nfs4_client {
     /* Set once the client has issued RECLAIM_COMPLETE; a second one is
      * NFS4ERR_COMPLETE_ALREADY (RFC 8881 §18.51.4). */
     uint8_t               nfs4_client_reclaim_complete;
+    /* NFSv4.0 SETCLIENTID/SETCLIENTID_CONFIRM handshake (RFC 7530 §16.33/16.34).
+     * When a SETCLIENTID leaves a confirm pending on this record, the 8-byte
+     * verifier the client must echo back is stored here and scid_confirm_valid
+     * is set.  For a *confirmed* record, scid_pending_id names a separate
+     * superseding unconfirmed record (a reboot with a new verifier created a
+     * new clientid); 0 = none. */
+    uint8_t               nfs4_client_scid_confirm[NFS4_VERIFIER_SIZE];
+    uint8_t               nfs4_client_scid_confirm_valid;
+    uint64_t              nfs4_client_scid_pending_id;
     /* Unified state hierarchy.  Created when this nfs4_client is first
      * registered; freed when the nfs4_client is unregistered or the table
      * is torn down.  See nfs4_state.h. */
@@ -200,6 +209,9 @@ struct nfs4_client_table {
     struct nfs4_client  *nfs4_ct_clients_by_id;
     struct nfs4_session *nfs4_ct_sessions;
     uint64_t             nfs4_ct_next_client_id;
+    /* Monotonic source for SETCLIENTID setclientid_confirm verifiers; every
+     * value handed out is unique for the life of the table. */
+    uint64_t             nfs4_ct_next_confirm;
     pthread_mutex_t      nfs4_ct_lock;
 };
 
@@ -230,6 +242,45 @@ nfs4_client_register(
     uint32_t                  proto,
     const char               *nii_domain,
     const char               *nii_name);
+
+/* Outcome of the NFSv4.0 SETCLIENTID record-matching state machine
+ * (RFC 7530 §16.33.5).  On NFS4_OK the handler returns `clientid` and the
+ * `confirm` verifier the client must echo in SETCLIENTID_CONFIRM. */
+struct nfs4_setclientid_result {
+    nfsstat4           status;
+    uint64_t           clientid;
+    uint8_t            confirm[NFS4_VERIFIER_SIZE];
+    /* A replaced unconfirmed record's state hierarchy, to be torn down with
+     * nfs_client_destroy after the table lock is dropped (NULL if none). */
+    struct nfs_client *destroy_unified;
+};
+
+/* RFC 7530 §16.33.5 SETCLIENTID record matching.  Records (or updates) an
+ * unconfirmed record for the client owner and fills *out.  May return
+ * NFS4ERR_CLID_INUSE when a confirmed record owned by a different principal
+ * still holds open/lock state. */
+void
+nfs4_client_setclientid(
+    struct nfs4_client_table           *table,
+    const void                         *owner,
+    int                                 owner_len,
+    uint64_t                            verifier,
+    const struct nfs4_client_principal *principal,
+    uint8_t                             minorversion,
+    struct nfs4_setclientid_result     *out);
+
+/* RFC 7530 §16.34 SETCLIENTID_CONFIRM.  Confirms the (unconfirmed) record
+ * named by `clientid`/`confirm`.  On a client reboot this promotes the
+ * superseding record and tears the old one down, returning its unified state
+ * hierarchy via *destroy_unified for teardown outside the table lock.
+ * Returns NFS4ERR_STALE_CLIENTID (no such clientid) or NFS4ERR_CLID_INUSE
+ * (confirm verifier mismatch) on failure. */
+nfsstat4
+nfs4_client_setclientid_confirm(
+    struct nfs4_client_table *table,
+    uint64_t                  clientid,
+    const uint8_t            *confirm,
+    struct nfs_client       **destroy_unified);
 
 /* RFC 8881 §18.35.4 EXCHANGE_ID client-record matching state machine.  Runs
  * entirely under the table lock and fills *out (see nfs4_exchange_id_result).
