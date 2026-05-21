@@ -126,10 +126,22 @@ chimera_smb_write(struct chimera_smb_request *request)
                 request->write.open_file->handle->fh_hash,
                 request->write.offset, request->write.length,
                 true, &io_owner)) {
+            /* Release the write payload iovecs here: the normal path frees
+            * them in chimera_smb_write_callback, which we are skipping. */
+            evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
             chimera_smb_open_file_release(request, request->write.open_file);
             chimera_smb_complete_request(request, SMB2_STATUS_FILE_LOCK_CONFLICT);
             return;
         }
+
+        /* A write stales every read cache on this file: break those
+         * caching oplocks/leases (to NONE), except the writer's own
+         * write cache. */
+        chimera_vfs_state_break_on_write(thread->vfs_thread->vfs->vfs_state,
+                                         request->write.open_file->handle->fh,
+                                         request->write.open_file->handle->fh_len,
+                                         request->write.open_file->handle->fh_hash,
+                                         &io_owner);
     }
 
     if (request->write.channel == SMB2_CHANNEL_RDMA_V1) {
