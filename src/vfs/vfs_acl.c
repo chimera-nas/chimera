@@ -8,10 +8,11 @@
 #include "vfs_cred.h"
 #include "common/macros.h"
 
-/* Bits everyone is granted regardless of rwx (attribute/acl reads, sync). */
+/* Bits everyone is granted regardless of rwx (attribute and ACL reads).
+ * SYNCHRONIZE is deliberately excluded: Windows grants it only as part of a
+ * specific/generic right, not unconditionally, so it must come from an ACE. */
 #define ACE_BASELINE       (CHIMERA_ACE_READ_ATTRIBUTES | \
-                            CHIMERA_ACE_READ_ACL | \
-                            CHIMERA_ACE_SYNCHRONIZE)
+                            CHIMERA_ACE_READ_ACL)
 
 /* Extra bits the owner always holds (it owns the object). */
 #define ACE_OWNER_EXTRA    (CHIMERA_ACE_WRITE_ATTRIBUTES | \
@@ -20,9 +21,10 @@
                             CHIMERA_ACE_READ_ACL)
 
 /* Owner-implied rights under an explicit ACL (Windows "owner rights"): the
- * object owner always holds READ_CONTROL and WRITE_DAC, but NOT, for example,
- * WRITE_ATTRIBUTES or WRITE_OWNER -- those must be granted by an ACE. */
-#define ACE_OWNER_IMPLICIT (CHIMERA_ACE_READ_ACL | CHIMERA_ACE_WRITE_ACL)
+ * object owner always holds READ_CONTROL, WRITE_DAC and DELETE, but NOT, for
+ * example, WRITE_ATTRIBUTES or WRITE_OWNER -- those must be granted by an ACE. */
+#define ACE_OWNER_IMPLICIT (CHIMERA_ACE_READ_ACL | CHIMERA_ACE_WRITE_ACL | \
+                            CHIMERA_ACE_DELETE)
 
 /* Translate the rwx bits of one POSIX permission class into a canonical mask. */
 static uint32_t
