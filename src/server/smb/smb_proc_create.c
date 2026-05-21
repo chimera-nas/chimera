@@ -677,6 +677,15 @@ chimera_smb_create_check_access(
         req |= CHIMERA_ACE_MASK_ALL;
     }
 
+    /* Truncating dispositions implicitly require write access to the existing
+     * data, regardless of what the caller asked for: overwriting a read-only
+     * file is denied even for a read-only open. */
+    if (request->create.create_disposition == SMB2_FILE_SUPERSEDE ||
+        request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+        request->create.create_disposition == SMB2_FILE_OVERWRITE_IF) {
+        req |= CHIMERA_ACE_WRITE_DATA;
+    }
+
     if (!req) {
         return SMB2_STATUS_SUCCESS;
     }
