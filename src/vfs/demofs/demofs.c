@@ -4734,6 +4734,186 @@ demofs_getattr(
                               demofs_getattr_inode_cb, request);
 } /* demofs_getattr */
 
+/*
+ * Truncation extent walk (async): remove/trim every extent past new EOF.
+ * inode_stash[0] = inode, loop_off = new_size, ext_iter = current extent.
+ */
+static void demofs_setattr_trunc_process(
+    struct chimera_vfs_request *request);
+
+static void
+demofs_setattr_trunc_done(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_inode           *inode  = p->inode_stash[0];
+
+    demofs_apply_attrs(inode, request->setattr.set_attr);
+    demofs_map_attrs(thread, &request->setattr.r_post_attr, inode);
+    demofs_op_ok(request, p->txn);
+} /* demofs_setattr_trunc_done */
+
+static void
+demofs_setattr_trunc_walk_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+
+    p->loop_have = demofs_ext_from_op(op, result, &p->ext_iter);
+    demofs_bt_op_free(p->thread, op);
+    demofs_setattr_trunc_process(request);
+} /* demofs_setattr_trunc_walk_cb */
+
+static void
+demofs_setattr_trunc_advance(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_bt_op           *op     = demofs_bt_op_alloc(thread);
+
+    if (demofs_ext_next_async(op, thread, p->inode_stash[0], p->ext_iter.file_offset,
+                              p->rec_scratch, sizeof(p->rec_scratch),
+                              demofs_setattr_trunc_walk_cb, request)) {
+        demofs_setattr_trunc_walk_cb(op, op->result, request);
+    }
+} /* demofs_setattr_trunc_advance */
+
+static void
+demofs_setattr_trunc_inserted_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    (void) result;
+    demofs_bt_op_free(((struct demofs_request_private *) request->plugin_data)->thread, op);
+    demofs_setattr_trunc_advance(request);
+} /* demofs_setattr_trunc_inserted_cb */
+
+/* A trimmed or removed extent's slot is gone; re-insert the trimmed head
+ * (trim case) then advance, or just advance (full-remove case). */
+static void
+demofs_setattr_trunc_removed_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request  = private_data;
+    struct demofs_request_private *p        = request->plugin_data;
+    struct demofs_thread          *thread   = p->thread;
+    uint64_t                       new_size = p->loop_off;
+
+    (void) result;
+    demofs_bt_op_free(thread, op);
+
+    if (p->ext_iter.file_offset + p->ext_iter.length > new_size &&
+        p->ext_iter.file_offset < new_size) {
+        /* Trim case: reinsert the surviving head [start, new_size). */
+        uint64_t new_logical = new_size - p->ext_iter.file_offset;
+
+        op = demofs_bt_op_alloc(thread);
+        {
+            struct demofs_extent_rec rec = {
+                .length        = new_logical,
+                .device_id     = p->ext_iter.device_id,
+                .pad           = 0,
+                .device_offset = p->ext_iter.device_offset,
+            };
+            struct demofs_bt_key     key = demofs_extent_key(p->ext_iter.file_offset);
+
+            if (demofs_bt_insert_async(op, thread, p->txn, p->inode_stash[0], &key,
+                                       &rec, sizeof(rec),
+                                       demofs_setattr_trunc_inserted_cb, request)) {
+                demofs_setattr_trunc_inserted_cb(op, op->result, request);
+            }
+        }
+        return;
+    }
+
+    demofs_setattr_trunc_advance(request);
+} /* demofs_setattr_trunc_removed_cb */
+
+static void
+demofs_setattr_trunc_process(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p        = request->plugin_data;
+    struct demofs_thread          *thread   = p->thread;
+    uint64_t                       new_size = p->loop_off;
+    uint64_t                       extent_start, extent_end;
+    struct demofs_bt_op           *op;
+
+    if (!p->loop_have) {
+        demofs_setattr_trunc_done(request);
+        return;
+    }
+
+    extent_start = p->ext_iter.file_offset;
+    extent_end   = extent_start + p->ext_iter.length;
+
+    if (extent_start >= new_size) {
+        demofs_thread_free_space(thread, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset,
+                                 SM_ALIGN_UP(p->ext_iter.length));
+    } else if (extent_end > new_size) {
+        uint64_t old_aligned = SM_ALIGN_UP(p->ext_iter.length);
+        uint64_t new_logical = new_size - extent_start;
+        uint64_t new_aligned = SM_ALIGN_UP(new_logical);
+
+        if (old_aligned > new_aligned) {
+            demofs_thread_free_space(thread, p->ext_iter.device_id,
+                                     p->ext_iter.device_offset + new_aligned,
+                                     old_aligned - new_aligned);
+        }
+    } else {
+        /* Extent entirely within new size: nothing to do, just advance. */
+        demofs_setattr_trunc_advance(request);
+        return;
+    }
+
+    /* Both the full-remove and trim cases start by removing the slot. */
+    op = demofs_bt_op_alloc(thread);
+    {
+        struct demofs_bt_key key = demofs_extent_key(extent_start);
+
+        if (demofs_bt_remove_async(op, thread, p->txn, p->inode_stash[0], &key,
+                                   demofs_setattr_trunc_removed_cb, request)) {
+            demofs_setattr_trunc_removed_cb(op, op->result, request);
+        }
+    }
+} /* demofs_setattr_trunc_process */
+
+/* First-extent selection for truncation: floor(new_size), else first extent. */
+static void
+demofs_setattr_trunc_first_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    int                            have    = demofs_ext_from_op(op, result, &p->ext_iter);
+
+    demofs_bt_op_free(thread, op);
+
+    if (!have) {
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_ceil_async(op, thread, p->inode_stash[0], 0, p->rec_scratch,
+                                  sizeof(p->rec_scratch), demofs_setattr_trunc_walk_cb,
+                                  request)) {
+            demofs_setattr_trunc_walk_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    p->loop_have = 1;
+    demofs_setattr_trunc_process(request);
+} /* demofs_setattr_trunc_first_cb */
+
 static void
 demofs_setattr_inode_cb(
     struct demofs_inode *inode,
@@ -4743,6 +4923,7 @@ demofs_setattr_inode_cb(
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
+    struct demofs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -4751,55 +4932,25 @@ demofs_setattr_inode_cb(
 
     demofs_map_attrs(thread, &request->setattr.r_pre_attr, inode);
 
-    /* Handle truncation: remove/trim extents past new EOF */
+    /* Handle truncation: remove/trim extents past new EOF. */
     if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
         S_ISREG(inode->mode) &&
         request->setattr.set_attr->va_size < inode->size) {
 
-        uint64_t              new_size = request->setattr.set_attr->va_size;
-        struct demofs_extent  ext_buf;
-        struct demofs_extent *extent = &ext_buf;
-        int                   have;
+        p->inode_stash[0] = inode;
+        p->loop_off       = request->setattr.set_attr->va_size;
 
-        have = demofs_ext_floor(thread, inode, new_size, extent);
-        if (!have) {
-            have = demofs_ext_ceil(thread, inode, 0, extent);
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_floor_async(op, thread, inode, p->loop_off, p->rec_scratch,
+                                   sizeof(p->rec_scratch), demofs_setattr_trunc_first_cb,
+                                   request)) {
+            demofs_setattr_trunc_first_cb(op, op->result, request);
         }
-
-        while (have) {
-            uint64_t extent_start = extent->file_offset;
-            uint64_t extent_end   = extent_start + extent->length;
-            uint64_t cur_fo       = extent->file_offset;
-
-            if (extent_start >= new_size) {
-                demofs_thread_free_space(thread, extent->device_id,
-                                         extent->device_offset,
-                                         SM_ALIGN_UP(extent->length));
-                demofs_ext_remove(thread, p->txn, inode, cur_fo);
-            } else if (extent_end > new_size) {
-                uint64_t old_aligned = SM_ALIGN_UP(extent->length);
-                uint64_t new_logical = new_size - extent_start;
-                uint64_t new_aligned = SM_ALIGN_UP(new_logical);
-
-                if (old_aligned > new_aligned) {
-                    demofs_thread_free_space(thread, extent->device_id,
-                                             extent->device_offset + new_aligned,
-                                             old_aligned - new_aligned);
-                }
-                /* Trim in place by rewriting the record with the new length. */
-                demofs_ext_remove(thread, p->txn, inode, cur_fo);
-                demofs_ext_insert(thread, p->txn, inode, cur_fo, new_logical,
-                                  extent->device_id, extent->device_offset);
-            }
-
-            have = demofs_ext_next(thread, inode, cur_fo, extent);
-        }
+        return;
     }
 
     demofs_apply_attrs(inode, request->setattr.set_attr);
     demofs_map_attrs(thread, &request->setattr.r_post_attr, inode);
-
-
     demofs_op_ok(request, p->txn);
 } /* demofs_setattr_inode_cb */
 
