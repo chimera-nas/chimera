@@ -90,6 +90,16 @@ struct demofs_request_private {
     /* Small integer scratch for ops that need to carry state across
      * async callbacks (mount path walker uses it as a path byte offset). */
     uint32_t              op_scratch;
+
+    /* readdir iteration cursor + the current dirent copied out of the
+     * b+tree (carried across the per-child inode fetch). */
+    uint64_t              rd_from_hash;
+    uint64_t              rd_hash;
+    uint64_t              rd_inum;
+    uint32_t              rd_gen;
+    int                   rd_namelen;
+    char                  rd_name[256];
+
     struct evpl_iovec     iov[66];
 
     // For RMW (read-modify-write) on partial block writes
@@ -175,12 +185,17 @@ typedef void (*demofs_inode_cb_t)(
     int                  status,
     void                *private_data);
 
-/* Defined in the block-cache section below. */
+/* Defined in the block-cache / b+tree sections below. */
 static void demofs_txn_pin_inode_block(
     struct demofs_thread *thread,
     struct demofs_txn    *txn,
     struct demofs_inode  *inode,
     int                   is_new);
+static inline void demofs_bt_node_init(
+    void    *buf,
+    uint32_t base,
+    uint32_t capacity,
+    uint16_t level);
 
 /*
  * A transaction that cannot immediately acquire an inode in the desired
@@ -229,22 +244,20 @@ struct demofs_inode {
     struct demofs_inode_waiter *wait_tail;
 
     /* This inode's 4 KiB metadata home block in the block cache; pinned
-     * while the inode is dirty in a transaction.  NULL until first claimed. */
+     * while the inode is dirty in a transaction.  NULL until first claimed.
+     * Directory entries, extents and the symlink target all live as keyed
+     * records in this inode's b+tree (rooted in the block at offset 256). */
     struct demofs_block        *block;
 
-    union {
-        struct {
-            struct rb_tree dirents;
-            uint64_t       parent_inum;
-            uint32_t       parent_gen;
-        } dir;
-        struct {
-            struct rb_tree extents;
-        } file;
-        struct {
-            struct demofs_symlink_target *target;
-        } symlink;
-    };
+    /* Directory only: parent for ".." resolution (also persisted in dinode). */
+    uint64_t                    parent_inum;
+    uint32_t                    parent_gen;
+
+    /* TODO(phase 1c): extents move into the b+tree; until then regular
+     * files keep their extents in this in-memory rb-tree. */
+    struct {
+        struct rb_tree extents;
+    } file;
 };
 
 struct demofs_inode_shard {
@@ -303,10 +316,19 @@ struct demofs_block_cache {
 };
 
 /*
- * On-disk inode layout, written at the front of the inode's 4 KiB block.
- * Scalar attributes only for now; directory entries and file extents stay
- * in memory until the b+tree block work lands.
+ * On-disk inode block layout (4 KiB):
+ *   [0, DEMOFS_INODE_AREA)   struct demofs_dinode (scalar attributes)
+ *   [DEMOFS_INODE_AREA, end) the inode's b+tree root node (embedded)
+ *
+ * Directory entries, file extents and the symlink target all live as keyed
+ * records in the inode's single b+tree; the root node is embedded in the
+ * inode block, and deeper nodes occupy their own 4 KiB blocks.
  */
+#define DEMOFS_INODE_AREA   256
+#define DEMOFS_BT_ROOT_BASE DEMOFS_INODE_AREA
+#define DEMOFS_BT_ROOT_CAP  (DEMOFS_BLOCK_SIZE - DEMOFS_INODE_AREA)   /* 3840 */
+#define DEMOFS_BT_NODE_CAP  DEMOFS_BLOCK_SIZE                          /* 4096 */
+
 struct demofs_dinode {
     uint64_t inum;
     uint32_t gen;
@@ -327,13 +349,75 @@ struct demofs_dinode {
     uint32_t parent_gen;
 };
 
+/* ------------------------------------------------------------------ */
+/* Per-inode b+tree (on-disk, slotted nodes)                           */
+/* ------------------------------------------------------------------ */
+
+/* Record types share one tree per inode; each occupies a key range. */
+enum demofs_bt_rectype {
+    DEMOFS_REC_DIRENT  = 1,
+    DEMOFS_REC_EXTENT  = 2,
+    DEMOFS_REC_SYMLINK = 3,
+};
+
+/* B+tree key: ordered by (type, subkey).  subkey is the name hash for
+ * dirents, the file offset for extents, 0 for the single symlink record. */
+struct demofs_bt_key {
+    uint8_t  type;
+    uint8_t  pad[7];
+    uint64_t subkey;
+};
+
+/*
+ * Slotted node header at the base of every node (embedded root or full
+ * block).  level 0 == leaf.  Interior nodes hold a fixed array of
+ * {key, child_bptr}; leaves hold a slot array of {key, off, len} plus a
+ * record heap growing down from free_end.
+ */
+struct demofs_bt_node_hdr {
+    uint16_t level;
+    uint16_t nitems;
+    uint32_t capacity;     /* usable node bytes (DEMOFS_BT_ROOT_CAP or _NODE_CAP) */
+    uint32_t free_end;     /* leaf heap top (records occupy [free_end, capacity)) */
+    uint32_t reserved;
+    uint64_t next_leaf;    /* leaf only: bptr of next leaf in key order (0 = none) */
+};
+
+struct demofs_bt_islot {          /* interior slot, 24 B */
+    struct demofs_bt_key key;
+    uint64_t             child;   /* bptr (sm disk:ag:index encoding) */
+};
+
+struct demofs_bt_lslot {          /* leaf slot, 24 B */
+    struct demofs_bt_key key;
+    uint32_t             off;     /* record offset from node base */
+    uint32_t             len;     /* record length */
+};
+
+/* Leaf record payloads (stored in the leaf heap). */
+struct demofs_dirent_rec {
+    uint64_t inum;
+    uint32_t gen;
+    uint16_t name_len;
+    char     name[];
+} __attribute__((packed));
+
+struct demofs_extent_rec {
+    uint64_t length;
+    uint32_t device_id;
+    uint32_t pad;
+    uint64_t device_offset;
+} __attribute__((packed));
+
+#define DEMOFS_DIRENT_REC_MAX (sizeof(struct demofs_dirent_rec) + 256)
+
 /*
  * Intent-log redo record, written into the reserved intent-log region.
  * A record is a header followed by num_blocks (block-header, 4 KiB content)
  * pairs, padded to a 4 KiB multiple.  Full-block redo: the record carries
  * the entire post-image of every dirty block in the transaction.
  */
-#define DEMOFS_REDO_MAGIC 0x4F44455246534944ULL    /* "DISFREDO" */
+#define DEMOFS_REDO_MAGIC     0x4F44455246534944ULL /* "DISFREDO" */
 
 struct demofs_redo_header {
     uint64_t magic;
@@ -1028,6 +1112,13 @@ demofs_txn_pin_inode_block(
 
     inode->block = demofs_block_claim(thread, device_id, device_offset, is_new);
     demofs_txn_add_block(txn, inode->block);
+
+    if (is_new) {
+        /* Initialize the embedded b+tree root (empty leaf) in the new
+         * inode block. */
+        demofs_bt_node_init(inode->block->buffer, DEMOFS_BT_ROOT_BASE,
+                            DEMOFS_BT_ROOT_CAP, 0);
+    }
 } /* demofs_txn_pin_inode_block */
 
 /* Serialize an inode's durable attributes into the front of its block. */
@@ -1058,8 +1149,8 @@ demofs_inode_flush(struct demofs_inode *inode)
     di->mtime_nsec = inode->mtime_nsec;
     di->ctime_nsec = inode->ctime_nsec;
     if (S_ISDIR(inode->mode)) {
-        di->parent_inum = inode->dir.parent_inum;
-        di->parent_gen  = inode->dir.parent_gen;
+        di->parent_inum = inode->parent_inum;
+        di->parent_gen  = inode->parent_gen;
     }
 
     inode->block->state = DEMOFS_BLOCK_DIRTY;
@@ -1117,6 +1208,961 @@ demofs_txn_unpin_blocks(
         tb = n;
     }
 } /* demofs_txn_unpin_blocks */
+
+/* ------------------------------------------------------------------ */
+/* Per-inode b+tree                                                    */
+/* ------------------------------------------------------------------ */
+
+/* Lock-free RCU lookup of a resident block; NULL if not cached. */
+static struct demofs_block *
+demofs_block_lookup_rcu(
+    struct demofs_thread *thread,
+    uint32_t              device_id,
+    uint64_t              device_offset)
+{
+    struct demofs_block_cache *cache  = thread->shared->block_cache;
+    uint64_t                   hash   = demofs_block_hash(device_id, device_offset);
+    uint32_t                   sidx   = hash & DEMOFS_BLOCK_CACHE_SHARD_MASK;
+    uint32_t                   bucket = (hash >> 8) & DEMOFS_BLOCK_CACHE_BUCKET_MASK;
+    struct demofs_block_shard *shard  = &cache->shards[sidx];
+    struct demofs_block       *blk;
+
+    for (blk = rcu_dereference(shard->buckets[bucket]); blk;
+         blk = rcu_dereference(blk->hash_next)) {
+        if (blk->device_id == device_id && blk->device_offset == device_offset) {
+            return blk;
+        }
+    }
+    return NULL;
+} /* demofs_block_lookup_rcu */
+
+static inline int
+demofs_bt_key_cmp(
+    const struct demofs_bt_key *a,
+    const struct demofs_bt_key *b)
+{
+    if (a->type != b->type) {
+        return a->type < b->type ? -1 : 1;
+    }
+    if (a->subkey != b->subkey) {
+        return a->subkey < b->subkey ? -1 : 1;
+    }
+    return 0;
+} /* demofs_bt_key_cmp */
+
+static inline struct demofs_bt_node_hdr *
+demofs_bt_hdr(
+    void    *buf,
+    uint32_t base)
+{
+    return (struct demofs_bt_node_hdr *) ((char *) buf + base);
+} /* demofs_bt_hdr */
+
+static inline struct demofs_bt_islot *
+demofs_bt_islots(
+    void    *buf,
+    uint32_t base)
+{
+    return (struct demofs_bt_islot *) ((char *) buf + base + sizeof(struct demofs_bt_node_hdr));
+} /* demofs_bt_islots */
+
+static inline struct demofs_bt_lslot *
+demofs_bt_lslots(
+    void    *buf,
+    uint32_t base)
+{
+    return (struct demofs_bt_lslot *) ((char *) buf + base + sizeof(struct demofs_bt_node_hdr));
+} /* demofs_bt_lslots */
+
+static inline void
+demofs_bt_node_init(
+    void    *buf,
+    uint32_t base,
+    uint32_t capacity,
+    uint16_t level)
+{
+    struct demofs_bt_node_hdr *h = demofs_bt_hdr(buf, base);
+
+    h->level     = level;
+    h->nitems    = 0;
+    h->capacity  = capacity;
+    h->free_end  = capacity;
+    h->reserved  = 0;
+    h->next_leaf = 0;
+} /* demofs_bt_node_init */
+
+/* Free bytes available in a leaf for one more (slot + record). */
+static inline uint32_t
+demofs_bt_leaf_free(
+    void    *buf,
+    uint32_t base)
+{
+    struct demofs_bt_node_hdr *h          = demofs_bt_hdr(buf, base);
+    uint32_t                   free_start = sizeof(*h) + h->nitems * sizeof(struct demofs_bt_lslot);
+
+    return h->free_end - free_start;
+} /* demofs_bt_leaf_free */
+
+static inline uint32_t
+demofs_bt_interior_free(
+    void    *buf,
+    uint32_t base)
+{
+    struct demofs_bt_node_hdr *h          = demofs_bt_hdr(buf, base);
+    uint32_t                   free_start = sizeof(*h) + h->nitems * sizeof(struct demofs_bt_islot);
+
+    return h->capacity - free_start;
+} /* demofs_bt_interior_free */
+
+/*
+ * Binary search a leaf for key.  Returns the index of the first slot whose
+ * key is >= the search key; sets *exact if that slot's key matches.
+ */
+static int
+demofs_bt_leaf_search(
+    void                       *buf,
+    uint32_t                    base,
+    const struct demofs_bt_key *key,
+    int                        *exact)
+{
+    struct demofs_bt_lslot *sl = demofs_bt_lslots(buf, base);
+    int                     n  = demofs_bt_hdr(buf, base)->nitems;
+    int                     lo = 0, hi = n;
+
+    *exact = 0;
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+        int c   = demofs_bt_key_cmp(&sl[mid].key, key);
+
+        if (c < 0) {
+            lo = mid + 1;
+        } else if (c > 0) {
+            hi = mid;
+        } else {
+            *exact = 1;
+            return mid;
+        }
+    }
+    return lo;
+} /* demofs_bt_leaf_search */
+
+/* Index of the child subtree that may contain key (largest key <= search). */
+static int
+demofs_bt_interior_search(
+    void                       *buf,
+    uint32_t                    base,
+    const struct demofs_bt_key *key)
+{
+    struct demofs_bt_islot *sl = demofs_bt_islots(buf, base);
+    int                     n  = demofs_bt_hdr(buf, base)->nitems;
+    int                     lo = 0, hi = n, ans = 0;
+
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+
+        if (demofs_bt_key_cmp(&sl[mid].key, key) <= 0) {
+            ans = mid;
+            lo  = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return ans;
+} /* demofs_bt_interior_search */
+
+/* Append a leaf record at the end (caller guarantees sorted order + room). */
+static void
+demofs_bt_leaf_append(
+    void                       *buf,
+    uint32_t                    base,
+    const struct demofs_bt_key *key,
+    const void                 *rec,
+    uint32_t                    reclen)
+{
+    struct demofs_bt_node_hdr *h  = demofs_bt_hdr(buf, base);
+    struct demofs_bt_lslot    *sl = demofs_bt_lslots(buf, base);
+
+    h->free_end -= reclen;
+    memcpy((char *) buf + base + h->free_end, rec, reclen);
+    sl[h->nitems].key = *key;
+    sl[h->nitems].off = h->free_end;
+    sl[h->nitems].len = reclen;
+    h->nitems++;
+} /* demofs_bt_leaf_append */
+
+/* Allocate a fresh b+tree node block; returns the (pinned, txn-attached)
+ * block and its bptr.  Buffer is zeroed and initialized as an empty node. */
+static struct demofs_block *
+demofs_bt_alloc_node(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    uint16_t              level,
+    uint64_t             *r_bptr)
+{
+    struct demofs_shared *shared = thread->shared;
+    struct demofs_block  *blk;
+    uint32_t              device_id;
+    uint64_t              device_offset;
+    int                   rc;
+
+    rc = space_map_alloc(shared->space_map, &thread->space_cache,
+                         DEMOFS_BLOCK_SIZE, &device_id, &device_offset);
+    chimera_demofs_abort_if(rc != 0, "b+tree node allocation failed (ENOSPC)");
+
+    blk = demofs_block_claim(thread, device_id, device_offset, 1);
+    demofs_txn_add_block(txn, blk);
+
+    demofs_bt_node_init(blk->buffer, 0, DEMOFS_BT_NODE_CAP, level);
+
+    *r_bptr = sm_inum_from_device_offset(shared->space_map, device_id, device_offset);
+    return blk;
+} /* demofs_bt_alloc_node */
+
+/* Resolve a child bptr to its block buffer for writing (claim+pin+attach). */
+static void *
+demofs_bt_node_for_write(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    uint64_t              bptr)
+{
+    uint32_t             device_id;
+    uint64_t             device_offset;
+    struct demofs_block *blk;
+
+    device_offset = sm_inum_to_device_offset(thread->shared->space_map, bptr, &device_id);
+    blk           = demofs_block_claim(thread, device_id, device_offset, 0);
+    demofs_txn_add_block(txn, blk);
+    return blk->buffer;
+} /* demofs_bt_node_for_write */
+
+/*
+ * Split a full leaf (current node at buf/base/cap) while inserting
+ * (nkey,nrec).  The lower half stays in place; the upper half plus the new
+ * right sibling's bptr are returned via *sep_key / *sep_bptr.
+ */
+static void
+demofs_bt_leaf_split(
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    void                       *buf,
+    uint32_t                    base,
+    uint32_t                    cap,
+    int                         insert_idx,
+    const struct demofs_bt_key *nkey,
+    const void                 *nrec,
+    uint32_t                    nreclen,
+    struct demofs_bt_key       *sep_key,
+    uint64_t                   *sep_bptr)
+{
+    struct demofs_bt_node_hdr *h     = demofs_bt_hdr(buf, base);
+    struct demofs_bt_lslot    *sl    = demofs_bt_lslots(buf, base);
+    int                        n     = h->nitems;
+    int                        total = n + 1;
+
+    struct {
+        struct demofs_bt_key key;
+        uint32_t             len;
+        uint32_t             scratch_off;
+    } *items;
+    char                      *scratch;
+    uint32_t                   sp = 0, total_bytes = 0, half, acc = 0;
+    int                        i, oi, split_i;
+    struct demofs_block       *right;
+    void                      *rbuf;
+    uint64_t                   old_next;
+
+    items   = malloc(total * sizeof(*items));
+    scratch = malloc(cap + nreclen);
+
+    for (i = 0, oi = 0; i < total; i++) {
+        if (i == insert_idx) {
+            memcpy(scratch + sp, nrec, nreclen);
+            items[i].key = *nkey;
+            items[i].len = nreclen;
+        } else {
+            memcpy(scratch + sp, (char *) buf + base + sl[oi].off, sl[oi].len);
+            items[i].key = sl[oi].key;
+            items[i].len = sl[oi].len;
+            oi++;
+        }
+        items[i].scratch_off = sp;
+        sp                  += items[i].len;
+        total_bytes         += items[i].len;
+    }
+
+    half    = total_bytes / 2;
+    split_i = 1;
+    for (i = 0; i < total; i++) {
+        if (acc >= half && i > 0) {
+            split_i = i;
+            break;
+        }
+        acc    += items[i].len;
+        split_i = i + 1;
+    }
+    if (split_i < 1) {
+        split_i = 1;
+    }
+    if (split_i > total - 1) {
+        split_i = total - 1;
+    }
+
+    old_next = h->next_leaf;
+
+    right = demofs_bt_alloc_node(thread, txn, 0, sep_bptr);
+    rbuf  = right->buffer;
+
+    /* Rebuild the left node in place from scratch (no aliasing). */
+    demofs_bt_node_init(buf, base, cap, 0);
+    for (i = 0; i < split_i; i++) {
+        demofs_bt_leaf_append(buf, base, &items[i].key,
+                              scratch + items[i].scratch_off, items[i].len);
+    }
+    for (i = split_i; i < total; i++) {
+        demofs_bt_leaf_append(rbuf, 0, &items[i].key,
+                              scratch + items[i].scratch_off, items[i].len);
+    }
+
+    demofs_bt_hdr(rbuf, 0)->next_leaf = old_next;
+    h->next_leaf                      = *sep_bptr;
+
+    *sep_key = items[split_i].key;
+
+    chimera_demofs_abort_if(demofs_bt_leaf_free(buf, base) > cap ||
+                            demofs_bt_leaf_free(rbuf, 0) > DEMOFS_BT_NODE_CAP,
+                            "b+tree leaf split overflow");
+
+    free(items);
+    free(scratch);
+} /* demofs_bt_leaf_split */
+
+/* Insert (key,rec) into a leaf, splitting if needed.  Returns 1 on split. */
+static int
+demofs_bt_leaf_insert(
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    void                       *buf,
+    uint32_t                    base,
+    uint32_t                    cap,
+    const struct demofs_bt_key *key,
+    const void                 *rec,
+    uint32_t                    reclen,
+    struct demofs_bt_key       *sep_key,
+    uint64_t                   *sep_bptr)
+{
+    struct demofs_bt_node_hdr *h = demofs_bt_hdr(buf, base);
+    struct demofs_bt_lslot    *sl;
+    int                        idx, exact, j;
+
+    idx = demofs_bt_leaf_search(buf, base, key, &exact);
+    chimera_demofs_abort_if(exact, "b+tree duplicate key insert");
+
+    if (demofs_bt_leaf_free(buf, base) >= sizeof(struct demofs_bt_lslot) + reclen) {
+        sl = demofs_bt_lslots(buf, base);
+        for (j = h->nitems; j > idx; j--) {
+            sl[j] = sl[j - 1];
+        }
+        h->free_end -= reclen;
+        memcpy((char *) buf + base + h->free_end, rec, reclen);
+        sl[idx].key = *key;
+        sl[idx].off = h->free_end;
+        sl[idx].len = reclen;
+        h->nitems++;
+        return 0;
+    }
+
+    demofs_bt_leaf_split(thread, txn, buf, base, cap, idx, key, rec, reclen,
+                         sep_key, sep_bptr);
+    return 1;
+} /* demofs_bt_leaf_insert */
+
+/* Insert (key,child) into an interior node, splitting if needed. */
+static int
+demofs_bt_interior_insert(
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    void                       *buf,
+    uint32_t                    base,
+    uint32_t                    cap,
+    const struct demofs_bt_key *key,
+    uint64_t                    child,
+    struct demofs_bt_key       *sep_key,
+    uint64_t                   *sep_bptr)
+{
+    struct demofs_bt_node_hdr *h  = demofs_bt_hdr(buf, base);
+    struct demofs_bt_islot    *sl = demofs_bt_islots(buf, base);
+    int                        n  = h->nitems;
+    int                        idx, j, split_i;
+    struct demofs_block       *right;
+    struct demofs_bt_islot    *rsl;
+    struct demofs_bt_node_hdr *rh;
+
+    /* Find sorted insert position (keys are unique separators). */
+    idx = 0;
+    while (idx < n && demofs_bt_key_cmp(&sl[idx].key, key) < 0) {
+        idx++;
+    }
+
+    if (demofs_bt_interior_free(buf, base) >= sizeof(struct demofs_bt_islot)) {
+        for (j = n; j > idx; j--) {
+            sl[j] = sl[j - 1];
+        }
+        sl[idx].key   = *key;
+        sl[idx].child = child;
+        h->nitems++;
+        return 0;
+    }
+
+    /* Split: build the full set of n+1 slots in order, distribute halves. */
+    {
+        struct demofs_bt_islot all[ (DEMOFS_BT_NODE_CAP / sizeof(struct demofs_bt_islot)) + 2 ];
+        int                    total = n + 1;
+        int                    p = 0, ins = 0;
+
+        for (j = 0; j < n; j++) {
+            if (!ins && demofs_bt_key_cmp(key, &sl[j].key) < 0) {
+                all[p].key = *key; all[p].child = child; p++; ins = 1;
+            }
+            all[p++] = sl[j];
+        }
+        if (!ins) {
+            all[p].key = *key; all[p].child = child; p++;
+        }
+
+        split_i = total / 2;
+
+        right = demofs_bt_alloc_node(thread, txn, h->level, sep_bptr);
+        rsl   = demofs_bt_islots(right->buffer, 0);
+        rh    = demofs_bt_hdr(right->buffer, 0);
+
+        h->nitems = split_i;
+        for (j = 0; j < split_i; j++) {
+            sl[j] = all[j];
+        }
+        for (j = split_i; j < total; j++) {
+            rsl[j - split_i] = all[j];
+        }
+        rh->nitems = total - split_i;
+
+        *sep_key = rsl[0].key;
+        return 1;
+    }
+} /* demofs_bt_interior_insert */
+
+static int
+demofs_bt_insert_rec(
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    void                       *buf,
+    uint32_t                    base,
+    uint32_t                    cap,
+    const struct demofs_bt_key *key,
+    const void                 *rec,
+    uint32_t                    reclen,
+    struct demofs_bt_key       *sep_key,
+    uint64_t                   *sep_bptr)
+{
+    struct demofs_bt_node_hdr *h = demofs_bt_hdr(buf, base);
+    struct demofs_bt_islot    *sl;
+    int                        ci, csplit;
+    uint64_t                   child_bptr;
+    void                      *child_buf;
+    struct demofs_bt_key       csep;
+    uint64_t                   cbptr;
+
+    if (h->level == 0) {
+        return demofs_bt_leaf_insert(thread, txn, buf, base, cap, key, rec, reclen,
+                                     sep_key, sep_bptr);
+    }
+
+    ci         = demofs_bt_interior_search(buf, base, key);
+    sl         = demofs_bt_islots(buf, base);
+    child_bptr = sl[ci].child;
+    child_buf  = demofs_bt_node_for_write(thread, txn, child_bptr);
+
+    csplit = demofs_bt_insert_rec(thread, txn, child_buf, 0, DEMOFS_BT_NODE_CAP,
+                                  key, rec, reclen, &csep, &cbptr);
+    if (!csplit) {
+        return 0;
+    }
+
+    return demofs_bt_interior_insert(thread, txn, buf, base, cap, &csep, cbptr,
+                                     sep_key, sep_bptr);
+} /* demofs_bt_insert_rec */
+
+/*
+ * Insert a record into an inode's b+tree.  The inode must be write-locked
+ * and its root block pinned (true for any write op that acquired it).
+ */
+static void
+demofs_bt_insert(
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    struct demofs_inode        *inode,
+    const struct demofs_bt_key *key,
+    const void                 *rec,
+    uint32_t                    reclen)
+{
+    void                *root = inode->block->buffer;
+    struct demofs_bt_key sep;
+    uint64_t             sep_bptr;
+    int                  split;
+
+    split = demofs_bt_insert_rec(thread, txn, root, DEMOFS_BT_ROOT_BASE,
+                                 DEMOFS_BT_ROOT_CAP, key, rec, reclen, &sep, &sep_bptr);
+    if (!split) {
+        return;
+    }
+
+    /* Root overflowed: grow the tree.  Move the (post-split lower-half)
+     * root contents into a new left child, then re-form the root as an
+     * interior node pointing at the new left child and the split's right
+     * sibling. */
+    {
+        struct demofs_bt_node_hdr *rh        = demofs_bt_hdr(root, DEMOFS_BT_ROOT_BASE);
+        uint16_t                   old_level = rh->level;
+        uint64_t                   left_bptr;
+        struct demofs_block       *left;
+        struct demofs_bt_key       left_min;
+        struct demofs_bt_islot    *isl;
+
+        left = demofs_bt_alloc_node(thread, txn, old_level, &left_bptr);
+
+        /* Copy the entire embedded root node into the new left block. */
+        memcpy((char *) left->buffer, (char *) root + DEMOFS_BT_ROOT_BASE, DEMOFS_BT_ROOT_CAP);
+        demofs_bt_hdr(left->buffer, 0)->capacity = DEMOFS_BT_NODE_CAP;
+
+        if (old_level == 0) {
+            left_min = demofs_bt_lslots(left->buffer, 0)[0].key;
+        } else {
+            left_min = demofs_bt_islots(left->buffer, 0)[0].key;
+        }
+
+        demofs_bt_node_init(root, DEMOFS_BT_ROOT_BASE, DEMOFS_BT_ROOT_CAP,
+                            old_level + 1);
+        rh           = demofs_bt_hdr(root, DEMOFS_BT_ROOT_BASE);
+        rh->nitems   = 2;
+        isl          = demofs_bt_islots(root, DEMOFS_BT_ROOT_BASE);
+        isl[0].key   = left_min;
+        isl[0].child = left_bptr;
+        isl[1].key   = sep;
+        isl[1].child = sep_bptr;
+    }
+} /* demofs_bt_insert */
+
+/*
+ * Remove a key from an inode's b+tree (lazy: no merge/rebalance).  Returns
+ * 1 if removed, 0 if not found.  The descent dirties the path blocks.
+ */
+static int
+demofs_bt_remove(
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    struct demofs_inode        *inode,
+    const struct demofs_bt_key *key)
+{
+    void    *buf  = inode->block->buffer;
+    uint32_t base = DEMOFS_BT_ROOT_BASE;
+
+    for (;; ) {
+        struct demofs_bt_node_hdr *h = demofs_bt_hdr(buf, base);
+
+        if (h->level == 0) {
+            struct demofs_bt_lslot *sl = demofs_bt_lslots(buf, base);
+            int                     idx, exact, j;
+
+            idx = demofs_bt_leaf_search(buf, base, key, &exact);
+            if (!exact) {
+                return 0;
+            }
+            for (j = idx; j < h->nitems - 1; j++) {
+                sl[j] = sl[j + 1];
+            }
+            h->nitems--;
+            return 1;
+        } else {
+            int ci = demofs_bt_interior_search(buf, base, key);
+
+            buf = demofs_bt_node_for_write(thread, txn,
+                                           demofs_bt_islots(buf, base)[ci].child);
+            base = 0;
+        }
+    }
+} /* demofs_bt_remove */
+
+/*
+ * Copy out the record for an exact key match.  Read path: traverses via the
+ * RCU block cache, one critical section per node.  Returns the record
+ * length (copied into out, up to out_cap) or -1 if not found.  Phase 1
+ * aborts if a needed node is not resident.
+ */
+static int
+demofs_bt_lookup_exact(
+    struct demofs_thread       *thread,
+    struct demofs_inode        *inode,
+    const struct demofs_bt_key *key,
+    void                       *out,
+    uint32_t                    out_cap)
+{
+    uint32_t device_id;
+    uint64_t device_offset;
+    uint64_t bptr = 0;
+    void    *buf;
+    uint32_t base;
+    int      result   = -1;
+    int      use_root = 1;
+
+    device_offset = sm_inum_to_device_offset(thread->shared->space_map, inode->inum, &device_id);
+
+    for (;; ) {
+        struct demofs_block *blk;
+
+        urcu_memb_read_lock();
+        if (use_root) {
+            blk = demofs_block_lookup_rcu(thread, device_id, device_offset);
+        } else {
+            uint32_t cdev;
+            uint64_t coff = sm_inum_to_device_offset(thread->shared->space_map, bptr, &cdev);
+            blk = demofs_block_lookup_rcu(thread, cdev, coff);
+        }
+        chimera_demofs_abort_if(!blk, "b+tree read: node not resident (inum %lu)", inode->inum);
+
+        buf  = blk->buffer;
+        base = use_root ? DEMOFS_BT_ROOT_BASE : 0;
+
+        struct demofs_bt_node_hdr *h = demofs_bt_hdr(buf, base);
+        if (h->level == 0) {
+            int exact;
+            int idx = demofs_bt_leaf_search(buf, base, key, &exact);
+            if (exact) {
+                struct demofs_bt_lslot *sl  = demofs_bt_lslots(buf, base);
+                uint32_t                len = sl[idx].len;
+                if (len > out_cap) {
+                    len = out_cap;
+                }
+                memcpy(out, (char *) buf + base + sl[idx].off, len);
+                result = (int) sl[idx].len;
+            }
+            urcu_memb_read_unlock();
+            return result;
+        } else {
+            int ci = demofs_bt_interior_search(buf, base, key);
+            bptr = demofs_bt_islots(buf, base)[ci].child;
+            urcu_memb_read_unlock();
+            use_root = 0;
+        }
+    }
+} /* demofs_bt_lookup_exact */
+
+/* Descend (floor-style) to the leaf that would hold key.  Returns the leaf
+ * block (RCU lookup; aborts if not resident) without entering a critical
+ * section; the caller must re-enter RCU around its own access.  Used as a
+ * helper only where the whole traversal is inside one logic block. */
+
+/*
+ * Smallest key >= search key (ceil).  Copies the found key into *r_key and
+ * the record into out; returns record length, or -1 if no such key.
+ */
+static int
+demofs_bt_lookup_ge(
+    struct demofs_thread       *thread,
+    struct demofs_inode        *inode,
+    const struct demofs_bt_key *key,
+    struct demofs_bt_key       *r_key,
+    void                       *out,
+    uint32_t                    out_cap)
+{
+    uint32_t device_id;
+    uint64_t device_offset;
+    uint64_t bptr      = 0;
+    int      use_root  = 1;
+    uint64_t next_leaf = 0;
+
+    device_offset = sm_inum_to_device_offset(thread->shared->space_map, inode->inum, &device_id);
+
+    for (;; ) {
+        struct demofs_block       *blk;
+        struct demofs_bt_node_hdr *h;
+        void                      *buf;
+        uint32_t                   base;
+
+        urcu_memb_read_lock();
+        if (use_root) {
+            blk = demofs_block_lookup_rcu(thread, device_id, device_offset);
+        } else {
+            uint32_t cdev;
+            uint64_t coff = sm_inum_to_device_offset(thread->shared->space_map, bptr, &cdev);
+            blk = demofs_block_lookup_rcu(thread, cdev, coff);
+        }
+        chimera_demofs_abort_if(!blk, "b+tree read: node not resident (inum %lu)", inode->inum);
+
+        buf  = blk->buffer;
+        base = use_root ? DEMOFS_BT_ROOT_BASE : 0;
+        h    = demofs_bt_hdr(buf, base);
+
+        if (h->level == 0) {
+            int exact;
+            int idx = demofs_bt_leaf_search(buf, base, key, &exact);
+
+            if (idx < h->nitems) {
+                struct demofs_bt_lslot *sl  = demofs_bt_lslots(buf, base);
+                uint32_t                len = sl[idx].len;
+
+                *r_key = sl[idx].key;
+                if (len > out_cap) {
+                    len = out_cap;
+                }
+                memcpy(out, (char *) buf + base + sl[idx].off, len);
+                len = sl[idx].len;
+                urcu_memb_read_unlock();
+                return (int) len;
+            }
+            next_leaf = h->next_leaf;
+            urcu_memb_read_unlock();
+
+            if (next_leaf == 0) {
+                return -1;     /* no key >= search */
+            }
+            /* Successor is the first slot of the next leaf. */
+            bptr     = next_leaf;
+            use_root = 0;
+            {
+                uint32_t cdev;
+                uint64_t coff = sm_inum_to_device_offset(thread->shared->space_map, bptr, &cdev);
+
+                urcu_memb_read_lock();
+                blk = demofs_block_lookup_rcu(thread, cdev, coff);
+                chimera_demofs_abort_if(!blk, "b+tree read: next leaf not resident");
+                h = demofs_bt_hdr(blk->buffer, 0);
+                if (h->nitems == 0) {
+                    urcu_memb_read_unlock();
+                    return -1;
+                }
+                struct demofs_bt_lslot *sl  = demofs_bt_lslots(blk->buffer, 0);
+                uint32_t                len = sl[0].len;
+                *r_key = sl[0].key;
+                if (len > out_cap) {
+                    len = out_cap;
+                }
+                memcpy(out, (char *) blk->buffer + sl[0].off, len);
+                len = sl[0].len;
+                urcu_memb_read_unlock();
+                return (int) len;
+            }
+        } else {
+            int ci = demofs_bt_interior_search(buf, base, key);
+            bptr = demofs_bt_islots(buf, base)[ci].child;
+            urcu_memb_read_unlock();
+            use_root = 0;
+        }
+    }
+} /* demofs_bt_lookup_ge */
+
+/*
+ * Largest key <= search key (floor).  Copies the found key into *r_key and
+ * the record into out; returns record length, or -1 if no such key.
+ */
+static int
+demofs_bt_lookup_le(
+    struct demofs_thread       *thread,
+    struct demofs_inode        *inode,
+    const struct demofs_bt_key *key,
+    struct demofs_bt_key       *r_key,
+    void                       *out,
+    uint32_t                    out_cap)
+{
+    uint32_t device_id;
+    uint64_t device_offset;
+    uint64_t bptr     = 0;
+    int      use_root = 1;
+
+    device_offset = sm_inum_to_device_offset(thread->shared->space_map, inode->inum, &device_id);
+
+    for (;; ) {
+        struct demofs_block       *blk;
+        struct demofs_bt_node_hdr *h;
+        void                      *buf;
+        uint32_t                   base;
+
+        urcu_memb_read_lock();
+        if (use_root) {
+            blk = demofs_block_lookup_rcu(thread, device_id, device_offset);
+        } else {
+            uint32_t cdev;
+            uint64_t coff = sm_inum_to_device_offset(thread->shared->space_map, bptr, &cdev);
+            blk = demofs_block_lookup_rcu(thread, cdev, coff);
+        }
+        chimera_demofs_abort_if(!blk, "b+tree read: node not resident (inum %lu)", inode->inum);
+
+        buf  = blk->buffer;
+        base = use_root ? DEMOFS_BT_ROOT_BASE : 0;
+        h    = demofs_bt_hdr(buf, base);
+
+        if (h->level == 0) {
+            int exact;
+            int idx = demofs_bt_leaf_search(buf, base, key, &exact);
+            int fidx;
+
+            if (h->nitems == 0) {
+                urcu_memb_read_unlock();
+                return -1;
+            }
+            fidx = exact ? idx : idx - 1;
+            if (fidx < 0) {
+                urcu_memb_read_unlock();
+                return -1;     /* no key <= search in this (leftmost) leaf */
+            }
+            {
+                struct demofs_bt_lslot *sl  = demofs_bt_lslots(buf, base);
+                uint32_t                len = sl[fidx].len;
+
+                *r_key = sl[fidx].key;
+                if (len > out_cap) {
+                    len = out_cap;
+                }
+                memcpy(out, (char *) buf + base + sl[fidx].off, len);
+                len = sl[fidx].len;
+                urcu_memb_read_unlock();
+                return (int) len;
+            }
+        } else {
+            int ci = demofs_bt_interior_search(buf, base, key);
+            bptr = demofs_bt_islots(buf, base)[ci].child;
+            urcu_memb_read_unlock();
+            use_root = 0;
+        }
+    }
+} /* demofs_bt_lookup_le */
+
+/* ------------------------------------------------------------------ */
+/* Directory / symlink records over the inode b+tree                   */
+/* ------------------------------------------------------------------ */
+
+static inline struct demofs_bt_key
+demofs_dirent_key(uint64_t hash)
+{
+    struct demofs_bt_key k = { .type = DEMOFS_REC_DIRENT, .subkey = hash };
+
+    return k;
+} /* demofs_dirent_key */
+
+static void
+demofs_dir_insert(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *dir,
+    uint64_t              hash,
+    const char           *name,
+    int                   namelen,
+    uint64_t              child_inum,
+    uint32_t              child_gen)
+{
+    char                      buf[DEMOFS_DIRENT_REC_MAX];
+    struct demofs_dirent_rec *r   = (struct demofs_dirent_rec *) buf;
+    struct demofs_bt_key      key = demofs_dirent_key(hash);
+
+    r->inum     = child_inum;
+    r->gen      = child_gen;
+    r->name_len = (uint16_t) namelen;
+    memcpy(r->name, name, namelen);
+
+    demofs_bt_insert(thread, txn, dir, &key,
+                     buf, sizeof(*r) + namelen);
+} /* demofs_dir_insert */
+
+/* Returns 0 and fills the inum/gen out params if found, -1 otherwise. */
+static int
+demofs_dir_lookup(
+    struct demofs_thread *thread,
+    struct demofs_inode  *dir,
+    uint64_t              hash,
+    uint64_t             *r_inum,
+    uint32_t             *r_gen)
+{
+    char                      buf[DEMOFS_DIRENT_REC_MAX];
+    struct demofs_dirent_rec *r   = (struct demofs_dirent_rec *) buf;
+    struct demofs_bt_key      key = demofs_dirent_key(hash);
+    int                       len;
+
+    len = demofs_bt_lookup_exact(thread, dir, &key, buf, sizeof(buf));
+    if (len < 0) {
+        return -1;
+    }
+    *r_inum = r->inum;
+    *r_gen  = r->gen;
+    return 0;
+} /* demofs_dir_lookup */
+
+static int
+demofs_dir_remove(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *dir,
+    uint64_t              hash)
+{
+    struct demofs_bt_key key = demofs_dirent_key(hash);
+
+    return demofs_bt_remove(thread, txn, dir, &key);
+} /* demofs_dir_remove */
+
+/*
+ * Find the next directory entry whose hash is >= from_hash.  Returns 0 and
+ * fills the out params (the entry's hash, child inum/gen, name) or -1 when
+ * there are no more dirents.
+ */
+static int
+demofs_dir_next(
+    struct demofs_thread *thread,
+    struct demofs_inode  *dir,
+    uint64_t              from_hash,
+    uint64_t             *r_hash,
+    uint64_t             *r_inum,
+    uint32_t             *r_gen,
+    char                 *name,
+    int                  *r_namelen)
+{
+    char                      buf[DEMOFS_DIRENT_REC_MAX];
+    struct demofs_dirent_rec *r   = (struct demofs_dirent_rec *) buf;
+    struct demofs_bt_key      key = demofs_dirent_key(from_hash);
+    struct demofs_bt_key      found;
+    int                       len;
+
+    len = demofs_bt_lookup_ge(thread, dir, &key, &found, buf, sizeof(buf));
+    if (len < 0 || found.type != DEMOFS_REC_DIRENT) {
+        return -1;
+    }
+    *r_hash    = found.subkey;
+    *r_inum    = r->inum;
+    *r_gen     = r->gen;
+    *r_namelen = r->name_len;
+    memcpy(name, r->name, r->name_len);
+    return 0;
+} /* demofs_dir_next */
+
+static void
+demofs_symlink_set(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *inode,
+    const void           *target,
+    int                   len)
+{
+    struct demofs_bt_key key = { .type = DEMOFS_REC_SYMLINK, .subkey = 0 };
+
+    demofs_bt_insert(thread, txn, inode, &key, target, len);
+} /* demofs_symlink_set */
+
+static int
+demofs_symlink_get(
+    struct demofs_thread *thread,
+    struct demofs_inode  *inode,
+    void                 *out,
+    uint32_t              cap)
+{
+    struct demofs_bt_key key = { .type = DEMOFS_REC_SYMLINK, .subkey = 0 };
+
+    return demofs_bt_lookup_exact(thread, inode, &key, out, cap);
+} /* demofs_symlink_get */
 
 static inline struct demofs_extent *
 demofs_extent_alloc(struct demofs_thread *thread)
@@ -1275,13 +2321,9 @@ demofs_inode_free(
     if (S_ISREG(inode->mode)) {
         rb_tree_destroy(&inode->file.extents, demofs_extent_release, thread);
         rb_tree_init(&inode->file.extents);
-    } else if (S_ISDIR(inode->mode)) {
-        rb_tree_destroy(&inode->dir.dirents, demofs_dirent_release, thread);
-        rb_tree_init(&inode->dir.dirents);
-    } else if (S_ISLNK(inode->mode)) {
-        demofs_symlink_target_free(thread, inode->symlink.target);
-        inode->symlink.target = NULL;
     }
+    /* Directory / symlink contents live in the inode's b+tree blocks, which
+     * are leaked for now (no space reclaim yet). */
 
     inode->gen++;
     inode->refcnt = 0;
@@ -2017,13 +3059,23 @@ demofs_bootstrap(struct demofs_thread *thread)
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
 
-    rb_tree_init(&inode->dir.dirents);
-
     /* Root directory's parent is itself for ".." lookup */
-    inode->dir.parent_inum = inode->inum;
-    inode->dir.parent_gen  = inode->gen;
+    inode->parent_inum = inode->inum;
+    inode->parent_gen  = inode->gen;
 
     demofs_inode_cache_insert(shared, inode);
+
+    /* Create the root inode's block in the cache: an embedded empty b+tree
+     * root plus the dinode.  Bootstrap is not a transaction, so leave the
+     * block resident but unpinned/detached; the first write op that touches
+     * root will re-claim and log it. */
+    inode->block = demofs_block_claim(thread, device_id, device_offset, 1);
+    demofs_bt_node_init(inode->block->buffer, DEMOFS_BT_ROOT_BASE,
+                        DEMOFS_BT_ROOT_CAP, 0);
+    demofs_inode_flush(inode);
+    inode->block->state = DEMOFS_BLOCK_CLEAN;
+    __atomic_fetch_sub(&inode->block->pin_count, 1, __ATOMIC_RELAXED);
+    inode->block = NULL;
 
     /* Create 16-byte fsid buffer for root FH encoding (8-byte fsid + 8 bytes padding) */
     {
@@ -2048,11 +3100,10 @@ demofs_inode_cache_release(
     (void) private_data;
 
     /* Process is exiting; thread slab allocators are already gone, so the
-     * dirent/extent release callbacks no-op with a NULL thread.  We still
-     * own and must free the inode struct itself (heap-allocated). */
-    if (S_ISDIR(inode->mode)) {
-        rb_tree_destroy(&inode->dir.dirents, demofs_dirent_release, NULL);
-    } else if (S_ISREG(inode->mode)) {
+     * extent release callback no-ops with a NULL thread.  Directory/symlink
+     * b+tree blocks are freed via the block cache.  We still own and must
+     * free the inode struct itself (heap-allocated). */
+    if (S_ISREG(inode->mode)) {
         rb_tree_destroy(&inode->file.extents, demofs_extent_release, NULL);
     }
 
@@ -2518,13 +3569,12 @@ demofs_lookup_path(
 {
     struct demofs_shared *shared = thread->shared;
     struct demofs_inode  *parent, *inode;
-    struct demofs_dirent *dirent;
     const char           *name;
     const char           *pathc = path;
     const char           *slash;
     int                   namelen;
-    uint64_t              hash, inum;
-    uint32_t              gen;
+    uint64_t              hash, inum, child_inum;
+    uint32_t              gen, child_gen;
 
     demofs_fh_to_inum(&inum, &gen, shared->root_fh, shared->root_fhlen);
     inode = demofs_inode_acquire_sync_read(thread, txn, inum, gen);
@@ -2557,15 +3607,13 @@ demofs_lookup_path(
 
         hash = chimera_vfs_hash(name, namelen);
 
-        rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
-
-        if (!dirent) {
+        if (demofs_dir_lookup(thread, inode, hash, &child_inum, &child_gen) != 0) {
             return NULL;
         }
 
         parent = inode;
 
-        inode = demofs_inode_acquire_sync_read(thread, txn, dirent->inum, dirent->gen);
+        inode = demofs_inode_acquire_sync_read(thread, txn, child_inum, child_gen);
 
         /* Done with the parent now; release its slot so deep walks reuse it. */
         demofs_txn_unlock_inode(txn, parent);
@@ -2663,10 +3711,11 @@ demofs_lookup_at_parent_cb(
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
-    struct demofs_dirent          *dirent;
     const char                    *name    = request->lookup_at.component;
     uint32_t                       namelen = request->lookup_at.component_len;
     uint64_t                       hash    = request->lookup_at.component_hash;
+    uint64_t                       child_inum;
+    uint32_t                       child_gen;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -2692,20 +3741,18 @@ demofs_lookup_at_parent_cb(
 
     if (namelen == 2 && name[0] == '.' && name[1] == '.') {
         demofs_inode_get_inum_async(thread, p->txn,
-                                    parent->dir.parent_inum,
-                                    parent->dir.parent_gen,
+                                    parent->parent_inum,
+                                    parent->parent_gen,
                                     demofs_lookup_at_child_cb, request);
         return;
     }
 
-    rb_tree_query_exact(&parent->dir.dirents, hash, hash, dirent);
-
-    if (!dirent) {
+    if (demofs_dir_lookup(thread, parent, hash, &child_inum, &child_gen) != 0) {
         demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
 
-    demofs_inode_get_inum_async(thread, p->txn, dirent->inum, dirent->gen,
+    demofs_inode_get_inum_async(thread, p->txn, child_inum, child_gen,
                                 demofs_lookup_at_child_cb, request);
 } /* demofs_lookup_at_parent_cb */
 
@@ -2759,7 +3806,6 @@ demofs_mkdir_at_alloc_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     struct demofs_inode           *parent  = p->inode_stash[0];
-    struct demofs_dirent          *dirent;
     struct timespec                now;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -2782,18 +3828,15 @@ demofs_mkdir_at_alloc_cb(
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
 
-    rb_tree_init(&inode->dir.dirents);
-    inode->dir.parent_inum = parent->inum;
-    inode->dir.parent_gen  = parent->gen;
+    inode->parent_inum = parent->inum;
+    inode->parent_gen  = parent->gen;
 
     demofs_apply_attrs(inode, request->mkdir_at.set_attr);
     demofs_map_attrs(thread, &request->mkdir_at.r_attr, inode);
 
-    dirent = demofs_dirent_alloc(thread, inode->inum, inode->gen,
-                                 request->mkdir_at.name_hash,
-                                 request->mkdir_at.name,
-                                 request->mkdir_at.name_len);
-    rb_tree_insert(&parent->dir.dirents, hash, dirent);
+    demofs_dir_insert(thread, p->txn, parent, request->mkdir_at.name_hash,
+                      request->mkdir_at.name, request->mkdir_at.name_len,
+                      inode->inum, inode->gen);
 
     parent->nlink++;
     parent->mtime_sec  = now.tv_sec;
@@ -2815,8 +3858,9 @@ demofs_mkdir_at_parent_cb(
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
-    struct demofs_dirent          *existing_dirent;
-    uint64_t                       hash = request->mkdir_at.name_hash;
+    uint64_t                       hash    = request->mkdir_at.name_hash;
+    uint64_t                       existing_inum;
+    uint32_t                       existing_gen;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -2830,14 +3874,11 @@ demofs_mkdir_at_parent_cb(
 
     demofs_map_attrs(thread, &request->mkdir_at.r_dir_pre_attr, parent);
 
-    rb_tree_query_exact(&parent->dir.dirents, hash, hash, existing_dirent);
-
     p->inode_stash[0] = parent;
 
-    if (existing_dirent) {
+    if (demofs_dir_lookup(thread, parent, hash, &existing_inum, &existing_gen) == 0) {
         demofs_inode_get_inum_async(thread, p->txn,
-                                    existing_dirent->inum,
-                                    existing_dirent->gen,
+                                    existing_inum, existing_gen,
                                     demofs_mkdir_at_existing_cb, request);
         return;
     }
@@ -2896,7 +3937,6 @@ demofs_mknod_at_alloc_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     struct demofs_inode           *parent  = p->inode_stash[0];
-    struct demofs_dirent          *dirent;
     struct timespec                now;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -2931,11 +3971,9 @@ demofs_mknod_at_alloc_cb(
     demofs_apply_attrs(inode, request->mknod_at.set_attr);
     demofs_map_attrs(thread, &request->mknod_at.r_attr, inode);
 
-    dirent = demofs_dirent_alloc(thread, inode->inum, inode->gen,
-                                 request->mknod_at.name_hash,
-                                 request->mknod_at.name,
-                                 request->mknod_at.name_len);
-    rb_tree_insert(&parent->dir.dirents, hash, dirent);
+    demofs_dir_insert(thread, p->txn, parent, request->mknod_at.name_hash,
+                      request->mknod_at.name, request->mknod_at.name_len,
+                      inode->inum, inode->gen);
 
     parent->mtime_sec  = now.tv_sec;
     parent->mtime_nsec = now.tv_nsec;
@@ -2956,8 +3994,9 @@ demofs_mknod_at_parent_cb(
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
-    struct demofs_dirent          *existing_dirent;
-    uint64_t                       hash = request->mknod_at.name_hash;
+    uint64_t                       hash    = request->mknod_at.name_hash;
+    uint64_t                       existing_inum;
+    uint32_t                       existing_gen;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -2971,14 +4010,11 @@ demofs_mknod_at_parent_cb(
 
     demofs_map_attrs(thread, &request->mknod_at.r_dir_pre_attr, parent);
 
-    rb_tree_query_exact(&parent->dir.dirents, hash, hash, existing_dirent);
-
     p->inode_stash[0] = parent;
 
-    if (existing_dirent) {
+    if (demofs_dir_lookup(thread, parent, hash, &existing_inum, &existing_gen) == 0) {
         demofs_inode_get_inum_async(thread, p->txn,
-                                    existing_dirent->inum,
-                                    existing_dirent->gen,
+                                    existing_inum, existing_gen,
                                     demofs_mknod_at_existing_cb, request);
         return;
     }
@@ -3019,8 +4055,7 @@ demofs_remove_at_child_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     struct demofs_inode           *parent  = p->inode_stash[0];
-    struct demofs_dirent          *dirent;
-    uint64_t                       hash = request->remove_at.name_hash;
+    uint64_t                       hash    = request->remove_at.name_hash;
     struct timespec                now;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -3033,12 +4068,9 @@ demofs_remove_at_child_cb(
         return;
     }
 
-    rb_tree_query_exact(&parent->dir.dirents, hash, hash, dirent);
-
-    /* The dirent was located before the child fetch and the parent has
-     * been write-locked throughout, so it must still be present; guard
-     * defensively to keep the derefs below provably safe. */
-    if (unlikely(!dirent)) {
+    /* The dirent was located before the child fetch and the parent has been
+     * write-locked throughout, so it must still be present. */
+    if (unlikely(demofs_dir_remove(thread, p->txn, parent, hash) != 1)) {
         demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
@@ -3052,8 +4084,6 @@ demofs_remove_at_child_cb(
     parent->mtime_nsec = now.tv_nsec;
     parent->ctime_sec  = now.tv_sec;
     parent->ctime_nsec = now.tv_nsec;
-
-    rb_tree_remove(&parent->dir.dirents, &dirent->node);
 
     if (S_ISDIR(inode->mode)) {
         inode->nlink = 0;
@@ -3076,8 +4106,6 @@ demofs_remove_at_child_cb(
 
     demofs_map_attrs(thread, &request->remove_at.r_dir_post_attr, parent);
 
-    demofs_dirent_free(thread, dirent);
-
     demofs_op_ok(request, p->txn);
 } /* demofs_remove_at_child_cb */
 
@@ -3090,8 +4118,9 @@ demofs_remove_at_parent_cb(
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
-    struct demofs_dirent          *dirent;
-    uint64_t                       hash = request->remove_at.name_hash;
+    uint64_t                       hash    = request->remove_at.name_hash;
+    uint64_t                       child_inum;
+    uint32_t                       child_gen;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -3105,15 +4134,13 @@ demofs_remove_at_parent_cb(
         return;
     }
 
-    rb_tree_query_exact(&parent->dir.dirents, hash, hash, dirent);
-
-    if (!dirent) {
+    if (demofs_dir_lookup(thread, parent, hash, &child_inum, &child_gen) != 0) {
         demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
 
     p->inode_stash[0] = parent;
-    demofs_inode_get_inum_async(thread, p->txn, dirent->inum, dirent->gen,
+    demofs_inode_get_inum_async(thread, p->txn, child_inum, child_gen,
                                 demofs_remove_at_child_cb, request);
 } /* demofs_remove_at_parent_cb */
 
@@ -3150,8 +4177,9 @@ demofs_remove_at(
 
 /*
  * Readdir state machine.
- *   inode_stash[0] = directory inode (locked for the whole iteration)
- *   inode_stash[1] = (struct demofs_dirent *) cursor cast to void *
+ *   inode_stash[0] = directory inode (read-locked for the whole iteration)
+ *   p->rd_from_hash = next dirent hash to fetch (>= cursor)
+ *   p->rd_* = the dirent currently being emitted (copied out of the b+tree)
  * r_cookie/r_eof on the request are updated as we go.
  */
 
@@ -3177,14 +4205,12 @@ demofs_readdir_iter_inode_cb(
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
-    struct demofs_inode           *inode   = p->inode_stash[0];
-    struct demofs_dirent          *dirent  = (struct demofs_dirent *) p->inode_stash[1];
     struct chimera_vfs_attrs       attr;
     int                            rc;
 
     if (status != CHIMERA_VFS_OK) {
-        /* Stale dirent — skip. */
-        p->inode_stash[1] = (struct demofs_inode *) rb_tree_next(&inode->dir.dirents, dirent);
+        /* Stale dirent — skip to the next. */
+        p->rd_from_hash = p->rd_hash + 1;
         demofs_readdir_iter_step(request);
         return;
     }
@@ -3197,12 +4223,12 @@ demofs_readdir_iter_inode_cb(
     demofs_txn_unlock_inode(p->txn, dirent_inode);
 
     rc = request->readdir.callback(
-        dirent->inum,
-        dirent->hash + DEMOFS_COOKIE_FIRST,
-        dirent->name, dirent->name_len,
+        p->rd_inum,
+        p->rd_hash + DEMOFS_COOKIE_FIRST,
+        p->rd_name, p->rd_namelen,
         &attr, request->proto_private_data);
 
-    request->readdir.r_cookie = dirent->hash + DEMOFS_COOKIE_FIRST;
+    request->readdir.r_cookie = p->rd_hash + DEMOFS_COOKIE_FIRST;
 
     if (rc) {
         request->readdir.r_eof = 0;
@@ -3210,7 +4236,7 @@ demofs_readdir_iter_inode_cb(
         return;
     }
 
-    p->inode_stash[1] = (struct demofs_inode *) rb_tree_next(&inode->dir.dirents, dirent);
+    p->rd_from_hash = p->rd_hash + 1;
     demofs_readdir_iter_step(request);
 } /* demofs_readdir_iter_inode_cb */
 
@@ -3219,15 +4245,16 @@ demofs_readdir_iter_step(struct chimera_vfs_request *request)
 {
     struct demofs_request_private *p      = request->plugin_data;
     struct demofs_thread          *thread = p->thread;
-    struct demofs_dirent          *dirent = (struct demofs_dirent *) p->inode_stash[1];
+    struct demofs_inode           *inode  = p->inode_stash[0];
 
-    if (!dirent) {
+    if (demofs_dir_next(thread, inode, p->rd_from_hash, &p->rd_hash,
+                        &p->rd_inum, &p->rd_gen, p->rd_name, &p->rd_namelen) != 0) {
         request->readdir.r_eof = 1;
         demofs_readdir_complete(request);
         return;
     }
 
-    demofs_inode_get_inum_async(thread, p->txn, dirent->inum, dirent->gen,
+    demofs_inode_get_inum_async(thread, p->txn, p->rd_inum, p->rd_gen,
                                 demofs_readdir_iter_inode_cb, request);
 } /* demofs_readdir_iter_step */
 
@@ -3235,18 +4262,14 @@ static void
 demofs_readdir_start_iter(struct chimera_vfs_request *request)
 {
     struct demofs_request_private *p      = request->plugin_data;
-    struct demofs_inode           *inode  = p->inode_stash[0];
     uint64_t                       cookie = request->readdir.r_cookie;
-    struct demofs_dirent          *dirent;
 
     if (cookie < DEMOFS_COOKIE_FIRST) {
-        rb_tree_first(&inode->dir.dirents, dirent);
+        p->rd_from_hash = 0;
     } else {
-        uint64_t hash_cookie = cookie - DEMOFS_COOKIE_FIRST;
-        rb_tree_query_ceil(&inode->dir.dirents, hash_cookie + 1, hash, dirent);
+        p->rd_from_hash = (cookie - DEMOFS_COOKIE_FIRST) + 1;
     }
 
-    p->inode_stash[1] = (struct demofs_inode *) dirent;
     demofs_readdir_iter_step(request);
 } /* demofs_readdir_start_iter */
 
@@ -3260,7 +4283,7 @@ demofs_readdir_emit_dotdot(
     int                            rc;
 
     rc = request->readdir.callback(
-        inode->dir.parent_inum,
+        inode->parent_inum,
         DEMOFS_COOKIE_DOTDOT,
         "..", 2,
         attr, request->proto_private_data);
@@ -3347,15 +4370,15 @@ demofs_readdir_inode_cb(
 
     if ((request->readdir.flags & CHIMERA_VFS_READDIR_EMIT_DOT) &&
         cookie < DEMOFS_COOKIE_DOTDOT) {
-        if (inode->dir.parent_inum == inode->inum &&
-            inode->dir.parent_gen == inode->gen) {
+        if (inode->parent_inum == inode->inum &&
+            inode->parent_gen == inode->gen) {
             demofs_map_attrs(thread, &attr, inode);
             demofs_readdir_emit_dotdot(request, &attr);
             return;
         }
         demofs_inode_get_inum_async(thread, p->txn,
-                                    inode->dir.parent_inum,
-                                    inode->dir.parent_gen,
+                                    inode->parent_inum,
+                                    inode->parent_gen,
                                     demofs_readdir_dotdot_cb, request);
         return;
     }
@@ -3482,7 +4505,6 @@ demofs_open_at_alloc_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     struct demofs_inode           *parent  = p->inode_stash[0];
-    struct demofs_dirent          *dirent;
     struct timespec                now;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -3508,11 +4530,9 @@ demofs_open_at_alloc_cb(
     rb_tree_init(&inode->file.extents);
     demofs_apply_attrs(inode, request->open_at.set_attr);
 
-    dirent = demofs_dirent_alloc(thread, inode->inum, inode->gen,
-                                 request->open_at.name_hash,
-                                 request->open_at.name,
-                                 request->open_at.namelen);
-    rb_tree_insert(&parent->dir.dirents, hash, dirent);
+    demofs_dir_insert(thread, p->txn, parent, request->open_at.name_hash,
+                      request->open_at.name, request->open_at.namelen,
+                      inode->inum, inode->gen);
 
     parent->mtime_sec  = now.tv_sec;
     parent->mtime_nsec = now.tv_nsec;
@@ -3531,9 +4551,10 @@ demofs_open_at_parent_cb(
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
-    struct demofs_dirent          *dirent;
-    unsigned int                   flags = request->open_at.flags;
-    uint64_t                       hash  = request->open_at.name_hash;
+    unsigned int                   flags   = request->open_at.flags;
+    uint64_t                       hash    = request->open_at.name_hash;
+    uint64_t                       child_inum;
+    uint32_t                       child_gen;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -3547,11 +4568,9 @@ demofs_open_at_parent_cb(
 
     demofs_map_attrs(thread, &request->open_at.r_dir_pre_attr, parent);
 
-    rb_tree_query_exact(&parent->dir.dirents, hash, hash, dirent);
-
     p->inode_stash[0] = parent;
 
-    if (!dirent) {
+    if (demofs_dir_lookup(thread, parent, hash, &child_inum, &child_gen) != 0) {
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
             demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
             return;
@@ -3566,7 +4585,7 @@ demofs_open_at_parent_cb(
         return;
     }
 
-    demofs_inode_get_inum_async(thread, p->txn, dirent->inum, dirent->gen,
+    demofs_inode_get_inum_async(thread, p->txn, child_inum, child_gen,
                                 demofs_open_at_existing_cb, request);
 } /* demofs_open_at_parent_cb */
 
@@ -4786,7 +5805,6 @@ demofs_symlink_at_alloc_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     struct demofs_inode           *parent  = p->inode_stash[0];
-    struct demofs_dirent          *dirent;
     struct timespec                now;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -4809,16 +5827,13 @@ demofs_symlink_at_alloc_cb(
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
 
-    inode->symlink.target = demofs_symlink_target_alloc(thread,
-                                                        request->symlink_at.target,
-                                                        request->symlink_at.targetlen);
+    demofs_symlink_set(thread, p->txn, inode,
+                       request->symlink_at.target, request->symlink_at.targetlen);
     demofs_map_attrs(thread, &request->symlink_at.r_attr, inode);
 
-    dirent = demofs_dirent_alloc(thread, inode->inum, inode->gen,
-                                 request->symlink_at.name_hash,
-                                 request->symlink_at.name,
-                                 request->symlink_at.namelen);
-    rb_tree_insert(&parent->dir.dirents, hash, dirent);
+    demofs_dir_insert(thread, p->txn, parent, request->symlink_at.name_hash,
+                      request->symlink_at.name, request->symlink_at.namelen,
+                      inode->inum, inode->gen);
 
     parent->mtime_sec  = now.tv_sec;
     parent->mtime_nsec = now.tv_nsec;
@@ -4839,8 +5854,9 @@ demofs_symlink_at_parent_cb(
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
-    struct demofs_dirent          *existing_dirent;
-    uint64_t                       hash = request->symlink_at.name_hash;
+    uint64_t                       hash    = request->symlink_at.name_hash;
+    uint64_t                       existing_inum;
+    uint32_t                       existing_gen;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -4852,9 +5868,7 @@ demofs_symlink_at_parent_cb(
         return;
     }
 
-    rb_tree_query_exact(&parent->dir.dirents, hash, hash, existing_dirent);
-
-    if (existing_dirent) {
+    if (demofs_dir_lookup(thread, parent, hash, &existing_inum, &existing_gen) == 0) {
         demofs_op_fail(request, p->txn, CHIMERA_VFS_EEXIST);
         return;
     }
@@ -4905,10 +5919,13 @@ demofs_readlink_inode_cb(
         return;
     }
 
-    request->readlink.r_target_length = inode->symlink.target->length;
-    memcpy(request->readlink.r_target,
-           inode->symlink.target->data,
-           inode->symlink.target->length);
+    {
+        int len = demofs_symlink_get(p->thread, inode,
+                                     request->readlink.r_target,
+                                     request->readlink.target_maxlength);
+        chimera_demofs_abort_if(len < 0, "symlink record missing (inum %lu)", inode->inum);
+        request->readlink.r_target_length = len;
+    }
 
     demofs_map_attrs(p->thread, &request->readlink.r_attr, inode);
 
@@ -5014,45 +6031,37 @@ demofs_rename_at_perform(struct chimera_vfs_request *request)
     struct demofs_inode           *np             = p->inode_stash[1];
     struct demofs_inode           *child          = p->inode_stash[2];
     struct demofs_inode           *existing_inode = p->inode_stash[3];
-    struct demofs_dirent          *old_dirent, *existing_dirent = NULL, *new_dirent;
-    uint64_t                       hash     = request->rename_at.name_hash;
-    uint64_t                       new_hash = request->rename_at.new_name_hash;
+    uint64_t                       hash           = request->rename_at.name_hash;
+    uint64_t                       new_hash       = request->rename_at.new_name_hash;
+    uint64_t                       old_inum;
+    uint32_t                       old_gen;
     struct timespec                now;
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    rb_tree_query_exact(&op->dir.dirents, hash, hash, old_dirent);
-
     /* The source dirent was verified before we fetched the child and the
      * source parent has been write-locked the whole time, so it must still
-     * be present; guard defensively to keep the deref provably safe. */
-    if (unlikely(!old_dirent)) {
+     * be present. */
+    if (unlikely(demofs_dir_lookup(thread, op, hash, &old_inum, &old_gen) != 0)) {
         demofs_rename_at_unlock_parents(request);
         demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
 
     if (existing_inode) {
-        rb_tree_query_exact(&np->dir.dirents, new_hash, hash, existing_dirent);
-        if (existing_dirent) {
-            rb_tree_remove(&np->dir.dirents, &existing_dirent->node);
+        if (demofs_dir_remove(thread, p->txn, np, new_hash) == 1) {
             existing_inode->nlink--;
             if (S_ISDIR(existing_inode->mode)) {
                 np->nlink--;
             }
-            demofs_dirent_free(thread, existing_dirent);
         }
     }
 
-    new_dirent = demofs_dirent_alloc(thread,
-                                     old_dirent->inum,
-                                     old_dirent->gen,
-                                     new_hash,
-                                     request->rename_at.new_name,
-                                     request->rename_at.new_namelen);
+    demofs_dir_insert(thread, p->txn, np, new_hash,
+                      request->rename_at.new_name, request->rename_at.new_namelen,
+                      old_inum, old_gen);
 
-    rb_tree_insert(&np->dir.dirents, hash, new_dirent);
-    rb_tree_remove(&op->dir.dirents, &old_dirent->node);
+    demofs_dir_remove(thread, p->txn, op, hash);
 
     if (S_ISDIR(child->mode)) {
         op->nlink--;
@@ -5074,7 +6083,6 @@ demofs_rename_at_perform(struct chimera_vfs_request *request)
     demofs_map_attrs(thread, &request->rename_at.r_todir_post_attr, np);
 
     demofs_rename_at_unlock_parents(request);
-    demofs_dirent_free(thread, old_dirent);
     demofs_op_ok(request, p->txn);
 } /* demofs_rename_at_perform */
 
@@ -5084,14 +6092,15 @@ demofs_rename_at_child_cb(
     int                  status,
     void                *private_data)
 {
-    struct chimera_vfs_request    *request = private_data;
-    struct demofs_request_private *p       = request->plugin_data;
-    struct demofs_thread          *thread  = p->thread;
-    struct demofs_inode           *op      = p->inode_stash[0];
-    struct demofs_inode           *np      = p->inode_stash[1];
-    struct demofs_dirent          *old_dirent, *existing_dirent;
+    struct chimera_vfs_request    *request  = private_data;
+    struct demofs_request_private *p        = request->plugin_data;
+    struct demofs_thread          *thread   = p->thread;
+    struct demofs_inode           *op       = p->inode_stash[0];
+    struct demofs_inode           *np       = p->inode_stash[1];
     uint64_t                       hash     = request->rename_at.name_hash;
     uint64_t                       new_hash = request->rename_at.new_name_hash;
+    uint64_t                       old_inum, existing_inum;
+    uint32_t                       old_gen, existing_gen;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_rename_at_unlock_parents(request);
@@ -5101,24 +6110,20 @@ demofs_rename_at_child_cb(
 
     p->inode_stash[2] = child;
 
-    rb_tree_query_exact(&op->dir.dirents, hash, hash, old_dirent);
-    if (unlikely(!old_dirent)) {
+    if (unlikely(demofs_dir_lookup(thread, op, hash, &old_inum, &old_gen) != 0)) {
         demofs_rename_at_unlock_parents(request);
         demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
 
-    rb_tree_query_exact(&np->dir.dirents, new_hash, hash, existing_dirent);
-
-    if (!existing_dirent) {
+    if (demofs_dir_lookup(thread, np, new_hash, &existing_inum, &existing_gen) != 0) {
         p->inode_stash[3] = NULL;
         demofs_rename_at_perform(request);
         return;
     }
 
     /* Hardlink shortcut: source and dest already refer to the same inode. */
-    if (existing_dirent->inum == old_dirent->inum &&
-        existing_dirent->gen == old_dirent->gen) {
+    if (existing_inum == old_inum && existing_gen == old_gen) {
         demofs_map_attrs(thread, &request->rename_at.r_fromdir_post_attr, op);
         demofs_map_attrs(thread, &request->rename_at.r_todir_post_attr, np);
         demofs_rename_at_unlock_parents(request);
@@ -5127,7 +6132,7 @@ demofs_rename_at_child_cb(
     }
 
     demofs_inode_get_inum_async(thread, p->txn,
-                                existing_dirent->inum, existing_dirent->gen,
+                                existing_inum, existing_gen,
                                 demofs_rename_at_existing_cb, request);
 } /* demofs_rename_at_child_cb */
 
@@ -5138,21 +6143,21 @@ demofs_rename_at_have_parents(struct chimera_vfs_request *request)
     struct demofs_thread          *thread = p->thread;
     struct demofs_inode           *op     = p->inode_stash[0];
     struct demofs_inode           *np     = p->inode_stash[1];
-    struct demofs_dirent          *old_dirent;
-    uint64_t                       hash = request->rename_at.name_hash;
+    uint64_t                       hash   = request->rename_at.name_hash;
+    uint64_t                       old_inum;
+    uint32_t                       old_gen;
 
     demofs_map_attrs(thread, &request->rename_at.r_fromdir_pre_attr, op);
     demofs_map_attrs(thread, &request->rename_at.r_todir_pre_attr, np);
 
-    rb_tree_query_exact(&op->dir.dirents, hash, hash, old_dirent);
-    if (!old_dirent) {
+    if (demofs_dir_lookup(thread, op, hash, &old_inum, &old_gen) != 0) {
         demofs_rename_at_unlock_parents(request);
         demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
 
     demofs_inode_get_inum_async(thread, p->txn,
-                                old_dirent->inum, old_dirent->gen,
+                                old_inum, old_gen,
                                 demofs_rename_at_child_cb, request);
 } /* demofs_rename_at_have_parents */
 
@@ -5281,16 +6286,14 @@ demofs_link_at_finish(struct chimera_vfs_request *request)
     struct demofs_thread          *thread = p->thread;
     struct demofs_inode           *parent = p->inode_stash[0];
     struct demofs_inode           *inode  = p->inode_stash[1];
-    struct demofs_dirent          *dirent;
-    uint64_t                       hash = request->link_at.name_hash;
+    uint64_t                       hash   = request->link_at.name_hash;
     struct timespec                now;
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    dirent = demofs_dirent_alloc(thread, inode->inum, inode->gen, hash,
-                                 request->link_at.name,
-                                 request->link_at.namelen);
-    rb_tree_insert(&parent->dir.dirents, hash, dirent);
+    demofs_dir_insert(thread, p->txn, parent, hash,
+                      request->link_at.name, request->link_at.namelen,
+                      inode->inum, inode->gen);
 
     inode->nlink++;
     inode->ctime_sec   = now.tv_sec;
@@ -5336,8 +6339,9 @@ demofs_link_at_inode_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     struct demofs_inode           *parent  = p->inode_stash[0];
-    struct demofs_dirent          *dirent;
-    uint64_t                       hash = request->link_at.name_hash;
+    uint64_t                       hash    = request->link_at.name_hash;
+    uint64_t                       einum;
+    uint32_t                       egen;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -5351,15 +6355,9 @@ demofs_link_at_inode_cb(
 
     p->inode_stash[1] = inode;
 
-    rb_tree_query_exact(&parent->dir.dirents, hash, hash, dirent);
-
-    if (dirent) {
+    if (demofs_dir_lookup(thread, parent, hash, &einum, &egen) == 0) {
         if (request->link_at.replace && !S_ISDIR(inode->mode)) {
-            uint64_t einum = dirent->inum;
-            uint32_t egen  = dirent->gen;
-
-            rb_tree_remove(&parent->dir.dirents, &dirent->node);
-            demofs_dirent_free(thread, dirent);
+            demofs_dir_remove(thread, p->txn, parent, hash);
 
             demofs_inode_get_inum_async(thread, p->txn, einum, egen,
                                         demofs_link_at_existing_cb, request);
