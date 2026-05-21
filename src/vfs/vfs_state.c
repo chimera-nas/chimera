@@ -4,6 +4,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "vfs_state.h"
 #include "vfs_internal.h"
@@ -15,6 +16,39 @@
  * revocation," and is well inside the NFSv4 lease (typically 60-90s).
  */
 #define CHIMERA_VFS_STATE_DEFAULT_BREAK_DEADLINE_MS 30000
+
+/*
+ * NFSv4 delegation recall deadline.  A delegation being recalled keeps
+ * conflicting acquirers waiting (NFS4ERR_DELAY); if the holder does not return
+ * it within this window the server revokes it so other access can proceed.
+ * Real clients return in milliseconds; this is a generous upper bound.  It is
+ * deliberately longer than a typical client's own DELAY-retry window so that a
+ * client that intends to return the delegation (rather than abandon it) gets
+ * the chance to, instead of having a competing open silently granted under it.
+ */
+#define CHIMERA_VFS_NFS_DELEG_RECALL_MS             15000
+
+/*
+ * Recall deadline for a delegation broken by a namespace/metadata operation
+ * (REMOVE/RENAME/LINK).  The operation itself blocks (NFS4ERR_DELAY) while the
+ * recall is outstanding, so this is shorter than the conflicting-open recall
+ * window above -- the holder either returns promptly or is revoked so the
+ * operation can complete within a client's retry budget.
+ */
+#define CHIMERA_VFS_NFS_DELEG_METAOP_MS             5000
+
+/* True if `lease`'s break deadline has elapsed (CLOCK_MONOTONIC). */
+static inline bool
+chimera_vfs_break_deadline_passed(const struct chimera_vfs_lease *lease)
+{
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (now.tv_sec != lease->break_deadline.tv_sec) {
+        return now.tv_sec > lease->break_deadline.tv_sec;
+    }
+    return now.tv_nsec >= lease->break_deadline.tv_nsec;
+} /* chimera_vfs_break_deadline_passed */
 
 /* -------------------------------------------------------------------- */
 /* Lifecycle                                                            */
@@ -398,45 +432,79 @@ chimera_vfs_state_would_conflict(
              *     delegation (W) by any other open.  Limiting the R/W rule to
              *     NFSv4-owned leases keeps SMB oplock/lease break semantics
              *     unchanged (those run through the CACHING-vs-CACHING path). */
-            for (cur = file->caching_leases; cur; cur = cur->next) {
-                bool want_break = false;
+            {
+                struct chimera_vfs_lease *idle_break    = NULL;
+                struct chimera_vfs_lease *expired_break = NULL;
 
-                if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
-                    continue;
+                for (cur = file->caching_leases; cur; cur = cur->next) {
+                    bool want_break_h   = false;
+                    bool want_break_nfs = false;
+
+                    if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
+                        continue;
+                    }
+                    if (!cur->owner.break_cb) {
+                        continue;
+                    }
+
+                    if (cur->mode.granted & CHIMERA_VFS_LEASE_MODE_H) {
+                        want_break_h = true;
+                    }
+
+                    if (cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4 &&
+                        cur->owner.client_key != probe->owner.client_key) {
+                        /* A client never recalls its own delegation; recall is
+                         * for conflicting access by *other* clients. */
+                        uint8_t g  = cur->mode.granted;
+                        uint8_t pg = probe->mode.granted;
+                        uint8_t pd = probe->mode.denied;
+
+                        if ((g & CHIMERA_VFS_LEASE_MODE_W) &&
+                            (pg & (CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W))) {
+                            want_break_nfs = true; /* write deleg vs any open */
+                        }
+                        if ((g & CHIMERA_VFS_LEASE_MODE_R) &&
+                            (pg & CHIMERA_VFS_LEASE_MODE_W)) {
+                            want_break_nfs = true; /* read deleg vs writer */
+                        }
+                        if (pd & g) {
+                            want_break_nfs = true; /* deny clashes with cache */
+                        }
+                    }
+
+                    /* SMB handle-cache: break only an IDLE holder (existing
+                    * optimistic-after-break semantics retained for SMB). */
+                    if (want_break_h &&
+                        cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
+                        has_breakable_conflict = true;
+                        if (!idle_break) {
+                            idle_break = cur;
+                        }
+                    }
+
+                    /* NFSv4 delegation: a holder that is still IDLE must be
+                     * recalled; one already BREAKING keeps the acquirer waiting
+                     * (do NOT grant conflicting access mid-recall) until it
+                     * returns the delegation or its recall deadline elapses, at
+                     * which point it becomes revocable. */
+                    if (want_break_nfs) {
+                        if (cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
+                            has_breakable_conflict = true;
+                            if (!idle_break) {
+                                idle_break = cur;
+                            }
+                        } else if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING) {
+                            has_breakable_conflict = true;
+                            if (!expired_break &&
+                                chimera_vfs_break_deadline_passed(cur)) {
+                                expired_break = cur;
+                            }
+                        }
+                    }
                 }
 
-                if (cur->mode.granted & CHIMERA_VFS_LEASE_MODE_H) {
-                    want_break = true;
-                }
-
-                if (cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4 &&
-                    cur->owner.client_key != probe->owner.client_key) {
-                    /* A client never recalls its own delegation; recall is for
-                     * conflicting access by *other* clients. */
-                    uint8_t g  = cur->mode.granted;
-                    uint8_t pg = probe->mode.granted;
-                    uint8_t pd = probe->mode.denied;
-
-                    if ((g & CHIMERA_VFS_LEASE_MODE_W) &&
-                        (pg & (CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W))) {
-                        want_break = true; /* write deleg vs any open */
-                    }
-                    if ((g & CHIMERA_VFS_LEASE_MODE_R) &&
-                        (pg & CHIMERA_VFS_LEASE_MODE_W)) {
-                        want_break = true; /* read deleg vs writer */
-                    }
-                    if (pd & g) {
-                        want_break = true; /* deny clashes with cached mode */
-                    }
-                }
-
-                if (want_break &&
-                    cur->owner.break_cb &&
-                    cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
-                    has_breakable_conflict = true;
-                    if (conflict_out && !*conflict_out) {
-                        *conflict_out = cur;
-                    }
+                if (conflict_out && !*conflict_out) {
+                    *conflict_out = idle_break ? idle_break : expired_break;
                 }
             }
             break;
@@ -576,8 +644,21 @@ chimera_vfs_state_try_insert(
         pthread_mutex_unlock(&file->lock);
 
         while (conflict) {
-            chimera_vfs_lease_begin_break(state, conflict,
-                                          lease->mode.granted, 0);
+            if (conflict->break_state == CHIMERA_VFS_BREAK_IDLE) {
+                /* Start the recall.  NFSv4 delegations get a bounded recall
+                 * deadline so an unresponsive holder can be revoked; other
+                 * holders (SMB) keep the default deadline. */
+                uint32_t deadline_ms =
+                    (conflict->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4)
+                    ? CHIMERA_VFS_NFS_DELEG_RECALL_MS : 0;
+                chimera_vfs_lease_begin_break(state, conflict,
+                                              lease->mode.granted, deadline_ms);
+            } else {
+                /* Surfaced because its recall deadline elapsed -- the holder
+                 * never returned the delegation.  Revoke it so this acquirer
+                 * (on a subsequent retry) can proceed. */
+                chimera_vfs_lease_revoke(conflict);
+            }
             conflict = NULL;
             pthread_mutex_lock(&file->lock);
             if (chimera_vfs_state_would_conflict(file, lease, &conflict) !=
@@ -972,43 +1053,60 @@ chimera_vfs_state_break_caching(
         return false;
     }
 
-    pthread_mutex_lock(&file->lock);
-    had = (file->caching_leases != NULL);
-    pthread_mutex_unlock(&file->lock);
-
-    if (!had) {
-        chimera_vfs_state_put(state, file);
-        return false;
-    }
-
-    /* Break every still-IDLE caching lease.  begin_break flips each to
-     * BREAKING (idempotent), so re-scanning returns the next IDLE one until
-     * none remain.  Holders that have already started breaking are left to
-     * complete; the non-empty caching_leases list keeps `had` true so the
-     * caller retries until every holder has returned. */
+    /* Drive each caching holder forward: recall a still-IDLE holder, and
+     * revoke a holder whose recall deadline has elapsed (never returned).
+     * begin_break flips IDLE->BREAKING and revoke clears the granted mode, so
+     * neither is re-selected; the loop terminates once only not-yet-expired
+     * BREAKING holders remain. */
     for ( ; ; ) {
         struct chimera_vfs_lease *cur;
-        struct chimera_vfs_lease *target = NULL;
+        struct chimera_vfs_lease *to_break  = NULL;
+        struct chimera_vfs_lease *to_revoke = NULL;
 
         pthread_mutex_lock(&file->lock);
         for (cur = file->caching_leases; cur; cur = cur->next) {
-            if (cur->owner.break_cb &&
-                cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
-                target = cur;
+            if (cur->mode.granted == 0 || !cur->owner.break_cb) {
+                continue;
+            }
+            if (cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
+                to_break = cur;
+                break;
+            }
+            if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
+                chimera_vfs_break_deadline_passed(cur)) {
+                to_revoke = cur;
                 break;
             }
         }
         pthread_mutex_unlock(&file->lock);
 
-        if (!target) {
+        if (to_break) {
+            chimera_vfs_lease_begin_break(state, to_break,
+                                          to_break->mode.granted,
+                                          CHIMERA_VFS_NFS_DELEG_METAOP_MS);
+        } else if (to_revoke) {
+            chimera_vfs_lease_revoke(to_revoke);
+        } else {
             break;
         }
-        chimera_vfs_lease_begin_break(state, target,
-                                      target->mode.granted, 0);
     }
 
+    /* Still blocked iff some caching holder retains a granted mode. */
+    pthread_mutex_lock(&file->lock);
+    had = false;
+    {
+        struct chimera_vfs_lease *cur;
+        for (cur = file->caching_leases; cur; cur = cur->next) {
+            if (cur->mode.granted != 0) {
+                had = true;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+
     chimera_vfs_state_put(state, file);
-    return true;
+    return had;
 } /* chimera_vfs_state_break_caching */
 
 /* -------------------------------------------------------------------- */
