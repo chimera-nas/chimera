@@ -2064,8 +2064,9 @@ memfs_open_at(
 
         rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
-        parent_inode->mtime = now;
-        parent_inode->ctime = now;
+        parent_inode->mtime        = now;
+        parent_inode->ctime        = now;
+        request->open_at.r_created = 1;
     } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_EEXIST;

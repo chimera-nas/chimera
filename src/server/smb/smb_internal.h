@@ -287,6 +287,10 @@ struct chimera_smb_request {
             struct chimera_smb_open_file   *r_open_file;
             struct chimera_smb_attrs        r_attrs;
             struct chimera_vfs_attrs        set_attr;
+            /* Set by the open/mkdir callbacks when this CREATE actually created
+             * the file/dir (vs opened an existing one) — drives the OPENED vs
+             * CREATED Create Action in the reply. */
+            uint8_t                         r_created;
             /* CREATE contexts the client sent (CHIMERA_SMB_CREATE_CTX_* bits).
              * Phase-0 stubs set the bit and capture a minimum set of fields needed
              * by the response emit; Phase 1/3 will populate the rest. */

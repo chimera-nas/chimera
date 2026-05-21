@@ -45,6 +45,10 @@ chimera_vfs_open_at_hdl_callback(
                                       &request->open_at.r_attr);
     }
 
+    if (handle) {
+        handle->r_created = request->open_at.r_created;
+    }
+
     chimera_vfs_complete(request);
 
     callback(request->status,
@@ -153,6 +157,7 @@ chimera_vfs_open_at_hs(
     request->open_at.flags                       = flags;
     request->open_at.set_attr                    = set_attr;
     request->open_at.handle_state                = handle_state;
+    request->open_at.r_created                   = 0;
     request->open_at.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->open_at.r_attr.va_set_mask          = 0;
     request->open_at.r_dir_pre_attr.va_req_mask  = pre_attr_mask;

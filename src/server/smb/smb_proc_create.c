@@ -682,6 +682,9 @@ chimera_smb_create_mkdir_callback(
         return;
     }
 
+    /* mkdir_at succeeded — the directory was created by this CREATE. */
+    request->create.r_created = 1;
+
     chimera_smb_marshal_attrs(
         attr,
         &request->create.r_attrs);
@@ -718,6 +721,10 @@ chimera_smb_create_open_at_callback(
         chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
         return;
     }
+
+    /* Record whether the VFS open created the file (vs opened an existing one)
+     * so the reply reports the correct Create Action. */
+    request->create.r_created = oh ? oh->r_created : 0;
 
     open_file = chimera_smb_create_gen_open_file_normal(request,
                                                         request->create.parent_handle->fh,
@@ -1704,13 +1711,38 @@ chimera_smb_create_reply(
     /* Flags */
     evpl_iovec_cursor_append_uint8(reply_cursor, 0);
 
-    /* Create Action */
+    /* Create Action: distinguish OPENED / CREATED / OVERWRITTEN / SUPERSEDED.
+     * For the "*_IF" / SUPERSEDE dispositions the outcome depends on whether the
+     * file already existed — the VFS open reports that via handle->r_created. */
+    uint32_t create_action;
+    bool     created = request->create.r_created;
 
-    if (request->create.create_disposition == SMB2_FILE_OPEN) {
-        evpl_iovec_cursor_append_uint32(reply_cursor, SMB2_CREATE_ACTION_OPENED);
-    } else {
-        evpl_iovec_cursor_append_uint32(reply_cursor, SMB2_CREATE_ACTION_CREATED);
-    }
+    switch (request->create.create_disposition) {
+        case SMB2_FILE_CREATE:
+            create_action = SMB2_CREATE_ACTION_CREATED;
+            break;
+        case SMB2_FILE_OVERWRITE:
+            create_action = SMB2_CREATE_ACTION_OVERWRITTEN;
+            break;
+        case SMB2_FILE_OVERWRITE_IF:
+            create_action = created ? SMB2_CREATE_ACTION_CREATED
+                                    : SMB2_CREATE_ACTION_OVERWRITTEN;
+            break;
+        case SMB2_FILE_SUPERSEDE:
+            create_action = created ? SMB2_CREATE_ACTION_CREATED
+                                    : SMB2_CREATE_ACTION_SUPERSEDED;
+            break;
+        case SMB2_FILE_OPEN_IF:
+            create_action = created ? SMB2_CREATE_ACTION_CREATED
+                                    : SMB2_CREATE_ACTION_OPENED;
+            break;
+        case SMB2_FILE_OPEN:
+        default:
+            create_action = SMB2_CREATE_ACTION_OPENED;
+            break;
+    } /* switch */
+
+    evpl_iovec_cursor_append_uint32(reply_cursor, create_action);
 
     chimera_smb_append_network_open_info(reply_cursor, &request->create.r_attrs);
 

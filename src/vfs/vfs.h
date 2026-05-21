@@ -139,6 +139,10 @@ struct chimera_vfs_open_handle {
     uint8_t                         cache_id;
     uint8_t                         flags;
     uint8_t                         access_mode;
+    /* Whether the most recent open via this handle created the file (vs opened
+     * an existing one).  Refreshed on every open completion and read by the SMB
+     * create path immediately afterwards to report OPENED vs CREATED. */
+    uint8_t                         r_created;
     uint32_t                        opencnt;
     struct chimera_vfs_request     *blocked_requests;
     uint64_t                        vfs_private;
@@ -595,6 +599,10 @@ struct chimera_vfs_request {
             struct chimera_vfs_attrs         r_dir_pre_attr;
             struct chimera_vfs_attrs         r_dir_post_attr;
             uint64_t                         r_vfs_private;
+            /* Set by the module when the open created a new file (vs opened an
+             * existing one); lets the SMB server report OPENED vs CREATED.
+             * Modules that don't set it leave it 0 (treated as "opened"). */
+            uint8_t                          r_created;
         } open_at;
 
         struct {
