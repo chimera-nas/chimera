@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+  SPDX-License-Identifier: Unlicense
+
+  Chimera deployment overrides for the WPTS File Server common config.
+  Workgroup topology: the chimera daemon is the SUT at 10.0.0.1, reached
+  over loopback-routed TCP inside an isolated network namespace. No domain
+  controller, NTLM auth only.
+
+  Capability flags reflect what the Phase-0 SMB2 server honestly negotiates
+  today: SMB 3.1.1 dialect + signing, but NO encryption / leasing /
+  multichannel / persistent handles. Widen these as features land.
+-->
+<TestSite xmlns="http://schemas.microsoft.com/windows/ProtocolsTest/2007/07/TestConfig"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://schemas.microsoft.com/windows/ProtocolsTest/2007/07/TestConfig http://schemas.microsoft.com/windows/ProtocolsTest/2007/07/TestConfig.xsd">
+  <Properties>
+    <Group name="Common">
+      <Property name="Timeout" value="20"/>
+      <Property name="LongerTimeout" value="120"/>
+      <Property name="RetryInterval" value="5"/>
+      <Property name="UnderlyingTransport" value="Tcp"/>
+      <Property name="TransportPort" value="445"/>
+
+      <!-- SUT identity (workgroup: DomainName == SutComputerName) -->
+      <Property name="SutComputerName" value="10.0.0.1"/>
+      <Property name="SutIPAddress" value="10.0.0.1"/>
+      <Property name="DomainName" value="10.0.0.1"/>
+      <Property name="DCServerComputerName" value=""/>
+
+      <!-- Credentials: matches the chimera smbpasswd user in the wrapper -->
+      <Property name="AdminUserName" value="administrator"/>
+      <Property name="NonAdminUserName" value=""/>
+      <Property name="GuestUserName" value=""/>
+      <Property name="PasswordForAllUsers" value="Password01!"/>
+
+      <!-- Share names provisioned by the wrapper -->
+      <Property name="BasicFileShare" value="SMBBasic"/>
+      <Property name="EncryptedFileShare" value=""/>
+      <Property name="CompressedFileShare" value=""/>
+      <Property name="CAShareName" value=""/>
+      <Property name="CAShareServerName" value=""/>
+
+      <!-- Driver NIC (single homed; same netns as the SUT) -->
+      <Property name="ClientNic1IPAddress" value="10.0.0.1"/>
+      <Property name="ClientNic2IPAddress" value=""/>
+
+      <Property name="Platform" value="NonWindows"/>
+
+      <!-- Dialect + auth -->
+      <Property name="MaxSmbVersionSupported" value="Smb311"/>
+      <Property name="MaxSmbVersionClientSupported" value="Smb311"/>
+      <Property name="IsSMB1NegotiateEnabled" value="false"/>
+      <Property name="SupportedSecurityPackage" value="Ntlm"/>
+      <Property name="UseServerGssToken" value="false"/>
+
+      <!-- Signing: supported (HMAC-SHA256). SMB 3.1.1 mandates signing, so
+           WPTS requires SendSignedRequest=true when MaxSmbVersionSupported is
+           Smb311. We still skip verifying the server's response signatures. -->
+      <Property name="SendSignedRequest" value="true"/>
+      <Property name="DisableVerifySignature" value="true"/>
+      <Property name="IsRequireMessageSigning" value="false"/>
+      <Property name="SupportedSigningAlgorithms" value="HMAC_SHA256"/>
+
+      <!-- Advanced features NOT yet honestly negotiated -->
+      <Property name="IsLeasingSupported" value="false"/>
+      <Property name="IsDirectoryLeasingSupported" value="false"/>
+      <Property name="IsMultiChannelCapable" value="false"/>
+      <Property name="IsPersistentHandlesSupported" value="false"/>
+      <Property name="IsEncryptionSupported" value="false"/>
+      <Property name="IsGlobalEncryptDataEnabled" value="false"/>
+      <Property name="IsGlobalRejectUnencryptedAccessEnabled" value="false"/>
+      <Property name="IsRDMATransformSupported" value="false"/>
+      <Property name="IsChainedCompressionSupported" value="false"/>
+      <Property name="IsMultiCreditSupported" value="true"/>
+      <Property name="SutSupportedEncryptionAlgorithms" value=""/>
+      <Property name="SupportedCompressionAlgorithms" value=""/>
+
+      <Property name="UnsupportedIoCtlCodes" value="FSCTL_OFFLOAD_READ;FSCTL_OFFLOAD_WRITE;FSCTL_FILE_LEVEL_TRIM"/>
+      <Property name="UnsupportedCreateContexts" value=""/>
+      <Property name="MaxResiliencyTimeout" value="300000"/>
+    </Group>
+  </Properties>
+</TestSite>

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+  SPDX-License-Identifier: Unlicense
+
+  Chimera deployment overrides for the WPTS MS-SMB2 server test suite.
+  Most knobs live in the included CommonTestSuite.deployment.ptfconfig; this
+  file only carries SMB2-suite-specific properties and disables the cluster /
+  snapshot / ReFS-integrity features chimera does not implement.
+-->
+<TestSite xmlns="http://schemas.microsoft.com/windows/ProtocolsTest/2007/07/TestConfig"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://schemas.microsoft.com/windows/ProtocolsTest/2007/07/TestConfig http://schemas.microsoft.com/windows/ProtocolsTest/2007/07/TestConfig.xsd">
+  <Include>
+    <File name="CommonTestSuite.deployment.ptfconfig"/>
+  </Include>
+
+  <Properties>
+    <Group name="SMB2">
+      <Property name="WaitTimeoutInMilliseconds" value="8000"/>
+      <Property name="SutAlternativeIPAddress" value=""/>
+
+      <!-- Optional features chimera does not implement: leave blank to skip -->
+      <Property name="FileShareSupportingIntegrityInfo" value=""/>
+      <Property name="Symboliclink" value=""/>
+      <Property name="SymboliclinkInSubFolder" value=""/>
+      <Property name="NumberOfPreviousVersions" value=""/>
+      <Property name="ClusteredInfrastructureFileServerName" value=""/>
+      <Property name="InfrastructureRootShare" value=""/>
+
+      <Property name="DriverComputerName" value="chimera-driver"/>
+      <Property name="IsKB500139Installed" value="false"/>
+      <Property name="IsServerToClientNotificationsSupported" value="false"/>
+    </Group>
+  </Properties>
+</TestSite>
