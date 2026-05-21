@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <string.h>
+#include <sys/stat.h>
 #include <xxhash.h>
 
 #include "nfs4_procs.h"
@@ -14,32 +15,35 @@
 #include "vfs/vfs_state.h"
 
 static void
-chimera_nfs4_lockt_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs4_lockt_probe(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
 {
-    struct nfs_request            *req       = private_data;
-    struct LOCKT4args             *args      = &req->args_compound->argarray[req->index].oplockt;
-    struct LOCKT4res              *res       = &req->res_compound.resarray[req->index].oplockt;
-    struct chimera_vfs_state      *vfs_state = req->thread->vfs->vfs_state;
-    struct chimera_vfs_file_state *file_state;
-    struct chimera_vfs_lease       probe;
-    struct chimera_vfs_lease      *conflict = NULL;
-    enum chimera_vfs_lease_result  result;
-    uint64_t                       vfs_length;
+    struct nfs_request             *req       = private_data;
+    struct LOCKT4args              *args      = &req->args_compound->argarray[req->index].oplockt;
+    struct LOCKT4res               *res       = &req->res_compound.resarray[req->index].oplockt;
+    struct chimera_vfs_open_handle *handle    = req->handle;
+    struct chimera_vfs_state       *vfs_state = req->thread->vfs->vfs_state;
+    struct chimera_vfs_file_state  *file_state;
+    struct chimera_vfs_lease        probe;
+    struct chimera_vfs_lease       *conflict = NULL;
+    enum chimera_vfs_lease_result   result;
+    uint64_t                        vfs_length;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(req->thread->vfs_thread, handle);
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
-    /* RFC 7530 §16.11.4: same length rules as LOCK */
-    if (args->length == 0 ||
-        (args->length != UINT64_MAX && args->offset > UINT64_MAX - args->length)) {
+    /* RFC 7530 §16.11.4: byte-range locking is defined only for regular
+     * files.  A directory target is NFS4ERR_ISDIR; any other non-regular
+     * type is NFS4ERR_INVAL. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISREG(attr->va_mode)) {
         chimera_vfs_release(req->thread->vfs_thread, handle);
-        res->status = NFS4ERR_INVAL;
+        res->status = S_ISDIR(attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_INVAL;
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
@@ -90,6 +94,39 @@ chimera_nfs4_lockt_open_complete(
 
     /* LOCKT NFS4ERR_DENIED is a successful query result. */
     chimera_nfs4_compound_complete(req, res->status);
+} /* chimera_nfs4_lockt_probe */
+
+static void
+chimera_nfs4_lockt_open_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req  = private_data;
+    struct LOCKT4args  *args = &req->args_compound->argarray[req->index].oplockt;
+    struct LOCKT4res   *res  = &req->res_compound.resarray[req->index].oplockt;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    /* RFC 7530 §16.11.4: same length rules as LOCK */
+    if (args->length == 0 ||
+        (args->length != UINT64_MAX && args->offset > UINT64_MAX - args->length)) {
+        chimera_vfs_release(req->thread->vfs_thread, handle);
+        res->status = NFS4ERR_INVAL;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    /* Fetch the target's type before probing -- LOCKT is only valid on a
+     * regular file (see chimera_nfs4_lockt_probe). */
+    req->handle = handle;
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, handle,
+                        CHIMERA_VFS_ATTR_MASK_STAT,
+                        chimera_nfs4_lockt_probe, req);
 } /* chimera_nfs4_lockt_open_complete */
 
 void
