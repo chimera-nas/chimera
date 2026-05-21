@@ -137,9 +137,11 @@ mode_access_check(
 
     allowed = ACE_BASELINE | perm_class_to_mask(r, w, x);
 
-    /* The owner can always read/write the ACL and attributes of its object. */
+    /* The owner always holds the same implicit rights as under an explicit ACL
+     * (READ_CONTROL/WRITE_DAC/DELETE) -- not WRITE_ATTRIBUTES or WRITE_OWNER,
+     * which Windows grants the owner only via an explicit ACE. */
     if ((uint64_t) cred->uid == owner_uid) {
-        allowed |= ACE_OWNER_EXTRA;
+        allowed |= ACE_OWNER_IMPLICIT;
     }
 
     return requested & allowed;
