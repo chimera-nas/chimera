@@ -275,10 +275,13 @@ struct demofs_inode_cache {
 #define DEMOFS_BLOCK_CACHE_BUCKET_MASK       (DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD - 1)
 
 enum demofs_block_state {
+    DEMOFS_BLOCK_LOADING,  /* read I/O in flight; buffer not yet valid, ops wait */
     DEMOFS_BLOCK_CLEAN,    /* matches final on-disk location; evictable when unpinned */
     DEMOFS_BLOCK_DIRTY,    /* modified, pinned by >=1 txn, not yet logged */
     DEMOFS_BLOCK_LOGGED,   /* intent record durable; awaiting tail-push to final loc */
 };
+
+struct demofs_bt_op;
 
 /*
  * A cached 4 KiB on-disk block, keyed by (device_id, device_offset).  The
@@ -298,6 +301,11 @@ struct demofs_block {
     struct rcu_head      rcu;
     struct demofs_block *lru_prev, *lru_next;      /* clean+unpinned LRU (Stage 3) */
     struct demofs_block *wb_next;              /* writeback queue (Stage 3) */
+
+    /* Ops blocked on a LOADING block, woken when the read I/O completes.
+     * Protected by the owning shard lock. */
+    struct demofs_bt_op *wait_head;
+    struct demofs_bt_op *wait_tail;
 };
 
 struct demofs_block_shard {
@@ -561,6 +569,96 @@ struct demofs_thread {
     struct demofs_inode_waiter *grant_head;
     struct demofs_inode_waiter *grant_tail;
     struct evpl_doorbell        grant_doorbell;
+
+    /* Cross-thread b+tree op resumption: when a block this worker's ops are
+     * waiting on finishes loading (possibly on another worker that issued the
+     * read), the ready ops are queued here.  Same-worker resumptions drain via
+     * the deferral (no eventfd); cross-worker ones ring the doorbell. */
+    pthread_mutex_t             resume_lock;
+    struct demofs_bt_op        *resume_head;
+    struct demofs_bt_op        *resume_tail;
+    struct evpl_doorbell        resume_doorbell;
+    struct evpl_deferral        resume_deferral;
+    struct demofs_bt_op        *bt_op_free_list;
+};
+
+/* ------------------------------------------------------------------ */
+/* Async b+tree operation context                                      */
+/* ------------------------------------------------------------------ */
+
+#define DEMOFS_BT_MAX_DEPTH 16
+
+/*
+ * Result callback for an async b+tree operation.  `result` carries the record
+ * length (>= 0) or -1 (not found) for lookups, and 0/1 (not found / removed,
+ * or inserted) for remove/insert.
+ */
+typedef void (*demofs_bt_cb_t)(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data);
+
+enum demofs_bt_opcode {
+    DEMOFS_BT_OP_LOOKUP_EXACT,
+    DEMOFS_BT_OP_LOOKUP_GE,
+    DEMOFS_BT_OP_LOOKUP_LE,
+    DEMOFS_BT_OP_INSERT,
+    DEMOFS_BT_OP_REMOVE,
+};
+
+enum demofs_bt_phase {
+    DEMOFS_BT_PHASE_DESCEND,
+    DEMOFS_BT_PHASE_WALK_NEXT,
+    DEMOFS_BT_PHASE_WALK_PREV,
+    DEMOFS_BT_PHASE_REBALANCE,
+    DEMOFS_BT_PHASE_COLLAPSE,
+};
+
+struct demofs_bt_path_ent {
+    uint64_t bptr;     /* node bptr (0 == embedded root, reached via the inode) */
+    uint32_t base;
+    int      ci;       /* child index descended into */
+};
+
+/*
+ * One in-flight b+tree operation.  Holds all state needed to suspend the
+ * traversal when a node is not resident (a block read is issued and the op is
+ * parked on the block's waiter list) and resume it from the same point once
+ * the block loads.  Allocated from a per-thread free list.
+ */
+struct demofs_bt_op {
+    struct demofs_thread     *thread;
+    struct demofs_txn        *txn;
+    struct demofs_inode      *inode;
+    enum demofs_bt_opcode     opcode;
+    enum demofs_bt_phase      phase;
+    struct demofs_bt_key      key;
+
+    /* insert payload (copied into op-owned storage so it survives suspension) */
+    uint8_t                   recbuf[DEMOFS_DIRENT_REC_MAX];
+    uint32_t                  reclen;
+
+    /* lookup output (caller-owned, must outlive the op) */
+    void                     *out;
+    uint32_t                  out_cap;
+    struct demofs_bt_key     *r_key;
+
+    /* traversal cursor */
+    uint64_t                  cur_bptr;
+    int                       use_root;
+
+    /* descent path for insert split / remove rebalance */
+    struct demofs_bt_path_ent path[DEMOFS_BT_MAX_DEPTH];
+    int                       depth;
+    int                       removed_idx;
+    int                       reb_level;
+
+    /* completion */
+    demofs_bt_cb_t            cb;
+    void                     *private_data;
+
+    /* block-waiter list / per-worker resume-queue linkage */
+    struct demofs_bt_op      *next;
 };
 
 static inline uint32_t
@@ -955,6 +1053,27 @@ demofs_block_hash(
     return h;
 } /* demofs_block_hash */
 
+static inline struct demofs_block_shard *
+demofs_block_shard(
+    struct demofs_block_cache *cache,
+    uint32_t                   device_id,
+    uint64_t                   device_offset)
+{
+    uint64_t hash = demofs_block_hash(device_id, device_offset);
+
+    return &cache->shards[hash & DEMOFS_BLOCK_CACHE_SHARD_MASK];
+} /* demofs_block_shard */
+
+static inline uint32_t
+demofs_block_bucket(
+    uint32_t device_id,
+    uint64_t device_offset)
+{
+    uint64_t hash = demofs_block_hash(device_id, device_offset);
+
+    return (hash >> 8) & DEMOFS_BLOCK_CACHE_BUCKET_MASK;
+} /* demofs_block_bucket */
+
 static void
 demofs_block_cache_create(struct demofs_shared *shared)
 {
@@ -1083,6 +1202,219 @@ demofs_txn_add_block(
     txn->blocks = tb;
 } /* demofs_txn_add_block */
 
+/* ------------------------------------------------------------------ */
+/* Async block fetch with per-op suspend/resume                        */
+/* ------------------------------------------------------------------ */
+
+static void demofs_bt_run(
+    struct demofs_bt_op *op);
+
+static inline struct demofs_bt_op *
+demofs_bt_op_alloc(struct demofs_thread *thread)
+{
+    struct demofs_bt_op *op = thread->bt_op_free_list;
+
+    if (op) {
+        thread->bt_op_free_list = op->next;
+    } else {
+        op = calloc(1, sizeof(*op));
+    }
+    op->next = NULL;
+    return op;
+} /* demofs_bt_op_alloc */
+
+static inline void
+demofs_bt_op_free(
+    struct demofs_thread *thread,
+    struct demofs_bt_op  *op)
+{
+    op->next                = thread->bt_op_free_list;
+    thread->bt_op_free_list = op;
+} /* demofs_bt_op_free */
+
+/*
+ * Enqueue a ready op on its owning worker's resume queue.  If the waking
+ * thread is the op's own worker, schedule a deferral (no eventfd); otherwise
+ * ring the cross-thread doorbell.
+ */
+static void
+demofs_bt_op_resume(
+    struct demofs_thread *waker,
+    struct demofs_bt_op  *op)
+{
+    struct demofs_thread *worker = op->thread;
+
+    pthread_mutex_lock(&worker->resume_lock);
+    op->next = NULL;
+    if (worker->resume_tail) {
+        worker->resume_tail->next = op;
+    } else {
+        worker->resume_head = op;
+    }
+    worker->resume_tail = op;
+    pthread_mutex_unlock(&worker->resume_lock);
+
+    if (worker == waker) {
+        evpl_defer(worker->evpl, &worker->resume_deferral);
+    } else {
+        evpl_ring_doorbell(&worker->resume_doorbell);
+    }
+} /* demofs_bt_op_resume */
+
+/* Drain this worker's resume queue, re-entering each ready op's driver. */
+static void
+demofs_bt_resume_drain(struct demofs_thread *thread)
+{
+    struct demofs_bt_op *list, *op;
+
+    pthread_mutex_lock(&thread->resume_lock);
+    list                = thread->resume_head;
+    thread->resume_head = NULL;
+    thread->resume_tail = NULL;
+    pthread_mutex_unlock(&thread->resume_lock);
+
+    while (list) {
+        op       = list;
+        list     = op->next;
+        op->next = NULL;
+        demofs_bt_run(op);
+    }
+} /* demofs_bt_resume_drain */
+
+static void
+demofs_bt_resume_doorbell_cb(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct demofs_thread *thread = container_of(doorbell, struct demofs_thread,
+                                                resume_doorbell);
+
+    (void) evpl;
+    demofs_bt_resume_drain(thread);
+} /* demofs_bt_resume_doorbell_cb */
+
+static void
+demofs_bt_resume_deferral_cb(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    (void) evpl;
+    demofs_bt_resume_drain(private_data);
+} /* demofs_bt_resume_deferral_cb */
+
+/* Completion context for an in-flight block read. */
+struct demofs_block_load {
+    struct demofs_block  *blk;
+    struct demofs_thread *thread;     /* worker that issued the read */
+    struct evpl_iovec     iov;
+};
+
+/* Block read completion: copy into the cache buffer, mark CLEAN, wake waiters. */
+static void
+demofs_block_load_complete(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct demofs_block_load  *ld    = private_data;
+    struct demofs_block       *blk   = ld->blk;
+    struct demofs_thread      *self  = ld->thread;
+    struct demofs_block_shard *shard = demofs_block_shard(self->shared->block_cache,
+                                                          blk->device_id, blk->device_offset);
+    struct demofs_bt_op       *waiters, *op;
+
+    if (likely(status == 0)) {
+        memcpy(blk->buffer, ld->iov.data, DEMOFS_BLOCK_SIZE);
+    }
+    evpl_iovec_release(evpl, &ld->iov);
+
+    pthread_mutex_lock(&shard->lock);
+    blk->state     = DEMOFS_BLOCK_CLEAN;
+    waiters        = blk->wait_head;
+    blk->wait_head = NULL;
+    blk->wait_tail = NULL;
+    pthread_mutex_unlock(&shard->lock);
+
+    self->pending_io--;
+    free(ld);
+
+    while (waiters) {
+        op      = waiters;
+        waiters = op->next;
+        demofs_bt_op_resume(self, op);
+    }
+} /* demofs_block_load_complete */
+
+/*
+ * Fetch the block backing a b+tree node for op.  On a resident, valid block
+ * the block is returned immediately.  Otherwise the op is parked on the
+ * block's waiter list (a read is issued if it is not already in flight) and
+ * NULL is returned; the op's driver will be re-entered once the block loads.
+ */
+static struct demofs_block *
+demofs_bt_block_get(
+    struct demofs_bt_op *op,
+    uint32_t             device_id,
+    uint64_t             device_offset)
+{
+    struct demofs_thread      *thread = op->thread;
+    struct demofs_block_cache *cache  = thread->shared->block_cache;
+    struct demofs_block_shard *shard  = demofs_block_shard(cache, device_id, device_offset);
+    uint32_t                   bucket = demofs_block_bucket(device_id, device_offset);
+    struct demofs_block       *blk;
+    struct demofs_block_load  *ld;
+    int                        issue = 0;
+
+    /* Fast path: lock-free hit on a resident, loaded block. */
+    urcu_memb_read_lock();
+    blk = demofs_block_lookup_locked(shard, bucket, device_id, device_offset);
+    if (blk && blk->state != DEMOFS_BLOCK_LOADING) {
+        urcu_memb_read_unlock();
+        return blk;
+    }
+    urcu_memb_read_unlock();
+
+    pthread_mutex_lock(&shard->lock);
+    blk = demofs_block_lookup_locked(shard, bucket, device_id, device_offset);
+    if (blk && blk->state != DEMOFS_BLOCK_LOADING) {
+        pthread_mutex_unlock(&shard->lock);
+        return blk;
+    }
+
+    if (!blk) {
+        blk                = calloc(1, sizeof(*blk));
+        blk->device_id     = device_id;
+        blk->device_offset = device_offset;
+        blk->buffer        = calloc(1, DEMOFS_BLOCK_SIZE);
+        blk->state         = DEMOFS_BLOCK_LOADING;
+        blk->hash_next     = shard->buckets[bucket];
+        rcu_assign_pointer(shard->buckets[bucket], blk);
+        issue = 1;
+    }
+
+    /* Park this op on the block's waiter list. */
+    op->next = NULL;
+    if (blk->wait_tail) {
+        blk->wait_tail->next = op;
+    } else {
+        blk->wait_head = op;
+    }
+    blk->wait_tail = op;
+    pthread_mutex_unlock(&shard->lock);
+
+    if (issue) {
+        ld         = malloc(sizeof(*ld));
+        ld->blk    = blk;
+        ld->thread = thread;
+        evpl_iovec_alloc(thread->evpl, DEMOFS_BLOCK_SIZE, DEMOFS_BLOCK_SIZE, 1, 0, &ld->iov);
+        thread->pending_io++;
+        evpl_block_read(thread->evpl, thread->queue[device_id], &ld->iov, 1,
+                        device_offset, demofs_block_load_complete, ld);
+    }
+
+    return NULL;
+} /* demofs_bt_block_get */
+
 /*
  * Ensure this (write-locked) inode's home block is resident and pinned, and
  * attached to the transaction.  Idempotent per inode: the inode caches its
@@ -1207,29 +1539,6 @@ demofs_txn_unpin_blocks(
 /* ------------------------------------------------------------------ */
 /* Per-inode b+tree                                                    */
 /* ------------------------------------------------------------------ */
-
-/* Lock-free RCU lookup of a resident block; NULL if not cached. */
-static struct demofs_block *
-demofs_block_lookup_rcu(
-    struct demofs_thread *thread,
-    uint32_t              device_id,
-    uint64_t              device_offset)
-{
-    struct demofs_block_cache *cache  = thread->shared->block_cache;
-    uint64_t                   hash   = demofs_block_hash(device_id, device_offset);
-    uint32_t                   sidx   = hash & DEMOFS_BLOCK_CACHE_SHARD_MASK;
-    uint32_t                   bucket = (hash >> 8) & DEMOFS_BLOCK_CACHE_BUCKET_MASK;
-    struct demofs_block_shard *shard  = &cache->shards[sidx];
-    struct demofs_block       *blk;
-
-    for (blk = rcu_dereference(shard->buckets[bucket]); blk;
-         blk = rcu_dereference(blk->hash_next)) {
-        if (blk->device_id == device_id && blk->device_offset == device_offset) {
-            return blk;
-        }
-    }
-    return NULL;
-} /* demofs_block_lookup_rcu */
 
 static inline int
 demofs_bt_key_cmp(
@@ -1771,8 +2080,6 @@ demofs_bt_insert(
     }
 } /* demofs_bt_insert */
 
-#define DEMOFS_BT_MAX_DEPTH 16
-
 /* A node (other than the root) is too empty and must borrow/merge once it
  * holds less than half its capacity: leaves measured in bytes (slots +
  * records), interior nodes in slot count. */
@@ -2242,12 +2549,216 @@ demofs_bt_remove(
     return 1;
 } /* demofs_bt_remove */
 
+/* ------------------------------------------------------------------ */
+/* Async b+tree operation driver                                       */
+/* ------------------------------------------------------------------ */
+
+/* Copy a leaf slot's record + key into the op's output; returns true length. */
+static inline int
+demofs_bt_op_emit(
+    struct demofs_bt_op *op,
+    void                *buf,
+    uint32_t             base,
+    int                  idx)
+{
+    struct demofs_bt_lslot *sl  = demofs_bt_lslots(buf, base);
+    uint32_t                len = sl[idx].len;
+
+    if (op->r_key) {
+        *op->r_key = sl[idx].key;
+    }
+    if (len > op->out_cap) {
+        len = op->out_cap;
+    }
+    if (op->out) {
+        memcpy(op->out, (char *) buf + base + sl[idx].off, len);
+    }
+    return (int) sl[idx].len;
+} /* demofs_bt_op_emit */
+
+static inline void
+demofs_bt_complete(
+    struct demofs_bt_op *op,
+    int                  result)
+{
+    op->cb(op, result, op->private_data);
+} /* demofs_bt_complete */
+
 /*
- * Copy out the record for an exact key match.  Read path: traverses via the
- * RCU block cache, one critical section per node.  Returns the record
- * length (copied into out, up to out_cap) or -1 if not found.  Phase 1
- * aborts if a needed node is not resident.
+ * Drive (or resume) an async b+tree operation.  The traversal suspends and
+ * returns whenever a needed node is not resident (demofs_bt_block_get parks
+ * the op on the block's waiter list); it is re-entered here from the resume
+ * queue once the block loads.  All per-step state lives in *op so the loop is
+ * safe to re-enter from the top of the current phase.
  */
+static void
+demofs_bt_run(struct demofs_bt_op *op)
+{
+    struct demofs_thread *thread = op->thread;
+    struct demofs_inode  *inode  = op->inode;
+    struct demofs_block  *blk;
+    void                 *buf;
+    uint32_t              base;
+    uint32_t              dev;
+    uint64_t              off;
+
+    switch (op->opcode) {
+        case DEMOFS_BT_OP_LOOKUP_EXACT:
+        case DEMOFS_BT_OP_LOOKUP_GE:
+        case DEMOFS_BT_OP_LOOKUP_LE:
+            break;
+        default:
+            chimera_demofs_abort("demofs_bt_run: opcode %d not async yet", op->opcode);
+            return;
+    } /* switch */
+
+    for (;; ) {
+        struct demofs_bt_node_hdr *h;
+
+        if (op->phase == DEMOFS_BT_PHASE_DESCEND && op->use_root) {
+            off  = sm_inum_to_device_offset(thread->shared->space_map, inode->inum, &dev);
+            base = DEMOFS_BT_ROOT_BASE;
+        } else {
+            off  = sm_inum_to_device_offset(thread->shared->space_map, op->cur_bptr, &dev);
+            base = 0;
+        }
+
+        blk = demofs_bt_block_get(op, dev, off);
+        if (!blk) {
+            return;     /* suspended; resumed when the block loads */
+        }
+        buf = blk->buffer;
+        h   = demofs_bt_hdr(buf, base);
+
+        if (op->phase == DEMOFS_BT_PHASE_DESCEND) {
+            if (h->level > 0) {
+                int ci = demofs_bt_interior_search(buf, base, &op->key);
+
+                op->cur_bptr = demofs_bt_islots(buf, base)[ci].child;
+                op->use_root = 0;
+                continue;
+            }
+
+            /* At the leaf. */
+            if (op->opcode == DEMOFS_BT_OP_LOOKUP_EXACT) {
+                int exact, idx = demofs_bt_leaf_search(buf, base, &op->key, &exact);
+
+                demofs_bt_complete(op, exact ? demofs_bt_op_emit(op, buf, base, idx) : -1);
+                return;
+            } else if (op->opcode == DEMOFS_BT_OP_LOOKUP_GE) {
+                int exact, idx = h->nitems ? demofs_bt_leaf_search(buf, base, &op->key, &exact) : 0;
+
+                if (idx < h->nitems) {
+                    demofs_bt_complete(op, demofs_bt_op_emit(op, buf, base, idx));
+                    return;
+                }
+                op->cur_bptr = h->next_leaf;
+                op->use_root = 0;
+                op->phase    = DEMOFS_BT_PHASE_WALK_NEXT;
+                if (op->cur_bptr == 0) {
+                    demofs_bt_complete(op, -1);
+                    return;
+                }
+                continue;
+            } else {     /* LOOKUP_LE */
+                int exact = 0;
+                int idx   = h->nitems ? demofs_bt_leaf_search(buf, base, &op->key, &exact) : 0;
+                int fidx  = h->nitems ? (exact ? idx : idx - 1) : -1;
+
+                if (fidx >= 0) {
+                    demofs_bt_complete(op, demofs_bt_op_emit(op, buf, base, fidx));
+                    return;
+                }
+                op->cur_bptr = h->prev_leaf;
+                op->use_root = 0;
+                op->phase    = DEMOFS_BT_PHASE_WALK_PREV;
+                if (op->cur_bptr == 0) {
+                    demofs_bt_complete(op, -1);
+                    return;
+                }
+                continue;
+            }
+        } else if (op->phase == DEMOFS_BT_PHASE_WALK_NEXT) {
+            if (h->nitems > 0) {
+                demofs_bt_complete(op, demofs_bt_op_emit(op, buf, 0, 0));
+                return;
+            }
+            op->cur_bptr = h->next_leaf;
+            if (op->cur_bptr == 0) {
+                demofs_bt_complete(op, -1);
+                return;
+            }
+            continue;
+        } else {     /* DEMOFS_BT_PHASE_WALK_PREV */
+            if (h->nitems > 0) {
+                demofs_bt_complete(op, demofs_bt_op_emit(op, buf, 0, h->nitems - 1));
+                return;
+            }
+            op->cur_bptr = h->prev_leaf;
+            if (op->cur_bptr == 0) {
+                demofs_bt_complete(op, -1);
+                return;
+            }
+            continue;
+        }
+    }
+} /* demofs_bt_run */
+
+/*
+ * Synchronous-completion sink for the transitional sync wrappers below: every
+ * traversal currently hits in cache, so the op completes inline before the
+ * entry point returns and we capture the result here.
+ */
+struct demofs_bt_sync {
+    int done;
+    int result;
+};
+
+static void
+demofs_bt_sync_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct demofs_bt_sync *s = private_data;
+
+    (void) op;
+    s->result = result;
+    s->done   = 1;
+} /* demofs_bt_sync_cb */
+
+static int
+demofs_bt_lookup_sync(
+    struct demofs_thread       *thread,
+    struct demofs_inode        *inode,
+    enum demofs_bt_opcode       opcode,
+    const struct demofs_bt_key *key,
+    struct demofs_bt_key       *r_key,
+    void                       *out,
+    uint32_t                    out_cap)
+{
+    struct demofs_bt_op   op;
+    struct demofs_bt_sync s = { .done = 0, .result = -1 };
+
+    memset(&op, 0, sizeof(op));
+    op.thread       = thread;
+    op.inode        = inode;
+    op.opcode       = opcode;
+    op.phase        = DEMOFS_BT_PHASE_DESCEND;
+    op.key          = *key;
+    op.r_key        = r_key;
+    op.out          = out;
+    op.out_cap      = out_cap;
+    op.use_root     = 1;
+    op.cb           = demofs_bt_sync_cb;
+    op.private_data = &s;
+
+    demofs_bt_run(&op);
+    chimera_demofs_abort_if(!s.done,
+                            "b+tree lookup suspended on a cache miss (no eviction yet)");
+    return s.result;
+} /* demofs_bt_lookup_sync */
+
 static int
 demofs_bt_lookup_exact(
     struct demofs_thread       *thread,
@@ -2256,54 +2767,8 @@ demofs_bt_lookup_exact(
     void                       *out,
     uint32_t                    out_cap)
 {
-    uint32_t device_id;
-    uint64_t device_offset;
-    uint64_t bptr = 0;
-    void    *buf;
-    uint32_t base;
-    int      result   = -1;
-    int      use_root = 1;
-
-    device_offset = sm_inum_to_device_offset(thread->shared->space_map, inode->inum, &device_id);
-
-    for (;; ) {
-        struct demofs_block *blk;
-
-        urcu_memb_read_lock();
-        if (use_root) {
-            blk = demofs_block_lookup_rcu(thread, device_id, device_offset);
-        } else {
-            uint32_t cdev;
-            uint64_t coff = sm_inum_to_device_offset(thread->shared->space_map, bptr, &cdev);
-            blk = demofs_block_lookup_rcu(thread, cdev, coff);
-        }
-        chimera_demofs_abort_if(!blk, "b+tree read: node not resident (inum %lu)", inode->inum);
-
-        buf  = blk->buffer;
-        base = use_root ? DEMOFS_BT_ROOT_BASE : 0;
-
-        struct demofs_bt_node_hdr *h = demofs_bt_hdr(buf, base);
-        if (h->level == 0) {
-            int exact;
-            int idx = demofs_bt_leaf_search(buf, base, key, &exact);
-            if (exact) {
-                struct demofs_bt_lslot *sl  = demofs_bt_lslots(buf, base);
-                uint32_t                len = sl[idx].len;
-                if (len > out_cap) {
-                    len = out_cap;
-                }
-                memcpy(out, (char *) buf + base + sl[idx].off, len);
-                result = (int) sl[idx].len;
-            }
-            urcu_memb_read_unlock();
-            return result;
-        } else {
-            int ci = demofs_bt_interior_search(buf, base, key);
-            bptr = demofs_bt_islots(buf, base)[ci].child;
-            urcu_memb_read_unlock();
-            use_root = 0;
-        }
-    }
+    return demofs_bt_lookup_sync(thread, inode, DEMOFS_BT_OP_LOOKUP_EXACT,
+                                 key, NULL, out, out_cap);
 } /* demofs_bt_lookup_exact */
 
 /* Descend (floor-style) to the leaf that would hold key.  Returns the leaf
@@ -2324,88 +2789,8 @@ demofs_bt_lookup_ge(
     void                       *out,
     uint32_t                    out_cap)
 {
-    uint32_t device_id;
-    uint64_t device_offset;
-    uint64_t bptr      = 0;
-    int      use_root  = 1;
-    uint64_t next_leaf = 0;
-
-    device_offset = sm_inum_to_device_offset(thread->shared->space_map, inode->inum, &device_id);
-
-    for (;; ) {
-        struct demofs_block       *blk;
-        struct demofs_bt_node_hdr *h;
-        void                      *buf;
-        uint32_t                   base;
-
-        urcu_memb_read_lock();
-        if (use_root) {
-            blk = demofs_block_lookup_rcu(thread, device_id, device_offset);
-        } else {
-            uint32_t cdev;
-            uint64_t coff = sm_inum_to_device_offset(thread->shared->space_map, bptr, &cdev);
-            blk = demofs_block_lookup_rcu(thread, cdev, coff);
-        }
-        chimera_demofs_abort_if(!blk, "b+tree read: node not resident (inum %lu)", inode->inum);
-
-        buf  = blk->buffer;
-        base = use_root ? DEMOFS_BT_ROOT_BASE : 0;
-        h    = demofs_bt_hdr(buf, base);
-
-        if (h->level == 0) {
-            int exact;
-            int idx = demofs_bt_leaf_search(buf, base, key, &exact);
-
-            if (idx < h->nitems) {
-                struct demofs_bt_lslot *sl  = demofs_bt_lslots(buf, base);
-                uint32_t                len = sl[idx].len;
-
-                *r_key = sl[idx].key;
-                if (len > out_cap) {
-                    len = out_cap;
-                }
-                memcpy(out, (char *) buf + base + sl[idx].off, len);
-                len = sl[idx].len;
-                urcu_memb_read_unlock();
-                return (int) len;
-            }
-            next_leaf = h->next_leaf;
-            urcu_memb_read_unlock();
-
-            /* The successor is the first slot of the nearest non-empty leaf to
-             * the right.  Lazy deletion can leave emptied leaves in the chain,
-             * so walk next_leaf until a populated leaf is found. */
-            while (next_leaf) {
-                uint32_t cdev;
-                uint64_t coff = sm_inum_to_device_offset(thread->shared->space_map, next_leaf, &cdev);
-
-                urcu_memb_read_lock();
-                blk = demofs_block_lookup_rcu(thread, cdev, coff);
-                chimera_demofs_abort_if(!blk, "b+tree read: next leaf not resident");
-                h = demofs_bt_hdr(blk->buffer, 0);
-                if (h->nitems > 0) {
-                    struct demofs_bt_lslot *sl  = demofs_bt_lslots(blk->buffer, 0);
-                    uint32_t                len = sl[0].len;
-                    *r_key = sl[0].key;
-                    if (len > out_cap) {
-                        len = out_cap;
-                    }
-                    memcpy(out, (char *) blk->buffer + sl[0].off, len);
-                    len = sl[0].len;
-                    urcu_memb_read_unlock();
-                    return (int) len;
-                }
-                next_leaf = h->next_leaf;
-                urcu_memb_read_unlock();
-            }
-            return -1;     /* no key >= search */
-        } else {
-            int ci = demofs_bt_interior_search(buf, base, key);
-            bptr = demofs_bt_islots(buf, base)[ci].child;
-            urcu_memb_read_unlock();
-            use_root = 0;
-        }
-    }
+    return demofs_bt_lookup_sync(thread, inode, DEMOFS_BT_OP_LOOKUP_GE,
+                                 key, r_key, out, out_cap);
 } /* demofs_bt_lookup_ge */
 
 /*
@@ -2421,98 +2806,8 @@ demofs_bt_lookup_le(
     void                       *out,
     uint32_t                    out_cap)
 {
-    uint32_t device_id;
-    uint64_t device_offset;
-    uint64_t bptr     = 0;
-    int      use_root = 1;
-
-    device_offset = sm_inum_to_device_offset(thread->shared->space_map, inode->inum, &device_id);
-
-    for (;; ) {
-        struct demofs_block       *blk;
-        struct demofs_bt_node_hdr *h;
-        void                      *buf;
-        uint32_t                   base;
-
-        urcu_memb_read_lock();
-        if (use_root) {
-            blk = demofs_block_lookup_rcu(thread, device_id, device_offset);
-        } else {
-            uint32_t cdev;
-            uint64_t coff = sm_inum_to_device_offset(thread->shared->space_map, bptr, &cdev);
-            blk = demofs_block_lookup_rcu(thread, cdev, coff);
-        }
-        chimera_demofs_abort_if(!blk, "b+tree read: node not resident (inum %lu)", inode->inum);
-
-        buf  = blk->buffer;
-        base = use_root ? DEMOFS_BT_ROOT_BASE : 0;
-        h    = demofs_bt_hdr(buf, base);
-
-        if (h->level == 0) {
-            int      exact = 0;
-            int      idx   = h->nitems ? demofs_bt_leaf_search(buf, base, key, &exact) : 0;
-            int      fidx  = h->nitems ? (exact ? idx : idx - 1) : -1;
-            uint64_t prev;
-
-            if (fidx >= 0) {
-                struct demofs_bt_lslot *sl  = demofs_bt_lslots(buf, base);
-                uint32_t                len = sl[fidx].len;
-
-                *r_key = sl[fidx].key;
-                if (len > out_cap) {
-                    len = out_cap;
-                }
-                memcpy(out, (char *) buf + base + sl[fidx].off, len);
-                len = sl[fidx].len;
-                urcu_memb_read_unlock();
-                return (int) len;
-            }
-
-            /* No key <= search in this leaf.  Lazy deletion can leave a
-             * parent separator pointing below a leaf's true minimum (or at an
-             * emptied leaf), so the floor may be the last key of a leaf to the
-             * left.  Walk the prev chain, skipping empties. */
-            prev = h->prev_leaf;
-            urcu_memb_read_unlock();
-
-            while (prev) {
-                uint32_t                   pdev;
-                uint64_t                   poff;
-                struct demofs_block       *pblk;
-                struct demofs_bt_node_hdr *ph;
-
-                poff = sm_inum_to_device_offset(thread->shared->space_map, prev, &pdev);
-
-                urcu_memb_read_lock();
-                pblk = demofs_block_lookup_rcu(thread, pdev, poff);
-                chimera_demofs_abort_if(!pblk, "b+tree read: prev leaf not resident");
-                ph = demofs_bt_hdr(pblk->buffer, 0);
-
-                if (ph->nitems > 0) {
-                    struct demofs_bt_lslot *sl  = demofs_bt_lslots(pblk->buffer, 0);
-                    int                     li  = ph->nitems - 1;
-                    uint32_t                len = sl[li].len;
-
-                    *r_key = sl[li].key;
-                    if (len > out_cap) {
-                        len = out_cap;
-                    }
-                    memcpy(out, (char *) pblk->buffer + sl[li].off, len);
-                    len = sl[li].len;
-                    urcu_memb_read_unlock();
-                    return (int) len;
-                }
-                prev = ph->prev_leaf;
-                urcu_memb_read_unlock();
-            }
-            return -1;
-        } else {
-            int ci = demofs_bt_interior_search(buf, base, key);
-            bptr = demofs_bt_islots(buf, base)[ci].child;
-            urcu_memb_read_unlock();
-            use_root = 0;
-        }
-    }
+    return demofs_bt_lookup_sync(thread, inode, DEMOFS_BT_OP_LOOKUP_LE,
+                                 key, r_key, out, out_cap);
 } /* demofs_bt_lookup_le */
 
 /* ------------------------------------------------------------------ */
@@ -3826,6 +4121,14 @@ demofs_thread_init(
     thread->grant_tail = NULL;
     evpl_add_doorbell(evpl, &thread->grant_doorbell, demofs_grant_doorbell_cb);
 
+    /* B+tree op resume queue: doorbell (cross-thread) + deferral (same-thread). */
+    pthread_mutex_init(&thread->resume_lock, NULL);
+    thread->resume_head     = NULL;
+    thread->resume_tail     = NULL;
+    thread->bt_op_free_list = NULL;
+    evpl_add_doorbell(evpl, &thread->resume_doorbell, demofs_bt_resume_doorbell_cb);
+    evpl_deferral_init(&thread->resume_deferral, demofs_bt_resume_deferral_cb, thread);
+
     pthread_mutex_lock(&shared->lock);
     thread->thread_id = shared->num_active_threads++;
     pthread_mutex_unlock(&shared->lock);
@@ -3887,6 +4190,15 @@ demofs_thread_destroy(void *private_data)
 
     evpl_remove_doorbell(thread->evpl, &thread->grant_doorbell);
     pthread_mutex_destroy(&thread->grant_lock);
+
+    evpl_remove_doorbell(thread->evpl, &thread->resume_doorbell);
+    pthread_mutex_destroy(&thread->resume_lock);
+
+    while (thread->bt_op_free_list) {
+        struct demofs_bt_op *op = thread->bt_op_free_list;
+        thread->bt_op_free_list = op->next;
+        free(op);
+    }
 
     while (thread->txn_free_list) {
         struct demofs_txn *txn = thread->txn_free_list;
