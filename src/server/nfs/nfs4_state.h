@@ -293,6 +293,9 @@ struct nfs_state_shard {
 
 struct nfs_state_table {
     struct nfs_state_shard shards[NFS_STATE_NUM_SHARDS];
+    /* Per-server-instance epoch stamped into every stateid; see
+     * nfs4_stateid.h.  Set once at nfs_state_table_init. */
+    uint32_t               epoch;
 };
 
 /*
@@ -405,7 +408,6 @@ nfs_open_state_create(
     uint32_t                        share_access,
     uint32_t                        share_deny,
     struct chimera_vfs_open_handle *handle_dup,
-    uint32_t                        client_short_id,
     struct nfs_state_table         *table,
     struct stateid4                *out_stateid);
 
@@ -433,11 +435,11 @@ nfs_client_check_share_conflict(
  * write the (now-updated) stateid to `out_stateid`. */
 SYMBOL_EXPORT void
 nfs_open_state_coalesce(
-    struct nfs_open_state *state,
-    uint32_t               share_access,
-    uint32_t               share_deny,
-    uint32_t               client_short_id,
-    struct stateid4       *out_stateid);
+    struct nfs_open_state  *state,
+    uint32_t                share_access,
+    uint32_t                share_deny,
+    struct nfs_state_table *table,
+    struct stateid4        *out_stateid);
 
 /* Mark a state for destruction and drop the lifetime ref.  Any walks
  * already holding an acquire-ref will complete their work; the actual
@@ -461,7 +463,6 @@ nfs_lock_state_create(
     struct nfs_lock_owner          *lock_owner,
     struct nfs_open_state          *open_state,
     struct chimera_vfs_open_handle *handle_dup,
-    uint32_t                        client_short_id,
     struct nfs_state_table         *table,
     struct stateid4                *out_stateid);
 

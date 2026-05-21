@@ -45,17 +45,17 @@ test_stateid_codec(void)
                         /*shard*/ 7,
                         /*slot_idx*/ 0xABCDEF,
                         /*generation*/ 0x123456,
-                        /*client_short*/ 0xDEADBEEF);
+                        /*epoch*/ 0xDEADBEEF);
 
     nfs4_stateid_decode(&view, &sid);
 
     CHECK(sid.seqid == 1);
+    CHECK(view.epoch == 0xDEADBEEF);
     CHECK(view.version == NFS4_STATEID_VERSION);
     CHECK(view.type == NFS4_STATEID_TYPE_OPEN);
     CHECK(view.shard == 7);
     CHECK(view.slot_idx == 0xABCDEF);
     CHECK(view.generation == 0x123456);
-    CHECK(view.client_short_id == 0xDEADBEEF);
 
     /* Special-stateid detection */
     struct stateid4 zero = { 0 };
@@ -91,7 +91,7 @@ test_slot_lifecycle(void)
      * pointer yet, so acquire would fault; validate just checks the slot). */
     struct stateid4 sid;
     nfs4_stateid_encode(&sid, 1, NFS4_STATEID_TYPE_OPEN,
-                        first_shard, first_slot, first_gen, 0);
+                        first_shard, first_slot, first_gen, table.epoch);
     nfsstat4        v = nfs_state_table_validate(&table, &sid);
     CHECK(v == NFS4_OK);
 
@@ -108,9 +108,20 @@ test_slot_lifecycle(void)
     /* A stateid with a wrong generation also rejects as stale. */
     struct stateid4 stale;
     nfs4_stateid_encode(&stale, 1, NFS4_STATEID_TYPE_OPEN,
-                        first_shard, first_slot, /*gen*/ 999, 0);
+                        first_shard, first_slot, /*gen*/ 999, table.epoch);
     v = nfs_state_table_validate(&table, &stale);
     CHECK(v != NFS4_OK);
+
+    /* A stateid carrying a different server-instance epoch (i.e. minted
+     * before a reboot) must be reported as stale, not merely bad. */
+    rc = nfs_state_table_alloc(&table, NFS4_SLOT_TYPE_OPEN,
+                               &first_shard, &first_slot, &first_gen);
+    CHECK(rc == 0);
+    struct stateid4 wrong_epoch;
+    nfs4_stateid_encode(&wrong_epoch, 1, NFS4_STATEID_TYPE_OPEN,
+                        first_shard, first_slot, first_gen, table.epoch ^ 0x1u);
+    v = nfs_state_table_validate(&table, &wrong_epoch);
+    CHECK(v == NFS4ERR_STALE_STATEID);
 
     nfs_state_table_free(&table, NULL);
     printf("ok: slot_lifecycle\n");
@@ -152,7 +163,6 @@ test_owner_state_lifecycle(void)
                                   OPEN4_SHARE_ACCESS_READ,
                                   OPEN4_SHARE_DENY_NONE,
                                   /*handle_dup*/ NULL,
-                                  /*client_short*/ 42,
                                   &table,
                                   &sid);
     CHECK(state != NULL);
@@ -173,7 +183,7 @@ test_owner_state_lifecycle(void)
     nfs_open_state_coalesce(state,
                             OPEN4_SHARE_ACCESS_WRITE,
                             OPEN4_SHARE_DENY_NONE,
-                            42, &sid2);
+                            &table, &sid2);
     CHECK((state->share_access &
            (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE)) ==
           (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE));
@@ -261,7 +271,7 @@ test_share_mode_conflict(void)
     state_a = nfs_open_state_create(owner_a, fh, sizeof(fh),
                                     OPEN4_SHARE_ACCESS_READ,
                                     OPEN4_SHARE_DENY_WRITE,
-                                    NULL, 99, &table, &sid_a);
+                                    NULL, &table, &sid_a);
     CHECK(state_a != NULL);
 
     /* Owner B asking for WRITE should be denied. */

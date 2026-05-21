@@ -111,7 +111,7 @@ chimera_nfs4_open_downgrade(
                         NFS4_STATEID_TYPE_OPEN,
                         open_state->shard, open_state->slot_idx,
                         open_state->generation,
-                        (uint32_t) owner->client->client_id);
+                        table->epoch);
 
     if (is_v40) {
         owner->seqid = args->seqid;

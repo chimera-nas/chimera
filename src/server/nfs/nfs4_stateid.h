@@ -12,11 +12,18 @@
 /*
  * Server-private encoding of stateid.other (12 bytes):
  *
- *   byte 0   : version (high 6 bits) | type (low 2 bits)
- *   byte 1   : shard index (0..NFS_STATE_NUM_SHARDS-1)
- *   bytes 2-4: slot_idx (24-bit, big-endian)
- *   bytes 5-7: generation (24-bit, big-endian)
- *   bytes 8-11: client_short_id (low 32 bits of nfs_client.client_id, big-endian)
+ *   bytes 0-3 : server-instance epoch (big-endian) -- see below
+ *   byte 4    : version (high 6 bits) | type (low 2 bits)
+ *   byte 5    : shard index (0..NFS_STATE_NUM_SHARDS-1)
+ *   bytes 6-8 : slot_idx (24-bit, big-endian)
+ *   bytes 9-11: generation (24-bit, big-endian)
+ *
+ * The epoch is a per-server-instance value (see nfs_state_table.epoch),
+ * placed first on purpose: a stateid minted by a previous server instance
+ * carries a different epoch, so the lookup returns NFS4ERR_STALE_STATEID
+ * (server reboot) instead of NFS4ERR_BAD_STATEID (RFC 7530 §9.1.4.2).  This is
+ * the convention pynfs's makeStaleId() probes -- it rewrites the leading bytes
+ * with an "old" epoch while makeBadID() preserves them and corrupts the rest.
  *
  * Special stateids defined by RFC 7530 §9.1.4 (all-zero, all-ones, etc.) are
  * detected by inspecting the entire {seqid, other} blob before any decode.
@@ -32,12 +39,12 @@
 #define NFS_STATE_NUM_SHARDS       64
 
 struct nfs4_stateid_view {
+    uint32_t epoch;
     uint8_t  version;
     uint8_t  type;
     uint8_t  shard;
     uint32_t slot_idx;       /* 24-bit */
     uint32_t generation;     /* 24-bit */
-    uint32_t client_short_id;
 };
 
 static inline void
@@ -48,25 +55,25 @@ nfs4_stateid_encode(
     uint8_t          shard,
     uint32_t         slot_idx,
     uint32_t         generation,
-    uint32_t         client_short_id)
+    uint32_t         epoch)
 {
     uint8_t *p = (uint8_t *) out->other;
 
     out->seqid = seqid;
 
-    p[0] = (NFS4_STATEID_VERSION << NFS4_STATEID_VERSION_SHIFT) |
+    p[0] = (uint8_t) (epoch >> 24);
+    p[1] = (uint8_t) (epoch >> 16);
+    p[2] = (uint8_t) (epoch >> 8);
+    p[3] = (uint8_t) (epoch);
+    p[4] = (NFS4_STATEID_VERSION << NFS4_STATEID_VERSION_SHIFT) |
         (type & NFS4_STATEID_TYPE_MASK);
-    p[1]  = shard;
-    p[2]  = (uint8_t) (slot_idx >> 16);
-    p[3]  = (uint8_t) (slot_idx >> 8);
-    p[4]  = (uint8_t) (slot_idx);
-    p[5]  = (uint8_t) (generation >> 16);
-    p[6]  = (uint8_t) (generation >> 8);
-    p[7]  = (uint8_t) (generation);
-    p[8]  = (uint8_t) (client_short_id >> 24);
-    p[9]  = (uint8_t) (client_short_id >> 16);
-    p[10] = (uint8_t) (client_short_id >> 8);
-    p[11] = (uint8_t) (client_short_id);
+    p[5]  = shard;
+    p[6]  = (uint8_t) (slot_idx >> 16);
+    p[7]  = (uint8_t) (slot_idx >> 8);
+    p[8]  = (uint8_t) (slot_idx);
+    p[9]  = (uint8_t) (generation >> 16);
+    p[10] = (uint8_t) (generation >> 8);
+    p[11] = (uint8_t) (generation);
 } /* nfs4_stateid_encode */
 
 static inline void
@@ -76,13 +83,13 @@ nfs4_stateid_decode(
 {
     const uint8_t *p = (const uint8_t *) sid->other;
 
-    out->version         = p[0] >> NFS4_STATEID_VERSION_SHIFT;
-    out->type            = p[0] & NFS4_STATEID_TYPE_MASK;
-    out->shard           = p[1];
-    out->slot_idx        = ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 8) | p[4];
-    out->generation      = ((uint32_t) p[5] << 16) | ((uint32_t) p[6] << 8) | p[7];
-    out->client_short_id = ((uint32_t) p[8] << 24) | ((uint32_t) p[9] << 16) |
-        ((uint32_t) p[10] << 8) | p[11];
+    out->epoch = ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16) |
+        ((uint32_t) p[2] << 8) | p[3];
+    out->version    = p[4] >> NFS4_STATEID_VERSION_SHIFT;
+    out->type       = p[4] & NFS4_STATEID_TYPE_MASK;
+    out->shard      = p[5];
+    out->slot_idx   = ((uint32_t) p[6] << 16) | ((uint32_t) p[7] << 8) | p[8];
+    out->generation = ((uint32_t) p[9] << 16) | ((uint32_t) p[10] << 8) | p[11];
 } /* nfs4_stateid_decode */
 
 /*

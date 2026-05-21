@@ -94,7 +94,7 @@ chimera_nfs4_open_confirm(
                         NFS4_STATEID_TYPE_OPEN,
                         open_state->shard, open_state->slot_idx,
                         open_state->generation,
-                        (uint32_t) owner->client->client_id);
+                        table->epoch);
 
     nfs4_replay_record(&owner->replay, args->seqid, OP_OPEN_CONFIRM,
                        NFS4_OK, &res->resok4.open_stateid);

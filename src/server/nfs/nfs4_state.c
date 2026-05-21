@@ -4,6 +4,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "nfs4_state.h"
 #include "nfs_internal.h"
@@ -106,6 +107,13 @@ nfs_state_table_init(struct nfs_state_table *table)
     for (int i = 0; i < NFS_STATE_NUM_SHARDS; i++) {
         shard_init(&table->shards[i]);
     }
+
+    /* Per-instance epoch stamped into every stateid (see nfs4_stateid.h).
+     * Boot time makes it differ across restarts so stateids from a previous
+     * instance are recognised as stale.  Force the high bit set so it can
+     * never collide with the special all-zero/all-ones stateids or the small
+     * "old epoch" values pynfs's makeStaleId() uses. */
+    table->epoch = (uint32_t) time(NULL) | 0x80000000u;
 } /* nfs_state_table_init */
 
 void
@@ -241,8 +249,24 @@ state_table_lookup_locked(
         *out_type = NFS4_SLOT_TYPE_FREE;
     }
 
+    /* The special stateids (all-zero anonymous, all-ones read-bypass) are not
+     * resolvable concrete state -- callers that accept them handle them before
+     * calling here, so reaching the table with one is a bad stateid.  Checked
+     * before the epoch test so an all-zero stateid is not misread as a stale
+     * (wrong-epoch) one. */
+    if (nfs4_stateid_is_special(sid)) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
     nfs4_stateid_decode(&view, sid);
 
+    /* RFC 7530 §9.1.4.2: a stateid whose epoch does not match this server
+     * instance was minted before a restart -- NFS4ERR_STALE_STATEID.  Checked
+     * before the structural fields so a "rebooted" stateid (whose other bytes
+     * are otherwise meaningless) is not misreported as merely bad. */
+    if (view.epoch != table->epoch) {
+        return NFS4ERR_STALE_STATEID;
+    }
     if (view.version != NFS4_STATEID_VERSION) {
         return NFS4ERR_BAD_STATEID;
     }
@@ -583,7 +607,6 @@ nfs_open_state_create(
     uint32_t                        share_access,
     uint32_t                        share_deny,
     struct chimera_vfs_open_handle *handle_dup,
-    uint32_t                        client_short_id,
     struct nfs_state_table         *table,
     struct stateid4                *out_stateid)
 {
@@ -623,7 +646,7 @@ nfs_open_state_create(
 
     nfs4_stateid_encode(out_stateid, state->seqid,
                         NFS4_STATEID_TYPE_OPEN, shard, slot_idx, gen,
-                        client_short_id);
+                        table->epoch);
     return state;
 } /* nfs_open_state_create */
 
@@ -677,11 +700,11 @@ nfs_client_check_share_conflict(
 
 void
 nfs_open_state_coalesce(
-    struct nfs_open_state *state,
-    uint32_t               share_access,
-    uint32_t               share_deny,
-    uint32_t               client_short_id,
-    struct stateid4       *out_stateid)
+    struct nfs_open_state  *state,
+    uint32_t                share_access,
+    uint32_t                share_deny,
+    struct nfs_state_table *table,
+    struct stateid4        *out_stateid)
 {
     state->share_access |= share_access;
     state->share_deny   |= share_deny;
@@ -690,7 +713,7 @@ nfs_open_state_coalesce(
     nfs4_stateid_encode(out_stateid, state->seqid,
                         NFS4_STATEID_TYPE_OPEN,
                         state->shard, state->slot_idx, state->generation,
-                        client_short_id);
+                        table->epoch);
 } /* nfs_open_state_coalesce */
 
 static void
@@ -782,7 +805,6 @@ nfs_lock_state_create(
     struct nfs_lock_owner          *lock_owner,
     struct nfs_open_state          *open_state,
     struct chimera_vfs_open_handle *handle_dup,
-    uint32_t                        client_short_id,
     struct nfs_state_table         *table,
     struct stateid4                *out_stateid)
 {
@@ -820,7 +842,7 @@ nfs_lock_state_create(
 
     nfs4_stateid_encode(out_stateid, state->seqid,
                         NFS4_STATEID_TYPE_LOCK, shard, slot_idx, gen,
-                        client_short_id);
+                        table->epoch);
     return state;
 } /* nfs_lock_state_create */
 

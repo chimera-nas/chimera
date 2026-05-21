@@ -30,7 +30,6 @@ chimera_nfs4_locku(
     struct nfs_lock_owner    *lock_owner;
     struct nfs4_range_lease  *rl, *prev, *match;
     uint64_t                  vfs_length;
-    uint32_t                  client_short_id;
     nfsstat4                  status;
 
     /* RFC 7530 §16.12.3: current filehandle must be set */
@@ -132,11 +131,10 @@ chimera_nfs4_locku(
     free(match);
 
     lock_state->seqid += 1;
-    client_short_id    = (uint32_t) lock_owner->client->client_id;
     nfs4_stateid_encode(&res->lock_stateid, lock_state->seqid,
                         NFS4_STATEID_TYPE_LOCK,
                         lock_state->shard, lock_state->slot_idx,
-                        lock_state->generation, client_short_id);
+                        lock_state->generation, table->epoch);
     res->status = NFS4_OK;
 
     /* RFC 7530 §9.1.7: record cached reply for the lock_owner. */

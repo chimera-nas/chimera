@@ -136,7 +136,7 @@ chimera_nfs4_open_install_state(
     if (existing) {
         nfs_open_state_coalesce(existing,
                                 args->share_access, args->share_deny,
-                                (uint32_t) client->client_id,
+                                &req->thread->shared->nfs4_state_table,
                                 out_stateid);
         chimera_vfs_release(req->thread->vfs_thread, handle);
         /* The SHARE reservation acquired on the first OPEN of this
@@ -151,7 +151,6 @@ chimera_nfs4_open_install_state(
                                           handle->fh, handle->fh_len,
                                           args->share_access, args->share_deny,
                                           handle,
-                                          (uint32_t) client->client_id,
                                           &req->thread->shared->nfs4_state_table,
                                           out_stateid);
 
