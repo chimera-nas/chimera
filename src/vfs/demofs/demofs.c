@@ -16,6 +16,8 @@
 #include <limits.h>
 #include <jansson.h>
 #include <utlist.h>
+#include <urcu.h>
+#include <urcu/urcu-memb.h>
 
 #include "common/varint.h"
 #include "common/rbtree.h"
@@ -37,14 +39,14 @@
         ((type *) ((char *) (ptr) - offsetof(type, member)))
 #endif /* ifndef container_of */
 
-#define CHIMERA_DEMOFS_INODE_LIST_SHIFT  8
-#define CHIMERA_DEMOFS_INODE_NUM_LISTS   (1 << CHIMERA_DEMOFS_INODE_LIST_SHIFT)
-#define CHIMERA_DEMOFS_INODE_LIST_MASK   (CHIMERA_DEMOFS_INODE_NUM_LISTS - 1)
+/* Inode cache: sharded rb-tree keyed by inum. */
+#define DEMOFS_INODE_CACHE_SHARDS 256
+#define DEMOFS_INODE_CACHE_MASK   (DEMOFS_INODE_CACHE_SHARDS - 1)
 
-
-#define CHIMERA_DEMOFS_INODE_BLOCK_SHIFT 16
-#define CHIMERA_DEMOFS_INODE_BLOCK       (1 << CHIMERA_DEMOFS_INODE_BLOCK_SHIFT)
-#define CHIMERA_DEMOFS_INODE_BLOCK_MASK  (CHIMERA_DEMOFS_INODE_BLOCK - 1)
+/* Max inodes a single transaction can hold locked at once.  rename needs
+ * 4 (two parents, child, replaced target); others (e.g. readdir) touch
+ * many but only 2 at a time and release as they go. */
+#define DEMOFS_TXN_MAX_INODES     4
 
 #define chimera_demofs_debug(...) chimera_debug("demofs", \
                                                 __FILE__, \
@@ -157,26 +159,78 @@ struct demofs_symlink_target {
     struct demofs_symlink_target *next;
 };
 
-struct demofs_inode {
-    uint64_t             inum;
-    uint32_t             gen;
-    uint32_t             refcnt;
-    uint64_t             size;
-    uint64_t             space_used;
-    uint32_t             mode;
-    uint32_t             nlink;
-    uint32_t             uid;
-    uint32_t             gid;
-    uint64_t             rdev;
-    uint64_t             atime_sec;
-    uint64_t             ctime_sec;
-    uint64_t             mtime_sec;
-    uint32_t             atime_nsec;
-    uint32_t             ctime_nsec;
-    uint32_t             mtime_nsec;
-    struct demofs_inode *next;
+struct demofs_txn;
+struct demofs_inode;
+struct demofs_inode_waiter;
+struct demofs_block;
 
-    pthread_mutex_t      lock;
+/* Logical lock mode for an inode held by a transaction. */
+enum demofs_inode_lock_mode {
+    DEMOFS_INODE_LOCK_READ,
+    DEMOFS_INODE_LOCK_WRITE,
+};
+
+typedef void (*demofs_inode_cb_t)(
+    struct demofs_inode *inode,
+    int                  status,
+    void                *private_data);
+
+/* Defined in the block-cache section below. */
+static void demofs_txn_pin_inode_block(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *inode,
+    int                   is_new);
+
+/*
+ * A transaction that cannot immediately acquire an inode in the desired
+ * mode parks a waiter on the inode's FIFO wait list (protected by the
+ * inode's cache shard lock).  When the conflicting holder releases, the
+ * releasing thread grants the lock and hands the waiter to the owning
+ * worker's grant queue (+doorbell) so the continuation runs back on the
+ * transaction's own thread.
+ */
+struct demofs_inode_waiter {
+    struct demofs_txn          *txn;
+    enum demofs_inode_lock_mode mode;
+    uint32_t                    gen;     /* generation the txn referenced */
+    int                         status;  /* CHIMERA_VFS_OK or ENOENT when granted */
+    demofs_inode_cb_t           cb;
+    void                       *private_data;
+    struct demofs_inode        *inode;
+    struct demofs_inode_waiter *next;
+};
+
+struct demofs_inode {
+    uint64_t                    inum;
+    uint32_t                    gen;
+    uint32_t                    refcnt;
+    uint64_t                    size;
+    uint64_t                    space_used;
+    uint32_t                    mode;
+    uint32_t                    nlink;
+    uint32_t                    uid;
+    uint32_t                    gid;
+    uint64_t                    rdev;
+    uint64_t                    atime_sec;
+    uint64_t                    ctime_sec;
+    uint64_t                    mtime_sec;
+    uint32_t                    atime_nsec;
+    uint32_t                    ctime_nsec;
+    uint32_t                    mtime_nsec;
+
+    /* Inode-cache linkage, keyed by inum.  Lock state and the wait list
+     * below are protected by the owning shard's mutex, never held across
+     * a callback or I/O. */
+    struct rb_node              node;
+    int                         readers;     /* shared-lock holders */
+    int                         writer;      /* 0/1 exclusive holder */
+    struct demofs_inode_waiter *wait_head;
+    struct demofs_inode_waiter *wait_tail;
+
+    /* This inode's 4 KiB metadata home block in the block cache; pinned
+     * while the inode is dirty in a transaction.  NULL until first claimed. */
+    struct demofs_block        *block;
 
     union {
         struct {
@@ -193,28 +247,121 @@ struct demofs_inode {
     };
 };
 
-struct demofs_inode_list {
-    uint32_t              id;
-    uint32_t              num_blocks;
-    uint32_t              max_blocks;
-    struct demofs_inode **inode;
-    struct demofs_inode  *free_inode;
-    uint64_t              num_inodes;
-    uint64_t              total_inodes;
-    pthread_mutex_t       lock;
+struct demofs_inode_shard {
+    pthread_mutex_t lock;
+    struct rb_tree  inodes;       /* keyed by inum */
 };
 
-struct demofs_txn;
-struct demofs_txn_inode_ref;
+struct demofs_inode_cache {
+    struct demofs_inode_shard shards[DEMOFS_INODE_CACHE_SHARDS];
+};
+
+/* ------------------------------------------------------------------ */
+/* Block cache                                                         */
+/* ------------------------------------------------------------------ */
+
+#define DEMOFS_BLOCK_SHIFT                   SM_BLOCK_SHIFT  /* 12 */
+#define DEMOFS_BLOCK_SIZE                    SM_BLOCK_SIZE   /* 4096 */
+#define DEMOFS_BLOCK_CACHE_SHARDS            256
+#define DEMOFS_BLOCK_CACHE_SHARD_MASK        (DEMOFS_BLOCK_CACHE_SHARDS - 1)
+#define DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD 1024
+#define DEMOFS_BLOCK_CACHE_BUCKET_MASK       (DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD - 1)
+
+enum demofs_block_state {
+    DEMOFS_BLOCK_CLEAN,    /* matches final on-disk location; evictable when unpinned */
+    DEMOFS_BLOCK_DIRTY,    /* modified, pinned by >=1 txn, not yet logged */
+    DEMOFS_BLOCK_LOGGED,   /* intent record durable; awaiting tail-push to final loc */
+};
+
+/*
+ * A cached 4 KiB on-disk block, keyed by (device_id, device_offset).  The
+ * buffer is plain heap memory; block I/O copies it through a thread-local
+ * evpl_iovec so buffers are never shared across evpl instances.  Hash-chain
+ * linkage is RCU-managed for lock-free lookup; mutation happens under the
+ * owning shard lock and frees defer through call_rcu.
+ */
+struct demofs_block {
+    uint32_t             device_id;
+    uint64_t             device_offset;        /* block-aligned; key with device_id */
+    void                *buffer;               /* DEMOFS_BLOCK_SIZE bytes */
+    int                  pin_count;            /* atomic; >0 => not reclaimable */
+    enum demofs_block_state state;
+    uint64_t             seq;                  /* update order for tail-push */
+    struct demofs_block *hash_next;            /* RCU bucket chain */
+    struct rcu_head      rcu;
+    struct demofs_block *lru_prev, *lru_next;      /* clean+unpinned LRU (Stage 3) */
+    struct demofs_block *wb_next;              /* writeback queue (Stage 3) */
+};
+
+struct demofs_block_shard {
+    pthread_mutex_t       lock;
+    struct demofs_block **buckets;     /* [DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD] */
+};
+
+struct demofs_block_cache {
+    struct demofs_block_shard shards[DEMOFS_BLOCK_CACHE_SHARDS];
+};
+
+/*
+ * On-disk inode layout, written at the front of the inode's 4 KiB block.
+ * Scalar attributes only for now; directory entries and file extents stay
+ * in memory until the b+tree block work lands.
+ */
+struct demofs_dinode {
+    uint64_t inum;
+    uint32_t gen;
+    uint32_t mode;
+    uint32_t nlink;
+    uint32_t uid;
+    uint32_t gid;
+    uint64_t rdev;
+    uint64_t size;
+    uint64_t space_used;
+    uint64_t atime_sec;
+    uint64_t mtime_sec;
+    uint64_t ctime_sec;
+    uint32_t atime_nsec;
+    uint32_t mtime_nsec;
+    uint32_t ctime_nsec;
+    uint64_t parent_inum;     /* directories only */
+    uint32_t parent_gen;
+};
+
+/*
+ * Intent-log redo record, written into the reserved intent-log region.
+ * A record is a header followed by num_blocks (block-header, 4 KiB content)
+ * pairs, padded to a 4 KiB multiple.  Full-block redo: the record carries
+ * the entire post-image of every dirty block in the transaction.
+ */
+#define DEMOFS_REDO_MAGIC 0x4F44455246534944ULL    /* "DISFREDO" */
+
+struct demofs_redo_header {
+    uint64_t magic;
+    uint64_t seq;          /* monotonically increasing record sequence */
+    uint32_t num_blocks;
+    uint32_t reclen;       /* total record length, including padding */
+};
+
+struct demofs_redo_block_header {
+    uint32_t device_id;
+    uint32_t pad;
+    uint64_t device_offset;
+};
 
 enum demofs_txn_type {
     DEMOFS_TXN_READ,
     DEMOFS_TXN_WRITE,
 };
 
-struct demofs_txn_inode_ref {
-    struct demofs_inode         *inode;
-    struct demofs_txn_inode_ref *next;
+/* A dirty block held (pinned) by a transaction until commit/log. */
+struct demofs_txn_block {
+    struct demofs_block     *block;
+    struct demofs_txn_block *next;
+};
+
+struct demofs_txn_slot {
+    struct demofs_inode *inode;
+    enum demofs_inode_lock_mode mode;
 };
 
 /* Commit completion callback.  Will be invoked exactly once per successful
@@ -227,10 +374,12 @@ typedef void (*demofs_txn_commit_cb_t)(
     void              *private_data);
 
 struct demofs_txn {
-    enum demofs_txn_type         type;
-    struct demofs_thread        *thread;
-    struct demofs_txn           *next;        /* per-thread free list link */
-    struct demofs_txn_inode_ref *refs;        /* pinned (locked) inodes */
+    enum demofs_txn_type     type;
+    struct demofs_thread    *thread;
+    struct demofs_txn       *next;         /* per-thread free list link */
+    struct demofs_txn_slot   inodes[DEMOFS_TXN_MAX_INODES];
+    int                      num_inodes;
+    struct demofs_txn_block *blocks;       /* dirty blocks pinned by this txn */
 };
 
 /*
@@ -264,6 +413,10 @@ struct demofs_iq_channel {
     struct evpl_doorbell      cq_doorbell;
     struct demofs_thread     *worker;
 
+    /* CQEs reserved for redo writes issued but not yet completed.  Owned by
+     * the intent-log thread; bounds in-flight writes to available CQ space. */
+    uint32_t                  cq_inflight;
+
     /* Lifecycle: workers append on register, set flag on unregister.
      * Intent log thread owns the slot array. */
     struct demofs_iq_channel *next_pending;
@@ -283,37 +436,52 @@ struct demofs_intent_log {
     struct demofs_iq_channel *channels[DEMOFS_IL_MAX_CHANNELS];
     pthread_mutex_t           registration_lock;
     struct demofs_iq_channel *pending_head;
+
+    /* Block queues on the intent-log thread's own evpl (one per device),
+     * used to write redo records into the reserved intent-log region. */
+    struct evpl_block_queue **queue;
+    uint64_t                  log_head;          /* next free byte in the intent-log region */
+    uint64_t                  log_seq;           /* next redo record sequence number */
 };
 
 struct demofs_shared {
-    struct demofs_device     *devices;
-    int                       num_devices;
-    struct demofs_inode_list *inode_list;
-    int                       num_inode_list;
-    struct demofs_kv_shard   *kv_shards;
-    int                       num_kv_shards;
-    int                       num_active_threads;
-    uint8_t                   root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                  root_fhlen;
-    uint64_t                  fsid;
-    struct space_map         *space_map;
-    struct demofs_intent_log  intent_log;
-    pthread_mutex_t           lock;
+    struct demofs_device      *devices;
+    int                        num_devices;
+    struct demofs_inode_cache *inode_cache;
+    struct demofs_block_cache *block_cache;
+    struct demofs_kv_shard    *kv_shards;
+    int                        num_kv_shards;
+    int                        num_active_threads;
+    uint8_t                    root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                   root_fhlen;
+    uint64_t                   fsid;
+    struct space_map          *space_map;
+    struct demofs_intent_log   intent_log;
+    pthread_mutex_t            lock;
 };
 
 struct demofs_thread {
-    struct evpl              *evpl;
-    struct demofs_shared     *shared;
-    struct evpl_block_queue **queue;
-    struct evpl_iovec         zero;
-    struct evpl_iovec         pad;
-    int                       thread_id;
-    struct slab_allocator    *allocator;
-    struct sm_thread_cache    space_cache;
-    struct demofs_txn           *txn_free_list;
-    struct demofs_txn_inode_ref *txn_ref_free_list;
-    struct demofs_iq_channel    *iq_channel;
-    int                          pending_io;
+    struct evpl                *evpl;
+    struct demofs_shared       *shared;
+    struct evpl_block_queue   **queue;
+    struct evpl_iovec           zero;
+    struct evpl_iovec           pad;
+    int                         thread_id;
+    struct slab_allocator      *allocator;
+    struct sm_thread_cache      space_cache;
+    struct demofs_txn          *txn_free_list;
+    struct demofs_inode_waiter *waiter_free_list;
+    struct demofs_iq_channel   *iq_channel;
+    int                         pending_io;
+
+    /* Cross-thread lock-grant delivery: any thread that releases an inode
+     * and grants it to a waiter belonging to this worker enqueues the
+     * granted waiter here and rings grant_doorbell, so the continuation
+     * runs back on this worker. */
+    pthread_mutex_t             grant_lock;
+    struct demofs_inode_waiter *grant_head;
+    struct demofs_inode_waiter *grant_tail;
+    struct evpl_doorbell        grant_doorbell;
 };
 
 static inline uint32_t
@@ -336,150 +504,290 @@ demofs_fh_to_inum(
     chimera_vfs_decode_fh_inum(fh, fhlen, inum, gen);
 } /* demofs_fh_to_inum */
 
-static inline struct demofs_inode *
-demofs_inode_get_inum(
-    struct demofs_shared *shared,
-    uint64_t              inum,
-    uint32_t              gen)
-{
-    uint64_t                  inum_block;
-    uint32_t                  list_id, block_id, block_index;
-    struct demofs_inode_list *inode_list;
-    struct demofs_inode      *inode;
-
-    list_id     = inum & CHIMERA_DEMOFS_INODE_LIST_MASK;
-    inum_block  = inum >> CHIMERA_DEMOFS_INODE_LIST_SHIFT;
-    block_index = inum_block & CHIMERA_DEMOFS_INODE_BLOCK_MASK;
-    block_id    = inum_block >> CHIMERA_DEMOFS_INODE_BLOCK_SHIFT;
-
-    if (unlikely(list_id >= shared->num_inode_list)) {
-        return NULL;
-    }
-
-    inode_list = &shared->inode_list[list_id];
-
-    if (unlikely(block_id >= inode_list->num_blocks)) {
-        return NULL;
-    }
-
-    inode = &inode_list->inode[block_id][block_index];
-
-    pthread_mutex_lock(&inode->lock);
-
-    if (unlikely(inode->gen != gen)) {
-        pthread_mutex_unlock(&inode->lock);
-        return NULL;
-    }
-
-    return inode;
-} /* demofs_inode_get_inum */
-
-static inline struct demofs_inode *
-demofs_inode_get_fh(
-    struct demofs_shared *shared,
-    const uint8_t        *fh,
-    int                   fhlen)
-{
-    uint64_t inum;
-    uint32_t gen;
-
-    demofs_fh_to_inum(&inum, &gen, fh, fhlen);
-
-    return demofs_inode_get_inum(shared, inum, gen);
-} /* demofs_inode_get_fh */
-
 /* ------------------------------------------------------------------ */
-/* Async inode-fetch / inode-alloc API                                 */
+/* Inode cache + logical (read/write) transaction locks                */
 /* ------------------------------------------------------------------ */
 
-typedef void (*demofs_inode_cb_t)(
-    struct demofs_inode *inode,
-    int                  status,
-    void                *private_data);
+#define DEMOFS_INODE_MODE_FOR_TXN(txn) \
+        ((txn)->type == DEMOFS_TXN_WRITE ? DEMOFS_INODE_LOCK_WRITE \
+                                         : DEMOFS_INODE_LOCK_READ)
 
-static inline struct demofs_txn_inode_ref *
-demofs_txn_ref_alloc(struct demofs_thread *thread)
+static inline struct demofs_inode_shard *
+demofs_inode_shard(
+    struct demofs_shared *shared,
+    uint64_t              inum)
 {
-    struct demofs_txn_inode_ref *r = thread->txn_ref_free_list;
+    return &shared->inode_cache->shards[inum & DEMOFS_INODE_CACHE_MASK];
+} /* demofs_inode_shard */
 
-    if (r) {
-        thread->txn_ref_free_list = r->next;
+static inline struct demofs_inode_waiter *
+demofs_waiter_alloc(struct demofs_thread *thread)
+{
+    struct demofs_inode_waiter *w = thread->waiter_free_list;
+
+    if (w) {
+        thread->waiter_free_list = w->next;
     } else {
-        r = malloc(sizeof(*r));
+        w = malloc(sizeof(*w));
     }
-    return r;
-} /* demofs_txn_ref_alloc */
+    return w;
+} /* demofs_waiter_alloc */
 
 static inline void
-demofs_txn_ref_release(
-    struct demofs_thread        *thread,
-    struct demofs_txn_inode_ref *r)
+demofs_waiter_free(
+    struct demofs_thread       *thread,
+    struct demofs_inode_waiter *w)
 {
-    r->next                   = thread->txn_ref_free_list;
-    thread->txn_ref_free_list = r;
-} /* demofs_txn_ref_release */
+    w->next                  = thread->waiter_free_list;
+    thread->waiter_free_list = w;
+} /* demofs_waiter_free */
+
+/* Record a held inode in the transaction's fixed slot array. */
+static inline void
+demofs_txn_add_slot(
+    struct demofs_txn          *txn,
+    struct demofs_inode        *inode,
+    enum demofs_inode_lock_mode mode)
+{
+    chimera_demofs_abort_if(txn->num_inodes >= DEMOFS_TXN_MAX_INODES,
+                            "demofs txn inode slots exhausted");
+    txn->inodes[txn->num_inodes].inode = inode;
+    txn->inodes[txn->num_inodes].mode  = mode;
+    txn->num_inodes++;
+} /* demofs_txn_add_slot */
+
+/* Caller must hold the inode's shard lock. */
+static inline int
+demofs_inode_lock_compatible(
+    struct demofs_inode        *inode,
+    enum demofs_inode_lock_mode mode)
+{
+    if (mode == DEMOFS_INODE_LOCK_WRITE) {
+        return inode->writer == 0 && inode->readers == 0;
+    }
+    return inode->writer == 0;
+} /* demofs_inode_lock_compatible */
+
+/* Caller must hold the inode's shard lock. */
+static inline void
+demofs_inode_lock_grant(
+    struct demofs_inode        *inode,
+    enum demofs_inode_lock_mode mode)
+{
+    if (mode == DEMOFS_INODE_LOCK_WRITE) {
+        inode->writer = 1;
+    } else {
+        inode->readers++;
+    }
+} /* demofs_inode_lock_grant */
 
 /*
- * Pin a locked inode into the transaction's ref list.  The inode must be
- * locked by the caller; ownership of the lock passes to the txn, which
- * drops it during commit or abort via demofs_txn_unlock_all().
+ * Hand a granted (or stale-failed) waiter to its owning worker so its
+ * continuation runs back on the transaction's own thread.
  */
-static inline void
-demofs_txn_pin_inode(
-    struct demofs_txn   *txn,
-    struct demofs_inode *inode)
+static void
+demofs_dispatch_grant(struct demofs_inode_waiter *w)
 {
-    struct demofs_txn_inode_ref *r = demofs_txn_ref_alloc(txn->thread);
+    struct demofs_thread *worker = w->txn->thread;
 
-    r->inode  = inode;
-    r->next   = txn->refs;
-    txn->refs = r;
-} /* demofs_txn_pin_inode */
+    pthread_mutex_lock(&worker->grant_lock);
+    w->next = NULL;
+    if (worker->grant_tail) {
+        worker->grant_tail->next = w;
+    } else {
+        worker->grant_head = w;
+    }
+    worker->grant_tail = w;
+    pthread_mutex_unlock(&worker->grant_lock);
+
+    evpl_ring_doorbell(&worker->grant_doorbell);
+} /* demofs_dispatch_grant */
 
 /*
- * Release a single pinned inode early (e.g. readdir-style iteration that
- * doesn't want every visited inode held until commit).  No-op if the
- * inode isn't in the txn's ref list.
+ * Drop one held inode lock and grant the lock to compatible FIFO waiters.
+ * Safe to call from any thread (worker for read/abort, intent-log thread
+ * for write commit); granted waiters are dispatched to their own workers.
+ */
+static void
+demofs_inode_release_one(
+    struct demofs_thread       *thread,
+    struct demofs_inode        *inode,
+    enum demofs_inode_lock_mode mode)
+{
+    struct demofs_inode_shard  *shard   = demofs_inode_shard(thread->shared, inode->inum);
+    struct demofs_inode_waiter *granted = NULL;
+    struct demofs_inode_waiter *w;
+
+    pthread_mutex_lock(&shard->lock);
+
+    if (mode == DEMOFS_INODE_LOCK_WRITE) {
+        inode->writer = 0;
+    } else {
+        inode->readers--;
+    }
+
+    while (inode->wait_head) {
+        w = inode->wait_head;
+
+        if (w->gen != inode->gen) {
+            /* The inode this waiter referenced was freed/replaced.  Fail
+             * it with ENOENT rather than handing back a stale inode. */
+            inode->wait_head = w->next;
+            if (!inode->wait_head) {
+                inode->wait_tail = NULL;
+            }
+            w->status = CHIMERA_VFS_ENOENT;
+            w->next   = granted;
+            granted   = w;
+            continue;
+        }
+
+        if (!demofs_inode_lock_compatible(inode, w->mode)) {
+            break;
+        }
+
+        inode->wait_head = w->next;
+        if (!inode->wait_head) {
+            inode->wait_tail = NULL;
+        }
+        demofs_inode_lock_grant(inode, w->mode);
+        w->status = CHIMERA_VFS_OK;
+        w->next   = granted;
+        granted   = w;
+
+        if (w->mode == DEMOFS_INODE_LOCK_WRITE) {
+            break;     /* exclusive: stop granting */
+        }
+    }
+
+    pthread_mutex_unlock(&shard->lock);
+
+    while (granted) {
+        w       = granted;
+        granted = w->next;
+        demofs_dispatch_grant(w);
+    }
+} /* demofs_inode_release_one */
+
+/*
+ * Release a single held inode early (readdir-style iteration that walks
+ * many children but only needs to hold the current one).  No-op if the
+ * inode isn't held by this txn.
  */
 static inline void
 demofs_txn_unlock_inode(
     struct demofs_txn   *txn,
     struct demofs_inode *inode)
 {
-    struct demofs_txn_inode_ref **pp = &txn->refs;
-    struct demofs_txn_inode_ref  *r;
+    int i;
 
-    while (*pp) {
-        if ((*pp)->inode == inode) {
-            r   = *pp;
-            *pp = r->next;
-            demofs_txn_ref_release(txn->thread, r);
+    for (i = 0; i < txn->num_inodes; i++) {
+        if (txn->inodes[i].inode == inode) {
+            enum demofs_inode_lock_mode mode = txn->inodes[i].mode;
+
+            txn->inodes[i] = txn->inodes[txn->num_inodes - 1];
+            txn->num_inodes--;
+            demofs_inode_release_one(txn->thread, inode, mode);
             return;
         }
-        pp = &(*pp)->next;
     }
 } /* demofs_txn_unlock_inode */
 
 /*
- * Release every inode pinned by this txn.  Called by the worker thread for
- * read-txn commits and aborts, and by the IL-side completion handler (on
- * the worker thread, via CQE doorbell) for write-txn commits.
+ * Release every inode held by this txn.  Called by the worker thread for
+ * read-txn commits and aborts, and by the intent-log thread for write-txn
+ * commits (before it pushes the CQE).
  */
 static inline void
 demofs_txn_unlock_all(struct demofs_txn *txn)
 {
-    struct demofs_thread        *thread = txn->thread;
-    struct demofs_txn_inode_ref *r      = txn->refs;
-    struct demofs_txn_inode_ref *n;
+    int i;
 
-    txn->refs = NULL;
-    while (r) {
-        n = r->next;
-        pthread_mutex_unlock(&r->inode->lock);
-        demofs_txn_ref_release(thread, r);
-        r = n;
+    for (i = 0; i < txn->num_inodes; i++) {
+        demofs_inode_release_one(txn->thread, txn->inodes[i].inode,
+                                 txn->inodes[i].mode);
     }
+    txn->num_inodes = 0;
 } /* demofs_txn_unlock_all */
+
+/*
+ * Acquire an inode in the given mode for a transaction.
+ *   1. already held by this txn -> reuse
+ *   2. in the cache -> grant if compatible, else park a waiter
+ *   3. not cached -> ENOENT (no disk fetch yet; everything created so far
+ *      is resident since we never drop or flush)
+ * The callback fires immediately on the calling thread for cases 1/2-grant
+ * and 3, or later (via the grant doorbell, on this txn's worker) once a
+ * conflicting holder releases.
+ */
+static void
+demofs_inode_acquire(
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    uint64_t                    inum,
+    uint32_t                    gen,
+    enum demofs_inode_lock_mode mode,
+    demofs_inode_cb_t           cb,
+    void                       *private_data)
+{
+    struct demofs_inode_shard  *shard;
+    struct demofs_inode        *inode;
+    struct demofs_inode_waiter *w;
+    int                         i;
+
+    for (i = 0; i < txn->num_inodes; i++) {
+        inode = txn->inodes[i].inode;
+        if (inode->inum == inum) {
+            if (unlikely(inode->gen != gen)) {
+                cb(NULL, CHIMERA_VFS_ENOENT, private_data);
+            } else {
+                cb(inode, CHIMERA_VFS_OK, private_data);
+            }
+            return;
+        }
+    }
+
+    shard = demofs_inode_shard(thread->shared, inum);
+    pthread_mutex_lock(&shard->lock);
+
+    rb_tree_query_exact(&shard->inodes, inum, inum, inode);
+
+    if (unlikely(!inode || inode->gen != gen)) {
+        pthread_mutex_unlock(&shard->lock);
+        cb(NULL, CHIMERA_VFS_ENOENT, private_data);
+        return;
+    }
+
+    if (demofs_inode_lock_compatible(inode, mode)) {
+        demofs_inode_lock_grant(inode, mode);
+        pthread_mutex_unlock(&shard->lock);
+        demofs_txn_add_slot(txn, inode, mode);
+        if (mode == DEMOFS_INODE_LOCK_WRITE) {
+            demofs_txn_pin_inode_block(thread, txn, inode, 0);
+        }
+        cb(inode, CHIMERA_VFS_OK, private_data);
+        return;
+    }
+
+    w               = demofs_waiter_alloc(thread);
+    w->txn          = txn;
+    w->mode         = mode;
+    w->gen          = gen;
+    w->cb           = cb;
+    w->private_data = private_data;
+    w->inode        = inode;
+    w->status       = CHIMERA_VFS_OK;
+    w->next         = NULL;
+
+    if (inode->wait_tail) {
+        inode->wait_tail->next = w;
+    } else {
+        inode->wait_head = w;
+    }
+    inode->wait_tail = w;
+
+    pthread_mutex_unlock(&shard->lock);
+} /* demofs_inode_acquire */
 
 static inline void
 demofs_inode_get_inum_async(
@@ -490,15 +798,8 @@ demofs_inode_get_inum_async(
     demofs_inode_cb_t     cb,
     void                 *private_data)
 {
-    struct demofs_inode *inode;
-
-    inode = demofs_inode_get_inum(thread->shared, inum, gen);
-    if (inode) {
-        demofs_txn_pin_inode(txn, inode);
-        cb(inode, CHIMERA_VFS_OK, private_data);
-    } else {
-        cb(NULL, CHIMERA_VFS_ENOENT, private_data);
-    }
+    demofs_inode_acquire(thread, txn, inum, gen,
+                         DEMOFS_INODE_MODE_FOR_TXN(txn), cb, private_data);
 } /* demofs_inode_get_inum_async */
 
 static inline void
@@ -516,6 +817,306 @@ demofs_inode_get_fh_async(
     demofs_fh_to_inum(&inum, &gen, fh, fhlen);
     demofs_inode_get_inum_async(thread, txn, inum, gen, cb, private_data);
 } /* demofs_inode_get_fh_async */
+
+/*
+ * Synchronous read-lock acquire, used by the mount-time path walk which
+ * runs before concurrent load.  Records the read lock in the txn so it is
+ * released centrally at commit.  Asserts there is no conflicting writer
+ * (cannot happen at mount); returns NULL if the inode isn't resident or
+ * the generation is stale.
+ */
+static struct demofs_inode *
+demofs_inode_acquire_sync_read(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    uint64_t              inum,
+    uint32_t              gen)
+{
+    struct demofs_inode_shard *shard;
+    struct demofs_inode       *inode;
+    int                        i;
+
+    for (i = 0; i < txn->num_inodes; i++) {
+        if (txn->inodes[i].inode->inum == inum) {
+            return txn->inodes[i].inode->gen == gen ? txn->inodes[i].inode : NULL;
+        }
+    }
+
+    shard = demofs_inode_shard(thread->shared, inum);
+    pthread_mutex_lock(&shard->lock);
+    rb_tree_query_exact(&shard->inodes, inum, inum, inode);
+    if (!inode || inode->gen != gen) {
+        pthread_mutex_unlock(&shard->lock);
+        return NULL;
+    }
+    chimera_demofs_abort_if(inode->writer,
+                            "mount path walk: inode %lu write-locked", inum);
+    inode->readers++;
+    pthread_mutex_unlock(&shard->lock);
+
+    demofs_txn_add_slot(txn, inode, DEMOFS_INODE_LOCK_READ);
+    return inode;
+} /* demofs_inode_acquire_sync_read */
+
+/* ------------------------------------------------------------------ */
+/* Block cache                                                         */
+/* ------------------------------------------------------------------ */
+
+static inline uint64_t
+demofs_block_hash(
+    uint32_t device_id,
+    uint64_t device_offset)
+{
+    uint64_t h = device_offset >> DEMOFS_BLOCK_SHIFT;
+
+    h ^= (uint64_t) device_id * 0x9e3779b97f4a7c15ULL;
+    h ^= h >> 29;
+    h *= 0xbf58476d1ce4e5b9ULL;
+    h ^= h >> 32;
+    return h;
+} /* demofs_block_hash */
+
+static void
+demofs_block_cache_create(struct demofs_shared *shared)
+{
+    struct demofs_block_cache *cache = calloc(1, sizeof(*cache));
+    int                        i;
+
+    for (i = 0; i < DEMOFS_BLOCK_CACHE_SHARDS; i++) {
+        pthread_mutex_init(&cache->shards[i].lock, NULL);
+        cache->shards[i].buckets = calloc(DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD,
+                                          sizeof(struct demofs_block *));
+    }
+    shared->block_cache = cache;
+} /* demofs_block_cache_create */
+
+static void
+demofs_block_cache_destroy(struct demofs_shared *shared)
+{
+    struct demofs_block_cache *cache = shared->block_cache;
+    int                        i;
+    uint32_t                   b;
+
+    if (!cache) {
+        return;
+    }
+
+    for (i = 0; i < DEMOFS_BLOCK_CACHE_SHARDS; i++) {
+        struct demofs_block_shard *shard = &cache->shards[i];
+
+        for (b = 0; b < DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD; b++) {
+            struct demofs_block *blk = shard->buckets[b];
+
+            while (blk) {
+                struct demofs_block *next = blk->hash_next;
+                free(blk->buffer);
+                free(blk);
+                blk = next;
+            }
+        }
+        free(shard->buckets);
+        pthread_mutex_destroy(&shard->lock);
+    }
+    free(cache);
+    shared->block_cache = NULL;
+} /* demofs_block_cache_destroy */
+
+/*
+ * Find a block already resident in the cache.  Lock-free RCU read; the
+ * caller must be inside an rcu read-side critical section (or hold no
+ * concurrent eviction risk, as in Stage 1/2 where blocks are never freed).
+ */
+static inline struct demofs_block *
+demofs_block_lookup_locked(
+    struct demofs_block_shard *shard,
+    uint32_t                   bucket,
+    uint32_t                   device_id,
+    uint64_t                   device_offset)
+{
+    struct demofs_block *blk;
+
+    for (blk = shard->buckets[bucket]; blk; blk = blk->hash_next) {
+        if (blk->device_id == device_id && blk->device_offset == device_offset) {
+            return blk;
+        }
+    }
+    return NULL;
+} /* demofs_block_lookup_locked */
+
+/*
+ * Find or create the cache entry for (device_id, device_offset) and pin it.
+ * If is_new is set the block was just allocated from the space map, so its
+ * buffer is zeroed and it starts DIRTY; otherwise an existing block is
+ * returned (created zeroed on a miss for now, since the read-back path is
+ * not implemented yet).
+ */
+static struct demofs_block *
+demofs_block_claim(
+    struct demofs_thread *thread,
+    uint32_t              device_id,
+    uint64_t              device_offset,
+    int                   is_new)
+{
+    struct demofs_block_cache *cache  = thread->shared->block_cache;
+    uint64_t                   hash   = demofs_block_hash(device_id, device_offset);
+    uint32_t                   sidx   = hash & DEMOFS_BLOCK_CACHE_SHARD_MASK;
+    uint32_t                   bucket = (hash >> 8) & DEMOFS_BLOCK_CACHE_BUCKET_MASK;
+    struct demofs_block_shard *shard  = &cache->shards[sidx];
+    struct demofs_block       *blk;
+
+    (void) is_new;
+
+    pthread_mutex_lock(&shard->lock);
+
+    blk = demofs_block_lookup_locked(shard, bucket, device_id, device_offset);
+    if (!blk) {
+        blk                = calloc(1, sizeof(*blk));
+        blk->device_id     = device_id;
+        blk->device_offset = device_offset;
+        blk->buffer        = calloc(1, DEMOFS_BLOCK_SIZE);
+        blk->state         = DEMOFS_BLOCK_CLEAN;
+        blk->pin_count     = 0;
+        /* Publish into the bucket chain (RCU readers will use hash_next). */
+        blk->hash_next = shard->buckets[bucket];
+        rcu_assign_pointer(shard->buckets[bucket], blk);
+    }
+
+    blk->pin_count++;
+    pthread_mutex_unlock(&shard->lock);
+
+    return blk;
+} /* demofs_block_claim */
+
+/*
+ * txn_block link nodes are allocated on the worker (when a block is pinned)
+ * but freed on the intent-log thread (when the txn's blocks are unpinned),
+ * so they use plain malloc/free rather than a per-thread free list.
+ */
+static inline void
+demofs_txn_add_block(
+    struct demofs_txn   *txn,
+    struct demofs_block *block)
+{
+    struct demofs_txn_block *tb = malloc(sizeof(*tb));
+
+    tb->block   = block;
+    tb->next    = txn->blocks;
+    txn->blocks = tb;
+} /* demofs_txn_add_block */
+
+/*
+ * Ensure this (write-locked) inode's home block is resident and pinned, and
+ * attached to the transaction.  Idempotent per inode: the inode caches its
+ * block pointer and we only claim/attach once.
+ */
+static void
+demofs_txn_pin_inode_block(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *inode,
+    int                   is_new)
+{
+    uint32_t device_id;
+    uint64_t device_offset;
+
+    if (inode->block) {
+        return;     /* already pinned by this txn */
+    }
+
+    device_offset = sm_inum_to_device_offset(thread->shared->space_map,
+                                             inode->inum, &device_id);
+
+    inode->block = demofs_block_claim(thread, device_id, device_offset, is_new);
+    demofs_txn_add_block(txn, inode->block);
+} /* demofs_txn_pin_inode_block */
+
+/* Serialize an inode's durable attributes into the front of its block. */
+static void
+demofs_inode_flush(struct demofs_inode *inode)
+{
+    struct demofs_dinode *di;
+
+    if (!inode->block) {
+        return;
+    }
+
+    di = inode->block->buffer;
+
+    di->inum       = inode->inum;
+    di->gen        = inode->gen;
+    di->mode       = inode->mode;
+    di->nlink      = inode->nlink;
+    di->uid        = inode->uid;
+    di->gid        = inode->gid;
+    di->rdev       = inode->rdev;
+    di->size       = inode->size;
+    di->space_used = inode->space_used;
+    di->atime_sec  = inode->atime_sec;
+    di->mtime_sec  = inode->mtime_sec;
+    di->ctime_sec  = inode->ctime_sec;
+    di->atime_nsec = inode->atime_nsec;
+    di->mtime_nsec = inode->mtime_nsec;
+    di->ctime_nsec = inode->ctime_nsec;
+    if (S_ISDIR(inode->mode)) {
+        di->parent_inum = inode->dir.parent_inum;
+        di->parent_gen  = inode->dir.parent_gen;
+    }
+
+    inode->block->state = DEMOFS_BLOCK_DIRTY;
+} /* demofs_inode_flush */
+
+/*
+ * At commit, serialize every write-locked inode into its block buffer.
+ * Runs on the worker thread (it owns the live inodes under write lock).
+ */
+static void
+demofs_txn_flush_inodes(struct demofs_txn *txn)
+{
+    int i;
+
+    for (i = 0; i < txn->num_inodes; i++) {
+        if (txn->inodes[i].mode == DEMOFS_INODE_LOCK_WRITE) {
+            demofs_inode_flush(txn->inodes[i].inode);
+        }
+    }
+} /* demofs_txn_flush_inodes */
+
+/*
+ * Unpin all blocks held by this txn, transitioning them to new_state.  Also
+ * clears each write-locked inode's cached block pointer (it is only valid
+ * while the txn holds the block pinned; a later txn re-claims it).  Used at
+ * commit (intent-log thread) and abort (worker).  Must run while the txn's
+ * inode slots are still populated (before demofs_txn_unlock_all).
+ */
+static void
+demofs_txn_unpin_blocks(
+    struct demofs_txn      *txn,
+    enum demofs_block_state new_state)
+{
+    struct demofs_thread    *thread = txn->thread;
+    struct demofs_txn_block *tb     = txn->blocks;
+    struct demofs_txn_block *n;
+    int                      i;
+
+    for (i = 0; i < txn->num_inodes; i++) {
+        if (txn->inodes[i].mode == DEMOFS_INODE_LOCK_WRITE) {
+            txn->inodes[i].inode->block = NULL;
+        }
+    }
+
+    (void) thread;
+
+    txn->blocks = NULL;
+    while (tb) {
+        struct demofs_block *blk = tb->block;
+
+        n          = tb->next;
+        blk->state = new_state;
+        __atomic_fetch_sub(&blk->pin_count, 1, __ATOMIC_RELAXED);
+        free(tb);
+        tb = n;
+    }
+} /* demofs_txn_unpin_blocks */
 
 static inline struct demofs_extent *
 demofs_extent_alloc(struct demofs_thread *thread)
@@ -577,83 +1178,40 @@ demofs_symlink_target_free(
 } /* demofs_symlink_target_free */
 
 
+/*
+ * Allocate a bare inode struct for a freshly-minted inum.  The 4 KiB
+ * metadata block on storage has already been carved out of the space map;
+ * for now we leak that block and only use its address to derive the inum.
+ */
 static inline struct demofs_inode *
-demofs_inode_alloc(
-    struct demofs_thread *thread,
-    uint32_t              list_id)
+demofs_inode_struct_new(uint64_t inum)
 {
-    struct demofs_shared     *shared = thread->shared;
-    struct demofs_inode_list *inode_list;
-    struct demofs_inode      *inodes, *inode, *last;
-    uint32_t                  bi, i, base_id;
+    struct demofs_inode *inode = calloc(1, sizeof(*inode));
 
-    inode_list = &shared->inode_list[list_id];
-
-    pthread_mutex_lock(&inode_list->lock);
-
-    inode = inode_list->free_inode;
-
-    if (!inode) {
-
-        bi = inode_list->num_blocks++;
-
-        chimera_demofs_abort_if(bi >= inode_list->max_blocks, "max inode blocks exceeded");
-
-        inodes = slab_allocator_alloc_perm(thread->allocator, CHIMERA_DEMOFS_INODE_BLOCK * sizeof(*inodes));
-
-        base_id = bi << CHIMERA_DEMOFS_INODE_BLOCK_SHIFT;
-
-        if (unlikely(!inode_list->inode)) {
-            inode_list->inode = slab_allocator_alloc_perm(thread->allocator,
-                                                          inode_list->max_blocks *
-                                                          sizeof(*inode_list->inode));
-        }
-
-        inode_list->inode[bi] = inodes;
-
-        last = NULL;
-
-        inode_list->total_inodes += CHIMERA_DEMOFS_INODE_BLOCK;
-
-        for (i = 0; i < CHIMERA_DEMOFS_INODE_BLOCK; i++) {
-            inode       = &inodes[i];
-            inode->inum = (base_id + i) << 8 | list_id;
-            pthread_mutex_init(&inode->lock, NULL);
-
-            if (inode->inum) {
-                /* Toss inode 0, we want non-zero inums */
-                inode->next = last;
-                last        = inode;
-            }
-        }
-        inode_list->free_inode = last;
-
-        inode = inode_list->free_inode;
-    }
-
-    LL_DELETE(inode_list->free_inode, inode);
-
-    inode_list->num_inodes++;
-
-    pthread_mutex_unlock(&inode_list->lock);
-
-    inode->gen++;
+    inode->inum   = inum;
+    inode->gen    = 1;
     inode->refcnt = 1;
-    inode->mode   = 0;
-
+    /* readers/writer/wait_head/wait_tail zeroed by calloc */
     return inode;
+} /* demofs_inode_struct_new */
 
-} /* demofs_inode_alloc */
-
-static inline struct demofs_inode *
-demofs_inode_alloc_thread(struct demofs_thread *thread)
+static inline void
+demofs_inode_cache_insert(
+    struct demofs_shared *shared,
+    struct demofs_inode  *inode)
 {
-    uint32_t list_id = thread->thread_id &
-        CHIMERA_DEMOFS_INODE_LIST_MASK;
+    struct demofs_inode_shard *shard = demofs_inode_shard(shared, inode->inum);
 
-    return demofs_inode_alloc(thread, list_id);
-} /* demofs_inode_alloc */
+    pthread_mutex_lock(&shard->lock);
+    rb_tree_insert(&shard->inodes, inum, inode);
+    pthread_mutex_unlock(&shard->lock);
+} /* demofs_inode_cache_insert */
 
+/*
+ * Allocate a new inode: grab a 4 KiB metadata block from the space map to
+ * mint the inum, create the in-memory inode, publish it write-locked into
+ * the cache, and record it in the transaction.
+ */
 static inline void
 demofs_inode_alloc_async(
     struct demofs_thread *thread,
@@ -661,12 +1219,32 @@ demofs_inode_alloc_async(
     demofs_inode_cb_t     cb,
     void                 *private_data)
 {
-    struct demofs_inode *inode;
+    struct demofs_shared *shared = thread->shared;
+    struct demofs_inode  *inode;
+    uint32_t              device_id;
+    uint64_t              device_offset, inum;
+    int                   rc;
 
-    (void) txn;
+    rc = space_map_alloc(shared->space_map, &thread->space_cache,
+                         SM_BLOCK_SIZE, &device_id, &device_offset);
+    if (unlikely(rc != 0)) {
+        cb(NULL, CHIMERA_VFS_ENOSPC, private_data);
+        return;
+    }
 
-    inode = demofs_inode_alloc_thread(thread);
-    cb(inode, inode ? CHIMERA_VFS_OK : CHIMERA_VFS_ENOSPC, private_data);
+    inum  = sm_inum_from_device_offset(shared->space_map, device_id, device_offset);
+    inode = demofs_inode_struct_new(inum);
+
+    /* New dirty inode: write-locked by this (write) txn from birth. */
+    inode->writer = 1;
+
+    demofs_inode_cache_insert(shared, inode);
+    demofs_txn_add_slot(txn, inode, DEMOFS_INODE_LOCK_WRITE);
+
+    /* Claim and pin the inode's freshly-allocated home block. */
+    demofs_txn_pin_inode_block(thread, txn, inode, 1);
+
+    cb(inode, CHIMERA_VFS_OK, private_data);
 } /* demofs_inode_alloc_async */
 
 static void
@@ -682,34 +1260,31 @@ demofs_dirent_release(
     }
 } /* demofs_dirent_release */
 
+/*
+ * Tear down an inode's contents when its last link/reference is dropped.
+ * We bump the generation so stale file handles return ESTALE, but we do
+ * NOT remove it from the cache or free the struct yet (no eviction), and
+ * we leak its 4 KiB metadata block.  The caller still holds the inode's
+ * write lock via the transaction; the lock is released at commit.
+ */
 static inline void
 demofs_inode_free(
     struct demofs_thread *thread,
     struct demofs_inode  *inode)
 {
-    struct demofs_shared     *shared = thread->shared;
-    struct demofs_inode_list *inode_list;
-    uint32_t                  list_id = thread->thread_id &
-        CHIMERA_DEMOFS_INODE_LIST_MASK;
-
-    inode_list = &shared->inode_list[list_id];
-
     if (S_ISREG(inode->mode)) {
         rb_tree_destroy(&inode->file.extents, demofs_extent_release, thread);
+        rb_tree_init(&inode->file.extents);
     } else if (S_ISDIR(inode->mode)) {
         rb_tree_destroy(&inode->dir.dirents, demofs_dirent_release, thread);
+        rb_tree_init(&inode->dir.dirents);
     } else if (S_ISLNK(inode->mode)) {
         demofs_symlink_target_free(thread, inode->symlink.target);
         inode->symlink.target = NULL;
     }
 
-    /* Increment generation so stale file handles return ESTALE */
     inode->gen++;
-
-    pthread_mutex_lock(&inode_list->lock);
-    LL_PREPEND(inode_list->free_inode, inode);
-    inode_list->num_inodes--;
-    pthread_mutex_unlock(&inode_list->lock);
+    inode->refcnt = 0;
 } /* demofs_inode_free */
 
 static inline struct demofs_dirent *
@@ -839,10 +1414,11 @@ demofs_txn_begin(
         txn = malloc(sizeof(*txn));
     }
 
-    txn->type   = type;
-    txn->thread = thread;
-    txn->next   = NULL;
-    txn->refs   = NULL;
+    txn->type       = type;
+    txn->thread     = thread;
+    txn->next       = NULL;
+    txn->num_inodes = 0;
+    txn->blocks     = NULL;
     return txn;
 } /* demofs_txn_begin */
 
@@ -859,7 +1435,9 @@ static inline void
 demofs_txn_abort(struct demofs_txn *txn)
 {
     /* Nothing to undo today; future intent records and deferred frees
-     * get discarded here. */
+     * get discarded here.  Drop any blocks the aborted txn pinned (their
+     * contents are discarded) and release the inode locks. */
+    demofs_txn_unpin_blocks(txn, DEMOFS_BLOCK_CLEAN);
     demofs_txn_unlock_all(txn);
     demofs_txn_release(txn);
 } /* demofs_txn_abort */
@@ -918,12 +1496,128 @@ demofs_op_ok(
 /* Intent log: SPSC ring helpers + doorbell callbacks + thread         */
 /* ------------------------------------------------------------------ */
 
+/* Completion context for an in-flight redo-record write. */
+struct demofs_redo_ctx {
+    struct demofs_intent_log *il;
+    struct demofs_iq_channel *ch;
+    struct demofs_iq_entry    entry;
+    struct evpl_iovec         iov;
+};
+
+/*
+ * Runs on the intent-log thread when a redo record has been written
+ * durably.  The transaction's changes are now recoverable, so drop the
+ * block pins (-> LOGGED, awaiting tail-push) and the inode locks, then push
+ * the completion onto the worker's CQ.
+ */
+static void
+demofs_redo_write_cb(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct demofs_redo_ctx   *ctx = private_data;
+    struct demofs_iq_channel *ch  = ctx->ch;
+    struct demofs_intent_log *il  = ctx->il;
+    uint32_t                  cq_tail;
+
+    (void) evpl;
+
+    demofs_txn_unpin_blocks(ctx->entry.txn, DEMOFS_BLOCK_LOGGED);
+    demofs_txn_unlock_all(ctx->entry.txn);
+
+    ctx->entry.status = status;
+
+    cq_tail                                       = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
+    ch->cq.entries[cq_tail & DEMOFS_IQ_RING_MASK] = ctx->entry;
+    __atomic_store_n(&ch->cq.tail, cq_tail + 1, __ATOMIC_RELEASE);
+
+    ch->cq_inflight--;
+
+    evpl_iovec_release(il->evpl, &ctx->iov);
+    free(ctx);
+
+    evpl_ring_doorbell(&ch->cq_doorbell);
+} /* demofs_redo_write_cb */
+
+/*
+ * Build a full-block redo record for one transaction and issue a durable
+ * write into the reserved intent-log region.  Runs on the intent-log thread.
+ */
+static void
+demofs_il_write_redo(
+    struct demofs_intent_log *il,
+    struct demofs_iq_channel *ch,
+    struct demofs_iq_entry   *entry)
+{
+    struct demofs_txn               *txn = entry->txn;
+    struct demofs_txn_block         *tb;
+    struct demofs_redo_ctx          *ctx;
+    struct demofs_redo_header       *hdr;
+    struct demofs_redo_block_header *bh;
+    uint32_t                         nblocks = 0;
+    uint64_t                         reclen, offset;
+    char                            *p;
+    int                              niov;
+
+    for (tb = txn->blocks; tb; tb = tb->next) {
+        nblocks++;
+    }
+
+    reclen = sizeof(struct demofs_redo_header) +
+        (uint64_t) nblocks * (sizeof(struct demofs_redo_block_header) + DEMOFS_BLOCK_SIZE);
+    reclen = (reclen + DEMOFS_BLOCK_SIZE - 1) & ~((uint64_t) DEMOFS_BLOCK_SIZE - 1);
+
+    /* Circular region; no tail/checkpoint yet, so just wrap and overwrite. */
+    if (il->log_head + reclen > SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE) {
+        il->log_head = SM_INTENT_LOG_OFFSET;
+    }
+    offset        = il->log_head;
+    il->log_head += reclen;
+
+    ctx        = malloc(sizeof(*ctx));
+    ctx->il    = il;
+    ctx->ch    = ch;
+    ctx->entry = *entry;
+
+    niov = evpl_iovec_alloc(il->evpl, reclen, DEMOFS_BLOCK_SIZE, 1, 0, &ctx->iov);
+    chimera_demofs_abort_if(niov != 1, "redo record did not fit in one iovec (%d)", niov);
+
+    p               = ctx->iov.data;
+    hdr             = (struct demofs_redo_header *) p;
+    hdr->magic      = DEMOFS_REDO_MAGIC;
+    hdr->seq        = il->log_seq++;
+    hdr->num_blocks = nblocks;
+    hdr->reclen     = (uint32_t) reclen;
+    p              += sizeof(*hdr);
+
+    for (tb = txn->blocks; tb; tb = tb->next) {
+        struct demofs_block *blk = tb->block;
+
+        bh                = (struct demofs_redo_block_header *) p;
+        bh->device_id     = blk->device_id;
+        bh->pad           = 0;
+        bh->device_offset = blk->device_offset;
+        p                += sizeof(*bh);
+
+        memcpy(p, blk->buffer, DEMOFS_BLOCK_SIZE);
+        p += DEMOFS_BLOCK_SIZE;
+    }
+
+    ch->cq_inflight++;
+
+    evpl_block_write(il->evpl, il->queue[SM_INTENT_LOG_DEVICE],
+                     &ctx->iov, 1, offset, 1 /* sync */,
+                     demofs_redo_write_cb, ctx);
+} /* demofs_il_write_redo */
+
 static void
 demofs_iq_process_channel(struct demofs_iq_channel *ch)
 {
-    uint32_t sq_head   = __atomic_load_n(&ch->sq.head, __ATOMIC_RELAXED);
-    uint32_t sq_tail   = __atomic_load_n(&ch->sq.tail, __ATOMIC_ACQUIRE);
-    int      processed = 0;
+    struct demofs_intent_log *il      = &ch->worker->shared->intent_log;
+    uint32_t                  sq_head = __atomic_load_n(&ch->sq.head, __ATOMIC_RELAXED);
+    uint32_t                  sq_tail = __atomic_load_n(&ch->sq.tail, __ATOMIC_ACQUIRE);
+    int                       issued  = 0;
 
     while (sq_head != sq_tail) {
         struct demofs_iq_entry entry;
@@ -931,8 +1625,11 @@ demofs_iq_process_channel(struct demofs_iq_channel *ch)
 
         cq_tail = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
         cq_head = __atomic_load_n(&ch->cq.head, __ATOMIC_ACQUIRE);
-        if (cq_tail - cq_head >= DEMOFS_IQ_RING_SIZE) {
-            /* CQ full -- defer until worker drains + pings. */
+
+        /* Reserve a CQ slot per in-flight write so completions can't
+         * overflow the CQ.  Defer if no room; the worker's CQ drain pings
+         * us to resume. */
+        if ((cq_tail - cq_head) + ch->cq_inflight >= DEMOFS_IQ_RING_SIZE) {
             break;
         }
 
@@ -940,15 +1637,14 @@ demofs_iq_process_channel(struct demofs_iq_channel *ch)
         sq_head++;
         entry.status = 0;
 
-        ch->cq.entries[cq_tail & DEMOFS_IQ_RING_MASK] = entry;
-        __atomic_store_n(&ch->cq.tail, cq_tail + 1, __ATOMIC_RELEASE);
-
-        processed++;
+        /* Issue a durable redo write; the completion drops pins/locks and
+         * pushes the CQE (see demofs_redo_write_cb). */
+        demofs_il_write_redo(il, ch, &entry);
+        issued++;
     }
 
-    if (processed > 0) {
+    if (issued > 0) {
         __atomic_store_n(&ch->sq.head, sq_head, __ATOMIC_RELEASE);
-        evpl_ring_doorbell(&ch->cq_doorbell);
     }
 } /* demofs_iq_process_channel */
 
@@ -1030,8 +1726,8 @@ demofs_iq_cq_doorbell_cb(
         head++;
         drained++;
 
-        /* Inode pins were released by the worker before SQ enqueue (see
-         * demofs_txn_commit). */
+        /* The txn's logical inode locks were already dropped by the intent
+         * log thread (demofs_iq_process_channel); just deliver completion. */
         entry.cb(entry.txn, entry.status, entry.private_data);
         demofs_txn_release(entry.txn);
     }
@@ -1049,9 +1745,20 @@ demofs_intent_log_thread_init(
     struct evpl *evpl,
     void        *private_data)
 {
-    struct demofs_intent_log *il = private_data;
+    struct demofs_intent_log *il     = private_data;
+    struct demofs_shared     *shared = container_of(il, struct demofs_shared, intent_log);
+    int                       i;
 
-    il->evpl = evpl;
+    il->evpl     = evpl;
+    il->log_head = SM_INTENT_LOG_OFFSET;
+    il->log_seq  = 0;
+
+    /* Open block queues on this thread's evpl for redo-record writes. */
+    il->queue = calloc(shared->num_devices, sizeof(*il->queue));
+    for (i = 0; i < shared->num_devices; i++) {
+        il->queue[i] = evpl_block_open_queue(evpl, shared->devices[i].bdev);
+    }
+
     evpl_add_doorbell(evpl, &il->wake_doorbell, demofs_intent_log_wake_cb);
     __atomic_store_n(&il->ready, 1, __ATOMIC_RELEASE);
     return il;
@@ -1062,11 +1769,19 @@ demofs_intent_log_thread_shutdown(
     struct evpl *evpl,
     void        *private_data)
 {
-    struct demofs_intent_log *il = private_data;
+    struct demofs_intent_log *il     = private_data;
+    struct demofs_shared     *shared = container_of(il, struct demofs_shared, intent_log);
+    int                       i;
 
     /* By the time this runs the VFS layer has destroyed the worker
-     * threads, which freed their channels.  Just drop the doorbell. */
+     * threads, which freed their channels.  Just drop the doorbell and
+     * close our block queues. */
     evpl_remove_doorbell(evpl, &il->wake_doorbell);
+
+    for (i = 0; i < shared->num_devices; i++) {
+        evpl_block_close_queue(evpl, il->queue[i]);
+    }
+    free(il->queue);
 } /* demofs_intent_log_thread_shutdown */
 
 static inline void
@@ -1089,13 +1804,18 @@ demofs_txn_commit(
         return;
     }
 
-    /* Release all pinned inode locks BEFORE the SQ enqueue.  Otherwise
-     * SQ-full backpressure (which spins via evpl_continue) could re-enter
-     * other op callbacks that want these locks and self-deadlock. */
-    demofs_txn_unlock_all(txn);
+    /* Serialize every dirty inode into its block buffer now, on the worker
+     * that owns the live inodes under write lock, before handing the txn
+     * (and its pinned blocks) to the intent log thread. */
+    demofs_txn_flush_inodes(txn);
 
-    /* Write txn -> intent log thread via this worker's SQ.  Callback
-     * fires from the CQ doorbell back on the original worker thread. */
+    /* Write txn -> intent log thread via this worker's SQ.  The intent
+     * log thread drops the txn's logical inode locks when it processes
+     * the entry (see demofs_iq_process_channel); these are logical locks
+     * tracked in the cache, not pthread mutexes, so holding them across
+     * the SQ-full evpl_continue spin below cannot deadlock (conflicting
+     * ops simply park as waiters).  The completion callback fires from the
+     * CQ doorbell back on this worker thread. */
     shared = thread->shared;
     ch     = thread->iq_channel;
 
@@ -1124,7 +1844,6 @@ static void *
 demofs_init(const char *cfgdata)
 {
     struct demofs_shared       *shared = calloc(1, sizeof(*shared));
-    struct demofs_inode_list   *inode_list;
     struct demofs_device       *device;
     enum evpl_block_protocol_id protocol_id;
     const char                 *protocol_name, *device_path;
@@ -1215,22 +1934,15 @@ demofs_init(const char *cfgdata)
                             device0_path, strerror(errno));
     free(device0_path);
 
-    shared->num_inode_list = 255;
-    shared->inode_list     = calloc(shared->num_inode_list,
-                                    sizeof(*shared->inode_list));
-
-    for (i = 0; i < shared->num_inode_list; i++) {
-
-        inode_list = &shared->inode_list[i];
-
-        inode_list->id         = i;
-        inode_list->num_blocks = 0;
-        inode_list->max_blocks = 0;
-
-        pthread_mutex_init(&inode_list->lock, NULL);
-
-        inode_list->max_blocks = 1024 * 1024;
+    /* Inode cache: sharded rb-trees keyed by inum.  Never evicts yet. */
+    shared->inode_cache = calloc(1, sizeof(*shared->inode_cache));
+    for (i = 0; i < DEMOFS_INODE_CACHE_SHARDS; i++) {
+        rb_tree_init(&shared->inode_cache->shards[i].inodes);
+        pthread_mutex_init(&shared->inode_cache->shards[i].lock, NULL);
     }
+
+    /* Block cache: sharded RCU hash of 4 KiB device blocks. */
+    demofs_block_cache_create(shared);
 
     /* Initialize KV shards */
     shared->num_kv_shards = 256;
@@ -1267,15 +1979,33 @@ demofs_bootstrap(struct demofs_thread *thread)
     struct demofs_shared *shared = thread->shared;
     struct timespec       now;
     struct demofs_inode  *inode;
+    uint32_t              device_id;
+    uint64_t              device_offset, inum;
+    int                   rc;
+
+    /* Guard against concurrent first-touch from multiple workers. */
+    pthread_mutex_lock(&shared->lock);
+    if (shared->root_fhlen != 0) {
+        pthread_mutex_unlock(&shared->lock);
+        return;
+    }
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    inode = demofs_inode_alloc(thread, 0);
+    /* The very first space-map allocation lands at block_idx 2 of AG 0 /
+     * disk 0 (block_idx 1 is reserved at format time), so the root inode
+     * gets inum 2. */
+    rc = space_map_alloc(shared->space_map, &thread->space_cache,
+                         SM_BLOCK_SIZE, &device_id, &device_offset);
+    chimera_demofs_abort_if(rc != 0, "bootstrap: failed to allocate root inode block");
+
+    inum = sm_inum_from_device_offset(shared->space_map, device_id, device_offset);
+    chimera_demofs_abort_if(inum != 2, "bootstrap: root inode is %lu, expected 2", inum);
+
+    inode = demofs_inode_struct_new(inum);
 
     inode->size       = 4096;
     inode->space_used = 4096;
-    inode->gen        = 1;
-    inode->refcnt     = 1;
     inode->uid        = 0;
     inode->gid        = 0;
     inode->nlink      = 2;
@@ -1293,6 +2023,8 @@ demofs_bootstrap(struct demofs_thread *thread)
     inode->dir.parent_inum = inode->inum;
     inode->dir.parent_gen  = inode->gen;
 
+    demofs_inode_cache_insert(shared, inode);
+
     /* Create 16-byte fsid buffer for root FH encoding (8-byte fsid + 8 bytes padding) */
     {
         uint8_t fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
@@ -1302,33 +2034,41 @@ demofs_bootstrap(struct demofs_thread *thread)
                                                               inode->gen,
                                                               shared->root_fh);
     }
+
+    pthread_mutex_unlock(&shared->lock);
 } /* demofs_bootstrap */
+
+static void
+demofs_inode_cache_release(
+    struct rb_node *node,
+    void           *private_data)
+{
+    struct demofs_inode *inode = container_of(node, struct demofs_inode, node);
+
+    (void) private_data;
+
+    /* Process is exiting; thread slab allocators are already gone, so the
+     * dirent/extent release callbacks no-op with a NULL thread.  We still
+     * own and must free the inode struct itself (heap-allocated). */
+    if (S_ISDIR(inode->mode)) {
+        rb_tree_destroy(&inode->dir.dirents, demofs_dirent_release, NULL);
+    } else if (S_ISREG(inode->mode)) {
+        rb_tree_destroy(&inode->file.extents, demofs_extent_release, NULL);
+    }
+
+    free(inode);
+} /* demofs_inode_cache_release */
 
 static void
 demofs_destroy(void *private_data)
 {
     struct demofs_shared *shared = private_data;
-    struct demofs_inode  *inode;
-    int                   i, j, k;
+    int                   i;
 
-    for (i = 0; i < shared->num_inode_list; i++) {
-        for (j = 0; j < shared->inode_list[i].num_blocks; j++) {
-            for (k = 0; k < CHIMERA_DEMOFS_INODE_BLOCK; k++) {
-                inode = &shared->inode_list[i].inode[j][k];
-
-                if (inode->gen == 0 || inode->refcnt == 0) {
-                    continue;
-                }
-
-                if (S_ISDIR(inode->mode)) {
-                    rb_tree_destroy(&inode->dir.dirents, demofs_dirent_release, NULL);
-                } else if (S_ISLNK(inode->mode)) {
-                    /* do nothing */
-                } else if (S_ISREG(inode->mode)) {
-                    rb_tree_destroy(&inode->file.extents, demofs_extent_release, NULL);
-                }
-            }
-        }
+    for (i = 0; i < DEMOFS_INODE_CACHE_SHARDS; i++) {
+        rb_tree_destroy(&shared->inode_cache->shards[i].inodes,
+                        demofs_inode_cache_release, NULL);
+        pthread_mutex_destroy(&shared->inode_cache->shards[i].lock);
     }
 
     /* Shut down the intent log thread before tearing down anything it
@@ -1342,11 +2082,13 @@ demofs_destroy(void *private_data)
         evpl_block_close_device(shared->devices[i].bdev);
     }
 
+    demofs_block_cache_destroy(shared);
+
     space_map_destroy(shared->space_map);
 
     pthread_mutex_destroy(&shared->lock);
     free(shared->devices);
-    free(shared->inode_list);
+    free(shared->inode_cache);
 
     /* Clean up KV shards */
     for (i = 0; i < shared->num_kv_shards; i++) {
@@ -1357,6 +2099,62 @@ demofs_destroy(void *private_data)
 
     free(shared);
 } /* demofs_destroy */ /* demofs_destroy */
+
+/*
+ * Runs on a worker thread when another thread has granted it one or more
+ * inode locks it was waiting on.  The lock state was already updated by
+ * the releasing thread; here we record the slot (on this, the txn's own
+ * thread) and resume the parked continuation.
+ */
+static void
+demofs_grant_doorbell_cb(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct demofs_thread       *thread = container_of(doorbell,
+                                                      struct demofs_thread,
+                                                      grant_doorbell);
+    struct demofs_inode_waiter *list, *w;
+
+    (void) evpl;
+
+    pthread_mutex_lock(&thread->grant_lock);
+    list               = thread->grant_head;
+    thread->grant_head = NULL;
+    thread->grant_tail = NULL;
+    pthread_mutex_unlock(&thread->grant_lock);
+
+    while (list) {
+        demofs_inode_cb_t    cb;
+        void                *private_data;
+        struct demofs_inode *inode;
+        int                  status;
+
+        w    = list;
+        list = w->next;
+
+        cb           = w->cb;
+        private_data = w->private_data;
+        inode        = w->inode;
+        status       = w->status;
+
+        if (status == CHIMERA_VFS_OK) {
+            struct demofs_txn          *wtxn  = w->txn;
+            enum demofs_inode_lock_mode wmode = w->mode;
+
+            demofs_txn_add_slot(wtxn, inode, wmode);
+            if (wmode == DEMOFS_INODE_LOCK_WRITE) {
+                demofs_txn_pin_inode_block(thread, wtxn, inode, 0);
+            }
+        } else {
+            inode = NULL;
+        }
+
+        demofs_waiter_free(thread, w);
+
+        cb(inode, status, private_data);
+    }
+} /* demofs_grant_doorbell_cb */
 
 static void *
 demofs_thread_init(
@@ -1388,6 +2186,12 @@ demofs_thread_init(
     thread->iq_channel->worker = thread;
     evpl_add_doorbell(evpl, &thread->iq_channel->cq_doorbell,
                       demofs_iq_cq_doorbell_cb);
+
+    /* Inode lock-grant delivery queue + doorbell. */
+    pthread_mutex_init(&thread->grant_lock, NULL);
+    thread->grant_head = NULL;
+    thread->grant_tail = NULL;
+    evpl_add_doorbell(evpl, &thread->grant_doorbell, demofs_grant_doorbell_cb);
 
     pthread_mutex_lock(&shared->lock);
     thread->thread_id = shared->num_active_threads++;
@@ -1448,16 +2252,19 @@ demofs_thread_destroy(void *private_data)
         thread->iq_channel = NULL;
     }
 
+    evpl_remove_doorbell(thread->evpl, &thread->grant_doorbell);
+    pthread_mutex_destroy(&thread->grant_lock);
+
     while (thread->txn_free_list) {
         struct demofs_txn *txn = thread->txn_free_list;
         thread->txn_free_list = txn->next;
         free(txn);
     }
 
-    while (thread->txn_ref_free_list) {
-        struct demofs_txn_inode_ref *r = thread->txn_ref_free_list;
-        thread->txn_ref_free_list = r->next;
-        free(r);
+    while (thread->waiter_free_list) {
+        struct demofs_inode_waiter *w = thread->waiter_free_list;
+        thread->waiter_free_list = w->next;
+        free(w);
     }
 
     free(thread->queue);
@@ -1513,17 +2320,7 @@ demofs_map_attrs(
         attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_free  = CHIMERA_VFS_SYNTHETIC_FS_INODES;
-
-        for (int i = 0; i < shared->num_inode_list; i++) {
-            pthread_mutex_lock(&shared->inode_list[i].lock);
-            attr->va_fs_files_total += shared->inode_list[i].total_inodes;
-            pthread_mutex_unlock(&shared->inode_list[i].lock);
-        }
-
-        attr->va_fs_files_free  = 0;
-        attr->va_fs_files_avail = 0;
         attr->va_fsid           = shared->fsid;
-
     }
 
 } /* demofs_map_attrs */
@@ -1715,19 +2512,22 @@ demofs_setattr(
 static inline struct demofs_inode *
 demofs_lookup_path(
     struct demofs_thread *thread,
-    struct demofs_shared *shared,
+    struct demofs_txn    *txn,
     const char           *path,
     int                   pathlen)
 {
+    struct demofs_shared *shared = thread->shared;
     struct demofs_inode  *parent, *inode;
     struct demofs_dirent *dirent;
     const char           *name;
     const char           *pathc = path;
     const char           *slash;
     int                   namelen;
-    uint64_t              hash;
+    uint64_t              hash, inum;
+    uint32_t              gen;
 
-    inode = demofs_inode_get_fh(shared, shared->root_fh, shared->root_fhlen);
+    demofs_fh_to_inum(&inum, &gen, shared->root_fh, shared->root_fhlen);
+    inode = demofs_inode_acquire_sync_read(thread, txn, inum, gen);
 
     if (unlikely(!inode)) {
         return NULL;
@@ -1760,22 +2560,21 @@ demofs_lookup_path(
         rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
 
         if (!dirent) {
-            pthread_mutex_unlock(&inode->lock);
             return NULL;
         }
 
         parent = inode;
 
-        inode = demofs_inode_get_inum(shared, dirent->inum, dirent->gen);
+        inode = demofs_inode_acquire_sync_read(thread, txn, dirent->inum, dirent->gen);
 
-        pthread_mutex_unlock(&parent->lock);
+        /* Done with the parent now; release its slot so deep walks reuse it. */
+        demofs_txn_unlock_inode(txn, parent);
 
         if (!inode) {
             return NULL;
         }
 
         if (!S_ISDIR(inode->mode)) {
-            pthread_mutex_unlock(&inode->lock);
             return NULL;
         }
 
@@ -1797,12 +2596,14 @@ demofs_mount(
 
     (void) private_data;
 
+    (void) shared;
+
     p->thread = thread;
     p->txn    = demofs_txn_begin(thread, DEMOFS_TXN_READ);
 
-    /* demofs_lookup_path is still synchronous; it'll be converted to an
-     * async path-walker when the inode cache lands. */
-    inode = demofs_lookup_path(thread, shared, request->mount.path,
+    /* Synchronous read-locked path walk; the resolved inode (and any
+     * parents still held) are recorded in the txn and released at commit. */
+    inode = demofs_lookup_path(thread, p->txn, request->mount.path,
                                request->mount.pathlen);
 
     if (unlikely(!inode)) {
@@ -1810,9 +2611,6 @@ demofs_mount(
         return;
     }
 
-    /* demofs_lookup_path returns a locked inode; pin it so the txn
-     * commit handles the unlock centrally. */
-    demofs_txn_pin_inode(p->txn, inode);
     demofs_map_attrs(thread, &request->mount.r_attr, inode);
 
     demofs_op_ok(request, p->txn);
@@ -2237,6 +3035,14 @@ demofs_remove_at_child_cb(
 
     rb_tree_query_exact(&parent->dir.dirents, hash, hash, dirent);
 
+    /* The dirent was located before the child fetch and the parent has
+     * been write-locked throughout, so it must still be present; guard
+     * defensively to keep the derefs below provably safe. */
+    if (unlikely(!dirent)) {
+        demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        return;
+    }
+
     clock_gettime(CLOCK_REALTIME, &now);
 
     if (S_ISDIR(inode->mode)) {
@@ -2386,6 +3192,10 @@ demofs_readdir_iter_inode_cb(
     attr.va_req_mask = request->readdir.attr_mask;
     demofs_map_attrs(thread, &attr, dirent_inode);
 
+    /* Done with this child; release its slot so the next iteration reuses
+     * it (only the directory itself stays held across the walk). */
+    demofs_txn_unlock_inode(p->txn, dirent_inode);
+
     rc = request->readdir.callback(
         dirent->inum,
         dirent->hash + DEMOFS_COOKIE_FIRST,
@@ -2480,6 +3290,9 @@ demofs_readdir_dotdot_cb(
 
     if (status == CHIMERA_VFS_OK) {
         demofs_map_attrs(p->thread, &attr, parent_inode);
+        /* Release the parent (".." target); it's distinct from the dir
+        * being read (the self-parent root case never reaches here). */
+        demofs_txn_unlock_inode(p->txn, parent_inode);
     } else {
         demofs_map_attrs(p->thread, &attr, inode);
     }
@@ -2841,6 +3654,28 @@ demofs_create_unlinked(
 } /* demofs_create_unlinked */
 
 static void
+demofs_close_inode_cb(
+    struct demofs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        demofs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    --inode->refcnt;
+    if (inode->refcnt == 0) {
+        demofs_inode_free(p->thread, inode);
+    }
+
+    demofs_op_ok(request, p->txn);
+} /* demofs_close_inode_cb */
+
+static void
 demofs_close(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
@@ -2856,16 +3691,11 @@ demofs_close(
     p->thread = thread;
     p->txn    = demofs_txn_begin(thread, DEMOFS_TXN_WRITE);
 
-    /* The inode pointer came in via vfs_private (set at open); take its
-     * lock and pin it into the txn so commit drops it centrally. */
-    pthread_mutex_lock(&inode->lock);
-    demofs_txn_pin_inode(p->txn, inode);
-    --inode->refcnt;
-    if (inode->refcnt == 0) {
-        demofs_inode_free(thread, inode);
-    }
-
-    demofs_op_ok(request, p->txn);
+    /* The inode pointer came in via vfs_private (set at open); re-acquire
+     * it by (inum,gen) so its write lock is tracked in the cache like any
+     * other op. */
+    demofs_inode_get_inum_async(thread, p->txn, inode->inum, inode->gen,
+                                demofs_close_inode_cb, request);
 } /* demofs_close */
 
 /*
@@ -4193,6 +5023,15 @@ demofs_rename_at_perform(struct chimera_vfs_request *request)
 
     rb_tree_query_exact(&op->dir.dirents, hash, hash, old_dirent);
 
+    /* The source dirent was verified before we fetched the child and the
+     * source parent has been write-locked the whole time, so it must still
+     * be present; guard defensively to keep the deref provably safe. */
+    if (unlikely(!old_dirent)) {
+        demofs_rename_at_unlock_parents(request);
+        demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        return;
+    }
+
     if (existing_inode) {
         rb_tree_query_exact(&np->dir.dirents, new_hash, hash, existing_dirent);
         if (existing_dirent) {
@@ -4436,48 +5275,15 @@ demofs_rename_at(
 /* inode_stash[0] = parent dir; inode_stash[1] = link target inode (both locked) */
 
 static void
-demofs_link_at_inode_cb(
-    struct demofs_inode *inode,
-    int                  status,
-    void                *private_data)
+demofs_link_at_finish(struct chimera_vfs_request *request)
 {
-    struct chimera_vfs_request    *request = private_data;
-    struct demofs_request_private *p       = request->plugin_data;
-    struct demofs_thread          *thread  = p->thread;
-    struct demofs_inode           *parent  = p->inode_stash[0];
-    struct demofs_inode           *existing_inode;
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_inode           *parent = p->inode_stash[0];
+    struct demofs_inode           *inode  = p->inode_stash[1];
     struct demofs_dirent          *dirent;
     uint64_t                       hash = request->link_at.name_hash;
     struct timespec                now;
-
-    if (unlikely(status != CHIMERA_VFS_OK)) {
-        demofs_op_fail(request, p->txn, status);
-        return;
-    }
-
-    if (unlikely(S_ISDIR(inode->mode))) {
-        demofs_op_fail(request, p->txn, CHIMERA_VFS_EISDIR);
-        return;
-    }
-
-    rb_tree_query_exact(&parent->dir.dirents, hash, hash, dirent);
-
-    if (dirent) {
-        if (request->link_at.replace && !S_ISDIR(inode->mode)) {
-            existing_inode = demofs_inode_get_inum(thread->shared,
-                                                   dirent->inum, dirent->gen);
-            chimera_demofs_abort_if(!existing_inode,
-                                    "demofs_link_at: existing_inode not found");
-            demofs_txn_pin_inode(p->txn, existing_inode);
-            existing_inode->nlink--;
-            demofs_map_attrs(thread, &request->link_at.r_replaced_attr,
-                             existing_inode);
-            rb_tree_remove(&parent->dir.dirents, &dirent->node);
-        } else {
-            demofs_op_fail(request, p->txn, CHIMERA_VFS_EEXIST);
-            return;
-        }
-    }
 
     clock_gettime(CLOCK_REALTIME, &now);
 
@@ -4497,8 +5303,73 @@ demofs_link_at_inode_cb(
     demofs_map_attrs(thread, &request->link_at.r_attr, inode);
     demofs_map_attrs(thread, &request->link_at.r_dir_post_attr, parent);
 
-
     demofs_op_ok(request, p->txn);
+} /* demofs_link_at_finish */
+
+static void
+demofs_link_at_existing_cb(
+    struct demofs_inode *existing_inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+
+    /* The old dirent was already removed; if its inode is still resident,
+     * drop its link count for the replace. */
+    if (status == CHIMERA_VFS_OK) {
+        existing_inode->nlink--;
+        demofs_map_attrs(p->thread, &request->link_at.r_replaced_attr,
+                         existing_inode);
+    }
+
+    demofs_link_at_finish(request);
+} /* demofs_link_at_existing_cb */
+
+static void
+demofs_link_at_inode_cb(
+    struct demofs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    struct demofs_inode           *parent  = p->inode_stash[0];
+    struct demofs_dirent          *dirent;
+    uint64_t                       hash = request->link_at.name_hash;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        demofs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    if (unlikely(S_ISDIR(inode->mode))) {
+        demofs_op_fail(request, p->txn, CHIMERA_VFS_EISDIR);
+        return;
+    }
+
+    p->inode_stash[1] = inode;
+
+    rb_tree_query_exact(&parent->dir.dirents, hash, hash, dirent);
+
+    if (dirent) {
+        if (request->link_at.replace && !S_ISDIR(inode->mode)) {
+            uint64_t einum = dirent->inum;
+            uint32_t egen  = dirent->gen;
+
+            rb_tree_remove(&parent->dir.dirents, &dirent->node);
+            demofs_dirent_free(thread, dirent);
+
+            demofs_inode_get_inum_async(thread, p->txn, einum, egen,
+                                        demofs_link_at_existing_cb, request);
+            return;
+        }
+        demofs_op_fail(request, p->txn, CHIMERA_VFS_EEXIST);
+        return;
+    }
+
+    demofs_link_at_finish(request);
 } /* demofs_link_at_inode_cb */
 
 static void
