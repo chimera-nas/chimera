@@ -15,6 +15,7 @@
 #include "nlm4_xdr.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_state.h"
 #include "vfs/vfs_cred.h"
 
 /* Magic number stored in nlm_client.magic to distinguish it from nfs4_session *
@@ -35,18 +36,26 @@
  * POSIX advisory locks are tied to the open file description.
  */
 struct nlm_lock_entry {
-    uint8_t                         fh[NFS4_FHSIZE];
-    uint32_t                        fh_len;
-    uint8_t                         oh[LM_MAXSTRLEN]; /* owner handle (opaque) */
-    uint32_t                        oh_len;
-    int32_t                         svid;   /* client-side PID */
-    uint64_t                        offset;
-    uint64_t                        length; /* 0 == to EOF (POSIX) */
-    bool                            exclusive;
-    bool                            pending; /* true while VFS open/lock in flight */
-    struct chimera_vfs_open_handle *handle; /* kept open while lock held */
-    struct nlm_lock_entry          *next;
-    struct nlm_lock_entry          *prev;
+    uint8_t                            fh[NFS4_FHSIZE];
+    uint32_t                           fh_len;
+    uint8_t                            oh[LM_MAXSTRLEN]; /* owner handle (opaque) */
+    uint32_t                           oh_len;
+    int32_t                            svid;   /* client-side PID */
+    uint64_t                           offset;
+    uint64_t                           length; /* 0 == to EOF (POSIX) */
+    bool                               exclusive;
+    bool                               pending; /* true while VFS open/acquire in flight */
+    struct chimera_vfs_open_handle    *handle; /* kept open while lock held */
+    /* vfs_state coordination — populated once the open completes and the
+     * acquire is dispatched.  `lease` is inserted into vfs_state on
+     * GRANTED; `ticket` is the queue entry for breakable conflicts; CANCEL
+     * uses chimera_vfs_lease_acquire_cancel on the ticket. */
+    struct chimera_vfs_lease           lease;
+    struct chimera_vfs_pending_acquire ticket;
+    struct chimera_vfs_file_state     *file_state;
+    bool                               lease_inserted; /* lease present in vfs_state */
+    struct nlm_lock_entry             *next;
+    struct nlm_lock_entry             *prev;
 };
 
 /*
@@ -317,4 +326,5 @@ nlm_client_release_all_locks(
     struct nlm_state          *state,
     struct nlm_client         *client,
     struct chimera_vfs_thread *vfs_thread,
+    struct chimera_vfs_state  *vfs_state,
     struct chimera_vfs_cred   *cred);

@@ -21,3 +21,7 @@ add_test(chimera/vfs/sync_delegation_test vfs_sync_delegation_test)
 add_executable(vfs_notify_test vfs_notify_test.c)
 target_link_libraries(vfs_notify_test chimera_vfs urcu)
 add_test(chimera/vfs/notify_test vfs_notify_test)
+
+add_executable(vfs_state_test vfs_state_test.c)
+target_link_libraries(vfs_state_test chimera_vfs)
+add_test(chimera/vfs/state_test vfs_state_test)

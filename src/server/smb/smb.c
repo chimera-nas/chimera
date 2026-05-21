@@ -389,6 +389,12 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
                 case SMB2_CHANGE_NOTIFY:
                     chimera_smb_change_notify_reply(&reply_cursor, request);
                     break;
+                case SMB2_LOCK:
+                    chimera_smb_lock_reply(&reply_cursor, request);
+                    break;
+                case SMB2_OPLOCK_BREAK:
+                    chimera_smb_oplock_break_reply(&reply_cursor, request);
+                    break;
                     /* SMB2_CANCEL never reaches this switch: chimera_smb_cancel
                      * always completes with STATUS_PENDING so the slot is
                      * skipped above. */
@@ -637,6 +643,12 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
             break;
         case SMB2_CANCEL:
             chimera_smb_cancel(request);
+            break;
+        case SMB2_LOCK:
+            chimera_smb_lock(request);
+            break;
+        case SMB2_OPLOCK_BREAK:
+            chimera_smb_oplock_break(request);
             break;
         default:
             chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
@@ -915,6 +927,12 @@ chimera_smb_server_handle_smb2(
                 break;
             case SMB2_CANCEL:
                 rc = chimera_smb_parse_cancel(request_cursor, request);
+                break;
+            case SMB2_LOCK:
+                rc = chimera_smb_parse_lock(request_cursor, request);
+                break;
+            case SMB2_OPLOCK_BREAK:
+                rc = chimera_smb_parse_oplock_break(request_cursor, request);
                 break;
             default:
                 chimera_smb_error("Received SMB2 message with unimplemented command %u",

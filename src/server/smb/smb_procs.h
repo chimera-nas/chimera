@@ -240,3 +240,39 @@ int chimera_smb_parse_cancel(
 
 void chimera_smb_cancel(
     struct chimera_smb_request *request);
+
+int chimera_smb_parse_lock(
+    struct evpl_iovec_cursor   *request_cursor,
+    struct chimera_smb_request *request);
+
+void chimera_smb_lock(
+    struct chimera_smb_request *request);
+
+void chimera_smb_lock_reply(
+    struct evpl_iovec_cursor   *reply_cursor,
+    struct chimera_smb_request *request);
+
+/* Drain (release + free) every byte-range lock entry held by `open_file`.
+ * Called at close before the underlying VFS handle is released. */
+void chimera_smb_open_file_drain_locks(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file);
+
+/* break_cb wired onto SMB CACHING leases at CREATE time.  Sends an
+ * OPLOCK_BREAK Notification on the conn the open was created on, or
+ * forcibly revokes if the conn is gone. */
+void chimera_smb_lease_break_cb(
+    struct chimera_vfs_lease *lease,
+    uint8_t                   needed_mode,
+    void                     *private_data);
+
+int chimera_smb_parse_oplock_break(
+    struct evpl_iovec_cursor   *request_cursor,
+    struct chimera_smb_request *request);
+
+void chimera_smb_oplock_break(
+    struct chimera_smb_request *request);
+
+void chimera_smb_oplock_break_reply(
+    struct evpl_iovec_cursor   *reply_cursor,
+    struct chimera_smb_request *request);

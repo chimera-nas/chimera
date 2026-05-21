@@ -1,0 +1,872 @@
+// SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "vfs_state.h"
+#include "vfs_internal.h"
+#include "common/macros.h"
+
+/*
+ * Default lease-break deadline.  Matches the SMB2 client expectation of
+ * "the server will wait roughly 30s for the break ack before forcing
+ * revocation," and is well inside the NFSv4 lease (typically 60-90s).
+ */
+#define CHIMERA_VFS_STATE_DEFAULT_BREAK_DEADLINE_MS 30000
+
+/* -------------------------------------------------------------------- */
+/* Lifecycle                                                            */
+/* -------------------------------------------------------------------- */
+
+SYMBOL_EXPORT struct chimera_vfs_state *
+chimera_vfs_state_init(void)
+{
+    struct chimera_vfs_state *state;
+    int                       i;
+
+    state = calloc(1, sizeof(*state));
+    if (!state) {
+        return NULL;
+    }
+
+    for (i = 0; i < CHIMERA_VFS_STATE_NUM_BUCKETS; i++) {
+        pthread_mutex_init(&state->buckets[i].lock, NULL);
+        state->buckets[i].files = NULL;
+    }
+
+    state->default_break_deadline_ms = CHIMERA_VFS_STATE_DEFAULT_BREAK_DEADLINE_MS;
+
+    return state;
+} /* chimera_vfs_state_init */
+
+SYMBOL_EXPORT void
+chimera_vfs_state_destroy(struct chimera_vfs_state *state)
+{
+    struct chimera_vfs_file_state *file, *next;
+    int                            i;
+
+    if (!state) {
+        return;
+    }
+
+    for (i = 0; i < CHIMERA_VFS_STATE_NUM_BUCKETS; i++) {
+        file = state->buckets[i].files;
+        while (file) {
+            next = file->bucket_next;
+            /* In Stage A there is no protocol caller, so we should never
+             * leak per-file state.  Asserts here would be too strict for
+             * test code that exits without releasing; instead we just
+             * tear down whatever remains. */
+            pthread_mutex_destroy(&file->lock);
+            free(file);
+            file = next;
+        }
+        pthread_mutex_destroy(&state->buckets[i].lock);
+    }
+
+    free(state);
+} /* chimera_vfs_state_destroy */
+
+/* -------------------------------------------------------------------- */
+/* Per-file state lookup                                                */
+/* -------------------------------------------------------------------- */
+
+static inline struct chimera_vfs_state_bucket *
+chimera_vfs_state_bucket_for(
+    struct chimera_vfs_state *state,
+    uint64_t                  fh_hash)
+{
+    return &state->buckets[fh_hash & (CHIMERA_VFS_STATE_NUM_BUCKETS - 1)];
+} /* chimera_vfs_state_bucket_for */
+
+static inline int
+chimera_vfs_file_state_match(
+    const struct chimera_vfs_file_state *file,
+    const uint8_t                       *fh,
+    uint8_t                              fh_len,
+    uint64_t                             fh_hash)
+{
+    return file->fh_hash == fh_hash &&
+           file->fh_len == fh_len &&
+           memcmp(file->fh, fh, fh_len) == 0;
+} /* chimera_vfs_file_state_match */
+
+SYMBOL_EXPORT struct chimera_vfs_file_state *
+chimera_vfs_state_get(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash,
+    bool                      create)
+{
+    struct chimera_vfs_state_bucket *bucket;
+    struct chimera_vfs_file_state   *file;
+
+    bucket = chimera_vfs_state_bucket_for(state, fh_hash);
+
+    pthread_mutex_lock(&bucket->lock);
+
+    for (file = bucket->files; file; file = file->bucket_next) {
+        if (chimera_vfs_file_state_match(file, fh, fh_len, fh_hash)) {
+            file->refcount++;
+            pthread_mutex_unlock(&bucket->lock);
+            return file;
+        }
+    }
+
+    if (!create) {
+        pthread_mutex_unlock(&bucket->lock);
+        return NULL;
+    }
+
+    file = calloc(1, sizeof(*file));
+    if (!file) {
+        pthread_mutex_unlock(&bucket->lock);
+        return NULL;
+    }
+
+    memcpy(file->fh, fh, fh_len);
+    file->fh_len   = fh_len;
+    file->fh_hash  = fh_hash;
+    file->refcount = 1;
+    file->state    = state;
+    pthread_mutex_init(&file->lock, NULL);
+
+    file->bucket_next = bucket->files;
+    bucket->files     = file;
+
+    pthread_mutex_unlock(&bucket->lock);
+    return file;
+} /* chimera_vfs_state_get */
+
+SYMBOL_EXPORT void
+chimera_vfs_state_put(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
+{
+    struct chimera_vfs_state_bucket *bucket;
+    struct chimera_vfs_file_state  **link;
+    bool                             empty;
+
+    if (!file) {
+        return;
+    }
+
+    bucket = chimera_vfs_state_bucket_for(state, file->fh_hash);
+
+    pthread_mutex_lock(&bucket->lock);
+
+    chimera_vfs_abort_if(file->refcount == 0, "double put on vfs_state file");
+
+    file->refcount--;
+    if (file->refcount != 0) {
+        pthread_mutex_unlock(&bucket->lock);
+        return;
+    }
+
+    /* Refcount reached zero.  Tear down only if no leases remain — a
+     * lease holder is effectively a reference too (held implicitly via
+     * the caller that owns the lease), but if any caller forgot to put
+     * after acquiring a lease we'd otherwise free state with live
+     * leases.  Detect this and keep the entry around; a future put()
+     * will retry. */
+    empty = (file->range_locks == NULL &&
+             file->share_resvs == NULL &&
+             file->caching_leases == NULL);
+
+    if (!empty) {
+        /* Restore the implicit reference held by the lease(s). */
+        file->refcount = 1;
+        pthread_mutex_unlock(&bucket->lock);
+        return;
+    }
+
+    /* Unlink from bucket and free. */
+    for (link = &bucket->files; *link; link = &(*link)->bucket_next) {
+        if (*link == file) {
+            *link = file->bucket_next;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&bucket->lock);
+
+    pthread_mutex_destroy(&file->lock);
+    free(file);
+} /* chimera_vfs_state_put */
+
+/* -------------------------------------------------------------------- */
+/* Conflict matrix                                                      */
+/* -------------------------------------------------------------------- */
+
+/* Same-owner coalescing: two leases share an owner iff protocol +
+ * client_key + owner_lo + owner_hi all match.  For SMB this is the
+ * (client_guid, lease_key) tuple that lets one client open the same
+ * file multiple times without breaking its own lease.  For NFSv4 it
+ * is (clientid, lock_owner4).  For NLM it is (hostname-hash, svid). */
+static inline bool
+chimera_vfs_lease_owner_equal(
+    const struct chimera_vfs_lease_owner *a,
+    const struct chimera_vfs_lease_owner *b)
+{
+    return a->protocol == b->protocol &&
+           a->client_key == b->client_key &&
+           a->owner_lo == b->owner_lo &&
+           a->owner_hi == b->owner_hi;
+} /* chimera_vfs_lease_owner_equal */
+
+/* Byte-range overlap test.  length==0 means "to EOF" (NLM/SMB
+ * convention); represent EOF as UINT64_MAX for the math. */
+static inline bool
+chimera_vfs_range_overlap(
+    uint64_t a_off,
+    uint64_t a_len,
+    uint64_t b_off,
+    uint64_t b_len)
+{
+    uint64_t a_end = (a_len == 0) ? UINT64_MAX : a_off + a_len;
+    uint64_t b_end = (b_len == 0) ? UINT64_MAX : b_off + b_len;
+
+    return a_off < b_end && b_off < a_end;
+} /* chimera_vfs_range_overlap */
+
+/* Conflict between two range leases.  Classical fcntl rule: only
+ * conflict if ranges overlap AND at least one side is exclusive (W). */
+static inline bool
+chimera_vfs_range_conflict(
+    const struct chimera_vfs_lease *a,
+    const struct chimera_vfs_lease *b)
+{
+    if (!chimera_vfs_range_overlap(a->offset, a->length,
+                                   b->offset, b->length)) {
+        return false;
+    }
+
+    return (a->mode.granted & CHIMERA_VFS_LEASE_MODE_W) ||
+           (b->mode.granted & CHIMERA_VFS_LEASE_MODE_W);
+} /* chimera_vfs_range_conflict */
+
+/* Conflict between two share reservations.  Lifted from
+ * chimera_smb_sharemode_check_conflict() at smb_sharemode.c:110-150 —
+ * the same predicate expressed in RWH-mask terms.  An access bit on one
+ * side conflicts if the other side denies it. */
+static inline bool
+chimera_vfs_share_conflict(
+    const struct chimera_vfs_lease *existing,
+    const struct chimera_vfs_lease *probe)
+{
+    if (existing->mode.granted & probe->mode.denied) {
+        return true;
+    }
+
+    if (probe->mode.granted & existing->mode.denied) {
+        return true;
+    }
+
+    return false;
+} /* chimera_vfs_share_conflict */
+
+/* Conflict between two caching leases.  An RWH triple on a holder
+ * conflicts with another holder if their granted bits overlap AND the
+ * combination is mutually exclusive — both can't hold W, etc.  In
+ * practice, since caching leases use the SMB lease bits directly, the
+ * rule simplifies to: any bit shared in `granted` between two different
+ * owners is a conflict.  W and H are exclusive across clients; R is
+ * shareable (multiple clients can each hold an R-lease — that's how
+ * SMB2 Level2 oplocks generalize). */
+static inline bool
+chimera_vfs_caching_conflict(
+    const struct chimera_vfs_lease *existing,
+    const struct chimera_vfs_lease *probe)
+{
+    uint8_t e = existing->mode.granted;
+    uint8_t p = probe->mode.granted;
+
+    /* W (write-cache) is exclusive — only one holder may have W on a
+     * given file, even across owners.  Two readers (R-only) coexist. */
+    if ((e & CHIMERA_VFS_LEASE_MODE_W) && (p & (CHIMERA_VFS_LEASE_MODE_R |
+                                                CHIMERA_VFS_LEASE_MODE_W))) {
+        return true;
+    }
+    if ((p & CHIMERA_VFS_LEASE_MODE_W) && (e & (CHIMERA_VFS_LEASE_MODE_R |
+                                                CHIMERA_VFS_LEASE_MODE_W))) {
+        return true;
+    }
+
+    /* H (handle-cache) is exclusive across owners — only one client may
+     * cache the open handle. */
+    if ((e & CHIMERA_VFS_LEASE_MODE_H) && (p & CHIMERA_VFS_LEASE_MODE_H)) {
+        return true;
+    }
+
+    return false;
+} /* chimera_vfs_caching_conflict */
+
+SYMBOL_EXPORT enum chimera_vfs_lease_result
+chimera_vfs_state_would_conflict(
+    const struct chimera_vfs_file_state *file,
+    const struct chimera_vfs_lease      *probe,
+    struct chimera_vfs_lease           **conflict_out)
+{
+    struct chimera_vfs_lease *cur;
+    bool has_breakable_conflict = false;
+
+    if (conflict_out) {
+        *conflict_out = NULL;
+    }
+
+    switch (probe->kind) {
+        case CHIMERA_VFS_LEASE_RANGE:
+            for (cur = file->range_locks; cur; cur = cur->next) {
+                if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
+                    /* Same owner: coalesce / upgrade rather than conflict. */
+                    continue;
+                }
+                if (chimera_vfs_range_conflict(cur, probe)) {
+                    if (conflict_out) {
+                        *conflict_out = cur;
+                    }
+                    return CHIMERA_VFS_LEASE_DENIED;
+                }
+            }
+            /* A range lock may also be blocked by a caching W-lease on
+             * another client (the other client believes it has exclusive
+             * write access and a range lock here would invalidate that
+             * cache).  This is the "I/O breaks caching" rule applied
+             * conservatively to range locks too. */
+            for (cur = file->caching_leases; cur; cur = cur->next) {
+                if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
+                    continue;
+                }
+                /* A read range lock conflicts with a W cache on another
+                 * client (their writes may be cached); a write range lock
+                 * conflicts with any R/W cache on another client. */
+                if (probe->mode.granted & CHIMERA_VFS_LEASE_MODE_W) {
+                    if (cur->mode.granted & (CHIMERA_VFS_LEASE_MODE_R |
+                                             CHIMERA_VFS_LEASE_MODE_W)) {
+                        if (cur->owner.break_cb &&
+                            cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
+                            has_breakable_conflict = true;
+                            if (conflict_out && !*conflict_out) {
+                                *conflict_out = cur;
+                            }
+                        } else {
+                            if (conflict_out) {
+                                *conflict_out = cur;
+                            }
+                            return CHIMERA_VFS_LEASE_DENIED;
+                        }
+                    }
+                } else if (cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W) {
+                    if (cur->owner.break_cb &&
+                        cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
+                        has_breakable_conflict = true;
+                        if (conflict_out && !*conflict_out) {
+                            *conflict_out = cur;
+                        }
+                    } else {
+                        if (conflict_out) {
+                            *conflict_out = cur;
+                        }
+                        return CHIMERA_VFS_LEASE_DENIED;
+                    }
+                }
+            }
+            break;
+
+        case CHIMERA_VFS_LEASE_SHARE:
+            for (cur = file->share_resvs; cur; cur = cur->next) {
+                if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
+                    continue;
+                }
+                if (chimera_vfs_share_conflict(cur, probe)) {
+                    if (conflict_out) {
+                        *conflict_out = cur;
+                    }
+                    return CHIMERA_VFS_LEASE_DENIED;
+                }
+            }
+            /* A new SHARE acquire may also need to break an H (handle-
+             * caching) lease on another client — the cached handle has
+             * to be invalidated when a different client opens the file. */
+            for (cur = file->caching_leases; cur; cur = cur->next) {
+                if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
+                    continue;
+                }
+                if (cur->mode.granted & CHIMERA_VFS_LEASE_MODE_H) {
+                    if (cur->owner.break_cb &&
+                        cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
+                        has_breakable_conflict = true;
+                        if (conflict_out && !*conflict_out) {
+                            *conflict_out = cur;
+                        }
+                    }
+                }
+            }
+            break;
+
+        case CHIMERA_VFS_LEASE_CACHING:
+            for (cur = file->caching_leases; cur; cur = cur->next) {
+                if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
+                    continue;
+                }
+                if (chimera_vfs_caching_conflict(cur, probe)) {
+                    if (cur->owner.break_cb &&
+                        cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
+                        has_breakable_conflict = true;
+                        if (conflict_out && !*conflict_out) {
+                            *conflict_out = cur;
+                        }
+                    } else {
+                        if (conflict_out) {
+                            *conflict_out = cur;
+                        }
+                        return CHIMERA_VFS_LEASE_DENIED;
+                    }
+                }
+            }
+            break;
+
+        case CHIMERA_VFS_LEASE_KIND_MAX:
+            break;
+    } /* switch */
+
+    return has_breakable_conflict ? CHIMERA_VFS_LEASE_BREAKING
+                                  : CHIMERA_VFS_LEASE_GRANTED;
+} /* chimera_vfs_state_would_conflict */
+
+/* Insert a lease onto the appropriate per-kind list.  Caller holds
+ * file->lock. */
+static inline void
+chimera_vfs_file_state_insert_lease(
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_lease      *lease)
+{
+    struct chimera_vfs_lease **head;
+
+    switch (lease->kind) {
+        case CHIMERA_VFS_LEASE_RANGE:
+            head = &file->range_locks;
+            break;
+        case CHIMERA_VFS_LEASE_SHARE:
+            head = &file->share_resvs;
+            break;
+        case CHIMERA_VFS_LEASE_CACHING:
+            head = &file->caching_leases;
+            break;
+        case CHIMERA_VFS_LEASE_KIND_MAX:
+        default:
+            return;
+    } /* switch */
+
+    lease->file = file;
+    lease->prev = NULL;
+    lease->next = *head;
+    if (*head) {
+        (*head)->prev = lease;
+    }
+    *head = lease;
+} /* chimera_vfs_file_state_insert_lease */
+
+static inline void
+chimera_vfs_file_state_remove_lease(
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_lease      *lease)
+{
+    struct chimera_vfs_lease **head;
+
+    switch (lease->kind) {
+        case CHIMERA_VFS_LEASE_RANGE:
+            head = &file->range_locks;
+            break;
+        case CHIMERA_VFS_LEASE_SHARE:
+            head = &file->share_resvs;
+            break;
+        case CHIMERA_VFS_LEASE_CACHING:
+            head = &file->caching_leases;
+            break;
+        case CHIMERA_VFS_LEASE_KIND_MAX:
+        default:
+            return;
+    } /* switch */
+
+    if (lease->prev) {
+        lease->prev->next = lease->next;
+    } else if (*head == lease) {
+        *head = lease->next;
+    }
+
+    if (lease->next) {
+        lease->next->prev = lease->prev;
+    }
+
+    lease->prev = NULL;
+    lease->next = NULL;
+    lease->file = NULL;
+} /* chimera_vfs_file_state_remove_lease */
+
+SYMBOL_EXPORT enum chimera_vfs_lease_result
+chimera_vfs_state_try_insert(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_lease      *lease,
+    struct chimera_vfs_lease     **conflict_out)
+{
+    enum chimera_vfs_lease_result result;
+    struct chimera_vfs_lease     *conflict = NULL;
+
+    pthread_mutex_lock(&file->lock);
+
+    result = chimera_vfs_state_would_conflict(file, lease, &conflict);
+
+    if (result == CHIMERA_VFS_LEASE_GRANTED) {
+        chimera_vfs_file_state_insert_lease(file, lease);
+        pthread_mutex_unlock(&file->lock);
+        return CHIMERA_VFS_LEASE_GRANTED;
+    }
+
+    if (conflict_out) {
+        *conflict_out = conflict;
+    }
+
+    if (result == CHIMERA_VFS_LEASE_BREAKING && conflict) {
+        /* Kick off a break on the conflicting holder.  Caller is
+         * expected to retry once the break completes. */
+        pthread_mutex_unlock(&file->lock);
+        chimera_vfs_lease_begin_break(state, conflict,
+                                      lease->mode.granted, 0);
+        return CHIMERA_VFS_LEASE_BREAKING;
+    }
+
+    pthread_mutex_unlock(&file->lock);
+    return result;
+} /* chimera_vfs_state_try_insert */
+
+/* -------------------------------------------------------------------- */
+/* Pending-acquire queue                                                */
+/* -------------------------------------------------------------------- */
+
+/* All three helpers expect file->lock held by caller. */
+
+static inline void
+chimera_vfs_pending_enqueue_locked(
+    struct chimera_vfs_file_state      *file,
+    struct chimera_vfs_pending_acquire *ticket)
+{
+    ticket->file   = file;
+    ticket->queued = true;
+    ticket->next   = NULL;
+    ticket->prev   = file->pending_tail;
+
+    if (file->pending_tail) {
+        file->pending_tail->next = ticket;
+    } else {
+        file->pending_head = ticket;
+    }
+    file->pending_tail = ticket;
+} /* chimera_vfs_pending_enqueue_locked */
+
+static inline void
+chimera_vfs_pending_dequeue_locked(
+    struct chimera_vfs_file_state      *file,
+    struct chimera_vfs_pending_acquire *ticket)
+{
+    if (ticket->prev) {
+        ticket->prev->next = ticket->next;
+    } else if (file->pending_head == ticket) {
+        file->pending_head = ticket->next;
+    }
+
+    if (ticket->next) {
+        ticket->next->prev = ticket->prev;
+    } else if (file->pending_tail == ticket) {
+        file->pending_tail = ticket->prev;
+    }
+
+    ticket->prev   = NULL;
+    ticket->next   = NULL;
+    ticket->queued = false;
+} /* chimera_vfs_pending_dequeue_locked */
+
+static inline struct chimera_vfs_pending_acquire *
+chimera_vfs_pending_drain_locked(struct chimera_vfs_file_state *file)
+{
+    struct chimera_vfs_pending_acquire *head = file->pending_head;
+    struct chimera_vfs_pending_acquire *t;
+
+    file->pending_head = NULL;
+    file->pending_tail = NULL;
+    for (t = head; t; t = t->next) {
+        t->queued = false;
+    }
+    return head;
+} /* chimera_vfs_pending_drain_locked */
+
+/* Retry every queued acquire on `file`.  Called after any state mutation
+ * that could clear a conflict (remove, ack with downgrade, revoke).  This
+ * MUST be called with file->lock NOT held; it takes and releases the lock
+ * internally. */
+static void
+chimera_vfs_state_pump_pending(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
+{
+    struct chimera_vfs_pending_acquire *head, *t, *next;
+    enum chimera_vfs_lease_result       result;
+    struct chimera_vfs_lease           *conflict;
+
+    pthread_mutex_lock(&file->lock);
+    head = chimera_vfs_pending_drain_locked(file);
+    pthread_mutex_unlock(&file->lock);
+
+    for (t = head; t; t = next) {
+        next     = t->next;
+        t->prev  = NULL;
+        t->next  = NULL;
+        conflict = NULL;
+
+        result = chimera_vfs_state_try_insert(state, file, t->lease, &conflict);
+
+        if (result == CHIMERA_VFS_LEASE_BREAKING) {
+            /* Re-queue and wait for the next ack/revoke.  begin_break
+             * has already been invoked on the conflicting holder by
+             * try_insert. */
+            pthread_mutex_lock(&file->lock);
+            chimera_vfs_pending_enqueue_locked(file, t);
+            pthread_mutex_unlock(&file->lock);
+            continue;
+        }
+
+        t->cb(result,
+              result == CHIMERA_VFS_LEASE_GRANTED ? t->lease : NULL,
+              conflict,
+              t->private_data);
+    }
+} /* chimera_vfs_state_pump_pending */
+
+SYMBOL_EXPORT void
+chimera_vfs_state_remove(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_lease      *lease)
+{
+    (void) state;
+
+    pthread_mutex_lock(&file->lock);
+    chimera_vfs_file_state_remove_lease(file, lease);
+    pthread_mutex_unlock(&file->lock);
+
+    /* Removing a lease may unblock a pending acquire. */
+    chimera_vfs_state_pump_pending(state, file);
+} /* chimera_vfs_state_remove */
+
+/* -------------------------------------------------------------------- */
+/* Async acquire / release / test                                       */
+/* -------------------------------------------------------------------- */
+
+SYMBOL_EXPORT void
+chimera_vfs_lease_acquire(
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_file_state      *file,
+    struct chimera_vfs_lease           *lease,
+    struct chimera_vfs_pending_acquire *ticket,
+    bool                                wait,
+    chimera_vfs_lease_acquire_cb_t      cb,
+    void                               *private_data)
+{
+    enum chimera_vfs_lease_result result;
+    struct chimera_vfs_lease     *conflict = NULL;
+
+    ticket->lease        = lease;
+    ticket->cb           = cb;
+    ticket->private_data = private_data;
+    ticket->file         = file;
+    ticket->queued       = false;
+    ticket->prev         = NULL;
+    ticket->next         = NULL;
+
+    result = chimera_vfs_state_try_insert(state, file, lease, &conflict);
+
+    if (result == CHIMERA_VFS_LEASE_BREAKING && wait) {
+        /* Conflict is breakable and caller said to wait.  Queue the
+         * ticket; it will fire when the break completes (via pump). */
+        pthread_mutex_lock(&file->lock);
+        chimera_vfs_pending_enqueue_locked(file, ticket);
+        pthread_mutex_unlock(&file->lock);
+        return;
+    }
+
+    /* Synchronous outcome (GRANTED, DENIED, or wait==false BREAKING). */
+    cb(result,
+       result == CHIMERA_VFS_LEASE_GRANTED ? lease : NULL,
+       conflict,
+       private_data);
+} /* chimera_vfs_lease_acquire */
+
+SYMBOL_EXPORT void
+chimera_vfs_lease_release(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_lease      *lease)
+{
+    chimera_vfs_state_remove(state, file, lease);
+} /* chimera_vfs_lease_release */
+
+SYMBOL_EXPORT bool
+chimera_vfs_lease_acquire_cancel(
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_pending_acquire *ticket)
+{
+    struct chimera_vfs_file_state *file = ticket->file;
+    bool                           was_queued;
+
+    (void) state;
+
+    if (!file) {
+        return false;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    was_queued = ticket->queued;
+    if (was_queued) {
+        chimera_vfs_pending_dequeue_locked(file, ticket);
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    return was_queued;
+} /* chimera_vfs_lease_acquire_cancel */
+
+SYMBOL_EXPORT enum chimera_vfs_lease_result
+chimera_vfs_lease_test(
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_lease *probe,
+    struct chimera_vfs_lease      **conflict_out)
+{
+    enum chimera_vfs_lease_result result;
+
+    pthread_mutex_lock(&file->lock);
+    result = chimera_vfs_state_would_conflict(file, probe, conflict_out);
+    pthread_mutex_unlock(&file->lock);
+    return result;
+} /* chimera_vfs_lease_test */
+
+/* -------------------------------------------------------------------- */
+/* Break orchestration                                                  */
+/* -------------------------------------------------------------------- */
+
+SYMBOL_EXPORT void
+chimera_vfs_lease_begin_break(
+    struct chimera_vfs_state *state,
+    struct chimera_vfs_lease *lease,
+    uint8_t                   needed_mode,
+    uint32_t                  deadline_ms)
+{
+    struct chimera_vfs_file_state *file = lease->file;
+    struct timespec                now;
+    chimera_vfs_lease_break_cb_t   cb;
+    void                          *cb_priv;
+    bool                           should_invoke;
+
+    if (deadline_ms == 0) {
+        deadline_ms = state->default_break_deadline_ms;
+    }
+
+    if (file) {
+        pthread_mutex_lock(&file->lock);
+    }
+
+    should_invoke = (lease->break_state == CHIMERA_VFS_BREAK_IDLE) &&
+        (lease->owner.break_cb != NULL);
+
+    if (should_invoke) {
+        lease->break_state       = CHIMERA_VFS_BREAK_BREAKING;
+        lease->break_needed_mode = needed_mode;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        now.tv_sec  += deadline_ms / 1000;
+        now.tv_nsec += (long) (deadline_ms % 1000) * 1000000L;
+        if (now.tv_nsec >= 1000000000L) {
+            now.tv_sec  += 1;
+            now.tv_nsec -= 1000000000L;
+        }
+        lease->break_deadline = now;
+        cb                    = lease->owner.break_cb;
+        cb_priv               = lease->owner.cb_private;
+    } else {
+        cb      = NULL;
+        cb_priv = NULL;
+    }
+
+    if (file) {
+        pthread_mutex_unlock(&file->lock);
+    }
+
+    /* Invoke the break callback outside the file lock — the protocol
+     * server may need to send packets, take other locks, etc. */
+    if (cb) {
+        cb(lease, needed_mode, cb_priv);
+    }
+} /* chimera_vfs_lease_begin_break */
+
+SYMBOL_EXPORT void
+chimera_vfs_lease_ack(
+    struct chimera_vfs_lease     *lease,
+    struct chimera_vfs_lease_mode resulting)
+{
+    struct chimera_vfs_file_state *file    = lease->file;
+    bool                           mutated = false;
+
+    if (file) {
+        pthread_mutex_lock(&file->lock);
+    }
+
+    if (lease->break_state == CHIMERA_VFS_BREAK_BREAKING) {
+        lease->mode        = resulting;
+        lease->break_state = CHIMERA_VFS_BREAK_ACKED;
+        mutated            = true;
+    }
+
+    if (file) {
+        pthread_mutex_unlock(&file->lock);
+    }
+
+    /* Acking a break may unblock pending acquires. */
+    if (mutated && file && file->state) {
+        chimera_vfs_state_pump_pending(file->state, file);
+    }
+} /* chimera_vfs_lease_ack */
+
+SYMBOL_EXPORT void
+chimera_vfs_lease_revoke(struct chimera_vfs_lease *lease)
+{
+    struct chimera_vfs_file_state *file = lease->file;
+
+    if (file) {
+        pthread_mutex_lock(&file->lock);
+    }
+
+    lease->mode.granted = 0;
+    lease->mode.denied  = 0;
+    lease->break_state  = CHIMERA_VFS_BREAK_REVOKED;
+
+    if (file) {
+        pthread_mutex_unlock(&file->lock);
+    }
+
+    /* Revoking a lease may unblock pending acquires. */
+    if (file && file->state) {
+        chimera_vfs_state_pump_pending(file->state, file);
+    }
+} /* chimera_vfs_lease_revoke */
+
+/* -------------------------------------------------------------------- */
+/* I/O hook (no-op for Stage A)                                         */
+/* -------------------------------------------------------------------- */
+
+SYMBOL_EXPORT int
+chimera_vfs_state_check_io(struct chimera_vfs_request *request)
+{
+    (void) request;
+    return 0;
+} /* chimera_vfs_state_check_io */

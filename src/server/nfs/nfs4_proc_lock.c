@@ -2,12 +2,16 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <stdlib.h>
+#include <xxhash.h>
+
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_state.h"
 
 /*
  * RFC 7530 §9.1.7 LOCK completion wrapper.  Advances the owner seqid(s)
@@ -88,21 +92,30 @@ chimera_nfs4_lock_finish(
 
 static void
 chimera_nfs4_lock_complete(
-    enum chimera_vfs_error error_code,
-    uint32_t               conflict_type,
-    uint64_t               conflict_offset,
-    uint64_t               conflict_length,
-    pid_t                  conflict_pid,
-    void                  *private_data)
+    enum chimera_vfs_lease_result result,
+    struct chimera_vfs_lease     *granted,
+    struct chimera_vfs_lease     *conflict,
+    void                         *private_data)
 {
-    struct nfs_request     *req        = private_data;
-    struct LOCK4args       *args       = &req->args_compound->argarray[req->index].oplock;
-    struct LOCK4res        *res        = &req->res_compound.resarray[req->index].oplock;
-    struct nfs_state_table *table      = &req->thread->shared->nfs4_state_table;
-    struct nfs_lock_state  *lock_state = req->nfs_state_ref;
-    uint32_t                client_short_id;
+    struct nfs_request       *req        = private_data;
+    struct LOCK4args         *args       = &req->args_compound->argarray[req->index].oplock;
+    struct LOCK4res          *res        = &req->res_compound.resarray[req->index].oplock;
+    struct nfs_state_table   *table      = &req->thread->shared->nfs4_state_table;
+    struct nfs_lock_state    *lock_state = req->nfs_state_ref;
+    struct nfs4_range_lease  *rl         = req->nfs_inflight_range;
+    struct chimera_vfs_state *vfs_state  = req->thread->vfs->vfs_state;
+    uint32_t                  client_short_id;
 
-    if (error_code == CHIMERA_VFS_OK) {
+    (void) granted;
+
+    req->nfs_inflight_range = NULL;
+
+    if (result == CHIMERA_VFS_LEASE_GRANTED) {
+        /* Link the granted range lease onto the lock_state so LOCKU /
+         * teardown can find and release it. */
+        rl->next                 = lock_state->range_leases;
+        lock_state->range_leases = rl;
+
         /* RFC 7530 §9.1.3: stateid.seqid starts at 1 for a new lock_stateid;
          * only increment when modifying an existing lock state. */
         if (!args->locker.new_lock_owner) {
@@ -117,9 +130,6 @@ chimera_nfs4_lock_complete(
 
         res->status = NFS4_OK;
 
-        /* Drop the acquire ref taken at lock entry.  The seqid advance
-         * + replay cache record runs inside chimera_nfs4_lock_complete
-         * (the wrapper, called via the macro below). */
         nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                                 req->thread->vfs_thread);
         req->nfs_state_ref = NULL;
@@ -127,11 +137,13 @@ chimera_nfs4_lock_complete(
         return;
     }
 
-    /* Failure: tear down the freshly-allocated lock_state if this was a
-     * new lock_owner request; otherwise just drop the acquire ref. */
+    /* DENIED (or wait=false BREAKING): discard the half-built range lease. */
+    chimera_vfs_state_put(vfs_state, rl->file_state);
+    free(rl);
+
+    /* Tear down the freshly-allocated lock_state if this was a new
+     * lock_owner request; otherwise just drop the acquire ref. */
     if (args->locker.new_lock_owner) {
-        /* Drop the acquire ref taken at create time, then destroy.  Destroy
-         * will release the dup'd handle as the last ref drops. */
         nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                                 req->thread->vfs_thread);
         nfs_lock_state_destroy(lock_state, table, req->thread->vfs_thread);
@@ -141,19 +153,15 @@ chimera_nfs4_lock_complete(
     }
     req->nfs_state_ref = NULL;
 
-    if (error_code == CHIMERA_VFS_EACCES || error_code == CHIMERA_VFS_EAGAIN) {
-        res->status          = NFS4ERR_DENIED;
-        res->denied.offset   = conflict_offset;
-        res->denied.length   = conflict_length;
-        res->denied.locktype = (conflict_type == CHIMERA_VFS_LOCK_READ) ?
-            READ_LT : WRITE_LT;
-        /* VFS does not expose the conflicting lock's NFS owner; zero it. */
-        res->denied.owner.clientid   = 0;
-        res->denied.owner.owner.len  = 0;
-        res->denied.owner.owner.data = NULL;
-    } else {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-    }
+    res->status          = NFS4ERR_DENIED;
+    res->denied.offset   = conflict ? conflict->offset : 0;
+    res->denied.length   = (conflict && conflict->length) ? conflict->length : UINT64_MAX;
+    res->denied.locktype = (conflict && (conflict->mode.granted & CHIMERA_VFS_LEASE_MODE_W)) ?
+        WRITE_LT : READ_LT;
+    /* vfs_state does not expose the conflicting lock's NFS owner; zero it. */
+    res->denied.owner.clientid   = 0;
+    res->denied.owner.owner.len  = 0;
+    res->denied.owner.owner.data = NULL;
     chimera_nfs4_lock_finish(req, res->status);
 } /* chimera_nfs4_lock_complete */
 
@@ -352,14 +360,68 @@ chimera_nfs4_lock(
         return;
     }
 
-    /* NFS uses UINT64_MAX to mean "to end of file"; POSIX fcntl uses 0. */
-    chimera_vfs_lock(thread->vfs_thread, &req->cred,
-                     handle,
-                     SEEK_SET,
-                     args->offset,
-                     args->length == UINT64_MAX ? 0 : args->length,
-                     lock_type,
-                     0,
-                     chimera_nfs4_lock_complete,
-                     req);
+    /* Acquire the byte-range lease through vfs_state for cross-protocol
+     * (NLM / SMB) coordination.  NFS uses UINT64_MAX for "to EOF";
+     * vfs_state uses 0. */
+    {
+        struct chimera_vfs_state      *vfs_state = thread->vfs->vfs_state;
+        struct chimera_vfs_file_state *file_state;
+        struct nfs4_range_lease       *rl;
+
+        rl = calloc(1, sizeof(*rl));
+        if (!rl) {
+            if (args->locker.new_lock_owner) {
+                nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
+                                        thread->vfs_thread);
+                nfs_lock_state_destroy(lock_state, table, thread->vfs_thread);
+            } else {
+                nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
+                                        thread->vfs_thread);
+            }
+            req->nfs_state_ref = NULL;
+            res->status        = NFS4ERR_RESOURCE;
+            chimera_nfs4_lock_finish(req, res->status);
+            return;
+        }
+
+        file_state = chimera_vfs_state_get(vfs_state,
+                                           handle->fh, handle->fh_len,
+                                           handle->fh_hash, true);
+        if (!file_state) {
+            free(rl);
+            if (args->locker.new_lock_owner) {
+                nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
+                                        thread->vfs_thread);
+                nfs_lock_state_destroy(lock_state, table, thread->vfs_thread);
+            } else {
+                nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
+                                        thread->vfs_thread);
+            }
+            req->nfs_state_ref = NULL;
+            res->status        = NFS4ERR_RESOURCE;
+            chimera_nfs4_lock_finish(req, res->status);
+            return;
+        }
+
+        rl->file_state         = file_state;
+        rl->lease.kind         = CHIMERA_VFS_LEASE_RANGE;
+        rl->lease.mode.granted = (lock_type == CHIMERA_VFS_LOCK_READ) ?
+            CHIMERA_VFS_LEASE_MODE_R : CHIMERA_VFS_LEASE_MODE_W;
+        rl->lease.offset           = args->offset;
+        rl->lease.length           = args->length == UINT64_MAX ? 0 : args->length;
+        rl->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4;
+        rl->lease.owner.client_key = lock_state->lock_owner->client->client_id;
+        rl->lease.owner.owner_lo   = XXH3_64bits(lock_state->lock_owner->owner,
+                                                 lock_state->lock_owner->owner_len);
+        rl->lease.owner.owner_hi = 0;
+
+        req->nfs_inflight_range = rl;
+
+        /* wait=false: NFSv4 LOCK returns DENIED on conflict (matching the
+         * prior backend behavior).  A cross-protocol breakable conflict
+         * still kicks off the break inside try_insert. */
+        chimera_vfs_lease_acquire(vfs_state, file_state,
+                                  &rl->lease, &rl->ticket, false,
+                                  chimera_nfs4_lock_complete, req);
+    }
 } /* chimera_nfs4_lock */

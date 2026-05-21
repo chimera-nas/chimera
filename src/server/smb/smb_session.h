@@ -5,14 +5,17 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <pthread.h>
 #include <uthash.h>
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_cred.h"
+#include "vfs/vfs_state.h"
 #include "smb2.h"
 
 struct chimera_smb_share;
+struct chimera_smb_conn;
 
 struct chimera_smb_file_id {
     uint64_t pid;
@@ -66,6 +69,7 @@ typedef int (*chimera_smb_pipe_transceive_t)(
     struct evpl_iovec          *output_iov);
 
 struct chimera_smb_notify_state;
+struct chimera_smb_lock_entry;
 
 struct chimera_smb_open_file {
     enum chimera_smb_open_file_type  type;
@@ -94,6 +98,24 @@ struct chimera_smb_open_file {
     uint8_t                          create_guid[16];
     struct chimera_smb_open_file    *next;
     struct chimera_smb_notify_state *notify_state;
+    /* Byte-range locks (SMB2_LOCK) held against this open.  Allocated
+     * and linked on each granted lock op; freed on UNLOCK or on close. */
+    struct chimera_smb_lock_entry   *lock_entries;
+    /* SHARE lease (whole-file deny mode reservation) held by this open
+     * once CREATE succeeds.  Released at close. */
+    struct chimera_vfs_lease         share_lease;
+    struct chimera_vfs_file_state   *share_file_state;
+    bool                             share_lease_inserted;
+    /* CACHING lease (SMB2 lease / oplock) held by this open.  Released
+     * at close or on OPLOCK_BREAK ack with mode=0. */
+    struct chimera_vfs_lease         caching_lease;
+    struct chimera_vfs_file_state   *caching_file_state;
+    bool                             caching_lease_inserted;
+    /* Conn on which this open was created — used by the break path to
+     * send unsolicited OPLOCK_BREAK Notifications.  Cleared by the
+     * disconnect handler before the conn is freed; if NULL when a
+     * break is needed, the lease is forcibly revoked instead. */
+    struct chimera_smb_conn         *create_conn;
     uint8_t                          parent_fh[CHIMERA_VFS_FH_SIZE];
     char                             name[SMB_FILENAME_MAX];
     uint16_t                         pattern[SMB_FILENAME_MAX];

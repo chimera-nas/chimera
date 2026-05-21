@@ -19,6 +19,7 @@
 #include "nfs_nlm_state.h"
 
 struct chimera_server_nfs_thread;
+struct nfs4_range_lease;
 
 struct nfs_nfs3_readdir_cursor {
     uint64_t       count;
@@ -64,6 +65,10 @@ struct nfs_request {
      * NFS4_SLOT_TYPE_OPEN / NFS4_SLOT_TYPE_LOCK. */
     void                             *nfs_state_ref;
     uint8_t                           nfs_state_type;
+    /* In-flight vfs_state byte-range lease for an async NFSv4 LOCK.
+     * Allocated at lock dispatch, linked onto the lock_state on grant,
+     * freed on denial.  See nfs4_proc_lock.c. */
+    struct nfs4_range_lease          *nfs_inflight_range;
     /* Per-owner seqid bookkeeping for the 4.0 OPEN flow.  Populated at
      * entry to chimera_nfs4_open after the seqid is classified NEW; nil on
      * 4.1+ and on replay/bad-seqid short-circuits.  All OPEN response

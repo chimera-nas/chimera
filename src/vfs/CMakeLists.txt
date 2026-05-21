@@ -18,7 +18,7 @@ add_library(chimera_vfs SHARED vfs.c vfs_lsan.c
             vfs_proc_delete_key.c vfs_proc_search_keys.c
             vfs_proc_allocate.c vfs_proc_seek.c vfs_proc_lock.c
             vfs_proc_copy_range.c vfs_proc_clone_range.c vfs_proc_move_range.c
-            vfs_proc_getparent.c vfs_notify.c vfs_dump.c)
+            vfs_proc_getparent.c vfs_notify.c vfs_state.c vfs_dump.c)
 
 target_compile_definitions(chimera_vfs PRIVATE
     XXH_INLINE_ALL

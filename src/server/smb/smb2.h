@@ -710,7 +710,20 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_OPLOCK_LEVEL_BATCH                     0x09
 #define SMB2_OPLOCK_LEVEL_LEASE                     0xff
 
+/* SMB2 lease state bits (MS-SMB2 §2.2.13.2.8/2.2.13.2.10).  Note the
+ * bit positions differ from the internal vfs_state RWH masks — the
+ * smb_proc_create lease helpers do the translation. */
+#define SMB2_LEASE_NONE                             0x00
+#define SMB2_LEASE_READ_CACHING                     0x01
+#define SMB2_LEASE_HANDLE_CACHING                   0x02
+#define SMB2_LEASE_WRITE_CACHING                    0x04
+
 #define SMB2_CREATE_REQUEST_LEASE_SIZE              32
+#define SMB2_CREATE_REQUEST_LEASE_V2_SIZE           52
+#define SMB2_OPLOCK_BREAK_NOTIFY_LEASE_SIZE         44
+#define SMB2_OPLOCK_BREAK_NOTIFY_LEGACY_SIZE        24
+#define SMB2_OPLOCK_BREAK_ACK_LEASE_SIZE            36
+#define SMB2_OPLOCK_BREAK_ACK_LEGACY_SIZE           24
 
 #define SMB2_IMPERSONATION_ANONYMOUS                0x00000000
 #define SMB2_IMPERSONATION_IDENTIFICATION           0x00000001

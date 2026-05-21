@@ -16,7 +16,18 @@
 #include "nfs4_stateid.h"
 #include "nfs4_lease.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_state.h"
 #include "common/macros.h"
+
+/* One held NFSv4 byte-range, tracked so it can be released on LOCKU or
+ * cascaded at lock_state teardown.  vfs_state coordinates the range
+ * across NLM and SMB; the lease lives here for the lock_state's lifetime. */
+struct nfs4_range_lease {
+    struct chimera_vfs_lease           lease;
+    struct chimera_vfs_pending_acquire ticket;
+    struct chimera_vfs_file_state     *file_state;
+    struct nfs4_range_lease           *next;
+};
 
 /*
  * Unified NFSv4 state model.
@@ -200,6 +211,13 @@ struct nfs_open_state {
     struct nfs_lock_state          *locks;              /* utlist via next_in_open */
     UT_hash_handle                  hh;                 /* by fh in owner->states_by_fh */
 
+    /* vfs_state SHARE reservation for cross-protocol (NLM/SMB) share-mode
+     * coordination.  Held while the open_state is alive; released in
+     * open_state_cleanup. */
+    struct chimera_vfs_lease        share_lease;
+    struct chimera_vfs_file_state  *share_file_state;
+    bool                            share_lease_held;
+
     /* Lifetime: starts at 1 for the state's slot; each acquire bumps it.
      * destroy() flips `destroyed` and drops the +1.  When refcount reaches
      * zero AND destroyed is set, the handle is released and the struct
@@ -229,6 +247,11 @@ struct nfs_lock_state {
     uint32_t                        generation;
 
     struct chimera_vfs_open_handle *handle;             /* +1 distinct dup */
+
+    /* vfs_state RANGE leases held by this lock_state, one per locked
+     * byte-range.  LOCK appends, LOCKU removes the matching range, and
+     * lock_state_cleanup drains the remainder. */
+    struct nfs4_range_lease        *range_leases;
 
     /* utlist LL chains.  *_in_open is rooted on open_state->locks (CLOSE
      * cascade); *_in_owner is rooted on lock_owner->states (RELEASE_LOCKOWNER
