@@ -141,6 +141,11 @@ struct demofs_request_private {
     uint32_t                 rmw_prefix_valid; // Valid bytes in prefix (extent may be truncated)
     uint32_t                 rmw_suffix_adjust; // Adjustment for suffix when block starts before extent
     uint32_t                 rmw_suffix_valid; // Valid bytes in suffix (extent may be truncated)
+    /* Carried across the async prefix/suffix lookups + trim walk. */
+    int                      need_prefix_read;
+    int                      need_suffix_read;
+    uint64_t                 prefix_device_id, prefix_device_offset;
+    uint64_t                 suffix_device_id, suffix_device_offset;
 };
 
 struct demofs_device {
@@ -6912,25 +6917,478 @@ demofs_write_phase2(
 
 } /* demofs_write_phase2 */
 
-// Find the extent covering a specific file offset; fills *buf and returns
-// it, or NULL if no extent covers the offset.
-static struct demofs_extent *
-demofs_find_extent_at(
-    struct demofs_thread *thread,
-    struct demofs_inode  *inode,
-    uint64_t              file_offset,
-    struct demofs_extent *buf)
-{
-    if (demofs_ext_floor(thread, inode, file_offset, buf)) {
-        uint64_t extent_end = buf->file_offset + buf->length;
+/*
+ * Write (read-modify-write) as an async chain:
+ *   prefix lookup -> suffix lookup -> trim overlapping extents ->
+ *   insert the new aligned extent -> [RMW reads] -> phase2 data write.
+ * State is carried in demofs_private (rmw_*, need_*_read, *_device_*),
+ * inode_stash[0] = inode, ext_iter = current extent during the trim walk.
+ */
+static void demofs_write_trim_process(
+    struct chimera_vfs_request *request);
+static void demofs_write_trim_done(
+    struct chimera_vfs_request *request);
 
-        if (file_offset >= buf->file_offset && file_offset < extent_end) {
-            return buf;
+/* Tail: inode metadata, unlock, RMW reads, phase2. */
+static void
+demofs_write_inserted_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request        = private_data;
+    struct demofs_request_private *demofs_private = request->plugin_data;
+    struct demofs_thread          *thread         = demofs_private->thread;
+    struct demofs_shared          *shared         = thread->shared;
+    struct evpl                   *evpl           = thread->evpl;
+    struct demofs_inode           *inode          = demofs_private->inode_stash[0];
+    uint64_t                       write_end      = request->write.offset + request->write.length;
+    struct timespec                now;
+
+    (void) result;
+    demofs_bt_op_free(thread, op);
+
+    if (inode->size < write_end) {
+        inode->size       = write_end;
+        inode->space_used = (inode->size + 4095) & ~4095;
+    }
+
+    clock_gettime(CLOCK_REALTIME, &now);
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+
+    demofs_map_attrs(thread, &request->write.r_post_attr, inode);
+
+    request->write.r_length = request->write.length;
+    request->write.r_sync   = 1;
+
+    /* In-memory mutations done; release the inode lock before block I/O. */
+    demofs_txn_unlock_inode(demofs_private->txn, inode);
+
+    if (demofs_private->need_prefix_read || demofs_private->need_suffix_read) {
+        demofs_private->rmw_phase = 1;
+
+        if (demofs_private->need_prefix_read) {
+            int niov = evpl_iovec_alloc(evpl, 4096, 4096, 1, 0,
+                                        &demofs_private->rmw_prefix_iov);
+            if (niov > 0) {
+                demofs_private->pending++;
+                thread->pending_io++;
+                demofs_private->rmw_prefix_pending = 1;
+                evpl_block_read(evpl, thread->queue[demofs_private->prefix_device_id],
+                                &demofs_private->rmw_prefix_iov, 1,
+                                demofs_private->prefix_device_offset,
+                                demofs_write_rmw_read_callback, request);
+            }
+        }
+        if (demofs_private->need_suffix_read) {
+            int niov = evpl_iovec_alloc(evpl, 4096, 4096, 1, 0,
+                                        &demofs_private->rmw_suffix_iov);
+            if (niov > 0) {
+                demofs_private->pending++;
+                thread->pending_io++;
+                demofs_private->rmw_suffix_pending = 1;
+                evpl_block_read(evpl, thread->queue[demofs_private->suffix_device_id],
+                                &demofs_private->rmw_suffix_iov, 1,
+                                demofs_private->suffix_device_offset,
+                                demofs_write_rmw_read_callback, request);
+            }
+        }
+
+        if (demofs_private->pending == 0) {
+            demofs_private->rmw_phase = 2;
+            demofs_write_phase2(thread, shared, request);
+        }
+    } else {
+        demofs_private->rmw_phase = 2;
+        demofs_write_phase2(thread, shared, request);
+    }
+} /* demofs_write_inserted_cb */
+
+static void
+demofs_write_trim_done(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_bt_op           *op     = demofs_bt_op_alloc(thread);
+
+    if (demofs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
+                                p->rmw_aligned_start, p->rmw_aligned_length,
+                                p->rmw_device_id, p->rmw_device_offset,
+                                demofs_write_inserted_cb, request)) {
+        demofs_write_inserted_cb(op, op->result, request);
+    }
+} /* demofs_write_trim_done */
+
+static void
+demofs_write_trim_walk_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+
+    p->loop_have = demofs_ext_from_op(op, result, &p->ext_iter);
+    demofs_bt_op_free(p->thread, op);
+    demofs_write_trim_process(request);
+} /* demofs_write_trim_walk_cb */
+
+static void
+demofs_write_trim_advance(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_bt_op           *op     = demofs_bt_op_alloc(thread);
+
+    if (demofs_ext_next_async(op, thread, p->inode_stash[0], p->ext_iter.file_offset,
+                              p->rec_scratch, sizeof(p->rec_scratch),
+                              demofs_write_trim_walk_cb, request)) {
+        demofs_write_trim_walk_cb(op, op->result, request);
+    }
+} /* demofs_write_trim_advance */
+
+static void
+demofs_write_trim_advance_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    (void) result;
+    demofs_bt_op_free(((struct demofs_request_private *) request->plugin_data)->thread, op);
+    demofs_write_trim_advance(request);
+} /* demofs_write_trim_advance_cb */
+
+/* spans: insert tail -> remove -> insert head -> done. */
+static void
+demofs_write_trim_spans_before_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    (void) result;
+    demofs_bt_op_free(((struct demofs_request_private *) request->plugin_data)->thread, op);
+    demofs_write_trim_done(request);
+} /* demofs_write_trim_spans_before_cb */
+
+static void
+demofs_write_trim_spans_removed_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    uint64_t                       astart  = p->rmw_aligned_start;
+
+    (void) result;
+    demofs_bt_op_free(thread, op);
+
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
+                                p->ext_iter.file_offset, astart - p->ext_iter.file_offset,
+                                p->ext_iter.device_id, p->ext_iter.device_offset,
+                                demofs_write_trim_spans_before_cb, request)) {
+        demofs_write_trim_spans_before_cb(op, op->result, request);
+    }
+} /* demofs_write_trim_spans_removed_cb */
+
+static void
+demofs_write_trim_spans_after_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+
+    (void) result;
+    demofs_bt_op_free(thread, op);
+
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_remove_async(op, thread, p->txn, p->inode_stash[0],
+                                p->ext_iter.file_offset,
+                                demofs_write_trim_spans_removed_cb, request)) {
+        demofs_write_trim_spans_removed_cb(op, op->result, request);
+    }
+} /* demofs_write_trim_spans_after_cb */
+
+/* overlap-left: remove -> reinsert head -> advance. */
+static void
+demofs_write_trim_oleft_removed_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    uint64_t                       astart  = p->rmw_aligned_start;
+
+    (void) result;
+    demofs_bt_op_free(thread, op);
+
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
+                                p->ext_iter.file_offset, astart - p->ext_iter.file_offset,
+                                p->ext_iter.device_id, p->ext_iter.device_offset,
+                                demofs_write_trim_advance_cb, request)) {
+        demofs_write_trim_advance_cb(op, op->result, request);
+    }
+} /* demofs_write_trim_oleft_removed_cb */
+
+/* overlap-right: remove -> reinsert tail at aligned_end -> done. */
+static void
+demofs_write_trim_oright_removed_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    uint64_t                       es      = p->ext_iter.file_offset;
+    uint64_t                       ee      = es + p->ext_iter.length;
+    uint64_t                       aend    = p->rmw_aligned_start + p->rmw_aligned_length;
+
+    (void) result;
+    demofs_bt_op_free(thread, op);
+
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], aend, ee - aend,
+                                p->ext_iter.device_id,
+                                p->ext_iter.device_offset + (aend - es),
+                                demofs_write_trim_spans_before_cb, request)) {
+        demofs_write_trim_spans_before_cb(op, op->result, request);
+    }
+} /* demofs_write_trim_oright_removed_cb */
+
+static void
+demofs_write_trim_process(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    uint64_t                       astart = p->rmw_aligned_start;
+    uint64_t                       aend   = p->rmw_aligned_start + p->rmw_aligned_length;
+    uint64_t                       es, ee;
+    struct demofs_bt_op           *op;
+
+    if (!p->loop_have) {
+        demofs_write_trim_done(request);
+        return;
+    }
+
+    es = p->ext_iter.file_offset;
+    ee = es + p->ext_iter.length;
+
+    if (es >= aend) {
+        demofs_write_trim_done(request);
+        return;
+    }
+
+    if (es >= astart && ee <= aend) {
+        /* Completely inside the aligned region: remove, then advance. */
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
+                                    demofs_write_trim_advance_cb, request)) {
+            demofs_write_trim_advance_cb(op, op->result, request);
+        }
+    } else if (es < astart && ee > aend) {
+        /* Spans the region: insert tail at aligned_end first. */
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], aend,
+                                    ee - aend, p->ext_iter.device_id,
+                                    p->ext_iter.device_offset + (aend - es),
+                                    demofs_write_trim_spans_after_cb, request)) {
+            demofs_write_trim_spans_after_cb(op, op->result, request);
+        }
+    } else if (es < astart && ee > astart) {
+        /* Overlaps the left edge: remove, reinsert the head. */
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
+                                    demofs_write_trim_oleft_removed_cb, request)) {
+            demofs_write_trim_oleft_removed_cb(op, op->result, request);
+        }
+    } else if (es < aend && ee > aend) {
+        /* Starts within, extends past: remove, reinsert tail at aligned_end. */
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
+                                    demofs_write_trim_oright_removed_cb, request)) {
+            demofs_write_trim_oright_removed_cb(op, op->result, request);
+        }
+    } else {
+        /* No overlap (extent before aligned_start): skip. */
+        demofs_write_trim_advance(request);
+    }
+} /* demofs_write_trim_process */
+
+static void
+demofs_write_trim_first_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    int                            have    = demofs_ext_from_op(op, result, &p->ext_iter);
+
+    demofs_bt_op_free(thread, op);
+
+    if (!have) {
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_ceil_async(op, thread, p->inode_stash[0], 0, p->rec_scratch,
+                                  sizeof(p->rec_scratch), demofs_write_trim_walk_cb,
+                                  request)) {
+            demofs_write_trim_walk_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    p->loop_have = 1;
+    demofs_write_trim_process(request);
+} /* demofs_write_trim_first_cb */
+
+static void
+demofs_write_trim_start(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_bt_op           *op     = demofs_bt_op_alloc(thread);
+
+    if (demofs_ext_floor_async(op, thread, p->inode_stash[0], p->rmw_aligned_start,
+                               p->rec_scratch, sizeof(p->rec_scratch),
+                               demofs_write_trim_first_cb, request)) {
+        demofs_write_trim_first_cb(op, op->result, request);
+    }
+} /* demofs_write_trim_start */
+
+static void
+demofs_write_suffix_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request   = private_data;
+    struct demofs_request_private *p         = request->plugin_data;
+    int                            have      = demofs_ext_from_op(op, result, &p->ext_iter);
+    uint64_t                       write_end = request->write.offset + request->write.length;
+    uint64_t                       aend      = p->rmw_aligned_start + p->rmw_aligned_length;
+
+    demofs_bt_op_free(p->thread, op);
+
+    if (have && p->ext_iter.file_offset <= write_end &&
+        write_end < p->ext_iter.file_offset + p->ext_iter.length) {
+        uint64_t suffix_block = write_end & ~4095ULL;
+        uint64_t ee           = p->ext_iter.file_offset + p->ext_iter.length;
+
+        if (ee >= aend) {
+            p->rmw_suffix_valid = p->rmw_suffix_len;
+        } else if (ee > write_end) {
+            p->rmw_suffix_valid = ee - write_end;
+        } else {
+            p->rmw_suffix_valid = 0;
+        }
+
+        if (suffix_block >= p->ext_iter.file_offset) {
+            p->need_suffix_read     = 1;
+            p->suffix_device_id     = p->ext_iter.device_id;
+            p->suffix_device_offset = p->ext_iter.device_offset +
+                (suffix_block - p->ext_iter.file_offset);
+        } else {
+            p->need_suffix_read     = 1;
+            p->suffix_device_id     = p->ext_iter.device_id;
+            p->suffix_device_offset = p->ext_iter.device_offset;
+            p->rmw_suffix_adjust    = p->ext_iter.file_offset - suffix_block;
         }
     }
 
-    return NULL;
-} /* demofs_find_extent_at */
+    demofs_write_trim_start(request);
+} /* demofs_write_suffix_cb */
+
+static void
+demofs_write_suffix_lookup(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p         = request->plugin_data;
+    struct demofs_thread          *thread    = p->thread;
+    uint64_t                       write_end = request->write.offset + request->write.length;
+    struct demofs_bt_op           *op;
+
+    if (p->rmw_suffix_len == 0) {
+        demofs_write_trim_start(request);
+        return;
+    }
+
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_floor_async(op, thread, p->inode_stash[0], write_end, p->rec_scratch,
+                               sizeof(p->rec_scratch), demofs_write_suffix_cb, request)) {
+        demofs_write_suffix_cb(op, op->result, request);
+    }
+} /* demofs_write_suffix_lookup */
+
+static void
+demofs_write_prefix_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    int                            have    = demofs_ext_from_op(op, result, &p->ext_iter);
+    uint64_t                       astart  = p->rmw_aligned_start;
+
+    demofs_bt_op_free(p->thread, op);
+
+    if (have && p->ext_iter.file_offset <= astart &&
+        astart < p->ext_iter.file_offset + p->ext_iter.length) {
+        uint64_t ee = p->ext_iter.file_offset + p->ext_iter.length;
+
+        if (ee >= astart + p->rmw_prefix_len) {
+            p->rmw_prefix_valid = p->rmw_prefix_len;
+        } else if (ee > astart) {
+            p->rmw_prefix_valid = ee - astart;
+        } else {
+            p->rmw_prefix_valid = 0;
+        }
+
+        if (p->rmw_prefix_valid > 0) {
+            p->need_prefix_read     = 1;
+            p->prefix_device_id     = p->ext_iter.device_id;
+            p->prefix_device_offset = p->ext_iter.device_offset +
+                (astart - p->ext_iter.file_offset);
+        }
+    }
+
+    demofs_write_suffix_lookup(request);
+} /* demofs_write_prefix_cb */
+
+static void
+demofs_write_prefix_lookup(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_bt_op           *op;
+
+    if (p->rmw_prefix_len == 0) {
+        demofs_write_suffix_lookup(request);
+        return;
+    }
+
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_floor_async(op, thread, p->inode_stash[0], p->rmw_aligned_start,
+                               p->rec_scratch, sizeof(p->rec_scratch),
+                               demofs_write_prefix_cb, request)) {
+        demofs_write_prefix_cb(op, op->result, request);
+    }
+} /* demofs_write_prefix_lookup */
 
 static void
 demofs_write_inode_cb(
@@ -6941,19 +7399,11 @@ demofs_write_inode_cb(
     struct chimera_vfs_request    *request        = private_data;
     struct demofs_request_private *demofs_private = request->plugin_data;
     struct demofs_thread          *thread         = demofs_private->thread;
-    struct demofs_shared          *shared         = thread->shared;
-    struct evpl                   *evpl           = thread->evpl;
-    struct demofs_extent           ext_buf;
-    struct demofs_extent          *extent = &ext_buf;
-    struct demofs_extent           prefix_buf, suffix_buf;
-    int                            have;
-    uint64_t                       write_start = request->write.offset;
-    uint64_t                       write_end   = write_start + request->write.length;
+    uint64_t                       write_start    = request->write.offset;
+    uint64_t                       write_end      = write_start + request->write.length;
     uint64_t                       aligned_start, aligned_end, aligned_length;
     uint64_t                       device_id, device_offset;
-    uint64_t                       extent_start, extent_end;
     int                            rc;
-    struct timespec                now;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, demofs_private->txn, status);
@@ -6967,243 +7417,32 @@ demofs_write_inode_cb(
 
     demofs_map_attrs(thread, &request->write.r_pre_attr, inode);
 
-    // Calculate block-aligned boundaries
     aligned_start  = write_start & ~4095ULL;
     aligned_end    = (write_end + 4095ULL) & ~4095ULL;
     aligned_length = aligned_end - aligned_start;
 
-    // Calculate prefix/suffix lengths for partial blocks
-    uint32_t prefix_len = write_start - aligned_start;
-    uint32_t suffix_len = aligned_end - write_end;
-
-    demofs_private->rmw_prefix_len     = prefix_len;
-    demofs_private->rmw_suffix_len     = suffix_len;
-    demofs_private->rmw_aligned_start  = aligned_start;
-    demofs_private->rmw_aligned_length = aligned_length;
-
-    // Allocate space for the aligned write
     rc = demofs_thread_alloc_space(thread, aligned_length, &device_id, &device_offset);
-
     if (rc) {
         demofs_op_fail(request, demofs_private->txn, CHIMERA_VFS_ENOSPC);
         return;
     }
 
-    demofs_private->rmw_device_id     = device_id;
-    demofs_private->rmw_device_offset = device_offset;
+    demofs_private->rmw_prefix_len     = write_start - aligned_start;
+    demofs_private->rmw_suffix_len     = aligned_end - write_end;
+    demofs_private->rmw_aligned_start  = aligned_start;
+    demofs_private->rmw_aligned_length = aligned_length;
+    demofs_private->rmw_device_id      = device_id;
+    demofs_private->rmw_device_offset  = device_offset;
+    demofs_private->rmw_prefix_valid   = 0;
+    demofs_private->rmw_suffix_valid   = 0;
+    demofs_private->rmw_suffix_adjust  = 0;
+    demofs_private->need_prefix_read   = 0;
+    demofs_private->need_suffix_read   = 0;
+    demofs_private->inode_stash[0]     = inode;
 
-    // Check if we need to read existing data for partial blocks
-    int                   need_prefix_read = 0;
-    int                   need_suffix_read = 0;
-    struct demofs_extent *prefix_extent    = NULL;
-    struct demofs_extent *suffix_extent    = NULL;
-    uint64_t              prefix_device_id = 0, prefix_device_offset = 0;
-    uint64_t              suffix_device_id = 0, suffix_device_offset = 0;
-
-    if (prefix_len > 0) {
-        // Check if there's an existing extent covering the prefix region
-        prefix_extent = demofs_find_extent_at(thread, inode, aligned_start, &prefix_buf);
-        if (prefix_extent) {
-            uint64_t extent_end = prefix_extent->file_offset + prefix_extent->length;
-
-            // Calculate how much of the prefix is actually valid data
-            // (extent may have been truncated to non-4K boundary)
-            if (extent_end >= aligned_start + prefix_len) {
-                demofs_private->rmw_prefix_valid = prefix_len;
-            } else if (extent_end > aligned_start) {
-                demofs_private->rmw_prefix_valid = extent_end - aligned_start;
-            } else {
-                demofs_private->rmw_prefix_valid = 0;
-            }
-
-            if (demofs_private->rmw_prefix_valid > 0) {
-                need_prefix_read     = 1;
-                prefix_device_id     = prefix_extent->device_id;
-                prefix_device_offset = prefix_extent->device_offset +
-                    (aligned_start - prefix_extent->file_offset);
-            }
-        }
-    }
-
-    if (suffix_len > 0) {
-        // Check if there's an existing extent covering the suffix region
-        // The suffix starts at write_end
-        suffix_extent = demofs_find_extent_at(thread, inode, write_end, &suffix_buf);
-        if (suffix_extent) {
-            // The block containing write_end
-            uint64_t suffix_block = write_end & ~4095ULL;
-            uint64_t extent_end   = suffix_extent->file_offset + suffix_extent->length;
-
-            // Calculate how much of the suffix is actually valid data
-            // (extent may have been truncated to non-4K boundary)
-            if (extent_end >= aligned_end) {
-                demofs_private->rmw_suffix_valid = suffix_len;
-            } else if (extent_end > write_end) {
-                demofs_private->rmw_suffix_valid = extent_end - write_end;
-            } else {
-                demofs_private->rmw_suffix_valid = 0;
-            }
-
-            // Only read if the block start is within the extent
-            // If suffix_block < suffix_extent->file_offset, then the early part
-            // of the block has no data. The suffix (from write_end to aligned_end)
-            // IS covered by the extent, so read from extent start and adjust.
-            if (suffix_block >= suffix_extent->file_offset) {
-                need_suffix_read     = 1;
-                suffix_device_id     = suffix_extent->device_id;
-                suffix_device_offset = suffix_extent->device_offset +
-                    (suffix_block - suffix_extent->file_offset);
-            } else {
-                // Read from extent start, adjust in phase2 by storing offset
-                need_suffix_read     = 1;
-                suffix_device_id     = suffix_extent->device_id;
-                suffix_device_offset = suffix_extent->device_offset;
-                // Store the adjustment: how much the read buffer offset differs
-                // from the expected (write_end & 4095) position
-                demofs_private->rmw_suffix_adjust =
-                    suffix_extent->file_offset - suffix_block;
-            }
-        }
-    }
-
-    // Remove/trim extents that overlap with the aligned write region
-    have = demofs_ext_floor(thread, inode, aligned_start, extent);
-    if (!have) {
-        /* No extent at or before aligned_start - get the first extent
-         * in case there's one that starts within our write range */
-        have = demofs_ext_ceil(thread, inode, 0, extent);
-    }
-
-    while (have) {
-        uint64_t cur_fo = extent->file_offset;
-
-        extent_start = extent->file_offset;
-        extent_end   = extent_start + extent->length;
-
-        if (extent_start >= aligned_end) {
-            break;
-        }
-
-        if (extent_start >= aligned_start && extent_end <= aligned_end) {
-            // Completely inside the aligned region - remove it.
-            demofs_ext_remove(thread, demofs_private->txn, inode, cur_fo);
-        } else if (extent_start < aligned_start && extent_end > aligned_end) {
-            // Spans the whole region - split into a before part (trimmed)
-            // and an after part, then we're done (extents are disjoint).
-            uint64_t after_shift = aligned_end - extent_start;
-
-            demofs_ext_insert(thread, demofs_private->txn, inode, aligned_end,
-                              extent_end - aligned_end, extent->device_id,
-                              extent->device_offset + after_shift);
-            demofs_ext_remove(thread, demofs_private->txn, inode, cur_fo);
-            demofs_ext_insert(thread, demofs_private->txn, inode, cur_fo,
-                              aligned_start - extent_start, extent->device_id,
-                              extent->device_offset);
-            break;
-        } else if (extent_start < aligned_start && extent_end > aligned_start) {
-            // Overlaps the left edge - trim to end at aligned_start
-            // (file_offset key unchanged).
-            demofs_ext_remove(thread, demofs_private->txn, inode, cur_fo);
-            demofs_ext_insert(thread, demofs_private->txn, inode, cur_fo,
-                              aligned_start - extent_start, extent->device_id,
-                              extent->device_offset);
-        } else if (extent_start < aligned_end && extent_end > aligned_end) {
-            // Starts within the write region but extends past - move its
-            // front to aligned_end (the key changes), then we're done.
-            uint64_t shift = aligned_end - extent_start;
-
-            demofs_ext_remove(thread, demofs_private->txn, inode, cur_fo);
-            demofs_ext_insert(thread, demofs_private->txn, inode, aligned_end,
-                              extent_end - aligned_end, extent->device_id,
-                              extent->device_offset + shift);
-            break;
-        }
-
-        have = demofs_ext_next(thread, inode, cur_fo, extent);
-    }
-
-    // Create new extent for the aligned write
-    demofs_ext_insert(thread, demofs_private->txn, inode, aligned_start,
-                      aligned_length, device_id, device_offset);
-
-    // Update inode metadata
-    if (inode->size < write_end) {
-        inode->size       = write_end;
-        inode->space_used = (inode->size + 4095) & ~4095;
-    }
-
-    clock_gettime(CLOCK_REALTIME, &now);
-
-    inode->mtime_sec  = now.tv_sec;
-    inode->mtime_nsec = now.tv_nsec;
-    inode->ctime_sec  = now.tv_sec;
-    inode->ctime_nsec = now.tv_nsec;
-
-    demofs_map_attrs(thread, &request->write.r_post_attr, inode);
-
-    request->write.r_length = request->write.length;
-    request->write.r_sync   = 1;
-
-    /* All in-memory inode mutations are done.  Release the inode lock
-     * before submitting block I/O so other ops on this worker (or other
-     * workers) can proceed concurrently, and so we don't self-deadlock
-     * when SQ-full backpressure spins this worker's evpl loop. */
-    demofs_txn_unlock_inode(demofs_private->txn, inode);
-
-    // Issue RMW reads if needed
-    if (need_prefix_read || need_suffix_read) {
-        demofs_private->rmw_phase = 1;
-
-        if (need_prefix_read) {
-            // Allocate buffer and read prefix block
-            int niov = evpl_iovec_alloc(evpl, 4096, 4096, 1,
-                                        0, &demofs_private->rmw_prefix_iov);
-            if (niov > 0) {
-                demofs_private->pending++;
-                thread->pending_io++;
-                demofs_private->rmw_prefix_pending = 1;
-
-                evpl_block_read(evpl,
-                                thread->queue[prefix_device_id],
-                                &demofs_private->rmw_prefix_iov,
-                                1,
-                                prefix_device_offset,
-                                demofs_write_rmw_read_callback,
-                                request);
-            }
-        }
-
-        if (need_suffix_read) {
-            // Allocate buffer and read suffix block
-            int niov = evpl_iovec_alloc(evpl, 4096, 4096, 1,
-                                        0, &demofs_private->rmw_suffix_iov);
-            if (niov > 0) {
-                demofs_private->pending++;
-                thread->pending_io++;
-                demofs_private->rmw_suffix_pending = 1;
-
-                evpl_block_read(evpl,
-                                thread->queue[suffix_device_id],
-                                &demofs_private->rmw_suffix_iov,
-                                1,
-                                suffix_device_offset,
-                                demofs_write_rmw_read_callback,
-                                request);
-            }
-        }
-
-        // Wait for RMW reads to complete before proceeding
-        if (demofs_private->pending == 0) {
-            // No reads were actually issued (allocation failed?)
-            demofs_private->rmw_phase = 2;
-            demofs_write_phase2(thread, shared, request);
-        }
-    } else {
-        // No RMW needed, proceed directly to write
-        demofs_private->rmw_phase = 2;
-        demofs_write_phase2(thread, shared, request);
-    }
+    demofs_write_prefix_lookup(request);
 } /* demofs_write_inode_cb */
+
 
 static void
 demofs_write(
