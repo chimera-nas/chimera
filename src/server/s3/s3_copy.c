@@ -343,7 +343,8 @@ chimera_s3_copy_clone_callback(
                                         ctx->request->file_handle->fh,
                                         ctx->request->file_handle->fh_len);
 
-        ctx->mode = (module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE) ?
+        ctx->mode = (module &&
+                     (module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE)) ?
             CHIMERA_S3_COPY_COPY : CHIMERA_S3_COPY_RW;
         ctx->offset = 0;
         chimera_s3_copy_step(ctx);
@@ -524,7 +525,9 @@ chimera_s3_copy_start_transfer(struct chimera_s3_copy_ctx *ctx)
                                         request->file_handle->fh,
                                         request->file_handle->fh_len);
 
-    if (src_module != dst_module) {
+    if (!dst_module || src_module != dst_module) {
+        /* Range ops require both handles on the same (resolvable) module;
+         * otherwise the buffered read+write path is the only option. */
         ctx->mode = CHIMERA_S3_COPY_RW;
     } else if (dst_module->capabilities & CHIMERA_VFS_CAP_CLONE_RANGE) {
         ctx->mode = CHIMERA_S3_COPY_CLONE;
