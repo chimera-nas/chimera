@@ -639,3 +639,144 @@ space_map_read_superblock_path(
     *out = *sb;
     return 0;
 } /* space_map_read_superblock_path */
+
+int
+space_map_persist_paths(
+    struct space_map *sm,
+    char            **device_paths)
+{
+    uint32_t d, a;
+    uint64_t maxrecs = (SM_AG_LOG_SLOT_SIZE - sizeof(struct sm_ag_snap_header)) /
+        sizeof(struct sm_ag_snap_rec);
+
+    for (d = 0; d < sm->num_devices; d++) {
+        struct sm_device *dev = &sm->devices[d];
+        int               fd  = open(device_paths[d], O_WRONLY);
+
+        if (fd < 0) {
+            return -1;
+        }
+
+        for (a = 0; a < dev->num_ags; a++) {
+            struct sm_ag             *ag   = &dev->ags[a];
+            uint8_t                  *buf  = calloc(1, SM_AG_LOG_SLOT_SIZE);
+            struct sm_ag_snap_header *h    = (struct sm_ag_snap_header *) buf;
+            struct sm_ag_snap_rec    *recs =
+                (struct sm_ag_snap_rec *) (buf + sizeof(*h));
+            struct sm_extent         *ext;
+            uint32_t                  count = 0;
+            uint64_t                  payload, aligned;
+            ssize_t                   n;
+
+            pthread_mutex_lock(&ag->lock);
+            rb_tree_first(&ag->free_by_offset, ext);
+            while (ext) {
+                sm_abort_if(count >= maxrecs,
+                            "AG %u/%u snapshot overflow (%u extents)",
+                            d, a, count);
+                recs[count].offset = ext->offset;
+                recs[count].length = ext->length;
+                count++;
+                ext = rb_tree_next(&ag->free_by_offset, ext);
+            }
+            h->magic      = SM_AG_SNAP_MAGIC;
+            h->version    = SM_FORMAT_VERSION;
+            h->count      = count;
+            h->free_bytes = ag->free_bytes;
+            h->pad        = 0;
+            h->crc32      = 0;
+            pthread_mutex_unlock(&ag->lock);
+
+            payload  = sizeof(*h) + (uint64_t) count * sizeof(*recs);
+            h->crc32 = sm_crc32(buf, payload);
+            aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
+
+            n = pwrite(fd, buf, aligned, ag->log_offset);
+            free(buf);
+            if (n != (ssize_t) aligned) {
+                close(fd);
+                return -1;
+            }
+        }
+
+        if (fsync(fd) != 0) {
+            close(fd);
+            return -1;
+        }
+        close(fd);
+    }
+    return 0;
+} /* space_map_persist_paths */
+
+int
+space_map_load_paths(
+    struct space_map *sm,
+    char            **device_paths)
+{
+    uint32_t d, a;
+    uint64_t free_total = 0;
+
+    for (d = 0; d < sm->num_devices; d++) {
+        struct sm_device *dev = &sm->devices[d];
+        int               fd  = open(device_paths[d], O_RDONLY);
+
+        if (fd < 0) {
+            return -1;
+        }
+
+        for (a = 0; a < dev->num_ags; a++) {
+            struct sm_ag            *ag = &dev->ags[a];
+            struct sm_ag_snap_header h;
+            struct sm_ag_snap_rec   *recs;
+            uint8_t                 *cbuf;
+            uint32_t                 i, stored, computed;
+            uint64_t                 payload;
+            ssize_t                  n;
+
+            n = pread(fd, &h, sizeof(h), ag->log_offset);
+            if (n != (ssize_t) sizeof(h) || h.magic != SM_AG_SNAP_MAGIC ||
+                h.version != SM_FORMAT_VERSION) {
+                close(fd);
+                return -1;
+            }
+
+            payload = sizeof(h) + (uint64_t) h.count * sizeof(*recs);
+            cbuf    = malloc(payload);
+            n       = pread(fd, cbuf, payload, ag->log_offset);
+            if (n != (ssize_t) payload) {
+                free(cbuf);
+                close(fd);
+                return -1;
+            }
+            stored                                     = h.crc32;
+            ((struct sm_ag_snap_header *) cbuf)->crc32 = 0;
+            computed                                   = sm_crc32(cbuf, payload);
+            if (stored != computed) {
+                free(cbuf);
+                close(fd);
+                return -1;
+            }
+            recs = (struct sm_ag_snap_rec *) (cbuf + sizeof(h));
+
+            /* Replace the default full-free tree with the snapshot. */
+            pthread_mutex_lock(&ag->lock);
+            rb_tree_destroy(&ag->free_by_offset, sm_extent_release, NULL);
+            rb_tree_init(&ag->free_by_offset);
+            for (i = 0; i < h.count; i++) {
+                struct sm_extent *ext = sm_extent_new(recs[i].offset, recs[i].length);
+
+                rb_tree_insert(&ag->free_by_offset, offset, ext);
+            }
+            ag->free_bytes = h.free_bytes;
+            pthread_mutex_unlock(&ag->lock);
+
+            free_total += h.free_bytes;
+            free(cbuf);
+        }
+        close(fd);
+    }
+
+    sm->used_bytes = sm->total_capacity > free_total ?
+        sm->total_capacity - free_total : 0;
+    return 0;
+} /* space_map_load_paths */

@@ -128,6 +128,27 @@ struct sm_extent {
     uint64_t       length;
 };
 
+/*
+ * On-disk free-space snapshot, written to slot A of each AG's log region at
+ * clean unmount and reloaded at mount.  Header + a packed array of free
+ * extents (absolute device offsets) covering exactly that AG.
+ */
+#define SM_AG_SNAP_MAGIC 0x50414E53534B4944ULL          /* "DIKSSNAP" */
+
+struct sm_ag_snap_header {
+    uint64_t magic;
+    uint32_t version;
+    uint32_t count;     /* number of free-extent records following */
+    uint64_t free_bytes;
+    uint32_t crc32;     /* over header (crc32=0) + the records */
+    uint32_t pad;
+};
+
+struct sm_ag_snap_rec {
+    uint64_t offset;
+    uint64_t length;
+};
+
 struct sm_ag {
     uint32_t        device_id;
     uint32_t        ag_index;
@@ -211,6 +232,23 @@ int
 space_map_read_superblock_path(
     const char           *device_path,
     struct sm_superblock *out);
+
+/*
+ * Persist the free-space map to each AG's on-disk log slot (clean unmount),
+ * and reload it (mount).  device_paths[d] is the path of device d.  persist
+ * returns 0 on success; load returns 0 if every AG's snapshot validated and
+ * the in-memory free trees were rebuilt from them, -1 otherwise (caller
+ * should treat the filesystem as needing mkfs / recovery).
+ */
+int
+space_map_persist_paths(
+    struct space_map *sm,
+    char            **device_paths);
+
+int
+space_map_load_paths(
+    struct space_map *sm,
+    char            **device_paths);
 
 static inline uint64_t
 space_map_total_capacity(const struct space_map *sm)

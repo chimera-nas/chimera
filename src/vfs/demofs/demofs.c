@@ -579,6 +579,7 @@ struct demofs_intent_log {
 
 struct demofs_shared {
     struct demofs_device      *devices;
+    char                     **device_paths;     /* for unmount-time persistence */
     int                        num_devices;
     struct demofs_inode_cache *inode_cache;
     struct demofs_block_cache *block_cache;
@@ -4435,8 +4436,9 @@ demofs_init(const char *cfgdata)
 
     devices_cfg = json_object_get(cfg, "devices");
 
-    shared->num_devices = json_array_size(devices_cfg);
-    shared->devices     = calloc(shared->num_devices, sizeof(*shared->devices));
+    shared->num_devices  = json_array_size(devices_cfg);
+    shared->devices      = calloc(shared->num_devices, sizeof(*shared->devices));
+    shared->device_paths = calloc(shared->num_devices, sizeof(char *));
 
     json_array_foreach(devices_cfg, i, device_cfg)
     {
@@ -4446,6 +4448,8 @@ demofs_init(const char *cfgdata)
         protocol_name = json_string_value(json_object_get(device_cfg, "type"));
         device_path   = json_string_value(json_object_get(device_cfg, "path"));
         size          = json_integer_value(json_object_get(device_cfg, "size"));
+
+        shared->device_paths[i] = strdup(device_path);
 
         if (strcmp(protocol_name, "io_uring") == 0) {
             protocol_id = EVPL_BLOCK_PROTOCOL_IO_URING;
@@ -4660,7 +4664,20 @@ demofs_destroy(void *private_data)
 
     demofs_block_cache_destroy(shared);
 
+    /* Persist the free-space map now that all device I/O has quiesced (evpl
+     * released the devices), so a later mount can reload it instead of
+     * re-handing-out in-use space.  (A future mount only trusts this once the
+     * superblock is also marked clean -- wired in the mount-detection step.) */
+    if (space_map_persist_paths(shared->space_map, shared->device_paths) != 0) {
+        chimera_demofs_error("space-map persist at unmount failed");
+    }
+
     space_map_destroy(shared->space_map);
+
+    for (int i = 0; i < shared->num_devices; i++) {
+        free(shared->device_paths[i]);
+    }
+    free(shared->device_paths);
 
     pthread_mutex_destroy(&shared->lock);
     free(shared->devices);
