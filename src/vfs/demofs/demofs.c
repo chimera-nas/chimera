@@ -653,9 +653,14 @@ struct demofs_bt_op {
     int                       removed_idx;
     int                       reb_level;
 
-    /* completion */
+    /* completion.  cb fires only when the op actually suspended (an I/O
+     * deferred it); a fully-resident traversal completes inline and reports
+     * via `done`/`result` so callers can iterate without recursing. */
     demofs_bt_cb_t            cb;
     void                     *private_data;
+    int                       suspended;
+    int                       done;
+    int                       result;
 
     /* block-waiter list / per-worker resume-queue linkage */
     struct demofs_bt_op      *next;
@@ -1392,8 +1397,10 @@ demofs_bt_block_get(
         issue = 1;
     }
 
-    /* Park this op on the block's waiter list. */
-    op->next = NULL;
+    /* Park this op on the block's waiter list; it can no longer complete
+     * inline, so its result will be delivered via the callback. */
+    op->suspended = 1;
+    op->next      = NULL;
     if (blk->wait_tail) {
         blk->wait_tail->next = op;
     } else {
@@ -2583,7 +2590,12 @@ demofs_bt_complete(
     struct demofs_bt_op *op,
     int                  result)
 {
-    op->cb(op, result, op->private_data);
+    op->result = result;
+    if (op->suspended) {
+        op->cb(op, result, op->private_data);
+    } else {
+        op->done = 1;
+    }
 } /* demofs_bt_complete */
 
 /*
@@ -2773,24 +2785,103 @@ demofs_bt_run(struct demofs_bt_op *op)
  * traversal currently hits in cache, so the op completes inline before the
  * entry point returns and we capture the result here.
  */
-struct demofs_bt_sync {
-    int done;
-    int result;
-};
-
-static void
-demofs_bt_sync_cb(
-    struct demofs_bt_op *op,
-    int                  result,
-    void                *private_data)
+/*
+ * Start an async lookup on a caller-owned op.  Returns 1 if it completed
+ * synchronously (result in op->result, outputs already written into
+ * out/r_key), 0 if it suspended (op->cb will be invoked with the result once
+ * the deferring I/O completes).
+ */
+static int
+demofs_bt_lookup_async(
+    struct demofs_bt_op        *op,
+    struct demofs_thread       *thread,
+    struct demofs_inode        *inode,
+    enum demofs_bt_opcode       opcode,
+    const struct demofs_bt_key *key,
+    struct demofs_bt_key       *r_key,
+    void                       *out,
+    uint32_t                    out_cap,
+    demofs_bt_cb_t              cb,
+    void                       *private_data)
 {
-    struct demofs_bt_sync *s = private_data;
+    memset(op, 0, sizeof(*op));
+    op->thread       = thread;
+    op->inode        = inode;
+    op->opcode       = opcode;
+    op->phase        = DEMOFS_BT_PHASE_DESCEND;
+    op->key          = *key;
+    op->r_key        = r_key;
+    op->out          = out;
+    op->out_cap      = out_cap;
+    op->use_root     = 1;
+    op->cb           = cb;
+    op->private_data = private_data;
 
-    (void) op;
-    s->result = result;
-    s->done   = 1;
-} /* demofs_bt_sync_cb */
+    demofs_bt_run(op);
+    return op->done;
+} /* demofs_bt_lookup_async */
 
+static int
+demofs_bt_insert_async(
+    struct demofs_bt_op        *op,
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    struct demofs_inode        *inode,
+    const struct demofs_bt_key *key,
+    const void                 *rec,
+    uint32_t                    reclen,
+    demofs_bt_cb_t              cb,
+    void                       *private_data)
+{
+    chimera_demofs_abort_if(reclen > sizeof(op->recbuf), "b+tree record too large");
+
+    memset(op, 0, sizeof(*op));
+    op->thread       = thread;
+    op->txn          = txn;
+    op->inode        = inode;
+    op->opcode       = DEMOFS_BT_OP_INSERT;
+    op->phase        = DEMOFS_BT_PHASE_DESCEND;
+    op->key          = *key;
+    op->reclen       = reclen;
+    op->use_root     = 1;
+    op->cb           = cb;
+    op->private_data = private_data;
+    memcpy(op->recbuf, rec, reclen);
+
+    demofs_bt_run(op);
+    return op->done;
+} /* demofs_bt_insert_async */
+
+static int
+demofs_bt_remove_async(
+    struct demofs_bt_op        *op,
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    struct demofs_inode        *inode,
+    const struct demofs_bt_key *key,
+    demofs_bt_cb_t              cb,
+    void                       *private_data)
+{
+    memset(op, 0, sizeof(*op));
+    op->thread       = thread;
+    op->txn          = txn;
+    op->inode        = inode;
+    op->opcode       = DEMOFS_BT_OP_REMOVE;
+    op->phase        = DEMOFS_BT_PHASE_DESCEND;
+    op->key          = *key;
+    op->use_root     = 1;
+    op->cb           = cb;
+    op->private_data = private_data;
+
+    demofs_bt_run(op);
+    return op->done;
+} /* demofs_bt_remove_async */
+
+/*
+ * Synchronous wrappers used by init/mount-time paths (which run before
+ * concurrent load, so everything is resident).  They assert that the op did
+ * not suspend, since a cache miss cannot occur until block eviction exists.
+ */
 static int
 demofs_bt_lookup_sync(
     struct demofs_thread       *thread,
@@ -2801,33 +2892,14 @@ demofs_bt_lookup_sync(
     void                       *out,
     uint32_t                    out_cap)
 {
-    struct demofs_bt_op   op;
-    struct demofs_bt_sync s = { .done = 0, .result = -1 };
+    struct demofs_bt_op op;
 
-    memset(&op, 0, sizeof(op));
-    op.thread       = thread;
-    op.inode        = inode;
-    op.opcode       = opcode;
-    op.phase        = DEMOFS_BT_PHASE_DESCEND;
-    op.key          = *key;
-    op.r_key        = r_key;
-    op.out          = out;
-    op.out_cap      = out_cap;
-    op.use_root     = 1;
-    op.cb           = demofs_bt_sync_cb;
-    op.private_data = &s;
-
-    demofs_bt_run(&op);
-    chimera_demofs_abort_if(!s.done,
+    chimera_demofs_abort_if(!demofs_bt_lookup_async(&op, thread, inode, opcode, key,
+                                                    r_key, out, out_cap, NULL, NULL),
                             "b+tree lookup suspended on a cache miss (no eviction yet)");
-    return s.result;
+    return op.result;
 } /* demofs_bt_lookup_sync */
 
-/*
- * Transitional synchronous insert: drive an INSERT op to completion.  The
- * descent faults in the path through demofs_bt_block_get; with no eviction it
- * always hits, so the structural modify runs inline before returning.
- */
 static void
 demofs_bt_insert(
     struct demofs_thread       *thread,
@@ -2837,30 +2909,13 @@ demofs_bt_insert(
     const void                 *rec,
     uint32_t                    reclen)
 {
-    struct demofs_bt_op   op;
-    struct demofs_bt_sync s = { .done = 0, .result = 0 };
+    struct demofs_bt_op op;
 
-    chimera_demofs_abort_if(reclen > sizeof(op.recbuf), "b+tree record too large");
-
-    memset(&op, 0, sizeof(op));
-    op.thread       = thread;
-    op.txn          = txn;
-    op.inode        = inode;
-    op.opcode       = DEMOFS_BT_OP_INSERT;
-    op.phase        = DEMOFS_BT_PHASE_DESCEND;
-    op.key          = *key;
-    op.reclen       = reclen;
-    op.use_root     = 1;
-    op.cb           = demofs_bt_sync_cb;
-    op.private_data = &s;
-    memcpy(op.recbuf, rec, reclen);
-
-    demofs_bt_run(&op);
-    chimera_demofs_abort_if(!s.done,
+    chimera_demofs_abort_if(!demofs_bt_insert_async(&op, thread, txn, inode, key,
+                                                    rec, reclen, NULL, NULL),
                             "b+tree insert suspended on a cache miss (no eviction yet)");
 } /* demofs_bt_insert */
 
-/* Transitional synchronous remove: drive a REMOVE op to completion. */
 static int
 demofs_bt_remove(
     struct demofs_thread       *thread,
@@ -2868,24 +2923,12 @@ demofs_bt_remove(
     struct demofs_inode        *inode,
     const struct demofs_bt_key *key)
 {
-    struct demofs_bt_op   op;
-    struct demofs_bt_sync s = { .done = 0, .result = 0 };
+    struct demofs_bt_op op;
 
-    memset(&op, 0, sizeof(op));
-    op.thread       = thread;
-    op.txn          = txn;
-    op.inode        = inode;
-    op.opcode       = DEMOFS_BT_OP_REMOVE;
-    op.phase        = DEMOFS_BT_PHASE_DESCEND;
-    op.key          = *key;
-    op.use_root     = 1;
-    op.cb           = demofs_bt_sync_cb;
-    op.private_data = &s;
-
-    demofs_bt_run(&op);
-    chimera_demofs_abort_if(!s.done,
+    chimera_demofs_abort_if(!demofs_bt_remove_async(&op, thread, txn, inode, key,
+                                                    NULL, NULL),
                             "b+tree remove suspended on a cache miss (no eviction yet)");
-    return s.result;
+    return op.result;
 } /* demofs_bt_remove */
 
 static int
