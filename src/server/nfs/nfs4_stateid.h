@@ -85,6 +85,31 @@ nfs4_stateid_decode(
         ((uint32_t) p[10] << 8) | p[11];
 } /* nfs4_stateid_decode */
 
+/*
+ * RFC 7530 §9.1.4.2 seqid validation for a (non-special) NFSv4.0 stateid: the
+ * presented seqid is compared against the state's current seqid.  A smaller
+ * seqid is a stale reference to a superseded stateid (NFS4ERR_OLD_STATEID); a
+ * larger one was never issued (NFS4ERR_BAD_STATEID).  A zero seqid means "use
+ * the most current" and always matches.  4.1+ does not carry this seqid
+ * coupling, so callers gate this on minorversion 0.
+ */
+static inline nfsstat4
+nfs4_stateid_check_seqid(
+    uint32_t cur_seqid,
+    uint32_t sid_seqid)
+{
+    if (sid_seqid == 0) {
+        return NFS4_OK;
+    }
+    if (sid_seqid < cur_seqid) {
+        return NFS4ERR_OLD_STATEID;
+    }
+    if (sid_seqid > cur_seqid) {
+        return NFS4ERR_BAD_STATEID;
+    }
+    return NFS4_OK;
+} /* nfs4_stateid_check_seqid */
+
 static inline int
 nfs4_stateid_is_special(const struct stateid4 *sid)
 {
