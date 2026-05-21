@@ -100,6 +100,11 @@ struct demofs_request_private {
     int                   rd_namelen;
     char                  rd_name[256];
 
+    /* Scratch buffer for handlers that parse a looked-up b+tree record
+     * (e.g. a dirent's inum/gen) in their async continuation.  Sized to hold
+     * the largest record (DEMOFS_DIRENT_REC_MAX == sizeof(dirent_rec) + 256). */
+    char                  rec_scratch[320];
+
     struct evpl_iovec     iov[66];
 
     // For RMW (read-modify-write) on partial block writes
@@ -413,6 +418,8 @@ struct demofs_extent_rec {
 } __attribute__((packed));
 
 #define DEMOFS_DIRENT_REC_MAX (sizeof(struct demofs_dirent_rec) + 256)
+_Static_assert(DEMOFS_DIRENT_REC_MAX <= 320,
+               "demofs_request_private.rec_scratch must hold a full dirent record");
 
 /*
  * Intent-log redo record, written into the reserved intent-log region.
@@ -4770,6 +4777,28 @@ demofs_lookup_at_child_cb(
     demofs_op_ok(request, p->txn);
 } /* demofs_lookup_at_child_cb */
 
+/* b+tree lookup completion: parse the dirent and fetch the child inode. */
+static void
+demofs_lookup_at_dirent_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_dirent_rec      *rec     = (struct demofs_dirent_rec *) p->rec_scratch;
+
+    demofs_bt_op_free(p->thread, op);
+
+    if (result < 0) {
+        demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        return;
+    }
+
+    demofs_inode_get_inum_async(p->thread, p->txn, rec->inum, rec->gen,
+                                demofs_lookup_at_child_cb, request);
+} /* demofs_lookup_at_dirent_cb */
+
 static void
 demofs_lookup_at_parent_cb(
     struct demofs_inode *parent,
@@ -4782,8 +4811,8 @@ demofs_lookup_at_parent_cb(
     const char                    *name    = request->lookup_at.component;
     uint32_t                       namelen = request->lookup_at.component_len;
     uint64_t                       hash    = request->lookup_at.component_hash;
-    uint64_t                       child_inum;
-    uint32_t                       child_gen;
+    struct demofs_bt_key           key;
+    struct demofs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -4815,13 +4844,13 @@ demofs_lookup_at_parent_cb(
         return;
     }
 
-    if (demofs_dir_lookup(thread, parent, hash, &child_inum, &child_gen) != 0) {
-        demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
-        return;
+    key = demofs_dirent_key(hash);
+    op  = demofs_bt_op_alloc(thread);
+    if (demofs_bt_lookup_async(op, thread, parent, DEMOFS_BT_OP_LOOKUP_EXACT,
+                               &key, NULL, p->rec_scratch, sizeof(p->rec_scratch),
+                               demofs_lookup_at_dirent_cb, request)) {
+        demofs_lookup_at_dirent_cb(op, op->result, request);
     }
-
-    demofs_inode_get_inum_async(thread, p->txn, child_inum, child_gen,
-                                demofs_lookup_at_child_cb, request);
 } /* demofs_lookup_at_parent_cb */
 
 static void
