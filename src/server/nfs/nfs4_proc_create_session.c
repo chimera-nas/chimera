@@ -64,8 +64,25 @@ chimera_nfs4_create_session(
 
     if (!session) {
         res->csr_status = NFS4ERR_STALE_CLIENTID;
-        chimera_nfs4_compound_complete(req, NFS4_OK);
+        chimera_nfs4_compound_complete(req, NFS4ERR_STALE_CLIENTID);
         return;
+    }
+
+    /* RFC 8881 §18.36.3: a successful CREATE_SESSION confirms the client
+     * record.  If this record superseded an earlier one (client reboot, see
+     * nfs4_client_exchange_id), confirmation tears the old record and its
+     * sessions down; release its state hierarchy outside the table lock. */
+    {
+        struct nfs_client *superseded = NULL;
+
+        nfs4_client_confirm(&shared->nfs4_shared_clients,
+                            args->csa_clientid, &superseded);
+
+        if (superseded) {
+            nfs_client_destroy(superseded,
+                               &shared->nfs4_state_table,
+                               thread->vfs_thread);
+        }
     }
 
     nfs4_session_bind_conn(conn, session);
