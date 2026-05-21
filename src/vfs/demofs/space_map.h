@@ -99,6 +99,29 @@ struct sm_superblock {
     /* Remainder of the 4 KiB block is implicit zero padding. */
 };
 
+/*
+ * IEEE CRC-32 (bitwise; used for the superblock and, later, intent-log redo
+ * records).  Adequate for these low-frequency / one-record-at-a-time paths.
+ */
+static inline uint32_t
+sm_crc32(
+    const void *data,
+    size_t      len)
+{
+    const uint8_t *p   = data;
+    uint32_t       crc = 0xFFFFFFFFu;
+    size_t         i;
+    int            k;
+
+    for (i = 0; i < len; i++) {
+        crc ^= p[i];
+        for (k = 0; k < 8; k++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t) (-(int32_t) (crc & 1)));
+        }
+    }
+    return ~crc;
+} /* sm_crc32 */
+
 struct sm_extent {
     struct rb_node node;
     uint64_t       offset;
@@ -181,6 +204,13 @@ space_map_write_superblock_path(
     struct space_map *sm,
     const char       *device_path,
     uint64_t          fsid);
+
+/* Read + validate the superblock from device 0; 0 on success (fills *out),
+ * -1 if absent/corrupt/wrong-version (caller should mkfs). */
+int
+space_map_read_superblock_path(
+    const char           *device_path,
+    struct sm_superblock *out);
 
 static inline uint64_t
 space_map_total_capacity(const struct space_map *sm)

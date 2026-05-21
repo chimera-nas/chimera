@@ -575,7 +575,8 @@ space_map_write_superblock_path(
     sb->intent_log_device = SM_INTENT_LOG_DEVICE;
     sb->intent_log_offset = SM_INTENT_LOG_OFFSET;
     sb->intent_log_size   = SM_INTENT_LOG_SIZE;
-    sb->crc32             = 0; /* TODO: compute when persistence work begins */
+    sb->crc32             = 0;
+    sb->crc32             = sm_crc32(buf, sizeof(buf));
 
     fd = open(device_path, O_WRONLY);
     if (fd < 0) {
@@ -596,3 +597,45 @@ space_map_write_superblock_path(
     close(fd);
     return 0;
 } /* space_map_write_superblock_path */
+
+/*
+ * Read and validate the superblock from device 0.  Returns 0 and fills *out
+ * if a well-formed, current-version superblock with a matching CRC is present;
+ * returns -1 (no/!valid superblock -> caller should mkfs) on any mismatch.
+ */
+int
+space_map_read_superblock_path(
+    const char           *device_path,
+    struct sm_superblock *out)
+{
+    int                   fd;
+    ssize_t               n;
+    uint8_t               buf[SM_SUPERBLOCK_SIZE];
+    struct sm_superblock *sb = (struct sm_superblock *) buf;
+    uint32_t              stored, computed;
+
+    fd = open(device_path, O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    n = pread(fd, buf, sizeof(buf), SM_SUPERBLOCK_OFFSET);
+    close(fd);
+    if (n != (ssize_t) sizeof(buf)) {
+        return -1;
+    }
+
+    if (sb->magic != SM_SUPERBLOCK_MAGIC || sb->version != SM_FORMAT_VERSION) {
+        return -1;
+    }
+
+    stored    = sb->crc32;
+    sb->crc32 = 0;
+    computed  = sm_crc32(buf, sizeof(buf));
+    sb->crc32 = stored;
+    if (stored != computed) {
+        return -1;
+    }
+
+    *out = *sb;
+    return 0;
+} /* space_map_read_superblock_path */
