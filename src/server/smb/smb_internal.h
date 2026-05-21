@@ -172,8 +172,10 @@ chimera_smb_set_info_rename_process(
 #define CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN 5
 #define CHIMERA_SMB_DURABLE_KEY_LEN        (CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN + 8)
 #define CHIMERA_SMB_DURABLE_RECORD_MAGIC   0x31484453  /* 'SDH1' LE */
-/* Fixed header bytes before the variable-length name in a serialized record. */
-#define CHIMERA_SMB_DURABLE_REC_HDR_LEN    (4 + 8 + 16 + 8 + 4 + 8 + 4 + 4 + 4)
+/* Fixed header bytes before the variable-length name in a serialized record:
+ * magic(4) pid(8) create_guid(16) client_guid(16) session(8) durable_flags(4)
+ * timeout(8) desired(4) share(4) name_len(4). */
+#define CHIMERA_SMB_DURABLE_REC_HDR_LEN    (4 + 8 + 16 + 16 + 8 + 4 + 8 + 4 + 4 + 4)
 #define CHIMERA_SMB_DURABLE_VALUE_MAX      (CHIMERA_SMB_DURABLE_REC_HDR_LEN + SMB_FILENAME_MAX)
 
 struct chimera_smb_request {
@@ -643,7 +645,11 @@ struct chimera_smb_conn {
 struct chimera_smb_durable_entry {
     uint64_t                          persistent_id; /* hash key == open_file->file_id.pid */
     uint8_t                           create_guid[16];
-    uint64_t                          session_id; /* original owning session */
+    /* Reconnect is matched on the client GUID (the connection's negotiated
+     * identity), not the session id: a durable reconnect lands on a brand-new
+     * session after the original connection dropped. */
+    uint8_t                           client_guid[16];
+    uint64_t                          session_id; /* original owning session (informational) */
     struct timespec                   deadline;  /* reconnect grace; valid only while parked */
     bool                              parked;    /* true => disconnected, awaiting reconnect */
     /* persistent: the record is also persisted in the share's backend (survives
@@ -668,6 +674,7 @@ struct chimera_smb_durable_table {
 struct chimera_smb_durable_record {
     uint64_t persistent_id;
     uint8_t  create_guid[16];
+    uint8_t  client_guid[16];
     uint64_t session_id;
     uint32_t durable_flags;
     uint64_t durable_timeout_ms;
@@ -723,6 +730,7 @@ chimera_smb_durable_register(
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_open_file     *open_file,
     uint64_t                          session_id,
+    const uint8_t                    *client_guid,
     const char                       *name,
     uint32_t                          name_len,
     bool                              persistent);
@@ -739,7 +747,7 @@ chimera_smb_durable_claim(
     struct chimera_server_smb_shared *shared,
     uint64_t                          persistent_id,
     const uint8_t                    *create_guid,
-    uint64_t                          session_id,
+    const uint8_t                    *client_guid,
     const char                       *name,
     uint32_t                          name_len,
     bool                             *r_cold,

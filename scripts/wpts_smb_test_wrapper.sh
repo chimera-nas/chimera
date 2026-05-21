@@ -78,9 +78,18 @@ generate_config() {
         "
     done
 
+    # Enable SMB3 durable/persistent handles when requested (the durable/
+    # persistent WPTS cases need the feature on; default off keeps the rest of
+    # the suite exercising the baseline path).
+    local persistent_line=""
+    if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ]; then
+        persistent_line='"smb_persistent_handles": true,'
+    fi
+
     cat > "$CONFIG_FILE" << EOF
 {
     "server": {
+        ${persistent_line}
         "threads": 4,
         "delegation_threads": 4,
         "external_portmap": false
@@ -148,6 +157,18 @@ fi
 cp -f "${WPTS_PTFCONFIG_DIR}/CommonTestSuite.deployment.ptfconfig" \
       "${WPTS_PTFCONFIG_DIR}/MS-SMB2_ServerTestSuite.deployment.ptfconfig" \
       "${WPTS_BIN_DIR}/"
+
+# When persistent handles are enabled, advertise the matching capability +
+# CA-share to the test driver so the DurableHandleV2 / PersistentHandle cases
+# become applicable (otherwise they are Inconclusive/skipped).
+if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ]; then
+    staged="${WPTS_BIN_DIR}/CommonTestSuite.deployment.ptfconfig"
+    sed -i \
+        -e 's#<Property name="IsPersistentHandlesSupported" value="false"/>#<Property name="IsPersistentHandlesSupported" value="true"/>#' \
+        -e 's#<Property name="CAShareName" value=""/>#<Property name="CAShareName" value="FileShare"/>#' \
+        -e "s#<Property name=\"CAShareServerName\" value=\"\"/>#<Property name=\"CAShareServerName\" value=\"${SUT_IP}\"/>#" \
+        "$staged"
+fi
 
 mkdir -p "$RESULT_DIR"
 

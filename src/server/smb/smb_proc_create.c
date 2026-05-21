@@ -475,6 +475,7 @@ chimera_smb_create_gen_open_file(
         }
         chimera_smb_durable_register(thread->shared, open_file,
                                      request->session_handle->session->session_id,
+                                     request->compound->conn->client_guid,
                                      open_file->name, open_file->name_len,
                                      request->create.persist_pid != 0);
     }
@@ -850,6 +851,7 @@ chimera_smb_create_persist_prepare(
     memset(&rec, 0, sizeof(rec));
     rec.persistent_id = pid;
     memcpy(rec.create_guid, request->create.dh2q.create_guid, 16);
+    memcpy(rec.client_guid, request->compound->conn->client_guid, 16);
     rec.session_id         = request->session_handle->session->session_id;
     rec.durable_flags      = CHIMERA_SMB_DURABLE_V2 | CHIMERA_SMB_DURABLE_PERSISTENT;
     rec.durable_timeout_ms = request->create.dh2q.timeout_ms == 0 ?
@@ -1208,7 +1210,7 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
     }
 
     open_file = chimera_smb_durable_claim(shared, persistent_id, create_guid,
-                                          request->session_handle->session->session_id,
+                                          request->compound->conn->client_guid,
                                           request->create.name, request->create.name_len,
                                           &cold, &status);
 

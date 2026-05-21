@@ -72,7 +72,8 @@ chimera_smb_server_init(
     shared->config.port      = 445;
     shared->config.rdma_port = 445;
 
-    shared->config.capabilities = SMB2_GLOBAL_CAP_LARGE_MTU | SMB2_GLOBAL_CAP_MULTI_CHANNEL;
+    shared->config.capabilities = SMB2_GLOBAL_CAP_LARGE_MTU | SMB2_GLOBAL_CAP_MULTI_CHANNEL |
+        SMB2_GLOBAL_CAP_LEASING;
 
     shared->config.num_dialects = chimera_server_config_get_smb_num_dialects(config);
 

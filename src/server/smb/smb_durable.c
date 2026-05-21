@@ -68,6 +68,7 @@ chimera_smb_durable_register(
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_open_file     *open_file,
     uint64_t                          session_id,
+    const uint8_t                    *client_guid,
     const char                       *name,
     uint32_t                          name_len,
     bool                              persistent)
@@ -81,6 +82,7 @@ chimera_smb_durable_register(
     entry->persistent    = persistent;
     entry->cold          = false;
     memcpy(entry->create_guid, open_file->create_guid, sizeof(entry->create_guid));
+    memcpy(entry->client_guid, client_guid, sizeof(entry->client_guid));
 
     if (name_len > sizeof(entry->name)) {
         name_len = sizeof(entry->name);
@@ -113,6 +115,7 @@ chimera_smb_durable_recover_entry(
     entry->persistent    = true;
     entry->cold          = true;
     memcpy(entry->create_guid, record->create_guid, sizeof(entry->create_guid));
+    memcpy(entry->client_guid, record->client_guid, sizeof(entry->client_guid));
 
     name_len = record->name_len;
     if (name_len > sizeof(entry->name)) {
@@ -188,7 +191,7 @@ chimera_smb_durable_claim(
     struct chimera_server_smb_shared *shared,
     uint64_t                          persistent_id,
     const uint8_t                    *create_guid,
-    uint64_t                          session_id,
+    const uint8_t                    *client_guid,
     const char                       *name,
     uint32_t                          name_len,
     bool                             *r_cold,
@@ -211,9 +214,11 @@ chimera_smb_durable_claim(
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (create_guid && memcmp(entry->create_guid, create_guid, 16) != 0) {
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
-    } else if (entry->session_id != session_id) {
-        /* A different session/user may not reclaim the handle. */
-        *status = SMB2_STATUS_ACCESS_DENIED;
+    } else if (client_guid && memcmp(entry->client_guid, client_guid, 16) != 0) {
+        /* Reconnect from a different client.  MS-SMB2 3.3.5.9.7: a ClientGuid
+         * mismatch must fail with STATUS_OBJECT_NAME_NOT_FOUND (the handle is
+         * simply not visible to this client), not ACCESS_DENIED. */
+        *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (entry->name_len != name_len || memcmp(entry->name, name, name_len) != 0) {
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (entry->cold) {
@@ -347,6 +352,8 @@ chimera_smb_durable_serialize(
     durable_put_le64(buf, &p, record->persistent_id);
     memcpy(buf + p, record->create_guid, 16);
     p += 16;
+    memcpy(buf + p, record->client_guid, 16);
+    p += 16;
     durable_put_le64(buf, &p, record->session_id);
     durable_put_le32(buf, &p, record->durable_flags);
     durable_put_le64(buf, &p, record->durable_timeout_ms);
@@ -375,6 +382,8 @@ chimera_smb_durable_deserialize(
     record->persistent_id = smb_wire_le64(buf + p);
     p                    += 8;
     memcpy(record->create_guid, buf + p, 16);
+    p += 16;
+    memcpy(record->client_guid, buf + p, 16);
     p                         += 16;
     record->session_id         = smb_wire_le64(buf + p);
     p                         += 8;
