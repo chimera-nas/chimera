@@ -142,22 +142,24 @@ chimera_smb_create_gen_open_file(
         struct chimera_vfs_lease      *conflict = NULL;
         enum chimera_vfs_lease_result  result;
 
-        /* Map desired_access -> RWH grant.  Generic + maximum_allowed
-         * bits imply both R and W, matching the expansion that
-         * smb_sharemode_expand_access used to perform. */
+        /* Map desired_access -> RWH grant.  Only data-access rights
+         * participate in share-mode conflicts (matching Windows and the
+         * legacy smb_sharemode_check_conflict): READ_DATA/EXECUTE are
+         * "read", WRITE_DATA/APPEND_DATA are "write", DELETE is "delete".
+         * EA and attribute rights (READ_EA, WRITE_EA, *_ATTRIBUTES) do NOT
+         * count.  Generic + MAXIMUM_ALLOWED expand to the data rights they
+         * imply, as smb_sharemode_expand_access used to do. */
         if (da & (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE |
-                  SMB2_FILE_READ_EA |
                   SMB2_GENERIC_READ | SMB2_GENERIC_EXECUTE |
                   SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
             granted |= CHIMERA_VFS_LEASE_MODE_R;
         }
         if (da & (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
-                  SMB2_FILE_WRITE_EA |
                   SMB2_GENERIC_WRITE |
                   SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
             granted |= CHIMERA_VFS_LEASE_MODE_W;
         }
-        if (da & SMB2_DELETE) {
+        if (da & (SMB2_DELETE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
             granted |= CHIMERA_VFS_LEASE_MODE_D;
         }
 
