@@ -544,6 +544,11 @@ struct chimera_smb_conn {
     uint16_t                           dialect;
     uint16_t                           smbvers;
     uint32_t                           capabilities;
+    /* Client values captured at NEGOTIATE, validated later by
+     * FSCTL_VALIDATE_NEGOTIATE_INFO (MS-SMB2 3.3.5.15.12). */
+    uint8_t                            client_guid[16];
+    uint8_t                            client_security_mode;
+    uint32_t                           client_capabilities;
     uint32_t                           requests_completed;
     int                                rdma_max_send;
     int                                rdma_niov;

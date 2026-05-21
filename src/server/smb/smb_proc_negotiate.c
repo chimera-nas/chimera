@@ -120,6 +120,12 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
 
     conn->dialect = dialect;
 
+    /* Record the client's negotiate parameters so a later
+     * FSCTL_VALIDATE_NEGOTIATE_INFO can be checked against them. */
+    memcpy(conn->client_guid, request->negotiate.client_guid, SMB2_GUID_SIZE);
+    conn->client_security_mode = request->negotiate.security_mode;
+    conn->client_capabilities  = request->negotiate.capabilities;
+
     /* Pick algorithms from the client's negotiate contexts. Phase 0 records
      * presence; Phases 2/4/5 will actually flip on preauth/encryption/RDMA. */
     chimera_smb_select_negotiated_algorithms(conn, request);
