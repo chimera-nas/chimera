@@ -55,6 +55,10 @@ chimera_nfs4_errno_to_nfsstat4(enum chimera_vfs_error err)
             return NFS4ERR_BADHANDLE;
         case CHIMERA_VFS_ENOTSUP:
             return NFS4ERR_NOTSUPP;
+        case CHIMERA_VFS_ENODATA:
+            return NFS4ERR_NOXATTR;
+        case CHIMERA_VFS_ERANGE:
+            return NFS4ERR_XATTR2BIG;
         case CHIMERA_VFS_EOVERFLOW:
             return NFS4ERR_TOOSMALL;
         case CHIMERA_VFS_EFAULT:

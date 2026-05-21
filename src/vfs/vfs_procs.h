@@ -712,3 +712,79 @@ chimera_vfs_getparent(
     int                              fhlen,
     chimera_vfs_getparent_callback_t callback,
     void                            *private_data);
+
+/*
+ * RFC 8276 extended attribute operations.
+ */
+
+typedef void (*chimera_vfs_get_xattr_callback_t)(
+    enum chimera_vfs_error error_code,
+    uint32_t               value_len,
+    void                  *private_data);
+
+void
+chimera_vfs_get_xattr(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_open_handle  *handle,
+    const char                      *name,
+    uint32_t                         namelen,
+    void                            *value,
+    uint32_t                         value_maxlen,
+    chimera_vfs_get_xattr_callback_t callback,
+    void                            *private_data);
+
+typedef void (*chimera_vfs_set_xattr_callback_t)(
+    enum chimera_vfs_error          error_code,
+    const struct chimera_vfs_attrs *pre_attr,
+    const struct chimera_vfs_attrs *post_attr,
+    void                           *private_data);
+
+void
+chimera_vfs_set_xattr(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_open_handle  *handle,
+    uint32_t                         option,
+    const char                      *name,
+    uint32_t                         namelen,
+    const void                      *value,
+    uint32_t                         value_len,
+    chimera_vfs_set_xattr_callback_t callback,
+    void                            *private_data);
+
+typedef void (*chimera_vfs_list_xattrs_callback_t)(
+    enum chimera_vfs_error error_code,
+    const char            *names,    /* back-to-back NUL-terminated names */
+    uint32_t               names_len,
+    uint32_t               count,
+    uint32_t               eof,
+    uint64_t               cookie,
+    void                  *private_data);
+
+void
+chimera_vfs_list_xattrs(
+    struct chimera_vfs_thread         *thread,
+    const struct chimera_vfs_cred     *cred,
+    struct chimera_vfs_open_handle    *handle,
+    uint64_t                           cookie,
+    void                              *buffer,
+    uint32_t                           max_bytes,
+    chimera_vfs_list_xattrs_callback_t callback,
+    void                              *private_data);
+
+typedef void (*chimera_vfs_remove_xattr_callback_t)(
+    enum chimera_vfs_error          error_code,
+    const struct chimera_vfs_attrs *pre_attr,
+    const struct chimera_vfs_attrs *post_attr,
+    void                           *private_data);
+
+void
+chimera_vfs_remove_xattr(
+    struct chimera_vfs_thread          *thread,
+    const struct chimera_vfs_cred      *cred,
+    struct chimera_vfs_open_handle     *handle,
+    const char                         *name,
+    uint32_t                            namelen,
+    chimera_vfs_remove_xattr_callback_t callback,
+    void                               *private_data);

@@ -250,6 +250,18 @@ chimera_nfs4_compound_process(
                 case OP_SEEK:
                     chimera_nfs4_seek(thread, req, argop, resop);
                     break;
+                case OP_GETXATTR:
+                    chimera_nfs4_getxattr(thread, req, argop, resop);
+                    break;
+                case OP_SETXATTR:
+                    chimera_nfs4_setxattr(thread, req, argop, resop);
+                    break;
+                case OP_LISTXATTRS:
+                    chimera_nfs4_listxattrs(thread, req, argop, resop);
+                    break;
+                case OP_REMOVEXATTR:
+                    chimera_nfs4_removexattr(thread, req, argop, resop);
+                    break;
                 case OP_LOCK:
                     chimera_nfs4_lock(thread, req, argop, resop);
                     break;
@@ -267,7 +279,7 @@ chimera_nfs4_compound_process(
                     break;
                 default:
                     chimera_nfs_error("Unsupported operation: %d", argop->argop);
-                    if (argop->argop >= OP_ACCESS && argop->argop <= OP_CLONE) {
+                    if (argop->argop >= OP_ACCESS && argop->argop <= OP_REMOVEXATTR) {
                         chimera_nfs4_compound_complete(req, NFS4ERR_NOTSUPP);
                     } else {
                         chimera_nfs4_compound_complete(req, NFS4ERR_OP_ILLEGAL);

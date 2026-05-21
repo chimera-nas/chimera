@@ -29,7 +29,9 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs4_state.c nfs4_lease.c nf
             nfs4_proc_verify.c
             nfs4_proc_putpubfh.c
             nfs4_proc_renew.c nfs4_proc_open_confirm.c
-            nfs4_proc_open_downgrade.c nfs4_proc_release_lockowner.c)
+            nfs4_proc_open_downgrade.c nfs4_proc_release_lockowner.c
+            nfs4_proc_getxattr.c nfs4_proc_setxattr.c
+            nfs4_proc_listxattrs.c nfs4_proc_removexattr.c)
 
 target_compile_definitions(chimera_nfs PRIVATE XXH_INLINE_ALL)
 target_link_libraries(chimera_nfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid urcu urcu-common)

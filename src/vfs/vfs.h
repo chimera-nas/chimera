@@ -75,7 +75,11 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_COPY_RANGE       29
 #define CHIMERA_VFS_OP_CLONE_RANGE      30
 #define CHIMERA_VFS_OP_MOVE_RANGE       31
-#define CHIMERA_VFS_OP_NUM              32
+#define CHIMERA_VFS_OP_GET_XATTR        32
+#define CHIMERA_VFS_OP_SET_XATTR        33
+#define CHIMERA_VFS_OP_LIST_XATTRS      34
+#define CHIMERA_VFS_OP_REMOVE_XATTR     35
+#define CHIMERA_VFS_OP_NUM              36
 
 #define CHIMERA_VFS_OPEN_CREATE         (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH           (1U << 1)
@@ -787,6 +791,46 @@ struct chimera_vfs_request {
             char     r_name[CHIMERA_VFS_NAME_MAX];
             uint16_t r_name_len;
         } getparent;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            const char                     *name;
+            uint32_t                        namelen;
+            void                           *value;        /* caller-provided buffer */
+            uint32_t                        value_maxlen;
+            uint32_t                        r_value_len;   /* bytes written to value */
+        } get_xattr;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint32_t                        option;       /* setxattr_option4 */
+            const char                     *name;
+            uint32_t                        namelen;
+            const void                     *value;
+            uint32_t                        value_len;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
+        } set_xattr;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        cookie;
+            void                           *buffer;        /* caller-provided buffer */
+            uint32_t                        max_bytes;
+            /* buffer is filled with NUL-terminated names, back to back */
+            uint32_t                        r_len;         /* bytes written to buffer */
+            uint32_t                        r_count;       /* number of names written */
+            uint32_t                        r_eof;
+            uint64_t                        r_cookie;
+        } list_xattrs;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            const char                     *name;
+            uint32_t                        namelen;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
+        } remove_xattr;
     };
 };
 
@@ -900,6 +944,18 @@ enum CHIMERA_FS_FH_MAGIC {
  * range becomes a hole. Not exposed over NFS; intended for server-internal
  * use (e.g. S3 multipart-upload completion). */
 #define CHIMERA_VFS_CAP_MOVE_RANGE         (1U << 12)
+
+/* If set, module supports extended attributes via
+ * chimera_vfs_get_xattr / set_xattr / list_xattrs / remove_xattr.
+ * Surfaced over NFSv4.2 (RFC 8276). Modules that leave this unset
+ * cause the VFS layer to return ENOTSUP. */
+#define CHIMERA_VFS_CAP_XATTR              (1U << 13)
+
+/* setxattr_option4 values (RFC 8276 §8) passed to chimera_vfs_set_xattr().
+ * Kept numerically identical to the on-the-wire NFSv4.2 enum. */
+#define CHIMERA_VFS_XATTR_EITHER           0  /* create or replace */
+#define CHIMERA_VFS_XATTR_CREATE           1  /* must not already exist */
+#define CHIMERA_VFS_XATTR_REPLACE          2  /* must already exist */
 
 struct chimera_vfs_module {
     /* Required

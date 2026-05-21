@@ -271,8 +271,14 @@ chimera_nfs4_marshall_attrs(
                                             (1UL << (FATTR4_SPACE_TOTAL - 32)));
 
             if (minorversion >= 1) {
-                chimera_nfs4_attr_append_uint32(&attrs,
-                                                (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64)));
+                uint32_t word2 = (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64));
+
+                /* Extended attributes (RFC 8276) are an NFSv4.2 feature. */
+                if (minorversion >= 2) {
+                    word2 |= (1 << (FATTR4_XATTR_SUPPORT - 64));
+                }
+
+                chimera_nfs4_attr_append_uint32(&attrs, word2);
             }
         }
 
@@ -574,6 +580,15 @@ chimera_nfs4_marshall_attrs(
     }
 
     if (num_req_mask >= 3) {
+        if ((req_mask[2] & (1 << (FATTR4_XATTR_SUPPORT - 64))) &&
+            minorversion >= 2) {
+            rsp_mask[2]  |= (1 << (FATTR4_XATTR_SUPPORT - 64));
+            *num_rsp_mask = 3;
+
+            /* memfs and the other validated backends support xattrs. */
+            chimera_nfs4_attr_append_uint32(&attrs, 1);
+        }
+
         if (req_mask[2] & (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64))) {
             rsp_mask[2]  |= (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64));
             *num_rsp_mask = 3;
