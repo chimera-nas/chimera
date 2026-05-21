@@ -6945,6 +6945,25 @@ demofs_symlink_at(
 } /* demofs_symlink_at */
 
 static void
+demofs_readlink_done_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_inode           *inode   = p->inode_stash[0];
+
+    demofs_bt_op_free(p->thread, op);
+
+    chimera_demofs_abort_if(result < 0, "symlink record missing (inum %lu)", inode->inum);
+    request->readlink.r_target_length = result;
+
+    demofs_map_attrs(p->thread, &request->readlink.r_attr, inode);
+    demofs_op_ok(request, p->txn);
+} /* demofs_readlink_done_cb */
+
+static void
 demofs_readlink_inode_cb(
     struct demofs_inode *inode,
     int                  status,
@@ -6952,6 +6971,8 @@ demofs_readlink_inode_cb(
 {
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_bt_key           key     = { .type = DEMOFS_REC_SYMLINK, .subkey = 0 };
+    struct demofs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -6963,17 +6984,15 @@ demofs_readlink_inode_cb(
         return;
     }
 
-    {
-        int len = demofs_symlink_get(p->thread, inode,
-                                     request->readlink.r_target,
-                                     request->readlink.target_maxlength);
-        chimera_demofs_abort_if(len < 0, "symlink record missing (inum %lu)", inode->inum);
-        request->readlink.r_target_length = len;
+    p->inode_stash[0] = inode;
+
+    op = demofs_bt_op_alloc(p->thread);
+    if (demofs_bt_lookup_async(op, p->thread, inode, DEMOFS_BT_OP_LOOKUP_EXACT,
+                               &key, NULL, request->readlink.r_target,
+                               request->readlink.target_maxlength,
+                               demofs_readlink_done_cb, request)) {
+        demofs_readlink_done_cb(op, op->result, request);
     }
-
-    demofs_map_attrs(p->thread, &request->readlink.r_attr, inode);
-
-    demofs_op_ok(request, p->txn);
 } /* demofs_readlink_inode_cb */
 
 static void
