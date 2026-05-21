@@ -81,6 +81,15 @@ chimera_server_config_set_async_delegation_threads(
     int                           threads);
 
 void
+chimera_server_config_set_smb_persistent_handles(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_smb_persistent_handles(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_cache_ttl(
     struct chimera_server_config *config,
     int                           ttl);

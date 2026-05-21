@@ -143,7 +143,12 @@ chimera_smb_server_init(
                          shared->config.auth.kerberos_keytab[0] ? shared->config.auth.kerberos_keytab : "(default)");
     }
 
-    shared->config.soft_fail_bad_req = chimera_server_config_get_soft_fail_bad_req(config);
+    shared->config.soft_fail_bad_req  = chimera_server_config_get_soft_fail_bad_req(config);
+    shared->config.persistent_handles = chimera_server_config_get_smb_persistent_handles(config);
+
+    if (shared->config.persistent_handles) {
+        chimera_smb_info("SMB3 durable/persistent handles enabled (in-memory state)");
+    }
 
     shared->vfs     = vfs;
     shared->metrics = metrics;
@@ -174,6 +179,13 @@ chimera_smb_server_init(
     pthread_mutex_init(&shared->shares_lock, NULL);
     pthread_mutex_init(&shared->trees_lock, NULL);
 
+    /* Seed the persistent-id allocator with a random, nonzero base so ids do
+     * not restart from a fixed value across daemon restarts (a courtesy to the
+     * future on-disk persistence layer; 0 is reserved for "no file id"). */
+    atomic_init(&shared->next_persistent_id, (chimera_rand64() | 1));
+
+    chimera_smb_durable_table_init(&shared->durable);
+
     return shared;
 } /* smb_server_init */
 
@@ -195,6 +207,8 @@ chimera_smb_server_destroy(void *data)
 
 
     chimera_smb_abort_if(shared->sessions, "active sessions exist at server shutdown")
+
+    chimera_smb_durable_table_destroy(&shared->durable);
 
     while (shared->free_sessions) {
         session = shared->free_sessions;
@@ -1397,6 +1411,20 @@ chimera_smb_server_accept(
 } /* smb_server_accept */
 
 
+/* Interval between durable-handle reconnect-grace sweeps. */
+#define CHIMERA_SMB_DURABLE_SWEEP_INTERVAL_US (1 * 1000 * 1000)
+
+static void
+chimera_smb_durable_sweeper_fire(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_server_smb_thread *thread =
+        container_of(timer, struct chimera_server_smb_thread, durable_sweeper);
+
+    chimera_smb_durable_sweep(thread);
+} /* chimera_smb_durable_sweeper_fire */
+
 static void *
 chimera_smb_server_thread_init(
     struct evpl               *evpl,
@@ -1417,6 +1445,12 @@ chimera_smb_server_thread_init(
 
     chimera_smb_iconv_init(&thread->iconv_ctx);
     chimera_smb_notify_thread_init(thread);
+
+    if (shared->config.persistent_handles) {
+        evpl_add_timer(evpl, &thread->durable_sweeper,
+                       chimera_smb_durable_sweeper_fire,
+                       CHIMERA_SMB_DURABLE_SWEEP_INTERVAL_US);
+    }
 
     thread->binding = evpl_listener_attach(
         evpl,
@@ -1467,6 +1501,10 @@ chimera_smb_server_thread_destroy(void *data)
         free(session_handle);
     }
 
+    if (thread->shared->config.persistent_handles) {
+        evpl_remove_timer(thread->evpl, &thread->durable_sweeper);
+    }
+
     evpl_listener_detach(thread->evpl, thread->binding);
     chimera_smb_notify_thread_destroy(thread);
 
@@ -1489,6 +1527,11 @@ chimera_smb_add_share(
     snprintf(share->name, sizeof(share->name), "%s", name);
     snprintf(share->path, sizeof(share->path), "%s", path);
     chimera_smb_sharemode_init(&share->sharemode);
+
+    /* Initial pass: every share inherits continuous-availability from the
+     * global persistent-handles flag.  A per-share config knob will refine
+     * this later. */
+    share->continuous_availability = shared->config.persistent_handles;
 
     pthread_mutex_lock(&shared->shares_lock);
     LL_PREPEND(shared->shares, share);

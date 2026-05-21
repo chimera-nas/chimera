@@ -25,6 +25,11 @@ struct chimera_smb_file_id {
 #define CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY       0x00000001
 #define CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE 0x00000002
 #define CHIMERA_SMB_OPEN_FILE_CLOSED               0x00000004
+/* Open survived its owning connection's teardown and is parked in the shared
+ * durable-handle table awaiting reconnect or expiry.  While set, the open is
+ * not present in any tree's open_files[] hash and is owned solely by the
+ * durable table (refcnt == 1). Cleared when a reconnect re-homes it. */
+#define CHIMERA_SMB_OPEN_FILE_PARKED               0x00000008
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases

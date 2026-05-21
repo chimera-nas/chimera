@@ -63,6 +63,7 @@ struct chimera_server_config {
     int                                   rest_https_port;
     int                                   smb_num_dialects;
     uint32_t                              smb_dialects[16];
+    int                                   smb_persistent_handles;
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
@@ -134,6 +135,10 @@ chimera_server_config_init(void)
     config->smb_dialects[3]  = SMB2_DIALECT_3_1_1;
 
     config->smb_num_nic_info = 0;
+
+    /* SMB3 durable/persistent handles are off by default; they are an
+     * opt-in feature gated by the "smb_persistent_handles" config flag. */
+    config->smb_persistent_handles = 0;
 
     // SMB auth config defaults - local NTLM only
     config->smb_auth.winbind_enabled    = 0;
@@ -241,6 +246,20 @@ chimera_server_config_set_async_delegation_threads(
 {
     config->async_delegation_threads = threads;
 } /* chimera_server_config_set_async_delegation_threads */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_persistent_handles(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->smb_persistent_handles = enable;
+} /* chimera_server_config_set_smb_persistent_handles */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_persistent_handles(const struct chimera_server_config *config)
+{
+    return config->smb_persistent_handles;
+} /* chimera_server_config_get_smb_persistent_handles */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_max_open_files(

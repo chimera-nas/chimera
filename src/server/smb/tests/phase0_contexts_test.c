@@ -839,6 +839,189 @@ test_negotiate_duplicate_context_rejected(void)
     }
 } /* test_negotiate_duplicate_context_rejected */
 
+/* ------------------------------------------------------------------ *
+*  Durable / persistent handle: response emit + registry lifecycle    *
+* ------------------------------------------------------------------ */
+
+static void
+test_create_response_dh2q_persistent(void)
+{
+    struct chimera_smb_request   req;
+    struct chimera_smb_open_file open_file;
+    uint8_t                      ctx_buf[256];
+    uint32_t                     ctx_len;
+
+    memset(&req,       0, sizeof(req));
+    memset(&open_file, 0, sizeof(open_file));
+
+    /* A persistent-v2 grant: the emitter echoes Timeout + PERSISTENT flag. */
+    req.create.ctx_present_mask  = CHIMERA_SMB_CREATE_CTX_DH2Q;
+    open_file.durable_flags      = CHIMERA_SMB_DURABLE_V2 | CHIMERA_SMB_DURABLE_PERSISTENT;
+    open_file.durable_timeout_ms = 30000;
+    req.create.r_open_file       = &open_file;
+
+    ctx_len = chimera_smb_build_create_response_contexts(&req, ctx_buf, sizeof(ctx_buf));
+
+    /* 24-byte header+name+pad, then 8-byte body: Timeout(4)=30000, Flags(4)=0x02. */
+    if (ctx_len == 32 &&
+        ctx_buf[16] == 'D' && ctx_buf[17] == 'H' && ctx_buf[18] == '2' && ctx_buf[19] == 'Q' &&
+        ctx_buf[24] == 0x30 && ctx_buf[25] == 0x75 && ctx_buf[26] == 0 && ctx_buf[27] == 0 &&
+        ctx_buf[28] == SMB2_DHANDLE_FLAG_PERSISTENT &&
+        ctx_buf[29] == 0 && ctx_buf[30] == 0 && ctx_buf[31] == 0) {
+        TEST_PASS("DH2Q response: timeout + PERSISTENT flag emitted");
+    } else {
+        TEST_FAIL("DH2Q response: timeout + PERSISTENT flag emitted");
+        fprintf(stderr, "    got ctx_len=%u\n", ctx_len);
+    }
+} /* test_create_response_dh2q_persistent */
+
+static void
+test_create_response_dhnq_v1(void)
+{
+    struct chimera_smb_request   req;
+    struct chimera_smb_open_file open_file;
+    uint8_t                      ctx_buf[256];
+    uint32_t                     ctx_len;
+
+    memset(&req,       0, sizeof(req));
+    memset(&open_file, 0, sizeof(open_file));
+
+    req.create.ctx_present_mask = CHIMERA_SMB_CREATE_CTX_DHNQ;
+    open_file.durable_flags     = CHIMERA_SMB_DURABLE_V1;
+    req.create.r_open_file      = &open_file;
+
+    ctx_len = chimera_smb_build_create_response_contexts(&req, ctx_buf, sizeof(ctx_buf));
+
+    /* 8-byte reserved (zero) body. */
+    if (ctx_len == 32 &&
+        ctx_buf[16] == 'D' && ctx_buf[17] == 'H' && ctx_buf[18] == 'n' && ctx_buf[19] == 'Q' &&
+        ctx_buf[24] == 0 && ctx_buf[25] == 0 && ctx_buf[26] == 0 && ctx_buf[27] == 0 &&
+        ctx_buf[28] == 0 && ctx_buf[29] == 0 && ctx_buf[30] == 0 && ctx_buf[31] == 0) {
+        TEST_PASS("DHnQ response: 8 reserved bytes emitted");
+    } else {
+        TEST_FAIL("DHnQ response: 8 reserved bytes emitted");
+    }
+} /* test_create_response_dhnq_v1 */
+
+static void
+test_create_response_dh2q_suppressed_without_grant(void)
+{
+    struct chimera_smb_request   req;
+    struct chimera_smb_open_file open_file;
+    uint8_t                      ctx_buf[256];
+    uint32_t                     ctx_len;
+
+    memset(&req,       0, sizeof(req));
+    memset(&open_file, 0, sizeof(open_file));
+
+    /* Client asked (DH2Q) but no durable grant was made (feature off / not a
+     * share): the emitter must suppress the response context. */
+    req.create.ctx_present_mask = CHIMERA_SMB_CREATE_CTX_DH2Q;
+    open_file.durable_flags     = 0;
+    req.create.r_open_file      = &open_file;
+
+    ctx_len = chimera_smb_build_create_response_contexts(&req, ctx_buf, sizeof(ctx_buf));
+
+    if (ctx_len == 0) {
+        TEST_PASS("DH2Q response suppressed when no grant made");
+    } else {
+        TEST_FAIL("DH2Q response suppressed when no grant made");
+    }
+} /* test_create_response_dh2q_suppressed_without_grant */
+
+static void
+test_durable_register_park_claim(void)
+{
+    struct chimera_server_smb_shared *shared = calloc(1, sizeof(*shared));
+    struct chimera_smb_open_file      of;
+    struct chimera_smb_open_file     *claimed;
+    uint8_t                           guid[16];
+    uint32_t                          status;
+    int                               i;
+
+    chimera_smb_durable_table_init(&shared->durable);
+
+    memset(&of, 0, sizeof(of));
+    for (i = 0; i < 16; i++) {
+        guid[i] = (uint8_t) (0x10 + i);
+    }
+    of.file_id.pid        = 0xABCDEF;
+    of.durable_flags      = CHIMERA_SMB_DURABLE_V2;
+    of.durable_timeout_ms = 60000;
+    memcpy(of.create_guid, guid, 16);
+
+    chimera_smb_durable_register(shared, &of, 42, "foo.txt", 7);
+
+    /* Before park: live, not reclaimable. */
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, 42, "foo.txt", 7, &status);
+    if (claimed != NULL || status != SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
+        TEST_FAIL("durable: live (unparked) handle is not reclaimable");
+    } else {
+        TEST_PASS("durable: live (unparked) handle is not reclaimable");
+    }
+
+    chimera_smb_durable_park(shared, &of);
+
+    /* Wrong create-guid is rejected. */
+    guid[0] = 0xFF;
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, 42, "foo.txt", 7, &status);
+    guid[0] = 0x10;
+    if (claimed != NULL || status != SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
+        TEST_FAIL("durable: create-guid mismatch rejected");
+    } else {
+        TEST_PASS("durable: create-guid mismatch rejected");
+    }
+
+    /* Wrong session is ACCESS_DENIED. */
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, 99, "foo.txt", 7, &status);
+    if (claimed != NULL || status != SMB2_STATUS_ACCESS_DENIED) {
+        TEST_FAIL("durable: session mismatch -> ACCESS_DENIED");
+    } else {
+        TEST_PASS("durable: session mismatch -> ACCESS_DENIED");
+    }
+
+    /* Matching reconnect succeeds and returns the surviving open. */
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, 42, "foo.txt", 7, &status);
+    if (claimed == &of && status == SMB2_STATUS_SUCCESS) {
+        TEST_PASS("durable: matching reconnect reclaims the open");
+    } else {
+        TEST_FAIL("durable: matching reconnect reclaims the open");
+    }
+
+    /* A second reconnect must fail — the handle is now live again. */
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, 42, "foo.txt", 7, &status);
+    if (claimed != NULL || status != SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
+        TEST_FAIL("durable: double-reconnect rejected");
+    } else {
+        TEST_PASS("durable: double-reconnect rejected");
+    }
+
+    /* After forget, the persistent id is unknown. */
+    chimera_smb_durable_forget(shared, 0xABCDEF);
+    chimera_smb_durable_park(shared, &of);  /* no entry -> no-op */
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, 42, "foo.txt", 7, &status);
+    if (claimed != NULL || status != SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
+        TEST_FAIL("durable: forgotten handle not found");
+    } else {
+        TEST_PASS("durable: forgotten handle not found");
+    }
+
+    /* v1 reconnect (DHnC): no create-guid supplied. */
+    of.file_id.pid   = 0x999;
+    of.durable_flags = CHIMERA_SMB_DURABLE_V1;
+    chimera_smb_durable_register(shared, &of, 7, "bar", 3);
+    chimera_smb_durable_park(shared, &of);
+    claimed = chimera_smb_durable_claim(shared, 0x999, NULL, 7, "bar", 3, &status);
+    if (claimed == &of && status == SMB2_STATUS_SUCCESS) {
+        TEST_PASS("durable: v1 (no-guid) reconnect reclaims the open");
+    } else {
+        TEST_FAIL("durable: v1 (no-guid) reconnect reclaims the open");
+    }
+
+    chimera_smb_durable_table_destroy(&shared->durable);
+    free(shared);
+} /* test_durable_register_park_claim */
+
 int
 main(
     int   argc,
@@ -878,6 +1061,12 @@ main(
     test_create_response_mxac_on_maximum_allowed();
     test_create_response_mxac_suppressed_on_specific_access();
     test_create_response_empty_when_no_mxac_bit();
+
+    fprintf(stderr, "=== Durable/persistent handles ===\n");
+    test_create_response_dh2q_persistent();
+    test_create_response_dhnq_v1();
+    test_create_response_dh2q_suppressed_without_grant();
+    test_durable_register_park_claim();
 
     fprintf(stderr, "\nTotal: %d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

@@ -426,6 +426,38 @@ chimera_smb_create_gen_open_file(
                                         &request->session_handle->session->cred);
     }
 
+    /* Durable / persistent handle grant.  Initial in-memory pass with a lax
+     * policy: granted whenever the client asks and the feature is enabled,
+     * independent of the oplock/lease actually held.  Persistent (vs merely
+     * durable) additionally requires a continuous-availability share; absent
+     * that we silently downgrade to durable-v2, which is spec-legal. */
+    if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share &&
+        thread->shared->config.persistent_handles) {
+        uint32_t ctx = request->create.ctx_present_mask;
+
+        if (ctx & CHIMERA_SMB_CREATE_CTX_DH2Q) {
+            open_file->durable_flags = CHIMERA_SMB_DURABLE_V2;
+            memcpy(open_file->create_guid, request->create.dh2q.create_guid, 16);
+
+            if ((request->create.dh2q.flags & SMB2_DHANDLE_FLAG_PERSISTENT) &&
+                tree->share->continuous_availability) {
+                open_file->durable_flags |= CHIMERA_SMB_DURABLE_PERSISTENT;
+            }
+
+            if (request->create.dh2q.timeout_ms == 0) {
+                open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_DEFAULT_MS;
+            } else if (request->create.dh2q.timeout_ms > CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS) {
+                open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS;
+            } else {
+                open_file->durable_timeout_ms = request->create.dh2q.timeout_ms;
+            }
+        } else if (ctx & CHIMERA_SMB_CREATE_CTX_DHNQ) {
+            /* Durable v1: no timeout or create-guid on the wire. */
+            open_file->durable_flags      = CHIMERA_SMB_DURABLE_V1;
+            open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_DEFAULT_MS;
+        }
+    }
+
     open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
     pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
@@ -433,6 +465,15 @@ chimera_smb_create_gen_open_file(
     HASH_ADD(hh, tree->open_files[open_file_bucket], file_id, sizeof(open_file->file_id), open_file);
 
     pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+
+    /* Register the durable handle in the shared registry so it survives a
+     * disconnect and can be reclaimed on reconnect.  Done outside the bucket
+     * lock to keep the bucket -> registry lock order (see smb_durable.c). */
+    if (open_file->durable_flags) {
+        chimera_smb_durable_register(thread->shared, open_file,
+                                     request->session_handle->session->session_id,
+                                     open_file->name, open_file->name_len);
+    }
 
     compound->saved_file_id = open_file->file_id;
 
@@ -453,10 +494,15 @@ chimera_smb_create_gen_open_file_normal(
 {
     struct chimera_smb_open_file *open_file;
 
+    /* Persistent ids are drawn from a process-global monotonic counter rather
+     * than a per-tree one so they stay unique across tree teardowns — durable
+     * reconnect looks an open up by persistent id alone. */
+    uint64_t                      pid = atomic_fetch_add(&request->compound->thread->shared->next_persistent_id, 1);
+
     open_file = chimera_smb_create_gen_open_file(request,
                                                  CHIMERA_SMB_OPEN_FILE_TYPE_FILE,
                                                  NULL,
-                                                 ++request->tree->next_file_id,
+                                                 pid,
                                                  parent_fh,
                                                  parent_fh_len,
                                                  name,
@@ -1038,6 +1084,66 @@ chimera_smb_revalidate_tree(
 
 } /* chimera_smb_revalidate_tree */
 
+/* Durable-handle reconnect (DH2C / DHnC).  Reclaims a parked open that
+ * survived its previous connection and re-homes it into the reconnecting
+ * tree, then replies as a normal OPEN of the surviving file. */
+static void
+chimera_smb_durable_reconnect(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+    struct chimera_server_smb_shared *shared = thread->shared;
+    struct chimera_smb_tree          *tree   = request->tree;
+    struct chimera_smb_open_file     *open_file;
+    const uint8_t                    *create_guid = NULL;
+    uint64_t                          persistent_id;
+    uint32_t                          status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    int                               bucket;
+
+    if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2C) {
+        persistent_id = request->create.dh2c.persistent;
+        create_guid   = request->create.dh2c.create_guid;
+    } else {
+        persistent_id = request->create.dhnc.persistent;
+    }
+
+    open_file = chimera_smb_durable_claim(shared, persistent_id, create_guid,
+                                          request->session_handle->session->session_id,
+                                          request->create.name, request->create.name_len,
+                                          &status);
+
+    if (!open_file) {
+        chimera_smb_complete_request(request, status);
+        return;
+    }
+
+    /* Re-home the surviving open into the reconnecting tree.  The persistent
+     * id is unchanged; the volatile id is reissued (spec permits this).  The
+     * registry reference becomes the new tree reference; we add one more for
+     * this in-flight request, which the getattr callback releases below. */
+    open_file->flags      &= ~CHIMERA_SMB_OPEN_FILE_PARKED;
+    open_file->create_conn = request->compound->conn;
+    open_file->file_id.vid = chimera_rand64();
+    open_file->refcnt      = 2;
+
+    bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+    pthread_mutex_lock(&tree->open_files_lock[bucket]);
+    HASH_ADD(hh, tree->open_files[bucket], file_id, sizeof(open_file->file_id), open_file);
+    pthread_mutex_unlock(&tree->open_files_lock[bucket]);
+
+    request->create.r_open_file        = open_file;
+    request->create.create_disposition = SMB2_FILE_OPEN; /* reply emits OPENED */
+    request->compound->saved_file_id   = open_file->file_id;
+
+    /* Refresh the network-open-info from the surviving handle, then reply.
+     * Reuses the normal create getattr callback (releases the request ref). */
+    chimera_vfs_getattr(thread->vfs_thread,
+                        &request->session_handle->session->cred,
+                        open_file->handle,
+                        CHIMERA_VFS_ATTR_MASK_STAT,
+                        chimera_smb_create_open_getattr_callback,
+                        request);
+} /* chimera_smb_durable_reconnect */
+
 void
 chimera_smb_create(struct chimera_smb_request *request)
 {
@@ -1094,6 +1200,15 @@ chimera_smb_create(struct chimera_smb_request *request)
             !(request->create.desired_access &
               (SMB2_DELETE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED))) {
             chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+            return;
+        }
+
+        /* Durable-handle reconnect short-circuits the normal open path: the
+         * file is already open (parked); we just reclaim and re-home it. */
+        if (request->compound->thread->shared->config.persistent_handles &&
+            (request->create.ctx_present_mask &
+             (CHIMERA_SMB_CREATE_CTX_DH2C | CHIMERA_SMB_CREATE_CTX_DHNC))) {
+            chimera_smb_durable_reconnect(request);
             return;
         }
 
@@ -1263,12 +1378,62 @@ build_rqls_response(
     return needed;
 } /* build_rqls_response */
 
+/* Build the DH2Q (durable-handle-request-v2) response body — 8 bytes:
+ * Timeout(4) | Flags(4).  Emitted only when a durable-v2 grant was made;
+ * Flags echoes PERSISTENT when the grant is persistent. */
+static int
+build_dh2q_response(
+    struct chimera_smb_request *request,
+    uint8_t                    *out,
+    uint32_t                    out_size)
+{
+    struct chimera_smb_open_file *of = request->create.r_open_file;
+    uint32_t                      timeout, flags;
+
+    if (!of || !(of->durable_flags & CHIMERA_SMB_DURABLE_V2) || out_size < 8) {
+        return -1;
+    }
+
+    timeout = (uint32_t) of->durable_timeout_ms;
+    flags   = (of->durable_flags & CHIMERA_SMB_DURABLE_PERSISTENT) ?
+        SMB2_DHANDLE_FLAG_PERSISTENT : 0;
+
+    out[0] = timeout & 0xff;
+    out[1] = (timeout >> 8) & 0xff;
+    out[2] = (timeout >> 16) & 0xff;
+    out[3] = (timeout >> 24) & 0xff;
+    out[4] = flags & 0xff;
+    out[5] = (flags >> 8) & 0xff;
+    out[6] = (flags >> 16) & 0xff;
+    out[7] = (flags >> 24) & 0xff;
+    return 8;
+} /* build_dh2q_response */
+
+/* Build the DHnQ (durable-handle-request v1) response body — 8 reserved
+ * (zero) bytes.  Emitted only when a durable-v1 grant was made. */
+static int
+build_dhnq_response(
+    struct chimera_smb_request *request,
+    uint8_t                    *out,
+    uint32_t                    out_size)
+{
+    struct chimera_smb_open_file *of = request->create.r_open_file;
+
+    if (!of || !(of->durable_flags & CHIMERA_SMB_DURABLE_V1) || out_size < 8) {
+        return -1;
+    }
+
+    memset(out, 0, 8);
+    return 8;
+} /* build_dhnq_response */
+
 /* *INDENT-OFF* */ /* uncrustify oscillates on aligned struct-init tables */
 static const struct chimera_smb_create_response_emitter smb_create_response_emitters[] = {
     { CHIMERA_SMB_CREATE_CTX_MXAC, "MxAc", build_mxac_response  },
     { CHIMERA_SMB_CREATE_CTX_RQLS, "RqLs", build_rqls_response  },
-    /* Phase 3: + DH2Q (durable handle grant), DHnQ
-     * Phase 8: + QFid (32-byte on-disk id) */
+    { CHIMERA_SMB_CREATE_CTX_DH2Q, "DH2Q", build_dh2q_response  },
+    { CHIMERA_SMB_CREATE_CTX_DHNQ, "DHnQ", build_dhnq_response  },
+    /* Phase 8: + QFid (32-byte on-disk id) */
     { 0,                           NULL,   NULL                },
 };
 /* *INDENT-ON* */

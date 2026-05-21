@@ -541,6 +541,7 @@
 #define SMB2_STATUS_VOLUME_DISMOUNTED                 0xC000026E
 #define SMB2_STATUS_NOT_A_REPARSE_POINT               0xC0000275
 #define SMB2_STATUS_SERVER_UNAVAILABLE                0xC0000466
+#define SMB2_STATUS_FILE_NOT_AVAILABLE                0xC0000467
 
 /* Warning codes */
 #define SMB2_STATUS_BUFFER_OVERFLOW                   0x80000005
@@ -608,6 +609,16 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_GLOBAL_CAP_PERSISTENT_HANDLES          0x00000010 // Supports persistent handles (SMB 3.0+)
 #define SMB2_GLOBAL_CAP_DIRECTORY_LEASING           0x00000020 // Supports directory leasing (SMB 3.0+)
 #define SMB2_GLOBAL_CAP_ENCRYPTION                  0x00000040 // Supports encryption (SMB 3.0+)
+
+// SMB2 TREE_CONNECT response share capabilities (MS-SMB2 §2.2.10)
+#define SMB2_SHARE_CAP_DFS                          0x00000008
+#define SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY      0x00000010 // CA share (persistent handles)
+#define SMB2_SHARE_CAP_SCALEOUT                     0x00000020
+#define SMB2_SHARE_CAP_CLUSTER                      0x00000040
+#define SMB2_SHARE_CAP_ASYMMETRIC                   0x00000080
+
+// SMB2 CREATE durable-handle-request-v2 (DH2Q) / response flags (MS-SMB2 §2.2.13.2.11)
+#define SMB2_DHANDLE_FLAG_PERSISTENT                0x00000002
 
 /* SMB2 3.1.1 negotiate context types (MS-SMB2 §2.2.3.1) */
 #define SMB2_PREAUTH_INTEGRITY_CAPABILITIES         0x0001

@@ -12,7 +12,7 @@ add_library(chimera_smb SHARED
     smb_proc_reparse.c smb_proc_change_notify.c smb_proc_cancel.c
     smb_proc_sparse.c smb_proc_copychunk.c
     smb_proc_lock.c smb_proc_oplock_break.c
-    smb_notify.c smb_sharemode.c smb_ntlm.c
+    smb_notify.c smb_sharemode.c smb_ntlm.c smb_durable.c
     smb_wbclient.c smb_auth.c smb_gssapi.c
     #idl/ndr_dcerpc.c
 )
