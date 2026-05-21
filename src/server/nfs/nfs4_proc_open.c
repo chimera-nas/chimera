@@ -603,26 +603,33 @@ chimera_nfs4_open(
         return;
     }
 
-    if (!req->session) {
-        struct nfs4_session *found = nfs4_session_find_by_clientid(
-            &thread->shared->nfs4_shared_clients,
-            args->owner.clientid);
-
-        if (found) {
-            nfs4_session_bind_conn(req->conn, found);
-            req->session = found;
-            /* Drop the +1 ref returned by find_by_clientid; conn owns it. */
-            nfs4_session_put(found);
-        }
-    }
-
     /* RFC 7530 §9.1.7 entry-time seqid classification for the 4.0 path.
      * Done BEFORE any VFS work so a replay short-circuits without
      * re-executing the open.  On NEW, the resolved owner is stashed on
      * req for chimera_nfs4_open_complete to advance + cache the reply. */
     if (req->minorversion == 0) {
-        struct nfs_client *client =
-            req->session ? req->session->client_unified : NULL;
+        struct nfs_client *client = NULL;
+
+        /* Resolve the client strictly by the OPEN owner's clientid.  The
+         * connection may carry a stale or unrelated implicit session (e.g. a
+         * prior confirmed client), so an unconfirmed/unknown clientid must not
+         * be silently accepted just because the conn is bound. */
+        if (req->session && req->session->client_unified &&
+            req->session->client_unified->client_id == args->owner.clientid) {
+            client = req->session->client_unified;
+        } else {
+            struct nfs4_session *found = nfs4_session_find_by_clientid(
+                &thread->shared->nfs4_shared_clients,
+                args->owner.clientid);
+
+            if (found) {
+                client = found->client_unified;
+                nfs4_session_bind_conn(req->conn, found);
+                req->session = found;
+                /* Drop the +1 ref from find_by_clientid; the conn owns it. */
+                nfs4_session_put(found);
+            }
+        }
 
         if (!client) {
             /* NFS4ERR_STALE_CLIENTID is in the no-advance set; we don't
