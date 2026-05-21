@@ -127,6 +127,7 @@ chimera_nfs4_lock_complete(
                             lock_state->generation, table->epoch);
 
         res->status = NFS4_OK;
+        chimera_nfs4_set_current_stateid(req, &res->resok4.lock_stateid);
 
         nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                                 req->thread->vfs_thread);

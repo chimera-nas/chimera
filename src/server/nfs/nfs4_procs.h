@@ -411,6 +411,54 @@ chimera_nfs4_compound_process(
 /* Validate that [p, p+len) is well-formed UTF-8 (RFC 3629): rejects stray
  * continuation bytes, overlong encodings, UTF-16 surrogates, the U+FFFE/FFFF
  * non-characters, and anything above U+10FFFF. Returns true if well-formed. */
+/*
+ * NFS4.1 "current stateid" (RFC 8881 §16.2.3.1.2).  The special value
+ * { seqid = 1, other = all zeros } means "use the COMPOUND's current stateid",
+ * which stateid-returning operations (OPEN, LOCK, OPEN_DOWNGRADE, ...) set.
+ */
+static inline bool
+chimera_nfs4_stateid_is_current(const struct stateid4 *sid)
+{
+    static const uint8_t zero[NFS4_OTHER_SIZE] = { 0 };
+
+    return sid->seqid == 1 &&
+           memcmp(sid->other, zero, NFS4_OTHER_SIZE) == 0;
+} /* chimera_nfs4_stateid_is_current */
+
+/* Record the current stateid produced by a stateid-returning op (4.1+). */
+static inline void
+chimera_nfs4_set_current_stateid(
+    struct nfs_request    *req,
+    const struct stateid4 *sid)
+{
+    if (req->minorversion >= 1) {
+        req->current_stateid       = *sid;
+        req->current_stateid_valid = true;
+    }
+} /* chimera_nfs4_set_current_stateid */
+
+/* Clear the COMPOUND's current stateid -- done by ops that change the current
+ * filehandle (RFC 8881 §16.2.3.1.2). */
+static inline void
+chimera_nfs4_clear_current_stateid(struct nfs_request *req)
+{
+    req->current_stateid_valid = false;
+} /* chimera_nfs4_clear_current_stateid */
+
+/* If `sid` is the special current-stateid value, replace it in place with the
+ * COMPOUND's current stateid (4.1+).  No-op otherwise. */
+static inline void
+chimera_nfs4_resolve_current_stateid(
+    struct nfs_request *req,
+    struct stateid4    *sid)
+{
+    if (req->minorversion >= 1 &&
+        req->current_stateid_valid &&
+        chimera_nfs4_stateid_is_current(sid)) {
+        *sid = req->current_stateid;
+    }
+} /* chimera_nfs4_resolve_current_stateid */
+
 static inline bool
 chimera_nfs4_utf8_valid(
     const char *data,
