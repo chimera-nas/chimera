@@ -10,6 +10,20 @@
 #include "vfs/vfs_procs.h"
 #include "xxhash.h"
 
+static unsigned int
+chimera_smb_query_directory_status(enum chimera_vfs_error error_code)
+{
+    switch (error_code) {
+        case CHIMERA_VFS_OK:      return SMB2_STATUS_SUCCESS;
+        /* QUERY_DIRECTORY against a non-directory open: per MS-SMB2 3.3.5.18
+         * the server fails the request with STATUS_INVALID_PARAMETER. */
+        case CHIMERA_VFS_ENOTDIR: return SMB2_STATUS_INVALID_PARAMETER;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:   return SMB2_STATUS_ACCESS_DENIED;
+        default:                  return SMB2_STATUS_INTERNAL_ERROR;
+    } /* switch */
+} /* chimera_smb_query_directory_status */
+
 void
 chimera_smb_query_directory_readdir_complete(
     enum chimera_vfs_error          error_code,
@@ -29,7 +43,12 @@ chimera_smb_query_directory_readdir_complete(
     chimera_smb_open_file_release(request, request->query_directory.open_file);
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        /* Must return here: falling through would complete the request a
+         * second time, overrunning the compound's completion counter and
+         * tripping the compound_advance abort (smb.c). */
+        evpl_iovec_release(request->compound->thread->evpl, &request->query_directory.iov);
+        chimera_smb_complete_request(request, chimera_smb_query_directory_status(error_code));
+        return;
     }
 
     if (request->query_directory.output_length) {
@@ -39,7 +58,7 @@ chimera_smb_query_directory_readdir_complete(
         chimera_smb_complete_request(request, SMB2_STATUS_NO_MORE_FILES);
     }
 
-} /* chimera_smb_query_directory_readdir_complete */ /* chimera_smb_query_directory_readdir_complete */
+} /* chimera_smb_query_directory_readdir_complete */
 
 int
 chimera_smb_query_directory_readdir_callback(
