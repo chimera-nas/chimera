@@ -42,7 +42,7 @@ set(PYNFS_PASS_0
     access commit create getattr getfh link lockt lookup lookupp nverify
     putpubfh putrootfh readdir readlink remove rename restorefh savefh verify)
 set(PYNFS_PASS_1
-    destroy_clientid getfh lookup putfh rename verify xattr)
+    currentstateid destroy_clientid getfh lookup putfh rename verify xattr)
 set(PYNFS_PASS_2
     destroy_clientid getfh lookup rename sparse verify)
 
@@ -50,13 +50,20 @@ set(PYNFS_PASS_2
 # register the same suites but leave them DISABLED until validated.
 set(PYNFS_PASS_BACKENDS memfs)
 
+# Extra pynfs flag tokens for specific suites.  pynfs excludes any test tagged
+# with a "no<flag>" token, so this drops tests a suite pulls in that the server
+# does not support.  currentstateid's CSID7 is tagged pnfs (LAYOUTGET); chimera
+# is not a pNFS server, so exclude it.
+set(PYNFS_EXTRA_currentstateid nopnfs)
+
 # Register one suite, enabling it only when both the backend and the
 # flag/minor pair are on the validated pass-lists; otherwise mark it DISABLED.
 function(pynfs_add_test flag backend minor)
     set(name chimera/pynfs/${flag}_${backend}_nfs4.${minor})
     add_test(NAME ${name}
         COMMAND bash ${PYNFS_WRAPPER}
-                ${CHIMERA_BINARY} ${backend} ${minor} ${PYNFS_DIR} ${flag})
+                ${CHIMERA_BINARY} ${backend} ${minor} ${PYNFS_DIR} ${flag}
+                ${PYNFS_EXTRA_${flag}})
     set_tests_properties(${name} PROPERTIES
         LABELS pynfs
         ENVIRONMENT "PYTHONUNBUFFERED=1")
