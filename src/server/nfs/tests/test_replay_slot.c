@@ -109,13 +109,13 @@ test_unused_slot_first_seq_ok(void)
     CHECK(req.replay_slot == &session->replay_slots[0]);
     CHECK(req.replay_slot_id == 0);
     CHECK(req.replay_action == NFS4_REPLAY_ACTION_NEW);
-    CHECK(session->replay_slots[0].state == NFS4_SLOT_IN_PROGRESS);
-    CHECK(session->replay_slots[0].inflight_seqid == 1);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_IN_PROGRESS);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[0]) == 1);
 
     /* Finalize transitions to COMPLETED (no cachethis, no cached_buf). */
     nfs4_replay_slot_finalize(&req);
-    CHECK(session->replay_slots[0].state == NFS4_SLOT_COMPLETED);
-    CHECK(session->replay_slots[0].seqid == 1);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[0]) == 1);
     CHECK(session->replay_slots[0].cached_buf == NULL);
 
     destroy_session_table(&table, session);
@@ -138,7 +138,7 @@ test_unused_slot_wrong_seq_misordered(void)
 
     CHECK(status == NFS4ERR_SEQ_MISORDERED);
     CHECK(!is_replay);
-    CHECK(session->replay_slots[0].state == NFS4_SLOT_UNUSED);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_UNUSED);
 
     destroy_session_table(&table, session);
 } /* test_unused_slot_wrong_seq_misordered */
@@ -181,7 +181,7 @@ test_in_progress_retry(void)
 
     status = nfs4_replay_slot_acquire(session, 0, 1, true, &req1, &is_replay);
     CHECK(status == NFS4_OK);
-    CHECK(session->replay_slots[0].state == NFS4_SLOT_IN_PROGRESS);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_IN_PROGRESS);
 
     /* Without calling finalize, a second SEQUENCE on the same slot with
      * the same seqid arrives -- libevpl has no DRC, so this hits us. */
@@ -215,7 +215,7 @@ test_completed_retry_uncached(void)
     status = nfs4_replay_slot_acquire(session, 0, 1, false, &req, &is_replay);
     CHECK(status == NFS4_OK);
     nfs4_replay_slot_finalize(&req);
-    CHECK(session->replay_slots[0].state == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_COMPLETED);
 
     /* Retry (same seqid) -> no cached bytes -> RETRY_UNCACHED_REP. */
     reset_request(&req);
@@ -255,7 +255,7 @@ test_cached_retry_replay(void)
     session->replay_bytes_in_use       += 64;
 
     nfs4_replay_slot_finalize(&req);
-    CHECK(session->replay_slots[0].state == NFS4_SLOT_CACHED);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_CACHED);
     CHECK(session->replay_slots[0].cached_buf == fake_reply);
 
     /* Retry same seqid -> REPLAY. */
@@ -293,7 +293,7 @@ test_advance_frees_cache(void)
     session->replay_slots[0].cached_len = 128;
     session->replay_bytes_in_use       += 128;
     nfs4_replay_slot_finalize(&req);
-    CHECK(session->replay_slots[0].state == NFS4_SLOT_CACHED);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_CACHED);
     CHECK(session->replay_bytes_in_use == 128);
 
     /* Advance: seqid + 1.  Old buf must be freed and bytes accounted. */
@@ -303,12 +303,12 @@ test_advance_frees_cache(void)
     CHECK(status == NFS4_OK);
     CHECK(!is_replay);
     CHECK(req.replay_action == NFS4_REPLAY_ACTION_NEW);
-    CHECK(session->replay_slots[0].state == NFS4_SLOT_IN_PROGRESS);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_IN_PROGRESS);
     CHECK(session->replay_slots[0].cached_buf == NULL);
     CHECK(session->replay_bytes_in_use == 0);
 
     nfs4_replay_slot_finalize(&req);
-    CHECK(session->replay_slots[0].state == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_COMPLETED);
 
     destroy_session_table(&table, session);
 } /* test_advance_frees_cache */
@@ -368,8 +368,8 @@ test_slots_independent(void)
     status      = nfs4_replay_slot_acquire(session, 1, 1, false, &req, &is_replay);
     CHECK(status == NFS4_OK);
     nfs4_replay_slot_finalize(&req);
-    CHECK(session->replay_slots[1].state == NFS4_SLOT_COMPLETED);
-    CHECK(session->replay_slots[0].state == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_state(&session->replay_slots[1]) == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_COMPLETED);
 
     destroy_session_table(&table, session);
 } /* test_slots_independent */
