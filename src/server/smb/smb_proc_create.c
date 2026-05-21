@@ -247,15 +247,29 @@ chimera_smb_create_gen_open_file(
         }
 
         /* SMB lease bits use R=0x01, H=0x02, W=0x04 — different layout
-         * from vfs_state's R/W/H mask, so map field-by-field. */
+         * from vfs_state's R/W/H mask, so map field-by-field.  We grant only
+         * the read-caching (R) bit — a LEVEL_II oplock — and deliberately
+         * withhold write caching (W) and handle caching (H):
+         *
+         *   - Handle caching (batch oplock) makes the Linux cifs client keep
+         *     "deferred close" handles cached, which collide with unlink of
+         *     an open file (delete-of-open-file needs delete-pending across
+         *     the cached handle, not yet implemented) — cthon op_unlk failed
+         *     with EBUSY.
+         *   - Write caching lets the client buffer writes it has not flushed
+         *     to the server, which corrupts server-side copy: copy_file_range
+         *     (FSCTL_SRV_COPYCHUNK) reads the source on the server before the
+         *     buffered write lands, copying stale/zero data (fsx READ BAD
+         *     DATA).  Write-through keeps the server authoritative.
+         *
+         * Read caching is the important win and is coherent: a write breaks
+         * other holders' R leases (chimera_vfs_state_break_on_write), and the
+         * VFS attr/data caches keep a single client consistent.  A client that
+         * asked for an exclusive/batch oplock or an RWH lease simply receives
+         * the read-only (LEVEL_II) subset.  Re-enable W/H once write-cache
+         * flush-before-copy and delete-pending semantics are implemented. */
         if (req_smb & SMB2_LEASE_READ_CACHING) {
             req_vfs |= CHIMERA_VFS_LEASE_MODE_R;
-        }
-        if (req_smb & SMB2_LEASE_HANDLE_CACHING) {
-            req_vfs |= CHIMERA_VFS_LEASE_MODE_H;
-        }
-        if (req_smb & SMB2_LEASE_WRITE_CACHING) {
-            req_vfs |= CHIMERA_VFS_LEASE_MODE_W;
         }
 
         /* Oplocks are about data caching: an attribute-only open (no
@@ -271,17 +285,17 @@ chimera_smb_create_gen_open_file(
             request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
             request->create.create_disposition == SMB2_FILE_SUPERSEDE;
 
-        /* Oplocks/leases are parsed and the break machinery is in place, but
-         * granting them is not yet advertised: a real cifs.ko client caches
-         * aggressively under an oplock and keeps deferred-close handles, which
-         * makes open-then-unlink fail with EBUSY until delete-of-open-file
-         * (break-before-sharing-violation + delete-pending) semantics land.
-         * Until then, leave caching oplocks ungranted so the server matches
-         * its no-oplock behavior for interop (cthon special / fsx).  Flip this
-         * to true once those semantics are implemented and verified via KVM. */
-        bool advertise_oplocks = false;
+        /* Only advertise a read-caching oplock on backends that can serve a
+         * server-side copy (FSCTL_SRV_COPYCHUNK -> chimera_vfs_copy_range).
+         * Under a read cache the client offloads copy_file_range to the
+         * server; if the backend can't do server-side copy the client falls
+         * back to a cache-mediated copy that reads stale data (fsx READ BAD
+         * DATA on demofs/cairn).  Where copy_range is unavailable we leave the
+         * file uncached (write-through), which is correct. */
+        bool backend_copy_safe =
+            (oh->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE) != 0;
 
-        if (req_vfs != 0 && caching_touches_data && advertise_oplocks) {
+        if (req_vfs != 0 && caching_touches_data && backend_copy_safe) {
             file_state = chimera_vfs_state_get(vfs_state,
                                                oh->fh, oh->fh_len,
                                                oh->fh_hash, true);
@@ -376,6 +390,30 @@ chimera_smb_create_gen_open_file(
                     open_file->oplock_level = SMB2_OPLOCK_LEVEL_NONE;
                 }
             }
+        } else if ((request->create.desired_access &
+                    (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
+                     SMB2_GENERIC_WRITE | SMB2_GENERIC_ALL |
+                     SMB2_DELETE | SMB2_MAXIMUM_ALLOWED)) ||
+                   (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
+                   request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+                   request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
+                   request->create.create_disposition == SMB2_FILE_SUPERSEDE) {
+            /* This open does not request a caching lease of its own, but it
+             * modifies or deletes the file, so it must break any caching
+             * oplock/lease another open holds — otherwise that holder keeps a
+             * stale cache.  Concretely, the delete-on-close open that cifs.ko
+             * issues to unlink a file held open under a batch oplock would
+             * otherwise leave the oplock unbroken, and the client fails the
+             * unlink with EBUSY (cthon special op_unlk). */
+            struct chimera_vfs_lease_owner io_owner = {
+                .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
+                .client_key = request->session_handle->session->session_id,
+                .owner_lo   = open_file->file_id.pid,
+                .owner_hi   = open_file->file_id.vid,
+            };
+
+            chimera_vfs_state_break_on_write(vfs_state, oh->fh, oh->fh_len,
+                                             oh->fh_hash, &io_owner);
         }
     }
 

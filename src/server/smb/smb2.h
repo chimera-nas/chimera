@@ -872,6 +872,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FSCTL_SET_SPARSE                       0x000900C4
 #define SMB2_FSCTL_SET_ZERO_DATA                    0x000980C8
 #define SMB2_FSCTL_QUERY_ALLOCATED_RANGES           0x000940CF
+#define SMB2_FSCTL_SRV_REQUEST_RESUME_KEY           0x00140078
+#define SMB2_FSCTL_SRV_COPYCHUNK                    0x001440F2
+#define SMB2_FSCTL_SRV_COPYCHUNK_WRITE              0x001480F2
 
 #define SMB2_IO_REPARSE_TAG_NFS                     0x80000014
 #define SMB2_IO_REPARSE_TAG_SYMLINK                 0xA000000C
