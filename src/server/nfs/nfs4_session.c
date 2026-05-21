@@ -390,6 +390,96 @@ nfs4_client_exchange_id(
     pthread_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_exchange_id */
 
+void
+nfs4_client_create_session_classify(
+    struct nfs4_client_table           *table,
+    uint64_t                            client_id,
+    uint32_t                            csa_sequence,
+    const struct nfs4_client_principal *principal,
+    struct nfs4_cs_classify            *out)
+{
+    struct nfs4_client *c;
+
+    memset(out, 0, sizeof(*out));
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), c);
+
+    if (!c) {
+        out->action = NFS4_CS_ERROR;
+        out->status = NFS4ERR_STALE_CLIENTID;
+    } else if (csa_sequence == c->nfs4_client_cs_seqid) {
+        /* Retransmit of the last request, or -- before any request -- the
+         * contrived (eir_sequenceid - 1) value (RFC 8881 §18.36.4). */
+        if (c->nfs4_client_cs_have_reply) {
+            out->action   = NFS4_CS_REPLAY;
+            out->status   = c->nfs4_client_cs_reply_status;
+            out->sequence = c->nfs4_client_cs_reply_sequence;
+            out->flags    = c->nfs4_client_cs_reply_flags;
+            out->fore     = c->nfs4_client_cs_reply_fore;
+            out->back     = c->nfs4_client_cs_reply_back;
+            memcpy(out->sessionid, c->nfs4_client_cs_reply_sessionid,
+                   NFS4_SESSIONID_SIZE);
+        } else {
+            out->action = NFS4_CS_ERROR;
+            out->status = NFS4ERR_SEQ_MISORDERED;
+        }
+    } else if (csa_sequence == c->nfs4_client_cs_seqid + 1) {
+        out->action       = NFS4_CS_NEW;
+        out->confirmed    = c->nfs4_client_confirmed;
+        out->principal_ok = nfs4_principal_matches(c, principal);
+    } else {
+        out->action = NFS4_CS_ERROR;
+        out->status = NFS4ERR_SEQ_MISORDERED;
+    }
+
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+} /* nfs4_client_create_session_classify */
+
+void
+nfs4_client_create_session_cache(
+    struct nfs4_client_table    *table,
+    uint64_t                     client_id,
+    uint32_t                     csa_sequence,
+    nfsstat4                     status,
+    const uint8_t               *sessionid,
+    uint32_t                     sequence,
+    uint32_t                     flags,
+    const struct channel_attrs4 *fore,
+    const struct channel_attrs4 *back)
+{
+    struct nfs4_client *c;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), c);
+
+    if (c) {
+        c->nfs4_client_cs_seqid        = csa_sequence;
+        c->nfs4_client_cs_have_reply   = 1;
+        c->nfs4_client_cs_reply_status = status;
+
+        if (status == NFS4_OK) {
+            memcpy(c->nfs4_client_cs_reply_sessionid, sessionid,
+                   NFS4_SESSIONID_SIZE);
+            c->nfs4_client_cs_reply_sequence = sequence;
+            c->nfs4_client_cs_reply_flags    = flags;
+            c->nfs4_client_cs_reply_fore     = *fore;
+            c->nfs4_client_cs_reply_back     = *back;
+            /* Drop the borrowed ca_rdma_ird pointers; see header. */
+            c->nfs4_client_cs_reply_fore.num_ca_rdma_ird = 0;
+            c->nfs4_client_cs_reply_fore.ca_rdma_ird     = NULL;
+            c->nfs4_client_cs_reply_back.num_ca_rdma_ird = 0;
+            c->nfs4_client_cs_reply_back.ca_rdma_ird     = NULL;
+        }
+    }
+
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+} /* nfs4_client_create_session_cache */
+
 bool
 nfs4_client_confirm(
     struct nfs4_client_table *table,

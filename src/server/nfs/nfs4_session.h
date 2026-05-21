@@ -130,6 +130,21 @@ struct nfs4_client {
      * CREATE_SESSION, at which point the old record and its sessions are torn
      * down.  0 means "supersedes nothing". */
     uint64_t              nfs4_client_supersedes_id;
+    /* CREATE_SESSION sequencing + single-entry reply cache (RFC 8881
+     * §18.36.4).  cs_seqid is the last csa_sequence processed, initialised to
+     * eir_sequenceid - 1 (= 0).  When cs_have_reply is set, the cached fields
+     * below reproduce the reply for a retransmit of cs_seqid. */
+    uint32_t              nfs4_client_cs_seqid;
+    uint8_t               nfs4_client_cs_have_reply;
+    nfsstat4              nfs4_client_cs_reply_status;
+    uint8_t               nfs4_client_cs_reply_sessionid[NFS4_SESSIONID_SIZE];
+    uint32_t              nfs4_client_cs_reply_sequence;
+    uint32_t              nfs4_client_cs_reply_flags;
+    /* Negotiated channel attrs.  Stored with ca_rdma_ird cleared (the pointer
+     * would otherwise dangle once the session is freed); the RDMA ird is not
+     * preserved across a CREATE_SESSION retransmit, which no client relies on. */
+    struct channel_attrs4 nfs4_client_cs_reply_fore;
+    struct channel_attrs4 nfs4_client_cs_reply_back;
     /* Unified state hierarchy.  Created when this nfs4_client is first
      * registered; freed when the nfs4_client is unregistered or the table
      * is torn down.  See nfs4_state.h. */
@@ -226,6 +241,53 @@ nfs4_client_exchange_id(
     bool                                update,
     uint8_t                             minorversion,
     struct nfs4_exchange_id_result     *out);
+
+/* CREATE_SESSION sequencing decision (RFC 8881 §18.36.4). */
+enum nfs4_cs_action {
+    NFS4_CS_NEW,    /* fresh request -- caller creates the session */
+    NFS4_CS_REPLAY, /* retransmit -- caller replays the cached reply */
+    NFS4_CS_ERROR,  /* sequencing error -- caller returns `status` (uncached) */
+};
+
+struct nfs4_cs_classify {
+    enum nfs4_cs_action   action;
+    nfsstat4              status;   /* ERROR status, or REPLAY cached status */
+    uint32_t              confirmed; /* record confirmed? (NEW only) */
+    uint32_t              principal_ok; /* current principal matches record? (NEW only) */
+    /* REPLAY cached reply fields. */
+    uint8_t               sessionid[NFS4_SESSIONID_SIZE];
+    uint32_t              sequence;
+    uint32_t              flags;
+    struct channel_attrs4 fore;
+    struct channel_attrs4 back;
+};
+
+/* Classify an incoming CREATE_SESSION against the client's sequence state and
+ * reply cache.  Looks up `client_id`; on NFS4_CS_NEW it also reports whether
+ * the record is confirmed and whether `principal` matches the record's
+ * principal so the caller can apply the RFC 8881 §18.36.4 principal rule. */
+void
+nfs4_client_create_session_classify(
+    struct nfs4_client_table           *table,
+    uint64_t                            client_id,
+    uint32_t                            csa_sequence,
+    const struct nfs4_client_principal *principal,
+    struct nfs4_cs_classify            *out);
+
+/* Record the reply for the just-processed CREATE_SESSION (advances cs_seqid
+ * and populates the reply cache).  `status` is the op result; the resok fields
+ * are ignored when status != NFS4_OK. */
+void
+nfs4_client_create_session_cache(
+    struct nfs4_client_table    *table,
+    uint64_t                     client_id,
+    uint32_t                     csa_sequence,
+    nfsstat4                     status,
+    const uint8_t               *sessionid,
+    uint32_t                     sequence,
+    uint32_t                     flags,
+    const struct channel_attrs4 *fore,
+    const struct channel_attrs4 *back);
 
 /* Mark a client record confirmed (first successful CREATE_SESSION).  If the
  * record supersedes an older one (client reboot), the older record and its
