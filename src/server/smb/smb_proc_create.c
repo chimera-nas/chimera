@@ -319,7 +319,10 @@ chimera_smb_create_gen_open_file(
                     if (request->create.rqls.is_v2) {
                         memcpy(open_file->parent_lease_key,
                                request->create.rqls.parent_key, 16);
-                        open_file->lease_epoch = request->create.rqls.epoch;
+                        /* MS-SMB2 3.3.5.9.11: granting (or changing) a lease
+                         * increments its epoch; a freshly granted lease returns
+                         * the client's epoch + 1 (1 for a new lease). */
+                        open_file->lease_epoch = request->create.rqls.epoch + 1;
                     }
                 } else {
                     open_file->caching_lease.owner.owner_lo = open_file->file_id.pid;

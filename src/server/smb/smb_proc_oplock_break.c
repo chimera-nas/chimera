@@ -274,7 +274,6 @@ chimera_smb_parse_oplock_break(
 {
     uint16_t reserved;
     uint32_t reserved32;
-    uint64_t reserved64;
 
     if (request->request_struct_size == SMB2_OPLOCK_BREAK_ACK_LEASE_SIZE) {
         request->oplock_break.is_lease = true;
@@ -283,7 +282,10 @@ chimera_smb_parse_oplock_break(
         evpl_iovec_cursor_copy(request_cursor, request->oplock_break.lease_key, 16);
         evpl_iovec_cursor_get_uint32(request_cursor, &reserved32);
         request->oplock_break.lease_state = (uint8_t) (reserved32 & 0xff);
-        evpl_iovec_cursor_get_uint64(request_cursor, &reserved64);
+        /* LeaseDuration (8 bytes, reserved) sits at a 4-aligned offset; the
+         * aligning get_uint64 would skip to the next 8-boundary and overrun the
+         * 36-byte request.  It is unused, so just advance past it. */
+        evpl_iovec_cursor_skip(request_cursor, 8);
     } else if (request->request_struct_size == SMB2_OPLOCK_BREAK_ACK_LEGACY_SIZE) {
         request->oplock_break.is_lease = false;
         evpl_iovec_cursor_get_uint8(request_cursor, &request->oplock_break.oplock_level);
