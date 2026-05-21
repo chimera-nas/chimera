@@ -139,6 +139,12 @@ rb_tree_init(struct rb_tree *tree)
     tree->root      = &tree->nil;
 } /* rb_tree_init */
 
+static inline int
+rb_tree_empty(const struct rb_tree *tree)
+{
+    return tree->root == &tree->nil;
+} /* rb_tree_empty */
+
 static void
 rb_tree_destroy(
     struct rb_tree *tree,
