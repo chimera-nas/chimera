@@ -3393,6 +3393,46 @@ demofs_ext_next_async(
                                  rec_out, rec_cap, cb, private_data);
 } /* demofs_ext_next_async */
 
+static int
+demofs_ext_insert_async(
+    struct demofs_bt_op  *op,
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *inode,
+    uint64_t              file_offset,
+    uint64_t              length,
+    uint32_t              device_id,
+    uint64_t              device_offset,
+    demofs_bt_cb_t        cb,
+    void                 *private_data)
+{
+    struct demofs_extent_rec rec = {
+        .length        = length,
+        .device_id     = device_id,
+        .pad           = 0,
+        .device_offset = device_offset,
+    };
+    struct demofs_bt_key     key = demofs_extent_key(file_offset);
+
+    return demofs_bt_insert_async(op, thread, txn, inode, &key, &rec, sizeof(rec),
+                                  cb, private_data);
+} /* demofs_ext_insert_async */
+
+static int
+demofs_ext_remove_async(
+    struct demofs_bt_op  *op,
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *inode,
+    uint64_t              file_offset,
+    demofs_bt_cb_t        cb,
+    void                 *private_data)
+{
+    struct demofs_bt_key key = demofs_extent_key(file_offset);
+
+    return demofs_bt_remove_async(op, thread, txn, inode, &key, cb, private_data);
+} /* demofs_ext_remove_async */
+
 /* Materialize the extent from a completed async lookup op (result + the
  * record left in op->out + the key in op->found_key).  Returns 1 if a valid
  * extent record was found, 0 otherwise. */
@@ -7125,6 +7165,294 @@ demofs_write(
 } /* demofs_write */
 
 
+/*
+ * DEALLOCATE hole-punch extent walk (async).  inode_stash[0] = inode,
+ * loop_off = hole_start, loop_left = hole_end, ext_iter = current extent.
+ */
+static void demofs_dealloc_process(
+    struct chimera_vfs_request *request);
+
+static void
+demofs_allocate_finalize(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_inode           *inode  = p->inode_stash[0];
+    struct timespec                now;
+
+    clock_gettime(CLOCK_REALTIME, &now);
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+
+    demofs_map_attrs(thread, &request->allocate.r_post_attr, inode);
+    demofs_op_ok(request, p->txn);
+} /* demofs_allocate_finalize */
+
+static void
+demofs_dealloc_finish(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p     = request->plugin_data;
+    struct demofs_inode           *inode = p->inode_stash[0];
+
+    inode->space_used = (inode->size + 4095) & ~4095;
+    demofs_allocate_finalize(request);
+} /* demofs_dealloc_finish */
+
+static void
+demofs_dealloc_walk_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+
+    p->loop_have = demofs_ext_from_op(op, result, &p->ext_iter);
+    demofs_bt_op_free(p->thread, op);
+    demofs_dealloc_process(request);
+} /* demofs_dealloc_walk_cb */
+
+static void
+demofs_dealloc_advance(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_bt_op           *op     = demofs_bt_op_alloc(thread);
+
+    if (demofs_ext_next_async(op, thread, p->inode_stash[0], p->ext_iter.file_offset,
+                              p->rec_scratch, sizeof(p->rec_scratch),
+                              demofs_dealloc_walk_cb, request)) {
+        demofs_dealloc_walk_cb(op, op->result, request);
+    }
+} /* demofs_dealloc_advance */
+
+/* Generic "advance after a single async modify" continuation. */
+static void
+demofs_dealloc_modify_advance_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    (void) result;
+    demofs_bt_op_free(((struct demofs_request_private *) request->plugin_data)->thread, op);
+    demofs_dealloc_advance(request);
+} /* demofs_dealloc_modify_advance_cb */
+
+static void
+demofs_dealloc_modify_finish_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    (void) result;
+    demofs_bt_op_free(((struct demofs_request_private *) request->plugin_data)->thread, op);
+    demofs_dealloc_finish(request);
+} /* demofs_dealloc_modify_finish_cb */
+
+/* overlap-start: after removing the slot, reinsert the trimmed head. */
+static void
+demofs_dealloc_ostart_removed_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+
+    (void) result;
+    demofs_bt_op_free(thread, op);
+
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
+                                p->ext_iter.file_offset,
+                                p->loop_off - p->ext_iter.file_offset,
+                                p->ext_iter.device_id, p->ext_iter.device_offset,
+                                demofs_dealloc_modify_advance_cb, request)) {
+        demofs_dealloc_modify_advance_cb(op, op->result, request);
+    }
+} /* demofs_dealloc_ostart_removed_cb */
+
+/* overlap-end: after removing, reinsert the trimmed tail at hole_end. */
+static void
+demofs_dealloc_oend_removed_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    uint64_t                       es      = p->ext_iter.file_offset;
+    uint64_t                       ee      = es + p->ext_iter.length;
+    uint64_t                       he      = p->loop_left;
+
+    (void) result;
+    demofs_bt_op_free(thread, op);
+
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], he, ee - he,
+                                p->ext_iter.device_id,
+                                p->ext_iter.device_offset + (he - es),
+                                demofs_dealloc_modify_finish_cb, request)) {
+        demofs_dealloc_modify_finish_cb(op, op->result, request);
+    }
+} /* demofs_dealloc_oend_removed_cb */
+
+/* spans: insert tail -> remove -> insert head -> finish. */
+static void
+demofs_dealloc_spans_before_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    (void) result;
+    demofs_bt_op_free(((struct demofs_request_private *) request->plugin_data)->thread, op);
+    demofs_dealloc_finish(request);
+} /* demofs_dealloc_spans_before_cb */
+
+static void
+demofs_dealloc_spans_removed_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+
+    (void) result;
+    demofs_bt_op_free(thread, op);
+
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
+                                p->ext_iter.file_offset,
+                                p->loop_off - p->ext_iter.file_offset,
+                                p->ext_iter.device_id, p->ext_iter.device_offset,
+                                demofs_dealloc_spans_before_cb, request)) {
+        demofs_dealloc_spans_before_cb(op, op->result, request);
+    }
+} /* demofs_dealloc_spans_removed_cb */
+
+static void
+demofs_dealloc_spans_after_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+
+    (void) result;
+    demofs_bt_op_free(thread, op);
+
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_remove_async(op, thread, p->txn, p->inode_stash[0],
+                                p->ext_iter.file_offset,
+                                demofs_dealloc_spans_removed_cb, request)) {
+        demofs_dealloc_spans_removed_cb(op, op->result, request);
+    }
+} /* demofs_dealloc_spans_after_cb */
+
+static void
+demofs_dealloc_process(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p          = request->plugin_data;
+    struct demofs_thread          *thread     = p->thread;
+    uint64_t                       hole_start = p->loop_off;
+    uint64_t                       hole_end   = p->loop_left;
+    uint64_t                       es, ee;
+    struct demofs_bt_op           *op;
+
+    if (!p->loop_have) {
+        demofs_dealloc_finish(request);
+        return;
+    }
+
+    es = p->ext_iter.file_offset;
+    ee = es + p->ext_iter.length;
+
+    if (ee <= hole_start) {     /* entirely before the hole: skip */
+        demofs_dealloc_advance(request);
+        return;
+    }
+    if (es >= hole_end) {       /* at/after hole end: done */
+        demofs_dealloc_finish(request);
+        return;
+    }
+
+    if (es >= hole_start && ee <= hole_end) {
+        /* Completely inside the hole: free + remove, then advance. */
+        demofs_thread_free_space(thread, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset,
+                                 SM_ALIGN_UP(p->ext_iter.length));
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
+                                    demofs_dealloc_modify_advance_cb, request)) {
+            demofs_dealloc_modify_advance_cb(op, op->result, request);
+        }
+    } else if (es < hole_start && ee > hole_end) {
+        /* Spans the hole: insert tail at hole_end first. */
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], hole_end,
+                                    ee - hole_end, p->ext_iter.device_id,
+                                    p->ext_iter.device_offset + (hole_end - es),
+                                    demofs_dealloc_spans_after_cb, request)) {
+            demofs_dealloc_spans_after_cb(op, op->result, request);
+        }
+    } else if (es < hole_start) {
+        /* Overlaps the hole start: remove, then reinsert the head. */
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
+                                    demofs_dealloc_ostart_removed_cb, request)) {
+            demofs_dealloc_ostart_removed_cb(op, op->result, request);
+        }
+    } else {
+        /* Overlaps the hole end: remove, then reinsert the tail at hole_end. */
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
+                                    demofs_dealloc_oend_removed_cb, request)) {
+            demofs_dealloc_oend_removed_cb(op, op->result, request);
+        }
+    }
+} /* demofs_dealloc_process */
+
+static void
+demofs_dealloc_first_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    int                            have    = demofs_ext_from_op(op, result, &p->ext_iter);
+
+    demofs_bt_op_free(thread, op);
+
+    if (!have) {
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_ceil_async(op, thread, p->inode_stash[0], 0, p->rec_scratch,
+                                  sizeof(p->rec_scratch), demofs_dealloc_walk_cb,
+                                  request)) {
+            demofs_dealloc_walk_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    p->loop_have = 1;
+    demofs_dealloc_process(request);
+} /* demofs_dealloc_first_cb */
+
 static void
 demofs_allocate_inode_cb(
     struct demofs_inode *inode,
@@ -7134,96 +7462,38 @@ demofs_allocate_inode_cb(
     struct chimera_vfs_request    *request = private_data;
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
-    struct timespec                now;
+    struct demofs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
         return;
     }
 
-    clock_gettime(CLOCK_REALTIME, &now);
-
     demofs_map_attrs(thread, &request->allocate.r_pre_attr, inode);
+    p->inode_stash[0] = inode;
 
     if (request->allocate.flags & CHIMERA_VFS_ALLOCATE_DEALLOCATE) {
-        /* DEALLOCATE: punch hole in [offset, offset+length) */
-        uint64_t              hole_start = request->allocate.offset;
-        uint64_t              hole_end   = hole_start + request->allocate.length;
-        struct demofs_extent  ext_buf;
-        struct demofs_extent *extent = &ext_buf;
-        int                   have;
+        uint64_t hole_start = request->allocate.offset;
+        uint64_t hole_end   = hole_start + request->allocate.length;
 
         if (hole_end > inode->size) {
             hole_end = inode->size;
         }
 
         if (hole_start < hole_end) {
-            have = demofs_ext_floor(thread, inode, hole_start, extent);
-            if (!have) {
-                have = demofs_ext_ceil(thread, inode, 0, extent);
+            p->loop_off  = hole_start;
+            p->loop_left = hole_end;
+
+            op = demofs_bt_op_alloc(thread);
+            if (demofs_ext_floor_async(op, thread, inode, hole_start, p->rec_scratch,
+                                       sizeof(p->rec_scratch), demofs_dealloc_first_cb,
+                                       request)) {
+                demofs_dealloc_first_cb(op, op->result, request);
             }
-
-            while (have) {
-                uint64_t extent_start = extent->file_offset;
-                uint64_t extent_end   = extent_start + extent->length;
-                uint64_t cur_fo       = extent_start;
-
-                /* Skip extents entirely before hole */
-                if (extent_end <= hole_start) {
-                    have = demofs_ext_next(thread, inode, cur_fo, extent);
-                    continue;
-                }
-
-                /* Stop if extent starts at or after hole end */
-                if (extent_start >= hole_end) {
-                    break;
-                }
-
-                if (extent_start >= hole_start && extent_end <= hole_end) {
-                    /* Extent is completely inside hole - remove it.
-                     * Partial-overlap cases below currently leak the punched
-                     * device range (sub-block accounting), deferred. */
-                    demofs_thread_free_space(thread, extent->device_id,
-                                             extent->device_offset,
-                                             SM_ALIGN_UP(extent->length));
-                    demofs_ext_remove(thread, p->txn, inode, cur_fo);
-                } else if (extent_start < hole_start &&
-                           extent_end > hole_end) {
-                    /* Extent spans the entire hole - split it. */
-                    uint64_t after_shift = hole_end - extent_start;
-
-                    demofs_ext_insert(thread, p->txn, inode, hole_end,
-                                      extent_end - hole_end, extent->device_id,
-                                      extent->device_offset + after_shift);
-                    demofs_ext_remove(thread, p->txn, inode, cur_fo);
-                    demofs_ext_insert(thread, p->txn, inode, cur_fo,
-                                      hole_start - extent_start, extent->device_id,
-                                      extent->device_offset);
-                    break;
-                } else if (extent_start < hole_start) {
-                    /* Extent overlaps start of hole - trim end. */
-                    demofs_ext_remove(thread, p->txn, inode, cur_fo);
-                    demofs_ext_insert(thread, p->txn, inode, cur_fo,
-                                      hole_start - extent_start, extent->device_id,
-                                      extent->device_offset);
-                } else {
-                    /* Extent overlaps end of hole - trim start (key moves). */
-                    uint64_t shift = hole_end - extent_start;
-
-                    demofs_ext_remove(thread, p->txn, inode, cur_fo);
-                    demofs_ext_insert(thread, p->txn, inode, hole_end,
-                                      extent_end - hole_end, extent->device_id,
-                                      extent->device_offset + shift);
-                    break;
-                }
-
-                have = demofs_ext_next(thread, inode, cur_fo, extent);
-            }
-
-            inode->space_used = (inode->size + 4095) & ~4095;
+            return;
         }
     } else {
-        /* ALLOCATE: extend file size if needed */
+        /* ALLOCATE: extend file size if needed. */
         uint64_t new_end = request->allocate.offset + request->allocate.length;
 
         if (new_end > inode->size) {
@@ -7232,15 +7502,7 @@ demofs_allocate_inode_cb(
         }
     }
 
-    inode->mtime_sec  = now.tv_sec;
-    inode->mtime_nsec = now.tv_nsec;
-    inode->ctime_sec  = now.tv_sec;
-    inode->ctime_nsec = now.tv_nsec;
-
-    demofs_map_attrs(thread, &request->allocate.r_post_attr, inode);
-
-
-    demofs_op_ok(request, p->txn);
+    demofs_allocate_finalize(request);
 } /* demofs_allocate_inode_cb */
 
 static void
