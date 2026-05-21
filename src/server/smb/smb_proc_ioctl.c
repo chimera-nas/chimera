@@ -8,6 +8,57 @@
 #include "smb2.h"
 #include "common/misc.h"
 
+/* MS-SMB2 3.3.5.15.12: validate an FSCTL_VALIDATE_NEGOTIATE_INFO request
+ * against the connection's negotiated state.  Returns true if it matches and
+ * a response should be sent; false if the connection MUST be terminated. */
+static bool
+chimera_smb_validate_negotiate_info_ok(
+    const struct chimera_smb_conn          *conn,
+    const struct chimera_server_smb_shared *shared,
+    const struct chimera_smb_request       *request)
+{
+    uint16_t gcd = 0;
+    int      i, j;
+
+    /* The response is 24 bytes; an output buffer too small to hold it is a
+     * protocol violation. */
+    if (request->ioctl.max_output_response < 24) {
+        return false;
+    }
+
+    /* VALIDATE_NEGOTIATE_INFO is not used on SMB 3.1.1 (preauth integrity
+     * supersedes it); receiving it there terminates the connection. */
+    if (conn->dialect == SMB2_DIALECT_3_1_1) {
+        return false;
+    }
+
+    if (memcmp(request->ioctl.vni_guid, conn->client_guid, 16) != 0) {
+        return false;
+    }
+    if (request->ioctl.vni_security_mode != conn->client_security_mode) {
+        return false;
+    }
+    if (request->ioctl.vni_capabilities != conn->client_capabilities) {
+        return false;
+    }
+
+    /* The greatest dialect common to the request's list and the server's
+     * supported set must equal the dialect negotiated on this connection. */
+    for (i = 0; i < request->ioctl.vni_dialect_count; i++) {
+        uint16_t cand = request->ioctl.vni_dialects[i];
+        for (j = 0; j < shared->config.num_dialects; j++) {
+            if (shared->config.dialects[j] == cand && cand > gcd) {
+                gcd = cand;
+            }
+        }
+    }
+    if (gcd != conn->dialect) {
+        return false;
+    }
+
+    return true;
+} /* chimera_smb_validate_negotiate_info_ok */
+
 void
 chimera_smb_ioctl(struct chimera_smb_request *request)
 {
@@ -24,6 +75,18 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             break;
 
         case SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO:
+            if (!chimera_smb_validate_negotiate_info_ok(conn, shared, request)) {
+                /* MS-SMB2 3.3.5.15.12: a mismatch (or a 3.1.1 connection)
+                 * MUST terminate the transport connection with no reply.
+                 * Mirror the signing-failure teardown: drop the compound and
+                 * close the bind. */
+                struct chimera_smb_compound *compound = request->compound;
+
+                chimera_smb_compound_free(thread, compound);
+                evpl_close(thread->evpl, conn->bind);
+                return;
+            }
+
             request->ioctl.r_capabilities = conn->capabilities;
             memcpy(request->ioctl.r_guid, shared->guid, 16);
             request->ioctl.r_security_mode = SMB2_SIGNING_ENABLED;

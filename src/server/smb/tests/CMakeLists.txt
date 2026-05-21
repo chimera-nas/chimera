@@ -133,7 +133,13 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         Negotiate_SMB311_InvalidCipher
         Negotiate_SMB311_IsTransportCapabilitiesSupported
         Signing_VerifyAesGmacSigning
-        TreeMgmt_SMB311_CLUSTER_RECONNECT)
+        TreeMgmt_SMB311_CLUSTER_RECONNECT
+        ValidateNegotiateInfo_Negative_InvalidCapabilities
+        ValidateNegotiateInfo_Negative_InvalidDialects_CommonDialectNotExpected
+        ValidateNegotiateInfo_Negative_InvalidDialects_NoCommonDialect
+        ValidateNegotiateInfo_Negative_InvalidGuid
+        ValidateNegotiateInfo_Negative_InvalidMaxOutputResponse
+        ValidateNegotiateInfo_Negative_InvalidSecurityMode)
 
     foreach(tc ${WPTS_SMB2_ALLOWLIST})
         add_test(NAME chimera/server/smb/wpts/memfs/${tc}
