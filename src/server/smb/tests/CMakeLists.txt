@@ -158,14 +158,12 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # SMB3 durable / persistent handle cases.  These need the daemon run with
     # smb_persistent_handles enabled (the wrapper sets it from CHIMERA_SMB_PERSISTENT,
     # which also flips the persistent-handle / CA-share ptfconfig capabilities and
-    # marks FileShare as the CA share).  Allowlist = the durable/persistent BVT +
-    # reconnect + reconnect-validation cases confirmed green against the current
-    # server.  Left out (known gaps): the *_WithoutHandleCaching / LeaseIsNull /
-    # NoPersistenceGrantedOnNonCAShare negatives require a strict durable grant
-    # (only with a batch oplock or HANDLE-caching lease), which is blocked on the
-    # lease/oplock backend honestly producing oplock_level==BATCH; and
-    # AfterServerDisconnect needs negotiate-after-negotiate to drop the connection
-    # (an unrelated protocol gap).
+    # marks FileShare as the CA share).  Allowlist = every applicable
+    # durable/persistent case confirmed green against the current server.  Left
+    # out: DurableHandleV1_Reconnect_AfterServerDisconnect (needs
+    # negotiate-after-negotiate to drop the connection — an unrelated protocol
+    # gap) and *_WithDifferentDurableOwner / BVT_PersistentHandles (need a second
+    # user account / scale-out config the harness doesn't provide).
     set(WPTS_SMB2_PERSISTENT_ALLOWLIST
         BVT_DurableHandleV1_Reconnect_WithBatchOplock
         BVT_DurableHandleV1_Reconnect_WithLeaseV1
@@ -175,6 +173,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         DurableHandleV1_Reconnect_IncludeCreateDurableHandle
         DurableHandleV1_Reconnect_IncludeReconnectV2
         DurableHandleV1_Reconnect_IncludeRequestV2
+        DurableHandleV1_Reconnect_LeaseIsNull
         DurableHandleV1_Reconnect_SessionIsNotNull
         DurableHandleV1_Reconnect_WithDifferentClientGuid
         DurableHandleV1_Reconnect_WithDifferentLeaseKey
@@ -183,9 +182,12 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         DurableHandleV1_Reconnect_WithoutFileIdPersistent
         DurableHandleV1_Reconnect_WithoutLogoffOrDisconnect_WithoutPreviousSessionIdSet
         DurableHandleV1_Reconnect_WithoutRequestLease
+        DurableHandleV1_WithLeaseV1_WithoutHandleCaching
+        DurableHandleV2_NoPersistenceGrantedOnNonCAShare
         DurableHandleV2_Reconnect_WithLeaseV1_WithDifferentFileName
         DurableHandleV2_Reconnect_WithoutPersistence
         DurableHandleV2_WithLeaseV1AndV2_WithDifferentLeaseKey
+        DurableHandleV2_WithLeaseV2_WithoutHandleCaching
         PersistentHandle_ReOpenFromDiffClient)
 
     foreach(tc ${WPTS_SMB2_PERSISTENT_ALLOWLIST})

@@ -426,35 +426,41 @@ chimera_smb_create_gen_open_file(
                                         &request->session_handle->session->cred);
     }
 
-    /* Durable / persistent handle grant.  NOTE: MS-SMB2 3.3.5.9 only grants a
-     * durable handle when the open also holds a batch oplock or a HANDLE-caching
-     * lease.  We use a lax policy (grant on request) for now because the legacy
-     * batch-oplock grant does not yet reliably produce oplock_level==BATCH; once
-     * the lease/oplock backend honors that, gate this on
-     * (oplock_level == SMB2_OPLOCK_LEVEL_BATCH ||
-     *  (lease_state & SMB2_LEASE_HANDLE_CACHING)).  See the WPTS
-     * *_WithoutHandleCaching / LeaseIsNull failures. */
+    /* Durable / persistent handle grant.  MS-SMB2 3.3.5.9: a durable handle is
+     * granted only when the open also holds a batch oplock or a lease that
+     * includes HANDLE caching — otherwise a survived handle could not be safely
+     * reclaimed.  oplock_level / lease_state were set by the caching-lease block
+     * above. */
     if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share &&
         thread->shared->config.persistent_handles) {
         uint32_t ctx = request->create.ctx_present_mask;
+        /* A durable handle requires a batch oplock or a HANDLE-caching lease
+         * (MS-SMB2 3.3.5.9.10/9.11).  A *persistent* handle (DH2Q + PERSISTENT
+         * on a continuous-availability share, 3.3.5.9.12) is exempt — the CA
+         * share provides the durability guarantee, so it is granted with no
+         * oplock/lease. */
+        bool     has_caching = (open_file->oplock_level == SMB2_OPLOCK_LEVEL_BATCH) ||
+            (open_file->lease_state & SMB2_LEASE_HANDLE_CACHING);
 
         if (ctx & CHIMERA_SMB_CREATE_CTX_DH2Q) {
-            open_file->durable_flags = CHIMERA_SMB_DURABLE_V2;
-            memcpy(open_file->create_guid, request->create.dh2q.create_guid, 16);
+            bool persistent = (request->create.dh2q.flags & SMB2_DHANDLE_FLAG_PERSISTENT) &&
+                tree->share->continuous_availability;
 
-            if ((request->create.dh2q.flags & SMB2_DHANDLE_FLAG_PERSISTENT) &&
-                tree->share->continuous_availability) {
-                open_file->durable_flags |= CHIMERA_SMB_DURABLE_PERSISTENT;
+            if (has_caching || persistent) {
+                open_file->durable_flags = CHIMERA_SMB_DURABLE_V2;
+                memcpy(open_file->create_guid, request->create.dh2q.create_guid, 16);
+                if (persistent) {
+                    open_file->durable_flags |= CHIMERA_SMB_DURABLE_PERSISTENT;
+                }
+                if (request->create.dh2q.timeout_ms == 0) {
+                    open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_DEFAULT_MS;
+                } else if (request->create.dh2q.timeout_ms > CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS) {
+                    open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS;
+                } else {
+                    open_file->durable_timeout_ms = request->create.dh2q.timeout_ms;
+                }
             }
-
-            if (request->create.dh2q.timeout_ms == 0) {
-                open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_DEFAULT_MS;
-            } else if (request->create.dh2q.timeout_ms > CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS) {
-                open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS;
-            } else {
-                open_file->durable_timeout_ms = request->create.dh2q.timeout_ms;
-            }
-        } else if (ctx & CHIMERA_SMB_CREATE_CTX_DHNQ) {
+        } else if ((ctx & CHIMERA_SMB_CREATE_CTX_DHNQ) && has_caching) {
             /* Durable v1: no timeout or create-guid on the wire. */
             open_file->durable_flags      = CHIMERA_SMB_DURABLE_V1;
             open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_DEFAULT_MS;
@@ -1891,13 +1897,14 @@ chimera_smb_parse_create_contexts(
             for (p = smb_create_ctx_parsers; p->tag != NULL; p++) {
                 if (memcmp(name, p->tag, 4) == 0) {
 
-                    /* Tag-aware special case: RqLs v2 (52-byte body) sets a
-                     * distinct mask bit so the response emit can tell which
-                     * lease variant the client requested. */
+                    /* Always set the base mask bit; RqLs v2 (52-byte body)
+                     * additionally sets RQLS_V2 so the response emit can tell
+                     * which lease variant the client requested.  (The base RQLS
+                     * bit must be set for v2 too — gen_open_file keys lease
+                     * handling off it.) */
+                    request->create.ctx_present_mask |= p->mask_bit;
                     if (p->mask_bit == CHIMERA_SMB_CREATE_CTX_RQLS && data_len == 52) {
                         request->create.ctx_present_mask |= CHIMERA_SMB_CREATE_CTX_RQLS_V2;
-                    } else {
-                        request->create.ctx_present_mask |= p->mask_bit;
                     }
                     if (p->handler) {
                         p->handler(data, data_len, request);
@@ -1963,7 +1970,13 @@ chimera_smb_parse_create(
         return -1;
     }
 
-    evpl_iovec_cursor_skip(request_cursor, 1); /* SecurityFlags (reserved) */
+    /* SMB2 CREATE fixed body (after the already-consumed 2-byte StructureSize):
+     * SecurityFlags(1) | RequestedOplockLevel(1) | ImpersonationLevel(4) | ...
+     * SecurityFlags is reserved (clients send 0) but MUST be consumed; the
+     * aligning cursor would otherwise swallow RequestedOplockLevel as padding
+     * before the uint32 ImpersonationLevel read, leaving oplock level always 0. */
+    uint8_t security_flags;
+    evpl_iovec_cursor_get_uint8(request_cursor, &security_flags);
     evpl_iovec_cursor_get_uint8(request_cursor, &request->create.requested_oplock_level);
     evpl_iovec_cursor_get_uint32(request_cursor, &request->create.impersonation_level);
     evpl_iovec_cursor_get_uint64(request_cursor, &request->create.flags);
