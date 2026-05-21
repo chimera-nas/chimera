@@ -653,7 +653,14 @@ chimera_smb_create_check_access(
      * (including reserved/undefined ones) stays in `req`, so an open asking for
      * a right the object does not grant is denied -- the SMB2 specific+standard
      * bits share the canonical ACE mask layout exactly. */
+    /* DELETE is a parent-directory operation: deleting a name is governed by
+     * the parent's FILE_DELETE_CHILD (or the file's own DELETE), mirroring POSIX
+     * where directory write/execute governs unlink.  We do not gate DELETE at
+     * the file-open level here -- doing so would wrongly deny an owner removing
+     * a child whose inherited ACL omits DELETE.  (Full parent DELETE_CHILD
+     * evaluation is a follow-up.) */
     req = da & ~(SMB2_MAXIMUM_ALLOWED | SMB2_ACCESS_SYSTEM_SECURITY |
+                 SMB2_DELETE |
                  SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
                  SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL);
 
@@ -696,6 +703,7 @@ chimera_smb_create_granted_access(
     const struct chimera_vfs_attrs *attr)
 {
     uint32_t da = request->create.desired_access;
+    uint32_t g;
 
     if (da & SMB2_MAXIMUM_ALLOWED) {
         return chimera_vfs_access_check(
@@ -703,7 +711,27 @@ chimera_smb_create_granted_access(
             CHIMERA_ACE_MASK_ALL);
     }
 
-    return da & ~SMB2_MAXIMUM_ALLOWED;
+    /* GrantedAccess is reported in resolved specific rights, never the NT
+     * generic bits; expand them.  A specific-bits open that reached here was
+     * granted everything it asked for. */
+    g = da & ~(SMB2_MAXIMUM_ALLOWED | SMB2_ACCESS_SYSTEM_SECURITY |
+               SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
+               SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL);
+
+    if (da & SMB2_GENERIC_READ) {
+        g |= 0x00120089;
+    }
+    if (da & SMB2_GENERIC_WRITE) {
+        g |= 0x00120116;
+    }
+    if (da & SMB2_GENERIC_EXECUTE) {
+        g |= 0x001200a0;
+    }
+    if (da & SMB2_GENERIC_ALL) {
+        g |= CHIMERA_ACE_MASK_ALL;
+    }
+
+    return g;
 } /* chimera_smb_create_granted_access */
 
 static inline void
