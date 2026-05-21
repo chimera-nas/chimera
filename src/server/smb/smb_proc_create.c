@@ -502,7 +502,8 @@ chimera_smb_create_mkdir_callback(
                 request->create.name_len,
                 CHIMERA_VFS_OPEN_DIRECTORY,
                 &request->create.set_attr,
-                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
+                CHIMERA_VFS_ATTR_ACL,
                 0,
                 0,
                 chimera_smb_create_open_at_callback,
