@@ -121,23 +121,21 @@ chimera_smb_parse_lock(
     evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.file_id.pid);
     evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.file_id.vid);
 
-    if (unlikely(request->lock.lock_count == 0)) {
-        request->status = SMB2_STATUS_INVALID_PARAMETER;
-        return -1;
-    }
-
-    /* Stage B supports LockCount==1.  Multi-lock requests fall through
-    * to INVALID_PARAMETER below, after we've consumed at least one. */
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.l_offset);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.l_length);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->lock.l_flags);
-    evpl_iovec_cursor_get_uint32(request_cursor, &reserved);
-
-    if (request->lock.lock_count > 1) {
-        chimera_smb_error("SMB2 LOCK multi-lock requests (count=%u) not supported in Stage B",
-                          request->lock.lock_count);
-        request->status = SMB2_STATUS_INVALID_PARAMETER;
-        return -1;
+    /* Only a LockCount of 1 carries a lock element we can read; a
+     * zero-lock request (which smbtorture sends to probe rejection) has
+     * no element, so reading one would over-run the buffer.  Invalid
+     * LockCount values are reported by the handler as a normal
+     * INVALID_PARAMETER response rather than a parse failure — returning
+     * -1 here would tear the connection down instead of replying. */
+    if (request->lock.lock_count == 1) {
+        evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.l_offset);
+        evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.l_length);
+        evpl_iovec_cursor_get_uint32(request_cursor, &request->lock.l_flags);
+        evpl_iovec_cursor_get_uint32(request_cursor, &reserved);
+    } else {
+        request->lock.l_offset = 0;
+        request->lock.l_length = 0;
+        request->lock.l_flags  = 0;
     }
 
     return 0;
@@ -197,6 +195,14 @@ chimera_smb_lock(struct chimera_smb_request *request)
     }
 
     request->lock.open_file = open_file;
+
+    /* LockCount==0 is illegal; >1 (multi-lock) is not yet supported.  Both
+    * are reported as INVALID_PARAMETER without dropping the connection. */
+    if (unlikely(request->lock.lock_count != 1)) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
 
     kind = request->lock.l_flags & SMB2_LOCKFLAG_KIND_MASK;
     if (kind != SMB2_LOCKFLAG_SHARED_LOCK &&
