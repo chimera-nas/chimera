@@ -214,6 +214,15 @@ void chimera_smb_ioctl_set_reparse(
 void chimera_smb_ioctl_get_reparse(
     struct chimera_smb_request *request);
 
+void chimera_smb_ioctl_set_sparse(
+    struct chimera_smb_request *request);
+
+void chimera_smb_ioctl_set_zero_data(
+    struct chimera_smb_request *request);
+
+void chimera_smb_ioctl_query_allocated_ranges(
+    struct chimera_smb_request *request);
+
 int chimera_smb_parse_change_notify(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request);

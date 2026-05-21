@@ -384,6 +384,23 @@ struct chimera_smb_request {
             /* GET response buffer */
             uint8_t                         rp_response[16 + (CHIMERA_VFS_PATH_MAX - 1) * 2];
             int                             rp_response_len;
+            /* SET_SPARSE / SET_ZERO_DATA / QUERY_ALLOCATED_RANGES fields */
+            struct chimera_smb_open_file   *sp_open_file;
+            uint8_t                         sp_set_sparse;
+            uint64_t                        sp_zero_offset;
+            uint64_t                        sp_zero_beyond;
+            uint64_t                        sp_qar_offset;
+            uint64_t                        sp_qar_length;
+            uint64_t                        sp_qar_end;
+            uint64_t                        sp_qar_cursor;
+            uint64_t                        sp_qar_data_start;
+            uint32_t                        sp_qar_count;
+            struct chimera_vfs_attrs        sp_set_attr;
+#define CHIMERA_SMB_QAR_MAX 256
+            struct {
+                uint64_t offset;
+                uint64_t length;
+            }                               sp_qar_ranges[CHIMERA_SMB_QAR_MAX];
         } ioctl;
         struct {
             uint8_t                       info_type;
