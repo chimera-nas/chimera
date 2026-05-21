@@ -901,6 +901,12 @@ enum CHIMERA_FS_FH_MAGIC {
  * use (e.g. S3 multipart-upload completion). */
 #define CHIMERA_VFS_CAP_MOVE_RANGE         (1U << 12)
 
+/* If set, the module stores the canonical Windows/NFSv4 ACL (via va_acl)
+ * losslessly.  If unset, the module is mode-only: the VFS translates ACLs to
+ * and from UNIX mode bits on its behalf.  There is no POSIX.1e capability by
+ * design -- Chimera carries a single ACL model (see vfs_acl.h). */
+#define CHIMERA_VFS_CAP_ACL_NATIVE         (1U << 13)
+
 struct chimera_vfs_module {
     /* Required
      * Short name for the module to be used in creating shares

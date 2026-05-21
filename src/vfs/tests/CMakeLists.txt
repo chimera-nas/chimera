@@ -25,3 +25,7 @@ add_test(chimera/vfs/notify_test vfs_notify_test)
 add_executable(vfs_state_test vfs_state_test.c)
 target_link_libraries(vfs_state_test chimera_vfs)
 add_test(chimera/vfs/state_test vfs_state_test)
+
+add_executable(vfs_acl_test vfs_acl_test.c)
+target_link_libraries(vfs_acl_test chimera_vfs)
+add_test(chimera/vfs/acl_test vfs_acl_test)

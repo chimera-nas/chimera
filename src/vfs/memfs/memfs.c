@@ -17,6 +17,7 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
+#include "vfs/vfs_acl.h"
 #include "memfs.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -121,6 +122,7 @@ struct memfs_inode {
     uint32_t            gid;
     uint64_t            rdev;
     uint32_t            dos_attributes;
+    struct chimera_acl *acl; /* NULL => mode-derived; CAP_ACL_NATIVE storage */
     struct timespec     atime;
     struct timespec     mtime;
     struct timespec     ctime;
@@ -380,10 +382,33 @@ memfs_inode_alloc(
     inode->refcnt         = 1;
     inode->mode           = 0;
     inode->dos_attributes = 0;
+    inode->acl            = NULL;
 
     return inode;
 
 } /* memfs_inode_alloc */
+
+/*
+ * Replace inode->acl with a deep copy of `src` (NULL clears it).  Caller holds
+ * the inode lock.
+ */
+static inline void
+memfs_inode_set_acl(
+    struct memfs_inode       *inode,
+    const struct chimera_acl *src)
+{
+    if (inode->acl) {
+        free(inode->acl);
+        inode->acl = NULL;
+    }
+
+    if (src && src->num_aces) {
+        size_t sz = chimera_acl_size(src->num_aces);
+
+        inode->acl = malloc(sz);
+        memcpy(inode->acl, src, sz);
+    }
+} /* memfs_inode_set_acl */
 
 static inline struct memfs_inode *
 memfs_inode_alloc_thread(struct memfs_thread *thread)
@@ -408,6 +433,11 @@ memfs_inode_free(
         CHIMERA_MEMFS_INODE_LIST_MASK;
 
     inode_list = &shared->inode_list[list_id];
+
+    if (inode->acl) {
+        free(inode->acl);
+        inode->acl = NULL;
+    }
 
     if (S_ISREG(inode->mode)) {
         if (inode->file.blocks) {
@@ -804,6 +834,26 @@ memfs_map_attrs(
         attr->va_dos_attributes = inode->dos_attributes;
     }
 
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_ACL) {
+        /* Copy into a per-thread scratch buffer: memfs releases the inode lock
+         * before the (synchronous) completion runs, so we must not hand out the
+         * live inode->acl pointer.  The scratch is valid through completion
+         * because each memfs thread serves one request at a time. */
+        static __thread uint8_t acl_scratch[
+            sizeof(struct chimera_acl) +
+            CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
+        struct chimera_acl *dst = (struct chimera_acl *) acl_scratch;
+
+        if (inode->acl) {
+            memcpy(dst, inode->acl, chimera_acl_size(inode->acl->num_aces));
+        } else {
+            chimera_acl_from_mode(inode->mode, dst, CHIMERA_ACL_MAX_ACES);
+        }
+
+        attr->va_acl       = dst;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
         attr->va_fsid      = shared->fsid;
@@ -874,6 +924,29 @@ memfs_apply_attrs(
             inode->mtime = now;
         } else {
             inode->mtime = attr->va_mtime;
+        }
+    }
+
+    /* ACL coherence.  An explicit ACL set replaces storage and re-derives mode;
+     * a bare chmod (MODE without ACL) regenerates the special-who ACEs of any
+     * existing rich ACL while preserving named entries. */
+    if (set_mask & CHIMERA_VFS_ATTR_ACL) {
+        memfs_inode_set_acl(inode, attr->va_acl);
+        if (inode->acl) {
+            inode->mode = (inode->mode & S_IFMT) | chimera_acl_to_mode(inode->acl);
+        }
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+    } else if ((set_mask & CHIMERA_VFS_ATTR_MODE) && inode->acl) {
+        unsigned            cap = inode->acl->num_aces + 8;
+        struct chimera_acl *tmp = malloc(chimera_acl_size(cap));
+        int                 n   = chimera_acl_chmod(inode->acl, inode->mode,
+                                                    tmp, cap);
+
+        if (n >= 0) {
+            free(inode->acl);
+            inode->acl = tmp;
+        } else {
+            free(tmp);
         }
     }
 
@@ -3941,7 +4014,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_MEMFS,
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP |
-        CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE,
+        CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE |
+        CHIMERA_VFS_CAP_ACL_NATIVE,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

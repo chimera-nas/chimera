@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <time.h>
 
+struct chimera_acl;
+
 #define CHIMERA_VFS_FH_SIZE             48
 
 #define CHIMERA_VFS_ATTR_DEV            (1UL << 0)
@@ -35,6 +37,11 @@
 /* Windows/SMB DOS attribute bits (FILE_ATTRIBUTE_*).  Optional: a backend
  * sets this bit in va_set_mask only if it actually persists the value. */
 #define CHIMERA_VFS_ATTR_DOS_ATTRIBUTES (1UL << 21)
+
+/* Canonical (NFSv4/Windows) ACL, carried via va_acl.  Deliberately excluded
+ * from the cacheable mask: the attr cache stays fixed-size and ACLs are fetched
+ * fresh, mask-gated, only when a protocol asks for them. */
+#define CHIMERA_VFS_ATTR_ACL            (1UL << 22)
 
 #define CHIMERA_VFS_ATTR_MASK_STAT      ( \
             CHIMERA_VFS_ATTR_DEV | \
@@ -91,6 +98,11 @@ struct chimera_vfs_attrs {
     uint64_t        va_fsid;
 
     uint32_t        va_dos_attributes;
+
+    /* Canonical ACL (CHIMERA_VFS_ATTR_ACL).  On getattr, the backend points
+     * this at storage valid only for the duration of the completion callback
+     * (same contract as va_fh).  On setattr, the caller owns the buffer. */
+    struct chimera_acl *va_acl;
 
     uint32_t        va_fh_len;
     uint64_t        va_fh_hash;
