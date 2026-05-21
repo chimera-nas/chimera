@@ -350,7 +350,7 @@ memfs_inode_alloc(
             }
         }
 
-        inodes = malloc(CHIMERA_MEMFS_INODE_BLOCK * sizeof(*inodes));
+        inodes = calloc(CHIMERA_MEMFS_INODE_BLOCK, sizeof(*inodes));
 
         base_id = bi << CHIMERA_MEMFS_INODE_BLOCK_SHIFT;
 
@@ -699,6 +699,11 @@ memfs_destroy(void *private_data)
                     continue;
                 }
 
+                if (inode->acl) {
+                    free(inode->acl);
+                    inode->acl = NULL;
+                }
+
                 if (S_ISDIR(inode->mode)) {
                     rb_tree_destroy(&inode->dir.dirents, memfs_dirent_release, NULL);
                 } else if (S_ISLNK(inode->mode)) {
@@ -842,7 +847,7 @@ memfs_map_attrs(
         static __thread uint8_t acl_scratch[
             sizeof(struct chimera_acl) +
             CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
-        struct chimera_acl *dst = (struct chimera_acl *) acl_scratch;
+        struct chimera_acl     *dst = (struct chimera_acl *) acl_scratch;
 
         if (inode->acl) {
             memcpy(dst, inode->acl, chimera_acl_size(inode->acl->num_aces));

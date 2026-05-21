@@ -39,7 +39,7 @@ set(PYNFS_MINOR_VERSIONS 0 1 2)
 # still listed, so the full matrix is visible and suites can be promoted here
 # as the server gains conformance).  Keep these sorted.
 set(PYNFS_PASS_0
-    access commit create getattr getfh link lockt lookup lookupp nverify
+    access acl commit create getattr getfh link lockt lookup lookupp nverify
     putpubfh putrootfh readdir readlink remove rename restorefh savefh verify)
 set(PYNFS_PASS_1
     destroy_clientid getfh lookup putfh rename verify xattr)
