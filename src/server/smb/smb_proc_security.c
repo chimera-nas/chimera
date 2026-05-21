@@ -26,6 +26,7 @@
 #define SE_SELF_RELATIVE           0x8000
 #define SE_DACL_PRESENT            0x0004
 #define SE_DACL_AUTO_INHERITED     0x0400
+#define SE_DACL_PROTECTED          0x1000
 
 /* Size of a SID with 3 sub-authorities: S-1-5-88-X-Y */
 #define SID_UNIX_SIZE              20 /* 1+1+6+3*4 */
@@ -120,8 +121,11 @@ write_unix_sid(
 #define NT_GENERIC_WRITE         0x40000000
 #define NT_GENERIC_EXECUTE       0x20000000
 #define NT_GENERIC_ALL           0x10000000
-#define ACE4_GENERIC_READ        0x00120081
-#define ACE4_GENERIC_WRITE       0x00160106
+/* FILE_GENERIC_{READ,WRITE,EXECUTE}: STANDARD_RIGHTS_* | the file-specific
+ * read/write/execute rights | SYNCHRONIZE.  Each includes its EA right
+ * (READ_EA 0x8 / WRITE_EA 0x10), which earlier values omitted. */
+#define ACE4_GENERIC_READ        0x00120089
+#define ACE4_GENERIC_WRITE       0x00120116
 #define ACE4_GENERIC_EXECUTE     0x001200a0
 
 /*
@@ -391,8 +395,16 @@ chimera_smb_sd_to_acl(
             pos += ace_size;
         }
 
+        uint16_t sd_control = sd_buf[2] | (sd_buf[3] << 8);
+
         acl->num_aces   = n;
         acl->ctrl_flags = 0;
+        if (sd_control & SE_DACL_AUTO_INHERITED) {
+            acl->ctrl_flags |= CHIMERA_ACL_CTRL_AUTO_INHERITED;
+        }
+        if (sd_control & SE_DACL_PROTECTED) {
+            acl->ctrl_flags |= CHIMERA_ACL_CTRL_PROTECTED;
+        }
         if (n > 0) {
             attrs->va_acl       = acl;
             attrs->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
@@ -434,7 +446,17 @@ chimera_smb_acl_to_sd(
         uint16_t ace_count = 0;
         uint32_t ace_pos;
 
-        control |= SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED;
+        control |= SE_DACL_PRESENT;
+
+        /* Reflect the canonical ACL control bits.  AUTO_INHERITED is set only
+         * for a DACL produced by inheritance (so an explicitly-set SD round
+         * trips without it); PROTECTED blocks inheritance from the parent. */
+        if (acl && (acl->ctrl_flags & CHIMERA_ACL_CTRL_AUTO_INHERITED)) {
+            control |= SE_DACL_AUTO_INHERITED;
+        }
+        if (acl && (acl->ctrl_flags & CHIMERA_ACL_CTRL_PROTECTED)) {
+            control |= SE_DACL_PROTECTED;
+        }
 
         if (offset + 8 > cap) {
             return -1;

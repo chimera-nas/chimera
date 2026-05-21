@@ -45,13 +45,13 @@ who_string_to_special(
         const char *name;
         uint8_t     special;
     } table[] = {
-        { "OWNER@",         CHIMERA_WHO_OWNER                         },
-        { "GROUP@",         CHIMERA_WHO_GROUP                         },
-        { "EVERYONE@",      CHIMERA_WHO_EVERYONE                      },
-        { "INTERACTIVE@",   CHIMERA_WHO_INTERACTIVE                   },
-        { "NETWORK@",       CHIMERA_WHO_NETWORK                       },
-        { "AUTHENTICATED@", CHIMERA_WHO_AUTHENTICATED                 },
-        { "ANONYMOUS@",     CHIMERA_WHO_ANONYMOUS                     },
+        { "OWNER@",         CHIMERA_WHO_OWNER                                 },
+        { "GROUP@",         CHIMERA_WHO_GROUP                                 },
+        { "EVERYONE@",      CHIMERA_WHO_EVERYONE                              },
+        { "INTERACTIVE@",   CHIMERA_WHO_INTERACTIVE                           },
+        { "NETWORK@",       CHIMERA_WHO_NETWORK                               },
+        { "AUTHENTICATED@", CHIMERA_WHO_AUTHENTICATED                         },
+        { "ANONYMOUS@",     CHIMERA_WHO_ANONYMOUS                             },
     };
 
     for (unsigned i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
@@ -246,11 +246,14 @@ chimera_idmap_principal_to_sid(
         return len;
     }
 
-    /* Algorithmic Samba unix-id SIDs. */
+    /* Unix uid/gid SIDs in the modefromsid scheme (S-1-5-88-1/2-<id>), matching
+     * the owner/group SIDs the SMB security-descriptor emitter writes for the
+     * SD owner and group fields, so a uid appears as the same SID throughout a
+     * descriptor.  sid_to_principal parses both this and the S-1-22 form. */
     if (p->type == CHIMERA_PRINCIPAL_USER) {
-        len = snprintf(buf, buflen, "S-1-22-1-%u", p->id);
+        len = snprintf(buf, buflen, "S-1-5-88-1-%u", p->id);
     } else {
-        len = snprintf(buf, buflen, "S-1-22-2-%u", p->id);
+        len = snprintf(buf, buflen, "S-1-5-88-2-%u", p->id);
     }
 
     if (len < 0 || len + 1 > buflen) {
