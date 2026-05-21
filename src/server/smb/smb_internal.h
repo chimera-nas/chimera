@@ -293,6 +293,10 @@ struct chimera_smb_request {
             } rqls;
             uint64_t alsi_alloc_size;
             uint64_t twrp_timestamp;
+            /* Backing storage for a canonical ACL decoded from a SecD create
+             * context (SMB2_CREATE_SD_BUFFER); set_attr.va_acl points here. */
+            uint8_t  acl_storage[sizeof(struct chimera_acl) +
+                                 64 * sizeof(struct chimera_ace)];
             char     parent_path[SMB_FILENAME_MAX];
             char    *name;
         } create;

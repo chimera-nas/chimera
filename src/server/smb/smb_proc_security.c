@@ -614,6 +614,21 @@ chimera_smb_parse_sd_to_attrs(
 } /* chimera_smb_parse_sd_to_attrs */
 
 void
+chimera_smb_parse_sd_to_acl(
+    const uint8_t            *sd_buf,
+    uint32_t                  sd_len,
+    struct chimera_vfs_attrs *attrs,
+    void                     *acl_buf,
+    uint32_t                  acl_buf_len)
+{
+    struct chimera_acl *acl     = acl_buf;
+    unsigned            acl_max = (acl_buf_len - sizeof(struct chimera_acl)) /
+        sizeof(struct chimera_ace);
+
+    chimera_smb_sd_to_acl(sd_buf, sd_len, attrs, acl, acl_max);
+} /* chimera_smb_parse_sd_to_acl */
+
+void
 chimera_smb_set_security(struct chimera_smb_request *request)
 {
     struct chimera_vfs_attrs *vfs_attrs = &request->set_info.vfs_attrs;

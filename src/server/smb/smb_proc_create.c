@@ -1294,7 +1294,9 @@ parse_ctx_secd(
     uint32_t                    data_len,
     struct chimera_smb_request *request)
 {
-    chimera_smb_parse_sd_to_attrs(data, data_len, &request->create.set_attr);
+    chimera_smb_parse_sd_to_acl(data, data_len, &request->create.set_attr,
+                                request->create.acl_storage,
+                                sizeof(request->create.acl_storage));
 } /* parse_ctx_secd */
 
 static void

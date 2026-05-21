@@ -959,6 +959,54 @@ memfs_apply_attrs(
 
 } /* memfs_apply_attrs */
 
+/*
+ * Apply Windows/NFSv4 create-time ACL inheritance to a freshly-created child.
+ * When the child carries no explicit ACL (none supplied at create) and the
+ * parent directory holds ACEs marked inheritable for this child's type, compute
+ * the inherited ACL via the shared engine and store it, re-deriving the mode.
+ * Otherwise the child is left mode-derived (acl == NULL) -- matching the legacy
+ * and mode-only-backend behaviour.  Both inodes are held locked by the caller.
+ */
+static void
+memfs_inherit_acl(
+    struct memfs_inode *child,
+    struct memfs_inode *parent)
+{
+    int                 is_dir = S_ISDIR(child->mode);
+    uint16_t            want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
+        (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
+    int                 has_inh = 0;
+    unsigned            cap;
+    struct chimera_acl *tmp;
+    int                 n;
+
+    if (child->acl || !parent->acl) {
+        return;
+    }
+
+    for (unsigned i = 0; i < parent->acl->num_aces; i++) {
+        if (parent->acl->aces[i].flags & want) {
+            has_inh = 1;
+            break;
+        }
+    }
+
+    if (!has_inh) {
+        return;
+    }
+
+    cap = parent->acl->num_aces;
+    tmp = malloc(chimera_acl_size(cap));
+    n   = chimera_acl_inherit(parent->acl, is_dir, child->mode & 07777, tmp, cap);
+
+    if (n > 0) {
+        memfs_inode_set_acl(child, tmp);
+        child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(child->acl);
+    }
+
+    free(tmp);
+} /* memfs_inherit_acl */
+
 static void
 memfs_getattr(
     struct memfs_thread        *thread,
@@ -1444,6 +1492,11 @@ memfs_mkdir_at(
     /* Set parent pointer for .. lookup support */
     inode->dir.parent_inum = parent_inode->inum;
     inode->dir.parent_gen  = parent_inode->gen;
+
+    /* Inherit the parent's inheritable ACEs (no-op when none); refresh the
+     * child's returned attrs since the mode may have been re-derived. */
+    memfs_inherit_acl(inode, parent_inode);
+    memfs_map_attrs(shared, r_attr, inode, request->fh);
 
     memfs_map_attrs(shared, r_dir_pre_attr, parent_inode, request->fh);
 
@@ -1951,6 +2004,8 @@ memfs_open_at(
         inode->file.num_blocks = 0;
 
         memfs_apply_attrs(inode, request->open_at.set_attr);
+
+        memfs_inherit_acl(inode, parent_inode);
 
         dirent = memfs_dirent_alloc(thread,
                                     inode->inum,

@@ -197,6 +197,19 @@ void chimera_smb_parse_sd_to_attrs(
     uint32_t                  sd_len,
     struct chimera_vfs_attrs *attrs);
 
+/*
+ * Decode a self-relative security descriptor into owner/group/mode AND a full
+ * canonical DACL.  The decoded ACL is written into `acl_buf` (capacity
+ * `acl_buf_len` bytes) and, when non-empty, attrs->va_acl is pointed at it with
+ * the ATTR_ACL set-mask bit raised.
+ */
+void chimera_smb_parse_sd_to_acl(
+    const uint8_t            *sd_buf,
+    uint32_t                  sd_len,
+    struct chimera_vfs_attrs *attrs,
+    void                     *acl_buf,
+    uint32_t                  acl_buf_len);
+
 int chimera_smb_parse_echo(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request);
