@@ -25,6 +25,8 @@
 #include "smb_ntlm.h"
 #include "smb_gssapi.h"
 #include "smb_sharemode.h"
+#include "vfs/vfs_acl.h"
+#include "vfs/vfs_idmap.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_notify.h"
 
@@ -438,6 +440,10 @@ struct chimera_smb_request {
             struct chimera_smb_attrs      r_attrs;
             struct chimera_smb_fs_attrs   r_fs_attrs;
             struct chimera_smb_open_file *open_file;
+            /* Security descriptor built in the getattr callback and emitted by
+             * the reply builder (SMB2_INFO_SECURITY). */
+            uint8_t                       sec_buf[2048];
+            uint32_t                      sec_buf_len;
         } query_info;
 
         struct {
@@ -455,8 +461,12 @@ struct chimera_smb_request {
             /* Rename information */
             struct chimera_smb_rename_info  rename_info;
             /* Security descriptor buffer for SMB2_INFO_SECURITY */
-            uint8_t                         sec_buf[256];
+            uint8_t                         sec_buf[2048];
             uint32_t                        sec_buf_len;
+            /* Backing storage for the canonical ACL decoded from the incoming
+             * security descriptor; vfs_attrs.va_acl points here. */
+            uint8_t                         acl_storage[sizeof(struct chimera_acl) +
+                                                        64 * sizeof(struct chimera_ace)];
         } set_info;
 
         struct {

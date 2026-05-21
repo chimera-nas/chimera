@@ -12,6 +12,7 @@
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_access.h"
 #include "vfs/vfs_notify.h"
 #include "vfs/vfs_release.h"
 #include "smb_attr.h"
@@ -618,6 +619,46 @@ chimera_smb_create_open_getattr_callback(
         request->create.r_open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY;
     }
 
+    /* Enforce the requested access against the object's ACL via the shared
+     * engine, so a Windows ACL (stored over SMB or NFSv4) is honoured here.
+     * Only the data/exec/delete classes are checked; metadata and control
+     * rights are granted by the engine baseline. */
+    {
+        uint32_t da  = request->create.desired_access;
+        uint32_t req = 0;
+
+        if (da & (SMB2_FILE_READ_DATA | SMB2_GENERIC_READ)) {
+            req |= CHIMERA_ACE_READ_DATA;
+        }
+        if (da & (SMB2_FILE_WRITE_DATA | SMB2_GENERIC_WRITE)) {
+            req |= CHIMERA_ACE_WRITE_DATA;
+        }
+        if (da & SMB2_FILE_APPEND_DATA) {
+            req |= CHIMERA_ACE_APPEND_DATA;
+        }
+        if (da & (SMB2_FILE_EXECUTE | SMB2_GENERIC_EXECUTE)) {
+            req |= CHIMERA_ACE_EXECUTE;
+        }
+        if (da & SMB2_DELETE) {
+            req |= CHIMERA_ACE_DELETE;
+        }
+        if (da & SMB2_GENERIC_ALL) {
+            req |= CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA |
+                CHIMERA_ACE_EXECUTE;
+        }
+
+        if (req) {
+            uint32_t granted = chimera_vfs_access_check(
+                attr, &request->session_handle->session->cred, req);
+
+            if ((granted & req) != req) {
+                chimera_smb_open_file_release(request, request->create.r_open_file);
+                chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+                return;
+            }
+        }
+    }
+
     chimera_smb_open_file_release(request, request->create.r_open_file);
 
     chimera_smb_marshal_attrs(
@@ -664,7 +705,8 @@ chimera_smb_create_open_callback(
     chimera_vfs_getattr(vfs_thread,
                         &request->session_handle->session->cred,
                         oh,
-                        CHIMERA_VFS_ATTR_FH,
+                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
+                        CHIMERA_VFS_ATTR_ACL,
                         chimera_smb_create_open_getattr_callback,
                         request);
 

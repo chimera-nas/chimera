@@ -103,6 +103,440 @@ write_unix_sid(
 } /* write_unix_sid */
 
 /* ------------------------------------------------------------------ */
+/* General SID <-> string and NT ACE <-> canonical ACE translation    */
+/* ------------------------------------------------------------------ */
+
+/* NT ACE header flag bits (differ from the canonical/NFSv4 layout). */
+#define NT_ACE_OBJECT_INHERIT    0x01
+#define NT_ACE_CONTAINER_INHERIT 0x02
+#define NT_ACE_NO_PROPAGATE      0x04
+#define NT_ACE_INHERIT_ONLY      0x08
+#define NT_ACE_INHERITED         0x10
+#define NT_ACE_SUCCESSFUL_ACCESS 0x40
+#define NT_ACE_FAILED_ACCESS     0x80
+
+/* NT generic access bits and their specific-rights expansions. */
+#define NT_GENERIC_READ          0x80000000
+#define NT_GENERIC_WRITE         0x40000000
+#define NT_GENERIC_EXECUTE       0x20000000
+#define NT_GENERIC_ALL           0x10000000
+#define ACE4_GENERIC_READ        0x00120081
+#define ACE4_GENERIC_WRITE       0x00160106
+#define ACE4_GENERIC_EXECUTE     0x001200a0
+
+/*
+ * Format a binary SID into "S-<rev>-<authority>-<sub>..." text.  Returns the
+ * number of bytes consumed from `buf`, or -1 on a malformed/truncated SID.
+ */
+static int
+sid_bin_to_str(
+    const uint8_t *buf,
+    uint32_t       len,
+    char          *out,
+    int            outlen)
+{
+    uint8_t  rev, count;
+    uint64_t authority = 0;
+    int      pos;
+
+    if (len < 8) {
+        return -1;
+    }
+    rev   = buf[0];
+    count = buf[1];
+    if (8 + (uint32_t) count * 4 > len) {
+        return -1;
+    }
+    for (int i = 0; i < 6; i++) {
+        authority = (authority << 8) | buf[2 + i];
+    }
+
+    pos = snprintf(out, outlen, "S-%u-%llu", rev, (unsigned long long) authority);
+    for (int i = 0; i < count; i++) {
+        uint32_t sa = buf[8 + i * 4] | (buf[8 + i * 4 + 1] << 8) |
+            (buf[8 + i * 4 + 2] << 16) | ((uint32_t) buf[8 + i * 4 + 3] << 24);
+
+        if (pos < 0 || pos >= outlen) {
+            return -1;
+        }
+        pos += snprintf(out + pos, outlen - pos, "-%u", sa);
+    }
+    if (pos < 0 || pos >= outlen) {
+        return -1;
+    }
+    return 8 + count * 4;
+} /* sid_bin_to_str */
+
+/*
+ * Parse "S-<rev>-<authority>-<sub>..." into a binary SID.  Returns the binary
+ * length written, or -1 on malformed input / insufficient capacity.
+ */
+static int
+sid_str_to_bin(
+    const char *str,
+    uint8_t    *out,
+    int         outcap)
+{
+    const char *p = str;
+    uint64_t    authority;
+    uint8_t     count = 0;
+    char       *end;
+
+    if (str[0] != 'S' && str[0] != 's') {
+        return -1;
+    }
+    p++;
+    if (*p != '-') {
+        return -1;
+    }
+    p++;
+    out[0] = (uint8_t) strtoul(p, &end, 10); /* revision */
+    if (end == p || *end != '-') {
+        return -1;
+    }
+    p = end + 1;
+
+    authority = strtoull(p, &end, 10);
+    if (end == p) {
+        return -1;
+    }
+    for (int i = 0; i < 6; i++) {
+        out[2 + i] = (uint8_t) ((authority >> (8 * (5 - i))) & 0xff);
+    }
+    p = end;
+
+    while (*p == '-') {
+        uint32_t sa;
+
+        p++;
+        sa = (uint32_t) strtoul(p, &end, 10);
+        if (end == p) {
+            return -1;
+        }
+        if (8 + (count + 1) * 4 > outcap) {
+            return -1;
+        }
+        out[8 + count * 4]     = sa & 0xff;
+        out[8 + count * 4 + 1] = (sa >> 8) & 0xff;
+        out[8 + count * 4 + 2] = (sa >> 16) & 0xff;
+        out[8 + count * 4 + 3] = (sa >> 24) & 0xff;
+        count++;
+        p = end;
+    }
+
+    out[1] = count;
+    return 8 + count * 4;
+} /* sid_str_to_bin */
+
+static uint16_t
+nt_flags_to_canon(uint8_t f)
+{
+    uint16_t c = f & 0x0f; /* the four inheritance bits share the layout */
+
+    if (f & NT_ACE_INHERITED) {
+        c |= CHIMERA_ACE_FLAG_INHERITED;
+    }
+    if (f & NT_ACE_SUCCESSFUL_ACCESS) {
+        c |= CHIMERA_ACE_FLAG_SUCCESSFUL_ACCESS;
+    }
+    if (f & NT_ACE_FAILED_ACCESS) {
+        c |= CHIMERA_ACE_FLAG_FAILED_ACCESS;
+    }
+    return c;
+} /* nt_flags_to_canon */
+
+static uint8_t
+canon_flags_to_nt(uint16_t c)
+{
+    uint8_t f = c & 0x0f;
+
+    if (c & CHIMERA_ACE_FLAG_INHERITED) {
+        f |= NT_ACE_INHERITED;
+    }
+    if (c & CHIMERA_ACE_FLAG_SUCCESSFUL_ACCESS) {
+        f |= NT_ACE_SUCCESSFUL_ACCESS;
+    }
+    if (c & CHIMERA_ACE_FLAG_FAILED_ACCESS) {
+        f |= NT_ACE_FAILED_ACCESS;
+    }
+    return f;
+} /* canon_flags_to_nt */
+
+/* Expand NT generic access bits into the equivalent specific rights. */
+static uint32_t
+expand_generic_mask(uint32_t m)
+{
+    uint32_t out = m & 0x01ffffff; /* specific + standard rights */
+
+    if (m & NT_GENERIC_READ) {
+        out |= ACE4_GENERIC_READ;
+    }
+    if (m & NT_GENERIC_WRITE) {
+        out |= ACE4_GENERIC_WRITE;
+    }
+    if (m & NT_GENERIC_EXECUTE) {
+        out |= ACE4_GENERIC_EXECUTE;
+    }
+    if (m & NT_GENERIC_ALL) {
+        out |= CHIMERA_ACE_MASK_ALL;
+    }
+    return out;
+} /* expand_generic_mask */
+
+/*
+ * Parse a full self-relative security descriptor into owner/group ids and a
+ * canonical ACL.  Owner/group come from the SID via the idmap; the DACL is
+ * translated ACE-by-ACE.  Falls back to recognising the modefromsid encoding
+ * (S-1-5-88-3-<mode>) to recover a POSIX mode.  Returns 0 on success.
+ */
+static int
+chimera_smb_sd_to_acl(
+    const uint8_t            *sd_buf,
+    uint32_t                  sd_len,
+    struct chimera_vfs_attrs *attrs,
+    struct chimera_acl       *acl,
+    unsigned                  acl_max_aces)
+{
+    uint32_t offset_owner, offset_group, offset_dacl;
+    uint32_t value;
+    char     sidstr[CHIMERA_IDMAP_SID_MAX];
+
+    if (sd_len < SD_HEADER_SIZE) {
+        return -1;
+    }
+
+    offset_owner = sd_buf[4] | (sd_buf[5] << 8) | (sd_buf[6] << 16) | ((uint32_t) sd_buf[7] << 24);
+    offset_group = sd_buf[8] | (sd_buf[9] << 8) | (sd_buf[10] << 16) | ((uint32_t) sd_buf[11] << 24);
+    offset_dacl  = sd_buf[16] | (sd_buf[17] << 8) | (sd_buf[18] << 16) | ((uint32_t) sd_buf[19] << 24);
+
+    /* Owner SID -> uid (modefromsid first, then general idmap). */
+    if (offset_owner && offset_owner + 8 <= sd_len) {
+        struct chimera_principal p;
+
+        if (parse_unix_sid(sd_buf + offset_owner, sd_len - offset_owner, 1, &value) == 0) {
+            attrs->va_uid       = value;
+            attrs->va_set_mask |= CHIMERA_VFS_ATTR_UID;
+        } else if (sid_bin_to_str(sd_buf + offset_owner, sd_len - offset_owner,
+                                  sidstr, sizeof(sidstr)) > 0 &&
+                   chimera_idmap_sid_to_principal(sidstr, &p) == 0 &&
+                   p.type != CHIMERA_PRINCIPAL_SPECIAL) {
+            attrs->va_uid       = p.id;
+            attrs->va_set_mask |= CHIMERA_VFS_ATTR_UID;
+        }
+    }
+
+    /* Group SID -> gid. */
+    if (offset_group && offset_group + 8 <= sd_len) {
+        struct chimera_principal p;
+
+        if (parse_unix_sid(sd_buf + offset_group, sd_len - offset_group, 2, &value) == 0) {
+            attrs->va_gid       = value;
+            attrs->va_set_mask |= CHIMERA_VFS_ATTR_GID;
+        } else if (sid_bin_to_str(sd_buf + offset_group, sd_len - offset_group,
+                                  sidstr, sizeof(sidstr)) > 0 &&
+                   chimera_idmap_sid_to_principal(sidstr, &p) == 0 &&
+                   p.type != CHIMERA_PRINCIPAL_SPECIAL) {
+            attrs->va_gid       = p.id;
+            attrs->va_set_mask |= CHIMERA_VFS_ATTR_GID;
+        }
+    }
+
+    /* DACL -> canonical ACL. */
+    if (acl && offset_dacl && offset_dacl + 8 <= sd_len) {
+        const uint8_t *acl_buf   = sd_buf + offset_dacl;
+        uint16_t       acl_size  = acl_buf[2] | (acl_buf[3] << 8);
+        uint16_t       ace_count = acl_buf[4] | (acl_buf[5] << 8);
+        uint32_t       pos       = 8;
+        unsigned       n         = 0;
+
+        if (offset_dacl + acl_size > sd_len) {
+            acl_size = sd_len - offset_dacl;
+        }
+
+        for (uint16_t i = 0; i < ace_count && n < acl_max_aces &&
+             pos + 8 <= acl_size; i++) {
+            uint8_t                  ace_type  = acl_buf[pos];
+            uint8_t                  ace_flags = acl_buf[pos + 1];
+            uint16_t                 ace_size  = acl_buf[pos + 2] | (acl_buf[pos + 3] << 8);
+            uint32_t                 mask      = acl_buf[pos + 4] | (acl_buf[pos + 5] << 8) |
+                (acl_buf[pos + 6] << 16) | ((uint32_t) acl_buf[pos + 7] << 24);
+            uint32_t                 modeval;
+            struct chimera_principal p;
+
+            if (ace_size < 8 || pos + ace_size > acl_size) {
+                break;
+            }
+
+            /* modefromsid mode ACE: recover POSIX mode, do not store as ACE. */
+            if (parse_unix_sid(acl_buf + pos + 8, acl_size - pos - 8, 3,
+                               &modeval) == 0) {
+                attrs->va_mode      = modeval;
+                attrs->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+                pos                += ace_size;
+                continue;
+            }
+
+            if (sid_bin_to_str(acl_buf + pos + 8, acl_size - pos - 8,
+                               sidstr, sizeof(sidstr)) <= 0 ||
+                chimera_idmap_sid_to_principal(sidstr, &p) != 0) {
+                pos += ace_size;
+                continue;
+            }
+
+            acl->aces[n].type        = ace_type;
+            acl->aces[n].flags       = nt_flags_to_canon(ace_flags);
+            acl->aces[n].access_mask = expand_generic_mask(mask);
+            acl->aces[n].who         = p;
+            n++;
+            pos += ace_size;
+        }
+
+        acl->num_aces   = n;
+        acl->ctrl_flags = 0;
+        if (n > 0) {
+            attrs->va_acl       = acl;
+            attrs->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+        }
+    }
+
+    return 0;
+} /* chimera_smb_sd_to_acl */
+
+/*
+ * Build a self-relative security descriptor from owner/group ids and a
+ * canonical ACL into `out` (capacity `cap`).  Returns the SD length, or -1 if
+ * it does not fit.  When `acl` is NULL only owner/group (and a modefromsid mode
+ * ACE) are emitted, matching the legacy single-ACE behaviour.
+ */
+static int
+chimera_smb_acl_to_sd(
+    uint32_t                  uid,
+    uint32_t                  gid,
+    uint32_t                  mode,
+    const struct chimera_acl *acl,
+    int                       has_owner,
+    int                       has_group,
+    int                       has_dacl,
+    uint8_t                  *out,
+    uint32_t                  cap)
+{
+    uint32_t offset = SD_HEADER_SIZE;
+    uint32_t dacl_off = 0, owner_off = 0, group_off = 0;
+    uint16_t control = SE_SELF_RELATIVE;
+
+    if (cap < SD_HEADER_SIZE) {
+        return -1;
+    }
+    memset(out, 0, SD_HEADER_SIZE);
+
+    if (has_dacl) {
+        uint32_t acl_hdr   = offset;
+        uint16_t ace_count = 0;
+        uint32_t ace_pos;
+
+        control |= SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED;
+
+        if (offset + 8 > cap) {
+            return -1;
+        }
+        ace_pos = offset + 8; /* after ACL header */
+
+        if (acl && acl->num_aces) {
+            for (unsigned i = 0; i < acl->num_aces; i++) {
+                const struct chimera_ace *ace = &acl->aces[i];
+                char                      sidstr[CHIMERA_IDMAP_SID_MAX];
+                int                       sidlen;
+                uint16_t                  ace_size;
+
+                if (chimera_idmap_principal_to_sid(&ace->who, sidstr,
+                                                   sizeof(sidstr)) < 0) {
+                    continue;
+                }
+                if (ace_pos + 8 > cap) {
+                    return -1;
+                }
+                sidlen = sid_str_to_bin(sidstr, out + ace_pos + 8, cap - ace_pos - 8);
+                if (sidlen < 0) {
+                    return -1;
+                }
+                ace_size = 8 + sidlen;
+
+                out[ace_pos]     = (uint8_t) ace->type;
+                out[ace_pos + 1] = canon_flags_to_nt(ace->flags);
+                out[ace_pos + 2] = ace_size & 0xff;
+                out[ace_pos + 3] = (ace_size >> 8) & 0xff;
+                out[ace_pos + 4] = ace->access_mask & 0xff;
+                out[ace_pos + 5] = (ace->access_mask >> 8) & 0xff;
+                out[ace_pos + 6] = (ace->access_mask >> 16) & 0xff;
+                out[ace_pos + 7] = (ace->access_mask >> 24) & 0xff;
+
+                ace_pos += ace_size;
+                ace_count++;
+            }
+        } else {
+            /* No ACL: emit one modefromsid GENERIC_ALL ACE (legacy). */
+            if (ace_pos + ACE_UNIX_SIZE > cap) {
+                return -1;
+            }
+            out[ace_pos]      = 0;         /* ACCESS_ALLOWED */
+            out[ace_pos + 1]  = 0;
+            out[ace_pos + 2]  = ACE_UNIX_SIZE & 0xff;
+            out[ace_pos + 3]  = (ACE_UNIX_SIZE >> 8) & 0xff;
+            out[ace_pos + 15] = 0x10;      /* GENERIC_ALL */
+            write_unix_sid(&out[ace_pos + 8], 3, mode & 07777);
+            ace_pos  += ACE_UNIX_SIZE;
+            ace_count = 1;
+        }
+
+        /* ACL header */
+        uint16_t acl_size = ace_pos - acl_hdr;
+        out[acl_hdr]     = 2; /* revision */
+        out[acl_hdr + 1] = 0;
+        out[acl_hdr + 2] = acl_size & 0xff;
+        out[acl_hdr + 3] = (acl_size >> 8) & 0xff;
+        out[acl_hdr + 4] = ace_count & 0xff;
+        out[acl_hdr + 5] = (ace_count >> 8) & 0xff;
+        out[acl_hdr + 6] = 0;
+        out[acl_hdr + 7] = 0;
+
+        dacl_off = acl_hdr;
+        offset   = ace_pos;
+    }
+
+    if (has_owner) {
+        if (offset + SID_UNIX_SIZE > cap) {
+            return -1;
+        }
+        owner_off = offset;
+        write_unix_sid(&out[offset], 1, uid);
+        offset += SID_UNIX_SIZE;
+    }
+
+    if (has_group) {
+        if (offset + SID_UNIX_SIZE > cap) {
+            return -1;
+        }
+        group_off = offset;
+        write_unix_sid(&out[offset], 2, gid);
+        offset += SID_UNIX_SIZE;
+    }
+
+    out[0]  = 1; /* revision */
+    out[1]  = 0;
+    out[2]  = control & 0xff;
+    out[3]  = (control >> 8) & 0xff;
+    out[4]  = owner_off & 0xff; out[5] = (owner_off >> 8) & 0xff;
+    out[6]  = (owner_off >> 16) & 0xff; out[7] = (owner_off >> 24) & 0xff;
+    out[8]  = group_off & 0xff; out[9] = (group_off >> 8) & 0xff;
+    out[10] = (group_off >> 16) & 0xff; out[11] = (group_off >> 24) & 0xff;
+    out[12] = 0; out[13] = 0; out[14] = 0; out[15] = 0; /* SACL */
+    out[16] = dacl_off & 0xff; out[17] = (dacl_off >> 8) & 0xff;
+    out[18] = (dacl_off >> 16) & 0xff; out[19] = (dacl_off >> 24) & 0xff;
+
+    return (int) offset;
+} /* chimera_smb_acl_to_sd */
+
+/* ------------------------------------------------------------------ */
 /* SET_INFO handler for SMB2_INFO_SECURITY                            */
 /* ------------------------------------------------------------------ */
 
@@ -196,7 +630,15 @@ chimera_smb_set_security(struct chimera_smb_request *request)
     sd_buf = request->set_info.sec_buf;
     sd_len = request->set_info.sec_buf_len;
 
-    chimera_smb_parse_sd_to_attrs(sd_buf, sd_len, vfs_attrs);
+    {
+        struct chimera_acl *acl_buf =
+            (struct chimera_acl *) request->set_info.acl_storage;
+        unsigned            acl_max = (sizeof(request->set_info.acl_storage) -
+                                       sizeof(struct chimera_acl)) /
+            sizeof(struct chimera_ace);
+
+        chimera_smb_sd_to_acl(sd_buf, sd_len, vfs_attrs, acl_buf, acl_max);
+    }
 
     if (vfs_attrs->va_set_mask == 0) {
         /* Nothing to change */
@@ -226,7 +668,9 @@ chimera_smb_query_security_getattr_callback(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_smb_request *request = private_data;
+    struct chimera_smb_request *request   = private_data;
+    uint32_t                    addl_info = request->query_info.addl_info;
+    int                         sd_len;
 
     if (error_code) {
         chimera_smb_open_file_release(request, request->query_info.open_file);
@@ -234,15 +678,24 @@ chimera_smb_query_security_getattr_callback(
         return;
     }
 
-    /*
-     * Store uid/gid/mode in the request so the reply function can build
-     * the security descriptor.
-     */
-    request->query_info.r_attrs.smb_ino                       = attr->va_mode; /* borrow ino for mode */
-    request->query_info.r_fs_attrs.smb_total_allocation_units =
-        attr->va_uid;                                                          /* borrow for uid */
-    request->query_info.r_fs_attrs.smb_caller_available_allocation_units =
-        attr->va_gid;                                                          /* borrow for gid */
+    /* Build the security descriptor now, while the (callback-scoped) ACL is
+     * valid, and stash the bytes for the reply builder. */
+    sd_len = chimera_smb_acl_to_sd(
+        attr->va_uid, attr->va_gid, attr->va_mode & 07777,
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) ? attr->va_acl : NULL,
+        !!(addl_info & OWNER_SECURITY_INFORMATION),
+        !!(addl_info & GROUP_SECURITY_INFORMATION),
+        !!(addl_info & DACL_SECURITY_INFORMATION),
+        request->query_info.sec_buf,
+        sizeof(request->query_info.sec_buf));
+
+    if (sd_len < 0) {
+        chimera_smb_open_file_release(request, request->query_info.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_BUFFER_OVERFLOW);
+        return;
+    }
+
+    request->query_info.sec_buf_len = (uint32_t) sd_len;
 
     chimera_smb_open_file_release(request, request->query_info.open_file);
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
@@ -255,7 +708,7 @@ chimera_smb_query_security(struct chimera_smb_request *request)
         request->compound->thread->vfs_thread,
         &request->session_handle->session->cred,
         request->query_info.open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT,
+        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
         chimera_smb_query_security_getattr_callback,
         request);
 } /* chimera_smb_query_security */
@@ -265,97 +718,11 @@ chimera_smb_query_security_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request)
 {
-    uint32_t addl_info = request->query_info.addl_info;
-    uint32_t uid       = (uint32_t) request->query_info.r_fs_attrs.smb_total_allocation_units;
-    uint32_t gid       = (uint32_t) request->query_info.r_fs_attrs.smb_caller_available_allocation_units;
-    uint32_t mode      = (uint32_t) request->query_info.r_attrs.smb_ino;
-    uint8_t  sd[SD_HEADER_SIZE + SID_UNIX_SIZE * 2 + ACL_UNIX_SIZE];
-    uint32_t sd_len;
-    uint32_t offset;
-    int      has_owner = !!(addl_info & OWNER_SECURITY_INFORMATION);
-    int      has_group = !!(addl_info & GROUP_SECURITY_INFORMATION);
-    int      has_dacl  = !!(addl_info & DACL_SECURITY_INFORMATION);
-    uint16_t control   = SE_SELF_RELATIVE;
-
-    memset(sd, 0, sizeof(sd));
-
-    if (has_dacl) {
-        control |= SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED;
-    }
-
-    /* Build security descriptor: header, then DACL, owner, group */
-    offset = SD_HEADER_SIZE;
-
-    uint32_t dacl_offset  = 0;
-    uint32_t owner_offset = 0;
-    uint32_t group_offset = 0;
-
-    if (has_dacl) {
-        dacl_offset = offset;
-
-        /* ACL header */
-        sd[offset + 0] = 2; /* revision */
-        sd[offset + 1] = 0; /* reserved */
-        /* acl size (little-endian) */
-        sd[offset + 2] = ACL_UNIX_SIZE & 0xff;
-        sd[offset + 3] = (ACL_UNIX_SIZE >> 8) & 0xff;
-        /* ace count */
-        sd[offset + 4] = 1;
-        sd[offset + 5] = 0;
-        /* reserved */
-        sd[offset + 6] = 0;
-        sd[offset + 7] = 0;
-
-        /* ACE header */
-        sd[offset + 8]  = 0; /* ACCESS_ALLOWED_ACE_TYPE */
-        sd[offset + 9]  = 0; /* flags */
-        sd[offset + 10] = ACE_UNIX_SIZE & 0xff;
-        sd[offset + 11] = (ACE_UNIX_SIZE >> 8) & 0xff;
-        /* access mask (GENERIC_ALL) */
-        sd[offset + 12] = 0;
-        sd[offset + 13] = 0;
-        sd[offset + 14] = 0;
-        sd[offset + 15] = 0x10;
-
-        /* SID S-1-5-88-3-<mode> */
-        write_unix_sid(&sd[offset + 16], 3, mode & 07777);
-
-        offset += ACL_UNIX_SIZE;
-    }
-
-    if (has_owner) {
-        owner_offset = offset;
-        write_unix_sid(&sd[offset], 1, uid);
-        offset += SID_UNIX_SIZE;
-    }
-
-    if (has_group) {
-        group_offset = offset;
-        write_unix_sid(&sd[offset], 2, gid);
-        offset += SID_UNIX_SIZE;
-    }
-
-    sd_len = offset;
-
-    /* Fill in the header */
-    sd[0] = 1; /* revision */
-    sd[1] = 0; /* reserved */
-    sd[2] = control & 0xff;
-    sd[3] = (control >> 8) & 0xff;
-    /* offset_owner */
-    sd[4] = owner_offset & 0xff; sd[5] = (owner_offset >> 8) & 0xff;
-    sd[6] = (owner_offset >> 16) & 0xff; sd[7] = (owner_offset >> 24) & 0xff;
-    /* offset_group */
-    sd[8]  = group_offset & 0xff; sd[9] = (group_offset >> 8) & 0xff;
-    sd[10] = (group_offset >> 16) & 0xff; sd[11] = (group_offset >> 24) & 0xff;
-    /* offset_sacl = 0 */
-    sd[12] = 0; sd[13] = 0; sd[14] = 0; sd[15] = 0;
-    /* offset_dacl */
-    sd[16] = dacl_offset & 0xff; sd[17] = (dacl_offset >> 8) & 0xff;
-    sd[18] = (dacl_offset >> 16) & 0xff; sd[19] = (dacl_offset >> 24) & 0xff;
+    uint32_t sd_len = request->query_info.sec_buf_len;
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_QUERY_INFO_REPLY_SIZE);
     evpl_iovec_cursor_append_uint16(reply_cursor, 64 + 8);
     evpl_iovec_cursor_append_uint32(reply_cursor, sd_len);
-    evpl_iovec_cursor_append_blob_unaligned(reply_cursor, sd, sd_len);
+    evpl_iovec_cursor_append_blob_unaligned(reply_cursor,
+                                            request->query_info.sec_buf, sd_len);
 } /* chimera_smb_query_security_reply */
