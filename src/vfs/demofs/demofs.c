@@ -534,6 +534,21 @@ struct demofs_iq_channel {
 
 #define DEMOFS_IL_MAX_CHANNELS 256
 
+/*
+ * A durably-logged redo record awaiting tail-push.  Holds the record's own
+ * immutable on-log image (iov), so the tail-pusher writes block post-images
+ * to their final locations straight from the log copy — never racing a worker
+ * that re-dirties the live cache block.
+ */
+struct demofs_il_record {
+    uint64_t                 seq;
+    uint64_t                 offset;     /* byte offset in the intent-log region */
+    uint64_t                 reclen;
+    uint32_t                 num_blocks;
+    struct evpl_iovec        iov;
+    struct demofs_il_record *next;
+};
+
 struct demofs_intent_log {
     struct evpl_doorbell      wake_doorbell;
     struct evpl              *evpl;
@@ -546,10 +561,20 @@ struct demofs_intent_log {
     struct demofs_iq_channel *pending_head;
 
     /* Block queues on the intent-log thread's own evpl (one per device),
-     * used to write redo records into the reserved intent-log region. */
+     * used both to write redo records into the intent-log region and to
+     * tail-push logged blocks to their final on-disk locations. */
     struct evpl_block_queue **queue;
     uint64_t                  log_head;          /* next free byte in the intent-log region */
+    uint64_t                  log_tail;          /* oldest un-pushed record (trim point) */
     uint64_t                  log_seq;           /* next redo record sequence number */
+
+    /* Tail-pusher (runs on this thread): FIFO of durably-logged records whose
+    * blocks have not yet been written to their final locations.  Processed
+    * strictly oldest-first so a re-logged block's newest image lands last. */
+    struct demofs_il_record  *push_head;
+    struct demofs_il_record  *push_tail;
+    struct demofs_il_record  *push_cur;          /* record currently being pushed */
+    int                       push_outstanding;  /* home writes in flight for push_cur */
 };
 
 struct demofs_shared {
@@ -3838,8 +3863,158 @@ struct demofs_redo_ctx {
     struct demofs_intent_log *il;
     struct demofs_iq_channel *ch;
     struct demofs_iq_entry    entry;
-    struct evpl_iovec         iov;
+    struct demofs_il_record  *rec;     /* owns the record image (iov) */
 };
+
+/* Per-block home-write completion context for the tail-pusher. */
+struct demofs_push_ctx {
+    struct demofs_intent_log *il;
+    struct evpl_iovec         iov;     /* aligned copy of the block post-image */
+};
+
+/* ------------------------------------------------------------------ */
+/* Tail-pusher: write logged blocks to final locations + trim the log  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Largest contiguous run available for one record (records never wrap the end
+ * of the log region; a short run at the end is simply left unused until the
+ * tail laps it).  The log is empty exactly when no record is pending.
+ */
+static uint64_t
+demofs_il_contig_free(struct demofs_intent_log *il)
+{
+    uint64_t start = SM_INTENT_LOG_OFFSET;
+    uint64_t end   = SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE;
+
+    if (!il->push_head) {
+        return SM_INTENT_LOG_SIZE;
+    }
+    if (il->log_head >= il->log_tail) {
+        uint64_t run_end   = end - il->log_head;
+        uint64_t run_start = il->log_tail - start;
+
+        return run_end > run_start ? run_end : run_start;
+    }
+    return il->log_tail - il->log_head;
+} /* demofs_il_contig_free */
+
+static int
+demofs_il_fits(
+    struct demofs_intent_log *il,
+    uint64_t                  reclen)
+{
+    return demofs_il_contig_free(il) >= reclen;
+} /* demofs_il_fits */
+
+/* Choose the offset for a record of `reclen` bytes and advance log_head. */
+static uint64_t
+demofs_il_place(
+    struct demofs_intent_log *il,
+    uint64_t                  reclen)
+{
+    uint64_t end = SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE;
+    uint64_t offset;
+
+    if (il->log_head + reclen > end) {
+        il->log_head = SM_INTENT_LOG_OFFSET;     /* wrap; tail of region unused */
+    }
+    offset       = il->log_head;
+    il->log_head = offset + reclen;
+    return offset;
+} /* demofs_il_place */
+
+static void demofs_il_push_kick(
+    struct demofs_intent_log *il);
+
+/* One home-write of a logged block completed. */
+static void
+demofs_il_push_block_cb(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct demofs_push_ctx   *pc = private_data;
+    struct demofs_intent_log *il = pc->il;
+
+    chimera_demofs_abort_if(status, "tail-push home write failed: %d", status);
+    evpl_iovec_release(evpl, &pc->iov);
+    free(pc);
+
+    if (--il->push_outstanding == 0) {
+        /* Whole record is durably home; trim past it and advance the tail. */
+        struct demofs_il_record *rec = il->push_cur;
+
+        il->push_cur = NULL;
+        evpl_iovec_release(il->evpl, &rec->iov);
+        free(rec);
+
+        il->log_tail = il->push_head ? il->push_head->offset : il->log_head;
+
+        demofs_il_push_kick(il);
+
+        /* Space freed: re-poke channel processing in case a writer was
+         * blocked on a full log. */
+        evpl_ring_doorbell(&il->wake_doorbell);
+    }
+} /* demofs_il_push_block_cb */
+
+/*
+ * Start pushing the oldest pending record (if idle).  Writes every block's
+ * post-image, copied out of the immutable log record into an aligned iovec,
+ * to its final (device, offset).  Strict oldest-first ordering means a block
+ * re-logged in a later record gets its newest image written last.
+ */
+static void
+demofs_il_push_kick(struct demofs_intent_log *il)
+{
+    struct demofs_il_record         *rec;
+    struct demofs_redo_block_header *bh;
+    char                            *p;
+    uint32_t                         i;
+
+    if (il->push_cur || !il->push_head) {
+        return;
+    }
+
+    rec           = il->push_head;
+    il->push_head = rec->next;
+    if (!il->push_head) {
+        il->push_tail = NULL;
+    }
+    rec->next    = NULL;
+    il->push_cur = rec;
+
+    if (rec->num_blocks == 0) {
+        il->push_cur = NULL;
+        evpl_iovec_release(il->evpl, &rec->iov);
+        free(rec);
+        il->log_tail = il->push_head ? il->push_head->offset : il->log_head;
+        demofs_il_push_kick(il);
+        return;
+    }
+
+    /* Block I/O completes asynchronously, so no completion can fire while we
+     * issue these writes; the last completion trims the record. */
+    il->push_outstanding = rec->num_blocks;
+
+    p = (char *) rec->iov.data + sizeof(struct demofs_redo_header);
+    for (i = 0; i < rec->num_blocks; i++) {
+        struct demofs_push_ctx *pc;
+
+        bh = (struct demofs_redo_block_header *) p;
+        p += sizeof(*bh);
+
+        pc     = malloc(sizeof(*pc));
+        pc->il = il;
+        evpl_iovec_alloc(il->evpl, DEMOFS_BLOCK_SIZE, DEMOFS_BLOCK_SIZE, 1, 0, &pc->iov);
+        memcpy(pc->iov.data, p, DEMOFS_BLOCK_SIZE);
+        p += DEMOFS_BLOCK_SIZE;
+
+        evpl_block_write(il->evpl, il->queue[bh->device_id], &pc->iov, 1,
+                         bh->device_offset, 1 /* sync */, demofs_il_push_block_cb, pc);
+    }
+} /* demofs_il_push_kick */
 
 /*
  * Runs on the intent-log thread when a redo record has been written
@@ -3856,9 +4031,11 @@ demofs_redo_write_cb(
     struct demofs_redo_ctx   *ctx = private_data;
     struct demofs_iq_channel *ch  = ctx->ch;
     struct demofs_intent_log *il  = ctx->il;
+    struct demofs_il_record  *rec = ctx->rec;
     uint32_t                  cq_tail;
 
     (void) evpl;
+    chimera_demofs_abort_if(status, "redo record write failed: %d", status);
 
     demofs_txn_unpin_blocks(ctx->entry.txn, DEMOFS_BLOCK_LOGGED);
     demofs_txn_unlock_all(ctx->entry.txn);
@@ -3871,9 +4048,19 @@ demofs_redo_write_cb(
 
     ch->cq_inflight--;
 
-    evpl_iovec_release(il->evpl, &ctx->iov);
+    /* The record (which owns its on-log image) is now durable; queue it for
+     * the tail-pusher.  Its iovec stays in place -- never struct-copied. */
+    rec->next = NULL;
+    if (il->push_tail) {
+        il->push_tail->next = rec;
+    } else {
+        il->push_head = rec;
+    }
+    il->push_tail = rec;
+
     free(ctx);
 
+    demofs_il_push_kick(il);
     evpl_ring_doorbell(&ch->cq_doorbell);
 } /* demofs_redo_write_cb */
 
@@ -3890,6 +4077,7 @@ demofs_il_write_redo(
     struct demofs_txn               *txn = entry->txn;
     struct demofs_txn_block         *tb;
     struct demofs_redo_ctx          *ctx;
+    struct demofs_il_record         *rec;
     struct demofs_redo_header       *hdr;
     struct demofs_redo_block_header *bh;
     uint32_t                         nblocks = 0;
@@ -3905,22 +4093,27 @@ demofs_il_write_redo(
         (uint64_t) nblocks * (sizeof(struct demofs_redo_block_header) + DEMOFS_BLOCK_SIZE);
     reclen = (reclen + DEMOFS_BLOCK_SIZE - 1) & ~((uint64_t) DEMOFS_BLOCK_SIZE - 1);
 
-    /* Circular region; no tail/checkpoint yet, so just wrap and overwrite. */
-    if (il->log_head + reclen > SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE) {
-        il->log_head = SM_INTENT_LOG_OFFSET;
-    }
-    offset        = il->log_head;
-    il->log_head += reclen;
+    /* Caller guarantees space (demofs_iq_process_channel checks demofs_il_fits
+     * before consuming the SQ entry), so placement always succeeds. */
+    offset = demofs_il_place(il, reclen);
+
+    rec             = malloc(sizeof(*rec));
+    rec->seq        = il->log_seq;
+    rec->offset     = offset;
+    rec->reclen     = reclen;
+    rec->num_blocks = nblocks;
+    rec->next       = NULL;
+
+    niov = evpl_iovec_alloc(il->evpl, reclen, DEMOFS_BLOCK_SIZE, 1, 0, &rec->iov);
+    chimera_demofs_abort_if(niov != 1, "redo record did not fit in one iovec (%d)", niov);
 
     ctx        = malloc(sizeof(*ctx));
     ctx->il    = il;
     ctx->ch    = ch;
     ctx->entry = *entry;
+    ctx->rec   = rec;
 
-    niov = evpl_iovec_alloc(il->evpl, reclen, DEMOFS_BLOCK_SIZE, 1, 0, &ctx->iov);
-    chimera_demofs_abort_if(niov != 1, "redo record did not fit in one iovec (%d)", niov);
-
-    p               = ctx->iov.data;
+    p               = (char *) rec->iov.data;
     hdr             = (struct demofs_redo_header *) p;
     hdr->magic      = DEMOFS_REDO_MAGIC;
     hdr->seq        = il->log_seq++;
@@ -3944,9 +4137,25 @@ demofs_il_write_redo(
     ch->cq_inflight++;
 
     evpl_block_write(il->evpl, il->queue[SM_INTENT_LOG_DEVICE],
-                     &ctx->iov, 1, offset, 1 /* sync */,
+                     &rec->iov, 1, offset, 1 /* sync */,
                      demofs_redo_write_cb, ctx);
 } /* demofs_il_write_redo */
+
+/* Padded on-log length of the redo record for one transaction. */
+static uint64_t
+demofs_il_txn_reclen(struct demofs_txn *txn)
+{
+    struct demofs_txn_block *tb;
+    uint32_t                 nblocks = 0;
+    uint64_t                 reclen;
+
+    for (tb = txn->blocks; tb; tb = tb->next) {
+        nblocks++;
+    }
+    reclen = sizeof(struct demofs_redo_header) +
+        (uint64_t) nblocks * (sizeof(struct demofs_redo_block_header) + DEMOFS_BLOCK_SIZE);
+    return (reclen + DEMOFS_BLOCK_SIZE - 1) & ~((uint64_t) DEMOFS_BLOCK_SIZE - 1);
+} /* demofs_il_txn_reclen */
 
 static void
 demofs_iq_process_channel(struct demofs_iq_channel *ch)
@@ -3957,8 +4166,9 @@ demofs_iq_process_channel(struct demofs_iq_channel *ch)
     int                       issued  = 0;
 
     while (sq_head != sq_tail) {
-        struct demofs_iq_entry entry;
-        uint32_t               cq_tail, cq_head;
+        struct demofs_iq_entry *slot = &ch->sq.entries[sq_head & DEMOFS_IQ_RING_MASK];
+        struct demofs_iq_entry  entry;
+        uint32_t                cq_tail, cq_head;
 
         cq_tail = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
         cq_head = __atomic_load_n(&ch->cq.head, __ATOMIC_ACQUIRE);
@@ -3970,7 +4180,13 @@ demofs_iq_process_channel(struct demofs_iq_channel *ch)
             break;
         }
 
-        entry = ch->sq.entries[sq_head & DEMOFS_IQ_RING_MASK];
+        /* Back off if the log lacks room for this record; the tail-pusher
+         * rings the wake doorbell once it frees space. */
+        if (!demofs_il_fits(il, demofs_il_txn_reclen(slot->txn))) {
+            break;
+        }
+
+        entry = *slot;
         sq_head++;
         entry.status = 0;
 
@@ -4086,11 +4302,16 @@ demofs_intent_log_thread_init(
     struct demofs_shared     *shared = container_of(il, struct demofs_shared, intent_log);
     int                       i;
 
-    il->evpl     = evpl;
-    il->log_head = SM_INTENT_LOG_OFFSET;
-    il->log_seq  = 0;
+    il->evpl             = evpl;
+    il->log_head         = SM_INTENT_LOG_OFFSET;
+    il->log_tail         = SM_INTENT_LOG_OFFSET;
+    il->log_seq          = 0;
+    il->push_head        = NULL;
+    il->push_tail        = NULL;
+    il->push_cur         = NULL;
+    il->push_outstanding = 0;
 
-    /* Open block queues on this thread's evpl for redo-record writes. */
+    /* Open block queues on this thread's evpl for redo writes + tail-push. */
     il->queue = calloc(shared->num_devices, sizeof(*il->queue));
     for (i = 0; i < shared->num_devices; i++) {
         il->queue[i] = evpl_block_open_queue(evpl, shared->devices[i].bdev);
@@ -4114,6 +4335,21 @@ demofs_intent_log_thread_shutdown(
      * threads, which freed their channels.  Just drop the doorbell and
      * close our block queues. */
     evpl_remove_doorbell(evpl, &il->wake_doorbell);
+
+    /* Drop any records still awaiting tail-push.  Their block images remain
+     * durable in the intent log, so a future mount recovers them by replay
+     * (the data isn't lost; it just hasn't reached its home location). */
+    if (il->push_cur) {
+        evpl_iovec_release(evpl, &il->push_cur->iov);
+        free(il->push_cur);
+        il->push_cur = NULL;
+    }
+    while (il->push_head) {
+        struct demofs_il_record *rec = il->push_head;
+        il->push_head = rec->next;
+        evpl_iovec_release(evpl, &rec->iov);
+        free(rec);
+    }
 
     for (i = 0; i < shared->num_devices; i++) {
         evpl_block_close_queue(evpl, il->queue[i]);
