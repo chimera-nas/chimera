@@ -38,14 +38,52 @@ enum nfs4_slot_state {
 #define NFS4_REPLAY_ACTION_NEW        1
 #define NFS4_REPLAY_ACTION_FROM_CACHE 2
 
+/*
+ * Per-slot state lives in a single atomic word so the SEQUENCE hot path needs
+ * no per-session lock: bits [1:0] hold enum nfs4_slot_state, bits [33:2] hold
+ * the 32-bit seqid (the in-flight seqid while IN_PROGRESS, otherwise the last
+ * completed seqid).  calloc() zero-init == (seqid 0, NFS4_SLOT_UNUSED).
+ *
+ * Distinct slots are independent (RFC 5661: a client has at most one
+ * outstanding request per slot id), so concurrent SEQUENCEs touch different
+ * words and never contend.  The only same-slot race is a retransmit arriving on
+ * another connection/thread; it is arbitrated by the CAS in
+ * nfs4_replay_slot_acquire.  cached_buf/cached_len are written by the (rare)
+ * cachethis capture path on the owning thread and published via the release
+ * store in nfs4_replay_slot_finalize.
+ */
 struct nfs4_replay_slot {
-    uint32_t seqid;                    /* last completed seqid (in CACHED/COMPLETED) */
-    uint32_t inflight_seqid; /* seqid being processed when IN_PROGRESS */
-    uint8_t  state;                    /* enum nfs4_slot_state */
-    uint8_t  cachethis;      /* sa_cachethis from current inflight */
-    uint32_t cached_len;     /* bytes in cached_buf (CACHED only) */
-    void    *cached_buf;     /* RPC reply (header+body); malloc'd */
+    _Atomic uint64_t state_word;       /* (seqid << NFS4_SLOT_SEQID_SHIFT) | state */
+    uint32_t         cached_len;       /* bytes in cached_buf (CACHED only) */
+    void            *cached_buf;       /* RPC reply (header+body); malloc'd */
 };
+
+#define NFS4_SLOT_STATE_MASK  0x3u
+#define NFS4_SLOT_SEQID_SHIFT 2
+
+static inline uint64_t
+nfs4_slot_word(
+    uint32_t             seqid,
+    enum nfs4_slot_state state)
+{
+    return ((uint64_t) seqid << NFS4_SLOT_SEQID_SHIFT) | (uint64_t) state;
+} /* nfs4_slot_word */
+
+static inline enum nfs4_slot_state
+nfs4_slot_state(struct nfs4_replay_slot *slot)
+{
+    return (enum nfs4_slot_state) (atomic_load_explicit(&slot->state_word,
+                                                        memory_order_acquire) &
+                                   NFS4_SLOT_STATE_MASK);
+} /* nfs4_slot_state */
+
+static inline uint32_t
+nfs4_slot_seqid(struct nfs4_replay_slot *slot)
+{
+    return (uint32_t) (atomic_load_explicit(&slot->state_word,
+                                            memory_order_acquire) >>
+                       NFS4_SLOT_SEQID_SHIFT);
+} /* nfs4_slot_seqid */
 
 /* Magic stored in nfs4_session.magic so that a connection's private_data
  * (which may hold either an nlm_client* or an nfs4_session*) can be safely
@@ -82,10 +120,6 @@ struct nfs4_session {
     _Atomic bool             destroyed;
     uint8_t                  nfs4_session_id[NFS4_SESSIONID_SIZE];
     uint64_t                 nfs4_session_clientid;
-    /* Guards mutable session-level state: the 4.1 replay slot table and
-     * its byte accounting.  Stateid lookups don't need this -- they go
-     * through the per-shard rwlocks in nfs_state_table. */
-    pthread_mutex_t          nfs4_session_lock;
     uint32_t                 nfs4_session_implicit;
     struct nfs4_client      *nfs4_session_client;
     struct channel_attrs4    nfs4_session_fore_attrs;
@@ -98,7 +132,7 @@ struct nfs4_session {
      * sessions (4.0 SETCLIENTID path) leave replay_max_slots = 0. */
     uint32_t                 replay_max_slots;
     uint32_t                 replay_maxresp_cached;
-    size_t                   replay_bytes_in_use;
+    _Atomic size_t           replay_bytes_in_use;
     struct nfs4_replay_slot *replay_slots;
     struct UT_hash_handle    nfs4_session_hh;
 };

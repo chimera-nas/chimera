@@ -267,15 +267,13 @@ nfs4_create_session(
         session->nfs4_session_implicit = implicit;
         session->nfs4_session_clientid = client_id;
 
-        pthread_mutex_init(&session->nfs4_session_lock, NULL);
-
         /* NFS4.1 SEQUENCE replay cache slot table.  Implicit (NFS4.0)
          * sessions get zero slots -- v4.0 uses per-owner replay caches in
          * nfs_open_owner / nfs_lock_owner instead. */
         session->replay_max_slots      = implicit ? 0 : replay_max_slots;
         session->replay_maxresp_cached = replay_maxresp_cached;
-        session->replay_bytes_in_use   = 0;
-        session->replay_slots          = NULL;
+        atomic_init(&session->replay_bytes_in_use, 0);
+        session->replay_slots = NULL;
 
         if (session->replay_max_slots) {
             session->replay_slots = calloc(session->replay_max_slots,
@@ -457,7 +455,6 @@ nfs4_session_put(struct nfs4_session *session)
             free(session->replay_slots);
             session->replay_slots = NULL;
         }
-        pthread_mutex_destroy(&session->nfs4_session_lock);
         session->magic = 0;
         free(session);
     }
@@ -547,6 +544,8 @@ nfs4_replay_capture_reply(
     struct nfs4_replay_slot *slot    = req->replay_slot;
     uint8_t                 *buf;
     size_t                   offset = 0;
+    size_t                   total  = (size_t) total_length;
+    size_t                   cur;
     int                      i;
 
     if (!slot || !session || total_length <= 0) {
@@ -557,17 +556,23 @@ nfs4_replay_capture_reply(
         return;
     }
 
-    pthread_mutex_lock(&session->nfs4_session_lock);
-
-    if (session->replay_bytes_in_use + (size_t) total_length >
-        NFS4_MAX_REPLY_CACHE_BYTES) {
-        pthread_mutex_unlock(&session->nfs4_session_lock);
-        return;
-    }
+    /* Reserve against the per-session byte cap with a CAS loop -- no lock.
+     * The slot is IN_PROGRESS for this (owning) thread, so no other thread
+     * touches slot->cached_buf concurrently; only the session-wide counter is
+     * shared. */
+    cur = atomic_load_explicit(&session->replay_bytes_in_use, memory_order_relaxed);
+    do {
+        if (cur + total > NFS4_MAX_REPLY_CACHE_BYTES) {
+            return;  /* demote: over the per-session cap */
+        }
+    } while (!atomic_compare_exchange_weak_explicit(
+                 &session->replay_bytes_in_use, &cur, cur + total,
+                 memory_order_relaxed, memory_order_relaxed));
 
     buf = malloc(total_length);
     if (!buf) {
-        pthread_mutex_unlock(&session->nfs4_session_lock);
+        atomic_fetch_sub_explicit(&session->replay_bytes_in_use, total,
+                                  memory_order_relaxed);
         return;
     }
 
@@ -579,20 +584,18 @@ nfs4_replay_capture_reply(
         offset += iov[i].length;
     }
 
-    slot->cached_buf              = buf;
-    slot->cached_len              = total_length;
-    session->replay_bytes_in_use += total_length;
+    /* Same thread runs finalize next, which release-publishes these via the
+     * state_word store -- a later reader that observes CACHED sees them. */
+    slot->cached_buf = buf;
+    slot->cached_len = total_length;
 
-    pthread_mutex_unlock(&session->nfs4_session_lock);
-
-    /* Update gauge after dropping the session lock. */
     nfs4_replay_bytes_delta(req, total_length);
 } /* nfs4_replay_capture_reply */
 
 /*
  * Install the capture callback on the encoding so it fires from inside
- * the next send_reply call.  Caller already holds the session lock and
- * has set req->replay_slot. */
+ * the next send_reply call.  Caller has won the slot transition and set
+ * req->replay_slot. */
 static inline void
 nfs4_replay_arm_capture(struct nfs_request *req)
 {
@@ -624,10 +627,17 @@ nfs4_replay_slot_acquire(
 
     slot = &session->replay_slots[slotid];
 
-    pthread_mutex_lock(&session->nfs4_session_lock);
+    /* Lock-free state machine.  Distinct slots never collide; the CAS only
+     * ever actually contends on a same-slot retransmit racing the original
+     * (possibly on another connection).  Losers re-read and observe
+     * IN_PROGRESS -> RETRY_UNCACHED_REP, exactly as the old lock produced. */
+    for ( ;; ) {
+        uint64_t             cur = atomic_load_explicit(&slot->state_word,
+                                                        memory_order_acquire);
+        enum nfs4_slot_state state = (enum nfs4_slot_state) (cur & NFS4_SLOT_STATE_MASK);
+        uint32_t             cseq  = (uint32_t) (cur >> NFS4_SLOT_SEQID_SHIFT);
 
-    switch (slot->state) {
-        case NFS4_SLOT_UNUSED:
+        if (state == NFS4_SLOT_UNUSED) {
             /* First-ever use.  RFC 5661 sets csr_sequence = 1 at
              * CREATE_SESSION; the client's first SEQUENCE on a slot must
              * therefore use seqid = 1. */
@@ -635,42 +645,48 @@ nfs4_replay_slot_acquire(
                 status = NFS4ERR_SEQ_MISORDERED;
                 break;
             }
-            slot->state          = NFS4_SLOT_IN_PROGRESS;
-            slot->inflight_seqid = seqid;
-            slot->cachethis      = cachethis ? 1 : 0;
-            req->replay_slot     = slot;
-            req->replay_slot_id  = slotid;
-            req->replay_action   = NFS4_REPLAY_ACTION_NEW;
+            if (!atomic_compare_exchange_weak_explicit(
+                    &slot->state_word, &cur,
+                    nfs4_slot_word(seqid, NFS4_SLOT_IN_PROGRESS),
+                    memory_order_acq_rel, memory_order_acquire)) {
+                continue;  /* lost the race; re-read and re-evaluate */
+            }
+            req->replay_slot    = slot;
+            req->replay_slot_id = slotid;
+            req->replay_action  = NFS4_REPLAY_ACTION_NEW;
             if (cachethis) {
                 nfs4_replay_arm_capture(req);
             }
             break;
-
-        case NFS4_SLOT_CACHED:
-        case NFS4_SLOT_COMPLETED:
-            if (seqid == (uint32_t) (slot->seqid + 1)) {
-                /* Normal advance.  Drop any prior cached reply -- the
-                 * client has acknowledged it by moving on. */
-                if (slot->state == NFS4_SLOT_CACHED &&
-                    slot->cached_buf) {
-                    freed_bytes                   = slot->cached_len;
-                    session->replay_bytes_in_use -= slot->cached_len;
+        } else if (state == NFS4_SLOT_CACHED || state == NFS4_SLOT_COMPLETED) {
+            if (seqid == (uint32_t) (cseq + 1)) {
+                /* Normal advance. */
+                if (!atomic_compare_exchange_weak_explicit(
+                        &slot->state_word, &cur,
+                        nfs4_slot_word(seqid, NFS4_SLOT_IN_PROGRESS),
+                        memory_order_acq_rel, memory_order_acquire)) {
+                    continue;
+                }
+                /* We won the transition; reclaim any prior cached reply -- the
+                 * client acknowledged it by moving on.  Only the CAS winner
+                 * reaches here, so the free is unraced. */
+                if (state == NFS4_SLOT_CACHED && slot->cached_buf) {
+                    freed_bytes = slot->cached_len;
                     free(slot->cached_buf);
                     slot->cached_buf = NULL;
                     slot->cached_len = 0;
+                    atomic_fetch_sub_explicit(&session->replay_bytes_in_use,
+                                              freed_bytes, memory_order_relaxed);
                 }
-                slot->state          = NFS4_SLOT_IN_PROGRESS;
-                slot->inflight_seqid = seqid;
-                slot->cachethis      = cachethis ? 1 : 0;
-                req->replay_slot     = slot;
-                req->replay_slot_id  = slotid;
-                req->replay_action   = NFS4_REPLAY_ACTION_NEW;
+                req->replay_slot    = slot;
+                req->replay_slot_id = slotid;
+                req->replay_action  = NFS4_REPLAY_ACTION_NEW;
                 if (cachethis) {
                     nfs4_replay_arm_capture(req);
                 }
-            } else if (seqid == slot->seqid) {
+            } else if (seqid == cseq) {
                 /* Retransmit. */
-                if (slot->state == NFS4_SLOT_CACHED && slot->cached_buf) {
+                if (state == NFS4_SLOT_CACHED && slot->cached_buf) {
                     req->replay_slot    = slot;
                     req->replay_slot_id = slotid;
                     req->replay_action  = NFS4_REPLAY_ACTION_FROM_CACHE;
@@ -684,26 +700,20 @@ nfs4_replay_slot_acquire(
                 status = NFS4ERR_SEQ_MISORDERED;
             }
             break;
-
-        case NFS4_SLOT_IN_PROGRESS:
+        } else { /* NFS4_SLOT_IN_PROGRESS */
             /* Original compound is still running.  Whether seqid matches
              * (true retry) or not (client jumped ahead), we cannot
              * produce a reply yet.  Both paths return errors. */
-            if (seqid == slot->inflight_seqid) {
+            if (seqid == cseq) {
                 status = NFS4ERR_RETRY_UNCACHED_REP;
             } else {
                 status = NFS4ERR_SEQ_MISORDERED;
             }
             break;
+        }
+    } /* for */
 
-        default:
-            status = NFS4ERR_SERVERFAULT;
-            break;
-    } /* switch */
-
-    pthread_mutex_unlock(&session->nfs4_session_lock);
-
-    /* Update metrics outside the session lock to avoid serializing the
+    /* Update metrics outside the hot path to avoid serializing the
      * shared prometheus counters on per-session traffic. */
     if (freed_bytes) {
         nfs4_replay_bytes_delta(req, -(int64_t) freed_bytes);
@@ -723,6 +733,7 @@ nfs4_replay_slot_finalize(struct nfs_request *req)
 {
     struct nfs4_session     *session = req->session;
     struct nfs4_replay_slot *slot    = req->replay_slot;
+    uint64_t                 cur;
 
     if (!slot || !session) {
         return;
@@ -739,23 +750,21 @@ nfs4_replay_slot_finalize(struct nfs_request *req)
         return;
     }
 
-    pthread_mutex_lock(&session->nfs4_session_lock);
-
-    /* If the capture callback successfully copied bytes into the slot,
-     * transition to CACHED so a retransmit can replay.  Otherwise (no
-     * cachethis, or demoted for size) transition to COMPLETED -- a
-     * retransmit will get NFS4ERR_RETRY_UNCACHED_REP. */
-    if (slot->state == NFS4_SLOT_IN_PROGRESS) {
-        slot->seqid          = slot->inflight_seqid;
-        slot->inflight_seqid = 0;
-        if (slot->cached_buf) {
-            slot->state = NFS4_SLOT_CACHED;
-        } else {
-            slot->state = NFS4_SLOT_COMPLETED;
-        }
+    /* Runs on the same thread that won the acquire; while IN_PROGRESS no other
+     * thread writes the word (retransmits only read it and error out), so a
+     * plain load + release store is sufficient.  The release pairs with the
+     * acquire load in nfs4_replay_slot_acquire so a reader that observes CACHED
+     * also observes cached_buf/cached_len written by the capture callback.
+     * The seqid is unchanged -- it was set to the in-flight value at acquire. */
+    cur = atomic_load_explicit(&slot->state_word, memory_order_relaxed);
+    if ((cur & NFS4_SLOT_STATE_MASK) == NFS4_SLOT_IN_PROGRESS) {
+        enum nfs4_slot_state new_state = slot->cached_buf ?
+            NFS4_SLOT_CACHED : NFS4_SLOT_COMPLETED;
+        atomic_store_explicit(&slot->state_word,
+                              nfs4_slot_word((uint32_t) (cur >> NFS4_SLOT_SEQID_SHIFT),
+                                             new_state),
+                              memory_order_release);
     }
-
-    pthread_mutex_unlock(&session->nfs4_session_lock);
 
     req->replay_slot = NULL;
 } /* nfs4_replay_slot_finalize */
