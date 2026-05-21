@@ -374,6 +374,20 @@ void
 chimera_vfs_lease_revoke(
     struct chimera_vfs_lease *lease);
 
+/* Recall (begin_break) every caching lease held on the file identified by
+ * `fh`, regardless of owner.  Used by namespace/metadata operations (REMOVE,
+ * RENAME, LINK, SETATTR) that must invalidate a delegation/oplock before
+ * proceeding.  Returns true if any caching lease is still present (the caller
+ * should fail the op with a retryable error, e.g. NFS4ERR_DELAY, and retry
+ * once the holders return); false if the file has no caching lease and the
+ * op may proceed. */
+bool
+chimera_vfs_state_break_caching(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash);
+
 /* -------------------------------------------------------------------- */
 /* I/O hook                                                             */
 /* -------------------------------------------------------------------- */

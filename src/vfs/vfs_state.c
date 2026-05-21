@@ -957,6 +957,60 @@ chimera_vfs_lease_revoke(struct chimera_vfs_lease *lease)
     }
 } /* chimera_vfs_lease_revoke */
 
+SYMBOL_EXPORT bool
+chimera_vfs_state_break_caching(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash)
+{
+    struct chimera_vfs_file_state *file;
+    bool                           had;
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return false;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    had = (file->caching_leases != NULL);
+    pthread_mutex_unlock(&file->lock);
+
+    if (!had) {
+        chimera_vfs_state_put(state, file);
+        return false;
+    }
+
+    /* Break every still-IDLE caching lease.  begin_break flips each to
+     * BREAKING (idempotent), so re-scanning returns the next IDLE one until
+     * none remain.  Holders that have already started breaking are left to
+     * complete; the non-empty caching_leases list keeps `had` true so the
+     * caller retries until every holder has returned. */
+    for ( ; ; ) {
+        struct chimera_vfs_lease *cur;
+        struct chimera_vfs_lease *target = NULL;
+
+        pthread_mutex_lock(&file->lock);
+        for (cur = file->caching_leases; cur; cur = cur->next) {
+            if (cur->owner.break_cb &&
+                cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
+                target = cur;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&file->lock);
+
+        if (!target) {
+            break;
+        }
+        chimera_vfs_lease_begin_break(state, target,
+                                      target->mode.granted, 0);
+    }
+
+    chimera_vfs_state_put(state, file);
+    return true;
+} /* chimera_vfs_state_break_caching */
+
 /* -------------------------------------------------------------------- */
 /* I/O hook (no-op for Stage A)                                         */
 /* -------------------------------------------------------------------- */
