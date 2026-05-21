@@ -197,6 +197,40 @@ chimera_smb_create_gen_open_file(
 
         result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                               &open_file->share_lease, &conflict);
+
+        /* A new open that conflicts with a *disconnected* durable handle must
+         * not be refused: MS-SMB2 has the disconnected (non-persistent) handle
+         * yield.  The conflict may be the parked open's share reservation
+         * (DENIED) or its HANDLE-caching lease that the share acquire must break
+         * (BREAKING).  Resolve the conflicting lease back to its owning open and,
+         * if that open is a parked durable, purge it and retry.  Live,
+         * persistent, and non-durable holders are left intact, so they still
+         * produce a real SHARING_VIOLATION.  Bounded by the parked-owner count. */
+        int purge_guard = 64;
+        while (result != CHIMERA_VFS_LEASE_GRANTED && conflict && purge_guard-- > 0) {
+            uint64_t conflict_pid;
+
+            if (conflict->kind == CHIMERA_VFS_LEASE_SHARE) {
+                /* Share reservation: owner_lo carries the open's persistent id. */
+                conflict_pid = conflict->owner.owner_lo;
+            } else if (conflict->kind == CHIMERA_VFS_LEASE_CACHING &&
+                       conflict->owner.cb_private) {
+                /* Caching lease: owner_lo is the lease key, but cb_private points
+                 * at the owning open_file (set in the lease-grant block). */
+                conflict_pid = ((struct chimera_smb_open_file *)
+                                conflict->owner.cb_private)->file_id.pid;
+            } else {
+                break;
+            }
+
+            if (!chimera_smb_durable_purge_parked(thread, conflict_pid)) {
+                break;
+            }
+            conflict = NULL;
+            result   = chimera_vfs_state_try_insert(vfs_state, file_state,
+                                                    &open_file->share_lease, &conflict);
+        }
+
         if (result != CHIMERA_VFS_LEASE_GRANTED) {
             chimera_vfs_state_put(vfs_state, file_state);
             open_file->handle = NULL;

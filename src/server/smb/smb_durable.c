@@ -160,6 +160,48 @@ chimera_smb_durable_forget(
     }
 } /* chimera_smb_durable_forget */
 
+/* Purge a parked (disconnected) *durable* open by persistent id when a new,
+ * conflicting open arrives: MS-SMB2 has the disconnected handle yield.  Tears
+ * down its leases / share reservation / byte-range locks and VFS handle (the
+ * same teardown the grace-timer sweeper does).  Returns true iff a matching
+ * parked entry was found and purged.
+ *
+ * Persistent handles are deliberately excluded: they outrank a conflicting
+ * fresh open (a different client must reclaim via CreateGuid, not displace),
+ * and their teardown also issues an async backend KV-record delete that cannot
+ * complete while the event loop is blocked here in the CREATE dispatch. */
+SYMBOL_EXPORT bool
+chimera_smb_durable_purge_parked(
+    struct chimera_server_smb_thread *thread,
+    uint64_t                          persistent_id)
+{
+    struct chimera_server_smb_shared *shared = thread->shared;
+    struct chimera_smb_durable_entry *entry;
+    struct chimera_smb_open_file     *open_file = NULL;
+
+    pthread_mutex_lock(&shared->durable.lock);
+    HASH_FIND(hh, shared->durable.by_pid, &persistent_id, sizeof(persistent_id), entry);
+    if (entry && entry->parked && !entry->persistent && !entry->cold &&
+        entry->open_file) {
+        HASH_DELETE(hh, shared->durable.by_pid, entry);
+        open_file = entry->open_file;
+        free(entry);
+    }
+    pthread_mutex_unlock(&shared->durable.lock);
+
+    if (!open_file) {
+        return false;
+    }
+
+    chimera_smb_open_file_drain_locks(thread, open_file);
+    if (open_file->handle) {
+        chimera_vfs_release(thread->vfs_thread, open_file->handle);
+        open_file->handle = NULL;
+    }
+    chimera_smb_open_file_free(thread, open_file);
+    return true;
+} /* chimera_smb_durable_purge_parked */
+
 SYMBOL_EXPORT void
 chimera_smb_durable_park(
     struct chimera_server_smb_shared *shared,

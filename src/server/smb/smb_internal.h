@@ -758,6 +758,14 @@ void
 chimera_smb_durable_sweep(
     struct chimera_server_smb_thread *thread);
 
+/* Purge a parked (disconnected) durable open by persistent id when a new
+ * conflicting open arrives.  Returns true iff found+purged.  No-op for live,
+ * persistent, cold, or unknown ids. */
+bool
+chimera_smb_durable_purge_parked(
+    struct chimera_server_smb_thread *thread,
+    uint64_t                          persistent_id);
+
 /* Scan a share's backend (routed via `fh`) for persisted handle records and
  * rebuild cold registry entries.  Best-effort, idempotent. */
 void
