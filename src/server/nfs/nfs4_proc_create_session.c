@@ -6,6 +6,17 @@
 #include "nfs4_session.h"
 #include "server/server.h"
 
+/* Flag bits a client may set in csa_flags (RFC 8881 §18.36.3). */
+#define NFS4_CS_VALID_FLAGS                                  \
+        (CREATE_SESSION4_FLAG_PERSIST |                          \
+         CREATE_SESSION4_FLAG_CONN_BACK_CHAN |                   \
+         CREATE_SESSION4_FLAG_CONN_RDMA)
+
+/* Smallest ca_maxrequestsize / ca_maxresponsesize that could ever carry a
+ * request/reply (a bare SEQUENCE op plus COMPOUND framing).  Below this the
+ * server returns NFS4ERR_TOOSMALL per RFC 8881 §18.36.3. */
+#define NFS4_CS_MIN_CHAN_SIZE 64u
+
 void
 chimera_nfs4_create_session(
     struct chimera_server_nfs_thread *thread,
@@ -18,14 +29,97 @@ chimera_nfs4_create_session(
     struct CREATE_SESSION4args       *args   = &argop->opcreate_session;
     struct CREATE_SESSION4res        *res    = &resop->opcreate_session;
     struct nfs4_session              *session;
+    struct nfs4_client_principal      principal;
+    struct nfs4_cs_classify           cs;
     struct channel_attrs4             clamped_fore;
     uint32_t                          flags = 0;
     uint32_t                          replay_max_slots;
     uint32_t                          replay_maxresp_cached;
     uint32_t                          server_max_slots;
 
+    /* RFC 8881 §18.36.3: outside a session CREATE_SESSION must be the only op. */
+    if (!req->seen_sequence && req->args_compound->num_argarray != 1) {
+        res->csr_status = NFS4ERR_NOT_ONLY_OP;
+        chimera_nfs4_compound_complete(req, res->csr_status);
+        return;
+    }
+
+    /* Undefined csa_flags bits are rejected. */
+    if (args->csa_flags & ~NFS4_CS_VALID_FLAGS) {
+        res->csr_status = NFS4ERR_INVAL;
+        chimera_nfs4_compound_complete(req, res->csr_status);
+        return;
+    }
+
+    /* ca_rdma_ird is XDR array<1>; more than one element is malformed. */
+    if (args->csa_fore_chan_attrs.num_ca_rdma_ird > 1 ||
+        args->csa_back_chan_attrs.num_ca_rdma_ird > 1) {
+        res->csr_status = NFS4ERR_BADXDR;
+        chimera_nfs4_compound_complete(req, res->csr_status);
+        return;
+    }
+
+    /* A maxrequestsize/maxresponsesize too small to ever carry a
+     * request/reply is NFS4ERR_TOOSMALL. */
+    if (args->csa_fore_chan_attrs.ca_maxresponsesize < NFS4_CS_MIN_CHAN_SIZE ||
+        args->csa_back_chan_attrs.ca_maxresponsesize < NFS4_CS_MIN_CHAN_SIZE ||
+        args->csa_fore_chan_attrs.ca_maxrequestsize < NFS4_CS_MIN_CHAN_SIZE ||
+        args->csa_back_chan_attrs.ca_maxrequestsize < NFS4_CS_MIN_CHAN_SIZE) {
+        res->csr_status = NFS4ERR_TOOSMALL;
+        chimera_nfs4_compound_complete(req, res->csr_status);
+        return;
+    }
+
     if (args->csa_flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) {
         flags |= CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
+    }
+
+    /* RFC 8881 §18.36.4 sequencing + reply cache. */
+    principal.flavor          = req->principal_flavor;
+    principal.uid             = req->principal_uid;
+    principal.gid             = req->principal_gid;
+    principal.machinename     = req->principal_machinename;
+    principal.machinename_len = req->principal_machinename_len;
+
+    nfs4_client_create_session_classify(&shared->nfs4_shared_clients,
+                                        args->csa_clientid,
+                                        args->csa_sequence,
+                                        &principal,
+                                        &cs);
+
+    if (cs.action == NFS4_CS_ERROR) {
+        res->csr_status = cs.status;
+        chimera_nfs4_compound_complete(req, cs.status);
+        return;
+    }
+
+    if (cs.action == NFS4_CS_REPLAY) {
+        res->csr_status = cs.status;
+        if (cs.status == NFS4_OK) {
+            memcpy(res->csr_resok4.csr_sessionid, cs.sessionid,
+                   sizeof(res->csr_resok4.csr_sessionid));
+            res->csr_resok4.csr_sequence        = cs.sequence;
+            res->csr_resok4.csr_flags           = cs.flags;
+            res->csr_resok4.csr_fore_chan_attrs = cs.fore;
+            res->csr_resok4.csr_back_chan_attrs = cs.back;
+        }
+        chimera_nfs4_compound_complete(req, cs.status);
+        return;
+    }
+
+    /* NFS4_CS_NEW.  RFC 8881 §18.36.3: an as-yet-unconfirmed record may only be
+     * confirmed by the same principal that created it (EXCHANGE_ID); a
+     * different principal is a collision.  Cache the error so a retransmit
+     * replays it. */
+    if (!cs.confirmed && !cs.principal_ok) {
+        res->csr_status = NFS4ERR_CLID_INUSE;
+        nfs4_client_create_session_cache(&shared->nfs4_shared_clients,
+                                         args->csa_clientid,
+                                         args->csa_sequence,
+                                         NFS4ERR_CLID_INUSE,
+                                         NULL, 0, 0, NULL, NULL);
+        chimera_nfs4_compound_complete(req, res->csr_status);
+        return;
     }
 
     /* RFC 5661 18.36.4: the server may negotiate ca_maxrequests and
@@ -90,11 +184,23 @@ chimera_nfs4_create_session(
 
     res->csr_status = NFS4_OK;
     memcpy(res->csr_resok4.csr_sessionid, session->nfs4_session_id, sizeof(res->csr_resok4.csr_sessionid));
-    res->csr_resok4.csr_sequence = 1;
+    /* RFC 8881 §18.36.4: csr_sequence MUST equal the request's csa_sequence. */
+    res->csr_resok4.csr_sequence = args->csa_sequence;
     res->csr_resok4.csr_flags    = flags;
 
     res->csr_resok4.csr_fore_chan_attrs = session->nfs4_session_fore_attrs;
     res->csr_resok4.csr_back_chan_attrs = session->nfs4_session_back_attrs;
+
+    /* Cache the reply for retransmit detection (RFC 8881 §18.36.4). */
+    nfs4_client_create_session_cache(&shared->nfs4_shared_clients,
+                                     args->csa_clientid,
+                                     args->csa_sequence,
+                                     NFS4_OK,
+                                     session->nfs4_session_id,
+                                     args->csa_sequence,
+                                     flags,
+                                     &session->nfs4_session_fore_attrs,
+                                     &session->nfs4_session_back_attrs);
 
     /* Drop the +1 ref returned by nfs4_create_session; the conn now holds
      * its own ref via bind_conn, and the hash holds the other ref. */
