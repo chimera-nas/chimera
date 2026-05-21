@@ -480,6 +480,44 @@ nfs4_client_create_session_cache(
     pthread_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_create_session_cache */
 
+nfsstat4
+nfs4_client_destroy_clientid(
+    struct nfs4_client_table  *table,
+    struct nfs_state_table    *state_table,
+    struct chimera_vfs_thread *vfs_thread,
+    uint64_t                   client_id)
+{
+    struct nfs4_client *c;
+    struct nfs_client  *unified;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), c);
+
+    if (!c) {
+        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        return NFS4ERR_STALE_CLIENTID;
+    }
+
+    /* RFC 8881 §18.50.3: a client that still owns sessions cannot be
+     * destroyed -- the client must DESTROY_SESSION them first. */
+    if (nfs4_client_has_session_locked(table, client_id)) {
+        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        return NFS4ERR_CLIENTID_BUSY;
+    }
+
+    unified = nfs4_client_remove_locked(table, c);
+
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+
+    if (unified) {
+        nfs_client_destroy(unified, state_table, vfs_thread);
+    }
+
+    return NFS4_OK;
+} /* nfs4_client_destroy_clientid */
+
 bool
 nfs4_client_confirm(
     struct nfs4_client_table *table,

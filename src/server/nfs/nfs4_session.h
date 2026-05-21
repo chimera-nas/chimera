@@ -289,6 +289,16 @@ nfs4_client_create_session_cache(
     const struct channel_attrs4 *fore,
     const struct channel_attrs4 *back);
 
+/* DESTROY_CLIENTID (RFC 8881 §18.50): returns NFS4ERR_STALE_CLIENTID if no
+ * such client, NFS4ERR_CLIENTID_BUSY if it still owns sessions, else removes
+ * the record (tearing down its unified state hierarchy) and returns NFS4_OK. */
+nfsstat4
+nfs4_client_destroy_clientid(
+    struct nfs4_client_table  *table,
+    struct nfs_state_table    *state_table,
+    struct chimera_vfs_thread *vfs_thread,
+    uint64_t                   client_id);
+
 /* Mark a client record confirmed (first successful CREATE_SESSION).  If the
  * record supersedes an older one (client reboot), the older record and its
  * sessions are torn down and its state hierarchy is returned via

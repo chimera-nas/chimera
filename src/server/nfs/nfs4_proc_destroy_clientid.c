@@ -17,16 +17,27 @@ chimera_nfs4_destroy_clientid(
     struct DESTROY_CLIENTID4args     *args   = &argop->opdestroy_clientid;
     struct DESTROY_CLIENTID4res      *res    = &resop->opdestroy_clientid;
 
-    /* Pass state_table + vfs_thread so nfs4_client_unregister can tear
-     * down the unified state hierarchy (owners, states, dup'd VFS
-     * handles) along with the nfs4_client record.  Previously this leaked
-     * the unified hierarchy on every DESTROY_CLIENTID. */
-    nfs4_client_unregister(&shared->nfs4_shared_clients,
-                           &shared->nfs4_state_table,
-                           thread->vfs_thread,
-                           args->dca_clientid);
+    /* RFC 8881 §18.50.3: when preceded by SEQUENCE, DESTROY_CLIENTID must be
+     * the final operation; otherwise it must be the sole operation. */
+    if (req->seen_sequence) {
+        if (req->index != req->args_compound->num_argarray - 1) {
+            res->dcr_status = NFS4ERR_NOT_ONLY_OP;
+            chimera_nfs4_compound_complete(req, res->dcr_status);
+            return;
+        }
+    } else if (req->args_compound->num_argarray != 1) {
+        res->dcr_status = NFS4ERR_NOT_ONLY_OP;
+        chimera_nfs4_compound_complete(req, res->dcr_status);
+        return;
+    }
 
-    res->dcr_status = NFS4_OK;
+    /* NFS4ERR_STALE_CLIENTID for an unknown clientid, NFS4ERR_CLIENTID_BUSY
+     * if it still owns sessions, else tear the record (and its unified state
+     * hierarchy) down. */
+    res->dcr_status = nfs4_client_destroy_clientid(&shared->nfs4_shared_clients,
+                                                   &shared->nfs4_state_table,
+                                                   thread->vfs_thread,
+                                                   args->dca_clientid);
 
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_compound_complete(req, res->dcr_status);
 } /* chimera_nfs4_destroy_clientid */
