@@ -429,6 +429,83 @@ def test_list(client, bucket):
     print("LIST tests passed!")
 
 
+def test_copy(client, bucket):
+    """Test server-side CopyObject (x-amz-copy-source) operations.
+
+    Exercises the copy handler's transfer paths (clone_range fast path,
+    copy_range, and the read+write fallback are selected per backend) plus
+    source/destination parsing and the error paths.
+    """
+    print("Testing COPY operations...")
+
+    data = b'abcd' * 1024  # 4096 bytes
+    client.put_object(Bucket=bucket, Key='copydir/src1', Body=data)
+
+    # Simple copy to a new key.
+    client.copy_object(Bucket=bucket, Key='copydir/dst1',
+                       CopySource={'Bucket': bucket, 'Key': 'copydir/src1'})
+    assert client.get_object(Bucket=bucket, Key='copydir/dst1')['Body'].read() == data
+    print("  COPY src1 -> dst1 (4KB) - content matches")
+
+    # Source must remain intact (copy, not move).
+    assert client.get_object(Bucket=bucket, Key='copydir/src1')['Body'].read() == data
+    print("  source intact after copy - OK")
+
+    # Empty object.
+    client.put_object(Bucket=bucket, Key='copydir/empty', Body=b'')
+    client.copy_object(Bucket=bucket, Key='copydir/empty_copy',
+                       CopySource={'Bucket': bucket, 'Key': 'copydir/empty'})
+    assert client.get_object(Bucket=bucket, Key='copydir/empty_copy')['Body'].read() == b''
+    print("  COPY empty object - OK")
+
+    # Large, deliberately non-block-aligned object. On reflink-capable
+    # backends this forces the clone fast path to fall back (an unaligned
+    # interior length is rejected) to copy_range / read+write.
+    large = b'z' * (5 * 1024 * 1024 + 123)
+    client.put_object(Bucket=bucket, Key='copydir/large', Body=large)
+    client.copy_object(Bucket=bucket, Key='copydir/large_copy',
+                       CopySource={'Bucket': bucket, 'Key': 'copydir/large'})
+    body = client.get_object(Bucket=bucket, Key='copydir/large_copy')['Body'].read()
+    assert len(body) == len(large), f"size {len(body)} != {len(large)}"
+    assert body == large, "large copy content mismatch"
+    print("  COPY large unaligned (5MB+123) - content matches")
+
+    # Copy over an existing destination object (replace).
+    client.put_object(Bucket=bucket, Key='copydir/dst2', Body=b'stale-contents')
+    client.copy_object(Bucket=bucket, Key='copydir/dst2',
+                       CopySource={'Bucket': bucket, 'Key': 'copydir/src1'})
+    assert client.get_object(Bucket=bucket, Key='copydir/dst2')['Body'].read() == data
+    print("  COPY overwrites existing destination - OK")
+
+    # CopySource passed as a raw "bucket/key" string.
+    client.copy_object(Bucket=bucket, Key='copydir/dst3',
+                       CopySource=f'{bucket}/copydir/src1')
+    assert client.get_object(Bucket=bucket, Key='copydir/dst3')['Body'].read() == data
+    print("  COPY with string CopySource - OK")
+
+    # Missing source key -> NoSuchKey.
+    try:
+        client.copy_object(Bucket=bucket, Key='copydir/nope',
+                           CopySource={'Bucket': bucket, 'Key': 'copydir/does_not_exist'})
+        raise AssertionError("copy of missing source should fail")
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'NoSuchKey':
+            raise
+    print("  COPY missing source -> NoSuchKey (ok)")
+
+    # Missing source bucket -> NoSuchBucket.
+    try:
+        client.copy_object(Bucket=bucket, Key='copydir/nope2',
+                           CopySource={'Bucket': 'no_such_bucket_xyz', 'Key': 'copydir/src1'})
+        raise AssertionError("copy from missing bucket should fail")
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'NoSuchBucket':
+            raise
+    print("  COPY missing source bucket -> NoSuchBucket (ok)")
+
+    print("COPY tests passed!")
+
+
 def _multipart_upload_and_verify(client, bucket, key, part_sizes):
     """Helper: run a full multipart upload and verify the assembled bytes
     match the concatenation of the part bodies. Exercises whichever
@@ -731,6 +808,7 @@ TESTS = {
     'delete': test_delete,
     'delete_objects': test_delete_objects,
     'list': test_list,
+    'copy': test_copy,
     'multipart': test_multipart,
 }
 

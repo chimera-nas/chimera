@@ -132,6 +132,11 @@ chimera_s3_prepare_error_response(
                           "  <Message>The XML you provided was not well-formed or did not validate against our published schema.</Message>\n");
             code = 400;
             break;
+        case CHIMERA_S3_STATUS_BAD_REQUEST:
+            bp  += sprintf(bp, "  <Code>InvalidArgument</Code>\n");
+            bp  += sprintf(bp, "  <Message>Invalid Argument</Message>\n");
+            code = 400;
+            break;
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             bp += sprintf(bp, "  <Code>NotImplemented</Code>\n");
             bp += sprintf(bp,
