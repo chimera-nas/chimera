@@ -271,9 +271,15 @@ struct nfs_lock_state {
  * incremented on every (re)use to detect stale stateids (ABA).
  */
 
-#define NFS4_SLOT_TYPE_FREE 0
-#define NFS4_SLOT_TYPE_OPEN 1
-#define NFS4_SLOT_TYPE_LOCK 2
+#define NFS4_SLOT_TYPE_FREE    0
+#define NFS4_SLOT_TYPE_OPEN    1
+#define NFS4_SLOT_TYPE_LOCK    2
+/* A slot whose state was torn down because the owning client was purged
+ * (lease expiry / reboot / DESTROY_CLIENTID).  Distinct from FREE so a stateid
+ * minted by the purged client resolves to NFS4ERR_EXPIRED rather than
+ * NFS4ERR_BAD_STATEID (RFC 7530 §8.1.3).  The slot is on the free list and
+ * reverts to a normal type when reallocated. */
+#define NFS4_SLOT_TYPE_EXPIRED 3
 
 struct nfs_state_slot {
     void    *state;
@@ -327,6 +333,13 @@ SYMBOL_EXPORT void nfs_state_table_install(
 
 /* Release a slot back to the pool (advances generation, clears type). */
 SYMBOL_EXPORT void nfs_state_table_free_slot(
+    struct nfs_state_table *table,
+    uint8_t                 shard,
+    uint32_t                slot_idx);
+
+/* Like free_slot but marks the slot EXPIRED (client purged); see
+ * NFS4_SLOT_TYPE_EXPIRED. */
+SYMBOL_EXPORT void nfs_state_table_expire_slot(
     struct nfs_state_table *table,
     uint8_t                 shard,
     uint32_t                slot_idx);

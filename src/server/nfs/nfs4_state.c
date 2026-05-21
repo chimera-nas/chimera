@@ -224,6 +224,35 @@ nfs_state_table_free_slot(
     pthread_rwlock_unlock(&shard->lock);
 } /* nfs_state_table_free_slot */
 
+/* Like nfs_state_table_free_slot, but for a slot whose owning client was
+ * purged.  The generation is left unchanged so a stateid the client still
+ * holds continues to resolve to this slot -- now marked EXPIRED so the lookup
+ * returns NFS4ERR_EXPIRED.  The slot is placed on the free list and reverts to
+ * a normal type (bumping the generation) when it is next allocated. */
+void
+nfs_state_table_expire_slot(
+    struct nfs_state_table *table,
+    uint8_t                 shard_idx,
+    uint32_t                slot_idx)
+{
+    struct nfs_state_shard *shard = &table->shards[shard_idx];
+    struct nfs_state_slot  *slot;
+
+    pthread_rwlock_wrlock(&shard->lock);
+
+    chimera_nfs_abort_if(slot_idx >= shard->slots_used,
+                         "expire of unallocated slot %u/%u",
+                         slot_idx, shard->slots_used);
+
+    slot        = &shard->slots[slot_idx];
+    slot->type  = NFS4_SLOT_TYPE_EXPIRED;
+    slot->state = NULL;
+
+    (void) shard_push_free_locked(shard, slot_idx);
+
+    pthread_rwlock_unlock(&shard->lock);
+} /* nfs_state_table_expire_slot */
+
 /*
  * Internal lookup: under shard rdlock, validate slot identity and (when
  * `bump_refcount` is true) increment the state's refcount before unlocking.
@@ -285,7 +314,12 @@ state_table_lookup_locked(
 
     slot = &shard->slots[view.slot_idx];
 
-    if (slot->type == NFS4_SLOT_TYPE_FREE) {
+    if (slot->type == NFS4_SLOT_TYPE_EXPIRED) {
+        /* The owning client was purged.  A stateid still naming this slot's
+         * generation gets NFS4ERR_EXPIRED; an older generation is stale. */
+        status = (slot->generation == view.generation)
+                 ? NFS4ERR_EXPIRED : NFS4ERR_STALE_STATEID;
+    } else if (slot->type == NFS4_SLOT_TYPE_FREE) {
         status = NFS4ERR_BAD_STATEID;
     } else if (slot->generation != view.generation) {
         status = NFS4ERR_STALE_STATEID;
@@ -440,7 +474,8 @@ open_state_destroy_locked(
     struct nfs_open_owner     *owner,
     struct nfs_open_state     *state,
     struct nfs_state_table    *table,
-    struct chimera_vfs_thread *vfs_thread)
+    struct chimera_vfs_thread *vfs_thread,
+    bool                       expire)
 {
     uint8_t prev_destroyed;
 
@@ -467,7 +502,11 @@ open_state_destroy_locked(
         ls_prev_destroyed = atomic_exchange_explicit(&ls->destroyed, 1,
                                                      memory_order_acq_rel);
         if (ls_prev_destroyed == 0) {
-            nfs_state_table_free_slot(table, ls->shard, ls->slot_idx);
+            if (expire) {
+                nfs_state_table_expire_slot(table, ls->shard, ls->slot_idx);
+            } else {
+                nfs_state_table_free_slot(table, ls->shard, ls->slot_idx);
+            }
             uint32_t lprev = atomic_fetch_sub_explicit(&ls->refcount, 1,
                                                        memory_order_acq_rel);
             if (lprev == 1) {
@@ -476,7 +515,11 @@ open_state_destroy_locked(
         }
     }
 
-    nfs_state_table_free_slot(table, state->shard, state->slot_idx);
+    if (expire) {
+        nfs_state_table_expire_slot(table, state->shard, state->slot_idx);
+    } else {
+        nfs_state_table_free_slot(table, state->shard, state->slot_idx);
+    }
 
     uint32_t prev = atomic_fetch_sub_explicit(&state->refcount, 1,
                                               memory_order_acq_rel);
@@ -511,7 +554,9 @@ nfs_client_destroy(
         struct nfs_open_state *os, *os_tmp;
         HASH_ITER(hh, oo->states_by_fh, os, os_tmp)
         {
-            open_state_destroy_locked(oo, os, table, vfs_thread);
+            /* The whole client is going away (lease expiry / reboot /
+             * DESTROY_CLIENTID); mark its stateids EXPIRED, not free. */
+            open_state_destroy_locked(oo, os, table, vfs_thread, true);
         }
         pthread_mutex_unlock(&oo->lock);
 
@@ -753,7 +798,9 @@ nfs_open_state_destroy(
     struct nfs_open_owner *owner = state->owner;
 
     pthread_mutex_lock(&owner->lock);
-    open_state_destroy_locked(owner, state, table, vfs_thread);
+    /* A single open being closed/rolled back -- its stateid becomes invalid
+     * (free), not expired. */
+    open_state_destroy_locked(owner, state, table, vfs_thread, false);
     pthread_mutex_unlock(&owner->lock);
 } /* nfs_open_state_destroy */
 
