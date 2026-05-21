@@ -37,8 +37,18 @@ chimera_nfs4_getattr_complete(
         return;
     }
 
+    /* Size the attribute buffer to hold a variable-length ACL when one is
+     * present, so FATTR4_ACL is never silently dropped for lack of space. */
+    uint32_t attrvals_cap = 4096;
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+        attrvals_cap += chimera_nfs4_acl_wire_size(attr->va_acl);
+    } else if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        attrvals_cap += chimera_nfs4_acl_wire_size(NULL) +
+            8 * (4 * sizeof(uint32_t) + ((CHIMERA_IDMAP_WHO_MAX + 3) & ~3u));
+    }
+
     rc = xdr_dbuf_alloc_opaque(&res->resok4.obj_attributes.attr_vals,
-                               4096,
+                               attrvals_cap,
                                req->encoding->dbuf);
 
     if (rc) {
@@ -58,6 +68,7 @@ chimera_nfs4_getattr_complete(
                                 3,
                                 res->resok4.obj_attributes.attr_vals.data,
                                 &res->resok4.obj_attributes.attr_vals.len,
+                                attrvals_cap,
                                 req->minorversion);
 
     if (req->handle) {

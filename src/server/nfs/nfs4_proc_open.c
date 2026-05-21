@@ -499,11 +499,23 @@ chimera_nfs4_open_parent_complete(
                     chimera_nfs4_open_complete(req, status);
                     return;
                 }
-                chimera_nfs4_unmarshall_attrs(attr,
-                                              args->openhow.how.createattrs.num_attrmask,
-                                              args->openhow.how.createattrs.attrmask,
-                                              args->openhow.how.createattrs.attr_vals.data,
-                                              args->openhow.how.createattrs.attr_vals.len);
+                {
+                    struct chimera_acl *acl_buf      = NULL;
+                    unsigned            acl_buf_aces = 0;
+                    if (args->openhow.how.createattrs.num_attrmask >= 1 &&
+                        (args->openhow.how.createattrs.attrmask[0] & (1 << FATTR4_ACL))) {
+                        acl_buf = xdr_dbuf_alloc_space(
+                            chimera_acl_size(CHIMERA_ACL_MAX_ACES), req->encoding->dbuf);
+                        acl_buf_aces = acl_buf ? CHIMERA_ACL_MAX_ACES : 0;
+                    }
+                    chimera_nfs4_unmarshall_attrs(attr,
+                                                  args->openhow.how.createattrs.num_attrmask,
+                                                  args->openhow.how.createattrs.attrmask,
+                                                  args->openhow.how.createattrs.attr_vals.data,
+                                                  args->openhow.how.createattrs.attr_vals.len,
+                                                  acl_buf,
+                                                  acl_buf_aces);
+                }
                 break;
             case EXCLUSIVE4_1:
                 flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
@@ -517,11 +529,24 @@ chimera_nfs4_open_parent_complete(
                     chimera_nfs4_open_complete(req, status);
                     return;
                 }
-                chimera_nfs4_unmarshall_attrs(attr,
-                                              args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
-                                              args->openhow.how.ch_createboth.cva_attrs.attrmask,
-                                              args->openhow.how.ch_createboth.cva_attrs.attr_vals.data,
-                                              args->openhow.how.ch_createboth.cva_attrs.attr_vals.len);
+                {
+                    struct chimera_acl *acl_buf      = NULL;
+                    unsigned            acl_buf_aces = 0;
+                    if (args->openhow.how.ch_createboth.cva_attrs.num_attrmask >= 1 &&
+                        (args->openhow.how.ch_createboth.cva_attrs.attrmask[0] &
+                         (1 << FATTR4_ACL))) {
+                        acl_buf = xdr_dbuf_alloc_space(
+                            chimera_acl_size(CHIMERA_ACL_MAX_ACES), req->encoding->dbuf);
+                        acl_buf_aces = acl_buf ? CHIMERA_ACL_MAX_ACES : 0;
+                    }
+                    chimera_nfs4_unmarshall_attrs(attr,
+                                                  args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
+                                                  args->openhow.how.ch_createboth.cva_attrs.attrmask,
+                                                  args->openhow.how.ch_createboth.cva_attrs.attr_vals.data,
+                                                  args->openhow.how.ch_createboth.cva_attrs.attr_vals.len,
+                                                  acl_buf,
+                                                  acl_buf_aces);
+                }
                 /* TODO: Store verifier in a server-private xattr (e.g. trusted.nfs4_excl_verf)
                  * once the VFS layer exposes setxattr/getxattr.  That would remove the
                  * restriction on clients setting time_access_set/time_modify_set in cva_attrs.

@@ -84,6 +84,7 @@ chimera_nfs4_verify_complete(
                                 3,
                                 out_buf,
                                 &out_len,
+                                sizeof(out_buf),
                                 req->minorversion);
 
     bool match = (num_out_mask == args->num_attrmask) &&

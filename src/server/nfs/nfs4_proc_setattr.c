@@ -66,11 +66,22 @@ chimera_nfs4_setattr_open_callback(
         return;
     }
 
+    struct chimera_acl *acl_buf      = NULL;
+    unsigned            acl_buf_aces = 0;
+    if (args->obj_attributes.num_attrmask >= 1 &&
+        (args->obj_attributes.attrmask[0] & (1 << FATTR4_ACL))) {
+        acl_buf = xdr_dbuf_alloc_space(chimera_acl_size(CHIMERA_ACL_MAX_ACES),
+                                       req->encoding->dbuf);
+        acl_buf_aces = acl_buf ? CHIMERA_ACL_MAX_ACES : 0;
+    }
+
     rc = chimera_nfs4_unmarshall_attrs(attr,
                                        args->obj_attributes.num_attrmask,
                                        args->obj_attributes.attrmask,
                                        args->obj_attributes.attr_vals.data,
-                                       args->obj_attributes.attr_vals.len);
+                                       args->obj_attributes.attr_vals.len,
+                                       acl_buf,
+                                       acl_buf_aces);
 
     if (rc != NFS4_OK) {
         res->status = rc;
