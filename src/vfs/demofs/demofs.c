@@ -575,6 +575,7 @@ struct demofs_intent_log {
     struct demofs_il_record  *push_tail;
     struct demofs_il_record  *push_cur;          /* record currently being pushed */
     int                       push_outstanding;  /* home writes in flight for push_cur */
+    int                       redo_inflight;     /* redo writes issued, not yet in FIFO */
 };
 
 struct demofs_shared {
@@ -588,6 +589,10 @@ struct demofs_shared {
     int                        num_active_threads;
     uint8_t                    root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                   root_fhlen;
+    uint64_t                   root_inum;          /* for the clean-unmount superblock */
+    uint32_t                   root_gen;
+    int                        persistent;         /* config opt-in: detect+reload a clean FS instead of mkfs */
+    int                        mounted;            /* 1 = remounted existing FS (enables inode read-back) */
     uint64_t                   fsid;
     struct space_map          *space_map;
     struct demofs_intent_log   intent_log;
@@ -950,6 +955,15 @@ demofs_txn_unlock_all(struct demofs_txn *txn)
  * and 3, or later (via the grant doorbell, on this txn's worker) once a
  * conflicting holder releases.
  */
+static void demofs_inode_load(
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    uint64_t                    inum,
+    uint32_t                    gen,
+    enum demofs_inode_lock_mode mode,
+    demofs_inode_cb_t           cb,
+    void                       *private_data);
+
 static void
 demofs_inode_acquire(
     struct demofs_thread       *thread,
@@ -982,9 +996,24 @@ demofs_inode_acquire(
 
     rb_tree_query_exact(&shard->inodes, inum, inum, inode);
 
-    if (unlikely(!inode || inode->gen != gen)) {
+    if (unlikely(inode && inode->gen != gen)) {
+        /* Cached under a different generation: the handle is stale. */
         pthread_mutex_unlock(&shard->lock);
         cb(NULL, CHIMERA_VFS_ENOENT, private_data);
+        return;
+    }
+
+    if (unlikely(!inode)) {
+        /* Not resident.  On a freshly-formatted FS everything created is
+         * cached, so this is simply ENOENT.  On a remounted FS the inode may
+         * live on disk -- fault it in (validated against the requested gen). */
+        pthread_mutex_unlock(&shard->lock);
+        if (thread->shared->mounted &&
+            sm_inum_valid(thread->shared->space_map, inum)) {
+            demofs_inode_load(thread, txn, inum, gen, mode, cb, private_data);
+        } else {
+            cb(NULL, CHIMERA_VFS_ENOENT, private_data);
+        }
         return;
     }
 
@@ -1049,11 +1078,95 @@ demofs_inode_get_fh_async(
 } /* demofs_inode_get_fh_async */
 
 /*
+ * Synchronously fault an inode in from disk (mount-time path walk on a
+ * remounted FS).  Blocking pread is fine here: mount is rare and runs before
+ * concurrent load.  Returns a populated, cache-inserted inode or NULL.
+ */
+static struct demofs_block * demofs_block_claim(
+    struct demofs_thread *thread,
+    uint32_t              device_id,
+    uint64_t              device_offset,
+    int                   is_new);
+
+static struct demofs_inode *
+demofs_inode_load_sync(
+    struct demofs_thread *thread,
+    uint64_t              inum,
+    uint32_t              gen)
+{
+    struct demofs_shared      *shared = thread->shared;
+    struct demofs_inode_shard *shard  = demofs_inode_shard(shared, inum);
+    struct demofs_inode       *inode;
+    struct demofs_dinode      *di;
+    uint8_t                    buf[DEMOFS_BLOCK_SIZE];
+    uint32_t                   dev;
+    uint64_t                   off;
+    int                        fd;
+    ssize_t                    n;
+
+    if (!shared->mounted || !sm_inum_valid(shared->space_map, inum)) {
+        return NULL;
+    }
+
+    off = sm_inum_to_device_offset(shared->space_map, inum, &dev);
+    fd  = open(shared->device_paths[dev], O_RDONLY);
+    if (fd < 0) {
+        return NULL;
+    }
+    n = pread(fd, buf, sizeof(buf), off);
+    close(fd);
+    if (n != (ssize_t) sizeof(buf)) {
+        return NULL;
+    }
+
+    di = (struct demofs_dinode *) buf;
+    if (di->inum != inum || di->gen != gen || di->nlink == 0) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&shard->lock);
+    rb_tree_query_exact(&shard->inodes, inum, inum, inode);
+    if (!inode) {
+        inode              = calloc(1, sizeof(*inode));
+        inode->inum        = inum;
+        inode->refcnt      = 1;
+        inode->gen         = di->gen;
+        inode->mode        = di->mode;
+        inode->nlink       = di->nlink;
+        inode->uid         = di->uid;
+        inode->gid         = di->gid;
+        inode->rdev        = di->rdev;
+        inode->size        = di->size;
+        inode->space_used  = di->space_used;
+        inode->atime_sec   = di->atime_sec;
+        inode->atime_nsec  = di->atime_nsec;
+        inode->mtime_sec   = di->mtime_sec;
+        inode->mtime_nsec  = di->mtime_nsec;
+        inode->ctime_sec   = di->ctime_sec;
+        inode->ctime_nsec  = di->ctime_nsec;
+        inode->parent_inum = di->parent_inum;
+        inode->parent_gen  = di->parent_gen;
+        rb_tree_insert(&shard->inodes, inum, inode);
+    }
+    pthread_mutex_unlock(&shard->lock);
+
+    /* Seed the inode's home block into the block cache from the disk image. */
+    {
+        struct demofs_block *blk = demofs_block_claim(thread, dev, off, 0);
+
+        memcpy(blk->buffer, buf, DEMOFS_BLOCK_SIZE);
+        blk->state = DEMOFS_BLOCK_CLEAN;
+        __atomic_fetch_sub(&blk->pin_count, 1, __ATOMIC_RELAXED);
+    }
+    return inode;
+} /* demofs_inode_load_sync */
+
+/*
  * Synchronous read-lock acquire, used by the mount-time path walk which
  * runs before concurrent load.  Records the read lock in the txn so it is
- * released centrally at commit.  Asserts there is no conflicting writer
- * (cannot happen at mount); returns NULL if the inode isn't resident or
- * the generation is stale.
+ * released centrally at commit.  On a remounted FS a non-resident inode is
+ * faulted in from disk; returns NULL if it isn't on disk or the generation
+ * is stale.
  */
 static struct demofs_inode *
 demofs_inode_acquire_sync_read(
@@ -1075,9 +1188,17 @@ demofs_inode_acquire_sync_read(
     shard = demofs_inode_shard(thread->shared, inum);
     pthread_mutex_lock(&shard->lock);
     rb_tree_query_exact(&shard->inodes, inum, inum, inode);
-    if (!inode || inode->gen != gen) {
+    if (inode && inode->gen != gen) {
         pthread_mutex_unlock(&shard->lock);
         return NULL;
+    }
+    if (!inode) {
+        pthread_mutex_unlock(&shard->lock);
+        inode = demofs_inode_load_sync(thread, inum, gen);
+        if (!inode) {
+            return NULL;
+        }
+        pthread_mutex_lock(&shard->lock);
     }
     chimera_demofs_abort_if(inode->writer,
                             "mount path walk: inode %lu write-locked", inum);
@@ -3575,6 +3696,123 @@ demofs_inode_cache_insert(
 } /* demofs_inode_cache_insert */
 
 /*
+ * Fault an inode in from disk on a cache miss (remounted filesystem only).
+ * Reads the inode's home block, validates the on-disk dinode against the
+ * requested inum/gen, constructs + caches the inode, then re-drives
+ * demofs_inode_acquire (which now hits the cache and grants normally).  The
+ * inode's b+tree blocks load lazily via demofs_bt_block_get as they are
+ * traversed.
+ */
+struct demofs_inode_load_ctx {
+    struct demofs_thread *thread;
+    struct demofs_txn    *txn;
+    uint64_t              inum;
+    uint32_t              gen;
+    enum demofs_inode_lock_mode mode;
+    demofs_inode_cb_t     cb;
+    void                 *private_data;
+    struct evpl_iovec     iov;
+};
+
+static void
+demofs_inode_load_complete(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct demofs_inode_load_ctx *lc     = private_data;
+    struct demofs_thread         *thread = lc->thread;
+    struct demofs_shared         *shared = thread->shared;
+    struct demofs_dinode         *di     = (struct demofs_dinode *) lc->iov.data;
+    struct demofs_inode_shard    *shard  = demofs_inode_shard(shared, lc->inum);
+    struct demofs_inode          *inode;
+
+    if (status != 0 || di->inum != lc->inum || di->gen != lc->gen ||
+        di->nlink == 0) {
+        /* No such inode on disk (or stale generation). */
+        evpl_iovec_release(thread->evpl, &lc->iov);
+        lc->cb(NULL, CHIMERA_VFS_ENOENT, lc->private_data);
+        free(lc);
+        return;
+    }
+
+    pthread_mutex_lock(&shard->lock);
+    rb_tree_query_exact(&shard->inodes, lc->inum, inum, inode);
+    if (!inode) {
+        inode              = demofs_inode_struct_new(lc->inum);
+        inode->gen         = di->gen;
+        inode->mode        = di->mode;
+        inode->nlink       = di->nlink;
+        inode->uid         = di->uid;
+        inode->gid         = di->gid;
+        inode->rdev        = di->rdev;
+        inode->size        = di->size;
+        inode->space_used  = di->space_used;
+        inode->atime_sec   = di->atime_sec;
+        inode->atime_nsec  = di->atime_nsec;
+        inode->mtime_sec   = di->mtime_sec;
+        inode->mtime_nsec  = di->mtime_nsec;
+        inode->ctime_sec   = di->ctime_sec;
+        inode->ctime_nsec  = di->ctime_nsec;
+        inode->parent_inum = di->parent_inum;
+        inode->parent_gen  = di->parent_gen;
+        rb_tree_insert(&shard->inodes, inum, inode);
+    }
+    pthread_mutex_unlock(&shard->lock);
+
+    /* Seed the inode's home block (dinode + embedded b+tree root) into the
+     * block cache from the disk image, so the b+tree traversal and inode-block
+     * pin find the real contents instead of a zero-created block.  No writer
+     * can be modifying it yet -- the lock isn't granted until the re-acquire
+     * below. */
+    {
+        uint32_t             dev;
+        uint64_t             off = sm_inum_to_device_offset(shared->space_map,
+                                                            lc->inum, &dev);
+        struct demofs_block *blk = demofs_block_claim(thread, dev, off, 0);
+
+        memcpy(blk->buffer, lc->iov.data, DEMOFS_BLOCK_SIZE);
+        blk->state = DEMOFS_BLOCK_CLEAN;
+        __atomic_fetch_sub(&blk->pin_count, 1, __ATOMIC_RELAXED);
+    }
+
+    evpl_iovec_release(thread->evpl, &lc->iov);
+
+    /* Now resident: re-drive the acquire to grant the lock as usual. */
+    demofs_inode_acquire(thread, lc->txn, lc->inum, lc->gen, lc->mode,
+                         lc->cb, lc->private_data);
+    free(lc);
+} /* demofs_inode_load_complete */
+
+static void
+demofs_inode_load(
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    uint64_t                    inum,
+    uint32_t                    gen,
+    enum demofs_inode_lock_mode mode,
+    demofs_inode_cb_t           cb,
+    void                       *private_data)
+{
+    struct demofs_inode_load_ctx *lc = malloc(sizeof(*lc));
+    uint32_t                      dev;
+    uint64_t                      off;
+
+    off              = sm_inum_to_device_offset(thread->shared->space_map, inum, &dev);
+    lc->thread       = thread;
+    lc->txn          = txn;
+    lc->inum         = inum;
+    lc->gen          = gen;
+    lc->mode         = mode;
+    lc->cb           = cb;
+    lc->private_data = private_data;
+
+    evpl_iovec_alloc(thread->evpl, DEMOFS_BLOCK_SIZE, DEMOFS_BLOCK_SIZE, 1, 0, &lc->iov);
+    evpl_block_read(thread->evpl, thread->queue[dev], &lc->iov, 1, off,
+                    demofs_inode_load_complete, lc);
+} /* demofs_inode_load */
+
+/*
  * Allocate a new inode: grab a 4 KiB metadata block from the space map to
  * mint the inum, create the in-memory inode, publish it write-locked into
  * the cache, and record it in the transaction.
@@ -4038,6 +4276,8 @@ demofs_redo_write_cb(
     (void) evpl;
     chimera_demofs_abort_if(status, "redo record write failed: %d", status);
 
+    il->redo_inflight--;
+
     demofs_txn_unpin_blocks(ctx->entry.txn, DEMOFS_BLOCK_LOGGED);
     demofs_txn_unlock_all(ctx->entry.txn);
 
@@ -4136,6 +4376,7 @@ demofs_il_write_redo(
     }
 
     ch->cq_inflight++;
+    il->redo_inflight++;
 
     evpl_block_write(il->evpl, il->queue[SM_INTENT_LOG_DEVICE],
                      &rec->iov, 1, offset, 1 /* sync */,
@@ -4311,6 +4552,7 @@ demofs_intent_log_thread_init(
     il->push_tail        = NULL;
     il->push_cur         = NULL;
     il->push_outstanding = 0;
+    il->redo_inflight    = 0;
 
     /* Open block queues on this thread's evpl for redo writes + tail-push. */
     il->queue = calloc(shared->num_devices, sizeof(*il->queue));
@@ -4337,19 +4579,13 @@ demofs_intent_log_thread_shutdown(
      * close our block queues. */
     evpl_remove_doorbell(evpl, &il->wake_doorbell);
 
-    /* Drop any records still awaiting tail-push.  Their block images remain
-     * durable in the intent log, so a future mount recovers them by replay
-     * (the data isn't lost; it just hasn't reached its home location). */
-    if (il->push_cur) {
-        evpl_iovec_release(evpl, &il->push_cur->iov);
-        free(il->push_cur);
-        il->push_cur = NULL;
-    }
-    while (il->push_head) {
-        struct demofs_il_record *rec = il->push_head;
-        il->push_head = rec->next;
-        evpl_iovec_release(evpl, &rec->iov);
-        free(rec);
+    /* Clean unmount: drain everything to its final on-disk location so the
+     * filesystem is fully consistent at home offsets (no replay needed).
+     * Pump our evpl until all in-flight redo writes have landed in the push
+     * FIFO and the tail-pusher has flushed every record home. */
+    while (il->redo_inflight || il->push_cur || il->push_head) {
+        demofs_il_push_kick(il);
+        evpl_continue(evpl);
     }
 
     for (i = 0; i < shared->num_devices; i++) {
@@ -4489,26 +4725,74 @@ demofs_init(const char *cfgdata)
         }
     }
 
+    /* Opt-in persistence: when set, a clean superblock is detected at mount
+     * and the prior on-disk state is reloaded instead of reformatting.  Off by
+     * default so the common case (and the test suite) reformats every mount;
+     * the reload + on-disk read-back paths are exercised only under this flag. */
+    shared->persistent = json_is_true(json_object_get(cfg, "persistent"));
+
     json_decref(cfg);
 
 
     pthread_mutex_init(&shared->lock, NULL);
 
-    /* Generate a random 64-bit filesystem ID */
-    shared->fsid = chimera_rand64();
+    /* Decide mkfs vs mount: a valid superblock with the CLEAN flag means the
+     * previous instance unmounted cleanly, so we can reload its persisted
+     * free-space map and skip bootstrap (the root inode faults in from disk on
+     * first access).  Anything else (no/garbage superblock, or not clean ->
+     * a crash, which needs recovery we haven't built) is treated as mkfs. */
+    {
+        struct sm_superblock sb;
+        int                  mounting = 0;
 
-    device_sizes = calloc(shared->num_devices, sizeof(*device_sizes));
-    for (i = 0; i < shared->num_devices; i++) {
-        device_sizes[i] = shared->devices[i].size;
+        if (shared->persistent &&
+            space_map_read_superblock_path(device0_path, &sb) == 0 &&
+            (sb.flags & SM_SB_CLEAN)) {
+            shared->fsid = sb.fsid;
+            mounting     = 1;
+        } else {
+            shared->fsid = chimera_rand64();
+        }
+
+        device_sizes = calloc(shared->num_devices, sizeof(*device_sizes));
+        for (i = 0; i < shared->num_devices; i++) {
+            device_sizes[i] = shared->devices[i].size;
+        }
+        shared->space_map = space_map_create(device_sizes, shared->num_devices);
+        free(device_sizes);
+
+        if (mounting &&
+            space_map_load_paths(shared->space_map, shared->device_paths) != 0) {
+            chimera_demofs_error("space-map reload failed; treating as fresh");
+            mounting = 0;
+        }
+
+        shared->mounted = mounting;
+
+        if (mounting) {
+            uint8_t fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
+
+            shared->root_inum = sb.root_inum;
+            shared->root_gen  = sb.root_gen;
+            memcpy(fsid_buf, &shared->fsid, sizeof(shared->fsid));
+            shared->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf,
+                                                                  sb.root_inum,
+                                                                  sb.root_gen,
+                                                                  shared->root_fh);
+        }
+
+        /* Clear the CLEAN flag for this session: an unclean teardown then
+         * leaves it clear, so the next mount won't mistake a crash for a
+         * clean shutdown. */
+        rc = space_map_write_superblock_path(shared->space_map, device0_path,
+                                             shared->fsid, 0,
+                                             mounting ? sb.root_inum : 0,
+                                             mounting ? sb.root_gen : 0,
+                                             mounting ? sb.log_seq : 0);
+        chimera_demofs_abort_if(rc != 0,
+                                "Failed to write superblock to %s: %s",
+                                device0_path, strerror(errno));
     }
-    shared->space_map = space_map_create(device_sizes, shared->num_devices);
-    free(device_sizes);
-
-    rc = space_map_write_superblock_path(shared->space_map, device0_path,
-                                         shared->fsid);
-    chimera_demofs_abort_if(rc != 0,
-                            "Failed to write superblock to %s: %s",
-                            device0_path, strerror(errno));
     free(device0_path);
 
     /* Inode cache: sharded rb-trees keyed by inum.  Never evicts yet. */
@@ -4621,6 +4905,8 @@ demofs_bootstrap(struct demofs_thread *thread)
                                                               inode->gen,
                                                               shared->root_fh);
     }
+    shared->root_inum = inode->inum;
+    shared->root_gen  = inode->gen;
 
     pthread_mutex_unlock(&shared->lock);
 } /* demofs_bootstrap */
@@ -4664,12 +4950,25 @@ demofs_destroy(void *private_data)
 
     demofs_block_cache_destroy(shared);
 
-    /* Persist the free-space map now that all device I/O has quiesced (evpl
-     * released the devices), so a later mount can reload it instead of
-     * re-handing-out in-use space.  (A future mount only trusts this once the
-     * superblock is also marked clean -- wired in the mount-detection step.) */
-    if (space_map_persist_paths(shared->space_map, shared->device_paths) != 0) {
+    /* Clean unmount: the intent-log thread already drained every logged block
+     * to its home location, so persist the free-space map and stamp the
+     * superblock CLEAN (with the root + next log seq) so the next mount
+     * reloads instead of re-handing-out in-use space.  Done now that all
+     * device I/O has quiesced (evpl released the devices).  Only mark clean if
+     * a root actually exists (an untouched mkfs has nothing to preserve). */
+    if (!shared->persistent) {
+        /* mkfs-every-mount mode: nothing to preserve. */
+    } else if (space_map_persist_paths(shared->space_map, shared->device_paths) != 0) {
         chimera_demofs_error("space-map persist at unmount failed");
+    } else if (shared->root_fhlen != 0) {
+        int rc = space_map_write_superblock_path(shared->space_map,
+                                                 shared->device_paths[0],
+                                                 shared->fsid, SM_SB_CLEAN,
+                                                 shared->root_inum, shared->root_gen,
+                                                 shared->intent_log.log_seq);
+        if (rc != 0) {
+            chimera_demofs_error("clean-superblock write at unmount failed");
+        }
     }
 
     space_map_destroy(shared->space_map);

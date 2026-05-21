@@ -556,7 +556,11 @@ int
 space_map_write_superblock_path(
     struct space_map *sm,
     const char       *device_path,
-    uint64_t          fsid)
+    uint64_t          fsid,
+    uint64_t          flags,
+    uint64_t          root_inum,
+    uint32_t          root_gen,
+    uint64_t          log_seq)
 {
     int                   fd;
     ssize_t               n;
@@ -575,6 +579,10 @@ space_map_write_superblock_path(
     sb->intent_log_device = SM_INTENT_LOG_DEVICE;
     sb->intent_log_offset = SM_INTENT_LOG_OFFSET;
     sb->intent_log_size   = SM_INTENT_LOG_SIZE;
+    sb->flags             = flags;
+    sb->root_inum         = root_inum;
+    sb->root_gen          = root_gen;
+    sb->log_seq           = log_seq;
     sb->crc32             = 0;
     sb->crc32             = sm_crc32(buf, sizeof(buf));
 

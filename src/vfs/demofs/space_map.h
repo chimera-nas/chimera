@@ -71,7 +71,7 @@
  * fragmentation of a 1 GiB AG with 4 KiB blocks (~2 MiB per snapshot) with
  * comfortable headroom.
  */
-#define SM_AG_LOG_SLOT_SIZE  (4ULL << 20)                   /* 4 MiB */
+#define SM_AG_LOG_SLOT_SIZE  (4ULL << 20)  /* 4 MiB */
 #define SM_AG_LOG_SLOT_COUNT 2
 #define SM_AG_LOG_SIZE       (SM_AG_LOG_SLOT_SIZE * SM_AG_LOG_SLOT_COUNT)
 
@@ -82,7 +82,10 @@
  */
 #define SM_INTENT_LOG_DEVICE 0
 #define SM_INTENT_LOG_OFFSET SM_SUPERBLOCK_SIZE
-#define SM_INTENT_LOG_SIZE   (64ULL << 20)                  /* 64 MiB */
+#define SM_INTENT_LOG_SIZE   (64ULL << 20) /* 64 MiB */
+
+/* superblock flags */
+#define SM_SB_CLEAN          0x1ULL        /* set at clean unmount, cleared at mount */
 
 struct sm_superblock {
     uint64_t magic;
@@ -96,6 +99,12 @@ struct sm_superblock {
     uint64_t intent_log_offset;
     uint64_t intent_log_size;
     uint32_t crc32;
+    /* Mount/recovery state (covered by crc32, which is computed over the
+     * whole 4 KiB block with the crc field zeroed). */
+    uint64_t flags;
+    uint64_t root_inum;
+    uint32_t root_gen;
+    uint64_t log_seq;           /* next redo seq at clean unmount (for recovery) */
     /* Remainder of the 4 KiB block is implicit zero padding. */
 };
 
@@ -224,7 +233,11 @@ int
 space_map_write_superblock_path(
     struct space_map *sm,
     const char       *device_path,
-    uint64_t          fsid);
+    uint64_t          fsid,
+    uint64_t          flags,
+    uint64_t          root_inum,
+    uint32_t          root_gen,
+    uint64_t          log_seq);
 
 /* Read + validate the superblock from device 0; 0 on success (fills *out),
  * -1 if absent/corrupt/wrong-version (caller should mkfs). */
@@ -305,6 +318,35 @@ sm_inum_to_device_offset(
     return ag->log_offset + ag->log_size +
            (uint64_t) (block_idx - 1) * SM_BLOCK_SIZE;
 } // sm_inum_to_device_offset
+
+/*
+ * Is `inum` addressable in this space map (disk / AG / block index all in
+ * range, and the resulting block within the device)?  Used before faulting an
+ * inode block in from disk so a bogus/stale handle can't index out of bounds.
+ */
+static inline int
+sm_inum_valid(
+    const struct space_map *sm,
+    uint64_t                inum)
+{
+    uint32_t            disk, ag_idx, block_idx;
+    const struct sm_ag *ag;
+    uint64_t            off;
+
+    if (inum == 0) {
+        return 0;
+    }
+    sm_inum_decode(inum, &disk, &ag_idx, &block_idx);
+    if (disk >= sm->num_devices || block_idx == 0) {
+        return 0;
+    }
+    if (ag_idx >= sm->devices[disk].num_ags) {
+        return 0;
+    }
+    ag  = &sm->devices[disk].ags[ag_idx];
+    off = ag->log_offset + ag->log_size + (uint64_t) (block_idx - 1) * SM_BLOCK_SIZE;
+    return off + SM_BLOCK_SIZE <= ag->base_offset + ag->size;
+} // sm_inum_valid
 
 /*
  * Inverse of sm_inum_to_device_offset: given a freshly-allocated block at
