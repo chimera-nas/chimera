@@ -75,55 +75,6 @@
 #define chimera_demofs_abort_if(cond, ...) \
         chimera_abort_if(cond, "demofs", __FILE__, __LINE__, __VA_ARGS__)
 
-struct demofs_request_private {
-    int                   opcode;
-    int                   status;
-    int                   pending;
-    int                   niov;
-    uint32_t              read_prefix;
-    uint32_t              read_suffix;
-    struct demofs_thread *thread;        // Thread for tracking pending I/O
-    struct demofs_txn    *txn;           // Transaction wrapping this op
-    /* Multi-inode op scratch (lookup_at parent/child, rename's 4-inode
-     * chain, etc.).  Per-op semantics documented at use sites. */
-    struct demofs_inode  *inode_stash[4];
-    /* Small integer scratch for ops that need to carry state across
-     * async callbacks (mount path walker uses it as a path byte offset). */
-    uint32_t              op_scratch;
-
-    /* readdir iteration cursor + the current dirent copied out of the
-     * b+tree (carried across the per-child inode fetch). */
-    uint64_t              rd_from_hash;
-    uint64_t              rd_hash;
-    uint64_t              rd_inum;
-    uint32_t              rd_gen;
-    int                   rd_namelen;
-    char                  rd_name[256];
-
-    /* Scratch buffer for handlers that parse a looked-up b+tree record
-     * (e.g. a dirent's inum/gen) in their async continuation.  Sized to hold
-     * the largest record (DEMOFS_DIRENT_REC_MAX == sizeof(dirent_rec) + 256). */
-    char                  rec_scratch[320];
-
-    struct evpl_iovec     iov[66];
-
-    // For RMW (read-modify-write) on partial block writes
-    int                   rmw_phase;     // 0 = no RMW, 1 = reading, 2 = writing
-    uint64_t              rmw_aligned_start; // Block-aligned start offset
-    uint64_t              rmw_aligned_length;// Block-aligned length
-    uint64_t              rmw_device_id; // Device for the new extent
-    uint64_t              rmw_device_offset; // Device offset for the new extent
-    uint32_t              rmw_prefix_len; // Bytes to preserve at start of first block
-    uint32_t              rmw_suffix_len; // Bytes to preserve at end of last block
-    struct evpl_iovec     rmw_prefix_iov; // IOV for prefix data (if read from existing extent)
-    struct evpl_iovec     rmw_suffix_iov; // IOV for suffix data (if read from existing extent)
-    int                   rmw_prefix_pending;// Pending read for prefix
-    int                   rmw_suffix_pending;// Pending read for suffix
-    uint32_t              rmw_prefix_valid;  // Valid bytes in prefix (extent may be truncated)
-    uint32_t              rmw_suffix_adjust; // Adjustment for suffix when block starts before extent
-    uint32_t              rmw_suffix_valid;  // Valid bytes in suffix (extent may be truncated)
-};
-
 struct demofs_extent {
     uint32_t              device_id;
     uint32_t              length;
@@ -132,6 +83,64 @@ struct demofs_extent {
     void                 *buffer;
     struct rb_node        node;
     struct demofs_extent *next;
+};
+
+struct demofs_request_private {
+    int                      opcode;
+    int                      status;
+    int                      pending;
+    int                      niov;
+    uint32_t                 read_prefix;
+    uint32_t                 read_suffix;
+    struct demofs_thread    *thread;     // Thread for tracking pending I/O
+    struct demofs_txn       *txn;        // Transaction wrapping this op
+    /* Multi-inode op scratch (lookup_at parent/child, rename's 4-inode
+     * chain, etc.).  Per-op semantics documented at use sites. */
+    struct demofs_inode     *inode_stash[4];
+    /* Small integer scratch for ops that need to carry state across
+     * async callbacks (mount path walker uses it as a path byte offset). */
+    uint32_t                 op_scratch;
+
+    /* readdir iteration cursor + the current dirent copied out of the
+     * b+tree (carried across the per-child inode fetch). */
+    uint64_t                 rd_from_hash;
+    uint64_t                 rd_hash;
+    uint64_t                 rd_inum;
+    uint32_t                 rd_gen;
+    int                      rd_namelen;
+    char                     rd_name[256];
+
+    /* Scratch buffer for handlers that parse a looked-up b+tree record
+     * (e.g. a dirent's inum/gen) in their async continuation.  Sized to hold
+     * the largest record (DEMOFS_DIRENT_REC_MAX == sizeof(dirent_rec) + 256). */
+    char                     rec_scratch[320];
+
+    /* Extent-walk iteration state, hoisted here so an async ext_next can
+     * suspend the loop and resume it.  loop_* are generic loop scalars. */
+    struct demofs_extent     ext_iter;
+    struct evpl_iovec_cursor rd_cursor;
+    uint64_t                 loop_off;
+    uint64_t                 loop_left;
+    uint64_t                 loop_pos;
+    int                      loop_have;
+
+    struct evpl_iovec        iov[66];
+
+    // For RMW (read-modify-write) on partial block writes
+    int                      rmw_phase;  // 0 = no RMW, 1 = reading, 2 = writing
+    uint64_t                 rmw_aligned_start; // Block-aligned start offset
+    uint64_t                 rmw_aligned_length;// Block-aligned length
+    uint64_t                 rmw_device_id; // Device for the new extent
+    uint64_t                 rmw_device_offset; // Device offset for the new extent
+    uint32_t                 rmw_prefix_len; // Bytes to preserve at start of first block
+    uint32_t                 rmw_suffix_len; // Bytes to preserve at end of last block
+    struct evpl_iovec        rmw_prefix_iov; // IOV for prefix data (if read from existing extent)
+    struct evpl_iovec        rmw_suffix_iov; // IOV for suffix data (if read from existing extent)
+    int                      rmw_prefix_pending;// Pending read for prefix
+    int                      rmw_suffix_pending;// Pending read for suffix
+    uint32_t                 rmw_prefix_valid; // Valid bytes in prefix (extent may be truncated)
+    uint32_t                 rmw_suffix_adjust; // Adjustment for suffix when block starts before extent
+    uint32_t                 rmw_suffix_valid; // Valid bytes in suffix (extent may be truncated)
 };
 
 struct demofs_device {
@@ -3326,6 +3335,84 @@ demofs_ext_next(
 {
     return demofs_ext_ceil(thread, inode, after_file_offset + 1, out);
 } /* demofs_ext_next */
+
+/*
+ * Async extent lookups (floor / ceil / next).  Each returns 1 if it completed
+ * synchronously, 0 if it suspended (cb fires later); on completion the result
+ * is in op->result and the record + found key are in rec_out / op->found_key.
+ * Use demofs_ext_from_op() in the callback to materialize the extent.
+ */
+static int
+demofs_ext_floor_async(
+    struct demofs_bt_op  *op,
+    struct demofs_thread *thread,
+    struct demofs_inode  *inode,
+    uint64_t              file_offset,
+    void                 *rec_out,
+    uint32_t              rec_cap,
+    demofs_bt_cb_t        cb,
+    void                 *private_data)
+{
+    struct demofs_bt_key key = demofs_extent_key(file_offset);
+    int                  r;
+
+    r = demofs_bt_lookup_async(op, thread, inode, DEMOFS_BT_OP_LOOKUP_LE,
+                               &key, &op->found_key, rec_out, rec_cap, cb, private_data);
+    return r;
+} /* demofs_ext_floor_async */
+
+static int
+demofs_ext_ceil_async(
+    struct demofs_bt_op  *op,
+    struct demofs_thread *thread,
+    struct demofs_inode  *inode,
+    uint64_t              file_offset,
+    void                 *rec_out,
+    uint32_t              rec_cap,
+    demofs_bt_cb_t        cb,
+    void                 *private_data)
+{
+    struct demofs_bt_key key = demofs_extent_key(file_offset);
+
+    return demofs_bt_lookup_async(op, thread, inode, DEMOFS_BT_OP_LOOKUP_GE,
+                                  &key, &op->found_key, rec_out, rec_cap, cb, private_data);
+} /* demofs_ext_ceil_async */
+
+static int
+demofs_ext_next_async(
+    struct demofs_bt_op  *op,
+    struct demofs_thread *thread,
+    struct demofs_inode  *inode,
+    uint64_t              after_file_offset,
+    void                 *rec_out,
+    uint32_t              rec_cap,
+    demofs_bt_cb_t        cb,
+    void                 *private_data)
+{
+    return demofs_ext_ceil_async(op, thread, inode, after_file_offset + 1,
+                                 rec_out, rec_cap, cb, private_data);
+} /* demofs_ext_next_async */
+
+/* Materialize the extent from a completed async lookup op (result + the
+ * record left in op->out + the key in op->found_key).  Returns 1 if a valid
+ * extent record was found, 0 otherwise. */
+static inline int
+demofs_ext_from_op(
+    struct demofs_bt_op  *op,
+    int                   result,
+    struct demofs_extent *out)
+{
+    struct demofs_extent_rec *rec = op->out;
+
+    if (result < 0 || op->found_key.type != DEMOFS_REC_EXTENT) {
+        return 0;
+    }
+    out->file_offset   = op->found_key.subkey;
+    out->length        = (uint32_t) rec->length;
+    out->device_id     = rec->device_id;
+    out->device_offset = rec->device_offset;
+    return 1;
+} /* demofs_ext_from_op */
 
 static inline struct demofs_extent *
 demofs_extent_alloc(struct demofs_thread *thread)
@@ -7025,6 +7112,132 @@ demofs_allocate(
                               demofs_allocate_inode_cb, request);
 } /* demofs_allocate */
 
+/*
+ * SEEK_DATA / SEEK_HOLE walk the extent map forward.  The walk is an async
+ * state machine: inode_stash[0] = inode, ext_iter = current extent,
+ * loop_have = whether ext_iter is valid, loop_pos = current scan position
+ * (SEEK_HOLE).  Each step advances via ext_next_async.
+ */
+static void demofs_seek_process(
+    struct chimera_vfs_request *request);
+
+static void
+demofs_seek_walk_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+
+    p->loop_have = demofs_ext_from_op(op, result, &p->ext_iter);
+    demofs_bt_op_free(p->thread, op);
+    demofs_seek_process(request);
+} /* demofs_seek_walk_cb */
+
+static void
+demofs_seek_advance(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_bt_op           *op     = demofs_bt_op_alloc(thread);
+
+    if (demofs_ext_next_async(op, thread, p->inode_stash[0], p->ext_iter.file_offset,
+                              p->rec_scratch, sizeof(p->rec_scratch),
+                              demofs_seek_walk_cb, request)) {
+        demofs_seek_walk_cb(op, op->result, request);
+    }
+} /* demofs_seek_advance */
+
+static void
+demofs_seek_process(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_inode           *inode  = p->inode_stash[0];
+    uint64_t                       offset = request->seek.offset;
+    uint64_t                       extent_end;
+
+    if (request->seek.what == 0) {
+        /* SEEK_DATA: first extent whose data covers/follows offset. */
+        if (!p->loop_have) {
+            request->seek.r_eof    = 1;
+            request->seek.r_offset = 0;
+            demofs_op_ok(request, p->txn);
+            return;
+        }
+
+        extent_end = p->ext_iter.file_offset + p->ext_iter.length;
+        if (extent_end > offset) {
+            request->seek.r_offset = (p->ext_iter.file_offset > offset) ?
+                p->ext_iter.file_offset : offset;
+            request->seek.r_eof = 0;
+            demofs_op_ok(request, p->txn);
+            return;
+        }
+        demofs_seek_advance(request);
+    } else {
+        /* SEEK_HOLE: first gap from loop_pos forward. */
+        if (!p->loop_have) {
+            request->seek.r_offset = (p->loop_pos < inode->size) ?
+                p->loop_pos : inode->size;
+            request->seek.r_eof = 0;
+            demofs_op_ok(request, p->txn);
+            return;
+        }
+
+        extent_end = p->ext_iter.file_offset + p->ext_iter.length;
+        if (extent_end <= p->loop_pos) {
+            demofs_seek_advance(request);
+            return;
+        }
+        if (p->ext_iter.file_offset > p->loop_pos) {
+            request->seek.r_offset = p->loop_pos;
+            request->seek.r_eof    = 0;
+            demofs_op_ok(request, p->txn);
+            return;
+        }
+        p->loop_pos = extent_end;
+        demofs_seek_advance(request);
+    }
+
+    (void) thread;
+} /* demofs_seek_process */
+
+/* First-extent selection: floor(offset), advancing to the next extent if the
+ * floor extent ends at/before offset, or the first extent if none. */
+static void
+demofs_seek_first_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    uint64_t                       offset  = request->seek.offset;
+    int                            have    = demofs_ext_from_op(op, result, &p->ext_iter);
+
+    demofs_bt_op_free(thread, op);
+
+    if (have && p->ext_iter.file_offset + p->ext_iter.length <= offset) {
+        demofs_seek_advance(request);
+        return;
+    }
+    if (!have) {
+        op = demofs_bt_op_alloc(thread);
+        if (demofs_ext_ceil_async(op, thread, p->inode_stash[0], 0, p->rec_scratch,
+                                  sizeof(p->rec_scratch), demofs_seek_walk_cb,
+                                  request)) {
+            demofs_seek_walk_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    p->loop_have = 1;
+    demofs_seek_process(request);
+} /* demofs_seek_first_cb */
+
 static void
 demofs_seek_inode_cb(
     struct demofs_inode *inode,
@@ -7035,6 +7248,7 @@ demofs_seek_inode_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     uint64_t                       offset  = request->seek.offset;
+    struct demofs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -7048,86 +7262,14 @@ demofs_seek_inode_cb(
         return;
     }
 
-    if (request->seek.what == 0) {
-        /* SEEK_DATA: find first extent covering or after offset */
-        struct demofs_extent  ext_buf;
-        struct demofs_extent *extent = &ext_buf;
-        int                   have;
+    p->inode_stash[0] = inode;
+    p->loop_pos       = offset;
 
-        have = demofs_ext_floor(thread, inode, offset, extent);
-
-        if (have) {
-            uint64_t extent_end = extent->file_offset + extent->length;
-            if (extent_end <= offset) {
-                have = demofs_ext_next(thread, inode, extent->file_offset, extent);
-            }
-        } else {
-            have = demofs_ext_ceil(thread, inode, 0, extent);
-        }
-
-        while (have) {
-            uint64_t extent_end = extent->file_offset + extent->length;
-
-            if (extent_end > offset) {
-                request->seek.r_offset = (extent->file_offset > offset) ?
-                    extent->file_offset : offset;
-                request->seek.r_eof = 0;
-                demofs_op_ok(request, p->txn);
-                return;
-            }
-
-            have = demofs_ext_next(thread, inode, extent->file_offset, extent);
-        }
-
-        request->seek.r_eof    = 1;
-        request->seek.r_offset = 0;
-        demofs_op_ok(request, p->txn);
-        return;
-    } else {
-        /* SEEK_HOLE: find first gap from offset forward */
-        struct demofs_extent  ext_buf;
-        struct demofs_extent *extent = &ext_buf;
-        int                   have;
-        uint64_t              current_pos = offset;
-
-        have = demofs_ext_floor(thread, inode, offset, extent);
-
-        if (have) {
-            uint64_t extent_end = extent->file_offset + extent->length;
-            if (extent_end <= offset) {
-                have = demofs_ext_next(thread, inode, extent->file_offset, extent);
-            }
-        } else {
-            have = demofs_ext_ceil(thread, inode, 0, extent);
-        }
-
-        while (have) {
-            uint64_t extent_end = extent->file_offset + extent->length;
-
-            if (extent_end <= current_pos) {
-                have = demofs_ext_next(thread, inode, extent->file_offset, extent);
-                continue;
-            }
-
-            if (extent->file_offset > current_pos) {
-                request->seek.r_offset = current_pos;
-                request->seek.r_eof    = 0;
-                demofs_op_ok(request, p->txn);
-                return;
-            }
-
-            current_pos = extent_end;
-            have        = demofs_ext_next(thread, inode, extent->file_offset, extent);
-        }
-
-        if (current_pos < inode->size) {
-            request->seek.r_offset = current_pos;
-        } else {
-            request->seek.r_offset = inode->size;
-        }
-        request->seek.r_eof = 0;
-        demofs_op_ok(request, p->txn);
-        return;
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_ext_floor_async(op, thread, inode, offset, p->rec_scratch,
+                               sizeof(p->rec_scratch), demofs_seek_first_cb,
+                               request)) {
+        demofs_seek_first_cb(op, op->result, request);
     }
 } /* demofs_seek_inode_cb */
 
