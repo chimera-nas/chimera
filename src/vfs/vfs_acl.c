@@ -489,7 +489,7 @@ chimera_acl_inherit(
                 }
                 out->aces[n]       = *src;
                 out->aces[n].who   = inherit_subst_creator(&src->who);
-                out->aces[n].flags = CHIMERA_ACE_FLAG_INHERITED;
+                out->aces[n].flags = 0;
                 n++;
             } else {
                 /* A directory the ACE applies to (CONTAINER_INHERIT) gets an
@@ -525,8 +525,10 @@ chimera_acl_inherit(
     (void) create_mode;
 
     /* Return the number of inherited ACEs (0 = nothing inheritable applied; the
-     * caller seeds its own default in that case). */
+     * caller seeds its own default in that case).  AUTO_INHERITED propagates
+     * from the parent: a child is in auto-inherit mode only if the parent was. */
     out->num_aces   = n;
-    out->ctrl_flags = n ? CHIMERA_ACL_CTRL_AUTO_INHERITED : 0;
+    out->ctrl_flags = (n && parent) ?
+        (parent->ctrl_flags & CHIMERA_ACL_CTRL_AUTO_INHERITED) : 0;
     return n;
 } /* chimera_acl_inherit */
