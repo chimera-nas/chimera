@@ -15,6 +15,7 @@
 #define SID_EVERYONE      "S-1-1-0"  /* World            */
 #define SID_CREATOR_OWNER "S-1-3-0"  /* CREATOR OWNER    */
 #define SID_CREATOR_GROUP "S-1-3-1"  /* CREATOR GROUP    */
+#define SID_SYSTEM        "S-1-5-18" /* NT AUTHORITY\SYSTEM */
 #define SID_AUTHENTICATED "S-1-5-11" /* Authenticated    */
 #define SID_NETWORK       "S-1-5-2"  /* Network          */
 #define SID_INTERACTIVE   "S-1-5-4"  /* Interactive      */
@@ -45,13 +46,13 @@ who_string_to_special(
         const char *name;
         uint8_t     special;
     } table[] = {
-        { "OWNER@",         CHIMERA_WHO_OWNER                                 },
-        { "GROUP@",         CHIMERA_WHO_GROUP                                 },
-        { "EVERYONE@",      CHIMERA_WHO_EVERYONE                              },
-        { "INTERACTIVE@",   CHIMERA_WHO_INTERACTIVE                           },
-        { "NETWORK@",       CHIMERA_WHO_NETWORK                               },
-        { "AUTHENTICATED@", CHIMERA_WHO_AUTHENTICATED                         },
-        { "ANONYMOUS@",     CHIMERA_WHO_ANONYMOUS                             },
+        { "OWNER@",         CHIMERA_WHO_OWNER                                         },
+        { "GROUP@",         CHIMERA_WHO_GROUP                                         },
+        { "EVERYONE@",      CHIMERA_WHO_EVERYONE                                      },
+        { "INTERACTIVE@",   CHIMERA_WHO_INTERACTIVE                                   },
+        { "NETWORK@",       CHIMERA_WHO_NETWORK                                       },
+        { "AUTHENTICATED@", CHIMERA_WHO_AUTHENTICATED                                 },
+        { "ANONYMOUS@",     CHIMERA_WHO_ANONYMOUS                                     },
     };
 
     for (unsigned i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
@@ -231,6 +232,7 @@ chimera_idmap_principal_to_sid(
              * S-1-3 well-known SIDs. */
             case CHIMERA_WHO_CREATOR_OWNER: s = SID_CREATOR_OWNER; break;
             case CHIMERA_WHO_CREATOR_GROUP: s = SID_CREATOR_GROUP; break;
+            case CHIMERA_WHO_SYSTEM:        s = SID_SYSTEM; break;
             case CHIMERA_WHO_EVERYONE:      s = SID_EVERYONE; break;
             case CHIMERA_WHO_INTERACTIVE:   s = SID_INTERACTIVE; break;
             case CHIMERA_WHO_NETWORK:       s = SID_NETWORK; break;
@@ -278,6 +280,10 @@ chimera_idmap_sid_to_principal(
     }
     if (strcmp(sid, SID_CREATOR_GROUP) == 0) {
         *p = chimera_idmap_special_principal(CHIMERA_WHO_CREATOR_GROUP);
+        return 0;
+    }
+    if (strcmp(sid, SID_SYSTEM) == 0) {
+        *p = chimera_idmap_special_principal(CHIMERA_WHO_SYSTEM);
         return 0;
     }
     if (strcmp(sid, SID_AUTHENTICATED) == 0) {

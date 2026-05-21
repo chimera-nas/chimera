@@ -90,6 +90,10 @@ enum chimera_special_who {
      * GROUP@ for the effective inherited ACE. */
     CHIMERA_WHO_CREATOR_OWNER = 7,
     CHIMERA_WHO_CREATOR_GROUP = 8,
+    /* NT AUTHORITY\SYSTEM (S-1-5-18).  Emitted in the Windows-style default DACL
+     * so SMB clients see the owner+SYSTEM full-control default they expect; it
+     * matches no Unix caller during access evaluation. */
+    CHIMERA_WHO_SYSTEM        = 9,
 };
 
 struct chimera_principal {

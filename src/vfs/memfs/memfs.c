@@ -998,7 +998,9 @@ memfs_inherit_acl(
     }
 
     if (has_inh) {
-        unsigned            cap = parent->acl->num_aces;
+        /* A directory child can yield up to two ACEs per inheritable parent ACE
+         * (an effective entry plus an inherit-only continuation). */
+        unsigned            cap = parent->acl->num_aces * 2;
         struct chimera_acl *tmp = malloc(chimera_acl_size(cap));
         int                 n   = chimera_acl_inherit(parent->acl, is_dir,
                                                       child->mode & 07777, tmp, cap);
@@ -1008,7 +1010,15 @@ memfs_inherit_acl(
             child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(child->acl);
         }
         free(tmp);
-    } else if (windows_default) {
+
+        if (child->acl) {
+            return;
+        }
+        /* Nothing actually inherited (e.g. an OBJECT_INHERIT-only ACE on a new
+         * directory): fall through to the default below. */
+    }
+
+    if (windows_default) {
         uint8_t             buf[sizeof(struct chimera_acl) +
                                 4 * sizeof(struct chimera_ace)];
         struct chimera_acl *def = (struct chimera_acl *) buf;

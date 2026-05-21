@@ -270,14 +270,9 @@ chimera_acl_default_acl(
     struct chimera_acl *out,
     unsigned            max_aces)
 {
-    uint32_t group_p = perm_class_to_mask(!!(mode & S_IRGRP),
-                                          !!(mode & S_IWGRP),
-                                          !!(mode & S_IXGRP));
-    uint32_t other_p = perm_class_to_mask(!!(mode & S_IROTH),
-                                          !!(mode & S_IWOTH),
-                                          !!(mode & S_IXOTH));
-    uint32_t group_deny = other_p & ~group_p;
-    unsigned n          = 0;
+    unsigned n = 0;
+
+    (void) mode;
 
 #define EMIT(t, m, sp) \
         do { \
@@ -291,17 +286,13 @@ chimera_acl_default_acl(
             n++; \
         } while (0)
 
-    /* Windows-style default DACL: the owner gets full control; group and other
-     * track the POSIX mode.  Used for objects created over SMB with neither an
-     * explicit security descriptor nor an inheritable parent ACE, so a Windows
-     * client sees the owner-full-control it expects (POSIX mode alone would, for
-     * example, deny the owner FILE_EXECUTE on a 0644 file). */
+    /* Windows-style default DACL for an object created with neither an explicit
+     * security descriptor nor an inheritable parent ACE: the owner and SYSTEM
+     * each get full control, matching the token default DACL a Windows client
+     * (and the smbtorture acls suite) expects.  The POSIX mode is left intact
+     * for NFS; group/other access on this object is governed by this DACL. */
     EMIT(CHIMERA_ACE_ALLOWED, CHIMERA_ACE_MASK_ALL, CHIMERA_WHO_OWNER);
-    EMIT(CHIMERA_ACE_ALLOWED, group_p | ACE_BASELINE, CHIMERA_WHO_GROUP);
-    if (group_deny) {
-        EMIT(CHIMERA_ACE_DENIED, group_deny, CHIMERA_WHO_GROUP);
-    }
-    EMIT(CHIMERA_ACE_ALLOWED, other_p | ACE_BASELINE, CHIMERA_WHO_EVERYONE);
+    EMIT(CHIMERA_ACE_ALLOWED, CHIMERA_ACE_MASK_ALL, CHIMERA_WHO_SYSTEM);
 #undef EMIT
 
     out->num_aces   = n;
@@ -446,6 +437,24 @@ chimera_acl_chmod(
     return n;
 } /* chimera_acl_chmod */
 
+/* Substitute the CREATOR_OWNER/CREATOR_GROUP placeholder for the concrete
+ * OWNER@/GROUP@ when an inheritable ACE is materialised as an effective entry
+ * on a child; other principals pass through unchanged. */
+static struct chimera_principal
+inherit_subst_creator(const struct chimera_principal *who)
+{
+    struct chimera_principal p = *who;
+
+    if (p.type == CHIMERA_PRINCIPAL_SPECIAL) {
+        if (p.special == CHIMERA_WHO_CREATOR_OWNER) {
+            p.special = CHIMERA_WHO_OWNER;
+        } else if (p.special == CHIMERA_WHO_CREATOR_GROUP) {
+            p.special = CHIMERA_WHO_GROUP;
+        }
+    }
+    return p;
+} /* inherit_subst_creator */
+
 SYMBOL_EXPORT int
 chimera_acl_inherit(
     const struct chimera_acl *parent,
@@ -459,54 +468,65 @@ chimera_acl_inherit(
     if (parent) {
         for (unsigned i = 0; i < parent->num_aces; i++) {
             const struct chimera_ace *src = &parent->aces[i];
-            uint16_t                  flags;
+            uint16_t                  f   = src->flags;
+            int                       oi  = !!(f & CHIMERA_ACE_FLAG_FILE_INHERIT);
+            int                       ci  = !!(f & CHIMERA_ACE_FLAG_DIR_INHERIT);
+            int                       np  = !!(f & CHIMERA_ACE_FLAG_NO_PROPAGATE);
 
-            /* Only ACEs marked inheritable propagate. */
-            if (is_dir) {
-                if (!(src->flags & CHIMERA_ACE_FLAG_DIR_INHERIT)) {
-                    /* A FILE_INHERIT-only ACE still propagates onto a child
-                     * directory as INHERIT_ONLY so it reaches grandchildren. */
-                    if (!(src->flags & CHIMERA_ACE_FLAG_FILE_INHERIT)) {
-                        continue;
-                    }
-                }
-            } else {
-                if (!(src->flags & CHIMERA_ACE_FLAG_FILE_INHERIT)) {
-                    continue;
-                }
+            /* Only ACEs flagged inheritable propagate at all. */
+            if (!oi && !ci) {
+                continue;
             }
-
-            if (n >= max_aces) {
-                return -1;
-            }
-
-            out->aces[n]       = *src;
-            flags              = src->flags;
-            out->aces[n].flags = flags | CHIMERA_ACE_FLAG_INHERITED;
 
             if (!is_dir) {
-                /* A file is not a container: strip all inheritance flags so the
-                 * ACE becomes an ordinary effective entry. */
-                out->aces[n].flags &= ~CHIMERA_ACE_FLAG_INHERIT_MASK;
-            } else if (flags & CHIMERA_ACE_FLAG_NO_PROPAGATE) {
-                /* Applies to this directory but does not propagate further. */
-                out->aces[n].flags &= ~CHIMERA_ACE_FLAG_INHERIT_MASK;
-            } else if (!(flags & CHIMERA_ACE_FLAG_DIR_INHERIT)) {
-                /* FILE_INHERIT-only on a child dir: keep propagating but it must
-                 * not apply to the directory object itself. */
-                out->aces[n].flags |= CHIMERA_ACE_FLAG_INHERIT_ONLY;
-            }
+                /* A file inherits an OBJECT_INHERIT ACE as a single effective
+                 * entry: CREATOR_* resolved to OWNER@/GROUP@. */
+                if (!oi) {
+                    continue;
+                }
+                if (n >= max_aces) {
+                    return -1;
+                }
+                out->aces[n]       = *src;
+                out->aces[n].who   = inherit_subst_creator(&src->who);
+                out->aces[n].flags = CHIMERA_ACE_FLAG_INHERITED;
+                n++;
+            } else {
+                /* A directory the ACE applies to (CONTAINER_INHERIT) gets an
+                 * effective entry: CREATOR_* resolved, no inheritance flags. */
+                if (ci) {
+                    if (n >= max_aces) {
+                        return -1;
+                    }
+                    out->aces[n]       = *src;
+                    out->aces[n].who   = inherit_subst_creator(&src->who);
+                    out->aces[n].flags = 0;
+                    n++;
+                }
 
-            n++;
+                /* Unless NO_PROPAGATE, the ACE continues to propagate from this
+                 * directory as an INHERIT_ONLY copy carrying the original
+                 * trustee (CREATOR_* stays a placeholder so grandchildren
+                 * resolve their own owner) and the original inherit flags. */
+                if (!np) {
+                    if (n >= max_aces) {
+                        return -1;
+                    }
+                    out->aces[n]       = *src;
+                    out->aces[n].flags = (f & (CHIMERA_ACE_FLAG_FILE_INHERIT |
+                                               CHIMERA_ACE_FLAG_DIR_INHERIT)) |
+                        CHIMERA_ACE_FLAG_INHERIT_ONLY;
+                    n++;
+                }
+            }
         }
     }
 
-    if (n == 0) {
-        /* Nothing inherited: fall back to the mode-derived ACL. */
-        return chimera_acl_from_mode(create_mode, out, max_aces);
-    }
+    (void) create_mode;
 
+    /* Return the number of inherited ACEs (0 = nothing inheritable applied; the
+     * caller seeds its own default in that case). */
     out->num_aces   = n;
-    out->ctrl_flags = CHIMERA_ACL_CTRL_AUTO_INHERITED;
+    out->ctrl_flags = n ? CHIMERA_ACL_CTRL_AUTO_INHERITED : 0;
     return n;
 } /* chimera_acl_inherit */
