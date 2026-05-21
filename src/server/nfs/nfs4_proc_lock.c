@@ -215,6 +215,18 @@ chimera_nfs4_lock(
         open_state = state_void;
         client     = open_state->owner->client;
 
+        /* RFC 7530 §9.1.4: the new lock-owner's clientid must be the client
+         * that holds the open being locked.  A mismatched (e.g. stale)
+         * clientid is a bad stateid. */
+        if (req->minorversion == 0 &&
+            lo_args->clientid != client->client_id) {
+            nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                    thread->vfs_thread);
+            res->status = NFS4ERR_BAD_STATEID;
+            chimera_nfs4_lock_finish(req, res->status);
+            return;
+        }
+
         /* RFC 7530 §9.1.4: lock_owner is scoped to the client.  Find or
          * create one and link the new lock_state to both the lock_owner and
          * the open_state. */

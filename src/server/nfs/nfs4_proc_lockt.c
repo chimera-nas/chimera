@@ -8,6 +8,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_state.h"
+#include "nfs4_session.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_state.h"
@@ -98,12 +99,27 @@ chimera_nfs4_lockt(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct LOCKT4res *res = &resop->oplockt;
+    struct LOCKT4args *args = &argop->oplockt;
+    struct LOCKT4res  *res  = &resop->oplockt;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
         chimera_nfs4_compound_complete(req, res->status);
         return;
+    }
+
+    /* RFC 7530 §9.1.4: the lock-owner names a clientid; reject one the server
+     * has no record of.  4.1+ identifies the client via the session instead. */
+    if (req->minorversion == 0) {
+        struct nfs4_session *s = nfs4_session_find_by_clientid(
+            &thread->shared->nfs4_shared_clients, args->owner.clientid);
+        if (s) {
+            nfs4_session_put(s);
+        } else {
+            res->status = NFS4ERR_STALE_CLIENTID;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
     }
 
     /* LOCKT operates on CURRENT_FH - open it temporarily to validate. */
