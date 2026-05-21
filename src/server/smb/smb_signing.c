@@ -137,6 +137,9 @@ chimera_smb_derive_signing_key(
                 return -1;
             }
         case SMB2_DIALECT_3_0:
+        case SMB2_DIALECT_3_0_2:
+            /* 3.0 and 3.0.2 share the SP800-108 signing-key derivation
+             * (label "SMB2AESCMAC", context "SmbSign"). */
             return kdf_counter_hmac_sha256_ossl3(session_key, session_key_len,
                                                  label30, sizeof(label30), /* includes '\0' */
                                                  (const uint8_t *) ctx30, sizeof(ctx30), /* includes '\0' */
@@ -337,6 +340,7 @@ chimera_smb_verify_signature(
             }
             break;
         case SMB2_DIALECT_3_0:
+        case SMB2_DIALECT_3_0_2:
             rc = chimera_smb_request_cmac_aes_128_cbc(
                 ctx,
                 &request->smb2_hdr,
@@ -448,6 +452,7 @@ chimera_smb_sign_compound(
                     }
                     break;
                 case SMB2_DIALECT_3_0:
+                case SMB2_DIALECT_3_0_2:
                     rc = chimera_smb_request_cmac_aes_128_cbc(
                         ctx,
                         hdr,
