@@ -25,6 +25,7 @@
 /* Security descriptor control flags */
 #define SE_SELF_RELATIVE           0x8000
 #define SE_DACL_PRESENT            0x0004
+#define SE_DACL_AUTO_INHERIT_REQ   0x0100
 #define SE_DACL_AUTO_INHERITED     0x0400
 #define SE_DACL_PROTECTED          0x1000
 
@@ -399,7 +400,10 @@ chimera_smb_sd_to_acl(
 
         acl->num_aces   = n;
         acl->ctrl_flags = 0;
-        if (sd_control & SE_DACL_AUTO_INHERITED) {
+        /* AUTO_INHERITED in the stored descriptor is driven by the client's
+         * AUTO_INHERIT_REQ request bit, not the (output-only) AUTO_INHERITED
+         * bit.  PROTECTED is stored as-is. */
+        if (sd_control & SE_DACL_AUTO_INHERIT_REQ) {
             acl->ctrl_flags |= CHIMERA_ACL_CTRL_AUTO_INHERITED;
         }
         if (sd_control & SE_DACL_PROTECTED) {
