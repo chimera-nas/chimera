@@ -4,6 +4,7 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <time.h>
 
 #include "nfs4_lease.h"
 #include "nfs4_recovery.h"
@@ -15,6 +16,47 @@
 #include "evpl/evpl.h"
 
 #define NFS_LEASE_SWEEP_INTERVAL_US 1000000   /* 1 Hz */
+
+/* True once `deadline` (CLOCK_MONOTONIC) has elapsed. */
+static inline bool
+nfs_deleg_deadline_passed(const struct timespec *deadline)
+{
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (now.tv_sec != deadline->tv_sec) {
+        return now.tv_sec > deadline->tv_sec;
+    }
+    return now.tv_nsec >= deadline->tv_nsec;
+} /* nfs_deleg_deadline_passed */
+
+/* If any of `uc`'s delegations has an outstanding recall that has gone
+ * unanswered past its deadline, the client's callback path is unusable: mark
+ * it DOWN so a subsequent RENEW returns NFS4ERR_CB_PATH_DOWN (RFC 7530
+ * §16.30.4).  Blocked acquirers separately revoke the lease lazily on retry. */
+static void
+nfs_deleg_recall_timeout_check(struct nfs_client *uc)
+{
+    struct nfs_delegation *deleg;
+    bool                   timed_out = false;
+
+    pthread_mutex_lock(&uc->lock);
+    LL_FOREACH2(uc->delegations, deleg, next_in_client)
+    {
+        if (deleg->lease_held &&
+            deleg->lease.break_state == CHIMERA_VFS_BREAK_BREAKING &&
+            nfs_deleg_deadline_passed(&deleg->lease.break_deadline)) {
+            timed_out = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&uc->lock);
+
+    if (timed_out) {
+        atomic_store_explicit(&uc->cb_path.cb_state, NFS4_CB_DOWN,
+                              memory_order_release);
+    }
+} /* nfs_deleg_recall_timeout_check */
 
 void
 nfs_lease_sweep_once(struct chimera_server_nfs_shared *shared)
@@ -52,6 +94,9 @@ nfs_lease_sweep_once(struct chimera_server_nfs_shared *shared)
         if (now_ns - last > lease_ns) {
             uc->expired = 1;
         }
+
+        /* Detect delegation recalls the client never answered. */
+        nfs_deleg_recall_timeout_check(uc);
     }
 
     pthread_mutex_unlock(&table->nfs4_ct_lock);
