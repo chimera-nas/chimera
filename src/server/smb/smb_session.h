@@ -30,6 +30,10 @@ struct chimera_smb_file_id {
  * not present in any tree's open_files[] hash and is owned solely by the
  * durable table (refcnt == 1). Cleared when a reconnect re-homes it. */
 #define CHIMERA_SMB_OPEN_FILE_PARKED               0x00000008
+/* A persistent-handle record for this open was written to the share's backend
+ * (atomically with the open).  On final close the record must be deleted from
+ * that backend so a restart doesn't resurrect a closed handle. */
+#define CHIMERA_SMB_OPEN_FILE_PERSISTED            0x00000010
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases

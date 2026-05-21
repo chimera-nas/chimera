@@ -118,19 +118,20 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
 } /* chimera_vfs_open_complete */
 
 SYMBOL_EXPORT void
-chimera_vfs_open_at(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_open_handle *handle,
-    const char                     *name,
-    int                             namelen,
-    unsigned int                    flags,
-    struct chimera_vfs_attrs       *set_attr,
-    uint64_t                        attr_mask,
-    uint64_t                        pre_attr_mask,
-    uint64_t                        post_attr_mask,
-    chimera_vfs_open_at_callback_t  callback,
-    void                           *private_data)
+chimera_vfs_open_at_hs(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_open_handle  *handle,
+    const char                      *name,
+    int                              namelen,
+    unsigned int                     flags,
+    struct chimera_vfs_attrs        *set_attr,
+    uint64_t                         attr_mask,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    struct chimera_vfs_handle_state *handle_state,
+    chimera_vfs_open_at_callback_t   callback,
+    void                            *private_data)
 {
     struct chimera_vfs_request *request;
 
@@ -151,6 +152,7 @@ chimera_vfs_open_at(
     request->open_at.name_hash                   = chimera_vfs_hash(name, namelen);
     request->open_at.flags                       = flags;
     request->open_at.set_attr                    = set_attr;
+    request->open_at.handle_state                = handle_state;
     request->open_at.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->open_at.r_attr.va_set_mask          = 0;
     request->open_at.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
@@ -161,4 +163,24 @@ chimera_vfs_open_at(
     request->proto_private_data                  = private_data;
 
     chimera_vfs_dispatch(request);
-} /* chimera_vfs_open_fh */
+} /* chimera_vfs_open_at_hs */
+
+SYMBOL_EXPORT void
+chimera_vfs_open_at(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    flags,
+    struct chimera_vfs_attrs       *set_attr,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_open_at_callback_t  callback,
+    void                           *private_data)
+{
+    chimera_vfs_open_at_hs(thread, cred, handle, name, namelen, flags, set_attr,
+                           attr_mask, pre_attr_mask, post_attr_mask, NULL,
+                           callback, private_data);
+} /* chimera_vfs_open_at */

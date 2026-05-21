@@ -1380,6 +1380,36 @@ cairn_get_meta_txn(struct cairn_thread *thread)
     return thread->meta_txn;
 } /* cairn_get_meta_txn */
 
+/* Stage an optional atomic handle-state record (carried on an open) into the
+ * current meta transaction, so it commits in the same rocksdb_transaction_commit
+ * as the inode/dirent writes for the open — no gap, no second round trip.
+ * Stored under the shared CAIRN_KEY_KV namespace so the generic search/delete
+ * KV ops can later enumerate and remove it. */
+static void
+cairn_stage_handle_state(
+    struct cairn_thread             *thread,
+    struct chimera_vfs_handle_state *hs)
+{
+    rocksdb_transaction_t *txn;
+    char                  *err = NULL;
+    uint8_t                kv_key[1 + CAIRN_KV_KEY_MAX];
+    size_t                 kv_key_len;
+
+    if (!hs || hs->key_len > CAIRN_KV_KEY_MAX) {
+        return;
+    }
+
+    kv_key[0]  = CAIRN_KEY_KV;
+    kv_key_len = 1 + hs->key_len;
+    memcpy(kv_key + 1, hs->key, hs->key_len);
+
+    txn = cairn_get_meta_txn(thread);
+    rocksdb_transaction_put(txn,
+                            (const char *) kv_key, kv_key_len,
+                            (const char *) hs->value, hs->value_len, &err);
+    chimera_cairn_abort_if(err, "Error staging handle-state: %s\n", err);
+} /* cairn_stage_handle_state */
+
 static rocksdb_writebatch_t *
 cairn_get_data_batch(struct cairn_thread *thread)
 {
@@ -2393,6 +2423,8 @@ cairn_open_fh(
     cairn_put_inode(thread, inode);
     cairn_inode_handle_release(&ih);
 
+    cairn_stage_handle_state(thread, request->open_fh.handle_state);
+
     request->status = CHIMERA_VFS_OK;
 
     cairn_queue_request(thread, request);
@@ -2524,6 +2556,8 @@ cairn_open_at(
     if (!is_new_inode) {
         cairn_inode_handle_release(&child_ih);
     }
+
+    cairn_stage_handle_state(thread, request->open_at.handle_state);
 
     request->status = CHIMERA_VFS_OK;
     cairn_queue_request(thread, request);
@@ -4070,7 +4104,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
     .name         = "cairn",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_CAIRN,
     .capabilities = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
-        CHIMERA_VFS_CAP_FS_RELATIVE_OP,
+        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE,
     .init           = cairn_init,
     .destroy        = cairn_destroy,
     .thread_init    = cairn_thread_init,

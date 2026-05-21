@@ -470,9 +470,13 @@ chimera_smb_create_gen_open_file(
      * disconnect and can be reclaimed on reconnect.  Done outside the bucket
      * lock to keep the bucket -> registry lock order (see smb_durable.c). */
     if (open_file->durable_flags) {
+        if (request->create.persist_pid != 0) {
+            open_file->flags |= CHIMERA_SMB_OPEN_FILE_PERSISTED;
+        }
         chimera_smb_durable_register(thread->shared, open_file,
                                      request->session_handle->session->session_id,
-                                     open_file->name, open_file->name_len);
+                                     open_file->name, open_file->name_len,
+                                     request->create.persist_pid != 0);
     }
 
     compound->saved_file_id = open_file->file_id;
@@ -496,8 +500,12 @@ chimera_smb_create_gen_open_file_normal(
 
     /* Persistent ids are drawn from a process-global monotonic counter rather
      * than a per-tree one so they stay unique across tree teardowns — durable
-     * reconnect looks an open up by persistent id alone. */
-    uint64_t                      pid = atomic_fetch_add(&request->compound->thread->shared->next_persistent_id, 1);
+     * reconnect looks an open up by persistent id alone.  A persistent grant
+     * (fresh or cold reclaim) pre-allocates its id so the on-disk record can be
+     * written atomically with the open; adopt it here. */
+    uint64_t                      pid = request->create.persist_pid ?
+        request->create.persist_pid :
+        atomic_fetch_add(&request->compound->thread->shared->next_persistent_id, 1);
 
     open_file = chimera_smb_create_gen_open_file(request,
                                                  CHIMERA_SMB_OPEN_FILE_TYPE_FILE,
@@ -803,6 +811,70 @@ chimera_smb_disposition_overwrites(uint32_t disposition)
            disposition == SMB2_FILE_SUPERSEDE;
 } /* chimera_smb_disposition_overwrites */
 
+/* Decide whether this open is a persistent-handle grant whose record must be
+ * persisted atomically with the open, and if so build the handle-state
+ * descriptor (request->create.persist_*).  Returns true if persisting; the
+ * caller then opens via chimera_vfs_open_at_hs. */
+static bool
+chimera_smb_create_persist_prepare(
+    struct chimera_smb_request     *request,
+    struct chimera_vfs_open_handle *parent_handle)
+{
+    struct chimera_server_smb_shared *shared = request->compound->thread->shared;
+    struct chimera_smb_tree          *tree   = request->tree;
+    struct chimera_smb_durable_record rec;
+    uint64_t                          pid;
+    uint32_t                          name_len;
+
+    if (!shared->config.persistent_handles ||
+        tree->type != CHIMERA_SMB_TREE_TYPE_SHARE ||
+        !tree->share || !tree->share->continuous_availability) {
+        return false;
+    }
+
+    if (!(request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2Q) ||
+        !(request->create.dh2q.flags & SMB2_DHANDLE_FLAG_PERSISTENT)) {
+        return false;
+    }
+
+    if (!parent_handle || !parent_handle->vfs_module ||
+        !(parent_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE)) {
+        return false;
+    }
+
+    if (request->create.persist_pid == 0) {
+        request->create.persist_pid = atomic_fetch_add(&shared->next_persistent_id, 1);
+    }
+    pid = request->create.persist_pid;
+
+    memset(&rec, 0, sizeof(rec));
+    rec.persistent_id = pid;
+    memcpy(rec.create_guid, request->create.dh2q.create_guid, 16);
+    rec.session_id         = request->session_handle->session->session_id;
+    rec.durable_flags      = CHIMERA_SMB_DURABLE_V2 | CHIMERA_SMB_DURABLE_PERSISTENT;
+    rec.durable_timeout_ms = request->create.dh2q.timeout_ms == 0 ?
+        CHIMERA_SMB_DURABLE_TIMEOUT_DEFAULT_MS :
+        (request->create.dh2q.timeout_ms > CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS ?
+         CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS : request->create.dh2q.timeout_ms);
+    rec.desired_access = request->create.desired_access;
+    rec.share_access   = request->create.share_access;
+
+    name_len = request->create.name_len;
+    if (name_len > SMB_FILENAME_MAX) {
+        name_len = SMB_FILENAME_MAX;
+    }
+    rec.name_len = name_len;
+    memcpy(rec.name, request->create.name, name_len);
+
+    request->create.persist_hs.key       = request->create.persist_key;
+    request->create.persist_hs.key_len   = chimera_smb_durable_key(request->create.persist_key, pid);
+    request->create.persist_hs.value     = request->create.persist_value;
+    request->create.persist_hs.value_len = chimera_smb_durable_serialize(
+        request->create.persist_value, sizeof(request->create.persist_value), &rec);
+
+    return request->create.persist_hs.value_len > 0;
+} /* chimera_smb_create_persist_prepare */
+
 /* Issue the open_at against the (already opened) parent handle in
  * request->create.parent_handle.  Shared by the plain path and the
  * post-overwrite-check path. */
@@ -855,19 +927,36 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
         request->create.set_attr.va_set_mask       |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
     }
 
-    chimera_vfs_open_at(
-        vfs_thread,
-        &request->session_handle->session->cred,
-        request->create.parent_handle,
-        request->create.name,
-        request->create.name_len,
-        flags,
-        &request->create.set_attr,
-        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
-        0,
-        0,
-        chimera_smb_create_open_at_callback,
-        request);
+    if (chimera_smb_create_persist_prepare(request, request->create.parent_handle)) {
+        chimera_vfs_open_at_hs(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            request->create.parent_handle,
+            request->create.name,
+            request->create.name_len,
+            flags,
+            &request->create.set_attr,
+            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
+            0,
+            0,
+            &request->create.persist_hs,
+            chimera_smb_create_open_at_callback,
+            request);
+    } else {
+        chimera_vfs_open_at(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            request->create.parent_handle,
+            request->create.name,
+            request->create.name_len,
+            flags,
+            &request->create.set_attr,
+            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
+            0,
+            0,
+            chimera_smb_create_open_at_callback,
+            request);
+    }
 } /* chimera_smb_create_issue_open */
 
 /* MS-FSA create with an overwriting disposition: before replacing an
@@ -1056,6 +1145,17 @@ chimera_smb_revalidate_tree_callback(
     clock_gettime(CLOCK_MONOTONIC, &tree->fh_expiration);
     tree->fh_expiration.tv_sec += 60;
 
+    /* First time we hold this CA share's root handle, scan its backend for
+     * persisted handle records left by a previous server instance and rebuild
+     * cold registry entries so they can be reclaimed on reconnect. */
+    if (request->compound->thread->shared->config.persistent_handles &&
+        tree->share && tree->share->continuous_availability &&
+        !tree->share->durable_recovered) {
+        tree->share->durable_recovered = true;
+        chimera_smb_durable_recover_share(request->compound->thread,
+                                          tree->fh, tree->fh_len);
+    }
+
     chimera_smb_create_process(request);
 } /* chimera_smb_revalidate_tree_callback */
 
@@ -1097,6 +1197,7 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
     const uint8_t                    *create_guid = NULL;
     uint64_t                          persistent_id;
     uint32_t                          status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    bool                              cold   = false;
     int                               bucket;
 
     if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2C) {
@@ -1109,7 +1210,18 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
     open_file = chimera_smb_durable_claim(shared, persistent_id, create_guid,
                                           request->session_handle->session->session_id,
                                           request->create.name, request->create.name_len,
-                                          &status);
+                                          &cold, &status);
+
+    if (cold) {
+        /* Recovered-after-restart persistent handle: there is no live open to
+         * re-home.  Re-open the file from scratch via the normal create path
+         * (the reconnect CREATE carries the name + access), forcing the
+         * recovered persistent id so the open re-adopts its identity and the
+         * backend record is refreshed atomically. */
+        request->create.persist_pid = persistent_id;
+        chimera_smb_create_process(request);
+        return;
+    }
 
     if (!open_file) {
         chimera_smb_complete_request(request, status);
@@ -1160,6 +1272,10 @@ chimera_smb_create(struct chimera_smb_request *request)
         chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_INVALID);
         return;
     }
+
+    /* No persistent-handle grant by default; set by the reconnect path (cold
+     * reclaim) or chimera_smb_create_persist_prepare for a fresh grant. */
+    request->create.persist_pid = 0;
 
     if (request->tree->type == CHIMERA_SMB_TREE_TYPE_PIPE) {
 

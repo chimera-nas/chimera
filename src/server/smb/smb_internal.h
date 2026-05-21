@@ -137,6 +137,9 @@ struct chimera_smb_share {
      * from the global smb_persistent_handles flag; a per-share config knob
      * will replace that later. */
     bool                               continuous_availability;
+    /* Set once the share's backend has been scanned for persisted handle
+     * records at first use (best-effort, idempotent recovery). */
+    bool                               durable_recovered;
 };
 
 struct chimera_smb_conn;
@@ -160,6 +163,18 @@ chimera_smb_parse_rename_info(
 void
 chimera_smb_set_info_rename_process(
     struct chimera_smb_request *request);
+
+/* SMB3 persistent-handle backend record.  Key is CHIMERA_SMB_DURABLE_KEY_PREFIX
+ * + persistent_id; the value is the serialized chimera_smb_durable_record (see
+ * below).  Defined here because the CREATE request carries scratch buffers
+ * sized by these macros. */
+#define CHIMERA_SMB_DURABLE_KEY_PREFIX     "smbdh"
+#define CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN 5
+#define CHIMERA_SMB_DURABLE_KEY_LEN        (CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN + 8)
+#define CHIMERA_SMB_DURABLE_RECORD_MAGIC   0x31484453  /* 'SDH1' LE */
+/* Fixed header bytes before the variable-length name in a serialized record. */
+#define CHIMERA_SMB_DURABLE_REC_HDR_LEN    (4 + 8 + 16 + 8 + 4 + 8 + 4 + 4 + 4)
+#define CHIMERA_SMB_DURABLE_VALUE_MAX      (CHIMERA_SMB_DURABLE_REC_HDR_LEN + SMB_FILENAME_MAX)
 
 struct chimera_smb_request {
     uint32_t                           status;
@@ -297,10 +312,18 @@ struct chimera_smb_request {
                 uint16_t epoch;
                 int      is_v2;
             } rqls;
-            uint64_t alsi_alloc_size;
-            uint64_t twrp_timestamp;
-            char     parent_path[SMB_FILENAME_MAX];
-            char    *name;
+            uint64_t                        alsi_alloc_size;
+            uint64_t                        twrp_timestamp;
+            /* SMB3 persistent-handle write-through.  persist_pid != 0 marks this
+             * open as a persistent grant (fresh or cold reclaim): the record is
+             * persisted atomically with the VFS open via persist_hs, and
+             * gen_open_file adopts persist_pid as the file's persistent id. */
+            uint64_t                        persist_pid;
+            struct chimera_vfs_handle_state persist_hs;
+            uint8_t                         persist_key[CHIMERA_SMB_DURABLE_KEY_LEN];
+            uint8_t                         persist_value[CHIMERA_SMB_DURABLE_VALUE_MAX];
+            char                            parent_path[SMB_FILENAME_MAX];
+            char                           *name;
         } create;
 
         struct  {
@@ -623,6 +646,11 @@ struct chimera_smb_durable_entry {
     uint64_t                          session_id; /* original owning session */
     struct timespec                   deadline;  /* reconnect grace; valid only while parked */
     bool                              parked;    /* true => disconnected, awaiting reconnect */
+    /* persistent: the record is also persisted in the share's backend (survives
+     * server restart).  cold: recovered from the backend at startup — the open
+     * is not in memory (open_file == NULL) and must be re-opened on reclaim. */
+    bool                              persistent;
+    bool                              cold;
     struct chimera_smb_open_file     *open_file;
     uint32_t                          name_len;
     char                              name[SMB_FILENAME_MAX];
@@ -635,6 +663,18 @@ struct chimera_smb_durable_entry {
 struct chimera_smb_durable_table {
     pthread_mutex_t                   lock;
     struct chimera_smb_durable_entry *by_pid;
+};
+
+struct chimera_smb_durable_record {
+    uint64_t persistent_id;
+    uint8_t  create_guid[16];
+    uint64_t session_id;
+    uint32_t durable_flags;
+    uint64_t durable_timeout_ms;
+    uint32_t desired_access;
+    uint32_t share_access;
+    uint32_t name_len;
+    char     name[SMB_FILENAME_MAX];
 };
 
 struct chimera_server_smb_shared {
@@ -684,7 +724,8 @@ chimera_smb_durable_register(
     struct chimera_smb_open_file     *open_file,
     uint64_t                          session_id,
     const char                       *name,
-    uint32_t                          name_len);
+    uint32_t                          name_len,
+    bool                              persistent);
 void
 chimera_smb_durable_forget(
     struct chimera_server_smb_shared *shared,
@@ -701,10 +742,46 @@ chimera_smb_durable_claim(
     uint64_t                          session_id,
     const char                       *name,
     uint32_t                          name_len,
+    bool                             *r_cold,
     uint32_t                         *status);
 void
 chimera_smb_durable_sweep(
     struct chimera_server_smb_thread *thread);
+
+/* Scan a share's backend (routed via `fh`) for persisted handle records and
+ * rebuild cold registry entries.  Best-effort, idempotent. */
+void
+chimera_smb_durable_recover_share(
+    struct chimera_server_smb_thread *thread,
+    const void                       *fh,
+    int                               fh_len);
+
+/* Add a cold (recovered-from-backend, not-yet-reopened) entry from a record
+ * read off the backend at startup.  Idempotent on persistent_id. */
+void
+chimera_smb_durable_recover_entry(
+    struct chimera_server_smb_shared        *shared,
+    const struct chimera_smb_durable_record *record);
+
+/* Build the backend KV key for a persistent id into buf (>= CHIMERA_SMB_DURABLE_KEY_LEN). */
+uint32_t
+chimera_smb_durable_key(
+    uint8_t *buf,
+    uint64_t persistent_id);
+
+/* Serialize a record into buf; returns bytes written (0 if buf too small). */
+uint32_t
+chimera_smb_durable_serialize(
+    uint8_t                                 *buf,
+    uint32_t                                 buf_size,
+    const struct chimera_smb_durable_record *record);
+
+/* Parse a serialized record; returns 0 on success, -1 on malformed input. */
+int
+chimera_smb_durable_deserialize(
+    const uint8_t                     *buf,
+    uint32_t                           buf_len,
+    struct chimera_smb_durable_record *record);
 
 struct chimera_server_smb_thread {
     struct evpl                       *evpl;

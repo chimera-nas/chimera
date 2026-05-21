@@ -62,14 +62,15 @@ chimera_vfs_open_fh_hdl_callback(
 } /* chimera_vfs_open_fh_hdl_callback */
 
 SYMBOL_EXPORT void
-chimera_vfs_open_fh(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    unsigned int                   flags,
-    chimera_vfs_open_fh_callback_t callback,
-    void                          *private_data)
+chimera_vfs_open_fh_hs(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    const void                      *fh,
+    int                              fhlen,
+    unsigned int                     flags,
+    struct chimera_vfs_handle_state *handle_state,
+    chimera_vfs_open_fh_callback_t   callback,
+    void                            *private_data)
 {
     struct chimera_vfs_module      *module;
     struct chimera_vfs_request     *request;
@@ -103,11 +104,12 @@ chimera_vfs_open_fh(
             return;
         }
 
-        request->opcode             = CHIMERA_VFS_OP_OPEN_FH;
-        request->complete           = chimera_vfs_open_fh_complete;
-        request->open_fh.flags      = flags;
-        request->proto_callback     = callback;
-        request->proto_private_data = private_data;
+        request->opcode               = CHIMERA_VFS_OP_OPEN_FH;
+        request->complete             = chimera_vfs_open_fh_complete;
+        request->open_fh.flags        = flags;
+        request->open_fh.handle_state = handle_state;
+        request->proto_callback       = callback;
+        request->proto_private_data   = private_data;
 
         chimera_vfs_open_cache_acquire(
             thread,
@@ -140,4 +142,17 @@ chimera_vfs_open_fh(
         callback(CHIMERA_VFS_OK, handle, private_data);
         return;
     }
+} /* chimera_vfs_open_fh_hs */
+
+SYMBOL_EXPORT void
+chimera_vfs_open_fh(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    unsigned int                   flags,
+    chimera_vfs_open_fh_callback_t callback,
+    void                          *private_data)
+{
+    chimera_vfs_open_fh_hs(thread, cred, fh, fhlen, flags, NULL, callback, private_data);
 } /* chimera_vfs_open_fh */

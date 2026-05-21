@@ -264,6 +264,20 @@ chimera_vfs_open_fh(
     chimera_vfs_open_fh_callback_t callback,
     void                          *private_data);
 
+/* Variant that persists an opaque handle-state record atomically with the
+ * open (backends advertising CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE); handle_state
+ * may be NULL, in which case it behaves exactly like chimera_vfs_open_fh. */
+void
+chimera_vfs_open_fh_hs(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    const void                      *fh,
+    int                              fhlen,
+    unsigned int                     flags,
+    struct chimera_vfs_handle_state *handle_state,
+    chimera_vfs_open_fh_callback_t   callback,
+    void                            *private_data);
+
 typedef void (*chimera_vfs_open_at_callback_t)(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *oh,
@@ -287,6 +301,25 @@ chimera_vfs_open_at(
     uint64_t                        post_attr_mask,
     chimera_vfs_open_at_callback_t  callback,
     void                           *private_data);
+
+/* Variant that persists an opaque handle-state record atomically with the
+ * open (backends advertising CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE); handle_state
+ * may be NULL, in which case it behaves exactly like chimera_vfs_open_at. */
+void
+chimera_vfs_open_at_hs(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_open_handle  *handle,
+    const char                      *name,
+    int                              namelen,
+    unsigned int                     flags,
+    struct chimera_vfs_attrs        *attr,
+    uint64_t                         attr_mask,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    struct chimera_vfs_handle_state *handle_state,
+    chimera_vfs_open_at_callback_t   callback,
+    void                            *private_data);
 
 
 typedef void (*chimera_vfs_create_unlinked_callback_t)(
@@ -596,9 +629,36 @@ chimera_vfs_delete_key(
     chimera_vfs_delete_key_callback_t callback,
     void                             *private_data);
 
+/* fh-routed variants: operate on the backend serving `fh` rather than the
+ * global kv_module (used for per-share handle-state records). */
+void
+chimera_vfs_delete_key_at(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    const void                       *fh,
+    int                               fhlen,
+    const void                       *key,
+    uint32_t                          key_len,
+    chimera_vfs_delete_key_callback_t callback,
+    void                             *private_data);
+
 void
 chimera_vfs_search_keys(
     struct chimera_vfs_thread         *thread,
+    const void                        *start_key,
+    uint32_t                           start_key_len,
+    const void                        *end_key,
+    uint32_t                           end_key_len,
+    chimera_vfs_search_keys_callback_t callback,
+    chimera_vfs_search_keys_complete_t complete,
+    void                              *private_data);
+
+void
+chimera_vfs_search_keys_at(
+    struct chimera_vfs_thread         *thread,
+    const struct chimera_vfs_cred     *cred,
+    const void                        *fh,
+    int                                fhlen,
     const void                        *start_key,
     uint32_t                           start_key_len,
     const void                        *end_key,
