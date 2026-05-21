@@ -23,6 +23,7 @@
 #include <linux/version.h>
 #include "vfs/vfs_error.h"
 #include "vfs/vfs_internal.h"
+#include "vfs/vfs_acl.h"
 
 // fchmodat support for AT_SYMLINK_NOFOLLOW was added in Linux 6.6
 #if defined(LINUX_VERSION_CODE) && defined(KERNEL_VERSION)
@@ -141,6 +142,15 @@ chimera_linux_set_attrs(
 {
     int      rc;
     uint64_t set_mask = attr->va_set_mask;
+
+    /* Mode-only backend: a set-ACL request is down-projected to the equivalent
+    * POSIX mode and applied as a chmod (lossy, by design -- see vfs_acl.h). */
+    if ((set_mask & CHIMERA_VFS_ATTR_ACL) &&
+        !(set_mask & CHIMERA_VFS_ATTR_MODE) && attr->va_acl) {
+        attr->va_mode = (attr->va_mode & S_IFMT) |
+            chimera_acl_to_mode(attr->va_acl);
+        set_mask |= CHIMERA_VFS_ATTR_MODE;
+    }
 
     if (set_mask & CHIMERA_VFS_ATTR_MODE) {
 #ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW
@@ -281,6 +291,19 @@ chimera_linux_getattr(
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                             &request->getattr.r_attr,
                             fd);
+
+    /* Mode-only backend: synthesise an ACL from the POSIX mode bits when the
+     * caller asked for one (lossy, one-way -- see vfs_acl.h). */
+    if ((request->getattr.r_attr.va_req_mask & CHIMERA_VFS_ATTR_ACL) &&
+        (request->getattr.r_attr.va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+        static __thread uint8_t scratch[sizeof(struct chimera_acl) +
+                                        8 * sizeof(struct chimera_ace)];
+        struct chimera_acl     *dst = (struct chimera_acl *) scratch;
+
+        chimera_acl_from_mode(request->getattr.r_attr.va_mode, dst, 8);
+        request->getattr.r_attr.va_acl       = dst;
+        request->getattr.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+    }
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
