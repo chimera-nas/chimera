@@ -854,7 +854,15 @@ build_canonical_request_v4(
     /* Signed Headers */
     offset += snprintf(canonical_request + offset, max_len - offset, "%s\n", signed_headers);
 
-    /* Hashed Payload */
+    /* Hashed Payload.
+     *
+     * For SigV4 streaming uploads the client sends a sentinel here
+     * (STREAMING-AWS4-HMAC-SHA256-PAYLOAD or STREAMING-UNSIGNED-PAYLOAD-TRAILER)
+     * rather than a payload hash, and that literal value is exactly what the
+     * seed signature is computed over -- so copying it verbatim is correct.
+     * The streaming sentinel additionally signals that the body is wrapped in
+     * aws-chunked framing; the PUT / UploadPart handlers detect it (see
+     * s3_server_dispatch) and de-chunk the body before storing it. */
     const char *content_sha256 = evpl_http_request_header(request, "x-amz-content-sha256");
     if (content_sha256) {
         strncpy(payload_hash, content_sha256, sizeof(payload_hash) - 1);

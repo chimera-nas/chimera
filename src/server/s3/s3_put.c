@@ -167,7 +167,55 @@ chimera_s3_put_recv(
 
     io = chimera_s3_io_alloc(thread, request);
 
-    io->niov = evpl_http_request_get_datav(evpl, request->http_request, io->iov, avail);
+    if (request->chunked) {
+        /* De-chunk the aws-chunked framing into a fresh buffer. Decoding only
+         * strips framing, so the decoded length never exceeds the raw input
+         * and a single output iovec of `avail` bytes always suffices. The raw
+         * input is pulled into a separate scratch array and released once
+         * copied; the decoded output is allocated directly into io->iov[0] so
+         * libevpl's iovec ownership tracking stays intact. */
+        struct evpl_iovec in_iov[CHIMERA_S3_IOV_MAX];
+        int               in_niov;
+        int               out_len = 0;
+        int               i;
+
+        in_niov = evpl_http_request_get_datav(evpl, request->http_request,
+                                              in_iov, avail);
+
+        evpl_iovec_alloc(evpl, avail, 0, 1, 0, &io->iov[0]);
+
+        for (i = 0; i < in_niov; i++) {
+            s3_chunk_decode(&request->chunk,
+                            evpl_iovec_data(&in_iov[i]),
+                            evpl_iovec_length(&in_iov[i]),
+                            evpl_iovec_data(&io->iov[0]),
+                            &out_len);
+        }
+
+        evpl_iovecs_release(evpl, in_iov, in_niov);
+
+        if (request->chunk.error) {
+            evpl_iovec_release(evpl, &io->iov[0]);
+            chimera_s3_io_free(thread, io);
+            request->status    = CHIMERA_S3_STATUS_BAD_REQUEST;
+            request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            return;
+        }
+
+        if (out_len == 0) {
+            /* This read carried only framing (e.g. a chunk header or the
+             * trailer); nothing to write yet. */
+            evpl_iovec_release(evpl, &io->iov[0]);
+            chimera_s3_io_free(thread, io);
+            goto again;
+        }
+
+        evpl_iovec_set_length(&io->iov[0], out_len);
+        io->niov = 1;
+        avail    = out_len;
+    } else {
+        io->niov = evpl_http_request_get_datav(evpl, request->http_request, io->iov, avail);
+    }
 
     request->io_pending++;
 

@@ -28,6 +28,13 @@ if(BOTO3_FOUND)
     set(S3_TEST_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/s3_test.py)
     set(CHIMERA_DAEMON ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 
+    # The 'awscli' test drives the real AWS CLI; only register it where the
+    # `aws` binary is available.
+    find_program(AWS_CLI aws)
+    if(NOT AWS_CLI)
+        message(STATUS "aws CLI not found - S3 awscli interop tests will be skipped")
+    endif()
+
     # Macro to add S3 test with specific signature version
     macro(add_s3_test_sigver testname backend sigver)
         if(CHIMERA_NETNS_TESTING)
@@ -62,6 +69,10 @@ if(BOTO3_FOUND)
     add_s3_test(delete_objects memfs)
     add_s3_test(list memfs)
     add_s3_test(multipart memfs)
+    add_s3_test(streaming memfs)
+    if(AWS_CLI)
+        add_s3_test(awscli memfs)
+    endif()
 
     # linux tests (V4)
     add_s3_test(put linux)
@@ -71,6 +82,10 @@ if(BOTO3_FOUND)
     add_s3_test(delete_objects linux)
     add_s3_test(list linux)
     add_s3_test(multipart linux)
+    add_s3_test(streaming linux)
+    if(AWS_CLI)
+        add_s3_test(awscli linux)
+    endif()
 
     # io_uring tests (V4)
     if(IO_URING_ENABLED)
@@ -81,6 +96,10 @@ if(BOTO3_FOUND)
         add_s3_test(delete_objects io_uring)
         add_s3_test(list io_uring)
         add_s3_test(multipart io_uring)
+        add_s3_test(streaming io_uring)
+        if(AWS_CLI)
+            add_s3_test(awscli io_uring)
+        endif()
 
         # demofs tests (V4) - demofs uses io_uring backend
         add_s3_test(put demofs)
@@ -103,6 +122,10 @@ if(BOTO3_FOUND)
     add_s3_test(delete_objects cairn)
     add_s3_test(list cairn)
     add_s3_test(multipart cairn)
+    add_s3_test(streaming cairn)
+    if(AWS_CLI)
+        add_s3_test(awscli cairn)
+    endif()
 
     # ==================== V2 Signature Tests ====================
     # V2 tests use memfs backend to verify V2 signing works
