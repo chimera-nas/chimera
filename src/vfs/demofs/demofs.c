@@ -3094,6 +3094,89 @@ demofs_dir_next(
     return 0;
 } /* demofs_dir_next */
 
+/*
+ * Async directory-record helpers (thin wrappers over the b+tree op driver).
+ * Each returns 1 if it completed synchronously (result in op->result; the
+ * looked-up record, if any, written into rec_out), or 0 if it suspended (cb
+ * fires with the result later).  Callers parse the dirent record themselves.
+ */
+static int
+demofs_dir_lookup_async(
+    struct demofs_bt_op  *op,
+    struct demofs_thread *thread,
+    struct demofs_inode  *dir,
+    uint64_t              hash,
+    void                 *rec_out,
+    uint32_t              rec_cap,
+    demofs_bt_cb_t        cb,
+    void                 *private_data)
+{
+    struct demofs_bt_key key = demofs_dirent_key(hash);
+
+    return demofs_bt_lookup_async(op, thread, dir, DEMOFS_BT_OP_LOOKUP_EXACT,
+                                  &key, NULL, rec_out, rec_cap, cb, private_data);
+} /* demofs_dir_lookup_async */
+
+static int
+demofs_dir_next_async(
+    struct demofs_bt_op  *op,
+    struct demofs_thread *thread,
+    struct demofs_inode  *dir,
+    uint64_t              from_hash,
+    struct demofs_bt_key *r_key,
+    void                 *rec_out,
+    uint32_t              rec_cap,
+    demofs_bt_cb_t        cb,
+    void                 *private_data)
+{
+    struct demofs_bt_key key = demofs_dirent_key(from_hash);
+
+    return demofs_bt_lookup_async(op, thread, dir, DEMOFS_BT_OP_LOOKUP_GE,
+                                  &key, r_key, rec_out, rec_cap, cb, private_data);
+} /* demofs_dir_next_async */
+
+static int
+demofs_dir_insert_async(
+    struct demofs_bt_op  *op,
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *dir,
+    uint64_t              hash,
+    const char           *name,
+    int                   namelen,
+    uint64_t              child_inum,
+    uint32_t              child_gen,
+    demofs_bt_cb_t        cb,
+    void                 *private_data)
+{
+    char                      buf[DEMOFS_DIRENT_REC_MAX];
+    struct demofs_dirent_rec *r   = (struct demofs_dirent_rec *) buf;
+    struct demofs_bt_key      key = demofs_dirent_key(hash);
+
+    r->inum     = child_inum;
+    r->gen      = child_gen;
+    r->name_len = (uint16_t) namelen;
+    memcpy(r->name, name, namelen);
+
+    return demofs_bt_insert_async(op, thread, txn, dir, &key, buf,
+                                  sizeof(*r) + namelen, cb, private_data);
+} /* demofs_dir_insert_async */
+
+static int
+demofs_dir_remove_async(
+    struct demofs_bt_op  *op,
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *dir,
+    uint64_t              hash,
+    demofs_bt_cb_t        cb,
+    void                 *private_data)
+{
+    struct demofs_bt_key key = demofs_dirent_key(hash);
+
+    return demofs_bt_remove_async(op, thread, txn, dir, &key, cb, private_data);
+} /* demofs_dir_remove_async */
+
 static void
 demofs_symlink_set(
     struct demofs_thread *thread,
@@ -4894,6 +4977,20 @@ demofs_mkdir_at_existing_cb(
 } /* demofs_mkdir_at_existing_cb */
 
 static void
+demofs_mkdir_at_inserted_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    demofs_bt_op_free(p->thread, op);
+    demofs_op_ok(request, p->txn);
+} /* demofs_mkdir_at_inserted_cb */
+
+static void
 demofs_mkdir_at_alloc_cb(
     struct demofs_inode *inode,
     int                  status,
@@ -4903,6 +5000,7 @@ demofs_mkdir_at_alloc_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     struct demofs_inode           *parent  = p->inode_stash[0];
+    struct demofs_bt_op           *op;
     struct timespec                now;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -4931,10 +5029,6 @@ demofs_mkdir_at_alloc_cb(
     demofs_apply_attrs(inode, request->mkdir_at.set_attr);
     demofs_map_attrs(thread, &request->mkdir_at.r_attr, inode);
 
-    demofs_dir_insert(thread, p->txn, parent, request->mkdir_at.name_hash,
-                      request->mkdir_at.name, request->mkdir_at.name_len,
-                      inode->inum, inode->gen);
-
     parent->nlink++;
     parent->mtime_sec  = now.tv_sec;
     parent->mtime_nsec = now.tv_nsec;
@@ -4943,8 +5037,37 @@ demofs_mkdir_at_alloc_cb(
 
     demofs_map_attrs(thread, &request->mkdir_at.r_dir_post_attr, parent);
 
-    demofs_op_ok(request, p->txn);
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_dir_insert_async(op, thread, p->txn, parent,
+                                request->mkdir_at.name_hash, request->mkdir_at.name,
+                                request->mkdir_at.name_len, inode->inum, inode->gen,
+                                demofs_mkdir_at_inserted_cb, request)) {
+        demofs_mkdir_at_inserted_cb(op, op->result, request);
+    }
 } /* demofs_mkdir_at_alloc_cb */
+
+static void
+demofs_mkdir_at_check_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+
+    demofs_bt_op_free(thread, op);
+
+    if (result >= 0) {
+        struct demofs_dirent_rec *rec = (struct demofs_dirent_rec *) p->rec_scratch;
+
+        demofs_inode_get_inum_async(thread, p->txn, rec->inum, rec->gen,
+                                    demofs_mkdir_at_existing_cb, request);
+        return;
+    }
+
+    demofs_inode_alloc_async(thread, p->txn, demofs_mkdir_at_alloc_cb, request);
+} /* demofs_mkdir_at_check_cb */
 
 static void
 demofs_mkdir_at_parent_cb(
@@ -4956,8 +5079,7 @@ demofs_mkdir_at_parent_cb(
     struct demofs_request_private *p       = request->plugin_data;
     struct demofs_thread          *thread  = p->thread;
     uint64_t                       hash    = request->mkdir_at.name_hash;
-    uint64_t                       existing_inum;
-    uint32_t                       existing_gen;
+    struct demofs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_op_fail(request, p->txn, status);
@@ -4973,15 +5095,12 @@ demofs_mkdir_at_parent_cb(
 
     p->inode_stash[0] = parent;
 
-    if (demofs_dir_lookup(thread, parent, hash, &existing_inum, &existing_gen) == 0) {
-        demofs_inode_get_inum_async(thread, p->txn,
-                                    existing_inum, existing_gen,
-                                    demofs_mkdir_at_existing_cb, request);
-        return;
+    op = demofs_bt_op_alloc(thread);
+    if (demofs_dir_lookup_async(op, thread, parent, hash, p->rec_scratch,
+                                sizeof(p->rec_scratch), demofs_mkdir_at_check_cb,
+                                request)) {
+        demofs_mkdir_at_check_cb(op, op->result, request);
     }
-
-    demofs_inode_alloc_async(thread, p->txn,
-                             demofs_mkdir_at_alloc_cb, request);
 } /* demofs_mkdir_at_parent_cb */
 
 static void
