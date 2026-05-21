@@ -2063,6 +2063,20 @@ memfs_read(
         eof    = 1;
     }
 
+    if (length == 0) {
+        /* Nothing to read. Returning early also avoids the
+         * (offset + length - 1) underflow below that would spin the
+         * block loop on a zero-length request. */
+        memfs_map_attrs(shared, &request->read.r_attr, inode, request->fh);
+        pthread_mutex_unlock(&inode->lock);
+        request->status        = CHIMERA_VFS_OK;
+        request->read.r_niov   = 0;
+        request->read.r_length = 0;
+        request->read.r_eof    = eof;
+        request->complete(request);
+        return;
+    }
+
     const uint32_t block_size  = shared->block_size;
     const uint32_t block_shift = shared->block_shift;
     const uint32_t block_mask  = shared->block_mask;
@@ -2169,6 +2183,19 @@ memfs_write(
     }
 
     memfs_map_attrs(shared, &request->write.r_pre_attr, inode, request->fh);
+
+    if (request->write.length == 0) {
+        /* A zero-length write changes nothing. Returning early also avoids
+         * the (offset + length - 1) underflow above, which drives last_block
+         * to a huge value and spins the 32-bit block-growth loop forever. */
+        memfs_map_attrs(shared, &request->write.r_post_attr, inode, request->fh);
+        pthread_mutex_unlock(&inode->lock);
+        request->status         = CHIMERA_VFS_OK;
+        request->write.r_length = 0;
+        request->write.r_sync   = 1;
+        request->complete(request);
+        return;
+    }
 
     if (inode->file.max_blocks <= last_block || !inode->file.blocks) {
         struct memfs_block **new_blocks;
