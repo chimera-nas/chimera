@@ -202,6 +202,9 @@ chimera_nfs4_compound_process(
                 case OP_RECLAIM_COMPLETE:
                     chimera_nfs4_reclaim_complete(thread, req, argop, resop);
                     break;
+                case OP_SECINFO:
+                    chimera_nfs4_secinfo(thread, req, argop, resop);
+                    break;
                 case OP_SECINFO_NO_NAME:
                     chimera_nfs4_secinfo_no_name(thread, req, argop, resop);
                     break;
