@@ -238,6 +238,9 @@ chimera_nfs4_compound_process(
                 case OP_TEST_STATEID:
                     chimera_nfs4_test_stateid(thread, req, argop, resop);
                     break;
+                case OP_FREE_STATEID:
+                    chimera_nfs4_free_stateid(thread, req, argop, resop);
+                    break;
                 case OP_ALLOCATE:
                     chimera_nfs4_allocate(thread, req, argop, resop);
                     break;
