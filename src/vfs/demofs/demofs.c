@@ -1771,9 +1771,389 @@ demofs_bt_insert(
     }
 } /* demofs_bt_insert */
 
+#define DEMOFS_BT_MAX_DEPTH 16
+
+/* A node (other than the root) is too empty and must borrow/merge once it
+ * holds less than half its capacity: leaves measured in bytes (slots +
+ * records), interior nodes in slot count. */
+static inline int
+demofs_bt_leaf_underflow(
+    void    *buf,
+    uint32_t base)
+{
+    struct demofs_bt_node_hdr *h    = demofs_bt_hdr(buf, base);
+    uint32_t                   used = h->nitems * sizeof(struct demofs_bt_lslot) +
+        (h->capacity - h->free_end);
+
+    return used * 2 < h->capacity;
+} /* demofs_bt_leaf_underflow */
+
+static inline int
+demofs_bt_interior_underflow(
+    void    *buf,
+    uint32_t base)
+{
+    struct demofs_bt_node_hdr *h    = demofs_bt_hdr(buf, base);
+    uint32_t                   maxi = (h->capacity - sizeof(struct demofs_bt_node_hdr)) /
+        sizeof(struct demofs_bt_islot);
+
+    return (uint32_t) h->nitems * 2 < maxi;
+} /* demofs_bt_interior_underflow */
+
+/* Repack a leaf's live records into a fresh heap, reclaiming the dead space
+ * left by prior slot removals.  Leaf-chain links are preserved. */
+static void
+demofs_bt_leaf_compact(
+    void    *buf,
+    uint32_t base,
+    uint32_t cap)
+{
+    struct demofs_bt_node_hdr *h  = demofs_bt_hdr(buf, base);
+    struct demofs_bt_lslot    *sl = demofs_bt_lslots(buf, base);
+    int                        n    = h->nitems, i;
+    uint64_t                   next = h->next_leaf, prev = h->prev_leaf;
+    struct demofs_bt_key      *keys    = malloc(n * sizeof(*keys) + 1);
+    uint32_t                  *lens    = malloc(n * sizeof(uint32_t) + 1);
+    char                      *scratch = malloc(cap);
+    uint32_t                   o       = 0;
+
+    for (i = 0; i < n; i++) {
+        keys[i] = sl[i].key;
+        lens[i] = sl[i].len;
+        memcpy(scratch + o, (char *) buf + base + sl[i].off, sl[i].len);
+        o += sl[i].len;
+    }
+
+    demofs_bt_node_init(buf, base, cap, 0);
+    o = 0;
+    for (i = 0; i < n; i++) {
+        demofs_bt_leaf_append(buf, base, &keys[i], scratch + o, lens[i]);
+        o += lens[i];
+    }
+    h            = demofs_bt_hdr(buf, base);
+    h->next_leaf = next;
+    h->prev_leaf = prev;
+
+    free(keys);
+    free(lens);
+    free(scratch);
+} /* demofs_bt_leaf_compact */
+
 /*
- * Remove a key from an inode's b+tree (lazy: no merge/rebalance).  Returns
- * 1 if removed, 0 if not found.  The descent dirties the path blocks.
+ * Rebalance an underflowing leaf (child index ci of the interior parent at
+ * pbuf/pbase) against an adjacent sibling: merge the two leaves if their
+ * combined contents fit in one node, otherwise redistribute evenly.  Returns
+ * 1 if the merge dropped a slot from the parent (which may now underflow), 0
+ * otherwise.  Freed leaf blocks are orphaned (reclaim deferred).
+ */
+static int
+demofs_bt_rebalance_leaf(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    void                 *pbuf,
+    uint32_t              pbase,
+    int                   ci)
+{
+    struct demofs_bt_islot    *psl = demofs_bt_islots(pbuf, pbase);
+    int                        pn  = demofs_bt_hdr(pbuf, pbase)->nitems;
+    int                        lidx, ridx, ln, rn, total, i, merged;
+    uint64_t                   l_bptr, r_bptr, l_prev, r_next;
+    void                      *lbuf, *rbuf;
+    struct demofs_bt_node_hdr *lh, *rh;
+    struct demofs_bt_key      *keys;
+    uint32_t                  *lens;
+    char                      *scratch;
+    uint32_t                   o, need;
+
+    if (pn < 2) {
+        return 0;     /* sole child of a degenerate root: collapse handles it */
+    }
+
+    if (ci + 1 < pn) {
+        lidx = ci;
+        ridx = ci + 1;
+    } else {
+        lidx = ci - 1;
+        ridx = ci;
+    }
+
+    l_bptr = psl[lidx].child;
+    r_bptr = psl[ridx].child;
+    lbuf   = demofs_bt_node_for_write(thread, txn, l_bptr);
+    rbuf   = demofs_bt_node_for_write(thread, txn, r_bptr);
+    lh     = demofs_bt_hdr(lbuf, 0);
+    rh     = demofs_bt_hdr(rbuf, 0);
+    ln     = lh->nitems;
+    rn     = rh->nitems;
+    total  = ln + rn;
+    l_prev = lh->prev_leaf;
+    r_next = rh->next_leaf;
+
+    keys    = malloc((total + 1) * sizeof(*keys));
+    lens    = malloc((total + 1) * sizeof(uint32_t));
+    scratch = malloc(2 * DEMOFS_BT_NODE_CAP);
+
+    o = 0;
+    for (i = 0; i < ln; i++) {
+        struct demofs_bt_lslot *s = demofs_bt_lslots(lbuf, 0);
+        keys[i] = s[i].key;
+        lens[i] = s[i].len;
+        memcpy(scratch + o, (char *) lbuf + s[i].off, s[i].len);
+        o += s[i].len;
+    }
+    for (i = 0; i < rn; i++) {
+        struct demofs_bt_lslot *s = demofs_bt_lslots(rbuf, 0);
+        keys[ln + i] = s[i].key;
+        lens[ln + i] = s[i].len;
+        memcpy(scratch + o, (char *) rbuf + s[i].off, s[i].len);
+        o += s[i].len;
+    }
+
+    need = sizeof(struct demofs_bt_node_hdr) +
+        total * sizeof(struct demofs_bt_lslot) + o;
+
+    if (need <= DEMOFS_BT_NODE_CAP) {
+        /* Merge everything into L; orphan R and unlink it from the chain. */
+        uint32_t off = 0;
+
+        demofs_bt_node_init(lbuf, 0, DEMOFS_BT_NODE_CAP, 0);
+        for (i = 0; i < total; i++) {
+            demofs_bt_leaf_append(lbuf, 0, &keys[i], scratch + off, lens[i]);
+            off += lens[i];
+        }
+        lh            = demofs_bt_hdr(lbuf, 0);
+        lh->prev_leaf = l_prev;
+        lh->next_leaf = r_next;
+        if (r_next) {
+            void *nn = demofs_bt_node_for_write(thread, txn, r_next);
+            demofs_bt_hdr(nn, 0)->prev_leaf = l_bptr;
+        }
+
+        for (i = ridx; i < pn - 1; i++) {
+            psl[i] = psl[i + 1];
+        }
+        demofs_bt_hdr(pbuf, pbase)->nitems = pn - 1;
+        merged                             = 1;
+    } else {
+        /* Redistribute evenly across L and R. */
+        uint32_t half = o / 2, acc = 0, off = 0;
+        int      split = 1;
+
+        for (i = 0; i < total; i++) {
+            if (acc >= half && i > 0) {
+                split = i;
+                break;
+            }
+            acc  += lens[i];
+            split = i + 1;
+        }
+        if (split < 1) {
+            split = 1;
+        }
+        if (split > total - 1) {
+            split = total - 1;
+        }
+
+        demofs_bt_node_init(lbuf, 0, DEMOFS_BT_NODE_CAP, 0);
+        for (i = 0; i < split; i++) {
+            demofs_bt_leaf_append(lbuf, 0, &keys[i], scratch + off, lens[i]);
+            off += lens[i];
+        }
+        demofs_bt_node_init(rbuf, 0, DEMOFS_BT_NODE_CAP, 0);
+        for (i = split; i < total; i++) {
+            demofs_bt_leaf_append(rbuf, 0, &keys[i], scratch + off, lens[i]);
+            off += lens[i];
+        }
+
+        lh            = demofs_bt_hdr(lbuf, 0);
+        rh            = demofs_bt_hdr(rbuf, 0);
+        lh->prev_leaf = l_prev;
+        lh->next_leaf = r_bptr;
+        rh->prev_leaf = l_bptr;
+        rh->next_leaf = r_next;
+
+        psl[ridx].key = demofs_bt_lslots(rbuf, 0)[0].key;
+        merged        = 0;
+    }
+
+    free(keys);
+    free(lens);
+    free(scratch);
+    return merged;
+} /* demofs_bt_rebalance_leaf */
+
+/*
+ * Rebalance an underflowing interior node (child index ci of parent
+ * pbuf/pbase) against a sibling.  B+tree separators are routing copies, so a
+ * merge is a plain concatenation of the two children's slots.  Returns 1 if a
+ * parent slot was dropped, 0 otherwise.
+ */
+static int
+demofs_bt_rebalance_interior(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    void                 *pbuf,
+    uint32_t              pbase,
+    int                   ci)
+{
+    struct demofs_bt_islot *psl = demofs_bt_islots(pbuf, pbase);
+    int                     pn  = demofs_bt_hdr(pbuf, pbase)->nitems;
+    int                     lidx, ridx, ln, rn, total, i, merged;
+    void                   *lbuf, *rbuf;
+    struct demofs_bt_islot  all[(2 * DEMOFS_BT_NODE_CAP / sizeof(struct demofs_bt_islot)) + 2];
+    uint32_t                maxi;
+
+    if (pn < 2) {
+        return 0;
+    }
+
+    if (ci + 1 < pn) {
+        lidx = ci;
+        ridx = ci + 1;
+    } else {
+        lidx = ci - 1;
+        ridx = ci;
+    }
+
+    lbuf  = demofs_bt_node_for_write(thread, txn, psl[lidx].child);
+    rbuf  = demofs_bt_node_for_write(thread, txn, psl[ridx].child);
+    ln    = demofs_bt_hdr(lbuf, 0)->nitems;
+    rn    = demofs_bt_hdr(rbuf, 0)->nitems;
+    total = ln + rn;
+
+    for (i = 0; i < ln; i++) {
+        all[i] = demofs_bt_islots(lbuf, 0)[i];
+    }
+    for (i = 0; i < rn; i++) {
+        all[ln + i] = demofs_bt_islots(rbuf, 0)[i];
+    }
+
+    maxi = (DEMOFS_BT_NODE_CAP - sizeof(struct demofs_bt_node_hdr)) /
+        sizeof(struct demofs_bt_islot);
+
+    if ((uint32_t) total <= maxi) {
+        for (i = 0; i < total; i++) {
+            demofs_bt_islots(lbuf, 0)[i] = all[i];
+        }
+        demofs_bt_hdr(lbuf, 0)->nitems = total;
+
+        for (i = ridx; i < pn - 1; i++) {
+            psl[i] = psl[i + 1];
+        }
+        demofs_bt_hdr(pbuf, pbase)->nitems = pn - 1;
+        merged                             = 1;
+    } else {
+        int split = total / 2;
+
+        for (i = 0; i < split; i++) {
+            demofs_bt_islots(lbuf, 0)[i] = all[i];
+        }
+        demofs_bt_hdr(lbuf, 0)->nitems = split;
+        for (i = split; i < total; i++) {
+            demofs_bt_islots(rbuf, 0)[i - split] = all[i];
+        }
+        demofs_bt_hdr(rbuf, 0)->nitems = total - split;
+
+        psl[ridx].key = demofs_bt_islots(rbuf, 0)[0].key;
+        merged        = 0;
+    }
+
+    return merged;
+} /* demofs_bt_rebalance_interior */
+
+/*
+ * Collapse the tree when the embedded root interior shrinks to a single
+ * child: pull that child up into the embedded root, provided its contents fit
+ * in the (smaller) embedded area.  Otherwise keep the degenerate one-child
+ * root until later removals make it fit.
+ */
+static void
+demofs_bt_collapse_root(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *inode)
+{
+    void    *root = inode->block->buffer;
+    uint32_t base = DEMOFS_BT_ROOT_BASE;
+
+    for (;; ) {
+        struct demofs_bt_node_hdr *rh = demofs_bt_hdr(root, base);
+        uint64_t                   cbptr;
+        void                      *cbuf;
+        struct demofs_bt_node_hdr *ch;
+        uint32_t                   need;
+        int                        i, n;
+
+        if (rh->level == 0 || rh->nitems != 1) {
+            break;
+        }
+
+        cbptr = demofs_bt_islots(root, base)[0].child;
+        cbuf  = demofs_bt_node_for_write(thread, txn, cbptr);
+        ch    = demofs_bt_hdr(cbuf, 0);
+        n     = ch->nitems;
+
+        if (ch->level == 0) {
+            need = sizeof(struct demofs_bt_node_hdr) +
+                n * sizeof(struct demofs_bt_lslot) +
+                (DEMOFS_BT_NODE_CAP - ch->free_end);
+        } else {
+            need = sizeof(struct demofs_bt_node_hdr) +
+                n * sizeof(struct demofs_bt_islot);
+        }
+
+        if (need > DEMOFS_BT_ROOT_CAP) {
+            break;     /* keep the one-child root */
+        }
+
+        if (ch->level == 0) {
+            struct demofs_bt_lslot *cs = demofs_bt_lslots(cbuf, 0);
+            uint64_t                cnext = ch->next_leaf, cprev = ch->prev_leaf;
+            struct demofs_bt_key   *keys    = malloc((n + 1) * sizeof(*keys));
+            uint32_t               *lens    = malloc((n + 1) * sizeof(uint32_t));
+            char                   *scratch = malloc(DEMOFS_BT_NODE_CAP);
+            uint32_t                o       = 0;
+
+            for (i = 0; i < n; i++) {
+                keys[i] = cs[i].key;
+                lens[i] = cs[i].len;
+                memcpy(scratch + o, (char *) cbuf + cs[i].off, cs[i].len);
+                o += cs[i].len;
+            }
+            demofs_bt_node_init(root, base, DEMOFS_BT_ROOT_CAP, 0);
+            o = 0;
+            for (i = 0; i < n; i++) {
+                demofs_bt_leaf_append(root, base, &keys[i], scratch + o, lens[i]);
+                o += lens[i];
+            }
+            rh            = demofs_bt_hdr(root, base);
+            rh->next_leaf = cnext;
+            rh->prev_leaf = cprev;
+            free(keys);
+            free(lens);
+            free(scratch);
+        } else {
+            struct demofs_bt_islot tmp[(DEMOFS_BT_NODE_CAP / sizeof(struct demofs_bt_islot))];
+            uint16_t               clevel = ch->level;
+
+            for (i = 0; i < n; i++) {
+                tmp[i] = demofs_bt_islots(cbuf, 0)[i];
+            }
+            demofs_bt_node_init(root, base, DEMOFS_BT_ROOT_CAP, clevel);
+            for (i = 0; i < n; i++) {
+                demofs_bt_islots(root, base)[i] = tmp[i];
+            }
+            demofs_bt_hdr(root, base)->nitems = n;
+        }
+        /* cbuf is now orphaned; physical reclaim deferred. */
+    }
+} /* demofs_bt_collapse_root */
+
+/*
+ * Remove a key from an inode's b+tree, maintaining the B+tree invariants:
+ * the leaf heap is compacted, parent separators are kept exact, and
+ * underflowing non-root nodes borrow/merge with a sibling (propagating up).
+ * Returns 1 if removed, 0 if not found.
  */
 static int
 demofs_bt_remove(
@@ -1782,15 +2162,22 @@ demofs_bt_remove(
     struct demofs_inode        *inode,
     const struct demofs_bt_key *key)
 {
-    void    *buf  = inode->block->buffer;
-    uint32_t base = DEMOFS_BT_ROOT_BASE;
+    struct {
+        void    *buf;
+        uint32_t base;
+        int      ci;
+    } path[DEMOFS_BT_MAX_DEPTH];
+    int      depth = 0;
+    void    *buf   = inode->block->buffer;
+    uint32_t base  = DEMOFS_BT_ROOT_BASE;
+    int      idx, exact, j, level;
 
+    /* Descend to the leaf, recording the interior path. */
     for (;; ) {
         struct demofs_bt_node_hdr *h = demofs_bt_hdr(buf, base);
 
         if (h->level == 0) {
             struct demofs_bt_lslot *sl = demofs_bt_lslots(buf, base);
-            int                     idx, exact, j;
 
             idx = demofs_bt_leaf_search(buf, base, key, &exact);
             if (!exact) {
@@ -1800,15 +2187,59 @@ demofs_bt_remove(
                 sl[j] = sl[j + 1];
             }
             h->nitems--;
-            return 1;
-        } else {
-            int ci = demofs_bt_interior_search(buf, base, key);
+            demofs_bt_leaf_compact(buf, base, h->capacity);
+            break;
+        }
 
-            buf = demofs_bt_node_for_write(thread, txn,
-                                           demofs_bt_islots(buf, base)[ci].child);
-            base = 0;
+        chimera_demofs_abort_if(depth >= DEMOFS_BT_MAX_DEPTH,
+                                "b+tree remove: path too deep");
+        path[depth].buf  = buf;
+        path[depth].base = base;
+        path[depth].ci   = demofs_bt_interior_search(buf, base, key);
+        buf              = demofs_bt_node_for_write(thread, txn,
+                                                    demofs_bt_islots(buf, base)[path[depth].ci].child);
+        base = 0;
+        depth++;
+    }
+
+    if (depth == 0) {
+        return 1;     /* the leaf is the embedded root; nothing more to do */
+    }
+
+    /* Removing a leaf's minimum changes its subtree min; keep the ancestor
+     * separators exact (cascading up through leftmost links). */
+    if (idx == 0 && demofs_bt_hdr(buf, base)->nitems > 0) {
+        struct demofs_bt_key new_min = demofs_bt_lslots(buf, base)[0].key;
+
+        for (level = depth - 1; level >= 0; level--) {
+            int ci = path[level].ci;
+
+            demofs_bt_islots(path[level].buf, path[level].base)[ci].key = new_min;
+            if (ci > 0) {
+                break;
+            }
         }
     }
+
+    /* Rebalance up the tree from the leaf's parent. */
+    if (demofs_bt_leaf_underflow(buf, base)) {
+        int merged = demofs_bt_rebalance_leaf(thread, txn, path[depth - 1].buf,
+                                              path[depth - 1].base, path[depth - 1].ci);
+
+        for (level = depth - 1; merged && level > 0; level--) {
+            if (demofs_bt_interior_underflow(path[level].buf, path[level].base)) {
+                merged = demofs_bt_rebalance_interior(thread, txn,
+                                                      path[level - 1].buf,
+                                                      path[level - 1].base,
+                                                      path[level - 1].ci);
+            } else {
+                merged = 0;
+            }
+        }
+    }
+
+    demofs_bt_collapse_root(thread, txn, inode);
+    return 1;
 } /* demofs_bt_remove */
 
 /*
