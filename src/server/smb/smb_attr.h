@@ -37,6 +37,12 @@
                                      SMB2_FILE_ATTRIBUTE_SYSTEM |   \
                                      SMB2_FILE_ATTRIBUTE_ARCHIVE)
 
+/* Persisted DOS bits reported back to clients.  SPARSE is reportable but is
+ * excluded from SMB_DOS_ATTR_SETTABLE because it is managed via
+ * FSCTL_SET_SPARSE, not FileBasicInformation. */
+#define SMB_DOS_ATTR_REPORTABLE     (SMB_DOS_ATTR_SETTABLE | \
+                                     SMB2_FILE_ATTRIBUTE_SPARSE_FILE)
+
 /* Masks for each information class */
 #define SMB_ATTR_MASK_BASIC         ( \
             SMB_ATTR_CRTTIME | SMB_ATTR_ATIME | SMB_ATTR_MTIME | \
@@ -123,11 +129,11 @@ chimera_smb_marshal_basic_attrs(
     /* File attributes */
     smb_attr->smb_attributes = 0;
 
-    /* Settable DOS attribute bits persisted by the VFS (READONLY, HIDDEN,
-     * SYSTEM, ARCHIVE).  Only honored when the backend reports it actually
+    /* DOS attribute bits persisted by the VFS (READONLY, HIDDEN, SYSTEM,
+     * ARCHIVE, SPARSE).  Only honored when the backend reports it actually
      * stores them; otherwise we fall back to synthesizing from the mode. */
     if (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) {
-        smb_attr->smb_attributes |= attr->va_dos_attributes & SMB_DOS_ATTR_SETTABLE;
+        smb_attr->smb_attributes |= attr->va_dos_attributes & SMB_DOS_ATTR_REPORTABLE;
     }
 
     if ((attr->va_mode & S_IFMT) == S_IFDIR) {
@@ -146,9 +152,12 @@ chimera_smb_marshal_basic_attrs(
             break;
     } // switch
 
-    /* Set default for normal file if no attributes are set */
-    if (smb_attr->smb_attributes == 0 && (attr->va_mode & S_IFMT) == S_IFREG) {
-        smb_attr->smb_attributes = SMB2_FILE_ATTRIBUTE_ARCHIVE;
+    /* A regular file always reports at least ARCHIVE when it carries none of
+     * the settable attribute bits (so e.g. a sparse-but-otherwise-plain file
+     * still shows ARCHIVE, matching Windows). */
+    if ((smb_attr->smb_attributes & SMB_DOS_ATTR_SETTABLE) == 0 &&
+        (attr->va_mode & S_IFMT) == S_IFREG) {
+        smb_attr->smb_attributes |= SMB2_FILE_ATTRIBUTE_ARCHIVE;
     }
     smb_attr->smb_attr_mask |= SMB_ATTR_ATTRIBUTES;
 } /* chimera_smb_marshal_basic_attrs */

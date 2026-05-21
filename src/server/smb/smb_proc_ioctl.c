@@ -79,6 +79,18 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             chimera_smb_ioctl_get_reparse(request);
             break;
 
+        case SMB2_FSCTL_SET_SPARSE:
+            chimera_smb_ioctl_set_sparse(request);
+            break;
+
+        case SMB2_FSCTL_SET_ZERO_DATA:
+            chimera_smb_ioctl_set_zero_data(request);
+            break;
+
+        case SMB2_FSCTL_QUERY_ALLOCATED_RANGES:
+            chimera_smb_ioctl_query_allocated_ranges(request);
+            break;
+
         default:
             chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
             break;
@@ -111,6 +123,9 @@ chimera_smb_ioctl_reply(
             break;
         case SMB2_FSCTL_GET_REPARSE_POINT:
             output_length = request->ioctl.rp_response_len;
+            break;
+        case SMB2_FSCTL_QUERY_ALLOCATED_RANGES:
+            output_length = request->ioctl.sp_qar_count * 16;
             break;
     } /* switch */
 
@@ -179,6 +194,12 @@ chimera_smb_ioctl_reply(
                                           request->ioctl.rp_response,
                                           request->ioctl.rp_response_len);
             break;
+        case SMB2_FSCTL_QUERY_ALLOCATED_RANGES:
+            for (uint32_t qi = 0; qi < request->ioctl.sp_qar_count; qi++) {
+                evpl_iovec_cursor_append_uint64(reply_cursor, request->ioctl.sp_qar_ranges[qi].offset);
+                evpl_iovec_cursor_append_uint64(reply_cursor, request->ioctl.sp_qar_ranges[qi].length);
+            }
+            break;
         default:
             break;
     } /* switch */
@@ -211,6 +232,9 @@ chimera_smb_parse_ioctl(
     evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.output_count);
     evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.max_output_response);
     evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.flags);
+
+    /* SET_SPARSE with no input buffer means SetSparse = TRUE. */
+    request->ioctl.sp_set_sparse = 1;
 
     /* Parse IOCTL-specific input data if present */
     if (request->ioctl.input_count > 0) {
@@ -427,6 +451,32 @@ chimera_smb_parse_ioctl(
                 }
                 break;
             }
+            case SMB2_FSCTL_SET_SPARSE:
+                /* FILE_SET_SPARSE_BUFFER: optional single SetSparse byte. */
+                evpl_iovec_cursor_get_uint8(request_cursor, &request->ioctl.sp_set_sparse);
+                break;
+            case SMB2_FSCTL_SET_ZERO_DATA:
+                /* FILE_ZERO_DATA_INFORMATION: int64 FileOffset, int64 BeyondFinalZero. */
+                if (request->ioctl.input_count < 16) {
+                    chimera_smb_error("SET_ZERO_DATA input too small (%u < 16)",
+                                      request->ioctl.input_count);
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.sp_zero_offset);
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.sp_zero_beyond);
+                break;
+            case SMB2_FSCTL_QUERY_ALLOCATED_RANGES:
+                /* FILE_ALLOCATED_RANGE_BUFFER: int64 FileOffset, int64 Length. */
+                if (request->ioctl.input_count < 16) {
+                    chimera_smb_error("QUERY_ALLOCATED_RANGES input too small (%u < 16)",
+                                      request->ioctl.input_count);
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.sp_qar_offset);
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.sp_qar_length);
+                break;
             default:
                 /* Other IOCTLs don't need input parsing yet */
                 chimera_smb_info("Received IOCTL request with unhandled ctl_code 0x%08x, skipping input parsing",
