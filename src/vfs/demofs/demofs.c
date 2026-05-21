@@ -649,6 +649,7 @@ struct demofs_bt_op {
     void                     *out;
     uint32_t                  out_cap;
     struct demofs_bt_key     *r_key;
+    struct demofs_bt_key      found_key;   /* op-owned storage for r_key */
 
     /* traversal cursor */
     uint64_t                  cur_bptr;
@@ -5554,21 +5555,48 @@ demofs_readdir_iter_inode_cb(
 } /* demofs_readdir_iter_inode_cb */
 
 static void
-demofs_readdir_iter_step(struct chimera_vfs_request *request)
+demofs_readdir_next_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *private_data)
 {
-    struct demofs_request_private *p      = request->plugin_data;
-    struct demofs_thread          *thread = p->thread;
-    struct demofs_inode           *inode  = p->inode_stash[0];
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    struct demofs_dirent_rec      *rec     = (struct demofs_dirent_rec *) p->rec_scratch;
 
-    if (demofs_dir_next(thread, inode, p->rd_from_hash, &p->rd_hash,
-                        &p->rd_inum, &p->rd_gen, p->rd_name, &p->rd_namelen) != 0) {
+    if (result < 0 || op->found_key.type != DEMOFS_REC_DIRENT) {
+        demofs_bt_op_free(thread, op);
         request->readdir.r_eof = 1;
         demofs_readdir_complete(request);
         return;
     }
 
+    p->rd_hash    = op->found_key.subkey;
+    p->rd_inum    = rec->inum;
+    p->rd_gen     = rec->gen;
+    p->rd_namelen = rec->name_len;
+    memcpy(p->rd_name, rec->name, rec->name_len);
+
+    demofs_bt_op_free(thread, op);
+
     demofs_inode_get_inum_async(thread, p->txn, p->rd_inum, p->rd_gen,
                                 demofs_readdir_iter_inode_cb, request);
+} /* demofs_readdir_next_cb */
+
+static void
+demofs_readdir_iter_step(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_inode           *inode  = p->inode_stash[0];
+    struct demofs_bt_op           *op     = demofs_bt_op_alloc(thread);
+
+    if (demofs_dir_next_async(op, thread, inode, p->rd_from_hash, &op->found_key,
+                              p->rec_scratch, sizeof(p->rec_scratch),
+                              demofs_readdir_next_cb, request)) {
+        demofs_readdir_next_cb(op, op->result, request);
+    }
 } /* demofs_readdir_iter_step */
 
 static void
@@ -7431,46 +7459,33 @@ demofs_rename_at_existing_cb(
     demofs_rename_at_perform(request);
 } /* demofs_rename_at_existing_cb */
 
+/*
+ * Perform stage, async-chained: [remove dest dirent] -> insert new dirent ->
+ * remove source dirent -> commit.  old_inum/old_gen live in rd_inum/rd_gen
+ * (captured by the source lookup); the source parent stays write-locked so no
+ * re-verify lookup is needed.
+ */
+static void demofs_rename_at_perform_insert(
+    struct chimera_vfs_request *request);
+
 static void
-demofs_rename_at_perform(struct chimera_vfs_request *request)
+demofs_rename_at_perform_final_cb(
+    struct demofs_bt_op *bop,
+    int                  result,
+    void                *private_data)
 {
-    struct demofs_request_private *p              = request->plugin_data;
-    struct demofs_thread          *thread         = p->thread;
-    struct demofs_inode           *op             = p->inode_stash[0];
-    struct demofs_inode           *np             = p->inode_stash[1];
-    struct demofs_inode           *child          = p->inode_stash[2];
-    struct demofs_inode           *existing_inode = p->inode_stash[3];
-    uint64_t                       hash           = request->rename_at.name_hash;
-    uint64_t                       new_hash       = request->rename_at.new_name_hash;
-    uint64_t                       old_inum;
-    uint32_t                       old_gen;
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    struct demofs_inode           *op      = p->inode_stash[0];
+    struct demofs_inode           *np      = p->inode_stash[1];
+    struct demofs_inode           *child   = p->inode_stash[2];
     struct timespec                now;
 
+    (void) result;
+    demofs_bt_op_free(thread, bop);
+
     clock_gettime(CLOCK_REALTIME, &now);
-
-    /* The source dirent was verified before we fetched the child and the
-     * source parent has been write-locked the whole time, so it must still
-     * be present. */
-    if (unlikely(demofs_dir_lookup(thread, op, hash, &old_inum, &old_gen) != 0)) {
-        demofs_rename_at_unlock_parents(request);
-        demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
-        return;
-    }
-
-    if (existing_inode) {
-        if (demofs_dir_remove(thread, p->txn, np, new_hash) == 1) {
-            existing_inode->nlink--;
-            if (S_ISDIR(existing_inode->mode)) {
-                np->nlink--;
-            }
-        }
-    }
-
-    demofs_dir_insert(thread, p->txn, np, new_hash,
-                      request->rename_at.new_name, request->rename_at.new_namelen,
-                      old_inum, old_gen);
-
-    demofs_dir_remove(thread, p->txn, op, hash);
 
     if (S_ISDIR(child->mode)) {
         op->nlink--;
@@ -7493,7 +7508,129 @@ demofs_rename_at_perform(struct chimera_vfs_request *request)
 
     demofs_rename_at_unlock_parents(request);
     demofs_op_ok(request, p->txn);
+} /* demofs_rename_at_perform_final_cb */
+
+static void
+demofs_rename_at_perform_inserted_cb(
+    struct demofs_bt_op *bop,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+
+    (void) result;
+    demofs_bt_op_free(thread, bop);
+
+    bop = demofs_bt_op_alloc(thread);
+    if (demofs_dir_remove_async(bop, thread, p->txn, p->inode_stash[0],
+                                request->rename_at.name_hash,
+                                demofs_rename_at_perform_final_cb, request)) {
+        demofs_rename_at_perform_final_cb(bop, bop->result, request);
+    }
+} /* demofs_rename_at_perform_inserted_cb */
+
+static void
+demofs_rename_at_perform_insert(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_thread          *thread = p->thread;
+    struct demofs_bt_op           *bop    = demofs_bt_op_alloc(thread);
+
+    if (demofs_dir_insert_async(bop, thread, p->txn, p->inode_stash[1],
+                                request->rename_at.new_name_hash,
+                                request->rename_at.new_name,
+                                request->rename_at.new_namelen,
+                                p->rd_inum, p->rd_gen,
+                                demofs_rename_at_perform_inserted_cb, request)) {
+        demofs_rename_at_perform_inserted_cb(bop, bop->result, request);
+    }
+} /* demofs_rename_at_perform_insert */
+
+static void
+demofs_rename_at_perform_removed_cb(
+    struct demofs_bt_op *bop,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request        = private_data;
+    struct demofs_request_private *p              = request->plugin_data;
+    struct demofs_inode           *np             = p->inode_stash[1];
+    struct demofs_inode           *existing_inode = p->inode_stash[3];
+
+    demofs_bt_op_free(p->thread, bop);
+
+    if (result == 1) {
+        existing_inode->nlink--;
+        if (S_ISDIR(existing_inode->mode)) {
+            np->nlink--;
+        }
+    }
+
+    demofs_rename_at_perform_insert(request);
+} /* demofs_rename_at_perform_removed_cb */
+
+static void
+demofs_rename_at_perform(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p              = request->plugin_data;
+    struct demofs_thread          *thread         = p->thread;
+    struct demofs_inode           *existing_inode = p->inode_stash[3];
+    struct demofs_bt_op           *bop;
+
+    if (existing_inode) {
+        bop = demofs_bt_op_alloc(thread);
+        if (demofs_dir_remove_async(bop, thread, p->txn, p->inode_stash[1],
+                                    request->rename_at.new_name_hash,
+                                    demofs_rename_at_perform_removed_cb, request)) {
+            demofs_rename_at_perform_removed_cb(bop, bop->result, request);
+        }
+        return;
+    }
+
+    demofs_rename_at_perform_insert(request);
 } /* demofs_rename_at_perform */
+
+/* The dest-name lookup completed; decide replace vs hardlink-shortcut. */
+static void
+demofs_rename_at_dest_cb(
+    struct demofs_bt_op *bop,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    struct demofs_inode           *op      = p->inode_stash[0];
+    struct demofs_inode           *np      = p->inode_stash[1];
+    struct demofs_dirent_rec      *rec     = (struct demofs_dirent_rec *) p->rec_scratch;
+    uint64_t                       existing_inum;
+    uint32_t                       existing_gen;
+
+    demofs_bt_op_free(thread, bop);
+
+    if (result < 0) {
+        p->inode_stash[3] = NULL;
+        demofs_rename_at_perform(request);
+        return;
+    }
+
+    existing_inum = rec->inum;
+    existing_gen  = rec->gen;
+
+    /* Hardlink shortcut: source and dest already refer to the same inode. */
+    if (existing_inum == p->rd_inum && existing_gen == p->rd_gen) {
+        demofs_map_attrs(thread, &request->rename_at.r_fromdir_post_attr, op);
+        demofs_map_attrs(thread, &request->rename_at.r_todir_post_attr, np);
+        demofs_rename_at_unlock_parents(request);
+        demofs_op_ok(request, p->txn);
+        return;
+    }
+
+    demofs_inode_get_inum_async(thread, p->txn, existing_inum, existing_gen,
+                                demofs_rename_at_existing_cb, request);
+} /* demofs_rename_at_dest_cb */
 
 static void
 demofs_rename_at_child_cb(
@@ -7501,15 +7638,11 @@ demofs_rename_at_child_cb(
     int                  status,
     void                *private_data)
 {
-    struct chimera_vfs_request    *request  = private_data;
-    struct demofs_request_private *p        = request->plugin_data;
-    struct demofs_thread          *thread   = p->thread;
-    struct demofs_inode           *op       = p->inode_stash[0];
-    struct demofs_inode           *np       = p->inode_stash[1];
-    uint64_t                       hash     = request->rename_at.name_hash;
-    uint64_t                       new_hash = request->rename_at.new_name_hash;
-    uint64_t                       old_inum, existing_inum;
-    uint32_t                       old_gen, existing_gen;
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    struct demofs_inode           *np      = p->inode_stash[1];
+    struct demofs_bt_op           *bop;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         demofs_rename_at_unlock_parents(request);
@@ -7519,31 +7652,41 @@ demofs_rename_at_child_cb(
 
     p->inode_stash[2] = child;
 
-    if (unlikely(demofs_dir_lookup(thread, op, hash, &old_inum, &old_gen) != 0)) {
+    bop = demofs_bt_op_alloc(thread);
+    if (demofs_dir_lookup_async(bop, thread, np, request->rename_at.new_name_hash,
+                                p->rec_scratch, sizeof(p->rec_scratch),
+                                demofs_rename_at_dest_cb, request)) {
+        demofs_rename_at_dest_cb(bop, bop->result, request);
+    }
+} /* demofs_rename_at_child_cb */
+
+/* The source-name lookup completed; capture old inum/gen and fetch the
+ * child inode. */
+static void
+demofs_rename_at_source_cb(
+    struct demofs_bt_op *bop,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_thread          *thread  = p->thread;
+    struct demofs_dirent_rec      *rec     = (struct demofs_dirent_rec *) p->rec_scratch;
+
+    demofs_bt_op_free(thread, bop);
+
+    if (result < 0) {
         demofs_rename_at_unlock_parents(request);
         demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
 
-    if (demofs_dir_lookup(thread, np, new_hash, &existing_inum, &existing_gen) != 0) {
-        p->inode_stash[3] = NULL;
-        demofs_rename_at_perform(request);
-        return;
-    }
+    p->rd_inum = rec->inum;
+    p->rd_gen  = rec->gen;
 
-    /* Hardlink shortcut: source and dest already refer to the same inode. */
-    if (existing_inum == old_inum && existing_gen == old_gen) {
-        demofs_map_attrs(thread, &request->rename_at.r_fromdir_post_attr, op);
-        demofs_map_attrs(thread, &request->rename_at.r_todir_post_attr, np);
-        demofs_rename_at_unlock_parents(request);
-        demofs_op_ok(request, p->txn);
-        return;
-    }
-
-    demofs_inode_get_inum_async(thread, p->txn,
-                                existing_inum, existing_gen,
-                                demofs_rename_at_existing_cb, request);
-} /* demofs_rename_at_child_cb */
+    demofs_inode_get_inum_async(thread, p->txn, rec->inum, rec->gen,
+                                demofs_rename_at_child_cb, request);
+} /* demofs_rename_at_source_cb */
 
 static void
 demofs_rename_at_have_parents(struct chimera_vfs_request *request)
@@ -7552,22 +7695,17 @@ demofs_rename_at_have_parents(struct chimera_vfs_request *request)
     struct demofs_thread          *thread = p->thread;
     struct demofs_inode           *op     = p->inode_stash[0];
     struct demofs_inode           *np     = p->inode_stash[1];
-    uint64_t                       hash   = request->rename_at.name_hash;
-    uint64_t                       old_inum;
-    uint32_t                       old_gen;
+    struct demofs_bt_op           *bop;
 
     demofs_map_attrs(thread, &request->rename_at.r_fromdir_pre_attr, op);
     demofs_map_attrs(thread, &request->rename_at.r_todir_pre_attr, np);
 
-    if (demofs_dir_lookup(thread, op, hash, &old_inum, &old_gen) != 0) {
-        demofs_rename_at_unlock_parents(request);
-        demofs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
-        return;
+    bop = demofs_bt_op_alloc(thread);
+    if (demofs_dir_lookup_async(bop, thread, op, request->rename_at.name_hash,
+                                p->rec_scratch, sizeof(p->rec_scratch),
+                                demofs_rename_at_source_cb, request)) {
+        demofs_rename_at_source_cb(bop, bop->result, request);
     }
-
-    demofs_inode_get_inum_async(thread, p->txn,
-                                old_inum, old_gen,
-                                demofs_rename_at_child_cb, request);
 } /* demofs_rename_at_have_parents */
 
 static void
