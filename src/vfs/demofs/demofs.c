@@ -306,21 +306,22 @@ struct demofs_bt_op;
 /*
  * A cached 4 KiB on-disk block, keyed by (device_id, device_offset).  The
  * buffer is plain heap memory; block I/O copies it through a thread-local
- * evpl_iovec so buffers are never shared across evpl instances.  Hash-chain
- * linkage is RCU-managed for lock-free lookup; mutation happens under the
- * owning shard lock and frees defer through call_rcu.
+ * evpl_iovec so buffers are never shared across evpl instances.  All fields
+ * (hash linkage, pin_count, state, LRU membership) are protected by the
+ * owning shard lock.  A buffer is an eviction candidate exactly when it is
+ * CLEAN and pin_count == 0, in which case it sits on the shard LRU
+ * (on_lru == 1); recycling reuses the least-recently-used such buffer.
  */
 struct demofs_block {
     uint32_t             device_id;
     uint64_t             device_offset;        /* block-aligned; key with device_id */
     void                *buffer;               /* DEMOFS_BLOCK_SIZE bytes */
-    int                  pin_count;            /* atomic; >0 => not reclaimable */
+    int                  pin_count;            /* >0 => pinned, not reclaimable */
     enum demofs_block_state state;
     uint64_t             seq;                  /* update order for tail-push */
-    struct demofs_block *hash_next;            /* RCU bucket chain */
-    struct rcu_head      rcu;
-    struct demofs_block *lru_prev, *lru_next;      /* clean+unpinned LRU (Stage 3) */
-    struct demofs_block *wb_next;              /* writeback queue (Stage 3) */
+    struct demofs_block *hash_next;            /* bucket chain */
+    struct demofs_block *lru_prev, *lru_next;  /* shard LRU (CLEAN + unpinned) */
+    int                  on_lru;               /* 1 iff linked on the shard LRU */
 
     /* Ops blocked on a LOADING block, woken when the read I/O completes.
      * Protected by the owning shard lock. */
@@ -342,8 +343,11 @@ struct demofs_block_shard {
 };
 
 struct demofs_block_cache {
+    uint32_t                  shard_cap;   /* max resident buffers per shard */
     struct demofs_block_shard shards[DEMOFS_BLOCK_CACHE_SHARDS];
 };
+
+#define DEMOFS_BLOCK_CACHE_DEFAULT_BLOCKS 8192  /* total; ~32 MiB of 4 KiB buffers */
 
 /*
  * On-disk inode block layout (4 KiB):
@@ -354,10 +358,10 @@ struct demofs_block_cache {
  * records in the inode's single b+tree; the root node is embedded in the
  * inode block, and deeper nodes occupy their own 4 KiB blocks.
  */
-#define DEMOFS_INODE_AREA   256
-#define DEMOFS_BT_ROOT_BASE DEMOFS_INODE_AREA
-#define DEMOFS_BT_ROOT_CAP  (DEMOFS_BLOCK_SIZE - DEMOFS_INODE_AREA)   /* 3840 */
-#define DEMOFS_BT_NODE_CAP  DEMOFS_BLOCK_SIZE                          /* 4096 */
+#define DEMOFS_INODE_AREA                 256
+#define DEMOFS_BT_ROOT_BASE               DEMOFS_INODE_AREA
+#define DEMOFS_BT_ROOT_CAP                (DEMOFS_BLOCK_SIZE - DEMOFS_INODE_AREA) /* 3840 */
+#define DEMOFS_BT_NODE_CAP                DEMOFS_BLOCK_SIZE            /* 4096 */
 
 struct demofs_dinode {
     uint64_t inum;
@@ -618,6 +622,7 @@ struct demofs_shared {
     uint32_t                   root_gen;
     int                        persistent;         /* config opt-in: detect+reload a clean FS instead of mkfs */
     int                        mounted;            /* 1 = remounted existing FS (enables inode read-back) */
+    uint32_t                   block_cache_blocks; /* total resident block-buffer cap (0 = default) */
     uint64_t                   fsid;
     struct space_map          *space_map;
     struct demofs_intent_log   intent_log;
@@ -739,6 +744,12 @@ struct demofs_bt_op {
     int                       suspended;
     int                       done;
     int                       result;
+
+    /* Blocks pinned by this op's descent so eviction can't recycle a node
+     * while we read it; released at completion.  Sized for the descent path
+     * plus the siblings a remove-rebalance can fault at each level. */
+    struct demofs_block      *pins[DEMOFS_BT_MAX_DEPTH * 4];
+    int                       npins;
 
     /* block-waiter list / per-worker resume-queue linkage */
     struct demofs_bt_op      *next;
@@ -1113,6 +1124,13 @@ static struct demofs_block * demofs_block_claim(
     uint64_t              device_offset,
     int                   is_new);
 
+/* Decrement a block's pin and set its new state; if it becomes CLEAN and
+ * unpinned it joins the shard LRU as an eviction candidate. */
+static void demofs_block_unpin(
+    struct demofs_thread   *thread,
+    struct demofs_block    *blk,
+    enum demofs_block_state new_state);
+
 static struct demofs_inode *
 demofs_inode_load_sync(
     struct demofs_thread *thread,
@@ -1180,8 +1198,7 @@ demofs_inode_load_sync(
         struct demofs_block *blk = demofs_block_claim(thread, dev, off, 0);
 
         memcpy(blk->buffer, buf, DEMOFS_BLOCK_SIZE);
-        blk->state = DEMOFS_BLOCK_CLEAN;
-        __atomic_fetch_sub(&blk->pin_count, 1, __ATOMIC_RELAXED);
+        demofs_block_unpin(thread, blk, DEMOFS_BLOCK_CLEAN);
     }
     return inode;
 } /* demofs_inode_load_sync */
@@ -1273,11 +1290,138 @@ demofs_block_bucket(
     return (hash >> 8) & DEMOFS_BLOCK_CACHE_BUCKET_MASK;
 } /* demofs_block_bucket */
 
+/* --- shard LRU (caller holds the shard lock) --------------------------- */
+
+static inline void
+demofs_block_lru_push_tail(
+    struct demofs_block_shard *shard,
+    struct demofs_block       *blk)
+{
+    blk->lru_prev = shard->lru_tail;
+    blk->lru_next = NULL;
+    if (shard->lru_tail) {
+        shard->lru_tail->lru_next = blk;
+    } else {
+        shard->lru_head = blk;
+    }
+    shard->lru_tail = blk;
+    blk->on_lru     = 1;
+} /* demofs_block_lru_push_tail */
+
+static inline void
+demofs_block_lru_unlink(
+    struct demofs_block_shard *shard,
+    struct demofs_block       *blk)
+{
+    if (!blk->on_lru) {
+        return;
+    }
+    if (blk->lru_prev) {
+        blk->lru_prev->lru_next = blk->lru_next;
+    } else {
+        shard->lru_head = blk->lru_next;
+    }
+    if (blk->lru_next) {
+        blk->lru_next->lru_prev = blk->lru_prev;
+    } else {
+        shard->lru_tail = blk->lru_prev;
+    }
+    blk->lru_prev = blk->lru_next = NULL;
+    blk->on_lru   = 0;
+} /* demofs_block_lru_unlink */
+
+/*
+ * Recycle the least-recently-used clean buffer for reuse at a new key, or
+ * allocate a fresh one.  Caller holds the shard lock.  Returns a buffer with
+ * pin_count 0 and not on the LRU, removed from its old bucket; the caller sets
+ * the new key/state and links it into the new bucket.  Grows the pool past the
+ * cap only when every buffer is pinned (no LRU victim) -- a bounded transient
+ * until block_claim learns to wait (top-down rewrite).
+ */
+static struct demofs_block *
+demofs_block_recycle_or_alloc(
+    struct demofs_block_cache *cache,
+    struct demofs_block_shard *shard)
+{
+    struct demofs_block *blk;
+
+    if (shard->nblocks >= cache->shard_cap && shard->lru_head) {
+        uint32_t             ob;
+        struct demofs_block *cur, *prev;
+
+        blk = shard->lru_head;
+        demofs_block_lru_unlink(shard, blk);
+
+        /* Unhook from its current bucket. */
+        ob   = demofs_block_bucket(blk->device_id, blk->device_offset);
+        prev = NULL;
+        for (cur = shard->buckets[ob]; cur; prev = cur, cur = cur->hash_next) {
+            if (cur == blk) {
+                if (prev) {
+                    prev->hash_next = cur->hash_next;
+                } else {
+                    shard->buckets[ob] = cur->hash_next;
+                }
+                break;
+            }
+        }
+        blk->hash_next = NULL;
+        return blk;
+    }
+
+    blk         = calloc(1, sizeof(*blk));
+    blk->buffer = calloc(1, DEMOFS_BLOCK_SIZE);
+    shard->nblocks++;
+    return blk;
+} /* demofs_block_recycle_or_alloc */
+
+static void
+demofs_block_unpin(
+    struct demofs_thread   *thread,
+    struct demofs_block    *blk,
+    enum demofs_block_state new_state)
+{
+    struct demofs_block_shard *shard = demofs_block_shard(thread->shared->block_cache,
+                                                          blk->device_id, blk->device_offset);
+
+    pthread_mutex_lock(&shard->lock);
+    blk->state = new_state;
+    if (--blk->pin_count == 0 && blk->state == DEMOFS_BLOCK_CLEAN && !blk->on_lru) {
+        demofs_block_lru_push_tail(shard, blk);
+        /* A3b: wake a buffer waiter here. */
+    }
+    pthread_mutex_unlock(&shard->lock);
+} /* demofs_block_unpin */
+
+/* Release a descent pin without changing the block's state. */
+static void
+demofs_block_release(
+    struct demofs_thread *thread,
+    struct demofs_block  *blk)
+{
+    struct demofs_block_shard *shard = demofs_block_shard(thread->shared->block_cache,
+                                                          blk->device_id, blk->device_offset);
+
+    pthread_mutex_lock(&shard->lock);
+    if (--blk->pin_count == 0 && blk->state == DEMOFS_BLOCK_CLEAN && !blk->on_lru) {
+        demofs_block_lru_push_tail(shard, blk);
+        /* A3b: wake a buffer waiter here. */
+    }
+    pthread_mutex_unlock(&shard->lock);
+} /* demofs_block_release */
+
 static void
 demofs_block_cache_create(struct demofs_shared *shared)
 {
     struct demofs_block_cache *cache = calloc(1, sizeof(*cache));
+    uint32_t                   total = shared->block_cache_blocks ?
+        shared->block_cache_blocks : DEMOFS_BLOCK_CACHE_DEFAULT_BLOCKS;
     int                        i;
+
+    cache->shard_cap = total / DEMOFS_BLOCK_CACHE_SHARDS;
+    if (cache->shard_cap == 0) {
+        cache->shard_cap = 1;
+    }
 
     for (i = 0; i < DEMOFS_BLOCK_CACHE_SHARDS; i++) {
         pthread_mutex_init(&cache->shards[i].lock, NULL);
@@ -1342,10 +1486,12 @@ demofs_block_lookup_locked(
 
 /*
  * Find or create the cache entry for (device_id, device_offset) and pin it.
- * If is_new is set the block was just allocated from the space map, so its
- * buffer is zeroed and it starts DIRTY; otherwise an existing block is
- * returned (created zeroed on a miss for now, since the read-back path is
- * not implemented yet).
+ * On a miss a buffer is obtained from the shard pool (recycling the LRU
+ * eviction candidate, or growing the pool): is_new (a freshly space-map-
+ * allocated block) starts zeroed; otherwise -- always, now that eviction can
+ * discard a resident CLEAN block whose content is already home -- the buffer
+ * is repopulated from disk so a re-claimed evicted block keeps its contents.
+ * A hit unlinks the block from the LRU (it is now pinned, not a candidate).
  */
 static struct demofs_block *
 demofs_block_claim(
@@ -1365,37 +1511,33 @@ demofs_block_claim(
 
     blk = demofs_block_lookup_locked(shard, bucket, device_id, device_offset);
     if (!blk) {
-        blk                = calloc(1, sizeof(*blk));
+        blk                = demofs_block_recycle_or_alloc(cache, shard);
         blk->device_id     = device_id;
         blk->device_offset = device_offset;
-        blk->buffer        = calloc(1, DEMOFS_BLOCK_SIZE);
         blk->state         = DEMOFS_BLOCK_CLEAN;
-        blk->pin_count     = 0;
+        blk->seq           = 0;
+        blk->wait_head     = NULL;
+        blk->wait_tail     = NULL;
 
-        /* On a remounted FS a synchronous structural modify can reference a
-         * block the async descent never faulted in -- notably a leaf merge
-         * relinking the right partner's next_leaf, which is not one of the
-         * ci-1/ci/ci+1 siblings the rebalance pre-faults.  Read its real
-         * contents from disk rather than publishing a zeroed block (which
-         * would corrupt the tree once written back).  Rare; a buffered read
-         * served from the page cache.  is_new blocks are freshly allocated,
-         * so they are correctly left zeroed. */
-        if (thread->shared->mounted && !is_new) {
-            int fd = open(thread->shared->device_paths[device_id], O_RDONLY);
+        if (is_new) {
+            memset(blk->buffer, 0, DEMOFS_BLOCK_SIZE);
+        } else {
+            int     fd = open(thread->shared->device_paths[device_id], O_RDONLY);
+            ssize_t n  = -1;
 
             if (fd >= 0) {
-                ssize_t n = pread(fd, blk->buffer, DEMOFS_BLOCK_SIZE,
-                                  (off_t) device_offset);
+                n = pread(fd, blk->buffer, DEMOFS_BLOCK_SIZE, (off_t) device_offset);
                 close(fd);
-                chimera_demofs_abort_if(n != (ssize_t) DEMOFS_BLOCK_SIZE,
-                                        "block_claim disk read failed off=%lu n=%zd",
-                                        device_offset, n);
             }
+            chimera_demofs_abort_if(n != (ssize_t) DEMOFS_BLOCK_SIZE,
+                                    "block_claim disk read failed off=%lu n=%zd",
+                                    device_offset, n);
         }
 
-        /* Publish into the bucket chain (all lookups hold the shard lock). */
         blk->hash_next         = shard->buckets[bucket];
         shard->buckets[bucket] = blk;
+    } else if (blk->on_lru) {
+        demofs_block_lru_unlink(shard, blk);
     }
 
     blk->pin_count++;
@@ -1600,6 +1742,23 @@ demofs_block_load_complete(
  * block's waiter list (a read is issued if it is not already in flight) and
  * NULL is returned; the op's driver will be re-entered once the block loads.
  */
+/* Pin a block for op's descent (so it can't be evicted while in use) and
+ * record it for release at completion.  Caller holds the shard lock. */
+static inline void
+demofs_bt_op_pin(
+    struct demofs_bt_op       *op,
+    struct demofs_block_shard *shard,
+    struct demofs_block       *blk)
+{
+    if (blk->on_lru) {
+        demofs_block_lru_unlink(shard, blk);
+    }
+    blk->pin_count++;
+    chimera_demofs_abort_if(op->npins >= (int) (sizeof(op->pins) / sizeof(op->pins[0])),
+                            "b+tree op pin list overflow");
+    op->pins[op->npins++] = blk;
+} /* demofs_bt_op_pin */
+
 static struct demofs_block *
 demofs_bt_block_get(
     struct demofs_bt_op *op,
@@ -1617,16 +1776,19 @@ demofs_bt_block_get(
     pthread_mutex_lock(&shard->lock);
     blk = demofs_block_lookup_locked(shard, bucket, device_id, device_offset);
     if (blk && blk->state != DEMOFS_BLOCK_LOADING) {
+        demofs_bt_op_pin(op, shard, blk);
         pthread_mutex_unlock(&shard->lock);
         return blk;
     }
 
     if (!blk) {
-        blk                    = calloc(1, sizeof(*blk));
+        blk                    = demofs_block_recycle_or_alloc(cache, shard);
         blk->device_id         = device_id;
         blk->device_offset     = device_offset;
-        blk->buffer            = calloc(1, DEMOFS_BLOCK_SIZE);
         blk->state             = DEMOFS_BLOCK_LOADING;
+        blk->seq               = 0;
+        blk->wait_head         = NULL;
+        blk->wait_tail         = NULL;
         blk->hash_next         = shard->buckets[bucket];
         shard->buckets[bucket] = blk;
         issue                  = 1;
@@ -1764,15 +1926,12 @@ demofs_txn_unpin_blocks(
         }
     }
 
-    (void) thread;
-
     txn->blocks = NULL;
     while (tb) {
         struct demofs_block *blk = tb->block;
 
-        n          = tb->next;
-        blk->state = new_state;
-        __atomic_fetch_sub(&blk->pin_count, 1, __ATOMIC_RELAXED);
+        n = tb->next;
+        demofs_block_unpin(thread, blk, new_state);
         free(tb);
         tb = n;
     }
@@ -2826,6 +2985,15 @@ demofs_bt_complete(
     struct demofs_bt_op *op,
     int                  result)
 {
+    int i;
+
+    /* Release the descent pins (a write op's structural blocks stay pinned by
+     * the transaction; this only drops the read pin taken during descent). */
+    for (i = 0; i < op->npins; i++) {
+        demofs_block_release(op->thread, op->pins[i]);
+    }
+    op->npins = 0;
+
     op->result = result;
     if (op->suspended) {
         op->cb(op, result, op->private_data);
@@ -3839,8 +4007,7 @@ demofs_inode_load_complete(
         struct demofs_block *blk = demofs_block_claim(thread, dev, off, 0);
 
         memcpy(blk->buffer, lc->iov.data, DEMOFS_BLOCK_SIZE);
-        blk->state = DEMOFS_BLOCK_CLEAN;
-        __atomic_fetch_sub(&blk->pin_count, 1, __ATOMIC_RELAXED);
+        demofs_block_unpin(thread, blk, DEMOFS_BLOCK_CLEAN);
     }
 
     evpl_iovec_release(thread->evpl, &lc->iov);
@@ -4273,6 +4440,10 @@ demofs_il_clean_pushed_record(
         if (blk && blk->state == DEMOFS_BLOCK_LOGGED &&
             blk->seq == rec->seq && blk->pin_count == 0) {
             blk->state = DEMOFS_BLOCK_CLEAN;
+            if (!blk->on_lru) {
+                demofs_block_lru_push_tail(shard, blk);
+                /* A3b: wake a buffer waiter here. */
+            }
         }
         pthread_mutex_unlock(&shard->lock);
     }
@@ -4998,7 +5169,9 @@ demofs_init(const char *cfgdata)
      * and the prior on-disk state is reloaded instead of reformatting.  Off by
      * default so the common case (and the test suite) reformats every mount;
      * the reload + on-disk read-back paths are exercised only under this flag. */
-    shared->persistent = json_is_true(json_object_get(cfg, "persistent"));
+    shared->persistent         = json_is_true(json_object_get(cfg, "persistent"));
+    shared->block_cache_blocks = (uint32_t) json_integer_value(
+        json_object_get(cfg, "block_cache_blocks"));
 
     json_decref(cfg);
 
@@ -5206,16 +5379,26 @@ demofs_bootstrap(struct demofs_thread *thread)
 
     demofs_inode_cache_insert(shared, inode);
 
-    /* Create the root inode's block in the cache: an embedded empty b+tree
-     * root plus the dinode.  Bootstrap is not a transaction, so leave the
-     * block resident but unpinned/detached; the first write op that touches
-     * root will re-claim and log it. */
+    /* Create the root inode's block: an embedded empty b+tree root plus the
+     * dinode.  Bootstrap is not a transaction, so write the block to its home
+     * location synchronously -- otherwise it would be CLEAN-but-not-home and
+     * eviction could discard it before the first write op logs it (CLEAN
+     * blocks must be re-readable from disk).  Then detach it, evictable. */
     inode->block = demofs_block_claim(thread, device_id, device_offset, 1);
     demofs_bt_node_init(inode->block->buffer, DEMOFS_BT_ROOT_BASE,
                         DEMOFS_BT_ROOT_CAP, 0);
     demofs_inode_flush(inode);
+    {
+        int fd = open(shared->device_paths[device_id], O_WRONLY);
+
+        if (fd >= 0) {
+            pwrite(fd, inode->block->buffer, DEMOFS_BLOCK_SIZE, (off_t) device_offset);
+            fsync(fd);
+            close(fd);
+        }
+    }
     inode->block->state = DEMOFS_BLOCK_CLEAN;
-    __atomic_fetch_sub(&inode->block->pin_count, 1, __ATOMIC_RELAXED);
+    demofs_block_unpin(thread, inode->block, DEMOFS_BLOCK_CLEAN);
     inode->block = NULL;
 
     /* Create 16-byte fsid buffer for root FH encoding (8-byte fsid + 8 bytes padding) */
