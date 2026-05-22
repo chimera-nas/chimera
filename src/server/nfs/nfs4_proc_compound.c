@@ -180,6 +180,9 @@ chimera_nfs4_compound_process(
                 case OP_WRITE:
                     chimera_nfs4_write(thread, req, argop, resop);
                     break;
+                case OP_COPY:
+                    chimera_nfs4_copy(thread, req, argop, resop);
+                    break;
                 case OP_COMMIT:
                     chimera_nfs4_commit(thread, req, argop, resop);
                     break;
