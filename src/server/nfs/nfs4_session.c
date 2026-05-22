@@ -1470,3 +1470,45 @@ nfs4_client_set_cb_path(
     pthread_mutex_unlock(&u->lock);
     pthread_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_set_cb_path */
+
+/*
+ * Record the RPC auth flavor/credentials the client wants the server to use on
+ * its callback channel (CREATE_SESSION csa_sec_parms / BACKCHANNEL_CTL).
+ * flavor is an ONC RPC flavor (AUTH_NONE=0, AUTH_SYS=1); uid/gid apply only to
+ * AUTH_SYS.  Optionally also updates the callback program number.
+ */
+void
+nfs4_client_set_cb_sec(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    uint32_t                  cb_program,
+    uint32_t                  flavor,
+    uint32_t                  uid,
+    uint32_t                  gid)
+{
+    struct nfs4_client *c;
+    struct nfs_client  *u;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), c);
+
+    if (!c || !c->unified) {
+        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        return;
+    }
+
+    u = c->unified;
+
+    pthread_mutex_lock(&u->lock);
+    if (cb_program) {
+        u->cb_path.cb_program = cb_program;
+    }
+    u->cb_path.cb_sec_flavor = flavor;
+    u->cb_path.cb_sec_uid    = uid;
+    u->cb_path.cb_sec_gid    = gid;
+    pthread_mutex_unlock(&u->lock);
+
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+} /* nfs4_client_set_cb_sec */

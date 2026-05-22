@@ -396,14 +396,36 @@ nfs4_cb_recall_send(
     ctx->deleg  = deleg;
     ctx->thread = thread;
 
-    chan->cb_prog.send_call_CB_COMPOUND(&chan->cb_prog.rpc2,
-                                        thread->evpl,
-                                        chan->conn,
-                                        NULL,
-                                        &args,
-                                        0, 0, 0,
-                                        nfs4_cb_recall_complete,
-                                        ctx);
+    /* Use the RPC auth the client requested for its callback channel
+     * (CREATE_SESSION csa_sec_parms / BACKCHANNEL_CTL).  AUTH_NONE -> NULL
+     * cred; AUTH_SYS -> the client's uid/gid. */
+    {
+        struct nfs4_cb_path   *cb = &deleg->client->cb_path;
+        struct evpl_rpc2_cred  rpc_cred;
+        struct evpl_rpc2_cred *credp         = NULL;
+        static const char      machinename[] = "chimera";
+
+        if (cb->cb_sec_flavor == AUTH_SYS) {
+            memset(&rpc_cred, 0, sizeof(rpc_cred));
+            rpc_cred.flavor                  = EVPL_RPC2_AUTH_SYS;
+            rpc_cred.authsys.uid             = cb->cb_sec_uid;
+            rpc_cred.authsys.gid             = cb->cb_sec_gid;
+            rpc_cred.authsys.num_gids        = 0;
+            rpc_cred.authsys.gids            = NULL;
+            rpc_cred.authsys.machinename     = machinename;
+            rpc_cred.authsys.machinename_len = sizeof(machinename) - 1;
+            credp                            = &rpc_cred;
+        }
+
+        chan->cb_prog.send_call_CB_COMPOUND(&chan->cb_prog.rpc2,
+                                            thread->evpl,
+                                            chan->conn,
+                                            credp,
+                                            &args,
+                                            0, 0, 0,
+                                            nfs4_cb_recall_complete,
+                                            ctx);
+    }
 } /* nfs4_cb_recall_send */
 
 /* Owner-thread doorbell handler: drain queued recalls and send them. */

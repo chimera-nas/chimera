@@ -197,6 +197,22 @@ chimera_nfs4_create_session(
                                 0,
                                 1,
                                 NULL, 0, NULL, 0);
+
+        /* Record the callback auth the client wants the server to use
+         * (RFC 8881 §18.36.3 csa_sec_parms).  Use the first parameter; for
+         * AUTH_SYS carry its uid/gid onto the callback path. */
+        if (args->num_csa_sec_parms > 0) {
+            struct callback_sec_parms4 *sp = &args->csa_sec_parms[0];
+            uint32_t                    uid = 0, gid = 0;
+
+            if (sp->cb_secflavor == AUTH_SYS) {
+                uid = sp->cbsp_sys_cred.uid;
+                gid = sp->cbsp_sys_cred.gid;
+            }
+            nfs4_client_set_cb_sec(&shared->nfs4_shared_clients,
+                                   args->csa_clientid, 0,
+                                   sp->cb_secflavor, uid, gid);
+        }
     }
 
     res->csr_status = NFS4_OK;

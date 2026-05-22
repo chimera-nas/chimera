@@ -85,6 +85,12 @@ struct nfs4_cb_path {
     char                   cb_netid[8];      /* "tcp" / "tcp6"                   */
     char                   cb_addr[64];      /* universal address h.h.h.h.p.p    */
     _Atomic uint8_t        cb_state;         /* NFS4_CB_*                        */
+    /* RPC auth the client asked the server to use on the callback channel
+     * (CREATE_SESSION csa_sec_parms / BACKCHANNEL_CTL).  cb_sec_flavor is an
+     * ONC RPC flavor (AUTH_NONE=0, AUTH_SYS=1); uid/gid apply to AUTH_SYS. */
+    uint32_t               cb_sec_flavor;
+    uint32_t               cb_sec_uid;
+    uint32_t               cb_sec_gid;
     /* Lazily-established outbound channel (4.0) or borrowed backchannel (4.1).
      * Owned/serviced by a single NFS thread; see nfs4_callback.c. */
     struct nfs4_cb_client *cb_client;

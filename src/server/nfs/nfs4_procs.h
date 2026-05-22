@@ -369,6 +369,13 @@ chimera_nfs4_free_stateid(
     struct nfs_resop4                *resop);
 
 void
+chimera_nfs4_backchannel_ctl(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
 chimera_nfs4_secinfo(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,

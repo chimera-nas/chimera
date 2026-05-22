@@ -445,6 +445,18 @@ nfs4_client_set_cb_path(
     const char               *addr,
     int                       addr_len);
 
+/* Record the callback-channel RPC auth (CREATE_SESSION csa_sec_parms /
+ * BACKCHANNEL_CTL).  flavor is an ONC RPC flavor (AUTH_NONE=0, AUTH_SYS=1);
+ * uid/gid apply to AUTH_SYS.  cb_program, if non-zero, updates the program. */
+void
+nfs4_client_set_cb_sec(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    uint32_t                  cb_program,
+    uint32_t                  flavor,
+    uint32_t                  uid,
+    uint32_t                  gid);
+
 struct nfs4_session *
 nfs4_session_lookup(
     struct nfs4_client_table *table,
