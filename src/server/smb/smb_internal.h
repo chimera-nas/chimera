@@ -128,6 +128,10 @@ struct netbios_header {
 struct chimera_smb_share {
     char                               name[81];
     char                               path[CHIMERA_VFS_PATH_MAX];
+    /* Access-based directory enumeration: hide directory entries the caller
+     * cannot read.  Advertised to clients via SMB2_SHAREFLAG_ACCESS_BASED_
+     * DIRECTORY_ENUM and enforced in QUERY_DIRECTORY. */
+    int                                access_based_enum;
     struct chimera_smb_share          *prev;
     struct chimera_smb_share          *next;
     struct chimera_smb_sharemode_table sharemode;

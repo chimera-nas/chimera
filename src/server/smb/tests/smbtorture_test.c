@@ -305,6 +305,10 @@ main(
     chimera_server_start(env.server);
     chimera_test_add_server_users(env.server);
     chimera_server_create_share(env.server, "share", "share");
+    /* Second view of the same tree with access-based enumeration enabled, for
+     * smb2.acls.ACCESSBASED. */
+    chimera_server_create_share(env.server, "hideunread", "share");
+    chimera_server_share_set_access_based_enum(env.server, "hideunread");
 
     fprintf(stderr, "Server started\n");
 

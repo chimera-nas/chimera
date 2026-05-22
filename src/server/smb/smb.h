@@ -15,6 +15,12 @@ chimera_smb_add_share(
     const char *name,
     const char *path);
 
+/* Enable access-based directory enumeration on a named share. */
+int
+chimera_smb_share_set_access_based_enum(
+    void       *smb_shared,
+    const char *name);
+
 int
 chimera_smb_remove_share(
     void       *smb_shared,

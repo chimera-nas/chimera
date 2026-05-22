@@ -63,28 +63,35 @@ test_sid_roundtrip(void)
     assert(chimera_idmap_sid_to_principal(buf, &q) == 0);
     assert(q.type == CHIMERA_PRINCIPAL_SPECIAL && q.special == CHIMERA_WHO_EVERYONE);
 
-    p = chimera_idmap_special_principal(CHIMERA_WHO_OWNER);
-    chimera_idmap_principal_to_sid(&p, buf, sizeof(buf));
+    /* CREATOR_OWNER (the inheritance template) owns S-1-3-0; OWNER@ has no
+     * standalone SID -- the SD emitter substitutes the concrete owner SID. */
+    p = chimera_idmap_special_principal(CHIMERA_WHO_CREATOR_OWNER);
+    assert(chimera_idmap_principal_to_sid(&p, buf, sizeof(buf)) > 0);
     assert(strcmp(buf, "S-1-3-0") == 0);
     assert(chimera_idmap_sid_to_principal(buf, &q) == 0);
-    assert(q.special == CHIMERA_WHO_OWNER);
+    assert(q.special == CHIMERA_WHO_CREATOR_OWNER);
 
+    p = chimera_idmap_special_principal(CHIMERA_WHO_OWNER);
+    assert(chimera_idmap_principal_to_sid(&p, buf, sizeof(buf)) < 0);
+
+    /* uid/gid SIDs use the modefromsid scheme (S-1-5-88-1/2-<id>), matching the
+     * owner/group SIDs the SMB security-descriptor emitter writes. */
     p = chimera_idmap_uid_principal(1234);
     chimera_idmap_principal_to_sid(&p, buf, sizeof(buf));
-    assert(strcmp(buf, "S-1-22-1-1234") == 0);
+    assert(strcmp(buf, "S-1-5-88-1-1234") == 0);
     assert(chimera_idmap_sid_to_principal(buf, &q) == 0);
     assert(q.type == CHIMERA_PRINCIPAL_USER && q.id == 1234);
 
     p = chimera_idmap_gid_principal(5678);
     chimera_idmap_principal_to_sid(&p, buf, sizeof(buf));
-    assert(strcmp(buf, "S-1-22-2-5678") == 0);
+    assert(strcmp(buf, "S-1-5-88-2-5678") == 0);
     assert(chimera_idmap_sid_to_principal(buf, &q) == 0);
     assert(q.type == CHIMERA_PRINCIPAL_GROUP && q.id == 5678);
 
-    /* interop: modefromsid user/group SIDs decode to numeric principals */
-    assert(chimera_idmap_sid_to_principal("S-1-5-88-1-100", &q) == 0);
+    /* interop: the algorithmic S-1-22 user/group SIDs still decode. */
+    assert(chimera_idmap_sid_to_principal("S-1-22-1-100", &q) == 0);
     assert(q.type == CHIMERA_PRINCIPAL_USER && q.id == 100);
-    assert(chimera_idmap_sid_to_principal("S-1-5-88-2-200", &q) == 0);
+    assert(chimera_idmap_sid_to_principal("S-1-22-2-200", &q) == 0);
     assert(q.type == CHIMERA_PRINCIPAL_GROUP && q.id == 200);
 
     /* unrecognised SID is rejected */

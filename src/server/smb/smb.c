@@ -1433,6 +1433,29 @@ chimera_smb_add_share(
 
 } /* chimera_smb_add_share */
 
+SYMBOL_EXPORT int
+chimera_smb_share_set_access_based_enum(
+    void       *smb_shared,
+    const char *name)
+{
+    struct chimera_server_smb_shared *shared = smb_shared;
+    struct chimera_smb_share         *cur;
+    int                               rc = -1;
+
+    pthread_mutex_lock(&shared->shares_lock);
+    LL_FOREACH(shared->shares, cur)
+    {
+        if (strcasecmp(cur->name, name) == 0) {
+            cur->access_based_enum = 1;
+            rc                     = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&shared->shares_lock);
+
+    return rc;
+} /* chimera_smb_share_set_access_based_enum */
+
 
 SYMBOL_EXPORT int
 chimera_smb_remove_share(

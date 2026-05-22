@@ -420,6 +420,11 @@ memfs_inode_alloc_thread(struct memfs_thread *thread)
     return memfs_inode_alloc(shared, list_id);
 } /* memfs_inode_alloc */
 
+static void
+memfs_dirent_release(
+    struct rb_node *node,
+    void           *private_data);
+
 static inline void
 memfs_inode_free(
     struct memfs_thread *thread,
@@ -458,6 +463,11 @@ memfs_inode_free(
     } else if (S_ISLNK(inode->mode)) {
         memfs_symlink_target_free(thread, inode->symlink.target);
         inode->symlink.target = NULL;
+    } else if (S_ISDIR(inode->mode)) {
+        /* Release any remaining directory entries.  For a normally-removed
+         * (empty) directory this is a no-op; it also prevents leaking the
+         * entries of a directory torn down while still populated. */
+        rb_tree_destroy(&inode->dir.dirents, memfs_dirent_release, thread);
     }
 
     /* Increment generation so stale file handles return ESTALE */

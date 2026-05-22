@@ -171,8 +171,34 @@ target_include_directories(smbtorture_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 set(SMBTORTURE_LSAN "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt")
 set(SMBTORTURE_CMD ${CMAKE_CURRENT_BINARY_DIR}/smbtorture_test)
 
+# The smb2.acls suite is registered both as the whole suite (kept visible but
+# disabled -- see below) and as individual subtests.  Every ACL subtest passes,
+# but the suite as a single run shares one server process and trips over an
+# unrelated robustness gap: smb2_deltree's per-test cleanup believes its
+# delete-on-close of a non-empty directory succeeded, so a leftover directory
+# collides with the next subtest's setup.  Running each subtest in its own
+# server process (one ctest each) avoids that, so the ACL behaviour is fully
+# covered in CI; greening the combined run is tracked as a deltree follow-up.
+set(SMBTORTURE_ACLS_SUBTESTS
+    smb2.acls.CREATOR
+    smb2.acls.GENERIC
+    smb2.acls.OWNER
+    smb2.acls.INHERITANCE
+    smb2.acls.INHERITFLAGS
+    smb2.acls.SDFLAGSVSCHOWN
+    smb2.acls.DYNAMIC
+    smb2.acls.ACCESSBASED
+    smb2.acls.OWNER-RIGHTS
+    smb2.acls.OWNER-RIGHTS-DENY
+    smb2.acls.OWNER-RIGHTS-DENY1
+    smb2.acls.DENY1
+    smb2.acls.MXAC-NOT-GRANTED
+    smb2.acls.OVERWRITE_READ_ONLY_FILE
+)
+
 set(SMBTORTURE_SUITES
     smb2.acls
+    ${SMBTORTURE_ACLS_SUBTESTS}
     smb2.acls_non_canonical
     smb2.async_dosmode
     smb2.change_notify_disabled
@@ -253,6 +279,10 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.winattr2
+    # Unified-ACL coverage: every smb2.acls subtest runs green individually.
+    # The combined smb2.acls suite stays disabled (shared-process deltree
+    # cleanup cascade, see above).
+    ${SMBTORTURE_ACLS_SUBTESTS}
     # smb2.acls_non_canonical and smb2.async_dosmode pass on x86_64 but fail on
     # arm64 CI; left disabled until the arch difference is understood.
 )

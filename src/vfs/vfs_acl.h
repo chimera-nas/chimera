@@ -152,6 +152,20 @@ uint32_t chimera_acl_access_check(
     int                            is_dir);
 
 /*
+ * Strict ACL evaluation: the ordered ALLOW/DENY walk over the explicit ACEs
+ * only, with none of the baseline / owner-implicit grants chimera_acl_access_
+ * check applies (and a NULL ACL grants nothing).  Used for access-based
+ * enumeration, where an entry is hidden unless its DACL itself grants the
+ * caller the requested read rights.
+ */
+uint32_t chimera_acl_access_raw(
+    const struct chimera_acl      *acl,
+    uint64_t                       owner_uid,
+    uint64_t                       owner_gid,
+    const struct chimera_vfs_cred *cred,
+    uint32_t                       requested);
+
+/*
  * Synthesise a canonical ACL from POSIX mode (lower 9 bits). Exact direction.
  * Writes up to 5 ACEs into `out`; returns the ACE count, or -1 if max_aces is
  * too small.

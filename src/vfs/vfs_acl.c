@@ -230,6 +230,49 @@ chimera_acl_access_check(
     return granted;
 } /* chimera_acl_access_check */
 
+SYMBOL_EXPORT uint32_t
+chimera_acl_access_raw(
+    const struct chimera_acl      *acl,
+    uint64_t                       owner_uid,
+    uint64_t                       owner_gid,
+    const struct chimera_vfs_cred *cred,
+    uint32_t                       requested)
+{
+    uint32_t granted   = 0;
+    uint32_t remaining = requested;
+
+    /* Strict evaluation: only the explicit ALLOW/DENY ACEs are considered --
+     * none of the baseline/owner-implicit grants chimera_acl_access_check adds.
+     * Used for access-based enumeration, where Windows hides an entry unless the
+     * DACL itself grants the caller the read rights.  No ACL grants nothing. */
+    if (!acl) {
+        return 0;
+    }
+
+    for (unsigned i = 0; i < acl->num_aces && remaining; i++) {
+        const struct chimera_ace *ace = &acl->aces[i];
+
+        if (ace->type != CHIMERA_ACE_ALLOWED &&
+            ace->type != CHIMERA_ACE_DENIED) {
+            continue;
+        }
+        if (ace->flags & CHIMERA_ACE_FLAG_INHERIT_ONLY) {
+            continue;
+        }
+        if (!ace_applies(ace, owner_uid, owner_gid, cred)) {
+            continue;
+        }
+        if (ace->type == CHIMERA_ACE_ALLOWED) {
+            granted   |= (ace->access_mask & remaining);
+            remaining &= ~ace->access_mask;
+        } else {
+            remaining &= ~ace->access_mask;
+        }
+    }
+
+    return granted;
+} /* chimera_acl_access_raw */
+
 SYMBOL_EXPORT int
 chimera_acl_from_mode(
     uint32_t            mode,

@@ -191,7 +191,8 @@ test_inherit_file(void)
     int                     n;
     uint32_t                g;
 
-    parent->ctrl_flags    = 0;
+    /* Auto-inherited parent: the materialised child ACEs are marked INHERITED. */
+    parent->ctrl_flags    = CHIMERA_ACL_CTRL_AUTO_INHERITED;
     parent->aces[0].type  = CHIMERA_ACE_ALLOWED;
     parent->aces[0].flags = CHIMERA_ACE_FLAG_FILE_INHERIT |
         CHIMERA_ACE_FLAG_DIR_INHERIT;
@@ -202,7 +203,8 @@ test_inherit_file(void)
 
     n = chimera_acl_inherit(parent, 0 /* file */, 0644, child, 8);
     assert(n == 1);
-    /* On a file the inheritance flags are stripped and INHERITED is set. */
+    /* On a file the inheritance flags are stripped; INHERITED is set because the
+     * parent DACL is in auto-inherit mode. */
     assert(!(child->aces[0].flags & CHIMERA_ACE_FLAG_INHERIT_MASK));
     assert(child->aces[0].flags & CHIMERA_ACE_FLAG_INHERITED);
 
@@ -213,7 +215,7 @@ test_inherit_file(void)
     TEST_PASS("FILE_INHERIT ACE becomes effective on a new file");
 } /* test_inherit_file */
 
-/* No inheritable ACEs -> fall back to create_mode. */
+/* No inheritable ACEs -> inherit yields nothing (the caller seeds a default). */
 static void
 test_inherit_fallback(void)
 {
@@ -221,8 +223,7 @@ test_inherit_fallback(void)
     ACL_BUF(child, 8);
     int n;
 
-    /* parent ACE is INHERIT_ONLY for directories only; a new file inherits
-     * nothing. */
+    /* parent ACE is CONTAINER_INHERIT only; a new file inherits nothing. */
     parent->ctrl_flags          = 0;
     parent->aces[0].type        = CHIMERA_ACE_ALLOWED;
     parent->aces[0].flags       = CHIMERA_ACE_FLAG_DIR_INHERIT;
@@ -231,11 +232,12 @@ test_inherit_fallback(void)
     parent->aces[0].who.special = CHIMERA_WHO_EVERYONE;
     parent->num_aces            = 1;
 
+    /* chimera_acl_inherit returns 0 when nothing is inheritable; the create
+     * path is responsible for seeding a default ACL in that case. */
     n = chimera_acl_inherit(parent, 0 /* file */, 0640, child, 8);
-    assert(n >= 3);
-    assert(chimera_acl_to_mode(child) == 0640);
+    assert(n == 0);
 
-    TEST_PASS("inherit falls back to create_mode when nothing inheritable");
+    TEST_PASS("inherit yields no ACEs when nothing is inheritable");
 } /* test_inherit_fallback */
 
 /* Serialize -> deserialize must reproduce the ACL byte-for-byte. */
