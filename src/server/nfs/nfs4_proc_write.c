@@ -11,12 +11,10 @@
 #include "evpl/evpl.h"
 
 static inline int
-chimera_nfs4_write_stateid_is_anonymous(const struct stateid4 *sid)
+chimera_nfs4_write_stateid_is_special(const struct stateid4 *sid)
 {
-    static const uint8_t zero[12] = { 0 };
-
-    return sid->seqid == 0 && memcmp(sid->other, zero, sizeof(zero)) == 0;
-} /* chimera_nfs4_write_stateid_is_anonymous */
+    return nfs4_stateid_is_special(sid);
+} /* chimera_nfs4_write_stateid_is_special */
 
 static void
 chimera_nfs4_write_complete(
@@ -127,15 +125,15 @@ chimera_nfs4_write(
     evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL, NULL);
 
     /*
-     * RFC 7530 9.1.4.3 / RFC 8881 8.2.3 require WRITE to honor the
-     * anonymous stateid (all zeros).  Open the current FH on the fly
-     * instead of consulting the state table.
+     * RFC 7530 9.1.4.3 / RFC 8881 8.2.3 require WRITE to honor special
+     * stateids.  Open the current FH on the fly instead of consulting the
+     * state table.
      *
      * A pNFS data server does not hold open state for the files it stores --
      * the metadata server authorizes the client's I/O via the layout -- so it
      * likewise serves WRITE by file handle without a state-table lookup.
      */
-    if (chimera_nfs4_write_stateid_is_anonymous(&args->stateid) ||
+    if (chimera_nfs4_write_stateid_is_special(&args->stateid) ||
         chimera_server_config_get_nfs_data_server(thread->shared->config)) {
         if (req->fhlen == 0) {
             res->status = NFS4ERR_NOFILEHANDLE;
