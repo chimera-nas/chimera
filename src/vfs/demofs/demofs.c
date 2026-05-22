@@ -18,6 +18,7 @@
 #include <utlist.h>
 #include <urcu.h>
 #include <urcu/urcu-memb.h>
+#include <xxhash.h>     /* XXH_INLINE_ALL set in CMakeLists; header-only */
 
 #include "common/varint.h"
 #include "common/rbtree.h"
@@ -443,9 +444,25 @@ _Static_assert(DEMOFS_DIRENT_REC_MAX <= 320,
  */
 #define DEMOFS_REDO_MAGIC     0x4F44455246534944ULL /* "DISFREDO" */
 
+/*
+ * Redo record on-log layout: this header, then num_blocks
+ * {demofs_redo_block_header, 4 KiB image} pairs, padded to a 4 KiB multiple.
+ *
+ * `magic` is the scan signature and `csum_{lo,hi}` is an XXH3-128 over the
+ * entire record (reclen bytes) computed with the csum fields zeroed.  Together
+ * they let crash recovery locate intact records anywhere in the (possibly
+ * wrapped) circular log: probe 4 KiB boundaries for the magic, then accept the
+ * record only if the 128-bit hash over `reclen` bytes verifies -- a partially
+ * overwritten or torn record fails and is skipped.  `seq` orders records
+ * (latest image of a block wins) and `tail` is the log tail at write time, so
+ * recovery bounds replay to [tail, head] from the highest-seq record.
+ */
 struct demofs_redo_header {
     uint64_t magic;
+    uint64_t csum_lo;      /* XXH3-128 of the record, csum fields zeroed */
+    uint64_t csum_hi;
     uint64_t seq;          /* monotonically increasing record sequence */
+    uint64_t tail;         /* log_tail (oldest un-pushed offset) at write time */
     uint32_t num_blocks;
     uint32_t reclen;       /* total record length, including padding */
 };
@@ -4377,7 +4394,10 @@ demofs_il_write_redo(
     p               = (char *) rec->iov.data;
     hdr             = (struct demofs_redo_header *) p;
     hdr->magic      = DEMOFS_REDO_MAGIC;
+    hdr->csum_lo    = 0;
+    hdr->csum_hi    = 0;
     hdr->seq        = il->log_seq++;
+    hdr->tail       = il->log_tail;
     hdr->num_blocks = nblocks;
     hdr->reclen     = (uint32_t) reclen;
     p              += sizeof(*hdr);
@@ -4393,6 +4413,22 @@ demofs_il_write_redo(
 
         memcpy(p, blk->buffer, DEMOFS_BLOCK_SIZE);
         p += DEMOFS_BLOCK_SIZE;
+    }
+
+    /* Zero the tail padding (reclen is 4 KiB-rounded) so the checksum covers
+     * deterministic bytes, then stamp the XXH3-128 over the whole record. */
+    {
+        char *end = (char *) rec->iov.data + reclen;
+
+        if (p < end) {
+            memset(p, 0, (size_t) (end - p));
+        }
+    }
+    {
+        XXH128_hash_t h = XXH3_128bits(rec->iov.data, reclen);
+
+        hdr->csum_lo = h.low64;
+        hdr->csum_hi = h.high64;
     }
 
     ch->cq_inflight++;
