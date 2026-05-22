@@ -231,18 +231,43 @@ build_preauth_integrity_response(
     return 6 + salt_len;
 } /* build_preauth_integrity_response */
 
+/* Build the SMB2_SIGNING_CAPABILITIES response context:
+ *   SigningAlgorithmCount(2)=1, SigningAlgorithms[1]=selected algorithm.
+ */
+static int
+build_signing_capabilities_response(
+    struct chimera_smb_conn    *conn,
+    struct chimera_smb_request *request,
+    uint8_t                    *out,
+    uint32_t                    out_size)
+{
+    (void) request;
+
+    if (conn->negotiated.signing_alg == 0 || out_size < 4) {
+        return -1;
+    }
+
+    out[0] = 1; out[1] = 0; /* SigningAlgorithmCount */
+    out[2] = conn->negotiated.signing_alg & 0xff;
+    out[3] = (conn->negotiated.signing_alg >> 8) & 0xff;
+
+    return 4;
+} /* build_signing_capabilities_response */
+
 /* The negotiate-response context emitters. Only consulted when the negotiated
  * dialect is 3.1.1; each entry emits only if the client sent the matching
  * request context (need_mask_bit).
  *
  * PreauthIntegrity is implemented: the server selects SHA-512, returns a salt,
  * maintains Connection.PreauthIntegrityHashValue across NEGOTIATE/SESSION_SETUP
- * (smb.c), and derives the 3.1.1 signing key bound to that hash. Encryption,
- * Signing (GMAC), Compression and RdmaTransform contexts are not yet emitted
- * (encryption/compression deferred). */
+ * (smb.c), and derives the 3.1.1 signing key bound to that hash. AES-CMAC
+ * signing negotiation is implemented; GMAC, encryption, compression and
+ * RdmaTransform contexts are not yet emitted. */
 static const struct chimera_smb_negotiate_response_emitter smb_negotiate_response_emitters[] = {
     { CHIMERA_SMB_NEGOTIATE_CTX_PREAUTH, SMB2_PREAUTH_INTEGRITY_CAPABILITIES,
       build_preauth_integrity_response },
+    { CHIMERA_SMB_NEGOTIATE_CTX_SIGNING, SMB2_SIGNING_CAPABILITIES,
+      build_signing_capabilities_response },
     { 0,                                 0,                                  NULL }
 };
 
@@ -697,6 +722,18 @@ chimera_smb_select_negotiated_algorithms(
         if (RAND_bytes(conn->negotiated.preauth_salt,
                        sizeof(conn->negotiated.preauth_salt)) != 1) {
             memset(conn->negotiated.preauth_salt, 0, sizeof(conn->negotiated.preauth_salt));
+        }
+    }
+
+    if (conn->dialect == SMB2_DIALECT_3_1_1 &&
+        (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_SIGNING)) {
+        int i;
+
+        for (i = 0; i < request->negotiate.signing_in.alg_count; i++) {
+            if (request->negotiate.signing_in.algs[i] == SMB2_SIGNING_AES_CMAC) {
+                conn->negotiated.signing_alg = SMB2_SIGNING_AES_CMAC;
+                break;
+            }
         }
     }
 } /* chimera_smb_select_negotiated_algorithms */

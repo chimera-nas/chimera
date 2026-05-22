@@ -88,6 +88,7 @@ run_smbtorture(
                    " --option=torture:offset=0"
                    " --option=torture:beyond_final_zero=4096"
                    " --option=torture:acl_xattr_name=user.NTACL"
+                   " --option='client smb3 signing algorithms=aes-128-cmac'"
                    " --fullname");
 
     /* samba3misc's localposixlock test needs the share's on-disk path so

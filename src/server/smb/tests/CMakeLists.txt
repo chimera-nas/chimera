@@ -219,6 +219,7 @@ set(SMBTORTURE_SUITES
     smb2.session
     smb2.session-id
     smb2.session-require-signing
+    smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.setinfo
     smb2.sharemode
@@ -251,6 +252,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.create_no_streams
     smb2.notify-inotify
     smb2.secleak
+    smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.winattr2
