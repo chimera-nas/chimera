@@ -116,15 +116,39 @@ kdf_counter_hmac_sha256_ossl3(
     return ok;
 } /* kdf_counter_hmac_sha256_ossl3 */
 
+/* Extend an SMB 3.1.1 preauth-integrity hash: hash = SHA512(hash || msg).
+ * `hash` is the running 64-byte value, updated in place. */
+void
+chimera_smb_preauth_extend(
+    uint8_t    *hash,
+    const void *msg,
+    uint32_t    msg_len)
+{
+    EVP_MD_CTX  *md      = EVP_MD_CTX_new();
+    unsigned int out_len = 0;
+
+    chimera_smb_abort_if(!md, "EVP_MD_CTX_new failed");
+
+    if (EVP_DigestInit_ex(md, EVP_sha512(), NULL) != 1 ||
+        EVP_DigestUpdate(md, hash, SMB2_PREAUTH_HASH_SIZE) != 1 ||
+        EVP_DigestUpdate(md, msg, msg_len) != 1 ||
+        EVP_DigestFinal_ex(md, hash, &out_len) != 1) {
+        chimera_smb_abort("SHA-512 preauth hash update failed");
+    }
+    EVP_MD_CTX_free(md);
+} /* chimera_smb_preauth_extend */
+
 int
 chimera_smb_derive_signing_key(
-    int    dialect,
-    void  *output,
-    void  *session_key,
-    size_t session_key_len)
+    int            dialect,
+    void          *output,
+    void          *session_key,
+    size_t         session_key_len,
+    const uint8_t *preauth_hash)
 {
-    static const char label30[] = "SMB2AESCMAC";  /* include NUL per spec */
-    static const char ctx30[]   = "SmbSign";      /* include NUL per spec */
+    static const char label30[]  = "SMB2AESCMAC";   /* include NUL per spec */
+    static const char ctx30[]    = "SmbSign";       /* include NUL per spec */
+    static const char label311[] = "SMBSigningKey"; /* include NUL per spec */
 
     switch (dialect) {
         case SMB2_DIALECT_2_0_2:
@@ -143,6 +167,21 @@ chimera_smb_derive_signing_key(
             return kdf_counter_hmac_sha256_ossl3(session_key, session_key_len,
                                                  label30, sizeof(label30), /* includes '\0' */
                                                  (const uint8_t *) ctx30, sizeof(ctx30), /* includes '\0' */
+                                                 output, 16);
+        case SMB2_DIALECT_3_1_1:
+            /* 3.1.1 binds the signing key to the preauth-integrity hash:
+             * label "SMBSigningKey", context = PreauthIntegrityHashValue. */
+            if (!preauth_hash) {
+                chimera_smb_error("SMB 3.1.1 signing key derivation without preauth hash");
+                return -1;
+            }
+            /* Per the WPTS/Windows reference, the label includes its NUL
+             * terminator ("SMBSigningKey\0"); the KDF helper then inserts the
+             * SP800-108 0x00 separator before the PreauthIntegrityHashValue
+             * context. Pass the full sizeof (label + NUL). */
+            return kdf_counter_hmac_sha256_ossl3(session_key, session_key_len,
+                                                 label311, sizeof(label311),
+                                                 preauth_hash, SMB2_PREAUTH_HASH_SIZE,
                                                  output, 16);
         default:
             return -1;
@@ -341,6 +380,7 @@ chimera_smb_verify_signature(
             break;
         case SMB2_DIALECT_3_0:
         case SMB2_DIALECT_3_0_2:
+        case SMB2_DIALECT_3_1_1:
             rc = chimera_smb_request_cmac_aes_128_cbc(
                 ctx,
                 &request->smb2_hdr,
@@ -453,6 +493,7 @@ chimera_smb_sign_compound(
                     break;
                 case SMB2_DIALECT_3_0:
                 case SMB2_DIALECT_3_0_2:
+                case SMB2_DIALECT_3_1_1:
                     rc = chimera_smb_request_cmac_aes_128_cbc(
                         ctx,
                         hdr,

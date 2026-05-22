@@ -621,6 +621,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 /* SMB2_PREAUTH_INTEGRITY_CAPABILITIES HashAlgorithm IDs */
 #define SMB2_PREAUTH_HASH_SHA_512                   0x0001
 
+/* SHA-512 produces a 64-byte preauth-integrity hash value. */
+#define SMB2_PREAUTH_HASH_SIZE                      64
+
 /* SMB2_ENCRYPTION_CAPABILITIES Cipher IDs */
 #define SMB2_ENCRYPTION_AES_128_CCM                 0x0001
 #define SMB2_ENCRYPTION_AES_128_GCM                 0x0002

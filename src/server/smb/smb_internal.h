@@ -563,6 +563,10 @@ struct chimera_smb_conn {
     uint8_t                            client_guid[16];
     uint8_t                            client_security_mode;
     uint32_t                           client_capabilities;
+    /* SMB 3.1.1 preauth-integrity running hash (SHA-512), extended over the
+     * NEGOTIATE and SESSION_SETUP request/response chain. Reset per connection
+     * at accept. Only consumed when the negotiated dialect is 3.1.1. */
+    uint8_t                            preauth_hash[SMB2_PREAUTH_HASH_SIZE];
     uint32_t                           requests_completed;
     int                                rdma_max_send;
     int                                rdma_niov;

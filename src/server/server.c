@@ -115,10 +115,11 @@ chimera_server_config_init(void)
     config->soft_fail_bad_req        = 0;
     config->tcp_flavor               = CHIMERA_TCP_FLAVOR_PLAIN;
 
-    config->smb_num_dialects = 3;
+    config->smb_num_dialects = 4;
     config->smb_dialects[0]  = SMB2_DIALECT_2_1;
     config->smb_dialects[1]  = SMB2_DIALECT_3_0;
     config->smb_dialects[2]  = SMB2_DIALECT_3_0_2;
+    config->smb_dialects[3]  = SMB2_DIALECT_3_1_1;
 
     config->smb_num_nic_info = 0;
 
