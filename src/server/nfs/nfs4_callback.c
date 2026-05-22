@@ -457,6 +457,132 @@ nfs4_cb_recall_send(
 } /* nfs4_cb_recall_send */
 
 /* ---------------------------------------------------------------------- */
+/* CB_LAYOUTRECALL (pNFS layout recall)                                   */
+/* ---------------------------------------------------------------------- */
+
+#define NFS4_LAYOUT4_FLEX_FILES 0x4 /* RFC 8435; not in the generated XDR */
+
+struct nfs4_cb_layoutrecall_ctx {
+    void  (*done)(
+        int   cb_status,
+        void *arg);
+    void *arg;
+};
+
+static void
+nfs4_cb_layoutrecall_complete(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct CB_COMPOUND4res      *reply,
+    int                          status,
+    void                        *private_data)
+{
+    struct nfs4_cb_layoutrecall_ctx *ctx = private_data;
+
+    (void) evpl;
+    (void) verf;
+
+    /* cb_status: the callback compound result (NFS4_OK => the client will
+     * LAYOUTRETURN); a negative value flags an RPC-level transport failure. */
+    ctx->done((status == 0 && reply) ? (int) reply->status : -1, ctx->arg);
+    free(ctx);
+} /* nfs4_cb_layoutrecall_complete */
+
+bool
+nfs4_cb_layoutrecall(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_client *client,
+    const uint8_t *fh,
+    uint32_t fh_len,
+    const struct stateid4 *layout_stateid,
+    void ( *done )(int cb_status, void *arg),
+    void *arg)
+{
+    struct nfs4_cb_client           *chan = client->cb_path.cb_client;
+    struct evpl_rpc2_conn           *conn = chan ? nfs4_cb_chan_conn(chan) : NULL;
+    struct nfs4_cb_layoutrecall_ctx *ctx;
+    struct CB_COMPOUND4args          args;
+    struct nfs_cb_argop4             ops[2];
+    int                              nops = 0;
+
+    if (!conn) {
+        return false;
+    }
+
+    memset(&args, 0, sizeof(args));
+    memset(ops, 0, sizeof(ops));
+
+    /* 4.1+: a CB_SEQUENCE must lead the compound. */
+    if (chan->minorversion >= 1) {
+        struct CB_SEQUENCE4args *seq = &ops[nops].opcbsequence;
+        ops[nops].argop = OP_CB_SEQUENCE;
+        memcpy(seq->csa_sessionid, chan->sessionid, NFS4_SESSIONID_SIZE);
+        seq->csa_sequenceid = atomic_fetch_add_explicit(&chan->cb_seq, 1,
+                                                        memory_order_relaxed);
+        seq->csa_slotid                   = 0;
+        seq->csa_highest_slotid           = 0;
+        seq->csa_cachethis                = 0;
+        seq->num_csa_referring_call_lists = 0;
+        seq->csa_referring_call_lists     = NULL;
+        nops++;
+    }
+
+    ops[nops].argop                                                = OP_CB_LAYOUTRECALL;
+    ops[nops].opcblayoutrecall.clora_type                          = NFS4_LAYOUT4_FLEX_FILES;
+    ops[nops].opcblayoutrecall.clora_iomode                        = LAYOUTIOMODE4_ANY;
+    ops[nops].opcblayoutrecall.clora_changed                       = 0;
+    ops[nops].opcblayoutrecall.clora_recall.lor_recalltype         = LAYOUTRECALL4_FILE;
+    ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_fh.len  = fh_len;
+    ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_fh.data = (void *) fh;
+    ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_offset  = 0;
+    ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_length  = UINT64_MAX;
+    ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_stateid = *layout_stateid;
+    nops++;
+
+    args.tag.len        = 0;
+    args.tag.data       = NULL;
+    args.minorversion   = chan->minorversion;
+    args.callback_ident = chan->cb_ident;
+    args.num_argarray   = nops;
+    args.argarray       = ops;
+
+    ctx       = calloc(1, sizeof(*ctx));
+    ctx->done = done;
+    ctx->arg  = arg;
+
+    /* Same callback RPC auth the channel uses for CB_RECALL. */
+    {
+        struct nfs4_cb_path   *cb = &client->cb_path;
+        struct evpl_rpc2_cred  rpc_cred;
+        struct evpl_rpc2_cred *credp         = NULL;
+        static const char      machinename[] = "chimera";
+
+        if (cb->cb_sec_flavor == AUTH_SYS) {
+            memset(&rpc_cred, 0, sizeof(rpc_cred));
+            rpc_cred.flavor                  = EVPL_RPC2_AUTH_SYS;
+            rpc_cred.authsys.uid             = cb->cb_sec_uid;
+            rpc_cred.authsys.gid             = cb->cb_sec_gid;
+            rpc_cred.authsys.num_gids        = 0;
+            rpc_cred.authsys.gids            = NULL;
+            rpc_cred.authsys.machinename     = machinename;
+            rpc_cred.authsys.machinename_len = sizeof(machinename) - 1;
+            credp                            = &rpc_cred;
+        }
+
+        chan->cb_prog.send_call_CB_COMPOUND(&chan->cb_prog.rpc2,
+                                            thread->evpl,
+                                            conn,
+                                            credp,
+                                            &args,
+                                            0, 0, 0,
+                                            nfs4_cb_layoutrecall_complete,
+                                            ctx);
+    }
+
+    return true;
+} /* nfs4_cb_layoutrecall */
+
+/* ---------------------------------------------------------------------- */
 /* CB_GETATTR (write-delegation attribute query)                          */
 /* ---------------------------------------------------------------------- */
 

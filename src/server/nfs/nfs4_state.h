@@ -219,28 +219,20 @@ struct nfs_client {
     /* Delegations granted to this client (utlist via next_in_client),
      * protected by client->lock.  Walked at client teardown to revoke
      * every outstanding delegation. */
-    struct nfs_delegation *delegations;
+    struct nfs_delegation   *delegations;
 
     /* Callback path for delegation recalls.  Populated at SETCLIENTID
      * (4.0) / CREATE_SESSION (4.1); see struct nfs4_cb_path. */
-    struct nfs4_cb_path    cb_path;
+    struct nfs4_cb_path      cb_path;
 
     /* Count of this client's delegations that have been force-revoked and not
      * yet FREE_STATEID'd.  Drives SEQ4_STATUS_RECALLABLE_STATE_REVOKED. */
-    _Atomic uint32_t       revoked_deleg_count;
+    _Atomic uint32_t         revoked_deleg_count;
 
     /* pNFS layouts held by this client, hashed by file handle (NFSv4.1+).
-     * Cascade-freed in nfs_client_destroy on lease expiry / DESTROY_CLIENTID. */
+     * Cascade-freed in nfs_client_destroy on lease expiry / DESTROY_CLIENTID.
+     * Recalls reach the client over the shared cb_path (see nfs4_callback.c). */
     struct nfs_layout_state *layouts_by_fh;
-
-    UT_hash_handle         hh_by_owner;
-    UT_hash_handle         hh_by_id;
-
-    /* A session of this client whose connection carries the NFSv4.1
-     * backchannel, used to send CB_COMPOUND (e.g. CB_LAYOUTRECALL) to this
-     * client.  Borrowed pointer set at CREATE_SESSION; cleared when the session
-     * is freed.  NULL if the client has no backchannel. */
-    struct nfs4_session     *cb_session;
 
     UT_hash_handle           hh_by_owner;
     UT_hash_handle           hh_by_id;

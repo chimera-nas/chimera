@@ -145,3 +145,20 @@ nfs4_find_conflicting_write_deleg(
     uint16_t                          fh_len,
     uint64_t                          querying_client_id);
 
+
+/* pNFS layout recall (CB_LAYOUTRECALL, RFC 8881 §20.3).  Sends
+ * CB_COMPOUND{[CB_SEQUENCE,] CB_LAYOUTRECALL(LAYOUTRECALL4_FILE, fh,
+ * layout_stateid)} on `client`'s callback channel -- the same path delegations
+ * use.  `done(cb_status, arg)` runs on completion: cb_status is the callback
+ * compound status (NFS4_OK => the client will LAYOUTRETURN), or a negative
+ * value on transport failure.  Returns false WITHOUT calling done if the client
+ * has no usable callback channel (the caller should then revoke locally). */
+bool
+nfs4_cb_layoutrecall(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_client *client,
+    const uint8_t *fh,
+    uint32_t fh_len,
+    const struct stateid4 *layout_stateid,
+    void ( *done )(int cb_status, void *arg),
+    void *arg);

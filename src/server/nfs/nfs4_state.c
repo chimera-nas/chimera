@@ -594,19 +594,6 @@ nfs_client_destroy(
         return;
     }
 
-    /* Release the backchannel session ref the client held (see CREATE_SESSION). */
-    {
-        struct nfs4_session *cb;
-
-        pthread_mutex_lock(&client->lock);
-        cb                 = client->cb_session;
-        client->cb_session = NULL;
-        pthread_mutex_unlock(&client->lock);
-        if (cb) {
-            nfs4_session_put(cb);
-        }
-    }
-
     pthread_mutex_lock(&client->lock);
 
     /* HASH_ITER + HASH_DELETE + free is the standard uthash teardown

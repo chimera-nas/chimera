@@ -18,6 +18,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_state.h"
 #include "nfs4_status.h"
+#include "nfs4_callback.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_procs.h"
@@ -445,6 +446,10 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
                                 &res->logr_resok4.logr_stateid);
     }
 
+    /* Open the client's callback channel so a later conflicting op can recall
+     * this layout; CB_LAYOUTRECALL rides the shared delegation channel. */
+    nfs4_cb_ensure_probe(req->thread, client, req);
+
     body = xdr_dbuf_alloc_space(256, req->encoding->dbuf);
     chimera_nfs_abort_if(body == NULL, "Failed to allocate space");
     body_len = chimera_nfs4_encode_ff_layout(body, deviceid, native_fh, native_fh_len,
@@ -654,6 +659,10 @@ lg_sourced_cb(
                                 &req->thread->shared->nfs4_layout_table,
                                 &res->logr_resok4.logr_stateid);
     }
+
+    /* Open the client's callback channel so a later conflicting op can recall
+     * this layout; CB_LAYOUTRECALL rides the shared delegation channel. */
+    nfs4_cb_ensure_probe(req->thread, client, req);
 
     if (loc_type == LAYOUT4_BLOCK_VOLUME) {
         uint8_t        *body = xdr_dbuf_alloc_space(1024, req->encoding->dbuf);
