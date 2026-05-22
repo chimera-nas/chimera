@@ -59,6 +59,17 @@ chimera_nfs4_compound_process(
 
         //dump_COMPOUND4res("res", &req->res_compound);
 
+        if (req->session &&
+            req->res_compound.status == NFS4_OK &&
+            req->res_compound.num_resarray > 0 &&
+            req->session->nfs4_session_fore_attrs.ca_maxresponsesize &&
+            marshall_length_COMPOUND4res(&req->res_compound) >
+            (int) req->session->nfs4_session_fore_attrs.ca_maxresponsesize) {
+            req->index = req->res_compound.num_resarray - 1;
+            chimera_nfs4_compound_complete(req, NFS4ERR_REP_TOO_BIG);
+            return;
+        }
+
         rc = shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
             thread->evpl,
             NULL,
