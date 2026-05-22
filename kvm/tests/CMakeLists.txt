@@ -6,6 +6,9 @@ set(CHIMERA_BINARY ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 set(NFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_test_wrapper.sh)
 set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
 
+set(KVM_TEST_PROCESSORS 4 CACHE STRING
+    "CTest processor slots consumed by each KVM integration test")
+
 set(KVM_BACKENDS memfs linux)
 
 if(CHIMERA_VFS_IO_URING)
@@ -60,7 +63,7 @@ foreach(image_spec ${KVM_IMAGES})
                             ${CHIMERA_BINARY} ${backend} ${nfsver}
                             "${CTHON_CMD_${category}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/cthon/${category}_${backend}_nfs${nfsver}
-                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS ${KVM_TEST_PROCESSORS})
             endforeach()
         endforeach()
     endforeach()
@@ -74,7 +77,7 @@ foreach(image_spec ${KVM_IMAGES})
                             ${CHIMERA_BINARY} cairn ${nfsver}
                             "${CTHON_CMD_${category}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/cthon/${category}_cairn_nfs${nfsver}
-                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS ${KVM_TEST_PROCESSORS})
             endforeach()
         endforeach()
     endif()
@@ -89,7 +92,7 @@ foreach(image_spec ${KVM_IMAGES})
                             ${CHIMERA_BINARY} ${backend} ${nfsver}
                             "${XFSTESTS_CMD_${prog}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/xfstests/${prog}_${backend}_nfs${nfsver}
-                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS ${KVM_TEST_PROCESSORS})
             endforeach()
         endforeach()
     endforeach()
@@ -103,7 +106,7 @@ foreach(image_spec ${KVM_IMAGES})
                             ${CHIMERA_BINARY} cairn ${nfsver}
                             "${XFSTESTS_CMD_${prog}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/xfstests/${prog}_cairn_nfs${nfsver}
-                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS ${KVM_TEST_PROCESSORS})
             endforeach()
         endforeach()
     endif()
@@ -117,7 +120,7 @@ foreach(image_spec ${KVM_IMAGES})
                         ${CHIMERA_BINARY} ${backend}
                         "${SMB_CTHON_CMD_${category}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_${backend}
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS ${KVM_TEST_PROCESSORS})
         endforeach()
     endforeach()
 
@@ -129,7 +132,7 @@ foreach(image_spec ${KVM_IMAGES})
                         ${CHIMERA_BINARY} cairn
                         "${SMB_CTHON_CMD_${category}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_cairn
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS ${KVM_TEST_PROCESSORS})
         endforeach()
     endif()
 
@@ -142,7 +145,7 @@ foreach(image_spec ${KVM_IMAGES})
                         ${CHIMERA_BINARY} ${backend}
                         "${XFSTESTS_CMD_${prog}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/xfstests/${prog}_${backend}
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS ${KVM_TEST_PROCESSORS})
         endforeach()
     endforeach()
 
@@ -154,7 +157,7 @@ foreach(image_spec ${KVM_IMAGES})
                         ${CHIMERA_BINARY} cairn
                         "${XFSTESTS_CMD_${prog}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/xfstests/${prog}_cairn
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS ${KVM_TEST_PROCESSORS})
         endforeach()
     endif()
 
