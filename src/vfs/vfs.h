@@ -907,6 +907,20 @@ enum CHIMERA_FS_FH_MAGIC {
  * design -- Chimera carries a single ACL model (see vfs_acl.h). */
 #define CHIMERA_VFS_CAP_ACL_NATIVE         (1U << 13)
 
+/* If set, the module delegates discretionary access control to a real
+ * underlying enforcer (e.g. the host kernel, via the seteuid/setegid
+ * impersonation in chimera_setup_credential).  The central VFS access gate
+ * (chimera_vfs_gate) is then a no-op for this module, since enforcing in the
+ * engine on top of the kernel would double-evaluate and -- on a mode-only
+ * backend whose ACL is mode-derived -- could only ever agree with it anyway.
+ *
+ * Modules WITHOUT this bit (memfs, cairn, ...) have no native DAC, so the VFS
+ * engine is their sole authorization point and the gate enforces the canonical
+ * ACL for them.  Note this is orthogonal to CAP_ACL_NATIVE: "stores the ACL"
+ * and "enforces the ACL" are different properties (memfs/cairn store but do not
+ * enforce; linux/io_uring enforce in-kernel but do not store the rich ACL). */
+#define CHIMERA_VFS_CAP_DELEGATES_DAC      (1U << 14)
+
 struct chimera_vfs_module {
     /* Required
      * Short name for the module to be used in creating shares

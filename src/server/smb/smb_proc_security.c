@@ -590,9 +590,24 @@ chimera_smb_set_security_setattr_callback(
     void                     *private_data)
 {
     struct chimera_smb_request *request = private_data;
+    unsigned int                status;
 
     chimera_smb_open_file_release(request, request->set_info.open_file);
-    chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+
+    switch (error_code) {
+        case CHIMERA_VFS_OK:
+            status = SMB2_STATUS_SUCCESS;
+            break;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:
+            status = SMB2_STATUS_ACCESS_DENIED;
+            break;
+        default:
+            status = SMB2_STATUS_INTERNAL_ERROR;
+            break;
+    } /* switch */
+
+    chimera_smb_complete_request(request, status);
 } /* chimera_smb_set_security_setattr_callback */
 
 void

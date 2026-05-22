@@ -17,6 +17,8 @@
 
 #include <stdint.h>
 
+#include "vfs_error.h"
+
 struct chimera_vfs_attrs;
 struct chimera_vfs_cred;
 
@@ -41,3 +43,28 @@ chimera_vfs_access_allowed(
 {
     return chimera_vfs_access_check(attr, cred, requested) == requested;
 } /* chimera_vfs_access_allowed */
+
+/*
+ * Should the central VFS gate enforce the canonical ACL for an operation on a
+ * `module_capabilities` backend by `cred`?  Returns 0 (skip -- no fetch, no
+ * check) when the backend delegates DAC to a real enforcer
+ * (CHIMERA_VFS_CAP_DELEGATES_DAC), or when the credential is exempt anyway
+ * (AUTH_NONE, or root): in those cases the engine would grant unconditionally,
+ * so the wrapper can avoid the pre-step attr/ACL fetch entirely.  Returns 1
+ * when the engine is the sole authority and must run.
+ */
+int chimera_vfs_gate_needed(
+    uint64_t                       module_capabilities,
+    const struct chimera_vfs_cred *cred);
+
+/*
+ * The enforcement decision itself: CHIMERA_VFS_OK if every bit in `required`
+ * (canonical CHIMERA_ACE_* mask) is granted to `cred` on the object described
+ * by `attr` (which must carry mode/uid/gid and, for a natively-stored ACL, the
+ * ACL via va_acl), else CHIMERA_VFS_EACCES.  Callers gate on
+ * chimera_vfs_gate_needed() first and fetch attrs+ACL before calling this.
+ */
+enum chimera_vfs_error chimera_vfs_gate(
+    const struct chimera_vfs_attrs *attr,
+    const struct chimera_vfs_cred  *cred,
+    uint32_t                        required);

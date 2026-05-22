@@ -9,8 +9,11 @@
 #undef NDEBUG
 #include <assert.h>
 
+#include "vfs/vfs.h"
 #include "vfs/vfs_acl.h"
 #include "vfs/vfs_acl_serialize.h"
+#include "vfs/vfs_access.h"
+#include "vfs/vfs_attrs.h"
 #include "vfs/vfs_cred.h"
 
 #define TEST_PASS(name) fprintf(stderr, "  PASS: %s\n", name)
@@ -270,6 +273,44 @@ test_serialize_roundtrip(void)
     TEST_PASS("serialize/deserialize round-trips, rejects bad input");
 } /* test_serialize_roundtrip */
 
+/* The central VFS gate: who must the engine enforce, and does it allow/deny. */
+static void
+test_gate(void)
+{
+    struct chimera_vfs_cred  owner = mkcred(1000, 2000);
+    struct chimera_vfs_cred  other = mkcred(1002, 2002);
+    struct chimera_vfs_cred  root  = mkcred(0, 0);
+    struct chimera_vfs_cred  none;
+    struct chimera_vfs_attrs attr;
+
+    /* gate_needed: a backend that delegates DAC is never engine-enforced. */
+    assert(chimera_vfs_gate_needed(CHIMERA_VFS_CAP_DELEGATES_DAC, &owner) == 0);
+    /* nor are exempt credentials, even on an engine-authoritative backend. */
+    chimera_vfs_cred_init_unix(&none, 0, 0, 0, NULL);
+    none.flavor = CHIMERA_VFS_AUTH_NONE;
+    assert(chimera_vfs_gate_needed(0, &none) == 0);
+    assert(chimera_vfs_gate_needed(0, &root) == 0);
+    /* a non-root identity on a non-delegating backend must be enforced. */
+    assert(chimera_vfs_gate_needed(0, &owner) == 1);
+
+    /* gate: an empty requirement is always allowed (no-op mutation). */
+    memset(&attr, 0, sizeof(attr));
+    attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
+    attr.va_mode     = 0700;
+    attr.va_uid      = 1000;
+    attr.va_gid      = 2000;
+    assert(chimera_vfs_gate(&attr, &owner, 0) == CHIMERA_VFS_OK);
+
+    /* the owner holds WRITE_ACL implicitly (may rewrite the DACL / chmod) ... */
+    assert(chimera_vfs_gate(&attr, &owner, CHIMERA_ACE_WRITE_ACL) == CHIMERA_VFS_OK);
+    /* ... but NOT WRITE_OWNER without an explicit grant (no implicit chown). */
+    assert(chimera_vfs_gate(&attr, &owner, CHIMERA_ACE_WRITE_OWNER) == CHIMERA_VFS_EACCES);
+    /* a non-owner with no ACE gets neither. */
+    assert(chimera_vfs_gate(&attr, &other, CHIMERA_ACE_WRITE_ACL) == CHIMERA_VFS_EACCES);
+
+    TEST_PASS("gate: enforcement scoping + owner-implicit WRITE_ACL, not WRITE_OWNER");
+} /* test_gate */
+
 int
 main(
     int    argc,
@@ -284,6 +325,7 @@ main(
     test_inherit_file();
     test_inherit_fallback();
     test_serialize_roundtrip();
+    test_gate();
 
     fprintf(stderr, "All ACL engine tests passed\n");
     return 0;
