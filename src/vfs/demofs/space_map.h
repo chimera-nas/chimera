@@ -76,6 +76,43 @@
 #define SM_AG_LOG_SIZE       (SM_AG_LOG_SLOT_SIZE * SM_AG_LOG_SLOT_COUNT)
 
 /*
+ * On-disk per-AG allocation log.  Each slot begins with this header, followed
+ * by `base_count` condensed free-extent records (the free set at the last
+ * condensation) and then `delta_count` allocation/free delta records appended
+ * since.  The free set is reconstructed at mount as base + replayed deltas.
+ * `generation` selects the live slot (highest valid wins); condensation
+ * rewrites the *other* slot at generation+1 and switches.  Integrity of the
+ * slot's 4 KiB blocks is provided by the main intent log (every block that a
+ * delta or condensation touches rides a redo record), so the header carries
+ * no separate checksum -- a torn condensation simply leaves the older slot
+ * live.
+ */
+#define SM_AG_LOG_MAGIC      0x474F4C47414B5344ULL     /* "DSKAGLOG" */
+
+#define SM_AG_LOG_OP_ALLOC   0u /* [offset,len) was handed out: remove from free */
+#define SM_AG_LOG_OP_FREE    1u /* [offset,len) was returned:   add to free */
+
+struct sm_ag_log_header {
+    uint64_t magic;
+    uint64_t generation;
+    uint32_t base_count;
+    uint32_t delta_count;
+    uint64_t reserved;
+};
+
+struct sm_ag_log_ext {          /* condensed base free extent */
+    uint64_t offset;
+    uint64_t length;
+};
+
+struct sm_ag_log_delta {
+    uint64_t offset;
+    uint64_t length;
+    uint32_t op;
+    uint32_t pad;
+};
+
+/*
  * Statically-reserved intent log region.  Lives on device 0 right after
  * the superblock; its exact location is also recorded in the superblock
  * so future format versions can move it.  Carved out of AG 0 of device 0.
@@ -137,27 +174,6 @@ struct sm_extent {
     uint64_t       length;
 };
 
-/*
- * On-disk free-space snapshot, written to slot A of each AG's log region at
- * clean unmount and reloaded at mount.  Header + a packed array of free
- * extents (absolute device offsets) covering exactly that AG.
- */
-#define SM_AG_SNAP_MAGIC 0x50414E53534B4944ULL          /* "DIKSSNAP" */
-
-struct sm_ag_snap_header {
-    uint64_t magic;
-    uint32_t version;
-    uint32_t count;     /* number of free-extent records following */
-    uint64_t free_bytes;
-    uint32_t crc32;     /* over header (crc32=0) + the records */
-    uint32_t pad;
-};
-
-struct sm_ag_snap_rec {
-    uint64_t offset;
-    uint64_t length;
-};
-
 struct sm_ag {
     uint32_t        device_id;
     uint32_t        ag_index;
@@ -168,6 +184,12 @@ struct sm_ag {
     uint64_t        free_bytes;
     struct rb_tree  free_by_offset;
     pthread_mutex_t lock;
+
+    /* On-disk allocation-log state (protected by lock). */
+    uint32_t        log_slot;        /* active slot index (0 or 1) */
+    uint64_t        log_generation;  /* generation of the active slot */
+    uint32_t        log_base_count;  /* condensed base extents in the active slot */
+    uint32_t        log_delta_count; /* deltas appended since the last condense */
 };
 
 struct sm_device {

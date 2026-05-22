@@ -112,12 +112,16 @@ sm_ag_init(
     struct sm_extent *initial;
     uint64_t          total_reserved;
 
-    ag->device_id   = device_id;
-    ag->ag_index    = ag_index;
-    ag->base_offset = base_offset;
-    ag->size        = size;
-    ag->log_offset  = base_offset + pre_log_reserved;
-    ag->log_size    = SM_AG_LOG_SIZE;
+    ag->device_id       = device_id;
+    ag->ag_index        = ag_index;
+    ag->base_offset     = base_offset;
+    ag->size            = size;
+    ag->log_offset      = base_offset + pre_log_reserved;
+    ag->log_size        = SM_AG_LOG_SIZE;
+    ag->log_slot        = 0;
+    ag->log_generation  = 0;
+    ag->log_base_count  = 0;
+    ag->log_delta_count = 0;
 
     pthread_mutex_init(&ag->lock, NULL);
     rb_tree_init(&ag->free_by_offset);
@@ -648,14 +652,122 @@ space_map_read_superblock_path(
     return 0;
 } /* space_map_read_superblock_path */
 
+/*
+ * Remove the specific range [offset, offset+length) from the AG's free tree
+ * (i.e. mark it allocated), splitting the containing free extent.  Used to
+ * replay alloc deltas during reconstruction.  Caller holds ag->lock.
+ */
+static void
+sm_ag_mark_used_locked(
+    struct sm_ag *ag,
+    uint64_t      offset,
+    uint64_t      length)
+{
+    struct sm_extent *e = NULL;
+    uint64_t          e_off, e_len;
+
+    rb_tree_query_floor(&ag->free_by_offset, offset, offset, e);
+    sm_abort_if(!e || e->offset > offset ||
+                e->offset + e->length < offset + length,
+                "mark_used [%lu,%lu) not within a free extent",
+                offset, offset + length);
+
+    e_off = e->offset;
+    e_len = e->length;
+    rb_tree_remove(&ag->free_by_offset, &e->node);
+    free(e);
+
+    if (offset > e_off) {
+        struct sm_extent *l = sm_extent_new(e_off, offset - e_off);
+        rb_tree_insert(&ag->free_by_offset, offset, l);
+    }
+    if (offset + length < e_off + e_len) {
+        struct sm_extent *r = sm_extent_new(offset + length,
+                                            (e_off + e_len) - (offset + length));
+        rb_tree_insert(&ag->free_by_offset, offset, r);
+    }
+    ag->free_bytes -= length;
+} /* sm_ag_mark_used_locked */
+
+/* Serialize the AG's current free set into `slot` as a condensed base (no
+ * deltas) at `generation`.  Caller holds ag->lock.  Returns bytes written. */
+static uint64_t
+sm_ag_condense_into(
+    struct sm_ag *ag,
+    uint8_t      *slot,
+    uint64_t      generation)
+{
+    struct sm_ag_log_header *h    = (struct sm_ag_log_header *) slot;
+    struct sm_ag_log_ext    *base = (struct sm_ag_log_ext *) (slot + sizeof(*h));
+    struct sm_extent        *e;
+    uint32_t                 n       = 0;
+    uint64_t                 maxbase = (SM_AG_LOG_SLOT_SIZE - sizeof(*h)) /
+        sizeof(struct sm_ag_log_ext);
+
+    rb_tree_first(&ag->free_by_offset, e);
+    while (e) {
+        sm_abort_if(n >= maxbase, "AG condense overflow (%u extents)", n);
+        base[n].offset = e->offset;
+        base[n].length = e->length;
+        n++;
+        e = rb_tree_next(&ag->free_by_offset, e);
+    }
+
+    h->magic       = SM_AG_LOG_MAGIC;
+    h->generation  = generation;
+    h->base_count  = n;
+    h->delta_count = 0;
+    h->reserved    = 0;
+    return sizeof(*h) + (uint64_t) n * sizeof(struct sm_ag_log_ext);
+} /* sm_ag_condense_into */
+
+/* Rebuild the AG's free tree from a slot image: install the base extents,
+ * then replay the appended deltas in order.  Caller holds ag->lock. */
+static void
+sm_ag_reconstruct(
+    struct sm_ag  *ag,
+    const uint8_t *slot)
+{
+    const struct sm_ag_log_header *h      = (const struct sm_ag_log_header *) slot;
+    const struct sm_ag_log_ext    *base   = (const struct sm_ag_log_ext *) (slot + sizeof(*h));
+    const struct sm_ag_log_delta  *deltas =
+        (const struct sm_ag_log_delta *) (base + h->base_count);
+    uint32_t                       i;
+
+    rb_tree_destroy(&ag->free_by_offset, sm_extent_release, NULL);
+    rb_tree_init(&ag->free_by_offset);
+    ag->free_bytes = 0;
+
+    for (i = 0; i < h->base_count; i++) {
+        struct sm_extent *e = sm_extent_new(base[i].offset, base[i].length);
+        rb_tree_insert(&ag->free_by_offset, offset, e);
+        ag->free_bytes += base[i].length;
+    }
+    for (i = 0; i < h->delta_count; i++) {
+        if (deltas[i].op == SM_AG_LOG_OP_ALLOC) {
+            sm_ag_mark_used_locked(ag, deltas[i].offset, deltas[i].length);
+        } else {
+            sm_ag_free_locked(ag, deltas[i].offset, deltas[i].length);
+        }
+    }
+
+    ag->log_generation  = h->generation;
+    ag->log_base_count  = h->base_count;
+    ag->log_delta_count = h->delta_count;
+} /* sm_ag_reconstruct */
+
+/*
+ * Persist the allocator: condense each AG's free set into the *other* slot at
+ * generation+1 and switch to it.  (Per-transaction delta journaling, which
+ * makes interim allocations crash-durable, is layered on top of this; this
+ * full condense is what runs at clean unmount and resets the delta log.)
+ */
 int
 space_map_persist_paths(
     struct space_map *sm,
     char            **device_paths)
 {
     uint32_t d, a;
-    uint64_t maxrecs = (SM_AG_LOG_SLOT_SIZE - sizeof(struct sm_ag_snap_header)) /
-        sizeof(struct sm_ag_snap_rec);
 
     for (d = 0; d < sm->num_devices; d++) {
         struct sm_device *dev = &sm->devices[d];
@@ -666,40 +778,27 @@ space_map_persist_paths(
         }
 
         for (a = 0; a < dev->num_ags; a++) {
-            struct sm_ag             *ag   = &dev->ags[a];
-            uint8_t                  *buf  = calloc(1, SM_AG_LOG_SLOT_SIZE);
-            struct sm_ag_snap_header *h    = (struct sm_ag_snap_header *) buf;
-            struct sm_ag_snap_rec    *recs =
-                (struct sm_ag_snap_rec *) (buf + sizeof(*h));
-            struct sm_extent         *ext;
-            uint32_t                  count = 0;
-            uint64_t                  payload, aligned;
-            ssize_t                   n;
+            struct sm_ag *ag  = &dev->ags[a];
+            uint8_t      *buf = calloc(1, SM_AG_LOG_SLOT_SIZE);
+            uint32_t      slot;
+            uint64_t      gen, payload, aligned, slot_off;
+            ssize_t       n;
 
             pthread_mutex_lock(&ag->lock);
-            rb_tree_first(&ag->free_by_offset, ext);
-            while (ext) {
-                sm_abort_if(count >= maxrecs,
-                            "AG %u/%u snapshot overflow (%u extents)",
-                            d, a, count);
-                recs[count].offset = ext->offset;
-                recs[count].length = ext->length;
-                count++;
-                ext = rb_tree_next(&ag->free_by_offset, ext);
-            }
-            h->magic      = SM_AG_SNAP_MAGIC;
-            h->version    = SM_FORMAT_VERSION;
-            h->count      = count;
-            h->free_bytes = ag->free_bytes;
-            h->pad        = 0;
-            h->crc32      = 0;
-            pthread_mutex_unlock(&ag->lock);
-
-            payload  = sizeof(*h) + (uint64_t) count * sizeof(*recs);
-            h->crc32 = sm_crc32(buf, payload);
+            slot     = 1 - ag->log_slot;
+            gen      = ag->log_generation + 1;
+            payload  = sm_ag_condense_into(ag, buf, gen);
+            slot_off = ag->log_offset + (uint64_t) slot * SM_AG_LOG_SLOT_SIZE;
             aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
 
-            n = pwrite(fd, buf, aligned, ag->log_offset);
+            n = pwrite(fd, buf, aligned, slot_off);
+            if (n == (ssize_t) aligned) {
+                ag->log_slot        = slot;
+                ag->log_generation  = gen;
+                ag->log_base_count  = ((struct sm_ag_log_header *) buf)->base_count;
+                ag->log_delta_count = 0;
+            }
+            pthread_mutex_unlock(&ag->lock);
             free(buf);
             if (n != (ssize_t) aligned) {
                 close(fd);
@@ -733,53 +832,47 @@ space_map_load_paths(
         }
 
         for (a = 0; a < dev->num_ags; a++) {
-            struct sm_ag            *ag = &dev->ags[a];
-            struct sm_ag_snap_header h;
-            struct sm_ag_snap_rec   *recs;
-            uint8_t                 *cbuf;
-            uint32_t                 i, stored, computed;
-            uint64_t                 payload;
-            ssize_t                  n;
+            struct sm_ag           *ag = &dev->ags[a];
+            struct sm_ag_log_header hdr[SM_AG_LOG_SLOT_COUNT];
+            uint8_t                *buf;
+            int                     best = -1;
+            uint32_t                s;
+            uint64_t                payload, slot_off;
+            ssize_t                 n;
 
-            n = pread(fd, &h, sizeof(h), ag->log_offset);
-            if (n != (ssize_t) sizeof(h) || h.magic != SM_AG_SNAP_MAGIC ||
-                h.version != SM_FORMAT_VERSION) {
+            /* Pick the live slot: highest generation with a valid magic. */
+            for (s = 0; s < SM_AG_LOG_SLOT_COUNT; s++) {
+                slot_off = ag->log_offset + (uint64_t) s * SM_AG_LOG_SLOT_SIZE;
+                n        = pread(fd, &hdr[s], sizeof(hdr[s]), slot_off);
+                if (n == (ssize_t) sizeof(hdr[s]) &&
+                    hdr[s].magic == SM_AG_LOG_MAGIC &&
+                    (best < 0 || hdr[s].generation > hdr[best].generation)) {
+                    best = (int) s;
+                }
+            }
+            if (best < 0) {
                 close(fd);
                 return -1;
             }
 
-            payload = sizeof(h) + (uint64_t) h.count * sizeof(*recs);
-            cbuf    = malloc(payload);
-            n       = pread(fd, cbuf, payload, ag->log_offset);
+            payload = sizeof(struct sm_ag_log_header) +
+                (uint64_t) hdr[best].base_count * sizeof(struct sm_ag_log_ext) +
+                (uint64_t) hdr[best].delta_count * sizeof(struct sm_ag_log_delta);
+            buf      = malloc(payload);
+            slot_off = ag->log_offset + (uint64_t) best * SM_AG_LOG_SLOT_SIZE;
+            n        = pread(fd, buf, payload, slot_off);
             if (n != (ssize_t) payload) {
-                free(cbuf);
+                free(buf);
                 close(fd);
                 return -1;
             }
-            stored                                     = h.crc32;
-            ((struct sm_ag_snap_header *) cbuf)->crc32 = 0;
-            computed                                   = sm_crc32(cbuf, payload);
-            if (stored != computed) {
-                free(cbuf);
-                close(fd);
-                return -1;
-            }
-            recs = (struct sm_ag_snap_rec *) (cbuf + sizeof(h));
 
-            /* Replace the default full-free tree with the snapshot. */
             pthread_mutex_lock(&ag->lock);
-            rb_tree_destroy(&ag->free_by_offset, sm_extent_release, NULL);
-            rb_tree_init(&ag->free_by_offset);
-            for (i = 0; i < h.count; i++) {
-                struct sm_extent *ext = sm_extent_new(recs[i].offset, recs[i].length);
-
-                rb_tree_insert(&ag->free_by_offset, offset, ext);
-            }
-            ag->free_bytes = h.free_bytes;
+            sm_ag_reconstruct(ag, buf);
+            ag->log_slot = (uint32_t) best;
+            free_total  += ag->free_bytes;
             pthread_mutex_unlock(&ag->lock);
-
-            free_total += h.free_bytes;
-            free(cbuf);
+            free(buf);
         }
         close(fd);
     }
