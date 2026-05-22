@@ -36,6 +36,11 @@
  * sets this bit in va_set_mask only if it actually persists the value. */
 #define CHIMERA_VFS_ATTR_DOS_ATTRIBUTES (1UL << 21)
 
+/* Birth/creation time (SMB create time, statx btime).  POSIX has no such
+ * concept, so this is optional: a backend sets this bit in va_set_mask only
+ * if it actually tracks the value. */
+#define CHIMERA_VFS_ATTR_BTIME          (1UL << 22)
+
 #define CHIMERA_VFS_ATTR_MASK_STAT      ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \
@@ -48,7 +53,8 @@
             CHIMERA_VFS_ATTR_SPACE_USED | \
             CHIMERA_VFS_ATTR_ATIME | \
             CHIMERA_VFS_ATTR_MTIME | \
-            CHIMERA_VFS_ATTR_CTIME)
+            CHIMERA_VFS_ATTR_CTIME | \
+            CHIMERA_VFS_ATTR_BTIME)
 
 #define CHIMERA_VFS_ATTR_MASK_STATFS    ( \
             CHIMERA_VFS_ATTR_SPACE_AVAIL | \
@@ -80,6 +86,7 @@ struct chimera_vfs_attrs {
     struct timespec va_atime;
     struct timespec va_mtime;
     struct timespec va_ctime;
+    struct timespec va_btime;
 
     uint64_t        va_fs_space_avail;
     uint64_t        va_fs_space_free;
