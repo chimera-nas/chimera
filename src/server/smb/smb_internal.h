@@ -591,6 +591,11 @@ struct chimera_smb_conn {
     uint8_t                           *ntlm_output;
     size_t                             ntlm_output_len;
     unsigned int                       flags;
+    /* Set under the owning thread's lease_break_lock while conn_free drains
+     * this connection's queued lease-break notifications, so a break_cb racing
+     * on another thread does not enqueue a send for a connection whose bind is
+     * being torn down.  Reset on reuse in chimera_smb_conn_alloc. */
+    uint8_t                            lease_break_tearing_down;
     enum evpl_protocol_id              protocol;
     uint16_t                           dialect;
     uint16_t                           smbvers;
@@ -805,29 +810,57 @@ chimera_smb_durable_deserialize(
     uint32_t                           buf_len,
     struct chimera_smb_durable_record *record);
 
+/* A queued, self-contained SMB2 OPLOCK_BREAK notification, addressed to the
+ * holder connection's owning thread. Carries values only (no pointers into
+ * lease/open state that could be freed) plus the target conn; conn_free drains
+ * any messages still queued for a connection being torn down. */
+struct chimera_smb_lease_break_msg {
+    struct chimera_smb_conn            *conn;
+    bool                                is_lease;
+    uint8_t                             lease_key[16];
+    uint8_t                             current_state;
+    uint8_t                             new_state;
+    uint16_t                            new_epoch;
+    uint64_t                            file_id_pid;
+    uint64_t                            file_id_vid;
+    uint8_t                             new_oplock_level;
+    struct chimera_smb_lease_break_msg *next;
+};
+
 struct chimera_server_smb_thread {
-    struct evpl                       *evpl;
-    struct chimera_vfs_thread         *vfs_thread;
-    struct evpl_listener_binding      *binding;
-    struct chimera_server_smb_shared  *shared;
-    struct chimera_smb_request        *free_requests;
-    struct chimera_smb_compound       *free_compounds;
-    struct chimera_smb_conn           *free_conns;
-    struct chimera_smb_session_handle *free_session_handles;
-    struct chimera_smb_open_file      *free_open_files;
-    struct chimera_smb_signing_ctx    *signing_ctx;
-    struct chimera_smb_iconv_ctx       iconv_ctx;
+    struct evpl                        *evpl;
+    struct chimera_vfs_thread          *vfs_thread;
+    struct evpl_listener_binding       *binding;
+    struct chimera_server_smb_shared   *shared;
+    struct chimera_smb_request         *free_requests;
+    struct chimera_smb_compound        *free_compounds;
+    struct chimera_smb_conn            *free_conns;
+    struct chimera_smb_session_handle  *free_session_handles;
+    struct chimera_smb_open_file       *free_open_files;
+    struct chimera_smb_signing_ctx     *signing_ctx;
+    struct chimera_smb_iconv_ctx        iconv_ctx;
 
     /* Notify doorbell: VFS callbacks push ready notify requests here,
      * then ring the doorbell so the SMB thread processes them. */
-    struct evpl_doorbell               notify_doorbell;
-    struct chimera_smb_notify_request *notify_ready;
-    pthread_mutex_t                    notify_ready_lock;
+    struct evpl_doorbell                notify_doorbell;
+    struct chimera_smb_notify_request  *notify_ready;
+    pthread_mutex_t                     notify_ready_lock;
+
+    /* Lease-break doorbell: a lease break_cb may fire on any thread (the
+     * breaker's), but the OPLOCK_BREAK notification must be sent on the holder
+     * connection's owning thread (evpl iovec pools and binds are thread-local).
+     * The break_cb enqueues a self-contained message addressed to the holder
+     * thread and rings this doorbell; the handler sends it on the right thread.
+     * Enqueue is cross-thread (lock-protected); the handler and conn_free both
+     * run on this thread, so draining on disconnect needs no extra sync. */
+    struct evpl_doorbell                lease_break_doorbell;
+    struct chimera_smb_lease_break_msg *lease_break_ready;
+    pthread_mutex_t                     lease_break_lock;
 
     /* Periodic sweep of the shared durable-handle registry for parked opens
      * whose reconnect grace window has expired.  Each thread sweeps the shared
      * table; entries are claimed under the registry lock so peers never race. */
-    struct evpl_timer                  durable_sweeper;
+    struct evpl_timer                   durable_sweeper;
 };
 
 
@@ -1054,6 +1087,7 @@ chimera_smb_conn_alloc(struct chimera_server_smb_thread *thread)
 
     if (conn) {
         LL_DELETE(thread->free_conns, conn);
+        conn->lease_break_tearing_down = 0;
     } else {
         conn = calloc(1, sizeof(*conn));
     }
@@ -1072,7 +1106,8 @@ chimera_smb_conn_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_conn          *conn)
 {
-    struct chimera_smb_session_handle *session_handle, *tmp;
+    struct chimera_smb_session_handle  *session_handle, *tmp;
+    struct chimera_smb_lease_break_msg *bmsg, **bpp;
 
     /* Drop all parked CHANGE_NOTIFY requests silently — the bind is
      * being torn down so a CANCELLED reply would race the destroy and
@@ -1080,6 +1115,25 @@ chimera_smb_conn_free(
     while (conn->parked_notifies) {
         chimera_smb_notify_drop(conn->parked_notifies);
     }
+
+    /* Drain any lease-break notifications still queued for this connection and
+     * mark it tearing-down so a break_cb racing on another thread won't enqueue
+     * a send against the bind we're about to free.  This runs on conn->thread,
+     * the same thread as the lease-break doorbell handler, so the two never
+     * interleave; only the cross-thread enqueue needs the lock. */
+    pthread_mutex_lock(&thread->lease_break_lock);
+    conn->lease_break_tearing_down = 1;
+    bpp                            = &thread->lease_break_ready;
+    while (*bpp) {
+        if ((*bpp)->conn == conn) {
+            bmsg = *bpp;
+            *bpp = bmsg->next;
+            free(bmsg);
+        } else {
+            bpp = &(*bpp)->next;
+        }
+    }
+    pthread_mutex_unlock(&thread->lease_break_lock);
 
     /* Clear create_conn pointers on every open_file that references
      * this conn.  When the session refcount drops to zero below, the

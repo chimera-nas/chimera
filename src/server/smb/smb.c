@@ -1446,6 +1446,7 @@ chimera_smb_server_thread_init(
 
     chimera_smb_iconv_init(&thread->iconv_ctx);
     chimera_smb_notify_thread_init(thread);
+    chimera_smb_lease_break_thread_init(thread);
 
     if (shared->config.persistent_handles) {
         evpl_add_timer(evpl, &thread->durable_sweeper,
@@ -1508,6 +1509,7 @@ chimera_smb_server_thread_destroy(void *data)
 
     evpl_listener_detach(thread->evpl, thread->binding);
     chimera_smb_notify_thread_destroy(thread);
+    chimera_smb_lease_break_thread_destroy(thread);
 
     chimera_smb_iconv_destroy(&thread->iconv_ctx);
     chimera_smb_signing_ctx_destroy(thread->signing_ctx);
