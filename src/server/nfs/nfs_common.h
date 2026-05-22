@@ -20,6 +20,30 @@
 #include "nfs_nlm_state.h"
 
 struct chimera_server_nfs_thread;
+
+/*
+ * pNFS device cache for backend-SOURCED layouts (CHIMERA_VFS_CAP_LAYOUT_SOURCE).
+ *
+ * A sourcing backend mints deviceids and returns their descriptors alongside
+ * the layout in chimera_vfs_get_layout().  GETDEVICEINFO arrives later with only
+ * a deviceid (no file handle), so LAYOUTGET caches each returned descriptor here
+ * and GETDEVICEINFO answers from the cache.  Bounded and fixed-size: the device
+ * population is tiny and stable.  (Orchestrated flex devices live in the
+ * chimera_vfs_pnfs table instead and never enter this cache.)
+ */
+#define NFS_PNFS_DEVCACHE_MAX 64
+
+struct nfs_pnfs_devcache_entry {
+    uint8_t                          deviceid[CHIMERA_VFS_DEVICEID_SIZE];
+    uint8_t                          valid;
+    struct chimera_vfs_layout_device device;
+};
+
+struct nfs_pnfs_devcache {
+    pthread_mutex_t                lock;
+    uint32_t                       count;
+    struct nfs_pnfs_devcache_entry entries[NFS_PNFS_DEVCACHE_MAX];
+};
 struct nfs4_range_lease;
 
 struct nfs_nfs3_readdir_cursor {
@@ -208,6 +232,7 @@ struct chimera_server_nfs_shared {
     struct nfs4_client_table            nfs4_shared_clients;
     struct nfs_state_table              nfs4_state_table;
     struct nfs_layout_table             nfs4_layout_table;   /* fh -> layout holders */
+    struct nfs_pnfs_devcache            nfs4_pnfs_devcache;  /* sourced deviceid -> descriptor */
     struct nfs_recovery                 nfs4_recovery;
 
     struct prometheus_histogram        *op_histogram;

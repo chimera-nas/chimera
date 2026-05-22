@@ -512,6 +512,20 @@ chimera_vfs_fh_is_plausible(
     return chimera_vfs_get_module(thread, fh, fhlen) != NULL;
 } /* chimera_vfs_fh_is_plausible */
 
+/* Capabilities of the backend module owning fh, or 0 if no mount matches.
+ * Lets callers without an open handle (e.g. the NFS attribute marshaller)
+ * learn a file's backend pNFS capabilities. */
+SYMBOL_EXPORT uint64_t
+chimera_vfs_module_capabilities(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen)
+{
+    struct chimera_vfs_module *module = chimera_vfs_get_module(thread, fh, fhlen);
+
+    return module ? module->capabilities : 0;
+} /* chimera_vfs_module_capabilities */
+
 SYMBOL_EXPORT void
 chimera_vfs_destroy(struct chimera_vfs *vfs)
 {

@@ -241,6 +241,8 @@ nfs_server_init(
     nfs4_client_table_init(&shared->nfs4_shared_clients);
     nfs_state_table_init(&shared->nfs4_state_table);
     nfs_layout_table_init(&shared->nfs4_layout_table);
+    pthread_mutex_init(&shared->nfs4_pnfs_devcache.lock, NULL);
+    shared->nfs4_pnfs_devcache.count = 0;
 
     /* Phase 3: lease defaults.  Per RFC 7530 §10.2.3, the lease_time
      * attribute reported via FATTR4_LEASE_TIME governs how often 4.0 clients
@@ -443,6 +445,7 @@ nfs_server_destroy(void *data)
      * this just frees the shard arrays and per-shard locks. */
     nfs_state_table_free(&shared->nfs4_state_table, NULL);
     nfs_layout_table_destroy(&shared->nfs4_layout_table);
+    pthread_mutex_destroy(&shared->nfs4_pnfs_devcache.lock);
 
     nfs_recovery_free(&shared->nfs4_recovery);
 

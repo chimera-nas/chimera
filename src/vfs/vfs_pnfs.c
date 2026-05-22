@@ -40,6 +40,17 @@ chimera_vfs_pnfs_enabled(const struct chimera_vfs *vfs)
     return vfs->pnfs && vfs->pnfs->enabled && vfs->pnfs->num_ds > 0;
 } /* chimera_vfs_pnfs_enabled */
 
+/* The pNFS feature is configured on.  Unlike chimera_vfs_pnfs_enabled() this
+ * does NOT require a configured data-server table: a layout-SOURCING backend
+ * (CHIMERA_VFS_CAP_LAYOUT_SOURCE) needs no chimera DS table.  Used as the
+ * protocol gate for the layout ops and pNFS advertisement; the orchestrated
+ * path additionally needs a DS (chimera_vfs_pnfs_steer() returns NULL if none). */
+SYMBOL_EXPORT int
+chimera_vfs_pnfs_feature_enabled(const struct chimera_vfs *vfs)
+{
+    return vfs->pnfs && vfs->pnfs->enabled;
+} /* chimera_vfs_pnfs_feature_enabled */
+
 SYMBOL_EXPORT int
 chimera_vfs_pnfs_add_device(
     struct chimera_vfs *vfs,

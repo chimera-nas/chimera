@@ -119,7 +119,7 @@ chimera_nfs4_exchange_id(
     uint32_t pnfs_flags;
     if (chimera_server_config_get_nfs_data_server(thread->shared->config)) {
         pnfs_flags = EXCHGID4_FLAG_USE_PNFS_DS;
-    } else if (chimera_vfs_pnfs_enabled(thread->shared->vfs)) {
+    } else if (chimera_vfs_pnfs_feature_enabled(thread->shared->vfs)) {
         pnfs_flags = EXCHGID4_FLAG_USE_PNFS_MDS;
     } else {
         pnfs_flags = EXCHGID4_FLAG_USE_NON_PNFS;

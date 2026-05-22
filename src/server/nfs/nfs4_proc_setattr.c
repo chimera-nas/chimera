@@ -198,7 +198,7 @@ chimera_nfs4_setattr(
      * nfs4_setattr_proceed runs immediately. */
     if (args->obj_attributes.num_attrmask >= 1 &&
         (args->obj_attributes.attrmask[0] & (1 << FATTR4_SIZE)) &&
-        chimera_vfs_pnfs_enabled(thread->shared->vfs)) {
+        chimera_vfs_pnfs_feature_enabled(thread->shared->vfs)) {
         chimera_nfs4_cb_recall_and_wait(thread, req->fh, req->fhlen,
                                         nfs4_setattr_proceed, req);
         return;
