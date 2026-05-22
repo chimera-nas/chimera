@@ -259,6 +259,8 @@ struct nfs_open_state {
     uint16_t                        fh_len;
     uint32_t                        share_access;       /* OPEN4_SHARE_ACCESS_* */
     uint32_t                        share_deny;         /* OPEN4_SHARE_DENY_*   */
+    uint32_t                        share_access_hist;  /* 3-bit OPEN_DOWNGRADE history */
+    uint32_t                        share_deny_hist;    /* 3-bit OPEN_DOWNGRADE history */
     uint32_t                        seqid;              /* stateid.seqid */
 
     /* Slot identity (decoded from stateid.other). */
@@ -727,5 +729,4 @@ nfs_client_touch(struct nfs_client *client)
     atomic_store_explicit((_Atomic uint64_t *) &client->last_touch_ns,
                           nfs_lease_now_ns(), memory_order_relaxed);
 } /* nfs_client_touch */
-
 
