@@ -10,6 +10,7 @@
 #include "vfs_dump.h"
 #include "vfs_error.h"
 #include "vfs_cred.h"
+#include "vfs_pnfs.h"
 #include "evpl/evpl.h"
 
 #define CHIMERA_VFS_PATH_MAX 4096
@@ -957,6 +958,10 @@ enum CHIMERA_FS_FH_MAGIC {
 #define CHIMERA_VFS_XATTR_CREATE           1  /* must not already exist */
 #define CHIMERA_VFS_XATTR_REPLACE          2  /* must already exist */
 
+/* Module persists the opaque CHIMERA_VFS_ATTR_PNFS_LAYOUT attribute, so the NFS
+ * server can store per-file pNFS layout state on it and hand out pNFS layouts. */
+#define CHIMERA_VFS_CAP_LAYOUT             (1U << 14)
+
 struct chimera_vfs_module {
     /* Required
      * Short name for the module to be used in creating shares
@@ -1100,6 +1105,7 @@ struct chimera_vfs_mount_table;
 
 struct chimera_vfs_notify;
 struct chimera_vfs_state;
+struct chimera_vfs_pnfs;
 
 struct chimera_vfs {
     struct chimera_vfs_module            *modules[CHIMERA_VFS_FH_MAGIC_MAX];
@@ -1113,6 +1119,7 @@ struct chimera_vfs {
     struct chimera_vfs_notify            *vfs_notify;
     struct chimera_vfs_state             *vfs_state;
     struct chimera_vfs_mount_table       *mount_table;
+    struct chimera_vfs_pnfs              *pnfs;
     int                                   num_sync_delegation_threads;
     struct chimera_vfs_delegation_thread *sync_delegation_threads;
     int                                   num_async_delegation_threads;

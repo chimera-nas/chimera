@@ -84,7 +84,8 @@ chimera_nfs4_verify_complete(
                                 3,
                                 out_buf,
                                 &out_len,
-                                req->minorversion);
+                                req->minorversion,
+                                chimera_vfs_pnfs_enabled(req->thread->shared->vfs));
 
     bool match = (num_out_mask == args->num_attrmask) &&
         (memcmp(out_mask, args->attrmask,

@@ -179,6 +179,33 @@ chimera_nfs4_create_session(
         }
     }
 
+    /* Remember the client's callback program + this connection so we can send
+     * CB_COMPOUND back over the NFSv4.1 backchannel.  Slot-0 sequenceids start
+     * at 1.  (Reconnect/BIND_CONN_TO_SESSION refresh of cb_conn is a follow-up.) */
+    session->nfs4_session_cb_program      = args->csa_cb_program;
+    session->nfs4_session_cb_conn         = conn;
+    session->nfs4_session_cb_seqid        = 1;
+    session->nfs4_session_cb_prog         = shared->nfs_v4_cb.rpc2;
+    session->nfs4_session_cb_prog.program = args->csa_cb_program;
+
+    /* Publish this session as the client's backchannel so a recall for any file
+     * this client holds a layout for can reach it (CONN_BACK_CHAN only).
+     * cb_session holds a session ref so the pointer is always safe to use; the
+     * previous backchannel's ref is dropped. */
+    if ((flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) && session->client_unified) {
+        struct nfs_client   *uc = session->client_unified;
+        struct nfs4_session *old;
+
+        nfs4_session_get(session);
+        pthread_mutex_lock(&uc->lock);
+        old            = uc->cb_session;
+        uc->cb_session = session;
+        pthread_mutex_unlock(&uc->lock);
+        if (old) {
+            nfs4_session_put(old);
+        }
+    }
+
     nfs4_session_bind_conn(conn, session);
     req->session = session;
 

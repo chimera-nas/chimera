@@ -265,6 +265,21 @@ chimera_nfs4_compound_process(
                 case OP_REMOVEXATTR:
                     chimera_nfs4_removexattr(thread, req, argop, resop);
                     break;
+                case OP_GETDEVICEINFO:
+                    chimera_nfs4_getdeviceinfo(thread, req, argop, resop);
+                    break;
+                case OP_LAYOUTGET:
+                    chimera_nfs4_layoutget(thread, req, argop, resop);
+                    break;
+                case OP_LAYOUTRETURN:
+                    chimera_nfs4_layoutreturn(thread, req, argop, resop);
+                    break;
+                case OP_LAYOUTCOMMIT:
+                    chimera_nfs4_layoutcommit(thread, req, argop, resop);
+                    break;
+                case OP_GETDEVICELIST:
+                    chimera_nfs4_getdevicelist(thread, req, argop, resop);
+                    break;
                 case OP_LOCK:
                     chimera_nfs4_lock(thread, req, argop, resop);
                     break;

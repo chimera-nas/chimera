@@ -15,6 +15,7 @@
 #include "nlm4_xdr.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
+#include "nfs4_layout_table.h"
 #include "nfs4_recovery.h"
 #include "nfs_nlm_state.h"
 
@@ -206,6 +207,7 @@ struct chimera_server_nfs_shared {
 
     struct nfs4_client_table            nfs4_shared_clients;
     struct nfs_state_table              nfs4_state_table;
+    struct nfs_layout_table             nfs4_layout_table;   /* fh -> layout holders */
     struct nfs_recovery                 nfs4_recovery;
 
     struct prometheus_histogram        *op_histogram;

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "server/server.h"
 #include "nfs4_status.h"
 #include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
@@ -129,8 +130,13 @@ chimera_nfs4_write(
      * RFC 7530 9.1.4.3 / RFC 8881 8.2.3 require WRITE to honor the
      * anonymous stateid (all zeros).  Open the current FH on the fly
      * instead of consulting the state table.
+     *
+     * A pNFS data server does not hold open state for the files it stores --
+     * the metadata server authorizes the client's I/O via the layout -- so it
+     * likewise serves WRITE by file handle without a state-table lookup.
      */
-    if (chimera_nfs4_write_stateid_is_anonymous(&args->stateid)) {
+    if (chimera_nfs4_write_stateid_is_anonymous(&args->stateid) ||
+        chimera_server_config_get_nfs_data_server(thread->shared->config)) {
         if (req->fhlen == 0) {
             res->status = NFS4ERR_NOFILEHANDLE;
             evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);

@@ -193,6 +193,18 @@ struct nfs4_session {
     struct channel_attrs4    nfs4_session_back_attrs;
     uint32_t                 nfs4_session_fore_attrs_rdma_ird;
     uint32_t                 nfs4_session_back_attrs_rdma_ird;
+    /* NFSv4.1 backchannel.  cb_program is the client's callback RPC program
+     * (csa_cb_program); cb_conn is the connection callbacks are sent on (for
+     * 4.1 the same connection the client uses, captured at CREATE_SESSION);
+     * cb_seqid is the next sequenceid for backchannel slot 0 (single-slot). */
+    uint32_t                 nfs4_session_cb_program;
+    struct evpl_rpc2_conn   *nfs4_session_cb_conn;
+    uint32_t                 nfs4_session_cb_seqid;
+    /* Per-session copy of the callback RPC program (the shared NFS_V4_CB with
+     * this client's program number).  evpl_rpc2 retains the program pointer
+     * until the reply is dispatched, so it must outlive the call -- the session
+     * owns it for exactly that lifetime. */
+    struct evpl_rpc2_program nfs4_session_cb_prog;
     /* NFS4.1 SEQUENCE replay cache (per-session slot table).  Distinct
      * mechanism from the 4.0 per-owner replay in nfs_open_owner.replay /
      * nfs_lock_owner.replay -- the two coexist by minor version.  Implicit

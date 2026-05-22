@@ -63,7 +63,8 @@ chimera_nfs4_getattr_finish(
                                 3,
                                 res->resok4.obj_attributes.attr_vals.data,
                                 &res->resok4.obj_attributes.attr_vals.len,
-                                req->minorversion);
+                                req->minorversion,
+                                chimera_vfs_pnfs_enabled(req->thread->shared->vfs));
 
     if (req->handle) {
         chimera_vfs_release(req->thread->vfs_thread, req->handle);

@@ -64,7 +64,8 @@ chimera_nfs4_readdir_callback(
                                 3,
                                 entry->attrs.attr_vals.data,
                                 &entry->attrs.attr_vals.len,
-                                req->minorversion);
+                                req->minorversion,
+                                chimera_vfs_pnfs_enabled(req->thread->shared->vfs));
 
     dbuf_cur = req->encoding->dbuf->used - dbuf_before;
 

@@ -23,6 +23,7 @@
 #include "vfs/vfs_user_cache.h"
 #include "vfs/vfs_notify.h"
 #include "vfs/vfs_state.h"
+#include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_mount_table.h"
 #include "vfs/memfs/memfs.h"
 #include "vfs/linux/linux.h"
@@ -417,6 +418,7 @@ chimera_vfs_init(
 
     vfs->vfs_notify = chimera_vfs_notify_init(vfs);
     vfs->vfs_state  = chimera_vfs_state_init();
+    vfs->pnfs       = chimera_vfs_pnfs_create();
 
     /* Register the root pseudo-filesystem module */
     chimera_vfs_register(vfs, &vfs_root, NULL);
@@ -543,6 +545,8 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     evpl_thread_destroy(vfs->close_thread.evpl_thread);
 
     chimera_vfs_mount_table_destroy(vfs->mount_table);
+
+    chimera_vfs_pnfs_destroy(vfs->pnfs);
 
     for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
         module = vfs->modules[i];
