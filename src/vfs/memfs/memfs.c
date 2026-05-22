@@ -427,6 +427,31 @@ memfs_xattr_free_all(struct memfs_inode *inode)
     }
 } /* memfs_xattr_free_all */
 
+/* Free all data blocks of a regular file and reset its block tracking.
+ * Leaves inode->size untouched (callers set it). */
+static void
+memfs_inode_truncate_blocks(
+    struct memfs_thread *thread,
+    struct memfs_inode  *inode)
+{
+    struct memfs_block *block;
+    int                 i;
+
+    if (inode->file.blocks) {
+        for (i = 0; i < inode->file.num_blocks; i++) {
+            block = inode->file.blocks[i];
+            if (block) {
+                memfs_block_free(thread, block);
+                inode->file.blocks[i] = NULL;
+            }
+        }
+        free(inode->file.blocks);
+        inode->file.blocks = NULL;
+    }
+    inode->file.num_blocks = 0;
+    inode->file.max_blocks = 0;
+} /* memfs_inode_truncate_blocks */
+
 static void
 memfs_inode_free(
     struct memfs_thread *thread,
@@ -434,29 +459,13 @@ memfs_inode_free(
 {
     struct memfs_shared     *shared = thread->shared;
     struct memfs_inode_list *inode_list;
-    int                      i;
-    struct memfs_block      *block;
     uint32_t                 list_id = thread->thread_id &
         CHIMERA_MEMFS_INODE_LIST_MASK;
 
     inode_list = &shared->inode_list[list_id];
 
     if (S_ISREG(inode->mode)) {
-        if (inode->file.blocks) {
-            for (i = 0; i < inode->file.num_blocks; i++) {
-                block = inode->file.blocks[i];
-                if (block) {
-                    memfs_block_free(thread, block);
-                    inode->file.blocks[i] = NULL;
-                }
-            }
-            free(inode->file.blocks);
-            inode->file.blocks = NULL;
-        }
-        /* Reset block tracking fields to prevent stale state if inode is
-         * reused or accessed via a stale handle */
-        inode->file.num_blocks = 0;
-        inode->file.max_blocks = 0;
+        memfs_inode_truncate_blocks(thread, inode);
     } else if (S_ISLNK(inode->mode)) {
         memfs_symlink_target_free(thread, inode->symlink.target);
         inode->symlink.target = NULL;
@@ -1961,6 +1970,15 @@ memfs_open_at(
             request->status = CHIMERA_VFS_ENOENT;
             request->complete(request);
             return;
+        }
+
+        /* Overwrite/supersede disposition: replace the existing file's
+         * contents (truncate to zero) and apply the new attributes. */
+        if ((flags & CHIMERA_VFS_OPEN_TRUNCATE) && S_ISREG(inode->mode)) {
+            memfs_inode_truncate_blocks(thread, inode);
+            inode->size       = 0;
+            inode->space_used = 0;
+            memfs_apply_attrs(inode, request->open_at.set_attr);
         }
     }
 

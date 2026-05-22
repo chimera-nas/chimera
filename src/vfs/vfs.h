@@ -88,6 +88,10 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OPEN_READ_ONLY      (1U << 4)
 #define CHIMERA_VFS_OPEN_EXCLUSIVE      (1U << 5)
 #define CHIMERA_VFS_OPEN_NOFOLLOW       (1U << 6)
+/* Replace an existing file's contents on open: truncate to zero and apply
+ * set_attr (used for the SMB OVERWRITE / OVERWRITE_IF / SUPERSEDE
+ * dispositions).  Backends that do not honor it simply open the file. */
+#define CHIMERA_VFS_OPEN_TRUNCATE       (1U << 7)
 
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE 0x01
