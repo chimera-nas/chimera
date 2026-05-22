@@ -5,6 +5,70 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_release.h"
+
+static void
+chimera_nfs4_putfh_getattr_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs_request             *req    = private_data;
+    struct PUTFH4args              *args   = &req->args_compound->argarray[req->index].opputfh;
+    struct PUTFH4res               *res    = &req->res_compound.resarray[req->index].opputfh;
+    struct chimera_vfs_open_handle *handle = req->handle;
+
+    req->handle = NULL;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = (error_code == CHIMERA_VFS_ENOENT ||
+                       error_code == CHIMERA_VFS_ESTALE) ?
+            NFS4ERR_STALE : chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, handle);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_release(req->thread->vfs_thread, handle);
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_NLINK) &&
+        attr->va_nlink == 0) {
+        res->status = NFS4ERR_STALE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    memcpy(req->fh, args->object.data, args->object.len);
+    req->fhlen = args->object.len;
+
+    res->status = NFS4_OK;
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_putfh_getattr_complete */
+
+static void
+chimera_nfs4_putfh_validate_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct PUTFH4res   *res = &req->res_compound.resarray[req->index].opputfh;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = (error_code == CHIMERA_VFS_ENOENT ||
+                       error_code == CHIMERA_VFS_ESTALE) ?
+            NFS4ERR_STALE : chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    req->handle = handle;
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+                        handle,
+                        CHIMERA_VFS_ATTR_NLINK,
+                        chimera_nfs4_putfh_getattr_complete,
+                        req);
+} /* chimera_nfs4_putfh_validate_complete */
 
 void
 chimera_nfs4_putfh(
@@ -35,6 +99,16 @@ chimera_nfs4_putfh(
     }
 
     res->status = NFS4_OK;
+
+    if (!fh_is_nfs4_root(args->object.data, args->object.len)) {
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            args->object.data,
+                            args->object.len,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                            chimera_nfs4_putfh_validate_complete,
+                            req);
+        return;
+    }
 
     memcpy(req->fh, args->object.data, args->object.len);
     req->fhlen = args->object.len;
