@@ -63,6 +63,14 @@ chimera_nfs4_sequence(
         return;
     }
 
+    if (session->nfs4_session_fore_attrs.ca_maxrequestsize &&
+        marshall_length_COMPOUND4args(req->args_compound) >
+        (int) session->nfs4_session_fore_attrs.ca_maxrequestsize) {
+        res->sr_status = NFS4ERR_REQ_TOO_BIG;
+        chimera_nfs4_compound_complete(req, NFS4ERR_REQ_TOO_BIG);
+        return;
+    }
+
     /* RFC 8881 §2.10.6.4: a COMPOUND with more operations than the session's
      * negotiated fore-channel ca_maxoperations (SEQUENCE counts as one) is
      * rejected with NFS4ERR_TOO_MANY_OPS. */
@@ -94,6 +102,15 @@ chimera_nfs4_sequence(
         atomic_load_explicit(&session->client_unified->revoked_deleg_count,
                              memory_order_acquire) > 0) {
         res->sr_resok4.sr_status_flags |= SEQ4_STATUS_RECALLABLE_STATE_REVOKED;
+    }
+
+    if (args->sa_cachethis &&
+        session->nfs4_session_fore_attrs.ca_maxresponsesize_cached &&
+        marshall_length_nfs_resop4(resop) >
+        (int) session->nfs4_session_fore_attrs.ca_maxresponsesize_cached) {
+        res->sr_status = NFS4ERR_REP_TOO_BIG_TO_CACHE;
+        chimera_nfs4_compound_complete(req, NFS4ERR_REP_TOO_BIG_TO_CACHE);
+        return;
     }
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
