@@ -1413,6 +1413,36 @@ demofs_txn_add_block(
     txn->blocks = tb;
 } /* demofs_txn_add_block */
 
+/*
+ * Journal bridge for the space-map allocation log: claim the AG-log block and
+ * pin it into the allocating transaction so the delta written into it rides
+ * the main redo log (durable + replayed on crash).  Passed to space_map_alloc/
+ * free as a struct sm_journal.
+ */
+struct demofs_sm_jnl {
+    struct demofs_thread *thread;
+    struct demofs_txn    *txn;
+};
+
+static void *
+demofs_sm_claim_block(
+    void    *user,
+    uint32_t device_id,
+    uint64_t device_offset,
+    int      is_new)
+{
+    struct demofs_sm_jnl *c   = user;
+    struct demofs_block  *blk = demofs_block_claim(c->thread, device_id,
+                                                   device_offset, is_new);
+
+    demofs_txn_add_block(c->txn, blk);
+    return blk->buffer;
+} /* demofs_sm_claim_block */
+
+#define DEMOFS_SM_JNL(name, thr, t)                          \
+        struct demofs_sm_jnl name ## _ctx = { (thr), (t) };  \
+        struct sm_journal    name         = { demofs_sm_claim_block, &name ## _ctx }
+
 /* ------------------------------------------------------------------ */
 /* Async block fetch with per-op suspend/resume                        */
 /* ------------------------------------------------------------------ */
@@ -1923,7 +1953,8 @@ demofs_bt_alloc_node(
     uint64_t              device_offset;
     int                   rc;
 
-    rc = space_map_alloc(shared->space_map, &thread->space_cache,
+    DEMOFS_SM_JNL(jnl, thread, txn);
+    rc = space_map_alloc(shared->space_map, &thread->space_cache, &jnl,
                          DEMOFS_BLOCK_SIZE, &device_id, &device_offset);
     chimera_demofs_abort_if(rc != 0, "b+tree node allocation failed (ENOSPC)");
 
@@ -3867,7 +3898,8 @@ demofs_inode_alloc_async(
     uint64_t              device_offset, inum;
     int                   rc;
 
-    rc = space_map_alloc(shared->space_map, &thread->space_cache,
+    DEMOFS_SM_JNL(jnl, thread, txn);
+    rc = space_map_alloc(shared->space_map, &thread->space_cache, &jnl,
                          SM_BLOCK_SIZE, &device_id, &device_offset);
     if (unlikely(rc != 0)) {
         cb(NULL, CHIMERA_VFS_ENOSPC, private_data);
@@ -4007,6 +4039,7 @@ demofs_kv_entry_release(
 static inline int
 demofs_thread_alloc_space(
     struct demofs_thread *thread,
+    struct demofs_txn    *txn,
     int64_t               desired_size,
     uint64_t             *r_device_id,
     uint64_t             *r_device_offset)
@@ -4014,7 +4047,8 @@ demofs_thread_alloc_space(
     uint32_t dev_id;
     int      rc;
 
-    rc = space_map_alloc(thread->shared->space_map, &thread->space_cache,
+    DEMOFS_SM_JNL(jnl, thread, txn);
+    rc = space_map_alloc(thread->shared->space_map, &thread->space_cache, &jnl,
                          (uint64_t) desired_size, &dev_id, r_device_offset);
 
     if (rc != 0) {
@@ -4028,11 +4062,13 @@ demofs_thread_alloc_space(
 static inline void
 demofs_thread_free_space(
     struct demofs_thread *thread,
+    struct demofs_txn    *txn,
     uint32_t              device_id,
     uint64_t              device_offset,
     uint64_t              length)
 {
-    space_map_free(thread->shared->space_map, device_id, device_offset, length);
+    DEMOFS_SM_JNL(jnl, thread, txn);
+    space_map_free(thread->shared->space_map, &jnl, device_id, device_offset, length);
 } /* demofs_thread_free_space */
 
 /* ------------------------------------------------------------------ */
@@ -4982,15 +5018,34 @@ demofs_init(const char *cfgdata)
         shared->mounted = (mode != 0);
 
         if (mode != 0) {
-            uint8_t  fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
-            uint64_t rinum                           = sb.root_inum ? sb.root_inum : 2;
+            uint8_t              fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
+            uint64_t             rinum                           = sb.root_inum ? sb.root_inum : 2;
+            uint32_t             rgen                            = sb.root_gen;
+            uint32_t             rdev;
+            uint64_t             roff;
+            int                  rfd;
+            struct demofs_dinode rdi;
+
+            /* The superblock's root generation is only refreshed at clean
+             * unmount, so after a crash it can be stale (0).  Read the
+             * authoritative generation from the root inode's on-disk dinode
+             * (consistent post-replay) so the mount handle matches. */
+            roff = sm_inum_to_device_offset(shared->space_map, rinum, &rdev);
+            rfd  = open(shared->device_paths[rdev], O_RDONLY);
+            if (rfd >= 0) {
+                if (pread(rfd, &rdi, sizeof(rdi), (off_t) roff) == (ssize_t) sizeof(rdi) &&
+                    rdi.inum == rinum) {
+                    rgen = rdi.gen;
+                }
+                close(rfd);
+            }
 
             shared->root_inum = rinum;
-            shared->root_gen  = sb.root_gen;
+            shared->root_gen  = rgen;
             memcpy(fsid_buf, &shared->fsid, sizeof(shared->fsid));
             shared->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf,
                                                                   rinum,
-                                                                  sb.root_gen,
+                                                                  rgen,
                                                                   shared->root_fh);
         }
 
@@ -5005,6 +5060,14 @@ demofs_init(const char *cfgdata)
         chimera_demofs_abort_if(rc != 0,
                                 "Failed to write superblock to %s: %s",
                                 device0_path, strerror(errno));
+
+        /* Persistent mkfs: write an initial condensed AG-log base so each
+         * slot has a valid header before any runtime delta is journaled --
+         * otherwise a crash right after format would leave the allocator log
+         * unreadable. */
+        if (mode == 0 && shared->persistent) {
+            space_map_persist_paths(shared->space_map, shared->device_paths);
+        }
     }
     free(device0_path);
 
@@ -5066,15 +5129,14 @@ demofs_bootstrap(struct demofs_thread *thread)
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    /* The very first space-map allocation lands at block_idx 2 of AG 0 /
-     * disk 0 (block_idx 1 is reserved at format time), so the root inode
-     * gets inum 2. */
-    rc = space_map_alloc(shared->space_map, &thread->space_cache,
-                         SM_BLOCK_SIZE, &device_id, &device_offset);
-    chimera_demofs_abort_if(rc != 0, "bootstrap: failed to allocate root inode block");
-
-    inum = sm_inum_from_device_offset(shared->space_map, device_id, device_offset);
-    chimera_demofs_abort_if(inum != 2, "bootstrap: root inode is %lu, expected 2", inum);
+    /* The root inode lives at the statically-reserved block_idx 2 of AG 0 /
+     * disk 0 (inum 2).  It is reserved (not allocated through the allocator)
+     * so it is excluded from every condensed free set -- no alloc delta is
+     * needed and it can never be re-handed-out after a crash. */
+    inum          = 2;
+    device_id     = 0;
+    device_offset = sm_inum_to_device_offset(shared->space_map, inum, &device_id);
+    (void) rc;
 
     inode = demofs_inode_struct_new(inum);
 
@@ -5346,7 +5408,9 @@ demofs_thread_destroy(void *private_data)
         evpl_block_close_queue(thread->evpl, thread->queue[i]);
     }
 
-    space_map_thread_cache_return(shared->space_map, &thread->space_cache);
+    /* No txn at thread teardown; the unused reservation tail returns to the
+     * in-memory free set and is captured by the condense at clean unmount. */
+    space_map_thread_cache_return(shared->space_map, NULL, &thread->space_cache);
 
     /* Unregister the intent-log channel.  Caller must have quiesced all
      * in-flight VFS ops on this thread first. */
@@ -5665,7 +5729,7 @@ demofs_setattr_trunc_process(struct chimera_vfs_request *request)
     extent_end   = extent_start + p->ext_iter.length;
 
     if (extent_start >= new_size) {
-        demofs_thread_free_space(thread, p->ext_iter.device_id,
+        demofs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
                                  p->ext_iter.device_offset,
                                  SM_ALIGN_UP(p->ext_iter.length));
     } else if (extent_end > new_size) {
@@ -5674,7 +5738,7 @@ demofs_setattr_trunc_process(struct chimera_vfs_request *request)
         uint64_t new_aligned = SM_ALIGN_UP(new_logical);
 
         if (old_aligned > new_aligned) {
-            demofs_thread_free_space(thread, p->ext_iter.device_id,
+            demofs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
                                      p->ext_iter.device_offset + new_aligned,
                                      old_aligned - new_aligned);
         }
@@ -8186,7 +8250,7 @@ demofs_write_inode_cb(
     aligned_end    = (write_end + 4095ULL) & ~4095ULL;
     aligned_length = aligned_end - aligned_start;
 
-    rc = demofs_thread_alloc_space(thread, aligned_length, &device_id, &device_offset);
+    rc = demofs_thread_alloc_space(thread, demofs_private->txn, aligned_length, &device_id, &device_offset);
     if (rc) {
         demofs_op_fail(request, demofs_private->txn, CHIMERA_VFS_ENOSPC);
         return;
@@ -8469,7 +8533,7 @@ demofs_dealloc_process(struct chimera_vfs_request *request)
 
     if (es >= hole_start && ee <= hole_end) {
         /* Completely inside the hole: free + remove, then advance. */
-        demofs_thread_free_space(thread, p->ext_iter.device_id,
+        demofs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
                                  p->ext_iter.device_offset,
                                  SM_ALIGN_UP(p->ext_iter.length));
         op = demofs_bt_op_alloc(thread);

@@ -29,31 +29,65 @@
         chimera_info("space_map", __FILE__, __LINE__, __VA_ARGS__)
 
 /*
- * Journal stubs.  These are the future intent-log hook points; calls land
- * here AFTER the in-memory state has been updated.  For now the records go
- * nowhere; replacing the body with a journal append is the next step.
+ * Append one allocation/free delta to the AG's active log slot, journaled
+ * through the current transaction (via jnl) so it rides the main redo log and
+ * is replayed on crash.  Caller holds ag->lock.  A NULL jnl (format-time or
+ * bootstrap allocations) skips logging -- those are captured in the next
+ * condensed base instead.  Deltas are appended after the condensed base in
+ * 4 KiB-aligned, 128-per-block units (no block-spanning); the delta count
+ * lives in the slot header (block 0).
+ *
+ * Runtime condensation (recycling a full delta region into a fresh base) is
+ * not yet implemented; the 4 MiB region holds ~128K deltas per AG between
+ * clean unmounts, which re-condense.  Overflow aborts (TODO).
  */
-static inline void
-sm_journal_record_alloc(
-    uint32_t device_id,
-    uint64_t offset,
-    uint64_t length)
+static void
+sm_ag_journal_delta(
+    struct sm_ag            *ag,
+    const struct sm_journal *jnl,
+    uint32_t                 op,
+    uint64_t                 offset,
+    uint64_t                 length)
 {
-    (void) device_id;
-    (void) offset;
-    (void) length;
-} /* sm_journal_record_alloc */
+    uint64_t                 slot_base, region_off, delta_byte, blk_off;
+    uint32_t                 idx, in_block;
+    struct sm_ag_log_header *h;
+    struct sm_ag_log_delta  *d;
+    void                    *blk_buf, *hdr_buf;
 
-static inline void
-sm_journal_record_free(
-    uint32_t device_id,
-    uint64_t offset,
-    uint64_t length)
-{
-    (void) device_id;
-    (void) offset;
-    (void) length;
-} /* sm_journal_record_free */
+    if (!jnl) {
+        return;
+    }
+
+    slot_base  = ag->log_offset + (uint64_t) ag->log_slot * SM_AG_LOG_SLOT_SIZE;
+    region_off = (sizeof(struct sm_ag_log_header) +
+                  (uint64_t) ag->log_base_count * sizeof(struct sm_ag_log_ext) +
+                  SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
+    idx = ag->log_delta_count;
+
+    delta_byte = region_off + (uint64_t) idx * sizeof(struct sm_ag_log_delta);
+    sm_abort_if(delta_byte + sizeof(struct sm_ag_log_delta) > SM_AG_LOG_SLOT_SIZE,
+                "AG %u/%u delta region full (%u deltas) -- condensation TODO",
+                ag->device_id, ag->ag_index, idx);
+
+    blk_off  = slot_base + (delta_byte & ~((uint64_t) SM_BLOCK_SIZE - 1));
+    in_block = (uint32_t) (delta_byte & (SM_BLOCK_SIZE - 1));
+
+    /* First delta in a block starts from a zeroed block; later ones modify the
+     * resident block. */
+    blk_buf   = jnl->claim_block(jnl->user, ag->device_id, blk_off, in_block == 0);
+    d         = (struct sm_ag_log_delta *) ((char *) blk_buf + in_block);
+    d->offset = offset;
+    d->length = length;
+    d->op     = op;
+    d->pad    = 0;
+    d->pad2   = 0;
+
+    hdr_buf             = jnl->claim_block(jnl->user, ag->device_id, slot_base, 0);
+    h                   = (struct sm_ag_log_header *) hdr_buf;
+    h->delta_count      = idx + 1;
+    ag->log_delta_count = idx + 1;
+} /* sm_ag_journal_delta */
 
 static struct sm_extent *
 sm_extent_new(
@@ -304,11 +338,12 @@ space_map_create(
                 pre_log_reserved = SM_SUPERBLOCK_SIZE + SM_INTENT_LOG_SIZE;
                 sm->used_bytes  += pre_log_reserved;
 
-                /* Reserve block_idx == 1 of AG 0 of disk 0 so the very
-                 * first inode allocation lands at block_idx == 2 (root
-                 * inum = 2).  block_idx == 1 is held for future bootstrap
-                 * use (e.g. an AG header). */
-                post_log_reserved = SM_BLOCK_SIZE;
+                /* Statically reserve block_idx 1 and 2 of AG 0 / disk 0.
+                 * block_idx 1 is held for a future AG header; block_idx 2 is
+                 * the root inode (inum 2), reserved (not allocated through the
+                 * allocator) so it is excluded from every condensed free set
+                 * and can never be re-handed-out after a crash. */
+                post_log_reserved = 2 * SM_BLOCK_SIZE;
                 sm->used_bytes   += post_log_reserved;
 
                 sm_abort_if(pre_log_reserved + SM_AG_LOG_SIZE +
@@ -371,10 +406,11 @@ space_map_destroy(struct space_map *sm)
  */
 static int
 sm_pick_and_alloc(
-    struct space_map *sm,
-    uint64_t          want,
-    uint32_t         *r_device_id,
-    uint64_t         *r_device_offset)
+    struct space_map        *sm,
+    const struct sm_journal *jnl,
+    uint64_t                 want,
+    uint32_t                *r_device_id,
+    uint64_t                *r_device_offset)
 {
     uint32_t start_dev, dev_id;
     uint32_t d, a;
@@ -412,13 +448,15 @@ sm_pick_and_alloc(
 
             pthread_mutex_lock(&ag->lock);
             rc = sm_ag_alloc_locked(ag, want, &offset);
+            if (rc == 0) {
+                sm_ag_journal_delta(ag, jnl, SM_AG_LOG_OP_ALLOC, offset, want);
+            }
             pthread_mutex_unlock(&ag->lock);
 
             if (rc == 0) {
                 *r_device_id     = dev_id;
                 *r_device_offset = offset;
                 __atomic_fetch_add(&sm->used_bytes, want, __ATOMIC_RELAXED);
-                sm_journal_record_alloc(dev_id, offset, want);
                 return 0;
             }
         }
@@ -429,11 +467,12 @@ sm_pick_and_alloc(
 
 int
 space_map_alloc(
-    struct space_map       *sm,
-    struct sm_thread_cache *cache,
-    uint64_t                size,
-    uint32_t               *r_device_id,
-    uint64_t               *r_device_offset)
+    struct space_map        *sm,
+    struct sm_thread_cache  *cache,
+    const struct sm_journal *jnl,
+    uint64_t                 size,
+    uint32_t                *r_device_id,
+    uint64_t                *r_device_offset)
 {
     uint64_t need = SM_ALIGN_UP(size);
     uint64_t want;
@@ -455,7 +494,7 @@ space_map_alloc(
     /* Cache cannot satisfy this request.  Return the unused remainder and
      * grab a fresh reservation. */
     if (cache->valid) {
-        space_map_thread_cache_return(sm, cache);
+        space_map_thread_cache_return(sm, jnl, cache);
     }
 
     want = need > SM_RESERVATION_MIN ? need : SM_RESERVATION_MIN;
@@ -467,12 +506,12 @@ space_map_alloc(
         return -1;
     }
 
-    rc = sm_pick_and_alloc(sm, want, &cache->device_id, &cache->offset);
+    rc = sm_pick_and_alloc(sm, jnl, want, &cache->device_id, &cache->offset);
     if (rc != 0) {
         /* Try the smaller exact size before giving up, in case fragmentation
          * blocks the reservation but the caller's actual ask is small. */
         if (want != need) {
-            rc = sm_pick_and_alloc(sm, need, &cache->device_id, &cache->offset);
+            rc = sm_pick_and_alloc(sm, jnl, need, &cache->device_id, &cache->offset);
             if (rc == 0) {
                 cache->length = need;
                 cache->valid  = 1;
@@ -498,10 +537,11 @@ space_map_alloc(
 
 void
 space_map_free(
-    struct space_map *sm,
-    uint32_t          device_id,
-    uint64_t          device_offset,
-    uint64_t          length)
+    struct space_map        *sm,
+    const struct sm_journal *jnl,
+    uint32_t                 device_id,
+    uint64_t                 device_offset,
+    uint64_t                 length)
 {
     struct sm_device *dev;
     struct sm_ag     *ag;
@@ -535,23 +575,24 @@ space_map_free(
 
     pthread_mutex_lock(&ag->lock);
     sm_ag_free_locked(ag, device_offset, aligned);
+    sm_ag_journal_delta(ag, jnl, SM_AG_LOG_OP_FREE, device_offset, aligned);
     pthread_mutex_unlock(&ag->lock);
 
     __atomic_fetch_sub(&sm->used_bytes, aligned, __ATOMIC_RELAXED);
-    sm_journal_record_free(device_id, device_offset, aligned);
 } /* space_map_free */
 
 void
 space_map_thread_cache_return(
-    struct space_map       *sm,
-    struct sm_thread_cache *cache)
+    struct space_map        *sm,
+    const struct sm_journal *jnl,
+    struct sm_thread_cache  *cache)
 {
     if (!cache->valid || cache->length == 0) {
         cache->valid = 0;
         return;
     }
 
-    space_map_free(sm, cache->device_id, cache->offset, cache->length);
+    space_map_free(sm, jnl, cache->device_id, cache->offset, cache->length);
     cache->valid  = 0;
     cache->length = 0;
 } /* space_map_thread_cache_return */

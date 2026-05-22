@@ -105,11 +105,31 @@ struct sm_ag_log_ext {          /* condensed base free extent */
     uint64_t length;
 };
 
+/* 32 bytes so 128 deltas tile a 4 KiB block exactly (no block-spanning). */
 struct sm_ag_log_delta {
     uint64_t offset;
     uint64_t length;
     uint32_t op;
     uint32_t pad;
+    uint64_t pad2;
+};
+
+#define SM_AG_LOG_DELTAS_PER_BLOCK (SM_BLOCK_SIZE / sizeof(struct sm_ag_log_delta))
+
+/*
+ * Journal bridge: space_map calls back into demofs to fetch the 4 KiB AG-log
+ * block at (device_id, device_offset), pinned into the current transaction so
+ * the delta it writes rides the main redo log.  is_new starts from a zeroed
+ * block (first use of a delta block) rather than reading disk.  A NULL journal
+ * (e.g. format-time or bootstrap allocations) skips delta logging.
+ */
+struct sm_journal {
+    void *(*claim_block)(
+        void    *user,
+        uint32_t device_id,
+        uint64_t device_offset,
+        int      is_new);
+    void *user;
 };
 
 /*
@@ -227,23 +247,26 @@ space_map_destroy(
 
 int
 space_map_alloc(
-    struct space_map       *sm,
-    struct sm_thread_cache *cache,
-    uint64_t                size,
-    uint32_t               *r_device_id,
-    uint64_t               *r_device_offset);
+    struct space_map        *sm,
+    struct sm_thread_cache  *cache,
+    const struct sm_journal *jnl,
+    uint64_t                 size,
+    uint32_t                *r_device_id,
+    uint64_t                *r_device_offset);
 
 void
 space_map_free(
-    struct space_map *sm,
-    uint32_t          device_id,
-    uint64_t          device_offset,
-    uint64_t          length);
+    struct space_map        *sm,
+    const struct sm_journal *jnl,
+    uint32_t                 device_id,
+    uint64_t                 device_offset,
+    uint64_t                 length);
 
 void
 space_map_thread_cache_return(
-    struct space_map       *sm,
-    struct sm_thread_cache *cache);
+    struct space_map        *sm,
+    const struct sm_journal *jnl,
+    struct sm_thread_cache  *cache);
 
 /*
  * Synchronously write a stub superblock to offset 0 of `device_path` by
