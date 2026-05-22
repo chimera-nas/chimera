@@ -85,3 +85,50 @@ void nfs4_delegation_break_cb(
     struct chimera_vfs_lease *lease,
     uint8_t                   needed_mode,
     void                     *private_data);
+
+/*
+ * CB_GETATTR (RFC 8881 §20.1): query the holder of a write delegation for the
+ * file's current change/size during another client's GETATTR.  Resumed
+ * asynchronously: `resume` is invoked on the REQUESTER's thread once the holder
+ * has replied (or the query failed).  `status` is 0 on success.  The caller
+ * passes a +1 ref on `deleg`; this module releases it when the query completes.
+ */
+typedef void (*nfs4_cb_getattr_resume_t)(
+    void    *priv,
+    int      status,
+    bool     got_change,
+    uint64_t change,
+    bool     got_size,
+    uint64_t size);
+
+void nfs4_cb_getattr(
+    struct chimera_server_nfs_thread *requester_thread,
+    struct nfs_delegation            *deleg,
+    void                             *priv,
+    nfs4_cb_getattr_resume_t          resume);
+
+/* Return the write delegation held on `fh` by a client other than
+ * `querying_client_id` (with a +1 ref the caller must release via the state
+ * table), or NULL if none.  Used by GETATTR to decide whether to CB_GETATTR. */
+struct nfs_delegation *
+nfs4_find_conflicting_write_deleg(
+    struct chimera_server_nfs_thread *thread,
+    const uint8_t                    *fh,
+    uint16_t                          fh_len,
+    uint64_t                          querying_client_id);
+
+/* Cross-thread CB_GETATTR work item (internal; queued on a thread's
+ * cb_getattr_queue). */
+struct nfs4_cb_getattr {
+    uint8_t                           phase;   /* request (0) / response (1) */
+    struct chimera_server_nfs_thread *requester_thread;
+    struct nfs_delegation            *deleg;
+    void                             *priv;
+    nfs4_cb_getattr_resume_t          resume;
+    int                               status;
+    bool                              got_change;
+    bool                              got_size;
+    uint64_t                          change;
+    uint64_t                          size;
+    struct nfs4_cb_getattr           *next;
+};

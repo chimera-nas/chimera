@@ -5,24 +5,29 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
+#include "nfs4_session.h"
+#include "nfs4_state.h"
+#include "nfs4_callback.h"
+#include "server/server.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+
+/* Parked-GETATTR context while a CB_GETATTR to a write-delegation holder is
+ * outstanding.  Holds a copy of the server's attrs (the VFS completion's are
+ * transient); the holder's reply overrides change/size. */
+struct nfs4_getattr_park {
+    struct nfs_request      *req;
+    struct chimera_vfs_attrs attr;
+};
+
 static void
-chimera_nfs4_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_nfs4_getattr_finish(
+    struct nfs_request       *req,
+    struct chimera_vfs_attrs *attr)
 {
-    struct nfs_request  *req  = private_data;
     struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
     struct GETATTR4res  *res  = &req->res_compound.resarray[req->index].opgetattr;
     int                  rc;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
 
     res->status = NFS4_OK;
 
@@ -65,6 +70,79 @@ chimera_nfs4_getattr_complete(
     }
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_getattr_finish */
+
+/* Resume (on the requester's thread) after the write-delegation holder has
+ * answered CB_GETATTR: override change/size with the holder's view, then
+ * finish the GETATTR.  On failure, fall back to the server's own attrs. */
+static void
+chimera_nfs4_getattr_cb_resume(
+    void    *priv,
+    int      status,
+    bool     got_change,
+    uint64_t change,
+    bool     got_size,
+    uint64_t size)
+{
+    struct nfs4_getattr_park *park = priv;
+
+    if (status == 0) {
+        if (got_change) {
+            /* The CHANGE attribute is encoded from va_ctime as
+             * sec*1e9 + nsec; reconstruct a ctime that re-encodes to the
+             * holder's exact change value. */
+            park->attr.va_ctime.tv_sec  = change / 1000000000ULL;
+            park->attr.va_ctime.tv_nsec = change % 1000000000ULL;
+            park->attr.va_set_mask     |= CHIMERA_VFS_ATTR_CTIME;
+        }
+        if (got_size) {
+            park->attr.va_size      = size;
+            park->attr.va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
+        }
+    }
+
+    chimera_nfs4_getattr_finish(park->req, &park->attr);
+    free(park);
+} /* chimera_nfs4_getattr_cb_resume */
+
+static void
+chimera_nfs4_getattr_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs_request    *req = private_data;
+    struct GETATTR4res    *res = &req->res_compound.resarray[req->index].opgetattr;
+    struct nfs_client     *client;
+    struct nfs_delegation *wdeleg;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    /* RFC 8881 §10.4.3 / §20.1: if another client holds a write delegation on
+     * this file it may have uncommitted size/change locally, so query it via
+     * CB_GETATTR and merge the result.  Only meaningful on 4.1+ with a known
+     * requesting client and delegations enabled. */
+    client = req->session ? req->session->client_unified : NULL;
+
+    if (req->minorversion >= 1 && client &&
+        chimera_server_config_get_nfs4_delegations(req->thread->shared->config) &&
+        (wdeleg = nfs4_find_conflicting_write_deleg(req->thread, req->fh,
+                                                    req->fhlen,
+                                                    client->client_id)) != NULL) {
+        struct nfs4_getattr_park *park = calloc(1, sizeof(*park));
+
+        park->req  = req;
+        park->attr = *attr;
+        nfs4_cb_getattr(req->thread, wdeleg, park,
+                        chimera_nfs4_getattr_cb_resume);
+        return; /* parked; resume finishes the GETATTR */
+    }
+
+    chimera_nfs4_getattr_finish(req, attr);
 } /* chimera_nfs4_getattr_complete */
 
 static void

@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <xxhash.h>
 
 /* portmap_xdr.h (pulled in via nfs_common.h below) #defines these RPC
  * protocol constants, colliding with <netinet/in.h>'s IPPROTO_* enum-macros.
@@ -428,7 +429,240 @@ nfs4_cb_recall_send(
     }
 } /* nfs4_cb_recall_send */
 
-/* Owner-thread doorbell handler: drain queued recalls and send them. */
+/* ---------------------------------------------------------------------- */
+/* CB_GETATTR (write-delegation attribute query)                          */
+/* ---------------------------------------------------------------------- */
+
+#define NFS4_CB_GETATTR_REQUEST  0
+#define NFS4_CB_GETATTR_RESPONSE 1
+
+/* Hand a completed CB_GETATTR work item back to the requester's thread. */
+static void
+nfs4_cb_getattr_respond(struct nfs4_cb_getattr *w)
+{
+    struct chimera_server_nfs_thread *x = w->requester_thread;
+
+    w->phase = NFS4_CB_GETATTR_RESPONSE;
+
+    pthread_mutex_lock(&x->cb_recall_lock);
+    w->next             = x->cb_getattr_queue;
+    x->cb_getattr_queue = w;
+    pthread_mutex_unlock(&x->cb_recall_lock);
+
+    evpl_ring_doorbell(&x->cb_doorbell);
+} /* nfs4_cb_getattr_respond */
+
+static void
+nfs4_cb_getattr_complete(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct CB_COMPOUND4res      *reply,
+    int                          status,
+    void                        *private_data)
+{
+    struct nfs4_cb_getattr *w = private_data;
+
+    (void) evpl;
+    (void) verf;
+
+    w->status = -1;
+
+    if (status == 0 && reply && reply->status == NFS4_OK) {
+        for (uint32_t i = 0; i < reply->num_resarray; i++) {
+            struct nfs_cb_resop4 *rop = &reply->resarray[i];
+
+            if (rop->resop == OP_CB_GETATTR &&
+                rop->opcbgetattr.status == NFS4_OK) {
+                struct fattr4 *fa  = &rop->opcbgetattr.resok4.obj_attributes;
+                const uint8_t *p   = fa->attr_vals.data;
+                const uint8_t *end = p + fa->attr_vals.len;
+                uint32_t       w0  = (fa->num_attrmask >= 1) ? fa->attrmask[0] : 0;
+                uint64_t       v;
+
+                /* The holder returns change (bit 3) then size (bit 4). */
+                if ((w0 & (1u << FATTR4_CHANGE)) && p + 8 <= end) {
+                    memcpy(&v, p, 8);
+                    w->change     = chimera_nfs_hton64(v);
+                    w->got_change = true;
+                    p            += 8;
+                }
+                if ((w0 & (1u << FATTR4_SIZE)) && p + 8 <= end) {
+                    memcpy(&v, p, 8);
+                    w->size     = chimera_nfs_hton64(v);
+                    w->got_size = true;
+                }
+                w->status = 0;
+                break;
+            }
+        }
+    }
+
+    nfs4_cb_getattr_respond(w);
+} /* nfs4_cb_getattr_complete */
+
+/* Runs on the delegation holder's thread: send CB_COMPOUND{[CB_SEQUENCE,]
+ * CB_GETATTR} to the holder. */
+static void
+nfs4_cb_getattr_send(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs4_cb_getattr           *w)
+{
+    struct nfs_delegation  *deleg = w->deleg;
+    struct nfs4_cb_client  *chan  = deleg->client->cb_path.cb_client;
+    struct CB_COMPOUND4args args;
+    struct nfs_cb_argop4    ops[2];
+    uint32_t                attr_req = (1u << FATTR4_CHANGE) | (1u << FATTR4_SIZE);
+    int                     nops     = 0;
+
+    if (!chan || !chan->conn) {
+        w->status = -1;
+        nfs4_cb_getattr_respond(w);
+        return;
+    }
+
+    memset(&args, 0, sizeof(args));
+    memset(ops, 0, sizeof(ops));
+
+    if (chan->minorversion >= 1) {
+        struct CB_SEQUENCE4args *seq = &ops[nops].opcbsequence;
+        ops[nops].argop = OP_CB_SEQUENCE;
+        memcpy(seq->csa_sessionid, chan->sessionid, NFS4_SESSIONID_SIZE);
+        seq->csa_sequenceid = atomic_fetch_add_explicit(&chan->cb_seq, 1,
+                                                        memory_order_relaxed);
+        seq->csa_slotid                   = 0;
+        seq->csa_highest_slotid           = 0;
+        seq->csa_cachethis                = 0;
+        seq->num_csa_referring_call_lists = 0;
+        seq->csa_referring_call_lists     = NULL;
+        nops++;
+    }
+
+    ops[nops].argop                        = OP_CB_GETATTR;
+    ops[nops].opcbgetattr.fh.len           = deleg->fh_len;
+    ops[nops].opcbgetattr.fh.data          = deleg->fh;
+    ops[nops].opcbgetattr.num_attr_request = 1;
+    ops[nops].opcbgetattr.attr_request     = &attr_req;
+    nops++;
+
+    args.tag.len        = 0;
+    args.tag.data       = NULL;
+    args.minorversion   = chan->minorversion;
+    args.callback_ident = chan->cb_ident;
+    args.num_argarray   = nops;
+    args.argarray       = ops;
+
+    {
+        struct nfs4_cb_path   *cb = &deleg->client->cb_path;
+        struct evpl_rpc2_cred  rpc_cred;
+        struct evpl_rpc2_cred *credp         = NULL;
+        static const char      machinename[] = "chimera";
+
+        if (cb->cb_sec_flavor == AUTH_SYS) {
+            memset(&rpc_cred, 0, sizeof(rpc_cred));
+            rpc_cred.flavor                  = EVPL_RPC2_AUTH_SYS;
+            rpc_cred.authsys.uid             = cb->cb_sec_uid;
+            rpc_cred.authsys.gid             = cb->cb_sec_gid;
+            rpc_cred.authsys.machinename     = machinename;
+            rpc_cred.authsys.machinename_len = sizeof(machinename) - 1;
+            credp                            = &rpc_cred;
+        }
+
+        chan->cb_prog.send_call_CB_COMPOUND(&chan->cb_prog.rpc2,
+                                            thread->evpl,
+                                            chan->conn,
+                                            credp,
+                                            &args,
+                                            0, 0, 0,
+                                            nfs4_cb_getattr_complete,
+                                            w);
+    }
+} /* nfs4_cb_getattr_send */
+
+struct nfs_delegation *
+nfs4_find_conflicting_write_deleg(
+    struct chimera_server_nfs_thread *thread,
+    const uint8_t                    *fh,
+    uint16_t                          fh_len,
+    uint64_t                          querying_client_id)
+{
+    struct chimera_vfs_state      *vfs_state = thread->vfs->vfs_state;
+    uint64_t                       fh_hash;
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease      *cur;
+    struct nfs_delegation         *deleg = NULL;
+
+    fh_hash = XXH3_64bits(fh, fh_len) & INT64_MAX;
+
+    file = chimera_vfs_state_get(vfs_state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        struct nfs_delegation *d;
+
+        if (cur->owner.protocol != CHIMERA_VFS_LEASE_PROTO_NFSV4) {
+            continue;
+        }
+        if (!(cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W)) {
+            continue;
+        }
+        if (cur->owner.client_key == querying_client_id) {
+            continue; /* the querying client's own delegation */
+        }
+        d = cur->owner.cb_private;
+        if (!d || atomic_load_explicit(&d->destroyed, memory_order_acquire)) {
+            continue;
+        }
+        atomic_fetch_add_explicit(&d->refcount, 1, memory_order_acq_rel);
+        deleg = d;
+        break;
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    chimera_vfs_state_put(vfs_state, file);
+    return deleg;
+} /* nfs4_find_conflicting_write_deleg */
+
+void
+nfs4_cb_getattr(
+    struct chimera_server_nfs_thread *requester_thread,
+    struct nfs_delegation            *deleg,
+    void                             *priv,
+    nfs4_cb_getattr_resume_t          resume)
+{
+    struct nfs4_cb_client            *chan = deleg->client->cb_path.cb_client;
+    struct chimera_server_nfs_thread *holder;
+    struct nfs4_cb_getattr           *w;
+
+    if (!chan) {
+        /* No callback channel -> can't query; fall back to server attrs. */
+        resume(priv, -1, false, 0, false, 0);
+        nfs_state_table_release(&requester_thread->shared->nfs4_state_table,
+                                deleg, NFS4_SLOT_TYPE_DELEG,
+                                requester_thread->vfs_thread);
+        return;
+    }
+
+    holder = chan->owner_thread;
+
+    w                   = calloc(1, sizeof(*w));
+    w->phase            = NFS4_CB_GETATTR_REQUEST;
+    w->requester_thread = requester_thread;
+    w->deleg            = deleg;
+    w->priv             = priv;
+    w->resume           = resume;
+
+    pthread_mutex_lock(&holder->cb_recall_lock);
+    w->next                  = holder->cb_getattr_queue;
+    holder->cb_getattr_queue = w;
+    pthread_mutex_unlock(&holder->cb_recall_lock);
+
+    evpl_ring_doorbell(&holder->cb_doorbell);
+} /* nfs4_cb_getattr */
+
+/* Owner-thread doorbell handler: drain queued recalls and CB_GETATTR work. */
 static void
 nfs4_cb_doorbell_drain(
     struct evpl          *evpl,
@@ -438,12 +672,15 @@ nfs4_cb_doorbell_drain(
         (struct chimera_server_nfs_thread *) ((char *) doorbell -
                                               offsetof(struct chimera_server_nfs_thread, cb_doorbell));
     struct nfs_delegation            *queue;
+    struct nfs4_cb_getattr           *gq;
 
     (void) evpl;
 
     pthread_mutex_lock(&thread->cb_recall_lock);
-    queue                   = thread->cb_recall_queue;
-    thread->cb_recall_queue = NULL;
+    queue                    = thread->cb_recall_queue;
+    thread->cb_recall_queue  = NULL;
+    gq                       = thread->cb_getattr_queue;
+    thread->cb_getattr_queue = NULL;
     pthread_mutex_unlock(&thread->cb_recall_lock);
 
     while (queue) {
@@ -451,6 +688,26 @@ nfs4_cb_doorbell_drain(
         queue               = deleg->recall_qnext;
         deleg->recall_qnext = NULL;
         nfs4_cb_recall_send(thread, deleg);
+    }
+
+    while (gq) {
+        struct nfs4_cb_getattr *w = gq;
+        gq      = w->next;
+        w->next = NULL;
+
+        if (w->phase == NFS4_CB_GETATTR_REQUEST) {
+            /* This thread owns the holder's callback channel. */
+            nfs4_cb_getattr_send(thread, w);
+        } else {
+            /* Back on the requester's thread: deliver the result and release
+             * the delegation ref taken for the query. */
+            w->resume(w->priv, w->status, w->got_change, w->change,
+                      w->got_size, w->size);
+            nfs_state_table_release(&thread->shared->nfs4_state_table,
+                                    w->deleg, NFS4_SLOT_TYPE_DELEG,
+                                    thread->vfs_thread);
+            free(w);
+        }
     }
 } /* nfs4_cb_doorbell_drain */
 

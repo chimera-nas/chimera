@@ -240,6 +240,10 @@ struct chimera_server_nfs_thread {
     struct evpl_doorbell              cb_doorbell;
     pthread_mutex_t                   cb_recall_lock;
     struct nfs_delegation            *cb_recall_queue; /* via deleg->recall_qnext */
+    /* Cross-thread CB_GETATTR work (request to the deleg holder's thread, and
+     * the response back to the requester's thread).  Protected by
+     * cb_recall_lock and drained by cb_doorbell.  See nfs4_callback.c. */
+    struct nfs4_cb_getattr           *cb_getattr_queue;
     uint8_t                           cb_doorbell_armed;
 };
 
