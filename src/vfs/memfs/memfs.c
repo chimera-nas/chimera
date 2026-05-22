@@ -1963,7 +1963,7 @@ memfs_open_at(
 
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
         return;
     }
@@ -2032,6 +2032,13 @@ memfs_open_at(
             inode->size       = 0;
             inode->space_used = 0;
             memfs_apply_attrs(inode, request->open_at.set_attr);
+        } else if ((flags & CHIMERA_VFS_OPEN_CREATE) &&
+                   S_ISREG(inode->mode) &&
+                   (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+                   request->open_at.set_attr->va_size == 0) {
+            memfs_inode_truncate_blocks(thread, inode);
+            inode->size       = 0;
+            inode->space_used = 0;
         }
     }
 
