@@ -113,8 +113,10 @@ chimera_smb_marshal_basic_attrs(
     const struct chimera_vfs_attrs *attr,
     struct chimera_smb_attrs       *smb_attr)
 {
-    /* Time attributes */
-    smb_attr->smb_crttime    = 0; /* Creation time not tracked in VFS */
+    /* Time attributes.  Creation/birth time is optional in the VFS (no POSIX
+     * equivalent); use it when the backend tracked it, else report 0. */
+    smb_attr->smb_crttime = (attr->va_set_mask & CHIMERA_VFS_ATTR_BTIME)
+                               ? chimera_nt_time(&attr->va_btime) : 0;
     smb_attr->smb_attr_mask |= SMB_ATTR_CRTTIME;
 
     smb_attr->smb_atime      = chimera_nt_time(&attr->va_atime);
@@ -372,6 +374,16 @@ chimera_smb_unmarshal_basic_info(
 
     attr->va_req_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME | CHIMERA_VFS_ATTR_CTIME;
     attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME | CHIMERA_VFS_ATTR_CTIME;
+
+    /* Creation/birth time: 0 means "no change" and -1 (0xFFFF...) means
+     * "do not change, and freeze against system updates" (MS-FSCC 2.4.7).
+     * In both cases leave the stored value alone. */
+    if (smb_attrs->smb_crttime != 0 &&
+        smb_attrs->smb_crttime != UINT64_MAX) {
+        chimera_nt_to_epoch(smb_attrs->smb_crttime, &attr->va_btime);
+        attr->va_req_mask |= CHIMERA_VFS_ATTR_BTIME;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+    }
 
     /* A FileAttributes value of 0 means "no change" (MS-FSCC 2.4.7); any
      * non-zero value replaces the persisted DOS attribute set. */

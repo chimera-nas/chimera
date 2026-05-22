@@ -132,6 +132,7 @@ struct memfs_inode {
     struct timespec     atime;
     struct timespec     mtime;
     struct timespec     ctime;
+    struct timespec     btime;
     struct memfs_inode *next;
     struct memfs_xattr *xattrs;
 
@@ -667,6 +668,7 @@ memfs_init(const char *cfgdata)
     inode->atime      = now;
     inode->mtime      = now;
     inode->ctime      = now;
+    inode->btime      = now;
 
     rb_tree_init(&inode->dir.dirents);
 
@@ -840,6 +842,13 @@ memfs_map_attrs(
         attr->va_dos_attributes = inode->dos_attributes;
     }
 
+    /* Birth time is optional and lives outside MASK_STAT, so report it under
+     * its own request bit. */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+        attr->va_btime     = inode->btime;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
         attr->va_fsid      = shared->fsid;
@@ -910,6 +919,15 @@ memfs_apply_attrs(
             inode->mtime = now;
         } else {
             inode->mtime = attr->va_mtime;
+        }
+    }
+
+    if (set_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+        if (attr->va_btime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+            inode->btime = now;
+        } else {
+            inode->btime = attr->va_btime;
         }
     }
 
@@ -1215,6 +1233,13 @@ memfs_mount(
         attr->va_dos_attributes = inode->dos_attributes;
     }
 
+    /* Birth time is optional and lives outside MASK_STAT, so report it under
+     * its own request bit. */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+        attr->va_btime     = inode->btime;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
         attr->va_fs_space_avail = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
@@ -1365,6 +1390,7 @@ memfs_mkdir_at(
     inode->atime      = now;
     inode->mtime      = now;
     inode->ctime      = now;
+    inode->btime      = now;
 
     rb_tree_init(&inode->dir.dirents);
 
@@ -1474,6 +1500,7 @@ memfs_mknod_at(
     inode->atime      = now;
     inode->mtime      = now;
     inode->ctime      = now;
+    inode->btime      = now;
 
     /* The mode (including file type bits S_IFCHR/S_IFBLK/S_IFSOCK/S_IFIFO)
      * and rdev are set via set_attr by the caller */
@@ -3226,6 +3253,7 @@ memfs_symlink_at(
     inode->atime      = now;
     inode->mtime      = now;
     inode->ctime      = now;
+    inode->btime      = now;
 
     inode->symlink.target = memfs_symlink_target_alloc(thread);
 
