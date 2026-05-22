@@ -840,7 +840,7 @@ nfs_client_check_io_denied(
     uint32_t               requested_access)
 {
     struct nfs_open_owner *oo, *oo_tmp;
-    nfsstat4               status           = NFS4_OK;
+    nfsstat4               status = NFS4_OK;
 
     if (fh_len > NFS4_FHSIZE) {
         return NFS4ERR_BAD_STATEID;
