@@ -402,7 +402,160 @@ test_caching_lease_basics(void)
     chimera_vfs_state_destroy(state);
 } /* test_caching_lease_basics */
 
-/* Test 8: caching W-lease forces break of R-cache on other client ----- */
+struct cache_wait_recorder {
+    int                       fired;
+    enum chimera_vfs_lease_result last_result;
+    struct chimera_vfs_lease *last_conflict;
+};
+
+static void
+recording_cache_wait_cb(
+    enum chimera_vfs_lease_result result,
+    struct chimera_vfs_lease     *conflict,
+    void                         *priv)
+{
+    struct cache_wait_recorder *r = priv;
+
+    r->fired++;
+    r->last_result   = result;
+    r->last_conflict = conflict;
+} /* recording_cache_wait_cb */
+
+/* Test 8: non-lease cache wait resumes after break ack --------------- */
+static void
+test_cache_wait_break_then_ack(void)
+{
+    struct chimera_vfs_state      *state;
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease       lease;
+    struct chimera_vfs_cache_wait  wait;
+    struct cache_wait_recorder     rec  = { 0 };
+    struct break_recorder          brec = { 0 };
+    struct chimera_vfs_lease_mode  downgraded;
+    enum chimera_vfs_lease_result  r;
+
+    fprintf(stderr, "\ntest_cache_wait_break_then_ack\n");
+
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    memset(&lease, 0, sizeof(lease));
+    lease.kind         = CHIMERA_VFS_LEASE_CACHING;
+    lease.mode.granted = CHIMERA_VFS_LEASE_MODE_R |
+        CHIMERA_VFS_LEASE_MODE_W;
+    init_owner(&lease.owner, CHIMERA_VFS_LEASE_PROTO_SMB2, 0xA, 1);
+    lease.owner.break_cb   = recording_break_cb;
+    lease.owner.cb_private = &brec;
+
+    r = chimera_vfs_state_try_insert(state, file, &lease, NULL);
+    CHECK(r == CHIMERA_VFS_LEASE_GRANTED, "RW-cache granted");
+
+    chimera_vfs_cache_wait(state, file, &wait,
+                           CHIMERA_VFS_LEASE_MODE_W,
+                           CHIMERA_VFS_LEASE_MODE_R,
+                           NULL,
+                           recording_cache_wait_cb,
+                           &rec);
+    CHECK(rec.fired == 0, "cache wait queues behind W-cache");
+    CHECK(wait.queued == true, "cache wait ticket queued");
+    CHECK(brec.fired == 1, "cache wait starts break");
+    CHECK(lease.break_state == CHIMERA_VFS_BREAK_BREAKING,
+          "cache holder marked breaking");
+
+    downgraded.granted = CHIMERA_VFS_LEASE_MODE_R;
+    downgraded.denied  = 0;
+    chimera_vfs_lease_ack(&lease, downgraded);
+    CHECK(lease.break_state == CHIMERA_VFS_BREAK_IDLE,
+          "downgraded non-empty lease becomes breakable again");
+    CHECK(rec.fired == 1, "cache wait callback fires after ack");
+    CHECK(rec.last_result == CHIMERA_VFS_LEASE_GRANTED,
+          "cache wait grants after W-cache downgrade");
+    CHECK(rec.last_conflict == NULL, "cache wait has no conflict after ack");
+
+    chimera_vfs_state_remove(state, file, &lease);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_cache_wait_break_then_ack */
+
+/* Test 8b: cache wait can ignore all leases from one client ---------- */
+static void
+test_cache_wait_ignores_client_owner(void)
+{
+    struct chimera_vfs_state      *state;
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease       own, other;
+    struct chimera_vfs_cache_wait  wait;
+    struct cache_wait_recorder     rec        = { 0 };
+    struct break_recorder          own_brec   = { 0 };
+    struct break_recorder          other_brec = { 0 };
+    struct chimera_vfs_lease_owner owner_filter;
+    enum chimera_vfs_lease_result  r;
+
+    fprintf(stderr, "\ntest_cache_wait_ignores_client_owner\n");
+
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    memset(&own, 0, sizeof(own));
+    own.kind         = CHIMERA_VFS_LEASE_CACHING;
+    own.mode.granted = CHIMERA_VFS_LEASE_MODE_W | CHIMERA_VFS_LEASE_MODE_H;
+    init_owner(&own.owner, CHIMERA_VFS_LEASE_PROTO_SMB2, 0xA, 1);
+    own.owner.break_cb   = recording_break_cb;
+    own.owner.cb_private = &own_brec;
+
+    r = chimera_vfs_state_try_insert(state, file, &own, NULL);
+    CHECK(r == CHIMERA_VFS_LEASE_GRANTED, "own WH-cache granted");
+
+    memset(&owner_filter, 0, sizeof(owner_filter));
+    owner_filter.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
+    owner_filter.client_key = 0xA;
+    owner_filter.owner_lo   = CHIMERA_VFS_LEASE_OWNER_WILDCARD;
+    owner_filter.owner_hi   = CHIMERA_VFS_LEASE_OWNER_WILDCARD;
+
+    chimera_vfs_cache_wait(state, file, &wait,
+                           CHIMERA_VFS_LEASE_MODE_W | CHIMERA_VFS_LEASE_MODE_H,
+                           0,
+                           &owner_filter,
+                           recording_cache_wait_cb,
+                           &rec);
+    CHECK(rec.fired == 1, "same-client cache wait completes immediately");
+    CHECK(rec.last_result == CHIMERA_VFS_LEASE_GRANTED,
+          "same-client cache wait is granted");
+    CHECK(own_brec.fired == 0, "same-client cache wait does not break holder");
+
+    memset(&other, 0, sizeof(other));
+    other.kind         = CHIMERA_VFS_LEASE_CACHING;
+    other.mode.granted = CHIMERA_VFS_LEASE_MODE_W;
+    init_owner(&other.owner, CHIMERA_VFS_LEASE_PROTO_SMB2, 0xB, 2);
+    other.owner.break_cb   = recording_break_cb;
+    other.owner.cb_private = &other_brec;
+
+    r = chimera_vfs_state_try_insert(state, file, &other, NULL);
+    CHECK(r == CHIMERA_VFS_LEASE_BREAKING, "other client conflicts with own W-cache");
+    chimera_vfs_lease_revoke(&own);
+
+    r = chimera_vfs_state_try_insert(state, file, &other, NULL);
+    CHECK(r == CHIMERA_VFS_LEASE_GRANTED, "other W-cache granted after own revoke");
+
+    rec.fired = 0;
+    chimera_vfs_cache_wait(state, file, &wait,
+                           CHIMERA_VFS_LEASE_MODE_W,
+                           0,
+                           &owner_filter,
+                           recording_cache_wait_cb,
+                           &rec);
+    CHECK(rec.fired == 0, "different-client cache wait queues");
+    CHECK(other_brec.fired == 1, "different-client holder is broken");
+
+    chimera_vfs_lease_revoke(&other);
+
+    chimera_vfs_state_remove(state, file, &other);
+    chimera_vfs_state_remove(state, file, &own);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_cache_wait_ignores_client_owner */
+
+/* Test 9: caching W-lease forces break of R-cache on other client ----- */
 static void
 test_caching_w_breaks_r(void)
 {
@@ -462,7 +615,7 @@ test_caching_w_breaks_r(void)
     chimera_vfs_state_destroy(state);
 } /* test_caching_w_breaks_r */
 
-/* Test 9: SMB lease-key coalescing — same client_key+owner doesn't break */
+/* Test 10: SMB lease-key coalescing - same client_key+owner doesn't break */
 static void
 test_smb_lease_key_coalesces(void)
 {
@@ -515,7 +668,7 @@ test_smb_lease_key_coalesces(void)
     chimera_vfs_state_destroy(state);
 } /* test_smb_lease_key_coalesces */
 
-/* Test 10: caching W-lease must be broken by another client's W request,
+/* Test 11: caching W-lease must be broken by another client's W request,
 * and revoke (timeout-equivalent) lets the new request through ------- */
 static void
 test_caching_break_revoke(void)
@@ -566,7 +719,7 @@ test_caching_break_revoke(void)
     chimera_vfs_state_destroy(state);
 } /* test_caching_break_revoke */
 
-/* Test 11: range-lock probe that would clash with a caching W-lease on
+/* Test 12: range-lock probe that would clash with a caching W-lease on
  * another client triggers a break instead of immediate denial -------- */
 static void
 test_range_breaks_caching(void)
@@ -637,7 +790,7 @@ recording_acquire_cb(
     r->last_conflict = conflict;
 } /* recording_acquire_cb */
 
-/* Test 12: async acquire wait=false fires cb synchronously --------- */
+/* Test 13: async acquire wait=false fires cb synchronously --------- */
 static void
 test_async_acquire_immediate(void)
 {
@@ -670,7 +823,7 @@ test_async_acquire_immediate(void)
     chimera_vfs_state_destroy(state);
 } /* test_async_acquire_immediate */
 
-/* Test 13: async acquire wait=true queues on BREAKING, fires after ack */
+/* Test 14: async acquire wait=true queues on BREAKING, fires after ack */
 static void
 test_async_acquire_wait_then_ack(void)
 {
@@ -723,7 +876,7 @@ test_async_acquire_wait_then_ack(void)
     chimera_vfs_state_destroy(state);
 } /* test_async_acquire_wait_then_ack */
 
-/* Test 14: cancel removes a queued ticket and suppresses cb -------- */
+/* Test 15: cancel removes a queued ticket and suppresses cb -------- */
 static void
 test_async_acquire_cancel(void)
 {
@@ -778,7 +931,7 @@ test_async_acquire_cancel(void)
     chimera_vfs_state_destroy(state);
 } /* test_async_acquire_cancel */
 
-/* Test 15: release pumps pending queue ----------------------------- */
+/* Test 16: release pumps pending queue ----------------------------- */
 static void
 test_release_pumps_pending(void)
 {
@@ -823,7 +976,7 @@ test_release_pumps_pending(void)
     chimera_vfs_state_destroy(state);
 } /* test_release_pumps_pending */
 
-/* Test 16: chimera_vfs_lease_test exposes conflict without inserting */
+/* Test 17: chimera_vfs_lease_test exposes conflict without inserting */
 static void
 test_lease_test(void)
 {
@@ -867,7 +1020,7 @@ test_lease_test(void)
     chimera_vfs_state_destroy(state);
 } /* test_lease_test */
 
-/* Test 17: I/O hook is a no-op pass-through for Stage A ------------ */
+/* Test 18: I/O hook is a no-op pass-through for Stage A ------------ */
 static void
 test_io_hook_passthrough(void)
 {
@@ -897,6 +1050,8 @@ main(
     test_range_to_eof();
     test_share_vs_share();
     test_caching_lease_basics();
+    test_cache_wait_break_then_ack();
+    test_cache_wait_ignores_client_owner();
     test_caching_w_breaks_r();
     test_smb_lease_key_coalesces();
     test_caching_break_revoke();

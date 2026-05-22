@@ -8,6 +8,7 @@
 #include "smb_session.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_state.h"
 
 /*
  * Server-side copy: FSCTL_SRV_REQUEST_RESUME_KEY + FSCTL_SRV_COPYCHUNK.
@@ -32,6 +33,9 @@
 #define CHIMERA_SMB_CC_MAX_TOTAL_LEN (16 * 1024 * 1024)
 
 static void chimera_smb_copychunk_next(
+    struct chimera_smb_request *request);
+
+static void chimera_smb_copychunk_wait_dst(
     struct chimera_smb_request *request);
 
 /* Resolve the source open from the resume key, then start copying. */
@@ -66,8 +70,115 @@ chimera_smb_copychunk_done(
         chimera_smb_open_file_release(request, request->ioctl.cc_dst_open_file);
         request->ioctl.cc_dst_open_file = NULL;
     }
+    if (request->ioctl.cc_wait_file_state) {
+        chimera_vfs_state_put(request->compound->thread->vfs_thread->vfs->vfs_state,
+                              request->ioctl.cc_wait_file_state);
+        request->ioctl.cc_wait_file_state = NULL;
+    }
     chimera_smb_complete_request(request, status);
 } /* chimera_smb_copychunk_done */
+
+static void
+chimera_smb_copychunk_wait_src_cb(
+    enum chimera_vfs_lease_result result,
+    struct chimera_vfs_lease     *conflict,
+    void                         *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    (void) conflict;
+
+    if (request->ioctl.cc_wait_file_state) {
+        chimera_vfs_state_put(request->compound->thread->vfs_thread->vfs->vfs_state,
+                              request->ioctl.cc_wait_file_state);
+        request->ioctl.cc_wait_file_state = NULL;
+    }
+
+    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+        chimera_smb_copychunk_done(request, SMB2_STATUS_FILE_LOCK_CONFLICT);
+        return;
+    }
+
+    chimera_smb_copychunk_wait_dst(request);
+} /* chimera_smb_copychunk_wait_src_cb */
+
+static void
+chimera_smb_copychunk_wait_dst_cb(
+    enum chimera_vfs_lease_result result,
+    struct chimera_vfs_lease     *conflict,
+    void                         *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    (void) conflict;
+
+    if (request->ioctl.cc_wait_file_state) {
+        chimera_vfs_state_put(request->compound->thread->vfs_thread->vfs->vfs_state,
+                              request->ioctl.cc_wait_file_state);
+        request->ioctl.cc_wait_file_state = NULL;
+    }
+
+    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+        chimera_smb_copychunk_done(request, SMB2_STATUS_FILE_LOCK_CONFLICT);
+        return;
+    }
+
+    chimera_smb_copychunk_next(request);
+} /* chimera_smb_copychunk_wait_dst_cb */
+
+static void
+chimera_smb_copychunk_wait_src(struct chimera_smb_request *request)
+{
+    struct chimera_vfs_state *vfs_state =
+        request->compound->thread->vfs_thread->vfs->vfs_state;
+
+    request->ioctl.cc_wait_file_state = chimera_vfs_state_get(
+        vfs_state,
+        request->ioctl.cc_src_open_file->handle->fh,
+        request->ioctl.cc_src_open_file->handle->fh_len,
+        request->ioctl.cc_src_open_file->handle->fh_hash,
+        false);
+    if (!request->ioctl.cc_wait_file_state) {
+        chimera_smb_copychunk_wait_dst(request);
+        return;
+    }
+
+    chimera_vfs_cache_wait(vfs_state,
+                           request->ioctl.cc_wait_file_state,
+                           &request->ioctl.cc_wait,
+                           CHIMERA_VFS_LEASE_MODE_W,
+                           CHIMERA_VFS_LEASE_MODE_R,
+                           NULL,
+                           chimera_smb_copychunk_wait_src_cb,
+                           request);
+} /* chimera_smb_copychunk_wait_src */
+
+static void
+chimera_smb_copychunk_wait_dst(struct chimera_smb_request *request)
+{
+    struct chimera_vfs_state *vfs_state =
+        request->compound->thread->vfs_thread->vfs->vfs_state;
+
+    request->ioctl.cc_wait_file_state = chimera_vfs_state_get(
+        vfs_state,
+        request->ioctl.cc_dst_open_file->handle->fh,
+        request->ioctl.cc_dst_open_file->handle->fh_len,
+        request->ioctl.cc_dst_open_file->handle->fh_hash,
+        false);
+    if (!request->ioctl.cc_wait_file_state) {
+        chimera_smb_copychunk_next(request);
+        return;
+    }
+
+    chimera_vfs_cache_wait(vfs_state,
+                           request->ioctl.cc_wait_file_state,
+                           &request->ioctl.cc_wait,
+                           CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W,
+                           0,
+                           NULL,
+                           chimera_smb_copychunk_wait_dst_cb,
+                           request);
+} /* chimera_smb_copychunk_wait_dst */
 
 static void
 chimera_smb_copychunk_cb(
@@ -131,11 +242,12 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
     uint64_t                      total = 0;
     uint32_t                      i;
 
-    request->ioctl.cc_src_open_file  = NULL;
-    request->ioctl.cc_dst_open_file  = NULL;
-    request->ioctl.cc_chunk_idx      = 0;
-    request->ioctl.cc_chunks_written = 0;
-    request->ioctl.cc_total_written  = 0;
+    request->ioctl.cc_src_open_file   = NULL;
+    request->ioctl.cc_dst_open_file   = NULL;
+    request->ioctl.cc_chunk_idx       = 0;
+    request->ioctl.cc_chunks_written  = 0;
+    request->ioctl.cc_total_written   = 0;
+    request->ioctl.cc_wait_file_state = NULL;
 
     if (request->ioctl.cc_chunk_count == 0 ||
         request->ioctl.cc_chunk_count > CHIMERA_SMB_CC_MAX_CHUNKS) {
@@ -177,5 +289,17 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
     request->ioctl.cc_dst_open_file = dst_open_file;
     request->ioctl.cc_src_open_file = src_open_file;
 
-    chimera_smb_copychunk_next(request);
+    /* Linux CIFS can issue COPYCHUNK while holding a local caching lease on
+     * the source or destination, then block the syscall waiting for our FSCTL
+     * response.  If we send a same-client lease break and wait for the ack here,
+     * the client never processes it.  If we ignore the lease and copy server-side,
+     * dirty client-cached data is skipped.  Report NOT_SUPPORTED so the client
+     * falls back to ordinary read/write through its own cache. */
+    if (src_open_file->caching_lease_inserted ||
+        dst_open_file->caching_lease_inserted) {
+        chimera_smb_copychunk_done(request, SMB2_STATUS_NOT_SUPPORTED);
+        return;
+    }
+
+    chimera_smb_copychunk_wait_src(request);
 } /* chimera_smb_ioctl_copychunk */

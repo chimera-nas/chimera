@@ -63,6 +63,7 @@ struct chimera_server_config {
     int                                   rest_https_port;
     int                                   smb_num_dialects;
     uint32_t                              smb_dialects[16];
+    int                                   smb_signing_required;
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
@@ -127,11 +128,12 @@ chimera_server_config_init(void)
     config->soft_fail_bad_req        = 0;
     config->tcp_flavor               = CHIMERA_TCP_FLAVOR_PLAIN;
 
-    config->smb_num_dialects = 4;
-    config->smb_dialects[0]  = SMB2_DIALECT_2_1;
-    config->smb_dialects[1]  = SMB2_DIALECT_3_0;
-    config->smb_dialects[2]  = SMB2_DIALECT_3_0_2;
-    config->smb_dialects[3]  = SMB2_DIALECT_3_1_1;
+    config->smb_num_dialects = 5;
+    config->smb_dialects[0]  = SMB2_DIALECT_2_0_2;
+    config->smb_dialects[1]  = SMB2_DIALECT_2_1;
+    config->smb_dialects[2]  = SMB2_DIALECT_3_0;
+    config->smb_dialects[3]  = SMB2_DIALECT_3_0_2;
+    config->smb_dialects[4]  = SMB2_DIALECT_3_1_1;
 
     config->smb_num_nic_info = 0;
 
@@ -702,6 +704,20 @@ chimera_server_config_get_soft_fail_bad_req(const struct chimera_server_config *
 {
     return config->soft_fail_bad_req;
 } /* chimera_server_config_get_soft_fail_bad_req */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_signing_required(
+    struct chimera_server_config *config,
+    int                           required)
+{
+    config->smb_signing_required = required;
+} /* chimera_server_config_set_smb_signing_required */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_signing_required(const struct chimera_server_config *config)
+{
+    return config->smb_signing_required;
+} /* chimera_server_config_get_smb_signing_required */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_tcp_flavor(

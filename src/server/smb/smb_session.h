@@ -148,6 +148,11 @@ struct chimera_smb_tree {
 };
 
 #define CHIMERA_SMB_SESSION_AUTHORIZED 0x1
+/* Session was invalidated by a reconnect (a later SESSION_SETUP named it as
+ * PreviousSessionId) or an explicit teardown.  It has been removed from the
+ * global session table, but connections that still cache a handle to it must
+ * stop honoring it and return SMB2_STATUS_USER_SESSION_DELETED. */
+#define CHIMERA_SMB_SESSION_EXPIRED    0x2
 
 struct chimera_smb_session {
     uint64_t                    session_id;
@@ -162,6 +167,11 @@ struct chimera_smb_session {
 
     int                         max_trees;
     uint8_t                     signing_key[16];
+
+    /* SMB dialect of the connection that first authenticated this session.
+     * A multichannel bind (SMB2_SESSION_FLAG_BINDING) is only legal from a
+     * connection negotiated at the same dialect (MS-SMB2 3.3.5.5.2). */
+    uint16_t                    dialect;
 
     struct chimera_vfs_cred     cred;
 };

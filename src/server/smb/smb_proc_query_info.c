@@ -124,6 +124,10 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                 case SMB2_FILE_FULL_EA_INFO:
                     request->query_info.output_length = 8;
                     break;
+                case SMB2_FILE_POSITION_INFO:
+                    /* CurrentByteOffset only; no VFS attributes needed. */
+                    request->query_info.output_length = SMB2_FILE_POSITION_INFO_SIZE;
+                    break;
                 default:
                     status = SMB2_STATUS_NOT_IMPLEMENTED;
                     break;
@@ -224,6 +228,10 @@ chimera_smb_query_info_reply(
                 case SMB2_FILE_FULL_EA_INFO:
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+                    break;
+                case SMB2_FILE_POSITION_INFO:
+                    evpl_iovec_cursor_append_uint64(reply_cursor,
+                                                    request->query_info.open_file->position);
                     break;
                 default:
                     chimera_smb_abort("%s: unsupported file information class: %d",

@@ -245,15 +245,9 @@ chimera_smb_lease_break_cb(
         open_file->oplock_level = new_level;
     }
 
-    /* Optimistic downgrade: assume the client acks.  The arriving ack
-     * calls chimera_vfs_lease_ack which is idempotent.  Keeping the read
-     * cache lets the conflicting opener settle at LEVEL_II too. */
-    {
-        struct chimera_vfs_lease_mode m;
-        m.granted = new_vfs;
-        m.denied  = 0;
-        chimera_vfs_lease_ack(lease, m);
-    }
+    /* The holder is downgraded only when its OPLOCK_BREAK ack arrives.
+     * vfs_state queues conflicting work until chimera_smb_oplock_break()
+     * applies that ack below. */
 } /* chimera_smb_lease_break_cb */
 
 /* ----------------------------------------------------------------------
@@ -304,9 +298,70 @@ chimera_smb_parse_oplock_break(
 SYMBOL_EXPORT void
 chimera_smb_oplock_break(struct chimera_smb_request *request)
 {
-    /* The lease was already optimistically acked inside the break_cb.
-     * Nothing else to do besides letting the dispatcher emit the
-     * reply packet. */
+    struct chimera_smb_open_file     *open_file = NULL;
+    struct chimera_vfs_lease_mode     mode      = { 0, 0 };
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct chimera_vfs_state         *vfs_state = thread->vfs_thread->vfs->vfs_state;
+
+    if (request->oplock_break.is_lease) {
+        uint32_t bucket;
+
+        if (request->tree) {
+            for (bucket = 0; bucket < CHIMERA_SMB_OPEN_FILE_BUCKETS; bucket++) {
+                for (open_file = request->tree->open_files[bucket];
+                     open_file;
+                     open_file = open_file->next) {
+                    if (open_file->caching_lease_inserted &&
+                        open_file->oplock_level == SMB2_OPLOCK_LEVEL_LEASE &&
+                        memcmp(open_file->lease_key,
+                               request->oplock_break.lease_key, 16) == 0) {
+                        goto found;
+                    }
+                }
+            }
+        }
+        open_file = NULL;
+ found:
+        mode.granted = chimera_smb_lease_to_vfs_bits(request->oplock_break.lease_state);
+    } else {
+        open_file = chimera_smb_open_file_resolve(request,
+                                                  &request->oplock_break.file_id);
+        switch (request->oplock_break.oplock_level) {
+            case SMB2_OPLOCK_LEVEL_II:
+                mode.granted = CHIMERA_VFS_LEASE_MODE_R;
+                break;
+            case SMB2_OPLOCK_LEVEL_NONE:
+            default:
+                mode.granted = 0;
+                break;
+        } /* switch */
+    }
+
+    if (!open_file || !open_file->caching_lease_inserted) {
+        if (open_file && !request->oplock_break.is_lease) {
+            chimera_smb_open_file_release(request, open_file);
+        }
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
+    chimera_vfs_lease_ack(&open_file->caching_lease, mode);
+
+    if (mode.granted == 0) {
+        chimera_vfs_lease_release(vfs_state, open_file->caching_file_state,
+                                  &open_file->caching_lease);
+        open_file->caching_lease_inserted = false;
+        chimera_vfs_state_put(vfs_state, open_file->caching_file_state);
+        open_file->caching_file_state = NULL;
+    }
+
+    if (request->oplock_break.is_lease) {
+        open_file->lease_state = request->oplock_break.lease_state;
+    } else {
+        open_file->oplock_level = request->oplock_break.oplock_level;
+        chimera_smb_open_file_release(request, open_file);
+    }
+
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_oplock_break */
 

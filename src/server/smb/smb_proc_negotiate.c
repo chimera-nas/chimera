@@ -109,8 +109,14 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
         conn->flags |= CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED;
     }
 
-    request->negotiate.r_dialect           = dialect;
-    request->negotiate.r_security_mode     = SMB2_SIGNING_ENABLED;
+    request->negotiate.r_dialect       = dialect;
+    request->negotiate.r_security_mode = SMB2_SIGNING_ENABLED;
+    if (shared->config.signing_required) {
+        /* Server signing = mandatory: advertise REQUIRED so clients sign
+         * every request (smb2.session-require-signing / bug15397). */
+        request->negotiate.r_security_mode |= SMB2_SIGNING_REQUIRED;
+        conn->flags                        |= CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED;
+    }
     request->negotiate.r_capabilities      = conn->capabilities;
     request->negotiate.r_max_transact_size = 1 * 1024 * 1024;
     request->negotiate.r_max_read_size     = 8 * 1024 * 1024;

@@ -16,6 +16,9 @@
 #define SMB2_DIALECT_3_0_2                            0x0302
 #define SMB2_DIALECT_3_1_1                            0x0311
 
+/* SESSION_SETUP request Flags (MS-SMB2 2.2.5) */
+#define SMB2_SESSION_FLAG_BINDING                     0x01
+
 
 /*
  * NTSTATUS fields

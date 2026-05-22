@@ -16,6 +16,105 @@ chimera_smb_write_callback(
     uint32_t                  sync,
     struct chimera_vfs_attrs *pre_attr,
     struct chimera_vfs_attrs *post_attr,
+    void                     *private_data);
+
+static void
+chimera_smb_write_start_vfs(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+
+    chimera_vfs_write(
+        thread->vfs_thread,
+        &request->session_handle->session->cred,
+        request->write.open_file->handle,
+        request->write.offset,
+        request->write.length,
+        !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH),
+        0,
+        0,
+        request->write.iov,
+        request->write.niov,
+        chimera_smb_write_callback,
+        request);
+} /* chimera_smb_write_start_vfs */
+
+static void
+chimera_smb_write_cache_wait_cb(
+    enum chimera_vfs_lease_result result,
+    struct chimera_vfs_lease     *conflict,
+    void                         *private_data)
+{
+    struct chimera_smb_request           *request     = private_data;
+    struct chimera_server_smb_thread     *thread      = request->compound->thread;
+    const struct chimera_vfs_lease_owner *cache_owner = NULL;
+
+    (void) conflict;
+
+    if (request->write.wait_file_state) {
+        chimera_vfs_state_put(thread->vfs_thread->vfs->vfs_state,
+                              request->write.wait_file_state);
+        request->write.wait_file_state = NULL;
+    }
+
+    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+        evpl_iovecs_release(thread->evpl, request->write.iov, request->write.niov);
+        chimera_smb_open_file_release(request, request->write.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_LOCK_CONFLICT);
+        return;
+    }
+
+    if (request->write.open_file->caching_lease_inserted) {
+        cache_owner = &request->write.open_file->caching_lease.owner;
+    }
+
+    chimera_vfs_state_break_on_write(thread->vfs_thread->vfs->vfs_state,
+                                     request->write.open_file->handle->fh,
+                                     request->write.open_file->handle->fh_len,
+                                     request->write.open_file->handle->fh_hash,
+                                     cache_owner);
+
+    chimera_smb_write_start_vfs(request);
+} /* chimera_smb_write_cache_wait_cb */
+
+static void
+chimera_smb_write_wait_for_cache(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread     *thread      = request->compound->thread;
+    const struct chimera_vfs_lease_owner *cache_owner = NULL;
+
+    if (request->write.open_file->caching_lease_inserted) {
+        cache_owner = &request->write.open_file->caching_lease.owner;
+    }
+
+    request->write.wait_file_state = chimera_vfs_state_get(
+        thread->vfs_thread->vfs->vfs_state,
+        request->write.open_file->handle->fh,
+        request->write.open_file->handle->fh_len,
+        request->write.open_file->handle->fh_hash,
+        false);
+    if (!request->write.wait_file_state) {
+        chimera_smb_write_cache_wait_cb(CHIMERA_VFS_LEASE_GRANTED,
+                                        NULL, request);
+        return;
+    }
+
+    chimera_vfs_cache_wait(thread->vfs_thread->vfs->vfs_state,
+                           request->write.wait_file_state,
+                           &request->write.cache_wait,
+                           CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W,
+                           0,
+                           cache_owner,
+                           chimera_smb_write_cache_wait_cb,
+                           request);
+} /* chimera_smb_write_wait_for_cache */
+
+static void
+chimera_smb_write_callback(
+    enum chimera_vfs_error    error_code,
+    uint32_t                  length,
+    uint32_t                  sync,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
     struct chimera_smb_request       *request = private_data;
@@ -75,19 +174,7 @@ chimera_smb_rdma_read_callback(
             return;
         }
 
-        chimera_vfs_write(
-            thread->vfs_thread,
-            &request->session_handle->session->cred,
-            request->write.open_file->handle,
-            request->write.offset,
-            request->write.length,
-            !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH),
-            0,
-            0,
-            request->write.iov,
-            request->write.niov,
-            chimera_smb_write_callback,
-            request);
+        chimera_smb_write_wait_for_cache(request);
     }
 
 } /* chimera_smb_rdma_read_callback */
@@ -102,7 +189,8 @@ chimera_smb_write(struct chimera_smb_request *request)
     struct evpl_iovec                *chunk_iov = request->write.chunk_iov;
     int                               i, offset = 0;
 
-    request->write.open_file = chimera_smb_open_file_resolve(request, &request->write.file_id);
+    request->write.open_file       = chimera_smb_open_file_resolve(request, &request->write.file_id);
+    request->write.wait_file_state = NULL;
 
     if (unlikely(!request->write.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
@@ -134,14 +222,6 @@ chimera_smb_write(struct chimera_smb_request *request)
             return;
         }
 
-        /* A write stales every read cache on this file: break those
-         * caching oplocks/leases (to NONE), except the writer's own
-         * write cache. */
-        chimera_vfs_state_break_on_write(thread->vfs_thread->vfs->vfs_state,
-                                         request->write.open_file->handle->fh,
-                                         request->write.open_file->handle->fh_len,
-                                         request->write.open_file->handle->fh_hash,
-                                         &io_owner);
     }
 
     if (request->write.channel == SMB2_CHANNEL_RDMA_V1) {
@@ -168,19 +248,7 @@ chimera_smb_write(struct chimera_smb_request *request)
             chunk_iov++;
         }
     } else {
-        chimera_vfs_write(
-            thread->vfs_thread,
-            &request->session_handle->session->cred,
-            request->write.open_file->handle,
-            request->write.offset,
-            request->write.length,
-            !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH),
-            0,
-            0,
-            request->write.iov,
-            request->write.niov,
-            chimera_smb_write_callback,
-            request);
+        chimera_smb_write_wait_for_cache(request);
     }
 } /* chimera_smb_write */
 

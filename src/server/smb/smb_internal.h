@@ -113,6 +113,9 @@ struct chimera_smb_config {
     int                            num_dialects;
     int                            num_nic_info;
     int                            soft_fail_bad_req;
+    /* When set, NEGOTIATE advertises SMB2_SIGNING_REQUIRED so clients must
+     * sign every request (server signing = mandatory). */
+    int                            signing_required;
     uint32_t                       capabilities;
     uint32_t                       dialects[16];
     struct chimera_smb_nic_info    nic_info[16];
@@ -133,7 +136,11 @@ struct chimera_smb_share {
 
 struct chimera_smb_conn;
 
-#define CHIMERA_SMB_REQUEST_FLAG_SIGN 0x01
+#define CHIMERA_SMB_REQUEST_FLAG_SIGN        0x01
+/* Request named a session id the server doesn't know (logged off / never
+ * existed).  We don't drop the connection — the request is completed with
+ * SMB2_STATUS_USER_SESSION_DELETED so the client can recover. */
+#define CHIMERA_SMB_REQUEST_FLAG_BAD_SESSION 0x02
 
 struct chimera_smb_rename_info {
     uint8_t                         replace_if_exist;
@@ -163,6 +170,11 @@ struct chimera_smb_request {
         struct smb2_header smb2_hdr;
     };
     struct chimera_smb_session_handle *session_handle;
+    /* For a SESSION_SETUP whose header names a session this connection does
+     * not own (multichannel bind, or an invalid cross-connection reference):
+     * the globally-resolved session, used to verify the request signature and
+     * to decide bind-vs-USER_SESSION_DELETED.  NULL for ordinary requests. */
+    struct chimera_smb_session        *bind_session;
     struct chimera_smb_tree           *tree;
     struct chimera_smb_compound       *compound;
     struct chimera_smb_request        *next;
@@ -262,6 +274,10 @@ struct chimera_smb_request {
             struct chimera_smb_open_file   *r_open_file;
             struct chimera_smb_attrs        r_attrs;
             struct chimera_vfs_attrs        set_attr;
+            struct chimera_vfs_open_handle *wait_open_handle;
+            struct chimera_vfs_file_state  *wait_file_state;
+            struct chimera_vfs_cache_wait   cache_wait;
+            int                             wait_is_directory;
             /* CREATE contexts the client sent (CHIMERA_SMB_CREATE_CTX_* bits).
              * Phase-0 stubs set the bit and capture a minimum set of fields needed
              * by the response emit; Phase 1/3 will populate the rest. */
@@ -316,6 +332,8 @@ struct chimera_smb_request {
             uint32_t                        r_rdma_status;
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_open_file   *open_file;
+            struct chimera_vfs_file_state  *wait_file_state;
+            struct chimera_vfs_cache_wait   cache_wait;
             struct chimera_smb_rdma_element rdma_elements[8];
             struct evpl_iovec               iov[256];
             struct evpl_iovec               chunk_iov[256];
@@ -336,6 +354,8 @@ struct chimera_smb_request {
             uint32_t                        r_rdma_status;
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_open_file   *open_file;
+            struct chimera_vfs_file_state  *wait_file_state;
+            struct chimera_vfs_cache_wait   cache_wait;
             struct chimera_smb_rdma_element rdma_elements[8];
             struct evpl_iovec               iov[256];
             struct evpl_iovec               chunk_iov[256];
@@ -430,11 +450,14 @@ struct chimera_smb_request {
             /* SRV_REQUEST_RESUME_KEY / SRV_COPYCHUNK fields */
             struct chimera_smb_open_file   *cc_src_open_file;
             struct chimera_smb_open_file   *cc_dst_open_file;
+            struct chimera_vfs_file_state  *cc_wait_file_state;
+            struct chimera_vfs_cache_wait   cc_wait;
             struct chimera_smb_file_id      cc_src_file_id;
             uint32_t                        cc_chunk_count;
             uint32_t                        cc_chunk_idx;
             uint32_t                        cc_chunks_written;
             uint64_t                        cc_total_written;
+            uint8_t                         cc_wait_phase;
 #define CHIMERA_SMB_COPYCHUNK_MAX 16
             struct {
                 uint64_t src_offset;
@@ -720,10 +743,11 @@ chimera_smb_request_alloc(struct chimera_server_smb_thread *thread)
         request = calloc(1, sizeof(*request));
     }
 
-    request->status   = SMB2_STATUS_SUCCESS;
-    request->flags    = 0;
-    request->async_id = 0;
-    request->tree     = NULL;
+    request->status       = SMB2_STATUS_SUCCESS;
+    request->flags        = 0;
+    request->async_id     = 0;
+    request->tree         = NULL;
+    request->bind_session = NULL;
 
     return request;
 } /* chimera_smb_request_alloc */
@@ -752,9 +776,16 @@ chimera_smb_session_alloc(struct chimera_server_smb_shared *shared)
         pthread_mutex_init(&session->lock, NULL);
     }
 
-    session->session_id = chimera_rand64();
-    session->flags      = 0;
-    session->refcnt     = 1;
+    /* Keep the session id within 32 bits (non-zero).  The wire field is 64
+     * bits, but Windows/Samba hand out small ids and some clients (and the
+     * smb2.session-id torture test) round-trip the id through a uint32_t.  A
+     * full 64-bit random id would be silently truncated by such clients and
+     * then fail to match on the next request. */
+    do {
+        session->session_id = chimera_rand64() & 0xFFFFFFFFULL;
+    } while (session->session_id == 0);
+    session->flags  = 0;
+    session->refcnt = 1;
 
     pthread_mutex_unlock(&shared->sessions_lock);
 
@@ -796,6 +827,43 @@ chimera_smb_session_lookup(
 
     return session;
 } /* chimera_smb_session_lookup */
+
+/*
+ * MS-SMB2 3.3.5.5.1: when a SESSION_SETUP carries a non-zero PreviousSessionId
+ * that differs from the new session, the server invalidates the prior session.
+ * We flag it EXPIRED and unlink it from the global table so future lookups
+ * miss; the connection that still holds a handle to it detects the flag at
+ * dispatch and returns USER_SESSION_DELETED.  We deliberately do NOT free the
+ * session or its trees here — its owning connection still references it and may
+ * live on a different thread; it is reclaimed when that connection releases its
+ * last reference.
+ */
+static inline void
+chimera_smb_session_expire_previous(
+    struct chimera_server_smb_shared *shared,
+    uint64_t                          prev_session_id,
+    uint64_t                          new_session_id)
+{
+    struct chimera_smb_session *prev;
+
+    if (prev_session_id == 0 || prev_session_id == new_session_id) {
+        return;
+    }
+
+    pthread_mutex_lock(&shared->sessions_lock);
+
+    HASH_FIND(hh, shared->sessions, &prev_session_id, sizeof(uint64_t), prev);
+
+    if (prev) {
+        prev->flags |= CHIMERA_SMB_SESSION_EXPIRED;
+        if (prev->flags & CHIMERA_SMB_SESSION_AUTHORIZED) {
+            HASH_DEL(shared->sessions, prev);
+            prev->flags &= ~CHIMERA_SMB_SESSION_AUTHORIZED;
+        }
+    }
+
+    pthread_mutex_unlock(&shared->sessions_lock);
+} /* chimera_smb_session_expire_previous */
 
 
 static inline void

@@ -50,10 +50,10 @@ enum chimera_vfs_lease_kind {
  * SHARE leases use granted = access bits, denied = deny bits.
  * CACHING leases use granted directly (e.g., {R,W,H} for an SMB lease).
  */
-#define CHIMERA_VFS_LEASE_MODE_R      0x01
-#define CHIMERA_VFS_LEASE_MODE_W      0x02
-#define CHIMERA_VFS_LEASE_MODE_H      0x04
-#define CHIMERA_VFS_LEASE_MODE_D      0x08
+#define CHIMERA_VFS_LEASE_MODE_R         0x01
+#define CHIMERA_VFS_LEASE_MODE_W         0x02
+#define CHIMERA_VFS_LEASE_MODE_H         0x04
+#define CHIMERA_VFS_LEASE_MODE_D         0x08
 
 struct chimera_vfs_lease_mode {
     uint8_t granted; /* bits the holder has been granted */
@@ -62,9 +62,14 @@ struct chimera_vfs_lease_mode {
 
 /* Protocol identifiers — used in owner.protocol so the conflict matrix
  * can apply protocol-specific same-owner coalescing rules. */
-#define CHIMERA_VFS_LEASE_PROTO_NLM   1
-#define CHIMERA_VFS_LEASE_PROTO_NFSV4 2
-#define CHIMERA_VFS_LEASE_PROTO_SMB2  3
+#define CHIMERA_VFS_LEASE_PROTO_NLM      1
+#define CHIMERA_VFS_LEASE_PROTO_NFSV4    2
+#define CHIMERA_VFS_LEASE_PROTO_SMB2     3
+
+/* Owner wildcard used by cache-wait callers that need to ignore every
+ * caching lease owned by a protocol client, regardless of that client's
+ * per-open/per-lease owner id. */
+#define CHIMERA_VFS_LEASE_OWNER_WILDCARD UINT64_MAX
 
 struct chimera_vfs_lease;
 
@@ -171,6 +176,27 @@ struct chimera_vfs_pending_acquire {
     struct chimera_vfs_pending_acquire *next;
 };
 
+typedef void (*chimera_vfs_cache_wait_cb_t)(
+    enum chimera_vfs_lease_result result,
+    struct chimera_vfs_lease     *conflict,
+    void                         *private_data);
+
+/* Caller-allocated ticket for operations that do not acquire a durable lease
+ * themselves, but must wait for conflicting caching leases to downgrade before
+ * touching server-side file state. */
+struct chimera_vfs_cache_wait {
+    uint8_t                        mode_mask;
+    uint8_t                        break_to_mode;
+    struct chimera_vfs_lease_owner owner;
+    bool                           has_owner;
+    chimera_vfs_cache_wait_cb_t    cb;
+    void                          *private_data;
+    struct chimera_vfs_file_state *file;
+    bool                           queued;
+    struct chimera_vfs_cache_wait *prev;
+    struct chimera_vfs_cache_wait *next;
+};
+
 /* -------------------------------------------------------------------- */
 /* Per-file state                                                       */
 /* -------------------------------------------------------------------- */
@@ -190,6 +216,10 @@ struct chimera_vfs_file_state {
     /* FIFO queue of acquires waiting on a break to complete. */
     struct chimera_vfs_pending_acquire *pending_head;
     struct chimera_vfs_pending_acquire *pending_tail;
+
+    /* FIFO queue of non-lease operations waiting on cache breaks. */
+    struct chimera_vfs_cache_wait      *cache_wait_head;
+    struct chimera_vfs_cache_wait      *cache_wait_tail;
 
     /* Back-pointer set on creation so ack/revoke/remove can pump the
      * pending queue without changing public-API signatures. */
@@ -353,6 +383,26 @@ chimera_vfs_state_range_io_conflict(
     uint64_t                              length,
     bool                                  is_write,
     const struct chimera_vfs_lease_owner *owner);
+
+/* Wait until no caching lease on `file` grants any bit in `mode_mask`.
+ * Matching breakable leases are broken to `break_to_mode`; the callback fires
+ * synchronously if no wait is needed, or asynchronously after ack/revoke/remove
+ * pumps the wait queue.  If `owner` is non-NULL, that owner is ignored. */
+void
+chimera_vfs_cache_wait(
+    struct chimera_vfs_state             *state,
+    struct chimera_vfs_file_state        *file,
+    struct chimera_vfs_cache_wait        *wait,
+    uint8_t                               mode_mask,
+    uint8_t                               break_to_mode,
+    const struct chimera_vfs_lease_owner *owner,
+    chimera_vfs_cache_wait_cb_t           cb,
+    void                                 *private_data);
+
+bool
+chimera_vfs_cache_wait_cancel(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_cache_wait *wait);
 
 /* -------------------------------------------------------------------- */
 /* Break orchestration                                                  */

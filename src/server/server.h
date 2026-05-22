@@ -160,6 +160,15 @@ chimera_server_config_set_soft_fail_bad_req(
     struct chimera_server_config *config,
     int                           enable);
 
+int
+chimera_server_config_get_smb_signing_required(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_signing_required(
+    struct chimera_server_config *config,
+    int                           required);
+
 void
 chimera_server_config_set_nfs_rdma(
     struct chimera_server_config *config,

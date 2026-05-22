@@ -45,6 +45,9 @@ struct smb_ntlm_ctx {
     int      have_challenge;
     int      authenticated;
     int      is_winbind_user;    // True if authenticated via winbind (AD user)
+    int      is_anonymous;       // True if the client authenticated anonymously
+                                 // (empty NT response) -- maps to nobody and
+                                 // produces no signing key.
     char     username[256];
     char     domain[256];
     char     sid[SMB_NTLM_SID_MAX_LEN];

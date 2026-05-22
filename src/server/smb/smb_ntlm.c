@@ -758,6 +758,24 @@ validate_authenticate(
     memcpy(&nt_response_len, buf + 20, 2);
     memcpy(&nt_response_offset, buf + 24, 4);
 
+    /* Anonymous authentication (MS-NLMP 3.2.5.1.2): the client sends an
+     * AUTHENTICATE_MESSAGE with an empty NtChallengeResponse (and typically an
+     * empty user name).  There is nothing to verify and no session key is
+     * derived (the session cannot be signed).  Map the caller to "nobody". */
+    if (nt_response_len == 0 && (username == NULL || username[0] == '\0')) {
+        memset(ctx->session_key, 0, sizeof(ctx->session_key));
+        ctx->username[0]   = '\0';
+        ctx->domain[0]     = '\0';
+        ctx->uid           = 65534;
+        ctx->gid           = 65534;
+        ctx->ngids         = 0;
+        ctx->is_anonymous  = 1;
+        ctx->authenticated = 1;
+        smb_ntlm_info("NTLM: anonymous authentication accepted (uid=65534)");
+        result = 0;
+        goto cleanup;
+    }
+
     if (nt_response_len < 24 || nt_response_offset + nt_response_len > buf_len) {
         smb_ntlm_error("NTLM: Invalid NT response field");
         goto cleanup;

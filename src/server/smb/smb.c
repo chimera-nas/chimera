@@ -74,6 +74,8 @@ chimera_smb_server_init(
 
     shared->config.capabilities = SMB2_GLOBAL_CAP_LARGE_MTU | SMB2_GLOBAL_CAP_MULTI_CHANNEL;
 
+    shared->config.signing_required = chimera_server_config_get_smb_signing_required(config);
+
     shared->config.num_dialects = chimera_server_config_get_smb_num_dialects(config);
 
     for (i = 0; i < shared->config.num_dialects; i++) {
@@ -623,6 +625,13 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
         }
     }
 
+    /* A request that named a session id we don't recognize: complete it with
+     * USER_SESSION_DELETED instead of dispatching to a command handler. */
+    if (unlikely(request->flags & CHIMERA_SMB_REQUEST_FLAG_BAD_SESSION)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
+        return;
+    }
+
     /* Reject commands that require a valid tree connection */
     if (unlikely(!request->tree &&
                  request->smb2_hdr.command != SMB2_NEGOTIATE &&
@@ -761,7 +770,6 @@ chimera_smb_server_handle_smb2(
     struct chimera_smb_compound       *compound;
     struct chimera_smb_request        *request;
     struct chimera_smb_session_handle *session_handle;
-    struct chimera_smb_session        *session;
     struct evpl_iovec_cursor           signature_cursor;
     /* Snapshot of the cursor at the SMB2 message start, for the 3.1.1
      * preauth-integrity hash (covers the whole received message). */
@@ -831,40 +839,58 @@ chimera_smb_server_handle_smb2(
 
                 if (session_handle) {
                     request->session_handle = session_handle;
-                } else {
-
-                    session = chimera_smb_session_lookup(thread->shared, request->smb2_hdr.session_id);
-
-                    if (session) {
-                        session_handle = chimera_smb_session_handle_alloc(thread);
-
-                        session_handle->session_id = session->session_id;
-                        session_handle->session    = session;
-
-                        HASH_ADD(hh, conn->session_handles, session_id, sizeof(uint64_t), session_handle);
-
-                        conn->last_session_handle = session_handle;
-
-                        request->session_handle = session_handle;
-
-                        memcpy(request->session_handle->signing_key,
-                               request->session_handle->session->signing_key,
-                               sizeof(request->session_handle->signing_key));
-
-                    } else {
-                        chimera_smb_error("Received SMB2 message with invalid session id %lx", request->smb2_hdr.
-                                          session_id);
-                        chimera_smb_request_free(thread, request);
-                        evpl_close(evpl, conn->bind);
-                        return;
+                } else if (request->smb2_hdr.command == SMB2_SESSION_SETUP) {
+                    /* A SESSION_SETUP naming a session this connection does not
+                     * own is either a multichannel bind or an invalid
+                     * cross-connection reference.  Resolve it globally so the
+                     * signature can be verified, but do NOT attach it to this
+                     * connection: chimera_smb_session_setup decides whether to
+                     * bind it or reject with USER_SESSION_DELETED.  (See Samba
+                     * bug 14512 / smb2.session.bind_negative_*.) */
+                    request->session_handle = NULL;
+                    request->bind_session   = chimera_smb_session_lookup(thread->shared,
+                                                                         request->smb2_hdr.session_id);
+                    if (!request->bind_session) {
+                        request->flags |= CHIMERA_SMB_REQUEST_FLAG_BAD_SESSION;
                     }
+                } else {
+                    /* Every other command must run against a session that was
+                     * established on THIS connection.  A session id we don't
+                     * own here is stale, or belongs to a channel that was
+                     * never bound: complete with USER_SESSION_DELETED rather
+                     * than tearing down the connection. */
+                    chimera_smb_debug("Received SMB2 message with unknown session id %lx",
+                                      request->smb2_hdr.session_id);
+                    request->session_handle = NULL;
+                    request->flags         |= CHIMERA_SMB_REQUEST_FLAG_BAD_SESSION;
                 }
             }
         } else {
             request->session_handle = NULL;
         }
 
-        if (request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) {
+        /* A session that was invalidated by a reconnect (PreviousSessionId)
+         * may still be cached on this connection.  Treat any request that
+         * resolves to it as a stale-session request: USER_SESSION_DELETED. */
+        if (request->session_handle &&
+            (request->session_handle->session->flags & CHIMERA_SMB_SESSION_EXPIRED)) {
+            request->session_handle = NULL;
+            request->flags         |= CHIMERA_SMB_REQUEST_FLAG_BAD_SESSION;
+        }
+
+        /* SESSION_SETUP requests are never signature-verified at dispatch:
+         *   - the final NTLM message is signed with a session key the server
+         *     only derives while *processing* this very request, so the key
+         *     isn't available yet here;
+         *   - a multichannel-bind setup that we are about to reject (wrong
+         *     dialect / missing binding flag) is signed with a key that won't
+         *     validate, and the client expects a status reply, not a dropped
+         *     connection.
+         * The NTLM exchange authenticates the request, and the success reply
+         * is signed (below / in compound_reply), proving the server's key. */
+        if ((request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) &&
+            !(request->flags & CHIMERA_SMB_REQUEST_FLAG_BAD_SESSION) &&
+            request->smb2_hdr.command != SMB2_SESSION_SETUP) {
             uint8_t *signing_key;
 
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
@@ -883,15 +909,14 @@ chimera_smb_server_handle_smb2(
                     return;
                 }
                 signing_key = conn->last_session_handle->signing_key;
-            } else {
-                if (unlikely(request->session_handle == NULL)) {
-                    chimera_smb_error("Received signed SMB2 message with missing/invalid session id %x",
-                                      request->smb2_hdr.session_id);
-                    chimera_smb_request_free(thread, request);
-                    evpl_close(evpl, conn->bind);
-                    return;
-                }
+            } else if (request->session_handle) {
                 signing_key = request->session_handle->signing_key;
+            } else {
+                chimera_smb_error("Received signed SMB2 message with missing/invalid session id %x",
+                                  request->smb2_hdr.session_id);
+                chimera_smb_request_free(thread, request);
+                evpl_close(evpl, conn->bind);
+                return;
             }
 
             rc = chimera_smb_verify_signature(thread->signing_ctx, request, signing_key, &signature_cursor,
@@ -906,6 +931,7 @@ chimera_smb_server_handle_smb2(
         }
 
         if (unlikely(!request->session_handle &&
+                     !(request->flags & CHIMERA_SMB_REQUEST_FLAG_BAD_SESSION) &&
                      !(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) &&
                      (request->smb2_hdr.command != SMB2_NEGOTIATE &&
                       request->smb2_hdr.command != SMB2_SESSION_SETUP &&

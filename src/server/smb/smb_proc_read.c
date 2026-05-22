@@ -17,6 +17,60 @@ chimera_smb_read_callback(
     struct evpl_iovec        *iov,
     int                       niov,
     struct chimera_vfs_attrs *attr,
+    void                     *private_data);
+
+static void
+chimera_smb_read_start_vfs(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+
+    chimera_vfs_read(
+        thread->vfs_thread,
+        &request->session_handle->session->cred,
+        request->read.open_file->handle,
+        request->read.offset,
+        request->read.length,
+        request->read.iov,
+        request->read.niov,
+        0,
+        chimera_smb_read_callback,
+        request);
+} /* chimera_smb_read_start_vfs */
+
+static void
+chimera_smb_read_cache_wait_cb(
+    enum chimera_vfs_lease_result result,
+    struct chimera_vfs_lease     *conflict,
+    void                         *private_data)
+{
+    struct chimera_smb_request       *request = private_data;
+    struct chimera_server_smb_thread *thread  = request->compound->thread;
+
+    (void) conflict;
+
+    if (request->read.wait_file_state) {
+        chimera_vfs_state_put(thread->vfs_thread->vfs->vfs_state,
+                              request->read.wait_file_state);
+        request->read.wait_file_state = NULL;
+    }
+
+    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+        chimera_smb_open_file_release(request, request->read.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_LOCK_CONFLICT);
+        return;
+    }
+
+    chimera_smb_read_start_vfs(request);
+} /* chimera_smb_read_cache_wait_cb */
+
+static void
+chimera_smb_read_callback(
+    enum chimera_vfs_error    error_code,
+    uint32_t                  count,
+    uint32_t                  eof,
+    struct evpl_iovec        *iov,
+    int                       niov,
+    struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
     struct chimera_smb_request       *request = private_data;
@@ -85,9 +139,11 @@ chimera_smb_read_callback(
 void
 chimera_smb_read(struct chimera_smb_request *request)
 {
-    struct chimera_server_smb_thread *thread = request->compound->thread;
+    struct chimera_server_smb_thread     *thread      = request->compound->thread;
+    const struct chimera_vfs_lease_owner *cache_owner = NULL;
 
-    request->read.open_file = chimera_smb_open_file_resolve(request, &request->read.file_id);
+    request->read.open_file       = chimera_smb_open_file_resolve(request, &request->read.file_id);
+    request->read.wait_file_state = NULL;
 
     if (unlikely(!request->read.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
@@ -150,17 +206,29 @@ chimera_smb_read(struct chimera_smb_request *request)
         }
     }
 
-    chimera_vfs_read(
-        thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->read.open_file->handle,
-        request->read.offset,
-        request->read.length,
-        request->read.iov,
-        request->read.niov,
-        0,
-        chimera_smb_read_callback,
-        request);
+    if (request->read.open_file->caching_lease_inserted) {
+        cache_owner = &request->read.open_file->caching_lease.owner;
+    }
+
+    request->read.wait_file_state = chimera_vfs_state_get(
+        thread->vfs_thread->vfs->vfs_state,
+        request->read.open_file->handle->fh,
+        request->read.open_file->handle->fh_len,
+        request->read.open_file->handle->fh_hash,
+        false);
+    if (!request->read.wait_file_state) {
+        chimera_smb_read_start_vfs(request);
+        return;
+    }
+
+    chimera_vfs_cache_wait(thread->vfs_thread->vfs->vfs_state,
+                           request->read.wait_file_state,
+                           &request->read.cache_wait,
+                           CHIMERA_VFS_LEASE_MODE_W,
+                           CHIMERA_VFS_LEASE_MODE_R,
+                           cache_owner,
+                           chimera_smb_read_cache_wait_cb,
+                           request);
 } /* chimera_smb_read */
 
 

@@ -110,6 +110,38 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         input_len = 0;
     }
 
+    /* Validate a SESSION_SETUP that names a session this connection does not
+     * own (request->bind_session, resolved globally by the dispatcher).  It is
+     * a multichannel bind only if SMB2_SESSION_FLAG_BINDING is set and the
+     * binding rules (MS-SMB2 3.3.5.5.2) are satisfied; otherwise it is an
+     * invalid cross-connection reference and the session is treated as deleted.
+     * Rejections happen before authentication so we never run NTLM for them. */
+    if (request->bind_session) {
+        uint32_t reject = 0;
+
+        if (!(request->session_setup.flags & SMB2_SESSION_FLAG_BINDING)) {
+            /* No binding flag: a session id belonging to another connection is
+             * not valid here. */
+            reject = SMB2_STATUS_USER_SESSION_DELETED;
+        } else if (conn->dialect < SMB2_DIALECT_3_0) {
+            /* Channel binding requires SMB 3.x. */
+            reject = SMB2_STATUS_REQUEST_NOT_ACCEPTED;
+        } else if (request->bind_session->dialect != conn->dialect) {
+            /* The bound session and this channel must share a dialect. */
+            reject = SMB2_STATUS_INVALID_PARAMETER;
+        }
+
+        if (reject) {
+            chimera_smb_session_release(thread, shared, request->bind_session);
+            request->bind_session = NULL;
+            chimera_smb_complete_request(request, reject);
+            evpl_iovecs_release(thread->evpl,
+                                request->session_setup.input_iov,
+                                request->session_setup.input_niov);
+            return;
+        }
+    }
+
     // Detect authentication mechanism
     mech = smb_auth_detect_mechanism(input, input_len);
     chimera_smb_debug("Session setup: detected mechanism %s", smb_auth_mech_name(mech));
@@ -143,7 +175,17 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
      * hash by the response's SessionId: a zero id on the interim response
      * splits the hash across buckets and breaks signing-key derivation. */
     if ((rc == 0 || rc == 1) && !request->session_handle) {
-        session = chimera_smb_session_alloc(shared);
+        if (request->bind_session) {
+            /* Multichannel bind: attach this connection as a new channel of
+             * the existing session instead of creating a new one. */
+            session = request->bind_session;
+            if (rc == 0) {
+                request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
+            }
+        } else {
+            session          = chimera_smb_session_alloc(shared);
+            session->dialect = conn->dialect;
+        }
 
         session_handle = chimera_smb_session_handle_alloc(thread);
 
@@ -160,6 +202,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         request->compound->conn->last_session_handle = session_handle;
 
         request->session_handle = session_handle;
+        request->bind_session   = NULL;
     }
 
     if (rc == 0) {
@@ -269,6 +312,12 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             chimera_smb_session_authorize(shared, session);
         }
 
+        /* A reconnect names the session it is replacing in PreviousSessionId;
+        * MS-SMB2 3.3.5.5.1 requires the server to invalidate that session. */
+        chimera_smb_session_expire_previous(shared,
+                                            request->session_setup.prev_session_id,
+                                            session->session_id);
+
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
     } else if (rc == 1) {
         // Continue needed
@@ -290,6 +339,15 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             request->session_handle   = NULL;
             conn->last_session_handle = NULL;
         }
+    }
+
+    /* If this was a bind that did not complete (MORE_PROCESSING) or failed,
+     * drop the dispatcher's lookup reference; the next bind message re-resolves
+     * it.  On a successful bind the reference was transferred to the new
+     * channel handle and bind_session is already NULL. */
+    if (request->bind_session) {
+        chimera_smb_session_release(thread, shared, request->bind_session);
+        request->bind_session = NULL;
     }
 
     evpl_iovecs_release(thread->evpl, request->session_setup.input_iov, request->session_setup.input_niov);

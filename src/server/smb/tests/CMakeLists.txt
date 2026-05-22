@@ -252,12 +252,20 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.create_no_streams
     smb2.notify-inotify
     smb2.secleak
+    smb2.session-id
+    smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.winattr2
     # smb2.acls_non_canonical and smb2.async_dosmode pass on x86_64 but fail on
     # arm64 CI; left disabled until the arch difference is understood.
+    #
+    # smb2.session is not yet green: reauth/reconnect/session-id/multichannel
+    # bind-rejection and signing-required all pass now, but the remaining
+    # subtests need SMB3 encryption (anon-encryption*), multichannel bind reply
+    # signing (bind1/bind2/bind_invalid_auth) and cross-connection session
+    # teardown (reconnect1/reauth6).  Left disabled until those land.
 )
 set(SMBTORTURE_ENABLED_linux)
 set(SMBTORTURE_ENABLED_demofs_io_uring)
