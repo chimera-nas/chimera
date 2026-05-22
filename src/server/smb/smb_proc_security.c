@@ -400,10 +400,12 @@ chimera_smb_sd_to_acl(
 
         acl->num_aces   = n;
         acl->ctrl_flags = 0;
-        /* AUTO_INHERITED in the stored descriptor is driven by the client's
-         * AUTO_INHERIT_REQ request bit, not the (output-only) AUTO_INHERITED
-         * bit.  PROTECTED is stored as-is. */
-        if (sd_control & SE_DACL_AUTO_INHERIT_REQ) {
+        /* The stored DACL is in auto-inherit mode only when the client both
+         * requested it (AUTO_INHERIT_REQ) and marked the descriptor as
+         * auto-inherited (AUTO_INHERITED) -- REQ alone does not.  PROTECTED is
+         * stored as-is. */
+        if ((sd_control & SE_DACL_AUTO_INHERIT_REQ) &&
+            (sd_control & SE_DACL_AUTO_INHERITED)) {
             acl->ctrl_flags |= CHIMERA_ACL_CTRL_AUTO_INHERITED;
         }
         if (sd_control & SE_DACL_PROTECTED) {

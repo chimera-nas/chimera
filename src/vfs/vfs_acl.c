@@ -480,6 +480,13 @@ chimera_acl_inherit(
     unsigned                  max_aces)
 {
     unsigned n = 0;
+    /* When the parent DACL is in auto-inherit mode, the inherited ACEs it
+     * produces are marked SEC_ACE_FLAG_INHERITED; under a legacy (manually-set)
+     * parent DACL they are not.  This is the bit smbtorture's INHERITFLAGS
+     * compares. */
+    uint16_t inh = (parent &&
+                    (parent->ctrl_flags & CHIMERA_ACL_CTRL_AUTO_INHERITED)) ?
+        CHIMERA_ACE_FLAG_INHERITED : 0;
 
     if (parent) {
         for (unsigned i = 0; i < parent->num_aces; i++) {
@@ -505,7 +512,7 @@ chimera_acl_inherit(
                 }
                 out->aces[n]       = *src;
                 out->aces[n].who   = inherit_subst_creator(&src->who);
-                out->aces[n].flags = 0;
+                out->aces[n].flags = inh;
                 n++;
             } else {
                 /* A directory the ACE applies to (CONTAINER_INHERIT) gets an
@@ -516,7 +523,7 @@ chimera_acl_inherit(
                     }
                     out->aces[n]       = *src;
                     out->aces[n].who   = inherit_subst_creator(&src->who);
-                    out->aces[n].flags = 0;
+                    out->aces[n].flags = inh;
                     n++;
                 }
 
@@ -531,7 +538,7 @@ chimera_acl_inherit(
                     out->aces[n]       = *src;
                     out->aces[n].flags = (f & (CHIMERA_ACE_FLAG_FILE_INHERIT |
                                                CHIMERA_ACE_FLAG_DIR_INHERIT)) |
-                        CHIMERA_ACE_FLAG_INHERIT_ONLY;
+                        CHIMERA_ACE_FLAG_INHERIT_ONLY | inh;
                     n++;
                 }
             }
