@@ -148,8 +148,20 @@ chimera_nfs4_setattr(
         }
 
         struct nfs_open_state *open_state = state_void;
-        bool                   has_write  = (open_state->share_access &
-                                             OPEN4_SHARE_ACCESS_WRITE) != 0;
+
+        /* RFC 7530 §9.1.4.3: the stateid must name an open of the object that
+         * is the current filehandle, not some other open file. */
+        if (open_state->fh_len != req->fhlen ||
+            memcmp(open_state->fh, req->fh, req->fhlen) != 0) {
+            nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                    thread->vfs_thread);
+            res->status = NFS4ERR_BAD_STATEID;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+
+        bool has_write = (open_state->share_access &
+                          OPEN4_SHARE_ACCESS_WRITE) != 0;
 
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
