@@ -96,6 +96,9 @@ chimera_nfs4_compound_process(
                                             req->seen_sequence);
 
         if (gate != NFS4_OK) {
+            if (gate == NFS4ERR_OP_ILLEGAL) {
+                resop->resop = OP_ILLEGAL;
+            }
             chimera_nfs4_compound_complete(req, gate);
         } else {
             /* NFS4.1 current-stateid lifecycle (RFC 8881 §16.2.3.1.2):
@@ -291,6 +294,7 @@ chimera_nfs4_compound_process(
                     if (argop->argop >= OP_ACCESS && argop->argop <= OP_REMOVEXATTR) {
                         chimera_nfs4_compound_complete(req, NFS4ERR_NOTSUPP);
                     } else {
+                        resop->resop = OP_ILLEGAL;
                         chimera_nfs4_compound_complete(req, NFS4ERR_OP_ILLEGAL);
                     }
                     break;
