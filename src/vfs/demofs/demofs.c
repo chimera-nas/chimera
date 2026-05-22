@@ -308,9 +308,11 @@ struct demofs_bt_op;
  * buffer is plain heap memory; block I/O copies it through a thread-local
  * evpl_iovec so buffers are never shared across evpl instances.  All fields
  * (hash linkage, pin_count, state, LRU membership) are protected by the
- * owning shard lock.  A buffer is an eviction candidate exactly when it is
- * CLEAN and pin_count == 0, in which case it sits on the shard LRU
- * (on_lru == 1); recycling reuses the least-recently-used such buffer.
+ * owning shard lock.  A buffer is a recycle candidate exactly when it is CLEAN
+ * and pin_count == 0, in which case it sits on the shard LRU (on_lru == 1);
+ * recycling reuses the least-recently-used such buffer.  Buffers are drawn
+ * from a pre-allocated fixed pool (shard->pool) -- a free, never-yet-keyed
+ * buffer starts CLEAN on the LRU, not in any bucket.
  */
 struct demofs_block {
     uint32_t             device_id;
@@ -333,12 +335,13 @@ struct demofs_block_shard {
     pthread_mutex_t       lock;
     struct demofs_block **buckets;     /* [DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD] */
 
-    /* Fixed buffer pool with LRU eviction (all protected by lock).  The LRU
-     * holds only CLEAN, unpinned buffers (eviction candidates), ordered
-     * least-recently-used first.  Ops that need a buffer when none are free
-     * park on the waiter list and are resumed when one is returned. */
-    struct demofs_block  *lru_head, *lru_tail;  /* lru_head = next to evict */
-    struct demofs_bt_op  *wait_head, *wait_tail; /* ops awaiting a free buffer */
+    /* Pre-allocated fixed buffer pool (all protected by lock).  pool is an
+     * array of nblocks blocks whose buffers carve up the pool_mem arena; they
+     * are never individually freed.  The LRU holds only CLEAN, unpinned
+     * buffers (recycle candidates), ordered least-recently-used first. */
+    struct demofs_block  *pool;                 /* [nblocks] */
+    void                 *pool_mem;             /* nblocks * DEMOFS_BLOCK_SIZE */
+    struct demofs_block  *lru_head, *lru_tail;  /* lru_head = next to recycle */
     uint32_t              nblocks;              /* buffers owned by this shard */
 };
 
@@ -347,7 +350,18 @@ struct demofs_block_cache {
     struct demofs_block_shard shards[DEMOFS_BLOCK_CACHE_SHARDS];
 };
 
-#define DEMOFS_BLOCK_CACHE_DEFAULT_BLOCKS 8192  /* total; ~32 MiB of 4 KiB buffers */
+/*
+ * The block-cache pool is fixed and never blocks (see demofs_block_recycle):
+ * it must exceed the maximum pinnable set so an unpinned victim always exists.
+ * The only long-lived pins are a transaction's blocks, held from claim through
+ * LOGGED until the tail-pusher marks them CLEAN, and logging is backpressured
+ * to the intent-log size -- so the pinned set is bounded by the journal.  The
+ * default is 2x the journal (comfortable per-shard headroom over the variance),
+ * and a configured size is floored at 1.5x.
+ */
+#define DEMOFS_INTENT_LOG_BLOCKS          (SM_INTENT_LOG_SIZE / SM_BLOCK_SIZE)
+#define DEMOFS_BLOCK_CACHE_DEFAULT_BLOCKS (2 * DEMOFS_INTENT_LOG_BLOCKS)
+#define DEMOFS_BLOCK_CACHE_MIN_BLOCKS     (DEMOFS_INTENT_LOG_BLOCKS + DEMOFS_INTENT_LOG_BLOCKS / 2)
 
 /*
  * On-disk inode block layout (4 KiB):
@@ -1331,49 +1345,51 @@ demofs_block_lru_unlink(
 } /* demofs_block_lru_unlink */
 
 /*
- * Recycle the least-recently-used clean buffer for reuse at a new key, or
- * allocate a fresh one.  Caller holds the shard lock.  Returns a buffer with
- * pin_count 0 and not on the LRU, removed from its old bucket; the caller sets
- * the new key/state and links it into the new bucket.  Grows the pool past the
- * cap only when every buffer is pinned (no LRU victim) -- a bounded transient
- * until block_claim learns to wait (top-down rewrite).
+ * Recycle the least-recently-used CLEAN, unpinned buffer for reuse at a new
+ * key.  Caller holds the shard lock.  Returns a buffer with pin_count 0,
+ * unlinked from the LRU and removed from its old bucket (a no-op for a free,
+ * never-keyed buffer); the caller sets the new key/state and links it into the
+ * new bucket.
+ *
+ * The pool is fixed and never grows or blocks: the cache is provisioned larger
+ * than the maximum pinnable set (bounded by the intent log -- see the cache
+ * sizing constants), so by the pigeonhole principle the LRU is never empty.
+ * An empty LRU means every buffer in this shard is pinned -- a provisioning
+ * violation or a leaked pin (and, since the descent that called us holds pins
+ * in this shard, the precise self-deadlock condition).  Abort loudly rather
+ * than block and hang.
  */
 static struct demofs_block *
-demofs_block_recycle_or_alloc(
-    struct demofs_block_cache *cache,
-    struct demofs_block_shard *shard)
+demofs_block_recycle(struct demofs_block_shard *shard)
 {
-    struct demofs_block *blk;
+    struct demofs_block *blk = shard->lru_head;
+    struct demofs_block *cur, *prev;
+    uint32_t             ob;
 
-    if (shard->nblocks >= cache->shard_cap && shard->lru_head) {
-        uint32_t             ob;
-        struct demofs_block *cur, *prev;
+    chimera_demofs_abort_if(!blk,
+                            "block cache shard exhausted: every buffer pinned "
+                            "(raise block_cache_blocks above the intent-log size, "
+                            "or a pin was leaked)");
 
-        blk = shard->lru_head;
-        demofs_block_lru_unlink(shard, blk);
+    demofs_block_lru_unlink(shard, blk);
 
-        /* Unhook from its current bucket. */
-        ob   = demofs_block_bucket(blk->device_id, blk->device_offset);
-        prev = NULL;
-        for (cur = shard->buckets[ob]; cur; prev = cur, cur = cur->hash_next) {
-            if (cur == blk) {
-                if (prev) {
-                    prev->hash_next = cur->hash_next;
-                } else {
-                    shard->buckets[ob] = cur->hash_next;
-                }
-                break;
+    /* Unhook from its current bucket (no-op for a never-keyed free buffer:
+     * it is in no chain, so the pointer search simply finds nothing). */
+    ob   = demofs_block_bucket(blk->device_id, blk->device_offset);
+    prev = NULL;
+    for (cur = shard->buckets[ob]; cur; prev = cur, cur = cur->hash_next) {
+        if (cur == blk) {
+            if (prev) {
+                prev->hash_next = cur->hash_next;
+            } else {
+                shard->buckets[ob] = cur->hash_next;
             }
+            break;
         }
-        blk->hash_next = NULL;
-        return blk;
     }
-
-    blk         = calloc(1, sizeof(*blk));
-    blk->buffer = calloc(1, DEMOFS_BLOCK_SIZE);
-    shard->nblocks++;
+    blk->hash_next = NULL;
     return blk;
-} /* demofs_block_recycle_or_alloc */
+} /* demofs_block_recycle */
 
 static void
 demofs_block_unpin(
@@ -1388,7 +1404,6 @@ demofs_block_unpin(
     blk->state = new_state;
     if (--blk->pin_count == 0 && blk->state == DEMOFS_BLOCK_CLEAN && !blk->on_lru) {
         demofs_block_lru_push_tail(shard, blk);
-        /* A3b: wake a buffer waiter here. */
     }
     pthread_mutex_unlock(&shard->lock);
 } /* demofs_block_unpin */
@@ -1405,7 +1420,6 @@ demofs_block_release(
     pthread_mutex_lock(&shard->lock);
     if (--blk->pin_count == 0 && blk->state == DEMOFS_BLOCK_CLEAN && !blk->on_lru) {
         demofs_block_lru_push_tail(shard, blk);
-        /* A3b: wake a buffer waiter here. */
     }
     pthread_mutex_unlock(&shard->lock);
 } /* demofs_block_release */
@@ -1417,6 +1431,14 @@ demofs_block_cache_create(struct demofs_shared *shared)
     uint32_t                   total = shared->block_cache_blocks ?
         shared->block_cache_blocks : DEMOFS_BLOCK_CACHE_DEFAULT_BLOCKS;
     int                        i;
+    uint32_t                   j;
+
+    /* The pool never grows or blocks, so it must clear the maximum pinnable
+     * set; floor an under-sized configuration rather than risk the recycle
+     * abort under load. */
+    if (total < DEMOFS_BLOCK_CACHE_MIN_BLOCKS) {
+        total = DEMOFS_BLOCK_CACHE_MIN_BLOCKS;
+    }
 
     cache->shard_cap = total / DEMOFS_BLOCK_CACHE_SHARDS;
     if (cache->shard_cap == 0) {
@@ -1424,9 +1446,24 @@ demofs_block_cache_create(struct demofs_shared *shared)
     }
 
     for (i = 0; i < DEMOFS_BLOCK_CACHE_SHARDS; i++) {
-        pthread_mutex_init(&cache->shards[i].lock, NULL);
-        cache->shards[i].buckets = calloc(DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD,
-                                          sizeof(struct demofs_block *));
+        struct demofs_block_shard *shard = &cache->shards[i];
+
+        pthread_mutex_init(&shard->lock, NULL);
+        shard->buckets = calloc(DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD,
+                                sizeof(struct demofs_block *));
+        shard->pool     = calloc(cache->shard_cap, sizeof(struct demofs_block));
+        shard->pool_mem = calloc(cache->shard_cap, DEMOFS_BLOCK_SIZE);
+
+        /* Pre-populate: every buffer starts free (unkeyed, in no bucket) and
+         * CLEAN on the LRU.  Carve the buffers out of the shared arena. */
+        for (j = 0; j < cache->shard_cap; j++) {
+            struct demofs_block *blk = &shard->pool[j];
+
+            blk->buffer = (char *) shard->pool_mem + (size_t) j * DEMOFS_BLOCK_SIZE;
+            blk->state  = DEMOFS_BLOCK_CLEAN;
+            demofs_block_lru_push_tail(shard, blk);
+            shard->nblocks++;
+        }
     }
     shared->block_cache = cache;
 } /* demofs_block_cache_create */
@@ -1436,7 +1473,6 @@ demofs_block_cache_destroy(struct demofs_shared *shared)
 {
     struct demofs_block_cache *cache = shared->block_cache;
     int                        i;
-    uint32_t                   b;
 
     if (!cache) {
         return;
@@ -1445,16 +1481,9 @@ demofs_block_cache_destroy(struct demofs_shared *shared)
     for (i = 0; i < DEMOFS_BLOCK_CACHE_SHARDS; i++) {
         struct demofs_block_shard *shard = &cache->shards[i];
 
-        for (b = 0; b < DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD; b++) {
-            struct demofs_block *blk = shard->buckets[b];
-
-            while (blk) {
-                struct demofs_block *next = blk->hash_next;
-                free(blk->buffer);
-                free(blk);
-                blk = next;
-            }
-        }
+        /* Blocks are slices of the fixed pool; free the arena, not each one. */
+        free(shard->pool_mem);
+        free(shard->pool);
         free(shard->buckets);
         pthread_mutex_destroy(&shard->lock);
     }
@@ -1511,7 +1540,7 @@ demofs_block_claim(
 
     blk = demofs_block_lookup_locked(shard, bucket, device_id, device_offset);
     if (!blk) {
-        blk                = demofs_block_recycle_or_alloc(cache, shard);
+        blk                = demofs_block_recycle(shard);
         blk->device_id     = device_id;
         blk->device_offset = device_offset;
         blk->state         = DEMOFS_BLOCK_CLEAN;
@@ -1782,7 +1811,7 @@ demofs_bt_block_get(
     }
 
     if (!blk) {
-        blk                    = demofs_block_recycle_or_alloc(cache, shard);
+        blk                    = demofs_block_recycle(shard);
         blk->device_id         = device_id;
         blk->device_offset     = device_offset;
         blk->state             = DEMOFS_BLOCK_LOADING;
@@ -4442,7 +4471,6 @@ demofs_il_clean_pushed_record(
             blk->state = DEMOFS_BLOCK_CLEAN;
             if (!blk->on_lru) {
                 demofs_block_lru_push_tail(shard, blk);
-                /* A3b: wake a buffer waiter here. */
             }
         }
         pthread_mutex_unlock(&shard->lock);
