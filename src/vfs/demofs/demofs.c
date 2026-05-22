@@ -331,6 +331,14 @@ struct demofs_block {
 struct demofs_block_shard {
     pthread_mutex_t       lock;
     struct demofs_block **buckets;     /* [DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD] */
+
+    /* Fixed buffer pool with LRU eviction (all protected by lock).  The LRU
+     * holds only CLEAN, unpinned buffers (eviction candidates), ordered
+     * least-recently-used first.  Ops that need a buffer when none are free
+     * park on the waiter list and are resumed when one is returned. */
+    struct demofs_block  *lru_head, *lru_tail;  /* lru_head = next to evict */
+    struct demofs_bt_op  *wait_head, *wait_tail; /* ops awaiting a free buffer */
+    uint32_t              nblocks;              /* buffers owned by this shard */
 };
 
 struct demofs_block_cache {
@@ -1385,9 +1393,9 @@ demofs_block_claim(
             }
         }
 
-        /* Publish into the bucket chain (RCU readers will use hash_next). */
-        blk->hash_next = shard->buckets[bucket];
-        rcu_assign_pointer(shard->buckets[bucket], blk);
+        /* Publish into the bucket chain (all lookups hold the shard lock). */
+        blk->hash_next         = shard->buckets[bucket];
+        shard->buckets[bucket] = blk;
     }
 
     blk->pin_count++;
@@ -1606,15 +1614,6 @@ demofs_bt_block_get(
     struct demofs_block_load  *ld;
     int                        issue = 0;
 
-    /* Fast path: lock-free hit on a resident, loaded block. */
-    urcu_memb_read_lock();
-    blk = demofs_block_lookup_locked(shard, bucket, device_id, device_offset);
-    if (blk && blk->state != DEMOFS_BLOCK_LOADING) {
-        urcu_memb_read_unlock();
-        return blk;
-    }
-    urcu_memb_read_unlock();
-
     pthread_mutex_lock(&shard->lock);
     blk = demofs_block_lookup_locked(shard, bucket, device_id, device_offset);
     if (blk && blk->state != DEMOFS_BLOCK_LOADING) {
@@ -1623,14 +1622,14 @@ demofs_bt_block_get(
     }
 
     if (!blk) {
-        blk                = calloc(1, sizeof(*blk));
-        blk->device_id     = device_id;
-        blk->device_offset = device_offset;
-        blk->buffer        = calloc(1, DEMOFS_BLOCK_SIZE);
-        blk->state         = DEMOFS_BLOCK_LOADING;
-        blk->hash_next     = shard->buckets[bucket];
-        rcu_assign_pointer(shard->buckets[bucket], blk);
-        issue = 1;
+        blk                    = calloc(1, sizeof(*blk));
+        blk->device_id         = device_id;
+        blk->device_offset     = device_offset;
+        blk->buffer            = calloc(1, DEMOFS_BLOCK_SIZE);
+        blk->state             = DEMOFS_BLOCK_LOADING;
+        blk->hash_next         = shard->buckets[bucket];
+        shard->buckets[bucket] = blk;
+        issue                  = 1;
     }
 
     /* Park this op on the block's waiter list; it can no longer complete
