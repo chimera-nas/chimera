@@ -719,18 +719,19 @@ def test_multipart(client, bucket):
                                PartNumber=n, UploadId=o_id,
                                Body=bytes([n]) * part_size)
         o_parts.append({'PartNumber': n, 'ETag': r['ETag']})
-    try:
-        client.complete_multipart_upload(
-            Bucket=bucket, Key='mpdir/order', UploadId=o_id,
-            MultipartUpload={'Parts': [o_parts[1], o_parts[0]]},
-        )
-        raise AssertionError("Complete with out-of-order parts should fail")
-    except ClientError as e:
-        # boto3 sometimes sorts internally; either InvalidPartOrder or
-        # silently sorted are both acceptable. If sorted, no error -> fail loud.
-        if e.response['Error']['Code'] != 'InvalidPartOrder':
-            raise
-        print("  Out-of-order parts -> InvalidPartOrder (ok)")
+    body = (
+        '<CompleteMultipartUpload>'
+        '<Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part>'
+        '<Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part>'
+        '</CompleteMultipartUpload>'
+    ).format(o_parts[1]['ETag'], o_parts[0]['ETag']).encode('utf-8')
+    status, resp_body = signed_s3_post_xml(
+        'localhost', 5000, 'myaccessid', 'mysecretkey', 'us-east-1',
+        bucket, 'mpdir/order', f'uploadId={o_id}', body)
+    assert status == 400 and b'InvalidPartOrder' in resp_body, (
+        f"out-of-order CompleteMultipartUpload: status={status}, "
+        f"body={resp_body!r}")
+    print("  Out-of-order parts -> InvalidPartOrder (ok)")
     client.abort_multipart_upload(Bucket=bucket, Key='mpdir/order',
                                   UploadId=o_id)
 
@@ -929,6 +930,66 @@ def streaming_put(host, port, access_key, secret_key, region, bucket, key,
     resp.read()
     conn.close()
     return resp.status, etag
+
+
+def signed_s3_post_xml(host, port, access_key, secret_key, region, bucket, key,
+                       query, body):
+    """Perform a plain SigV4 POST with an XML body.
+
+    boto3 may normalize CompleteMultipartUpload part manifests before sending
+    them. Negative parser tests need exact wire order, so use a minimal signed
+    request for those cases.
+    """
+    service = 's3'
+    host_header = f'{host}:{port}'
+    canonical_uri = f'/{bucket}/{key}'
+    request_target = canonical_uri + (f'?{query}' if query else '')
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    amz_date = now.strftime('%Y%m%dT%H%M%SZ')
+    date_stamp = now.strftime('%Y%m%d')
+    scope = f'{date_stamp}/{region}/{service}/aws4_request'
+
+    payload_hash = _sha256_hex(body)
+    headers = {
+        'content-length': str(len(body)),
+        'content-type': 'application/xml',
+        'host': host_header,
+        'x-amz-content-sha256': payload_hash,
+        'x-amz-date': amz_date,
+    }
+    signed_headers = ';'.join(sorted(headers))
+    canonical_headers = ''.join(f'{n}:{headers[n]}\n' for n in sorted(headers))
+
+    canonical_request = (
+        f'POST\n{canonical_uri}\n{_canonical_query(query)}\n{canonical_headers}\n'
+        f'{signed_headers}\n{payload_hash}'
+    )
+    string_to_sign = (
+        f'AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n'
+        f'{_sha256_hex(canonical_request.encode("utf-8"))}'
+    )
+
+    k_date = _sign(('AWS4' + secret_key).encode('utf-8'), date_stamp)
+    k_region = hmac.new(k_date, region.encode('utf-8'), hashlib.sha256).digest()
+    k_service = hmac.new(k_region, service.encode('utf-8'), hashlib.sha256).digest()
+    signing_key = hmac.new(k_service, b'aws4_request', hashlib.sha256).digest()
+    signature = hmac.new(signing_key, string_to_sign.encode('utf-8'),
+                         hashlib.sha256).hexdigest()
+
+    send_headers = dict(headers)
+    send_headers['Authorization'] = (
+        f'AWS4-HMAC-SHA256 Credential={access_key}/{scope}, '
+        f'SignedHeaders={signed_headers}, Signature={signature}'
+    )
+
+    conn = http.client.HTTPConnection(host, port, timeout=30)
+    conn.request('POST', request_target, body=body, headers=send_headers)
+    resp = conn.getresponse()
+    resp_body = resp.read()
+    status = resp.status
+    conn.close()
+    return status, resp_body
 
 
 def test_streaming(client, bucket):
