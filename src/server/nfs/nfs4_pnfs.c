@@ -169,10 +169,18 @@ chimera_nfs4_encode_ff_layout(
     uint8_t       *buf,
     const uint8_t *deviceid,
     const uint8_t *ds_fh,
-    uint32_t       ds_fh_len)
+    uint32_t       ds_fh_len,
+    uint32_t       iomode)
 {
     void         *p                = buf;
     const uint8_t zero_stateid[16] = { 0 };
+
+    /* ffds_user is the synthetic principal the client uses for DS I/O.  It
+     * varies by iomode -- RW segments use the cluster-trusted "0" (matching how
+     * the MDS owns the backing files), READ segments a distinct read principal
+     * -- so a client can tell two segments of the same file apart (RFC 8435
+     * §5.1).  ffds_group is constant across iomodes. */
+    const char   *ffds_user = (iomode == LAYOUTIOMODE4_RW) ? "0" : "1";
 
     pnfs_put_u64(&p, NFS4_PNFS_STRIPE_UNIT);          /* ffl_stripe_unit       */
 
@@ -186,7 +194,7 @@ chimera_nfs4_encode_ff_layout(
     p += sizeof(zero_stateid);
     pnfs_put_u32(&p, 1);                              /* ffds_fh_vers<> count  */
     pnfs_put_opaque(&p, ds_fh, ds_fh_len);            /* the DS's v3 handle    */
-    pnfs_put_opaque(&p, "0", 1);                      /* ffds_user  (synthetic)*/
+    pnfs_put_opaque(&p, ffds_user, 1);                /* ffds_user  (per-iomode)*/
     pnfs_put_opaque(&p, "0", 1);                      /* ffds_group (synthetic)*/
 
     pnfs_put_u32(&p, 0);                              /* ffl_flags             */
@@ -299,7 +307,8 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
 
     body = xdr_dbuf_alloc_space(256, req->encoding->dbuf);
     chimera_nfs_abort_if(body == NULL, "Failed to allocate space");
-    body_len = chimera_nfs4_encode_ff_layout(body, deviceid, native_fh, native_fh_len);
+    body_len = chimera_nfs4_encode_ff_layout(body, deviceid, native_fh, native_fh_len,
+                                             args->loga_iomode);
 
     lo = xdr_dbuf_alloc_space(sizeof(*lo), req->encoding->dbuf);
     chimera_nfs_abort_if(lo == NULL, "Failed to allocate space");
@@ -543,6 +552,25 @@ chimera_nfs4_layoutreturn(
             nfs_layout_state_find(client, req->fh, req->fhlen);
 
         if (layout) {
+            uint32_t in_seqid =
+                args->lora_layoutreturn.lr_layout.lrf_stateid.seqid;
+
+            /* RFC 8881 §12.5.3: the layout stateid carried by LAYOUTRETURN must
+             * match the server's current seqid for this layout.  A stale seqid
+             * is OLD_STATEID, a future one BAD_STATEID; seqid 0 is the wildcard
+             * "current" and always matches.  (LAYOUTGET, by contrast, tolerates
+             * an old seqid -- the client may race two LAYOUTGETs.) */
+            if (in_seqid != 0 && in_seqid < layout->seqid) {
+                res->lorr_status = NFS4ERR_OLD_STATEID;
+                chimera_nfs4_compound_complete(req, res->lorr_status);
+                return;
+            }
+            if (in_seqid > layout->seqid) {
+                res->lorr_status = NFS4ERR_BAD_STATEID;
+                chimera_nfs4_compound_complete(req, res->lorr_status);
+                return;
+            }
+
             /* Destroying the layout deregisters it from the server-wide table;
              * if it was the last holder of this file, that resumes any
              * operation deferred while its recall was outstanding (stage two). */
@@ -576,6 +604,29 @@ chimera_nfs4_getdevicelist(
     res->gdlr_status = NFS4ERR_NOTSUPP;
     chimera_nfs4_compound_complete(req, res->gdlr_status);
 } /* chimera_nfs4_getdevicelist */
+
+void
+chimera_nfs4_layoutstats(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
+{
+    struct LAYOUTSTATS4res *res = &resop->oplayoutstats;
+
+    (void) argop;
+
+    /* LAYOUTSTATS (RFC 7862 §15.x, used by flex-files RFC 8435 §6) lets the
+     * client report per-layout I/O statistics to the MDS.  Chimera does not yet
+     * consume them, so accept and acknowledge.  ffl_stats_collect_hint in the
+     * layout we hand out is 0, but clients may report regardless. */
+    if (!chimera_vfs_pnfs_enabled(thread->shared->vfs)) {
+        res->lsr_status = NFS4ERR_NOTSUPP;
+    } else {
+        res->lsr_status = NFS4_OK;
+    }
+    chimera_nfs4_compound_complete(req, res->lsr_status);
+} /* chimera_nfs4_layoutstats */
 
 static void
 chimera_nfs4_layoutcommit_setattr_complete(

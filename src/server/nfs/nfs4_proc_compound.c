@@ -277,6 +277,9 @@ chimera_nfs4_compound_process(
                 case OP_LAYOUTCOMMIT:
                     chimera_nfs4_layoutcommit(thread, req, argop, resop);
                     break;
+                case OP_LAYOUTSTATS:
+                    chimera_nfs4_layoutstats(thread, req, argop, resop);
+                    break;
                 case OP_GETDEVICELIST:
                     chimera_nfs4_getdevicelist(thread, req, argop, resop);
                     break;

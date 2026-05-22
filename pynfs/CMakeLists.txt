@@ -87,3 +87,14 @@ foreach(minor ${PYNFS_MINOR_VERSIONS})
         endforeach()
     endforeach()
 endforeach()
+
+# pNFS flex-files (RFC 8435) suite.  Unlike the suites above it needs a pNFS
+# metadata server *and* a separate data server, so it uses a dedicated wrapper
+# that brings up both (memfs MDS on :2049 + memfs data_server on :2050) and runs
+# pynfs's `flex` flag against the MDS.  memfs only.
+set(PNFS_WRAPPER ${CMAKE_SOURCE_DIR}/scripts/pynfs_pnfs_test_wrapper.sh)
+add_test(NAME chimera/pynfs/flex_memfs_nfs4.1
+    COMMAND bash ${PNFS_WRAPPER} ${CHIMERA_BINARY} ${PYNFS_DIR} flex)
+set_tests_properties(chimera/pynfs/flex_memfs_nfs4.1 PROPERTIES
+    LABELS pynfs
+    ENVIRONMENT "PYTHONUNBUFFERED=1")
