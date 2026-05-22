@@ -23,6 +23,7 @@ add_executable(test_replay_slot
     test_replay_slot.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_session.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_state.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_layout_table.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_lease.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c)

@@ -21,6 +21,8 @@
 #include "smb/smb.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_pnfs.h"
+#include "vfs/vfs_mount_table.h"
 #include "common/macros.h"
 #include "server/server.h"
 #include "smb/smb2.h"
@@ -41,6 +43,8 @@ struct chimera_server_config {
     int                                   nfs_rdma_port;
     int                                   nfs_tcp_rdma_port;
     int                                   nfs_lockmgr_port;
+    int                                   nfs_port;
+    int                                   nfs_data_server;
     int                                   external_portmap;
     char                                  portmap_hostname[256];
     int                                   soft_fail_bad_req;
@@ -71,6 +75,13 @@ struct chimera_server_config {
     struct chimera_vfs_module_cfg         modules[CHIMERA_SERVER_MAX_MODULES];
     struct chimera_server_config_smb_nic  smb_nic_info[16];
     struct chimera_server_config_smb_auth smb_auth;
+    int                                   pnfs_enabled;
+    int                                   pnfs_num_ds;
+    struct chimera_server_config_pnfs_ds {
+        char netid[8];
+        char uaddr[64];
+        char backing_path[CHIMERA_PNFS_BACKING_MAX];
+    }                                     pnfs_ds[CHIMERA_PNFS_MAX_DS];
 };
 
 struct chimera_server {
@@ -133,6 +144,15 @@ chimera_server_config_init(void)
 
     config->anonuid = 65534;
     config->anongid = 65534;
+
+    /* pNFS layouts are disabled by default. */
+    config->pnfs_enabled = 0;
+    config->pnfs_num_ds  = 0;
+
+    /* NFS service port (default 2049); data-server mode binds only the NFSv4
+     * service so a pNFS data server can coexist with an MDS on one host. */
+    config->nfs_port        = 2049;
+    config->nfs_data_server = 0;
 
     config->cache_ttl = 60;
 
@@ -319,6 +339,72 @@ chimera_server_config_get_nfs_rdma(const struct chimera_server_config *config)
 } /* chimera_server_config_get_nfs_rdma */
 
 SYMBOL_EXPORT void
+chimera_server_config_set_pnfs_enabled(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->pnfs_enabled = enable;
+} /* chimera_server_config_set_pnfs_enabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_pnfs_enabled(const struct chimera_server_config *config)
+{
+    return config->pnfs_enabled;
+} /* chimera_server_config_get_pnfs_enabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_add_pnfs_ds(
+    struct chimera_server_config *config,
+    const char                   *netid,
+    const char                   *uaddr,
+    const char                   *backing_path)
+{
+    struct chimera_server_config_pnfs_ds *ds;
+    int                                   idx;
+
+    if (config->pnfs_num_ds >= CHIMERA_PNFS_MAX_DS) {
+        return -1;
+    }
+
+    idx = config->pnfs_num_ds++;
+    ds  = &config->pnfs_ds[idx];
+
+    snprintf(ds->netid, sizeof(ds->netid), "%s", netid ? netid : "tcp");
+    snprintf(ds->uaddr, sizeof(ds->uaddr), "%s", uaddr ? uaddr : "");
+    snprintf(ds->backing_path, sizeof(ds->backing_path), "%s", backing_path ? backing_path : "");
+
+    return idx;
+} /* chimera_server_config_add_pnfs_ds */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->nfs_port = port;
+} /* chimera_server_config_set_nfs_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_port(const struct chimera_server_config *config)
+{
+    return config->nfs_port;
+} /* chimera_server_config_get_nfs_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_data_server(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->nfs_data_server = enable;
+} /* chimera_server_config_set_nfs_data_server */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_data_server(const struct chimera_server_config *config)
+{
+    return config->nfs_data_server;
+} /* chimera_server_config_get_nfs_data_server */
+
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_rdma_hostname(
     struct chimera_server_config *config,
     const char                   *hostname)
@@ -443,20 +529,33 @@ chimera_server_config_add_module(
     const char                   *module_path,
     const char                   *config_data)
 {
-    struct chimera_vfs_module_cfg *module_cfg;
+    struct chimera_vfs_module_cfg *module_cfg = NULL;
+    int                            i;
 
-    module_cfg = &config->modules[config->num_modules];
+    /* A module name maps to a single backend (one fh_magic), so configuring a
+     * built-in module (e.g. memfs with ds_mode/block_size) must override its
+     * default entry rather than register a duplicate -- a double registration
+     * leaks the first instance's private state. */
+    for (i = 0; i < config->num_modules; i++) {
+        if (strcmp(config->modules[i].module_name, module_name) == 0) {
+            module_cfg = &config->modules[i];
+            break;
+        }
+    }
 
-    strncpy(module_cfg->module_name, module_name, sizeof(module_cfg->module_name));
-    strncpy(module_cfg->config_data, config_data, sizeof(module_cfg->config_data));
+    if (!module_cfg) {
+        module_cfg = &config->modules[config->num_modules++];
+    }
+
+    snprintf(module_cfg->module_name, sizeof(module_cfg->module_name), "%s", module_name);
+    snprintf(module_cfg->config_data, sizeof(module_cfg->config_data), "%s", config_data);
     if (module_path) {
-        strncpy(module_cfg->module_path, module_path, sizeof(module_cfg->module_path));
+        snprintf(module_cfg->module_path, sizeof(module_cfg->module_path), "%s", module_path);
     } else {
         /* We don't specify a path for preloaded modules like demofs */
         module_cfg->module_path[0] = '\0';
     }
-    config->num_modules++;
-} /* chimera_server_config_add_module */ /* chimera_server_config_add_module */
+} /* chimera_server_config_add_module */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_metrics_port(
@@ -725,6 +824,46 @@ chimera_server_mount(
 } /* chimera_server_create_share */
 
 SYMBOL_EXPORT int
+chimera_server_pnfs_resolve(struct chimera_server *server)
+{
+    struct chimera_vfs *vfs = server->vfs;
+    int                 n   = chimera_vfs_pnfs_num_devices(vfs);
+    int                 i, resolved = 0;
+
+    for (i = 0; i < n; i++) {
+        struct chimera_vfs_ds    *ds = chimera_vfs_pnfs_get_device(vfs, i);
+        struct chimera_vfs_mount *m;
+        const char               *bpath = ds->backing_path;
+
+        /* Mounts are registered with leading slashes stripped (see
+         * chimera_vfs_mount), so normalize the configured backing path the same
+         * way -- otherwise "/ds0" only prefix-matches the empty-path root. */
+        while (*bpath == '/') {
+            bpath++;
+        }
+
+        m = chimera_vfs_mount_table_find_by_path(vfs->mount_table,
+                                                 bpath,
+                                                 strlen(bpath));
+        if (!m) {
+            chimera_server_error(
+                "pNFS data server %d: backing mount '%s' not found (mount it via the nfs module)",
+                i, ds->backing_path);
+            continue;
+        }
+
+        chimera_vfs_pnfs_set_device_root(vfs, i, m->root_fh, m->root_fh_len);
+        chimera_server_info("pNFS data server %d backing root resolved via '%s' (module=%s path=%s root_fh_len=%d)",
+                            i, ds->backing_path,
+                            m->module ? m->module->name : "?",
+                            m->path ? m->path : "?", m->root_fh_len);
+        resolved++;
+    }
+
+    return (resolved == n) ? 0 : -1;
+} /* chimera_server_pnfs_resolve */
+
+SYMBOL_EXPORT int
 chimera_server_create_bucket(
     struct chimera_server *server,
     const char            *bucket_name,
@@ -846,18 +985,39 @@ chimera_server_init(
                                    config->cache_ttl,
                                    metrics);
 
+    /* Publish the pNFS data-server table into the VFS layer so both the
+     * backend (steering / layout construction) and the NFS protocol layer
+     * (GETDEVICEINFO) read from a single authoritative table. */
+    if (config->pnfs_enabled && config->pnfs_num_ds > 0) {
+        chimera_vfs_pnfs_set_enabled(server->vfs, 1);
+        for (i = 0; i < config->pnfs_num_ds; i++) {
+            chimera_vfs_pnfs_add_device(server->vfs,
+                                        config->pnfs_ds[i].netid,
+                                        config->pnfs_ds[i].uaddr,
+                                        config->pnfs_ds[i].backing_path);
+        }
+        chimera_server_info("pNFS enabled with %d data server(s)", config->pnfs_num_ds);
+    }
+
     chimera_server_info("Initializing protocols...");
     server->protocols[server->num_protocols++] = &nfs_protocol;
-    server->protocols[server->num_protocols++] = &smb_protocol;
-    server->protocols[server->num_protocols++] = &s3_protocol;
+
+    /* A pNFS data server speaks only NFS; skipping SMB/S3 also frees their
+     * fixed listen ports so it can share a host with the metadata server. */
+    if (!config->nfs_data_server) {
+        server->protocols[server->num_protocols++] = &smb_protocol;
+        server->protocols[server->num_protocols++] = &s3_protocol;
+    }
 
     for (i = 0; i < server->num_protocols; i++) {
         server->protocol_private[i] = server->protocols[i]->init(config, server->vfs, metrics);
     }
 
-    server->s3_shared  = server->protocol_private[2];
-    server->smb_shared = server->protocol_private[1];
     server->nfs_shared = server->protocol_private[0];
+    if (!config->nfs_data_server) {
+        server->smb_shared = server->protocol_private[1];
+        server->s3_shared  = server->protocol_private[2];
+    }
 
     chimera_server_info("Initializing REST API...");
     server->rest = chimera_rest_init(config, server, server->vfs, metrics);

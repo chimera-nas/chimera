@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "server/server.h"
 #include "nfs4_status.h"
 #include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
@@ -112,7 +113,10 @@ chimera_nfs4_read(
      * anonymous stateid (all zeros).  Open the current FH on the fly
      * instead of consulting the state table.
      */
-    if (chimera_nfs4_stateid_is_anonymous(&args->stateid)) {
+    /* A pNFS data server serves READ by file handle without consulting its
+     * (empty) state table; the MDS authorizes the I/O via the layout. */
+    if (chimera_nfs4_stateid_is_anonymous(&args->stateid) ||
+        chimera_server_config_get_nfs_data_server(thread->shared->config)) {
         if (req->fhlen == 0) {
             res->status = NFS4ERR_NOFILEHANDLE;
             chimera_nfs4_compound_complete(req, NFS4_OK);

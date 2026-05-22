@@ -41,6 +41,14 @@
  * if it actually tracks the value. */
 #define CHIMERA_VFS_ATTR_BTIME          (1UL << 22)
 
+/* Opaque per-file pNFS layout state (va_pnfs/va_pnfs_len).  The contents are
+ * defined and interpreted solely by the NFS server (it packs the data-server
+ * deviceid + backing file handle); a backend just persists and returns the
+ * blob verbatim, which is all it takes to become a pNFS metadata-server
+ * backend.  A backend advertises CHIMERA_VFS_CAP_LAYOUT iff it persists it. */
+#define CHIMERA_VFS_ATTR_PNFS_LAYOUT    (1UL << 23)
+#define CHIMERA_VFS_PNFS_LAYOUT_MAX     96
+
 #define CHIMERA_VFS_ATTR_MASK_STAT      ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \
@@ -103,6 +111,11 @@ struct chimera_vfs_attrs {
     uint64_t        va_fsid;
 
     uint32_t        va_dos_attributes;
+
+    /* Opaque pNFS layout state, owned by the NFS server (see
+     * CHIMERA_VFS_ATTR_PNFS_LAYOUT). */
+    uint32_t        va_pnfs_len;
+    uint8_t         va_pnfs[CHIMERA_VFS_PNFS_LAYOUT_MAX];
 
     uint32_t        va_fh_len;
     uint64_t        va_fh_hash;

@@ -117,26 +117,36 @@ struct memfs_xattr {
     uint32_t            value_len;
 };
 
-struct memfs_inode {
-    uint64_t            inum;
-    uint32_t            gen;
-    uint32_t            refcnt;
-    uint64_t            size;
-    uint64_t            space_used;
-    uint32_t            mode;
-    uint32_t            nlink;
-    uint32_t            uid;
-    uint32_t            gid;
-    uint64_t            rdev;
-    uint32_t            dos_attributes;
-    struct timespec     atime;
-    struct timespec     mtime;
-    struct timespec     ctime;
-    struct timespec     btime;
-    struct memfs_inode *next;
-    struct memfs_xattr *xattrs;
+/* Opaque per-file pNFS layout state (CHIMERA_VFS_ATTR_PNFS_LAYOUT).  memfs
+ * persists and returns this blob verbatim via getattr/setattr; only the NFS
+ * server interprets it.  Present (non-NULL) once the NFS server has recorded a
+ * layout for the file. */
+struct memfs_remote {
+    uint32_t len;
+    uint8_t  data[CHIMERA_VFS_PNFS_LAYOUT_MAX];
+};
 
-    pthread_mutex_t     lock;
+struct memfs_inode {
+    uint64_t             inum;
+    uint32_t             gen;
+    uint32_t             refcnt;
+    uint64_t             size;
+    uint64_t             space_used;
+    uint32_t             mode;
+    uint32_t             nlink;
+    uint32_t             uid;
+    uint32_t             gid;
+    uint64_t             rdev;
+    uint32_t             dos_attributes;
+    struct timespec      atime;
+    struct timespec      mtime;
+    struct timespec      ctime;
+    struct timespec      btime;
+    struct memfs_inode  *next;
+    struct memfs_xattr  *xattrs;
+    struct memfs_remote *remote;   /* non-NULL => pNFS stub (data lives on a DS) */
+
+    pthread_mutex_t      lock;
 
     union {
         struct {
@@ -398,6 +408,7 @@ memfs_inode_alloc(
     inode->mode           = 0;
     inode->dos_attributes = 0;
     inode->xattrs         = NULL;
+    inode->remote         = NULL;
 
     return inode;
 
@@ -473,6 +484,11 @@ memfs_inode_free(
 
     /* Extended attributes hang off every inode type. */
     memfs_xattr_free_all(inode);
+
+    if (inode->remote) {
+        free(inode->remote);
+        inode->remote = NULL;
+    }
 
     /* Increment generation so stale file handles return ESTALE */
     inode->gen++;
@@ -633,6 +649,17 @@ memfs_init(const char *cfgdata)
             block_size = (uint32_t) v;
         }
 
+        /* A stable fsid keeps the mount_id constant across restarts (useful
+         * for a data server so its handles stay valid).  Hex or decimal int. */
+        json_t *fsid_cfg = json_object_get(cfg, "fsid");
+        if (fsid_cfg) {
+            if (json_is_integer(fsid_cfg)) {
+                shared->fsid = (uint64_t) json_integer_value(fsid_cfg);
+            } else if (json_is_string(fsid_cfg)) {
+                shared->fsid = strtoull(json_string_value(fsid_cfg), NULL, 0);
+            }
+        }
+
         json_decref(cfg);
     }
 
@@ -734,6 +761,13 @@ memfs_destroy(void *private_data)
 
                     if (inode->file.blocks) {
                         free(inode->file.blocks);
+                    }
+
+                    /* Stubs are always regular files; free the remote
+                     * descriptor here so we never touch the uninitialized
+                     * fields of never-allocated free-list inodes. */
+                    if (inode->remote) {
+                        free(inode->remote);
                     }
                 }
             }
@@ -863,6 +897,13 @@ memfs_map_attrs(
         attr->va_fsid      = shared->fsid;
     }
 
+    /* Opaque pNFS layout state, persisted verbatim for the NFS server. */
+    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) && inode->remote) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_PNFS_LAYOUT;
+        attr->va_pnfs_len  = inode->remote->len;
+        memcpy(attr->va_pnfs, inode->remote->data, inode->remote->len);
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
         attr->va_fs_space_avail = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
@@ -938,6 +979,18 @@ memfs_apply_attrs(
         } else {
             inode->btime = attr->va_btime;
         }
+    }
+
+    /* Opaque pNFS layout state: persist the NFS server's blob verbatim. */
+    if (set_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_PNFS_LAYOUT;
+        if (!inode->remote) {
+            inode->remote = calloc(1, sizeof(*inode->remote));
+        }
+        inode->remote->len = attr->va_pnfs_len;
+        memcpy(inode->remote->data, attr->va_pnfs,
+               attr->va_pnfs_len <= CHIMERA_VFS_PNFS_LAYOUT_MAX ?
+               attr->va_pnfs_len : CHIMERA_VFS_PNFS_LAYOUT_MAX);
     }
 
     inode->ctime = now;
@@ -4311,7 +4364,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE |
-        CHIMERA_VFS_CAP_XATTR,
+        CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

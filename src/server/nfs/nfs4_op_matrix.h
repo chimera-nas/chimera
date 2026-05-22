@@ -130,6 +130,10 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_LAYOUTRETURN] =         { NFS4_OP_V41 | NFS4_OP_V42,               0
     },
+    /* LAYOUTSTATS is a 4.2 operation (RFC 7862) but flex-files (RFC 8435, a 4.1
+     * layout type) clients emit it, so accept it on 4.1 too. */
+    [OP_LAYOUTSTATS] =          { NFS4_OP_V41 | NFS4_OP_V42,               0
+    },
     [OP_SECINFO_NO_NAME] =      { NFS4_OP_V41 | NFS4_OP_V42,               0
     },
     [OP_SEQUENCE] =             { NFS4_OP_V41 | NFS4_OP_V42,
@@ -157,8 +161,6 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     [OP_IO_ADVISE] =            { NFS4_OP_V42,                             0
     },
     [OP_LAYOUTERROR] =          { NFS4_OP_V42,                             0
-    },
-    [OP_LAYOUTSTATS] =          { NFS4_OP_V42,                             0
     },
     [OP_OFFLOAD_CANCEL] =       { NFS4_OP_V42,                             0
     },

@@ -58,6 +58,7 @@ struct nfs_open_owner;
 struct nfs_open_state;
 struct nfs_lock_owner;
 struct nfs_lock_state;
+struct nfs_layout_state;
 struct nfs_state_table;
 struct nfs_delegation;
 struct nfs4_cb_client;
@@ -199,40 +200,45 @@ nfs4_seqid_should_advance(nfsstat4 status)
 } /* nfs4_seqid_should_advance */
 
 struct nfs_client {
-    uint64_t               client_id;
-    uint64_t               verifier;
-    uint64_t               boot_id;
-    uint8_t                owner_string[NFS4_OPAQUE_LIMIT];
-    uint16_t               owner_len;
-    uint8_t                confirmed     : 1;
-    uint8_t                expired       : 1;
-    uint8_t                recovering    : 1;
-    uint8_t                soft_revoked  : 1;
-    uint8_t                minor;  /* 0/1/2 */
-    uint64_t               last_touch_ns;
+    uint64_t                 client_id;
+    uint64_t                 verifier;
+    uint64_t                 boot_id;
+    uint8_t                  owner_string[NFS4_OPAQUE_LIMIT];
+    uint16_t                 owner_len;
+    uint8_t                  confirmed     : 1;
+    uint8_t                  expired       : 1;
+    uint8_t                  recovering    : 1;
+    uint8_t                  soft_revoked  : 1;
+    uint8_t                  minor; /* 0/1/2 */
+    uint64_t                 last_touch_ns;
 
     /* Owners are hashed by their byte string. */
-    struct nfs_open_owner *open_owners_by_str;
-    struct nfs_lock_owner *lock_owners_by_str;
+    struct nfs_open_owner   *open_owners_by_str;
+    struct nfs_lock_owner   *lock_owners_by_str;
 
     /* Delegations granted to this client (utlist via next_in_client),
      * protected by client->lock.  Walked at client teardown to revoke
      * every outstanding delegation. */
-    struct nfs_delegation *delegations;
+    struct nfs_delegation   *delegations;
 
     /* Callback path for delegation recalls.  Populated at SETCLIENTID
      * (4.0) / CREATE_SESSION (4.1); see struct nfs4_cb_path. */
-    struct nfs4_cb_path    cb_path;
+    struct nfs4_cb_path      cb_path;
 
     /* Count of this client's delegations that have been force-revoked and not
      * yet FREE_STATEID'd.  Drives SEQ4_STATUS_RECALLABLE_STATE_REVOKED. */
-    _Atomic uint32_t       revoked_deleg_count;
+    _Atomic uint32_t         revoked_deleg_count;
 
-    UT_hash_handle         hh_by_owner;
-    UT_hash_handle         hh_by_id;
+    /* pNFS layouts held by this client, hashed by file handle (NFSv4.1+).
+     * Cascade-freed in nfs_client_destroy on lease expiry / DESTROY_CLIENTID.
+     * Recalls reach the client over the shared cb_path (see nfs4_callback.c). */
+    struct nfs_layout_state *layouts_by_fh;
 
-    _Atomic uint32_t       refcount;
-    pthread_mutex_t        lock;
+    UT_hash_handle           hh_by_owner;
+    UT_hash_handle           hh_by_id;
+
+    _Atomic uint32_t         refcount;
+    pthread_mutex_t          lock;
 };
 
 struct nfs_open_owner {
@@ -371,6 +377,46 @@ struct nfs_delegation {
 };
 
 /*
+ * pNFS layout state (NFSv4.1+), one per {client, file handle}.
+ *
+ * Unlike open/lock stateids, the layout stateid's seqid is advanced by the
+ * SERVER on each successful LAYOUTGET and LAYOUTRETURN (RFC 8881 §12.5.3); the
+ * client must echo the most recent value.  v1 tracks a single whole-file
+ * layout per file and does not implement recall, so the record exists mainly
+ * to mint and validate the layout stateid and to be torn down with the client.
+ */
+struct nfs_layout_table;
+
+struct nfs_layout_state {
+    struct nfs_client       *client;    /* borrowed; client outlives the layout */
+    uint8_t                  fh[NFS4_FHSIZE];
+    uint16_t                 fh_len;
+    uint32_t                 seqid;     /* server-incremented layout stateid seqid */
+    uint32_t                 iomode;    /* current LAYOUTIOMODE4 */
+
+    uint8_t                  shard;
+    uint32_t                 slot_idx;
+    uint32_t                 generation;
+
+    /* Membership in the server-wide layout table (keyed by fh): the table this
+     * layout is registered in, and the next holder of the same file. */
+    struct nfs_layout_table *global_table;
+    struct nfs_layout_state *global_next;
+
+    UT_hash_handle           hh;        /* by fh in client->layouts_by_fh */
+
+    _Atomic uint32_t         refcount;
+    _Atomic uint8_t          destroyed;
+};
+
+/* Refcount helpers for pinning a layout across a recall (the table snapshots
+ * holders under its shard lock, then the recaller works with them unlocked). */
+void nfs_layout_state_get(
+    struct nfs_layout_state *st);
+void nfs_layout_state_put(
+    struct nfs_layout_state *st);
+
+/*
  * Slot table.
  *
  * Each shard owns a dense slot array indexed by 24-bit slot_idx.  The slot
@@ -389,6 +435,8 @@ struct nfs_delegation {
 #define NFS4_SLOT_TYPE_EXPIRED 3
 /* An OPEN/WRITE delegation's stateid slot. */
 #define NFS4_SLOT_TYPE_DELEG   4
+/* A pNFS layout's stateid slot. */
+#define NFS4_SLOT_TYPE_LAYOUT  5
 
 struct nfs_state_slot {
     void    *state;
@@ -630,6 +678,42 @@ SYMBOL_EXPORT nfsstat4
 nfs_state_table_free_revoked_deleg(
     struct nfs_state_table    *table,
     const struct stateid4     *sid,
+    struct chimera_vfs_thread *vfs_thread);
+
+/* Find an existing layout_state on `client` for `fh`, or NULL.  No ref taken;
+ * caller holds no lock (acquires client->lock internally). */
+SYMBOL_EXPORT struct nfs_layout_state *
+nfs_layout_state_find(
+    struct nfs_client *client,
+    const uint8_t     *fh,
+    uint16_t           fh_len);
+
+/* Create a layout_state for {client, fh}, allocate a slot, and write the
+ * encoded layout stateid (seqid = 1) to out_stateid.  Lifetime ref = 1. */
+SYMBOL_EXPORT struct nfs_layout_state *
+nfs_layout_state_create(
+    struct nfs_client       *client,
+    const uint8_t           *fh,
+    uint16_t                 fh_len,
+    uint32_t                 iomode,
+    uint32_t                 client_short_id,
+    struct nfs_state_table  *table,
+    struct nfs_layout_table *layout_table,
+    struct stateid4         *out_stateid);
+
+/* Advance the layout stateid seqid and re-encode (subsequent LAYOUTGET /
+ * LAYOUTRETURN on an existing layout). */
+SYMBOL_EXPORT void
+nfs_layout_state_bump(
+    struct nfs_layout_state *state,
+    uint32_t                 client_short_id,
+    struct stateid4         *out_stateid);
+
+/* Tear down a layout_state (LAYOUTRETURN / client teardown). */
+SYMBOL_EXPORT void
+nfs_layout_state_destroy(
+    struct nfs_layout_state   *state,
+    struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread);
 
 /* Touch a client's lease.  Cheap relaxed store; called from any op that

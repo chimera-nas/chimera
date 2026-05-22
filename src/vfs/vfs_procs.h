@@ -447,6 +447,36 @@ chimera_vfs_commit(
     chimera_vfs_commit_callback_t   callback,
     void                           *private_data);
 
+/* pNFS: ask a layout-sourcing backend (CHIMERA_VFS_CAP_LAYOUT_SOURCE) where a
+ * file's data lives.  segments/devices are valid only while the callback runs. */
+typedef void (*chimera_vfs_get_layout_callback_t)(
+    enum chimera_vfs_error                   error_code,
+    uint32_t                                 layout_class,
+    uint32_t                                 num_segments,
+    const struct chimera_vfs_layout_segment *segments,
+    uint32_t                                 num_devices,
+    const struct chimera_vfs_layout_device  *devices,
+    void                                    *private_data);
+
+uint64_t
+chimera_vfs_module_capabilities(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen);
+
+void
+chimera_vfs_get_layout(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint64_t                          length,
+    uint32_t                          iomode,
+    uint32_t                          layout_class,
+    uint32_t                          max_segments,
+    chimera_vfs_get_layout_callback_t callback,
+    void                             *private_data);
+
 typedef void (*chimera_vfs_symlink_at_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
