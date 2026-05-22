@@ -12,6 +12,23 @@
 #include "vfs/vfs.h"
 #include "nfs4_lease.h"
 
+/* RFC 8275 OPEN-arguments attribute and its enumerations.  Not present in our
+ * generated nfs4.x (which stops at FATTR4_SEC_LABEL), so define what we need to
+ * advertise the attribute. */
+#ifndef FATTR4_OPEN_ARGUMENTS
+#define FATTR4_OPEN_ARGUMENTS                        86
+#endif // ifndef FATTR4_OPEN_ARGUMENTS
+#define OPEN_ARGS_SHARE_ACCESS_READ                  1
+#define OPEN_ARGS_SHARE_ACCESS_WRITE                 2
+#define OPEN_ARGS_SHARE_ACCESS_BOTH                  3
+#define OPEN_ARGS_SHARE_ACCESS_WANT_ANY_DELEG        3
+#define OPEN_ARGS_SHARE_ACCESS_WANT_NO_DELEG         4
+#define OPEN_ARGS_SHARE_ACCESS_WANT_DELEG_TIMESTAMPS 20
+#define OPEN_ARGS_OPEN_CLAIM_NULL                    0
+#define OPEN_ARGS_OPEN_CLAIM_PREVIOUS                1
+#define OPEN_ARGS_OPEN_CLAIM_DELEGATE_CUR            2
+#define OPEN_ARGS_OPEN_CLAIM_FH                      4
+
 static inline uint64_t
 chimera_nfs4_attr2mask(
     uint32_t *words,
@@ -271,7 +288,8 @@ chimera_nfs4_marshall_attrs(
                                             (1UL << (FATTR4_SPACE_TOTAL - 32)));
 
             if (minorversion >= 1) {
-                uint32_t word2 = (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64));
+                uint32_t word2 = (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64)) |
+                    (1 << (FATTR4_OPEN_ARGUMENTS - 64));
 
                 /* Extended attributes (RFC 8276) are an NFSv4.2 feature. */
                 if (minorversion >= 2) {
@@ -603,6 +621,40 @@ chimera_nfs4_marshall_attrs(
                                             (1UL << (FATTR4_MODE - 32)) |
                                             (1UL << (FATTR4_OWNER - 32)) |
                                             (1UL << (FATTR4_OWNER_GROUP - 32)));
+        }
+
+        if (req_mask[2] & (1 << (FATTR4_OPEN_ARGUMENTS - 64))) {
+            rsp_mask[2]  |= (1 << (FATTR4_OPEN_ARGUMENTS - 64));
+            *num_rsp_mask = 3;
+
+            /* open_arguments4 (RFC 8275): five bitmap4s describing what the
+             * server's OPEN supports.  Each is encoded as { count=1, word }.
+             * Deliberately omit WANT_DELEG_TIMESTAMPS from oa_share_access_want
+             * (we do not implement delegated timestamps). */
+            /* oa_share_access: READ(1) | WRITE(2) | BOTH(3) */
+            chimera_nfs4_attr_append_uint32(&attrs, 1);
+            chimera_nfs4_attr_append_uint32(&attrs,
+                                            (1 << OPEN_ARGS_SHARE_ACCESS_READ) |
+                                            (1 << OPEN_ARGS_SHARE_ACCESS_WRITE) |
+                                            (1 << OPEN_ARGS_SHARE_ACCESS_BOTH));
+            /* oa_share_deny: NONE(0) | READ(1) | WRITE(2) | BOTH(3) */
+            chimera_nfs4_attr_append_uint32(&attrs, 1);
+            chimera_nfs4_attr_append_uint32(&attrs, 0xF);
+            /* oa_share_access_want: ANY_DELEG(3) | NO_DELEG(4) */
+            chimera_nfs4_attr_append_uint32(&attrs, 1);
+            chimera_nfs4_attr_append_uint32(&attrs,
+                                            (1 << OPEN_ARGS_SHARE_ACCESS_WANT_ANY_DELEG) |
+                                            (1 << OPEN_ARGS_SHARE_ACCESS_WANT_NO_DELEG));
+            /* oa_open_claim: NULL(0) | PREVIOUS(1) | DELEGATE_CUR(2) | FH(4) */
+            chimera_nfs4_attr_append_uint32(&attrs, 1);
+            chimera_nfs4_attr_append_uint32(&attrs,
+                                            (1 << OPEN_ARGS_OPEN_CLAIM_NULL) |
+                                            (1 << OPEN_ARGS_OPEN_CLAIM_PREVIOUS) |
+                                            (1 << OPEN_ARGS_OPEN_CLAIM_DELEGATE_CUR) |
+                                            (1 << OPEN_ARGS_OPEN_CLAIM_FH));
+            /* oa_create_mode: UNCHECKED(0) | GUARDED(1) | EXCLUSIVE(2) | EXCL4_1(3) */
+            chimera_nfs4_attr_append_uint32(&attrs, 1);
+            chimera_nfs4_attr_append_uint32(&attrs, 0xF);
         }
     }
 

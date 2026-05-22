@@ -156,6 +156,27 @@ chimera_nfs4_write(
         return;
     }
 
+    /* A (write) delegation stateid authorizes the WRITE but carries no open
+     * handle; drop the ref and open the current FH on the fly. */
+    if (state_type == NFS4_SLOT_TYPE_DELEG) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        if (req->fhlen == 0) {
+            res->status = NFS4ERR_NOFILEHANDLE;
+            evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
+            chimera_nfs4_compound_complete(req, NFS4_OK);
+            return;
+        }
+        req->args_write4 = args;
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            req->fh,
+                            req->fhlen,
+                            CHIMERA_VFS_OPEN_INFERRED,
+                            chimera_nfs4_write_open_callback,
+                            req);
+        return;
+    }
+
     if (state_type == NFS4_SLOT_TYPE_OPEN) {
         state_handle = ((struct nfs_open_state *) state_void)->handle;
     } else {

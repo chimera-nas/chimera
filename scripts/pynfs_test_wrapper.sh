@@ -64,6 +64,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Enable NFSv4 protocol delegations only for delegation test runs, so the
+# other suites exercise the default (delegations-off) behavior.
+DELEG_ENABLE="false"
+case " $FLAG_ARGS " in
+    *" deleg"* | *" delegations"* | *DELEG* | *"delegations "* | *"deleg "*)
+        DELEG_ENABLE="true"
+        ;;
+esac
+
 # Generate chimera config based on backend
 generate_config() {
     local mount_path="/"
@@ -114,6 +123,7 @@ generate_config() {
     "server": {
         "threads": 4,
         "delegation_threads": 4,
+        "nfs4_delegations": $DELEG_ENABLE,
         $vfs_section
         "external_portmap": false
     },

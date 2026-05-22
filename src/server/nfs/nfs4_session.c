@@ -1140,6 +1140,11 @@ nfs4_session_unbind_conn(struct evpl_rpc2_conn *conn)
     }
 
     session = (struct nfs4_session *) existing;
+    /* Drop the backchannel pointer if this was the conn carrying it, so a
+     * later recall does not send on a dead connection. */
+    if (session->nfs4_session_backchannel_conn == conn) {
+        session->nfs4_session_backchannel_conn = NULL;
+    }
     evpl_rpc2_conn_set_private_data(conn, NULL);
     nfs4_session_put(session);
 } /* nfs4_session_unbind_conn */
@@ -1396,3 +1401,114 @@ nfs4_replay_slot_finalize(struct nfs_request *req)
 
     req->replay_slot = NULL;
 } /* nfs4_replay_slot_finalize */
+
+/*
+ * Record the delegation callback path for a client onto its unified state
+ * record.  Called from the SETCLIENTID handler (4.0, with a cb_client4) and
+ * from CREATE_SESSION (4.1, program only -- the backchannel rides the fore
+ * conn).  Re-setting the path (e.g. a fresh SETCLIENTID) resets the probe
+ * state so the callback channel is re-validated before any new delegation.
+ *
+ * The actual outbound channel (cb_path.cb_client) is established lazily by
+ * the callback subsystem; here we only capture the addressing the client
+ * supplied.
+ */
+void
+nfs4_client_set_cb_path(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    uint32_t                  cb_program,
+    uint32_t                  cb_ident,
+    uint8_t                   minorversion,
+    const char               *netid,
+    int                       netid_len,
+    const char               *addr,
+    int                       addr_len)
+{
+    struct nfs4_client  *c;
+    struct nfs_client   *u;
+    struct nfs4_cb_path *cb;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), c);
+
+    if (!c || !c->unified) {
+        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        return;
+    }
+
+    u  = c->unified;
+    cb = &u->cb_path;
+
+    pthread_mutex_lock(&u->lock);
+
+    cb->cb_program      = cb_program;
+    cb->cb_ident        = cb_ident;
+    cb->cb_minorversion = minorversion;
+
+    if (netid_len >= (int) sizeof(cb->cb_netid)) {
+        netid_len = sizeof(cb->cb_netid) - 1;
+    }
+    if (netid_len > 0) {
+        memcpy(cb->cb_netid, netid, netid_len);
+    }
+    cb->cb_netid[netid_len > 0 ? netid_len : 0] = '\0';
+
+    if (addr_len >= (int) sizeof(cb->cb_addr)) {
+        addr_len = sizeof(cb->cb_addr) - 1;
+    }
+    if (addr_len > 0) {
+        memcpy(cb->cb_addr, addr, addr_len);
+    }
+    cb->cb_addr[addr_len > 0 ? addr_len : 0] = '\0';
+
+    /* New addressing: force re-probe before the next delegation grant. */
+    atomic_store_explicit(&cb->cb_state, NFS4_CB_UNINIT, memory_order_relaxed);
+
+    pthread_mutex_unlock(&u->lock);
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+} /* nfs4_client_set_cb_path */
+
+/*
+ * Record the RPC auth flavor/credentials the client wants the server to use on
+ * its callback channel (CREATE_SESSION csa_sec_parms / BACKCHANNEL_CTL).
+ * flavor is an ONC RPC flavor (AUTH_NONE=0, AUTH_SYS=1); uid/gid apply only to
+ * AUTH_SYS.  Optionally also updates the callback program number.
+ */
+void
+nfs4_client_set_cb_sec(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    uint32_t                  cb_program,
+    uint32_t                  flavor,
+    uint32_t                  uid,
+    uint32_t                  gid)
+{
+    struct nfs4_client *c;
+    struct nfs_client  *u;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), c);
+
+    if (!c || !c->unified) {
+        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        return;
+    }
+
+    u = c->unified;
+
+    pthread_mutex_lock(&u->lock);
+    if (cb_program) {
+        u->cb_path.cb_program = cb_program;
+    }
+    u->cb_path.cb_sec_flavor = flavor;
+    u->cb_path.cb_sec_uid    = uid;
+    u->cb_path.cb_sec_gid    = gid;
+    pthread_mutex_unlock(&u->lock);
+
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+} /* nfs4_client_set_cb_sec */

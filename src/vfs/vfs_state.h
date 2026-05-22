@@ -86,6 +86,15 @@ typedef bool (*chimera_vfs_lease_is_alive_cb_t)(
     const struct chimera_vfs_lease *lease,
     void                           *private_data);
 
+/* Revocation notice — vfs_state calls this when it forcibly revokes a lease
+ * (recall deadline elapsed, etc.) rather than the holder releasing it.  The
+ * protocol layer uses it to mark its own state revoked (e.g. so a later use of
+ * an NFSv4 delegation stateid reports NFS4ERR_DELEG_REVOKED).  May be NULL.
+ * Invoked outside the file lock. */
+typedef void (*chimera_vfs_lease_revoked_cb_t)(
+    struct chimera_vfs_lease *lease,
+    void                     *private_data);
+
 struct chimera_vfs_lease_owner {
     uint32_t                        protocol;
     uint64_t                        client_key;
@@ -93,6 +102,7 @@ struct chimera_vfs_lease_owner {
     uint64_t                        owner_hi;
     chimera_vfs_lease_break_cb_t    break_cb;
     chimera_vfs_lease_is_alive_cb_t is_alive_cb;
+    chimera_vfs_lease_revoked_cb_t  revoked_cb;
     void                           *cb_private;
 };
 
@@ -373,6 +383,20 @@ chimera_vfs_lease_ack(
 void
 chimera_vfs_lease_revoke(
     struct chimera_vfs_lease *lease);
+
+/* Recall (begin_break) every caching lease held on the file identified by
+ * `fh`, regardless of owner.  Used by namespace/metadata operations (REMOVE,
+ * RENAME, LINK, SETATTR) that must invalidate a delegation/oplock before
+ * proceeding.  Returns true if any caching lease is still present (the caller
+ * should fail the op with a retryable error, e.g. NFS4ERR_DELAY, and retry
+ * once the holders return); false if the file has no caching lease and the
+ * op may proceed. */
+bool
+chimera_vfs_state_break_caching(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash);
 
 /* -------------------------------------------------------------------- */
 /* I/O hook                                                             */

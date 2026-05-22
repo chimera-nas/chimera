@@ -230,6 +230,21 @@ struct chimera_server_nfs_thread {
     int                               again;
     int                               active_requests;
     struct nfs_request               *free_requests;
+
+    /* Delegation callback recall marshalling.  A recall is triggered by a
+     * conflicting op on an arbitrary thread, but the callback connection is
+     * owned by one thread's evpl and evpl sends are not cross-thread safe.
+     * break_cb pushes the delegation onto the owner thread's queue (under
+     * cb_recall_lock) and rings cb_doorbell; the owner thread drains the
+     * queue and sends CB_RECALL.  See nfs4_callback.c. */
+    struct evpl_doorbell              cb_doorbell;
+    pthread_mutex_t                   cb_recall_lock;
+    struct nfs_delegation            *cb_recall_queue; /* via deleg->recall_qnext */
+    /* Cross-thread CB_GETATTR work (request to the deleg holder's thread, and
+     * the response back to the requester's thread).  Protected by
+     * cb_recall_lock and drained by cb_doorbell.  See nfs4_callback.c. */
+    struct nfs4_cb_getattr           *cb_getattr_queue;
+    uint8_t                           cb_doorbell_armed;
 };
 
 static inline struct nfs_request *
