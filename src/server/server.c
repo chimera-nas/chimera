@@ -547,10 +547,10 @@ chimera_server_config_add_module(
         module_cfg = &config->modules[config->num_modules++];
     }
 
-    strncpy(module_cfg->module_name, module_name, sizeof(module_cfg->module_name));
-    strncpy(module_cfg->config_data, config_data, sizeof(module_cfg->config_data));
+    snprintf(module_cfg->module_name, sizeof(module_cfg->module_name), "%s", module_name);
+    snprintf(module_cfg->config_data, sizeof(module_cfg->config_data), "%s", config_data);
     if (module_path) {
-        strncpy(module_cfg->module_path, module_path, sizeof(module_cfg->module_path));
+        snprintf(module_cfg->module_path, sizeof(module_cfg->module_path), "%s", module_path);
     } else {
         /* We don't specify a path for preloaded modules like demofs */
         module_cfg->module_path[0] = '\0';

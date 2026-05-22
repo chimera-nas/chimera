@@ -43,6 +43,8 @@ nfs_layout_table_destroy(struct nfs_layout_table *table)
     for (i = 0; i < NFS_LAYOUT_TABLE_SHARDS; i++) {
         struct nfs_layout_entry *e, *tmp;
 
+#ifndef __clang_analyzer__
+        /* uthash blows clangs mind */
         HASH_ITER(hh, table->shards[i].by_fh, e, tmp)
         {
             struct nfs_layout_recall_waiter *w, *wn;
@@ -54,6 +56,8 @@ nfs_layout_table_destroy(struct nfs_layout_table *table)
             }
             free(e);
         }
+#endif /* ifndef __clang_analyzer__ */
+
         pthread_mutex_destroy(&table->shards[i].lock);
     }
 } /* nfs_layout_table_destroy */
