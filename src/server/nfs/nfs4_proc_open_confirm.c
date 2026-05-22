@@ -84,6 +84,18 @@ chimera_nfs4_open_confirm(
         return;
     }
 
+    /* RFC 7530 §16.18: OPEN_CONFIRM is only valid for an unconfirmed owner.
+     * A (non-replayed) confirm of an already-confirmed owner is a stale use of
+     * the stateid. */
+    if (owner->confirmed) {
+        pthread_mutex_unlock(&owner->lock);
+        nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                thread->vfs_thread);
+        res->status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     /* New op: confirm the owner and advance state.seqid. */
     owner->confirmed   = true;
     owner->seqid       = args->seqid;
