@@ -140,7 +140,8 @@ chimera_smb_create_gen_open_file(
         uint32_t                       da = open_file->desired_access;
         uint32_t                       sa = open_file->share_access;
         uint8_t                        granted = 0, denied = 0;
-        struct chimera_vfs_lease      *conflict = NULL;
+        uint8_t                        held_granted = 0;
+        struct chimera_vfs_lease      *conflict     = NULL;
         enum chimera_vfs_lease_result  result;
 
         /* Map desired_access -> RWH grant.  Only data-access rights
@@ -176,6 +177,19 @@ chimera_smb_create_gen_open_file(
             denied |= CHIMERA_VFS_LEASE_MODE_D;
         }
 
+        /* A truncating disposition must obtain write access at open time to
+         * overwrite the data, so it conflicts with an existing opener that
+         * denies write -- but it does not *hold* write for the handle's
+         * lifetime (the granted access is what was requested).  Request write
+         * transiently for the conflict check, then downgrade the held grant
+         * once the lease is inserted. */
+        held_granted = granted;
+        if (request->create.create_disposition == SMB2_FILE_SUPERSEDE ||
+            request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+            request->create.create_disposition == SMB2_FILE_OVERWRITE_IF) {
+            granted |= CHIMERA_VFS_LEASE_MODE_W;
+        }
+
         file_state = chimera_vfs_state_get(vfs_state,
                                            oh->fh, oh->fh_len,
                                            oh->fh_hash, true);
@@ -203,6 +217,14 @@ chimera_smb_create_gen_open_file(
             open_file->handle = NULL;
             chimera_smb_open_file_free(thread, open_file);
             return NULL;
+        }
+
+        /* Drop the transient truncate-write grant: the handle holds only the
+         * access it requested, so it must not block a later reader. */
+        if (held_granted != granted) {
+            pthread_mutex_lock(&file_state->lock);
+            open_file->share_lease.mode.granted = held_granted;
+            pthread_mutex_unlock(&file_state->lock);
         }
 
         open_file->share_file_state     = file_state;
