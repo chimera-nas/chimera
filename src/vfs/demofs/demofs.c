@@ -723,6 +723,12 @@ struct demofs_thread {
     struct evpl_doorbell        resume_doorbell;
     struct evpl_deferral        resume_deferral;
     struct demofs_bt_op        *bt_op_free_list;
+
+    /* Background reclaim of large deleted inodes: a queue of orphan drain
+     * contexts processed one at a time on this worker (each drains its inode's
+     * b+tree in bounded batches across transactions). */
+    struct demofs_drain        *drain_head, *drain_tail;
+    int                         draining;
 };
 
 /* ------------------------------------------------------------------ */
@@ -3181,6 +3187,261 @@ demofs_bt_free_tree(
      * range is reclaimed on commit. */
     demofs_txn_free_space(thread, txn, dev, off, DEMOFS_BLOCK_SIZE);
 } /* demofs_bt_free_tree */
+
+/* Forward declarations for helpers defined later in the file. */
+static struct demofs_txn * demofs_txn_begin(
+    struct demofs_thread *thread,
+    enum demofs_txn_type  type);
+static inline void demofs_txn_abort(
+    struct demofs_txn *txn);
+static inline void demofs_txn_commit(
+    struct demofs_txn     *txn,
+    demofs_txn_commit_cb_t cb,
+    void                  *private_data);
+static void demofs_inode_free(
+    struct demofs_thread *thread,
+    struct demofs_inode  *inode);
+static void demofs_thread_free_space(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    uint32_t              device_id,
+    uint64_t              device_offset,
+    uint64_t              length);
+static int demofs_bt_remove_async(
+    struct demofs_bt_op        *op,
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    struct demofs_inode        *inode,
+    const struct demofs_bt_key *key,
+    demofs_bt_cb_t              cb,
+    void                       *private_data);
+static int demofs_bt_lookup_async(
+    struct demofs_bt_op        *op,
+    struct demofs_thread       *thread,
+    struct demofs_inode        *inode,
+    enum demofs_bt_opcode       opcode,
+    const struct demofs_bt_key *key,
+    struct demofs_bt_key       *r_key,
+    void                       *out,
+    uint32_t                    out_cap,
+    demofs_bt_cb_t              cb,
+    void                       *private_data);
+
+/* ------------------------------------------------------------------ */
+/* Background drainer: reclaim a large deleted inode incrementally.     */
+/*                                                                      */
+/* A large inode's tree can't be freed in one transaction (it would     */
+/* flood the block-I/O queue), so it is drained in bounded batches: per */
+/* transaction, remove up to DEMOFS_DRAIN_BATCH of the lowest b+tree    */
+/* entries (freeing a file extent's backing data; the remove itself     */
+/* reclaims emptied node blocks via merge), commit, repeat -- then a    */
+/* final transaction frees the home block + the inode struct.  Generic  */
+/* over entry type (extents, dirents, symlink).  Each transaction holds */
+/* only the one inode (no multi-inode lock ordering).  The orphan inode */
+/* stays cached throughout (A5 never evicts nlink==0).                  */
+/*                                                                      */
+/* In-memory queue, processed one at a time per worker.  Crash-safe     */
+/* resume via the durable orphan-list inode is a follow-up (Part B); a  */
+/* crash mid-drain currently leaks the not-yet-freed remainder.         */
+/* ------------------------------------------------------------------ */
+
+#define DEMOFS_DRAIN_BATCH 64
+
+struct demofs_drain {
+    struct demofs_thread *thread;
+    uint64_t              inum;
+    uint32_t              gen;
+    struct demofs_txn    *txn;
+    struct demofs_inode  *inode;
+    int                   batch;
+    struct demofs_bt_key  found_key;
+    uint8_t               recbuf[sizeof(struct demofs_extent_rec)];
+    struct demofs_drain  *next;
+};
+
+static void demofs_drain_kick(
+    struct demofs_thread *thread);
+static void demofs_drain_begin(
+    struct demofs_drain *d);
+
+/* Queue a deleted (nlink==0) large inode for background reclaim.  Its inode
+ * struct must stay resident until drained -- nlink==0 keeps A5 from evicting
+ * it -- and must NOT be demofs_inode_free'd by the caller (the drainer does
+ * that at the end). */
+static void
+demofs_drain_enqueue(
+    struct demofs_thread *thread,
+    uint64_t              inum,
+    uint32_t              gen)
+{
+    struct demofs_drain *d = calloc(1, sizeof(*d));
+
+    d->thread = thread;
+    d->inum   = inum;
+    d->gen    = gen;
+    if (thread->drain_tail) {
+        thread->drain_tail->next = d;
+    } else {
+        thread->drain_head = d;
+    }
+    thread->drain_tail = d;
+    demofs_drain_kick(thread);
+} /* demofs_drain_enqueue */
+
+static void
+demofs_drain_kick(struct demofs_thread *thread)
+{
+    struct demofs_drain *d;
+
+    if (thread->draining || !thread->drain_head) {
+        return;
+    }
+    d                  = thread->drain_head;
+    thread->drain_head = d->next;
+    if (!thread->drain_head) {
+        thread->drain_tail = NULL;
+    }
+    d->next          = NULL;
+    thread->draining = 1;
+    demofs_drain_begin(d);
+} /* demofs_drain_kick */
+
+static void
+demofs_drain_complete(struct demofs_drain *d)
+{
+    struct demofs_thread *thread = d->thread;
+
+    free(d);
+    thread->draining = 0;
+    demofs_drain_kick(thread);
+} /* demofs_drain_complete */
+
+static void demofs_drain_step(
+    struct demofs_drain *d);
+
+static void
+demofs_drain_acquired_cb(
+    struct demofs_inode *inode,
+    int                  status,
+    void                *priv)
+{
+    struct demofs_drain *d = priv;
+
+    /* The acquire parked behind the unlink's write lock; once granted the
+     * inode is durably nlink==0.  If the unlink aborted (or it was already
+     * reclaimed in a prior run), it isn't really gone -- skip it. */
+    if (status != CHIMERA_VFS_OK || inode->nlink != 0) {
+        demofs_txn_abort(d->txn);
+        demofs_drain_complete(d);
+        return;
+    }
+    d->inode = inode;
+    d->batch = 0;
+    demofs_drain_step(d);
+} /* demofs_drain_acquired_cb */
+
+static void
+demofs_drain_begin(struct demofs_drain *d)
+{
+    d->txn = demofs_txn_begin(d->thread, DEMOFS_TXN_WRITE);
+    demofs_inode_acquire(d->thread, d->txn, d->inum, d->gen,
+                         DEMOFS_INODE_LOCK_WRITE, demofs_drain_acquired_cb, d);
+} /* demofs_drain_begin */
+
+static void
+demofs_drain_committed_cb(
+    struct demofs_txn *txn,
+    int                status,
+    void              *priv)
+{
+    struct demofs_drain *d = priv;
+
+    (void) txn;
+    (void) status;
+    demofs_drain_begin(d);     /* next batch: fresh txn + re-acquire */
+} /* demofs_drain_committed_cb */
+
+static void
+demofs_drain_final_cb(
+    struct demofs_txn *txn,
+    int                status,
+    void              *priv)
+{
+    (void) txn;
+    (void) status;
+    demofs_drain_complete(priv);
+} /* demofs_drain_final_cb */
+
+static void
+demofs_drain_removed_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *priv)
+{
+    struct demofs_drain *d = priv;
+
+    (void) result;
+    demofs_bt_op_free(d->thread, op);
+
+    if (++d->batch >= DEMOFS_DRAIN_BATCH) {
+        demofs_txn_commit(d->txn, demofs_drain_committed_cb, d);
+    } else {
+        demofs_drain_step(d);
+    }
+} /* demofs_drain_removed_cb */
+
+static void
+demofs_drain_looked_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *priv)
+{
+    struct demofs_drain *d = priv;
+    struct demofs_bt_op *rop;
+
+    if (result < 0) {
+        /* Tree empty: free the home block + the inode struct, then commit. */
+        uint32_t dev;
+        uint64_t off = sm_inum_to_device_offset(d->thread->shared->space_map,
+                                                d->inum, &dev);
+
+        demofs_bt_op_free(d->thread, op);
+        demofs_txn_pin_inode_block(d->thread, d->txn, d->inode, 0);
+        demofs_txn_free_space(d->thread, d->txn, dev, off, DEMOFS_BLOCK_SIZE);
+        demofs_inode_free(d->thread, d->inode);
+        demofs_txn_commit(d->txn, demofs_drain_final_cb, d);
+        return;
+    }
+
+    /* Free a file extent's backing data before removing the record.  The
+     * remove reclaims any emptied b+tree node blocks (generic, any entry). */
+    if (d->found_key.type == DEMOFS_REC_EXTENT) {
+        struct demofs_extent_rec *e = (struct demofs_extent_rec *) d->recbuf;
+
+        demofs_thread_free_space(d->thread, d->txn, e->device_id, e->device_offset,
+                                 SM_ALIGN_UP(e->length));
+    }
+    demofs_bt_op_free(d->thread, op);
+
+    rop = demofs_bt_op_alloc(d->thread);
+    if (demofs_bt_remove_async(rop, d->thread, d->txn, d->inode, &d->found_key,
+                               demofs_drain_removed_cb, d)) {
+        demofs_drain_removed_cb(rop, rop->result, d);
+    }
+} /* demofs_drain_looked_cb */
+
+static void
+demofs_drain_step(struct demofs_drain *d)
+{
+    struct demofs_bt_op *op  = demofs_bt_op_alloc(d->thread);
+    struct demofs_bt_key key = { .type = 0, .subkey = 0 };   /* min key */
+
+    if (demofs_bt_lookup_async(op, d->thread, d->inode, DEMOFS_BT_OP_LOOKUP_GE,
+                               &key, &d->found_key, d->recbuf, sizeof(d->recbuf),
+                               demofs_drain_looked_cb, d)) {
+        demofs_drain_looked_cb(op, op->result, d);
+    }
+} /* demofs_drain_step */
 
 /*
  * Remove a key from an inode's b+tree, maintaining the B+tree invariants:
@@ -6155,6 +6416,15 @@ demofs_thread_destroy(void *private_data)
     struct demofs_thread *thread = private_data;
     struct demofs_shared *shared = thread->shared;
 
+    /* Quiesce background inode drains first: their transactions reference this
+     * thread (and, unlike VFS ops, nothing else waits for them), so they must
+     * finish before we tear the thread down.  Pump our event loop until the
+     * queue empties; the intent-log thread is still alive to complete the
+     * drain transactions we issue. */
+    while (thread->draining || thread->drain_head) {
+        evpl_continue(thread->evpl);
+    }
+
     /* Drain pending block I/O before closing queues */
     if (thread->pending_io > 0) {
         chimera_demofs_debug("demofs_thread_destroy: draining %d pending I/O operations",
@@ -7240,9 +7510,22 @@ demofs_remove_at_removed_cb(
     if (inode->nlink == 0) {
         --inode->refcnt;
         if (inode->refcnt == 0) {
-            /* Fully gone (not open): reclaim its tree, data, and home block. */
-            demofs_bt_free_tree(thread, p->txn, inode);
-            demofs_inode_free(thread, inode);
+            struct demofs_bt_node_hdr *rh;
+
+            demofs_txn_pin_inode_block(thread, p->txn, inode, 0);
+            rh = demofs_bt_hdr(inode->block->iov.data, DEMOFS_BT_ROOT_BASE);
+
+            if (rh->level == 0) {
+                /* Small inode (whole tree in the embedded root): reclaim inline. */
+                demofs_bt_free_tree(thread, p->txn, inode);
+                demofs_inode_free(thread, inode);
+            } else {
+                /* Large inode: hand to the background drainer (bounded batches)
+                 * so one delete can't flood the I/O queue.  The struct stays
+                 * resident (nlink==0 -> not evicted) until the drainer frees it;
+                 * the drainer's acquire parks until this unlink txn commits. */
+                demofs_drain_enqueue(thread, inode->inum, inode->gen);
+            }
         }
     }
 
