@@ -4,8 +4,41 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
+#include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+
+static bool
+chimera_nfs4_putfh_has_open_state(
+    struct nfs_request *req,
+    const uint8_t      *fh,
+    uint16_t            fh_len)
+{
+    struct nfs_client     *client = req->session ? req->session->client_unified : NULL;
+    struct nfs_open_owner *owner, *owner_tmp;
+    struct nfs_open_state *state;
+    bool                   found = false;
+
+    if (!client) {
+        return false;
+    }
+
+    pthread_mutex_lock(&client->lock);
+    HASH_ITER(hh, client->open_owners_by_str, owner, owner_tmp)
+    {
+        pthread_mutex_lock(&owner->lock);
+        HASH_FIND(hh, owner->states_by_fh, fh, fh_len, state);
+        pthread_mutex_unlock(&owner->lock);
+
+        if (state) {
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&client->lock);
+
+    return found;
+} /* chimera_nfs4_putfh_has_open_state */
 
 static void
 chimera_nfs4_putfh_getattr_complete(
@@ -32,7 +65,8 @@ chimera_nfs4_putfh_getattr_complete(
     chimera_vfs_release(req->thread->vfs_thread, handle);
 
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_NLINK) &&
-        attr->va_nlink == 0) {
+        attr->va_nlink == 0 &&
+        !chimera_nfs4_putfh_has_open_state(req, args->object.data, args->object.len)) {
         res->status = NFS4ERR_STALE;
         chimera_nfs4_compound_complete(req, res->status);
         return;
