@@ -81,7 +81,7 @@ chimera_nfs4_locku(
                                     thread->vfs_thread);
             req->nfs_state_ref = NULL;
             res->status        = NFS4ERR_BAD_SEQID;
-            chimera_nfs4_compound_complete(req, NFS4_OK);
+            chimera_nfs4_compound_complete(req, res->status);
             return;
         }
         pthread_mutex_unlock(&lock_owner->lock);

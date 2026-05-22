@@ -68,8 +68,12 @@ chimera_nfs4_lock_finish(
             if (lo) {
                 pthread_mutex_lock(&lo->lock);
                 lo->seqid = lock_seqid;
-                /* No replay cache on a brand-new lock_owner; the open_owner
-                 * cache above is the authoritative replay surface. */
+                /* The initial LOCK is replayed through the open_owner seqid,
+                 * but the lock_owner must still be marked initialized so the
+                 * next existing-lock-owner request cannot pick an arbitrary
+                 * fresh seqid. */
+                nfs4_replay_record(&lo->replay, lock_seqid, OP_LOCK,
+                                   status, cache_stateid);
                 pthread_mutex_unlock(&lo->lock);
             }
         } else {
