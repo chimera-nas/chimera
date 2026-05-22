@@ -263,6 +263,11 @@ struct demofs_inode {
     struct demofs_inode_waiter *wait_head;
     struct demofs_inode_waiter *wait_tail;
 
+    /* Eviction: an idle inode (refcnt==1, unlocked) sits on its shard's LRU
+     * as a recycle candidate.  All under the shard lock. */
+    struct demofs_inode        *lru_prev, *lru_next;
+    int                         on_lru;
+
     /* This inode's 4 KiB metadata home block in the block cache; pinned
      * while the inode is dirty in a transaction.  NULL until first claimed.
      * Directory entries, extents and the symlink target all live as keyed
@@ -275,13 +280,21 @@ struct demofs_inode {
 };
 
 struct demofs_inode_shard {
-    pthread_mutex_t lock;
-    struct rb_tree  inodes;       /* keyed by inum */
+    pthread_mutex_t      lock;
+    struct rb_tree       inodes;       /* keyed by inum */
+    struct demofs_inode *lru_head, *lru_tail; /* idle (recycle) candidates, LRU-first */
+    uint32_t             ninodes;      /* resident inodes in this shard */
 };
 
 struct demofs_inode_cache {
+    uint32_t                  shard_cap; /* soft cap before recycling kicks in */
     struct demofs_inode_shard shards[DEMOFS_INODE_CACHE_SHARDS];
 };
+
+/* Total inode cache target; per-shard cap = total / shards.  Eviction is a
+ * soft cap (grows past it when every resident inode is busy -- bounded by the
+ * live working set; the A5b waiter turns this into a hard cap). */
+#define DEMOFS_INODE_CACHE_DEFAULT_INODES    (256 * 1024)
 
 /* ------------------------------------------------------------------ */
 /* Block cache                                                         */
@@ -650,6 +663,7 @@ struct demofs_shared {
     int                        persistent;         /* config opt-in: detect+reload a clean FS instead of mkfs */
     int                        mounted;            /* 1 = remounted existing FS (enables inode read-back) */
     uint32_t                   block_cache_blocks; /* total resident block-buffer cap (0 = default) */
+    uint32_t                   inode_cache_inodes; /* total resident inode cap (0 = default) */
     uint64_t                   fsid;
     struct space_map          *space_map;
     struct demofs_intent_log   intent_log;
@@ -854,6 +868,58 @@ demofs_txn_add_slot(
     txn->num_inodes++;
 } /* demofs_txn_add_slot */
 
+/* Inode LRU (recycle candidates).  All require the owning shard lock. */
+static inline void
+demofs_inode_lru_push_tail(
+    struct demofs_inode_shard *shard,
+    struct demofs_inode       *inode)
+{
+    inode->lru_prev = shard->lru_tail;
+    inode->lru_next = NULL;
+    if (shard->lru_tail) {
+        shard->lru_tail->lru_next = inode;
+    } else {
+        shard->lru_head = inode;
+    }
+    shard->lru_tail = inode;
+    inode->on_lru   = 1;
+} /* demofs_inode_lru_push_tail */
+
+static inline void
+demofs_inode_lru_unlink(
+    struct demofs_inode_shard *shard,
+    struct demofs_inode       *inode)
+{
+    if (!inode->on_lru) {
+        return;
+    }
+    if (inode->lru_prev) {
+        inode->lru_prev->lru_next = inode->lru_next;
+    } else {
+        shard->lru_head = inode->lru_next;
+    }
+    if (inode->lru_next) {
+        inode->lru_next->lru_prev = inode->lru_prev;
+    } else {
+        shard->lru_tail = inode->lru_prev;
+    }
+    inode->lru_prev = inode->lru_next = NULL;
+    inode->on_lru   = 0;
+} /* demofs_inode_lru_unlink */
+
+/*
+ * An idle inode is a recycle candidate: no open handle (refcnt == 1, the
+ * cache's own reference), not locked, and live (nlink > 0).  Whether its
+ * dinode is durable enough to drop is checked separately at recycle time.
+ * Caller holds the shard lock.
+ */
+static inline int
+demofs_inode_idle(const struct demofs_inode *inode)
+{
+    return inode->refcnt == 1 && inode->readers == 0 &&
+           inode->writer == 0 && inode->nlink > 0;
+} /* demofs_inode_idle */
+
 /* Caller must hold the inode's shard lock. */
 static inline int
 demofs_inode_lock_compatible(
@@ -956,6 +1022,13 @@ demofs_inode_release_one(
         if (w->mode == DEMOFS_INODE_LOCK_WRITE) {
             break;     /* exclusive: stop granting */
         }
+    }
+
+    /* If nobody re-took the lock and the inode is now idle, it becomes a
+     * recycle candidate.  (Recycle re-checks evictability, so it's fine that
+     * its dinode may not be durable yet.) */
+    if (!inode->on_lru && demofs_inode_idle(inode)) {
+        demofs_inode_lru_push_tail(shard, inode);
     }
 
     pthread_mutex_unlock(&shard->lock);
@@ -1067,12 +1140,14 @@ demofs_inode_acquire(
     }
 
     if (unlikely(!inode)) {
-        /* Not resident.  On a freshly-formatted FS everything created is
-         * cached, so this is simply ENOENT.  On a remounted FS the inode may
-         * live on disk -- fault it in (validated against the requested gen). */
+        /* Not resident: either evicted (its dinode is durably home -- eviction
+         * only drops CLEAN inodes) or genuinely absent.  Fault it in from disk
+         * whenever the inum is within allocated space; the on-disk dinode read
+         * validates inum/gen/nlink and yields ENOENT if it isn't really there.
+         * (This must not gate on `mounted` -- a freshly-formatted FS evicts
+         * too, so a miss is not necessarily ENOENT.) */
         pthread_mutex_unlock(&shard->lock);
-        if (thread->shared->mounted &&
-            sm_inum_valid(thread->shared->space_map, inum)) {
+        if (sm_inum_valid(thread->shared->space_map, inum)) {
             demofs_inode_load(thread, txn, inum, gen, mode, cb, private_data);
         } else {
             cb(NULL, CHIMERA_VFS_ENOENT, private_data);
@@ -1082,6 +1157,7 @@ demofs_inode_acquire(
 
     if (demofs_inode_lock_compatible(inode, mode)) {
         demofs_inode_lock_grant(inode, mode);
+        demofs_inode_lru_unlink(shard, inode);     /* busy now, not a candidate */
         pthread_mutex_unlock(&shard->lock);
         demofs_txn_add_slot(txn, inode, mode);
         if (mode == DEMOFS_INODE_LOCK_WRITE) {
@@ -1158,6 +1234,11 @@ static void demofs_block_unpin(
     struct demofs_block    *blk,
     enum demofs_block_state new_state);
 
+/* Defined with the block-cache helpers it consults; used by the fault paths. */
+static void demofs_inode_cache_recycle_locked(
+    struct demofs_shared      *shared,
+    struct demofs_inode_shard *shard);
+
 static struct demofs_inode *
 demofs_inode_load_sync(
     struct demofs_thread *thread,
@@ -1174,7 +1255,7 @@ demofs_inode_load_sync(
     int                        fd;
     ssize_t                    n;
 
-    if (!shared->mounted || !sm_inum_valid(shared->space_map, inum)) {
+    if (!sm_inum_valid(shared->space_map, inum)) {
         return NULL;
     }
 
@@ -1197,6 +1278,7 @@ demofs_inode_load_sync(
     pthread_mutex_lock(&shard->lock);
     rb_tree_query_exact(&shard->inodes, inum, inum, inode);
     if (!inode) {
+        demofs_inode_cache_recycle_locked(shared, shard);
         inode              = calloc(1, sizeof(*inode));
         inode->inum        = inum;
         inode->refcnt      = 1;
@@ -1217,6 +1299,7 @@ demofs_inode_load_sync(
         inode->parent_inum = di->parent_inum;
         inode->parent_gen  = di->parent_gen;
         rb_tree_insert(&shard->inodes, inum, inode);
+        shard->ninodes++;
     }
     pthread_mutex_unlock(&shard->lock);
 
@@ -3997,6 +4080,71 @@ demofs_inode_struct_new(uint64_t inum)
     return inode;
 } /* demofs_inode_struct_new */
 
+/*
+ * An inode struct may be dropped only when its dinode is durably home, so a
+ * later fault re-reads current attrs from disk.  True iff the dinode's home
+ * block is CLEAN or no longer resident (it was CLEAN when evicted from the
+ * block cache, hence on disk).  Caller holds the inode shard lock; this takes
+ * the block shard lock (inode->block ordering, never the reverse).
+ */
+static int
+demofs_inode_dinode_clean(
+    struct demofs_shared *shared,
+    struct demofs_inode  *inode)
+{
+    uint32_t                   dev;
+    uint64_t                   off = sm_inum_to_device_offset(shared->space_map,
+                                                              inode->inum, &dev);
+    struct demofs_block_shard *bs     = demofs_block_shard(shared->block_cache, dev, off);
+    uint32_t                   bucket = demofs_block_bucket(dev, off);
+    struct demofs_block       *blk;
+    int                        clean;
+
+    pthread_mutex_lock(&bs->lock);
+    blk   = demofs_block_lookup_locked(bs, bucket, dev, off);
+    clean = (blk == NULL || blk->state == DEMOFS_BLOCK_CLEAN);
+    pthread_mutex_unlock(&bs->lock);
+    return clean;
+} /* demofs_inode_dinode_clean */
+
+/*
+ * Make room in a shard at/over its cap by evicting one idle, durable inode
+ * from the LRU.  Caller holds the shard lock.  The LRU is approximate -- a
+ * candidate may have gone busy since it was queued -- so each is re-validated;
+ * stale ones are unlinked (self-heal) and dinode-dirty ones skipped.  If none
+ * are evictable the pool grows past the cap (bounded by the live working set;
+ * the A5b waiter will make this a hard cap).
+ */
+static void
+demofs_inode_cache_recycle_locked(
+    struct demofs_shared      *shared,
+    struct demofs_inode_shard *shard)
+{
+    struct demofs_inode *inode, *next;
+
+    if (shard->ninodes < shared->inode_cache->shard_cap) {
+        return;
+    }
+
+    for (inode = shard->lru_head; inode; inode = next) {
+        next = inode->lru_next;
+
+        if (!demofs_inode_idle(inode)) {
+            demofs_inode_lru_unlink(shard, inode);     /* went busy; self-heal */
+            continue;
+        }
+        if (!demofs_inode_dinode_clean(shared, inode)) {
+            continue;                                  /* not durable yet; skip */
+        }
+
+        demofs_inode_lru_unlink(shard, inode);
+        rb_tree_remove(&shard->inodes, &inode->node);
+        shard->ninodes--;
+        free(inode);
+        return;
+    }
+} /* demofs_inode_cache_recycle_locked */
+
 static inline void
 demofs_inode_cache_insert(
     struct demofs_shared *shared,
@@ -4005,7 +4153,9 @@ demofs_inode_cache_insert(
     struct demofs_inode_shard *shard = demofs_inode_shard(shared, inode->inum);
 
     pthread_mutex_lock(&shard->lock);
+    demofs_inode_cache_recycle_locked(shared, shard);
     rb_tree_insert(&shard->inodes, inum, inode);
+    shard->ninodes++;
     pthread_mutex_unlock(&shard->lock);
 } /* demofs_inode_cache_insert */
 
@@ -4053,6 +4203,7 @@ demofs_inode_load_complete(
     pthread_mutex_lock(&shard->lock);
     rb_tree_query_exact(&shard->inodes, lc->inum, inum, inode);
     if (!inode) {
+        demofs_inode_cache_recycle_locked(shared, shard);
         inode              = demofs_inode_struct_new(lc->inum);
         inode->gen         = di->gen;
         inode->mode        = di->mode;
@@ -4071,6 +4222,7 @@ demofs_inode_load_complete(
         inode->parent_inum = di->parent_inum;
         inode->parent_gen  = di->parent_gen;
         rb_tree_insert(&shard->inodes, inum, inode);
+        shard->ninodes++;
     }
     pthread_mutex_unlock(&shard->lock);
 
@@ -5324,6 +5476,8 @@ demofs_init(const char *cfgdata)
     shared->persistent         = json_is_true(json_object_get(cfg, "persistent"));
     shared->block_cache_blocks = (uint32_t) json_integer_value(
         json_object_get(cfg, "block_cache_blocks"));
+    shared->inode_cache_inodes = (uint32_t) json_integer_value(
+        json_object_get(cfg, "inode_cache_inodes"));
 
     json_decref(cfg);
 
@@ -5443,8 +5597,16 @@ demofs_init(const char *cfgdata)
     }
     free(device0_path);
 
-    /* Inode cache: sharded rb-trees keyed by inum.  Never evicts yet. */
-    shared->inode_cache = calloc(1, sizeof(*shared->inode_cache));
+    /* Inode cache: sharded rb-trees keyed by inum, with per-shard LRU eviction
+     * of idle inodes (recycle candidates). */
+    shared->inode_cache            = calloc(1, sizeof(*shared->inode_cache));
+    shared->inode_cache->shard_cap = (shared->inode_cache_inodes ?
+                                      shared->inode_cache_inodes :
+                                      DEMOFS_INODE_CACHE_DEFAULT_INODES) /
+        DEMOFS_INODE_CACHE_SHARDS;
+    if (shared->inode_cache->shard_cap == 0) {
+        shared->inode_cache->shard_cap = 1;
+    }
     for (i = 0; i < DEMOFS_INODE_CACHE_SHARDS; i++) {
         rb_tree_init(&shared->inode_cache->shards[i].inodes);
         pthread_mutex_init(&shared->inode_cache->shards[i].lock, NULL);
