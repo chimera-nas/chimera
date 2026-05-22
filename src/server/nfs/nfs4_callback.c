@@ -159,6 +159,23 @@ nfs4_cb_null_complete(
  * fire a CB_NULL probe.  Runs on `thread`, which owns the client's fore
  * connection.
  */
+/*
+ * Resolve the connection to send a callback on, right now.  For 4.0 this is the
+ * server-owned outbound conn (NULLed by nfs4_cb_conn_lost() once it drops); for
+ * 4.1 it is read live from the session, since the backchannel-carrying fore
+ * conn is freed on disconnect and re-bound on reconnect and so must never be
+ * cached.  Returns NULL if no usable connection currently exists.  Called only
+ * on the channel's owner thread.
+ */
+static struct evpl_rpc2_conn *
+nfs4_cb_chan_conn(struct nfs4_cb_client *chan)
+{
+    if (chan->owns_conn) {
+        return chan->conn;
+    }
+    return chan->session ? chan->session->nfs4_session_backchannel_conn : NULL;
+} /* nfs4_cb_chan_conn */
+
 static void
 nfs4_cb_channel_open(
     struct chimera_server_nfs_thread *thread,
@@ -170,7 +187,9 @@ nfs4_cb_channel_open(
     struct nfs4_cb_probe_ctx *ctx;
 
     chan               = calloc(1, sizeof(*chan));
+    chan->magic        = NFS4_CB_CLIENT_MAGIC;
     chan->owner_thread = thread;
+    chan->cb_path      = cb;
     chan->minorversion = cb->cb_minorversion;
     chan->cb_ident     = cb->cb_ident;
 
@@ -228,8 +247,14 @@ nfs4_cb_channel_open(
             free(chan);
             return;
         }
+
+        /* Tag the conn so the shared rpc2 disconnect notify can find this
+         * channel and invalidate it if the conn drops (see nfs4_cb_conn_lost). */
+        evpl_rpc2_conn_set_private_data(chan->conn, chan);
     } else {
-        /* 4.1+: the backchannel rides the session's fore conn. */
+        /* 4.1+: the backchannel rides the session's fore conn.  Hold a ref on
+         * the session and re-read the live conn at send time rather than
+         * caching it, since the fore conn is freed on disconnect. */
         struct nfs4_session *session = req ? req->session : NULL;
 
         if (!session || !session->nfs4_session_backchannel_conn) {
@@ -238,7 +263,8 @@ nfs4_cb_channel_open(
             free(chan);
             return;
         }
-        chan->conn      = session->nfs4_session_backchannel_conn;
+        nfs4_session_get(session);
+        chan->session   = session;
         chan->owns_conn = 0;
         memcpy(chan->sessionid, session->nfs4_session_id, NFS4_SESSIONID_SIZE);
     }
@@ -251,7 +277,7 @@ nfs4_cb_channel_open(
 
     chan->cb_prog.send_call_CB_NULL(&chan->cb_prog.rpc2,
                                     thread->evpl,
-                                    chan->conn,
+                                    nfs4_cb_chan_conn(chan),
                                     NULL,
                                     0, 0, 0,
                                     nfs4_cb_null_complete,
@@ -340,13 +366,14 @@ nfs4_cb_recall_send(
     struct nfs_delegation            *deleg)
 {
     struct nfs4_cb_client     *chan = deleg->client->cb_path.cb_client;
+    struct evpl_rpc2_conn     *conn = chan ? nfs4_cb_chan_conn(chan) : NULL;
     struct nfs4_cb_recall_ctx *ctx;
     struct CB_COMPOUND4args    args;
     struct nfs_cb_argop4       ops[2];
     struct stateid4            sid;
     int                        nops = 0;
 
-    if (!chan || !chan->conn) {
+    if (!conn) {
         /* No path: revoke so the conflicting acquirer proceeds, drop ref. */
         if (deleg->lease_held) {
             chimera_vfs_lease_revoke(&deleg->lease);
@@ -420,7 +447,7 @@ nfs4_cb_recall_send(
 
         chan->cb_prog.send_call_CB_COMPOUND(&chan->cb_prog.rpc2,
                                             thread->evpl,
-                                            chan->conn,
+                                            conn,
                                             credp,
                                             &args,
                                             0, 0, 0,
@@ -433,24 +460,87 @@ nfs4_cb_recall_send(
 /* CB_GETATTR (write-delegation attribute query)                          */
 /* ---------------------------------------------------------------------- */
 
-#define NFS4_CB_GETATTR_REQUEST  0
-#define NFS4_CB_GETATTR_RESPONSE 1
+#define NFS4_CB_GETATTR_REQUEST    0
+#define NFS4_CB_GETATTR_RESPONSE   1
 
-/* Hand a completed CB_GETATTR work item back to the requester's thread. */
+/* A holder that accepts the CB_GETATTR but never answers must not wedge the
+ * requester's GETATTR forever; fall back to the server's own attrs after this. */
+#define NFS4_CB_GETATTR_TIMEOUT_US (5ULL * 1000 * 1000)
+
+/* Cross-thread CB_GETATTR work item.  A REQUEST item is created on the
+ * requester thread, queued to the holder thread, and lives until the CB_GETATTR
+ * RPC completes there (it carries the in-flight RPC's private_data and timeout
+ * timer).  The result is handed back to the requester as a separate RESPONSE
+ * item, so the request item can be freed independently of a late RPC reply. */
+struct nfs4_cb_getattr {
+    uint8_t                           phase;   /* request (0) / response (1) */
+    struct chimera_server_nfs_thread *requester_thread;
+    struct nfs_delegation            *deleg;
+    void                             *priv;
+    nfs4_cb_getattr_resume_t          resume;
+    int                               status;
+    bool                              got_change;
+    bool                              got_size;
+    uint64_t                          change;
+    uint64_t                          size;
+    /* REQUEST item, holder thread only: */
+    struct evpl_timer                 timeout_timer;
+    bool                              delivered; /* result already handed back */
+    struct nfs4_cb_getattr           *next;
+};
+
+/* Hand the result of a CB_GETATTR back to the requester's thread.  Runs on the
+ * holder thread; idempotent (whichever of the RPC reply / timeout fires first
+ * delivers, the other is a no-op).  A fresh RESPONSE item is queued rather than
+ * the REQUEST item `w`, because a timed-out RPC may still complete later and
+ * dereference `w`. */
 static void
-nfs4_cb_getattr_respond(struct nfs4_cb_getattr *w)
+nfs4_cb_getattr_deliver(struct nfs4_cb_getattr *w)
 {
     struct chimera_server_nfs_thread *x = w->requester_thread;
+    struct nfs4_cb_getattr           *r;
 
-    w->phase = NFS4_CB_GETATTR_RESPONSE;
+    if (w->delivered) {
+        return;
+    }
+    w->delivered = true;
+
+    r                   = calloc(1, sizeof(*r));
+    r->phase            = NFS4_CB_GETATTR_RESPONSE;
+    r->requester_thread = x;
+    r->deleg            = w->deleg;
+    r->priv             = w->priv;
+    r->resume           = w->resume;
+    r->status           = w->status;
+    r->got_change       = w->got_change;
+    r->change           = w->change;
+    r->got_size         = w->got_size;
+    r->size             = w->size;
 
     pthread_mutex_lock(&x->cb_recall_lock);
-    w->next             = x->cb_getattr_queue;
-    x->cb_getattr_queue = w;
+    r->next             = x->cb_getattr_queue;
+    x->cb_getattr_queue = r;
     pthread_mutex_unlock(&x->cb_recall_lock);
 
     evpl_ring_doorbell(&x->cb_doorbell);
-} /* nfs4_cb_getattr_respond */
+} /* nfs4_cb_getattr_deliver */
+
+/* One-shot timeout (holder thread): the CB_GETATTR RPC is still in flight, so
+ * deliver a fall-back result now.  The request item is freed by the RPC
+ * completion if/when it arrives (or by conn teardown), never here. */
+static void
+nfs4_cb_getattr_timeout(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct nfs4_cb_getattr *w = (struct nfs4_cb_getattr *)
+        ((char *) timer - offsetof(struct nfs4_cb_getattr, timeout_timer));
+
+    (void) evpl;
+
+    w->status = -1;
+    nfs4_cb_getattr_deliver(w);
+} /* nfs4_cb_getattr_timeout */
 
 static void
 nfs4_cb_getattr_complete(
@@ -462,42 +552,52 @@ nfs4_cb_getattr_complete(
 {
     struct nfs4_cb_getattr *w = private_data;
 
-    (void) evpl;
     (void) verf;
 
-    w->status = -1;
+    /* Cancel the timeout (a no-op if it already fired -- see one-shot timer
+     * semantics).  Runs on the holder thread, same as the timeout, so the
+     * delivered flag below needs no synchronisation. */
+    evpl_remove_timer(evpl, &w->timeout_timer);
 
-    if (status == 0 && reply && reply->status == NFS4_OK) {
-        for (uint32_t i = 0; i < reply->num_resarray; i++) {
-            struct nfs_cb_resop4 *rop = &reply->resarray[i];
+    if (!w->delivered) {
+        w->status = -1;
 
-            if (rop->resop == OP_CB_GETATTR &&
-                rop->opcbgetattr.status == NFS4_OK) {
-                struct fattr4 *fa  = &rop->opcbgetattr.resok4.obj_attributes;
-                const uint8_t *p   = fa->attr_vals.data;
-                const uint8_t *end = p + fa->attr_vals.len;
-                uint32_t       w0  = (fa->num_attrmask >= 1) ? fa->attrmask[0] : 0;
-                uint64_t       v;
+        if (status == 0 && reply && reply->status == NFS4_OK) {
+            for (uint32_t i = 0; i < reply->num_resarray; i++) {
+                struct nfs_cb_resop4 *rop = &reply->resarray[i];
 
-                /* The holder returns change (bit 3) then size (bit 4). */
-                if ((w0 & (1u << FATTR4_CHANGE)) && p + 8 <= end) {
-                    memcpy(&v, p, 8);
-                    w->change     = chimera_nfs_hton64(v);
-                    w->got_change = true;
-                    p            += 8;
+                if (rop->resop == OP_CB_GETATTR &&
+                    rop->opcbgetattr.status == NFS4_OK) {
+                    struct fattr4 *fa  = &rop->opcbgetattr.resok4.obj_attributes;
+                    const uint8_t *p   = fa->attr_vals.data;
+                    const uint8_t *end = p + fa->attr_vals.len;
+                    uint32_t       w0  = (fa->num_attrmask >= 1) ? fa->attrmask[0] : 0;
+                    uint64_t       v;
+
+                    /* The holder returns change (bit 3) then size (bit 4). */
+                    if ((w0 & (1u << FATTR4_CHANGE)) && p + 8 <= end) {
+                        memcpy(&v, p, 8);
+                        w->change     = chimera_nfs_hton64(v);
+                        w->got_change = true;
+                        p            += 8;
+                    }
+                    if ((w0 & (1u << FATTR4_SIZE)) && p + 8 <= end) {
+                        memcpy(&v, p, 8);
+                        w->size     = chimera_nfs_hton64(v);
+                        w->got_size = true;
+                    }
+                    w->status = 0;
+                    break;
                 }
-                if ((w0 & (1u << FATTR4_SIZE)) && p + 8 <= end) {
-                    memcpy(&v, p, 8);
-                    w->size     = chimera_nfs_hton64(v);
-                    w->got_size = true;
-                }
-                w->status = 0;
-                break;
             }
         }
+
+        nfs4_cb_getattr_deliver(w);
     }
 
-    nfs4_cb_getattr_respond(w);
+    /* The RPC is done; the request item is no longer referenced by the RPC
+     * layer, so free it (the result, if any, lives in a separate RESPONSE). */
+    free(w);
 } /* nfs4_cb_getattr_complete */
 
 /* Runs on the delegation holder's thread: send CB_COMPOUND{[CB_SEQUENCE,]
@@ -509,14 +609,18 @@ nfs4_cb_getattr_send(
 {
     struct nfs_delegation  *deleg = w->deleg;
     struct nfs4_cb_client  *chan  = deleg->client->cb_path.cb_client;
+    struct evpl_rpc2_conn  *conn  = chan ? nfs4_cb_chan_conn(chan) : NULL;
     struct CB_COMPOUND4args args;
     struct nfs_cb_argop4    ops[2];
     uint32_t                attr_req = (1u << FATTR4_CHANGE) | (1u << FATTR4_SIZE);
     int                     nops     = 0;
 
-    if (!chan || !chan->conn) {
+    if (!conn) {
+        /* No usable callback path: no RPC is issued, so the request item can
+         * be delivered and freed right here. */
         w->status = -1;
-        nfs4_cb_getattr_respond(w);
+        nfs4_cb_getattr_deliver(w);
+        free(w);
         return;
     }
 
@@ -567,9 +671,16 @@ nfs4_cb_getattr_send(
             credp                            = &rpc_cred;
         }
 
+        /* Arm the timeout before issuing the RPC: if the send completes
+         * synchronously (e.g. an immediate conn error), the completion cancels
+         * an already-armed timer and frees `w`, so nothing touches `w` after. */
+        evpl_add_oneshot_timer(thread->evpl, &w->timeout_timer,
+                               nfs4_cb_getattr_timeout,
+                               NFS4_CB_GETATTR_TIMEOUT_US);
+
         chan->cb_prog.send_call_CB_COMPOUND(&chan->cb_prog.rpc2,
                                             thread->evpl,
-                                            chan->conn,
+                                            conn,
                                             credp,
                                             &args,
                                             0, 0, 0,
@@ -768,6 +879,18 @@ nfs4_cb_recall(struct nfs_delegation *deleg)
 } /* nfs4_cb_recall */
 
 void
+nfs4_cb_conn_lost(struct nfs4_cb_client *chan)
+{
+    /* Runs on the conn's owner thread, which is the only thread that sends on
+     * this channel, so clearing the conn here cannot race a send. */
+    chan->conn = NULL;
+    if (chan->cb_path) {
+        atomic_store_explicit(&chan->cb_path->cb_state, NFS4_CB_DOWN,
+                              memory_order_release);
+    }
+} /* nfs4_cb_conn_lost */
+
+void
 nfs4_cb_path_teardown(struct nfs4_cb_path *cb)
 {
     struct nfs4_cb_client *chan = cb->cb_client;
@@ -777,10 +900,19 @@ nfs4_cb_path_teardown(struct nfs4_cb_path *cb)
     }
     cb->cb_client = NULL;
 
-    /* Free only the channel bookkeeping.  The outbound 4.0 connection is owned
-     * by its evpl thread and is drained/freed by evpl at thread teardown;
-     * disconnecting it here would race that teardown (the conn may already be
-     * gone).  4.1 channels borrow the session's fore conn and never own it. */
+    /* 4.0: if the outbound conn is still live, clear its back-pointer so a
+     * later disconnect notify does not dereference the freed channel.  We do
+     * not disconnect it; evpl drains/frees it at thread teardown, and
+     * disconnecting here would race that teardown. */
+    if (chan->owns_conn && chan->conn) {
+        evpl_rpc2_conn_set_private_data(chan->conn, NULL);
+    }
+
+    /* 4.1: release the backchannel session ref taken in nfs4_cb_channel_open. */
+    if (chan->session) {
+        nfs4_session_put(chan->session);
+    }
+
     free(chan);
 } /* nfs4_cb_path_teardown */
 

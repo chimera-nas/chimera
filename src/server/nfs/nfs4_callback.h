@@ -14,10 +14,18 @@ struct chimera_server_nfs_thread;
 struct nfs_client;
 struct nfs_delegation;
 struct nfs_request;
+struct nfs4_session;
+struct nfs4_cb_path;
 struct evpl;
 struct evpl_doorbell;
 struct evpl_rpc2_conn;
 struct chimera_vfs_lease;
+
+/* Marker stored at offset 0 of struct nfs4_cb_client and set as the
+ * private_data of a 4.0 outbound callback connection, so the shared rpc2
+ * disconnect notify can recognise the conn and invalidate the channel.  Shares
+ * the offset-0 magic convention used by nfs4_session / nlm_client. */
+#define NFS4_CB_CLIENT_MAGIC 0x4E464342U /* "NFCB" */
 
 /*
  * NFSv4 delegation callback channel.
@@ -31,19 +39,39 @@ struct chimera_vfs_lease;
  * threads are marshalled across via the owner thread's doorbell.
  */
 struct nfs4_cb_client {
+    /* Must be first: lets the rpc2 disconnect notify identify a 4.0 callback
+     * conn from its private_data (offset-0 magic convention). */
+    uint32_t                          magic;
     struct chimera_server_nfs_thread *owner_thread;
+    /* 4.0: the server-owned outbound connection.  Set to NULL by
+     * nfs4_cb_conn_lost() when the connection drops, so sends stop using a
+     * freed conn.  Unused for 4.1 (see `session`). */
     struct evpl_rpc2_conn            *conn;
+    /* 4.1: the session whose fore connection carries the backchannel (a held
+     * ref).  The live conn is re-read from session->nfs4_session_backchannel_conn
+     * at send time rather than cached, since that conn is freed on disconnect
+     * and re-bound on reconnect.  NULL for 4.0. */
+    struct nfs4_session              *session;
+    /* Back-pointer to the owning path so a connection loss can mark the path
+     * NFS4_CB_DOWN (stops further grants). */
+    struct nfs4_cb_path              *cb_path;
     /* Private copy of the NFS_V4_CB program with rpc2.program patched to the
      * client's transient callback program number (cb_program from
      * SETCLIENTID / CREATE_SESSION).  Heap-stable so async reply dispatch is
      * safe. */
     struct NFS_V4_CB                  cb_prog;
     uint8_t                           minorversion;
-    uint8_t                           owns_conn;   /* 1 => disconnect on free (4.0) */
+    uint8_t                           owns_conn;   /* 1 => 4.0 owned conn */
     uint32_t                          cb_ident;    /* 4.0 callback_ident */
     uint8_t                           sessionid[NFS4_SESSIONID_SIZE]; /* 4.1 */
     _Atomic uint32_t                  cb_seq;      /* 4.1 CB_SEQUENCE slot-0 seqid */
 };
+
+/* Invalidate a 4.0 callback channel whose outbound connection has dropped.
+ * Called from the rpc2 disconnect notify on the channel's owner thread (the
+ * only thread that sends on it), so simply clearing the conn is race-free. */
+void nfs4_cb_conn_lost(
+    struct nfs4_cb_client *chan);
 
 struct nfs4_cb_path;
 
@@ -117,18 +145,3 @@ nfs4_find_conflicting_write_deleg(
     uint16_t                          fh_len,
     uint64_t                          querying_client_id);
 
-/* Cross-thread CB_GETATTR work item (internal; queued on a thread's
- * cb_getattr_queue). */
-struct nfs4_cb_getattr {
-    uint8_t                           phase;   /* request (0) / response (1) */
-    struct chimera_server_nfs_thread *requester_thread;
-    struct nfs_delegation            *deleg;
-    void                             *priv;
-    nfs4_cb_getattr_resume_t          resume;
-    int                               status;
-    bool                              got_change;
-    bool                              got_size;
-    uint64_t                          change;
-    uint64_t                          size;
-    struct nfs4_cb_getattr           *next;
-};

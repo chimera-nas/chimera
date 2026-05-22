@@ -533,6 +533,10 @@ chimera_nfs_server_notify(
                 }
             } else if (magic == NFS4_SESSION_MAGIC) {
                 nfs4_session_unbind_conn(conn);
+            } else if (magic == NFS4_CB_CLIENT_MAGIC) {
+                /* A 4.0 outbound delegation callback connection dropped;
+                 * invalidate the channel so recalls stop using a freed conn. */
+                nfs4_cb_conn_lost(priv);
             }
             break;
     } /* switch */
