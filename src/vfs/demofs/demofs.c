@@ -317,7 +317,8 @@ struct demofs_bt_op;
 struct demofs_block {
     uint32_t             device_id;
     uint64_t             device_offset;        /* block-aligned; key with device_id */
-    void                *buffer;               /* DEMOFS_BLOCK_SIZE bytes */
+    struct evpl_iovec    iov;                  /* SHARED DEMOFS_BLOCK_SIZE buffer; .data may
+                                                * be NULL on a never-yet-used pool slot */
     int                  pin_count;            /* >0 => pinned, not reclaimable */
     enum demofs_block_state state;
     uint64_t             seq;                  /* update order for tail-push */
@@ -335,14 +336,14 @@ struct demofs_block_shard {
     pthread_mutex_t       lock;
     struct demofs_block **buckets;     /* [DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD] */
 
-    /* Pre-allocated fixed buffer pool (all protected by lock).  pool is an
-     * array of nblocks blocks whose buffers carve up the pool_mem arena; they
-     * are never individually freed.  The LRU holds only CLEAN, unpinned
-     * buffers (recycle candidates), ordered least-recently-used first. */
+    /* Pre-allocated fixed pool of block structs (all protected by lock); the
+     * structs are never individually freed.  Each struct's buffer is a SHARED
+     * evpl iovec allocated lazily on first use and reused across recyclings
+     * (released only at teardown).  The LRU holds only CLEAN, unpinned buffers
+     * (recycle candidates), ordered least-recently-used first. */
     struct demofs_block  *pool;                 /* [nblocks] */
-    void                 *pool_mem;             /* nblocks * DEMOFS_BLOCK_SIZE */
     struct demofs_block  *lru_head, *lru_tail;  /* lru_head = next to recycle */
-    uint32_t              nblocks;              /* buffers owned by this shard */
+    uint32_t              nblocks;              /* block structs owned by this shard */
 };
 
 struct demofs_block_cache {
@@ -507,6 +508,12 @@ enum demofs_txn_type {
 /* A dirty block held (pinned) by a transaction until commit/log. */
 struct demofs_txn_block {
     struct demofs_block     *block;
+    /* Zero-copy snapshot of block->iov, cloned at commit on the worker under
+     * the inode write lock (content final, no COW possible there).  Moved into
+     * the redo record by the intent-log thread, so the IL thread never touches
+     * the live block->iov and the record captures this txn's committed image
+     * even if a later writer COWs the cache block. */
+    struct evpl_iovec        snap;
     struct demofs_txn_block *next;
 };
 
@@ -588,7 +595,13 @@ struct demofs_il_record {
     uint64_t                 offset;     /* byte offset in the intent-log region */
     uint64_t                 reclen;
     uint32_t                 num_blocks;
-    struct evpl_iovec        iov;
+    uint32_t                 niov;       /* 1 + num_blocks */
+    /* Scatter-gather image of the on-log record: iovs[0] is the 4 KiB-aligned
+    * header region (redo_header + per-block headers); iovs[1..num_blocks] are
+    * zero-copy refs (clones) of the cache blocks' buffers.  The same refs are
+    * handed to the tail-pusher, so a block image is copied only when a writer
+    * must fork a still-referenced block (COW), never on the log/push path. */
+    struct evpl_iovec       *iovs;
     struct demofs_il_record *next;
 };
 
@@ -1211,7 +1224,7 @@ demofs_inode_load_sync(
     {
         struct demofs_block *blk = demofs_block_claim(thread, dev, off, 0);
 
-        memcpy(blk->buffer, buf, DEMOFS_BLOCK_SIZE);
+        memcpy(blk->iov.data, buf, DEMOFS_BLOCK_SIZE);
         demofs_block_unpin(thread, blk, DEMOFS_BLOCK_CLEAN);
     }
     return inode;
@@ -1451,16 +1464,15 @@ demofs_block_cache_create(struct demofs_shared *shared)
         pthread_mutex_init(&shard->lock, NULL);
         shard->buckets = calloc(DEMOFS_BLOCK_CACHE_BUCKETS_PER_SHARD,
                                 sizeof(struct demofs_block *));
-        shard->pool     = calloc(cache->shard_cap, sizeof(struct demofs_block));
-        shard->pool_mem = calloc(cache->shard_cap, DEMOFS_BLOCK_SIZE);
+        shard->pool = calloc(cache->shard_cap, sizeof(struct demofs_block));
 
-        /* Pre-populate: every buffer starts free (unkeyed, in no bucket) and
-         * CLEAN on the LRU.  Carve the buffers out of the shared arena. */
+        /* Pre-populate the struct pool: every block starts free (unkeyed, in
+         * no bucket) and CLEAN on the LRU, with no buffer yet (iov.data NULL);
+         * the iovec is allocated on first use and reused thereafter. */
         for (j = 0; j < cache->shard_cap; j++) {
             struct demofs_block *blk = &shard->pool[j];
 
-            blk->buffer = (char *) shard->pool_mem + (size_t) j * DEMOFS_BLOCK_SIZE;
-            blk->state  = DEMOFS_BLOCK_CLEAN;
+            blk->state = DEMOFS_BLOCK_CLEAN;
             demofs_block_lru_push_tail(shard, blk);
             shard->nblocks++;
         }
@@ -1480,9 +1492,16 @@ demofs_block_cache_destroy(struct demofs_shared *shared)
 
     for (i = 0; i < DEMOFS_BLOCK_CACHE_SHARDS; i++) {
         struct demofs_block_shard *shard = &cache->shards[i];
+        uint32_t                   j;
 
-        /* Blocks are slices of the fixed pool; free the arena, not each one. */
-        free(shard->pool_mem);
+        /* Release each block's buffer (NULL evpl -> straight to the global
+         * allocator, which is correct at teardown); the structs are one pool
+         * array.  At a clean unmount every block is CLEAN (refcount 1). */
+        for (j = 0; j < shard->nblocks; j++) {
+            if (shard->pool[j].iov.data) {
+                evpl_iovec_release(NULL, &shard->pool[j].iov);
+            }
+        }
         free(shard->pool);
         free(shard->buckets);
         pthread_mutex_destroy(&shard->lock);
@@ -1514,13 +1533,31 @@ demofs_block_lookup_locked(
 } /* demofs_block_lookup_locked */
 
 /*
+ * Ensure a block has a backing buffer.  Buffers are SHARED evpl iovecs so the
+ * intent logger and tail-pusher can reference them zero-copy for I/O (and RDMA)
+ * and hand the reference across threads.  A recycled block keeps (reuses) its
+ * iovec -- a CLEAN block's buffer is referenced only by the cache (refcount 1)
+ * -- so an allocation happens only on a never-yet-used pool slot (and on COW).
+ */
+static inline void
+demofs_block_ensure_iov(
+    struct demofs_thread *thread,
+    struct demofs_block  *blk)
+{
+    if (!blk->iov.data) {
+        evpl_iovec_alloc(thread->evpl, DEMOFS_BLOCK_SIZE, DEMOFS_BLOCK_SIZE, 1,
+                         EVPL_IOVEC_FLAG_SHARED, &blk->iov);
+    }
+} /* demofs_block_ensure_iov */
+
+/*
  * Find or create the cache entry for (device_id, device_offset) and pin it.
  * On a miss a buffer is obtained from the shard pool (recycling the LRU
- * eviction candidate, or growing the pool): is_new (a freshly space-map-
- * allocated block) starts zeroed; otherwise -- always, now that eviction can
- * discard a resident CLEAN block whose content is already home -- the buffer
- * is repopulated from disk so a re-claimed evicted block keeps its contents.
- * A hit unlinks the block from the LRU (it is now pinned, not a candidate).
+ * eviction candidate): is_new (a freshly space-map-allocated block) starts
+ * zeroed; otherwise -- always, now that eviction can discard a resident CLEAN
+ * block whose content is already home -- the buffer is repopulated from disk so
+ * a re-claimed evicted block keeps its contents.  A hit unlinks the block from
+ * the LRU (it is now pinned, not a candidate).
  */
 static struct demofs_block *
 demofs_block_claim(
@@ -1547,15 +1584,16 @@ demofs_block_claim(
         blk->seq           = 0;
         blk->wait_head     = NULL;
         blk->wait_tail     = NULL;
+        demofs_block_ensure_iov(thread, blk);
 
         if (is_new) {
-            memset(blk->buffer, 0, DEMOFS_BLOCK_SIZE);
+            memset(blk->iov.data, 0, DEMOFS_BLOCK_SIZE);
         } else {
             int     fd = open(thread->shared->device_paths[device_id], O_RDONLY);
             ssize_t n  = -1;
 
             if (fd >= 0) {
-                n = pread(fd, blk->buffer, DEMOFS_BLOCK_SIZE, (off_t) device_offset);
+                n = pread(fd, blk->iov.data, DEMOFS_BLOCK_SIZE, (off_t) device_offset);
                 close(fd);
             }
             chimera_demofs_abort_if(n != (ssize_t) DEMOFS_BLOCK_SIZE,
@@ -1567,6 +1605,20 @@ demofs_block_claim(
         shard->buckets[bucket] = blk;
     } else if (blk->on_lru) {
         demofs_block_lru_unlink(shard, blk);
+    } else if (blk->state == DEMOFS_BLOCK_LOGGED) {
+        /* COW: this buffer is still referenced by an un-pushed redo record (and
+         * the tail-pusher will write it home), so it must stay immutable.  Fork
+         * a private writable copy; the old buffer rides the record to its home
+         * and is freed when the pusher releases it.  Done under the shard lock
+         * so it serializes against the pusher's LOGGED->CLEAN transition. */
+        struct evpl_iovec nv;
+
+        evpl_iovec_alloc(thread->evpl, DEMOFS_BLOCK_SIZE, DEMOFS_BLOCK_SIZE, 1,
+                         EVPL_IOVEC_FLAG_SHARED, &nv);
+        memcpy(nv.data, blk->iov.data, DEMOFS_BLOCK_SIZE);
+        evpl_iovec_release(thread->evpl, &blk->iov);
+        evpl_iovec_move(&blk->iov, &nv);
+        blk->state = DEMOFS_BLOCK_CLEAN;
     }
 
     blk->pin_count++;
@@ -1615,7 +1667,7 @@ demofs_sm_claim_block(
                                                    device_offset, is_new);
 
     demofs_txn_add_block(c->txn, blk);
-    return blk->buffer;
+    return blk->iov.data;
 } /* demofs_sm_claim_block */
 
 #define DEMOFS_SM_JNL(name, thr, t)                          \
@@ -1726,10 +1778,9 @@ demofs_bt_resume_deferral_cb(
 struct demofs_block_load {
     struct demofs_block  *blk;
     struct demofs_thread *thread;     /* worker that issued the read */
-    struct evpl_iovec     iov;
 };
 
-/* Block read completion: copy into the cache buffer, mark CLEAN, wake waiters. */
+/* Block read completion: data landed directly in blk->iov; mark CLEAN, wake. */
 static void
 demofs_block_load_complete(
     struct evpl *evpl,
@@ -1743,10 +1794,9 @@ demofs_block_load_complete(
                                                           blk->device_id, blk->device_offset);
     struct demofs_bt_op       *waiters, *op;
 
-    if (likely(status == 0)) {
-        memcpy(blk->buffer, ld->iov.data, DEMOFS_BLOCK_SIZE);
-    }
-    evpl_iovec_release(evpl, &ld->iov);
+    (void) evpl;
+    chimera_demofs_abort_if(status != 0, "block read failed off=%lu status=%d",
+                            blk->device_offset, status);
 
     pthread_mutex_lock(&shard->lock);
     blk->state     = DEMOFS_BLOCK_CLEAN;
@@ -1836,12 +1886,12 @@ demofs_bt_block_get(
     pthread_mutex_unlock(&shard->lock);
 
     if (issue) {
+        demofs_block_ensure_iov(thread, blk);
         ld         = malloc(sizeof(*ld));
         ld->blk    = blk;
         ld->thread = thread;
-        evpl_iovec_alloc(thread->evpl, DEMOFS_BLOCK_SIZE, DEMOFS_BLOCK_SIZE, 1, 0, &ld->iov);
         thread->pending_io++;
-        evpl_block_read(thread->evpl, thread->queue[device_id], &ld->iov, 1,
+        evpl_block_read(thread->evpl, thread->queue[device_id], &blk->iov, 1,
                         device_offset, demofs_block_load_complete, ld);
     }
 
@@ -1876,7 +1926,7 @@ demofs_txn_pin_inode_block(
     if (is_new) {
         /* Initialize the embedded b+tree root (empty leaf) in the new
          * inode block. */
-        demofs_bt_node_init(inode->block->buffer, DEMOFS_BT_ROOT_BASE,
+        demofs_bt_node_init(inode->block->iov.data, DEMOFS_BT_ROOT_BASE,
                             DEMOFS_BT_ROOT_CAP, 0);
     }
 } /* demofs_txn_pin_inode_block */
@@ -1891,7 +1941,7 @@ demofs_inode_flush(struct demofs_inode *inode)
         return;
     }
 
-    di = inode->block->buffer;
+    di = inode->block->iov.data;
 
     di->inum       = inode->inum;
     di->gen        = inode->gen;
@@ -2148,7 +2198,7 @@ demofs_bt_alloc_node(
     blk = demofs_block_claim(thread, device_id, device_offset, 1);
     demofs_txn_add_block(txn, blk);
 
-    demofs_bt_node_init(blk->buffer, 0, DEMOFS_BT_NODE_CAP, level);
+    demofs_bt_node_init(blk->iov.data, 0, DEMOFS_BT_NODE_CAP, level);
 
     *r_bptr = sm_inum_from_device_offset(shared->space_map, device_id, device_offset);
     return blk;
@@ -2168,7 +2218,7 @@ demofs_bt_node_for_write(
     device_offset = sm_inum_to_device_offset(thread->shared->space_map, bptr, &device_id);
     blk           = demofs_block_claim(thread, device_id, device_offset, 0);
     demofs_txn_add_block(txn, blk);
-    return blk->buffer;
+    return blk->iov.data;
 } /* demofs_bt_node_for_write */
 
 /*
@@ -2248,7 +2298,7 @@ demofs_bt_leaf_split(
     old_prev = h->prev_leaf;
 
     right = demofs_bt_alloc_node(thread, txn, 0, sep_bptr);
-    rbuf  = right->buffer;
+    rbuf  = right->iov.data;
 
     /* Rebuild the left node in place from scratch (no aliasing).  node_init
      * clears the leaf links, so they are restored explicitly below. */
@@ -2383,8 +2433,8 @@ demofs_bt_interior_insert(
         split_i = total / 2;
 
         right = demofs_bt_alloc_node(thread, txn, h->level, sep_bptr);
-        rsl   = demofs_bt_islots(right->buffer, 0);
-        rh    = demofs_bt_hdr(right->buffer, 0);
+        rsl   = demofs_bt_islots(right->iov.data, 0);
+        rh    = demofs_bt_hdr(right->iov.data, 0);
 
         h->nitems = split_i;
         for (j = 0; j < split_i; j++) {
@@ -2456,7 +2506,7 @@ demofs_bt_insert_locked(
     const void                 *rec,
     uint32_t                    reclen)
 {
-    void                *root = inode->block->buffer;
+    void                *root = inode->block->iov.data;
     struct demofs_bt_key sep;
     uint64_t             sep_bptr;
     int                  split;
@@ -2483,13 +2533,13 @@ demofs_bt_insert_locked(
         left = demofs_bt_alloc_node(thread, txn, old_level, &left_bptr);
 
         /* Copy the entire embedded root node into the new left block. */
-        memcpy((char *) left->buffer, (char *) root + DEMOFS_BT_ROOT_BASE, DEMOFS_BT_ROOT_CAP);
-        demofs_bt_hdr(left->buffer, 0)->capacity = DEMOFS_BT_NODE_CAP;
+        memcpy((char *) left->iov.data, (char *) root + DEMOFS_BT_ROOT_BASE, DEMOFS_BT_ROOT_CAP);
+        demofs_bt_hdr(left->iov.data, 0)->capacity = DEMOFS_BT_NODE_CAP;
 
         if (old_level == 0) {
-            left_min = demofs_bt_lslots(left->buffer, 0)[0].key;
+            left_min = demofs_bt_lslots(left->iov.data, 0)[0].key;
         } else {
-            left_min = demofs_bt_islots(left->buffer, 0)[0].key;
+            left_min = demofs_bt_islots(left->iov.data, 0)[0].key;
         }
 
         demofs_bt_node_init(root, DEMOFS_BT_ROOT_BASE, DEMOFS_BT_ROOT_CAP,
@@ -2812,7 +2862,7 @@ demofs_bt_collapse_root(
     struct demofs_txn    *txn,
     struct demofs_inode  *inode)
 {
-    void    *root = inode->block->buffer;
+    void    *root = inode->block->iov.data;
     uint32_t base = DEMOFS_BT_ROOT_BASE;
 
     for (;; ) {
@@ -2908,7 +2958,7 @@ demofs_bt_remove_locked(
         int      ci;
     } path[DEMOFS_BT_MAX_DEPTH];
     int      depth = 0;
-    void    *buf   = inode->block->buffer;
+    void    *buf   = inode->block->iov.data;
     uint32_t base  = DEMOFS_BT_ROOT_BASE;
     int      idx, exact, j, level;
 
@@ -3071,7 +3121,7 @@ demofs_bt_run(struct demofs_bt_op *op)
                 if (!blk) {
                     return;
                 }
-                pbuf = blk->buffer;
+                pbuf = blk->iov.data;
                 ph   = demofs_bt_hdr(pbuf, pe->base);
                 ci   = pe->ci;
                 pn   = ph->nitems;
@@ -3116,7 +3166,7 @@ demofs_bt_run(struct demofs_bt_op *op)
         if (!blk) {
             return;     /* suspended; resumed when the block loads */
         }
-        buf = blk->buffer;
+        buf = blk->iov.data;
         h   = demofs_bt_hdr(buf, base);
 
         if (op->phase == DEMOFS_BT_PHASE_DESCEND) {
@@ -4035,7 +4085,7 @@ demofs_inode_load_complete(
                                                             lc->inum, &dev);
         struct demofs_block *blk = demofs_block_claim(thread, dev, off, 0);
 
-        memcpy(blk->buffer, lc->iov.data, DEMOFS_BLOCK_SIZE);
+        memcpy(blk->iov.data, lc->iov.data, DEMOFS_BLOCK_SIZE);
         demofs_block_unpin(thread, blk, DEMOFS_BLOCK_CLEAN);
     }
 
@@ -4370,14 +4420,33 @@ struct demofs_redo_ctx {
     struct demofs_intent_log *il;
     struct demofs_iq_channel *ch;
     struct demofs_iq_entry    entry;
-    struct demofs_il_record  *rec;     /* owns the record image (iov) */
+    struct demofs_il_record  *rec;     /* owns the record image (iovs) */
+    int                       segments; /* outstanding journal writes (see below) */
 };
 
-/* Per-block home-write completion context for the tail-pusher. */
-struct demofs_push_ctx {
-    struct demofs_intent_log *il;
-    struct evpl_iovec         iov;     /* aligned copy of the block post-image */
-};
+/*
+ * A record's scatter-gather image can exceed the block backend's per-request
+ * iovec limit (io_uring caps at 64), so the journal write for a large metadata
+ * txn is issued in consecutive chunks sharing one redo_ctx; the record is
+ * durable only when the last chunk completes.
+ */
+#define DEMOFS_IL_MAX_IOV 64
+
+/*
+ * On-log record layout (all 4 KiB-aligned for zero-copy scatter-gather):
+ *   [ header region: redo_header + num_blocks * redo_block_header, 4K-padded ]
+ *   [ block 0 data (4 KiB) ][ block 1 data ] ... [ block N-1 data ]
+ * The header region is materialized into one iovec; each data block is a
+ * zero-copy clone of the cache block's buffer.
+ */
+static inline uint64_t
+demofs_il_hdr_len(uint32_t nblocks)
+{
+    uint64_t h = sizeof(struct demofs_redo_header) +
+        (uint64_t) nblocks * sizeof(struct demofs_redo_block_header);
+
+    return (h + DEMOFS_BLOCK_SIZE - 1) & ~((uint64_t) DEMOFS_BLOCK_SIZE - 1);
+} /* demofs_il_hdr_len */
 
 /* ------------------------------------------------------------------ */
 /* Tail-pusher: write logged blocks to final locations + trim the log  */
@@ -4450,7 +4519,7 @@ demofs_il_clean_pushed_record(
 {
     struct demofs_shared      *shared = container_of(il, struct demofs_shared, intent_log);
     struct demofs_block_cache *cache  = shared->block_cache;
-    char                      *p      = (char *) rec->iov.data + sizeof(struct demofs_redo_header);
+    char                      *p      = (char *) rec->iovs[0].data + sizeof(struct demofs_redo_header);
     uint32_t                   i;
 
     for (i = 0; i < rec->num_blocks; i++) {
@@ -4459,7 +4528,7 @@ demofs_il_clean_pushed_record(
         struct demofs_block             *blk;
         uint32_t                         bucket;
 
-        p += sizeof(*bh) + DEMOFS_BLOCK_SIZE;
+        p += sizeof(*bh);
 
         shard  = demofs_block_shard(cache, bh->device_id, bh->device_offset);
         bucket = demofs_block_bucket(bh->device_id, bh->device_offset);
@@ -4477,46 +4546,52 @@ demofs_il_clean_pushed_record(
     }
 } /* demofs_il_clean_pushed_record */
 
-/* One home-write of a logged block completed. */
+/* Finish the current record: mark its blocks evictable, release the record's
+* iovecs (header + all block clones), advance the tail, and kick the next. */
+static void
+demofs_il_push_finish(struct demofs_intent_log *il)
+{
+    struct demofs_il_record *rec = il->push_cur;
+
+    demofs_il_clean_pushed_record(il, rec);
+
+    il->push_cur = NULL;
+    evpl_iovecs_release(il->evpl, rec->iovs, rec->niov);
+    free(rec->iovs);
+    free(rec);
+
+    il->log_tail = il->push_head ? il->push_head->offset : il->log_head;
+
+    demofs_il_push_kick(il);
+
+    /* Space freed: re-poke channel processing in case a writer was blocked
+     * on a full log. */
+    evpl_ring_doorbell(&il->wake_doorbell);
+} /* demofs_il_push_finish */
+
+/* One home-write of a logged block completed.  private_data is the il (all
+ * outstanding writes belong to the single current record). */
 static void
 demofs_il_push_block_cb(
     struct evpl *evpl,
     int          status,
     void        *private_data)
 {
-    struct demofs_push_ctx   *pc = private_data;
-    struct demofs_intent_log *il = pc->il;
+    struct demofs_intent_log *il = private_data;
 
+    (void) evpl;
     chimera_demofs_abort_if(status, "tail-push home write failed: %d", status);
-    evpl_iovec_release(evpl, &pc->iov);
-    free(pc);
 
     if (--il->push_outstanding == 0) {
-        /* Whole record is durably home; trim past it and advance the tail. */
-        struct demofs_il_record *rec = il->push_cur;
-
-        /* The blocks are now home -> make the (un-re-logged) ones evictable. */
-        demofs_il_clean_pushed_record(il, rec);
-
-        il->push_cur = NULL;
-        evpl_iovec_release(il->evpl, &rec->iov);
-        free(rec);
-
-        il->log_tail = il->push_head ? il->push_head->offset : il->log_head;
-
-        demofs_il_push_kick(il);
-
-        /* Space freed: re-poke channel processing in case a writer was
-         * blocked on a full log. */
-        evpl_ring_doorbell(&il->wake_doorbell);
+        demofs_il_push_finish(il);
     }
 } /* demofs_il_push_block_cb */
 
 /*
- * Start pushing the oldest pending record (if idle).  Writes every block's
- * post-image, copied out of the immutable log record into an aligned iovec,
- * to its final (device, offset).  Strict oldest-first ordering means a block
- * re-logged in a later record gets its newest image written last.
+ * Start pushing the oldest pending record (if idle).  Writes each block's
+ * post-image straight from the record's zero-copy clone of the cache buffer
+ * to its final (device, offset) -- no copy.  Strict oldest-first ordering
+ * means a block re-logged in a later record gets its newest image last.
  */
 static void
 demofs_il_push_kick(struct demofs_intent_log *il)
@@ -4539,33 +4614,21 @@ demofs_il_push_kick(struct demofs_intent_log *il)
     il->push_cur = rec;
 
     if (rec->num_blocks == 0) {
-        il->push_cur = NULL;
-        evpl_iovec_release(il->evpl, &rec->iov);
-        free(rec);
-        il->log_tail = il->push_head ? il->push_head->offset : il->log_head;
-        demofs_il_push_kick(il);
+        demofs_il_push_finish(il);
         return;
     }
 
     /* Block I/O completes asynchronously, so no completion can fire while we
-     * issue these writes; the last completion trims the record. */
+     * issue these writes; the last completion finishes the record. */
     il->push_outstanding = rec->num_blocks;
 
-    p = (char *) rec->iov.data + sizeof(struct demofs_redo_header);
+    p = (char *) rec->iovs[0].data + sizeof(struct demofs_redo_header);
     for (i = 0; i < rec->num_blocks; i++) {
-        struct demofs_push_ctx *pc;
-
         bh = (struct demofs_redo_block_header *) p;
         p += sizeof(*bh);
 
-        pc     = malloc(sizeof(*pc));
-        pc->il = il;
-        evpl_iovec_alloc(il->evpl, DEMOFS_BLOCK_SIZE, DEMOFS_BLOCK_SIZE, 1, 0, &pc->iov);
-        memcpy(pc->iov.data, p, DEMOFS_BLOCK_SIZE);
-        p += DEMOFS_BLOCK_SIZE;
-
-        evpl_block_write(il->evpl, il->queue[bh->device_id], &pc->iov, 1,
-                         bh->device_offset, 1 /* sync */, demofs_il_push_block_cb, pc);
+        evpl_block_write(il->evpl, il->queue[bh->device_id], &rec->iovs[1 + i], 1,
+                         bh->device_offset, 1 /* sync */, demofs_il_push_block_cb, il);
     }
 } /* demofs_il_push_kick */
 
@@ -4589,6 +4652,12 @@ demofs_redo_write_cb(
 
     (void) evpl;
     chimera_demofs_abort_if(status, "redo record write failed: %d", status);
+
+    /* One chunk of a possibly multi-chunk journal write landed; only the last
+     * makes the whole record durable. */
+    if (--ctx->segments > 0) {
+        return;
+    }
 
     il->redo_inflight--;
 
@@ -4636,17 +4705,18 @@ demofs_il_write_redo(
     struct demofs_redo_header       *hdr;
     struct demofs_redo_block_header *bh;
     uint32_t                         nblocks = 0;
-    uint64_t                         reclen, offset;
+    uint64_t                         hdr_len, reclen, offset;
+    uint32_t                         i;
     char                            *p;
     int                              niov;
+    XXH3_state_t                     xs;
 
     for (tb = txn->blocks; tb; tb = tb->next) {
         nblocks++;
     }
 
-    reclen = sizeof(struct demofs_redo_header) +
-        (uint64_t) nblocks * (sizeof(struct demofs_redo_block_header) + DEMOFS_BLOCK_SIZE);
-    reclen = (reclen + DEMOFS_BLOCK_SIZE - 1) & ~((uint64_t) DEMOFS_BLOCK_SIZE - 1);
+    hdr_len = demofs_il_hdr_len(nblocks);
+    reclen  = hdr_len + (uint64_t) nblocks * DEMOFS_BLOCK_SIZE;
 
     /* Caller guarantees space (demofs_iq_process_channel checks demofs_il_fits
      * before consuming the SQ entry), so placement always succeeds. */
@@ -4657,10 +4727,14 @@ demofs_il_write_redo(
     rec->offset     = offset;
     rec->reclen     = reclen;
     rec->num_blocks = nblocks;
+    rec->niov       = 1 + nblocks;
+    rec->iovs       = malloc(rec->niov * sizeof(struct evpl_iovec));
     rec->next       = NULL;
 
-    niov = evpl_iovec_alloc(il->evpl, reclen, DEMOFS_BLOCK_SIZE, 1, 0, &rec->iov);
-    chimera_demofs_abort_if(niov != 1, "redo record did not fit in one iovec (%d)", niov);
+    /* iovs[0]: materialized header region (redo_header + per-block headers). */
+    niov = evpl_iovec_alloc(il->evpl, hdr_len, DEMOFS_BLOCK_SIZE, 1,
+                            EVPL_IOVEC_FLAG_SHARED, &rec->iovs[0]);
+    chimera_demofs_abort_if(niov != 1, "redo header did not fit in one iovec (%d)", niov);
 
     ctx        = malloc(sizeof(*ctx));
     ctx->il    = il;
@@ -4668,7 +4742,7 @@ demofs_il_write_redo(
     ctx->entry = *entry;
     ctx->rec   = rec;
 
-    p               = (char *) rec->iov.data;
+    p               = (char *) rec->iovs[0].data;
     hdr             = (struct demofs_redo_header *) p;
     hdr->magic      = DEMOFS_REDO_MAGIC;
     hdr->csum_lo    = 0;
@@ -4679,7 +4753,8 @@ demofs_il_write_redo(
     hdr->reclen     = (uint32_t) reclen;
     p              += sizeof(*hdr);
 
-    for (tb = txn->blocks; tb; tb = tb->next) {
+    i = 0;
+    for (tb = txn->blocks; tb; tb = tb->next, i++) {
         struct demofs_block *blk = tb->block;
 
         /* Stamp the block with this record's seq so the tail-pusher can tell,
@@ -4693,32 +4768,64 @@ demofs_il_write_redo(
         bh->device_offset = blk->device_offset;
         p                += sizeof(*bh);
 
-        memcpy(p, blk->buffer, DEMOFS_BLOCK_SIZE);
-        p += DEMOFS_BLOCK_SIZE;
+        /* Move the commit-time snapshot ref into the record (no copy, no touch
+         * of the live block->iov from this thread).  The image stays immutable
+         * until pushed home and released; a later writer COWs the cache block. */
+        evpl_iovec_move(&rec->iovs[1 + i], &tb->snap);
     }
 
-    /* Zero the tail padding (reclen is 4 KiB-rounded) so the checksum covers
-     * deterministic bytes, then stamp the XXH3-128 over the whole record. */
+    /* Zero the header-region tail padding so the checksum covers deterministic
+     * bytes, then stamp the XXH3-128 over the header region + every block. */
     {
-        char *end = (char *) rec->iov.data + reclen;
+        char *end = (char *) rec->iovs[0].data + hdr_len;
 
         if (p < end) {
             memset(p, 0, (size_t) (end - p));
         }
     }
+    XXH3_128bits_reset(&xs);
+    XXH3_128bits_update(&xs, rec->iovs[0].data, hdr_len);
+    for (i = 0; i < nblocks; i++) {
+        XXH3_128bits_update(&xs, rec->iovs[1 + i].data, DEMOFS_BLOCK_SIZE);
+    }
     {
-        XXH128_hash_t h = XXH3_128bits(rec->iov.data, reclen);
+        XXH128_hash_t h = XXH3_128bits_digest(&xs);
 
         hdr->csum_lo = h.low64;
         hdr->csum_hi = h.high64;
     }
 
+    ctx->segments = (rec->niov + DEMOFS_IL_MAX_IOV - 1) / DEMOFS_IL_MAX_IOV;
+
     ch->cq_inflight++;
     il->redo_inflight++;
 
-    evpl_block_write(il->evpl, il->queue[SM_INTENT_LOG_DEVICE],
-                     &rec->iov, 1, offset, 1 /* sync */,
-                     demofs_redo_write_cb, ctx);
+    /* Issue the record in <=DEMOFS_IL_MAX_IOV-iovec chunks to consecutive
+     * offsets (the on-log record is contiguous); all chunks share ctx and the
+     * last completion finalizes the record. */
+    {
+        uint32_t done = 0;
+        uint64_t woff = offset;
+
+        while (done < rec->niov) {
+            uint32_t cnt   = rec->niov - done;
+            uint64_t bytes = 0;
+            uint32_t k;
+
+            if (cnt > DEMOFS_IL_MAX_IOV) {
+                cnt = DEMOFS_IL_MAX_IOV;
+            }
+            for (k = 0; k < cnt; k++) {
+                bytes += rec->iovs[done + k].length;
+            }
+
+            evpl_block_write(il->evpl, il->queue[SM_INTENT_LOG_DEVICE],
+                             &rec->iovs[done], cnt, woff, 1 /* sync */,
+                             demofs_redo_write_cb, ctx);
+            woff += bytes;
+            done += cnt;
+        }
+    }
 } /* demofs_il_write_redo */
 
 /* Padded on-log length of the redo record for one transaction. */
@@ -4727,14 +4834,11 @@ demofs_il_txn_reclen(struct demofs_txn *txn)
 {
     struct demofs_txn_block *tb;
     uint32_t                 nblocks = 0;
-    uint64_t                 reclen;
 
     for (tb = txn->blocks; tb; tb = tb->next) {
         nblocks++;
     }
-    reclen = sizeof(struct demofs_redo_header) +
-        (uint64_t) nblocks * (sizeof(struct demofs_redo_block_header) + DEMOFS_BLOCK_SIZE);
-    return (reclen + DEMOFS_BLOCK_SIZE - 1) & ~((uint64_t) DEMOFS_BLOCK_SIZE - 1);
+    return demofs_il_hdr_len(nblocks) + (uint64_t) nblocks * DEMOFS_BLOCK_SIZE;
 } /* demofs_il_txn_reclen */
 
 static void
@@ -4957,6 +5061,19 @@ demofs_txn_commit(
      * (and its pinned blocks) to the intent log thread. */
     demofs_txn_flush_inodes(txn);
 
+    /* Snapshot each block's buffer (zero-copy ref) while the content is final
+     * and the inode locks are still held -- so the redo record captures this
+     * txn's committed image, immune to a later COW, and the intent-log thread
+     * never has to touch the live block->iov.  The refs are moved into the
+     * record by demofs_il_write_redo. */
+    {
+        struct demofs_txn_block *tb;
+
+        for (tb = txn->blocks; tb; tb = tb->next) {
+            evpl_iovec_clone(&tb->snap, &tb->block->iov);
+        }
+    }
+
     /* Write txn -> intent log thread via this worker's SQ.  The intent
      * log thread drops the txn's logical inode locks when it processes
      * the entry (see demofs_iq_process_channel); these are logical locks
@@ -5089,18 +5206,25 @@ demofs_recover_log(struct demofs_shared *shared)
     }
 
     for (i = 0; i < nrec; i++) {
-        struct demofs_redo_header *hdr = (struct demofs_redo_header *) (log + recs[i].offset);
-        char                      *p   = log + recs[i].offset + sizeof(*hdr);
+        struct demofs_redo_header *hdr  = (struct demofs_redo_header *) (log + recs[i].offset);
+        char                      *bhp  = log + recs[i].offset + sizeof(*hdr);
+        char                      *data = log + recs[i].offset + demofs_il_hdr_len(hdr->num_blocks);
         uint32_t                   b;
 
+        /* New layout: all per-block headers are grouped after the redo header,
+         * and the block images follow the 4 KiB-aligned header region. */
         for (b = 0; b < hdr->num_blocks; b++) {
-            struct demofs_redo_block_header *bh = (struct demofs_redo_block_header *) p;
+            struct demofs_redo_block_header *bh =
+                (struct demofs_redo_block_header *) (bhp + (size_t) b * sizeof(*bh));
+            char                            *img = data + (size_t) b * DEMOFS_BLOCK_SIZE;
 
-            p += sizeof(*bh);
             if (bh->device_id < (uint32_t) shared->num_devices && wfd[bh->device_id] >= 0) {
-                pwrite(wfd[bh->device_id], p, DEMOFS_BLOCK_SIZE, (off_t) bh->device_offset);
+                ssize_t wn = pwrite(wfd[bh->device_id], img, DEMOFS_BLOCK_SIZE,
+                                    (off_t) bh->device_offset);
+
+                chimera_demofs_abort_if(wn != (ssize_t) DEMOFS_BLOCK_SIZE,
+                                        "recovery replay pwrite failed: %zd", wn);
             }
-            p += DEMOFS_BLOCK_SIZE;
         }
     }
 
@@ -5413,14 +5537,18 @@ demofs_bootstrap(struct demofs_thread *thread)
      * eviction could discard it before the first write op logs it (CLEAN
      * blocks must be re-readable from disk).  Then detach it, evictable. */
     inode->block = demofs_block_claim(thread, device_id, device_offset, 1);
-    demofs_bt_node_init(inode->block->buffer, DEMOFS_BT_ROOT_BASE,
+    demofs_bt_node_init(inode->block->iov.data, DEMOFS_BT_ROOT_BASE,
                         DEMOFS_BT_ROOT_CAP, 0);
     demofs_inode_flush(inode);
     {
         int fd = open(shared->device_paths[device_id], O_WRONLY);
 
         if (fd >= 0) {
-            pwrite(fd, inode->block->buffer, DEMOFS_BLOCK_SIZE, (off_t) device_offset);
+            ssize_t wn = pwrite(fd, inode->block->iov.data, DEMOFS_BLOCK_SIZE,
+                                (off_t) device_offset);
+
+            chimera_demofs_abort_if(wn != (ssize_t) DEMOFS_BLOCK_SIZE,
+                                    "bootstrap root pwrite failed: %zd", wn);
             fsync(fd);
             close(fd);
         }
@@ -8051,8 +8179,14 @@ demofs_write_inserted_cb(
     request->write.r_length = request->write.length;
     request->write.r_sync   = 1;
 
-    /* In-memory mutations done; release the inode lock before block I/O. */
-    demofs_txn_unlock_inode(demofs_private->txn, inode);
+    /* Do NOT release the inode lock here.  The dirty b+tree/inode blocks are
+     * not yet protected by the intent log, so exposing them to another thread
+     * (which could read stale state or re-dirty them) is unsafe.  The data I/O
+     * below is submitted by this worker, then the txn is handed to the intent
+     * log (demofs_op_ok -> demofs_txn_commit); the intent-log thread releases
+     * the inode locks only once the record is durable (demofs_redo_write_cb ->
+     * demofs_txn_unlock_all).  The lock is a logical flag, so holding it across
+     * async I/O doesn't block the worker -- conflicting ops park as waiters. */
 
     if (demofs_private->need_prefix_read || demofs_private->need_suffix_read) {
         demofs_private->rmw_phase = 1;
