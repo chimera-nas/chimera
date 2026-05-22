@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <string.h>
@@ -998,16 +999,19 @@ memfs_apply_attrs(
 } /* memfs_apply_attrs */
 
 static int
-memfs_cred_can_write(
+memfs_cred_can_access(
     const struct memfs_inode      *inode,
-    const struct chimera_vfs_cred *cred)
+    const struct chimera_vfs_cred *cred,
+    uint32_t                       user_bit,
+    uint32_t                       group_bit,
+    uint32_t                       other_bit)
 {
     if (cred->uid == 0) {
         return 1;
     }
 
     if ((uint64_t) cred->uid == inode->uid) {
-        return !!(inode->mode & S_IWUSR);
+        return !!(inode->mode & user_bit);
     }
 
     int in_group = ((uint64_t) cred->gid == inode->gid);
@@ -1019,10 +1023,26 @@ memfs_cred_can_write(
     }
 
     if (in_group) {
-        return !!(inode->mode & S_IWGRP);
+        return !!(inode->mode & group_bit);
     }
 
-    return !!(inode->mode & S_IWOTH);
+    return !!(inode->mode & other_bit);
+} /* memfs_cred_can_access */
+
+static int
+memfs_cred_can_read(
+    const struct memfs_inode      *inode,
+    const struct chimera_vfs_cred *cred)
+{
+    return memfs_cred_can_access(inode, cred, S_IRUSR, S_IRGRP, S_IROTH);
+} /* memfs_cred_can_read */
+
+static int
+memfs_cred_can_write(
+    const struct memfs_inode      *inode,
+    const struct chimera_vfs_cred *cred)
+{
+    return memfs_cred_can_access(inode, cred, S_IWUSR, S_IWGRP, S_IWOTH);
 } /* memfs_cred_can_write */
 
 static void
@@ -2076,6 +2096,24 @@ memfs_open_at(
         request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
         return;
+    }
+
+    if (!(flags & CHIMERA_VFS_OPEN_INFERRED)) {
+        bool allowed;
+
+        if (flags & CHIMERA_VFS_OPEN_READ_ONLY) {
+            allowed = memfs_cred_can_read(inode, request->cred);
+        } else {
+            allowed = memfs_cred_can_write(inode, request->cred);
+        }
+
+        if (!allowed) {
+            pthread_mutex_unlock(&inode->lock);
+            pthread_mutex_unlock(&parent_inode->lock);
+            request->status = CHIMERA_VFS_EACCES;
+            request->complete(request);
+            return;
+        }
     }
 
     if (flags & CHIMERA_VFS_OPEN_INFERRED) {
