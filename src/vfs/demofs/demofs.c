@@ -486,6 +486,16 @@ _Static_assert(DEMOFS_DIRENT_REC_MAX <= 320,
                "demofs_request_private.rec_scratch must hold a full dirent record");
 
 /*
+ * A symlink stores its target as the single record of the new inode's b+tree,
+ * which lives in the embedded root (it can never be split out -- there's only
+ * one record), so the target must fit one node: root capacity minus the node
+ * header and one leaf slot.  Longer targets are rejected with ENAMETOOLONG
+ * rather than aborting the daemon.
+ */
+#define DEMOFS_SYMLINK_TARGET_MAX \
+        (DEMOFS_BT_ROOT_CAP - sizeof(struct demofs_bt_node_hdr) - sizeof(struct demofs_bt_lslot))
+
+/*
  * Intent-log redo record, written into the reserved intent-log region.
  * A record is a header followed by num_blocks (block-header, 4 KiB content)
  * pairs, padded to a 4 KiB multiple.  Full-block redo: the record carries
@@ -787,8 +797,12 @@ struct demofs_bt_op {
     enum demofs_bt_phase      phase;
     struct demofs_bt_key      key;
 
-    /* insert payload (copied into op-owned storage so it survives suspension) */
+    /* insert payload (copied into op-owned storage so it survives suspension).
+     * Most records (dirents, extents) fit recbuf; an oversized one (a long
+     * symlink target) is staged in a heap buffer instead.  `rec` points at
+     * whichever holds the payload and is freed in demofs_bt_complete. */
     uint8_t                   recbuf[DEMOFS_DIRENT_REC_MAX];
+    uint8_t                  *rec;
     uint32_t                  reclen;
 
     /* lookup output (caller-owned, must outlive the op) */
@@ -3804,6 +3818,13 @@ demofs_bt_complete(
     }
     op->npins = 0;
 
+    /* Free an oversized record's heap staging buffer (small records sit in
+     * recbuf and need no free). */
+    if (op->rec && op->rec != op->recbuf) {
+        free(op->rec);
+    }
+    op->rec = NULL;
+
     op->result = result;
     if (op->suspended) {
         op->cb(op, result, op->private_data);
@@ -3921,7 +3942,7 @@ demofs_bt_run(struct demofs_bt_op *op)
             /* At the leaf. */
             if (op->opcode == DEMOFS_BT_OP_INSERT) {
                 demofs_bt_insert_locked(thread, op->txn, inode, &op->key,
-                                        op->recbuf, op->reclen);
+                                        op->rec, op->reclen);
                 demofs_bt_complete(op, 0);
                 return;
             } else if (op->opcode == DEMOFS_BT_OP_REMOVE) {
@@ -4047,7 +4068,10 @@ demofs_bt_insert_async(
     demofs_bt_cb_t              cb,
     void                       *private_data)
 {
-    chimera_demofs_abort_if(reclen > sizeof(op->recbuf), "b+tree record too large");
+    /* No record can exceed a single node; callers (e.g. the symlink path)
+     * reject oversized payloads before reaching here, so this is a true
+     * invariant. */
+    chimera_demofs_abort_if(reclen > DEMOFS_BT_NODE_CAP, "b+tree record too large");
 
     memset(op, 0, sizeof(*op));
     op->thread       = thread;
@@ -4060,7 +4084,10 @@ demofs_bt_insert_async(
     op->use_root     = 1;
     op->cb           = cb;
     op->private_data = private_data;
-    memcpy(op->recbuf, rec, reclen);
+    /* Stage the payload in op-owned storage so it survives suspension; recbuf
+     * for the common (small) case, a heap buffer for an oversized one. */
+    op->rec = (reclen > sizeof(op->recbuf)) ? malloc(reclen) : op->recbuf;
+    memcpy(op->rec, rec, reclen);
 
     demofs_bt_run(op);
     return op->done;
@@ -10356,7 +10383,16 @@ demofs_symlink_at(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = demofs_txn_begin(thread, DEMOFS_TXN_WRITE);
+
+    /* The target is the new inode's single b+tree record and must fit one
+     * node; reject anything longer rather than aborting deeper in the insert. */
+    if (request->symlink_at.targetlen > DEMOFS_SYMLINK_TARGET_MAX) {
+        request->status = CHIMERA_VFS_ENAMETOOLONG;
+        request->complete(request);
+        return;
+    }
+
+    p->txn = demofs_txn_begin(thread, DEMOFS_TXN_WRITE);
 
     demofs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
