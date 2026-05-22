@@ -85,11 +85,12 @@ enum chimera_nfs_client_mount_state {
  * Holds the session information established via EXCHANGE_ID + CREATE_SESSION
  */
 struct chimera_nfs4_client_session {
-    uint8_t   sessionid[NFS4_SESSIONID_SIZE];
-    uint64_t  clientid;
-    uint32_t  max_slots;           /* Maximum slots from server (ca_maxrequests) */
-    uint32_t  next_slot_id;        /* Next slot ID to assign to a thread */
-    uint32_t *slot_seqids;         /* Per-slot sequence IDs (array of max_slots) */
+    pthread_mutex_t lock;
+    uint8_t         sessionid[NFS4_SESSIONID_SIZE];
+    uint64_t        clientid;
+    uint32_t        max_slots;     /* Maximum slots from server (ca_maxrequests) */
+    uint32_t        next_slot_id;  /* Next slot ID to assign to a thread */
+    uint32_t       *slot_seqids;   /* Per-slot sequence IDs (array of max_slots) */
 };
 
 struct chimera_nfs_client_mount;
@@ -238,8 +239,10 @@ chimera_nfs_thread_get_server_thread(
         session = thread->shared->servers[index]->nfs4_session;
         if (session && session->max_slots > 0) {
             /* Round-robin slot assignment. If more threads than slots, they share. */
+            pthread_mutex_lock(&session->lock);
             thread->server_threads[index]->slot_id = session->next_slot_id % session->max_slots;
             session->next_slot_id++;
+            pthread_mutex_unlock(&session->lock);
         }
     }
 
@@ -301,7 +304,13 @@ chimera_nfs4_get_sequenceid(
     struct chimera_nfs4_client_session *session,
     uint32_t                            slot_id)
 {
-    return session->slot_seqids[slot_id]++;
+    uint32_t seqid;
+
+    pthread_mutex_lock(&session->lock);
+    seqid = session->slot_seqids[slot_id]++;
+    pthread_mutex_unlock(&session->lock);
+
+    return seqid;
 } // chimera_nfs4_get_sequenceid // chimera_nfs4_get_sequenceid
 
 /*
