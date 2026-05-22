@@ -4706,6 +4706,136 @@ demofs_txn_commit(
     evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
 } /* demofs_txn_commit */
 
+struct demofs_recover_rec {
+    uint64_t seq;
+    uint64_t offset;     /* byte offset within the read-in log image */
+};
+
+static int
+demofs_recover_rec_cmp(
+    const void *a,
+    const void *b)
+{
+    uint64_t sa = ((const struct demofs_recover_rec *) a)->seq;
+    uint64_t sb = ((const struct demofs_recover_rec *) b)->seq;
+
+    return (sa > sb) - (sa < sb);
+} /* demofs_recover_rec_cmp */
+
+/*
+ * Crash recovery (synchronous replay): the previous instance did not unmount
+ * cleanly, so logged-but-not-yet-pushed redo records may still sit in the
+ * intent log while their home locations hold stale data.  Sweep the log for
+ * intact records -- a 4 KiB-aligned magic whose XXH3-128 over reclen bytes
+ * verifies (rejecting torn/partially-overwritten records) -- and write each
+ * block image to its home location in seq order (latest image of a block
+ * wins), then fsync.  After this the on-disk b+tree / inodes / data are
+ * consistent with the last acknowledged write, exactly as the tail-pusher
+ * would have left them.
+ *
+ * Replaying every intact record (rather than just [tail, head]) is safe: in a
+ * FIFO circular log a superseding record outlives every record it supersedes,
+ * so seq-ordered replay always lands the latest image, and re-writing an
+ * already-current block is idempotent.  Runs at mount before evpl I/O starts,
+ * so it uses plain pread/pwrite via the device paths.
+ */
+static int
+demofs_recover_log(struct demofs_shared *shared)
+{
+    char                      *log;
+    int                        fd;
+    int                       *wfd;
+    ssize_t                    n;
+    uint64_t                   o;
+    struct demofs_recover_rec *recs;
+    uint32_t                   nrec = 0, cap = 4096, i;
+
+    log = malloc(SM_INTENT_LOG_SIZE);
+    fd  = open(shared->device_paths[SM_INTENT_LOG_DEVICE], O_RDONLY);
+    if (fd < 0) {
+        free(log);
+        return -1;
+    }
+    n = pread(fd, log, SM_INTENT_LOG_SIZE, SM_INTENT_LOG_OFFSET);
+    close(fd);
+    if (n != (ssize_t) SM_INTENT_LOG_SIZE) {
+        free(log);
+        return -1;
+    }
+
+    recs = malloc(cap * sizeof(*recs));
+
+    for (o = 0; o + sizeof(struct demofs_redo_header) <= SM_INTENT_LOG_SIZE;
+         o += DEMOFS_BLOCK_SIZE) {
+        struct demofs_redo_header *hdr = (struct demofs_redo_header *) (log + o);
+        uint64_t                   lo, hi;
+        XXH128_hash_t              h;
+
+        if (hdr->magic != DEMOFS_REDO_MAGIC) {
+            continue;
+        }
+        if (hdr->reclen < sizeof(*hdr) ||
+            (hdr->reclen & (DEMOFS_BLOCK_SIZE - 1)) ||
+            o + hdr->reclen > SM_INTENT_LOG_SIZE) {
+            continue;
+        }
+        lo           = hdr->csum_lo;
+        hi           = hdr->csum_hi;
+        hdr->csum_lo = 0;
+        hdr->csum_hi = 0;
+        h            = XXH3_128bits(log + o, hdr->reclen);
+        hdr->csum_lo = lo;
+        hdr->csum_hi = hi;
+        if (h.low64 != lo || h.high64 != hi) {
+            continue;
+        }
+
+        if (nrec == cap) {
+            cap *= 2;
+            recs = realloc(recs, cap * sizeof(*recs));
+        }
+        recs[nrec].seq    = hdr->seq;
+        recs[nrec].offset = o;
+        nrec++;
+    }
+
+    qsort(recs, nrec, sizeof(*recs), demofs_recover_rec_cmp);
+
+    wfd = malloc(shared->num_devices * sizeof(int));
+    for (i = 0; i < (uint32_t) shared->num_devices; i++) {
+        wfd[i] = open(shared->device_paths[i], O_WRONLY);
+    }
+
+    for (i = 0; i < nrec; i++) {
+        struct demofs_redo_header *hdr = (struct demofs_redo_header *) (log + recs[i].offset);
+        char                      *p   = log + recs[i].offset + sizeof(*hdr);
+        uint32_t                   b;
+
+        for (b = 0; b < hdr->num_blocks; b++) {
+            struct demofs_redo_block_header *bh = (struct demofs_redo_block_header *) p;
+
+            p += sizeof(*bh);
+            if (bh->device_id < (uint32_t) shared->num_devices && wfd[bh->device_id] >= 0) {
+                pwrite(wfd[bh->device_id], p, DEMOFS_BLOCK_SIZE, (off_t) bh->device_offset);
+            }
+            p += DEMOFS_BLOCK_SIZE;
+        }
+    }
+
+    for (i = 0; i < (uint32_t) shared->num_devices; i++) {
+        if (wfd[i] >= 0) {
+            fsync(wfd[i]);
+            close(wfd[i]);
+        }
+    }
+
+    free(wfd);
+    free(recs);
+    free(log);
+    chimera_demofs_info("crash recovery: replayed %u intact intent-log records", nrec);
+    return 0;
+} /* demofs_recover_log */
+
 static void *
 demofs_init(const char *cfgdata)
 {
@@ -4792,21 +4922,30 @@ demofs_init(const char *cfgdata)
 
     pthread_mutex_init(&shared->lock, NULL);
 
-    /* Decide mkfs vs mount: a valid superblock with the CLEAN flag means the
-     * previous instance unmounted cleanly, so we can reload its persisted
-     * free-space map and skip bootstrap (the root inode faults in from disk on
-     * first access).  Anything else (no/garbage superblock, or not clean ->
-     * a crash, which needs recovery we haven't built) is treated as mkfs. */
+    /* Decide mkfs vs clean-mount vs crash-recovery from the superblock
+     * (persistent mode only):
+     *   - valid + CLEAN  -> the previous instance unmounted cleanly: reload
+     *                       its persisted free-space map and mount.
+     *   - valid + !CLEAN -> a crash: synchronously replay the intent log to
+     *                       home, then mount the now-consistent image.
+     *   - no/garbage     -> mkfs.
+     */
     {
         struct sm_superblock sb;
-        int                  mounting = 0;
+        int                  have_sb;
+        int                  mode;     /* 0 = mkfs, 1 = clean mount, 2 = recover */
 
-        if (shared->persistent &&
-            space_map_read_superblock_path(device0_path, &sb) == 0 &&
-            (sb.flags & SM_SB_CLEAN)) {
+        have_sb = shared->persistent &&
+            space_map_read_superblock_path(device0_path, &sb) == 0;
+
+        if (have_sb && (sb.flags & SM_SB_CLEAN)) {
+            mode         = 1;
             shared->fsid = sb.fsid;
-            mounting     = 1;
+        } else if (have_sb) {
+            mode         = 2;
+            shared->fsid = sb.fsid;
         } else {
+            mode         = 0;
             shared->fsid = chimera_rand64();
         }
 
@@ -4817,22 +4956,40 @@ demofs_init(const char *cfgdata)
         shared->space_map = space_map_create(device_sizes, shared->num_devices);
         free(device_sizes);
 
-        if (mounting &&
-            space_map_load_paths(shared->space_map, shared->device_paths) != 0) {
-            chimera_demofs_error("space-map reload failed; treating as fresh");
-            mounting = 0;
+        if (mode == 2) {
+            chimera_demofs_info("superblock not clean: running crash recovery");
+            demofs_recover_log(shared);
         }
 
-        shared->mounted = mounting;
+        /* Reload the persisted free-space map.  NOTE: after a crash this
+         * snapshot is the one from the last *clean* unmount, so it does not
+         * reflect allocations made since then -- reads are correct (the log
+         * replay made the home image consistent) but the in-memory allocator
+         * must be rebuilt (namespace-walk fsck, TODO) before writes are safe.
+         * For a clean mount the snapshot must load or we fall back to mkfs. */
+        if (mode != 0 &&
+            space_map_load_paths(shared->space_map, shared->device_paths) != 0) {
+            if (mode == 1) {
+                chimera_demofs_error("space-map reload failed; treating as fresh");
+                mode = 0;
+            } else {
+                chimera_demofs_error(
+                    "post-recovery space-map reload failed; allocator is fresh "
+                    "(writes unsafe until namespace-walk reconstruction)");
+            }
+        }
 
-        if (mounting) {
-            uint8_t fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
+        shared->mounted = (mode != 0);
 
-            shared->root_inum = sb.root_inum;
+        if (mode != 0) {
+            uint8_t  fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
+            uint64_t rinum                           = sb.root_inum ? sb.root_inum : 2;
+
+            shared->root_inum = rinum;
             shared->root_gen  = sb.root_gen;
             memcpy(fsid_buf, &shared->fsid, sizeof(shared->fsid));
             shared->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf,
-                                                                  sb.root_inum,
+                                                                  rinum,
                                                                   sb.root_gen,
                                                                   shared->root_fh);
         }
@@ -4842,9 +4999,9 @@ demofs_init(const char *cfgdata)
          * clean shutdown. */
         rc = space_map_write_superblock_path(shared->space_map, device0_path,
                                              shared->fsid, 0,
-                                             mounting ? sb.root_inum : 0,
-                                             mounting ? sb.root_gen : 0,
-                                             mounting ? sb.log_seq : 0);
+                                             mode != 0 ? shared->root_inum : 0,
+                                             mode != 0 ? shared->root_gen : 0,
+                                             mode != 0 ? sb.log_seq : 0);
         chimera_demofs_abort_if(rc != 0,
                                 "Failed to write superblock to %s: %s",
                                 device0_path, strerror(errno));
