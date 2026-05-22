@@ -151,9 +151,15 @@ else
 fi
 CHIMERA_PID=$!
 
-# Wait for NFS port to be ready
-for i in $(seq 1 30); do
-    if ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/2049" 2>/dev/null; then
+# Wait for the daemon to finish startup and for NFS to accept connections.
+# On slower arm64 runners, the NFS socket can briefly accept before the server
+# has finished its own readiness path; starting pynfs in that window produces
+# connection-refused initialization failures.
+READY=0
+for i in $(seq 1 100); do
+    if grep -q "Server is ready." "$CHIMERA_LOG" &&
+       ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/2049" 2>/dev/null; then
+        READY=1
         break
     fi
     if ! kill -0 "$CHIMERA_PID" 2>/dev/null; then
@@ -162,6 +168,11 @@ for i in $(seq 1 30); do
     fi
     sleep 0.1
 done
+
+if [ "$READY" != "1" ]; then
+    echo "chimera NFS port never became ready"
+    exit 1
+fi
 
 # Run pynfs tests based on NFS minor version
 # Flags are passed as positional arguments to testserver.py
