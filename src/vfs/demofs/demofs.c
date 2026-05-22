@@ -667,6 +667,7 @@ struct demofs_intent_log {
     struct demofs_il_record  *push_cur;          /* record currently being pushed */
     int                       push_outstanding;  /* home writes in flight for push_cur */
     int                       redo_inflight;     /* redo writes issued, not yet in FIFO */
+    int                       iocbs_inflight;    /* block writes (redo + push) on the queue, not yet completed */
 };
 
 struct demofs_shared {
@@ -5235,7 +5236,20 @@ struct demofs_redo_ctx {
  * txn is issued in consecutive chunks sharing one redo_ctx; the record is
  * durable only when the last chunk completes.
  */
-#define DEMOFS_IL_MAX_IOV 64
+#define DEMOFS_IL_MAX_IOV    64
+
+/*
+ * The intent-log thread submits all its block writes (redo records + tail-push
+ * home writes) onto a single libaio/io_uring queue, whose submission ring is
+ * bounded (libaio_max_pending defaults to 256).  Each wake processes every
+ * channel's whole submission queue, so without a cap the redo writes for a
+ * burst of queued txns can flood the ring before any completion drains it
+ * ("too many pending iocbs").  Gate redo submission once this many writes are
+ * in flight, and resume from a completion once it drains back to the low
+ * watermark -- leaving headroom for the in-flight tail-push record's writes.
+ */
+#define DEMOFS_IL_IOCB_CAP   128
+#define DEMOFS_IL_IOCB_LOWAT 64
 
 /*
  * On-log record layout (all 4 KiB-aligned for zero-copy scatter-gather):
@@ -5387,6 +5401,11 @@ demofs_il_push_block_cb(
     (void) evpl;
     chimera_demofs_abort_if(status, "tail-push home write failed: %d", status);
 
+    /* One home write drained from the queue; resume redo at the low watermark. */
+    if (--il->iocbs_inflight == DEMOFS_IL_IOCB_LOWAT) {
+        evpl_ring_doorbell(&il->wake_doorbell);
+    }
+
     if (--il->push_outstanding == 0) {
         demofs_il_push_finish(il);
     }
@@ -5426,6 +5445,7 @@ demofs_il_push_kick(struct demofs_intent_log *il)
     /* Block I/O completes asynchronously, so no completion can fire while we
      * issue these writes; the last completion finishes the record. */
     il->push_outstanding = rec->num_blocks;
+    il->iocbs_inflight  += rec->num_blocks;    /* one home write per block below */
 
     p = (char *) rec->iovs[0].data + sizeof(struct demofs_redo_header);
     for (i = 0; i < rec->num_blocks; i++) {
@@ -5457,6 +5477,12 @@ demofs_redo_write_cb(
 
     (void) evpl;
     chimera_demofs_abort_if(status, "redo record write failed: %d", status);
+
+    /* One block write (one chunk) drained from the queue.  Resume redo
+     * submission once the queue has bled back down to the low watermark. */
+    if (--il->iocbs_inflight == DEMOFS_IL_IOCB_LOWAT) {
+        evpl_ring_doorbell(&il->wake_doorbell);
+    }
 
     /* One chunk of a possibly multi-chunk journal write landed; only the last
      * makes the whole record durable. */
@@ -5608,6 +5634,7 @@ demofs_il_write_redo(
 
     ch->cq_inflight++;
     il->redo_inflight++;
+    il->iocbs_inflight += ctx->segments;     /* one block write per chunk below */
 
     /* Issue the record in <=DEMOFS_IL_MAX_IOV-iovec chunks to consecutive
      * offsets (the on-log record is contiguous); all chunks share ctx and the
@@ -5662,6 +5689,15 @@ demofs_iq_process_channel(struct demofs_iq_channel *ch)
         struct demofs_iq_entry *slot = &ch->sq.entries[sq_head & DEMOFS_IQ_RING_MASK];
         struct demofs_iq_entry  entry;
         uint32_t                cq_tail, cq_head;
+
+        /* Don't overrun the block queue's submission ring.  A redo record is a
+         * handful of writes; stop consuming the SQ once we're at the cap and
+         * let a write completion ring the wake doorbell to resume us.  When the
+         * queue is idle, always issue at least one record so we make progress
+         * even if a single record exceeds the cap. */
+        if (il->iocbs_inflight >= DEMOFS_IL_IOCB_CAP) {
+            break;
+        }
 
         cq_tail = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
         cq_head = __atomic_load_n(&ch->cq.head, __ATOMIC_ACQUIRE);
@@ -5804,6 +5840,7 @@ demofs_intent_log_thread_init(
     il->push_cur         = NULL;
     il->push_outstanding = 0;
     il->redo_inflight    = 0;
+    il->iocbs_inflight   = 0;
 
     /* Open block queues on this thread's evpl for redo writes + tail-push. */
     il->queue = calloc(shared->num_devices, sizeof(*il->queue));
@@ -5825,19 +5862,22 @@ demofs_intent_log_thread_shutdown(
     struct demofs_shared     *shared = container_of(il, struct demofs_shared, intent_log);
     int                       i;
 
-    /* By the time this runs the VFS layer has destroyed the worker
-     * threads, which freed their channels.  Just drop the doorbell and
-     * close our block queues. */
-    evpl_remove_doorbell(evpl, &il->wake_doorbell);
-
-    /* Clean unmount: drain everything to its final on-disk location so the
+    /* By the time this runs the VFS layer has destroyed the worker threads,
+     * which freed their channels, so no new SQ work can arrive.
+     *
+     * Clean unmount: drain everything to its final on-disk location so the
      * filesystem is fully consistent at home offsets (no replay needed).
      * Pump our evpl until all in-flight redo writes have landed in the push
-     * FIFO and the tail-pusher has flushed every record home. */
+     * FIFO and the tail-pusher has flushed every record home.  Drain *before*
+     * dropping the wake doorbell: an in-flight redo/push write completing here
+     * rings the doorbell to resume submission, so it must still be open. */
     while (il->redo_inflight || il->push_cur || il->push_head) {
         demofs_il_push_kick(il);
         evpl_continue(evpl);
     }
+
+    /* All writes durable and no submitter remains; now drop the doorbell. */
+    evpl_remove_doorbell(evpl, &il->wake_doorbell);
 
     for (i = 0; i < shared->num_devices; i++) {
         evpl_block_close_queue(evpl, il->queue[i]);
