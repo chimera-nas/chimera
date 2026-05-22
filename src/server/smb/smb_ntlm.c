@@ -593,7 +593,10 @@ validate_local_user(
     const char                    *username,
     const char                    *domain,
     const uint8_t                 *nt_response,
-    size_t                         nt_response_len)
+    size_t                         nt_response_len,
+    uint32_t                       negotiate_flags,
+    const uint8_t                 *enc_session_key,
+    size_t                         enc_session_key_len)
 {
     const uint8_t *client_blob;
     size_t         client_blob_len;
@@ -644,11 +647,36 @@ validate_local_user(
         return -1;
     }
 
-    // Compute session key = HMAC-MD5(ntlmv2_hash, NTProofStr)
+    // Compute the key-exchange key = HMAC-MD5(ntlmv2_hash, NTProofStr).
+    // For NTLMv2 this is also the session base key.
     if (!HMAC(EVP_md5(), ntlmv2_hash, 16, nt_response, 16,
               ctx->session_key, &hmac_len)) {
         smb_ntlm_error("NTLM: Failed to compute session key");
         return -1;
+    }
+
+    /* If the client negotiated key exchange, the actual session key is a
+     * random value the client generated and sent RC4-wrapped with the
+     * key-exchange key (MS-NLMP 3.4.5.1). Recover it; otherwise the
+     * key-exchange key is used directly as the session key. */
+    if ((negotiate_flags & NTLMSSP_NEGOTIATE_KEY_EXCH) &&
+        enc_session_key_len == 16) {
+        uint8_t         exported_key[16];
+        int             outl = 0;
+        EVP_CIPHER_CTX *rc4  = EVP_CIPHER_CTX_new();
+
+        if (!rc4 ||
+            EVP_DecryptInit_ex(rc4, EVP_rc4(), NULL, ctx->session_key, NULL) != 1 ||
+            EVP_DecryptUpdate(rc4, exported_key, &outl, enc_session_key, 16) != 1 ||
+            outl != 16) {
+            if (rc4) {
+                EVP_CIPHER_CTX_free(rc4);
+            }
+            smb_ntlm_error("NTLM: Failed to unwrap exported session key");
+            return -1;
+        }
+        EVP_CIPHER_CTX_free(rc4);
+        memcpy(ctx->session_key, exported_key, 16);
     }
 
     // Store user info
@@ -736,12 +764,36 @@ validate_authenticate(
     }
     nt_response = buf + nt_response_offset;
 
+    // EncryptedRandomSessionKey field (offset 52) and NegotiateFlags (offset 60).
+    // Both live in the fixed AUTHENTICATE header (>= 64 bytes when present); a
+    // short LMv2-only message may omit them, so guard the read.
+    uint32_t       negotiate_flags     = 0;
+    const uint8_t *enc_session_key     = NULL;
+    size_t         enc_session_key_len = 0;
+
+    if (buf_len >= 64) {
+        uint16_t eskey_len;
+        uint32_t eskey_offset;
+
+        memcpy(&eskey_len, buf + 52, 2);
+        memcpy(&eskey_offset, buf + 56, 4);
+        memcpy(&negotiate_flags, buf + 60, 4);
+
+        if (eskey_len > 0 &&
+            (size_t) eskey_offset + eskey_len <= buf_len) {
+            enc_session_key     = buf + eskey_offset;
+            enc_session_key_len = eskey_len;
+        }
+    }
+
     // First, try to look up user in local VFS cache
     user = chimera_vfs_lookup_user_by_name(vfs, username);
     if (user && user->smbpasswd[0]) {
         // Found a local user with SMB password - validate locally
         result = validate_local_user(ctx, user, username, domain,
-                                     nt_response, nt_response_len);
+                                     nt_response, nt_response_len,
+                                     negotiate_flags, enc_session_key,
+                                     enc_session_key_len);
         goto cleanup;
     }
 

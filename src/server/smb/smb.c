@@ -256,8 +256,9 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     struct smb2_header               *reply_hdr;
     struct smb_direct_hdr            *direct_hdr = NULL;
     struct chimera_smb_request       *request;
-    uint32_t                         *prev_command = NULL;
-    uint16_t                          prev_hdr     = 0;
+    uint32_t                         *prev_command     = NULL;
+    uint16_t                          prev_hdr         = 0;
+    uint32_t                          preauth_fold_len = 0;
     struct evpl_iovec                 chunk_iov[3];
     int                               i, rc, chunk_niov;
     int                               reply_hdr_len, reply_payload_length, left, chunk;
@@ -292,6 +293,18 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
         if ((conn->flags & CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED) &&
             request->session_handle) {
+            request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
+        }
+
+        /* The final SESSION_SETUP response that establishes an authenticated
+         * session MUST be signed once a signing key exists, even when signing
+         * is only enabled (not required). SMB 3.x clients verify this response
+         * to confirm the server holds the session key; for SMB 3.1.1 it also
+         * binds the preauth-integrity hash. */
+        if (request->smb2_hdr.command == SMB2_SESSION_SETUP &&
+            request->status == SMB2_STATUS_SUCCESS &&
+            request->session_handle &&
+            (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
         }
 
@@ -401,7 +414,19 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
             } /* switch */
         }
 
-        evpl_iovec_cursor_zero(&reply_cursor, (8 - (evpl_iovec_cursor_consumed(&reply_cursor) & 7)) & 7);
+        /* Length of this response with no trailing alignment padding, captured
+         * before padding for the SMB 3.1.1 preauth-integrity fold below. */
+        preauth_fold_len = evpl_iovec_cursor_consumed(&reply_cursor);
+
+        /* Pad each response to an 8-byte boundary so the next compounded
+         * response's header is aligned. NEGOTIATE and SESSION_SETUP are never
+         * compounded and feed the SMB 3.1.1 preauth-integrity hash, which the
+         * client computes over the message *as received* (no trailing pad):
+         * emit them in canonical form so our hash matches the client's. */
+        if (request->smb2_hdr.command != SMB2_NEGOTIATE &&
+            request->smb2_hdr.command != SMB2_SESSION_SETUP) {
+            evpl_iovec_cursor_zero(&reply_cursor, (8 - (evpl_iovec_cursor_consumed(&reply_cursor) & 7)) & 7);
+        }
 
     }
 
@@ -431,7 +456,25 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         return;
     }
 
+    /* SMB 3.1.1 preauth integrity: fold the NEGOTIATE / SESSION_SETUP response
+    * into the running hash. The hash covers the canonical (unpadded) message,
+    * so use preauth_fold_len rather than the padded payload length — Windows
+    * and WPTS hash the message without trailing alignment padding. These
+    * responses are not compounded and carry no injected payload, so the whole
+    * SMB2 message is contiguous in reply_iov[0] after the transport header. */
+    if (compound->num_requests > 0 &&
+        (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE ||
+         compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP)) {
+        chimera_smb_preauth_extend(conn->preauth_hash,
+                                   (uint8_t *) evpl_iovec_data(&reply_iov[0]) + reply_hdr_len,
+                                   preauth_fold_len);
+    }
+
     if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
+
+        /* direct_hdr was set above under this same protocol check; assert the
+         * invariant so it is not a bare conditional dereference. */
+        chimera_smb_abort_if(direct_hdr == NULL, "RDMA reply without SMB-Direct header");
 
         left = reply_payload_length;
 
@@ -720,6 +763,9 @@ chimera_smb_server_handle_smb2(
     struct chimera_smb_session_handle *session_handle;
     struct chimera_smb_session        *session;
     struct evpl_iovec_cursor           signature_cursor;
+    /* Snapshot of the cursor at the SMB2 message start, for the 3.1.1
+     * preauth-integrity hash (covers the whole received message). */
+    struct evpl_iovec_cursor           preauth_cursor = *request_cursor;
     int                                more_requests, rc, left = length, payload_length;
 
     compound = chimera_smb_compound_alloc(thread);
@@ -974,6 +1020,21 @@ chimera_smb_server_handle_smb2(
     }
 
     smb_dump_compound_request(compound);
+
+    /* SMB 3.1.1 preauth integrity: fold the raw NEGOTIATE / SESSION_SETUP
+     * request into the running hash before dispatch, so the SESSION_SETUP
+     * handler derives the signing key over a hash that includes this request.
+     * Maintained unconditionally for these commands; only consumed at 3.1.1. */
+    if (compound->num_requests > 0 &&
+        (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE ||
+         compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP)) {
+        uint8_t *msg = malloc(length);
+        if (msg) {
+            evpl_iovec_cursor_copy(&preauth_cursor, msg, length);
+            chimera_smb_preauth_extend(conn->preauth_hash, msg, length);
+            free(msg);
+        }
+    }
 
     chimera_smb_compound_advance(compound);
 
@@ -1321,6 +1382,8 @@ chimera_smb_server_accept(
     conn->ntlm_output_len   = 0;
     smb_ntlm_ctx_init(&conn->ntlm_ctx);
     memset(&conn->gssapi_ctx, 0, sizeof(conn->gssapi_ctx));
+    /* SMB 3.1.1 preauth-integrity hash starts at zero for each connection. */
+    memset(conn->preauth_hash, 0, sizeof(conn->preauth_hash));
     conn->rdma_niov   = 0;
     conn->rdma_length = 0;
 

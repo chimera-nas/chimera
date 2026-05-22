@@ -20,10 +20,18 @@ chimera_smb_signing_ctx_destroy(
 
 int
 chimera_smb_derive_signing_key(
-    int    dialect,
-    void  *output,
-    void  *session_key,
-    size_t session_key_len);
+    int            dialect,
+    void          *output,
+    void          *session_key,
+    size_t         session_key_len,
+    const uint8_t *preauth_hash);
+
+/* Extend an SMB 3.1.1 preauth-integrity hash in place: hash = SHA512(hash||msg). */
+void
+chimera_smb_preauth_extend(
+    uint8_t    *hash,
+    const void *msg,
+    uint32_t    msg_len);
 
 
 int

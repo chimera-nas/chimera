@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <openssl/rand.h>
+
 #include "smb_internal.h"
 #include "smb_procs.h"
 
@@ -120,6 +122,28 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
 
     conn->dialect = dialect;
 
+    /* SMB 3.1.1 mandates a PreauthIntegrityCapabilities context offering a
+     * hash algorithm we support (SHA-512). Per MS-SMB2 3.3.5.4, a 3.1.1
+     * NEGOTIATE without it (or offering no supported hash) fails with
+     * STATUS_INVALID_PARAMETER. */
+    if (dialect == SMB2_DIALECT_3_1_1) {
+        int have_sha512 = 0;
+
+        if (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_PREAUTH) {
+            for (i = 0; i < request->negotiate.preauth_in.hash_alg_count; i++) {
+                if (request->negotiate.preauth_in.hash_algs[i] == SMB2_PREAUTH_HASH_SHA_512) {
+                    have_sha512 = 1;
+                    break;
+                }
+            }
+        }
+
+        if (!have_sha512) {
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            return;
+        }
+    }
+
     /* Record the client's negotiate parameters so a later
      * FSCTL_VALIDATE_NEGOTIATE_INFO can be checked against them. */
     memcpy(conn->client_guid, request->negotiate.client_guid, SMB2_GUID_SIZE);
@@ -180,27 +204,46 @@ struct chimera_smb_negotiate_response_emitter {
         uint32_t                    out_size);
 };
 
-/* Phase 0 ships an empty table on purpose. We have the plumbing to emit
- * negotiate response contexts, but nothing positive to advertise yet:
- *   - PreauthIntegrity, Encryption, Signing → Phase 2
- *   - Compression                            → Phase 8
- *   - RdmaTransform                          → Phase 5
- *   - Transport/Netname are not server-reply contexts in any phase.
- * Phase 2 will register builders here.
+/* Build the SMB2_PREAUTH_INTEGRITY_CAPABILITIES response context:
+ *   HashAlgorithmCount(2)=1, SaltLength(2)=32, HashAlgorithms[1](2)=SHA-512,
+ *   Salt(32). */
+static int
+build_preauth_integrity_response(
+    struct chimera_smb_conn    *conn,
+    struct chimera_smb_request *request,
+    uint8_t                    *out,
+    uint32_t                    out_size)
+{
+    const uint16_t salt_len = sizeof(conn->negotiated.preauth_salt);
+
+    (void) request;
+
+    if (out_size < (uint32_t) (6 + salt_len)) {
+        return -1;
+    }
+
+    out[0] = 1;    out[1] = 0;                            /* HashAlgorithmCount */
+    out[2] = salt_len & 0xff; out[3] = (salt_len >> 8) & 0xff; /* SaltLength */
+    out[4] = SMB2_PREAUTH_HASH_SHA_512 & 0xff;
+    out[5] = (SMB2_PREAUTH_HASH_SHA_512 >> 8) & 0xff;     /* HashAlgorithms[0] */
+    memcpy(out + 6, conn->negotiated.preauth_salt, salt_len);
+
+    return 6 + salt_len;
+} /* build_preauth_integrity_response */
+
+/* The negotiate-response context emitters. Only consulted when the negotiated
+ * dialect is 3.1.1; each entry emits only if the client sent the matching
+ * request context (need_mask_bit).
  *
- * !! Do NOT add SMB 3.1.1 to server.c's default dialect list until Phase 2
- * lands preauth integrity. With this table empty, a successful 3.1.1
- * negotiation produces a reply that is structurally legal (NegotiateContext-
- * Count=0, Offset=0) but spec-noncompliant: 3.1.1 mandates that the server
- * emit a PreauthIntegrityCapabilities reply. Lenient clients (current
- * Win11, macOS, libsmb2) tolerate the missing context and then derive
- * session-keys using SMB 3.0-style KDF — which diverges from the client's
- * preauth-bound derivation. The first signed message after SESSION_SETUP
- * fails MAC verification on both ends and the connection dies. The dialect
- * ceiling stays at 3.0 in server.c:103-105 specifically to keep this latent
- * mismatch unreachable. */
+ * PreauthIntegrity is implemented: the server selects SHA-512, returns a salt,
+ * maintains Connection.PreauthIntegrityHashValue across NEGOTIATE/SESSION_SETUP
+ * (smb.c), and derives the 3.1.1 signing key bound to that hash. Encryption,
+ * Signing (GMAC), Compression and RdmaTransform contexts are not yet emitted
+ * (encryption/compression deferred). */
 static const struct chimera_smb_negotiate_response_emitter smb_negotiate_response_emitters[] = {
-    { 0, 0, NULL }
+    { CHIMERA_SMB_NEGOTIATE_CTX_PREAUTH, SMB2_PREAUTH_INTEGRITY_CAPABILITIES,
+      build_preauth_integrity_response },
+    { 0,                                 0,                                  NULL }
 };
 
 /* Build the negotiate context list into ctx_buf. Returns total bytes written
@@ -214,8 +257,9 @@ chimera_smb_build_negotiate_response_contexts(
     uint32_t                    ctx_buf_size,
     uint16_t                   *out_count)
 {
-    uint32_t                                             pos   = 0;
-    uint16_t                                             count = 0;
+    uint32_t                                             pos      = 0;
+    uint32_t                                             last_end = 0;
+    uint16_t                                             count    = 0;
     const struct chimera_smb_negotiate_response_emitter *e;
 
     if (request->negotiate.r_dialect != SMB2_DIALECT_3_1_1) {
@@ -241,12 +285,19 @@ chimera_smb_build_negotiate_response_contexts(
         if (advance == 0) {
             break;
         }
-        pos += advance;
+        /* The 8-byte alignment padding belongs *between* contexts, so the next
+         * context starts aligned. The message itself MUST end at the last
+         * context's data (no trailing pad) — Windows/Samba emit it that way,
+         * and strict clients (e.g. WPTS) re-serialize to that canonical form
+         * when computing the SMB 3.1.1 preauth-integrity hash. Track the end
+         * of the current context's data and return that as the list length. */
+        last_end = pos + 8u + (uint32_t) data_len;
+        pos     += advance;
         count++;
     }
 
     *out_count = count;
-    return pos;
+    return last_end;
 } /* chimera_smb_build_negotiate_response_contexts */
 
 void
@@ -625,9 +676,6 @@ chimera_smb_select_negotiated_algorithms(
 {
     conn->negotiated.ctx_present_mask = request->negotiate.ctx_present_mask;
 
-    /* Phase 0 selects nothing new. Phase 2 will replace these zeros with the
-     * highest-preference algorithm the client offered that we implement.
-     * Leave the salt zeroed for now — Phase 2 generates a real one. */
     conn->negotiated.preauth_hash_alg      = 0;
     conn->negotiated.cipher_id             = 0;
     conn->negotiated.signing_alg           = 0;
@@ -637,6 +685,20 @@ chimera_smb_select_negotiated_algorithms(
     memset(conn->negotiated.preauth_salt,    0, sizeof(conn->negotiated.preauth_salt));
     memset(conn->negotiated.compression_algs, 0, sizeof(conn->negotiated.compression_algs));
     memset(conn->negotiated.rdma_transforms,  0, sizeof(conn->negotiated.rdma_transforms));
+
+    /* SMB 3.1.1: select SHA-512 preauth integrity and generate a server salt.
+     * The salt value need not match anything the client derives independently —
+     * both sides fold the negotiate *response* (which carries this salt) into
+     * the preauth hash, so any value works as long as it is the one we send.
+     * Encryption/compression/RDMA-transform selection remains deferred. */
+    if (conn->dialect == SMB2_DIALECT_3_1_1 &&
+        (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_PREAUTH)) {
+        conn->negotiated.preauth_hash_alg = SMB2_PREAUTH_HASH_SHA_512;
+        if (RAND_bytes(conn->negotiated.preauth_salt,
+                       sizeof(conn->negotiated.preauth_salt)) != 1) {
+            memset(conn->negotiated.preauth_salt, 0, sizeof(conn->negotiated.preauth_salt));
+        }
+    }
 } /* chimera_smb_select_negotiated_algorithms */
 
 int
