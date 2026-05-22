@@ -1019,17 +1019,28 @@ SYMBOL_EXPORT void
 chimera_vfs_lease_revoke(struct chimera_vfs_lease *lease)
 {
     struct chimera_vfs_file_state *file = lease->file;
+    chimera_vfs_lease_revoked_cb_t revoked_cb;
+    void                          *cb_private;
+    bool                           newly_revoked;
 
     if (file) {
         pthread_mutex_lock(&file->lock);
     }
 
+    newly_revoked       = (lease->break_state != CHIMERA_VFS_BREAK_REVOKED);
     lease->mode.granted = 0;
     lease->mode.denied  = 0;
     lease->break_state  = CHIMERA_VFS_BREAK_REVOKED;
+    revoked_cb          = lease->owner.revoked_cb;
+    cb_private          = lease->owner.cb_private;
 
     if (file) {
         pthread_mutex_unlock(&file->lock);
+    }
+
+    /* Notify the protocol layer (once) that this lease was force-revoked. */
+    if (newly_revoked && revoked_cb) {
+        revoked_cb(lease, cb_private);
     }
 
     /* Revoking a lease may unblock pending acquires. */

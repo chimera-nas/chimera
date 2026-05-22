@@ -86,5 +86,15 @@ chimera_nfs4_sequence(
     res->sr_resok4.sr_target_highest_slotid = res->sr_resok4.sr_highest_slotid;
     res->sr_resok4.sr_status_flags          = 0;
 
+    /* RFC 8881 §2.10.6.3 / §18.46.3: signal the client that one or more of its
+     * recallable objects (delegations) have been revoked, so it issues
+     * TEST_STATEID / FREE_STATEID to recover.  Cleared once the client has
+     * freed every revoked delegation. */
+    if (session->client_unified &&
+        atomic_load_explicit(&session->client_unified->revoked_deleg_count,
+                             memory_order_acquire) > 0) {
+        res->sr_resok4.sr_status_flags |= SEQ4_STATUS_RECALLABLE_STATE_REVOKED;
+    }
+
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_sequence */

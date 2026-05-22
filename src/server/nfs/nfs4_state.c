@@ -326,6 +326,14 @@ state_table_lookup_locked(
         status = NFS4ERR_STALE_STATEID;
     } else if (want_type != 0 && slot->type != want_type) {
         status = NFS4ERR_BAD_STATEID;
+    } else if (slot->type == NFS4_SLOT_TYPE_DELEG &&
+               atomic_load_explicit(
+                   &((struct nfs_delegation *) slot->state)->revoked,
+                   memory_order_acquire)) {
+        /* A force-revoked delegation: the stateid is still resolvable (so
+         * TEST_STATEID/FREE_STATEID can act on it) but any use of it as a
+         * delegation reports NFS4ERR_DELEG_REVOKED (RFC 8881 §8.2.4). */
+        status = NFS4ERR_DELEG_REVOKED;
     } else {
         *out_state = slot->state;
         if (out_type) {
@@ -1097,6 +1105,14 @@ delegation_destroy_common(
         return;
     }
 
+    /* If this delegation was force-revoked, drop it from the client's
+    * revoked count so SEQ4_STATUS_RECALLABLE_STATE_REVOKED clears. */
+    if (deleg->client &&
+        atomic_load_explicit(&deleg->revoked, memory_order_acquire)) {
+        atomic_fetch_sub_explicit(&deleg->client->revoked_deleg_count, 1,
+                                  memory_order_acq_rel);
+    }
+
     if (unlink_client && deleg->client) {
         pthread_mutex_lock(&deleg->client->lock);
         LL_DELETE2(deleg->client->delegations, deleg, next_in_client);
@@ -1123,3 +1139,107 @@ nfs_delegation_destroy(
 {
     delegation_destroy_common(deleg, table, vfs_thread, false, true);
 } /* nfs_delegation_destroy */
+
+/* vfs_state revoked_cb (wired onto every delegation lease).  Marks the
+ * delegation revoked so its stateid reports NFS4ERR_DELEG_REVOKED, and bumps
+ * the owning client's revoked count (drives SEQ4_STATUS_RECALLABLE_STATE_
+ * REVOKED).  Idempotent. */
+SYMBOL_EXPORT void
+nfs_delegation_revoked_cb(
+    struct chimera_vfs_lease *lease,
+    void                     *private_data)
+{
+    struct nfs_delegation *deleg    = private_data;
+    uint8_t                expected = 0;
+
+    (void) lease;
+
+    if (atomic_load_explicit(&deleg->destroyed, memory_order_acquire)) {
+        return;
+    }
+    if (atomic_compare_exchange_strong_explicit(
+            &deleg->revoked, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&deleg->client->revoked_deleg_count, 1,
+                                  memory_order_acq_rel);
+    }
+} /* nfs_delegation_revoked_cb */
+
+/* FREE_STATEID support: if `sid` names a force-revoked delegation, tear it
+* down (freeing the slot and clearing the client's revoked count) and return
+* NFS4_OK.  Returns NFS4ERR_LOCKS_HELD for a still-live state (cannot be
+* freed), or the usual NFS4ERR_BAD/STALE/EXPIRED for an invalid stateid. */
+SYMBOL_EXPORT nfsstat4
+nfs_state_table_free_revoked_deleg(
+    struct nfs_state_table    *table,
+    const struct stateid4     *sid,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    struct nfs4_stateid_view view;
+    struct nfs_state_shard  *shard;
+    struct nfs_state_slot   *slot;
+    struct nfs_delegation   *deleg = NULL;
+
+    if (nfs4_stateid_is_special(sid)) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    nfs4_stateid_decode(&view, sid);
+
+    if (view.epoch != table->epoch) {
+        return NFS4ERR_STALE_STATEID;
+    }
+    if (view.version != NFS4_STATEID_VERSION ||
+        view.shard >= NFS_STATE_NUM_SHARDS) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    shard = &table->shards[view.shard];
+
+    pthread_rwlock_rdlock(&shard->lock);
+
+    if (view.slot_idx >= shard->slots_used) {
+        pthread_rwlock_unlock(&shard->lock);
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    slot = &shard->slots[view.slot_idx];
+
+    if (slot->type == NFS4_SLOT_TYPE_EXPIRED) {
+        nfsstat4 st = (slot->generation == view.generation)
+                      ? NFS4ERR_EXPIRED : NFS4ERR_STALE_STATEID;
+        pthread_rwlock_unlock(&shard->lock);
+        return st;
+    }
+    if (slot->type == NFS4_SLOT_TYPE_FREE) {
+        pthread_rwlock_unlock(&shard->lock);
+        return NFS4ERR_BAD_STATEID;
+    }
+    if (slot->generation != view.generation) {
+        pthread_rwlock_unlock(&shard->lock);
+        return NFS4ERR_STALE_STATEID;
+    }
+    if (slot->type != NFS4_SLOT_TYPE_DELEG ||
+        !atomic_load_explicit(&((struct nfs_delegation *) slot->state)->revoked,
+                              memory_order_acquire)) {
+        /* A live (non-revoked) state cannot be freed while in use. */
+        pthread_rwlock_unlock(&shard->lock);
+        return NFS4ERR_LOCKS_HELD;
+    }
+
+    deleg = slot->state;
+    atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_acq_rel);
+    pthread_rwlock_unlock(&shard->lock);
+
+    /* Our +1 ref above keeps `deleg` alive across destroy, which drops only
+     * the lifetime ref (refcount stays >0); the release then drops our ref and
+     * is what actually frees it.  scan-build inlines the conditional free in
+     * delegation_destroy_common/delegation_cleanup (same TU) and can't follow
+     * the refcount, so it flags a false-positive use-after-free on the release.
+     * Hide the sequence from the analyzer, matching nfs_client_destroy. */
+#ifndef __clang_analyzer__
+    nfs_delegation_destroy(deleg, table, vfs_thread);
+    nfs_state_table_release(table, deleg, NFS4_SLOT_TYPE_DELEG, vfs_thread);
+#endif /* ifndef __clang_analyzer__ */
+    return NFS4_OK;
+} /* nfs_state_table_free_revoked_deleg */

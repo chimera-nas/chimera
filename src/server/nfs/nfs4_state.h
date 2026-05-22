@@ -218,6 +218,10 @@ struct nfs_client {
      * (4.0) / CREATE_SESSION (4.1); see struct nfs4_cb_path. */
     struct nfs4_cb_path    cb_path;
 
+    /* Count of this client's delegations that have been force-revoked and not
+     * yet FREE_STATEID'd.  Drives SEQ4_STATUS_RECALLABLE_STATE_REVOKED. */
+    _Atomic uint32_t       revoked_deleg_count;
+
     UT_hash_handle         hh_by_owner;
     UT_hash_handle         hh_by_id;
 
@@ -346,6 +350,10 @@ struct nfs_delegation {
     bool                           lease_held;
 
     _Atomic uint8_t                cb_recall_state;  /* NFS4_DELEG_* */
+    /* Set when the delegation was force-revoked (recall unanswered /
+     * conflicting access) rather than returned.  A revoked stateid resolves to
+     * NFS4ERR_DELEG_REVOKED until the client FREE_STATEIDs it. */
+    _Atomic uint8_t                revoked;
 
     struct nfs_delegation         *next_in_client;  /* utlist on client->delegations */
     /* Single-link queue for cross-thread recall marshalling (owner thread's
@@ -601,6 +609,21 @@ SYMBOL_EXPORT void
 nfs_delegation_destroy(
     struct nfs_delegation     *deleg,
     struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread);
+
+/* vfs_state revoked_cb for delegation leases; marks the delegation revoked. */
+SYMBOL_EXPORT void
+nfs_delegation_revoked_cb(
+    struct chimera_vfs_lease *lease,
+    void                     *private_data);
+
+/* FREE_STATEID: free a force-revoked delegation named by `sid`.  Returns
+ * NFS4_OK on success, NFS4ERR_LOCKS_HELD for a live state, or a BAD/STALE/
+ * EXPIRED stateid error. */
+SYMBOL_EXPORT nfsstat4
+nfs_state_table_free_revoked_deleg(
+    struct nfs_state_table    *table,
+    const struct stateid4     *sid,
     struct chimera_vfs_thread *vfs_thread);
 
 /* Touch a client's lease.  Cheap relaxed store; called from any op that

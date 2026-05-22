@@ -188,6 +188,7 @@ chimera_nfs4_open_grant_delegation(
     deleg->lease.owner.owner_hi    = 0;
     deleg->lease.owner.break_cb    = nfs4_delegation_break_cb;
     deleg->lease.owner.is_alive_cb = NULL;
+    deleg->lease.owner.revoked_cb  = nfs_delegation_revoked_cb;
     deleg->lease.owner.cb_private  = deleg;
 
     file_state = chimera_vfs_state_get(vfs_state, req->fh, req->fhlen,
