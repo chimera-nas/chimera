@@ -57,6 +57,36 @@ struct chimera_vfs_cred {
 };
 
 /*
+ * Compact identity hash for a credential, used to key the open-handle cache so
+ * each distinct caller gets its own handle (and its own authorization result).
+ * Mixes flavor, uid, gid and the supplementary gids (FNV-1a).  Two requests
+ * from the same caller hash equal; a hash collision between distinct callers
+ * would at worst share a handle (no security boundary under AUTH_SYS, which the
+ * client asserts anyway), so a 64-bit mix is ample.
+ */
+static inline uint64_t
+chimera_vfs_cred_hash(const struct chimera_vfs_cred *cred)
+{
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
+    uint32_t words[3];
+    uint32_t i;
+
+    words[0] = (uint32_t) cred->flavor;
+    words[1] = cred->uid;
+    words[2] = cred->gid;
+
+    for (i = 0; i < 3; i++) {
+        h = (h ^ words[i]) * 1099511628211ULL;
+    }
+
+    for (i = 0; i < cred->ngids; i++) {
+        h = (h ^ cred->gids[i]) * 1099511628211ULL;
+    }
+
+    return h;
+} /* chimera_vfs_cred_hash */
+
+/*
  * Return a pointer to the cached server process credentials.
  *
  * Captures the UID and GID of the running server process on first call so

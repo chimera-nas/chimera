@@ -2,10 +2,13 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <stdlib.h>
 #include "vfs/vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_open_cache.h"
 #include "vfs_attr_cache.h"
+#include "vfs_access.h"
+#include "vfs_acl.h"
 #include "common/macros.h"
 
 static void
@@ -42,8 +45,8 @@ chimera_vfs_read_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_read_complete */
 
-SYMBOL_EXPORT void
-chimera_vfs_read(
+static void
+chimera_vfs_read_dispatch(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
@@ -80,5 +83,97 @@ chimera_vfs_read(
     request->proto_private_data      = private_data;
 
     chimera_vfs_dispatch(request);
+} /* chimera_vfs_read_dispatch */
 
-} /* chimera_vfs_write */
+/* Continuation for the first gated read on a handle: a getattr+ACL computes the
+ * caller's effective access mask, which is cached on the handle for reuse. */
+struct chimera_vfs_read_gate {
+    struct chimera_vfs_thread      *thread;
+    const struct chimera_vfs_cred  *cred;
+    struct chimera_vfs_open_handle *handle;
+    uint64_t                        offset;
+    uint32_t                        count;
+    struct evpl_iovec              *iov;
+    int                             niov;
+    uint64_t                        attr_mask;
+    chimera_vfs_read_callback_t     callback;
+    void                           *private_data;
+};
+
+static void
+chimera_vfs_read_gate_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_read_gate *gate = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        gate->callback(error_code, 0, 0, NULL, 0, NULL, gate->private_data);
+        free(gate);
+        return;
+    }
+
+    gate->handle->granted_access = chimera_vfs_access_check(attr, gate->cred,
+                                                            CHIMERA_ACE_MASK_ALL);
+    gate->handle->granted_valid = 1;
+
+    if (!(gate->handle->granted_access & CHIMERA_ACE_READ_DATA)) {
+        gate->callback(CHIMERA_VFS_EACCES, 0, 0, NULL, 0, NULL, gate->private_data);
+        free(gate);
+        return;
+    }
+
+    chimera_vfs_read_dispatch(gate->thread, gate->cred, gate->handle,
+                              gate->offset, gate->count, gate->iov, gate->niov,
+                              gate->attr_mask, gate->callback, gate->private_data);
+    free(gate);
+} /* chimera_vfs_read_gate_complete */
+
+SYMBOL_EXPORT void
+chimera_vfs_read(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        count,
+    struct evpl_iovec              *iov,
+    int                             niov,
+    uint64_t                        attr_mask,
+    chimera_vfs_read_callback_t     callback,
+    void                           *private_data)
+{
+    struct chimera_vfs_read_gate *gate;
+
+    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
+        if (handle->granted_valid) {
+            /* Fast path: the caller's grant is cached on the handle. */
+            if (!(handle->granted_access & CHIMERA_ACE_READ_DATA)) {
+                callback(CHIMERA_VFS_EACCES, 0, 0, NULL, 0, NULL, private_data);
+                return;
+            }
+        } else {
+            /* First gated I/O on this handle: compute and cache the grant. */
+            gate = malloc(sizeof(*gate));
+
+            gate->thread       = thread;
+            gate->cred         = cred;
+            gate->handle       = handle;
+            gate->offset       = offset;
+            gate->count        = count;
+            gate->iov          = iov;
+            gate->niov         = niov;
+            gate->attr_mask    = attr_mask;
+            gate->callback     = callback;
+            gate->private_data = private_data;
+
+            chimera_vfs_getattr(thread, cred, handle,
+                                CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
+                                chimera_vfs_read_gate_complete, gate);
+            return;
+        }
+    }
+
+    chimera_vfs_read_dispatch(thread, cred, handle, offset, count, iov, niov,
+                              attr_mask, callback, private_data);
+} /* chimera_vfs_read */

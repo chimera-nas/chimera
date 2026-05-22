@@ -130,6 +130,16 @@ struct chimera_vfs_open_handle {
     uint8_t                         flags;
     uint8_t                         access_mode;
     uint32_t                        opencnt;
+    /* Identity hash of the credential that opened this handle: the open cache
+     * is keyed by (fh, access_mode, cred_hash) so each caller gets its own
+     * handle and its own authorization result (chimera_vfs_cred_hash). */
+    uint64_t                        cred_hash;
+    /* Cached effective access mask for this handle's credential, computed once
+     * (lazily, on the first gated read/write) and reused for the handle's life
+     * so the ACL check amortises across a caller's I/O.  granted_valid is 0
+     * until computed. */
+    uint32_t                        granted_access;
+    uint8_t                         granted_valid;
     struct chimera_vfs_request     *blocked_requests;
     uint64_t                        vfs_private;
     void                            ( *callback )(

@@ -7,6 +7,7 @@
 #include "vfs_internal.h"
 #include "common/misc.h"
 #include "vfs_open_cache.h"
+#include "vfs_access.h"
 #include "vfs_release.h"
 #include "common/macros.h"
 static void
@@ -92,9 +93,14 @@ chimera_vfs_open_fh(
         return;
     }
 
-    if ((module->capabilities & CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED) || !(flags & CHIMERA_VFS_OPEN_INFERRED)) {
+    if ((module->capabilities & CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED) || !(flags & CHIMERA_VFS_OPEN_INFERRED) ||
+        chimera_vfs_gate_needed(module->capabilities, cred)) {
 
-        /* We really need to open the file */
+        /* We really need to open the file -- or we are on an engine-authoritative
+         * backend for a non-exempt caller, in which case we route the inferred
+         * open through the (credential-keyed) cache so the per-caller ACL grant
+         * computed on first I/O is cached and reused, rather than re-derived on a
+         * throwaway synthetic handle for every operation. */
 
         request = chimera_vfs_request_alloc_by_hash(thread, cred, fh, fhlen, fh_hash);
 

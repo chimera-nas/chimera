@@ -288,6 +288,7 @@ chimera_vfs_synth_handle_alloc(struct chimera_vfs_thread *thread)
         handle           = calloc(1, sizeof(struct chimera_vfs_open_handle));
         handle->cache_id = CHIMERA_VFS_OPEN_ID_SYNTHETIC;
     }
+    handle->granted_valid = 0;
     return handle;
 } /* chimera_vfs_synth_handle_alloc */
 

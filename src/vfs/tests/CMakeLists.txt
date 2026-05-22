@@ -30,6 +30,10 @@ add_executable(vfs_acl_test vfs_acl_test.c)
 target_link_libraries(vfs_acl_test chimera_vfs)
 add_test(chimera/vfs/acl_test vfs_acl_test)
 
+add_executable(vfs_enforce_test vfs_enforce_test.c)
+target_link_libraries(vfs_enforce_test chimera_vfs chimera_vfs_memfs evpl)
+add_test(chimera/vfs/enforce_test vfs_enforce_test)
+
 add_executable(vfs_idmap_test vfs_idmap_test.c)
 target_link_libraries(vfs_idmap_test chimera_vfs)
 add_test(chimera/vfs/idmap_test vfs_idmap_test)
