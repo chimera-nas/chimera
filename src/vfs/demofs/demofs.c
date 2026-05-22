@@ -50,6 +50,7 @@
  * inums; the drainer empties it. */
 #define DEMOFS_ROOT_INUM          2
 #define DEMOFS_ORPHAN_INUM        3
+#define DEMOFS_ORPHAN_GEN         1   /* permanent: created at format, never deleted */
 
 /* Max inodes a single transaction can hold locked at once.  rename needs
  * 4 (two parents, child, replaced target); others (e.g. readdir) touch
@@ -427,6 +428,7 @@ enum demofs_bt_rectype {
     DEMOFS_REC_DIRENT  = 1,
     DEMOFS_REC_EXTENT  = 2,
     DEMOFS_REC_SYMLINK = 3,
+    DEMOFS_REC_ORPHAN  = 4,   /* orphan-list inode only: subkey = orphaned inum */
 };
 
 /* B+tree key: ordered by (type, subkey).  subkey is the name hash for
@@ -678,6 +680,7 @@ struct demofs_shared {
     int                        num_active_threads;
     uint8_t                    root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                   root_fhlen;
+    int                        orphans_scanned;    /* mount-time orphan recovery done */
     uint64_t                   root_inum;          /* for the clean-unmount superblock */
     uint32_t                   root_gen;
     int                        persistent;         /* config opt-in: detect+reload a clean FS instead of mkfs */
@@ -1269,7 +1272,8 @@ static struct demofs_inode *
 demofs_inode_load_sync(
     struct demofs_thread *thread,
     uint64_t              inum,
-    uint32_t              gen)
+    uint32_t              gen,
+    int                   allow_orphan)
 {
     struct demofs_shared      *shared = thread->shared;
     struct demofs_inode_shard *shard  = demofs_inode_shard(shared, inum);
@@ -1297,7 +1301,8 @@ demofs_inode_load_sync(
     }
 
     di = (struct demofs_dinode *) buf;
-    if (di->inum != inum || di->gen != gen || di->nlink == 0) {
+    if (di->inum != inum || di->gen != gen ||
+        (di->nlink == 0 && !allow_orphan)) {
         return NULL;
     }
 
@@ -1372,7 +1377,7 @@ demofs_inode_acquire_sync_read(
     }
     if (!inode) {
         pthread_mutex_unlock(&shard->lock);
-        inode = demofs_inode_load_sync(thread, inum, gen);
+        inode = demofs_inode_load_sync(thread, inum, gen, 0);
         if (!inode) {
             return NULL;
         }
@@ -3215,6 +3220,16 @@ static int demofs_bt_remove_async(
     const struct demofs_bt_key *key,
     demofs_bt_cb_t              cb,
     void                       *private_data);
+static int demofs_bt_insert_async(
+    struct demofs_bt_op        *op,
+    struct demofs_thread       *thread,
+    struct demofs_txn          *txn,
+    struct demofs_inode        *inode,
+    const struct demofs_bt_key *key,
+    const void                 *rec,
+    uint32_t                    reclen,
+    demofs_bt_cb_t              cb,
+    void                       *private_data);
 static int demofs_bt_lookup_async(
     struct demofs_bt_op        *op,
     struct demofs_thread       *thread,
@@ -3226,6 +3241,94 @@ static int demofs_bt_lookup_async(
     uint32_t                    out_cap,
     demofs_bt_cb_t              cb,
     void                       *private_data);
+
+/*
+ * Add (remove=0) or remove (remove=1) an entry for `inum` in the durable
+ * orphan-list inode's b+tree, within `txn`.  The orphan inode is acquired LAST
+ * (it is below every file inum and is always taken last, so it is a leaf in
+ * the lock order -> can't be in a deadlock cycle).  `done(priv)` is called
+ * once the b+tree op completes.  For an insert, the orphaned inode's gen is
+ * stored as the value (the mount scan reads it to reload the inode).
+ */
+struct demofs_orphan_op {
+    struct demofs_thread *thread;
+    struct demofs_txn    *txn;
+    uint64_t              inum;
+    uint32_t              gen;
+    int                   remove;
+    void                  (*done)(
+        void *priv);
+    void                 *priv;
+};
+
+static void
+demofs_orphan_op_done_cb(
+    struct demofs_bt_op *op,
+    int                  result,
+    void                *priv)
+{
+    struct demofs_orphan_op *o = priv;
+    void                     (*done)(
+        void *) = o->done;
+    void                    *dpriv = o->priv;
+
+    (void) result;
+    demofs_bt_op_free(o->thread, op);
+    free(o);
+    done(dpriv);
+} /* demofs_orphan_op_done_cb */
+
+static void
+demofs_orphan_op_acquired_cb(
+    struct demofs_inode *orphan_dir,
+    int                  status,
+    void                *priv)
+{
+    struct demofs_orphan_op *o = priv;
+    struct demofs_bt_op     *op;
+    struct demofs_bt_key     key = { .type = DEMOFS_REC_ORPHAN, .subkey = o->inum };
+
+    chimera_demofs_abort_if(status != CHIMERA_VFS_OK,
+                            "orphan-list inode acquire failed: %d", status);
+
+    op = demofs_bt_op_alloc(o->thread);
+    if (o->remove) {
+        if (demofs_bt_remove_async(op, o->thread, o->txn, orphan_dir, &key,
+                                   demofs_orphan_op_done_cb, o)) {
+            demofs_orphan_op_done_cb(op, op->result, o);
+        }
+    } else {
+        if (demofs_bt_insert_async(op, o->thread, o->txn, orphan_dir, &key,
+                                   &o->gen, sizeof(o->gen),
+                                   demofs_orphan_op_done_cb, o)) {
+            demofs_orphan_op_done_cb(op, op->result, o);
+        }
+    }
+} /* demofs_orphan_op_acquired_cb */
+
+static void
+demofs_orphan_op_start(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    uint64_t              inum,
+    uint32_t              gen,
+    int                   remove,
+    void (               *done )(void *priv),
+    void                 *priv)
+{
+    struct demofs_orphan_op *o = malloc(sizeof(*o));
+
+    o->thread = thread;
+    o->txn    = txn;
+    o->inum   = inum;
+    o->gen    = gen;
+    o->remove = remove;
+    o->done   = done;
+    o->priv   = priv;
+
+    demofs_inode_acquire(thread, txn, DEMOFS_ORPHAN_INUM, DEMOFS_ORPHAN_GEN,
+                         DEMOFS_INODE_LOCK_WRITE, demofs_orphan_op_acquired_cb, o);
+} /* demofs_orphan_op_start */
 
 /* ------------------------------------------------------------------ */
 /* Background drainer: reclaim a large deleted inode incrementally.     */
@@ -3274,7 +3377,16 @@ demofs_drain_enqueue(
     uint64_t              inum,
     uint32_t              gen)
 {
-    struct demofs_drain *d = calloc(1, sizeof(*d));
+    struct demofs_drain *d;
+
+    /* Test/safety knob: skip the in-session drain.  The durable orphan entry
+     * was already recorded by the unlink, so the next mount's scan reclaims
+     * it -- letting a remount deterministically exercise crash-resume. */
+    if (unlikely(getenv("DEMOFS_DRAIN_DISABLE") != NULL)) {
+        return;
+    }
+
+    d = calloc(1, sizeof(*d));
 
     d->thread = thread;
     d->inum   = inum;
@@ -3372,6 +3484,22 @@ demofs_drain_final_cb(
     demofs_drain_complete(priv);
 } /* demofs_drain_final_cb */
 
+/* The durable orphan entry is removed; finish reclaiming the inode itself
+ * (home block + struct) in the same transaction and commit. */
+static void
+demofs_drain_after_unrecord(void *priv)
+{
+    struct demofs_drain *d = priv;
+    uint32_t             dev;
+    uint64_t             off = sm_inum_to_device_offset(d->thread->shared->space_map,
+                                                        d->inum, &dev);
+
+    demofs_txn_pin_inode_block(d->thread, d->txn, d->inode, 0);
+    demofs_txn_free_space(d->thread, d->txn, dev, off, DEMOFS_BLOCK_SIZE);
+    demofs_inode_free(d->thread, d->inode);
+    demofs_txn_commit(d->txn, demofs_drain_final_cb, d);
+} /* demofs_drain_after_unrecord */
+
 static void
 demofs_drain_removed_cb(
     struct demofs_bt_op *op,
@@ -3400,16 +3528,14 @@ demofs_drain_looked_cb(
     struct demofs_bt_op *rop;
 
     if (result < 0) {
-        /* Tree empty: free the home block + the inode struct, then commit. */
-        uint32_t dev;
-        uint64_t off = sm_inum_to_device_offset(d->thread->shared->space_map,
-                                                d->inum, &dev);
-
+        /* Tree empty: remove the durable orphan entry, then (in the same txn)
+         * free the home block + inode struct.  Removing the orphan entry last
+         * means a crash before this commit just re-drains on the next mount
+         * (idempotent); the orphan inode (3) is acquired last (leaf -> no
+         * deadlock). */
         demofs_bt_op_free(d->thread, op);
-        demofs_txn_pin_inode_block(d->thread, d->txn, d->inode, 0);
-        demofs_txn_free_space(d->thread, d->txn, dev, off, DEMOFS_BLOCK_SIZE);
-        demofs_inode_free(d->thread, d->inode);
-        demofs_txn_commit(d->txn, demofs_drain_final_cb, d);
+        demofs_orphan_op_start(d->thread, d->txn, d->inum, d->gen, 1 /* remove */,
+                               demofs_drain_after_unrecord, d);
         return;
     }
 
@@ -3442,6 +3568,105 @@ demofs_drain_step(struct demofs_drain *d)
         demofs_drain_looked_cb(op, op->result, d);
     }
 } /* demofs_drain_step */
+
+/* ------------------------------------------------------------------ */
+/* Mount-time orphan recovery: re-enqueue inodes left on the durable    */
+/* orphan list by a crash mid-drain (draining is idempotent).           */
+/* ------------------------------------------------------------------ */
+
+struct demofs_orphan_ent {
+    uint64_t inum;
+    uint32_t gen;
+};
+
+/* Collect every orphan entry in the orphan-list inode's b+tree (sync walk;
+ * runs once at mount, single-threaded).  Generic recursion over node levels. */
+static void
+demofs_orphan_scan_node(
+    struct demofs_thread      *thread,
+    void                      *buf,
+    uint32_t                   base,
+    struct demofs_orphan_ent **arr,
+    uint32_t                  *n,
+    uint32_t                  *cap)
+{
+    struct demofs_bt_node_hdr *h = demofs_bt_hdr(buf, base);
+    int                        i;
+
+    if (h->level > 0) {
+        struct demofs_bt_islot *isl = demofs_bt_islots(buf, base);
+
+        for (i = 0; i < h->nitems; i++) {
+            uint32_t             cdev;
+            uint64_t             coff = sm_inum_to_device_offset(thread->shared->space_map,
+                                                                 isl[i].child, &cdev);
+            struct demofs_block *blk = demofs_block_claim(thread, cdev, coff, 0);
+
+            demofs_orphan_scan_node(thread, blk->iov.data, 0, arr, n, cap);
+            demofs_block_unpin(thread, blk, DEMOFS_BLOCK_CLEAN);
+        }
+    } else {
+        struct demofs_bt_lslot *s = demofs_bt_lslots(buf, base);
+
+        for (i = 0; i < h->nitems; i++) {
+            if (s[i].key.type != DEMOFS_REC_ORPHAN) {
+                continue;
+            }
+            if (*n == *cap) {
+                *cap *= 2;
+                *arr  = realloc(*arr, *cap * sizeof(**arr));
+            }
+            (*arr)[*n].inum = s[i].key.subkey;
+            (*arr)[*n].gen  = *(uint32_t *) ((char *) buf + base + s[i].off);
+            (*n)++;
+        }
+    }
+} /* demofs_orphan_scan_node */
+
+static void
+demofs_orphan_scan(struct demofs_thread *thread)
+{
+    struct demofs_shared     *shared = thread->shared;
+    struct demofs_inode      *odir;
+    struct demofs_block      *blk;
+    struct demofs_orphan_ent *arr;
+    uint32_t                  n = 0, cap = 16, i;
+    uint32_t                  dev;
+    uint64_t                  off;
+
+    pthread_mutex_lock(&shared->lock);
+    if (shared->orphans_scanned) {
+        pthread_mutex_unlock(&shared->lock);
+        return;
+    }
+    shared->orphans_scanned = 1;
+    pthread_mutex_unlock(&shared->lock);
+
+    /* Load the orphan-list inode (nlink 1) and read its tree from its home
+     * block, collecting every recorded orphan inum + gen. */
+    odir = demofs_inode_load_sync(thread, DEMOFS_ORPHAN_INUM, DEMOFS_ORPHAN_GEN, 0);
+    if (!odir) {
+        return;     /* not yet created (no orphans possible) */
+    }
+
+    off = sm_inum_to_device_offset(shared->space_map, DEMOFS_ORPHAN_INUM, &dev);
+    blk = demofs_block_claim(thread, dev, off, 0);
+    arr = malloc(cap * sizeof(*arr));
+    demofs_orphan_scan_node(thread, blk->iov.data, DEMOFS_BT_ROOT_BASE, &arr, &n, &cap);
+    demofs_block_unpin(thread, blk, DEMOFS_BLOCK_CLEAN);
+
+    for (i = 0; i < n; i++) {
+        /* Reload the orphaned (nlink==0) inode into cache, then enqueue it;
+         * the drainer resumes its (possibly partially-drained) tree. */
+        demofs_inode_load_sync(thread, arr[i].inum, arr[i].gen, 1 /* allow_orphan */);
+        demofs_drain_enqueue(thread, arr[i].inum, arr[i].gen);
+    }
+    free(arr);
+
+    if (n) {
+        chimera_demofs_info("orphan recovery: re-enqueued %u inode(s) for drain", n);
+    }
+} /* demofs_orphan_scan */
 
 /*
  * Remove a key from an inode's b+tree, maintaining the B+tree invariants:
@@ -7463,6 +7688,30 @@ demofs_mknod_at(
 
 /* inode_stash[0] = parent (locked across child fetch) */
 
+/* Finish a remove: map the parent's post-attrs and commit. */
+static void
+demofs_remove_at_finish(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p      = request->plugin_data;
+    struct demofs_inode           *parent = p->inode_stash[0];
+
+    demofs_map_attrs(p->thread, &request->remove_at.r_dir_post_attr, parent);
+    demofs_op_ok(request, p->txn);
+} /* demofs_remove_at_finish */
+
+/* Continuation after a large deleted inode is recorded on the durable orphan
+ * list: enqueue it for the in-session drainer and finish the request. */
+static void
+demofs_remove_orphan_done(void *priv)
+{
+    struct chimera_vfs_request    *request = priv;
+    struct demofs_request_private *p       = request->plugin_data;
+    struct demofs_inode           *inode   = p->inode_stash[1];
+
+    demofs_drain_enqueue(p->thread, inode->inum, inode->gen);
+    demofs_remove_at_finish(request);
+} /* demofs_remove_orphan_done */
+
 static void
 demofs_remove_at_removed_cb(
     struct demofs_bt_op *op,
@@ -7520,18 +7769,21 @@ demofs_remove_at_removed_cb(
                 demofs_bt_free_tree(thread, p->txn, inode);
                 demofs_inode_free(thread, inode);
             } else {
-                /* Large inode: hand to the background drainer (bounded batches)
-                 * so one delete can't flood the I/O queue.  The struct stays
-                 * resident (nlink==0 -> not evicted) until the drainer frees it;
-                 * the drainer's acquire parks until this unlink txn commits. */
-                demofs_drain_enqueue(thread, inode->inum, inode->gen);
+                /* Large inode: record it on the durable orphan list -- atomic
+                 * with this unlink txn (the orphan inode is acquired last, a
+                 * leaf in the lock order, so no deadlock).  The continuation
+                 * enqueues it for the in-session drainer + finishes; a crash
+                 * before this txn commits leaves neither the unlink nor the
+                 * orphan record, and after it the mount scan can resume. */
+                demofs_orphan_op_start(thread, p->txn, inode->inum, inode->gen,
+                                       0 /* insert */, demofs_remove_orphan_done,
+                                       request);
+                return;
             }
         }
     }
 
-    demofs_map_attrs(thread, &request->remove_at.r_dir_post_attr, parent);
-
-    demofs_op_ok(request, p->txn);
+    demofs_remove_at_finish(request);
 } /* demofs_remove_at_removed_cb */
 
 static void
@@ -10998,6 +11250,11 @@ demofs_dispatch(
 
     if (unlikely(shared->root_fhlen == 0)) {
         demofs_bootstrap(thread);
+    }
+
+    /* Resume any inode drains left pending by a crash (once per mount). */
+    if (unlikely(!shared->orphans_scanned)) {
+        demofs_orphan_scan(thread);
     }
 
     switch (request->opcode) {
