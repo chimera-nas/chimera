@@ -1336,8 +1336,6 @@ demofs_block_claim(
     struct demofs_block_shard *shard  = &cache->shards[sidx];
     struct demofs_block       *blk;
 
-    (void) is_new;
-
     pthread_mutex_lock(&shard->lock);
 
     blk = demofs_block_lookup_locked(shard, bucket, device_id, device_offset);
@@ -1348,6 +1346,28 @@ demofs_block_claim(
         blk->buffer        = calloc(1, DEMOFS_BLOCK_SIZE);
         blk->state         = DEMOFS_BLOCK_CLEAN;
         blk->pin_count     = 0;
+
+        /* On a remounted FS a synchronous structural modify can reference a
+         * block the async descent never faulted in -- notably a leaf merge
+         * relinking the right partner's next_leaf, which is not one of the
+         * ci-1/ci/ci+1 siblings the rebalance pre-faults.  Read its real
+         * contents from disk rather than publishing a zeroed block (which
+         * would corrupt the tree once written back).  Rare; a buffered read
+         * served from the page cache.  is_new blocks are freshly allocated,
+         * so they are correctly left zeroed. */
+        if (thread->shared->mounted && !is_new) {
+            int fd = open(thread->shared->device_paths[device_id], O_RDONLY);
+
+            if (fd >= 0) {
+                ssize_t n = pread(fd, blk->buffer, DEMOFS_BLOCK_SIZE,
+                                  (off_t) device_offset);
+                close(fd);
+                chimera_demofs_abort_if(n != (ssize_t) DEMOFS_BLOCK_SIZE,
+                                        "block_claim disk read failed off=%lu n=%zd",
+                                        device_offset, n);
+            }
+        }
+
         /* Publish into the bucket chain (RCU readers will use hash_next). */
         blk->hash_next = shard->buckets[bucket];
         rcu_assign_pointer(shard->buckets[bucket], blk);
