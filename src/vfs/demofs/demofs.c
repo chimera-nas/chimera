@@ -44,6 +44,13 @@
 #define DEMOFS_INODE_CACHE_SHARDS 256
 #define DEMOFS_INODE_CACHE_MASK   (DEMOFS_INODE_CACHE_SHARDS - 1)
 
+/* Statically-reserved inums (block_idx in AG 0 / disk 0; see space_map.c).
+ * inum 2 = root; inum 3 = orphan list (deleted inodes pending incremental
+ * reclaim).  The orphan inode is a directory whose b+tree keys are orphan
+ * inums; the drainer empties it. */
+#define DEMOFS_ROOT_INUM          2
+#define DEMOFS_ORPHAN_INUM        3
+
 /* Max inodes a single transaction can hold locked at once.  rename needs
  * 4 (two parents, child, replaced target); others (e.g. readdir) touch
  * many but only 2 at a time and release as they go. */
@@ -5882,6 +5889,53 @@ demofs_bootstrap(struct demofs_thread *thread)
     inode->block->state = DEMOFS_BLOCK_CLEAN;
     demofs_block_unpin(thread, inode->block, DEMOFS_BLOCK_CLEAN);
     inode->block = NULL;
+
+    /* Statically-reserved orphan-list inode (inum 3): an empty directory whose
+     * b+tree keys are the inums of deleted-but-not-fully-reclaimed inodes.
+     * Created at format alongside root (persists; loaded from disk on remount);
+     * the incremental drainer scans it on mount and empties it. */
+    {
+        uint32_t             odev;
+        uint64_t             ooff = sm_inum_to_device_offset(shared->space_map,
+                                                             DEMOFS_ORPHAN_INUM, &odev);
+        struct demofs_inode *oin = demofs_inode_struct_new(DEMOFS_ORPHAN_INUM);
+
+        oin->size        = 4096;
+        oin->space_used  = 4096;
+        oin->nlink       = 1;
+        oin->mode        = S_IFDIR | 0700;
+        oin->atime_sec   = now.tv_sec;
+        oin->atime_nsec  = now.tv_nsec;
+        oin->mtime_sec   = now.tv_sec;
+        oin->mtime_nsec  = now.tv_nsec;
+        oin->ctime_sec   = now.tv_sec;
+        oin->ctime_nsec  = now.tv_nsec;
+        oin->parent_inum = DEMOFS_ORPHAN_INUM;
+        oin->parent_gen  = oin->gen;
+
+        demofs_inode_cache_insert(shared, oin);
+
+        oin->block = demofs_block_claim(thread, odev, ooff, 1);
+        demofs_bt_node_init(oin->block->iov.data, DEMOFS_BT_ROOT_BASE,
+                            DEMOFS_BT_ROOT_CAP, 0);
+        demofs_inode_flush(oin);
+        {
+            int fd = open(shared->device_paths[odev], O_WRONLY);
+
+            if (fd >= 0) {
+                ssize_t wn = pwrite(fd, oin->block->iov.data, DEMOFS_BLOCK_SIZE,
+                                    (off_t) ooff);
+
+                chimera_demofs_abort_if(wn != (ssize_t) DEMOFS_BLOCK_SIZE,
+                                        "bootstrap orphan pwrite failed: %zd", wn);
+                fsync(fd);
+                close(fd);
+            }
+        }
+        oin->block->state = DEMOFS_BLOCK_CLEAN;
+        demofs_block_unpin(thread, oin->block, DEMOFS_BLOCK_CLEAN);
+        oin->block = NULL;
+    }
 
     /* Create 16-byte fsid buffer for root FH encoding (8-byte fsid + 8 bytes padding) */
     {

@@ -338,12 +338,14 @@ space_map_create(
                 pre_log_reserved = SM_SUPERBLOCK_SIZE + SM_INTENT_LOG_SIZE;
                 sm->used_bytes  += pre_log_reserved;
 
-                /* Statically reserve block_idx 1 and 2 of AG 0 / disk 0.
+                /* Statically reserve block_idx 1..3 of AG 0 / disk 0.
                  * block_idx 1 is held for a future AG header; block_idx 2 is
-                 * the root inode (inum 2), reserved (not allocated through the
-                 * allocator) so it is excluded from every condensed free set
-                 * and can never be re-handed-out after a crash. */
-                post_log_reserved = 2 * SM_BLOCK_SIZE;
+                 * the root inode (inum 2); block_idx 3 is the orphan-list inode
+                 * (inum 3, holds an entry per deleted-but-not-fully-reclaimed
+                 * inode).  All reserved (not allocated through the allocator)
+                 * so they are excluded from every condensed free set and can
+                 * never be re-handed-out after a crash. */
+                post_log_reserved = 3 * SM_BLOCK_SIZE;
                 sm->used_bytes   += post_log_reserved;
 
                 sm_abort_if(pre_log_reserved + SM_AG_LOG_SIZE +
