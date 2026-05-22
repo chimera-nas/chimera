@@ -4238,6 +4238,46 @@ demofs_il_place(
 static void demofs_il_push_kick(
     struct demofs_intent_log *il);
 
+/*
+ * A record's block images are now durably home.  Transition the corresponding
+ * cache blocks LOGGED -> CLEAN so they become evictable -- but only if the
+ * block hasn't been re-logged since (blk->seq still equals this record's seq)
+ * and isn't currently pinned by an active transaction.  Checked under the
+ * shard lock so it serializes against demofs_block_claim re-dirtying the block.
+ * (A3 will additionally enqueue the cleaned block on the shard LRU and wake a
+ * buffer waiter.)
+ */
+static void
+demofs_il_clean_pushed_record(
+    struct demofs_intent_log *il,
+    struct demofs_il_record  *rec)
+{
+    struct demofs_shared      *shared = container_of(il, struct demofs_shared, intent_log);
+    struct demofs_block_cache *cache  = shared->block_cache;
+    char                      *p      = (char *) rec->iov.data + sizeof(struct demofs_redo_header);
+    uint32_t                   i;
+
+    for (i = 0; i < rec->num_blocks; i++) {
+        struct demofs_redo_block_header *bh = (struct demofs_redo_block_header *) p;
+        struct demofs_block_shard       *shard;
+        struct demofs_block             *blk;
+        uint32_t                         bucket;
+
+        p += sizeof(*bh) + DEMOFS_BLOCK_SIZE;
+
+        shard  = demofs_block_shard(cache, bh->device_id, bh->device_offset);
+        bucket = demofs_block_bucket(bh->device_id, bh->device_offset);
+
+        pthread_mutex_lock(&shard->lock);
+        blk = demofs_block_lookup_locked(shard, bucket, bh->device_id, bh->device_offset);
+        if (blk && blk->state == DEMOFS_BLOCK_LOGGED &&
+            blk->seq == rec->seq && blk->pin_count == 0) {
+            blk->state = DEMOFS_BLOCK_CLEAN;
+        }
+        pthread_mutex_unlock(&shard->lock);
+    }
+} /* demofs_il_clean_pushed_record */
+
 /* One home-write of a logged block completed. */
 static void
 demofs_il_push_block_cb(
@@ -4255,6 +4295,9 @@ demofs_il_push_block_cb(
     if (--il->push_outstanding == 0) {
         /* Whole record is durably home; trim past it and advance the tail. */
         struct demofs_il_record *rec = il->push_cur;
+
+        /* The blocks are now home -> make the (un-re-logged) ones evictable. */
+        demofs_il_clean_pushed_record(il, rec);
 
         il->push_cur = NULL;
         evpl_iovec_release(il->evpl, &rec->iov);
@@ -4439,6 +4482,11 @@ demofs_il_write_redo(
 
     for (tb = txn->blocks; tb; tb = tb->next) {
         struct demofs_block *blk = tb->block;
+
+        /* Stamp the block with this record's seq so the tail-pusher can tell,
+        * on push completion, whether the block has been re-logged since (a
+        * higher seq) -- if not, it can be marked CLEAN and made evictable. */
+        blk->seq = rec->seq;
 
         bh                = (struct demofs_redo_block_header *) p;
         bh->device_id     = blk->device_id;
