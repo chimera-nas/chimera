@@ -747,6 +747,130 @@ chimera_smb_create_open_callback(
 } /* chimera_smb_create_open_at_callback */
 
 
+/* True for the dispositions that replace an existing file's contents
+ * (OVERWRITE / OVERWRITE_IF / SUPERSEDE). */
+static inline bool
+chimera_smb_disposition_overwrites(uint32_t disposition)
+{
+    return disposition == SMB2_FILE_OVERWRITE ||
+           disposition == SMB2_FILE_OVERWRITE_IF ||
+           disposition == SMB2_FILE_SUPERSEDE;
+} /* chimera_smb_disposition_overwrites */
+
+/* Issue the open_at against the (already opened) parent handle in
+ * request->create.parent_handle.  Shared by the plain path and the
+ * post-overwrite-check path. */
+static void
+chimera_smb_create_issue_open(struct chimera_smb_request *request)
+{
+    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
+    unsigned int               flags      = 0;
+
+    if (request->create.create_options & SMB2_FILE_DIRECTORY_FILE) {
+        flags |= CHIMERA_VFS_OPEN_DIRECTORY;
+    }
+
+    /* Metadata-only open: when the caller doesn't request any data-access
+     * bits, satisfy the open with an O_PATH-style handle. */
+    if (!(request->create.desired_access & SMB2_DATA_ACCESS_MASK) &&
+        request->create.create_disposition == SMB2_FILE_OPEN) {
+        flags |= CHIMERA_VFS_OPEN_PATH;
+    }
+
+    if (!(request->create.desired_access & SMB2_WRITE_MASK)) {
+        flags |= CHIMERA_VFS_OPEN_READ_ONLY;
+    }
+
+    if ((request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT) &&
+        request->create.create_disposition == SMB2_FILE_OPEN) {
+        flags |= CHIMERA_VFS_OPEN_NOFOLLOW;
+    }
+
+    switch (request->create.create_disposition) {
+        case SMB2_FILE_OPEN:
+        case SMB2_FILE_OVERWRITE:
+            /* Open existing only; never create. */
+            break;
+        case SMB2_FILE_SUPERSEDE:
+        case SMB2_FILE_OPEN_IF:
+        case SMB2_FILE_CREATE:
+        case SMB2_FILE_OVERWRITE_IF:
+            flags |= CHIMERA_VFS_OPEN_CREATE;
+            break;
+    } /* switch */
+
+    /* Replacing a file's contents truncates it and stamps it ARCHIVE
+    * (MS-FSCC).  OPEN_TRUNCATE makes the backend apply both to an existing
+    * file (a fresh create already starts empty with these attrs). */
+    if (chimera_smb_disposition_overwrites(request->create.create_disposition)) {
+        flags                                      |= CHIMERA_VFS_OPEN_TRUNCATE;
+        request->create.set_attr.va_dos_attributes |= SMB2_FILE_ATTRIBUTE_ARCHIVE;
+        request->create.set_attr.va_req_mask       |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        request->create.set_attr.va_set_mask       |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+    }
+
+    chimera_vfs_open_at(
+        vfs_thread,
+        &request->session_handle->session->cred,
+        request->create.parent_handle,
+        request->create.name,
+        request->create.name_len,
+        flags,
+        &request->create.set_attr,
+        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
+        0,
+        0,
+        chimera_smb_create_open_at_callback,
+        request);
+} /* chimera_smb_create_issue_open */
+
+/* MS-FSA create with an overwriting disposition: before replacing an
+ * existing file, reject the request when the target is READONLY, or when
+ * it is HIDDEN/SYSTEM and the request does not also carry that bit (which
+ * would otherwise silently clear it).  Run a getattr first so the check
+ * happens before any attribute change. */
+static void
+chimera_smb_create_overwrite_check_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+    uint32_t                    existing, requested;
+
+    if (error_code == CHIMERA_VFS_ENOENT) {
+        /* OVERWRITE requires an existing file; OVERWRITE_IF / SUPERSEDE
+         * create it. */
+        if (request->create.create_disposition == SMB2_FILE_OVERWRITE) {
+            chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+            return;
+        }
+        chimera_smb_create_issue_open(request);
+        return;
+    }
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
+        return;
+    }
+
+    existing = (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES)
+                ? attr->va_dos_attributes : 0;
+    requested = request->create.file_attributes;
+
+    if ((existing & SMB2_FILE_ATTRIBUTE_READONLY) ||
+        ((existing & SMB2_FILE_ATTRIBUTE_HIDDEN) &&
+         !(requested & SMB2_FILE_ATTRIBUTE_HIDDEN)) ||
+        ((existing & SMB2_FILE_ATTRIBUTE_SYSTEM) &&
+         !(requested & SMB2_FILE_ATTRIBUTE_SYSTEM))) {
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
+    chimera_smb_create_issue_open(request);
+} /* chimera_smb_create_overwrite_check_callback */
+
 static inline void
 chimera_smb_create_open_parent_callback(
     enum chimera_vfs_error          error_code,
@@ -756,7 +880,6 @@ chimera_smb_create_open_parent_callback(
     struct chimera_smb_request       *request    = private_data;
     struct chimera_server_smb_thread *thread     = request->compound->thread;
     struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
-    unsigned int                      flags      = 0;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_error("Open parent error_code %d", error_code);
@@ -783,67 +906,23 @@ chimera_smb_create_open_parent_callback(
             chimera_smb_create_mkdir_callback,
             request);
 
-    } else {
-        if (request->create.create_options & SMB2_FILE_DIRECTORY_FILE) {
-            flags |= CHIMERA_VFS_OPEN_DIRECTORY;
-        }
-
-        /* Metadata-only open: when the caller doesn't request any
-         * data-access bits, satisfy the open with an O_PATH-style
-         * handle.  This lets tools (e.g. cmd.exe `ren`, Explorer) open
-         * a directory with DELETE | READ_ATTRIBUTES | SYNCHRONIZE plus
-         * FILE_NON_DIRECTORY_FILE — Windows servers honor this opening
-         * pattern for metadata operations like rename and delete-on-
-         * close, and refusing it breaks directory rename over SMB. */
-        if (!(request->create.desired_access & SMB2_DATA_ACCESS_MASK) &&
-            request->create.create_disposition == SMB2_FILE_OPEN) {
-            flags |= CHIMERA_VFS_OPEN_PATH;
-        }
-
-        if (!(request->create.desired_access & SMB2_WRITE_MASK)) {
-            flags |= CHIMERA_VFS_OPEN_READ_ONLY;
-        }
-
-        if ((request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT) &&
-            request->create.create_disposition == SMB2_FILE_OPEN) {
-            flags |= CHIMERA_VFS_OPEN_NOFOLLOW;
-        }
-
-        switch (request->create.create_disposition) {
-            case SMB2_FILE_SUPERSEDE:
-                break;
-            case SMB2_FILE_OPEN:
-                break;
-            case SMB2_FILE_OPEN_IF:
-                flags |= CHIMERA_VFS_OPEN_CREATE;
-                break;
-            case SMB2_FILE_CREATE:
-                flags |= CHIMERA_VFS_OPEN_CREATE;
-                break;
-            case SMB2_FILE_OVERWRITE:
-                flags |= CHIMERA_VFS_OPEN_CREATE;
-                break;
-            case SMB2_FILE_OVERWRITE_IF:
-                flags |= CHIMERA_VFS_OPEN_CREATE;
-                break;
-        } /* switch */
-
-        chimera_vfs_open_at(
+    } else if (chimera_smb_disposition_overwrites(request->create.create_disposition)) {
+        /* Check the existing file's DOS attributes before overwriting. */
+        chimera_vfs_lookup_at(
             vfs_thread,
             &request->session_handle->session->cred,
             oh,
             request->create.name,
             request->create.name_len,
-            flags,
-            &request->create.set_attr,
-            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
+            CHIMERA_VFS_ATTR_DOS_ATTRIBUTES | CHIMERA_VFS_ATTR_MASK_STAT,
             0,
-            0,
-            chimera_smb_create_open_at_callback,
+            chimera_smb_create_overwrite_check_callback,
             request);
+    } else {
+        chimera_smb_create_issue_open(request);
     }
+} /* chimera_smb_create_open_parent_callback */
 
-} /* chimera_smb_create_open_at_callback */
 
 static inline void
 chimera_smb_create_lookup_parent_callback(
