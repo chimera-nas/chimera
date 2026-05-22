@@ -17,6 +17,14 @@
 #include "nfs4_state.h"
 #include "vfs/vfs_release.h"
 
+static uint32_t
+chimera_nfs4_open_share_history(uint32_t share)
+{
+    share &= (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE);
+    return share == (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE) ?
+           0x04 : share;
+} /* chimera_nfs4_open_share_history */
+
 void
 chimera_nfs4_open_downgrade(
     struct chimera_server_nfs_thread *thread,
@@ -93,10 +101,17 @@ chimera_nfs4_open_downgrade(
         }
     }
 
-    /* RFC 7530 §16.19.4: new bits must be a non-empty subset of current. */
+    /* RFC 7530 §16.19.4: new bits must be a non-empty subset of current and
+     * match the union of some subset of OPENs currently in effect.  The
+     * history bit maps BOTH to a separate bit so OPEN(BOTH) cannot be
+     * downgraded to READ unless READ was opened separately. */
     if (args->share_access == 0 ||
         (args->share_access & ~open_state->share_access) ||
-        (args->share_deny   & ~open_state->share_deny)) {
+        (args->share_deny   & ~open_state->share_deny) ||
+        (chimera_nfs4_open_share_history(args->share_access) &
+         ~open_state->share_access_hist) ||
+        (chimera_nfs4_open_share_history(args->share_deny) &
+         ~open_state->share_deny_hist)) {
         pthread_mutex_unlock(&owner->lock);
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
@@ -105,9 +120,11 @@ chimera_nfs4_open_downgrade(
         return;
     }
 
-    open_state->share_access = args->share_access;
-    open_state->share_deny   = args->share_deny;
-    open_state->seqid       += 1;
+    open_state->share_access      = args->share_access;
+    open_state->share_deny        = args->share_deny;
+    open_state->share_access_hist = chimera_nfs4_open_share_history(args->share_access);
+    open_state->share_deny_hist   = chimera_nfs4_open_share_history(args->share_deny);
+    open_state->seqid            += 1;
 
     nfs4_stateid_encode(&res->resok4.open_stateid,
                         open_state->seqid,

@@ -695,6 +695,14 @@ nfs_open_owner_find_state(
     return state;
 } /* nfs_open_owner_find_state */
 
+static uint32_t
+nfs_open_share_history(uint32_t share)
+{
+    share &= (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE);
+    return share == (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE) ?
+           0x04 : share;
+} /* nfs_open_share_history */
+
 struct nfs_open_state *
 nfs_open_state_create(
     struct nfs_open_owner          *owner,
@@ -722,15 +730,17 @@ nfs_open_state_create(
 
     state->owner = owner;
     memcpy(state->fh, fh, fh_len);
-    state->fh_len       = fh_len;
-    state->share_access = share_access;
-    state->share_deny   = share_deny;
-    state->seqid        = 1;
-    state->shard        = shard;
-    state->slot_idx     = slot_idx;
-    state->generation   = gen;
-    state->handle       = handle_dup;
-    state->locks        = NULL;
+    state->fh_len            = fh_len;
+    state->share_access      = share_access;
+    state->share_deny        = share_deny;
+    state->share_access_hist = nfs_open_share_history(share_access);
+    state->share_deny_hist   = nfs_open_share_history(share_deny);
+    state->seqid             = 1;
+    state->shard             = shard;
+    state->slot_idx          = slot_idx;
+    state->generation        = gen;
+    state->handle            = handle_dup;
+    state->locks             = NULL;
     atomic_init(&state->refcount, 1);
     atomic_init(&state->destroyed, 0);
 
@@ -802,9 +812,11 @@ nfs_open_state_coalesce(
     struct nfs_state_table *table,
     struct stateid4        *out_stateid)
 {
-    state->share_access |= share_access;
-    state->share_deny   |= share_deny;
-    state->seqid        += 1;
+    state->share_access      |= share_access;
+    state->share_deny        |= share_deny;
+    state->share_access_hist |= nfs_open_share_history(share_access);
+    state->share_deny_hist   |= nfs_open_share_history(share_deny);
+    state->seqid             += 1;
 
     nfs4_stateid_encode(out_stateid, state->seqid,
                         NFS4_STATEID_TYPE_OPEN,
