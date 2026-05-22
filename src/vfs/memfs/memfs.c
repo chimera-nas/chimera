@@ -833,7 +833,6 @@ memfs_map_attrs(
         attr->va_atime      = inode->atime;
         attr->va_mtime      = inode->mtime;
         attr->va_ctime      = inode->ctime;
-        attr->va_btime      = inode->btime;
         attr->va_ino        = inode->inum;
         attr->va_dev        = (42UL << 32) | 42;
         attr->va_rdev       = inode->rdev;
@@ -841,6 +840,13 @@ memfs_map_attrs(
         /* memfs persists DOS attributes, so report them alongside stat. */
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
         attr->va_dos_attributes = inode->dos_attributes;
+    }
+
+    /* Birth time is optional and lives outside MASK_STAT, so report it under
+     * its own request bit. */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+        attr->va_btime     = inode->btime;
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
@@ -1218,7 +1224,6 @@ memfs_mount(
         attr->va_atime      = inode->atime;
         attr->va_mtime      = inode->mtime;
         attr->va_ctime      = inode->ctime;
-        attr->va_btime      = inode->btime;
         attr->va_ino        = inode->inum;
         attr->va_dev        = (42UL << 32) | 42;
         attr->va_rdev       = inode->rdev;
@@ -1226,6 +1231,13 @@ memfs_mount(
         /* memfs persists DOS attributes, so report them alongside stat. */
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
         attr->va_dos_attributes = inode->dos_attributes;
+    }
+
+    /* Birth time is optional and lives outside MASK_STAT, so report it under
+     * its own request bit. */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+        attr->va_btime     = inode->btime;
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {

@@ -312,7 +312,7 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         thread->vfs_thread,
         &request->session_handle->session->cred,
         request->query_directory.open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT,
+        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
         0, /* dir_attr_mask */
         request->query_directory.open_file->position,
         0, /* verifier */

@@ -53,8 +53,7 @@
             CHIMERA_VFS_ATTR_SPACE_USED | \
             CHIMERA_VFS_ATTR_ATIME | \
             CHIMERA_VFS_ATTR_MTIME | \
-            CHIMERA_VFS_ATTR_CTIME | \
-            CHIMERA_VFS_ATTR_BTIME)
+            CHIMERA_VFS_ATTR_CTIME)
 
 #define CHIMERA_VFS_ATTR_MASK_STATFS    ( \
             CHIMERA_VFS_ATTR_SPACE_AVAIL | \
@@ -65,8 +64,14 @@
             CHIMERA_VFS_ATTR_FILES_AVAIL | \
             CHIMERA_VFS_ATTR_FSID)
 
+/* Birth time is cacheable and is requested alongside the stat set, but it is
+ * deliberately NOT part of MASK_STAT: MASK_STAT is the set every backend is
+ * required to supply, and the attr cache's "complete entry" gate and the
+ * remove_at hardlink-invalidation both rely on that.  Backends that don't
+ * track btime (linux/io_uring/cairn) must still satisfy MASK_STAT. */
 #define CHIMERA_VFS_ATTR_MASK_CACHEABLE ( \
-            CHIMERA_VFS_ATTR_MASK_STAT)
+            CHIMERA_VFS_ATTR_MASK_STAT | \
+            CHIMERA_VFS_ATTR_BTIME)
 
 #define CHIMERA_VFS_TIME_NOW            ((1l << 30) - 3l)
 
