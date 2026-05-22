@@ -529,6 +529,34 @@ chimera_vfs_state_would_conflict(
                     }
                 }
             }
+            /* An NFSv4 delegation must not be granted when another client
+             * already has the file open in a conflicting mode: a read
+             * delegation is denied by another client's write open; a write
+             * delegation by any other client's open (RFC 7530 §10.2 / §10.4).
+             * (SMB caching leases use the caching-vs-caching path above, so
+             * this NFSv4-only check leaves them unaffected.) */
+            if (probe->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4) {
+                for (cur = file->share_resvs; cur; cur = cur->next) {
+                    uint8_t sg = cur->mode.granted;
+                    bool conflict;
+
+                    if (cur->owner.client_key == probe->owner.client_key) {
+                        continue; /* the requesting client's own open */
+                    }
+                    if (probe->mode.granted & CHIMERA_VFS_LEASE_MODE_W) {
+                        conflict = (sg & (CHIMERA_VFS_LEASE_MODE_R |
+                                          CHIMERA_VFS_LEASE_MODE_W)) != 0;
+                    } else {
+                        conflict = (sg & CHIMERA_VFS_LEASE_MODE_W) != 0;
+                    }
+                    if (conflict) {
+                        if (conflict_out) {
+                            *conflict_out = cur;
+                        }
+                        return CHIMERA_VFS_LEASE_DENIED;
+                    }
+                }
+            }
             break;
 
         case CHIMERA_VFS_LEASE_KIND_MAX:

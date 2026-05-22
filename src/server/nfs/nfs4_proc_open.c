@@ -140,6 +140,18 @@ chimera_nfs4_open_grant_delegation(
         return;
     }
 
+    /* RFC 8881 §18.16: honor an explicit "no delegation wanted" request.  On
+    * 4.1+ this is reported as OPEN_DELEGATE_NONE_EXT with WND4_NOT_WANTED;
+    * 4.0 has no such extension, so the default OPEN_DELEGATE_NONE stands. */
+    if (args->share_access & OPEN4_SHARE_ACCESS_WANT_NO_DELEG) {
+        if (req->minorversion >= 1) {
+            res->resok4.delegation.delegation_type                       = OPEN_DELEGATE_NONE_EXT;
+            res->resok4.delegation.od_whynone.ond_why                    = WND4_NOT_WANTED;
+            res->resok4.delegation.od_whynone.ond_server_will_push_deleg = 0;
+        }
+        return;
+    }
+
     /* A write open earns a write delegation; otherwise a pure-read open earns
      * a read delegation. */
     if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
