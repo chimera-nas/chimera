@@ -997,6 +997,34 @@ memfs_apply_attrs(
 
 } /* memfs_apply_attrs */
 
+static int
+memfs_cred_can_write(
+    const struct memfs_inode      *inode,
+    const struct chimera_vfs_cred *cred)
+{
+    if (cred->uid == 0) {
+        return 1;
+    }
+
+    if ((uint64_t) cred->uid == inode->uid) {
+        return !!(inode->mode & S_IWUSR);
+    }
+
+    int in_group = ((uint64_t) cred->gid == inode->gid);
+
+    for (uint32_t i = 0; !in_group && i < cred->ngids; i++) {
+        if ((uint64_t) cred->gids[i] == inode->gid) {
+            in_group = 1;
+        }
+    }
+
+    if (in_group) {
+        return !!(inode->mode & S_IWGRP);
+    }
+
+    return !!(inode->mode & S_IWOTH);
+} /* memfs_cred_can_write */
+
 static void
 memfs_getattr(
     struct memfs_thread        *thread,
@@ -2321,6 +2349,21 @@ memfs_write(
             request->complete(request);
             return;
         }
+    }
+
+    if (!S_ISREG(inode->mode)) {
+        request->status = S_ISDIR(inode->mode) ?
+            CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL;
+        pthread_mutex_unlock(&inode->lock);
+        request->complete(request);
+        return;
+    }
+
+    if (!memfs_cred_can_write(inode, request->cred)) {
+        request->status = CHIMERA_VFS_EACCES;
+        pthread_mutex_unlock(&inode->lock);
+        request->complete(request);
+        return;
     }
 
     memfs_map_attrs(shared, &request->write.r_pre_attr, inode, request->fh);
