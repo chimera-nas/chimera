@@ -3124,6 +3124,58 @@ demofs_bt_collapse_root(
 } /* demofs_bt_collapse_root */
 
 /*
+ * Reclaim space owned by a deleted inode (nlink just hit 0, not open).
+ *
+ * The free count for one inode is bounded only by its tree size, but every
+ * free must ride a single transaction's redo -- an arbitrarily large inode
+ * would overflow the journal / block-I/O queue.  So we reclaim inline only the
+ * BOUNDED case: an inode whose entire tree fits in the embedded root (no child
+ * node blocks).  That covers small files (data extents in the root, <=~100) and
+ * empty/small directories.  We always free the home block.
+ *
+ * TODO(incremental-drain): a large inode (interior embedded root) still leaks
+ * its child node blocks and their data extents here.  Draining those needs a
+ * scheme that walks the tree across multiple bounded transactions (an orphan
+ * list of deleted-but-not-fully-reclaimed inodes, drained in the background).
+ * Also, a file unlinked while still open frees nothing here (deferred to close,
+ * which has no write txn) -- another known leak.
+ */
+static void
+demofs_bt_free_tree(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    struct demofs_inode  *inode)
+{
+    uint32_t                   dev;
+    uint64_t                   off = sm_inum_to_device_offset(thread->shared->space_map,
+                                                              inode->inum, &dev);
+    void                      *buf;
+    struct demofs_bt_node_hdr *h;
+
+    demofs_txn_pin_inode_block(thread, txn, inode, 0);
+    buf = inode->block->iov.data;
+    h   = demofs_bt_hdr(buf, DEMOFS_BT_ROOT_BASE);
+
+    if (h->level == 0 && S_ISREG(inode->mode)) {
+        /* Small file: every data extent is recorded in the embedded root. */
+        struct demofs_bt_lslot *s = demofs_bt_lslots(buf, DEMOFS_BT_ROOT_BASE);
+        int                     i;
+
+        for (i = 0; i < h->nitems; i++) {
+            struct demofs_extent_rec *e =
+                (struct demofs_extent_rec *) ((char *) buf + DEMOFS_BT_ROOT_BASE + s[i].off);
+
+            demofs_txn_free_space(thread, txn, e->device_id, e->device_offset,
+                                  SM_ALIGN_UP(e->length));
+        }
+    }
+
+    /* The home block stays pinned + logged (with the nlink=0 dinode); its
+     * range is reclaimed on commit. */
+    demofs_txn_free_space(thread, txn, dev, off, DEMOFS_BLOCK_SIZE);
+} /* demofs_bt_free_tree */
+
+/*
  * Remove a key from an inode's b+tree, maintaining the B+tree invariants:
  * the leaf heap is compacted, parent separators are kept exact, and
  * underflowing non-root nodes borrow/merge with a sibling (propagating up).
@@ -7134,6 +7186,8 @@ demofs_remove_at_removed_cb(
     if (inode->nlink == 0) {
         --inode->refcnt;
         if (inode->refcnt == 0) {
+            /* Fully gone (not open): reclaim its tree, data, and home block. */
+            demofs_bt_free_tree(thread, p->txn, inode);
             demofs_inode_free(thread, inode);
         }
     }
