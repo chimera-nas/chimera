@@ -5,6 +5,7 @@
 #include "nfs4_procs.h"
 #include "server/server.h"
 #include "nfs4_status.h"
+#include "nfs4_session.h"
 #include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
@@ -102,6 +103,7 @@ chimera_nfs4_read(
     void                           *state_void;
     uint8_t                         state_type;
     struct chimera_vfs_open_handle *state_handle;
+    struct nfs_open_state          *open_state;
     struct evpl_iovec              *iov;
     nfsstat4                        status;
 
@@ -121,6 +123,19 @@ chimera_nfs4_read(
             res->status = NFS4ERR_NOFILEHANDLE;
             chimera_nfs4_compound_complete(req, NFS4_OK);
             return;
+        }
+
+        if (req->session && req->session->client_unified) {
+            status = nfs_client_check_io_denied(req->session->client_unified,
+                                                NULL,
+                                                req->fh,
+                                                req->fhlen,
+                                                OPEN4_SHARE_ACCESS_READ);
+            if (status != NFS4_OK) {
+                res->status = status;
+                chimera_nfs4_compound_complete(req, res->status);
+                return;
+            }
         }
 
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
@@ -161,9 +176,21 @@ chimera_nfs4_read(
     }
 
     if (state_type == NFS4_SLOT_TYPE_OPEN) {
-        state_handle = ((struct nfs_open_state *) state_void)->handle;
+        open_state   = state_void;
+        state_handle = open_state->handle;
     } else {
+        open_state   = ((struct nfs_lock_state *) state_void)->open_state;
         state_handle = ((struct nfs_lock_state *) state_void)->handle;
+    }
+
+    status = nfs_open_state_check_io_denied(open_state,
+                                            OPEN4_SHARE_ACCESS_READ);
+    if (status != NFS4_OK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->status = status;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
     }
 
     req->nfs_state_ref  = state_void;
