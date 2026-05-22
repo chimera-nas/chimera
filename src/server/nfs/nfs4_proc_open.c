@@ -134,6 +134,15 @@ chimera_nfs4_open_install_state(
     existing = nfs_open_owner_find_state(owner, handle->fh, handle->fh_len);
 
     if (existing) {
+        /* RFC 7530 §9.9: a same-owner re-open is still a distinct share
+         * request -- it must not ask for access the existing open denies, nor
+         * deny access the existing open holds.  (Plain deny=NONE upgrades, as
+         * normal clients issue, never trip this.) */
+        if ((existing->share_access & args->share_deny) ||
+            (args->share_access & existing->share_deny)) {
+            chimera_vfs_release(req->thread->vfs_thread, handle);
+            return NFS4ERR_SHARE_DENIED;
+        }
         nfs_open_state_coalesce(existing,
                                 args->share_access, args->share_deny,
                                 &req->thread->shared->nfs4_state_table,
