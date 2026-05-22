@@ -57,6 +57,12 @@ set(PYNFS_PASS_BACKENDS memfs)
 # is not a pNFS server, so exclude it.
 set(PYNFS_EXTRA_currentstateid nopnfs)
 
+# Per-suite wall-clock timeout overrides for pynfs_test_wrapper.sh.  The
+# readdir group includes RDDR8b, which issues 300 READDIR compounds over a
+# 100-entry long-name directory.  It passes functionally, but slow arm64 CI
+# runners can exceed the wrapper's 60s default while still making progress.
+set(PYNFS_TIMEOUT_readdir 180)
+
 # Register one suite, enabling it only when both the backend and the
 # flag/minor pair are on the validated pass-lists; otherwise mark it DISABLED.
 function(pynfs_add_test flag backend minor)
@@ -68,6 +74,11 @@ function(pynfs_add_test flag backend minor)
     set_tests_properties(${name} PROPERTIES
         LABELS pynfs
         ENVIRONMENT "PYTHONUNBUFFERED=1")
+
+    if(DEFINED PYNFS_TIMEOUT_${flag})
+        set_tests_properties(${name} PROPERTIES
+            ENVIRONMENT "PYTHONUNBUFFERED=1;PYNFS_TIMEOUT=${PYNFS_TIMEOUT_${flag}}")
+    endif()
 
     set(enabled FALSE)
     if(("${backend}" IN_LIST PYNFS_PASS_BACKENDS) AND
