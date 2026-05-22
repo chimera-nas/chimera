@@ -110,6 +110,7 @@ chimera_nfs_destroy(void *private_data)
             /* Free NFS4 session if present */
             if (shared->servers[i]->nfs4_session) {
                 free(shared->servers[i]->nfs4_session->slot_seqids);
+                pthread_mutex_destroy(&shared->servers[i]->nfs4_session->lock);
                 free(shared->servers[i]->nfs4_session);
             }
             free(shared->servers[i]);

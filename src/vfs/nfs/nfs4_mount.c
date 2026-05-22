@@ -433,7 +433,8 @@ chimera_nfs4_mount_exchange_id_callback(
     eid_res = &res->resarray[0].opexchange_id.eir_resok4;
 
     /* Allocate and initialize session */
-    session              = calloc(1, sizeof(*session));
+    session = calloc(1, sizeof(*session));
+    pthread_mutex_init(&session->lock, NULL);
     session->clientid    = eid_res->eir_clientid;
     server->nfs4_session = session;
 
