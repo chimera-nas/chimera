@@ -535,6 +535,94 @@ space_map_alloc(
     return 0;
 } /* space_map_alloc */
 
+/* Resolve and validate the AG owning [device_offset, device_offset+aligned). */
+static struct sm_ag *
+sm_free_resolve_ag(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint64_t          device_offset,
+    uint64_t          aligned,
+    const char       *who)
+{
+    struct sm_device *dev;
+    struct sm_ag     *ag;
+    uint32_t          ag_idx;
+
+    sm_abort_if(device_id >= sm->num_devices, "%s: bad device_id %u", who, device_id);
+    dev    = &sm->devices[device_id];
+    ag_idx = device_offset >> SM_AG_SIZE_LOG2;
+    sm_abort_if(ag_idx >= dev->num_ags, "%s: offset %lu past device %u",
+                who, device_offset, device_id);
+    ag = &dev->ags[ag_idx];
+    /* Frees never straddle AGs (reservations come from a single AG). */
+    sm_abort_if(device_offset + aligned > ag->base_offset + ag->size,
+                "%s: range crosses AG boundary (offset=%lu length=%lu ag_base=%lu ag_size=%lu)",
+                who, device_offset, aligned, ag->base_offset, ag->size);
+    return ag;
+} /* sm_free_resolve_ag */
+
+/*
+ * Journal a FREE delta into the AG's redo log without making the range
+ * reusable.  The delta rides the freeing transaction's redo (so a crash
+ * replays it via AG-log reconstruction), but the in-memory free is withheld
+ * until the transaction is durable -- see space_map_free_apply.  This is the
+ * intent half of a "pending free": it prevents the range from being handed out
+ * (and a still-cached/pinned metadata block from being reclaimed) before the
+ * transaction that freed it has committed.
+ */
+void
+space_map_free_journal(
+    struct space_map        *sm,
+    const struct sm_journal *jnl,
+    uint32_t                 device_id,
+    uint64_t                 device_offset,
+    uint64_t                 length)
+{
+    uint64_t      aligned = SM_ALIGN_UP(length);
+    struct sm_ag *ag;
+
+    if (aligned == 0) {
+        return;
+    }
+    ag = sm_free_resolve_ag(sm, device_id, device_offset, aligned, "space_map_free_journal");
+
+    pthread_mutex_lock(&ag->lock);
+    sm_ag_journal_delta(ag, jnl, SM_AG_LOG_OP_FREE, device_offset, aligned);
+    pthread_mutex_unlock(&ag->lock);
+} /* space_map_free_journal */
+
+/*
+ * Apply the in-memory free, returning the range to its AG's free pool.  Call
+ * once the transaction that journaled the matching FREE delta is durable.
+ */
+void
+space_map_free_apply(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint64_t          device_offset,
+    uint64_t          length)
+{
+    uint64_t      aligned = SM_ALIGN_UP(length);
+    struct sm_ag *ag;
+
+    if (aligned == 0) {
+        return;
+    }
+    ag = sm_free_resolve_ag(sm, device_id, device_offset, aligned, "space_map_free_apply");
+
+    pthread_mutex_lock(&ag->lock);
+    sm_ag_free_locked(ag, device_offset, aligned);
+    pthread_mutex_unlock(&ag->lock);
+
+    __atomic_fetch_sub(&sm->used_bytes, aligned, __ATOMIC_RELAXED);
+} /* space_map_free_apply */
+
+/*
+ * Immediate free (journal + apply in one step).  Safe only for ranges that are
+ * not referenced by any cached/pinned block and need no transactional ordering
+ * -- e.g. returning a thread's leftover reservation.  Transactional frees use
+ * the pending (journal-then-apply-on-commit) path instead.
+ */
 void
 space_map_free(
     struct space_map        *sm,
@@ -543,42 +631,8 @@ space_map_free(
     uint64_t                 device_offset,
     uint64_t                 length)
 {
-    struct sm_device *dev;
-    struct sm_ag     *ag;
-    uint32_t          ag_idx;
-    uint64_t          aligned = SM_ALIGN_UP(length);
-
-    if (aligned == 0) {
-        return;
-    }
-
-    sm_abort_if(device_id >= sm->num_devices,
-                "space_map_free: bad device_id %u", device_id);
-
-    dev = &sm->devices[device_id];
-
-    ag_idx = device_offset >> SM_AG_SIZE_LOG2;
-    sm_abort_if(ag_idx >= dev->num_ags,
-                "space_map_free: offset %lu past device %u",
-                device_offset, device_id);
-
-    ag = &dev->ags[ag_idx];
-
-    /* For now we forbid frees that straddle AG boundaries.  Callers that
-     * allocated through this allocator never see straddling because
-     * reservations come from a single AG.  Defensive abort if it ever
-     * happens. */
-    sm_abort_if(device_offset + aligned > ag->base_offset + ag->size,
-                "space_map_free: range crosses AG boundary "
-                "(offset=%lu length=%lu ag_base=%lu ag_size=%lu)",
-                device_offset, aligned, ag->base_offset, ag->size);
-
-    pthread_mutex_lock(&ag->lock);
-    sm_ag_free_locked(ag, device_offset, aligned);
-    sm_ag_journal_delta(ag, jnl, SM_AG_LOG_OP_FREE, device_offset, aligned);
-    pthread_mutex_unlock(&ag->lock);
-
-    __atomic_fetch_sub(&sm->used_bytes, aligned, __ATOMIC_RELAXED);
+    space_map_free_journal(sm, jnl, device_id, device_offset, length);
+    space_map_free_apply(sm, device_id, device_offset, length);
 } /* space_map_free */
 
 void

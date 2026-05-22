@@ -262,6 +262,23 @@ space_map_free(
     uint64_t                 device_offset,
     uint64_t                 length);
 
+/* Pending free: journal the FREE delta now (rides the txn redo), apply the
+ * in-memory free only once that txn is durable. */
+void
+space_map_free_journal(
+    struct space_map        *sm,
+    const struct sm_journal *jnl,
+    uint32_t                 device_id,
+    uint64_t                 device_offset,
+    uint64_t                 length);
+
+void
+space_map_free_apply(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint64_t          device_offset,
+    uint64_t          length);
+
 void
 space_map_thread_cache_return(
     struct space_map        *sm,

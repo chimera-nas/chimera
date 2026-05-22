@@ -544,6 +544,18 @@ typedef void (*demofs_txn_commit_cb_t)(
     int                status,
     void              *private_data);
 
+/* A space range freed by a txn.  The FREE delta is journaled immediately (it
+ * rides the redo), but the in-memory free is withheld until the txn is durable
+ * (applied in demofs_redo_write_cb) or discarded on abort -- so a freed range
+ * (and any still-cached metadata block backing it) can't be reused until the
+ * free is committed. */
+struct demofs_txn_free {
+    uint32_t                device_id;
+    uint64_t                device_offset;
+    uint64_t                length;
+    struct demofs_txn_free *next;
+};
+
 struct demofs_txn {
     enum demofs_txn_type     type;
     struct demofs_thread    *thread;
@@ -551,6 +563,7 @@ struct demofs_txn {
     struct demofs_txn_slot   inodes[DEMOFS_TXN_MAX_INODES];
     int                      num_inodes;
     struct demofs_txn_block *blocks;       /* dirty blocks pinned by this txn */
+    struct demofs_txn_free  *pending_frees; /* ranges freed, applied on commit */
 };
 
 /*
@@ -1757,6 +1770,71 @@ demofs_sm_claim_block(
         struct demofs_sm_jnl name ## _ctx = { (thr), (t) };  \
         struct sm_journal    name         = { demofs_sm_claim_block, &name ## _ctx }
 
+/*
+ * Free a device range as part of a transaction.  The FREE delta is journaled
+ * now (it rides this txn's redo), but the in-memory free is deferred onto the
+ * txn's pending list and applied only once the record is durable
+ * (demofs_txn_apply_frees) or discarded on abort (demofs_txn_discard_frees).
+ * This is required for metadata blocks (b+tree nodes), which unlike file data
+ * are resident + pinned in the block cache: applying the free immediately
+ * could hand the range to a concurrent allocation that then claims the stale,
+ * still-pinned block.  Deferring to commit (block is LOGGED, unpinned by then)
+ * makes a re-claim COW cleanly.
+ */
+static void
+demofs_txn_free_space(
+    struct demofs_thread *thread,
+    struct demofs_txn    *txn,
+    uint32_t              device_id,
+    uint64_t              device_offset,
+    uint64_t              length)
+{
+    struct demofs_txn_free *f;
+
+    DEMOFS_SM_JNL(jnl, thread, txn);
+
+    space_map_free_journal(thread->shared->space_map, &jnl,
+                           device_id, device_offset, length);
+
+    f                  = malloc(sizeof(*f));
+    f->device_id       = device_id;
+    f->device_offset   = device_offset;
+    f->length          = length;
+    f->next            = txn->pending_frees;
+    txn->pending_frees = f;
+} /* demofs_txn_free_space */
+
+/* Commit a txn's pending frees -- the ranges become reusable.  Runs on the
+ * intent-log thread once the redo record is durable, after the txn's blocks
+ * have been unpinned (so a freed metadata block is LOGGED, not DIRTY-pinned). */
+static void
+demofs_txn_apply_frees(struct demofs_txn *txn)
+{
+    struct space_map       *sm = txn->thread->shared->space_map;
+    struct demofs_txn_free *f, *n;
+
+    for (f = txn->pending_frees; f; f = n) {
+        n = f->next;
+        space_map_free_apply(sm, f->device_id, f->device_offset, f->length);
+        free(f);
+    }
+    txn->pending_frees = NULL;
+} /* demofs_txn_apply_frees */
+
+/* Discard a txn's pending frees without applying (abort): the journaled FREE
+ * deltas never become durable, so the ranges stay allocated. */
+static void
+demofs_txn_discard_frees(struct demofs_txn *txn)
+{
+    struct demofs_txn_free *f, *n;
+
+    for (f = txn->pending_frees; f; f = n) {
+        n = f->next;
+        free(f);
+    }
+    txn->pending_frees = NULL;
+} /* demofs_txn_discard_frees */
+
 /* ------------------------------------------------------------------ */
 /* Async block fetch with per-op suspend/resume                        */
 /* ------------------------------------------------------------------ */
@@ -2806,6 +2884,16 @@ demofs_bt_rebalance_leaf(
         }
         demofs_bt_hdr(pbuf, pbase)->nitems = pn - 1;
         merged                             = 1;
+
+        /* R is merged away: return its node block to the allocator (pending
+         * free, applied when this txn commits). */
+        {
+            uint32_t fdev;
+            uint64_t foff = sm_inum_to_device_offset(thread->shared->space_map,
+                                                     r_bptr, &fdev);
+
+            demofs_txn_free_space(thread, txn, fdev, foff, DEMOFS_BLOCK_SIZE);
+        }
     } else {
         /* Redistribute evenly across L and R. */
         uint32_t half = o / 2, acc = 0, off = 0;
@@ -2904,6 +2992,10 @@ demofs_bt_rebalance_interior(
         sizeof(struct demofs_bt_islot);
 
     if ((uint32_t) total <= maxi) {
+        uint64_t r_child = psl[ridx].child;   /* captured before the slot shift */
+        uint32_t fdev;
+        uint64_t foff = sm_inum_to_device_offset(thread->shared->space_map, r_child, &fdev);
+
         for (i = 0; i < total; i++) {
             demofs_bt_islots(lbuf, 0)[i] = all[i];
         }
@@ -2914,6 +3006,9 @@ demofs_bt_rebalance_interior(
         }
         demofs_bt_hdr(pbuf, pbase)->nitems = pn - 1;
         merged                             = 1;
+
+        /* R is merged away: pending-free its node block. */
+        demofs_txn_free_space(thread, txn, fdev, foff, DEMOFS_BLOCK_SIZE);
     } else {
         int split = total / 2;
 
@@ -3017,7 +3112,14 @@ demofs_bt_collapse_root(
             }
             demofs_bt_hdr(root, base)->nitems = n;
         }
-        /* cbuf is now orphaned; physical reclaim deferred. */
+        /* The child was pulled into the embedded root: pending-free its block. */
+        {
+            uint32_t fdev;
+            uint64_t foff = sm_inum_to_device_offset(thread->shared->space_map,
+                                                     cbptr, &fdev);
+
+            demofs_txn_free_space(thread, txn, fdev, foff, DEMOFS_BLOCK_SIZE);
+        }
     }
 } /* demofs_bt_collapse_root */
 
@@ -4464,8 +4566,10 @@ demofs_thread_free_space(
     uint64_t              device_offset,
     uint64_t              length)
 {
-    DEMOFS_SM_JNL(jnl, thread, txn);
-    space_map_free(thread->shared->space_map, &jnl, device_id, device_offset, length);
+    /* Pending free: journal now, apply on commit (hardens the data path's
+     * abort behavior too -- an aborted txn no longer leaves the range freed
+     * in memory while its redo is discarded). */
+    demofs_txn_free_space(thread, txn, device_id, device_offset, length);
 } /* demofs_thread_free_space */
 
 /* ------------------------------------------------------------------ */
@@ -4485,11 +4589,12 @@ demofs_txn_begin(
         txn = malloc(sizeof(*txn));
     }
 
-    txn->type       = type;
-    txn->thread     = thread;
-    txn->next       = NULL;
-    txn->num_inodes = 0;
-    txn->blocks     = NULL;
+    txn->type          = type;
+    txn->thread        = thread;
+    txn->next          = NULL;
+    txn->num_inodes    = 0;
+    txn->blocks        = NULL;
+    txn->pending_frees = NULL;
     return txn;
 } /* demofs_txn_begin */
 
@@ -4505,9 +4610,12 @@ demofs_txn_release(struct demofs_txn *txn)
 static inline void
 demofs_txn_abort(struct demofs_txn *txn)
 {
-    /* Nothing to undo today; future intent records and deferred frees
-     * get discarded here.  Drop any blocks the aborted txn pinned (their
-     * contents are discarded) and release the inode locks. */
+    /* Discard pending frees (their journaled FREE deltas never commit, so the
+     * ranges stay allocated).  Drop any blocks the aborted txn pinned (their
+     * contents are discarded) and release the inode locks.  NOTE: the in-memory
+     * allocator alloc deltas applied during the txn are still not rolled back
+     * here -- a pre-existing transaction-atomicity gap, separate from frees. */
+    demofs_txn_discard_frees(txn);
     demofs_txn_unpin_blocks(txn, DEMOFS_BLOCK_CLEAN);
     demofs_txn_unlock_all(txn);
     demofs_txn_release(txn);
@@ -4814,6 +4922,10 @@ demofs_redo_write_cb(
     il->redo_inflight--;
 
     demofs_txn_unpin_blocks(ctx->entry.txn, DEMOFS_BLOCK_LOGGED);
+    /* Record now durable: the freed metadata blocks are LOGGED + unpinned, so
+     * returning their ranges to the allocator can no longer collide with a
+     * still-pinned block (a re-claim COWs cleanly). */
+    demofs_txn_apply_frees(ctx->entry.txn);
     demofs_txn_unlock_all(ctx->entry.txn);
 
     ctx->entry.status = status;
