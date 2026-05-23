@@ -6,9 +6,110 @@
 #include "nfs4_session.h"
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
+#include "evpl/evpl_rpc2_program.h"
 #include "evpl/evpl_bind.h"
 #include "nfs4_dump.h"
 #include "nfs4_op_matrix.h"
+
+static uint32_t
+nfs4_replay_be32(const uint8_t *p)
+{
+    return ((uint32_t) p[0] << 24) |
+           ((uint32_t) p[1] << 16) |
+           ((uint32_t) p[2] << 8) |
+           (uint32_t) p[3];
+} /* nfs4_replay_be32 */
+
+static bool
+nfs4_replay_cached_body_offset(
+    const uint8_t *buf,
+    uint32_t       len,
+    uint32_t      *offset)
+{
+    uint32_t v, verf_len, pad;
+    uint32_t pos = 4; /* TCP record marker */
+
+    if (len < 28) {
+        return false;
+    }
+
+    v = nfs4_replay_be32(buf);
+    if ((v & 0x80000000u) == 0 || (v & 0x7fffffffu) + 4 != len) {
+        return false;
+    }
+
+    pos += 4; /* xid */
+
+    v = nfs4_replay_be32(buf + pos); /* mtype */
+    if (v != 1) { /* REPLY */
+        return false;
+    }
+    pos += 4;
+
+    v = nfs4_replay_be32(buf + pos); /* reply stat */
+    if (v != 0) { /* MSG_ACCEPTED */
+        return false;
+    }
+    pos += 4;
+
+    pos     += 4; /* verifier flavor */
+    verf_len = nfs4_replay_be32(buf + pos);
+    pos     += 4;
+
+    pad = (4 - (verf_len & 3)) & 3;
+    if (pos + verf_len + pad + 4 > len) {
+        return false;
+    }
+    pos += verf_len + pad;
+
+    v = nfs4_replay_be32(buf + pos); /* accept stat */
+    if (v != 0) { /* SUCCESS */
+        return false;
+    }
+    pos += 4;
+
+    *offset = pos;
+    return true;
+} /* nfs4_replay_cached_body_offset */
+
+static int
+nfs4_send_cached_reply(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req)
+{
+    const uint8_t     *cached     = req->replay_slot->cached_buf;
+    uint32_t           cached_len = req->replay_slot->cached_len;
+    uint32_t           body_offset, body_len, reserve;
+    struct evpl_iovec *msg_iov;
+    int                niov;
+
+    if (!nfs4_replay_cached_body_offset(cached, cached_len, &body_offset)) {
+        return -1;
+    }
+
+    body_len = cached_len - body_offset;
+    reserve  = req->encoding->program->reserve;
+
+    msg_iov = xdr_dbuf_alloc_space(sizeof(*msg_iov), req->encoding->dbuf);
+    if (!msg_iov) {
+        return -1;
+    }
+
+    niov = evpl_iovec_alloc(thread->evpl, body_len + reserve, 8, 1, 0, msg_iov);
+    if (niov != 1) {
+        return -1;
+    }
+
+    memcpy((uint8_t *) msg_iov->data + reserve, cached + body_offset, body_len);
+
+    return evpl_rpc2_send_reply_dispatch(thread->evpl,
+                                         req->encoding,
+                                         NULL,
+                                         msg_iov,
+                                         1,
+                                         body_len + reserve);
+} /* nfs4_send_cached_reply */
+
 void
 chimera_nfs4_compound_process(
     struct nfs_request *req,
@@ -20,11 +121,13 @@ chimera_nfs4_compound_process(
     struct nfs_resop4                *resop;
     int                               rc;
 
+ again:
+
     /* SEQUENCE replay short-circuit: the SEQUENCE op detected a
-     * retransmit on a CACHED slot.  Send the cached reply bytes
-     * verbatim and free the request -- skip compound execution
-     * entirely.  The cached buf is alive because the slot stays
-     * CACHED until the next seqid+1 advances it. */
+     * retransmit on a CACHED slot.  Resend the cached COMPOUND body through
+     * the current RPC request so the reply carries the retransmit's XID, then
+     * skip compound execution entirely.  The cached buf is alive because the
+     * slot stays CACHED until the next seqid+1 advances it. */
     if (req->replay_action == NFS4_REPLAY_ACTION_FROM_CACHE &&
         req->replay_slot && req->replay_slot->cached_buf) {
         /* XDR clones a +1 ref on every WRITE4args.data; the retransmit
@@ -39,16 +142,12 @@ chimera_nfs4_compound_process(
                 ap->opwrite.data.niov = 0;
             }
         }
-        evpl_send(thread->evpl,
-                  req->conn->bind,
-                  req->replay_slot->cached_buf,
-                  req->replay_slot->cached_len);
+        rc = nfs4_send_cached_reply(thread, req);
+        chimera_nfs_abort_if(rc, "Failed to send cached RPC2 reply");
         req->replay_slot = NULL;
         nfs_request_free(thread, req);
         return;
     }
-
- again:
 
     if (status != NFS4_OK) {
         req->res_compound.status = status;
