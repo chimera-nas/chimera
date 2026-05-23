@@ -107,10 +107,13 @@ nfs4_cb_addr_reachable(
         return false;
     }
 
-    rc = connect(fd, (struct sockaddr *) &sin, sizeof(sin));
+    do {
+        rc = connect(fd, (struct sockaddr *) &sin, sizeof(sin));
+    } while (rc < 0 && errno == EINTR);
+
     if (rc == 0) {
         ok = true;
-    } else if (errno == EINPROGRESS) {
+    } else if (errno == EINPROGRESS || errno == EALREADY) {
         /* Connection underway; treat as reachable.  evpl will redo its own
          * connect immediately after, which the listening peer accepts. */
         ok = true;
