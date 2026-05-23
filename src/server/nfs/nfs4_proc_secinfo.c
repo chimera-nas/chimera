@@ -21,8 +21,11 @@ chimera_nfs4_secinfo_complete(
     struct chimera_vfs_attrs *dir_attr,
     void                     *private_data)
 {
-    struct nfs_request *req = private_data;
-    struct SECINFO4res *res = &req->res_compound.resarray[req->index].opsecinfo;
+    struct nfs_request  *req        = private_data;
+    struct SECINFO4res  *res        = &req->res_compound.resarray[req->index].opsecinfo;
+    static const uint8_t krb5_oid[] = {
+        0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02
+    };
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
@@ -32,11 +35,16 @@ chimera_nfs4_secinfo_complete(
         return;
     }
 
-    res->resok4 = xdr_dbuf_alloc_space(sizeof(struct secinfo4), req->encoding->dbuf);
+    res->resok4 = xdr_dbuf_alloc_space(2 * sizeof(struct secinfo4), req->encoding->dbuf);
     chimera_nfs_abort_if(res->resok4 == NULL, "Failed to allocate space");
 
-    res->num_resok4       = 1;
-    res->resok4[0].flavor = AUTH_SYS;
+    res->num_resok4                     = 2;
+    res->resok4[0].flavor               = AUTH_SYS;
+    res->resok4[1].flavor               = RPCSEC_GSS;
+    res->resok4[1].flavor_info.oid.len  = sizeof(krb5_oid);
+    res->resok4[1].flavor_info.oid.data = (void *) krb5_oid;
+    res->resok4[1].flavor_info.qop      = 0;
+    res->resok4[1].flavor_info.service  = RPC_GSS_SVC_NONE;
 
     res->status = NFS4_OK;
     chimera_nfs4_compound_complete(req, NFS4_OK);
