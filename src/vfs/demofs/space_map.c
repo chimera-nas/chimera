@@ -564,6 +564,37 @@ sm_free_resolve_ag(
 } /* sm_free_resolve_ag */
 
 /*
+ * Reduce a free request to the whole blocks strictly contained in
+ * [device_offset, device_offset+length).  For an aligned offset (the common
+ * case: callers pass block-multiple lengths) this is the full range.  A
+ * sub-block, unaligned extent -- produced when DEALLOCATE / zero-range trims an
+ * extent at a non-block boundary, a mapping the read path supports via padding
+ * -- shares its partial edge blocks with the neighbouring extents carved from
+ * the same allocation, so freeing an edge could release a block another extent
+ * still maps.  Releasing only the interior is conservative (a partial edge
+ * block leaks, consistent with the filesystem's deferred-reclaim model) but
+ * never double-frees or frees a shared block.  Returns 0 if no whole block is
+ * contained (nothing to free).
+ */
+static int
+sm_free_block_range(
+    uint64_t  device_offset,
+    uint64_t  length,
+    uint64_t *r_offset,
+    uint64_t *r_length)
+{
+    uint64_t start = SM_ALIGN_UP(device_offset);
+    uint64_t end   = (device_offset + length) & ~(uint64_t) SM_BLOCK_MASK;
+
+    if (end <= start) {
+        return 0;
+    }
+    *r_offset = start;
+    *r_length = end - start;
+    return 1;
+} /* sm_free_block_range */
+
+/*
  * Journal a FREE delta into the AG's redo log without making the range
  * reusable.  The delta rides the freeing transaction's redo (so a crash
  * replays it via AG-log reconstruction), but the in-memory free is withheld
@@ -580,16 +611,16 @@ space_map_free_journal(
     uint64_t                 device_offset,
     uint64_t                 length)
 {
-    uint64_t      aligned = SM_ALIGN_UP(length);
+    uint64_t      offset, aligned;
     struct sm_ag *ag;
 
-    if (aligned == 0) {
+    if (!sm_free_block_range(device_offset, length, &offset, &aligned)) {
         return;
     }
-    ag = sm_free_resolve_ag(sm, device_id, device_offset, aligned, "space_map_free_journal");
+    ag = sm_free_resolve_ag(sm, device_id, offset, aligned, "space_map_free_journal");
 
     pthread_mutex_lock(&ag->lock);
-    sm_ag_journal_delta(ag, jnl, SM_AG_LOG_OP_FREE, device_offset, aligned);
+    sm_ag_journal_delta(ag, jnl, SM_AG_LOG_OP_FREE, offset, aligned);
     pthread_mutex_unlock(&ag->lock);
 } /* space_map_free_journal */
 
@@ -604,16 +635,16 @@ space_map_free_apply(
     uint64_t          device_offset,
     uint64_t          length)
 {
-    uint64_t      aligned = SM_ALIGN_UP(length);
+    uint64_t      offset, aligned;
     struct sm_ag *ag;
 
-    if (aligned == 0) {
+    if (!sm_free_block_range(device_offset, length, &offset, &aligned)) {
         return;
     }
-    ag = sm_free_resolve_ag(sm, device_id, device_offset, aligned, "space_map_free_apply");
+    ag = sm_free_resolve_ag(sm, device_id, offset, aligned, "space_map_free_apply");
 
     pthread_mutex_lock(&ag->lock);
-    sm_ag_free_locked(ag, device_offset, aligned);
+    sm_ag_free_locked(ag, offset, aligned);
     pthread_mutex_unlock(&ag->lock);
 
     __atomic_fetch_sub(&sm->used_bytes, aligned, __ATOMIC_RELAXED);
