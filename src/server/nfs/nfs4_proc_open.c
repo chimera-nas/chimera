@@ -645,6 +645,7 @@ chimera_nfs4_open_parent_complete(
     unsigned int              flags = 0;
     nfsstat4                  status;
     struct chimera_vfs_attrs *attr;
+    uint32_t                  verf_part;
 
     req->handle = parent_handle;
 
@@ -709,17 +710,21 @@ chimera_nfs4_open_parent_complete(
                  * For now encode the verifier in atime.tv_sec (bytes 0-3) and mtime.tv_sec
                  * (bytes 4-7), which is the same strategy used by Linux nfsd. */
                 attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
-                memcpy(&attr->va_atime.tv_sec, args->openhow.how.ch_createboth.cva_verf, 4);
+                memcpy(&verf_part, args->openhow.how.ch_createboth.cva_verf, 4);
+                attr->va_atime.tv_sec  = verf_part;
                 attr->va_atime.tv_nsec = 0;
-                memcpy(&attr->va_mtime.tv_sec, args->openhow.how.ch_createboth.cva_verf + 4, 4);
+                memcpy(&verf_part, args->openhow.how.ch_createboth.cva_verf + 4, 4);
+                attr->va_mtime.tv_sec  = verf_part;
                 attr->va_mtime.tv_nsec = 0;
                 break;
             case EXCLUSIVE4:
                 flags            |= CHIMERA_VFS_OPEN_EXCLUSIVE;
                 attr->va_set_mask = CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
-                memcpy(&attr->va_atime.tv_sec, args->openhow.how.createverf, 4);
+                memcpy(&verf_part, args->openhow.how.createverf, 4);
+                attr->va_atime.tv_sec  = verf_part;
                 attr->va_atime.tv_nsec = 0;
-                memcpy(&attr->va_mtime.tv_sec, args->openhow.how.createverf + 4, 4);
+                memcpy(&verf_part, args->openhow.how.createverf + 4, 4);
+                attr->va_mtime.tv_sec  = verf_part;
                 attr->va_mtime.tv_nsec = 0;
                 break;
         } /* switch */
