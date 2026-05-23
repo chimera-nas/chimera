@@ -831,6 +831,59 @@ nfs_client_check_share_conflict(
     return status;
 } /* nfs_client_check_share_conflict */
 
+nfsstat4
+nfs_client_check_io_denied(
+    struct nfs_client     *client,
+    struct nfs_open_owner *requesting_owner,
+    const uint8_t         *fh,
+    uint16_t               fh_len,
+    uint32_t               requested_access)
+{
+    struct nfs_open_owner *oo, *oo_tmp;
+    nfsstat4               status = NFS4_OK;
+
+    if (fh_len > NFS4_FHSIZE) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    pthread_mutex_lock(&client->lock);
+
+    HASH_ITER(hh, client->open_owners_by_str, oo, oo_tmp)
+    {
+        struct nfs_open_state *peer = NULL;
+
+        if (oo == requesting_owner) {
+            continue;
+        }
+
+        pthread_mutex_lock(&oo->lock);
+        HASH_FIND(hh, oo->states_by_fh, fh, fh_len, peer);
+        if (peer && (peer->share_deny & requested_access)) {
+            status = NFS4ERR_LOCKED;
+        }
+        pthread_mutex_unlock(&oo->lock);
+
+        if (status != NFS4_OK) {
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&client->lock);
+    return status;
+} /* nfs_client_check_io_denied */
+
+nfsstat4
+nfs_open_state_check_io_denied(
+    struct nfs_open_state *requesting_state,
+    uint32_t               requested_access)
+{
+    return nfs_client_check_io_denied(requesting_state->owner->client,
+                                      requesting_state->owner,
+                                      requesting_state->fh,
+                                      requesting_state->fh_len,
+                                      requested_access);
+} /* nfs_open_state_check_io_denied */
+
 void
 nfs_open_state_coalesce(
     struct nfs_open_state  *state,

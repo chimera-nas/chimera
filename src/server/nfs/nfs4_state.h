@@ -603,6 +603,22 @@ nfs_client_check_share_conflict(
     uint32_t               requested_access,
     uint32_t               requested_deny);
 
+/* Check whether I/O through `requesting_state` conflicts with another
+ * open_owner's deny bits on the same file.  Returns NFS4ERR_LOCKED for
+ * denied READ/WRITE operations, as required by RFC 7530 §16.25. */
+SYMBOL_EXPORT nfsstat4
+nfs_open_state_check_io_denied(
+    struct nfs_open_state *requesting_state,
+    uint32_t               requested_access);
+
+SYMBOL_EXPORT nfsstat4
+nfs_client_check_io_denied(
+    struct nfs_client     *client,
+    struct nfs_open_owner *requesting_owner,
+    const uint8_t         *fh,
+    uint16_t               fh_len,
+    uint32_t               requested_access);
+
 /* Re-open: merge share bits onto an existing state, bump its seqid, and
  * write the (now-updated) stateid to `out_stateid`. */
 SYMBOL_EXPORT void
@@ -729,4 +745,3 @@ nfs_client_touch(struct nfs_client *client)
     atomic_store_explicit((_Atomic uint64_t *) &client->last_touch_ns,
                           nfs_lease_now_ns(), memory_order_relaxed);
 } /* nfs_client_touch */
-
