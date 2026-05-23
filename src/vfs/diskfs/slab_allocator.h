@@ -10,26 +10,26 @@
 
 #include "evpl/evpl.h"
 
-struct demofs_slab {
+struct diskfs_slab {
     void               *buffer;
     uint64_t            size;
     uint64_t            used;
-    struct demofs_slab *next;
+    struct diskfs_slab *next;
 };
 
-struct demofs_element {
+struct diskfs_element {
     void                  *buffer;
-    struct demofs_element *next;
+    struct diskfs_element *next;
 } __attribute__((aligned(8)));
 
-struct demofs_bucket {
-    struct demofs_element *elements;
+struct diskfs_bucket {
+    struct diskfs_element *elements;
 };
 
 struct slab_allocator {
-    struct demofs_slab    *slabs;
-    struct demofs_bucket  *buckets;
-    struct demofs_element *free_elements;
+    struct diskfs_slab    *slabs;
+    struct diskfs_bucket  *buckets;
+    struct diskfs_element *free_elements;
     uint64_t               slab_size;
     uint64_t               max_element_size;
 };
@@ -53,7 +53,7 @@ slab_allocator_create(
     max_bucket_id = ((max_element_size + 7) & ~7) >> 3;
 
     allocator->slabs   = NULL;
-    allocator->buckets = calloc(max_bucket_id + 1, sizeof(struct demofs_bucket));
+    allocator->buckets = calloc(max_bucket_id + 1, sizeof(struct diskfs_bucket));
 
     return allocator;
 } /* slab_allocator_create */
@@ -61,7 +61,7 @@ slab_allocator_create(
 static void
 slab_allocator_destroy(struct slab_allocator *allocator)
 {
-    struct demofs_slab *slab;
+    struct diskfs_slab *slab;
 
     while (allocator->slabs) {
         slab = allocator->slabs;
@@ -78,7 +78,7 @@ slab_allocator_alloc_new_chunk(
     struct slab_allocator *allocator,
     uint64_t               size)
 {
-    struct demofs_slab *slab = NULL;
+    struct diskfs_slab *slab = NULL;
     void               *ptr;
 
     if (allocator->slabs) {
@@ -113,8 +113,8 @@ slab_allocator_alloc(
 {
     uint64_t               asize     = (size + 7) & ~7;
     uint64_t               bucket_id = asize >> 3;
-    struct demofs_bucket  *bucket    = &allocator->buckets[bucket_id];
-    struct demofs_element *element;
+    struct diskfs_bucket  *bucket    = &allocator->buckets[bucket_id];
+    struct diskfs_element *element;
     void                  *ptr;
 
     if (bucket->elements) {
@@ -135,7 +135,7 @@ slab_allocator_alloc_perm(
     struct slab_allocator *allocator,
     uint64_t               size)
 {
-    struct demofs_slab *slab = NULL;
+    struct diskfs_slab *slab = NULL;
     void               *ptr;
     uint64_t            pad;
 
@@ -176,14 +176,14 @@ slab_allocator_free(
     uint64_t               size)
 {
     uint64_t               bucket_id = ((size + 7) & ~7) >> 3;
-    struct demofs_bucket  *bucket    = &allocator->buckets[bucket_id];
-    struct demofs_element *element;
+    struct diskfs_bucket  *bucket    = &allocator->buckets[bucket_id];
+    struct diskfs_element *element;
 
     if (allocator->free_elements) {
         element = allocator->free_elements;
         LL_DELETE(allocator->free_elements, element);
     } else {
-        element = slab_allocator_alloc_new_chunk(allocator, sizeof(struct demofs_element));
+        element = slab_allocator_alloc_new_chunk(allocator, sizeof(struct diskfs_element));
     }
 
     element->buffer = ptr;

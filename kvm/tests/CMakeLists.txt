@@ -14,11 +14,11 @@ if(CHIMERA_VFS_IO_URING)
 endif()
 
 if(IO_URING_ENABLED)
-    list(APPEND KVM_BACKENDS demofs_io_uring)
+    list(APPEND KVM_BACKENDS diskfs_io_uring)
 endif()
 
 if(HAVE_LIBAIO)
-    list(APPEND KVM_BACKENDS demofs_aio)
+    list(APPEND KVM_BACKENDS diskfs_aio)
 endif()
 
 set(NFS_VERSIONS 3 4.0 4.1 4.2)

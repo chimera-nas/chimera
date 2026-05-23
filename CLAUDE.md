@@ -94,7 +94,7 @@ All of these checks are verified by CI, so running `make check` locally ensures 
 1. **VFS Modules** (`src/vfs/`):
    - `memfs`: In-memory filesystem
    - `linux`: Linux filesystem passthrough
-   - `demofs`: Demo/test filesystem
+   - `diskfs`: Demo/test filesystem
    - `cairn`: Custom persistent filesystem
    - `io_uring`: io_uring-based async filesystem
 

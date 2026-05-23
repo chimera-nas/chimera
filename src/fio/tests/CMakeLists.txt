@@ -15,18 +15,18 @@ if(CHIMERA_NETNS_TESTING)
 endif()
 
 if(IO_URING_ENABLED)
-    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/demofs_io_uring_basic.fio ${CMAKE_CURRENT_BINARY_DIR}/demofs_io_uring_basic.fio)
-    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/demofs_io_uring_basic.json ${CMAKE_CURRENT_BINARY_DIR}/demofs_io_uring_basic.json)
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/diskfs_io_uring_basic.fio ${CMAKE_CURRENT_BINARY_DIR}/diskfs_io_uring_basic.fio)
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/diskfs_io_uring_basic.json ${CMAKE_CURRENT_BINARY_DIR}/diskfs_io_uring_basic.json)
     if(CHIMERA_NETNS_TESTING)
-        add_test(NAME chimera/fio/fio_demofs_io_uring_basic COMMAND ${NETNS_WRAPPER} /usr/local/bin/fio ${CMAKE_CURRENT_BINARY_DIR}/demofs_io_uring_basic.fio)
+        add_test(NAME chimera/fio/fio_diskfs_io_uring_basic COMMAND ${NETNS_WRAPPER} /usr/local/bin/fio ${CMAKE_CURRENT_BINARY_DIR}/diskfs_io_uring_basic.fio)
     endif()
 endif()
 
 if(HAVE_LIBAIO)
-    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/demofs_aio_basic.fio ${CMAKE_CURRENT_BINARY_DIR}/demofs_aio_basic.fio)
-    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/demofs_aio_basic.json ${CMAKE_CURRENT_BINARY_DIR}/demofs_aio_basic.json)
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/diskfs_aio_basic.fio ${CMAKE_CURRENT_BINARY_DIR}/diskfs_aio_basic.fio)
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/diskfs_aio_basic.json ${CMAKE_CURRENT_BINARY_DIR}/diskfs_aio_basic.json)
     if(CHIMERA_NETNS_TESTING)
-        add_test(NAME chimera/fio/fio_demofs_aio_basic COMMAND ${NETNS_WRAPPER} /usr/local/bin/fio ${CMAKE_CURRENT_BINARY_DIR}/demofs_aio_basic.fio)
+        add_test(NAME chimera/fio/fio_diskfs_aio_basic COMMAND ${NETNS_WRAPPER} /usr/local/bin/fio ${CMAKE_CURRENT_BINARY_DIR}/diskfs_aio_basic.fio)
     endif()
 endif()
 
@@ -55,13 +55,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         )
 
         if(IO_URING_ENABLED)
-            set_tests_properties(chimera/fio/fio_demofs_io_uring_basic PROPERTIES
+            set_tests_properties(chimera/fio/fio_diskfs_io_uring_basic PROPERTIES
                 ENVIRONMENT "LD_PRELOAD=${ASAN_LIB};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt"
             )
         endif()
 
         if(HAVE_LIBAIO)
-            set_tests_properties(chimera/fio/fio_demofs_aio_basic PROPERTIES
+            set_tests_properties(chimera/fio/fio_diskfs_aio_basic PROPERTIES
                 ENVIRONMENT "LD_PRELOAD=${ASAN_LIB};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt"
             )
         endif()

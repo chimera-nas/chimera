@@ -36,7 +36,7 @@
 #include "vfs/cairn/cairn.h"
 #endif /* ifdef HAVE_CAIRN */
 
-#include "vfs/demofs/demofs.h"
+#include "vfs/diskfs/diskfs.h"
 #include "common/misc.h"
 #include "common/macros.h"
 #include "prometheus-c.h"

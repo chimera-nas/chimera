@@ -10,7 +10,7 @@
 #include "common/rbtree.h"
 
 /*
- * Space map allocator for demofs.
+ * Space map allocator for diskfs.
  *
  * Each block device is divided into fixed-size allocation groups (AGs).
  * Each AG owns an in-memory red-black tree of free extents keyed by
@@ -117,7 +117,7 @@ struct sm_ag_log_delta {
 #define SM_AG_LOG_DELTAS_PER_BLOCK (SM_BLOCK_SIZE / sizeof(struct sm_ag_log_delta))
 
 /*
- * Journal bridge: space_map calls back into demofs to fetch the 4 KiB AG-log
+ * Journal bridge: space_map calls back into diskfs to fetch the 4 KiB AG-log
  * block at (device_id, device_offset), pinned into the current transaction so
  * the delta it writes rides the main redo log.  is_new starts from a zeroed
  * block (first use of a delta block) rather than reading disk.  A NULL journal

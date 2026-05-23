@@ -40,14 +40,14 @@ if (CHIMERA_VFS_IO_URING)
     add_subdirectory(io_uring)
 endif()
 
-add_subdirectory(demofs)
+add_subdirectory(diskfs)
 
 if (CAIRN_ENABLED)
     add_subdirectory(cairn)
 endif()
 
 target_link_libraries(chimera_vfs
-    chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_demofs
+    chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_diskfs
     chimera_vfs_nfs
     chimera_common prometheus-c xxhash dl urcu)
 
@@ -56,7 +56,7 @@ if (CHIMERA_VFS_IO_URING)
 endif()
 
 if (DEMFS_ENABLED)
-    target_link_libraries(chimera_vfs chimera_vfs_demofs)
+    target_link_libraries(chimera_vfs chimera_vfs_diskfs)
 endif()
 
 if (CAIRN_ENABLED)
