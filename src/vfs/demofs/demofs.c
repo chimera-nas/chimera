@@ -95,75 +95,76 @@ struct demofs_extent {
 };
 
 struct demofs_request_private {
-    int                      opcode;
-    int                      status;
-    int                      pending;
-    int                      niov;
-    uint32_t                 read_prefix;
-    uint32_t                 read_suffix;
-    struct demofs_thread    *thread;     // Thread for tracking pending I/O
-    struct demofs_txn       *txn;        // Transaction wrapping this op
+    int                         opcode;
+    int                         status;
+    int                         pending;
+    int                         niov;
+    uint32_t                    read_prefix;
+    uint32_t                    read_suffix;
+    struct demofs_thread       *thread;  // Thread for tracking pending I/O
+    struct demofs_txn          *txn;     // Transaction wrapping this op
 
     /* Data-I/O admission control (see demofs_thread.io_wait_head).  When a
      * request parks because the block queue is full, io_resume re-enters the
      * paused path; io_reading marks a read whose extent walk has not finished,
      * so a completion that drains its in-flight reads to zero must not finalize
      * it while it is parked mid-walk. */
-    void                     (*io_resume)(struct chimera_vfs_request *);
+    void                        (*io_resume)(
+        struct chimera_vfs_request *);
     struct chimera_vfs_request *io_wait_next;
-    int                      io_reading;
+    int                         io_reading;
     /* Multi-inode op scratch (lookup_at parent/child, rename's 4-inode
      * chain, etc.).  Per-op semantics documented at use sites. */
-    struct demofs_inode     *inode_stash[4];
+    struct demofs_inode        *inode_stash[4];
     /* Small integer scratch for ops that need to carry state across
      * async callbacks (mount path walker uses it as a path byte offset). */
-    uint32_t                 op_scratch;
+    uint32_t                    op_scratch;
 
     /* readdir iteration cursor + the current dirent copied out of the
      * b+tree (carried across the per-child inode fetch). */
-    uint64_t                 rd_from_hash;
-    uint64_t                 rd_hash;
-    uint64_t                 rd_inum;
-    uint32_t                 rd_gen;
-    int                      rd_namelen;
-    char                     rd_name[256];
+    uint64_t                    rd_from_hash;
+    uint64_t                    rd_hash;
+    uint64_t                    rd_inum;
+    uint32_t                    rd_gen;
+    int                         rd_namelen;
+    char                        rd_name[256];
 
     /* Scratch buffer for handlers that parse a looked-up b+tree record
      * (e.g. a dirent's inum/gen) in their async continuation.  Sized to hold
      * the largest record (DEMOFS_DIRENT_REC_MAX == sizeof(dirent_rec) + 256). */
-    char                     rec_scratch[320];
+    char                        rec_scratch[320];
 
     /* Extent-walk iteration state, hoisted here so an async ext_next can
      * suspend the loop and resume it.  loop_* are generic loop scalars. */
-    struct demofs_extent     ext_iter;
-    struct evpl_iovec_cursor rd_cursor;
-    uint64_t                 loop_off;
-    uint64_t                 loop_left;
-    uint64_t                 loop_pos;
-    int                      loop_have;
+    struct demofs_extent        ext_iter;
+    struct evpl_iovec_cursor    rd_cursor;
+    uint64_t                    loop_off;
+    uint64_t                    loop_left;
+    uint64_t                    loop_pos;
+    int                         loop_have;
 
-    struct evpl_iovec        iov[66];
+    struct evpl_iovec           iov[66];
 
     // For RMW (read-modify-write) on partial block writes
-    int                      rmw_phase;  // 0 = no RMW, 1 = reading, 2 = writing
-    uint64_t                 rmw_aligned_start; // Block-aligned start offset
-    uint64_t                 rmw_aligned_length;// Block-aligned length
-    uint64_t                 rmw_device_id; // Device for the new extent
-    uint64_t                 rmw_device_offset; // Device offset for the new extent
-    uint32_t                 rmw_prefix_len; // Bytes to preserve at start of first block
-    uint32_t                 rmw_suffix_len; // Bytes to preserve at end of last block
-    struct evpl_iovec        rmw_prefix_iov; // IOV for prefix data (if read from existing extent)
-    struct evpl_iovec        rmw_suffix_iov; // IOV for suffix data (if read from existing extent)
-    int                      rmw_prefix_pending;// Pending read for prefix
-    int                      rmw_suffix_pending;// Pending read for suffix
-    uint32_t                 rmw_prefix_valid; // Valid bytes in prefix (extent may be truncated)
-    uint32_t                 rmw_suffix_adjust; // Adjustment for suffix when block starts before extent
-    uint32_t                 rmw_suffix_valid; // Valid bytes in suffix (extent may be truncated)
+    int                         rmw_phase; // 0 = no RMW, 1 = reading, 2 = writing
+    uint64_t                    rmw_aligned_start; // Block-aligned start offset
+    uint64_t                    rmw_aligned_length;// Block-aligned length
+    uint64_t                    rmw_device_id; // Device for the new extent
+    uint64_t                    rmw_device_offset; // Device offset for the new extent
+    uint32_t                    rmw_prefix_len; // Bytes to preserve at start of first block
+    uint32_t                    rmw_suffix_len; // Bytes to preserve at end of last block
+    struct evpl_iovec           rmw_prefix_iov; // IOV for prefix data (if read from existing extent)
+    struct evpl_iovec           rmw_suffix_iov; // IOV for suffix data (if read from existing extent)
+    int                         rmw_prefix_pending;// Pending read for prefix
+    int                         rmw_suffix_pending;// Pending read for suffix
+    uint32_t                    rmw_prefix_valid; // Valid bytes in prefix (extent may be truncated)
+    uint32_t                    rmw_suffix_adjust; // Adjustment for suffix when block starts before extent
+    uint32_t                    rmw_suffix_valid; // Valid bytes in suffix (extent may be truncated)
     /* Carried across the async prefix/suffix lookups + trim walk. */
-    int                      need_prefix_read;
-    int                      need_suffix_read;
-    uint64_t                 prefix_device_id, prefix_device_offset;
-    uint64_t                 suffix_device_id, suffix_device_offset;
+    int                         need_prefix_read;
+    int                         need_suffix_read;
+    uint64_t                    prefix_device_id, prefix_device_offset;
+    uint64_t                    suffix_device_id, suffix_device_offset;
 };
 
 struct demofs_device {
@@ -1993,7 +1994,8 @@ struct demofs_block_load {
 /* Resume data-I/O requests parked on the admission gate (defined below); a
  * metadata-node read shares the worker queue, so its completion frees capacity
  * too and must wake parked requests, else they hang. */
-static void demofs_io_resume_waiters(struct demofs_thread *thread);
+static void demofs_io_resume_waiters(
+    struct demofs_thread *thread);
 
 /* Block read completion: data landed directly in blk->iov; mark CLEAN, wake. */
 static void
@@ -5416,7 +5418,8 @@ demofs_il_clean_pushed_record(
     }
 } /* demofs_il_clean_pushed_record */
 
-static void demofs_il_push_issue(struct demofs_intent_log *il);
+static void demofs_il_push_issue(
+    struct demofs_intent_log *il);
 
 /* Finish the current record: mark its blocks evictable, release the record's
 * iovecs (header + all block clones), advance the tail, and kick the next. */
@@ -8699,7 +8702,7 @@ static int
 demofs_io_gate(
     struct demofs_thread       *thread,
     struct chimera_vfs_request *request,
-    void                        (*resume)(struct chimera_vfs_request *))
+    void (                     *resume )(struct chimera_vfs_request *))
 {
     struct demofs_request_private *p = request->plugin_data;
 
@@ -8726,7 +8729,8 @@ demofs_io_resume_waiters(struct demofs_thread *thread)
     while (thread->io_wait_head && thread->pending_io < DEMOFS_IO_INFLIGHT_LOWAT) {
         struct chimera_vfs_request    *request = thread->io_wait_head;
         struct demofs_request_private *p       = request->plugin_data;
-        void                           (*resume)(struct chimera_vfs_request *) = p->io_resume;
+        void                           (*resume)(
+            struct chimera_vfs_request *) = p->io_resume;
 
         thread->io_wait_head = p->io_wait_next;
         if (!thread->io_wait_head) {
