@@ -18,6 +18,7 @@
 #include "nfs_internal.h"
 #include "nfs4_session.h"
 #include "nfs4_lease.h"
+#include "nfs4_callback.h"
 #include "nfs_nlm.h"
 #include "prometheus-c.h"
 #include "nfs_external_portmap.h"
@@ -60,9 +61,13 @@ nfs_server_init(
     int                               nfs_rdma_port;
     int                               nfs_tcp_rdma_port;
     int                               nfs_lockmgr_port;
+    int                               nfs_port;
+    int                               data_server;
     int                               external_portmap;
     const char                       *portmap_hostname;
 
+    nfs_port          = chimera_server_config_get_nfs_port(config);
+    data_server       = chimera_server_config_get_nfs_data_server(config);
     nfs_rdma          = chimera_server_config_get_nfs_rdma(config);
     nfs_rdma_hostname = chimera_server_config_get_nfs_rdma_hostname(config);
     nfs_rdma_port     = chimera_server_config_get_nfs_rdma_port(config);
@@ -235,6 +240,9 @@ nfs_server_init(
 
     nfs4_client_table_init(&shared->nfs4_shared_clients);
     nfs_state_table_init(&shared->nfs4_state_table);
+    nfs_layout_table_init(&shared->nfs4_layout_table);
+    pthread_mutex_init(&shared->nfs4_pnfs_devcache.lock, NULL);
+    shared->nfs4_pnfs_devcache.count = 0;
 
     /* Phase 3: lease defaults.  Per RFC 7530 §10.2.3, the lease_time
      * attribute reported via FATTR4_LEASE_TIME governs how often 4.0 clients
@@ -254,8 +262,24 @@ nfs_server_init(
     nlm_state_init(&shared->nlm_state,
                    chimera_server_config_get_state_dir(config));
 
-    shared->mount_endpoint = evpl_endpoint_create("0.0.0.0", NFS_MOUNT_PORT);
-    shared->nfs_endpoint   = evpl_endpoint_create("0.0.0.0", NFS_PORT);
+    shared->nfs_endpoint = evpl_endpoint_create("0.0.0.0", nfs_port);
+
+    /* A pNFS data server only needs the NFSv4 service (clients reach it by
+     * file handle for READ/WRITE); skip portmap/mountd/NLM so it can share a
+     * host with the metadata server. */
+    if (data_server) {
+        chimera_nfs_info("NFS data-server mode: binding only the NFS service on port %d", nfs_port);
+        shared->mount_endpoint   = NULL;
+        shared->mount_server     = NULL;
+        shared->nlm_endpoint     = NULL;
+        shared->nlm_server       = NULL;
+        shared->portmap_endpoint = NULL;
+        shared->portmap_server   = NULL;
+    }
+
+    if (!data_server) {
+        shared->mount_endpoint = evpl_endpoint_create("0.0.0.0", NFS_MOUNT_PORT);
+    }
 
     if (nfs_tcp_rdma_port > 0) {
         /* TCP-RDMA enabled - use TCP-RDMA port (hostname falls back to 0.0.0.0 if not set) */
@@ -265,24 +289,25 @@ nfs_server_init(
         /* Native RDMA enabled */
         shared->nfs_rdma_endpoint = evpl_endpoint_create(nfs_rdma_hostname, nfs_rdma_port);
     }
-    if (external_portmap) {
-        chimera_nfs_debug("Using external portmap/rpcbind services");
-        shared->portmap_server   = NULL;
-        shared->portmap_endpoint = NULL;
-    } else {
-        chimera_nfs_debug("Initializing internal portmap support");
-        shared->portmap_endpoint = evpl_endpoint_create("0.0.0.0", 111);
-        programs[0]              = &shared->portmap_v2.rpc2;
-        programs[1]              = &shared->portmap_v3.rpc2;
-        programs[2]              = &shared->portmap_v4.rpc2;
-        shared->portmap_server   = evpl_rpc2_server_init(programs, 3);
-        portmap_set_nlm_port(nfs_lockmgr_port);
+    if (!data_server) {
+        if (external_portmap) {
+            chimera_nfs_debug("Using external portmap/rpcbind services");
+            shared->portmap_server   = NULL;
+            shared->portmap_endpoint = NULL;
+        } else {
+            chimera_nfs_debug("Initializing internal portmap support");
+            shared->portmap_endpoint = evpl_endpoint_create("0.0.0.0", 111);
+            programs[0]              = &shared->portmap_v2.rpc2;
+            programs[1]              = &shared->portmap_v3.rpc2;
+            programs[2]              = &shared->portmap_v4.rpc2;
+            shared->portmap_server   = evpl_rpc2_server_init(programs, 3);
+            portmap_set_nlm_port(nfs_lockmgr_port);
+        }
+
+        chimera_nfs_debug("Initializing NFS mountd server");
+        programs[0]          = &shared->mount_v3.rpc2;
+        shared->mount_server = evpl_rpc2_server_init(programs, 1);
     }
-
-    chimera_nfs_debug("Initializing NFS mountd server");
-    programs[0] = &shared->mount_v3.rpc2;
-
-    shared->mount_server = evpl_rpc2_server_init(programs, 1);
 
     chimera_nfs_debug("Initializing NFS server");
     programs[0] = &shared->nfs_v3.rpc2;
@@ -291,10 +316,12 @@ nfs_server_init(
 
     shared->nfs_server = evpl_rpc2_server_init(programs, 3);
 
-    chimera_nfs_debug("Initializing NFS lock manager server on port %d", nfs_lockmgr_port);
-    shared->nlm_endpoint = evpl_endpoint_create("0.0.0.0", nfs_lockmgr_port);
-    programs[0]          = &shared->nlm_v4.rpc2;
-    shared->nlm_server   = evpl_rpc2_server_init(programs, 1);
+    if (!data_server) {
+        chimera_nfs_debug("Initializing NFS lock manager server on port %d", nfs_lockmgr_port);
+        shared->nlm_endpoint = evpl_endpoint_create("0.0.0.0", nfs_lockmgr_port);
+        programs[0]          = &shared->nlm_v4.rpc2;
+        shared->nlm_server   = evpl_rpc2_server_init(programs, 1);
+    }
 
     nlm_state_load(&shared->nlm_state);
     if (shared->nlm_state.in_grace) {
@@ -324,13 +351,21 @@ nfs_server_start(void *arg)
         evpl_rpc2_server_start(shared->nfs_server, rdma_protocol, shared->nfs_rdma_endpoint);
     }
 
-    evpl_rpc2_server_start(shared->mount_server, EVPL_STREAM_SOCKET_TCP, shared->mount_endpoint);
-    evpl_rpc2_server_start(shared->nlm_server, EVPL_STREAM_SOCKET_TCP, shared->nlm_endpoint);
+    if (shared->mount_server) {
+        evpl_rpc2_server_start(shared->mount_server, EVPL_STREAM_SOCKET_TCP, shared->mount_endpoint);
+    }
+    if (shared->nlm_server) {
+        evpl_rpc2_server_start(shared->nlm_server, EVPL_STREAM_SOCKET_TCP, shared->nlm_endpoint);
+    }
 
-    if (shared->portmap_server) {
-        evpl_rpc2_server_start(shared->portmap_server, EVPL_STREAM_SOCKET_TCP, shared->portmap_endpoint);
-    } else {
-        register_nfs_rpc_services(chimera_server_config_get_nfs_lockmgr_port(shared->config));
+    /* A data server registers no portmap services (it skips the auxiliary
+     * protocols entirely). */
+    if (!chimera_server_config_get_nfs_data_server(shared->config)) {
+        if (shared->portmap_server) {
+            evpl_rpc2_server_start(shared->portmap_server, EVPL_STREAM_SOCKET_TCP, shared->portmap_endpoint);
+        } else {
+            register_nfs_rpc_services(chimera_server_config_get_nfs_lockmgr_port(shared->config));
+        }
     }
 
 } /* nfs_server_start */
@@ -340,9 +375,13 @@ nfs_server_stop(void *arg)
 {
     struct chimera_server_nfs_shared *shared = arg;
 
-    evpl_rpc2_server_stop(shared->mount_server);
+    if (shared->mount_server) {
+        evpl_rpc2_server_stop(shared->mount_server);
+    }
     evpl_rpc2_server_stop(shared->nfs_server);
-    evpl_rpc2_server_stop(shared->nlm_server);
+    if (shared->nlm_server) {
+        evpl_rpc2_server_stop(shared->nlm_server);
+    }
     if (shared->portmap_server) {
         evpl_rpc2_server_stop(shared->portmap_server);
     } else {
@@ -384,9 +423,13 @@ nfs_server_destroy(void *data)
      * servers and then drop the hash table's refs -- with no conn refs
      * outstanding, refcount reaches zero and the sessions are freed in
      * nfs4_client_table_free. */
-    evpl_rpc2_server_destroy(shared->mount_server);
+    if (shared->mount_server) {
+        evpl_rpc2_server_destroy(shared->mount_server);
+    }
     evpl_rpc2_server_destroy(shared->nfs_server);
-    evpl_rpc2_server_destroy(shared->nlm_server);
+    if (shared->nlm_server) {
+        evpl_rpc2_server_destroy(shared->nlm_server);
+    }
 
     if (shared->portmap_server) {
         evpl_rpc2_server_destroy(shared->portmap_server);
@@ -401,6 +444,8 @@ nfs_server_destroy(void *data)
     /* All unified state slots have been freed via destroy_unified above;
      * this just frees the shard arrays and per-shard locks. */
     nfs_state_table_free(&shared->nfs4_state_table, NULL);
+    nfs_layout_table_destroy(&shared->nfs4_layout_table);
+    pthread_mutex_destroy(&shared->nfs4_pnfs_devcache.lock);
 
     nfs_recovery_free(&shared->nfs4_recovery);
 
@@ -532,6 +577,10 @@ chimera_nfs_server_notify(
                 }
             } else if (magic == NFS4_SESSION_MAGIC) {
                 nfs4_session_unbind_conn(conn);
+            } else if (magic == NFS4_CB_CLIENT_MAGIC) {
+                /* A 4.0 outbound delegation callback connection dropped;
+                 * invalidate the channel so recalls stop using a freed conn. */
+                nfs4_cb_conn_lost(priv);
             }
             break;
     } /* switch */
@@ -555,9 +604,13 @@ nfs_server_thread_init(
 
     thread->rpc2_thread = evpl_rpc2_thread_init(evpl, NULL, 0, chimera_nfs_server_notify, thread);
 
-    evpl_rpc2_server_attach(thread->rpc2_thread, shared->mount_server, thread);
+    if (shared->mount_server) {
+        evpl_rpc2_server_attach(thread->rpc2_thread, shared->mount_server, thread);
+    }
     evpl_rpc2_server_attach(thread->rpc2_thread, shared->nfs_server, thread);
-    evpl_rpc2_server_attach(thread->rpc2_thread, shared->nlm_server, thread);
+    if (shared->nlm_server) {
+        evpl_rpc2_server_attach(thread->rpc2_thread, shared->nlm_server, thread);
+    }
     if (shared->portmap_server) {
         evpl_rpc2_server_attach(thread->rpc2_thread, shared->portmap_server, thread);
     }
@@ -567,6 +620,9 @@ nfs_server_thread_init(
      * passes converge harmlessly. */
     thread->lease_sweeper = calloc(1, sizeof(*thread->lease_sweeper));
     nfs_lease_sweeper_init(thread->lease_sweeper, thread);
+
+    /* Delegation callback recall doorbell + queue. */
+    nfs4_cb_thread_init(thread);
 
     return thread;
 } /* nfs_server_thread_init */
@@ -583,9 +639,15 @@ nfs_server_thread_destroy(void *data)
         thread->lease_sweeper = NULL;
     }
 
-    evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->mount_server);
+    nfs4_cb_thread_destroy(thread);
+
+    if (thread->shared->mount_server) {
+        evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->mount_server);
+    }
     evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->nfs_server);
-    evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->nlm_server);
+    if (thread->shared->nlm_server) {
+        evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->nlm_server);
+    }
     if (thread->shared->portmap_server) {
         evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->portmap_server);
     }

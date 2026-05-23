@@ -23,6 +23,9 @@ chimera_nfs4_close(
     uint8_t                 state_type;
     nfsstat4                status;
 
+    /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
+    chimera_nfs4_resolve_current_stateid(req, &args->open_stateid);
+
     status = nfs_state_table_acquire(table,
                                      &args->open_stateid,
                                      NFS4_SLOT_TYPE_OPEN,

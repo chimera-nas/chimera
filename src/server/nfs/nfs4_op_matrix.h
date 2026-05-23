@@ -10,7 +10,7 @@
 #include "nfs4_xdr.h"
 
 #define NFS4_OP_MIN                 3 /* OP_ACCESS */
-#define NFS4_OP_MAX                 71 /* OP_CLONE */
+#define NFS4_OP_MAX                 75 /* OP_REMOVEXATTR */
 
 /* Per-minor-version support bits. */
 #define NFS4_OP_V40                 0x1
@@ -130,6 +130,10 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_LAYOUTRETURN] =         { NFS4_OP_V41 | NFS4_OP_V42,               0
     },
+    /* LAYOUTSTATS is a 4.2 operation (RFC 7862) but flex-files (RFC 8435, a 4.1
+     * layout type) clients emit it, so accept it on 4.1 too. */
+    [OP_LAYOUTSTATS] =          { NFS4_OP_V41 | NFS4_OP_V42,               0
+    },
     [OP_SECINFO_NO_NAME] =      { NFS4_OP_V41 | NFS4_OP_V42,               0
     },
     [OP_SEQUENCE] =             { NFS4_OP_V41 | NFS4_OP_V42,
@@ -158,8 +162,6 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_LAYOUTERROR] =          { NFS4_OP_V42,                             0
     },
-    [OP_LAYOUTSTATS] =          { NFS4_OP_V42,                             0
-    },
     [OP_OFFLOAD_CANCEL] =       { NFS4_OP_V42,                             0
     },
     [OP_OFFLOAD_STATUS] =       { NFS4_OP_V42,                             0
@@ -171,6 +173,16 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     [OP_WRITE_SAME] =           { NFS4_OP_V42,                             0
     },
     [OP_CLONE] =                { NFS4_OP_V42,                             0
+    },
+
+    /* RFC 8276 extended attribute ops (NFSv4.2 only) */
+    [OP_GETXATTR] =             { NFS4_OP_V42,                             0
+    },
+    [OP_SETXATTR] =             { NFS4_OP_V42,                             0
+    },
+    [OP_LISTXATTRS] =           { NFS4_OP_V42,                             0
+    },
+    [OP_REMOVEXATTR] =          { NFS4_OP_V42,                             0
     },
 };
 

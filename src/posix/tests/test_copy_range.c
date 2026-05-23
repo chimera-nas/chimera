@@ -5,7 +5,7 @@
 /* Tests for chimera_posix_copy_file_range and chimera_posix_clone_file_range.
  *
  * Some backends don't advertise CHIMERA_VFS_CAP_COPY_RANGE / _CLONE_RANGE
- * (demofs, cairn, the nfs proxy used by nfs3/nfs3rdma tests). On those the
+ * (diskfs, cairn, the nfs proxy used by nfs3/nfs3rdma tests). On those the
  * VFS layer returns ENOTSUP at the cap gate. The test probes for support
  * up front and only asserts behavior the backend actually offers.
  */

@@ -96,8 +96,8 @@ class ChimeraServer:
                 "module": "io_uring",
                 "path": self.temp_dir
             }
-        elif self.backend == 'demofs':
-            # Create device files for demofs
+        elif self.backend == 'diskfs':
+            # Create device files for diskfs
             devices = []
             for i in range(10):
                 device_path = os.path.join(self.temp_dir, f'device-{i}.img')
@@ -110,13 +110,13 @@ class ChimeraServer:
                 })
             # Module config goes under server.vfs, config is an object not string
             config["server"]["vfs"] = {
-                "demofs": {
+                "diskfs": {
                     "path": None,
                     "config": {"devices": devices}
                 }
             }
             config["mounts"]["share"] = {
-                "module": "demofs",
+                "module": "diskfs",
                 "path": "/"
             }
         elif self.backend == 'cairn':
@@ -144,7 +144,7 @@ class ChimeraServer:
         # For backends that use name_to_handle_at(), we need a filesystem that
         # supports file handles. /tmp is often tmpfs which doesn't support this.
         # Use /build/test/ instead, following the NFS test pattern.
-        if self.backend in ('linux', 'io_uring', 'demofs', 'cairn'):
+        if self.backend in ('linux', 'io_uring', 'diskfs', 'cairn'):
             test_base = '/build/test'
             os.makedirs(test_base, exist_ok=True)
             self.temp_dir = tempfile.mkdtemp(prefix='chimera_test_', dir=test_base)
@@ -433,6 +433,83 @@ def test_list(client, bucket):
     print("LIST tests passed!")
 
 
+def test_copy(client, bucket):
+    """Test server-side CopyObject (x-amz-copy-source) operations.
+
+    Exercises the copy handler's transfer paths (clone_range fast path,
+    copy_range, and the read+write fallback are selected per backend) plus
+    source/destination parsing and the error paths.
+    """
+    print("Testing COPY operations...")
+
+    data = b'abcd' * 1024  # 4096 bytes
+    client.put_object(Bucket=bucket, Key='copydir/src1', Body=data)
+
+    # Simple copy to a new key.
+    client.copy_object(Bucket=bucket, Key='copydir/dst1',
+                       CopySource={'Bucket': bucket, 'Key': 'copydir/src1'})
+    assert client.get_object(Bucket=bucket, Key='copydir/dst1')['Body'].read() == data
+    print("  COPY src1 -> dst1 (4KB) - content matches")
+
+    # Source must remain intact (copy, not move).
+    assert client.get_object(Bucket=bucket, Key='copydir/src1')['Body'].read() == data
+    print("  source intact after copy - OK")
+
+    # Empty object.
+    client.put_object(Bucket=bucket, Key='copydir/empty', Body=b'')
+    client.copy_object(Bucket=bucket, Key='copydir/empty_copy',
+                       CopySource={'Bucket': bucket, 'Key': 'copydir/empty'})
+    assert client.get_object(Bucket=bucket, Key='copydir/empty_copy')['Body'].read() == b''
+    print("  COPY empty object - OK")
+
+    # Large, deliberately non-block-aligned object. On reflink-capable
+    # backends this forces the clone fast path to fall back (an unaligned
+    # interior length is rejected) to copy_range / read+write.
+    large = b'z' * (5 * 1024 * 1024 + 123)
+    client.put_object(Bucket=bucket, Key='copydir/large', Body=large)
+    client.copy_object(Bucket=bucket, Key='copydir/large_copy',
+                       CopySource={'Bucket': bucket, 'Key': 'copydir/large'})
+    body = client.get_object(Bucket=bucket, Key='copydir/large_copy')['Body'].read()
+    assert len(body) == len(large), f"size {len(body)} != {len(large)}"
+    assert body == large, "large copy content mismatch"
+    print("  COPY large unaligned (5MB+123) - content matches")
+
+    # Copy over an existing destination object (replace).
+    client.put_object(Bucket=bucket, Key='copydir/dst2', Body=b'stale-contents')
+    client.copy_object(Bucket=bucket, Key='copydir/dst2',
+                       CopySource={'Bucket': bucket, 'Key': 'copydir/src1'})
+    assert client.get_object(Bucket=bucket, Key='copydir/dst2')['Body'].read() == data
+    print("  COPY overwrites existing destination - OK")
+
+    # CopySource passed as a raw "bucket/key" string.
+    client.copy_object(Bucket=bucket, Key='copydir/dst3',
+                       CopySource=f'{bucket}/copydir/src1')
+    assert client.get_object(Bucket=bucket, Key='copydir/dst3')['Body'].read() == data
+    print("  COPY with string CopySource - OK")
+
+    # Missing source key -> NoSuchKey.
+    try:
+        client.copy_object(Bucket=bucket, Key='copydir/nope',
+                           CopySource={'Bucket': bucket, 'Key': 'copydir/does_not_exist'})
+        raise AssertionError("copy of missing source should fail")
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'NoSuchKey':
+            raise
+    print("  COPY missing source -> NoSuchKey (ok)")
+
+    # Missing source bucket -> NoSuchBucket.
+    try:
+        client.copy_object(Bucket=bucket, Key='copydir/nope2',
+                           CopySource={'Bucket': 'no_such_bucket_xyz', 'Key': 'copydir/src1'})
+        raise AssertionError("copy from missing bucket should fail")
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'NoSuchBucket':
+            raise
+    print("  COPY missing source bucket -> NoSuchBucket (ok)")
+
+    print("COPY tests passed!")
+
+
 def _multipart_upload_and_verify(client, bucket, key, part_sizes):
     """Helper: run a full multipart upload and verify the assembled bytes
     match the concatenation of the part bodies. Exercises whichever
@@ -481,7 +558,7 @@ def test_multipart(client, bucket):
     matches the concatenation of part bodies. The same test exercises
     different VFS assembly paths depending on backend capabilities:
     move_range (memfs), copy_range (linux/io_uring), or read+write
-    (cairn/demofs).
+    (cairn/diskfs).
     """
     print("Testing multipart upload operations...")
 
@@ -642,18 +719,19 @@ def test_multipart(client, bucket):
                                PartNumber=n, UploadId=o_id,
                                Body=bytes([n]) * part_size)
         o_parts.append({'PartNumber': n, 'ETag': r['ETag']})
-    try:
-        client.complete_multipart_upload(
-            Bucket=bucket, Key='mpdir/order', UploadId=o_id,
-            MultipartUpload={'Parts': [o_parts[1], o_parts[0]]},
-        )
-        raise AssertionError("Complete with out-of-order parts should fail")
-    except ClientError as e:
-        # boto3 sometimes sorts internally; either InvalidPartOrder or
-        # silently sorted are both acceptable. If sorted, no error -> fail loud.
-        if e.response['Error']['Code'] != 'InvalidPartOrder':
-            raise
-        print("  Out-of-order parts -> InvalidPartOrder (ok)")
+    body = (
+        '<CompleteMultipartUpload>'
+        '<Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part>'
+        '<Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part>'
+        '</CompleteMultipartUpload>'
+    ).format(o_parts[1]['ETag'], o_parts[0]['ETag']).encode('utf-8')
+    status, resp_body = signed_s3_post_xml(
+        'localhost', 5000, 'myaccessid', 'mysecretkey', 'us-east-1',
+        bucket, 'mpdir/order', f'uploadId={o_id}', body)
+    assert status == 400 and b'InvalidPartOrder' in resp_body, (
+        f"out-of-order CompleteMultipartUpload: status={status}, "
+        f"body={resp_body!r}")
+    print("  Out-of-order parts -> InvalidPartOrder (ok)")
     client.abort_multipart_upload(Bucket=bucket, Key='mpdir/order',
                                   UploadId=o_id)
 
@@ -854,6 +932,66 @@ def streaming_put(host, port, access_key, secret_key, region, bucket, key,
     return resp.status, etag
 
 
+def signed_s3_post_xml(host, port, access_key, secret_key, region, bucket, key,
+                       query, body):
+    """Perform a plain SigV4 POST with an XML body.
+
+    boto3 may normalize CompleteMultipartUpload part manifests before sending
+    them. Negative parser tests need exact wire order, so use a minimal signed
+    request for those cases.
+    """
+    service = 's3'
+    host_header = f'{host}:{port}'
+    canonical_uri = f'/{bucket}/{key}'
+    request_target = canonical_uri + (f'?{query}' if query else '')
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    amz_date = now.strftime('%Y%m%dT%H%M%SZ')
+    date_stamp = now.strftime('%Y%m%d')
+    scope = f'{date_stamp}/{region}/{service}/aws4_request'
+
+    payload_hash = _sha256_hex(body)
+    headers = {
+        'content-length': str(len(body)),
+        'content-type': 'application/xml',
+        'host': host_header,
+        'x-amz-content-sha256': payload_hash,
+        'x-amz-date': amz_date,
+    }
+    signed_headers = ';'.join(sorted(headers))
+    canonical_headers = ''.join(f'{n}:{headers[n]}\n' for n in sorted(headers))
+
+    canonical_request = (
+        f'POST\n{canonical_uri}\n{_canonical_query(query)}\n{canonical_headers}\n'
+        f'{signed_headers}\n{payload_hash}'
+    )
+    string_to_sign = (
+        f'AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n'
+        f'{_sha256_hex(canonical_request.encode("utf-8"))}'
+    )
+
+    k_date = _sign(('AWS4' + secret_key).encode('utf-8'), date_stamp)
+    k_region = hmac.new(k_date, region.encode('utf-8'), hashlib.sha256).digest()
+    k_service = hmac.new(k_region, service.encode('utf-8'), hashlib.sha256).digest()
+    signing_key = hmac.new(k_service, b'aws4_request', hashlib.sha256).digest()
+    signature = hmac.new(signing_key, string_to_sign.encode('utf-8'),
+                         hashlib.sha256).hexdigest()
+
+    send_headers = dict(headers)
+    send_headers['Authorization'] = (
+        f'AWS4-HMAC-SHA256 Credential={access_key}/{scope}, '
+        f'SignedHeaders={signed_headers}, Signature={signature}'
+    )
+
+    conn = http.client.HTTPConnection(host, port, timeout=30)
+    conn.request('POST', request_target, body=body, headers=send_headers)
+    resp = conn.getresponse()
+    resp_body = resp.read()
+    status = resp.status
+    conn.close()
+    return status, resp_body
+
+
 def test_streaming(client, bucket):
     """Test SigV4 streaming (aws-chunked) uploads.
 
@@ -1042,6 +1180,7 @@ TESTS = {
     'delete': test_delete,
     'delete_objects': test_delete_objects,
     'list': test_list,
+    'copy': test_copy,
     'multipart': test_multipart,
     'streaming': test_streaming,
     'awscli': test_awscli,
@@ -1080,7 +1219,7 @@ def main():
                         choices=list(TESTS.keys()) + ['all'],
                         help='Test(s) to run (can specify multiple)')
     parser.add_argument('--backend', '-b', default='memfs',
-                        choices=['memfs', 'linux', 'io_uring', 'demofs', 'cairn'],
+                        choices=['memfs', 'linux', 'io_uring', 'diskfs', 'cairn'],
                         help='VFS backend to test')
     parser.add_argument('--sigver', '-s', default='v4',
                         choices=['v2', 'v4'],

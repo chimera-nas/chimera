@@ -18,6 +18,13 @@ chimera_s3_put(
     );
 
 void
+chimera_s3_copy(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request
+    );
+
+void
 chimera_s3_get_send(
     struct evpl               *evpl,
     struct chimera_s3_request *request);

@@ -14,8 +14,8 @@
  *   smbtorture_test [options] TEST1 [TEST2 ...]
  *
  * Options:
- *   -b <backend>   VFS backend (memfs, linux, io_uring, demofs_io_uring,
- *                  demofs_aio, cairn) - default: memfs
+ *   -b <backend>   VFS backend (memfs, linux, io_uring, diskfs_io_uring,
+ *                  diskfs_aio, cairn) - default: memfs
  */
 
 #include "common/logging.h"
@@ -88,6 +88,7 @@ run_smbtorture(
                    " --option=torture:offset=0"
                    " --option=torture:beyond_final_zero=4096"
                    " --option=torture:acl_xattr_name=user.NTACL"
+                   " --option='client smb3 signing algorithms=aes-128-cmac'"
                    " --fullname");
 
     /* samba3misc's localposixlock test needs the share's on-disk path so
@@ -123,7 +124,7 @@ print_usage(const char *prog)
     fprintf(stderr, "\n");
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -b <backend>   VFS backend (memfs, linux, io_uring,\n");
-    fprintf(stderr, "                 demofs_io_uring, demofs_aio, cairn)\n");
+    fprintf(stderr, "                 diskfs_io_uring, diskfs_aio, cairn)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Positional arguments are smbtorture test names, e.g.:\n");
     fprintf(stderr, "  smb2.connect  smb2.create.open  smb2.rw\n");
@@ -209,15 +210,15 @@ main(
     config = chimera_server_config_init();
 
     /* Configure backend-specific modules */
-    if (strcmp(backend, "demofs_io_uring") == 0 ||
-        strcmp(backend, "demofs_aio") == 0) {
-        char        demofs_cfg[4096];
+    if (strcmp(backend, "diskfs_io_uring") == 0 ||
+        strcmp(backend, "diskfs_aio") == 0) {
+        char        diskfs_cfg[4096];
         char        device_path[300];
         char       *json_str;
         json_t     *cfg, *devices, *device;
         const char *device_type;
 
-        device_type = strcmp(backend, "demofs_aio") == 0
+        device_type = strcmp(backend, "diskfs_aio") == 0
                       ? "libaio" : "io_uring";
 
         cfg     = json_object();
@@ -253,12 +254,12 @@ main(
 
         json_object_set_new(cfg, "devices", devices);
         json_str = json_dumps(cfg, JSON_COMPACT);
-        snprintf(demofs_cfg, sizeof(demofs_cfg), "%s", json_str);
+        snprintf(diskfs_cfg, sizeof(diskfs_cfg), "%s", json_str);
         free(json_str);
         json_decref(cfg);
 
-        chimera_server_config_add_module(config, "demofs",
-                                         "/build/test/demofs", demofs_cfg);
+        chimera_server_config_add_module(config, "diskfs",
+                                         "/build/test/diskfs", diskfs_cfg);
     } else if (strcmp(backend, "cairn") == 0) {
         char    cairn_cfg[4096];
         char   *json_str;
@@ -291,9 +292,9 @@ main(
         chimera_server_mount(env.server, "share", "linux", env.session_dir, NULL);
     } else if (strcmp(backend, "io_uring") == 0) {
         chimera_server_mount(env.server, "share", "io_uring", env.session_dir, NULL);
-    } else if (strcmp(backend, "demofs_io_uring") == 0 ||
-               strcmp(backend, "demofs_aio") == 0) {
-        chimera_server_mount(env.server, "share", "demofs", "/", NULL);
+    } else if (strcmp(backend, "diskfs_io_uring") == 0 ||
+               strcmp(backend, "diskfs_aio") == 0) {
+        chimera_server_mount(env.server, "share", "diskfs", "/", NULL);
     } else if (strcmp(backend, "cairn") == 0) {
         chimera_server_mount(env.server, "share", "cairn", "/", NULL);
     } else {

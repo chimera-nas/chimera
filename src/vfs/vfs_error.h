@@ -34,5 +34,7 @@ enum chimera_vfs_error {
     CHIMERA_VFS_ESTALE       = 116,    /* Stale file handle */
     CHIMERA_VFS_ESYMLINK     = 120,    /* Is a symbolic link */
     CHIMERA_VFS_EBADCOOKIE   = 200,    /* Bad readdir cookie/verifier */
+    CHIMERA_VFS_ENODATA      = 61,     /* No such extended attribute */
+    CHIMERA_VFS_ERANGE       = 34,     /* Result too large for buffer */
     CHIMERA_VFS_UNSET        = 100000  /* Unset error code */
 };

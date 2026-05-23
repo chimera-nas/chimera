@@ -59,6 +59,17 @@ chimera_nfs4_compound_process(
 
         //dump_COMPOUND4res("res", &req->res_compound);
 
+        if (req->session &&
+            req->res_compound.status == NFS4_OK &&
+            req->res_compound.num_resarray > 0 &&
+            req->session->nfs4_session_fore_attrs.ca_maxresponsesize &&
+            marshall_length_COMPOUND4res(&req->res_compound) >
+            (int) req->session->nfs4_session_fore_attrs.ca_maxresponsesize) {
+            req->index = req->res_compound.num_resarray - 1;
+            chimera_nfs4_compound_complete(req, NFS4ERR_REP_TOO_BIG);
+            return;
+        }
+
         rc = shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
             thread->evpl,
             NULL,
@@ -96,8 +107,38 @@ chimera_nfs4_compound_process(
                                             req->seen_sequence);
 
         if (gate != NFS4_OK) {
+            if (gate == NFS4ERR_OP_ILLEGAL) {
+                resop->resop = OP_ILLEGAL;
+            }
             chimera_nfs4_compound_complete(req, gate);
         } else {
+            /* NFS4.1 current-stateid lifecycle (RFC 8881 §16.2.3.1.2):
+             * ops that change the current filehandle clear the current
+             * stateid, while SAVEFH/RESTOREFH carry it alongside the
+             * saved filehandle.  Stateid-returning ops set it in their
+             * own handlers. */
+            switch (argop->argop) {
+                case OP_PUTFH:
+                case OP_PUTROOTFH:
+                case OP_PUTPUBFH:
+                case OP_LOOKUP:
+                case OP_LOOKUPP:
+                case OP_CREATE:
+                case OP_OPENATTR:
+                    chimera_nfs4_clear_current_stateid(req);
+                    break;
+                case OP_SAVEFH:
+                    req->saved_current_stateid_valid = req->current_stateid_valid;
+                    req->saved_current_stateid       = req->current_stateid;
+                    break;
+                case OP_RESTOREFH:
+                    req->current_stateid_valid = req->saved_current_stateid_valid;
+                    req->current_stateid       = req->saved_current_stateid;
+                    break;
+                default:
+                    break;
+            } /* switch */
+
             switch (argop->argop) {
                 case OP_ACCESS:
                     chimera_nfs4_access(thread, req, argop, resop);
@@ -152,6 +193,9 @@ chimera_nfs4_compound_process(
                     break;
                 case OP_WRITE:
                     chimera_nfs4_write(thread, req, argop, resop);
+                    break;
+                case OP_COPY:
+                    chimera_nfs4_copy(thread, req, argop, resop);
                     break;
                 case OP_COMMIT:
                     chimera_nfs4_commit(thread, req, argop, resop);
@@ -208,6 +252,12 @@ chimera_nfs4_compound_process(
                 case OP_SECINFO_NO_NAME:
                     chimera_nfs4_secinfo_no_name(thread, req, argop, resop);
                     break;
+                case OP_FREE_STATEID:
+                    chimera_nfs4_free_stateid(thread, req, argop, resop);
+                    break;
+                case OP_BACKCHANNEL_CTL:
+                    chimera_nfs4_backchannel_ctl(thread, req, argop, resop);
+                    break;
                 case OP_TEST_STATEID:
                     chimera_nfs4_test_stateid(thread, req, argop, resop);
                     break;
@@ -219,6 +269,36 @@ chimera_nfs4_compound_process(
                     break;
                 case OP_SEEK:
                     chimera_nfs4_seek(thread, req, argop, resop);
+                    break;
+                case OP_GETXATTR:
+                    chimera_nfs4_getxattr(thread, req, argop, resop);
+                    break;
+                case OP_SETXATTR:
+                    chimera_nfs4_setxattr(thread, req, argop, resop);
+                    break;
+                case OP_LISTXATTRS:
+                    chimera_nfs4_listxattrs(thread, req, argop, resop);
+                    break;
+                case OP_REMOVEXATTR:
+                    chimera_nfs4_removexattr(thread, req, argop, resop);
+                    break;
+                case OP_GETDEVICEINFO:
+                    chimera_nfs4_getdeviceinfo(thread, req, argop, resop);
+                    break;
+                case OP_LAYOUTGET:
+                    chimera_nfs4_layoutget(thread, req, argop, resop);
+                    break;
+                case OP_LAYOUTRETURN:
+                    chimera_nfs4_layoutreturn(thread, req, argop, resop);
+                    break;
+                case OP_LAYOUTCOMMIT:
+                    chimera_nfs4_layoutcommit(thread, req, argop, resop);
+                    break;
+                case OP_LAYOUTSTATS:
+                    chimera_nfs4_layoutstats(thread, req, argop, resop);
+                    break;
+                case OP_GETDEVICELIST:
+                    chimera_nfs4_getdevicelist(thread, req, argop, resop);
                     break;
                 case OP_LOCK:
                     chimera_nfs4_lock(thread, req, argop, resop);
@@ -235,11 +315,18 @@ chimera_nfs4_compound_process(
                 case OP_NVERIFY:
                     chimera_nfs4_nverify(thread, req, argop, resop);
                     break;
+                case OP_DELEGRETURN:
+                    chimera_nfs4_delegreturn(thread, req, argop, resop);
+                    break;
+                case OP_DELEGPURGE:
+                    chimera_nfs4_delegpurge(thread, req, argop, resop);
+                    break;
                 default:
                     chimera_nfs_error("Unsupported operation: %d", argop->argop);
-                    if (argop->argop >= OP_ACCESS && argop->argop <= OP_CLONE) {
+                    if (argop->argop >= OP_ACCESS && argop->argop <= OP_REMOVEXATTR) {
                         chimera_nfs4_compound_complete(req, NFS4ERR_NOTSUPP);
                     } else {
+                        resop->resop = OP_ILLEGAL;
                         chimera_nfs4_compound_complete(req, NFS4ERR_OP_ILLEGAL);
                     }
                     break;
@@ -308,14 +395,16 @@ chimera_nfs4_compound(
     /* RFC 7530 §16.2.4: the server MUST echo the request tag back to the
      * client unchanged. xdr_opaque .data is owned by the request msg buffer
      * which lives until the response is sent. */
-    req->res_compound.tag    = args->tag;
-    req->fhlen               = 0;
-    req->saved_fhlen         = 0;
-    req->minorversion        = (uint8_t) args->minorversion;
-    req->seen_sequence       = false;
-    req->open_4_0_owner      = NULL;
-    req->lock_4_0_open_owner = NULL;
-    req->lock_4_0_lock_owner = NULL;
+    req->res_compound.tag            = args->tag;
+    req->fhlen                       = 0;
+    req->saved_fhlen                 = 0;
+    req->minorversion                = (uint8_t) args->minorversion;
+    req->seen_sequence               = false;
+    req->current_stateid_valid       = false;
+    req->saved_current_stateid_valid = false;
+    req->open_4_0_owner              = NULL;
+    req->lock_4_0_open_owner         = NULL;
+    req->lock_4_0_lock_owner         = NULL;
 
     /* Chimera implements NFS v4.0, v4.1 and v4.2 (minorversions 0–2).
      * Reject unknown minor versions with NFS4ERR_MINOR_VERS_MISMATCH per

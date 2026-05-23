@@ -10,6 +10,7 @@
 #include "vfs_dump.h"
 #include "vfs_error.h"
 #include "vfs_cred.h"
+#include "vfs_pnfs.h"
 #include "evpl/evpl.h"
 
 #define CHIMERA_VFS_PATH_MAX 4096
@@ -75,7 +76,12 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_COPY_RANGE       29
 #define CHIMERA_VFS_OP_CLONE_RANGE      30
 #define CHIMERA_VFS_OP_MOVE_RANGE       31
-#define CHIMERA_VFS_OP_NUM              32
+#define CHIMERA_VFS_OP_GET_XATTR        32
+#define CHIMERA_VFS_OP_SET_XATTR        33
+#define CHIMERA_VFS_OP_LIST_XATTRS      34
+#define CHIMERA_VFS_OP_REMOVE_XATTR     35
+#define CHIMERA_VFS_OP_GET_LAYOUT       36
+#define CHIMERA_VFS_OP_NUM              37
 
 #define CHIMERA_VFS_OPEN_CREATE         (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH           (1U << 1)
@@ -84,6 +90,10 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OPEN_READ_ONLY      (1U << 4)
 #define CHIMERA_VFS_OPEN_EXCLUSIVE      (1U << 5)
 #define CHIMERA_VFS_OPEN_NOFOLLOW       (1U << 6)
+/* Replace an existing file's contents on open: truncate to zero and apply
+ * set_attr (used for the SMB OVERWRITE / OVERWRITE_IF / SUPERSEDE
+ * dispositions).  Backends that do not honor it simply open the file. */
+#define CHIMERA_VFS_OPEN_TRUNCATE       (1U << 7)
 
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE 0x01
@@ -797,6 +807,64 @@ struct chimera_vfs_request {
             char     r_name[CHIMERA_VFS_NAME_MAX];
             uint16_t r_name_len;
         } getparent;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            const char                     *name;
+            uint32_t                        namelen;
+            void                           *value;        /* caller-provided buffer */
+            uint32_t                        value_maxlen;
+            uint32_t                        r_value_len;   /* bytes written to value */
+        } get_xattr;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint32_t                        option;       /* setxattr_option4 */
+            const char                     *name;
+            uint32_t                        namelen;
+            const void                     *value;
+            uint32_t                        value_len;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
+        } set_xattr;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        cookie;
+            void                           *buffer;        /* caller-provided buffer */
+            uint32_t                        max_bytes;
+            /* buffer is filled with NUL-terminated names, back to back */
+            uint32_t                        r_len;         /* bytes written to buffer */
+            uint32_t                        r_count;       /* number of names written */
+            uint32_t                        r_eof;
+            uint64_t                        r_cookie;
+        } list_xattrs;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            const char                     *name;
+            uint32_t                        namelen;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
+        } remove_xattr;
+
+        /* pNFS: a layout-sourcing backend (CHIMERA_VFS_CAP_LAYOUT_SOURCE)
+         * describes where the file's data physically lives.  The NFS server
+         * encodes the returned segments/devices into a flex-files or block
+         * layout; the descriptors are protocol-neutral. */
+        struct {
+            struct chimera_vfs_open_handle   *handle;
+            uint64_t                          offset;
+            uint64_t                          length;
+            uint32_t                          iomode;        /* LAYOUTIOMODE4_*           */
+            uint32_t                          layout_class;  /* requested CHIMERA_VFS_LAYOUT_CLASS_* */
+            uint32_t                          max_segments;
+            uint32_t                          r_layout_class;/* class actually produced   */
+            uint32_t                          r_num_segments;
+            uint32_t                          r_num_devices;
+            struct chimera_vfs_layout_segment r_segments[CHIMERA_VFS_LAYOUT_MAX_SEGMENTS];
+            struct chimera_vfs_layout_device  r_devices[CHIMERA_VFS_LAYOUT_MAX_DEVICES];
+        } get_layout;
     };
 };
 
@@ -820,7 +888,7 @@ enum CHIMERA_FS_FH_MAGIC {
     CHIMERA_VFS_FH_MAGIC_LINUX    = 2,
     CHIMERA_VFS_FH_MAGIC_IO_URING = 3,
     CHIMERA_VFS_FH_MAGIC_CAIRN    = 4,
-    CHIMERA_VFS_FH_MAGIC_DEMOFS   = 5,
+    CHIMERA_VFS_FH_MAGIC_DISKFS   = 5,
     CHIMERA_VFS_FH_MAGIC_NFS      = 6,
     CHIMERA_VFS_FH_MAGIC_MAX      = 7
 
@@ -911,11 +979,39 @@ enum CHIMERA_FS_FH_MAGIC {
  * use (e.g. S3 multipart-upload completion). */
 #define CHIMERA_VFS_CAP_MOVE_RANGE         (1U << 12)
 
+/* If set, module supports extended attributes via
+ * chimera_vfs_get_xattr / set_xattr / list_xattrs / remove_xattr.
+ * Surfaced over NFSv4.2 (RFC 8276). Modules that leave this unset
+ * cause the VFS layer to return ENOTSUP. */
+#define CHIMERA_VFS_CAP_XATTR              (1U << 13)
+
+/* setxattr_option4 values (RFC 8276 §8) passed to chimera_vfs_set_xattr().
+ * Kept numerically identical to the on-the-wire NFSv4.2 enum. */
+#define CHIMERA_VFS_XATTR_EITHER           0  /* create or replace */
+#define CHIMERA_VFS_XATTR_CREATE           1  /* must not already exist */
+#define CHIMERA_VFS_XATTR_REPLACE          2  /* must already exist */
+
+/* Module persists the opaque CHIMERA_VFS_ATTR_PNFS_LAYOUT attribute, so the NFS
+ * server can store per-file pNFS layout state on it and hand out pNFS layouts.
+ * This is the "orchestrated" model: the module is a passive vessel and the NFS
+ * server produces the layout (creating data-server backing files itself). */
+#define CHIMERA_VFS_CAP_LAYOUT             (1U << 14)
+
+/* Module SOURCES the layout itself: it already knows where a file's data
+ * physically lives and synthesizes a protocol-neutral layout via
+ * CHIMERA_VFS_OP_GET_LAYOUT.  The NFS server is the consumer (it only encodes
+ * what the module returns) and does NO orchestration.  Mutually exclusive in
+ * effect with CHIMERA_VFS_CAP_LAYOUT for a given file.  Exactly one of the
+ * class bits below should accompany it. */
+#define CHIMERA_VFS_CAP_LAYOUT_SOURCE      (1U << 15)
+#define CHIMERA_VFS_CAP_LAYOUT_CLASS_FLEX  (1U << 16) /* produces flex-files (RFC 8435)  */
+#define CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK (1U << 17) /* produces block volume (RFC 5663)*/
+
 /* If set, the module stores the canonical Windows/NFSv4 ACL (via va_acl)
  * losslessly.  If unset, the module is mode-only: the VFS translates ACLs to
  * and from UNIX mode bits on its behalf.  There is no POSIX.1e capability by
  * design -- Chimera carries a single ACL model (see vfs_acl.h). */
-#define CHIMERA_VFS_CAP_ACL_NATIVE         (1U << 13)
+#define CHIMERA_VFS_CAP_ACL_NATIVE         (1U << 18)
 
 /* If set, the module delegates discretionary access control to a real
  * underlying enforcer (e.g. the host kernel, via the seteuid/setegid
@@ -929,7 +1025,7 @@ enum CHIMERA_FS_FH_MAGIC {
  * ACL for them.  Note this is orthogonal to CAP_ACL_NATIVE: "stores the ACL"
  * and "enforces the ACL" are different properties (memfs/cairn store but do not
  * enforce; linux/io_uring enforce in-kernel but do not store the rich ACL). */
-#define CHIMERA_VFS_CAP_DELEGATES_DAC      (1U << 14)
+#define CHIMERA_VFS_CAP_DELEGATES_DAC      (1U << 19)
 
 struct chimera_vfs_module {
     /* Required
@@ -1074,6 +1170,7 @@ struct chimera_vfs_mount_table;
 
 struct chimera_vfs_notify;
 struct chimera_vfs_state;
+struct chimera_vfs_pnfs;
 
 struct chimera_vfs {
     struct chimera_vfs_module            *modules[CHIMERA_VFS_FH_MAGIC_MAX];
@@ -1087,6 +1184,7 @@ struct chimera_vfs {
     struct chimera_vfs_notify            *vfs_notify;
     struct chimera_vfs_state             *vfs_state;
     struct chimera_vfs_mount_table       *mount_table;
+    struct chimera_vfs_pnfs              *pnfs;
     int                                   num_sync_delegation_threads;
     struct chimera_vfs_delegation_thread *sync_delegation_threads;
     int                                   num_async_delegation_threads;

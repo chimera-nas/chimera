@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "nfs4_session.h"
 #include "evpl/evpl_rpc2.h"
 
 void
@@ -15,6 +16,8 @@ chimera_nfs4_destroy_session(
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct DESTROY_SESSION4args      *args   = &argop->opdestroy_session;
     struct DESTROY_SESSION4res       *res    = &resop->opdestroy_session;
+    struct nfs4_session              *session;
+    struct nfs4_session              *bound;
 
     /* RFC 8881 §18.37.3: when preceded by SEQUENCE, DESTROY_SESSION must be
      * the final operation; otherwise it must be the sole operation. */
@@ -30,10 +33,25 @@ chimera_nfs4_destroy_session(
         return;
     }
 
-    nfs4_destroy_session(
-        &shared->nfs4_shared_clients,
-        args->dsa_sessionid);
+    session = nfs4_session_lookup(&shared->nfs4_shared_clients,
+                                  args->dsa_sessionid);
+    if (session == NULL) {
+        res->dsr_status = NFS4ERR_BADSESSION;
+        chimera_nfs4_compound_complete(req, res->dsr_status);
+        return;
+    }
 
+    bound = evpl_rpc2_conn_get_private_data(req->conn);
+    if (!nfs4_session_is_live(bound) || bound != session) {
+        nfs4_session_put(session);
+        res->dsr_status = NFS4ERR_CONN_NOT_BOUND_TO_SESSION;
+        chimera_nfs4_compound_complete(req, res->dsr_status);
+        return;
+    }
+
+    nfs4_session_put(session);
+
+    nfs4_destroy_session(&shared->nfs4_shared_clients, args->dsa_sessionid);
 
     res->dsr_status = NFS4_OK;
 

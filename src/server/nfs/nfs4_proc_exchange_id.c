@@ -4,6 +4,8 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_recovery.h"
+#include "server/server.h"
+#include "vfs/vfs_pnfs.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
 #include "evpl/evpl_rpc2.h"
@@ -111,10 +113,22 @@ chimera_nfs4_exchange_id(
         }
     }
 
+    /* Advertise our pNFS role (RFC 8881 §13.1): a data server confirms
+     * USE_PNFS_DS so the client will route layout I/O to it; a metadata server
+     * advertises USE_PNFS_MDS; otherwise plain NFS. */
+    uint32_t pnfs_flags;
+    if (chimera_server_config_get_nfs_data_server(thread->shared->config)) {
+        pnfs_flags = EXCHGID4_FLAG_USE_PNFS_DS;
+    } else if (chimera_vfs_pnfs_feature_enabled(thread->shared->vfs)) {
+        pnfs_flags = EXCHGID4_FLAG_USE_PNFS_MDS;
+    } else {
+        pnfs_flags = EXCHGID4_FLAG_USE_NON_PNFS;
+    }
+
     res->eir_status                = NFS4_OK;
     res->eir_resok4.eir_clientid   = eid.clientid;
     res->eir_resok4.eir_sequenceid = 1;
-    res->eir_resok4.eir_flags      = EXCHGID4_FLAG_USE_NON_PNFS |
+    res->eir_resok4.eir_flags      = pnfs_flags |
         (eid.confirmed ? EXCHGID4_FLAG_CONFIRMED_R : 0);
     res->eir_resok4.eir_state_protect.spr_how = SP4_NONE;
     res->eir_resok4.num_eir_server_impl_id    = 1;

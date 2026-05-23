@@ -64,6 +64,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Enable NFSv4 protocol delegations only for delegation test runs, so the
+# other suites exercise the default (delegations-off) behavior.
+DELEG_ENABLE="false"
+case " $FLAG_ARGS " in
+    *" deleg"* | *" delegations"* | *DELEG* | *"delegations "* | *"deleg "*)
+        DELEG_ENABLE="true"
+        ;;
+esac
+
 # Generate chimera config based on backend
 generate_config() {
     local mount_path="/"
@@ -77,9 +86,9 @@ generate_config() {
         memfs)
             mount_path="/"
             ;;
-        demofs_io_uring|demofs_aio)
+        diskfs_io_uring|diskfs_aio)
             local device_type="io_uring"
-            if [ "$BACKEND" = "demofs_aio" ]; then
+            if [ "$BACKEND" = "diskfs_aio" ]; then
                 device_type="libaio"
             fi
             local devices_json=""
@@ -92,9 +101,9 @@ generate_config() {
                 devices_json="${devices_json}{\"type\":\"$device_type\",\"size\":1,\"path\":\"$device_path\"}"
             done
             mount_path="/"
-            BACKEND="demofs"
+            BACKEND="diskfs"
             vfs_section="\"vfs\": {
-                \"demofs\": {
+                \"diskfs\": {
                     \"config\": {\"devices\":[$devices_json]}
                 }
             },"
@@ -114,6 +123,7 @@ generate_config() {
     "server": {
         "threads": 4,
         "delegation_threads": 4,
+        "nfs4_delegations": $DELEG_ENABLE,
         $vfs_section
         "external_portmap": false
     },
@@ -151,9 +161,15 @@ else
 fi
 CHIMERA_PID=$!
 
-# Wait for NFS port to be ready
-for i in $(seq 1 30); do
-    if ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/2049" 2>/dev/null; then
+# Wait for the daemon to finish startup and for NFS to accept connections.
+# On slower arm64 runners, the NFS socket can briefly accept before the server
+# has finished its own readiness path; starting pynfs in that window produces
+# connection-refused initialization failures.
+READY=0
+for i in $(seq 1 100); do
+    if grep -q "Server is ready." "$CHIMERA_LOG" &&
+       ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/2049" 2>/dev/null; then
+        READY=1
         break
     fi
     if ! kill -0 "$CHIMERA_PID" 2>/dev/null; then
@@ -162,6 +178,11 @@ for i in $(seq 1 30); do
     fi
     sleep 0.1
 done
+
+if [ "$READY" != "1" ]; then
+    echo "chimera NFS port never became ready"
+    exit 1
+fi
 
 # Run pynfs tests based on NFS minor version
 # Flags are passed as positional arguments to testserver.py

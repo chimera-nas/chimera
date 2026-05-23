@@ -57,32 +57,32 @@ posix_test_parse_nfs_backend(struct posix_test_env *env)
     return 0;
 } // posix_test_parse_nfs_backend
 
-// Helper to get device type for a demofs variant backend name
+// Helper to get device type for a diskfs variant backend name
 static inline const char *
-posix_test_demofs_device_type(const char *backend)
+posix_test_diskfs_device_type(const char *backend)
 {
-    if (strcmp(backend, "demofs_aio") == 0) {
+    if (strcmp(backend, "diskfs_aio") == 0) {
         return "libaio";
     }
     return "io_uring";
-} // posix_test_demofs_device_type
+} // posix_test_diskfs_device_type
 
-// Helper to check if a backend name is a demofs variant
+// Helper to check if a backend name is a diskfs variant
 static inline int
-posix_test_is_demofs(const char *backend)
+posix_test_is_diskfs(const char *backend)
 {
-    return strcmp(backend, "demofs") == 0 ||
-           strcmp(backend, "demofs_io_uring") == 0 ||
-           strcmp(backend, "demofs_aio") == 0;
-} // posix_test_is_demofs
+    return strcmp(backend, "diskfs") == 0 ||
+           strcmp(backend, "diskfs_io_uring") == 0 ||
+           strcmp(backend, "diskfs_aio") == 0;
+} // posix_test_is_diskfs
 
-// Helper to configure demofs backend
+// Helper to configure diskfs backend
 static inline void
-posix_test_configure_demofs(
+posix_test_configure_diskfs(
     const char *session_dir,
     const char *device_type,
-    char       *demofs_cfg,
-    size_t      demofs_cfg_size)
+    char       *diskfs_cfg,
+    size_t      diskfs_cfg_size)
 {
     char    device_path[300];
     json_t *cfg, *devices, *device;
@@ -118,10 +118,10 @@ posix_test_configure_demofs(
 
     json_object_set_new(cfg, "devices", devices);
     json_str = json_dumps(cfg, JSON_COMPACT);
-    snprintf(demofs_cfg, demofs_cfg_size, "%s", json_str);
+    snprintf(diskfs_cfg, diskfs_cfg_size, "%s", json_str);
     free(json_str);
     json_decref(cfg);
-} // posix_test_configure_demofs
+} // posix_test_configure_diskfs
 
 // Helper to configure cairn backend
 static inline void
@@ -154,11 +154,11 @@ posix_test_start_nfs_server(struct posix_test_env *env)
     server_config = chimera_server_config_init();
     chimera_server_config_set_state_dir(server_config, env->session_dir);
 
-    if (posix_test_is_demofs(nfs_backend_name)) {
-        posix_test_configure_demofs(env->session_dir,
-                                    posix_test_demofs_device_type(nfs_backend_name),
+    if (posix_test_is_diskfs(nfs_backend_name)) {
+        posix_test_configure_diskfs(env->session_dir,
+                                    posix_test_diskfs_device_type(nfs_backend_name),
                                     config_data, sizeof(config_data));
-        chimera_server_config_add_module(server_config, "demofs", NULL, config_data);
+        chimera_server_config_add_module(server_config, "diskfs", NULL, config_data);
     } else if (strcmp(nfs_backend_name, "cairn") == 0) {
         posix_test_configure_cairn(env->session_dir, config_data, sizeof(config_data));
         chimera_server_config_add_module(server_config, "cairn", NULL, config_data);
@@ -178,8 +178,8 @@ posix_test_start_nfs_server(struct posix_test_env *env)
         chimera_server_mount(env->server, "share", "io_uring", env->session_dir, NULL);
     } else if (strcmp(nfs_backend_name, "memfs") == 0) {
         chimera_server_mount(env->server, "share", "memfs", "/", NULL);
-    } else if (posix_test_is_demofs(nfs_backend_name)) {
-        chimera_server_mount(env->server, "share", "demofs", "/", NULL);
+    } else if (posix_test_is_diskfs(nfs_backend_name)) {
+        chimera_server_mount(env->server, "share", "diskfs", "/", NULL);
     } else if (strcmp(nfs_backend_name, "cairn") == 0) {
         chimera_server_mount(env->server, "share", "cairn", "/", NULL);
     } else {
@@ -286,17 +286,17 @@ posix_test_init(
         posix_json_config = json_object();
 
         if (!is_nfs) {
-            if (posix_test_is_demofs(backend)) {
-                char    demofs_cfg[4096];
+            if (posix_test_is_diskfs(backend)) {
+                char    diskfs_cfg[4096];
                 json_t *vfs, *vfs_entry;
-                posix_test_configure_demofs(env->session_dir,
-                                            posix_test_demofs_device_type(backend),
-                                            demofs_cfg, sizeof(demofs_cfg));
+                posix_test_configure_diskfs(env->session_dir,
+                                            posix_test_diskfs_device_type(backend),
+                                            diskfs_cfg, sizeof(diskfs_cfg));
                 vfs       = json_object();
                 vfs_entry = json_object();
-                json_object_set_new(vfs_entry, "path", json_string("/build/test/demofs"));
-                json_object_set_new(vfs_entry, "config", json_string(demofs_cfg));
-                json_object_set_new(vfs, "demofs", vfs_entry);
+                json_object_set_new(vfs_entry, "path", json_string("/build/test/diskfs"));
+                json_object_set_new(vfs_entry, "config", json_string(diskfs_cfg));
+                json_object_set_new(vfs, "diskfs", vfs_entry);
                 json_object_set_new(posix_json_config, "vfs", vfs);
             } else if (strcmp(backend, "cairn") == 0) {
                 char    cairn_cfg[4096];
@@ -394,8 +394,8 @@ posix_test_mount(struct posix_test_env *env)
 
     // Direct backend
     module_name = env->backend;
-    if (posix_test_is_demofs(env->backend)) {
-        module_name = "demofs";
+    if (posix_test_is_diskfs(env->backend)) {
+        module_name = "diskfs";
     } else if (strcmp(env->backend, "linux") == 0 || strcmp(env->backend, "io_uring") == 0) {
         module_path = env->session_dir;
     }

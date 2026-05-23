@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -138,6 +138,12 @@ rb_tree_init(struct rb_tree *tree)
     tree->nil.color = RB_BLACK;
     tree->root      = &tree->nil;
 } /* rb_tree_init */
+
+static inline int
+rb_tree_empty(const struct rb_tree *tree)
+{
+    return tree->root == &tree->nil;
+} /* rb_tree_empty */
 
 static void
 rb_tree_destroy(

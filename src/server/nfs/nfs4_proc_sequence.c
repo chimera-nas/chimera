@@ -63,6 +63,14 @@ chimera_nfs4_sequence(
         return;
     }
 
+    if (session->nfs4_session_fore_attrs.ca_maxrequestsize &&
+        marshall_length_COMPOUND4args(req->args_compound) >
+        (int) session->nfs4_session_fore_attrs.ca_maxrequestsize) {
+        res->sr_status = NFS4ERR_REQ_TOO_BIG;
+        chimera_nfs4_compound_complete(req, NFS4ERR_REQ_TOO_BIG);
+        return;
+    }
+
     /* RFC 8881 §2.10.6.4: a COMPOUND with more operations than the session's
      * negotiated fore-channel ca_maxoperations (SEQUENCE counts as one) is
      * rejected with NFS4ERR_TOO_MANY_OPS. */
@@ -85,6 +93,25 @@ chimera_nfs4_sequence(
         session->replay_max_slots ? session->replay_max_slots - 1 : 0;
     res->sr_resok4.sr_target_highest_slotid = res->sr_resok4.sr_highest_slotid;
     res->sr_resok4.sr_status_flags          = 0;
+
+    /* RFC 8881 §2.10.6.3 / §18.46.3: signal the client that one or more of its
+     * recallable objects (delegations) have been revoked, so it issues
+     * TEST_STATEID / FREE_STATEID to recover.  Cleared once the client has
+     * freed every revoked delegation. */
+    if (session->client_unified &&
+        atomic_load_explicit(&session->client_unified->revoked_deleg_count,
+                             memory_order_acquire) > 0) {
+        res->sr_resok4.sr_status_flags |= SEQ4_STATUS_RECALLABLE_STATE_REVOKED;
+    }
+
+    if (args->sa_cachethis &&
+        session->nfs4_session_fore_attrs.ca_maxresponsesize_cached &&
+        marshall_length_nfs_resop4(resop) >
+        (int) session->nfs4_session_fore_attrs.ca_maxresponsesize_cached) {
+        res->sr_status = NFS4ERR_REP_TOO_BIG_TO_CACHE;
+        chimera_nfs4_compound_complete(req, NFS4ERR_REP_TOO_BIG_TO_CACHE);
+        return;
+    }
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_sequence */

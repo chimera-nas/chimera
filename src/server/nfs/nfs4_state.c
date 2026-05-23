@@ -7,6 +7,9 @@
 #include <time.h>
 
 #include "nfs4_state.h"
+#include "nfs4_callback.h"
+#include "nfs4_session.h"
+#include "nfs4_layout_table.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_release.h"
 
@@ -325,6 +328,14 @@ state_table_lookup_locked(
         status = NFS4ERR_STALE_STATEID;
     } else if (want_type != 0 && slot->type != want_type) {
         status = NFS4ERR_BAD_STATEID;
+    } else if (slot->type == NFS4_SLOT_TYPE_DELEG &&
+               atomic_load_explicit(
+                   &((struct nfs_delegation *) slot->state)->revoked,
+                   memory_order_acquire)) {
+        /* A force-revoked delegation: the stateid is still resolvable (so
+         * TEST_STATEID/FREE_STATEID can act on it) but any use of it as a
+         * delegation reports NFS4ERR_DELEG_REVOKED (RFC 8881 §8.2.4). */
+        status = NFS4ERR_DELEG_REVOKED;
     } else {
         *out_state = slot->state;
         if (out_type) {
@@ -338,6 +349,10 @@ state_table_lookup_locked(
             } else if (slot->type == NFS4_SLOT_TYPE_LOCK) {
                 atomic_fetch_add_explicit(
                     &((struct nfs_lock_state *) slot->state)->refcount, 1,
+                    memory_order_acq_rel);
+            } else if (slot->type == NFS4_SLOT_TYPE_DELEG) {
+                atomic_fetch_add_explicit(
+                    &((struct nfs_delegation *) slot->state)->refcount, 1,
                     memory_order_acq_rel);
             }
         }
@@ -372,6 +387,9 @@ nfs_state_table_acquire(
             if (ls->lock_owner) {
                 nfs_client_touch(ls->lock_owner->client);
             }
+        } else if (*out_type == NFS4_SLOT_TYPE_DELEG) {
+            struct nfs_delegation *d = *out_state;
+            nfs_client_touch(d->client);
         }
     }
 
@@ -389,6 +407,17 @@ lock_state_cleanup(
     struct nfs_lock_state     *state,
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread);
+static void
+delegation_cleanup(
+    struct nfs_delegation     *deleg,
+    struct chimera_vfs_thread *vfs_thread);
+static void
+delegation_destroy_common(
+    struct nfs_delegation     *deleg,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread,
+    bool                       expire,
+    bool                       unlink_client);
 
 void
 nfs_state_table_release(
@@ -418,6 +447,26 @@ nfs_state_table_release(
         if (prev == 1 && atomic_load_explicit(&s->destroyed,
                                               memory_order_acquire)) {
             lock_state_cleanup(s, table, vfs_thread);
+        }
+    } else if (type == NFS4_SLOT_TYPE_DELEG) {
+        struct nfs_delegation *d = state;
+        prev = atomic_fetch_sub_explicit(&d->refcount, 1,
+                                         memory_order_acq_rel);
+        chimera_nfs_abort_if(prev == 0,
+                             "delegation refcount underflow on %p", d);
+        if (prev == 1 && atomic_load_explicit(&d->destroyed,
+                                              memory_order_acquire)) {
+            delegation_cleanup(d, vfs_thread);
+        }
+    } else if (type == NFS4_SLOT_TYPE_LAYOUT) {
+        struct nfs_layout_state *s = state;
+        prev = atomic_fetch_sub_explicit(&s->refcount, 1,
+                                         memory_order_acq_rel);
+        chimera_nfs_abort_if(prev == 0,
+                             "layout_state refcount underflow on %p", s);
+        if (prev == 1 && atomic_load_explicit(&s->destroyed,
+                                              memory_order_acquire)) {
+            free(s);
         }
     }
 } /* nfs_state_table_release */
@@ -528,6 +577,13 @@ open_state_destroy_locked(
     }
 } /* open_state_destroy_locked */
 
+static void
+layout_state_destroy_locked(
+    struct nfs_client         *client,
+    struct nfs_layout_state   *st,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread);
+
 void
 nfs_client_destroy(
     struct nfs_client         *client,
@@ -575,7 +631,29 @@ nfs_client_destroy(
         pthread_mutex_destroy(&lo->lock);
         free(lo);
     }
+
+    /* pNFS layouts held by the client (NFSv4.1+).  No recall is performed in
+     * v1; the records simply drop with the client's lease. */
+    struct nfs_layout_state *ly, *ly_tmp;
+    HASH_ITER(hh, client->layouts_by_fh, ly, ly_tmp)
+    {
+        layout_state_destroy_locked(client, ly, table, vfs_thread);
+    }
 #endif /* ifndef __clang_analyzer__ */
+
+    /* Revoke every outstanding delegation.  Slots are marked EXPIRED (the
+     * client is going away) so a stateid still naming one resolves to
+     * NFS4ERR_EXPIRED.  We already hold client->lock, so destroy with
+     * unlink_client=false and splice the list head ourselves. */
+    while (client->delegations) {
+        struct nfs_delegation *deleg = client->delegations;
+        LL_DELETE2(client->delegations, deleg, next_in_client);
+        delegation_destroy_common(deleg, table, vfs_thread, true, false);
+    }
+
+    /* Free the delegation callback channel (and disconnect its outbound 4.0
+     * connection) before the client struct goes away. */
+    nfs4_cb_path_teardown(&client->cb_path);
 
     pthread_mutex_unlock(&client->lock);
     pthread_mutex_destroy(&client->lock);
@@ -644,6 +722,14 @@ nfs_open_owner_find_state(
     return state;
 } /* nfs_open_owner_find_state */
 
+static uint32_t
+nfs_open_share_history(uint32_t share)
+{
+    share &= (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE);
+    return share == (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE) ?
+           0x04 : share;
+} /* nfs_open_share_history */
+
 struct nfs_open_state *
 nfs_open_state_create(
     struct nfs_open_owner          *owner,
@@ -671,15 +757,17 @@ nfs_open_state_create(
 
     state->owner = owner;
     memcpy(state->fh, fh, fh_len);
-    state->fh_len       = fh_len;
-    state->share_access = share_access;
-    state->share_deny   = share_deny;
-    state->seqid        = 1;
-    state->shard        = shard;
-    state->slot_idx     = slot_idx;
-    state->generation   = gen;
-    state->handle       = handle_dup;
-    state->locks        = NULL;
+    state->fh_len            = fh_len;
+    state->share_access      = share_access;
+    state->share_deny        = share_deny;
+    state->share_access_hist = nfs_open_share_history(share_access);
+    state->share_deny_hist   = nfs_open_share_history(share_deny);
+    state->seqid             = 1;
+    state->shard             = shard;
+    state->slot_idx          = slot_idx;
+    state->generation        = gen;
+    state->handle            = handle_dup;
+    state->locks             = NULL;
     atomic_init(&state->refcount, 1);
     atomic_init(&state->destroyed, 0);
 
@@ -743,6 +831,59 @@ nfs_client_check_share_conflict(
     return status;
 } /* nfs_client_check_share_conflict */
 
+nfsstat4
+nfs_client_check_io_denied(
+    struct nfs_client     *client,
+    struct nfs_open_owner *requesting_owner,
+    const uint8_t         *fh,
+    uint16_t               fh_len,
+    uint32_t               requested_access)
+{
+    struct nfs_open_owner *oo, *oo_tmp;
+    nfsstat4               status = NFS4_OK;
+
+    if (fh_len > NFS4_FHSIZE) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    pthread_mutex_lock(&client->lock);
+
+    HASH_ITER(hh, client->open_owners_by_str, oo, oo_tmp)
+    {
+        struct nfs_open_state *peer = NULL;
+
+        if (oo == requesting_owner) {
+            continue;
+        }
+
+        pthread_mutex_lock(&oo->lock);
+        HASH_FIND(hh, oo->states_by_fh, fh, fh_len, peer);
+        if (peer && (peer->share_deny & requested_access)) {
+            status = NFS4ERR_LOCKED;
+        }
+        pthread_mutex_unlock(&oo->lock);
+
+        if (status != NFS4_OK) {
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&client->lock);
+    return status;
+} /* nfs_client_check_io_denied */
+
+nfsstat4
+nfs_open_state_check_io_denied(
+    struct nfs_open_state *requesting_state,
+    uint32_t               requested_access)
+{
+    return nfs_client_check_io_denied(requesting_state->owner->client,
+                                      requesting_state->owner,
+                                      requesting_state->fh,
+                                      requesting_state->fh_len,
+                                      requested_access);
+} /* nfs_open_state_check_io_denied */
+
 void
 nfs_open_state_coalesce(
     struct nfs_open_state  *state,
@@ -751,9 +892,11 @@ nfs_open_state_coalesce(
     struct nfs_state_table *table,
     struct stateid4        *out_stateid)
 {
-    state->share_access |= share_access;
-    state->share_deny   |= share_deny;
-    state->seqid        += 1;
+    state->share_access      |= share_access;
+    state->share_deny        |= share_deny;
+    state->share_access_hist |= nfs_open_share_history(share_access);
+    state->share_deny_hist   |= nfs_open_share_history(share_deny);
+    state->seqid             += 1;
 
     nfs4_stateid_encode(out_stateid, state->seqid,
                         NFS4_STATEID_TYPE_OPEN,
@@ -803,6 +946,150 @@ nfs_open_state_destroy(
     open_state_destroy_locked(owner, state, table, vfs_thread, false);
     pthread_mutex_unlock(&owner->lock);
 } /* nfs_open_state_destroy */
+
+/* --- pNFS layout state ------------------------------------------------- */
+
+struct nfs_layout_state *
+nfs_layout_state_find(
+    struct nfs_client *client,
+    const uint8_t     *fh,
+    uint16_t           fh_len)
+{
+    struct nfs_layout_state *st;
+
+    pthread_mutex_lock(&client->lock);
+    HASH_FIND(hh, client->layouts_by_fh, fh, fh_len, st);
+    pthread_mutex_unlock(&client->lock);
+
+    return st;
+} /* nfs_layout_state_find */
+
+struct nfs_layout_state *
+nfs_layout_state_create(
+    struct nfs_client       *client,
+    const uint8_t           *fh,
+    uint16_t                 fh_len,
+    uint32_t                 iomode,
+    uint32_t                 client_short_id,
+    struct nfs_state_table  *table,
+    struct nfs_layout_table *layout_table,
+    struct stateid4         *out_stateid)
+{
+    struct nfs_layout_state *st;
+    uint8_t                  shard;
+    uint32_t                 slot_idx, gen;
+    int                      rc;
+
+    chimera_nfs_abort_if(fh_len > NFS4_FHSIZE,
+                         "layout_state_create fh_len %u", fh_len);
+
+    st = calloc(1, sizeof(*st));
+    chimera_nfs_abort_if(st == NULL, "layout_state alloc OOM");
+
+    rc = nfs_state_table_alloc(table, NFS4_SLOT_TYPE_LAYOUT, &shard, &slot_idx, &gen);
+    chimera_nfs_abort_if(rc != 0, "state table exhausted");
+
+    st->client = client;
+    memcpy(st->fh, fh, fh_len);
+    st->fh_len       = fh_len;
+    st->seqid        = 1;
+    st->iomode       = iomode;
+    st->shard        = shard;
+    st->slot_idx     = slot_idx;
+    st->generation   = gen;
+    st->global_table = layout_table;
+    atomic_init(&st->refcount, 1);
+    atomic_init(&st->destroyed, 0);
+
+    nfs_state_table_install(table, shard, slot_idx, NFS4_SLOT_TYPE_LAYOUT, st);
+
+    pthread_mutex_lock(&client->lock);
+    HASH_ADD_KEYPTR(hh, client->layouts_by_fh, st->fh, st->fh_len, st);
+    pthread_mutex_unlock(&client->lock);
+
+    /* Publish into the server-wide fh->holder index so a conflicting op from
+     * any client can find and recall this layout. */
+    nfs_layout_table_register(layout_table, st);
+
+    nfs4_stateid_encode(out_stateid, st->seqid, NFS4_STATEID_TYPE_LAYOUT,
+                        shard, slot_idx, gen, client_short_id);
+    return st;
+} /* nfs_layout_state_create */
+
+void
+nfs_layout_state_bump(
+    struct nfs_layout_state *st,
+    uint32_t                 client_short_id,
+    struct stateid4         *out_stateid)
+{
+    /* RFC 8881 §12.5.3: the server owns the layout stateid seqid and advances
+     * it on each successful LAYOUTGET / LAYOUTRETURN. */
+    st->seqid++;
+    nfs4_stateid_encode(out_stateid, st->seqid, NFS4_STATEID_TYPE_LAYOUT,
+                        st->shard, st->slot_idx, st->generation,
+                        client_short_id);
+} /* nfs_layout_state_bump */
+
+static void
+layout_state_destroy_locked(
+    struct nfs_client         *client,
+    struct nfs_layout_state   *st,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    uint8_t  prev_destroyed;
+    uint32_t prev;
+
+    (void) vfs_thread;
+
+    prev_destroyed = atomic_exchange_explicit(&st->destroyed, 1,
+                                              memory_order_acq_rel);
+    if (prev_destroyed != 0) {
+        return;
+    }
+
+    /* Drop from the server-wide fh->holder index; if this was the last holder
+     * of the file, that resumes any operation deferred on its recall. */
+    if (st->global_table) {
+        nfs_layout_table_deregister(st->global_table, st);
+    }
+
+    HASH_DEL(client->layouts_by_fh, st);
+
+    nfs_state_table_free_slot(table, st->shard, st->slot_idx);
+
+    prev = atomic_fetch_sub_explicit(&st->refcount, 1, memory_order_acq_rel);
+    if (prev == 1) {
+        free(st);
+    }
+} /* layout_state_destroy_locked */
+
+void
+nfs_layout_state_get(struct nfs_layout_state *st)
+{
+    atomic_fetch_add_explicit(&st->refcount, 1, memory_order_acq_rel);
+} /* nfs_layout_state_get */
+
+void
+nfs_layout_state_put(struct nfs_layout_state *st)
+{
+    if (atomic_fetch_sub_explicit(&st->refcount, 1, memory_order_acq_rel) == 1) {
+        free(st);
+    }
+} /* nfs_layout_state_put */
+
+void
+nfs_layout_state_destroy(
+    struct nfs_layout_state   *st,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    struct nfs_client *client = st->client;
+
+    pthread_mutex_lock(&client->lock);
+    layout_state_destroy_locked(client, st, table, vfs_thread);
+    pthread_mutex_unlock(&client->lock);
+} /* nfs_layout_state_destroy */
 
 struct nfs_lock_owner *
 nfs_lock_owner_find_or_create(
@@ -959,3 +1246,236 @@ nfs_lock_state_destroy(
         lock_state_cleanup(state, table, vfs_thread);
     }
 } /* nfs_lock_state_destroy */
+
+/* ---------------------------------------------------------------------- *
+*  Lifecycle: delegations
+* ---------------------------------------------------------------------- */
+
+struct nfs_delegation *
+nfs_delegation_create(
+    struct nfs_client      *client,
+    uint8_t                 deleg_type,
+    const uint8_t          *fh,
+    uint16_t                fh_len,
+    uint64_t                fh_hash,
+    struct nfs_state_table *table,
+    struct stateid4        *out_stateid)
+{
+    struct nfs_delegation *deleg;
+    uint8_t                shard;
+    uint32_t               slot_idx, gen;
+    int                    rc;
+
+    chimera_nfs_abort_if(fh_len > NFS4_FHSIZE,
+                         "delegation_create fh_len %u", fh_len);
+
+    deleg = calloc(1, sizeof(*deleg));
+    chimera_nfs_abort_if(deleg == NULL, "delegation alloc OOM");
+
+    rc = nfs_state_table_alloc(table, NFS4_SLOT_TYPE_DELEG, &shard, &slot_idx, &gen);
+    chimera_nfs_abort_if(rc != 0, "state table exhausted");
+
+    deleg->client = client;
+    deleg->type   = deleg_type;
+    memcpy(deleg->fh, fh, fh_len);
+    deleg->fh_len     = fh_len;
+    deleg->fh_hash    = fh_hash;
+    deleg->shard      = shard;
+    deleg->slot_idx   = slot_idx;
+    deleg->generation = gen;
+    deleg->seqid      = 1;
+    deleg->lease_held = false;
+    atomic_init(&deleg->cb_recall_state, NFS4_DELEG_ACTIVE);
+    atomic_init(&deleg->refcount, 1);
+    atomic_init(&deleg->destroyed, 0);
+
+    nfs_state_table_install(table, shard, slot_idx, NFS4_SLOT_TYPE_DELEG, deleg);
+
+    pthread_mutex_lock(&client->lock);
+    LL_PREPEND2(client->delegations, deleg, next_in_client);
+    pthread_mutex_unlock(&client->lock);
+
+    nfs4_stateid_encode(out_stateid, deleg->seqid,
+                        NFS4_STATEID_TYPE_DELEG, shard, slot_idx, gen,
+                        table->epoch);
+    return deleg;
+} /* nfs_delegation_create */
+
+static void
+delegation_cleanup(
+    struct nfs_delegation     *deleg,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    struct chimera_vfs_state *vfs_state =
+        vfs_thread ? vfs_thread->vfs->vfs_state : NULL;
+
+    if (vfs_state && deleg->lease_held) {
+        chimera_vfs_lease_release(vfs_state, deleg->file_state, &deleg->lease);
+        deleg->lease_held = false;
+    }
+    if (vfs_state && deleg->file_state) {
+        chimera_vfs_state_put(vfs_state, deleg->file_state);
+        deleg->file_state = NULL;
+    }
+    free(deleg);
+} /* delegation_cleanup */
+
+/* Mark a delegation for destruction and drop its lifetime ref.  Unlinks it
+ * from the owning client first so no new lookup finds it.  `expire` marks the
+ * slot EXPIRED (client purge) rather than FREE.  Idempotent via the destroyed
+ * CAS. */
+static void
+delegation_destroy_common(
+    struct nfs_delegation     *deleg,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread,
+    bool                       expire,
+    bool                       unlink_client)
+{
+    uint8_t  prev_destroyed;
+    uint32_t prev;
+
+    prev_destroyed = atomic_exchange_explicit(&deleg->destroyed, 1,
+                                              memory_order_acq_rel);
+    if (prev_destroyed != 0) {
+        return;
+    }
+
+    /* If this delegation was force-revoked, drop it from the client's
+    * revoked count so SEQ4_STATUS_RECALLABLE_STATE_REVOKED clears. */
+    if (deleg->client &&
+        atomic_load_explicit(&deleg->revoked, memory_order_acquire)) {
+        atomic_fetch_sub_explicit(&deleg->client->revoked_deleg_count, 1,
+                                  memory_order_acq_rel);
+    }
+
+    if (unlink_client && deleg->client) {
+        pthread_mutex_lock(&deleg->client->lock);
+        LL_DELETE2(deleg->client->delegations, deleg, next_in_client);
+        pthread_mutex_unlock(&deleg->client->lock);
+    }
+
+    if (expire) {
+        nfs_state_table_expire_slot(table, deleg->shard, deleg->slot_idx);
+    } else {
+        nfs_state_table_free_slot(table, deleg->shard, deleg->slot_idx);
+    }
+
+    prev = atomic_fetch_sub_explicit(&deleg->refcount, 1, memory_order_acq_rel);
+    if (prev == 1) {
+        delegation_cleanup(deleg, vfs_thread);
+    }
+} /* delegation_destroy_common */
+
+void
+nfs_delegation_destroy(
+    struct nfs_delegation     *deleg,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    delegation_destroy_common(deleg, table, vfs_thread, false, true);
+} /* nfs_delegation_destroy */
+
+/* vfs_state revoked_cb (wired onto every delegation lease).  Marks the
+ * delegation revoked so its stateid reports NFS4ERR_DELEG_REVOKED, and bumps
+ * the owning client's revoked count (drives SEQ4_STATUS_RECALLABLE_STATE_
+ * REVOKED).  Idempotent. */
+SYMBOL_EXPORT void
+nfs_delegation_revoked_cb(
+    struct chimera_vfs_lease *lease,
+    void                     *private_data)
+{
+    struct nfs_delegation *deleg    = private_data;
+    uint8_t                expected = 0;
+
+    (void) lease;
+
+    if (atomic_load_explicit(&deleg->destroyed, memory_order_acquire)) {
+        return;
+    }
+    if (atomic_compare_exchange_strong_explicit(
+            &deleg->revoked, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&deleg->client->revoked_deleg_count, 1,
+                                  memory_order_acq_rel);
+    }
+} /* nfs_delegation_revoked_cb */
+
+/* FREE_STATEID support: if `sid` names a force-revoked delegation, tear it
+* down (freeing the slot and clearing the client's revoked count) and return
+* NFS4_OK.  Returns NFS4ERR_LOCKS_HELD for a still-live state (cannot be
+* freed), or the usual NFS4ERR_BAD/STALE/EXPIRED for an invalid stateid. */
+SYMBOL_EXPORT nfsstat4
+nfs_state_table_free_revoked_deleg(
+    struct nfs_state_table    *table,
+    const struct stateid4     *sid,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    struct nfs4_stateid_view view;
+    struct nfs_state_shard  *shard;
+    struct nfs_state_slot   *slot;
+    struct nfs_delegation   *deleg = NULL;
+
+    if (nfs4_stateid_is_special(sid)) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    nfs4_stateid_decode(&view, sid);
+
+    if (view.epoch != table->epoch) {
+        return NFS4ERR_STALE_STATEID;
+    }
+    if (view.version != NFS4_STATEID_VERSION ||
+        view.shard >= NFS_STATE_NUM_SHARDS) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    shard = &table->shards[view.shard];
+
+    pthread_rwlock_rdlock(&shard->lock);
+
+    if (view.slot_idx >= shard->slots_used) {
+        pthread_rwlock_unlock(&shard->lock);
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    slot = &shard->slots[view.slot_idx];
+
+    if (slot->type == NFS4_SLOT_TYPE_EXPIRED) {
+        nfsstat4 st = (slot->generation == view.generation)
+                      ? NFS4ERR_EXPIRED : NFS4ERR_STALE_STATEID;
+        pthread_rwlock_unlock(&shard->lock);
+        return st;
+    }
+    if (slot->type == NFS4_SLOT_TYPE_FREE) {
+        pthread_rwlock_unlock(&shard->lock);
+        return NFS4ERR_BAD_STATEID;
+    }
+    if (slot->generation != view.generation) {
+        pthread_rwlock_unlock(&shard->lock);
+        return NFS4ERR_STALE_STATEID;
+    }
+    if (slot->type != NFS4_SLOT_TYPE_DELEG ||
+        !atomic_load_explicit(&((struct nfs_delegation *) slot->state)->revoked,
+                              memory_order_acquire)) {
+        /* A live (non-revoked) state cannot be freed while in use. */
+        pthread_rwlock_unlock(&shard->lock);
+        return NFS4ERR_LOCKS_HELD;
+    }
+
+    deleg = slot->state;
+    atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_acq_rel);
+    pthread_rwlock_unlock(&shard->lock);
+
+    /* Our +1 ref above keeps `deleg` alive across destroy, which drops only
+     * the lifetime ref (refcount stays >0); the release then drops our ref and
+     * is what actually frees it.  scan-build inlines the conditional free in
+     * delegation_destroy_common/delegation_cleanup (same TU) and can't follow
+     * the refcount, so it flags a false-positive use-after-free on the release.
+     * Hide the sequence from the analyzer, matching nfs_client_destroy. */
+#ifndef __clang_analyzer__
+    nfs_delegation_destroy(deleg, table, vfs_thread);
+    nfs_state_table_release(table, deleg, NFS4_SLOT_TYPE_DELEG, vfs_thread);
+#endif /* ifndef __clang_analyzer__ */
+    return NFS4_OK;
+} /* nfs_state_table_free_revoked_deleg */

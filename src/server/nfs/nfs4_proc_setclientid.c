@@ -59,6 +59,19 @@ chimera_nfs4_setclientid(
         return;
     }
 
+    /* RFC 7530 §16.33: capture the callback path (cb_client4) so the server
+     * can deliver CB_RECALL once it grants a delegation.  Only meaningful when
+     * delegations are enabled; harmless to record otherwise. */
+    nfs4_client_set_cb_path(&shared->nfs4_shared_clients,
+                            scid.clientid,
+                            args->callback.cb_program,
+                            args->callback_ident,
+                            0,
+                            args->callback.cb_location.na_r_netid.str,
+                            args->callback.cb_location.na_r_netid.len,
+                            args->callback.cb_location.na_r_addr.str,
+                            args->callback.cb_location.na_r_addr.len);
+
     res->status          = NFS4_OK;
     res->resok4.clientid = scid.clientid;
     memcpy(res->resok4.setclientid_confirm, scid.confirm,

@@ -79,9 +79,9 @@ generate_config() {
         memfs)
             mount_path="/"
             ;;
-        demofs_io_uring|demofs_aio)
+        diskfs_io_uring|diskfs_aio)
             local device_type="io_uring"
-            if [ "$BACKEND" = "demofs_aio" ]; then
+            if [ "$BACKEND" = "diskfs_aio" ]; then
                 device_type="libaio"
             fi
             local devices_json=""
@@ -94,9 +94,9 @@ generate_config() {
                 devices_json="${devices_json}{\"type\":\"$device_type\",\"size\":1,\"path\":\"$device_path\"}"
             done
             mount_path="/"
-            BACKEND="demofs"
+            BACKEND="diskfs"
             vfs_section="\"vfs\": {
-                \"demofs\": {
+                \"diskfs\": {
                     \"config\": {\"devices\":[$devices_json]}
                 }
             },"

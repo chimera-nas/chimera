@@ -208,6 +208,13 @@ chimera_nfs4_write(
     struct nfs_resop4                *resop);
 
 void
+chimera_nfs4_copy(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
 chimera_nfs4_commit(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
@@ -251,6 +258,20 @@ chimera_nfs4_remove(
 
 void
 chimera_nfs4_close(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_delegreturn(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_delegpurge(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
     struct nfs_argop4                *argop,
@@ -348,6 +369,20 @@ chimera_nfs4_test_stateid(
     struct nfs_resop4                *resop);
 
 void
+chimera_nfs4_free_stateid(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_backchannel_ctl(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
 chimera_nfs4_secinfo(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
@@ -382,6 +417,77 @@ chimera_nfs4_seek(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop);
 
+/* pNFS (NFSv4.1 file layout) operations — see nfs4_pnfs.c */
+void
+chimera_nfs4_getdeviceinfo(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_getdevicelist(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_layoutget(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_layoutreturn(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_layoutcommit(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_layoutstats(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_getxattr(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_setxattr(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_listxattrs(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_removexattr(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
 void
 chimera_nfs4_lock(
     struct chimera_server_nfs_thread *thread,
@@ -411,6 +517,54 @@ chimera_nfs4_compound_process(
 /* Validate that [p, p+len) is well-formed UTF-8 (RFC 3629): rejects stray
  * continuation bytes, overlong encodings, UTF-16 surrogates, the U+FFFE/FFFF
  * non-characters, and anything above U+10FFFF. Returns true if well-formed. */
+/*
+ * NFS4.1 "current stateid" (RFC 8881 §16.2.3.1.2).  The special value
+ * { seqid = 1, other = all zeros } means "use the COMPOUND's current stateid",
+ * which stateid-returning operations (OPEN, LOCK, OPEN_DOWNGRADE, ...) set.
+ */
+static inline bool
+chimera_nfs4_stateid_is_current(const struct stateid4 *sid)
+{
+    static const uint8_t zero[NFS4_OTHER_SIZE] = { 0 };
+
+    return sid->seqid == 1 &&
+           memcmp(sid->other, zero, NFS4_OTHER_SIZE) == 0;
+} /* chimera_nfs4_stateid_is_current */
+
+/* Record the current stateid produced by a stateid-returning op (4.1+). */
+static inline void
+chimera_nfs4_set_current_stateid(
+    struct nfs_request    *req,
+    const struct stateid4 *sid)
+{
+    if (req->minorversion >= 1) {
+        req->current_stateid       = *sid;
+        req->current_stateid_valid = true;
+    }
+} /* chimera_nfs4_set_current_stateid */
+
+/* Clear the COMPOUND's current stateid -- done by ops that change the current
+ * filehandle (RFC 8881 §16.2.3.1.2). */
+static inline void
+chimera_nfs4_clear_current_stateid(struct nfs_request *req)
+{
+    req->current_stateid_valid = false;
+} /* chimera_nfs4_clear_current_stateid */
+
+/* If `sid` is the special current-stateid value, replace it in place with the
+ * COMPOUND's current stateid (4.1+).  No-op otherwise. */
+static inline void
+chimera_nfs4_resolve_current_stateid(
+    struct nfs_request *req,
+    struct stateid4    *sid)
+{
+    if (req->minorversion >= 1 &&
+        req->current_stateid_valid &&
+        chimera_nfs4_stateid_is_current(sid)) {
+        *sid = req->current_stateid;
+    }
+} /* chimera_nfs4_resolve_current_stateid */
+
 static inline bool
 chimera_nfs4_utf8_valid(
     const char *data,

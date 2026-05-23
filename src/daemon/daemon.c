@@ -18,6 +18,7 @@
 
 #include "server/server.h"
 #include "vfs/vfs_cred.h"
+#include "vfs/vfs_pnfs.h"
 #include "server/server_internal.h"
 #include "common/logging.h"
 #include "metrics/metrics.h"
@@ -321,7 +322,17 @@ main(
 
     chimera_server_info("Initializing server...");
 
-    metrics = chimera_metrics_init(9000);
+    /* Metrics port (default 9000); configurable so multiple daemons can share
+     * a host (e.g. a pNFS MDS + data server). */
+    int metrics_port = 9000;
+    if (server_params) {
+        json_t *mp = json_object_get(server_params, "metrics_port");
+        if (json_is_integer(mp)) {
+            metrics_port = json_integer_value(mp);
+        }
+    }
+
+    metrics = chimera_metrics_init(metrics_port);
 
     server_config = chimera_server_config_init();
 
@@ -365,6 +376,11 @@ main(
         chimera_server_config_set_nfs4_session_slots(server_config, int_value);
     }
 
+    json_value = json_object_get(server_params, "nfs4_delegations");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_nfs4_delegations(server_config, json_is_true(json_value));
+    }
+
     json_value = json_object_get(server_params, "external_portmap");
     if (json_is_true(json_value)) {
         chimera_server_info("Enabling external portmap/rpcbind support");
@@ -405,6 +421,53 @@ main(
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);
         chimera_server_config_set_nfs_lockmgr_port(server_config, int_value);
+    }
+
+    json_value = json_object_get(server_params, "nfs_port");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_nfs_port(server_config, int_value);
+    }
+
+    /* Data-server mode: bind only the NFSv4 service (no portmap/mount/NLM) so
+     * a pNFS data server can run alongside an MDS on the same host. */
+    json_value = json_object_get(server_params, "data_server");
+    if (json_is_true(json_value)) {
+        chimera_server_config_set_nfs_data_server(server_config, 1);
+    }
+
+    /* pNFS layout configuration (disabled unless "enabled": true). */
+    json_t *pnfs = json_object_get(server_params, "pnfs");
+    if (pnfs && json_is_object(pnfs)) {
+        json_t *pnfs_enabled = json_object_get(pnfs, "enabled");
+        if (json_is_true(pnfs_enabled)) {
+            chimera_server_config_set_pnfs_enabled(server_config, 1);
+        }
+
+        json_t *data_servers = json_object_get(pnfs, "data_servers");
+        if (json_is_array(data_servers)) {
+            size_t  ds_i;
+            json_t *ds_entry;
+            json_array_foreach(data_servers, ds_i, ds_entry)
+            {
+                const char *netid_str   = json_string_value(json_object_get(ds_entry, "netid"));
+                const char *uaddr_str   = json_string_value(json_object_get(ds_entry, "uaddr"));
+                const char *backing_str = json_string_value(json_object_get(ds_entry, "backing_path"));
+
+                /* uaddr: the DS network address handed to clients in the
+                 * layout.  backing_path: the chimera path where this DS export
+                 * is mounted via the nfs module, under which the MDS creates
+                 * backing files. */
+                if (!uaddr_str || !backing_str) {
+                    chimera_server_error(
+                        "pNFS data_server[%zu] requires \"uaddr\" and \"backing_path\"; skipping",
+                        ds_i);
+                    continue;
+                }
+
+                chimera_server_config_add_pnfs_ds(server_config, netid_str, uaddr_str, backing_str);
+            }
+        }
     }
 
     json_value = json_object_get(server_params, "state_dir");
@@ -606,6 +669,10 @@ main(
             chimera_server_mount(server, name, module, path, mount_options);
         }
     }
+
+    /* Now that the nfs-module backing mounts exist, resolve each pNFS data
+     * server's backing root so the MDS can create backing files on it. */
+    chimera_server_pnfs_resolve(server);
 
     shares = json_object_get(config, "shares");
 

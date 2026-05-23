@@ -5,7 +5,7 @@
 [global]
 thread=1
 ioengine=external:${PLUGIN_PATH}
-chimera_config=${FIO_TEST_BINARY}/demofs_aio_basic.json
+chimera_config=${FIO_TEST_BINARY}/diskfs_aio_basic.json
 group_reporting
 numjobs=1
 create_on_open=1
@@ -14,7 +14,7 @@ iodepth=8
 size=128m
 verify=crc32c
 verify_pattern=0x12345678
-filename=/demofs/file1.dat
+filename=/diskfs/file1.dat
 stonewall
 
 [job1]

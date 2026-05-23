@@ -25,6 +25,7 @@ chimera_nfs4_umount(
     /* Free session when last mount is removed */
     if (server->refcnt == 0 && server->nfs4_session) {
         free(server->nfs4_session->slot_seqids);
+        pthread_mutex_destroy(&server->nfs4_session->lock);
         free(server->nfs4_session);
         server->nfs4_session = NULL;
     }

@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <stdio.h>
-
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_signing.h"
@@ -137,28 +135,35 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             break;
     } /* switch */
 
+    /* Allocate the session (and its SessionId) on the first leg, whether the
+     * exchange completes now or needs another round trip. The server MUST
+     * return this SessionId in the interim STATUS_MORE_PROCESSING_REQUIRED
+     * response so the client echoes it on subsequent legs (MS-SMB2 3.3.5.5).
+     * Crucially for SMB 3.1.1, the client keys its session preauth-integrity
+     * hash by the response's SessionId: a zero id on the interim response
+     * splits the hash across buckets and breaks signing-key derivation. */
+    if ((rc == 0 || rc == 1) && !request->session_handle) {
+        session = chimera_smb_session_alloc(shared);
+
+        session_handle = chimera_smb_session_handle_alloc(thread);
+
+        session_handle->session_id = session->session_id;
+        session_handle->session    = session;
+
+        chimera_smb_debug("chimera_smb_session_setup adding session_handle %p\n",
+                          session_handle);
+
+        HASH_ADD(hh, conn->session_handles, session_id, sizeof(uint64_t), session_handle);
+
+        session_handle->ctx = GSS_C_NO_CONTEXT;
+
+        request->compound->conn->last_session_handle = session_handle;
+
+        request->session_handle = session_handle;
+    }
+
     if (rc == 0) {
         // Authentication complete
-        if (!request->session_handle) {
-            session = chimera_smb_session_alloc(shared);
-
-            session_handle = chimera_smb_session_handle_alloc(thread);
-
-            session_handle->session_id = session->session_id;
-            session_handle->session    = session;
-
-            chimera_smb_debug("chimera_smb_session_setup adding session_handle %p\n",
-                              session_handle);
-
-            HASH_ADD(hh, conn->session_handles, session_id, sizeof(uint64_t), session_handle);
-
-            session_handle->ctx = GSS_C_NO_CONTEXT;
-
-            request->compound->conn->last_session_handle = session_handle;
-
-            request->session_handle = session_handle;
-        }
-
         session_handle = request->session_handle;
         session        = session_handle->session;
 
@@ -175,7 +180,9 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                 chimera_smb_derive_signing_key(conn->dialect,
                                                session_handle->signing_key,
                                                session_key,
-                                               SMB_NTLM_SESSION_KEY_SIZE);
+                                               SMB_NTLM_SESSION_KEY_SIZE,
+                                               conn->dialect == SMB2_DIALECT_3_1_1 ?
+                                               conn->preauth_hash : NULL);
             }
 
             uid        = smb_ntlm_get_uid(&conn->ntlm_ctx);
@@ -206,7 +213,9 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                 chimera_smb_derive_signing_key(conn->dialect,
                                                session_handle->signing_key,
                                                session_key,
-                                               SMB_GSSAPI_SESSION_KEY_SIZE);
+                                               SMB_GSSAPI_SESSION_KEY_SIZE,
+                                               conn->dialect == SMB2_DIALECT_3_1_1 ?
+                                               conn->preauth_hash : NULL);
             }
 
             // Map Kerberos principal to Unix credentials via winbind
@@ -271,6 +280,11 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
         if (request->session_handle &&
             (!(request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED))) {
+            /* The handle was registered in conn->session_handles when the
+             * session was allocated (possibly on an earlier interim leg), so
+             * remove it there before freeing — otherwise connection teardown
+             * iterates it again and double-releases the session. */
+            HASH_DEL(conn->session_handles, request->session_handle);
             chimera_smb_session_release(thread, shared, request->session_handle->session);
             chimera_smb_session_handle_free(thread, request->session_handle);
             request->session_handle   = NULL;

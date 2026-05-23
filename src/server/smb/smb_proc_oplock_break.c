@@ -146,6 +146,46 @@ chimera_smb_send_oplock_break_lease(
                EVPL_SEND_FLAG_TAKE_REF);
 } /* chimera_smb_send_oplock_break_lease */
 
+/* Send a legacy (non-lease) SMB2 OPLOCK_BREAK Notification (MS-SMB2
+ * §2.2.23.1) on `conn`, identifying the open by FileId. */
+static void
+chimera_smb_send_oplock_break_legacy(
+    struct chimera_smb_conn *conn,
+    uint64_t                 file_id_pid,
+    uint64_t                 file_id_vid,
+    uint8_t                  new_oplock_level)
+{
+    struct evpl_iovec iov;
+    uint8_t          *buf;
+    uint8_t          *p;
+    int               total = 4 + 64 + SMB2_OPLOCK_BREAK_NOTIFY_LEGACY_SIZE;
+    uint32_t          nb_len;
+
+    evpl_iovec_alloc(conn->thread->evpl, total, 8, 1, 0, &iov);
+    buf = iov.data;
+    memset(buf, 0, total);
+
+    p = chimera_smb_oplock_break_build_header(buf);
+
+    /* Body (24 bytes): MS-SMB2 §2.2.23.1 */
+    p[0] = 0x18;             /* StructureSize = 24 */
+    p[1] = 0x00;
+    p[2] = new_oplock_level; /* OplockLevel the holder breaks to */
+    p[3] = 0;                /* Reserved */
+    p[4] = 0; p[5] = 0; p[6] = 0; p[7] = 0; /* Reserved2 */
+    memcpy(p + 8,  &file_id_pid, 8); /* FileId.Persistent */
+    memcpy(p + 16, &file_id_vid, 8); /* FileId.Volatile */
+
+    p += SMB2_OPLOCK_BREAK_NOTIFY_LEGACY_SIZE;
+
+    nb_len = __builtin_bswap32((uint32_t) (p - (buf + 4)));
+    memcpy(buf, &nb_len, 4);
+
+    iov.length = (int) (p - buf);
+    evpl_sendv(conn->thread->evpl, conn->bind, &iov, 1, iov.length,
+               EVPL_SEND_FLAG_TAKE_REF);
+} /* chimera_smb_send_oplock_break_legacy */
+
 /* break_cb wired onto every SMB CACHING lease at CREATE time.  The
  * cb_private is the owning open_file. */
 SYMBOL_EXPORT void
@@ -155,11 +195,7 @@ chimera_smb_lease_break_cb(
     void                     *private_data)
 {
     struct chimera_smb_open_file *open_file = private_data;
-    uint8_t                       current_smb;
-    uint8_t                       new_smb;
     uint8_t                       new_vfs;
-
-    (void) needed_mode;
 
     /* If the conn is no longer live, we can't notify the client; the
      * pragmatic recovery is to forcibly revoke the lease so the pending
@@ -170,37 +206,53 @@ chimera_smb_lease_break_cb(
         return;
     }
 
-    /* Stage D.1 policy: full revocation on every break.  A future
-     * refinement would compute the minimum downgrade that satisfies
-     * `needed_mode` (e.g., drop W only if a reader is asking for R).
-     * For now we drop the entire lease, which is correct but more
-     * cache-disruptive than necessary. */
-    current_smb = chimera_smb_vfs_to_lease_bits(lease->mode.granted);
-    new_smb     = 0;
-    new_vfs     = 0;
+    /* needed_mode is the *retained* mask the holder may keep:
+     *   - A conflicting OPEN passes a non-zero mask (the new acquirer's
+     *     granted bits); the holder keeps a shared read cache (R) and
+     *     gives up write/handle caching — i.e. it downgrades to LEVEL_II.
+     *   - A WRITE invalidation passes 0; the holder's read cache is now
+     *     stale, so it breaks all the way to NONE.  (See
+     *     chimera_vfs_state_break_on_write.) */
+    if (needed_mode == 0) {
+        new_vfs = 0;
+    } else {
+        new_vfs = lease->mode.granted & CHIMERA_VFS_LEASE_MODE_R;
+    }
 
-    open_file->lease_epoch++;
+    if (open_file->oplock_level == SMB2_OPLOCK_LEVEL_LEASE) {
+        /* SMB2 lease (RqLs) — §2.2.23.2 lease-variant notification. */
+        uint8_t current_smb = chimera_smb_vfs_to_lease_bits(lease->mode.granted);
+        uint8_t new_smb     = chimera_smb_vfs_to_lease_bits(new_vfs);
 
-    chimera_smb_send_oplock_break_lease(open_file->create_conn,
-                                        open_file->lease_key,
-                                        current_smb,
-                                        new_smb,
-                                        open_file->lease_epoch);
+        open_file->lease_epoch++;
+        chimera_smb_send_oplock_break_lease(open_file->create_conn,
+                                            open_file->lease_key,
+                                            current_smb,
+                                            new_smb,
+                                            open_file->lease_epoch);
+        open_file->lease_state = new_smb;
+    } else {
+        /* Legacy oplock — §2.2.23.1 notification keyed by FileId.  Break
+         * to LEVEL_II when a read cache survives, otherwise to NONE. */
+        uint8_t new_level = (new_vfs & CHIMERA_VFS_LEASE_MODE_R)
+                            ? SMB2_OPLOCK_LEVEL_II
+                            : SMB2_OPLOCK_LEVEL_NONE;
 
-    /* Optimistic: assume the client will ack and mark the lease as
-     * already broken.  The arriving ack will call chimera_vfs_lease_ack
-     * which is idempotent against an already-acked state.  This lets
-     * pending acquires retry immediately rather than waiting on the
-     * RTT, at the cost of a brief window where the client may still be
-     * caching writes — acceptable for Stage D.1 because the request
-     * that triggered the break uses wait=false (try_insert) and gets a
-     * synchronous denial regardless. */
-    open_file->lease_state = new_smb;
+        chimera_smb_send_oplock_break_legacy(open_file->create_conn,
+                                             open_file->file_id.pid,
+                                             open_file->file_id.vid,
+                                             new_level);
+        open_file->oplock_level = new_level;
+    }
+
+    /* Optimistic downgrade: assume the client acks.  The arriving ack
+     * calls chimera_vfs_lease_ack which is idempotent.  Keeping the read
+     * cache lets the conflicting opener settle at LEVEL_II too. */
     {
-        struct chimera_vfs_lease_mode none;
-        none.granted = new_vfs;
-        none.denied  = 0;
-        chimera_vfs_lease_ack(lease, none);
+        struct chimera_vfs_lease_mode m;
+        m.granted = new_vfs;
+        m.denied  = 0;
+        chimera_vfs_lease_ack(lease, m);
     }
 } /* chimera_smb_lease_break_cb */
 

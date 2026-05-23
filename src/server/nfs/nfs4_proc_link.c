@@ -2,10 +2,14 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <xxhash.h>
+
 #include "nfs4_procs.h"
 #include "nfs4_attr.h"
+#include "server/server.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_state.h"
 #include "nfs4_status.h"
 
 static void
@@ -100,6 +104,20 @@ chimera_nfs4_link(
     if (res->status != NFS4_OK) {
         chimera_nfs4_compound_complete(req, res->status);
         return;
+    }
+
+    /* RFC 7530 §10.4.5: adding a hard link to a delegated file (the SAVEFH
+     * source) must recall the delegation first. */
+    if (chimera_server_config_get_nfs4_delegations(thread->shared->config)) {
+        uint64_t fh_hash = XXH3_64bits(req->saved_fh, req->saved_fhlen) & INT64_MAX;
+
+        if (chimera_vfs_state_break_caching(thread->vfs->vfs_state,
+                                            req->saved_fh, req->saved_fhlen,
+                                            fh_hash)) {
+            res->status = NFS4ERR_DELAY;
+            chimera_nfs4_compound_complete(req, NFS4ERR_DELAY);
+            return;
+        }
     }
 
     chimera_vfs_open_fh(thread->vfs_thread,

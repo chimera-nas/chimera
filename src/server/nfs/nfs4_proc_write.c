@@ -3,19 +3,19 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "server/server.h"
 #include "nfs4_status.h"
+#include "nfs4_session.h"
 #include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "evpl/evpl.h"
 
 static inline int
-chimera_nfs4_write_stateid_is_anonymous(const struct stateid4 *sid)
+chimera_nfs4_write_stateid_is_special(const struct stateid4 *sid)
 {
-    static const uint8_t zero[12] = { 0 };
-
-    return sid->seqid == 0 && memcmp(sid->other, zero, sizeof(zero)) == 0;
-} /* chimera_nfs4_write_stateid_is_anonymous */
+    return nfs4_stateid_is_special(sid);
+} /* chimera_nfs4_write_stateid_is_special */
 
 static void
 chimera_nfs4_write_complete(
@@ -108,10 +108,14 @@ chimera_nfs4_write(
     void                           *state_void;
     uint8_t                         state_type;
     struct chimera_vfs_open_handle *state_handle;
+    struct nfs_open_state          *open_state;
     nfsstat4                        status;
 
     req->nfs_state_ref = NULL;
     req->handle        = NULL;
+
+    /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
+    chimera_nfs4_resolve_current_stateid(req, &args->stateid);
 
     /*
      * Transfer ownership of write iovecs from the RPC2 message to prevent
@@ -123,16 +127,36 @@ chimera_nfs4_write(
     evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL, NULL);
 
     /*
-     * RFC 7530 9.1.4.3 / RFC 8881 8.2.3 require WRITE to honor the
-     * anonymous stateid (all zeros).  Open the current FH on the fly
-     * instead of consulting the state table.
+     * RFC 7530 9.1.4.3 / RFC 8881 8.2.3 require WRITE to honor special
+     * stateids.  Open the current FH on the fly instead of consulting the
+     * state table.
+     *
+     * A pNFS data server does not hold open state for the files it stores --
+     * the metadata server authorizes the client's I/O via the layout -- so it
+     * likewise serves WRITE by file handle without a state-table lookup.
      */
-    if (chimera_nfs4_write_stateid_is_anonymous(&args->stateid)) {
+    if (chimera_nfs4_write_stateid_is_special(&args->stateid) ||
+        chimera_server_config_get_nfs_data_server(thread->shared->config)) {
         if (req->fhlen == 0) {
             res->status = NFS4ERR_NOFILEHANDLE;
             evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
             chimera_nfs4_compound_complete(req, NFS4_OK);
             return;
+        }
+
+        if (req->session && req->session->client_unified) {
+            status = nfs_client_check_io_denied(req->session->client_unified,
+                                                NULL,
+                                                req->fh,
+                                                req->fhlen,
+                                                OPEN4_SHARE_ACCESS_WRITE);
+            if (status != NFS4_OK) {
+                res->status = status;
+                evpl_iovecs_release(thread->evpl, args->data.iov,
+                                    args->data.niov);
+                chimera_nfs4_compound_complete(req, res->status);
+                return;
+            }
         }
 
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
@@ -153,10 +177,44 @@ chimera_nfs4_write(
         return;
     }
 
+    /* A (write) delegation stateid authorizes the WRITE but carries no open
+     * handle; drop the ref and open the current FH on the fly. */
+    if (state_type == NFS4_SLOT_TYPE_DELEG) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        if (req->fhlen == 0) {
+            res->status = NFS4ERR_NOFILEHANDLE;
+            evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
+            chimera_nfs4_compound_complete(req, NFS4_OK);
+            return;
+        }
+        req->args_write4 = args;
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            req->fh,
+                            req->fhlen,
+                            CHIMERA_VFS_OPEN_INFERRED,
+                            chimera_nfs4_write_open_callback,
+                            req);
+        return;
+    }
+
     if (state_type == NFS4_SLOT_TYPE_OPEN) {
-        state_handle = ((struct nfs_open_state *) state_void)->handle;
+        open_state   = state_void;
+        state_handle = open_state->handle;
     } else {
+        open_state   = ((struct nfs_lock_state *) state_void)->open_state;
         state_handle = ((struct nfs_lock_state *) state_void)->handle;
+    }
+
+    status = nfs_open_state_check_io_denied(open_state,
+                                            OPEN4_SHARE_ACCESS_WRITE);
+    if (status != NFS4_OK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->status = status;
+        evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
     }
 
     req->nfs_state_ref  = state_void;

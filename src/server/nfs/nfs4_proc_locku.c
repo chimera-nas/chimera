@@ -39,6 +39,9 @@ chimera_nfs4_locku(
         return;
     }
 
+    /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
+    chimera_nfs4_resolve_current_stateid(req, &args->lock_stateid);
+
     status = nfs_state_table_acquire(table, &args->lock_stateid,
                                      NFS4_SLOT_TYPE_LOCK,
                                      &state_void, &state_type);
@@ -78,7 +81,7 @@ chimera_nfs4_locku(
                                     thread->vfs_thread);
             req->nfs_state_ref = NULL;
             res->status        = NFS4ERR_BAD_SEQID;
-            chimera_nfs4_compound_complete(req, NFS4_OK);
+            chimera_nfs4_compound_complete(req, res->status);
             return;
         }
         pthread_mutex_unlock(&lock_owner->lock);
@@ -136,6 +139,7 @@ chimera_nfs4_locku(
                         lock_state->shard, lock_state->slot_idx,
                         lock_state->generation, table->epoch);
     res->status = NFS4_OK;
+    chimera_nfs4_set_current_stateid(req, &res->lock_stateid);
 
     /* RFC 7530 §9.1.7: record cached reply for the lock_owner. */
     if (is_v40 && lock_owner) {

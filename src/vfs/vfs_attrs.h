@@ -38,10 +38,23 @@ struct chimera_acl;
  * sets this bit in va_set_mask only if it actually persists the value. */
 #define CHIMERA_VFS_ATTR_DOS_ATTRIBUTES (1UL << 21)
 
+/* Birth/creation time (SMB create time, statx btime).  POSIX has no such
+ * concept, so this is optional: a backend sets this bit in va_set_mask only
+ * if it actually tracks the value. */
+#define CHIMERA_VFS_ATTR_BTIME          (1UL << 22)
+
+/* Opaque per-file pNFS layout state (va_pnfs/va_pnfs_len).  The contents are
+ * defined and interpreted solely by the NFS server (it packs the data-server
+ * deviceid + backing file handle); a backend just persists and returns the
+ * blob verbatim, which is all it takes to become a pNFS metadata-server
+ * backend.  A backend advertises CHIMERA_VFS_CAP_LAYOUT iff it persists it. */
+#define CHIMERA_VFS_ATTR_PNFS_LAYOUT    (1UL << 23)
+#define CHIMERA_VFS_PNFS_LAYOUT_MAX     96
+
 /* Canonical (NFSv4/Windows) ACL, carried via va_acl.  Deliberately excluded
  * from the cacheable mask: the attr cache stays fixed-size and ACLs are fetched
  * fresh, mask-gated, only when a protocol asks for them. */
-#define CHIMERA_VFS_ATTR_ACL            (1UL << 22)
+#define CHIMERA_VFS_ATTR_ACL            (1UL << 24)
 
 #define CHIMERA_VFS_ATTR_MASK_STAT      ( \
             CHIMERA_VFS_ATTR_DEV | \
@@ -66,50 +79,62 @@ struct chimera_acl;
             CHIMERA_VFS_ATTR_FILES_AVAIL | \
             CHIMERA_VFS_ATTR_FSID)
 
+/* Birth time is cacheable and is requested alongside the stat set, but it is
+ * deliberately NOT part of MASK_STAT: MASK_STAT is the set every backend is
+ * required to supply, and the attr cache's "complete entry" gate and the
+ * remove_at hardlink-invalidation both rely on that.  Backends that don't
+ * track btime (linux/io_uring/cairn) must still satisfy MASK_STAT. */
 #define CHIMERA_VFS_ATTR_MASK_CACHEABLE ( \
-            CHIMERA_VFS_ATTR_MASK_STAT)
+            CHIMERA_VFS_ATTR_MASK_STAT | \
+            CHIMERA_VFS_ATTR_BTIME)
 
 #define CHIMERA_VFS_TIME_NOW            ((1l << 30) - 3l)
 
 struct chimera_vfs_attrs {
-    uint64_t        va_req_mask;
-    uint64_t        va_set_mask;
+    uint64_t            va_req_mask;
+    uint64_t            va_set_mask;
 
-    uint64_t        va_dev;
-    uint64_t        va_ino;
-    uint64_t        va_mode;
-    uint64_t        va_nlink;
-    uint64_t        va_uid;
-    uint64_t        va_gid;
-    uint64_t        va_rdev;
-    uint64_t        va_size;
-    uint64_t        va_space_used;
-    struct timespec va_atime;
-    struct timespec va_mtime;
-    struct timespec va_ctime;
+    uint64_t            va_dev;
+    uint64_t            va_ino;
+    uint64_t            va_mode;
+    uint64_t            va_nlink;
+    uint64_t            va_uid;
+    uint64_t            va_gid;
+    uint64_t            va_rdev;
+    uint64_t            va_size;
+    uint64_t            va_space_used;
+    struct timespec     va_atime;
+    struct timespec     va_mtime;
+    struct timespec     va_ctime;
+    struct timespec     va_btime;
 
-    uint64_t        va_fs_space_avail;
-    uint64_t        va_fs_space_free;
-    uint64_t        va_fs_space_total;
-    uint64_t        va_fs_space_used;
-    uint64_t        va_fs_files_total;
-    uint64_t        va_fs_files_free;
-    uint64_t        va_fs_files_avail;
-    uint64_t        va_fsid;
+    uint64_t            va_fs_space_avail;
+    uint64_t            va_fs_space_free;
+    uint64_t            va_fs_space_total;
+    uint64_t            va_fs_space_used;
+    uint64_t            va_fs_files_total;
+    uint64_t            va_fs_files_free;
+    uint64_t            va_fs_files_avail;
+    uint64_t            va_fsid;
 
-    uint32_t        va_dos_attributes;
+    uint32_t            va_dos_attributes;
 
     /* Canonical ACL (CHIMERA_VFS_ATTR_ACL).  On getattr, the backend points
      * this at storage valid only for the duration of the completion callback
      * (same contract as va_fh).  On setattr, the caller owns the buffer. */
     struct chimera_acl *va_acl;
 
-    uint32_t        va_fh_len;
-    uint64_t        va_fh_hash;
+    /* Opaque pNFS layout state, owned by the NFS server (see
+     * CHIMERA_VFS_ATTR_PNFS_LAYOUT). */
+    uint32_t            va_pnfs_len;
+    uint8_t             va_pnfs[CHIMERA_VFS_PNFS_LAYOUT_MAX];
+
+    uint32_t            va_fh_len;
+    uint64_t            va_fh_hash;
 
     /* XXH3 uses SIMD memory loads that may read beyond the end
      * of the actual data, so we need to provide enough padding
      * to prevent this from causing compiler complaints?
      */
-    uint8_t         va_fh[CHIMERA_VFS_FH_SIZE + 16];
+    uint8_t             va_fh[CHIMERA_VFS_FH_SIZE + 16];
 };

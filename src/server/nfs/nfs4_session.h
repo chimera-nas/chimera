@@ -201,6 +201,15 @@ struct nfs4_session {
     uint32_t                 replay_maxresp_cached;
     _Atomic size_t           replay_bytes_in_use;
     struct nfs4_replay_slot *replay_slots;
+    /* NFSv4.1 backchannel for delegation recalls (RFC 8881 §2.10.3.1).
+     * Set at CREATE_SESSION when CREATE_SESSION4_FLAG_CONN_BACK_CHAN is
+     * requested: cb_program is the client's callback program number and
+     * backchannel_conn is the fore connection the session was created on,
+     * which doubles as the server->client callback transport.  The conn is
+     * a borrowed pointer kept live by the session<->conn binding; it is
+     * cleared by nfs4_session_unbind_conn on disconnect. */
+    uint32_t                 nfs4_session_cb_program;
+    struct evpl_rpc2_conn   *nfs4_session_backchannel_conn;
     struct UT_hash_handle    nfs4_session_hh;
 };
 
@@ -418,6 +427,35 @@ nfsstat4 nfs4_replay_slot_acquire(
  * capture the encoded reply bytes and transition to CACHED. */
 void nfs4_replay_slot_finalize(
     struct nfs_request *req);
+
+/* Record the delegation callback path on a client's unified state record.
+ * 4.0 supplies a full cb_client4 (program + netid/addr); 4.1 supplies only
+ * the program (netid/addr empty -- the backchannel rides the fore conn).
+ * Resets the CB_NULL probe state so the path is re-validated before the next
+ * delegation grant. */
+void
+nfs4_client_set_cb_path(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    uint32_t                  cb_program,
+    uint32_t                  cb_ident,
+    uint8_t                   minorversion,
+    const char               *netid,
+    int                       netid_len,
+    const char               *addr,
+    int                       addr_len);
+
+/* Record the callback-channel RPC auth (CREATE_SESSION csa_sec_parms /
+ * BACKCHANNEL_CTL).  flavor is an ONC RPC flavor (AUTH_NONE=0, AUTH_SYS=1);
+ * uid/gid apply to AUTH_SYS.  cb_program, if non-zero, updates the program. */
+void
+nfs4_client_set_cb_sec(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    uint32_t                  cb_program,
+    uint32_t                  flavor,
+    uint32_t                  uid,
+    uint32_t                  gid);
 
 struct nfs4_session *
 nfs4_session_lookup(

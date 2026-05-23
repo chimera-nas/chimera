@@ -3034,8 +3034,8 @@ usage(void)
 	fname: path inside the Chimera VFS (REQUIRED)\n\n\
 NOTE: mmap operations are disabled as Chimera POSIX API does not support them.\n\
       Either --chimera-config or --backend must be specified.\n\
-      With --backend, supported backends: memfs, demofs_io_uring, demofs_aio, cairn, linux, io_uring\n\
-      NFS backends: nfs3_memfs, nfs3_demofs_io_uring, nfs3_demofs_aio, nfs3_cairn, nfs3_linux, nfs3_io_uring\n");
+      With --backend, supported backends: memfs, diskfs_io_uring, diskfs_aio, cairn, linux, io_uring\n\
+      NFS backends: nfs3_memfs, nfs3_diskfs_io_uring, nfs3_diskfs_aio, nfs3_cairn, nfs3_linux, nfs3_io_uring\n");
     exit(90);
 } /* usage */
 
@@ -3937,19 +3937,19 @@ main(
             /* NFS backend: Start server with the actual backend */
             chimera_server_config = chimera_server_config_init();
 
-            /* Configure demofs/cairn modules before server init */
-            if (strcmp(chimera_nfs_backend, "demofs_io_uring") == 0 ||
-                strcmp(chimera_nfs_backend, "demofs_aio") == 0) {
-                char        demofs_cfg[4096];
+            /* Configure diskfs/cairn modules before server init */
+            if (strcmp(chimera_nfs_backend, "diskfs_io_uring") == 0 ||
+                strcmp(chimera_nfs_backend, "diskfs_aio") == 0) {
+                char        diskfs_cfg[4096];
                 char        device_path[512];
                 int         i, fd, rc, off;
                 const char *device_type;
 
-                device_type = strcmp(chimera_nfs_backend, "demofs_aio") == 0
+                device_type = strcmp(chimera_nfs_backend, "diskfs_aio") == 0
                               ? "libaio" : "io_uring";
 
                 /* Create device files */
-                off = snprintf(demofs_cfg, sizeof(demofs_cfg), "{\"devices\":[");
+                off = snprintf(diskfs_cfg, sizeof(diskfs_cfg), "{\"devices\":[");
                 for (i = 0; i < 10; i++) {
                     snprintf(device_path, sizeof(device_path), "%s/device-%d.img",
                              chimera_session_dir, i);
@@ -3966,13 +3966,13 @@ main(
                         exit(100);
                     }
                     close(fd);
-                    off += snprintf(demofs_cfg + off, sizeof(demofs_cfg) - off,
+                    off += snprintf(diskfs_cfg + off, sizeof(diskfs_cfg) - off,
                                     "%s{\"type\":\"%s\",\"size\":1,\"path\":\"%s\"}",
                                     i > 0 ? "," : "", device_type, device_path);
                 }
-                snprintf(demofs_cfg + off, sizeof(demofs_cfg) - off, "]}");
+                snprintf(diskfs_cfg + off, sizeof(diskfs_cfg) - off, "]}");
 
-                chimera_server_config_add_module(chimera_server_config, "demofs", NULL, demofs_cfg);
+                chimera_server_config_add_module(chimera_server_config, "diskfs", NULL, diskfs_cfg);
             } else if (strcmp(chimera_nfs_backend, "cairn") == 0) {
                 char cairn_cfg[4096];
 
@@ -4009,9 +4009,9 @@ main(
                 chimera_server_mount(chimera_server, "share", "io_uring", chimera_session_dir, NULL);
             } else if (strcmp(chimera_nfs_backend, "memfs") == 0) {
                 chimera_server_mount(chimera_server, "share", "memfs", "/", NULL);
-            } else if (strcmp(chimera_nfs_backend, "demofs_io_uring") == 0 ||
-                       strcmp(chimera_nfs_backend, "demofs_aio") == 0) {
-                chimera_server_mount(chimera_server, "share", "demofs", "/", NULL);
+            } else if (strcmp(chimera_nfs_backend, "diskfs_io_uring") == 0 ||
+                       strcmp(chimera_nfs_backend, "diskfs_aio") == 0) {
+                chimera_server_mount(chimera_server, "share", "diskfs", "/", NULL);
             } else if (strcmp(chimera_nfs_backend, "cairn") == 0) {
                 chimera_server_mount(chimera_server, "share", "cairn", "/", NULL);
             } else {
@@ -4060,9 +4060,9 @@ main(
 
             /* Determine mount module and path */
             mount_module = chimera_backend;
-            if (strcmp(chimera_backend, "demofs_io_uring") == 0 ||
-                strcmp(chimera_backend, "demofs_aio") == 0) {
-                mount_module = "demofs";
+            if (strcmp(chimera_backend, "diskfs_io_uring") == 0 ||
+                strcmp(chimera_backend, "diskfs_aio") == 0) {
+                mount_module = "diskfs";
             }
             if (strcmp(chimera_backend, "linux") == 0 ||
                 strcmp(chimera_backend, "io_uring") == 0) {

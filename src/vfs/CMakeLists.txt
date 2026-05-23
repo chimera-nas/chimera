@@ -19,7 +19,10 @@ add_library(chimera_vfs SHARED vfs.c vfs_lsan.c
             vfs_proc_delete_key.c vfs_proc_search_keys.c
             vfs_proc_allocate.c vfs_proc_seek.c vfs_proc_lock.c
             vfs_proc_copy_range.c vfs_proc_clone_range.c vfs_proc_move_range.c
-            vfs_proc_getparent.c vfs_notify.c vfs_state.c vfs_dump.c)
+            vfs_proc_getparent.c vfs_notify.c vfs_state.c vfs_dump.c
+            vfs_proc_get_xattr.c vfs_proc_set_xattr.c
+            vfs_proc_list_xattrs.c vfs_proc_remove_xattr.c
+            vfs_pnfs.c vfs_proc_get_layout.c)
 
 target_compile_definitions(chimera_vfs PRIVATE
     XXH_INLINE_ALL
@@ -38,14 +41,14 @@ if (CHIMERA_VFS_IO_URING)
     add_subdirectory(io_uring)
 endif()
 
-add_subdirectory(demofs)
+add_subdirectory(diskfs)
 
 if (CAIRN_ENABLED)
     add_subdirectory(cairn)
 endif()
 
 target_link_libraries(chimera_vfs
-    chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_demofs
+    chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_diskfs
     chimera_vfs_nfs
     chimera_common prometheus-c xxhash dl urcu)
 
@@ -54,7 +57,7 @@ if (CHIMERA_VFS_IO_URING)
 endif()
 
 if (DEMFS_ENABLED)
-    target_link_libraries(chimera_vfs chimera_vfs_demofs)
+    target_link_libraries(chimera_vfs chimera_vfs_diskfs)
 endif()
 
 if (CAIRN_ENABLED)

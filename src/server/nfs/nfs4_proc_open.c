@@ -8,6 +8,8 @@
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
 #include "nfs4_state.h"
+#include "nfs4_callback.h"
+#include "server/server.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_state.h"
@@ -71,6 +73,15 @@ chimera_nfs4_open_acquire_share(
 
     result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                           &state->share_lease, &conflict);
+    if (result == CHIMERA_VFS_LEASE_BREAKING) {
+        /* The conflict is a breakable holder -- an NFSv4 delegation being
+         * recalled (try_insert already kicked the break).  Tell the client to
+         * retry; by the next attempt the delegation's DELEGRETURN should have
+         * released the lease and the SHARE will be granted (RFC 7530 §10.4.5
+         * recommends NFS4ERR_DELAY while a recall is outstanding). */
+        chimera_vfs_state_put(vfs_state, file_state);
+        return NFS4ERR_DELAY;
+    }
     if (result != CHIMERA_VFS_LEASE_GRANTED) {
         chimera_vfs_state_put(vfs_state, file_state);
         return NFS4ERR_SHARE_DENIED;
@@ -80,6 +91,160 @@ chimera_nfs4_open_acquire_share(
     state->share_lease_held = true;
     return NFS4_OK;
 } /* chimera_nfs4_open_acquire_share */
+
+/*
+ * Decide whether to grant an OPEN delegation and, if so, mint it and populate
+ * the OPEN response.  A read open is offered an OPEN_DELEGATE_READ; an open
+ * that requests write access is offered an OPEN_DELEGATE_WRITE.  A delegation
+ * is granted only when:
+ *   - the nfs4_delegations config knob is on,
+ *   - this is a normal open (CLAIM_NULL / CLAIM_FH, not a reclaim),
+ *   - the client's callback path has been validated (CB_NULL probe UP), and
+ *   - no conflicting access is present on the file (a write delegation also
+ *     requires no other reader/writer; conflicts are surfaced by the CACHING
+ *     lease conflict matrix).
+ * Otherwise the response carries OPEN_DELEGATE_NONE.  Must be called on the
+ * client's connection thread (it may kick a CB_NULL probe).
+ */
+static void
+chimera_nfs4_open_grant_delegation(
+    struct nfs_request *req,
+    struct OPEN4res    *res)
+{
+    struct chimera_server_nfs_thread *thread    = req->thread;
+    struct OPEN4args                 *args      = &req->args_compound->argarray[req->index].opopen;
+    struct nfs_client                *client    = req->session ? req->session->client_unified : NULL;
+    struct chimera_vfs_state         *vfs_state = thread->vfs->vfs_state;
+    struct nfs_delegation            *deleg;
+    struct nfs_delegation            *d;
+    struct chimera_vfs_file_state    *file_state;
+    struct chimera_vfs_lease         *conflict = NULL;
+    enum chimera_vfs_lease_result     result;
+    struct stateid4                   deleg_stateid;
+    uint64_t                          fh_hash;
+    bool                              exists = false;
+    uint8_t                           deleg_type;
+    uint8_t                           lease_mode;
+    struct nfsace4                   *perms;
+    static const char                 everyone[] = "EVERYONE@";
+
+    res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+
+    if (!chimera_server_config_get_nfs4_delegations(thread->shared->config)) {
+        return;
+    }
+    if (!client) {
+        return;
+    }
+    if (args->claim.claim != CLAIM_NULL && args->claim.claim != CLAIM_FH) {
+        return;
+    }
+
+    /* RFC 8881 §18.16: honor an explicit "no delegation wanted" request.  On
+    * 4.1+ this is reported as OPEN_DELEGATE_NONE_EXT with WND4_NOT_WANTED;
+    * 4.0 has no such extension, so the default OPEN_DELEGATE_NONE stands. */
+    if (args->share_access & OPEN4_SHARE_ACCESS_WANT_NO_DELEG) {
+        if (req->minorversion >= 1) {
+            res->resok4.delegation.delegation_type                       = OPEN_DELEGATE_NONE_EXT;
+            res->resok4.delegation.od_whynone.ond_why                    = WND4_NOT_WANTED;
+            res->resok4.delegation.od_whynone.ond_server_will_push_deleg = 0;
+        }
+        return;
+    }
+
+    /* A write open earns a write delegation; otherwise a pure-read open earns
+     * a read delegation. */
+    if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
+        deleg_type = OPEN_DELEGATE_WRITE;
+        lease_mode = CHIMERA_VFS_LEASE_MODE_W;
+    } else if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
+        deleg_type = OPEN_DELEGATE_READ;
+        lease_mode = CHIMERA_VFS_LEASE_MODE_R;
+    } else {
+        return;
+    }
+
+    if (!nfs4_cb_ensure_probe(thread, client, req)) {
+        return;
+    }
+
+    /* fh_hash must match the open-cache / SHARE-lease hashing so the
+     * delegation and conflicting opens land on the same file_state. */
+    fh_hash = XXH3_64bits(req->fh, req->fhlen) & INT64_MAX;
+
+    pthread_mutex_lock(&client->lock);
+    LL_FOREACH2(client->delegations, d, next_in_client)
+    {
+        if (d->fh_len == req->fhlen &&
+            memcmp(d->fh, req->fh, req->fhlen) == 0) {
+            exists = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&client->lock);
+    if (exists) {
+        return;
+    }
+
+    deleg = nfs_delegation_create(client, deleg_type,
+                                  req->fh, req->fhlen, fh_hash,
+                                  &thread->shared->nfs4_state_table,
+                                  &deleg_stateid);
+
+    deleg->lease.kind              = CHIMERA_VFS_LEASE_CACHING;
+    deleg->lease.mode.granted      = lease_mode;
+    deleg->lease.mode.denied       = 0;
+    deleg->lease.owner.protocol    = CHIMERA_VFS_LEASE_PROTO_NFSV4;
+    deleg->lease.owner.client_key  = client->client_id;
+    deleg->lease.owner.owner_lo    = fh_hash;
+    deleg->lease.owner.owner_hi    = 0;
+    deleg->lease.owner.break_cb    = nfs4_delegation_break_cb;
+    deleg->lease.owner.is_alive_cb = NULL;
+    deleg->lease.owner.revoked_cb  = nfs_delegation_revoked_cb;
+    deleg->lease.owner.cb_private  = deleg;
+
+    file_state = chimera_vfs_state_get(vfs_state, req->fh, req->fhlen,
+                                       fh_hash, true);
+    if (!file_state) {
+        nfs_delegation_destroy(deleg, &thread->shared->nfs4_state_table,
+                               thread->vfs_thread);
+        return;
+    }
+    deleg->file_state = file_state;
+
+    result = chimera_vfs_state_try_insert(vfs_state, file_state,
+                                          &deleg->lease, &conflict);
+    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+        /* Contention (another open / lease): just decline to delegate. */
+        chimera_vfs_state_put(vfs_state, file_state);
+        deleg->file_state = NULL;
+        nfs_delegation_destroy(deleg, &thread->shared->nfs4_state_table,
+                               thread->vfs_thread);
+        return;
+    }
+    deleg->lease_held = true;
+
+    res->resok4.delegation.delegation_type = deleg_type;
+
+    if (deleg_type == OPEN_DELEGATE_WRITE) {
+        res->resok4.delegation.write.stateid = deleg_stateid;
+        res->resok4.delegation.write.recall  = 0;
+        /* No space guarantee enforced -- advertise "no limit". */
+        res->resok4.delegation.write.space_limit.limitby  = NFS_LIMIT_SIZE;
+        res->resok4.delegation.write.space_limit.filesize = UINT64_MAX;
+        perms                                             = &res->resok4.delegation.write.permissions;
+    } else {
+        res->resok4.delegation.read.stateid = deleg_stateid;
+        res->resok4.delegation.read.recall  = 0;
+        perms                               = &res->resok4.delegation.read.permissions;
+    }
+
+    perms->type        = ACE4_ACCESS_ALLOWED_ACE_TYPE;
+    perms->flag        = 0;
+    perms->access_mask = ACE4_READ_DATA;
+    perms->who.len     = sizeof(everyone) - 1;
+    perms->who.data    = (void *) everyone;
+} /* chimera_nfs4_open_grant_delegation */
 
 /*
  * Install a freshly-opened VFS handle into the unified state model, returning
@@ -134,6 +299,15 @@ chimera_nfs4_open_install_state(
     existing = nfs_open_owner_find_state(owner, handle->fh, handle->fh_len);
 
     if (existing) {
+        /* RFC 7530 §9.9: a same-owner re-open is still a distinct share
+         * request -- it must not ask for access the existing open denies, nor
+         * deny access the existing open holds.  (Plain deny=NONE upgrades, as
+         * normal clients issue, never trip this.) */
+        if ((existing->share_access & args->share_deny) ||
+            (args->share_access & existing->share_deny)) {
+            chimera_vfs_release(req->thread->vfs_thread, handle);
+            return NFS4ERR_SHARE_DENIED;
+        }
         nfs_open_state_coalesce(existing,
                                 args->share_access, args->share_deny,
                                 &req->thread->shared->nfs4_state_table,
@@ -207,6 +381,13 @@ chimera_nfs4_open_complete(
         nfs4_replay_record(&owner->replay, args->seqid, OP_OPEN, status,
                            status == NFS4_OK ? &res->resok4.stateid : NULL);
         pthread_mutex_unlock(&owner->lock);
+    }
+
+    /* NFS4.1: a successful OPEN sets the COMPOUND's current stateid. */
+    if (status == NFS4_OK) {
+        struct OPEN4res *res =
+            &req->res_compound.resarray[req->index].opopen;
+        chimera_nfs4_set_current_stateid(req, &res->resok4.stateid);
     }
 
     chimera_nfs4_compound_complete(req, status);
@@ -284,8 +465,8 @@ chimera_nfs4_open_exclusive_verify(
             ((lock_caps & CHIMERA_VFS_CAP_FS_LOCK) ?
              OPEN4_RESULT_LOCKTYPE_POSIX : 0);
     }
-    res->resok4.num_attrset                = 0;
-    res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+    res->resok4.num_attrset = 0;
+    chimera_nfs4_open_grant_delegation(req, res);
 
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
     chimera_nfs4_open_complete(req, NFS4_OK);
@@ -371,8 +552,8 @@ chimera_nfs4_open_at_complete(
             ((lock_caps & CHIMERA_VFS_CAP_FS_LOCK) ?
              OPEN4_RESULT_LOCKTYPE_POSIX : 0);
     }
-    res->resok4.num_attrset                = 0;
-    res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+    res->resok4.num_attrset = 0;
+    chimera_nfs4_open_grant_delegation(req, res);
 
     if (args->openhow.opentype == OPEN4_CREATE &&
         (args->openhow.how.mode == UNCHECKED4 || args->openhow.how.mode == GUARDED4)) {
@@ -445,8 +626,8 @@ chimera_nfs4_open_claim_fh_complete(
             ((lock_caps & CHIMERA_VFS_CAP_FS_LOCK) ?
              OPEN4_RESULT_LOCKTYPE_POSIX : 0);
     }
-    res->resok4.num_attrset                = 0;
-    res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+    res->resok4.num_attrset = 0;
+    chimera_nfs4_open_grant_delegation(req, res);
 
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
 
@@ -464,6 +645,7 @@ chimera_nfs4_open_parent_complete(
     unsigned int              flags = 0;
     nfsstat4                  status;
     struct chimera_vfs_attrs *attr;
+    uint32_t                  verf_part;
 
     req->handle = parent_handle;
 
@@ -553,17 +735,21 @@ chimera_nfs4_open_parent_complete(
                  * For now encode the verifier in atime.tv_sec (bytes 0-3) and mtime.tv_sec
                  * (bytes 4-7), which is the same strategy used by Linux nfsd. */
                 attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
-                memcpy(&attr->va_atime.tv_sec, args->openhow.how.ch_createboth.cva_verf, 4);
+                memcpy(&verf_part, args->openhow.how.ch_createboth.cva_verf, 4);
+                attr->va_atime.tv_sec  = verf_part;
                 attr->va_atime.tv_nsec = 0;
-                memcpy(&attr->va_mtime.tv_sec, args->openhow.how.ch_createboth.cva_verf + 4, 4);
+                memcpy(&verf_part, args->openhow.how.ch_createboth.cva_verf + 4, 4);
+                attr->va_mtime.tv_sec  = verf_part;
                 attr->va_mtime.tv_nsec = 0;
                 break;
             case EXCLUSIVE4:
                 flags            |= CHIMERA_VFS_OPEN_EXCLUSIVE;
                 attr->va_set_mask = CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
-                memcpy(&attr->va_atime.tv_sec, args->openhow.how.createverf, 4);
+                memcpy(&verf_part, args->openhow.how.createverf, 4);
+                attr->va_atime.tv_sec  = verf_part;
                 attr->va_atime.tv_nsec = 0;
-                memcpy(&attr->va_mtime.tv_sec, args->openhow.how.createverf + 4, 4);
+                memcpy(&verf_part, args->openhow.how.createverf + 4, 4);
+                attr->va_mtime.tv_sec  = verf_part;
                 attr->va_mtime.tv_nsec = 0;
                 break;
         } /* switch */
@@ -597,6 +783,32 @@ chimera_nfs4_open_parent_complete(
                                 chimera_nfs4_open_at_complete,
                                 req);
             break;
+        case CLAIM_DELEGATE_CUR:
+            /* RFC 7530 §16.16: open of a file the client already holds a
+             * delegation on, identified by name within the current FH's
+             * directory.  Treat like CLAIM_NULL using the name carried in
+             * delegate_cur_info; the delegation the client cites is its own,
+             * so no recall is needed. */
+            status = chimera_nfs4_validate_name(&args->claim.delegate_cur_info.file);
+            if (status != NFS4_OK) {
+                struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+                res->status = status;
+                chimera_nfs4_open_complete(req, status);
+                return;
+            }
+            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                                parent_handle,
+                                args->claim.delegate_cur_info.file.data,
+                                args->claim.delegate_cur_info.file.len,
+                                flags,
+                                attr,
+                                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
+                                CHIMERA_VFS_ATTR_MTIME,
+                                CHIMERA_VFS_ATTR_MTIME,
+                                chimera_nfs4_open_at_complete,
+                                req);
+            break;
         case CLAIM_PREVIOUS:
         case CLAIM_FH:
             chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
@@ -607,7 +819,16 @@ chimera_nfs4_open_parent_complete(
                                 req);
             break;
         default:
-            abort();
+            /* CLAIM_DELEGATE_PREV (delegation reclaim across a client reboot)
+             * and any unknown claim are not supported -- reject rather than
+             * abort the server. */
+        {
+            struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+            chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+            res->status = NFS4ERR_NOTSUPP;
+            chimera_nfs4_open_complete(req, NFS4ERR_NOTSUPP);
+        }
+            return;
     } /* switch */
 
 } /* chimera_nfs4_open_complete */

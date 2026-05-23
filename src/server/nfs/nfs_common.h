@@ -15,10 +15,35 @@
 #include "nlm4_xdr.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
+#include "nfs4_layout_table.h"
 #include "nfs4_recovery.h"
 #include "nfs_nlm_state.h"
 
 struct chimera_server_nfs_thread;
+
+/*
+ * pNFS device cache for backend-SOURCED layouts (CHIMERA_VFS_CAP_LAYOUT_SOURCE).
+ *
+ * A sourcing backend mints deviceids and returns their descriptors alongside
+ * the layout in chimera_vfs_get_layout().  GETDEVICEINFO arrives later with only
+ * a deviceid (no file handle), so LAYOUTGET caches each returned descriptor here
+ * and GETDEVICEINFO answers from the cache.  Bounded and fixed-size: the device
+ * population is tiny and stable.  (Orchestrated flex devices live in the
+ * chimera_vfs_pnfs table instead and never enter this cache.)
+ */
+#define NFS_PNFS_DEVCACHE_MAX 64
+
+struct nfs_pnfs_devcache_entry {
+    uint8_t                          deviceid[CHIMERA_VFS_DEVICEID_SIZE];
+    uint8_t                          valid;
+    struct chimera_vfs_layout_device device;
+};
+
+struct nfs_pnfs_devcache {
+    pthread_mutex_t                lock;
+    uint32_t                       count;
+    struct nfs_pnfs_devcache_entry entries[NFS_PNFS_DEVCACHE_MAX];
+};
 struct nfs4_range_lease;
 
 struct nfs_nfs3_readdir_cursor {
@@ -60,6 +85,15 @@ struct nfs_request {
     int                               index;
     uint8_t                           minorversion;     /* COMPOUND4args.minorversion */
     bool                              seen_sequence;    /* set once OP_SEQUENCE has run in this compound */
+    /* NFS4.1 "current stateid" (RFC 8881 §16.2.3.1.2): a per-COMPOUND value
+     * set by stateid-returning ops (OPEN/LOCK/...) and substituted into
+     * later ops that present the special current-stateid value. */
+    bool                              current_stateid_valid;
+    struct stateid4                   current_stateid;
+    /* SAVEFH/RESTOREFH save and restore the current stateid alongside the
+     * current filehandle (RFC 8881 §16.2.3.1.2). */
+    bool                              saved_current_stateid_valid;
+    struct stateid4                   saved_current_stateid;
     /* In-flight state ref for ops that acquire from the unified state table.
      * Released by the completion handler.  Phase 2.  Type is one of
      * NFS4_SLOT_TYPE_OPEN / NFS4_SLOT_TYPE_LOCK. */
@@ -197,6 +231,8 @@ struct chimera_server_nfs_shared {
 
     struct nfs4_client_table            nfs4_shared_clients;
     struct nfs_state_table              nfs4_state_table;
+    struct nfs_layout_table             nfs4_layout_table;   /* fh -> layout holders */
+    struct nfs_pnfs_devcache            nfs4_pnfs_devcache;  /* sourced deviceid -> descriptor */
     struct nfs_recovery                 nfs4_recovery;
 
     struct prometheus_histogram        *op_histogram;
@@ -221,6 +257,21 @@ struct chimera_server_nfs_thread {
     int                               again;
     int                               active_requests;
     struct nfs_request               *free_requests;
+
+    /* Delegation callback recall marshalling.  A recall is triggered by a
+     * conflicting op on an arbitrary thread, but the callback connection is
+     * owned by one thread's evpl and evpl sends are not cross-thread safe.
+     * break_cb pushes the delegation onto the owner thread's queue (under
+     * cb_recall_lock) and rings cb_doorbell; the owner thread drains the
+     * queue and sends CB_RECALL.  See nfs4_callback.c. */
+    struct evpl_doorbell              cb_doorbell;
+    pthread_mutex_t                   cb_recall_lock;
+    struct nfs_delegation            *cb_recall_queue; /* via deleg->recall_qnext */
+    /* Cross-thread CB_GETATTR work (request to the deleg holder's thread, and
+     * the response back to the requester's thread).  Protected by
+     * cb_recall_lock and drained by cb_doorbell.  See nfs4_callback.c. */
+    struct nfs4_cb_getattr           *cb_getattr_queue;
+    uint8_t                           cb_doorbell_armed;
 };
 
 static inline struct nfs_request *

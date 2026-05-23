@@ -109,6 +109,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_Negotiate_Compatible_Wildcard
         BVT_Negotiate_SMB21
         BVT_Negotiate_SMB30
+        BVT_Negotiate_SMB302
         BVT_Negotiate_SigningEnabled
         BVT_SMB2Basic_ChangeNotify_ChangeAttributes
         BVT_SMB2Basic_ChangeNotify_ChangeCreation
@@ -244,6 +245,7 @@ set(SMBTORTURE_SUITES
     smb2.session
     smb2.session-id
     smb2.session-require-signing
+    smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.setinfo
     smb2.sharemode
@@ -276,6 +278,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.create_no_streams
     smb2.notify-inotify
     smb2.secleak
+    smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.winattr2
@@ -287,8 +290,8 @@ set(SMBTORTURE_ENABLED_memfs
     # arm64 CI; left disabled until the arch difference is understood.
 )
 set(SMBTORTURE_ENABLED_linux)
-set(SMBTORTURE_ENABLED_demofs_io_uring)
-set(SMBTORTURE_ENABLED_demofs_aio)
+set(SMBTORTURE_ENABLED_diskfs_io_uring)
+set(SMBTORTURE_ENABLED_diskfs_aio)
 set(SMBTORTURE_ENABLED_cairn)
 set(SMBTORTURE_ENABLED_io_uring)
 
@@ -322,9 +325,9 @@ find_program(SMBTORTURE_EXECUTABLE smbtorture)
 if(CHIMERA_NETNS_TESTING AND SMBTORTURE_EXECUTABLE)
     add_smbtorture_backend_tests(memfs)
     add_smbtorture_backend_tests(linux)
-    add_smbtorture_backend_tests(demofs_io_uring)
+    add_smbtorture_backend_tests(diskfs_io_uring)
     if(HAVE_LIBAIO)
-        add_smbtorture_backend_tests(demofs_aio)
+        add_smbtorture_backend_tests(diskfs_aio)
     endif()
     if(CAIRN_ENABLED)
         add_smbtorture_backend_tests(cairn)

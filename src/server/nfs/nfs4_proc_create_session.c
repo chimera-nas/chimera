@@ -182,6 +182,39 @@ chimera_nfs4_create_session(
     nfs4_session_bind_conn(conn, session);
     req->session = session;
 
+    /* RFC 8881 §18.36: when the client asks to use this connection as the
+     * backchannel, record it together with the callback program number so the
+     * server can deliver CB_RECALL for delegations over the fore conn.  Also
+     * stamp the callback path on the unified client (minorversion 1, no
+     * separate netid/addr -- the backchannel is the fore conn). */
+    if (args->csa_flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) {
+        session->nfs4_session_cb_program       = args->csa_cb_program;
+        session->nfs4_session_backchannel_conn = conn;
+
+        nfs4_client_set_cb_path(&shared->nfs4_shared_clients,
+                                args->csa_clientid,
+                                args->csa_cb_program,
+                                0,
+                                1,
+                                NULL, 0, NULL, 0);
+
+        /* Record the callback auth the client wants the server to use
+         * (RFC 8881 §18.36.3 csa_sec_parms).  Use the first parameter; for
+         * AUTH_SYS carry its uid/gid onto the callback path. */
+        if (args->num_csa_sec_parms > 0) {
+            struct callback_sec_parms4 *sp = &args->csa_sec_parms[0];
+            uint32_t                    uid = 0, gid = 0;
+
+            if (sp->cb_secflavor == AUTH_SYS) {
+                uid = sp->cbsp_sys_cred.uid;
+                gid = sp->cbsp_sys_cred.gid;
+            }
+            nfs4_client_set_cb_sec(&shared->nfs4_shared_clients,
+                                   args->csa_clientid, 0,
+                                   sp->cb_secflavor, uid, gid);
+        }
+    }
+
     res->csr_status = NFS4_OK;
     memcpy(res->csr_resok4.csr_sessionid, session->nfs4_session_id, sizeof(res->csr_resok4.csr_sessionid));
     /* RFC 8881 §18.36.4: csr_sequence MUST equal the request's csa_sequence. */
