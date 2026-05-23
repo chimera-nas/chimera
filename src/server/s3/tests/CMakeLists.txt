@@ -104,17 +104,17 @@ if(BOTO3_FOUND)
             add_s3_test(awscli io_uring)
         endif()
 
-        # demofs tests (V4) - demofs uses io_uring backend
-        add_s3_test(put demofs)
-        add_s3_test(get demofs)
-        add_s3_test(head demofs)
-        add_s3_test(delete demofs)
-        add_s3_test(delete_objects demofs)
-        add_s3_test(list demofs)
-        # demofs multipart and copy are omitted: both fall back to read+write
-        # across two files, which produces corrupted output on demofs;
-        # suspected demofs bug (cairn, which takes the same RW path, works
-        # fine). Re-enable when demofs read/write interleaving is investigated.
+        # diskfs tests (V4) - diskfs uses io_uring backend
+        add_s3_test(put diskfs)
+        add_s3_test(get diskfs)
+        add_s3_test(head diskfs)
+        add_s3_test(delete diskfs)
+        add_s3_test(delete_objects diskfs)
+        add_s3_test(list diskfs)
+        # diskfs multipart and copy are omitted: both fall back to read+write
+        # across two files, which produces corrupted output on diskfs;
+        # suspected diskfs bug (cairn, which takes the same RW path, works
+        # fine). Re-enable when diskfs read/write interleaving is investigated.
     endif()
 
     # cairn tests (V4)

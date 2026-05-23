@@ -668,7 +668,7 @@ print_usage(const char *prog)
     fprintf(stderr, "  --mode=kerberos  Test Kerberos (requires KDC setup)\n");
     fprintf(stderr, "  --mode=winbind   Test winbind NTLM (requires AD)\n");
     fprintf(stderr, "  --mode=all       Run all available tests\n");
-    fprintf(stderr, "  -b <backend>     VFS backend (memfs, linux, demofs)\n");
+    fprintf(stderr, "  -b <backend>     VFS backend (memfs, linux, diskfs)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "For Kerberos tests, run via: kerberos_test_wrapper.sh\n");
     fprintf(stderr, "For Winbind tests, run via:  ad_test_wrapper.sh\n");

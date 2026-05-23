@@ -47,7 +47,7 @@ chimera_nfs4_lookupp_open_callback(
 
         /*
          * Resolve parent via lookup_at(handle, "..").  Backends that
-         * understand directory structure (memfs, cairn, demofs) handle
+         * understand directory structure (memfs, cairn, diskfs) handle
          * ".." natively; pass-through backends (linux, io_uring) get
          * parent attrs from fstatat(parent_fd, "..").
          */

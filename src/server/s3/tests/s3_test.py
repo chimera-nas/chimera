@@ -96,8 +96,8 @@ class ChimeraServer:
                 "module": "io_uring",
                 "path": self.temp_dir
             }
-        elif self.backend == 'demofs':
-            # Create device files for demofs
+        elif self.backend == 'diskfs':
+            # Create device files for diskfs
             devices = []
             for i in range(10):
                 device_path = os.path.join(self.temp_dir, f'device-{i}.img')
@@ -110,13 +110,13 @@ class ChimeraServer:
                 })
             # Module config goes under server.vfs, config is an object not string
             config["server"]["vfs"] = {
-                "demofs": {
+                "diskfs": {
                     "path": None,
                     "config": {"devices": devices}
                 }
             }
             config["mounts"]["share"] = {
-                "module": "demofs",
+                "module": "diskfs",
                 "path": "/"
             }
         elif self.backend == 'cairn':
@@ -144,7 +144,7 @@ class ChimeraServer:
         # For backends that use name_to_handle_at(), we need a filesystem that
         # supports file handles. /tmp is often tmpfs which doesn't support this.
         # Use /build/test/ instead, following the NFS test pattern.
-        if self.backend in ('linux', 'io_uring', 'demofs', 'cairn'):
+        if self.backend in ('linux', 'io_uring', 'diskfs', 'cairn'):
             test_base = '/build/test'
             os.makedirs(test_base, exist_ok=True)
             self.temp_dir = tempfile.mkdtemp(prefix='chimera_test_', dir=test_base)
@@ -558,7 +558,7 @@ def test_multipart(client, bucket):
     matches the concatenation of part bodies. The same test exercises
     different VFS assembly paths depending on backend capabilities:
     move_range (memfs), copy_range (linux/io_uring), or read+write
-    (cairn/demofs).
+    (cairn/diskfs).
     """
     print("Testing multipart upload operations...")
 
@@ -1219,7 +1219,7 @@ def main():
                         choices=list(TESTS.keys()) + ['all'],
                         help='Test(s) to run (can specify multiple)')
     parser.add_argument('--backend', '-b', default='memfs',
-                        choices=['memfs', 'linux', 'io_uring', 'demofs', 'cairn'],
+                        choices=['memfs', 'linux', 'io_uring', 'diskfs', 'cairn'],
                         help='VFS backend to test')
     parser.add_argument('--sigver', '-s', default='v4',
                         choices=['v2', 'v4'],

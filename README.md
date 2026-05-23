@@ -153,9 +153,9 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
             }
         ],
         "vfs": {
-            "demofs": {
-                "path": "/usr/local/lib/chimera_vfs_demofs.so",
-                "config": "/usr/local/etc/demofs.json"
+            "diskfs": {
+                "path": "/usr/local/lib/chimera_vfs_diskfs.so",
+                "config": "/usr/local/etc/diskfs.json"
             }
         }
     },
@@ -163,8 +163,8 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
         "linux": {
             "path": "/linux"
         },
-        "demofs": {
-            "path": "/demofs"
+        "diskfs": {
+            "path": "/diskfs"
         },
         "memfs": {
             "path": "/memfs"
@@ -179,8 +179,8 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
             "module": "io_uring",
             "path": "/share"
         },
-        "demofs": {
-            "module": "demofs",
+        "diskfs": {
+            "module": "diskfs",
             "path": "/"
         }
     },
@@ -191,8 +191,8 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
         "linux": {
             "path": "/linux"
         },
-        "demofs": {
-            "path": "/demofs"
+        "diskfs": {
+            "path": "/diskfs"
         }
     }
 }

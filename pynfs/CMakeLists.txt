@@ -6,10 +6,10 @@ set(CHIMERA_BINARY ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 set(PYNFS_WRAPPER ${CMAKE_SOURCE_DIR}/scripts/pynfs_test_wrapper.sh)
 set(PYNFS_DIR /opt/pynfs)
 
-set(PYNFS_BACKENDS memfs linux io_uring demofs_io_uring)
+set(PYNFS_BACKENDS memfs linux io_uring diskfs_io_uring)
 
 if(HAVE_LIBAIO)
-    list(APPEND PYNFS_BACKENDS demofs_aio)
+    list(APPEND PYNFS_BACKENDS diskfs_aio)
 endif()
 
 if(CAIRN_ENABLED)

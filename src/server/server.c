@@ -552,7 +552,7 @@ chimera_server_config_add_module(
     if (module_path) {
         snprintf(module_cfg->module_path, sizeof(module_cfg->module_path), "%s", module_path);
     } else {
-        /* We don't specify a path for preloaded modules like demofs */
+        /* We don't specify a path for preloaded modules like diskfs */
         module_cfg->module_path[0] = '\0';
     }
 } /* chimera_server_config_add_module */

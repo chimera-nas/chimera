@@ -97,7 +97,7 @@ chimera_vfs_encode_fh_parent(
  *
  * Convenience function that varint-encodes inum and gen, then calls
  * chimera_vfs_encode_fh_mount. This is useful for backends that use
- * inum+gen as their file handle fragment (memfs, demofs, cairn).
+ * inum+gen as their file handle fragment (memfs, diskfs, cairn).
  *
  * @param fsid      16-byte filesystem identifier
  * @param inum      Inode number

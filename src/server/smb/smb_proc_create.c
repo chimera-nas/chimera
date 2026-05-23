@@ -290,7 +290,7 @@ chimera_smb_create_gen_open_file(
          * Under a read cache the client offloads copy_file_range to the
          * server; if the backend can't do server-side copy the client falls
          * back to a cache-mediated copy that reads stale data (fsx READ BAD
-         * DATA on demofs/cairn).  Where copy_range is unavailable we leave the
+         * DATA on diskfs/cairn).  Where copy_range is unavailable we leave the
          * file uncached (write-through), which is correct. */
         bool backend_copy_safe =
             (oh->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE) != 0;
