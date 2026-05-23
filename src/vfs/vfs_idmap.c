@@ -43,18 +43,20 @@ who_string_to_special(
     const char *who,
     int         len)
 {
+    /* *INDENT-OFF* */
     static const struct {
         const char *name;
         uint8_t     special;
     } table[] = {
-        { "OWNER@",         CHIMERA_WHO_OWNER                                                 },
-        { "GROUP@",         CHIMERA_WHO_GROUP                                                 },
-        { "EVERYONE@",      CHIMERA_WHO_EVERYONE                                              },
-        { "INTERACTIVE@",   CHIMERA_WHO_INTERACTIVE                                           },
-        { "NETWORK@",       CHIMERA_WHO_NETWORK                                               },
-        { "AUTHENTICATED@", CHIMERA_WHO_AUTHENTICATED                                         },
-        { "ANONYMOUS@",     CHIMERA_WHO_ANONYMOUS                                             },
+        { "OWNER@",         CHIMERA_WHO_OWNER         },
+        { "GROUP@",         CHIMERA_WHO_GROUP         },
+        { "EVERYONE@",      CHIMERA_WHO_EVERYONE      },
+        { "INTERACTIVE@",   CHIMERA_WHO_INTERACTIVE   },
+        { "NETWORK@",       CHIMERA_WHO_NETWORK       },
+        { "AUTHENTICATED@", CHIMERA_WHO_AUTHENTICATED },
+        { "ANONYMOUS@",     CHIMERA_WHO_ANONYMOUS     },
     };
+    /* *INDENT-ON* */
 
     for (unsigned i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
         int nlen = (int) strlen(table[i].name);

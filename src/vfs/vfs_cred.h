@@ -71,6 +71,12 @@ chimera_vfs_cred_hash(const struct chimera_vfs_cred *cred)
     uint32_t words[3];
     uint32_t i;
 
+    /* Internal/server opens may carry no credential; they are exempt from
+     * engine enforcement anyway, so share a single cache bucket. */
+    if (!cred) {
+        return h;
+    }
+
     words[0] = (uint32_t) cred->flavor;
     words[1] = cred->uid;
     words[2] = cred->gid;

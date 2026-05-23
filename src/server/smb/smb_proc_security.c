@@ -13,6 +13,8 @@
  *   S-1-5-88-3-<mode>  Unix permission bits
  */
 
+#include <stdio.h>
+
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "vfs/vfs.h"
