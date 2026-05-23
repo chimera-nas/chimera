@@ -481,7 +481,7 @@ chimera_vfs_state_would_conflict(
                     }
 
                     /* SMB handle-cache: break only an IDLE holder (existing
-                     * optimistic-after-break semantics retained for SMB). */
+                    * optimistic-after-break semantics retained for SMB). */
                     if (want_break_h &&
                         cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
                         has_breakable_conflict = true;
