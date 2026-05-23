@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdint.h>
+#include <string.h>
 #include "vfs_acl_serialize.h"
 #include "common/macros.h"
 
@@ -127,6 +128,9 @@ chimera_acl_deserialize(
 
     for (unsigned i = 0; i < num_aces; i++) {
         struct chimera_ace *ace = &out->aces[i];
+
+        /* Zero interior struct padding so a deserialized ACL is byte-deterministic. */
+        memset(ace, 0, sizeof(*ace));
 
         ace->type        = get_u16(&p);
         ace->flags       = get_u16(&p);

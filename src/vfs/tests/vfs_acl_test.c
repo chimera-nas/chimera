@@ -243,7 +243,10 @@ test_inherit_fallback(void)
     TEST_PASS("inherit yields no ACEs when nothing is inheritable");
 } /* test_inherit_fallback */
 
-/* Serialize -> deserialize must reproduce the ACL byte-for-byte. */
+/* Serialize -> deserialize must reproduce the ACL byte-for-byte.  Zero the
+ * backing storage first: struct chimera_ace/chimera_principal carry interior
+ * padding that field assignments don't write, so a raw memcmp would otherwise
+ * compare uninitialised stack bytes (which differ under -O2). */
 static void
 test_serialize_roundtrip(void)
 {
@@ -251,6 +254,9 @@ test_serialize_roundtrip(void)
     ACL_BUF(back, 8);
     uint8_t buf[256];
     int     len, n;
+
+    memset(acl_storage, 0, sizeof(acl_storage));
+    memset(back_storage, 0, sizeof(back_storage));
 
     chimera_acl_from_mode(0751, acl, 8);
     acl->ctrl_flags = CHIMERA_ACL_CTRL_PROTECTED;
