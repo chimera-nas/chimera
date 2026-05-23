@@ -103,6 +103,15 @@ struct demofs_request_private {
     uint32_t                 read_suffix;
     struct demofs_thread    *thread;     // Thread for tracking pending I/O
     struct demofs_txn       *txn;        // Transaction wrapping this op
+
+    /* Data-I/O admission control (see demofs_thread.io_wait_head).  When a
+     * request parks because the block queue is full, io_resume re-enters the
+     * paused path; io_reading marks a read whose extent walk has not finished,
+     * so a completion that drains its in-flight reads to zero must not finalize
+     * it while it is parked mid-walk. */
+    void                     (*io_resume)(struct chimera_vfs_request *);
+    struct chimera_vfs_request *io_wait_next;
+    int                      io_reading;
     /* Multi-inode op scratch (lookup_at parent/child, rename's 4-inode
      * chain, etc.).  Per-op semantics documented at use sites. */
     struct demofs_inode     *inode_stash[4];
@@ -675,6 +684,7 @@ struct demofs_intent_log {
     struct demofs_il_record  *push_head;
     struct demofs_il_record  *push_tail;
     struct demofs_il_record  *push_cur;          /* record currently being pushed */
+    uint32_t                  push_next;         /* next block index of push_cur to issue */
     int                       push_outstanding;  /* home writes in flight for push_cur */
     int                       redo_inflight;     /* redo writes issued, not yet in FIFO */
     int                       iocbs_inflight;    /* block writes (redo + push) on the queue, not yet completed */
@@ -743,6 +753,12 @@ struct demofs_thread {
      * b+tree in bounded batches across transactions). */
     struct demofs_drain        *drain_head, *drain_tail;
     int                         draining;
+
+    /* Data-I/O admission control: the per-thread block queues have a bounded
+     * submission ring, so a burst of concurrent (or heavily fragmented) reads
+     * and writes can overrun it.  Requests that would exceed the in-flight cap
+     * park here and are resumed from a block-I/O completion as capacity frees. */
+    struct chimera_vfs_request *io_wait_head, *io_wait_tail;
 };
 
 /* ------------------------------------------------------------------ */
@@ -1974,6 +1990,11 @@ struct demofs_block_load {
     struct demofs_thread *thread;     /* worker that issued the read */
 };
 
+/* Resume data-I/O requests parked on the admission gate (defined below); a
+ * metadata-node read shares the worker queue, so its completion frees capacity
+ * too and must wake parked requests, else they hang. */
+static void demofs_io_resume_waiters(struct demofs_thread *thread);
+
 /* Block read completion: data landed directly in blk->iov; mark CLEAN, wake. */
 static void
 demofs_block_load_complete(
@@ -2007,6 +2028,9 @@ demofs_block_load_complete(
         waiters = op->next;
         demofs_bt_op_resume(self, op);
     }
+
+    /* Freed a worker-queue slot: let any parked data-I/O requests resume. */
+    demofs_io_resume_waiters(self);
 } /* demofs_block_load_complete */
 
 /*
@@ -5392,6 +5416,8 @@ demofs_il_clean_pushed_record(
     }
 } /* demofs_il_clean_pushed_record */
 
+static void demofs_il_push_issue(struct demofs_intent_log *il);
+
 /* Finish the current record: mark its blocks evictable, release the record's
 * iovecs (header + all block clones), advance the tail, and kick the next. */
 static void
@@ -5433,7 +5459,17 @@ demofs_il_push_block_cb(
         evpl_ring_doorbell(&il->wake_doorbell);
     }
 
-    if (--il->push_outstanding == 0) {
+    --il->push_outstanding;
+
+    /* Capacity freed: issue any of this record's remaining home writes that the
+     * cap held back. */
+    if (il->push_cur && il->push_next < il->push_cur->num_blocks) {
+        demofs_il_push_issue(il);
+    }
+
+    /* All of the current record's blocks are issued and durably home. */
+    if (il->push_outstanding == 0 &&
+        il->push_cur && il->push_next == il->push_cur->num_blocks) {
         demofs_il_push_finish(il);
     }
 } /* demofs_il_push_block_cb */
@@ -5447,10 +5483,7 @@ demofs_il_push_block_cb(
 static void
 demofs_il_push_kick(struct demofs_intent_log *il)
 {
-    struct demofs_il_record         *rec;
-    struct demofs_redo_block_header *bh;
-    char                            *p;
-    uint32_t                         i;
+    struct demofs_il_record *rec;
 
     if (il->push_cur || !il->push_head) {
         return;
@@ -5461,28 +5494,48 @@ demofs_il_push_kick(struct demofs_intent_log *il)
     if (!il->push_head) {
         il->push_tail = NULL;
     }
-    rec->next    = NULL;
-    il->push_cur = rec;
+    rec->next            = NULL;
+    il->push_cur         = rec;
+    il->push_next        = 0;
+    il->push_outstanding = 0;
 
     if (rec->num_blocks == 0) {
         demofs_il_push_finish(il);
         return;
     }
 
-    /* Block I/O completes asynchronously, so no completion can fire while we
-     * issue these writes; the last completion finishes the record. */
-    il->push_outstanding = rec->num_blocks;
-    il->iocbs_inflight  += rec->num_blocks;    /* one home write per block below */
+    demofs_il_push_issue(il);
+} /* demofs_il_push_kick */
 
-    p = (char *) rec->iovs[0].data + sizeof(struct demofs_redo_header);
-    for (i = 0; i < rec->num_blocks; i++) {
-        bh = (struct demofs_redo_block_header *) p;
-        p += sizeof(*bh);
+/*
+ * Issue as many of the current record's remaining home writes as the block
+ * queue's in-flight cap allows.  A large metadata txn can have more blocks than
+ * the submission ring holds, so the rest are issued from demofs_il_push_block_cb
+ * as completions free capacity.  Shares the iocb budget with redo writes (both
+ * gate on iocbs_inflight) so the IL thread never overruns the queue.
+ */
+static void
+demofs_il_push_issue(struct demofs_intent_log *il)
+{
+    struct demofs_il_record         *rec  = il->push_cur;
+    char                            *base = (char *) rec->iovs[0].data +
+        sizeof(struct demofs_redo_header);
+    struct demofs_redo_block_header *bh;
 
-        evpl_block_write(il->evpl, il->queue[bh->device_id], &rec->iovs[1 + i], 1,
+    while (il->push_next < rec->num_blocks &&
+           il->iocbs_inflight < DEMOFS_IL_IOCB_CAP) {
+        uint32_t idx = il->push_next;
+
+        bh = (struct demofs_redo_block_header *) (base + (size_t) idx * sizeof(*bh));
+
+        il->push_next++;
+        il->push_outstanding++;
+        il->iocbs_inflight++;
+
+        evpl_block_write(il->evpl, il->queue[bh->device_id], &rec->iovs[1 + idx], 1,
                          bh->device_offset, 1 /* sync */, demofs_il_push_block_cb, il);
     }
-} /* demofs_il_push_kick */
+} /* demofs_il_push_issue */
 
 /*
  * Runs on the intent-log thread when a redo record has been written
@@ -5865,6 +5918,7 @@ demofs_intent_log_thread_init(
     il->push_head        = NULL;
     il->push_tail        = NULL;
     il->push_cur         = NULL;
+    il->push_next        = 0;
     il->push_outstanding = 0;
     il->redo_inflight    = 0;
     il->iocbs_inflight   = 0;
@@ -8623,6 +8677,67 @@ demofs_read_adjust_iovecs(
     }
 } /* demofs_read_adjust_iovecs */ /* demofs_read_adjust_iovecs */
 
+/*
+ * Data-I/O admission control.  A worker submits read/write block I/O onto its
+ * per-device queues, whose submission rings are bounded (libaio 256, io_uring
+ * 8192); fragmented reads fan out per extent and many connections (nconnect)
+ * drive concurrent requests, so unchecked submission overruns the ring.  Cap
+ * the in-flight data I/O well under the smaller ring; a request that would
+ * exceed it parks and is resumed from a completion at the low watermark.  The
+ * cap leaves headroom for the un-gated, self-limited metadata reads (one
+ * outstanding per suspended b+tree op) sharing the same queues.
+ */
+#define DEMOFS_IO_INFLIGHT_CAP   128
+#define DEMOFS_IO_INFLIGHT_LOWAT 64
+
+/*
+ * Returns 1 and parks the request if the in-flight data I/O is at the cap (the
+ * caller must then return without issuing); 0 if it is clear to submit.  resume
+ * re-enters the paused path once a completion drains the queue.
+ */
+static int
+demofs_io_gate(
+    struct demofs_thread       *thread,
+    struct chimera_vfs_request *request,
+    void                        (*resume)(struct chimera_vfs_request *))
+{
+    struct demofs_request_private *p = request->plugin_data;
+
+    if (thread->pending_io < DEMOFS_IO_INFLIGHT_CAP) {
+        return 0;
+    }
+
+    p->io_resume    = resume;
+    p->io_wait_next = NULL;
+    if (thread->io_wait_tail) {
+        struct demofs_request_private *tp = thread->io_wait_tail->plugin_data;
+        tp->io_wait_next = request;
+    } else {
+        thread->io_wait_head = request;
+    }
+    thread->io_wait_tail = request;
+    return 1;
+} /* demofs_io_gate */
+
+/* Resume parked requests while the queue has drained below the low watermark. */
+static void
+demofs_io_resume_waiters(struct demofs_thread *thread)
+{
+    while (thread->io_wait_head && thread->pending_io < DEMOFS_IO_INFLIGHT_LOWAT) {
+        struct chimera_vfs_request    *request = thread->io_wait_head;
+        struct demofs_request_private *p       = request->plugin_data;
+        void                           (*resume)(struct chimera_vfs_request *) = p->io_resume;
+
+        thread->io_wait_head = p->io_wait_next;
+        if (!thread->io_wait_head) {
+            thread->io_wait_tail = NULL;
+        }
+        p->io_wait_next = NULL;
+        p->io_resume    = NULL;
+        resume(request);
+    }
+} /* demofs_io_resume_waiters */
+
 static inline void
 demofs_io_callback(
     struct evpl *evpl,
@@ -8640,7 +8755,12 @@ demofs_io_callback(
     demofs_private->pending--;
     thread->pending_io--;
 
-    if (demofs_private->pending == 0) {
+    /* Don't finalize a read whose extent walk is still in progress (parked on
+     * the admission gate): its remaining reads have yet to be issued.  The
+     * io_reading guard is scoped to reads -- request plugin_data is pooled and
+     * not zeroed, and only demofs_read sets the flag (fresh, per op). */
+    if (demofs_private->pending == 0 &&
+        !(demofs_private->opcode == CHIMERA_VFS_OP_READ && demofs_private->io_reading)) {
         if (demofs_private->opcode == CHIMERA_VFS_OP_READ) {
             demofs_read_adjust_iovecs(request, demofs_private);
         }
@@ -8654,6 +8774,9 @@ demofs_io_callback(
             demofs_op_ok(request, demofs_private->txn);
         }
     }
+
+    /* Queue capacity freed: let any parked requests resume submitting. */
+    demofs_io_resume_waiters(thread);
 } /* demofs_io_callback */
 
 /*
@@ -8678,6 +8801,9 @@ demofs_read_finish(struct chimera_vfs_request *request)
     }
 
     demofs_map_attrs(thread, &request->read.r_attr, inode);
+
+    /* The extent walk is complete; a now-or-later finalize is safe. */
+    p->io_reading = 0;
 
     if (p->pending == 0) {
         demofs_read_adjust_iovecs(request, p);
@@ -8734,6 +8860,12 @@ demofs_read_process(struct chimera_vfs_request *request)
 
     if (!(read_left && p->loop_have && extent->file_offset < aligned_end)) {
         demofs_read_finish(request);
+        return;
+    }
+
+    /* Bound in-flight data I/O: park here (state is fully in p) and resume the
+     * walk from a completion if the queue is at the cap. */
+    if (demofs_io_gate(thread, request, demofs_read_process)) {
         return;
     }
 
@@ -8918,12 +9050,13 @@ demofs_read(
     (void) shared;
     (void) private_data;
 
-    p->opcode  = request->opcode;
-    p->status  = 0;
-    p->pending = 0;
-    p->niov    = 0;
-    p->thread  = thread;
-    p->txn     = demofs_txn_begin(thread, DEMOFS_TXN_READ);
+    p->opcode     = request->opcode;
+    p->status     = 0;
+    p->pending    = 0;
+    p->niov       = 0;
+    p->thread     = thread;
+    p->io_reading = 1;     /* cleared in demofs_read_finish when the walk ends */
+    p->txn        = demofs_txn_begin(thread, DEMOFS_TXN_READ);
 
     demofs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -8935,6 +9068,15 @@ static void demofs_write_phase2(
     struct demofs_thread       *thread,
     struct demofs_shared       *shared,
     struct chimera_vfs_request *request);
+
+/* Admission-gate resume trampoline for the write data phase. */
+static void
+demofs_write_phase2_resume(struct chimera_vfs_request *request)
+{
+    struct demofs_request_private *p = request->plugin_data;
+
+    demofs_write_phase2(p->thread, p->thread->shared, request);
+} /* demofs_write_phase2_resume */
 
 // Callback for RMW prefix/suffix reads
 static void
@@ -8954,6 +9096,9 @@ demofs_write_rmw_read_callback(
 
     demofs_private->pending--;
     thread->pending_io--;
+
+    /* Queue capacity freed: let any parked requests resume submitting. */
+    demofs_io_resume_waiters(thread);
 
     if (demofs_private->pending == 0) {
         if (demofs_private->status) {
@@ -8994,6 +9139,14 @@ demofs_write_phase2(
     uint64_t                       write_length = request->write.length;
     uint32_t                       prefix_len   = demofs_private->rmw_prefix_len;
     uint32_t                       suffix_len   = demofs_private->rmw_suffix_len;
+
+    /* Bound in-flight data I/O: park before assembling/issuing the write if the
+     * queue is at the cap.  We gate at entry (nothing allocated yet), so resume
+     * simply re-enters phase2.  The inode lock is held until the txn is durable
+     * regardless, so parking here doesn't expose dirty state. */
+    if (demofs_io_gate(thread, request, demofs_write_phase2_resume)) {
+        return;
+    }
 
     // Build the combined write iovec:
     // [prefix (if any)] + [write data] + [suffix (if any)] + [padding to 4KB]
