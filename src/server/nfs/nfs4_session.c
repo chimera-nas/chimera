@@ -633,6 +633,9 @@ nfs4_client_create_session_classify(
     if (!c) {
         out->action = NFS4_CS_ERROR;
         out->status = NFS4ERR_STALE_CLIENTID;
+    } else if (c->unified && c->unified->expired) {
+        out->action = NFS4_CS_ERROR;
+        out->status = NFS4ERR_STALE_CLIENTID;
     } else if (csa_sequence == c->nfs4_client_cs_seqid) {
         /* Retransmit of the last request, or -- before any request -- the
          * contrived (eir_sequenceid - 1) value (RFC 8881 §18.36.4). */
