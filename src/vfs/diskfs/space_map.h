@@ -133,6 +133,34 @@ struct sm_journal {
 };
 
 /*
+ * Mount-time block I/O bridge.  All disk access goes through the async
+ * evpl_block path; at mount (before worker threads exist) diskfs drives those
+ * async ops to completion by pumping a transient evpl loop and exposes them
+ * here.  offset must be block-aligned; read rounds the length up to a block
+ * internally and copies the requested bytes out (so callers may request a
+ * sub-block struct), write requires a block-aligned length.  Each returns 0 on
+ * success, -1 on error.
+ */
+struct sm_io {
+    int   (*read)(
+        void    *user,
+        uint32_t device_id,
+        void    *buf,
+        uint64_t length,
+        uint64_t offset);
+    int   (*write)(
+        void       *user,
+        uint32_t    device_id,
+        const void *buf,
+        uint64_t    length,
+        uint64_t    offset);
+    int   (*flush)(
+        void    *user,
+        uint32_t device_id);
+    void *user;
+};
+
+/*
  * Statically-reserved intent log region.  Lives on device 0 right after
  * the superblock; its exact location is also recorded in the superblock
  * so future format versions can move it.  Carved out of AG 0 of device 0.
@@ -245,6 +273,30 @@ void
 space_map_destroy(
     struct space_map *sm);
 
+/*
+ * Return code for the journaling operations below: the journal write goes
+ * through the async block path (sm_journal.claim_block), so when a log block
+ * is not resident the claim parks the calling request and issues the read, and
+ * the operation reports SM_AGAIN without changing any allocator state.  The
+ * caller must unwind and re-drive the whole operation once resumed; the retry
+ * is clean because nothing was mutated.  0 = done, -1 = ENOSPC (alloc only).
+ */
+#define SM_AGAIN 1
+
+/*
+ * Ensure the thread's reservation cache holds at least min_bytes of contiguous
+ * space, refilling (journals + may SM_AGAIN) if short.  Hands out nothing;
+ * callers use it to front-load the journaling/suspension of a metadata op
+ * before a non-suspendable section (e.g. a b+tree modify) so the subsequent
+ * allocs are pure cache draws.  0 = covered, -1 = ENOSPC, SM_AGAIN = parked.
+ */
+int
+space_map_reserve(
+    struct space_map        *sm,
+    struct sm_thread_cache  *cache,
+    const struct sm_journal *jnl,
+    uint64_t                 min_bytes);
+
 int
 space_map_alloc(
     struct space_map        *sm,
@@ -254,7 +306,7 @@ space_map_alloc(
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset);
 
-void
+int
 space_map_free(
     struct space_map        *sm,
     const struct sm_journal *jnl,
@@ -264,7 +316,7 @@ space_map_free(
 
 /* Pending free: journal the FREE delta now (rides the txn redo), apply the
  * in-memory free only once that txn is durable. */
-void
+int
 space_map_free_journal(
     struct space_map        *sm,
     const struct sm_journal *jnl,
@@ -279,51 +331,50 @@ space_map_free_apply(
     uint64_t          device_offset,
     uint64_t          length);
 
-void
+int
 space_map_thread_cache_return(
     struct space_map        *sm,
     const struct sm_journal *jnl,
     struct sm_thread_cache  *cache);
 
 /*
- * Synchronously write a stub superblock to offset 0 of `device_path` by
- * opening the file directly with pwrite + fsync.  Done at format time
- * (before evpl claims the device) so we avoid any reentrancy with the
- * VFS dispatch loop.
+ * Write a stub superblock to offset 0 of device 0 through the mount-time
+ * I/O bridge (async evpl_block, pumped to completion + flushed).  Done at
+ * format/unmount time before worker threads exist.
  */
 int
-space_map_write_superblock_path(
-    struct space_map *sm,
-    const char       *device_path,
-    uint64_t          fsid,
-    uint64_t          flags,
-    uint64_t          root_inum,
-    uint32_t          root_gen,
-    uint64_t          log_seq);
+space_map_write_superblock(
+    struct space_map   *sm,
+    const struct sm_io *io,
+    uint64_t            fsid,
+    uint64_t            flags,
+    uint64_t            root_inum,
+    uint32_t            root_gen,
+    uint64_t            log_seq);
 
 /* Read + validate the superblock from device 0; 0 on success (fills *out),
  * -1 if absent/corrupt/wrong-version (caller should mkfs). */
 int
-space_map_read_superblock_path(
-    const char           *device_path,
+space_map_read_superblock(
+    const struct sm_io   *io,
     struct sm_superblock *out);
 
 /*
  * Persist the free-space map to each AG's on-disk log slot (clean unmount),
- * and reload it (mount).  device_paths[d] is the path of device d.  persist
- * returns 0 on success; load returns 0 if every AG's snapshot validated and
- * the in-memory free trees were rebuilt from them, -1 otherwise (caller
- * should treat the filesystem as needing mkfs / recovery).
+ * and reload it (mount), through the mount-time I/O bridge.  persist returns
+ * 0 on success; load returns 0 if every AG's snapshot validated and the
+ * in-memory free trees were rebuilt from them, -1 otherwise (caller should
+ * treat the filesystem as needing mkfs / recovery).
  */
 int
-space_map_persist_paths(
-    struct space_map *sm,
-    char            **device_paths);
+space_map_persist(
+    struct space_map   *sm,
+    const struct sm_io *io);
 
 int
-space_map_load_paths(
-    struct space_map *sm,
-    char            **device_paths);
+space_map_load(
+    struct space_map   *sm,
+    const struct sm_io *io);
 
 static inline uint64_t
 space_map_total_capacity(const struct space_map *sm)

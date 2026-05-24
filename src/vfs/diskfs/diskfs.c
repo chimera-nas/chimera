@@ -333,6 +333,7 @@ enum diskfs_block_state {
 };
 
 struct diskfs_bt_op;
+struct diskfs_block_waiter;
 
 /*
  * A cached 4 KiB on-disk block, keyed by (device_id, device_offset).  The
@@ -346,21 +347,23 @@ struct diskfs_bt_op;
  * buffer starts CLEAN on the LRU, not in any bucket.
  */
 struct diskfs_block {
-    uint32_t             device_id;
-    uint64_t             device_offset;        /* block-aligned; key with device_id */
-    struct evpl_iovec    iov;                  /* SHARED DISKFS_BLOCK_SIZE buffer; .data may
+    uint32_t                    device_id;
+    uint64_t                    device_offset; /* block-aligned; key with device_id */
+    struct evpl_iovec           iov;           /* SHARED DISKFS_BLOCK_SIZE buffer; .data may
                                                 * be NULL on a never-yet-used pool slot */
-    int                  pin_count;            /* >0 => pinned, not reclaimable */
+    int                         pin_count;     /* >0 => pinned, not reclaimable */
     enum diskfs_block_state state;
-    uint64_t             seq;                  /* update order for tail-push */
-    struct diskfs_block *hash_next;            /* bucket chain */
-    struct diskfs_block *lru_prev, *lru_next;  /* shard LRU (CLEAN + unpinned) */
-    int                  on_lru;               /* 1 iff linked on the shard LRU */
+    uint64_t                    seq;           /* update order for tail-push */
+    struct diskfs_block        *hash_next;     /* bucket chain */
+    struct diskfs_block        *lru_prev, *lru_next; /* shard LRU (CLEAN + unpinned) */
+    int                         on_lru;        /* 1 iff linked on the shard LRU */
 
-    /* Ops blocked on a LOADING block, woken when the read I/O completes.
-     * Protected by the owning shard lock. */
-    struct diskfs_bt_op *wait_head;
-    struct diskfs_bt_op *wait_tail;
+    /* Continuations blocked on a LOADING block, woken when the read I/O
+     * completes.  Each waiter names its owning worker, so a completion that
+     * runs on a different worker (one that issued the read) can dispatch it
+     * back home.  Protected by the owning shard lock. */
+    struct diskfs_block_waiter *wait_head;
+    struct diskfs_block_waiter *wait_tail;
 };
 
 struct diskfs_block_shard {
@@ -582,6 +585,7 @@ struct diskfs_txn_free {
     uint32_t                device_id;
     uint64_t                device_offset;
     uint64_t                length;
+    int                     journaled; /* FREE delta written (pre-commit flush) */
     struct diskfs_txn_free *next;
 };
 
@@ -738,16 +742,17 @@ struct diskfs_thread {
     struct diskfs_inode_waiter *grant_tail;
     struct evpl_doorbell        grant_doorbell;
 
-    /* Cross-thread b+tree op resumption: when a block this worker's ops are
-     * waiting on finishes loading (possibly on another worker that issued the
-     * read), the ready ops are queued here.  Same-worker resumptions drain via
-     * the deferral (no eventfd); cross-worker ones ring the doorbell. */
+    /* Cross-thread continuation resumption: when a block this worker has
+     * waiters on finishes loading (possibly on another worker that issued the
+     * read), the ready waiters are queued here.  Same-worker resumptions drain
+     * via the deferral (no eventfd); cross-worker ones ring the doorbell. */
     pthread_mutex_t             resume_lock;
-    struct diskfs_bt_op        *resume_head;
-    struct diskfs_bt_op        *resume_tail;
+    struct diskfs_block_waiter *resume_head;
+    struct diskfs_block_waiter *resume_tail;
     struct evpl_doorbell        resume_doorbell;
     struct evpl_deferral        resume_deferral;
     struct diskfs_bt_op        *bt_op_free_list;
+    struct diskfs_block_waiter *block_waiter_free_list;
 
     /* Background reclaim of large deleted inodes: a queue of orphan drain
      * contexts processed one at a time on this worker (each drains its inode's
@@ -787,6 +792,7 @@ enum diskfs_bt_opcode {
 };
 
 enum diskfs_bt_phase {
+    DISKFS_BT_PHASE_RESERVE,   /* INSERT: pre-reserve split space (suspendable) */
     DISKFS_BT_PHASE_DESCEND,
     DISKFS_BT_PHASE_WALK_NEXT,
     DISKFS_BT_PHASE_WALK_PREV,
@@ -914,6 +920,47 @@ diskfs_waiter_free(
     w->next                  = thread->waiter_free_list;
     thread->waiter_free_list = w;
 } /* diskfs_waiter_free */
+
+/*
+ * A continuation parked on a block's LOADING waiter list.  Generalizes the
+ * wait list so any caller -- a b+tree op, an inode-block pin, the space-map
+ * allocator -- can suspend on a block read and be resumed: when the read
+ * completes, each waiter is dispatched to its owning worker's resume queue,
+ * which invokes resume(thread, arg).  Pooled per-thread; a waiter is always
+ * allocated and freed on its owning worker, so the pool stays thread-local
+ * even though the dispatch crosses workers.
+ */
+struct diskfs_block_waiter {
+    struct diskfs_thread       *thread; /* worker to resume on (owns the pool) */
+    void                        (*resume)(
+        struct diskfs_thread *thread,
+        void                 *arg);
+    void                       *arg;
+    struct diskfs_block_waiter *next;
+};
+
+static inline struct diskfs_block_waiter *
+diskfs_block_waiter_alloc(struct diskfs_thread *thread)
+{
+    struct diskfs_block_waiter *w = thread->block_waiter_free_list;
+
+    if (w) {
+        thread->block_waiter_free_list = w->next;
+    } else {
+        w = malloc(sizeof(*w));
+    }
+    w->next = NULL;
+    return w;
+} /* diskfs_block_waiter_alloc */
+
+static inline void
+diskfs_block_waiter_free(
+    struct diskfs_thread       *thread,
+    struct diskfs_block_waiter *w)
+{
+    w->next                        = thread->block_waiter_free_list;
+    thread->block_waiter_free_list = w;
+} /* diskfs_block_waiter_free */
 
 /* Record a held inode in the transaction's fixed slot array. */
 static inline void
@@ -1161,6 +1208,20 @@ static void diskfs_inode_load(
     diskfs_inode_cb_t           cb,
     void                       *private_data);
 
+/* Ensure a write-locked inode's home block is resident+pinned+attached (via
+ * the async block path) then fire cb; used at the two write-lock grant points
+ * so every later pin_inode_block on this inode is a resident no-op. */
+static void diskfs_inode_finish_write_pin(
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *inode,
+    diskfs_inode_cb_t     cb,
+    void                 *private_data);
+
+static void diskfs_pin_cont_resume(
+    struct diskfs_thread *thread,
+    void                 *arg);
+
 static void
 diskfs_inode_acquire(
     struct diskfs_thread       *thread,
@@ -1222,9 +1283,12 @@ diskfs_inode_acquire(
         pthread_mutex_unlock(&shard->lock);
         diskfs_txn_add_slot(txn, inode, mode);
         if (mode == DISKFS_INODE_LOCK_WRITE) {
-            diskfs_txn_pin_inode_block(thread, txn, inode, 0);
+            /* Pin the home block before reporting the grant; may async-load it
+             * (and defer cb) if it was evicted while the inode stayed cached. */
+            diskfs_inode_finish_write_pin(thread, txn, inode, cb, private_data);
+        } else {
+            cb(inode, CHIMERA_VFS_OK, private_data);
         }
-        cb(inode, CHIMERA_VFS_OK, private_data);
         return;
     }
 
@@ -1278,9 +1342,11 @@ diskfs_inode_get_fh_async(
 } /* diskfs_inode_get_fh_async */
 
 /*
- * Synchronously fault an inode in from disk (mount-time path walk on a
- * remounted FS).  Blocking pread is fine here: mount is rare and runs before
- * concurrent load.  Returns a populated, cache-inserted inode or NULL.
+ * Fault an inode in (mount-time orphan recovery + path walk on a remounted
+ * FS).  Returns it from cache if resident; otherwise reads the dinode block
+ * through the mount-time evpl pump `io` (VFIO-safe) and seeds the cache.  Runs
+ * single-threaded at mount, so the blocking pump is fine.  Returns a populated,
+ * cache-inserted inode or NULL.
  */
 static struct diskfs_block * diskfs_block_claim(
     struct diskfs_thread *thread,
@@ -1295,6 +1361,21 @@ static void diskfs_block_unpin(
     struct diskfs_block    *blk,
     enum diskfs_block_state new_state);
 
+/* Mount-time evpl-pump block I/O (defined with the recovery helpers); the
+ * mount-time orphan recovery + path-walk fault paths read through it so they
+ * reach a VFIO/io_uring/libaio device rather than pread'ing a device path. */
+struct diskfs_mount_io;
+static struct diskfs_mount_io * diskfs_mount_io_open(
+    struct diskfs_shared *shared);
+static void diskfs_mount_io_close(
+    struct diskfs_mount_io *io);
+static int diskfs_mount_io_read(
+    void    *user,
+    uint32_t device_id,
+    void    *buf,
+    uint64_t length,
+    uint64_t offset);
+
 /* Defined with the block-cache helpers it consults; used by the fault paths. */
 static void diskfs_inode_cache_recycle_locked(
     struct diskfs_shared      *shared,
@@ -1302,10 +1383,11 @@ static void diskfs_inode_cache_recycle_locked(
 
 static struct diskfs_inode *
 diskfs_inode_load_sync(
-    struct diskfs_thread *thread,
-    uint64_t              inum,
-    uint32_t              gen,
-    int                   allow_orphan)
+    struct diskfs_thread   *thread,
+    struct diskfs_mount_io *io,
+    uint64_t                inum,
+    uint32_t                gen,
+    int                     allow_orphan)
 {
     struct diskfs_shared      *shared = thread->shared;
     struct diskfs_inode_shard *shard  = diskfs_inode_shard(shared, inum);
@@ -1314,21 +1396,28 @@ diskfs_inode_load_sync(
     uint8_t                    buf[DISKFS_BLOCK_SIZE];
     uint32_t                   dev;
     uint64_t                   off;
-    int                        fd;
-    ssize_t                    n;
 
     if (!sm_inum_valid(shared->space_map, inum)) {
         return NULL;
     }
 
-    off = sm_inum_to_device_offset(shared->space_map, inum, &dev);
-    fd  = open(shared->device_paths[dev], O_RDONLY);
-    if (fd < 0) {
-        return NULL;
+    /* Already resident (e.g. a freshly-bootstrapped root/orphan inode, or a
+     * prior fault): return it without touching disk. */
+    pthread_mutex_lock(&shard->lock);
+    rb_tree_query_exact(&shard->inodes, inum, inum, inode);
+    if (inode) {
+        int ok = (inode->gen == gen && (inode->nlink != 0 || allow_orphan));
+
+        pthread_mutex_unlock(&shard->lock);
+        return ok ? inode : NULL;
     }
-    n = pread(fd, buf, sizeof(buf), off);
-    close(fd);
-    if (n != (ssize_t) sizeof(buf)) {
+    pthread_mutex_unlock(&shard->lock);
+
+    /* Not cached: read the dinode block from disk through the mount-time pump
+     * (VFIO-safe).  Safe to read the on-disk image directly -- an inode whose
+     * struct is not cached has no in-flight dirty block. */
+    off = sm_inum_to_device_offset(shared->space_map, inum, &dev);
+    if (diskfs_mount_io_read(io, dev, buf, sizeof(buf), off) != 0) {
         return NULL;
     }
 
@@ -1366,63 +1455,16 @@ diskfs_inode_load_sync(
     }
     pthread_mutex_unlock(&shard->lock);
 
-    /* Seed the inode's home block into the block cache from the disk image. */
+    /* Seed the inode's home block into the block cache from the disk image we
+     * just read.  Claim is_new (no read-back): we overwrite the whole block. */
     {
-        struct diskfs_block *blk = diskfs_block_claim(thread, dev, off, 0);
+        struct diskfs_block *blk = diskfs_block_claim(thread, dev, off, 1);
 
         memcpy(blk->iov.data, buf, DISKFS_BLOCK_SIZE);
         diskfs_block_unpin(thread, blk, DISKFS_BLOCK_CLEAN);
     }
     return inode;
 } /* diskfs_inode_load_sync */
-
-/*
- * Synchronous read-lock acquire, used by the mount-time path walk which
- * runs before concurrent load.  Records the read lock in the txn so it is
- * released centrally at commit.  On a remounted FS a non-resident inode is
- * faulted in from disk; returns NULL if it isn't on disk or the generation
- * is stale.
- */
-static struct diskfs_inode *
-diskfs_inode_acquire_sync_read(
-    struct diskfs_thread *thread,
-    struct diskfs_txn    *txn,
-    uint64_t              inum,
-    uint32_t              gen)
-{
-    struct diskfs_inode_shard *shard;
-    struct diskfs_inode       *inode;
-    int                        i;
-
-    for (i = 0; i < txn->num_inodes; i++) {
-        if (txn->inodes[i].inode->inum == inum) {
-            return txn->inodes[i].inode->gen == gen ? txn->inodes[i].inode : NULL;
-        }
-    }
-
-    shard = diskfs_inode_shard(thread->shared, inum);
-    pthread_mutex_lock(&shard->lock);
-    rb_tree_query_exact(&shard->inodes, inum, inum, inode);
-    if (inode && inode->gen != gen) {
-        pthread_mutex_unlock(&shard->lock);
-        return NULL;
-    }
-    if (!inode) {
-        pthread_mutex_unlock(&shard->lock);
-        inode = diskfs_inode_load_sync(thread, inum, gen, 0);
-        if (!inode) {
-            return NULL;
-        }
-        pthread_mutex_lock(&shard->lock);
-    }
-    chimera_diskfs_abort_if(inode->writer,
-                            "mount path walk: inode %lu write-locked", inum);
-    inode->readers++;
-    pthread_mutex_unlock(&shard->lock);
-
-    diskfs_txn_add_slot(txn, inode, DISKFS_INODE_LOCK_READ);
-    return inode;
-} /* diskfs_inode_acquire_sync_read */
 
 /* ------------------------------------------------------------------ */
 /* Block cache                                                         */
@@ -1732,20 +1774,17 @@ diskfs_block_claim(
         blk->wait_tail     = NULL;
         diskfs_block_ensure_iov(thread, blk);
 
-        if (is_new) {
-            memset(blk->iov.data, 0, DISKFS_BLOCK_SIZE);
-        } else {
-            int     fd = open(thread->shared->device_paths[device_id], O_RDONLY);
-            ssize_t n  = -1;
-
-            if (fd >= 0) {
-                n = pread(fd, blk->iov.data, DISKFS_BLOCK_SIZE, (off_t) device_offset);
-                close(fd);
-            }
-            chimera_diskfs_abort_if(n != (ssize_t) DISKFS_BLOCK_SIZE,
-                                    "block_claim disk read failed off=%lu n=%zd",
-                                    device_offset, n);
-        }
+        /* is_new starts from a zeroed buffer.  A non-resident is_new==0 claim
+         * would need a synchronous disk read, which no longer happens: every
+         * such caller either finds the block pinned/resident (inode-block pin
+         * after the write-lock grant pre-faults it; b+tree modify nodes faulted
+         * + pinned by bt_run) or goes through the async path (diskfs_block_
+         * claim_async) / the mount-time pump.  A miss here is therefore a bug. */
+        chimera_diskfs_abort_if(!is_new,
+                                "synchronous block_claim miss off=%lu -- "
+                                "caller must pre-fault or use the async path",
+                                device_offset);
+        memset(blk->iov.data, 0, DISKFS_BLOCK_SIZE);
 
         blk->hash_next         = shard->buckets[bucket];
         shard->buckets[bucket] = blk;
@@ -1799,7 +1838,21 @@ diskfs_txn_add_block(
 struct diskfs_sm_jnl {
     struct diskfs_thread *thread;
     struct diskfs_txn    *txn;
+    /* Continuation re-driving the journaling operation if a log-block claim
+     * must wait for a read.  Runs on `thread` once the block loads. */
+    void                  (*resume)(
+        struct diskfs_thread *thread,
+        void                 *arg);
+    void                 *resume_arg;
 };
+
+static struct diskfs_block * diskfs_block_claim_async(
+    struct diskfs_thread *thread,
+    uint32_t device_id,
+    uint64_t device_offset,
+    int is_new,
+    void ( *resume )(struct diskfs_thread *, void *),
+    void *arg);
 
 static void *
 diskfs_sm_claim_block(
@@ -1808,17 +1861,39 @@ diskfs_sm_claim_block(
     uint64_t device_offset,
     int      is_new)
 {
-    struct diskfs_sm_jnl *c   = user;
-    struct diskfs_block  *blk = diskfs_block_claim(c->thread, device_id,
-                                                   device_offset, is_new);
+    struct diskfs_sm_jnl *c = user;
+    struct diskfs_block  *blk;
+
+    /* Route the journal-block claim through the async path: a not-resident log
+     * block parks this journaling op's continuation (c->resume) and issues the
+     * read, returning NULL so the allocator unwinds with SM_AGAIN and the
+     * caller re-drives once it loads. */
+    blk = diskfs_block_claim_async(c->thread, device_id, device_offset, is_new,
+                                   c->resume, c->resume_arg);
+    if (!blk) {
+        return NULL;
+    }
 
     diskfs_txn_add_block(c->txn, blk);
     return blk->iov.data;
 } /* diskfs_sm_claim_block */
 
-#define DISKFS_SM_JNL(name, thr, t)                          \
-        struct diskfs_sm_jnl name ## _ctx = { (thr), (t) };  \
+#define DISKFS_SM_JNL(name, thr, t, res, a)                                  \
+        struct diskfs_sm_jnl name ## _ctx = { (thr), (t), (res), (a) };      \
         struct sm_journal    name         = { diskfs_sm_claim_block, &name ## _ctx }
+
+/* A journaling context for a site that has guaranteed its log blocks are
+ * resident (e.g. a pre-reserved b+tree modify): a claim must never park, so a
+ * suspend here is a bug. */
+static void
+diskfs_sm_no_suspend(
+    struct diskfs_thread *thread,
+    void                 *arg)
+{
+    (void) thread;
+    (void) arg;
+    chimera_diskfs_abort("space-map journal parked where it must not suspend");
+} /* diskfs_sm_no_suspend */
 
 /*
  * Free a device range as part of a transaction.  The FREE delta is journaled
@@ -1841,18 +1916,67 @@ diskfs_txn_free_space(
 {
     struct diskfs_txn_free *f;
 
-    DISKFS_SM_JNL(jnl, thread, txn);
+    (void) thread;
 
-    space_map_free_journal(thread->shared->space_map, &jnl,
-                           device_id, device_offset, length);
-
+    /* Record the pending free only -- the FREE delta is journaled later, in the
+     * suspendable pre-commit flush (diskfs_txn_flush_free_journals).  This is
+     * because diskfs_txn_free_space runs inside the b+tree synchronous modify
+     * (merge frees the emptied sibling, teardown frees nodes), which cannot
+     * suspend on a cold journal block.  The in-memory free stays deferred to
+     * commit (diskfs_txn_apply_frees). */
     f                  = malloc(sizeof(*f));
     f->device_id       = device_id;
     f->device_offset   = device_offset;
     f->length          = length;
+    f->journaled       = 0;
     f->next            = txn->pending_frees;
     txn->pending_frees = f;
 } /* diskfs_txn_free_space */
+
+/* Carried across a suspended commit: the pre-commit free-journal flush can
+ * park on a cold log block, so commit defers and resumes via this. */
+struct diskfs_commit_ctx {
+    struct diskfs_txn     *txn;
+    diskfs_txn_commit_cb_t cb;
+    void                  *private_data;
+};
+
+static void diskfs_commit_resume(
+    struct diskfs_thread *thread,
+    void                 *arg);
+
+/*
+ * Journal the FREE delta for every pending free recorded during the op's
+ * modify.  A suspendable pre-commit phase (run on the worker before the txn is
+ * handed to the intent-log thread): the delta write goes through the async
+ * journal claim, so on a not-resident log block this parks the request (with
+ * diskfs_commit_resume re-driving the commit) and returns SM_AGAIN.  Already-
+ * journaled frees are flagged so a resumed flush continues where it left off.
+ * Returns 0 when all frees are journaled.
+ */
+static int
+diskfs_txn_flush_free_journals(
+    struct diskfs_thread     *thread,
+    struct diskfs_txn        *txn,
+    struct diskfs_commit_ctx *cctx)
+{
+    struct diskfs_txn_free *f;
+
+    DISKFS_SM_JNL(jnl, thread, txn, diskfs_commit_resume, cctx);
+
+    for (f = txn->pending_frees; f; f = f->next) {
+        if (f->journaled) {
+            continue;
+        }
+        if (space_map_free_journal(thread->shared->space_map, &jnl,
+                                   f->device_id, f->device_offset,
+                                   f->length) == SM_AGAIN) {
+            return SM_AGAIN;
+        }
+        f->journaled = 1;
+    }
+    return 0;
+} /* diskfs_txn_flush_free_journals */
 
 /* Commit a txn's pending frees -- the ranges become reusable.  Runs on the
  * intent-log thread once the redo record is durable, after the txn's blocks
@@ -1916,25 +2040,25 @@ diskfs_bt_op_free(
 } /* diskfs_bt_op_free */
 
 /*
- * Enqueue a ready op on its owning worker's resume queue.  If the waking
- * thread is the op's own worker, schedule a deferral (no eventfd); otherwise
- * ring the cross-thread doorbell.
+ * Enqueue a ready waiter on its owning worker's resume queue.  If the waking
+ * thread is the waiter's own worker, schedule a deferral (no eventfd);
+ * otherwise ring the cross-thread doorbell.
  */
 static void
-diskfs_bt_op_resume(
-    struct diskfs_thread *waker,
-    struct diskfs_bt_op  *op)
+diskfs_block_waiter_dispatch(
+    struct diskfs_thread       *waker,
+    struct diskfs_block_waiter *w)
 {
-    struct diskfs_thread *worker = op->thread;
+    struct diskfs_thread *worker = w->thread;
 
     pthread_mutex_lock(&worker->resume_lock);
-    op->next = NULL;
+    w->next = NULL;
     if (worker->resume_tail) {
-        worker->resume_tail->next = op;
+        worker->resume_tail->next = w;
     } else {
-        worker->resume_head = op;
+        worker->resume_head = w;
     }
-    worker->resume_tail = op;
+    worker->resume_tail = w;
     pthread_mutex_unlock(&worker->resume_lock);
 
     if (worker == waker) {
@@ -1942,13 +2066,24 @@ diskfs_bt_op_resume(
     } else {
         evpl_ring_doorbell(&worker->resume_doorbell);
     }
-} /* diskfs_bt_op_resume */
+} /* diskfs_block_waiter_dispatch */
 
-/* Drain this worker's resume queue, re-entering each ready op's driver. */
+/* Resume trampoline for a parked b+tree op: re-enter its driver. */
+static void
+diskfs_bt_op_resume_cb(
+    struct diskfs_thread *thread,
+    void                 *arg)
+{
+    (void) thread;
+    diskfs_bt_run((struct diskfs_bt_op *) arg);
+} /* diskfs_bt_op_resume_cb */
+
+/* Drain this worker's resume queue, invoking each ready waiter's continuation
+ * (which re-enters its driver / request step), then recycling the waiter. */
 static void
 diskfs_bt_resume_drain(struct diskfs_thread *thread)
 {
-    struct diskfs_bt_op *list, *op;
+    struct diskfs_block_waiter *list, *w;
 
     pthread_mutex_lock(&thread->resume_lock);
     list                = thread->resume_head;
@@ -1957,10 +2092,17 @@ diskfs_bt_resume_drain(struct diskfs_thread *thread)
     pthread_mutex_unlock(&thread->resume_lock);
 
     while (list) {
-        op       = list;
-        list     = op->next;
-        op->next = NULL;
-        diskfs_bt_run(op);
+        void  (*resume)(
+            struct diskfs_thread *,
+            void *);
+        void *arg;
+
+        w      = list;
+        list   = w->next;
+        resume = w->resume;
+        arg    = w->arg;
+        diskfs_block_waiter_free(thread, w);
+        resume(thread, arg);
     }
 } /* diskfs_bt_resume_drain */
 
@@ -2004,12 +2146,12 @@ diskfs_block_load_complete(
     int          status,
     void        *private_data)
 {
-    struct diskfs_block_load  *ld    = private_data;
-    struct diskfs_block       *blk   = ld->blk;
-    struct diskfs_thread      *self  = ld->thread;
-    struct diskfs_block_shard *shard = diskfs_block_shard(self->shared->block_cache,
-                                                          blk->device_id, blk->device_offset);
-    struct diskfs_bt_op       *waiters, *op;
+    struct diskfs_block_load   *ld    = private_data;
+    struct diskfs_block        *blk   = ld->blk;
+    struct diskfs_thread       *self  = ld->thread;
+    struct diskfs_block_shard  *shard = diskfs_block_shard(self->shared->block_cache,
+                                                           blk->device_id, blk->device_offset);
+    struct diskfs_block_waiter *waiters, *w;
 
     (void) evpl;
     chimera_diskfs_abort_if(status != 0, "block read failed off=%lu status=%d",
@@ -2026,9 +2168,9 @@ diskfs_block_load_complete(
     free(ld);
 
     while (waiters) {
-        op      = waiters;
-        waiters = op->next;
-        diskfs_bt_op_resume(self, op);
+        w       = waiters;
+        waiters = w->next;
+        diskfs_block_waiter_dispatch(self, w);
     }
 
     /* Freed a worker-queue slot: let any parked data-I/O requests resume. */
@@ -2093,16 +2235,23 @@ diskfs_bt_block_get(
         issue                  = 1;
     }
 
-    /* Park this op on the block's waiter list; it can no longer complete
-     * inline, so its result will be delivered via the callback. */
-    op->suspended = 1;
-    op->next      = NULL;
-    if (blk->wait_tail) {
-        blk->wait_tail->next = op;
-    } else {
-        blk->wait_head = op;
+    /* Park this op on the block's waiter list (via a continuation that
+     * re-enters its driver); it can no longer complete inline, so its result
+     * will be delivered via the callback. */
+    {
+        struct diskfs_block_waiter *w = diskfs_block_waiter_alloc(thread);
+
+        op->suspended = 1;
+        w->thread     = op->thread;
+        w->resume     = diskfs_bt_op_resume_cb;
+        w->arg        = op;
+        if (blk->wait_tail) {
+            blk->wait_tail->next = w;
+        } else {
+            blk->wait_head = w;
+        }
+        blk->wait_tail = w;
     }
-    blk->wait_tail = op;
     pthread_mutex_unlock(&shard->lock);
 
     if (issue) {
@@ -2117,6 +2266,183 @@ diskfs_bt_block_get(
 
     return NULL;
 } /* diskfs_bt_block_get */
+
+/*
+ * Async, COW-aware block claim for non-bt_op callers.  Behaves like
+ * diskfs_block_claim (returns the block pinned; is_new starts from a zeroed
+ * buffer; a resident LOGGED buffer is COW-forked) but never reads
+ * synchronously: on a miss (or a read already in flight) it parks
+ * resume(thread, arg) on the block and returns NULL, and the read is driven on
+ * the async evpl_block path.  The caller's continuation re-invokes this once
+ * the block has loaded, when it returns the now-resident block inline.
+ */
+static struct diskfs_block *
+diskfs_block_claim_async(
+    struct diskfs_thread *thread,
+    uint32_t device_id,
+    uint64_t device_offset,
+    int is_new,
+    void ( *resume )(struct diskfs_thread *, void *),
+    void *arg)
+{
+    struct diskfs_block_cache  *cache  = thread->shared->block_cache;
+    uint64_t                    hash   = diskfs_block_hash(device_id, device_offset);
+    uint32_t                    sidx   = hash & DISKFS_BLOCK_CACHE_SHARD_MASK;
+    uint32_t                    bucket = (hash >> 8) & DISKFS_BLOCK_CACHE_BUCKET_MASK;
+    struct diskfs_block_shard  *shard  = &cache->shards[sidx];
+    struct diskfs_block        *blk;
+    struct diskfs_block_waiter *w;
+    struct diskfs_block_load   *ld;
+    int                         issue = 0;
+
+    pthread_mutex_lock(&shard->lock);
+
+    blk = diskfs_block_lookup_locked(shard, bucket, device_id, device_offset);
+
+    if (blk && blk->state == DISKFS_BLOCK_LOADING) {
+        /* A read is already in flight: park and resume when it lands. */
+        w         = diskfs_block_waiter_alloc(thread);
+        w->thread = thread;
+        w->resume = resume;
+        w->arg    = arg;
+        if (blk->wait_tail) {
+            blk->wait_tail->next = w;
+        } else {
+            blk->wait_head = w;
+        }
+        blk->wait_tail = w;
+        pthread_mutex_unlock(&shard->lock);
+        return NULL;
+    }
+
+    if (!blk) {
+        blk                = diskfs_block_recycle(shard);
+        blk->device_id     = device_id;
+        blk->device_offset = device_offset;
+        blk->seq           = 0;
+        blk->wait_head     = NULL;
+        blk->wait_tail     = NULL;
+
+        if (is_new) {
+            blk->state = DISKFS_BLOCK_CLEAN;
+            diskfs_block_ensure_iov(thread, blk);
+            memset(blk->iov.data, 0, DISKFS_BLOCK_SIZE);
+            blk->hash_next         = shard->buckets[bucket];
+            shard->buckets[bucket] = blk;
+            blk->pin_count++;
+            pthread_mutex_unlock(&shard->lock);
+            return blk;
+        }
+
+        /* Miss: publish a LOADING block, park, and issue the async read. */
+        blk->state             = DISKFS_BLOCK_LOADING;
+        blk->hash_next         = shard->buckets[bucket];
+        shard->buckets[bucket] = blk;
+        w                      = diskfs_block_waiter_alloc(thread);
+        w->thread              = thread;
+        w->resume              = resume;
+        w->arg                 = arg;
+        blk->wait_head         = w;
+        blk->wait_tail         = w;
+        issue                  = 1;
+    } else if (blk->on_lru) {
+        diskfs_block_lru_unlink(shard, blk);
+    } else if (blk->state == DISKFS_BLOCK_LOGGED) {
+        /* COW (see diskfs_block_claim): fork a private writable copy. */
+        struct evpl_iovec nv;
+
+        evpl_iovec_alloc(thread->evpl, DISKFS_BLOCK_SIZE, DISKFS_BLOCK_SIZE, 1,
+                         EVPL_IOVEC_FLAG_SHARED, &nv);
+        memcpy(nv.data, blk->iov.data, DISKFS_BLOCK_SIZE);
+        evpl_iovec_release(thread->evpl, &blk->iov);
+        evpl_iovec_move(&blk->iov, &nv);
+        blk->state = DISKFS_BLOCK_CLEAN;
+    }
+
+    if (issue) {
+        pthread_mutex_unlock(&shard->lock);
+        diskfs_block_ensure_iov(thread, blk);
+        ld         = malloc(sizeof(*ld));
+        ld->blk    = blk;
+        ld->thread = thread;
+        thread->pending_io++;
+        evpl_block_read(thread->evpl, thread->queue[device_id], &blk->iov, 1,
+                        device_offset, diskfs_block_load_complete, ld);
+        return NULL;
+    }
+
+    blk->pin_count++;
+    pthread_mutex_unlock(&shard->lock);
+    return blk;
+} /* diskfs_block_claim_async */
+
+/*
+ * Ensure a write-locked inode's home block is resident + pinned + attached to
+ * the txn, then fire cb(inode, OK, private_data).  The block read (on a cache
+ * miss) goes through the async path: if it must wait, this parks a continuation
+ * and returns; cb fires later, back on this worker, once the block loads.
+ * Idempotent: if the block is already attached (inode->block set), cb fires
+ * inline.  Used at the two write-lock grant points.
+ */
+struct diskfs_pin_cont {
+    struct diskfs_thread *thread;
+    struct diskfs_txn    *txn;
+    struct diskfs_inode  *inode;
+    diskfs_inode_cb_t     cb;
+    void                 *private_data;
+};
+
+static void
+diskfs_inode_finish_write_pin(
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *inode,
+    diskfs_inode_cb_t     cb,
+    void                 *private_data)
+{
+    struct diskfs_block    *blk;
+    struct diskfs_pin_cont *c;
+    uint32_t                device_id;
+    uint64_t                device_offset;
+
+    if (inode->block) {
+        cb(inode, CHIMERA_VFS_OK, private_data);
+        return;
+    }
+
+    device_offset = sm_inum_to_device_offset(thread->shared->space_map,
+                                             inode->inum, &device_id);
+
+    c               = malloc(sizeof(*c));
+    c->thread       = thread;
+    c->txn          = txn;
+    c->inode        = inode;
+    c->cb           = cb;
+    c->private_data = private_data;
+
+    blk = diskfs_block_claim_async(thread, device_id, device_offset, 0,
+                                   diskfs_pin_cont_resume, c);
+    if (!blk) {
+        return;     /* suspended; diskfs_pin_cont_resume re-runs on load */
+    }
+
+    free(c);
+    inode->block = blk;
+    diskfs_txn_add_block(txn, blk);
+    cb(inode, CHIMERA_VFS_OK, private_data);
+} /* diskfs_inode_finish_write_pin */
+
+static void
+diskfs_pin_cont_resume(
+    struct diskfs_thread *thread,
+    void                 *arg)
+{
+    struct diskfs_pin_cont c = *(struct diskfs_pin_cont *) arg;
+
+    (void) thread;
+    free(arg);
+    diskfs_inode_finish_write_pin(c.thread, c.txn, c.inode, c.cb, c.private_data);
+} /* diskfs_pin_cont_resume */
 
 /*
  * Ensure this (write-locked) inode's home block is resident and pinned, and
@@ -2410,7 +2736,10 @@ diskfs_bt_alloc_node(
     uint64_t              device_offset;
     int                   rc;
 
-    DISKFS_SM_JNL(jnl, thread, txn);
+    /* Runs inside the synchronous b+tree modify, which pre-reserves enough
+     * space (bt_run's RESERVE phase) so this draws from the thread cache and
+     * never journals -- hence no_suspend and the rc != 0 abort. */
+    DISKFS_SM_JNL(jnl, thread, txn, diskfs_sm_no_suspend, NULL);
     rc = space_map_alloc(shared->space_map, &thread->space_cache, &jnl,
                          DISKFS_BLOCK_SIZE, &device_id, &device_offset);
     chimera_diskfs_abort_if(rc != 0, "b+tree node allocation failed (ENOSPC)");
@@ -3625,6 +3954,7 @@ struct diskfs_orphan_ent {
 static void
 diskfs_orphan_scan_node(
     struct diskfs_thread      *thread,
+    struct diskfs_mount_io    *io,
     void                      *buf,
     uint32_t                   base,
     struct diskfs_orphan_ent **arr,
@@ -3638,13 +3968,18 @@ diskfs_orphan_scan_node(
         struct diskfs_bt_islot *isl = diskfs_bt_islots(buf, base);
 
         for (i = 0; i < h->nitems; i++) {
-            uint32_t             cdev;
-            uint64_t             coff = sm_inum_to_device_offset(thread->shared->space_map,
-                                                                 isl[i].child, &cdev);
-            struct diskfs_block *blk = diskfs_block_claim(thread, cdev, coff, 0);
+            uint32_t cdev;
+            uint64_t coff = sm_inum_to_device_offset(thread->shared->space_map,
+                                                     isl[i].child, &cdev);
+            /* Read the child node from disk through the pump (the orphan tree
+             * is not dirty at mount).  Heap buffer -- recursion depth can reach
+             * the tree height, too deep for a stack block per level. */
+            uint8_t *cbuf = malloc(DISKFS_BLOCK_SIZE);
 
-            diskfs_orphan_scan_node(thread, blk->iov.data, 0, arr, n, cap);
-            diskfs_block_unpin(thread, blk, DISKFS_BLOCK_CLEAN);
+            if (diskfs_mount_io_read(io, cdev, cbuf, DISKFS_BLOCK_SIZE, coff) == 0) {
+                diskfs_orphan_scan_node(thread, io, cbuf, 0, arr, n, cap);
+            }
+            free(cbuf);
         }
     } else {
         struct diskfs_bt_lslot *s = diskfs_bt_lslots(buf, base);
@@ -3669,7 +4004,8 @@ diskfs_orphan_scan(struct diskfs_thread *thread)
 {
     struct diskfs_shared     *shared = thread->shared;
     struct diskfs_inode      *odir;
-    struct diskfs_block      *blk;
+    struct diskfs_mount_io   *io;
+    uint8_t                  *obuf;
     struct diskfs_orphan_ent *arr;
     uint32_t                  n = 0, cap = 16, i;
     uint32_t                  dev;
@@ -3683,26 +4019,34 @@ diskfs_orphan_scan(struct diskfs_thread *thread)
     shared->orphans_scanned = 1;
     pthread_mutex_unlock(&shared->lock);
 
+    /* All reads here go through a transient evpl pump (VFIO-safe); the orphan
+     * tree is not dirty at mount, so reading the on-disk image is correct. */
+    io = diskfs_mount_io_open(shared);
+
     /* Load the orphan-list inode (nlink 1) and read its tree from its home
      * block, collecting every recorded orphan inum + gen. */
-    odir = diskfs_inode_load_sync(thread, DISKFS_ORPHAN_INUM, DISKFS_ORPHAN_GEN, 0);
+    odir = diskfs_inode_load_sync(thread, io, DISKFS_ORPHAN_INUM, DISKFS_ORPHAN_GEN, 0);
     if (!odir) {
+        diskfs_mount_io_close(io);
         return;     /* not yet created (no orphans possible) */
     }
 
-    off = sm_inum_to_device_offset(shared->space_map, DISKFS_ORPHAN_INUM, &dev);
-    blk = diskfs_block_claim(thread, dev, off, 0);
-    arr = malloc(cap * sizeof(*arr));
-    diskfs_orphan_scan_node(thread, blk->iov.data, DISKFS_BT_ROOT_BASE, &arr, &n, &cap);
-    diskfs_block_unpin(thread, blk, DISKFS_BLOCK_CLEAN);
+    off  = sm_inum_to_device_offset(shared->space_map, DISKFS_ORPHAN_INUM, &dev);
+    obuf = malloc(DISKFS_BLOCK_SIZE);
+    arr  = malloc(cap * sizeof(*arr));
+    if (diskfs_mount_io_read(io, dev, obuf, DISKFS_BLOCK_SIZE, off) == 0) {
+        diskfs_orphan_scan_node(thread, io, obuf, DISKFS_BT_ROOT_BASE, &arr, &n, &cap);
+    }
+    free(obuf);
 
     for (i = 0; i < n; i++) {
         /* Reload the orphaned (nlink==0) inode into cache, then enqueue it;
          * the drainer resumes its (possibly partially-drained) tree. */
-        diskfs_inode_load_sync(thread, arr[i].inum, arr[i].gen, 1 /* allow_orphan */);
+        diskfs_inode_load_sync(thread, io, arr[i].inum, arr[i].gen, 1 /* allow_orphan */);
         diskfs_drain_enqueue(thread, arr[i].inum, arr[i].gen);
     }
     free(arr);
+    diskfs_mount_io_close(io);
 
     if (n) {
         chimera_diskfs_info("orphan recovery: re-enqueued %u inode(s) for drain", n);
@@ -3879,6 +4223,31 @@ diskfs_bt_run(struct diskfs_bt_op *op)
 
     for (;; ) {
         struct diskfs_bt_node_hdr *h;
+
+        /*
+         * Pre-reserve worst-case split space (one new node per tree level)
+         * before the descent.  The refill journals and may park on a cold
+         * AG-log block -- suspendable here (we re-enter this phase on resume) --
+         * so the later synchronous modify's bt_alloc_node calls are guaranteed
+         * pure cache draws that never journal.
+         */
+        if (op->phase == DISKFS_BT_PHASE_RESERVE) {
+            /* Worst case a split allocates one node per tree level plus a new
+             * root (height+1 <= DISKFS_BT_MAX_DEPTH+1); +2 for margin so the
+             * modify can never exhaust the reservation and journal. */
+            DISKFS_SM_JNL(jnl, thread, op->txn, diskfs_bt_op_resume_cb, op);
+            int rrc = space_map_reserve(thread->shared->space_map,
+                                        &thread->space_cache, &jnl,
+                                        (uint64_t) (DISKFS_BT_MAX_DEPTH + 2) * DISKFS_BLOCK_SIZE);
+
+            if (rrc == SM_AGAIN) {
+                return;     /* parked; resumes back into this phase */
+            }
+            /* ENOSPC here is left to the modify's allocation to surface; just
+             * proceed to the descent. */
+            op->phase = DISKFS_BT_PHASE_DESCEND;
+            continue;
+        }
 
         /*
          * Remove rebalance can touch the immediate siblings of every node on
@@ -4100,11 +4469,13 @@ diskfs_bt_insert_async(
     chimera_diskfs_abort_if(reclen > DISKFS_BT_NODE_CAP, "b+tree record too large");
 
     memset(op, 0, sizeof(*op));
-    op->thread       = thread;
-    op->txn          = txn;
-    op->inode        = inode;
-    op->opcode       = DISKFS_BT_OP_INSERT;
-    op->phase        = DISKFS_BT_PHASE_DESCEND;
+    op->thread = thread;
+    op->txn    = txn;
+    op->inode  = inode;
+    op->opcode = DISKFS_BT_OP_INSERT;
+    /* Reserve worst-case split space before descending, so the synchronous
+    * modify's node allocs are pure cache draws (never journal/suspend). */
+    op->phase        = DISKFS_BT_PHASE_RESERVE;
     op->key          = *key;
     op->reclen       = reclen;
     op->use_root     = 1;
@@ -4284,29 +4655,6 @@ diskfs_dir_insert(
     diskfs_bt_insert(thread, txn, dir, &key,
                      buf, sizeof(*r) + namelen);
 } /* diskfs_dir_insert */
-
-/* Returns 0 and fills the inum/gen out params if found, -1 otherwise. */
-static int
-diskfs_dir_lookup(
-    struct diskfs_thread *thread,
-    struct diskfs_inode  *dir,
-    uint64_t              hash,
-    uint64_t             *r_inum,
-    uint32_t             *r_gen)
-{
-    char                      buf[DISKFS_DIRENT_REC_MAX];
-    struct diskfs_dirent_rec *r   = (struct diskfs_dirent_rec *) buf;
-    struct diskfs_bt_key      key = diskfs_dirent_key(hash);
-    int                       len;
-
-    len = diskfs_bt_lookup_exact(thread, dir, &key, buf, sizeof(buf));
-    if (len < 0) {
-        return -1;
-    }
-    *r_inum = r->inum;
-    *r_gen  = r->gen;
-    return 0;
-} /* diskfs_dir_lookup */
 
 static int
 diskfs_dir_remove(
@@ -4931,12 +5279,15 @@ diskfs_inode_load_complete(
      * block cache from the disk image, so the b+tree traversal and inode-block
      * pin find the real contents instead of a zero-created block.  No writer
      * can be modifying it yet -- the lock isn't granted until the re-acquire
-     * below. */
+     * below.  Claim is_new (no disk read): we already hold the freshly-read
+     * image in lc->iov and overwrite the whole block below, so reading it back
+     * would be redundant -- and a synchronous read here cannot reach a VFIO
+     * device anyway. */
     {
         uint32_t             dev;
         uint64_t             off = sm_inum_to_device_offset(shared->space_map,
                                                             lc->inum, &dev);
-        struct diskfs_block *blk = diskfs_block_claim(thread, dev, off, 0);
+        struct diskfs_block *blk = diskfs_block_claim(thread, dev, off, 1);
 
         memcpy(blk->iov.data, lc->iov.data, DISKFS_BLOCK_SIZE);
         diskfs_block_unpin(thread, blk, DISKFS_BLOCK_CLEAN);
@@ -4978,6 +5329,19 @@ diskfs_inode_load(
                     diskfs_inode_load_complete, lc);
 } /* diskfs_inode_load */
 
+/* Retry context for an inode allocation whose reservation refill parked on a
+ * cold AG-log block; the continuation re-drives the whole allocation. */
+struct diskfs_inode_alloc_ctx {
+    struct diskfs_thread *thread;
+    struct diskfs_txn    *txn;
+    diskfs_inode_cb_t     cb;
+    void                 *private_data;
+};
+
+static void diskfs_inode_alloc_resume(
+    struct diskfs_thread *thread,
+    void                 *arg);
+
 /*
  * Allocate a new inode: grab a 4 KiB metadata block from the space map to
  * mint the inum, create the in-memory inode, publish it write-locked into
@@ -4990,15 +5354,28 @@ diskfs_inode_alloc_async(
     diskfs_inode_cb_t     cb,
     void                 *private_data)
 {
-    struct diskfs_shared *shared = thread->shared;
-    struct diskfs_inode  *inode;
-    uint32_t              device_id;
-    uint64_t              device_offset, inum;
-    int                   rc;
+    struct diskfs_shared          *shared = thread->shared;
+    struct diskfs_inode           *inode;
+    struct diskfs_inode_alloc_ctx *actx;
+    uint32_t                       device_id;
+    uint64_t                       device_offset, inum;
+    int                            rc;
 
-    DISKFS_SM_JNL(jnl, thread, txn);
+    /* The reservation refill journals and may park on a cold log block; carry
+     * the retry context so the resumed allocation re-drives from the top. */
+    actx               = malloc(sizeof(*actx));
+    actx->thread       = thread;
+    actx->txn          = txn;
+    actx->cb           = cb;
+    actx->private_data = private_data;
+
+    DISKFS_SM_JNL(jnl, thread, txn, diskfs_inode_alloc_resume, actx);
     rc = space_map_alloc(shared->space_map, &thread->space_cache, &jnl,
                          SM_BLOCK_SIZE, &device_id, &device_offset);
+    if (rc == SM_AGAIN) {
+        return;     /* parked; diskfs_inode_alloc_resume re-runs (owns actx) */
+    }
+    free(actx);
     if (unlikely(rc != 0)) {
         cb(NULL, CHIMERA_VFS_ENOSPC, private_data);
         return;
@@ -5018,6 +5395,18 @@ diskfs_inode_alloc_async(
 
     cb(inode, CHIMERA_VFS_OK, private_data);
 } /* diskfs_inode_alloc_async */
+
+static void
+diskfs_inode_alloc_resume(
+    struct diskfs_thread *thread,
+    void                 *arg)
+{
+    struct diskfs_inode_alloc_ctx c = *(struct diskfs_inode_alloc_ctx *) arg;
+
+    (void) thread;
+    free(arg);
+    diskfs_inode_alloc_async(c.thread, c.txn, c.cb, c.private_data);
+} /* diskfs_inode_alloc_resume */
 
 static void
 diskfs_dirent_release(
@@ -5137,18 +5526,23 @@ diskfs_kv_entry_release(
 static inline int
 diskfs_thread_alloc_space(
     struct diskfs_thread *thread,
-    struct diskfs_txn    *txn,
-    int64_t               desired_size,
-    uint64_t             *r_device_id,
-    uint64_t             *r_device_offset)
+    struct diskfs_txn *txn,
+    int64_t desired_size,
+    uint64_t *r_device_id,
+    uint64_t *r_device_offset,
+    void ( *resume )(struct diskfs_thread *, void *),
+    void *resume_arg)
 {
     uint32_t dev_id;
     int      rc;
 
-    DISKFS_SM_JNL(jnl, thread, txn);
+    DISKFS_SM_JNL(jnl, thread, txn, resume, resume_arg);
     rc = space_map_alloc(thread->shared->space_map, &thread->space_cache, &jnl,
                          (uint64_t) desired_size, &dev_id, r_device_offset);
 
+    if (rc == SM_AGAIN) {
+        return SM_AGAIN;        /* parked; caller's resume re-drives */
+    }
     if (rc != 0) {
         return CHIMERA_VFS_ENOSPC;
     }
@@ -5969,8 +6363,13 @@ diskfs_intent_log_thread_shutdown(
     free(il->queue);
 } /* diskfs_intent_log_thread_shutdown */
 
-static inline void
-diskfs_txn_commit(
+/*
+ * The post-free-flush half of commit: serialize the dirty inodes, snapshot the
+ * pinned blocks, and hand the txn to the intent-log thread.  Runs once the
+ * deferred FREE deltas are journaled (inline, or resumed via the load).
+ */
+static void
+diskfs_txn_commit_finish(
     struct diskfs_txn     *txn,
     diskfs_txn_commit_cb_t cb,
     void                  *private_data)
@@ -5980,14 +6379,6 @@ diskfs_txn_commit(
     struct diskfs_iq_channel *ch;
     struct diskfs_iq_entry   *slot;
     uint32_t                  tail, head;
-
-    if (txn->type == DISKFS_TXN_READ) {
-        /* Read txns don't need durability -- complete inline. */
-        diskfs_txn_unlock_all(txn);
-        cb(txn, 0, private_data);
-        diskfs_txn_release(txn);
-        return;
-    }
 
     /* Serialize every dirty inode into its block buffer now, on the worker
      * that owns the live inodes under write lock, before handing the txn
@@ -6036,6 +6427,57 @@ diskfs_txn_commit(
     __atomic_store_n(&ch->sq.tail, tail + 1, __ATOMIC_RELEASE);
 
     evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
+} /* diskfs_txn_commit_finish */
+
+/* Resume a commit whose pre-commit free-journal flush parked on a log read. */
+static void
+diskfs_commit_resume(
+    struct diskfs_thread *thread,
+    void                 *arg)
+{
+    struct diskfs_commit_ctx *c = arg;
+
+    if (diskfs_txn_flush_free_journals(thread, c->txn, c) == SM_AGAIN) {
+        return;     /* re-parked; another log block is loading */
+    }
+    diskfs_txn_commit_finish(c->txn, c->cb, c->private_data);
+    free(c);
+} /* diskfs_commit_resume */
+
+static inline void
+diskfs_txn_commit(
+    struct diskfs_txn     *txn,
+    diskfs_txn_commit_cb_t cb,
+    void                  *private_data)
+{
+    struct diskfs_thread *thread = txn->thread;
+
+    if (txn->type == DISKFS_TXN_READ) {
+        /* Read txns don't need durability -- complete inline. */
+        diskfs_txn_unlock_all(txn);
+        cb(txn, 0, private_data);
+        diskfs_txn_release(txn);
+        return;
+    }
+
+    /* Journal the deferred FREE deltas before block serialization + snapshot,
+     * so the FREE-delta log blocks ride this txn's redo.  The journal claim is
+     * async: a cold log block parks the request and the flush returns SM_AGAIN,
+     * so commit defers and diskfs_commit_resume finishes once it loads. */
+    if (txn->pending_frees) {
+        struct diskfs_commit_ctx *c = malloc(sizeof(*c));
+
+        c->txn          = txn;
+        c->cb           = cb;
+        c->private_data = private_data;
+
+        if (diskfs_txn_flush_free_journals(thread, txn, c) == SM_AGAIN) {
+            return;     /* parked; diskfs_commit_resume continues */
+        }
+        free(c);
+    }
+
+    diskfs_txn_commit_finish(txn, cb, private_data);
 } /* diskfs_txn_commit */
 
 struct diskfs_recover_rec {
@@ -6054,6 +6496,181 @@ diskfs_recover_rec_cmp(
     return (sa > sb) - (sa < sb);
 } /* diskfs_recover_rec_cmp */
 
+/* ------------------------------------------------------------------ */
+/* Mount-time synchronous block I/O via a transient evpl pump.         */
+/*                                                                     */
+/* All diskfs disk access goes through evpl_block, but mount, crash    */
+/* recovery, bootstrap and unmount run with no worker event loop to    */
+/* drive completions (and a raw device path is not a file, so pread/   */
+/* pwrite cannot reach a VFIO/io_uring/libaio block device).  Stand up */
+/* a private evpl + per-device block queues and pump evpl_continue()   */
+/* until each async op finishes -- the same drain idiom the intent-log */
+/* thread uses at shutdown.                                            */
+/* ------------------------------------------------------------------ */
+struct diskfs_mount_io {
+    struct evpl              *evpl;
+    struct evpl_block_queue **queue;
+    struct diskfs_shared     *shared;
+};
+
+struct diskfs_mount_io_wait {
+    int done;
+    int status;
+};
+
+static void
+diskfs_mount_io_complete(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct diskfs_mount_io_wait *w = private_data;
+
+    (void) evpl;
+    w->status = status;
+    w->done   = 1;
+} /* diskfs_mount_io_complete */
+
+static struct diskfs_mount_io *
+diskfs_mount_io_open(struct diskfs_shared *shared)
+{
+    struct diskfs_mount_io *io = calloc(1, sizeof(*io));
+    int                     i;
+
+    io->shared = shared;
+    io->evpl   = evpl_create(NULL);
+    io->queue  = calloc(shared->num_devices, sizeof(*io->queue));
+    for (i = 0; i < shared->num_devices; i++) {
+        io->queue[i] = evpl_block_open_queue(io->evpl, shared->devices[i].bdev);
+    }
+    return io;
+} /* diskfs_mount_io_open */
+
+static void
+diskfs_mount_io_close(struct diskfs_mount_io *io)
+{
+    int i;
+
+    for (i = 0; i < io->shared->num_devices; i++) {
+        evpl_block_close_queue(io->evpl, io->queue[i]);
+    }
+    free(io->queue);
+    evpl_destroy(io->evpl);
+    free(io);
+} /* diskfs_mount_io_close */
+
+/*
+ * sm_io read bridge.  offset must be block-aligned; the device transfer is
+ * rounded up to a whole block and only the requested bytes are copied out, so
+ * callers may ask for a sub-block struct.  Chunked at the device max request
+ * size.
+ */
+static int
+diskfs_mount_io_read(
+    void    *user,
+    uint32_t device_id,
+    void    *buf,
+    uint64_t length,
+    uint64_t offset)
+{
+    struct diskfs_mount_io *io     = user;
+    uint64_t                maxreq = io->shared->devices[device_id].max_request_size;
+    uint64_t                done   = 0;
+
+    while (done < length) {
+        struct evpl_iovec           iov;
+        struct diskfs_mount_io_wait w    = { 0, 0 };
+        uint64_t                    want = length - done;
+        uint64_t                    xfer;
+
+        if (want > maxreq) {
+            want = maxreq;
+        }
+        xfer = (want + DISKFS_BLOCK_SIZE - 1) & ~((uint64_t) DISKFS_BLOCK_SIZE - 1);
+
+        evpl_iovec_alloc(io->evpl, xfer, DISKFS_BLOCK_SIZE, 1, 0, &iov);
+        evpl_block_read(io->evpl, io->queue[device_id], &iov, 1, offset + done,
+                        diskfs_mount_io_complete, &w);
+        while (!w.done) {
+            evpl_continue(io->evpl);
+        }
+        if (w.status) {
+            evpl_iovec_release(io->evpl, &iov);
+            return -1;
+        }
+        memcpy((char *) buf + done, iov.data, want);
+        evpl_iovec_release(io->evpl, &iov);
+        done += want;
+    }
+    return 0;
+} /* diskfs_mount_io_read */
+
+/* sm_io write bridge.  offset and length must be block-aligned (callers write
+ * whole blocks / the block-padded superblock + condensed log slots). */
+static int
+diskfs_mount_io_write(
+    void       *user,
+    uint32_t    device_id,
+    const void *buf,
+    uint64_t    length,
+    uint64_t    offset)
+{
+    struct diskfs_mount_io *io     = user;
+    uint64_t                maxreq = io->shared->devices[device_id].max_request_size;
+    uint64_t                done   = 0;
+
+    while (done < length) {
+        struct evpl_iovec           iov;
+        struct diskfs_mount_io_wait w    = { 0, 0 };
+        uint64_t                    want = length - done;
+
+        if (want > maxreq) {
+            want = maxreq;
+        }
+        evpl_iovec_alloc(io->evpl, want, DISKFS_BLOCK_SIZE, 1, 0, &iov);
+        memcpy(iov.data, (const char *) buf + done, want);
+        evpl_block_write(io->evpl, io->queue[device_id], &iov, 1, offset + done,
+                         1 /* sync */, diskfs_mount_io_complete, &w);
+        while (!w.done) {
+            evpl_continue(io->evpl);
+        }
+        evpl_iovec_release(io->evpl, &iov);
+        if (w.status) {
+            return -1;
+        }
+        done += want;
+    }
+    return 0;
+} /* diskfs_mount_io_write */
+
+static int
+diskfs_mount_io_flush(
+    void    *user,
+    uint32_t device_id)
+{
+    struct diskfs_mount_io     *io = user;
+    struct diskfs_mount_io_wait w  = { 0, 0 };
+
+    evpl_block_flush(io->evpl, io->queue[device_id], diskfs_mount_io_complete, &w);
+    while (!w.done) {
+        evpl_continue(io->evpl);
+    }
+    return w.status ? -1 : 0;
+} /* diskfs_mount_io_flush */
+
+static struct sm_io
+diskfs_mount_sm_io(struct diskfs_mount_io *io)
+{
+    struct sm_io smio = {
+        .read  = diskfs_mount_io_read,
+        .write = diskfs_mount_io_write,
+        .flush = diskfs_mount_io_flush,
+        .user  = io,
+    };
+
+    return smio;
+} /* diskfs_mount_sm_io */
+
 /*
  * Crash recovery (synchronous replay): the previous instance did not unmount
  * cleanly, so logged-but-not-yet-pushed redo records may still sit in the
@@ -6061,36 +6678,29 @@ diskfs_recover_rec_cmp(
  * intact records -- a 4 KiB-aligned magic whose XXH3-128 over reclen bytes
  * verifies (rejecting torn/partially-overwritten records) -- and write each
  * block image to its home location in seq order (latest image of a block
- * wins), then fsync.  After this the on-disk b+tree / inodes / data are
+ * wins), then flush.  After this the on-disk b+tree / inodes / data are
  * consistent with the last acknowledged write, exactly as the tail-pusher
  * would have left them.
  *
  * Replaying every intact record (rather than just [tail, head]) is safe: in a
  * FIFO circular log a superseding record outlives every record it supersedes,
  * so seq-ordered replay always lands the latest image, and re-writing an
- * already-current block is idempotent.  Runs at mount before evpl I/O starts,
- * so it uses plain pread/pwrite via the device paths.
+ * already-current block is idempotent.  Runs at mount before worker threads
+ * exist, so it drives the device through the mount-time evpl pump.
  */
 static int
-diskfs_recover_log(struct diskfs_shared *shared)
+diskfs_recover_log(
+    struct diskfs_shared   *shared,
+    struct diskfs_mount_io *io)
 {
     char                      *log;
-    int                        fd;
-    int                       *wfd;
-    ssize_t                    n;
     uint64_t                   o;
     struct diskfs_recover_rec *recs;
     uint32_t                   nrec = 0, cap = 4096, i;
 
     log = malloc(SM_INTENT_LOG_SIZE);
-    fd  = open(shared->device_paths[SM_INTENT_LOG_DEVICE], O_RDONLY);
-    if (fd < 0) {
-        free(log);
-        return -1;
-    }
-    n = pread(fd, log, SM_INTENT_LOG_SIZE, SM_INTENT_LOG_OFFSET);
-    close(fd);
-    if (n != (ssize_t) SM_INTENT_LOG_SIZE) {
+    if (diskfs_mount_io_read(io, SM_INTENT_LOG_DEVICE, log, SM_INTENT_LOG_SIZE,
+                             SM_INTENT_LOG_OFFSET) != 0) {
         free(log);
         return -1;
     }
@@ -6133,11 +6743,6 @@ diskfs_recover_log(struct diskfs_shared *shared)
 
     qsort(recs, nrec, sizeof(*recs), diskfs_recover_rec_cmp);
 
-    wfd = malloc(shared->num_devices * sizeof(int));
-    for (i = 0; i < (uint32_t) shared->num_devices; i++) {
-        wfd[i] = open(shared->device_paths[i], O_WRONLY);
-    }
-
     for (i = 0; i < nrec; i++) {
         struct diskfs_redo_header *hdr  = (struct diskfs_redo_header *) (log + recs[i].offset);
         char                      *bhp  = log + recs[i].offset + sizeof(*hdr);
@@ -6151,24 +6756,21 @@ diskfs_recover_log(struct diskfs_shared *shared)
                 (struct diskfs_redo_block_header *) (bhp + (size_t) b * sizeof(*bh));
             char                            *img = data + (size_t) b * DISKFS_BLOCK_SIZE;
 
-            if (bh->device_id < (uint32_t) shared->num_devices && wfd[bh->device_id] >= 0) {
-                ssize_t wn = pwrite(wfd[bh->device_id], img, DISKFS_BLOCK_SIZE,
-                                    (off_t) bh->device_offset);
+            if (bh->device_id < (uint32_t) shared->num_devices) {
+                int wr = diskfs_mount_io_write(io, bh->device_id, img,
+                                               DISKFS_BLOCK_SIZE,
+                                               bh->device_offset);
 
-                chimera_diskfs_abort_if(wn != (ssize_t) DISKFS_BLOCK_SIZE,
-                                        "recovery replay pwrite failed: %zd", wn);
+                chimera_diskfs_abort_if(wr != 0,
+                                        "recovery replay write failed");
             }
         }
     }
 
     for (i = 0; i < (uint32_t) shared->num_devices; i++) {
-        if (wfd[i] >= 0) {
-            fsync(wfd[i]);
-            close(wfd[i]);
-        }
+        diskfs_mount_io_flush(io, i);
     }
 
-    free(wfd);
     free(recs);
     free(log);
     chimera_diskfs_info("crash recovery: replayed %u intact intent-log records", nrec);
@@ -6222,19 +6824,25 @@ diskfs_init(const char *cfgdata)
             chimera_diskfs_abort("Unsupported protocol: %s", protocol_name);
         }
 
-        rc = stat(device_path, &st);
+        /* For the file-backed backends a missing path is auto-created + sized.
+         * A vfio device's "path" is a PCI BDF (e.g. "01:00.0"), not a file:
+         * stat'ing it ENOENTs, so skip the create -- otherwise we'd drop a
+         * stray zero-length file named after the BDF in the CWD. */
+        if (protocol_id != EVPL_BLOCK_PROTOCOL_VFIO) {
+            rc = stat(device_path, &st);
 
-        if (rc < 0 && errno == ENOENT) {
+            if (rc < 0 && errno == ENOENT) {
 
-            fd = open(device_path, O_CREAT | O_RDWR, 0644);
+                fd = open(device_path, O_CREAT | O_RDWR, 0644);
 
-            chimera_diskfs_abort_if(fd < 0, "Failed to open device %s: %s", device_path, strerror(errno));
+                chimera_diskfs_abort_if(fd < 0, "Failed to open device %s: %s", device_path, strerror(errno));
 
-            rc = ftruncate(fd, size);
+                rc = ftruncate(fd, size);
 
-            chimera_diskfs_abort_if(rc < 0, "Failed to truncate device %s: %s", device_path, strerror(errno));
+                chimera_diskfs_abort_if(rc < 0, "Failed to truncate device %s: %s", device_path, strerror(errno));
 
-            close(fd);
+                close(fd);
+            }
         }
 
         device->bdev = evpl_block_open_device(protocol_id, device_path);
@@ -6274,12 +6882,14 @@ diskfs_init(const char *cfgdata)
      *   - no/garbage     -> mkfs.
      */
     {
-        struct sm_superblock sb;
-        int                  have_sb;
-        int                  mode;     /* 0 = mkfs, 1 = clean mount, 2 = recover */
+        struct sm_superblock    sb;
+        int                     have_sb;
+        int                     mode; /* 0 = mkfs, 1 = clean mount, 2 = recover */
+        struct diskfs_mount_io *mio  = diskfs_mount_io_open(shared);
+        struct sm_io            smio = diskfs_mount_sm_io(mio);
 
         have_sb = shared->persistent &&
-            space_map_read_superblock_path(device0_path, &sb) == 0;
+            space_map_read_superblock(&smio, &sb) == 0;
 
         if (have_sb && (sb.flags & SM_SB_CLEAN)) {
             mode         = 1;
@@ -6301,7 +6911,7 @@ diskfs_init(const char *cfgdata)
 
         if (mode == 2) {
             chimera_diskfs_info("superblock not clean: running crash recovery");
-            diskfs_recover_log(shared);
+            diskfs_recover_log(shared, mio);
         }
 
         /* Reload the persisted free-space map.  NOTE: after a crash this
@@ -6311,7 +6921,7 @@ diskfs_init(const char *cfgdata)
          * must be rebuilt (namespace-walk fsck, TODO) before writes are safe.
          * For a clean mount the snapshot must load or we fall back to mkfs. */
         if (mode != 0 &&
-            space_map_load_paths(shared->space_map, shared->device_paths) != 0) {
+            space_map_load(shared->space_map, &smio) != 0) {
             if (mode == 1) {
                 chimera_diskfs_error("space-map reload failed; treating as fresh");
                 mode = 0;
@@ -6330,7 +6940,6 @@ diskfs_init(const char *cfgdata)
             uint32_t             rgen                            = sb.root_gen;
             uint32_t             rdev;
             uint64_t             roff;
-            int                  rfd;
             struct diskfs_dinode rdi;
 
             /* The superblock's root generation is only refreshed at clean
@@ -6338,13 +6947,9 @@ diskfs_init(const char *cfgdata)
              * authoritative generation from the root inode's on-disk dinode
              * (consistent post-replay) so the mount handle matches. */
             roff = sm_inum_to_device_offset(shared->space_map, rinum, &rdev);
-            rfd  = open(shared->device_paths[rdev], O_RDONLY);
-            if (rfd >= 0) {
-                if (pread(rfd, &rdi, sizeof(rdi), (off_t) roff) == (ssize_t) sizeof(rdi) &&
-                    rdi.inum == rinum) {
-                    rgen = rdi.gen;
-                }
-                close(rfd);
+            if (diskfs_mount_io_read(mio, rdev, &rdi, sizeof(rdi), roff) == 0 &&
+                rdi.inum == rinum) {
+                rgen = rdi.gen;
             }
 
             shared->root_inum = rinum;
@@ -6359,22 +6964,22 @@ diskfs_init(const char *cfgdata)
         /* Clear the CLEAN flag for this session: an unclean teardown then
          * leaves it clear, so the next mount won't mistake a crash for a
          * clean shutdown. */
-        rc = space_map_write_superblock_path(shared->space_map, device0_path,
-                                             shared->fsid, 0,
-                                             mode != 0 ? shared->root_inum : 0,
-                                             mode != 0 ? shared->root_gen : 0,
-                                             mode != 0 ? sb.log_seq : 0);
-        chimera_diskfs_abort_if(rc != 0,
-                                "Failed to write superblock to %s: %s",
-                                device0_path, strerror(errno));
+        rc = space_map_write_superblock(shared->space_map, &smio,
+                                        shared->fsid, 0,
+                                        mode != 0 ? shared->root_inum : 0,
+                                        mode != 0 ? shared->root_gen : 0,
+                                        mode != 0 ? sb.log_seq : 0);
+        chimera_diskfs_abort_if(rc != 0, "Failed to write superblock");
 
         /* Persistent mkfs: write an initial condensed AG-log base so each
          * slot has a valid header before any runtime delta is journaled --
          * otherwise a crash right after format would leave the allocator log
          * unreadable. */
         if (mode == 0 && shared->persistent) {
-            space_map_persist_paths(shared->space_map, shared->device_paths);
+            space_map_persist(shared->space_map, &smio);
         }
+
+        diskfs_mount_io_close(mio);
     }
     free(device0_path);
 
@@ -6428,12 +7033,13 @@ diskfs_init(const char *cfgdata)
 static void
 diskfs_bootstrap(struct diskfs_thread *thread)
 {
-    struct diskfs_shared *shared = thread->shared;
-    struct timespec       now;
-    struct diskfs_inode  *inode;
-    uint32_t              device_id;
-    uint64_t              device_offset, inum;
-    int                   rc;
+    struct diskfs_shared   *shared = thread->shared;
+    struct timespec         now;
+    struct diskfs_inode    *inode;
+    uint32_t                device_id;
+    uint64_t                device_offset, inum;
+    int                     rc;
+    struct diskfs_mount_io *mio;
 
     /* Guard against concurrent first-touch from multiple workers. */
     pthread_mutex_lock(&shared->lock);
@@ -6441,6 +7047,13 @@ diskfs_bootstrap(struct diskfs_thread *thread)
         pthread_mutex_unlock(&shared->lock);
         return;
     }
+
+    /* Bootstrap writes the root + orphan inode blocks to their home locations
+     * synchronously (they must be re-readable from disk before becoming
+     * evictable CLEAN blocks).  All device access goes through evpl_block, so
+     * drive it with a transient mount-time pump rather than this worker's own
+     * event loop (avoids re-entering the dispatch loop mid-request). */
+    mio = diskfs_mount_io_open(shared);
 
     clock_gettime(CLOCK_REALTIME, &now);
 
@@ -6483,19 +7096,10 @@ diskfs_bootstrap(struct diskfs_thread *thread)
     diskfs_bt_node_init(inode->block->iov.data, DISKFS_BT_ROOT_BASE,
                         DISKFS_BT_ROOT_CAP, 0);
     diskfs_inode_flush(inode);
-    {
-        int fd = open(shared->device_paths[device_id], O_WRONLY);
-
-        if (fd >= 0) {
-            ssize_t wn = pwrite(fd, inode->block->iov.data, DISKFS_BLOCK_SIZE,
-                                (off_t) device_offset);
-
-            chimera_diskfs_abort_if(wn != (ssize_t) DISKFS_BLOCK_SIZE,
-                                    "bootstrap root pwrite failed: %zd", wn);
-            fsync(fd);
-            close(fd);
-        }
-    }
+    rc = diskfs_mount_io_write(mio, device_id, inode->block->iov.data,
+                               DISKFS_BLOCK_SIZE, device_offset);
+    chimera_diskfs_abort_if(rc != 0, "bootstrap root write failed");
+    diskfs_mount_io_flush(mio, device_id);
     inode->block->state = DISKFS_BLOCK_CLEAN;
     diskfs_block_unpin(thread, inode->block, DISKFS_BLOCK_CLEAN);
     inode->block = NULL;
@@ -6529,19 +7133,10 @@ diskfs_bootstrap(struct diskfs_thread *thread)
         diskfs_bt_node_init(oin->block->iov.data, DISKFS_BT_ROOT_BASE,
                             DISKFS_BT_ROOT_CAP, 0);
         diskfs_inode_flush(oin);
-        {
-            int fd = open(shared->device_paths[odev], O_WRONLY);
-
-            if (fd >= 0) {
-                ssize_t wn = pwrite(fd, oin->block->iov.data, DISKFS_BLOCK_SIZE,
-                                    (off_t) ooff);
-
-                chimera_diskfs_abort_if(wn != (ssize_t) DISKFS_BLOCK_SIZE,
-                                        "bootstrap orphan pwrite failed: %zd", wn);
-                fsync(fd);
-                close(fd);
-            }
-        }
+        rc = diskfs_mount_io_write(mio, odev, oin->block->iov.data,
+                                   DISKFS_BLOCK_SIZE, ooff);
+        chimera_diskfs_abort_if(rc != 0, "bootstrap orphan write failed");
+        diskfs_mount_io_flush(mio, odev);
         oin->block->state = DISKFS_BLOCK_CLEAN;
         diskfs_block_unpin(thread, oin->block, DISKFS_BLOCK_CLEAN);
         oin->block = NULL;
@@ -6558,6 +7153,8 @@ diskfs_bootstrap(struct diskfs_thread *thread)
     }
     shared->root_inum = inode->inum;
     shared->root_gen  = inode->gen;
+
+    diskfs_mount_io_close(mio);
 
     pthread_mutex_unlock(&shared->lock);
 } /* diskfs_bootstrap */
@@ -6595,32 +7192,36 @@ diskfs_destroy(void *private_data)
     evpl_thread_destroy(shared->intent_log.thread);
     pthread_mutex_destroy(&shared->intent_log.registration_lock);
 
+    /* Clean unmount: the intent-log thread already drained every logged block
+     * to its home location, so persist the free-space map and stamp the
+     * superblock CLEAN (with the root + next log seq) so the next mount
+     * reloads instead of re-handing-out in-use space.  Driven through the
+     * mount-time evpl pump while the devices are still open -- the IL thread
+     * (the only other device user) is already gone.  Only mark clean if a root
+     * actually exists (an untouched mkfs has nothing to preserve). */
+    if (shared->persistent) {
+        struct diskfs_mount_io *mio  = diskfs_mount_io_open(shared);
+        struct sm_io            smio = diskfs_mount_sm_io(mio);
+
+        if (space_map_persist(shared->space_map, &smio) != 0) {
+            chimera_diskfs_error("space-map persist at unmount failed");
+        } else if (shared->root_fhlen != 0) {
+            int rc = space_map_write_superblock(shared->space_map, &smio,
+                                                shared->fsid, SM_SB_CLEAN,
+                                                shared->root_inum, shared->root_gen,
+                                                shared->intent_log.log_seq);
+            if (rc != 0) {
+                chimera_diskfs_error("clean-superblock write at unmount failed");
+            }
+        }
+        diskfs_mount_io_close(mio);
+    }
+
     for (int i = 0; i < shared->num_devices; i++) {
         evpl_block_close_device(shared->devices[i].bdev);
     }
 
     diskfs_block_cache_destroy(shared);
-
-    /* Clean unmount: the intent-log thread already drained every logged block
-     * to its home location, so persist the free-space map and stamp the
-     * superblock CLEAN (with the root + next log seq) so the next mount
-     * reloads instead of re-handing-out in-use space.  Done now that all
-     * device I/O has quiesced (evpl released the devices).  Only mark clean if
-     * a root actually exists (an untouched mkfs has nothing to preserve). */
-    if (!shared->persistent) {
-        /* mkfs-every-mount mode: nothing to preserve. */
-    } else if (space_map_persist_paths(shared->space_map, shared->device_paths) != 0) {
-        chimera_diskfs_error("space-map persist at unmount failed");
-    } else if (shared->root_fhlen != 0) {
-        int rc = space_map_write_superblock_path(shared->space_map,
-                                                 shared->device_paths[0],
-                                                 shared->fsid, SM_SB_CLEAN,
-                                                 shared->root_inum, shared->root_gen,
-                                                 shared->intent_log.log_seq);
-        if (rc != 0) {
-            chimera_diskfs_error("clean-superblock write at unmount failed");
-        }
-    }
 
     space_map_destroy(shared->space_map);
 
@@ -6686,16 +7287,19 @@ diskfs_grant_doorbell_cb(
             enum diskfs_inode_lock_mode wmode = w->mode;
 
             diskfs_txn_add_slot(wtxn, inode, wmode);
+            diskfs_waiter_free(thread, w);
+
             if (wmode == DISKFS_INODE_LOCK_WRITE) {
-                diskfs_txn_pin_inode_block(thread, wtxn, inode, 0);
+                /* Pin the home block (async-load if evicted) before reporting
+                 * the grant; cb may fire later, back on this worker. */
+                diskfs_inode_finish_write_pin(thread, wtxn, inode, cb, private_data);
+            } else {
+                cb(inode, CHIMERA_VFS_OK, private_data);
             }
         } else {
-            inode = NULL;
+            diskfs_waiter_free(thread, w);
+            cb(NULL, status, private_data);
         }
-
-        diskfs_waiter_free(thread, w);
-
-        cb(inode, status, private_data);
     }
 } /* diskfs_grant_doorbell_cb */
 
@@ -6738,9 +7342,10 @@ diskfs_thread_init(
 
     /* B+tree op resume queue: doorbell (cross-thread) + deferral (same-thread). */
     pthread_mutex_init(&thread->resume_lock, NULL);
-    thread->resume_head     = NULL;
-    thread->resume_tail     = NULL;
-    thread->bt_op_free_list = NULL;
+    thread->resume_head            = NULL;
+    thread->resume_tail            = NULL;
+    thread->bt_op_free_list        = NULL;
+    thread->block_waiter_free_list = NULL;
     evpl_add_doorbell(evpl, &thread->resume_doorbell, diskfs_bt_resume_doorbell_cb);
     evpl_deferral_init(&thread->resume_deferral, diskfs_bt_resume_deferral_cb, thread);
 
@@ -6824,6 +7429,12 @@ diskfs_thread_destroy(void *private_data)
         struct diskfs_bt_op *op = thread->bt_op_free_list;
         thread->bt_op_free_list = op->next;
         free(op);
+    }
+
+    while (thread->block_waiter_free_list) {
+        struct diskfs_block_waiter *w = thread->block_waiter_free_list;
+        thread->block_waiter_free_list = w->next;
+        free(w);
     }
 
     while (thread->txn_free_list) {
@@ -7233,77 +7844,103 @@ diskfs_setattr(
                               diskfs_setattr_inode_cb, request);
 } /* diskfs_setattr */
 
-static inline struct diskfs_inode *
-diskfs_lookup_path(
-    struct diskfs_thread *thread,
-    struct diskfs_txn    *txn,
-    const char           *path,
-    int                   pathlen)
+/*
+ * Async mount-path resolution.  Walks request->mount.path one component at a
+ * time using async inode acquire + async dirent lookup, so it resolves a path
+ * through non-resident directories on a remounted FS (and over VFIO) without a
+ * synchronous read.  Walk state lives in the request: inode_stash[0] is the
+ * directory currently being descended; op_scratch is the parse cursor (byte
+ * offset into the path).  Read-locked inodes accumulate in the txn and are
+ * released centrally at commit (parents are released eagerly as we descend so
+ * a deep walk reuses the slots).
+ */
+static void diskfs_mount_walk_acquired_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data);
+
+static void
+diskfs_mount_walk_dirent_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
 {
-    struct diskfs_shared *shared = thread->shared;
-    struct diskfs_inode  *parent, *inode;
-    const char           *name;
-    const char           *pathc = path;
-    const char           *slash;
-    int                   namelen;
-    uint64_t              hash, inum, child_inum;
-    uint32_t              gen, child_gen;
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_dirent_rec      *rec     = (struct diskfs_dirent_rec *) p->rec_scratch;
+    uint64_t                       child_inum;
+    uint32_t                       child_gen;
 
-    diskfs_fh_to_inum(&inum, &gen, shared->root_fh, shared->root_fhlen);
-    inode = diskfs_inode_acquire_sync_read(thread, txn, inum, gen);
+    diskfs_bt_op_free(p->thread, op);
 
-    if (unlikely(!inode)) {
-        return NULL;
+    if (result < 0) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        return;
+    }
+    child_inum = rec->inum;
+    child_gen  = rec->gen;
+
+    /* Done descending the parent; release its read lock so a deep walk reuses
+     * the slot, then fetch the child. */
+    diskfs_txn_unlock_inode(p->txn, p->inode_stash[0]);
+
+    diskfs_inode_get_inum_async(p->thread, p->txn, child_inum, child_gen,
+                                diskfs_mount_walk_acquired_cb, request);
+} /* diskfs_mount_walk_dirent_cb */
+
+static void
+diskfs_mount_walk_acquired_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    const char                    *path    = request->mount.path;
+    int                            pathlen = request->mount.pathlen;
+    const char                    *pathc, *name, *slash;
+    int                            namelen;
+    uint64_t                       hash;
+    struct diskfs_bt_op           *op;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
     }
 
-    while (*pathc == '/') {
+    pathc = path + p->op_scratch;
+    while (pathc < path + pathlen && *pathc == '/') {
         pathc++;
     }
 
-    while (pathc < (path + pathlen)) {
-
-        slash = strchr(pathc, '/');
-
-        if (slash) {
-            name    = pathc;
-            namelen = slash - pathc;
-        } else {
-            name    = pathc;
-            namelen = pathlen - (pathc - path);
-        }
-
-        pathc += namelen;
-
-        while (*pathc == '/') {
-            pathc++;
-        }
-
-        hash = chimera_vfs_hash(name, namelen);
-
-        if (diskfs_dir_lookup(thread, inode, hash, &child_inum, &child_gen) != 0) {
-            return NULL;
-        }
-
-        parent = inode;
-
-        inode = diskfs_inode_acquire_sync_read(thread, txn, child_inum, child_gen);
-
-        /* Done with the parent now; release its slot so deep walks reuse it. */
-        diskfs_txn_unlock_inode(txn, parent);
-
-        if (!inode) {
-            return NULL;
-        }
-
-        if (!S_ISDIR(inode->mode)) {
-            return NULL;
-        }
-
+    if (pathc >= path + pathlen) {
+        /* Fully resolved. */
+        diskfs_map_attrs(thread, &request->mount.r_attr, inode);
+        diskfs_op_ok(request, p->txn);
+        return;
     }
 
-    return inode;
+    if (unlikely(!S_ISDIR(inode->mode))) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        return;
+    }
 
-} /* diskfs_lookup_path */
+    slash         = memchr(pathc, '/', (size_t) (path + pathlen - pathc));
+    name          = pathc;
+    namelen       = slash ? (int) (slash - pathc) : (int) (path + pathlen - pathc);
+    p->op_scratch = (uint32_t) ((pathc + namelen) - path);
+
+    hash              = chimera_vfs_hash(name, namelen);
+    p->inode_stash[0] = inode;     /* parent for the dirent lookup */
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_dir_lookup_async(op, thread, inode, hash, p->rec_scratch,
+                                sizeof(p->rec_scratch),
+                                diskfs_mount_walk_dirent_cb, request)) {
+        diskfs_mount_walk_dirent_cb(op, op->result, request);
+    }
+} /* diskfs_mount_walk_acquired_cb */
 
 static void
 diskfs_mount(
@@ -7313,28 +7950,19 @@ diskfs_mount(
     void                       *private_data)
 {
     struct diskfs_request_private *p = request->plugin_data;
-    struct diskfs_inode           *inode;
+    uint64_t                       inum;
+    uint32_t                       gen;
 
     (void) private_data;
 
-    (void) shared;
+    p->thread     = thread;
+    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->op_scratch = 0;
 
-    p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
-
-    /* Synchronous read-locked path walk; the resolved inode (and any
-     * parents still held) are recorded in the txn and released at commit. */
-    inode = diskfs_lookup_path(thread, p->txn, request->mount.path,
-                               request->mount.pathlen);
-
-    if (unlikely(!inode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
-        return;
-    }
-
-    diskfs_map_attrs(thread, &request->mount.r_attr, inode);
-
-    diskfs_op_ok(request, p->txn);
+    /* Resolve the mount path asynchronously starting from the root inode. */
+    diskfs_fh_to_inum(&inum, &gen, shared->root_fh, shared->root_fhlen);
+    diskfs_inode_get_inum_async(thread, p->txn, inum, gen,
+                                diskfs_mount_walk_acquired_cb, request);
 } /* diskfs_mount */
 
 static void
@@ -9752,6 +10380,18 @@ diskfs_write_prefix_lookup(struct chimera_vfs_request *request)
     }
 } /* diskfs_write_prefix_lookup */
 
+/* Retry context for the write's data-space allocation when a reservation
+ * refill parks on a cold AG-log block; the continuation re-enters
+ * diskfs_write_inode_cb with the (already write-locked) inode. */
+struct diskfs_write_alloc_ctx {
+    struct diskfs_inode        *inode;
+    struct chimera_vfs_request *request;
+};
+
+static void diskfs_write_alloc_resume(
+    struct diskfs_thread *thread,
+    void                 *arg);
+
 static void
 diskfs_write_inode_cb(
     struct diskfs_inode *inode,
@@ -9765,6 +10405,7 @@ diskfs_write_inode_cb(
     uint64_t                       write_end      = write_start + request->write.length;
     uint64_t                       aligned_start, aligned_end, aligned_length;
     uint64_t                       device_id, device_offset;
+    struct diskfs_write_alloc_ctx *wctx;
     int                            rc;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -9783,7 +10424,16 @@ diskfs_write_inode_cb(
     aligned_end    = (write_end + 4095ULL) & ~4095ULL;
     aligned_length = aligned_end - aligned_start;
 
-    rc = diskfs_thread_alloc_space(thread, diskfs_private->txn, aligned_length, &device_id, &device_offset);
+    wctx          = malloc(sizeof(*wctx));
+    wctx->inode   = inode;
+    wctx->request = request;
+    rc            = diskfs_thread_alloc_space(thread, diskfs_private->txn, aligned_length,
+                                              &device_id, &device_offset,
+                                              diskfs_write_alloc_resume, wctx);
+    if (rc == SM_AGAIN) {
+        return;     /* parked; diskfs_write_alloc_resume re-runs (owns wctx) */
+    }
+    free(wctx);
     if (rc) {
         diskfs_op_fail(request, diskfs_private->txn, CHIMERA_VFS_ENOSPC);
         return;
@@ -9804,6 +10454,18 @@ diskfs_write_inode_cb(
 
     diskfs_write_prefix_lookup(request);
 } /* diskfs_write_inode_cb */
+
+static void
+diskfs_write_alloc_resume(
+    struct diskfs_thread *thread,
+    void                 *arg)
+{
+    struct diskfs_write_alloc_ctx c = *(struct diskfs_write_alloc_ctx *) arg;
+
+    (void) thread;
+    free(arg);
+    diskfs_write_inode_cb(c.inode, CHIMERA_VFS_OK, c.request);
+} /* diskfs_write_alloc_resume */
 
 
 static void
