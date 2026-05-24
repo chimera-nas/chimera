@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: Unlicense
+
 chimera/pynfs/access/ACC1a_memfs_nfs4.0
 chimera/pynfs/access/ACC1b_memfs_nfs4.0
 chimera/pynfs/access/ACC1c_memfs_nfs4.0
