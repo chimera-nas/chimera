@@ -142,19 +142,19 @@ struct sm_journal {
  * success, -1 on error.
  */
 struct sm_io {
-    int (*read)(
+    int   (*read)(
         void    *user,
         uint32_t device_id,
         void    *buf,
         uint64_t length,
         uint64_t offset);
-    int (*write)(
+    int   (*write)(
         void       *user,
         uint32_t    device_id,
         const void *buf,
         uint64_t    length,
         uint64_t    offset);
-    int (*flush)(
+    int   (*flush)(
         void    *user,
         uint32_t device_id);
     void *user;
@@ -273,6 +273,30 @@ void
 space_map_destroy(
     struct space_map *sm);
 
+/*
+ * Return code for the journaling operations below: the journal write goes
+ * through the async block path (sm_journal.claim_block), so when a log block
+ * is not resident the claim parks the calling request and issues the read, and
+ * the operation reports SM_AGAIN without changing any allocator state.  The
+ * caller must unwind and re-drive the whole operation once resumed; the retry
+ * is clean because nothing was mutated.  0 = done, -1 = ENOSPC (alloc only).
+ */
+#define SM_AGAIN 1
+
+/*
+ * Ensure the thread's reservation cache holds at least min_bytes of contiguous
+ * space, refilling (journals + may SM_AGAIN) if short.  Hands out nothing;
+ * callers use it to front-load the journaling/suspension of a metadata op
+ * before a non-suspendable section (e.g. a b+tree modify) so the subsequent
+ * allocs are pure cache draws.  0 = covered, -1 = ENOSPC, SM_AGAIN = parked.
+ */
+int
+space_map_reserve(
+    struct space_map        *sm,
+    struct sm_thread_cache  *cache,
+    const struct sm_journal *jnl,
+    uint64_t                 min_bytes);
+
 int
 space_map_alloc(
     struct space_map        *sm,
@@ -282,7 +306,7 @@ space_map_alloc(
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset);
 
-void
+int
 space_map_free(
     struct space_map        *sm,
     const struct sm_journal *jnl,
@@ -292,7 +316,7 @@ space_map_free(
 
 /* Pending free: journal the FREE delta now (rides the txn redo), apply the
  * in-memory free only once that txn is durable. */
-void
+int
 space_map_free_journal(
     struct space_map        *sm,
     const struct sm_journal *jnl,
@@ -307,7 +331,7 @@ space_map_free_apply(
     uint64_t          device_offset,
     uint64_t          length);
 
-void
+int
 space_map_thread_cache_return(
     struct space_map        *sm,
     const struct sm_journal *jnl,
