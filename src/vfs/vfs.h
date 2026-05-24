@@ -1008,7 +1008,7 @@ struct chimera_vfs_handle_state {
  * chimera_vfs_get_xattr / set_xattr / list_xattrs / remove_xattr.
  * Surfaced over NFSv4.2 (RFC 8276). Modules that leave this unset
  * cause the VFS layer to return ENOTSUP. */
-#define CHIMERA_VFS_CAP_XATTR              (1U << 13)
+#define CHIMERA_VFS_CAP_XATTR              (1U << 18)
 
 /* setxattr_option4 values (RFC 8276 §8) passed to chimera_vfs_set_xattr().
  * Kept numerically identical to the on-the-wire NFSv4.2 enum. */

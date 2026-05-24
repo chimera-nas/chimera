@@ -105,6 +105,10 @@ chimera_linux_errno_to_status(int err)
             return CHIMERA_VFS_ESTALE;
         case ELOOP:
             return CHIMERA_VFS_ELOOP;
+        case ENODATA:
+            return CHIMERA_VFS_ENODATA;
+        case ERANGE:
+            return CHIMERA_VFS_ERANGE;
         default:
             chimera_linux_error("Unknown errno value: %d", err);
             return CHIMERA_VFS_UNSET;

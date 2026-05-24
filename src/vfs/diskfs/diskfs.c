@@ -442,6 +442,7 @@ enum diskfs_bt_rectype {
     DISKFS_REC_EXTENT  = 2,
     DISKFS_REC_SYMLINK = 3,
     DISKFS_REC_ORPHAN  = 4,   /* orphan-list inode only: subkey = orphaned inum */
+    DISKFS_REC_XATTR   = 5,
 };
 
 /* B+tree key: ordered by (type, subkey).  subkey is the name hash for
@@ -494,6 +495,12 @@ struct diskfs_extent_rec {
     uint64_t device_offset;
 } __attribute__((packed));
 
+struct diskfs_xattr_rec {
+    uint32_t name_len;
+    uint32_t value_len;
+    char     data[];
+} __attribute__((packed));
+
 #define DISKFS_DIRENT_REC_MAX (sizeof(struct diskfs_dirent_rec) + 256)
 _Static_assert(DISKFS_DIRENT_REC_MAX <= 320,
                "diskfs_request_private.rec_scratch must hold a full dirent record");
@@ -506,6 +513,8 @@ _Static_assert(DISKFS_DIRENT_REC_MAX <= 320,
  * rather than aborting the daemon.
  */
 #define DISKFS_SYMLINK_TARGET_MAX \
+        (DISKFS_BT_ROOT_CAP - sizeof(struct diskfs_bt_node_hdr) - sizeof(struct diskfs_bt_lslot))
+#define DISKFS_XATTR_REC_MAX \
         (DISKFS_BT_ROOT_CAP - sizeof(struct diskfs_bt_node_hdr) - sizeof(struct diskfs_bt_lslot))
 
 /*
@@ -12135,6 +12144,322 @@ diskfs_search_keys(
     diskfs_op_ok(request, p->txn);
 } /* diskfs_search_keys */
 
+static inline int
+diskfs_xattr_rec_matches(
+    const struct diskfs_xattr_rec *rec,
+    uint32_t                       rec_len,
+    const char                    *name,
+    uint32_t                       name_len)
+{
+    return rec_len >= sizeof(*rec) &&
+           rec->name_len == name_len &&
+           rec_len >= sizeof(*rec) + rec->name_len + rec->value_len &&
+           memcmp(rec->data, name, name_len) == 0;
+} /* diskfs_xattr_rec_matches */
+
+static void
+diskfs_get_xattr_inode_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_bt_key           key;
+    struct diskfs_xattr_rec       *rec;
+    int                            len;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    key.type   = DISKFS_REC_XATTR;
+    key.subkey = chimera_vfs_hash(request->get_xattr.name,
+                                  request->get_xattr.namelen);
+
+    rec = malloc(DISKFS_BT_NODE_CAP);
+    len = diskfs_bt_lookup_exact(p->thread, inode, &key,
+                                 rec, DISKFS_BT_NODE_CAP);
+    if (len < 0 ||
+        !diskfs_xattr_rec_matches(rec, len, request->get_xattr.name,
+                                  request->get_xattr.namelen)) {
+        free(rec);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENODATA);
+        return;
+    }
+
+    if (rec->value_len > request->get_xattr.value_maxlen) {
+        free(rec);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ERANGE);
+        return;
+    }
+
+    memcpy(request->get_xattr.value, rec->data + rec->name_len,
+           rec->value_len);
+    request->get_xattr.r_value_len = rec->value_len;
+    free(rec);
+    diskfs_op_ok(request, p->txn);
+} /* diskfs_get_xattr_inode_cb */
+
+static void
+diskfs_get_xattr(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    (void) shared;
+    (void) private_data;
+
+    p->thread = thread;
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+
+    diskfs_inode_get_fh_async(thread, p->txn,
+                              request->fh, request->fh_len,
+                              diskfs_get_xattr_inode_cb, request);
+} /* diskfs_get_xattr */
+
+static void
+diskfs_set_xattr_inode_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_bt_key           key;
+    struct diskfs_xattr_rec       *old_rec;
+    struct diskfs_xattr_rec       *new_rec;
+    uint32_t                       rec_len;
+    int                            old_len;
+    struct timespec                now;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    rec_len = sizeof(*new_rec) + request->set_xattr.namelen +
+              request->set_xattr.value_len;
+    if (rec_len > DISKFS_XATTR_REC_MAX) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EFBIG);
+        return;
+    }
+
+    diskfs_map_attrs(p->thread, &request->set_xattr.r_pre_attr, inode);
+
+    key.type   = DISKFS_REC_XATTR;
+    key.subkey = chimera_vfs_hash(request->set_xattr.name,
+                                  request->set_xattr.namelen);
+
+    old_rec = malloc(DISKFS_BT_NODE_CAP);
+    old_len = diskfs_bt_lookup_exact(p->thread, inode, &key,
+                                     old_rec, DISKFS_BT_NODE_CAP);
+    if (old_len >= 0 &&
+        !diskfs_xattr_rec_matches(old_rec, old_len, request->set_xattr.name,
+                                  request->set_xattr.namelen)) {
+        free(old_rec);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EEXIST);
+        return;
+    }
+
+    if (old_len >= 0) {
+        if (request->set_xattr.option == CHIMERA_VFS_XATTR_CREATE) {
+            free(old_rec);
+            diskfs_op_fail(request, p->txn, CHIMERA_VFS_EEXIST);
+            return;
+        }
+        diskfs_bt_remove(p->thread, p->txn, inode, &key);
+    } else if (request->set_xattr.option == CHIMERA_VFS_XATTR_REPLACE) {
+        free(old_rec);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENODATA);
+        return;
+    }
+    free(old_rec);
+
+    new_rec            = malloc(rec_len);
+    new_rec->name_len  = request->set_xattr.namelen;
+    new_rec->value_len = request->set_xattr.value_len;
+    memcpy(new_rec->data, request->set_xattr.name, request->set_xattr.namelen);
+    memcpy(new_rec->data + request->set_xattr.namelen,
+           request->set_xattr.value, request->set_xattr.value_len);
+
+    diskfs_bt_insert(p->thread, p->txn, inode, &key, new_rec, rec_len);
+    free(new_rec);
+
+    clock_gettime(CLOCK_REALTIME, &now);
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+
+    diskfs_map_attrs(p->thread, &request->set_xattr.r_post_attr, inode);
+    diskfs_op_ok(request, p->txn);
+} /* diskfs_set_xattr_inode_cb */
+
+static void
+diskfs_set_xattr(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    (void) shared;
+    (void) private_data;
+
+    p->thread = thread;
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+
+    diskfs_inode_get_fh_async(thread, p->txn,
+                              request->fh, request->fh_len,
+                              diskfs_set_xattr_inode_cb, request);
+} /* diskfs_set_xattr */
+
+static void
+diskfs_list_xattrs_inode_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_bt_key           key = { .type = DISKFS_REC_XATTR, .subkey = 0 };
+    struct diskfs_bt_key           found;
+    struct diskfs_xattr_rec       *rec;
+    uint8_t                       *buf = request->list_xattrs.buffer;
+    uint32_t                       offset = 0, count = 0;
+    int                            len;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    rec = malloc(DISKFS_BT_NODE_CAP);
+    for (;;) {
+        len = diskfs_bt_lookup_ge(p->thread, inode, &key, &found,
+                                  rec, DISKFS_BT_NODE_CAP);
+        if (len < 0 || found.type != DISKFS_REC_XATTR) {
+            break;
+        }
+        if (len < (int) sizeof(*rec) ||
+            len < (int) (sizeof(*rec) + rec->name_len + rec->value_len)) {
+            free(rec);
+            diskfs_op_fail(request, p->txn, CHIMERA_VFS_EIO);
+            return;
+        }
+        if (offset + rec->name_len + 1 > request->list_xattrs.max_bytes) {
+            free(rec);
+            diskfs_op_fail(request, p->txn, CHIMERA_VFS_ERANGE);
+            return;
+        }
+        memcpy(buf + offset, rec->data, rec->name_len);
+        offset += rec->name_len;
+        buf[offset++] = '\0';
+        count++;
+        if (found.subkey == UINT64_MAX) {
+            break;
+        }
+        key.subkey = found.subkey + 1;
+    }
+
+    request->list_xattrs.r_len    = offset;
+    request->list_xattrs.r_count  = count;
+    request->list_xattrs.r_eof    = 1;
+    request->list_xattrs.r_cookie = 0;
+    free(rec);
+    diskfs_op_ok(request, p->txn);
+} /* diskfs_list_xattrs_inode_cb */
+
+static void
+diskfs_list_xattrs(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    (void) shared;
+    (void) private_data;
+
+    p->thread = thread;
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+
+    diskfs_inode_get_fh_async(thread, p->txn,
+                              request->fh, request->fh_len,
+                              diskfs_list_xattrs_inode_cb, request);
+} /* diskfs_list_xattrs */
+
+static void
+diskfs_remove_xattr_inode_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_bt_key           key;
+    struct diskfs_xattr_rec       *rec;
+    int                            len;
+    struct timespec                now;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    diskfs_map_attrs(p->thread, &request->remove_xattr.r_pre_attr, inode);
+
+    key.type   = DISKFS_REC_XATTR;
+    key.subkey = chimera_vfs_hash(request->remove_xattr.name,
+                                  request->remove_xattr.namelen);
+
+    rec = malloc(DISKFS_BT_NODE_CAP);
+    len = diskfs_bt_lookup_exact(p->thread, inode, &key,
+                                 rec, DISKFS_BT_NODE_CAP);
+    if (len < 0 ||
+        !diskfs_xattr_rec_matches(rec, len, request->remove_xattr.name,
+                                  request->remove_xattr.namelen)) {
+        free(rec);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENODATA);
+        return;
+    }
+    free(rec);
+
+    diskfs_bt_remove(p->thread, p->txn, inode, &key);
+
+    clock_gettime(CLOCK_REALTIME, &now);
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+
+    diskfs_map_attrs(p->thread, &request->remove_xattr.r_post_attr, inode);
+    diskfs_op_ok(request, p->txn);
+} /* diskfs_remove_xattr_inode_cb */
+
+static void
+diskfs_remove_xattr(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    (void) shared;
+    (void) private_data;
+
+    p->thread = thread;
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+
+    diskfs_inode_get_fh_async(thread, p->txn,
+                              request->fh, request->fh_len,
+                              diskfs_remove_xattr_inode_cb, request);
+} /* diskfs_remove_xattr */
+
 static void
 diskfs_dispatch(
     struct chimera_vfs_request *request,
@@ -12239,6 +12564,18 @@ diskfs_dispatch(
         case CHIMERA_VFS_OP_SEARCH_KEYS:
             diskfs_search_keys(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_GET_XATTR:
+            diskfs_get_xattr(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_SET_XATTR:
+            diskfs_set_xattr(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_LIST_XATTRS:
+            diskfs_list_xattrs(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_REMOVE_XATTR:
+            diskfs_remove_xattr(thread, shared, request, private_data);
+            break;
         default:
             chimera_diskfs_error("diskfs_dispatch: unknown operation %d",
                                  request->opcode);
@@ -12252,7 +12589,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .name         = "diskfs",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_DISKFS,
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
-        CHIMERA_VFS_CAP_FS_RELATIVE_OP,
+        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_XATTR,
     .init           = diskfs_init,
     .destroy        = diskfs_destroy,
     .thread_init    = diskfs_thread_init,
