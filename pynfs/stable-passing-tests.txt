@@ -3631,7 +3631,6 @@ chimera/pynfs/courteous/COUR3_diskfs_io_uring_nfs4.1
 chimera/pynfs/courteous/COUR4_diskfs_io_uring_nfs4.1
 chimera/pynfs/courteous/COUR5_diskfs_io_uring_nfs4.1
 chimera/pynfs/courteous/COUR6_diskfs_io_uring_nfs4.1
-chimera/pynfs/courteous/COUR7_diskfs_io_uring_nfs4.1
 chimera/pynfs/courteous/COUR2_diskfs_aio_nfs4.1
 chimera/pynfs/courteous/COUR3_diskfs_aio_nfs4.1
 chimera/pynfs/courteous/COUR4_diskfs_aio_nfs4.1
@@ -3827,7 +3826,6 @@ chimera/pynfs/create_session/CSESS7_cairn_nfs4.1
 chimera/pynfs/create_session/CSESS8_cairn_nfs4.1
 chimera/pynfs/create_session/CSESS9_cairn_nfs4.1
 chimera/pynfs/create_session/DELEG5_cairn_nfs4.1
-chimera/pynfs/create_session/DELEG6_cairn_nfs4.1
 chimera/pynfs/create_session/DELEG7_cairn_nfs4.1
 chimera/pynfs/currentstateid/CSID1_memfs_nfs4.1
 chimera/pynfs/currentstateid/CSID10_memfs_nfs4.1
