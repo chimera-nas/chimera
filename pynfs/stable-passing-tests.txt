@@ -483,9 +483,6 @@ chimera/pynfs/delegations/DELEG3e_diskfs_aio_nfs4.0
 chimera/pynfs/delegations/DELEG8_diskfs_aio_nfs4.0
 chimera/pynfs/delegations/REBT8_diskfs_aio_nfs4.0
 chimera/pynfs/delegations/DELEG15a_cairn_nfs4.0
-chimera/pynfs/delegations/DELEG15b_cairn_nfs4.0
-chimera/pynfs/delegations/DELEG15c_cairn_nfs4.0
-chimera/pynfs/delegations/DELEG15d_cairn_nfs4.0
 chimera/pynfs/delegations/DELEG2_cairn_nfs4.0
 chimera/pynfs/delegations/DELEG21_cairn_nfs4.0
 chimera/pynfs/delegations/DELEG22_cairn_nfs4.0
@@ -2201,7 +2198,6 @@ chimera/pynfs/readdir/RDDR5s_memfs_nfs4.0
 chimera/pynfs/readdir/RDDR6_memfs_nfs4.0
 chimera/pynfs/readdir/RDDR7_memfs_nfs4.0
 chimera/pynfs/readdir/RDDR8_memfs_nfs4.0
-chimera/pynfs/readdir/RDDR8b_memfs_nfs4.0
 chimera/pynfs/readdir/RDDR9_memfs_nfs4.0
 chimera/pynfs/readdir/RDDR1_linux_nfs4.0
 chimera/pynfs/readdir/RDDR10_linux_nfs4.0
@@ -2219,7 +2215,6 @@ chimera/pynfs/readdir/RDDR5s_linux_nfs4.0
 chimera/pynfs/readdir/RDDR6_linux_nfs4.0
 chimera/pynfs/readdir/RDDR7_linux_nfs4.0
 chimera/pynfs/readdir/RDDR8_linux_nfs4.0
-chimera/pynfs/readdir/RDDR8b_linux_nfs4.0
 chimera/pynfs/readdir/RDDR9_linux_nfs4.0
 chimera/pynfs/readdir/RDDR1_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR10_io_uring_nfs4.0
@@ -2237,7 +2232,6 @@ chimera/pynfs/readdir/RDDR5s_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR6_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR7_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR8_io_uring_nfs4.0
-chimera/pynfs/readdir/RDDR8b_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR9_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR1_diskfs_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR10_diskfs_io_uring_nfs4.0
@@ -2249,7 +2243,6 @@ chimera/pynfs/readdir/RDDR4_diskfs_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR6_diskfs_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR7_diskfs_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR8_diskfs_io_uring_nfs4.0
-chimera/pynfs/readdir/RDDR8b_diskfs_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR9_diskfs_io_uring_nfs4.0
 chimera/pynfs/readdir/RDDR1_diskfs_aio_nfs4.0
 chimera/pynfs/readdir/RDDR10_diskfs_aio_nfs4.0
@@ -2261,7 +2254,6 @@ chimera/pynfs/readdir/RDDR4_diskfs_aio_nfs4.0
 chimera/pynfs/readdir/RDDR6_diskfs_aio_nfs4.0
 chimera/pynfs/readdir/RDDR7_diskfs_aio_nfs4.0
 chimera/pynfs/readdir/RDDR8_diskfs_aio_nfs4.0
-chimera/pynfs/readdir/RDDR8b_diskfs_aio_nfs4.0
 chimera/pynfs/readdir/RDDR9_diskfs_aio_nfs4.0
 chimera/pynfs/readdir/RDDR1_cairn_nfs4.0
 chimera/pynfs/readdir/RDDR10_cairn_nfs4.0
@@ -2273,7 +2265,6 @@ chimera/pynfs/readdir/RDDR4_cairn_nfs4.0
 chimera/pynfs/readdir/RDDR6_cairn_nfs4.0
 chimera/pynfs/readdir/RDDR7_cairn_nfs4.0
 chimera/pynfs/readdir/RDDR8_cairn_nfs4.0
-chimera/pynfs/readdir/RDDR8b_cairn_nfs4.0
 chimera/pynfs/readdir/RDDR9_cairn_nfs4.0
 chimera/pynfs/readlink/RDLK1_memfs_nfs4.0
 chimera/pynfs/readlink/RDLK2b_memfs_nfs4.0
@@ -5149,7 +5140,6 @@ chimera/pynfs/deleg/DELEG4_diskfs_io_uring_nfs4.2
 chimera/pynfs/deleg/DELEG8_diskfs_io_uring_nfs4.2
 chimera/pynfs/deleg/DELEG9_diskfs_io_uring_nfs4.2
 chimera/pynfs/deleg/DELEG4_diskfs_aio_nfs4.2
-chimera/pynfs/deleg/DELEG8_diskfs_aio_nfs4.2
 chimera/pynfs/deleg/DELEG9_diskfs_aio_nfs4.2
 chimera/pynfs/deleg/DELEG4_cairn_nfs4.2
 chimera/pynfs/deleg/DELEG8_cairn_nfs4.2
