@@ -4327,7 +4327,6 @@ chimera/pynfs/open/OPEN8_linux_nfs4.1
 chimera/pynfs/open/DELEG1_io_uring_nfs4.1
 chimera/pynfs/open/DELEG3_io_uring_nfs4.1
 chimera/pynfs/open/DELEG4_io_uring_nfs4.1
-chimera/pynfs/open/DELEG5_io_uring_nfs4.1
 chimera/pynfs/open/DELEG6_io_uring_nfs4.1
 chimera/pynfs/open/DELEG7_io_uring_nfs4.1
 chimera/pynfs/open/OPEN1_io_uring_nfs4.1
