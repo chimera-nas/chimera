@@ -198,25 +198,29 @@ export PYTHONPATH="${PYNFS_DIR}:${PYTHONPATH:-}"
 # under a second; anything past this is hung. `timeout` returns 124 when it
 # fires, which we surface explicitly below.
 PYNFS_TIMEOUT="${PYNFS_TIMEOUT:-60}"
+PYNFS_DEP_ARGS=(--force)
+if [ "${PYNFS_RUNDEPS:-0}" = "1" ]; then
+    PYNFS_DEP_ARGS=(--rundeps --force)
+fi
 
 if [ "$NFS_MINOR_VERSION" = "0" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.0/testserver.py"
     # shellcheck disable=SC2086
     timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
         ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-        --maketree --force -v --json="${RESULTS_FILE}" $FLAG_ARGS
+        --maketree "${PYNFS_DEP_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
 elif [ "$NFS_MINOR_VERSION" = "1" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.1/testserver.py"
     # shellcheck disable=SC2086
     timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
         ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-        --minorversion=1 --maketree --force -v --json="${RESULTS_FILE}" $FLAG_ARGS
+        --minorversion=1 --maketree "${PYNFS_DEP_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
 elif [ "$NFS_MINOR_VERSION" = "2" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.1/testserver.py"
     # shellcheck disable=SC2086
     timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
         ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-        --minorversion=2 --maketree --force -v --json="${RESULTS_FILE}" $FLAG_ARGS
+        --minorversion=2 --maketree "${PYNFS_DEP_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
 else
     echo "Unsupported NFS minor version: $NFS_MINOR_VERSION"
     exit 1

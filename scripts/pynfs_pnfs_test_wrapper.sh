@@ -122,9 +122,14 @@ echo "=== pNFS metadata server up on 127.0.0.1:${MDS_PORT} ==="
 export PYTHONPATH="${PYNFS_DIR}:${PYTHONPATH:-}"
 
 TESTSERVER="${PYNFS_DIR}/nfs4.1/testserver.py"
+PYNFS_DEP_ARGS=(--force)
+if [ "${PYNFS_RUNDEPS:-0}" = "1" ]; then
+    PYNFS_DEP_ARGS=(--rundeps --force)
+fi
+
 timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
     ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-    --minorversion=1 --maketree --force -v --json="${RESULTS_FILE}" $FLAG_ARGS
+    --minorversion=1 --maketree "${PYNFS_DEP_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
 RC=$?
 
 # Propagate a pynfs crash / connection error directly.
