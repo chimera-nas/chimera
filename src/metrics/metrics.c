@@ -46,7 +46,10 @@ chimera_metrics_notify(
 {
     struct chimera_metrics *metrics = private_data;
     struct evpl_iovec       iov;
+    char                   *buf;
+    int                     cap;
     ssize_t                 len;
+    int                     evpl_len;
     int                     n;
 
     switch (notify_type) {
@@ -66,7 +69,15 @@ chimera_metrics_notify(
                 break;
             }
 
-            len = prometheus_metrics_scrape(metrics->metrics, (char *) evpl_iovec_data(&iov), evpl_iovec_length(&iov));
+            buf = (char *) evpl_iovec_data(&iov);
+            cap = evpl_iovec_length(&iov);
+
+            /* Chimera's own metrics first, then libevpl's appended into
+             * the remaining space.  Both emit Prometheus text format and
+             * use disjoint name prefixes (chimera_* vs evpl_*), so the
+             * concatenation is a valid single exposition page.
+             */
+            len = prometheus_metrics_scrape(metrics->metrics, buf, cap);
 
             if (len < 0) {
                 evpl_iovec_release(evpl, &iov);
@@ -74,6 +85,17 @@ chimera_metrics_notify(
                 evpl_http_server_dispatch_default(request, 500);
                 break;
             }
+
+            evpl_len = evpl_metrics_scrape(buf + len, cap - len);
+
+            if (evpl_len < 0) {
+                evpl_iovec_release(evpl, &iov);
+                evpl_http_server_set_response_length(request, 0);
+                evpl_http_server_dispatch_default(request, 500);
+                break;
+            }
+
+            len += evpl_len;
 
             evpl_iovec_set_length(&iov, len);
 
