@@ -264,10 +264,11 @@ chimera_smb_create_gen_open_file(
     if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && oh) {
         struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
         struct chimera_vfs_file_state *file_state;
-        uint8_t                        req_smb  = 0;
-        uint8_t                        req_vfs  = 0;
-        bool                           via_rqls = false;
-        struct chimera_vfs_lease      *conflict = NULL;
+        uint8_t                        req_smb         = 0;
+        uint8_t                        req_vfs         = 0;
+        bool                           via_rqls        = false;
+        bool                           durable_request = false;
+        struct chimera_vfs_lease      *conflict        = NULL;
         enum chimera_vfs_lease_result  result;
 
         if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
@@ -293,30 +294,46 @@ chimera_smb_create_gen_open_file(
             } /* switch */
         }
 
+        durable_request = thread->shared->config.persistent_handles &&
+            (request->create.ctx_present_mask &
+             (CHIMERA_SMB_CREATE_CTX_DHNQ |
+              CHIMERA_SMB_CREATE_CTX_DH2Q)) != 0;
+
         /* SMB lease bits use R=0x01, H=0x02, W=0x04 — different layout
-         * from vfs_state's R/W/H mask, so map field-by-field.  We grant only
-         * the read-caching (R) bit — a LEVEL_II oplock — and deliberately
-         * withhold write caching (W) and handle caching (H):
-         *
-         *   - Handle caching (batch oplock) makes the Linux cifs client keep
-         *     "deferred close" handles cached, which collide with unlink of
-         *     an open file (delete-of-open-file needs delete-pending across
-         *     the cached handle, not yet implemented) — cthon op_unlk failed
-         *     with EBUSY.
-         *   - Write caching lets the client buffer writes it has not flushed
-         *     to the server, which corrupts server-side copy: copy_file_range
-         *     (FSCTL_SRV_COPYCHUNK) reads the source on the server before the
-         *     buffered write lands, copying stale/zero data (fsx READ BAD
-         *     DATA).  Write-through keeps the server authoritative.
-         *
-         * Read caching is the important win and is coherent: a write breaks
-         * other holders' R leases (chimera_vfs_state_break_on_write), and the
-         * VFS attr/data caches keep a single client consistent.  A client that
-         * asked for an exclusive/batch oplock or an RWH lease simply receives
-         * the read-only (LEVEL_II) subset.  Re-enable W/H once write-cache
-         * flush-before-copy and delete-pending semantics are implemented. */
+        * from vfs_state's R/W/H mask, so map field-by-field.  For ordinary
+        * opens we grant only the read-caching (R) bit — a LEVEL_II oplock —
+        * and deliberately withhold write caching (W) and handle caching (H):
+        *
+        *   - Handle caching (batch oplock) makes the Linux cifs client keep
+        *     "deferred close" handles cached, which collide with unlink of
+        *     an open file (delete-of-open-file needs delete-pending across
+        *     the cached handle, not yet implemented) — cthon op_unlk failed
+        *     with EBUSY.
+        *   - Write caching lets the client buffer writes it has not flushed
+        *     to the server, which corrupts server-side copy: copy_file_range
+        *     (FSCTL_SRV_COPYCHUNK) reads the source on the server before the
+        *     buffered write lands, copying stale/zero data (fsx READ BAD
+        *     DATA).  Write-through keeps the server authoritative.
+        *
+        * Read caching is the important win and is coherent: a write breaks
+        * other holders' R leases (chimera_vfs_state_break_on_write), and the
+        * VFS attr/data caches keep a single client consistent.  A client that
+        * asked for an exclusive/batch oplock or an RWH lease simply receives
+        * the read-only (LEVEL_II) subset.
+        *
+        * Durable handles are the exception. MS-SMB2 requires a durable grant
+        * to be paired with a batch oplock or a HANDLE-caching lease, and WPTS
+        * verifies the durable response context on that initial CREATE. Only
+        * durable-aware clients take this path, so keep the normal-client
+        * behavior above while allowing the requested W/H bits here. */
         if (req_smb & SMB2_LEASE_READ_CACHING) {
             req_vfs |= CHIMERA_VFS_LEASE_MODE_R;
+        }
+        if (durable_request && (req_smb & SMB2_LEASE_HANDLE_CACHING)) {
+            req_vfs |= CHIMERA_VFS_LEASE_MODE_H;
+        }
+        if (durable_request && (req_smb & SMB2_LEASE_WRITE_CACHING)) {
+            req_vfs |= CHIMERA_VFS_LEASE_MODE_W;
         }
 
         /* Oplocks are about data caching: an attribute-only open (no

@@ -55,9 +55,25 @@ SHARES=(SMBBasic SMBEncrypted FileShare ShareForceLevel2)
 cleanup() {
     if [ -n "$CHIMERA_PID" ]; then
         kill "$CHIMERA_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            if ! kill -0 "$CHIMERA_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        if kill -0 "$CHIMERA_PID" 2>/dev/null; then
+            kill -9 "$CHIMERA_PID" 2>/dev/null || true
+        fi
         wait "$CHIMERA_PID" 2>/dev/null || true
     fi
-    ip netns delete "${NETNS_NAME}" 2>/dev/null || true
+    for pid in $(ip netns pids "${NETNS_NAME}" 2>/dev/null); do
+        kill "$pid" 2>/dev/null || true
+    done
+    sleep 0.1
+    for pid in $(ip netns pids "${NETNS_NAME}" 2>/dev/null); do
+        kill -9 "$pid" 2>/dev/null || true
+    done
+    timeout 2s ip netns delete "${NETNS_NAME}" 2>/dev/null || true
     rm -rf "$SESSION_DIR"
 }
 trap cleanup EXIT
