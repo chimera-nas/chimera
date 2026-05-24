@@ -33,3 +33,11 @@ target_include_directories(test_replay_slot PRIVATE
     ${NFS_COMMON_INCLUDE_DIR})
 target_link_libraries(test_replay_slot chimera_vfs chimera_common evpl evpl_rpc2 pthread uuid urcu urcu-common)
 add_test(NAME chimera/server/nfs/replay_slot COMMAND test_replay_slot)
+
+add_executable(test_protocol_advertise test_protocol_advertise.c)
+target_include_directories(test_protocol_advertise PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_protocol_advertise chimera_vfs chimera_common evpl evpl_rpc2 pthread uuid urcu urcu-common)
+add_test(NAME chimera/server/nfs/protocol_advertise COMMAND test_protocol_advertise)

@@ -118,8 +118,9 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_FREE_STATEID] =         { NFS4_OP_V41 | NFS4_OP_V42,               0
     },
-    [OP_GET_DIR_DELEGATION] =   { NFS4_OP_V41 | NFS4_OP_V42,               0
-    },
+    /* Directory delegations are distinct from OPEN file delegations and are
+     * not implemented.  Leave OP_GET_DIR_DELEGATION unsupported so clients
+     * receive NFS4ERR_NOTSUPP instead of passing dispatch with no handler. */
     [OP_GETDEVICEINFO] =        { NFS4_OP_V41 | NFS4_OP_V42,               0
     },
     [OP_GETDEVICELIST] =        { NFS4_OP_V41 | NFS4_OP_V42,               0
@@ -142,8 +143,8 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_TEST_STATEID] =         { NFS4_OP_V41 | NFS4_OP_V42,               0
     },
-    [OP_WANT_DELEGATION] =      { NFS4_OP_V41 | NFS4_OP_V42,               0
-    },
+    /* Explicit post-OPEN delegation requests are not implemented.  OPEN may
+     * still grant file delegations when nfs4_delegations is enabled. */
     [OP_DESTROY_CLIENTID] =     { NFS4_OP_V41 | NFS4_OP_V42,               NFS4_OP_FLAG_NO_REQ_SESSION
     },
     [OP_RECLAIM_COMPLETE] =     { NFS4_OP_V41 | NFS4_OP_V42,               0
