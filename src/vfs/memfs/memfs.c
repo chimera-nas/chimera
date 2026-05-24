@@ -1958,6 +1958,12 @@ memfs_readdir(
     request->complete(request);
 } /* memfs_readdir */
 
+static inline void
+memfs_store_handle_state(
+    struct memfs_thread             *thread,
+    struct memfs_shared             *shared,
+    struct chimera_vfs_handle_state *hs);
+
 static void
 memfs_open_fh(
     struct memfs_thread        *thread,
@@ -1979,6 +1985,8 @@ memfs_open_fh(
     pthread_mutex_unlock(&inode->lock);
 
     request->open_fh.r_vfs_private = (uint64_t) inode;
+
+    memfs_store_handle_state(thread, shared, request->open_fh.handle_state);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -2056,8 +2064,9 @@ memfs_open_at(
 
         rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
-        parent_inode->mtime = now;
-        parent_inode->ctime = now;
+        parent_inode->mtime        = now;
+        parent_inode->ctime        = now;
+        request->open_at.r_created = 1;
     } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_EEXIST;
@@ -2135,6 +2144,8 @@ memfs_open_at(
     memfs_map_attrs(shared, &request->open_at.r_attr, inode, request->fh);
 
     pthread_mutex_unlock(&inode->lock);
+
+    memfs_store_handle_state(thread, shared, request->open_at.handle_state);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -3903,6 +3914,57 @@ memfs_link_at(
 } /* memfs_link_at */
 
 
+/* Insert-or-replace a KV pair in the sharded store.  Shared by the generic
+ * PUT_KEY op and the atomic handle-state store on open. */
+static void
+memfs_kv_store(
+    struct memfs_thread *thread,
+    struct memfs_shared *shared,
+    const void          *key,
+    uint32_t             key_len,
+    const void          *value,
+    uint32_t             value_len)
+{
+    uint64_t               hash;
+    int                    shard_idx;
+    struct memfs_kv_shard *shard;
+    struct memfs_kv_entry *entry, *existing;
+
+    hash      = chimera_vfs_hash(key, key_len);
+    shard_idx = hash % shared->num_kv_shards;
+    shard     = &shared->kv_shards[shard_idx];
+
+    pthread_mutex_lock(&shard->lock);
+
+    rb_tree_query_exact(&shard->entries, hash, hash, existing);
+
+    if (existing) {
+        free(existing->value);
+        existing->value_len = value_len;
+        existing->value     = malloc(value_len);
+        memcpy(existing->value, value, value_len);
+    } else {
+        entry = memfs_kv_entry_alloc(thread, hash, key, key_len, value, value_len);
+        rb_tree_insert(&shard->entries, hash, entry);
+    }
+
+    pthread_mutex_unlock(&shard->lock);
+} /* memfs_kv_store */
+
+/* Honor an optional atomic handle-state record carried on an open.  memfs is
+ * synchronous, so storing it inline before completing the open is trivially
+ * atomic with respect to the open itself. */
+static inline void
+memfs_store_handle_state(
+    struct memfs_thread             *thread,
+    struct memfs_shared             *shared,
+    struct chimera_vfs_handle_state *hs)
+{
+    if (hs) {
+        memfs_kv_store(thread, shared, hs->key, hs->key_len, hs->value, hs->value_len);
+    }
+} /* memfs_store_handle_state */
+
 static void
 memfs_put_key(
     struct memfs_thread        *thread,
@@ -3910,39 +3972,9 @@ memfs_put_key(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    uint64_t               hash;
-    int                    shard_idx;
-    struct memfs_kv_shard *shard;
-    struct memfs_kv_entry *entry, *existing;
-
-    hash      = chimera_vfs_hash(request->put_key.key, request->put_key.key_len);
-    shard_idx = hash % shared->num_kv_shards;
-    shard     = &shared->kv_shards[shard_idx];
-
-    pthread_mutex_lock(&shard->lock);
-
-    /* Check if key already exists */
-    rb_tree_query_exact(&shard->entries, hash, hash, existing);
-
-    if (existing) {
-        /* Update existing entry */
-        free(existing->value);
-        existing->value_len = request->put_key.value_len;
-        existing->value     = malloc(request->put_key.value_len);
-        memcpy(existing->value, request->put_key.value, request->put_key.value_len);
-    } else {
-        /* Insert new entry */
-        entry = memfs_kv_entry_alloc(thread,
-                                     hash,
-                                     request->put_key.key,
-                                     request->put_key.key_len,
-                                     request->put_key.value,
-                                     request->put_key.value_len);
-
-        rb_tree_insert(&shard->entries, hash, entry);
-    }
-
-    pthread_mutex_unlock(&shard->lock);
+    memfs_kv_store(thread, shared,
+                   request->put_key.key, request->put_key.key_len,
+                   request->put_key.value, request->put_key.value_len);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -4452,7 +4484,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE |
-        CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT,
+        CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT | CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

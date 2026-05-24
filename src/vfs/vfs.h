@@ -139,6 +139,10 @@ struct chimera_vfs_open_handle {
     uint8_t                         cache_id;
     uint8_t                         flags;
     uint8_t                         access_mode;
+    /* Whether the most recent open via this handle created the file (vs opened
+     * an existing one).  Refreshed on every open completion and read by the SMB
+     * create path immediately afterwards to report OPENED vs CREATED. */
+    uint8_t                         r_created;
     uint32_t                        opencnt;
     struct chimera_vfs_request     *blocked_requests;
     uint64_t                        vfs_private;
@@ -574,21 +578,31 @@ struct chimera_vfs_request {
         } mknod_at;
 
         struct {
-            uint32_t flags;
-            uint64_t r_vfs_private;
+            uint32_t                         flags;
+            /* Optional: opaque record to persist atomically with the open,
+             * honored only by modules advertising CAP_ATOMIC_HANDLE_STATE. */
+            struct chimera_vfs_handle_state *handle_state;
+            uint64_t                         r_vfs_private;
         } open_fh;
 
         struct {
-            struct chimera_vfs_open_handle *handle;
-            const char                     *name;
-            uint64_t                        name_hash;
-            int                             namelen;
-            uint32_t                        flags;
-            struct chimera_vfs_attrs       *set_attr;
-            struct chimera_vfs_attrs        r_attr;
-            struct chimera_vfs_attrs        r_dir_pre_attr;
-            struct chimera_vfs_attrs        r_dir_post_attr;
-            uint64_t                        r_vfs_private;
+            struct chimera_vfs_open_handle  *handle;
+            const char                      *name;
+            uint64_t                         name_hash;
+            int                              namelen;
+            uint32_t                         flags;
+            struct chimera_vfs_attrs        *set_attr;
+            /* Optional: opaque record to persist atomically with the open,
+             * honored only by modules advertising CAP_ATOMIC_HANDLE_STATE. */
+            struct chimera_vfs_handle_state *handle_state;
+            struct chimera_vfs_attrs         r_attr;
+            struct chimera_vfs_attrs         r_dir_pre_attr;
+            struct chimera_vfs_attrs         r_dir_post_attr;
+            uint64_t                         r_vfs_private;
+            /* Set by the module when the open created a new file (vs opened an
+             * existing one); lets the SMB server report OPENED vs CREATED.
+             * Modules that don't set it leave it 0 (treated as "opened"). */
+            uint8_t                          r_created;
         } open_at;
 
         struct {
@@ -893,7 +907,7 @@ enum CHIMERA_FS_FH_MAGIC {
  * to the module for stateless operation (ie NFS3).
  */
 
-#define CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED (1U << 0)
+#define CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED  (1U << 0)
 
 
 /* If set, module requires open handles for file operations
@@ -903,7 +917,7 @@ enum CHIMERA_FS_FH_MAGIC {
  * only contain the file handle w/o an explicit open callout
  * to the module for stateless operation (ie NFS3).
  */
-#define CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED (1U << 1)
+#define CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED  (1U << 1)
 
 /* If set, dispatch function is synchronous/blocking
  * and chimera will delegate VFS requests to a separate
@@ -914,60 +928,81 @@ enum CHIMERA_FS_FH_MAGIC {
  * main threadpool and the dispatch function is expected
  * to return quickly.
  */
-#define CHIMERA_VFS_CAP_BLOCKING           (1U << 2)
+#define CHIMERA_VFS_CAP_BLOCKING            (1U << 2)
 
 /* If set, module supports chimera_vfs_create_unlinked()
  * Used primarily for S3 PUT.
  */
 
-#define CHIMERA_VFS_CAP_CREATE_UNLINKED    (1U << 3)
+#define CHIMERA_VFS_CAP_CREATE_UNLINKED     (1U << 3)
 
 /* If set, module supports filesystem operations (directories, files, etc.)
  * All current backends should declare this capability.
  */
-#define CHIMERA_VFS_CAP_FS                 (1U << 4)
+#define CHIMERA_VFS_CAP_FS                  (1U << 4)
 
 /* If set, module supports key-value operations
  * (put_key, get_key, delete_key, search_keys)
  */
-#define CHIMERA_VFS_CAP_KV                 (1U << 5)
+#define CHIMERA_VFS_CAP_KV                  (1U << 5)
 
 /* If set, module supports FH-relative operations (lookup_at, mkdir_at, etc.)
  * All current backends support this.
  */
-#define CHIMERA_VFS_CAP_FS_RELATIVE_OP     (1U << 6)
+#define CHIMERA_VFS_CAP_FS_RELATIVE_OP      (1U << 6)
 
 /* If set, module supports path-based operations (open, mkdir, etc.)
  * Path-based operations take a full path relative to the mount point.
  * If a module does not support path ops, the VFS core will resolve
  * path components one at a time using FH-relative operations.
  */
-#define CHIMERA_VFS_CAP_FS_PATH_OP         (1U << 7)
+#define CHIMERA_VFS_CAP_FS_PATH_OP          (1U << 7)
 
 /* If set, module supports byte-range file locking via chimera_vfs_lock(). */
-#define CHIMERA_VFS_CAP_FS_LOCK            (1U << 8)
+#define CHIMERA_VFS_CAP_FS_LOCK             (1U << 8)
 
 /* If set, module supports reverse path lookup: given a directory FH,
  * resolve (parent_fh, name_in_parent).  Enables precise subtree
  * change notifications via CHIMERA_VFS_OP_GETPARENT. */
-#define CHIMERA_VFS_CAP_RPL                (1U << 9)
+#define CHIMERA_VFS_CAP_RPL                 (1U << 9)
 
 /* If set, module supports server-side byte-range copy between two
  * open handles served by the same module (chimera_vfs_copy_range). */
-#define CHIMERA_VFS_CAP_COPY_RANGE         (1U << 10)
+#define CHIMERA_VFS_CAP_COPY_RANGE          (1U << 10)
 
 /* If set, module supports reflink/COW share of a byte range between
  * two open handles served by the same module (chimera_vfs_clone_range).
  * Modules backed by filesystems without reflink support should leave
  * this unset; the VFS layer will surface ENOTSUP. */
-#define CHIMERA_VFS_CAP_CLONE_RANGE        (1U << 11)
+#define CHIMERA_VFS_CAP_CLONE_RANGE         (1U << 11)
 
 /* If set, module supports zero-copy move of a byte range between two
  * open handles served by the same module (chimera_vfs_move_range): block
  * references are transferred from source to destination and the source
  * range becomes a hole. Not exposed over NFS; intended for server-internal
  * use (e.g. S3 multipart-upload completion). */
-#define CHIMERA_VFS_CAP_MOVE_RANGE         (1U << 12)
+#define CHIMERA_VFS_CAP_MOVE_RANGE          (1U << 12)
+
+/* If set, the module can persist an opaque "handle-state" record atomically
+ * with an open/create (see struct chimera_vfs_handle_state below): the record
+ * is committed in the same transaction as the open, so a crash cannot leave
+ * the file created without its record (or vice versa).  Used by the SMB server
+ * to persist SMB3 persistent-handle records.  Backends without this cap ignore
+ * any handle_state passed on an open. */
+#define CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE (1U << 13)
+
+/* Opaque key/value record the caller asks the backend to persist atomically
+ * as part of an open/create.  The VFS layer never interprets the bytes; for
+ * the SMB server the key is "smbdh\0"+CreateGuid and the value is a serialized
+ * persistent-handle record.  Stored in the backend's KV namespace, so it can
+ * later be enumerated with chimera_vfs_search_keys and removed with
+ * chimera_vfs_delete_key (clear-on-close / reap need not be atomic). */
+struct chimera_vfs_handle_state {
+    const void *key;
+    uint32_t    key_len;
+    const void *value;
+    uint32_t    value_len;
+};
 
 /* If set, module supports extended attributes via
  * chimera_vfs_get_xattr / set_xattr / list_xattrs / remove_xattr.

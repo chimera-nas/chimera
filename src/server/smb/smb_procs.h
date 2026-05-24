@@ -272,6 +272,12 @@ void chimera_smb_lease_break_cb(
     uint8_t                   needed_mode,
     void                     *private_data);
 
+void chimera_smb_lease_break_thread_init(
+    struct chimera_server_smb_thread *thread);
+
+void chimera_smb_lease_break_thread_destroy(
+    struct chimera_server_smb_thread *thread);
+
 int chimera_smb_parse_oplock_break(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request);

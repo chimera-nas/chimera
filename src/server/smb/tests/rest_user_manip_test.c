@@ -355,7 +355,7 @@ main(
     chimera_server_mount(server, "testvfs", "memfs", "/", NULL);
 
     /* Create the "share" SMB share for user tests */
-    chimera_server_create_share(server, "share", "share");
+    chimera_server_create_share(server, "share", "share", 0);
 
     /* Start server (SMB + REST) - no users added initially */
     chimera_server_start(server);

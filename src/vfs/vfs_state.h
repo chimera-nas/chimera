@@ -127,6 +127,15 @@ struct chimera_vfs_lease {
     uint8_t                        break_needed_mode;
     struct timespec                break_deadline;
 
+    /* For a SHARE probe only: a caching (handle) lease held under this same
+     * key is the requester's own lease (SMB2 same-client, same lease key) and
+     * must NOT be broken when acquiring the share — the opens coalesce.  Set by
+     * the SMB server when a lease-bearing open takes its share reservation;
+     * left zero (no skip) by every other caller. */
+    uint8_t                        has_break_skip_key;
+    uint64_t                       break_skip_lo;
+    uint64_t                       break_skip_hi;
+
     /* Intrusive linkage on the appropriate file->{range,share,caching} list. */
     struct chimera_vfs_lease      *prev;
     struct chimera_vfs_lease      *next;

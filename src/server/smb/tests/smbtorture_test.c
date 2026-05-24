@@ -305,7 +305,7 @@ main(
 
     chimera_server_start(env.server);
     chimera_test_add_server_users(env.server);
-    chimera_server_create_share(env.server, "share", "share");
+    chimera_server_create_share(env.server, "share", "share", 0);
 
     fprintf(stderr, "Server started\n");
 

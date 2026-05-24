@@ -39,6 +39,9 @@
       <Property name="BasicFileShare" value="SMBBasic"/>
       <Property name="EncryptedFileShare" value=""/>
       <Property name="CompressedFileShare" value=""/>
+      <!-- Continuous-availability share for persistent-handle tests; populated
+           by the wrapper when CHIMERA_SMB_PERSISTENT=1 (every chimera share is
+           CA when smb_persistent_handles is enabled). -->
       <Property name="CAShareName" value=""/>
       <Property name="CAShareServerName" value=""/>
 
@@ -63,8 +66,11 @@
       <Property name="IsRequireMessageSigning" value="false"/>
       <Property name="SupportedSigningAlgorithms" value="HMAC_SHA256"/>
 
-      <!-- Advanced features NOT yet honestly negotiated -->
-      <Property name="IsLeasingSupported" value="false"/>
+      <!-- Leasing is always negotiated (SMB2 lease/oplock backend). Persistent
+           handles are only advertised when the daemon runs with
+           smb_persistent_handles; the wrapper flips IsPersistentHandlesSupported
+           (and the CAShare* properties below) to true for those runs. -->
+      <Property name="IsLeasingSupported" value="true"/>
       <Property name="IsDirectoryLeasingSupported" value="false"/>
       <Property name="IsMultiChannelCapable" value="false"/>
       <Property name="IsPersistentHandlesSupported" value="false"/>

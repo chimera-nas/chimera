@@ -101,8 +101,14 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     if (dialect >= 0x210 && (shared->config.capabilities & SMB2_GLOBAL_CAP_LARGE_MTU)) {
         conn->capabilities |= SMB2_GLOBAL_CAP_LARGE_MTU;
     }
+    if (dialect >= 0x210 && (shared->config.capabilities & SMB2_GLOBAL_CAP_LEASING)) {
+        conn->capabilities |= SMB2_GLOBAL_CAP_LEASING;
+    }
     if (dialect >= 0x300 && (shared->config.capabilities & SMB2_GLOBAL_CAP_MULTI_CHANNEL)) {
         conn->capabilities |= SMB2_GLOBAL_CAP_MULTI_CHANNEL;
+    }
+    if (dialect >= 0x300 && shared->config.persistent_handles) {
+        conn->capabilities |= SMB2_GLOBAL_CAP_PERSISTENT_HANDLES;
     }
 
     if (request->negotiate.security_mode & SMB2_SIGNING_REQUIRED) {
