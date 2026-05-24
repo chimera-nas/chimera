@@ -71,7 +71,8 @@ chimera_nfs4_readdir_callback(
                                                               req->thread->shared->vfs,
                                                               req->fh, req->fhlen),
                                 chimera_server_config_get_nfs4_delegations(
-                                    req->thread->shared->config));
+                                    req->thread->shared->config),
+                                req->thread->shared->nfs_lease_time_s);
 
     dbuf_cur = req->encoding->dbuf->used - dbuf_before;
 

@@ -35,6 +35,8 @@ RESULTS_FILE="${SESSION_DIR}/results.json"
 CHIMERA_PID=""
 CHIMERA_LOG="${SESSION_DIR}/chimera.log"
 CHIMERA_DIED_DURING_TEST=0
+PYNFS_NFS4_LEASE_TIME="${PYNFS_NFS4_LEASE_TIME:-5}"
+PYNFS_NFS4_GRACE_TIME="${PYNFS_NFS4_GRACE_TIME:-10}"
 
 cleanup() {
     if [ -n "$CHIMERA_PID" ]; then
@@ -124,6 +126,8 @@ generate_config() {
         "threads": 4,
         "delegation_threads": 4,
         "nfs4_delegations": $DELEG_ENABLE,
+        "nfs4_lease_time": $PYNFS_NFS4_LEASE_TIME,
+        "nfs4_grace_time": $PYNFS_NFS4_GRACE_TIME,
         $vfs_section
         "external_portmap": false
     },

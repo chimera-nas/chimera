@@ -34,7 +34,9 @@ MDS_PID=""
 MDS_PORT=2049
 DS_PORT=2050
 DS_UADDR="127.0.0.1.8.2"   # RFC 5665 uaddr for 127.0.0.1:2050 (2050 = 8*256+2)
-PYNFS_TIMEOUT=300
+PYNFS_TIMEOUT="${PYNFS_TIMEOUT:-60}"
+PYNFS_NFS4_LEASE_TIME="${PYNFS_NFS4_LEASE_TIME:-5}"
+PYNFS_NFS4_GRACE_TIME="${PYNFS_NFS4_GRACE_TIME:-10}"
 
 run_chimera() {
     local cfg="$1" log="$2"
@@ -66,6 +68,8 @@ trap cleanup EXIT
 cat > "$DS_CONFIG" << EOF
 {
     "server": { "threads": 2, "nfs_port": ${DS_PORT}, "data_server": true,
+                "nfs4_lease_time": ${PYNFS_NFS4_LEASE_TIME},
+                "nfs4_grace_time": ${PYNFS_NFS4_GRACE_TIME},
                 "external_portmap": true, "metrics_port": 9001 },
     "mounts": { "ds_data": { "module": "memfs", "path": "/" } },
     "exports": { "/ds_export": { "path": "/ds_data" } }
@@ -76,6 +80,8 @@ cat > "$MDS_CONFIG" << EOF
 {
     "server": {
         "threads": 4, "external_portmap": false,
+        "nfs4_lease_time": ${PYNFS_NFS4_LEASE_TIME},
+        "nfs4_grace_time": ${PYNFS_NFS4_GRACE_TIME},
         "pnfs": { "enabled": true,
                   "data_servers": [ { "netid": "tcp", "uaddr": "${DS_UADDR}", "backing_path": "/ds0" } ] }
     },
