@@ -10,7 +10,8 @@
                         "size": 1073741824,
                         "path": "${FIO_TEST_BINARY}/diskfs_aio_device_0.img"
                     }
-                ]
+                ],
+                "unsafe_async": true
             }
         }
     ],

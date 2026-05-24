@@ -693,6 +693,7 @@ struct diskfs_intent_log {
     int                       push_outstanding;  /* home writes in flight for push_cur */
     int                       redo_inflight;     /* redo writes issued, not yet in FIFO */
     int                       iocbs_inflight;    /* block writes (redo + push) on the queue, not yet completed */
+    int                       sync;              /* sync flag passed to redo/push block writes (0 in unsafe_async mode) */
 };
 
 struct diskfs_shared {
@@ -709,7 +710,7 @@ struct diskfs_shared {
     int                        orphans_scanned;    /* mount-time orphan recovery done */
     uint64_t                   root_inum;          /* for the clean-unmount superblock */
     uint32_t                   root_gen;
-    int                        persistent;         /* config opt-in: detect+reload a clean FS instead of mkfs */
+    int                        unsafe_async;       /* config opt-in: submit block writes without FUA/sync (no crash safety) */
     int                        mounted;            /* 1 = remounted existing FS (enables inode read-back) */
     uint32_t                   block_cache_blocks; /* total resident block-buffer cap (0 = default) */
     uint32_t                   inode_cache_inodes; /* total resident inode cap (0 = default) */
@@ -4023,6 +4024,14 @@ diskfs_orphan_scan(struct diskfs_thread *thread)
      * tree is not dirty at mount, so reading the on-disk image is correct. */
     io = diskfs_mount_io_open(shared);
 
+    /* Remount fault-in: bootstrap (mkfs) seeds the reserved root inode into
+     * cache, but a remount skips bootstrap, so the root lives only on disk.
+     * Seed it synchronously here -- the MOUNT op's own walk would otherwise
+     * fault it in with an async read that the mount-time context never pumps
+     * to completion, hanging the mount.  A freshly bootstrapped FS already has
+     * it resident, so this is a cheap cache hit. */
+    diskfs_inode_load_sync(thread, io, shared->root_inum, shared->root_gen, 0);
+
     /* Load the orphan-list inode (nlink 1) and read its tree from its home
      * block, collecting every recorded orphan inum + gen. */
     odir = diskfs_inode_load_sync(thread, io, DISKFS_ORPHAN_INUM, DISKFS_ORPHAN_GEN, 0);
@@ -4293,6 +4302,34 @@ diskfs_bt_run(struct diskfs_bt_op *op)
                     }
                     op->removed_idx = 2;
                 }
+                if (op->removed_idx == 2 && op->reb_level == op->depth - 1) {
+                    /* Leaf-parent level: a leaf merge rewrites the right
+                     * participant's next-neighbour back-link.  That neighbour
+                     * is reachable only through the leaf chain (it is not a
+                     * child of any node on the descent path), so the merge's
+                     * synchronous node_for_write would miss it on a cold cache
+                     * (remount).  Fault it in here.  The right participant is
+                     * ridx = (ci+1 < pn) ? ci+1 : ci (matching
+                     * diskfs_bt_rebalance_leaf) and is already resident (faulted
+                     * by the descent or the ci+1 step above). */
+                    int                  ridx = (ci + 1 < pn) ? ci + 1 : ci;
+                    uint64_t             rb   = diskfs_bt_islots(pbuf, pe->base)[ridx].child;
+                    struct diskfs_block *rblk;
+                    uint64_t             rnext;
+
+                    off  = sm_inum_to_device_offset(thread->shared->space_map, rb, &dev);
+                    rblk = diskfs_bt_block_get(op, dev, off);
+                    if (!rblk) {
+                        return;
+                    }
+                    rnext = diskfs_bt_hdr(rblk->iov.data, 0)->next_leaf;
+                    if (rnext) {
+                        off = sm_inum_to_device_offset(thread->shared->space_map, rnext, &dev);
+                        if (!diskfs_bt_block_get(op, dev, off)) {
+                            return;
+                        }
+                    }
+                }
                 op->reb_level++;
                 op->removed_idx = 0;
             }
@@ -4336,6 +4373,18 @@ diskfs_bt_run(struct diskfs_bt_op *op)
 
             /* At the leaf. */
             if (op->opcode == DISKFS_BT_OP_INSERT) {
+                /* A leaf split rewrites the right sibling's prev_leaf link.
+                 * That sibling is off the descent path, so on a cold cache
+                 * (remount) the synchronous split's node_for_write would miss
+                 * it.  Fault it in first via the async evpl_block path (parks +
+                 * resumes into this phase if not resident); a warm cache hits. */
+                if (h->next_leaf) {
+                    off = sm_inum_to_device_offset(thread->shared->space_map,
+                                                   h->next_leaf, &dev);
+                    if (!diskfs_bt_block_get(op, dev, off)) {
+                        return;
+                    }
+                }
                 diskfs_bt_insert_locked(thread, op->txn, inode, &op->key,
                                         op->rec, op->reclen);
                 diskfs_bt_complete(op, 0);
@@ -5930,7 +5979,7 @@ diskfs_il_push_issue(struct diskfs_intent_log *il)
         il->iocbs_inflight++;
 
         evpl_block_write(il->evpl, il->queue[bh->device_id], &rec->iovs[1 + idx], 1,
-                         bh->device_offset, 1 /* sync */, diskfs_il_push_block_cb, il);
+                         bh->device_offset, il->sync, diskfs_il_push_block_cb, il);
     }
 } /* diskfs_il_push_issue */
 
@@ -6133,7 +6182,7 @@ diskfs_il_write_redo(
             }
 
             evpl_block_write(il->evpl, il->queue[SM_INTENT_LOG_DEVICE],
-                             &rec->iovs[done], cnt, woff, 1 /* sync */,
+                             &rec->iovs[done], cnt, woff, il->sync,
                              diskfs_redo_write_cb, ctx);
             woff += bytes;
             done += cnt;
@@ -6319,6 +6368,7 @@ diskfs_intent_log_thread_init(
     il->push_outstanding = 0;
     il->redo_inflight    = 0;
     il->iocbs_inflight   = 0;
+    il->sync             = !shared->unsafe_async;
 
     /* Open block queues on this thread's evpl for redo writes + tail-push. */
     il->queue = calloc(shared->num_devices, sizeof(*il->queue));
@@ -6630,7 +6680,7 @@ diskfs_mount_io_write(
         evpl_iovec_alloc(io->evpl, want, DISKFS_BLOCK_SIZE, 1, 0, &iov);
         memcpy(iov.data, (const char *) buf + done, want);
         evpl_block_write(io->evpl, io->queue[device_id], &iov, 1, offset + done,
-                         1 /* sync */, diskfs_mount_io_complete, &w);
+                         !io->shared->unsafe_async, diskfs_mount_io_complete, &w);
         while (!w.done) {
             evpl_continue(io->evpl);
         }
@@ -6858,11 +6908,11 @@ diskfs_init(const char *cfgdata)
         }
     }
 
-    /* Opt-in persistence: when set, a clean superblock is detected at mount
-     * and the prior on-disk state is reloaded instead of reformatting.  Off by
-     * default so the common case (and the test suite) reformats every mount;
-     * the reload + on-disk read-back paths are exercised only under this flag. */
-    shared->persistent         = json_is_true(json_object_get(cfg, "persistent"));
+    /* Opt-in unsafe async I/O: when set, block writes are submitted without
+     * FUA/sync, so diskfs runs lighter at the cost of crash safety.  Off by
+     * default; tests that do not exercise crash recovery enable it to run more
+     * efficiently. */
+    shared->unsafe_async       = json_is_true(json_object_get(cfg, "unsafe_async"));
     shared->block_cache_blocks = (uint32_t) json_integer_value(
         json_object_get(cfg, "block_cache_blocks"));
     shared->inode_cache_inodes = (uint32_t) json_integer_value(
@@ -6873,13 +6923,13 @@ diskfs_init(const char *cfgdata)
 
     pthread_mutex_init(&shared->lock, NULL);
 
-    /* Decide mkfs vs clean-mount vs crash-recovery from the superblock
-     * (persistent mode only):
+    /* Decide mkfs vs clean-mount vs crash-recovery from the superblock, just as
+     * a real filesystem would:
      *   - valid + CLEAN  -> the previous instance unmounted cleanly: reload
      *                       its persisted free-space map and mount.
      *   - valid + !CLEAN -> a crash: synchronously replay the intent log to
      *                       home, then mount the now-consistent image.
-     *   - no/garbage     -> mkfs.
+     *   - no/garbage     -> mkfs (e.g. a freshly created device image).
      */
     {
         struct sm_superblock    sb;
@@ -6888,8 +6938,7 @@ diskfs_init(const char *cfgdata)
         struct diskfs_mount_io *mio  = diskfs_mount_io_open(shared);
         struct sm_io            smio = diskfs_mount_sm_io(mio);
 
-        have_sb = shared->persistent &&
-            space_map_read_superblock(&smio, &sb) == 0;
+        have_sb = space_map_read_superblock(&smio, &sb) == 0;
 
         if (have_sb && (sb.flags & SM_SB_CLEAN)) {
             mode         = 1;
@@ -6971,11 +7020,10 @@ diskfs_init(const char *cfgdata)
                                         mode != 0 ? sb.log_seq : 0);
         chimera_diskfs_abort_if(rc != 0, "Failed to write superblock");
 
-        /* Persistent mkfs: write an initial condensed AG-log base so each
-         * slot has a valid header before any runtime delta is journaled --
-         * otherwise a crash right after format would leave the allocator log
-         * unreadable. */
-        if (mode == 0 && shared->persistent) {
+        /* mkfs: write an initial condensed AG-log base so each slot has a valid
+         * header before any runtime delta is journaled -- otherwise a crash
+         * right after format would leave the allocator log unreadable. */
+        if (mode == 0) {
             space_map_persist(shared->space_map, &smio);
         }
 
@@ -7199,7 +7247,7 @@ diskfs_destroy(void *private_data)
      * mount-time evpl pump while the devices are still open -- the IL thread
      * (the only other device user) is already gone.  Only mark clean if a root
      * actually exists (an untouched mkfs has nothing to preserve). */
-    if (shared->persistent) {
+    {
         struct diskfs_mount_io *mio  = diskfs_mount_io_open(shared);
         struct sm_io            smio = diskfs_mount_sm_io(mio);
 
@@ -9889,7 +9937,7 @@ diskfs_write_phase2(
                          chunk_iov,
                          chunk_niov,
                          diskfs_private->rmw_device_offset + offset,
-                         1,
+                         !shared->unsafe_async,
                          diskfs_io_callback,
                          request);
 

@@ -3970,7 +3970,10 @@ main(
                                     "%s{\"type\":\"%s\",\"size\":1,\"path\":\"%s\"}",
                                     i > 0 ? "," : "", device_type, device_path);
                 }
-                snprintf(diskfs_cfg + off, sizeof(diskfs_cfg) - off, "]}");
+                /* unsafe_async: tests below do not exercise crash recovery, so skip
+                 * FUA/sync on writes to run lighter. */
+                snprintf(diskfs_cfg + off, sizeof(diskfs_cfg) - off,
+                         "],\"unsafe_async\":true}");
 
                 chimera_server_config_add_module(chimera_server_config, "diskfs", NULL, diskfs_cfg);
             } else if (strcmp(chimera_nfs_backend, "cairn") == 0) {
