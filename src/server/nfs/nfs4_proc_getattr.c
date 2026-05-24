@@ -66,7 +66,9 @@ chimera_nfs4_getattr_finish(
                                 req->minorversion,
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,
-                                                              req->fh, req->fhlen));
+                                                              req->fh, req->fhlen),
+                                chimera_server_config_get_nfs4_delegations(
+                                    req->thread->shared->config));
 
     if (req->handle) {
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
