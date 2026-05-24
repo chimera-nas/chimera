@@ -1466,55 +1466,6 @@ diskfs_inode_load_sync(
     return inode;
 } /* diskfs_inode_load_sync */
 
-/*
- * Synchronous read-lock acquire, used by the mount-time path walk which
- * runs before concurrent load.  Records the read lock in the txn so it is
- * released centrally at commit.  On a remounted FS a non-resident inode is
- * faulted in from disk; returns NULL if it isn't on disk or the generation
- * is stale.
- */
-static struct diskfs_inode *
-diskfs_inode_acquire_sync_read(
-    struct diskfs_thread   *thread,
-    struct diskfs_mount_io *io,
-    struct diskfs_txn      *txn,
-    uint64_t                inum,
-    uint32_t                gen)
-{
-    struct diskfs_inode_shard *shard;
-    struct diskfs_inode       *inode;
-    int                        i;
-
-    for (i = 0; i < txn->num_inodes; i++) {
-        if (txn->inodes[i].inode->inum == inum) {
-            return txn->inodes[i].inode->gen == gen ? txn->inodes[i].inode : NULL;
-        }
-    }
-
-    shard = diskfs_inode_shard(thread->shared, inum);
-    pthread_mutex_lock(&shard->lock);
-    rb_tree_query_exact(&shard->inodes, inum, inum, inode);
-    if (inode && inode->gen != gen) {
-        pthread_mutex_unlock(&shard->lock);
-        return NULL;
-    }
-    if (!inode) {
-        pthread_mutex_unlock(&shard->lock);
-        inode = diskfs_inode_load_sync(thread, io, inum, gen, 0);
-        if (!inode) {
-            return NULL;
-        }
-        pthread_mutex_lock(&shard->lock);
-    }
-    chimera_diskfs_abort_if(inode->writer,
-                            "mount path walk: inode %lu write-locked", inum);
-    inode->readers++;
-    pthread_mutex_unlock(&shard->lock);
-
-    diskfs_txn_add_slot(txn, inode, DISKFS_INODE_LOCK_READ);
-    return inode;
-} /* diskfs_inode_acquire_sync_read */
-
 /* ------------------------------------------------------------------ */
 /* Block cache                                                         */
 /* ------------------------------------------------------------------ */
@@ -4705,29 +4656,6 @@ diskfs_dir_insert(
                      buf, sizeof(*r) + namelen);
 } /* diskfs_dir_insert */
 
-/* Returns 0 and fills the inum/gen out params if found, -1 otherwise. */
-static int
-diskfs_dir_lookup(
-    struct diskfs_thread *thread,
-    struct diskfs_inode  *dir,
-    uint64_t              hash,
-    uint64_t             *r_inum,
-    uint32_t             *r_gen)
-{
-    char                      buf[DISKFS_DIRENT_REC_MAX];
-    struct diskfs_dirent_rec *r   = (struct diskfs_dirent_rec *) buf;
-    struct diskfs_bt_key      key = diskfs_dirent_key(hash);
-    int                       len;
-
-    len = diskfs_bt_lookup_exact(thread, dir, &key, buf, sizeof(buf));
-    if (len < 0) {
-        return -1;
-    }
-    *r_inum = r->inum;
-    *r_gen  = r->gen;
-    return 0;
-} /* diskfs_dir_lookup */
-
 static int
 diskfs_dir_remove(
     struct diskfs_thread *thread,
@@ -7916,60 +7844,103 @@ diskfs_setattr(
                               diskfs_setattr_inode_cb, request);
 } /* diskfs_setattr */
 
-static inline struct diskfs_inode *
-diskfs_lookup_path(
-    struct diskfs_thread *thread,
-    struct diskfs_txn    *txn,
-    const char           *path,
-    int                   pathlen)
+/*
+ * Async mount-path resolution.  Walks request->mount.path one component at a
+ * time using async inode acquire + async dirent lookup, so it resolves a path
+ * through non-resident directories on a remounted FS (and over VFIO) without a
+ * synchronous read.  Walk state lives in the request: inode_stash[0] is the
+ * directory currently being descended; op_scratch is the parse cursor (byte
+ * offset into the path).  Read-locked inodes accumulate in the txn and are
+ * released centrally at commit (parents are released eagerly as we descend so
+ * a deep walk reuses the slots).
+ */
+static void diskfs_mount_walk_acquired_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data);
+
+static void
+diskfs_mount_walk_dirent_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
 {
-    struct diskfs_shared   *shared = thread->shared;
-    struct diskfs_inode    *parent, *inode, *result = NULL;
-    struct diskfs_mount_io *io = diskfs_mount_io_open(shared);
-    const char             *name;
-    const char             *pathc = path;
-    const char             *slash;
-    int                     namelen;
-    uint64_t                hash, inum, child_inum;
-    uint32_t                gen, child_gen;
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_dirent_rec      *rec     = (struct diskfs_dirent_rec *) p->rec_scratch;
+    uint64_t                       child_inum;
+    uint32_t                       child_gen;
 
-    diskfs_fh_to_inum(&inum, &gen, shared->root_fh, shared->root_fhlen);
-    inode = diskfs_inode_acquire_sync_read(thread, io, txn, inum, gen);
+    diskfs_bt_op_free(p->thread, op);
 
-    while (inode) {
-        while (*pathc == '/') {
-            pathc++;
-        }
-        if (pathc >= path + pathlen) {
-            result = inode;     /* fully resolved */
-            break;
-        }
+    if (result < 0) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        return;
+    }
+    child_inum = rec->inum;
+    child_gen  = rec->gen;
 
-        slash   = strchr(pathc, '/');
-        name    = pathc;
-        namelen = slash ? (slash - pathc) : (pathlen - (pathc - path));
-        pathc  += namelen;
+    /* Done descending the parent; release its read lock so a deep walk reuses
+     * the slot, then fetch the child. */
+    diskfs_txn_unlock_inode(p->txn, p->inode_stash[0]);
 
-        hash = chimera_vfs_hash(name, namelen);
-        if (diskfs_dir_lookup(thread, inode, hash, &child_inum, &child_gen) != 0) {
-            break;
-        }
+    diskfs_inode_get_inum_async(p->thread, p->txn, child_inum, child_gen,
+                                diskfs_mount_walk_acquired_cb, request);
+} /* diskfs_mount_walk_dirent_cb */
 
-        parent = inode;
-        inode  = diskfs_inode_acquire_sync_read(thread, io, txn, child_inum, child_gen);
+static void
+diskfs_mount_walk_acquired_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    const char                    *path    = request->mount.path;
+    int                            pathlen = request->mount.pathlen;
+    const char                    *pathc, *name, *slash;
+    int                            namelen;
+    uint64_t                       hash;
+    struct diskfs_bt_op           *op;
 
-        /* Done with the parent now; release its slot so deep walks reuse it. */
-        diskfs_txn_unlock_inode(txn, parent);
-
-        if (inode && !S_ISDIR(inode->mode)) {
-            break;     /* path component is not a directory */
-        }
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
     }
 
-    diskfs_mount_io_close(io);
-    return result;
+    pathc = path + p->op_scratch;
+    while (pathc < path + pathlen && *pathc == '/') {
+        pathc++;
+    }
 
-} /* diskfs_lookup_path */
+    if (pathc >= path + pathlen) {
+        /* Fully resolved. */
+        diskfs_map_attrs(thread, &request->mount.r_attr, inode);
+        diskfs_op_ok(request, p->txn);
+        return;
+    }
+
+    if (unlikely(!S_ISDIR(inode->mode))) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        return;
+    }
+
+    slash         = memchr(pathc, '/', (size_t) (path + pathlen - pathc));
+    name          = pathc;
+    namelen       = slash ? (int) (slash - pathc) : (int) (path + pathlen - pathc);
+    p->op_scratch = (uint32_t) ((pathc + namelen) - path);
+
+    hash              = chimera_vfs_hash(name, namelen);
+    p->inode_stash[0] = inode;     /* parent for the dirent lookup */
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_dir_lookup_async(op, thread, inode, hash, p->rec_scratch,
+                                sizeof(p->rec_scratch),
+                                diskfs_mount_walk_dirent_cb, request)) {
+        diskfs_mount_walk_dirent_cb(op, op->result, request);
+    }
+} /* diskfs_mount_walk_acquired_cb */
 
 static void
 diskfs_mount(
@@ -7979,28 +7950,19 @@ diskfs_mount(
     void                       *private_data)
 {
     struct diskfs_request_private *p = request->plugin_data;
-    struct diskfs_inode           *inode;
+    uint64_t                       inum;
+    uint32_t                       gen;
 
     (void) private_data;
 
-    (void) shared;
+    p->thread     = thread;
+    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->op_scratch = 0;
 
-    p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
-
-    /* Synchronous read-locked path walk; the resolved inode (and any
-     * parents still held) are recorded in the txn and released at commit. */
-    inode = diskfs_lookup_path(thread, p->txn, request->mount.path,
-                               request->mount.pathlen);
-
-    if (unlikely(!inode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
-        return;
-    }
-
-    diskfs_map_attrs(thread, &request->mount.r_attr, inode);
-
-    diskfs_op_ok(request, p->txn);
+    /* Resolve the mount path asynchronously starting from the root inode. */
+    diskfs_fh_to_inum(&inum, &gen, shared->root_fh, shared->root_fhlen);
+    diskfs_inode_get_inum_async(thread, p->txn, inum, gen,
+                                diskfs_mount_walk_acquired_cb, request);
 } /* diskfs_mount */
 
 static void
