@@ -117,6 +117,7 @@ posix_test_configure_diskfs(
     }
 
     json_object_set_new(cfg, "devices", devices);
+    json_object_set_new(cfg, "unsafe_async", json_true());
     json_str = json_dumps(cfg, JSON_COMPACT);
     snprintf(diskfs_cfg, diskfs_cfg_size, "%s", json_str);
     free(json_str);
