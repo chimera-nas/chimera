@@ -969,14 +969,19 @@ space_map_persist(
     struct space_map   *sm,
     const struct sm_io *io)
 {
+    uint8_t *buf;
     uint32_t d, a;
+
+    buf = malloc(SM_AG_LOG_SLOT_SIZE);
+    if (!buf) {
+        return -1;
+    }
 
     for (d = 0; d < sm->num_devices; d++) {
         struct sm_device *dev = &sm->devices[d];
 
         for (a = 0; a < dev->num_ags; a++) {
             struct sm_ag *ag  = &dev->ags[a];
-            uint8_t      *buf = calloc(1, SM_AG_LOG_SLOT_SIZE);
             uint32_t      slot;
             uint64_t      gen, payload, aligned, slot_off;
             int           rc;
@@ -987,6 +992,7 @@ space_map_persist(
             payload  = sm_ag_condense_into(ag, buf, gen);
             slot_off = ag->log_offset + (uint64_t) slot * SM_AG_LOG_SLOT_SIZE;
             aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
+            memset(buf + payload, 0, aligned - payload);
 
             rc = io->write(io->user, d, buf, aligned, slot_off);
             if (rc == 0) {
@@ -996,16 +1002,18 @@ space_map_persist(
                 ag->log_delta_count = 0;
             }
             pthread_mutex_unlock(&ag->lock);
-            free(buf);
             if (rc != 0) {
+                free(buf);
                 return -1;
             }
         }
 
         if (io->flush(io->user, d) != 0) {
+            free(buf);
             return -1;
         }
     }
+    free(buf);
     return 0;
 } /* space_map_persist */
 
