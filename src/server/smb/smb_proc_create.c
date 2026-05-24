@@ -618,6 +618,26 @@ chimera_smb_create_gen_open_file_pipe(
 } /* chimera_smb_create_gen_open_file_pipe */
 
 static inline void
+chimera_smb_create_release_handle(
+    struct chimera_vfs_thread      *vfs_thread,
+    struct chimera_vfs_open_handle *oh)
+{
+    if (oh) {
+        chimera_vfs_release(vfs_thread, oh);
+    }
+} /* chimera_smb_create_release_handle */
+
+static inline void
+chimera_smb_create_release_parent(struct chimera_smb_request *request)
+{
+    if (request->create.parent_handle) {
+        chimera_vfs_release(request->compound->thread->vfs_thread,
+                            request->create.parent_handle);
+        request->create.parent_handle = NULL;
+    }
+} /* chimera_smb_create_release_parent */
+
+static inline void
 chimera_smb_create_mkdir_open_callback(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *oh,
@@ -628,7 +648,7 @@ chimera_smb_create_mkdir_open_callback(
     struct chimera_smb_open_file *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
         return;
     }
@@ -643,15 +663,15 @@ chimera_smb_create_mkdir_open_callback(
                                                         oh);
 
     if (!open_file) {
-        chimera_vfs_release(vfs_thread, oh);
-        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_create_release_handle(vfs_thread, oh);
+        chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
         return;
     }
 
     request->create.r_open_file = open_file;
 
-    chimera_vfs_release(vfs_thread, request->create.parent_handle);
+    chimera_smb_create_release_parent(request);
     chimera_smb_open_file_release(request, open_file);
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 
@@ -701,7 +721,7 @@ chimera_smb_create_mkdir_callback(
                 request);
             return;
         }
-        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, error_code == CHIMERA_VFS_EEXIST ?
                                      SMB2_STATUS_OBJECT_NAME_COLLISION :
                                      SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
@@ -743,7 +763,7 @@ chimera_smb_create_open_at_callback(
     struct chimera_smb_open_file *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
         return;
     }
@@ -762,8 +782,8 @@ chimera_smb_create_open_at_callback(
                                                         oh);
 
     if (!open_file) {
-        chimera_vfs_release(vfs_thread, oh);
-        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_create_release_handle(vfs_thread, oh);
+        chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
         return;
     }
@@ -804,7 +824,7 @@ chimera_smb_create_open_at_callback(
                                 NULL, 0);
     }
 
-    chimera_vfs_release(vfs_thread, request->create.parent_handle);
+    chimera_smb_create_release_parent(request);
     chimera_smb_open_file_release(request, open_file);
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_create_open_at_callback */
@@ -864,7 +884,7 @@ chimera_smb_create_open_callback(
                                                         oh);
 
     if (!open_file) {
-        chimera_vfs_release(vfs_thread, oh);
+        chimera_smb_create_release_handle(vfs_thread, oh);
         chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
         return;
     }

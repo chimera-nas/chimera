@@ -54,10 +54,12 @@ chimera_smb_durable_table_destroy(struct chimera_smb_durable_table *table)
      * still here are parked opens that outlived their grace window without a
      * sweep, or were never reaped.  Free the bookkeeping; the open_file objects
      * themselves belong to thread free-lists that are torn down separately. */
-    HASH_ITER(hh, table->by_pid, entry, tmp)
-    {
-        HASH_DELETE(hh, table->by_pid, entry);
+    entry = table->by_pid;
+    HASH_CLEAR(hh, table->by_pid);
+    while (entry) {
+        tmp = entry->hh.next;
         free(entry);
+        entry = tmp;
     }
 
     pthread_mutex_destroy(&table->lock);
