@@ -12,6 +12,7 @@ ARG ENABLE_CLAUDE=1
 ARG ENABLE_CODEX=1
 ARG ENABLE_UV=1
 ARG ENABLE_WPTS=1
+ARG PYNFS_REF=chimera-fast-ci
 # Pinned Microsoft Windows Protocol Test Suites (WPTS) FileServer release.
 ARG WPTS_VERSION=4.26.3.0
 
@@ -90,7 +91,7 @@ RUN apt-get -y update && \
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends install python3-ply python3-gssapi python3-pip && \
     pip3 install --break-system-packages xdrlib3 && \
-    git clone --depth 1 https://github.com/chimera-nas/pynfs.git /opt/pynfs && \
+    git clone --depth 1 --branch "$PYNFS_REF" https://github.com/chimera-nas/pynfs.git /opt/pynfs && \
     cd /opt/pynfs && python3 ./setup.py build && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 

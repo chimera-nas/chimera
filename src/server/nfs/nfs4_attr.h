@@ -253,7 +253,8 @@ chimera_nfs4_marshall_attrs(
     uint32_t                       *attrvals_len,
     uint8_t                         minorversion,
     uint32_t                        pnfs_layout_type,
-    int                             nfs4_delegations)
+    int                             nfs4_delegations,
+    uint32_t                        lease_time_s)
 {
     /* pnfs_layout_type is the single layouttype4 this file's backend supports
      * (LAYOUT4_FLEX_FILES 0x4 or LAYOUT4_BLOCK_VOLUME 0x3), or 0 when pNFS is
@@ -434,7 +435,7 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[0]  |= (1 << FATTR4_LEASE_TIME);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, NFS4_LEASE_TIME_DEFAULT_S);
+            chimera_nfs4_attr_append_uint32(&attrs, lease_time_s);
         }
 
         if (req_mask[0] & (1 << FATTR4_ACLSUPPORT)) {

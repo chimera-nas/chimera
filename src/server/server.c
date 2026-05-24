@@ -17,6 +17,7 @@
 #include "server_internal.h"
 #include "protocol.h"
 #include "nfs/nfs.h"
+#include "nfs/nfs4_lease.h"
 #include "s3/s3.h"
 #include "smb/smb.h"
 #include "vfs/vfs.h"
@@ -57,6 +58,8 @@ struct chimera_server_config {
     int                                   cache_ttl;
     int                                   nfs4_session_slots;
     int                                   nfs4_delegations;
+    uint32_t                              nfs4_lease_time_s;
+    uint32_t                              nfs4_grace_time_s;
     int                                   num_modules;
     int                                   metrics_port;
     int                                   rest_http_port;
@@ -170,7 +173,9 @@ chimera_server_config_init(void)
      * default.  When off, every OPEN returns OPEN_DELEGATE_NONE and the
      * callback channel is never established.  Distinct from the VFS
      * sync_delegation/async_delegation thread-pool knobs above. */
-    config->nfs4_delegations = 0;
+    config->nfs4_delegations  = 0;
+    config->nfs4_lease_time_s = NFS4_LEASE_TIME_DEFAULT_S;
+    config->nfs4_grace_time_s = NFS4_GRACE_TIME_DEFAULT_S;
 
     strncpy(config->nfs_rdma_hostname, "0.0.0.0", sizeof(config->nfs_rdma_hostname));
     config->nfs_rdma_port    = 20049;
@@ -335,6 +340,34 @@ chimera_server_config_get_nfs4_delegations(const struct chimera_server_config *c
 {
     return config->nfs4_delegations;
 } /* chimera_server_config_get_nfs4_delegations */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs4_lease_time(
+    struct chimera_server_config *config,
+    uint32_t                      seconds)
+{
+    config->nfs4_lease_time_s = seconds;
+} /* chimera_server_config_set_nfs4_lease_time */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_nfs4_lease_time(const struct chimera_server_config *config)
+{
+    return config->nfs4_lease_time_s;
+} /* chimera_server_config_get_nfs4_lease_time */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs4_grace_time(
+    struct chimera_server_config *config,
+    uint32_t                      seconds)
+{
+    config->nfs4_grace_time_s = seconds;
+} /* chimera_server_config_set_nfs4_grace_time */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_nfs4_grace_time(const struct chimera_server_config *config)
+{
+    return config->nfs4_grace_time_s;
+} /* chimera_server_config_get_nfs4_grace_time */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_kv_module(
