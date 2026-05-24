@@ -75,7 +75,7 @@ chimera_nfs4_write_open_callback(
     if (error_code != CHIMERA_VFS_OK) {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         evpl_iovecs_release(req->thread->evpl, args->data.iov, args->data.niov);
-        chimera_nfs4_compound_complete(req, NFS4_OK);
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
@@ -140,7 +140,7 @@ chimera_nfs4_write(
         if (req->fhlen == 0) {
             res->status = NFS4ERR_NOFILEHANDLE;
             evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
-            chimera_nfs4_compound_complete(req, NFS4_OK);
+            chimera_nfs4_compound_complete(req, res->status);
             return;
         }
 
@@ -185,7 +185,7 @@ chimera_nfs4_write(
         if (req->fhlen == 0) {
             res->status = NFS4ERR_NOFILEHANDLE;
             evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
-            chimera_nfs4_compound_complete(req, NFS4_OK);
+            chimera_nfs4_compound_complete(req, res->status);
             return;
         }
         req->args_write4 = args;
@@ -204,6 +204,32 @@ chimera_nfs4_write(
     } else {
         open_state   = ((struct nfs_lock_state *) state_void)->open_state;
         state_handle = ((struct nfs_lock_state *) state_void)->handle;
+    }
+
+    if (req->minorversion == 0) {
+        uint32_t current_seqid = (state_type == NFS4_SLOT_TYPE_OPEN) ?
+            open_state->seqid :
+            ((struct nfs_lock_state *) state_void)->seqid;
+
+        status = nfs4_stateid_check_seqid(current_seqid,
+                                          args->stateid.seqid);
+        if (status != NFS4_OK) {
+            nfs_state_table_release(table, state_void, state_type,
+                                    thread->vfs_thread);
+            res->status = status;
+            evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+    }
+
+    if ((open_state->share_access & OPEN4_SHARE_ACCESS_WRITE) == 0) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->status = NFS4ERR_OPENMODE;
+        evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
     }
 
     status = nfs_open_state_check_io_denied(open_state,
