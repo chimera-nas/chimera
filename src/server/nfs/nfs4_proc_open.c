@@ -915,6 +915,15 @@ chimera_nfs4_open(
             chimera_nfs4_open_complete(req, g_status);
             return;
         }
+
+        if (req->minorversion > 0 && !is_reclaim && req->session &&
+            nfs_recovery_in_grace(&thread->shared->nfs4_recovery) &&
+            !nfs4_client_reclaim_complete(&thread->shared->nfs4_shared_clients,
+                                          req->session->nfs4_session_clientid)) {
+            res->status = NFS4ERR_GRACE;
+            chimera_nfs4_open_complete(req, res->status);
+            return;
+        }
     }
 
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,

@@ -726,6 +726,28 @@ nfs4_client_mark_reclaim_complete(
     return already;
 } /* nfs4_client_mark_reclaim_complete */
 
+bool
+nfs4_client_reclaim_complete(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id)
+{
+    struct nfs4_client *c;
+    bool                complete = false;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), c);
+
+    if (c) {
+        complete = c->nfs4_client_reclaim_complete;
+    }
+
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+
+    return complete;
+} /* nfs4_client_reclaim_complete */
+
 nfsstat4
 nfs4_client_destroy_clientid(
     struct nfs4_client_table  *table,
