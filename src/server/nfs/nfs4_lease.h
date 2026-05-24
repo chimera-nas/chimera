@@ -59,10 +59,10 @@ nfs_lease_sweeper_destroy(
     struct nfs_lease_sweeper *sweeper);
 
 /*
- * Walk the shared client table once and flip the `expired` flag on every
- * client whose lease has lapsed.  Exposed for the sweeper callback and for
- * tests.
+ * Walk the shared client table once, mark every lapsed client expired, and
+ * release its open/lock/delegation state.  Exposed for the sweeper callback
+ * and for tests.
  */
 void
 nfs_lease_sweep_once(
-    struct chimera_server_nfs_shared *shared);
+    struct chimera_server_nfs_thread *thread);

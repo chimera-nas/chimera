@@ -4,6 +4,7 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <time.h>
 
 #include "nfs4_lease.h"
@@ -59,13 +60,17 @@ nfs_deleg_recall_timeout_check(struct nfs_client *uc)
 } /* nfs_deleg_recall_timeout_check */
 
 void
-nfs_lease_sweep_once(struct chimera_server_nfs_shared *shared)
+nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
 {
 #ifndef __clang_analyzer__
-    struct nfs4_client_table *table = &shared->nfs4_shared_clients;
-    struct nfs4_client       *cur, *tmp;
-    uint64_t                  now_ns = nfs_lease_now_ns();
-    uint64_t                  lease_ns;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct nfs4_client_table         *table  = &shared->nfs4_shared_clients;
+    struct nfs4_client               *cur, *tmp;
+    struct nfs_client               **expired_clients  = NULL;
+    size_t                            expired_count    = 0;
+    size_t                            expired_capacity = 0;
+    uint64_t                          now_ns           = nfs_lease_now_ns();
+    uint64_t                          lease_ns;
 
     lease_ns = (uint64_t) shared->nfs_lease_time_s * 1000000000ULL;
 
@@ -91,8 +96,21 @@ nfs_lease_sweep_once(struct chimera_server_nfs_shared *shared)
             continue;
         }
 
-        if (now_ns - last > lease_ns) {
+        if (!uc->expired && now_ns - last > lease_ns) {
             uc->expired = 1;
+            if (expired_count == expired_capacity) {
+                size_t              new_capacity = expired_capacity ?
+                    expired_capacity * 2 : 8;
+                struct nfs_client **new_clients;
+
+                new_clients = realloc(expired_clients,
+                                      new_capacity * sizeof(*new_clients));
+                chimera_nfs_abort_if(new_clients == NULL,
+                                     "expired client list realloc failed");
+                expired_clients  = new_clients;
+                expired_capacity = new_capacity;
+            }
+            expired_clients[expired_count++] = uc;
         }
 
         /* Detect delegation recalls the client never answered. */
@@ -100,10 +118,17 @@ nfs_lease_sweep_once(struct chimera_server_nfs_shared *shared)
     }
 
     pthread_mutex_unlock(&table->nfs4_ct_lock);
+
+    for (size_t i = 0; i < expired_count; i++) {
+        nfs_client_expire_state(expired_clients[i],
+                                &shared->nfs4_state_table,
+                                thread->vfs_thread);
+    }
+    free(expired_clients);
 #endif /* ifndef __clang_analyzer__ */
 
     /* Phase 5: piggyback grace-window expiry on the lease tick. */
-    nfs_recovery_sweep_once(&shared->nfs4_recovery);
+    nfs_recovery_sweep_once(&thread->shared->nfs4_recovery);
 } /* nfs_lease_sweep_once */
 
 static void
@@ -114,7 +139,7 @@ nfs_lease_sweeper_fire(
     struct nfs_lease_sweeper *sweeper =
         container_of(timer, struct nfs_lease_sweeper, timer);
 
-    nfs_lease_sweep_once(sweeper->thread->shared);
+    nfs_lease_sweep_once(sweeper->thread);
 } /* nfs_lease_sweeper_fire */
 
 void
