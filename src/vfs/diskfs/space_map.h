@@ -133,6 +133,34 @@ struct sm_journal {
 };
 
 /*
+ * Mount-time block I/O bridge.  All disk access goes through the async
+ * evpl_block path; at mount (before worker threads exist) diskfs drives those
+ * async ops to completion by pumping a transient evpl loop and exposes them
+ * here.  offset must be block-aligned; read rounds the length up to a block
+ * internally and copies the requested bytes out (so callers may request a
+ * sub-block struct), write requires a block-aligned length.  Each returns 0 on
+ * success, -1 on error.
+ */
+struct sm_io {
+    int (*read)(
+        void    *user,
+        uint32_t device_id,
+        void    *buf,
+        uint64_t length,
+        uint64_t offset);
+    int (*write)(
+        void       *user,
+        uint32_t    device_id,
+        const void *buf,
+        uint64_t    length,
+        uint64_t    offset);
+    int (*flush)(
+        void    *user,
+        uint32_t device_id);
+    void *user;
+};
+
+/*
  * Statically-reserved intent log region.  Lives on device 0 right after
  * the superblock; its exact location is also recorded in the superblock
  * so future format versions can move it.  Carved out of AG 0 of device 0.
@@ -286,44 +314,43 @@ space_map_thread_cache_return(
     struct sm_thread_cache  *cache);
 
 /*
- * Synchronously write a stub superblock to offset 0 of `device_path` by
- * opening the file directly with pwrite + fsync.  Done at format time
- * (before evpl claims the device) so we avoid any reentrancy with the
- * VFS dispatch loop.
+ * Write a stub superblock to offset 0 of device 0 through the mount-time
+ * I/O bridge (async evpl_block, pumped to completion + flushed).  Done at
+ * format/unmount time before worker threads exist.
  */
 int
-space_map_write_superblock_path(
-    struct space_map *sm,
-    const char       *device_path,
-    uint64_t          fsid,
-    uint64_t          flags,
-    uint64_t          root_inum,
-    uint32_t          root_gen,
-    uint64_t          log_seq);
+space_map_write_superblock(
+    struct space_map   *sm,
+    const struct sm_io *io,
+    uint64_t            fsid,
+    uint64_t            flags,
+    uint64_t            root_inum,
+    uint32_t            root_gen,
+    uint64_t            log_seq);
 
 /* Read + validate the superblock from device 0; 0 on success (fills *out),
  * -1 if absent/corrupt/wrong-version (caller should mkfs). */
 int
-space_map_read_superblock_path(
-    const char           *device_path,
+space_map_read_superblock(
+    const struct sm_io   *io,
     struct sm_superblock *out);
 
 /*
  * Persist the free-space map to each AG's on-disk log slot (clean unmount),
- * and reload it (mount).  device_paths[d] is the path of device d.  persist
- * returns 0 on success; load returns 0 if every AG's snapshot validated and
- * the in-memory free trees were rebuilt from them, -1 otherwise (caller
- * should treat the filesystem as needing mkfs / recovery).
+ * and reload it (mount), through the mount-time I/O bridge.  persist returns
+ * 0 on success; load returns 0 if every AG's snapshot validated and the
+ * in-memory free trees were rebuilt from them, -1 otherwise (caller should
+ * treat the filesystem as needing mkfs / recovery).
  */
 int
-space_map_persist_paths(
-    struct space_map *sm,
-    char            **device_paths);
+space_map_persist(
+    struct space_map   *sm,
+    const struct sm_io *io);
 
 int
-space_map_load_paths(
-    struct space_map *sm,
-    char            **device_paths);
+space_map_load(
+    struct space_map   *sm,
+    const struct sm_io *io);
 
 static inline uint64_t
 space_map_total_capacity(const struct space_map *sm)

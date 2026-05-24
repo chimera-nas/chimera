@@ -685,17 +685,15 @@ space_map_thread_cache_return(
 } /* space_map_thread_cache_return */
 
 int
-space_map_write_superblock_path(
-    struct space_map *sm,
-    const char       *device_path,
-    uint64_t          fsid,
-    uint64_t          flags,
-    uint64_t          root_inum,
-    uint32_t          root_gen,
-    uint64_t          log_seq)
+space_map_write_superblock(
+    struct space_map   *sm,
+    const struct sm_io *io,
+    uint64_t            fsid,
+    uint64_t            flags,
+    uint64_t            root_inum,
+    uint32_t            root_gen,
+    uint64_t            log_seq)
 {
-    int                   fd;
-    ssize_t               n;
     uint8_t               buf[SM_SUPERBLOCK_SIZE];
     struct sm_superblock *sb = (struct sm_superblock *) buf;
 
@@ -718,25 +716,12 @@ space_map_write_superblock_path(
     sb->crc32             = 0;
     sb->crc32             = sm_crc32(buf, sizeof(buf));
 
-    fd = open(device_path, O_WRONLY);
-    if (fd < 0) {
+    if (io->write(io->user, 0, buf, sizeof(buf), SM_SUPERBLOCK_OFFSET) != 0) {
         return -1;
     }
 
-    n = pwrite(fd, buf, sizeof(buf), SM_SUPERBLOCK_OFFSET);
-    if (n != (ssize_t) sizeof(buf)) {
-        close(fd);
-        return -1;
-    }
-
-    if (fsync(fd) != 0) {
-        close(fd);
-        return -1;
-    }
-
-    close(fd);
-    return 0;
-} /* space_map_write_superblock_path */
+    return io->flush(io->user, 0);
+} /* space_map_write_superblock */
 
 /*
  * Read and validate the superblock from device 0.  Returns 0 and fills *out
@@ -744,23 +729,15 @@ space_map_write_superblock_path(
  * returns -1 (no/!valid superblock -> caller should mkfs) on any mismatch.
  */
 int
-space_map_read_superblock_path(
-    const char           *device_path,
+space_map_read_superblock(
+    const struct sm_io   *io,
     struct sm_superblock *out)
 {
-    int                   fd;
-    ssize_t               n;
     uint8_t               buf[SM_SUPERBLOCK_SIZE];
     struct sm_superblock *sb = (struct sm_superblock *) buf;
     uint32_t              stored, computed;
 
-    fd = open(device_path, O_RDONLY);
-    if (fd < 0) {
-        return -1;
-    }
-    n = pread(fd, buf, sizeof(buf), SM_SUPERBLOCK_OFFSET);
-    close(fd);
-    if (n != (ssize_t) sizeof(buf)) {
+    if (io->read(io->user, 0, buf, sizeof(buf), SM_SUPERBLOCK_OFFSET) != 0) {
         return -1;
     }
 
@@ -778,7 +755,7 @@ space_map_read_superblock_path(
 
     *out = *sb;
     return 0;
-} /* space_map_read_superblock_path */
+} /* space_map_read_superblock */
 
 /*
  * Remove the specific range [offset, offset+length) from the AG's free tree
@@ -891,26 +868,21 @@ sm_ag_reconstruct(
  * full condense is what runs at clean unmount and resets the delta log.)
  */
 int
-space_map_persist_paths(
-    struct space_map *sm,
-    char            **device_paths)
+space_map_persist(
+    struct space_map   *sm,
+    const struct sm_io *io)
 {
     uint32_t d, a;
 
     for (d = 0; d < sm->num_devices; d++) {
         struct sm_device *dev = &sm->devices[d];
-        int               fd  = open(device_paths[d], O_WRONLY);
-
-        if (fd < 0) {
-            return -1;
-        }
 
         for (a = 0; a < dev->num_ags; a++) {
             struct sm_ag *ag  = &dev->ags[a];
             uint8_t      *buf = calloc(1, SM_AG_LOG_SLOT_SIZE);
             uint32_t      slot;
             uint64_t      gen, payload, aligned, slot_off;
-            ssize_t       n;
+            int           rc;
 
             pthread_mutex_lock(&ag->lock);
             slot     = 1 - ag->log_slot;
@@ -919,8 +891,8 @@ space_map_persist_paths(
             slot_off = ag->log_offset + (uint64_t) slot * SM_AG_LOG_SLOT_SIZE;
             aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
 
-            n = pwrite(fd, buf, aligned, slot_off);
-            if (n == (ssize_t) aligned) {
+            rc = io->write(io->user, d, buf, aligned, slot_off);
+            if (rc == 0) {
                 ag->log_slot        = slot;
                 ag->log_generation  = gen;
                 ag->log_base_count  = ((struct sm_ag_log_header *) buf)->base_count;
@@ -928,36 +900,28 @@ space_map_persist_paths(
             }
             pthread_mutex_unlock(&ag->lock);
             free(buf);
-            if (n != (ssize_t) aligned) {
-                close(fd);
+            if (rc != 0) {
                 return -1;
             }
         }
 
-        if (fsync(fd) != 0) {
-            close(fd);
+        if (io->flush(io->user, d) != 0) {
             return -1;
         }
-        close(fd);
     }
     return 0;
-} /* space_map_persist_paths */
+} /* space_map_persist */
 
 int
-space_map_load_paths(
-    struct space_map *sm,
-    char            **device_paths)
+space_map_load(
+    struct space_map   *sm,
+    const struct sm_io *io)
 {
     uint32_t d, a;
     uint64_t free_total = 0;
 
     for (d = 0; d < sm->num_devices; d++) {
         struct sm_device *dev = &sm->devices[d];
-        int               fd  = open(device_paths[d], O_RDONLY);
-
-        if (fd < 0) {
-            return -1;
-        }
 
         for (a = 0; a < dev->num_ags; a++) {
             struct sm_ag           *ag = &dev->ags[a];
@@ -966,20 +930,17 @@ space_map_load_paths(
             int                     best = -1;
             uint32_t                s;
             uint64_t                payload, slot_off;
-            ssize_t                 n;
 
             /* Pick the live slot: highest generation with a valid magic. */
             for (s = 0; s < SM_AG_LOG_SLOT_COUNT; s++) {
                 slot_off = ag->log_offset + (uint64_t) s * SM_AG_LOG_SLOT_SIZE;
-                n        = pread(fd, &hdr[s], sizeof(hdr[s]), slot_off);
-                if (n == (ssize_t) sizeof(hdr[s]) &&
+                if (io->read(io->user, d, &hdr[s], sizeof(hdr[s]), slot_off) == 0 &&
                     hdr[s].magic == SM_AG_LOG_MAGIC &&
                     (best < 0 || hdr[s].generation > hdr[best].generation)) {
                     best = (int) s;
                 }
             }
             if (best < 0) {
-                close(fd);
                 return -1;
             }
 
@@ -988,10 +949,8 @@ space_map_load_paths(
                 (uint64_t) hdr[best].delta_count * sizeof(struct sm_ag_log_delta);
             buf      = malloc(payload);
             slot_off = ag->log_offset + (uint64_t) best * SM_AG_LOG_SLOT_SIZE;
-            n        = pread(fd, buf, payload, slot_off);
-            if (n != (ssize_t) payload) {
+            if (io->read(io->user, d, buf, payload, slot_off) != 0) {
                 free(buf);
-                close(fd);
                 return -1;
             }
 
@@ -1002,10 +961,9 @@ space_map_load_paths(
             pthread_mutex_unlock(&ag->lock);
             free(buf);
         }
-        close(fd);
     }
 
     sm->used_bytes = sm->total_capacity > free_total ?
         sm->total_capacity - free_total : 0;
     return 0;
-} /* space_map_load_paths */
+} /* space_map_load */

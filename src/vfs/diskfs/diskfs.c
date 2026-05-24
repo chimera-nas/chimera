@@ -6054,6 +6054,181 @@ diskfs_recover_rec_cmp(
     return (sa > sb) - (sa < sb);
 } /* diskfs_recover_rec_cmp */
 
+/* ------------------------------------------------------------------ */
+/* Mount-time synchronous block I/O via a transient evpl pump.         */
+/*                                                                     */
+/* All diskfs disk access goes through evpl_block, but mount, crash    */
+/* recovery, bootstrap and unmount run with no worker event loop to    */
+/* drive completions (and a raw device path is not a file, so pread/   */
+/* pwrite cannot reach a VFIO/io_uring/libaio block device).  Stand up */
+/* a private evpl + per-device block queues and pump evpl_continue()   */
+/* until each async op finishes -- the same drain idiom the intent-log */
+/* thread uses at shutdown.                                            */
+/* ------------------------------------------------------------------ */
+struct diskfs_mount_io {
+    struct evpl              *evpl;
+    struct evpl_block_queue **queue;
+    struct diskfs_shared     *shared;
+};
+
+struct diskfs_mount_io_wait {
+    int done;
+    int status;
+};
+
+static void
+diskfs_mount_io_complete(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct diskfs_mount_io_wait *w = private_data;
+
+    (void) evpl;
+    w->status = status;
+    w->done   = 1;
+} /* diskfs_mount_io_complete */
+
+static struct diskfs_mount_io *
+diskfs_mount_io_open(struct diskfs_shared *shared)
+{
+    struct diskfs_mount_io *io = calloc(1, sizeof(*io));
+    int                     i;
+
+    io->shared = shared;
+    io->evpl   = evpl_create(NULL);
+    io->queue  = calloc(shared->num_devices, sizeof(*io->queue));
+    for (i = 0; i < shared->num_devices; i++) {
+        io->queue[i] = evpl_block_open_queue(io->evpl, shared->devices[i].bdev);
+    }
+    return io;
+} /* diskfs_mount_io_open */
+
+static void
+diskfs_mount_io_close(struct diskfs_mount_io *io)
+{
+    int i;
+
+    for (i = 0; i < io->shared->num_devices; i++) {
+        evpl_block_close_queue(io->evpl, io->queue[i]);
+    }
+    free(io->queue);
+    evpl_destroy(io->evpl);
+    free(io);
+} /* diskfs_mount_io_close */
+
+/*
+ * sm_io read bridge.  offset must be block-aligned; the device transfer is
+ * rounded up to a whole block and only the requested bytes are copied out, so
+ * callers may ask for a sub-block struct.  Chunked at the device max request
+ * size.
+ */
+static int
+diskfs_mount_io_read(
+    void    *user,
+    uint32_t device_id,
+    void    *buf,
+    uint64_t length,
+    uint64_t offset)
+{
+    struct diskfs_mount_io *io     = user;
+    uint64_t                maxreq = io->shared->devices[device_id].max_request_size;
+    uint64_t                done   = 0;
+
+    while (done < length) {
+        struct evpl_iovec           iov;
+        struct diskfs_mount_io_wait w    = { 0, 0 };
+        uint64_t                    want = length - done;
+        uint64_t                    xfer;
+
+        if (want > maxreq) {
+            want = maxreq;
+        }
+        xfer = (want + DISKFS_BLOCK_SIZE - 1) & ~((uint64_t) DISKFS_BLOCK_SIZE - 1);
+
+        evpl_iovec_alloc(io->evpl, xfer, DISKFS_BLOCK_SIZE, 1, 0, &iov);
+        evpl_block_read(io->evpl, io->queue[device_id], &iov, 1, offset + done,
+                        diskfs_mount_io_complete, &w);
+        while (!w.done) {
+            evpl_continue(io->evpl);
+        }
+        if (w.status) {
+            evpl_iovec_release(io->evpl, &iov);
+            return -1;
+        }
+        memcpy((char *) buf + done, iov.data, want);
+        evpl_iovec_release(io->evpl, &iov);
+        done += want;
+    }
+    return 0;
+} /* diskfs_mount_io_read */
+
+/* sm_io write bridge.  offset and length must be block-aligned (callers write
+ * whole blocks / the block-padded superblock + condensed log slots). */
+static int
+diskfs_mount_io_write(
+    void       *user,
+    uint32_t    device_id,
+    const void *buf,
+    uint64_t    length,
+    uint64_t    offset)
+{
+    struct diskfs_mount_io *io     = user;
+    uint64_t                maxreq = io->shared->devices[device_id].max_request_size;
+    uint64_t                done   = 0;
+
+    while (done < length) {
+        struct evpl_iovec           iov;
+        struct diskfs_mount_io_wait w    = { 0, 0 };
+        uint64_t                    want = length - done;
+
+        if (want > maxreq) {
+            want = maxreq;
+        }
+        evpl_iovec_alloc(io->evpl, want, DISKFS_BLOCK_SIZE, 1, 0, &iov);
+        memcpy(iov.data, (const char *) buf + done, want);
+        evpl_block_write(io->evpl, io->queue[device_id], &iov, 1, offset + done,
+                         1 /* sync */, diskfs_mount_io_complete, &w);
+        while (!w.done) {
+            evpl_continue(io->evpl);
+        }
+        evpl_iovec_release(io->evpl, &iov);
+        if (w.status) {
+            return -1;
+        }
+        done += want;
+    }
+    return 0;
+} /* diskfs_mount_io_write */
+
+static int
+diskfs_mount_io_flush(
+    void    *user,
+    uint32_t device_id)
+{
+    struct diskfs_mount_io     *io = user;
+    struct diskfs_mount_io_wait w  = { 0, 0 };
+
+    evpl_block_flush(io->evpl, io->queue[device_id], diskfs_mount_io_complete, &w);
+    while (!w.done) {
+        evpl_continue(io->evpl);
+    }
+    return w.status ? -1 : 0;
+} /* diskfs_mount_io_flush */
+
+static struct sm_io
+diskfs_mount_sm_io(struct diskfs_mount_io *io)
+{
+    struct sm_io smio = {
+        .read  = diskfs_mount_io_read,
+        .write = diskfs_mount_io_write,
+        .flush = diskfs_mount_io_flush,
+        .user  = io,
+    };
+
+    return smio;
+} /* diskfs_mount_sm_io */
+
 /*
  * Crash recovery (synchronous replay): the previous instance did not unmount
  * cleanly, so logged-but-not-yet-pushed redo records may still sit in the
@@ -6061,36 +6236,29 @@ diskfs_recover_rec_cmp(
  * intact records -- a 4 KiB-aligned magic whose XXH3-128 over reclen bytes
  * verifies (rejecting torn/partially-overwritten records) -- and write each
  * block image to its home location in seq order (latest image of a block
- * wins), then fsync.  After this the on-disk b+tree / inodes / data are
+ * wins), then flush.  After this the on-disk b+tree / inodes / data are
  * consistent with the last acknowledged write, exactly as the tail-pusher
  * would have left them.
  *
  * Replaying every intact record (rather than just [tail, head]) is safe: in a
  * FIFO circular log a superseding record outlives every record it supersedes,
  * so seq-ordered replay always lands the latest image, and re-writing an
- * already-current block is idempotent.  Runs at mount before evpl I/O starts,
- * so it uses plain pread/pwrite via the device paths.
+ * already-current block is idempotent.  Runs at mount before worker threads
+ * exist, so it drives the device through the mount-time evpl pump.
  */
 static int
-diskfs_recover_log(struct diskfs_shared *shared)
+diskfs_recover_log(
+    struct diskfs_shared   *shared,
+    struct diskfs_mount_io *io)
 {
     char                      *log;
-    int                        fd;
-    int                       *wfd;
-    ssize_t                    n;
     uint64_t                   o;
     struct diskfs_recover_rec *recs;
     uint32_t                   nrec = 0, cap = 4096, i;
 
     log = malloc(SM_INTENT_LOG_SIZE);
-    fd  = open(shared->device_paths[SM_INTENT_LOG_DEVICE], O_RDONLY);
-    if (fd < 0) {
-        free(log);
-        return -1;
-    }
-    n = pread(fd, log, SM_INTENT_LOG_SIZE, SM_INTENT_LOG_OFFSET);
-    close(fd);
-    if (n != (ssize_t) SM_INTENT_LOG_SIZE) {
+    if (diskfs_mount_io_read(io, SM_INTENT_LOG_DEVICE, log, SM_INTENT_LOG_SIZE,
+                             SM_INTENT_LOG_OFFSET) != 0) {
         free(log);
         return -1;
     }
@@ -6133,11 +6301,6 @@ diskfs_recover_log(struct diskfs_shared *shared)
 
     qsort(recs, nrec, sizeof(*recs), diskfs_recover_rec_cmp);
 
-    wfd = malloc(shared->num_devices * sizeof(int));
-    for (i = 0; i < (uint32_t) shared->num_devices; i++) {
-        wfd[i] = open(shared->device_paths[i], O_WRONLY);
-    }
-
     for (i = 0; i < nrec; i++) {
         struct diskfs_redo_header *hdr  = (struct diskfs_redo_header *) (log + recs[i].offset);
         char                      *bhp  = log + recs[i].offset + sizeof(*hdr);
@@ -6151,24 +6314,21 @@ diskfs_recover_log(struct diskfs_shared *shared)
                 (struct diskfs_redo_block_header *) (bhp + (size_t) b * sizeof(*bh));
             char                            *img = data + (size_t) b * DISKFS_BLOCK_SIZE;
 
-            if (bh->device_id < (uint32_t) shared->num_devices && wfd[bh->device_id] >= 0) {
-                ssize_t wn = pwrite(wfd[bh->device_id], img, DISKFS_BLOCK_SIZE,
-                                    (off_t) bh->device_offset);
+            if (bh->device_id < (uint32_t) shared->num_devices) {
+                int wr = diskfs_mount_io_write(io, bh->device_id, img,
+                                               DISKFS_BLOCK_SIZE,
+                                               bh->device_offset);
 
-                chimera_diskfs_abort_if(wn != (ssize_t) DISKFS_BLOCK_SIZE,
-                                        "recovery replay pwrite failed: %zd", wn);
+                chimera_diskfs_abort_if(wr != 0,
+                                        "recovery replay write failed");
             }
         }
     }
 
     for (i = 0; i < (uint32_t) shared->num_devices; i++) {
-        if (wfd[i] >= 0) {
-            fsync(wfd[i]);
-            close(wfd[i]);
-        }
+        diskfs_mount_io_flush(io, i);
     }
 
-    free(wfd);
     free(recs);
     free(log);
     chimera_diskfs_info("crash recovery: replayed %u intact intent-log records", nrec);
@@ -6274,12 +6434,14 @@ diskfs_init(const char *cfgdata)
      *   - no/garbage     -> mkfs.
      */
     {
-        struct sm_superblock sb;
-        int                  have_sb;
-        int                  mode;     /* 0 = mkfs, 1 = clean mount, 2 = recover */
+        struct sm_superblock    sb;
+        int                     have_sb;
+        int                     mode; /* 0 = mkfs, 1 = clean mount, 2 = recover */
+        struct diskfs_mount_io *mio  = diskfs_mount_io_open(shared);
+        struct sm_io            smio = diskfs_mount_sm_io(mio);
 
         have_sb = shared->persistent &&
-            space_map_read_superblock_path(device0_path, &sb) == 0;
+            space_map_read_superblock(&smio, &sb) == 0;
 
         if (have_sb && (sb.flags & SM_SB_CLEAN)) {
             mode         = 1;
@@ -6301,7 +6463,7 @@ diskfs_init(const char *cfgdata)
 
         if (mode == 2) {
             chimera_diskfs_info("superblock not clean: running crash recovery");
-            diskfs_recover_log(shared);
+            diskfs_recover_log(shared, mio);
         }
 
         /* Reload the persisted free-space map.  NOTE: after a crash this
@@ -6311,7 +6473,7 @@ diskfs_init(const char *cfgdata)
          * must be rebuilt (namespace-walk fsck, TODO) before writes are safe.
          * For a clean mount the snapshot must load or we fall back to mkfs. */
         if (mode != 0 &&
-            space_map_load_paths(shared->space_map, shared->device_paths) != 0) {
+            space_map_load(shared->space_map, &smio) != 0) {
             if (mode == 1) {
                 chimera_diskfs_error("space-map reload failed; treating as fresh");
                 mode = 0;
@@ -6330,7 +6492,6 @@ diskfs_init(const char *cfgdata)
             uint32_t             rgen                            = sb.root_gen;
             uint32_t             rdev;
             uint64_t             roff;
-            int                  rfd;
             struct diskfs_dinode rdi;
 
             /* The superblock's root generation is only refreshed at clean
@@ -6338,13 +6499,9 @@ diskfs_init(const char *cfgdata)
              * authoritative generation from the root inode's on-disk dinode
              * (consistent post-replay) so the mount handle matches. */
             roff = sm_inum_to_device_offset(shared->space_map, rinum, &rdev);
-            rfd  = open(shared->device_paths[rdev], O_RDONLY);
-            if (rfd >= 0) {
-                if (pread(rfd, &rdi, sizeof(rdi), (off_t) roff) == (ssize_t) sizeof(rdi) &&
-                    rdi.inum == rinum) {
-                    rgen = rdi.gen;
-                }
-                close(rfd);
+            if (diskfs_mount_io_read(mio, rdev, &rdi, sizeof(rdi), roff) == 0 &&
+                rdi.inum == rinum) {
+                rgen = rdi.gen;
             }
 
             shared->root_inum = rinum;
@@ -6359,22 +6516,22 @@ diskfs_init(const char *cfgdata)
         /* Clear the CLEAN flag for this session: an unclean teardown then
          * leaves it clear, so the next mount won't mistake a crash for a
          * clean shutdown. */
-        rc = space_map_write_superblock_path(shared->space_map, device0_path,
-                                             shared->fsid, 0,
-                                             mode != 0 ? shared->root_inum : 0,
-                                             mode != 0 ? shared->root_gen : 0,
-                                             mode != 0 ? sb.log_seq : 0);
-        chimera_diskfs_abort_if(rc != 0,
-                                "Failed to write superblock to %s: %s",
-                                device0_path, strerror(errno));
+        rc = space_map_write_superblock(shared->space_map, &smio,
+                                        shared->fsid, 0,
+                                        mode != 0 ? shared->root_inum : 0,
+                                        mode != 0 ? shared->root_gen : 0,
+                                        mode != 0 ? sb.log_seq : 0);
+        chimera_diskfs_abort_if(rc != 0, "Failed to write superblock");
 
         /* Persistent mkfs: write an initial condensed AG-log base so each
          * slot has a valid header before any runtime delta is journaled --
          * otherwise a crash right after format would leave the allocator log
          * unreadable. */
         if (mode == 0 && shared->persistent) {
-            space_map_persist_paths(shared->space_map, shared->device_paths);
+            space_map_persist(shared->space_map, &smio);
         }
+
+        diskfs_mount_io_close(mio);
     }
     free(device0_path);
 
@@ -6428,12 +6585,13 @@ diskfs_init(const char *cfgdata)
 static void
 diskfs_bootstrap(struct diskfs_thread *thread)
 {
-    struct diskfs_shared *shared = thread->shared;
-    struct timespec       now;
-    struct diskfs_inode  *inode;
-    uint32_t              device_id;
-    uint64_t              device_offset, inum;
-    int                   rc;
+    struct diskfs_shared   *shared = thread->shared;
+    struct timespec         now;
+    struct diskfs_inode    *inode;
+    uint32_t                device_id;
+    uint64_t                device_offset, inum;
+    int                     rc;
+    struct diskfs_mount_io *mio;
 
     /* Guard against concurrent first-touch from multiple workers. */
     pthread_mutex_lock(&shared->lock);
@@ -6441,6 +6599,13 @@ diskfs_bootstrap(struct diskfs_thread *thread)
         pthread_mutex_unlock(&shared->lock);
         return;
     }
+
+    /* Bootstrap writes the root + orphan inode blocks to their home locations
+     * synchronously (they must be re-readable from disk before becoming
+     * evictable CLEAN blocks).  All device access goes through evpl_block, so
+     * drive it with a transient mount-time pump rather than this worker's own
+     * event loop (avoids re-entering the dispatch loop mid-request). */
+    mio = diskfs_mount_io_open(shared);
 
     clock_gettime(CLOCK_REALTIME, &now);
 
@@ -6483,19 +6648,10 @@ diskfs_bootstrap(struct diskfs_thread *thread)
     diskfs_bt_node_init(inode->block->iov.data, DISKFS_BT_ROOT_BASE,
                         DISKFS_BT_ROOT_CAP, 0);
     diskfs_inode_flush(inode);
-    {
-        int fd = open(shared->device_paths[device_id], O_WRONLY);
-
-        if (fd >= 0) {
-            ssize_t wn = pwrite(fd, inode->block->iov.data, DISKFS_BLOCK_SIZE,
-                                (off_t) device_offset);
-
-            chimera_diskfs_abort_if(wn != (ssize_t) DISKFS_BLOCK_SIZE,
-                                    "bootstrap root pwrite failed: %zd", wn);
-            fsync(fd);
-            close(fd);
-        }
-    }
+    rc = diskfs_mount_io_write(mio, device_id, inode->block->iov.data,
+                               DISKFS_BLOCK_SIZE, device_offset);
+    chimera_diskfs_abort_if(rc != 0, "bootstrap root write failed");
+    diskfs_mount_io_flush(mio, device_id);
     inode->block->state = DISKFS_BLOCK_CLEAN;
     diskfs_block_unpin(thread, inode->block, DISKFS_BLOCK_CLEAN);
     inode->block = NULL;
@@ -6529,19 +6685,10 @@ diskfs_bootstrap(struct diskfs_thread *thread)
         diskfs_bt_node_init(oin->block->iov.data, DISKFS_BT_ROOT_BASE,
                             DISKFS_BT_ROOT_CAP, 0);
         diskfs_inode_flush(oin);
-        {
-            int fd = open(shared->device_paths[odev], O_WRONLY);
-
-            if (fd >= 0) {
-                ssize_t wn = pwrite(fd, oin->block->iov.data, DISKFS_BLOCK_SIZE,
-                                    (off_t) ooff);
-
-                chimera_diskfs_abort_if(wn != (ssize_t) DISKFS_BLOCK_SIZE,
-                                        "bootstrap orphan pwrite failed: %zd", wn);
-                fsync(fd);
-                close(fd);
-            }
-        }
+        rc = diskfs_mount_io_write(mio, odev, oin->block->iov.data,
+                                   DISKFS_BLOCK_SIZE, ooff);
+        chimera_diskfs_abort_if(rc != 0, "bootstrap orphan write failed");
+        diskfs_mount_io_flush(mio, odev);
         oin->block->state = DISKFS_BLOCK_CLEAN;
         diskfs_block_unpin(thread, oin->block, DISKFS_BLOCK_CLEAN);
         oin->block = NULL;
@@ -6558,6 +6705,8 @@ diskfs_bootstrap(struct diskfs_thread *thread)
     }
     shared->root_inum = inode->inum;
     shared->root_gen  = inode->gen;
+
+    diskfs_mount_io_close(mio);
 
     pthread_mutex_unlock(&shared->lock);
 } /* diskfs_bootstrap */
@@ -6595,32 +6744,36 @@ diskfs_destroy(void *private_data)
     evpl_thread_destroy(shared->intent_log.thread);
     pthread_mutex_destroy(&shared->intent_log.registration_lock);
 
+    /* Clean unmount: the intent-log thread already drained every logged block
+     * to its home location, so persist the free-space map and stamp the
+     * superblock CLEAN (with the root + next log seq) so the next mount
+     * reloads instead of re-handing-out in-use space.  Driven through the
+     * mount-time evpl pump while the devices are still open -- the IL thread
+     * (the only other device user) is already gone.  Only mark clean if a root
+     * actually exists (an untouched mkfs has nothing to preserve). */
+    if (shared->persistent) {
+        struct diskfs_mount_io *mio  = diskfs_mount_io_open(shared);
+        struct sm_io            smio = diskfs_mount_sm_io(mio);
+
+        if (space_map_persist(shared->space_map, &smio) != 0) {
+            chimera_diskfs_error("space-map persist at unmount failed");
+        } else if (shared->root_fhlen != 0) {
+            int rc = space_map_write_superblock(shared->space_map, &smio,
+                                                shared->fsid, SM_SB_CLEAN,
+                                                shared->root_inum, shared->root_gen,
+                                                shared->intent_log.log_seq);
+            if (rc != 0) {
+                chimera_diskfs_error("clean-superblock write at unmount failed");
+            }
+        }
+        diskfs_mount_io_close(mio);
+    }
+
     for (int i = 0; i < shared->num_devices; i++) {
         evpl_block_close_device(shared->devices[i].bdev);
     }
 
     diskfs_block_cache_destroy(shared);
-
-    /* Clean unmount: the intent-log thread already drained every logged block
-     * to its home location, so persist the free-space map and stamp the
-     * superblock CLEAN (with the root + next log seq) so the next mount
-     * reloads instead of re-handing-out in-use space.  Done now that all
-     * device I/O has quiesced (evpl released the devices).  Only mark clean if
-     * a root actually exists (an untouched mkfs has nothing to preserve). */
-    if (!shared->persistent) {
-        /* mkfs-every-mount mode: nothing to preserve. */
-    } else if (space_map_persist_paths(shared->space_map, shared->device_paths) != 0) {
-        chimera_diskfs_error("space-map persist at unmount failed");
-    } else if (shared->root_fhlen != 0) {
-        int rc = space_map_write_superblock_path(shared->space_map,
-                                                 shared->device_paths[0],
-                                                 shared->fsid, SM_SB_CLEAN,
-                                                 shared->root_inum, shared->root_gen,
-                                                 shared->intent_log.log_seq);
-        if (rc != 0) {
-            chimera_diskfs_error("clean-superblock write at unmount failed");
-        }
-    }
 
     space_map_destroy(shared->space_map);
 
