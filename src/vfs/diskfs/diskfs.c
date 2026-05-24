@@ -6694,6 +6694,73 @@ diskfs_mount_io_write(
 } /* diskfs_mount_io_write */
 
 static int
+diskfs_mount_io_write_many(
+    void                     *user,
+    const struct sm_io_write *writes,
+    uint32_t                  count)
+{
+    struct diskfs_mount_io      *io = user;
+    struct diskfs_mount_io_wait *waits;
+    struct evpl_iovec           *iovs;
+    uint32_t                     i, done = 0;
+    int                          rc = 0;
+
+    if (count == 0) {
+        return 0;
+    }
+
+    waits = calloc(count, sizeof(*waits));
+    iovs  = calloc(count, sizeof(*iovs));
+    if (!waits || !iovs) {
+        free(waits);
+        free(iovs);
+        return -1;
+    }
+
+    for (i = 0; i < count; i++) {
+        struct diskfs_device *dev = &io->shared->devices[writes[i].device_id];
+
+        if (writes[i].length > dev->max_request_size) {
+            rc    = -1;
+            count = i;
+            goto out;
+        }
+
+        evpl_iovec_alloc(io->evpl, writes[i].length, DISKFS_BLOCK_SIZE, 1, 0,
+                         &iovs[i]);
+        memcpy(iovs[i].data, writes[i].buf, writes[i].length);
+        evpl_block_write(io->evpl, io->queue[writes[i].device_id], &iovs[i],
+                         1, writes[i].offset, !io->shared->unsafe_async,
+                         diskfs_mount_io_complete, &waits[i]);
+    }
+
+    while (done < count) {
+        evpl_continue(io->evpl);
+        done = 0;
+        for (i = 0; i < count; i++) {
+            if (waits[i].done) {
+                done++;
+            }
+        }
+    }
+
+    for (i = 0; i < count; i++) {
+        if (waits[i].status) {
+            rc = -1;
+            break;
+        }
+    }
+
+ out:
+    for (i = 0; i < count; i++) {
+        evpl_iovec_release(io->evpl, &iovs[i]);
+    }
+    free(iovs);
+    free(waits);
+    return rc;
+} /* diskfs_mount_io_write_many */
+
+static int
 diskfs_mount_io_flush(
     void    *user,
     uint32_t device_id)
@@ -6712,10 +6779,11 @@ static struct sm_io
 diskfs_mount_sm_io(struct diskfs_mount_io *io)
 {
     struct sm_io smio = {
-        .read  = diskfs_mount_io_read,
-        .write = diskfs_mount_io_write,
-        .flush = diskfs_mount_io_flush,
-        .user  = io,
+        .read       = diskfs_mount_io_read,
+        .write      = diskfs_mount_io_write,
+        .write_many = diskfs_mount_io_write_many,
+        .flush      = diskfs_mount_io_flush,
+        .user       = io,
     };
 
     return smio;
@@ -7024,7 +7092,8 @@ diskfs_init(const char *cfgdata)
          * header before any runtime delta is journaled -- otherwise a crash
          * right after format would leave the allocator log unreadable. */
         if (mode == 0) {
-            space_map_persist(shared->space_map, &smio);
+            rc = space_map_persist(shared->space_map, &smio);
+            chimera_diskfs_abort_if(rc != 0, "Failed to persist initial space map");
         }
 
         diskfs_mount_io_close(mio);
