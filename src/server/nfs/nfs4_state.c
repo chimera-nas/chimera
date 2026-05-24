@@ -661,6 +661,64 @@ nfs_client_destroy(
     free(client);
 } /* nfs_client_destroy */
 
+void
+nfs_client_expire_state(
+    struct nfs_client         *client,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    if (!client) {
+        return;
+    }
+
+    pthread_mutex_lock(&client->lock);
+    client->expired = 1;
+
+#ifndef __clang_analyzer__
+    struct nfs_open_owner *oo, *oo_tmp;
+    struct nfs_lock_owner *lo, *lo_tmp;
+
+    HASH_ITER(hh, client->open_owners_by_str, oo, oo_tmp)
+    {
+        pthread_mutex_lock(&oo->lock);
+        struct nfs_open_state *os, *os_tmp;
+        HASH_ITER(hh, oo->states_by_fh, os, os_tmp)
+        {
+            open_state_destroy_locked(oo, os, table, vfs_thread, true);
+        }
+        pthread_mutex_unlock(&oo->lock);
+
+        HASH_DELETE(hh, client->open_owners_by_str, oo);
+        pthread_mutex_destroy(&oo->lock);
+        free(oo);
+    }
+
+    HASH_ITER(hh, client->lock_owners_by_str, lo, lo_tmp)
+    {
+        chimera_nfs_abort_if(lo->states != NULL,
+                             "lock_owner %p has leftover lock_states", lo);
+        HASH_DELETE(hh, client->lock_owners_by_str, lo);
+        pthread_mutex_destroy(&lo->lock);
+        free(lo);
+    }
+
+    struct nfs_layout_state *ly, *ly_tmp;
+    HASH_ITER(hh, client->layouts_by_fh, ly, ly_tmp)
+    {
+        layout_state_destroy_locked(client, ly, table, vfs_thread);
+    }
+#endif /* ifndef __clang_analyzer__ */
+
+    while (client->delegations) {
+        struct nfs_delegation *deleg = client->delegations;
+        LL_DELETE2(client->delegations, deleg, next_in_client);
+        delegation_destroy_common(deleg, table, vfs_thread, true, false);
+    }
+
+    nfs4_cb_path_teardown(&client->cb_path);
+    pthread_mutex_unlock(&client->lock);
+} /* nfs_client_expire_state */
+
 struct nfs_open_owner *
 nfs_open_owner_find_or_create(
     struct nfs_client *client,

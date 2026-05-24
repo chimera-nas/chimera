@@ -550,6 +550,14 @@ nfs_client_destroy(
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread);
 
+/* Expire all state underneath a client, but keep the client record itself as
+ * an expired tombstone so later clientid operations can return EXPIRED. */
+SYMBOL_EXPORT void
+nfs_client_expire_state(
+    struct nfs_client         *client,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread);
+
 /* Find an existing open_owner under `client` by byte-string, or create one.
  * Sets *out_created = true if a new one was allocated. */
 SYMBOL_EXPORT struct nfs_open_owner *
@@ -740,6 +748,9 @@ static inline void
 nfs_client_touch(struct nfs_client *client)
 {
     if (!client) {
+        return;
+    }
+    if (client->expired) {
         return;
     }
     atomic_store_explicit((_Atomic uint64_t *) &client->last_touch_ns,

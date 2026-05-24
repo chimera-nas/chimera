@@ -276,6 +276,10 @@ chimera_nfs4_open_install_state(
         chimera_vfs_release(req->thread->vfs_thread, handle);
         return NFS4ERR_STALE_CLIENTID;
     }
+    if (client->expired) {
+        client->expired = 0;
+        nfs_client_touch(client);
+    }
 
     owner = nfs_open_owner_find_or_create(client,
                                           args->owner.owner.data,
@@ -858,6 +862,10 @@ chimera_nfs4_open(
             res->status = NFS4ERR_STALE_CLIENTID;
             chimera_nfs4_compound_complete(req, res->status);
             return;
+        }
+        if (client->expired) {
+            client->expired = 0;
+            nfs_client_touch(client);
         }
 
         bool                   created;

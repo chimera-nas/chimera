@@ -26,26 +26,35 @@ chimera_nfs4_renew(
     struct RENEW4res    *res  = &resop->oprenew;
     struct nfs4_session *session;
 
-    res->status = NFS4_OK;
-
     session = nfs4_session_find_by_clientid(&thread->shared->nfs4_shared_clients,
                                             args->clientid);
-    if (session) {
+    if (!session || !session->client_unified) {
+        res->status = NFS4ERR_STALE_CLIENTID;
+    } else {
         struct nfs_client *client = session->client_unified;
 
-        if (client &&
-            atomic_load_explicit(&client->cb_path.cb_state,
-                                 memory_order_acquire) == NFS4_CB_DOWN) {
-            bool has_deleg;
+        if (client->expired) {
+            res->status = NFS4ERR_EXPIRED;
+        } else {
+            res->status = NFS4_OK;
+            nfs_client_touch(client);
 
-            pthread_mutex_lock(&client->lock);
-            has_deleg = (client->delegations != NULL);
-            pthread_mutex_unlock(&client->lock);
+            if (atomic_load_explicit(&client->cb_path.cb_state,
+                                     memory_order_acquire) == NFS4_CB_DOWN) {
+                bool has_deleg;
 
-            if (has_deleg) {
-                res->status = NFS4ERR_CB_PATH_DOWN;
+                pthread_mutex_lock(&client->lock);
+                has_deleg = (client->delegations != NULL);
+                pthread_mutex_unlock(&client->lock);
+
+                if (has_deleg) {
+                    res->status = NFS4ERR_CB_PATH_DOWN;
+                }
             }
         }
+    }
+
+    if (session) {
         nfs4_session_put(session);
     }
 
