@@ -499,9 +499,10 @@ nfs_client_alloc(
 
     chimera_nfs_abort_if(c == NULL, "nfs_client_alloc OOM");
 
-    c->client_id = client_id;
-    c->verifier  = verifier;
-    c->minor     = minor;
+    c->client_id     = client_id;
+    c->verifier      = verifier;
+    c->minor         = minor;
+    c->last_touch_ns = nfs_lease_now_ns();
     if (owner_len > NFS4_OPAQUE_LIMIT) {
         owner_len = NFS4_OPAQUE_LIMIT;
     }
