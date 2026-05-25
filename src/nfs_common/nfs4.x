@@ -267,7 +267,9 @@ typedef uint64_t        nfs_cookie4;
 typedef opaque  nfs_fh4<NFS4_FHSIZE>;
 typedef uint64_t        offset4;
 typedef uint32_t        qop4;
-typedef opaque  sec_oid4<>;
+struct sec_oid4 {
+        opaque oid<>;
+};
 typedef uint32_t        sequenceid4;
 typedef uint32_t        seqid4;
 typedef opaque  sessionid4[NFS4_SESSIONID_SIZE];

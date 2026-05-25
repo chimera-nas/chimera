@@ -630,6 +630,12 @@ nfs4_client_create_session_classify(
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
 
+    if (c && c->unified && !c->nfs4_client_confirmed && c->unified->expired) {
+        out->action = NFS4_CS_ERROR;
+        out->status = NFS4ERR_STALE_CLIENTID;
+        goto out_unlock;
+    }
+
     if (c && c->unified) {
         /* CREATE_SESSION is client liveness on a clientid the server still
          * holds.  If the lease sweep had marked the client courtesy-expired
@@ -671,6 +677,7 @@ nfs4_client_create_session_classify(
         out->status = NFS4ERR_SEQ_MISORDERED;
     }
 
+ out_unlock:
     pthread_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_create_session_classify */
 
