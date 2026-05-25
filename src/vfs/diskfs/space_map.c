@@ -156,7 +156,7 @@ space_map_active_log_blocks(
             in_block  = (uint32_t) (delta_byte & (SM_BLOCK_SIZE - 1));
 
             if (count < max_blocks) {
-                blocks[count].device_id     = ag->device_id;
+                blocks[count].device_id     = ag->log_device_id;
                 blocks[count].device_offset = slot_base;
                 count++;
             }
@@ -165,7 +165,7 @@ space_map_active_log_blocks(
              * claim will create a fresh zeroed block and will not read disk.
              * Only warm the current delta block when it already exists. */
             if (in_block != 0 && delta_off != slot_base && count < max_blocks) {
-                blocks[count].device_id     = ag->device_id;
+                blocks[count].device_id     = ag->log_device_id;
                 blocks[count].device_offset = delta_off;
                 count++;
             }
