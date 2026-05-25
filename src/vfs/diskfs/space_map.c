@@ -94,11 +94,11 @@ sm_ag_journal_claim(
     blk_off        = slot_base + (delta_byte & ~((uint64_t) SM_BLOCK_SIZE - 1));
     slot->in_block = (uint32_t) (delta_byte & (SM_BLOCK_SIZE - 1));
 
-    slot->hdr_buf = jnl->claim_block(jnl->user, ag->device_id, slot_base, 0);
+    slot->hdr_buf = jnl->claim_block(jnl->user, ag->log_device_id, slot_base, 0);
     if (!slot->hdr_buf) {
         return SM_AGAIN;
     }
-    slot->blk_buf = jnl->claim_block(jnl->user, ag->device_id, blk_off,
+    slot->blk_buf = jnl->claim_block(jnl->user, ag->log_device_id, blk_off,
                                      slot->in_block == 0);
     if (!slot->blk_buf) {
         return SM_AGAIN;
@@ -159,25 +159,12 @@ sm_extent_release(
 } /* sm_extent_release */
 
 /*
- * Initialize an AG.
- *
- * Layout within the AG (offsets are absolute device offsets):
- *
- *   [base_offset, base_offset + pre_log_reserved)    -- global reservations
- *                                                       (e.g. superblock,
- *                                                       intent log on AG 0
- *                                                       of device 0)
- *   [log_offset,  log_offset + SM_AG_LOG_SIZE)       -- this AG's space-map log
- *   [data_base,   data_base + post_log_reserved)     -- format-time reservations
- *                                                       at the start of the
- *                                                       data region (e.g. the
- *                                                       block_idx==1 inode
- *                                                       slot on AG 0 of disk 0
- *                                                       so root lands at
- *                                                       inum 2)
- *   [free_start,  base_offset + size)                -- allocatable data range
- *
- * `data_base` == `log_offset + SM_AG_LOG_SIZE`.
+ * Initialize an AG.  Offsets are absolute device offsets.  The log lives on
+ * `log_device_id` at `log_offset` (for a LOCAL AG this is the AG's own device,
+ * carved off the front of the AG; for a relocated REMOTE AG it is a slot on the
+ * local metadata device).  The allocatable data range is [data_off, data_off +
+ * data_len) on the AG's own device -- the caller computes it so that the log
+ * (LOCAL) and any format-time / signature reservations are excluded.
  */
 static void
 sm_ag_init(
@@ -186,17 +173,19 @@ sm_ag_init(
     uint32_t      ag_index,
     uint64_t      base_offset,
     uint64_t      size,
-    uint64_t      pre_log_reserved,
-    uint64_t      post_log_reserved)
+    uint32_t      log_device_id,
+    uint64_t      log_offset,
+    uint64_t      data_off,
+    uint64_t      data_len)
 {
     struct sm_extent *initial;
-    uint64_t          total_reserved;
 
     ag->device_id       = device_id;
     ag->ag_index        = ag_index;
     ag->base_offset     = base_offset;
     ag->size            = size;
-    ag->log_offset      = base_offset + pre_log_reserved;
+    ag->log_device_id   = log_device_id;
+    ag->log_offset      = log_offset;
     ag->log_size        = SM_AG_LOG_SIZE;
     ag->log_slot        = 0;
     ag->log_generation  = 0;
@@ -206,21 +195,16 @@ sm_ag_init(
     pthread_mutex_init(&ag->lock, NULL);
     rb_tree_init(&ag->free_by_offset);
 
-    total_reserved = pre_log_reserved + SM_AG_LOG_SIZE + post_log_reserved;
-
-    if (total_reserved >= size) {
-        /* The AG is too small to hold even its own log.  This shouldn't
-         * happen for any reasonable AG size; if it does, the AG has zero
-         * usable data range. */
+    if ((int64_t) data_len <= 0) {
+        /* AG too small to hold even its own log + reservations: no data range. */
         ag->free_bytes = 0;
         return;
     }
 
-    initial = sm_extent_new(base_offset + total_reserved,
-                            size - total_reserved);
+    initial = sm_extent_new(data_off, data_len);
 
     rb_tree_insert(&ag->free_by_offset, offset, initial);
-    ag->free_bytes = size - total_reserved;
+    ag->free_bytes = data_len;
 } /* sm_ag_init */
 
 static void
@@ -336,82 +320,127 @@ sm_ag_free_locked(
 
 struct space_map *
 space_map_create(
-    const uint64_t *device_sizes,
-    uint32_t        num_devices)
+    const struct sm_device_cfg *cfg,
+    uint32_t                    num_devices)
 {
     struct space_map *sm;
     struct sm_device *dev;
     struct sm_ag     *ag;
     uint32_t          d, a;
+    uint32_t          remote_ag_total = 0;
+    uint64_t          region_base, reloc_cursor;
 
     sm_abort_if(num_devices == 0, "space_map_create with zero devices");
+    sm_abort_if(cfg[0].role != SM_DEV_LOCAL,
+                "device 0 must be a local metadata device");
 
     sm              = calloc(1, sizeof(*sm));
     sm->num_devices = num_devices;
     sm->devices     = calloc(num_devices, sizeof(*sm->devices));
     pthread_mutex_init(&sm->lock, NULL);
 
+    /* Pass 1: size each device and count remote AGs so the relocated-log
+     * region (which is reserved out of device 0's AG 0) can be sized first. */
     for (d = 0; d < num_devices; d++) {
         dev            = &sm->devices[d];
         dev->device_id = d;
-        dev->size      = device_sizes[d];
-
-        dev->num_ags  = (dev->size + SM_AG_SIZE - 1) >> SM_AG_SIZE_LOG2;
-        dev->ag_rotor = 0;
+        dev->size      = cfg[d].size;
+        dev->role      = cfg[d].role;
+        dev->ag_rotor  = 0;
+        dev->num_ags   = (dev->size + SM_AG_SIZE - 1) >> SM_AG_SIZE_LOG2;
 
         sm_abort_if(dev->num_ags == 0, "device %u has zero AGs (size=%lu)",
                     d, dev->size);
 
-        dev->ags = calloc(dev->num_ags, sizeof(*dev->ags));
+        if (dev->role == SM_DEV_REMOTE) {
+            memcpy(dev->deviceid, cfg[d].deviceid, SM_DEVICEID_SIZE);
+            dev->sig_offset = cfg[d].sig_offset;
+            dev->sig_len    = cfg[d].sig_len > SM_SIG_MAX ? SM_SIG_MAX : cfg[d].sig_len;
+            memcpy(dev->sig, cfg[d].sig, dev->sig_len);
+            sm_abort_if(dev->sig_offset + dev->sig_len > SM_AG_SIZE,
+                        "device %u signature must lie within the first AG", d);
+            remote_ag_total += dev->num_ags;
+            sm->num_remote_devices++;
+        }
 
+        dev->ags            = calloc(dev->num_ags, sizeof(*dev->ags));
         sm->total_capacity += dev->size;
+    }
+
+    /* The relocated remote-AG-log region sits on device 0, between the intent
+     * log and AG 0's own space-map log.  Deterministic (device,ag)->slot map. */
+    region_base           = SM_SUPERBLOCK_SIZE + SM_INTENT_LOG_SIZE;
+    sm->remote_log_offset = region_base;
+    sm->remote_log_size   = (uint64_t) remote_ag_total * SM_AG_LOG_SIZE;
+    reloc_cursor          = region_base;
+
+    /* Pass 2: lay out each AG. */
+    for (d = 0; d < num_devices; d++) {
+        dev = &sm->devices[d];
 
         for (a = 0; a < dev->num_ags; a++) {
-            uint64_t base              = (uint64_t) a << SM_AG_SIZE_LOG2;
-            uint64_t span              = SM_AG_SIZE;
-            uint64_t pre_log_reserved  = 0;
-            uint64_t post_log_reserved = 0;
+            uint64_t base = (uint64_t) a << SM_AG_SIZE_LOG2;
+            uint64_t span = SM_AG_SIZE;
+            uint32_t log_device_id;
+            uint64_t log_offset, data_off, data_end;
 
             if (base + span > dev->size) {
                 span = dev->size - base;
             }
 
-            if (d == SM_INTENT_LOG_DEVICE && a == 0) {
-                /* AG 0 of device 0 also hosts the superblock and the
-                 * statically-reserved intent log.  Both sit *before* the
-                 * AG's own space-map log.  Account for those bytes plus
-                 * the AG log itself so they never get handed out. */
-                pre_log_reserved = SM_SUPERBLOCK_SIZE + SM_INTENT_LOG_SIZE;
-                sm->used_bytes  += pre_log_reserved;
+            ag = &dev->ags[a];
 
-                /* Statically reserve block_idx 1..3 of AG 0 / disk 0.
-                 * block_idx 1 is held for a future AG header; block_idx 2 is
-                 * the root inode (inum 2); block_idx 3 is the orphan-list inode
-                 * (inum 3, holds an entry per deleted-but-not-fully-reclaimed
-                 * inode).  All reserved (not allocated through the allocator)
-                 * so they are excluded from every condensed free set and can
-                 * never be re-handed-out after a crash. */
-                post_log_reserved = 3 * SM_BLOCK_SIZE;
-                sm->used_bytes   += post_log_reserved;
+            if (dev->role == SM_DEV_REMOTE) {
+                /* Remote (data-only) device: log relocated to device 0, the
+                 * whole AG is allocatable data (AG 0 also excludes the
+                 * signature region at the front). */
+                log_device_id = SM_INTENT_LOG_DEVICE;
+                log_offset    = reloc_cursor;
+                reloc_cursor += SM_AG_LOG_SIZE;
 
-                sm_abort_if(pre_log_reserved + SM_AG_LOG_SIZE +
-                            post_log_reserved > span,
-                            "device 0 AG 0 too small (%lu) to hold "
-                            "superblock+intent_log+ag_log+bootstrap (%lu)",
-                            span,
-                            pre_log_reserved + SM_AG_LOG_SIZE +
-                            post_log_reserved);
+                data_off = base;
+                if (a == 0 && dev->sig_len) {
+                    data_off        = base + SM_ALIGN_UP(dev->sig_offset + dev->sig_len);
+                    sm->used_bytes += data_off - base;
+                }
+                data_end = base + span;
+                sm_ag_init(ag, d, a, base, span, log_device_id, log_offset,
+                           data_off, data_end > data_off ? data_end - data_off : 0);
+                continue;
             }
 
-            sm_abort_if(SM_AG_LOG_SIZE >= span,
-                        "AG size %lu too small to hold per-AG log %lu",
-                        span, SM_AG_LOG_SIZE);
+            /* Local device: the AG's log is carved off the front of the AG. */
+            log_device_id = d;
+            log_offset    = base;
+
+            if (d == SM_INTENT_LOG_DEVICE && a == 0) {
+                /* AG 0 of device 0 also hosts the superblock, the intent log
+                 * and the relocated remote-AG-log region, all *before* this
+                 * AG's own log.  Then 3 bootstrap inode blocks after the log
+                 * (block_idx 1=AG header, 2=root inode, 3=orphan list). */
+                uint64_t pre_log = SM_SUPERBLOCK_SIZE + SM_INTENT_LOG_SIZE +
+                    sm->remote_log_size;
+                uint64_t post_log = 3 * SM_BLOCK_SIZE;
+
+                log_offset      = base + pre_log;
+                sm->used_bytes += pre_log + post_log;
+
+                data_off = log_offset + SM_AG_LOG_SIZE + post_log;
+                sm_abort_if(pre_log + SM_AG_LOG_SIZE + post_log > span,
+                            "device 0 AG 0 too small (%lu) to hold superblock+"
+                            "intent_log+remote_log_region(%lu)+ag_log+bootstrap",
+                            span, sm->remote_log_size);
+            } else {
+                data_off = log_offset + SM_AG_LOG_SIZE;
+                sm_abort_if(SM_AG_LOG_SIZE >= span,
+                            "AG size %lu too small to hold per-AG log %lu",
+                            span, SM_AG_LOG_SIZE);
+            }
 
             sm->used_bytes += SM_AG_LOG_SIZE;
-
-            ag = &dev->ags[a];
-            sm_ag_init(ag, d, a, base, span,
-                       pre_log_reserved, post_log_reserved);
+            data_end        = base + span;
+            sm_ag_init(ag, d, a, base, span, log_device_id, log_offset,
+                       data_off, data_end > data_off ? data_end - data_off : 0);
         }
     }
 
@@ -423,6 +452,12 @@ space_map_create(
             (uint64_t) SM_AG_LOG_SIZE,
             (unsigned) SM_AG_LOG_SLOT_COUNT,
             (uint64_t) SM_AG_LOG_SLOT_SIZE);
+    if (sm->num_remote_devices) {
+        sm_info("Block mode: %u remote data device(s); relocated AG-log region "
+                "on device %u offset %lu size %lu",
+                sm->num_remote_devices, (unsigned) SM_INTENT_LOG_DEVICE,
+                sm->remote_log_offset, sm->remote_log_size);
+    }
 
     return sm;
 } /* space_map_create */
@@ -456,6 +491,7 @@ static int
 sm_pick_and_alloc(
     struct space_map        *sm,
     const struct sm_journal *jnl,
+    uint32_t                 role,
     uint64_t                 want,
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset)
@@ -475,6 +511,12 @@ sm_pick_and_alloc(
         dev_id = (start_dev + d) % sm->num_devices;
         struct sm_device *dev = &sm->devices[dev_id];
         uint32_t          start_ag;
+
+        /* Block mode keeps metadata on LOCAL devices and data on REMOTE
+         * devices; a role-matched allocation skips the other class. */
+        if (dev->role != role) {
+            continue;
+        }
 
         pthread_mutex_lock(&sm->lock);
         start_ag = dev->ag_rotor;
@@ -527,6 +569,7 @@ space_map_reserve(
     struct space_map        *sm,
     struct sm_thread_cache  *cache,
     const struct sm_journal *jnl,
+    uint32_t                 role,
     uint64_t                 min_bytes)
 {
     uint64_t need = SM_ALIGN_UP(min_bytes);
@@ -559,7 +602,7 @@ space_map_reserve(
         return -1;
     }
 
-    rc = sm_pick_and_alloc(sm, jnl, want, &cache->device_id, &cache->offset);
+    rc = sm_pick_and_alloc(sm, jnl, role, want, &cache->device_id, &cache->offset);
     if (rc == SM_AGAIN) {
         return SM_AGAIN;
     }
@@ -567,7 +610,7 @@ space_map_reserve(
         /* Try the smaller exact size before giving up, in case fragmentation
          * blocks the reservation but the caller's actual ask is small. */
         if (want != need) {
-            rc = sm_pick_and_alloc(sm, jnl, need, &cache->device_id, &cache->offset);
+            rc = sm_pick_and_alloc(sm, jnl, role, need, &cache->device_id, &cache->offset);
             if (rc == SM_AGAIN) {
                 return SM_AGAIN;
             }
@@ -591,6 +634,7 @@ space_map_alloc(
     struct space_map        *sm,
     struct sm_thread_cache  *cache,
     const struct sm_journal *jnl,
+    uint32_t                 role,
     uint64_t                 size,
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset)
@@ -603,7 +647,7 @@ space_map_alloc(
     /* Ensure the cache covers `need` (refilling -- journals, may SM_AGAIN),
      * then dole from it.  Callers that have front-loaded the reservation via
      * space_map_reserve hit the fast path here with no journaling. */
-    rc = space_map_reserve(sm, cache, jnl, need);
+    rc = space_map_reserve(sm, cache, jnl, role, need);
     if (rc != 0) {
         return rc;     /* SM_AGAIN or -1 (ENOSPC) */
     }
@@ -799,22 +843,26 @@ space_map_write_superblock(
 
     memset(buf, 0, sizeof(buf));
 
-    sb->magic             = SM_SUPERBLOCK_MAGIC;
-    sb->version           = SM_FORMAT_VERSION;
-    sb->block_size        = SM_BLOCK_SIZE;
-    sb->ag_size           = SM_AG_SIZE;
-    sb->ag_log_size       = SM_AG_LOG_SIZE;
-    sb->fsid              = fsid;
-    sb->num_devices       = sm->num_devices;
-    sb->intent_log_device = SM_INTENT_LOG_DEVICE;
-    sb->intent_log_offset = SM_INTENT_LOG_OFFSET;
-    sb->intent_log_size   = SM_INTENT_LOG_SIZE;
-    sb->flags             = flags;
-    sb->root_inum         = root_inum;
-    sb->root_gen          = root_gen;
-    sb->log_seq           = log_seq;
-    sb->crc32             = 0;
-    sb->crc32             = sm_crc32(buf, sizeof(buf));
+    sb->magic              = SM_SUPERBLOCK_MAGIC;
+    sb->version            = SM_FORMAT_VERSION;
+    sb->block_size         = SM_BLOCK_SIZE;
+    sb->ag_size            = SM_AG_SIZE;
+    sb->ag_log_size        = SM_AG_LOG_SIZE;
+    sb->fsid               = fsid;
+    sb->num_devices        = sm->num_devices;
+    sb->intent_log_device  = SM_INTENT_LOG_DEVICE;
+    sb->intent_log_offset  = SM_INTENT_LOG_OFFSET;
+    sb->intent_log_size    = SM_INTENT_LOG_SIZE;
+    sb->flags              = flags;
+    sb->root_inum          = root_inum;
+    sb->root_gen           = root_gen;
+    sb->log_seq            = log_seq;
+    sb->num_remote_devices = sm->num_remote_devices;
+    sb->remote_log_device  = SM_INTENT_LOG_DEVICE;
+    sb->remote_log_offset  = sm->remote_log_offset;
+    sb->remote_log_size    = sm->remote_log_size;
+    sb->crc32              = 0;
+    sb->crc32              = sm_crc32(buf, sizeof(buf));
 
     if (io->write(io->user, 0, buf, sizeof(buf), SM_SUPERBLOCK_OFFSET) != 0) {
         return -1;
@@ -1093,7 +1141,9 @@ space_map_persist(
             }
             memcpy(buf, scratch, aligned);
 
-            writes[count].device_id   = d;
+            /* The log lives on log_device_id (== d for local AGs, the local
+             * metadata device for a relocated remote AG). */
+            writes[count].device_id   = ag->log_device_id;
             writes[count].buf         = buf;
             writes[count].length      = aligned;
             writes[count].offset      = slot_off;
@@ -1107,10 +1157,19 @@ space_map_persist(
             bytes += aligned;
             pthread_mutex_unlock(&ag->lock);
         }
+    }
 
-        if (sm_persist_batch_submit(io, writes, updates, bufs, &count, &bytes) != 0) {
-            free(scratch);
-            return -1;
+    /* Submit the final partial batch. */
+    if (sm_persist_batch_submit(io, writes, updates, bufs, &count, &bytes) != 0) {
+        free(scratch);
+        return -1;
+    }
+
+    /* Flush only devices that hold real storage; remote data devices have no
+     * local handle and never received writes (their logs rode device 0). */
+    for (d = 0; d < sm->num_devices; d++) {
+        if (sm->devices[d].role != SM_DEV_LOCAL) {
+            continue;
         }
         if (io->flush(io->user, d) != 0) {
             free(scratch);
@@ -1140,10 +1199,12 @@ space_map_load(
             uint32_t                s;
             uint64_t                payload, slot_off;
 
-            /* Pick the live slot: highest generation with a valid magic. */
+            /* Pick the live slot: highest generation with a valid magic.  The
+             * log lives on log_device_id (the local metadata device for a
+             * relocated remote AG). */
             for (s = 0; s < SM_AG_LOG_SLOT_COUNT; s++) {
                 slot_off = ag->log_offset + (uint64_t) s * SM_AG_LOG_SLOT_SIZE;
-                if (io->read(io->user, d, &hdr[s], sizeof(hdr[s]), slot_off) == 0 &&
+                if (io->read(io->user, ag->log_device_id, &hdr[s], sizeof(hdr[s]), slot_off) == 0 &&
                     hdr[s].magic == SM_AG_LOG_MAGIC &&
                     (best < 0 || hdr[s].generation > hdr[best].generation)) {
                     best = (int) s;
@@ -1158,7 +1219,7 @@ space_map_load(
                 (uint64_t) hdr[best].delta_count * sizeof(struct sm_ag_log_delta);
             buf      = malloc(payload);
             slot_off = ag->log_offset + (uint64_t) best * SM_AG_LOG_SLOT_SIZE;
-            if (io->read(io->user, d, buf, payload, slot_off) != 0) {
+            if (io->read(io->user, ag->log_device_id, buf, payload, slot_off) != 0) {
                 free(buf);
                 return -1;
             }
