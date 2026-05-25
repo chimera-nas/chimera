@@ -4,11 +4,13 @@
 
 #include "smb_wbclient.h"
 #include "smb_internal.h"
+#include "vfs/vfs_user_cache.h"
 
 #ifdef HAVE_WBCLIENT
 
 #include <wbclient.h>
 #include <string.h>
+#include <pwd.h>
 
 int
 smb_wbclient_available(void)
@@ -271,6 +273,120 @@ smb_wbclient_map_principal(
     return 0;
 } // smb_wbclient_map_principal
 
+/* Fill a chimera_vfs_user (uid/gid/groups/name + real SID) from a resolved user
+ * SID.  Returns 0 on success, -1 if the SID does not map to a Unix user. */
+static int
+wbc_fill_user(
+    const struct wbcDomainSid *user_sid,
+    const char                *sidstr,
+    struct chimera_vfs_user   *out)
+{
+    wbcErr               wbc_err;
+    uint32_t             unix_uid;
+    struct passwd       *pwd         = NULL;
+    struct wbcDomainSid *groups_sids = NULL;
+    uint32_t             num_groups  = 0;
+    uint32_t             i;
+
+    wbc_err = wbcSidToUid(user_sid, &unix_uid);
+    if (wbc_err != WBC_ERR_SUCCESS) {
+        return -1;
+    }
+
+    out->uid = unix_uid;
+    if (sidstr) {
+        strncpy(out->sid, sidstr, sizeof(out->sid) - 1);
+    }
+
+    /* Primary gid + name from the winbind passwd entry. */
+    wbc_err = wbcGetpwuid(unix_uid, &pwd);
+    if (wbc_err == WBC_ERR_SUCCESS && pwd) {
+        out->gid = pwd->pw_gid;
+        strncpy(out->username, pwd->pw_name, sizeof(out->username) - 1);
+        out->username_len = (int) strlen(out->username);
+        wbcFreeMemory(pwd);
+    } else {
+        out->gid = unix_uid;
+    }
+
+    /* Supplementary groups. */
+    out->ngids = 0;
+    wbc_err    = wbcLookupUserSids(user_sid, 0, &num_groups, &groups_sids);
+    if (wbc_err == WBC_ERR_SUCCESS && num_groups > 0) {
+        for (i = 0; i < num_groups && out->ngids < CHIMERA_VFS_CRED_MAX_GIDS; i++) {
+            uint32_t group_gid;
+            if (wbcSidToGid(&groups_sids[i], &group_gid) == WBC_ERR_SUCCESS) {
+                out->gids[out->ngids++] = group_gid;
+            }
+        }
+        wbcFreeMemory(groups_sids);
+    }
+
+    return 0;
+} // wbc_fill_user
+
+int
+smb_wbclient_identity_handler(
+    enum chimera_vfs_identity_key key,
+    uint32_t                      id,
+    const char                   *name,
+    struct chimera_vfs_user      *out,
+    void                         *private_data)
+{
+    wbcErr              wbc_err;
+    struct wbcDomainSid user_sid;
+    enum wbcSidType     sid_type;
+    char                sidbuf[SMB_WBCLIENT_SID_MAX_LEN];
+    int                 rc;
+
+    (void) private_data;
+
+    switch (key) {
+        case CHIMERA_VFS_IDENTITY_BY_UID:
+            wbc_err = wbcUidToSid(id, &user_sid);
+            if (wbc_err != WBC_ERR_SUCCESS) {
+                return -1;
+            }
+            if (wbc_sid_to_string(&user_sid, sidbuf, sizeof(sidbuf)) < 0) {
+                return -1;
+            }
+            return wbc_fill_user(&user_sid, sidbuf, out);
+
+        case CHIMERA_VFS_IDENTITY_BY_SID:
+            if (!name) {
+                return -1;
+            }
+            wbc_err = wbcStringToSid(name, &user_sid);
+            if (wbc_err != WBC_ERR_SUCCESS) {
+                return -1;
+            }
+            return wbc_fill_user(&user_sid, name, out);
+
+        case CHIMERA_VFS_IDENTITY_BY_NAME:
+            if (!name) {
+                return -1;
+            }
+            wbc_err = wbcLookupName("", name, &user_sid, &sid_type);
+            if (wbc_err != WBC_ERR_SUCCESS || sid_type != WBC_SID_NAME_USER) {
+                return -1;
+            }
+            if (wbc_sid_to_string(&user_sid, sidbuf, sizeof(sidbuf)) < 0) {
+                sidbuf[0] = '\0';
+            }
+            rc = wbc_fill_user(&user_sid, sidbuf[0] ? sidbuf : NULL, out);
+            if (rc == 0 && !out->username[0]) {
+                strncpy(out->username, name, sizeof(out->username) - 1);
+                out->username_len = (int) strlen(out->username);
+            }
+            return rc;
+
+        default:
+            /* A gid is not a user record, so the user-centric cache cannot
+             * represent it. */
+            return -1;
+    } // switch
+} // smb_wbclient_identity_handler
+
 #else // HAVE_WBCLIENT
 
 // Stub implementations when libwbclient is not available
@@ -334,5 +450,22 @@ smb_wbclient_map_principal(
 
     return -1;
 } // smb_wbclient_map_principal
+
+int
+smb_wbclient_identity_handler(
+    enum chimera_vfs_identity_key key,
+    uint32_t                      id,
+    const char                   *name,
+    struct chimera_vfs_user      *out,
+    void                         *private_data)
+{
+    (void) key;
+    (void) id;
+    (void) name;
+    (void) out;
+    (void) private_data;
+
+    return -1;
+} // smb_wbclient_identity_handler
 
 #endif // HAVE_WBCLIENT

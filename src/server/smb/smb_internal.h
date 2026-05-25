@@ -503,6 +503,17 @@ struct chimera_smb_request {
              * the reply builder (SMB2_INFO_SECURITY). */
             uint8_t                       sec_buf[2048];
             uint32_t                      sec_buf_len;
+            /* When the SD references identities not yet in the cache, the
+             * getattr'd owner/group/mode + ACL are copied here so the SD can be
+             * built after an async identity resolve completes (the live attrs
+             * are only valid during the getattr callback). */
+            uint32_t                      sd_uid;
+            uint32_t                      sd_gid;
+            uint32_t                      sd_mode;
+            int                           sd_has_acl;
+            int                           sd_pending;
+            uint8_t                       sd_acl_storage[sizeof(struct chimera_acl) +
+                                                         64 * sizeof(struct chimera_ace)];
         } query_info;
 
         struct {
@@ -522,6 +533,9 @@ struct chimera_smb_request {
             /* Security descriptor buffer for SMB2_INFO_SECURITY */
             uint8_t                         sec_buf[2048];
             uint32_t                        sec_buf_len;
+            /* Outstanding async identity resolves before the SD is decoded for
+             * the final time (fan-out join guard). */
+            int                             sd_pending;
             /* Backing storage for the canonical ACL decoded from the incoming
              * security descriptor; vfs_attrs.va_acl points here. */
             uint8_t                         acl_storage[sizeof(struct chimera_acl) +

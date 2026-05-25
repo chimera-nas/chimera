@@ -21,6 +21,7 @@
 #include "vfs/vfs_name_cache.h"
 #include "vfs/vfs_attr_cache.h"
 #include "vfs/vfs_user_cache.h"
+#include "vfs/vfs_identity.h"
 #include "vfs/vfs_notify.h"
 #include "vfs/vfs_state.h"
 #include "vfs/vfs_pnfs.h"
@@ -415,6 +416,7 @@ chimera_vfs_init(
     vfs->vfs_attr_cache = chimera_vfs_attr_cache_create(8, 4, 2, cache_ttl, metrics);
 
     vfs->vfs_user_cache = chimera_vfs_user_cache_create(8192, 600);
+    vfs->identity       = chimera_vfs_identity_create(vfs, 4);
 
     vfs->vfs_notify = chimera_vfs_notify_init(vfs);
     vfs->vfs_state  = chimera_vfs_state_init();
@@ -542,6 +544,14 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     pthread_cond_wait(&vfs->close_thread.cond, &vfs->close_thread.lock);
     pthread_mutex_unlock(&vfs->close_thread.lock);
 
+    /* Stop the identity resolver first: its workers ring protocol/delegation
+     * thread doorbells and write the user cache, both of which must still be
+     * alive while the workers drain. */
+    if (vfs->identity) {
+        chimera_vfs_identity_destroy(vfs->identity);
+        vfs->identity = NULL;
+    }
+
     /* Destroy delegation threads before the close thread so that any
      * in-flight delegated close operations finish and their completion
      * doorbell rings execute before the close thread's vfs_thread
@@ -636,6 +646,9 @@ chimera_vfs_process_completion(
         LL_DELETE(unblocked_requests, request);
         request->unblock_callback(request, request->pending_handle);
     }
+
+    /* Deliver any identity-resolver jobs that completed for this thread. */
+    chimera_vfs_identity_thread_complete(thread);
 
 } /* chimera_vfs_process_completion */
 
@@ -842,6 +855,57 @@ chimera_vfs_user_is_member(
 {
     return chimera_vfs_user_cache_is_member(vfs->vfs_user_cache, uid, gid);
 } /* chimera_vfs_user_is_member */
+
+SYMBOL_EXPORT int
+chimera_vfs_identity_uid_to_sid(
+    struct chimera_vfs *vfs,
+    uint32_t            uid,
+    char               *buf,
+    int                 buflen)
+{
+    const struct chimera_vfs_user *user;
+    int                            rc = -1;
+
+    urcu_memb_read_lock();
+
+    user = chimera_vfs_user_cache_lookup_by_uid(vfs->vfs_user_cache, uid);
+
+    if (user && user->sid[0]) {
+        int len = (int) strlen(user->sid);
+
+        if (len + 1 <= buflen) {
+            memcpy(buf, user->sid, len + 1);
+            rc = len;
+        }
+    }
+
+    urcu_memb_read_unlock();
+
+    return rc;
+} /* chimera_vfs_identity_uid_to_sid */
+
+SYMBOL_EXPORT int
+chimera_vfs_identity_sid_to_uid(
+    struct chimera_vfs *vfs,
+    const char         *sid,
+    uint32_t           *uid)
+{
+    const struct chimera_vfs_user *user;
+    int                            rc = -1;
+
+    urcu_memb_read_lock();
+
+    user = chimera_vfs_user_cache_lookup_by_sid(vfs->vfs_user_cache, sid);
+
+    if (user) {
+        *uid = user->uid;
+        rc   = 0;
+    }
+
+    urcu_memb_read_unlock();
+
+    return rc;
+} /* chimera_vfs_identity_sid_to_uid */
 
 
 SYMBOL_EXPORT void

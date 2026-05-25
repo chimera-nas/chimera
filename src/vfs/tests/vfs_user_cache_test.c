@@ -274,6 +274,53 @@ test_is_member(void)
     TEST_PASS("is_member checks primary and secondary gids");
 } /* test_is_member */
 
+/* The SID index: a real (e.g. AD) SID round-trips to its uid, and the uid's
+ * cached entry carries that same SID back. */
+static void
+test_sid_index(void)
+{
+    struct chimera_vfs_user_cache *cache;
+    const struct chimera_vfs_user *user;
+
+    cache = chimera_vfs_user_cache_create(64, 600);
+
+    chimera_vfs_user_cache_add(cache, "alice", NULL, NULL,
+                               "S-1-5-21-111-222-333-1105",
+                               1000, 1000, 0, NULL, 1);
+    /* A user with no SID must not be reachable by SID lookup. */
+    chimera_vfs_user_cache_add(cache, "bob", NULL, NULL, NULL,
+                               1001, 1001, 0, NULL, 1);
+
+    urcu_memb_read_lock();
+
+    user = chimera_vfs_user_cache_lookup_by_sid(cache, "S-1-5-21-111-222-333-1105");
+    assert(user != NULL);
+    assert(user->uid == 1000);
+
+    /* uid lookup returns the same real SID (the round-trip direction). */
+    user = chimera_vfs_user_cache_lookup_by_uid(cache, 1000);
+    assert(user != NULL);
+    assert(strcmp(user->sid, "S-1-5-21-111-222-333-1105") == 0);
+
+    /* Unknown / SID-less lookups miss. */
+    assert(chimera_vfs_user_cache_lookup_by_sid(cache, "S-1-5-21-9-9-9-9") == NULL);
+    assert(chimera_vfs_user_cache_lookup_by_sid(cache, "") == NULL);
+
+    urcu_memb_read_unlock();
+
+    /* Removing the user also unindexes its SID. */
+    chimera_vfs_user_cache_remove(cache, "alice");
+    urcu_memb_synchronize_rcu();
+    urcu_memb_read_lock();
+    assert(chimera_vfs_user_cache_lookup_by_sid(cache,
+                                                "S-1-5-21-111-222-333-1105") == NULL);
+    urcu_memb_read_unlock();
+
+    chimera_vfs_user_cache_destroy(cache);
+
+    TEST_PASS("SID index round-trips uid<->real SID and unindexes on remove");
+} /* test_sid_index */
+
 int
 main(void)
 {
@@ -288,6 +335,7 @@ main(void)
     test_ttl_expiration();
     test_pinned_no_expire();
     test_is_member();
+    test_sid_index();
 
     fprintf(stderr, "All tests passed.\n");
 

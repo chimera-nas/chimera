@@ -1216,6 +1216,7 @@ struct chimera_vfs {
     struct chimera_vfs_name_cache        *vfs_name_cache;
     struct chimera_vfs_attr_cache        *vfs_attr_cache;
     struct chimera_vfs_user_cache        *vfs_user_cache;
+    struct chimera_vfs_identity          *identity;
     struct chimera_vfs_notify            *vfs_notify;
     struct chimera_vfs_state             *vfs_state;
     struct chimera_vfs_mount_table       *mount_table;
@@ -1231,22 +1232,23 @@ struct chimera_vfs {
 };
 
 struct chimera_vfs_thread {
-    struct evpl                      *evpl;
-    struct chimera_vfs               *vfs;
-    void                             *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
-    struct chimera_vfs_find_result   *free_find_results;
-    struct chimera_vfs_request       *free_requests;
-    struct chimera_vfs_request       *active_requests;
-    uint64_t                          num_active_requests;
-    struct chimera_vfs_open_handle   *free_synth_handles;
+    struct evpl                         *evpl;
+    struct chimera_vfs                  *vfs;
+    void                                *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
+    struct chimera_vfs_find_result      *free_find_results;
+    struct chimera_vfs_request          *free_requests;
+    struct chimera_vfs_request          *active_requests;
+    uint64_t                             num_active_requests;
+    struct chimera_vfs_open_handle      *free_synth_handles;
 
-    struct chimera_vfs_request       *pending_complete_requests;
-    struct chimera_vfs_request       *unblocked_requests;
-    struct evpl_doorbell              doorbell;
-    pthread_mutex_t                   lock;
-    uint64_t                          anon_fh_key;
+    struct chimera_vfs_request          *pending_complete_requests;
+    struct chimera_vfs_request          *unblocked_requests;
+    struct chimera_vfs_identity_request *pending_identity;
+    struct evpl_doorbell                 doorbell;
+    pthread_mutex_t                      lock;
+    uint64_t                             anon_fh_key;
 
-    struct chimera_vfs_thread_metrics metrics;
+    struct chimera_vfs_thread_metrics    metrics;
 };
 
 struct chimera_vfs_module_cfg {
@@ -1323,6 +1325,28 @@ chimera_vfs_user_is_member(
     struct chimera_vfs *vfs,
     uint32_t            uid,
     uint32_t            gid);
+
+/*
+ * Identity bridge used by ACL marshalling to round-trip *real* Windows SIDs
+ * through the user cache (the single identity authority).  uid_to_sid copies
+ * the cached SID for `uid` into `buf` and returns its length, or -1 when the
+ * user has no known real SID (the caller then falls back to the algorithmic
+ * idmap SID).  sid_to_uid resolves a SID string to its cached uid (0 on
+ * success, -1 on miss).  Both are RCU-safe and must be called from a
+ * VFS-registered thread.
+ */
+int
+chimera_vfs_identity_uid_to_sid(
+    struct chimera_vfs *vfs,
+    uint32_t            uid,
+    char               *buf,
+    int                 buflen);
+
+int
+chimera_vfs_identity_sid_to_uid(
+    struct chimera_vfs *vfs,
+    const char         *sid,
+    uint32_t           *uid);
 
 
 typedef int (*chimera_vfs_user_iterate_cb)(

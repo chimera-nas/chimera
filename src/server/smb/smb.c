@@ -20,6 +20,7 @@
 #include "server/server.h"
 #include "evpl/evpl.h"
 #include "smb_internal.h"
+#include "smb_wbclient.h"
 #include "smb_procs.h"
 #include "smb_notify.h"
 #include "smb_dump.h"
@@ -137,6 +138,12 @@ chimera_smb_server_init(
     if (shared->config.auth.winbind_enabled) {
         chimera_smb_info("SMB Auth: Winbind integration enabled (domain: %s)",
                          shared->config.auth.winbind_domain[0] ? shared->config.auth.winbind_domain : "(not set)");
+
+        /* Register winbind as an identity-resolver miss handler so the VFS can
+         * resolve real AD SIDs <-> uids (and uid -> real SID) on demand, behind
+         * the default NSS handler. */
+        chimera_vfs_identity_register_handler(vfs, smb_wbclient_identity_handler,
+                                              NULL);
     }
     if (shared->config.auth.kerberos_enabled) {
         chimera_smb_info("SMB Auth: Kerberos enabled (realm: %s, keytab: %s)",
