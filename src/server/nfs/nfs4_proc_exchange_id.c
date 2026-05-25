@@ -106,6 +106,13 @@ chimera_nfs4_exchange_id(
                   &eid.clientid, sizeof(eid.clientid), c);
         if (c) {
             uc = c->unified;
+            /* EXCHANGE_ID is client liveness: renew the lease so a client
+             * mid-handshake (EXCHANGE_ID -> CREATE_SESSION -> first SEQUENCE)
+             * is not expired by the lease sweep before it establishes a
+             * session. */
+            if (uc) {
+                nfs_client_touch(uc);
+            }
         }
         pthread_mutex_unlock(&thread->shared->nfs4_shared_clients.nfs4_ct_lock);
         if (uc) {
