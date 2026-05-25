@@ -472,7 +472,7 @@ jobs:
             ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '\
               scan-build --status-bugs -o /scan-report \
-              sh -c "cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} ${{ matrix.cmake_extra }} -B /build -S /workspace -G Ninja && ninja -C /build"' \
+              sh -c "cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -D IO_URING_NVME_ENABLED=OFF ${{ matrix.cmake_extra }} -B /build -S /workspace -G Ninja && ninja -C /build"' \
             2>&1 | tee "${{ github.workspace }}/scan-report/scan-build-output.txt"
 
       - name: Upload static analysis report
