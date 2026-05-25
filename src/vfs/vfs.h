@@ -345,6 +345,10 @@ struct chimera_vfs_request {
      * (NULL on the fast path where nothing was pinned). */
     struct chimera_vfs_lease_owner     io_owner;
     uint8_t                            io_owner_valid;
+    /* Set by chimera_vfs_io_recall(): this request is a namespace/metadata
+     * mutation that must recall every caching lease on a target file (regardless
+     * of owner) rather than hold an implicit lease. */
+    uint8_t                            io_recall_all;
     void                               ( *io_next )(
         struct chimera_vfs_request *request);
     struct chimera_vfs_file_state     *io_lease_file;

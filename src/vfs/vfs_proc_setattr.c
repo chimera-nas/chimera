@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include "vfs_procs.h"
+#include "vfs_state.h"
 #include "vfs_internal.h"
 #include "vfs_attr_cache.h"
 #include "common/misc.h"
@@ -65,5 +66,8 @@ chimera_vfs_setattr(
     request->proto_callback                  = callback;
     request->proto_private_data              = private_data;
 
-    chimera_vfs_dispatch(request);
+    /* A metadata change invalidates any cached attributes a delegation/oplock
+    * holder has; recall every caching lease on the target before dispatch. */
+    chimera_vfs_io_recall(request, request->fh, request->fh_len,
+                          request->fh_hash, chimera_vfs_dispatch);
 } /* chimera_vfs_setattr */

@@ -314,6 +314,20 @@ void
 chimera_vfs_io_lease_release(
     struct chimera_vfs_request *request);
 
+/* Mediate a namespace/metadata mutation (REMOVE/RENAME/LINK/SETATTR) through
+ * the lease layer: recall every caching lease on the target file identified
+ * by (fh, fh_hash) — regardless of owner, so even the operating client's own
+ * delegation is recalled (RFC 7530 §10.4.5) — then invoke next(request).  The
+ * request parks until the recall drains; no lease is held on chimera's behalf.
+ * A file with no per-file state proceeds immediately. */
+void
+chimera_vfs_io_recall(
+    struct chimera_vfs_request *request,
+    const uint8_t              *fh,
+    uint8_t                     fh_len,
+    uint64_t                    fh_hash,
+    void (                     *next )(struct chimera_vfs_request *request));
+
 /* Drop every implicit lease that has been idle (no in-flight I/O) for at
  * least `idle_ms` milliseconds.  Driven by a periodic reaper. */
 void

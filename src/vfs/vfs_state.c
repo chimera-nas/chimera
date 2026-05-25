@@ -1175,20 +1175,15 @@ chimera_vfs_lease_revoke(struct chimera_vfs_lease *lease)
     }
 } /* chimera_vfs_lease_revoke */
 
-SYMBOL_EXPORT bool
-chimera_vfs_state_break_caching(
-    struct chimera_vfs_state *state,
-    const uint8_t            *fh,
-    uint8_t                   fh_len,
-    uint64_t                  fh_hash)
+/* Recall every caching lease on `file`, regardless of owner.  Caller holds a
+ * reference on `file`.  Returns true if any caching holder still retains a
+ * granted mode (the recall is in flight; caller should wait/retry). */
+static bool
+chimera_vfs_break_caching_file(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
 {
-    struct chimera_vfs_file_state *file;
-    bool                           had;
-
-    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
-    if (!file) {
-        return false;
-    }
+    bool had;
 
     /* Drive each caching holder forward: recall a still-IDLE holder, and
      * revoke a holder whose recall deadline has elapsed (never returned).
@@ -1241,6 +1236,26 @@ chimera_vfs_state_break_caching(
         }
     }
     pthread_mutex_unlock(&file->lock);
+
+    return had;
+} /* chimera_vfs_break_caching_file */
+
+SYMBOL_EXPORT bool
+chimera_vfs_state_break_caching(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash)
+{
+    struct chimera_vfs_file_state *file;
+    bool                           had;
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return false;
+    }
+
+    had = chimera_vfs_break_caching_file(state, file);
 
     chimera_vfs_state_put(state, file);
     return had;
@@ -1552,6 +1567,25 @@ chimera_vfs_io_try(
     bool                          was_active;
     bool                          activated = false;
 
+    /* Namespace/metadata mutation: recall every caching lease on the target
+     * file (regardless of owner — RFC 7530 §10.4.5 requires recalling even
+     * the operating client's own delegation), then proceed.  No lease is held
+     * on chimera's behalf.  The periodic maintenance pass re-pumps parked
+     * waiters so an unresponsive holder is revoked at its recall deadline. */
+    if (request->io_recall_all) {
+        if (chimera_vfs_break_caching_file(state, file)) {
+            pthread_mutex_lock(&file->lock);
+            chimera_vfs_io_park_locked(file, request);
+            request->io_lease_file = file;
+            pthread_mutex_unlock(&file->lock);
+            return;
+        }
+        request->io_lease_file = NULL;
+        chimera_vfs_state_put(state, file);
+        request->io_next(request);
+        return;
+    }
+
     need = (request->opcode == CHIMERA_VFS_OP_WRITE)
         ? CHIMERA_VFS_LEASE_MODE_W : CHIMERA_VFS_LEASE_MODE_R;
 
@@ -1678,6 +1712,36 @@ chimera_vfs_io_lease_acquire(
 } /* chimera_vfs_io_lease_acquire */
 
 SYMBOL_EXPORT void
+chimera_vfs_io_recall(
+    struct chimera_vfs_request *request,
+    const uint8_t              *fh,
+    uint8_t                     fh_len,
+    uint64_t                    fh_hash,
+    void (                     *next )(struct chimera_vfs_request *request))
+{
+    struct chimera_vfs_state      *state = request->thread->vfs->vfs_state;
+    struct chimera_vfs_file_state *file;
+
+    request->io_next       = next;
+    request->io_lease_file = NULL;
+    request->io_recall_all = 1;
+
+    /* Fast path: no per-file state means no caching lease to recall. */
+    if (!state || fh_len == 0) {
+        next(request);
+        return;
+    }
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        next(request);
+        return;
+    }
+
+    chimera_vfs_io_try(state, file, request);
+} /* chimera_vfs_io_recall */
+
+SYMBOL_EXPORT void
 chimera_vfs_io_lease_release(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_state      *state;
@@ -1729,7 +1793,10 @@ chimera_vfs_state_reap_idle(
         for (file = bucket->files;
              file && n < CHIMERA_VFS_STATE_REAP_BATCH;
              file = file->bucket_next) {
-            if (file->implicit_active) {
+            /* Candidates: files holding an implicit lease (reapable when idle)
+             * or with parked I/O waiters (re-pumped so an unresponsive holder
+             * is revoked at its recall deadline and the waiter makes progress). */
+            if (file->implicit_active || file->io_wait_head) {
                 file->refcount++;
                 cand[n++] = file;
             }
@@ -1738,6 +1805,7 @@ chimera_vfs_state_reap_idle(
 
         for (i = 0; i < n; i++) {
             bool reapable;
+            bool has_waiters;
 
             file = cand[i];
 
@@ -1749,10 +1817,14 @@ chimera_vfs_state_reap_idle(
             if (reapable) {
                 file->implicit_draining = 1;
             }
+            has_waiters = (file->io_wait_head != NULL);
             pthread_mutex_unlock(&file->lock);
 
             if (reapable) {
+                /* finish_drain pumps the wait queue itself. */
                 chimera_vfs_implicit_finish_drain(state, file);
+            } else if (has_waiters) {
+                chimera_vfs_state_pump_io(state, file);
             }
 
             chimera_vfs_state_put(state, file);

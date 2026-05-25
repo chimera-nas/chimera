@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "vfs_procs.h"
+#include "vfs_state.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
 #include "vfs_notify.h"
@@ -143,5 +144,9 @@ chimera_vfs_rename_at(
     request->proto_callback                            = callback;
     request->proto_private_data                        = private_data;
 
-    chimera_vfs_dispatch(request);
+    /* If the rename overwrites an existing destination, recall any
+     * delegation/oplock on that doomed file before it is replaced. */
+    chimera_vfs_io_recall(request, target_fh, target_fh_len,
+                          target_fh_len ? chimera_vfs_hash(target_fh, target_fh_len) : 0,
+                          chimera_vfs_dispatch);
 } /* chimera_vfs_rename_at */
