@@ -252,6 +252,7 @@ main(
             close(fd);
         }
 
+        json_object_set_new(cfg, "initialize", json_true());
         json_object_set_new(cfg, "devices", devices);
         /* unsafe_async: this test does not exercise crash recovery, so skip FUA/sync
          * on writes to run lighter. */

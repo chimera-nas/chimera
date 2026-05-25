@@ -6927,6 +6927,7 @@ diskfs_init(const char *cfgdata)
     uint64_t                   *device_sizes;
     json_t                     *cfg, *devices_cfg, *device_cfg;
     json_error_t                json_error;
+    int                         initialize;
 
 
     cfg = json_loads(cfgdata, 0, &json_error);
@@ -6998,6 +6999,7 @@ diskfs_init(const char *cfgdata)
      * FUA/sync, so diskfs runs lighter at the cost of crash safety.  Off by
      * default; tests that do not exercise crash recovery enable it to run more
      * efficiently. */
+    initialize                 = json_object_get(cfg, "initialize") != NULL;
     shared->unsafe_async       = json_is_true(json_object_get(cfg, "unsafe_async"));
     shared->block_cache_blocks = (uint32_t) json_integer_value(
         json_object_get(cfg, "block_cache_blocks"));
@@ -7011,11 +7013,12 @@ diskfs_init(const char *cfgdata)
 
     /* Decide mkfs vs clean-mount vs crash-recovery from the superblock, just as
      * a real filesystem would:
-     *   - valid + CLEAN  -> the previous instance unmounted cleanly: reload
-     *                       its persisted free-space map and mount.
-     *   - valid + !CLEAN -> a crash: synchronously replay the intent log to
-     *                       home, then mount the now-consistent image.
-     *   - no/garbage     -> mkfs (e.g. a freshly created device image).
+     *   - initialize present -> mkfs, regardless of any existing contents.
+     *   - valid + CLEAN      -> previous instance unmounted cleanly: reload
+     *                           the persisted free-space map and mount.
+     *   - valid + !CLEAN     -> crash: replay the intent log to home, then
+     *                           mount the now-consistent image.
+     *   - no/garbage         -> fail; callers must opt in to mkfs.
      */
     {
         struct sm_superblock    sb;
@@ -7026,15 +7029,22 @@ diskfs_init(const char *cfgdata)
 
         have_sb = space_map_read_superblock(&smio, &sb) == 0;
 
-        if (have_sb && (sb.flags & SM_SB_CLEAN)) {
+        if (initialize) {
+            if (have_sb) {
+                chimera_diskfs_info(
+                    "initialize=true: ignoring existing superblock and formatting fresh");
+            }
+            mode         = 0;
+            shared->fsid = chimera_rand64();
+        } else if (have_sb && (sb.flags & SM_SB_CLEAN)) {
             mode         = 1;
             shared->fsid = sb.fsid;
         } else if (have_sb) {
             mode         = 2;
             shared->fsid = sb.fsid;
         } else {
-            mode         = 0;
-            shared->fsid = chimera_rand64();
+            chimera_diskfs_abort(
+                "diskfs superblock missing or invalid; specify initialize to format");
         }
 
         device_sizes = calloc(shared->num_devices, sizeof(*device_sizes));
@@ -7049,21 +7059,18 @@ diskfs_init(const char *cfgdata)
             diskfs_recover_log(shared, mio);
         }
 
-        /* Reload the persisted free-space map.  NOTE: after a crash this
-         * snapshot is the one from the last *clean* unmount, so it does not
-         * reflect allocations made since then -- reads are correct (the log
-         * replay made the home image consistent) but the in-memory allocator
-         * must be rebuilt (namespace-walk fsck, TODO) before writes are safe.
-         * For a clean mount the snapshot must load or we fall back to mkfs. */
+        /* Reload the persisted free-space map.  The allocator is authoritative
+         * for future writes; after recovery, mounting without it would let new
+         * allocations overlap live metadata/data until namespace-walk rebuild
+         * exists. */
         if (mode != 0 &&
             space_map_load(shared->space_map, &smio) != 0) {
             if (mode == 1) {
-                chimera_diskfs_error("space-map reload failed; treating as fresh");
-                mode = 0;
+                chimera_diskfs_abort("space-map reload failed");
             } else {
-                chimera_diskfs_error(
-                    "post-recovery space-map reload failed; allocator is fresh "
-                    "(writes unsafe until namespace-walk reconstruction)");
+                chimera_diskfs_abort(
+                    "post-recovery space-map reload failed; refusing unsafe mount "
+                    "until namespace-walk reconstruction is implemented");
             }
         }
 
