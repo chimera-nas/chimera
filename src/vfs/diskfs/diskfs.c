@@ -4931,13 +4931,6 @@ diskfs_dir_insert_async(
     r->name_len = (uint16_t) namelen;
     memcpy(r->name, name, namelen);
 
-    chimera_diskfs_debug("dir_insert name=%.*s hash=%lu parent=%lu child=%lu",
-                         namelen,
-                         name,
-                         hash,
-                         dir->inum,
-                         child_inum);
-
     return diskfs_bt_insert_async(op, thread, txn, dir, &key, buf,
                                   sizeof(*r) + namelen, cb, private_data);
 } /* diskfs_dir_insert_async */
@@ -8746,13 +8739,6 @@ diskfs_remove_at_removed_cb(
         return;
     }
 
-    chimera_diskfs_debug("remove_at removed name=%.*s hash=%lu parent=%lu child=%lu",
-                         request->remove_at.namelen,
-                         request->remove_at.name,
-                         request->remove_at.name_hash,
-                         parent->inum,
-                         inode->inum);
-
     clock_gettime(CLOCK_REALTIME, &now);
 
     if (S_ISDIR(inode->mode)) {
@@ -8850,11 +8836,6 @@ diskfs_remove_at_lookup_cb(
     diskfs_bt_op_free(thread, op);
 
     if (result < 0) {
-        chimera_diskfs_error("remove_at lookup miss name=%.*s hash=%lu parent=%lu",
-                             request->remove_at.namelen,
-                             request->remove_at.name,
-                             request->remove_at.name_hash,
-                             p->inode_stash[0]->inum);
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
