@@ -891,7 +891,7 @@ chimera_nfs4_open(
             res->resok4.num_attrset                = 0;
             res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
             pthread_mutex_unlock(&owner->lock);
-            chimera_nfs4_compound_complete(req, NFS4_OK);
+            chimera_nfs4_compound_complete(req, res->status);
             return;
         }
 

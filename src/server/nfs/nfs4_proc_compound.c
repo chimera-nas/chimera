@@ -73,12 +73,12 @@ nfs4_replay_cached_body_offset(
 } /* nfs4_replay_cached_body_offset */
 
 static int
-nfs4_send_cached_reply(
+nfs4_send_cached_reply_buf(
     struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req)
+    struct nfs_request               *req,
+    const uint8_t                    *cached,
+    uint32_t                          cached_len)
 {
-    const uint8_t     *cached     = req->replay_slot->cached_buf;
-    uint32_t           cached_len = req->replay_slot->cached_len;
     uint32_t           body_offset, body_len, reserve;
     struct evpl_iovec *msg_iov;
     int                niov;
@@ -108,7 +108,173 @@ nfs4_send_cached_reply(
                                          msg_iov,
                                          1,
                                          body_len + reserve);
+} /* nfs4_send_cached_reply_buf */
+
+static int
+nfs4_send_cached_reply(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req)
+{
+    return nfs4_send_cached_reply_buf(thread,
+                                      req,
+                                      req->replay_slot->cached_buf,
+                                      req->replay_slot->cached_len);
 } /* nfs4_send_cached_reply */
+
+static void
+nfs4_release_write_args(
+    struct chimera_server_nfs_thread *thread,
+    struct COMPOUND4args             *args)
+{
+    for (uint32_t i = 0; i < args->num_argarray; i++) {
+        struct nfs_argop4 *ap = &args->argarray[i];
+
+        if (ap->argop == OP_WRITE && ap->opwrite.data.niov) {
+            evpl_iovecs_release(thread->evpl,
+                                ap->opwrite.data.iov,
+                                ap->opwrite.data.niov);
+            ap->opwrite.data.niov = 0;
+        }
+    }
+} /* nfs4_release_write_args */
+
+static bool
+nfs4_v40_drc_lookup(
+    struct nfs4_v40_drc   *drc,
+    struct evpl_rpc2_conn *conn,
+    uint32_t               xid,
+    uint8_t              **out_buf,
+    uint32_t              *out_len)
+{
+    uint8_t *buf = NULL;
+    uint32_t len = 0;
+
+    pthread_mutex_lock(&drc->lock);
+    for (uint32_t i = 0; i < NFS4_V40_DRC_SLOTS; i++) {
+        struct nfs4_v40_drc_entry *entry = &drc->entries[i];
+
+        if (entry->valid && entry->conn == conn && entry->xid == xid) {
+            len = entry->len;
+            buf = malloc(len);
+            if (buf) {
+                memcpy(buf, entry->buf, len);
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&drc->lock);
+
+    if (!buf) {
+        return false;
+    }
+
+    *out_buf = buf;
+    *out_len = len;
+    return true;
+} /* nfs4_v40_drc_lookup */
+
+static void
+nfs4_v40_drc_insert(
+    struct nfs4_v40_drc     *drc,
+    struct evpl_rpc2_conn   *conn,
+    uint32_t                 xid,
+    const struct evpl_iovec *iov,
+    int                      niov,
+    int                      total_length)
+{
+    struct nfs4_v40_drc_entry *entry;
+    uint8_t                   *buf;
+    size_t                     offset = 0;
+
+    if (total_length <= 0 ||
+        (uint32_t) total_length > NFS4_MAX_CACHED_RESPONSE_SIZE) {
+        return;
+    }
+
+    buf = malloc((size_t) total_length);
+    if (!buf) {
+        return;
+    }
+
+    for (int i = 0; i < niov; i++) {
+        memcpy(buf + offset, iov[i].data, iov[i].length);
+        offset += iov[i].length;
+    }
+
+    pthread_mutex_lock(&drc->lock);
+
+    for (uint32_t i = 0; i < NFS4_V40_DRC_SLOTS; i++) {
+        entry = &drc->entries[i];
+        if (entry->valid && entry->conn == conn && entry->xid == xid) {
+            drc->bytes -= entry->len;
+            free(entry->buf);
+            entry->buf  = buf;
+            entry->len  = (uint32_t) total_length;
+            drc->bytes += entry->len;
+            pthread_mutex_unlock(&drc->lock);
+            return;
+        }
+    }
+
+    while (drc->bytes + (uint32_t) total_length > NFS4_MAX_REPLY_CACHE_BYTES) {
+        entry     = &drc->entries[drc->next];
+        drc->next = (drc->next + 1) % NFS4_V40_DRC_SLOTS;
+        if (!entry->valid) {
+            break;
+        }
+        drc->bytes -= entry->len;
+        free(entry->buf);
+        entry->buf   = NULL;
+        entry->len   = 0;
+        entry->valid = 0;
+    }
+
+    entry     = &drc->entries[drc->next];
+    drc->next = (drc->next + 1) % NFS4_V40_DRC_SLOTS;
+    if (entry->valid) {
+        drc->bytes -= entry->len;
+        free(entry->buf);
+    }
+
+    entry->conn  = conn;
+    entry->xid   = xid;
+    entry->len   = (uint32_t) total_length;
+    entry->buf   = buf;
+    entry->valid = 1;
+    drc->bytes  += entry->len;
+
+    pthread_mutex_unlock(&drc->lock);
+} /* nfs4_v40_drc_insert */
+
+static void
+nfs4_v40_drc_capture_reply(
+    const struct evpl_iovec *iov,
+    int                      niov,
+    int                      total_length,
+    void                    *private_data)
+{
+    struct nfs_request *req = private_data;
+
+    if (!req || req->minorversion != 0) {
+        return;
+    }
+
+    nfs4_v40_drc_insert(&req->thread->shared->v40_drc,
+                        req->conn,
+                        req->encoding->xid,
+                        iov,
+                        niov,
+                        total_length);
+} /* nfs4_v40_drc_capture_reply */
+
+static void
+nfs4_v40_drc_arm_capture(struct nfs_request *req)
+{
+    if (req->encoding) {
+        req->encoding->reply_capture_cb      = nfs4_v40_drc_capture_reply;
+        req->encoding->reply_capture_private = req;
+    }
+} /* nfs4_v40_drc_arm_capture */
 
 void
 chimera_nfs4_compound_process(
@@ -133,15 +299,7 @@ chimera_nfs4_compound_process(
         /* XDR clones a +1 ref on every WRITE4args.data; the retransmit
          * we are about to discard had its args unmarshalled but will
          * never dispatch, so release any cloned iovecs here. */
-        for (uint32_t i = 0; i < req->args_compound->num_argarray; i++) {
-            struct nfs_argop4 *ap = &req->args_compound->argarray[i];
-            if (ap->argop == OP_WRITE && ap->opwrite.data.niov) {
-                evpl_iovecs_release(thread->evpl,
-                                    ap->opwrite.data.iov,
-                                    ap->opwrite.data.niov);
-                ap->opwrite.data.niov = 0;
-            }
-        }
+        nfs4_release_write_args(thread, req->args_compound);
         rc = nfs4_send_cached_reply(thread, req);
         chimera_nfs_abort_if(rc, "Failed to send cached RPC2 reply");
         req->replay_slot = NULL;
@@ -504,6 +662,26 @@ chimera_nfs4_compound(
     req->open_4_0_owner              = NULL;
     req->lock_4_0_open_owner         = NULL;
     req->lock_4_0_lock_owner         = NULL;
+
+    if (args->minorversion == 0) {
+        uint8_t *cached_buf;
+        uint32_t cached_len;
+
+        if (nfs4_v40_drc_lookup(&thread->shared->v40_drc,
+                                conn,
+                                encoding->xid,
+                                &cached_buf,
+                                &cached_len)) {
+            nfs4_release_write_args(thread, args);
+            rc = nfs4_send_cached_reply_buf(thread, req, cached_buf, cached_len);
+            free(cached_buf);
+            chimera_nfs_abort_if(rc, "Failed to send cached RPC2 reply");
+            nfs_request_free(thread, req);
+            return;
+        }
+
+        nfs4_v40_drc_arm_capture(req);
+    }
 
     /* Chimera implements NFS v4.0, v4.1 and v4.2 (minorversions 0–2).
      * Reject unknown minor versions with NFS4ERR_MINOR_VERS_MISMATCH per

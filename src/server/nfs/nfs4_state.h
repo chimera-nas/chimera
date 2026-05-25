@@ -441,9 +441,11 @@ void nfs_layout_state_put(
 #define NFS4_SLOT_TYPE_LAYOUT  5
 
 struct nfs_state_slot {
-    void    *state;
-    uint32_t generation;
-    uint8_t  type;
+    void                    *state;
+    uint32_t                 generation;
+    uint8_t                  type;
+    uint32_t                 replay_generation;
+    struct nfs4_replay_cache replay;
 };
 
 struct nfs_state_shard {
@@ -513,6 +515,17 @@ SYMBOL_EXPORT nfsstat4 nfs_state_table_acquire(
     uint8_t                 want_type,                     /* 0 = ANY */
     void                  **out_state,
     uint8_t                *out_type);
+
+/* Lookup a replay tombstone left by a just-destroyed state slot.  This is
+ * intentionally narrow: NFSv4.0 CLOSE retransmits can arrive after the
+ * original CLOSE invalidated the stateid, but must still receive the cached
+ * owner-seqid reply. */
+SYMBOL_EXPORT nfsstat4 nfs_state_table_lookup_replay(
+    struct nfs_state_table   *table,
+    const struct stateid4    *sid,
+    uint32_t                  op,
+    uint32_t                  seqid,
+    struct nfs4_replay_cache *out_replay);
 
 /* Drop the ref taken by acquire.  If this was the last ref and the state has
  * been marked destroyed, performs cleanup (releases the VFS handle, frees

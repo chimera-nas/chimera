@@ -33,6 +33,49 @@
 #define NFS_PROGIDX_MAX        5
 
 static void
+nfs4_v40_drc_init(struct nfs4_v40_drc *drc)
+{
+    pthread_mutex_init(&drc->lock, NULL);
+} /* nfs4_v40_drc_init */
+
+static void
+nfs4_v40_drc_destroy(struct nfs4_v40_drc *drc)
+{
+    pthread_mutex_lock(&drc->lock);
+    for (uint32_t i = 0; i < NFS4_V40_DRC_SLOTS; i++) {
+        struct nfs4_v40_drc_entry *entry = &drc->entries[i];
+
+        free(entry->buf);
+        entry->buf   = NULL;
+        entry->len   = 0;
+        entry->valid = 0;
+    }
+    drc->bytes = 0;
+    pthread_mutex_unlock(&drc->lock);
+    pthread_mutex_destroy(&drc->lock);
+} /* nfs4_v40_drc_destroy */
+
+static void
+nfs4_v40_drc_remove_conn(
+    struct nfs4_v40_drc   *drc,
+    struct evpl_rpc2_conn *conn)
+{
+    pthread_mutex_lock(&drc->lock);
+    for (uint32_t i = 0; i < NFS4_V40_DRC_SLOTS; i++) {
+        struct nfs4_v40_drc_entry *entry = &drc->entries[i];
+
+        if (entry->valid && entry->conn == conn) {
+            drc->bytes -= entry->len;
+            free(entry->buf);
+            entry->buf   = NULL;
+            entry->len   = 0;
+            entry->valid = 0;
+        }
+    }
+    pthread_mutex_unlock(&drc->lock);
+} /* nfs4_v40_drc_remove_conn */
+
+static void
 chimera_nfs_init_metrics(
     struct chimera_server_nfs_shared *shared,
     struct evpl_rpc2_program         *program)
@@ -241,6 +284,7 @@ nfs_server_init(
     nfs4_client_table_init(&shared->nfs4_shared_clients);
     nfs_state_table_init(&shared->nfs4_state_table);
     nfs_layout_table_init(&shared->nfs4_layout_table);
+    nfs4_v40_drc_init(&shared->v40_drc);
     pthread_mutex_init(&shared->nfs4_pnfs_devcache.lock, NULL);
     shared->nfs4_pnfs_devcache.count = 0;
 
@@ -510,6 +554,7 @@ nfs_server_destroy(void *data)
     }
 
     nlm_state_destroy(&shared->nlm_state);
+    nfs4_v40_drc_destroy(&shared->v40_drc);
 
     free(shared);
 } /* nfs_server_destroy */
@@ -539,6 +584,8 @@ chimera_nfs_server_notify(
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
             evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
             chimera_nfs_debug("Client disconnected from %s to %s", remote_addr, local_addr);
+
+            nfs4_v40_drc_remove_conn(&shared->v40_drc, conn);
 
             priv = evpl_rpc2_conn_get_private_data(conn);
             if (!priv) {
