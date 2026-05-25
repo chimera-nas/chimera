@@ -793,7 +793,7 @@ nfs4_client_destroy_clientid(
     pthread_mutex_unlock(&table->nfs4_ct_lock);
 
     if (unified) {
-        nfs_client_destroy(unified, state_table, vfs_thread);
+        nfs_client_destroy(unified, state_table, vfs_thread, false);
     }
 
     return NFS4_OK;
@@ -891,7 +891,7 @@ nfs4_client_unregister(
      * the client have no remaining state at DESTROY_CLIENTID time -- if
      * any survived, this releases their slots + dup'd VFS handles. */
     if (unified) {
-        nfs_client_destroy(unified, state_table, vfs_thread);
+        nfs_client_destroy(unified, state_table, vfs_thread, false);
     }
 } /* nfs4_client_unregister */
 
@@ -1081,7 +1081,7 @@ nfs4_client_table_destroy_unified(
     HASH_ITER(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, cur, tmp)
     {
         if (cur->unified) {
-            nfs_client_destroy(cur->unified, state_table, vfs_thread);
+            nfs_client_destroy(cur->unified, state_table, vfs_thread, true);
             cur->unified = NULL;
         }
     }

@@ -85,9 +85,13 @@ void nfs4_cb_conn_lost(
 struct nfs4_cb_path;
 
 /* Tear down a client's callback channel (free the channel struct, disconnect a
- * 4.0 outbound connection).  Called from nfs_client_destroy. */
+ * 4.0 outbound connection).  Called from nfs_client_destroy.  When synchronous
+ * is true (server shutdown) the channel is freed in-line because the owner
+ * thread no longer exists; otherwise the free is marshaled to the owner thread
+ * via its cb_doorbell. */
 void nfs4_cb_path_teardown(
-    struct nfs4_cb_path *cb);
+    struct nfs4_cb_path *cb,
+    bool                 synchronous);
 
 /* Per-thread doorbell + recall queue setup/teardown. */
 void nfs4_cb_thread_init(

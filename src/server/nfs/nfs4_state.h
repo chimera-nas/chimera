@@ -580,7 +580,8 @@ SYMBOL_EXPORT void
 nfs_client_destroy(
     struct nfs_client         *client,
     struct nfs_state_table    *table,
-    struct chimera_vfs_thread *vfs_thread);
+    struct chimera_vfs_thread *vfs_thread,
+    bool                       synchronous);
 
 /* Expire all state underneath a client, but keep the client record itself as
  * an expired tombstone so later clientid operations can return EXPIRED. */

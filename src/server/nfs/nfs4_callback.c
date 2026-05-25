@@ -1097,7 +1097,9 @@ nfs4_cb_conn_lost(struct nfs4_cb_client *chan)
 } /* nfs4_cb_conn_lost */
 
 void
-nfs4_cb_path_teardown(struct nfs4_cb_path *cb)
+nfs4_cb_path_teardown(
+    struct nfs4_cb_path *cb,
+    bool                 synchronous)
 {
     struct nfs4_cb_client *chan = cb->cb_client;
 
@@ -1109,8 +1111,10 @@ nfs4_cb_path_teardown(struct nfs4_cb_path *cb)
     /* 4.0: if the outbound conn is still live, clear its back-pointer so a
      * later disconnect notify does not dereference the (about-to-be-freed)
      * channel.  We do not disconnect it; evpl drains/frees it at thread
-     * teardown, and disconnecting here would race that teardown. */
-    if (chan->owns_conn && chan->conn) {
+     * teardown, and disconnecting here would race that teardown.  Skipped at
+     * server shutdown: the rpc2 thread (and this conn) has already been freed
+     * by the threadpool teardown, so chan->conn is stale. */
+    if (!synchronous && chan->owns_conn && chan->conn) {
         evpl_rpc2_conn_set_private_data(chan->conn, NULL);
     }
     chan->cb_path = NULL;
@@ -1124,14 +1128,22 @@ nfs4_cb_path_teardown(struct nfs4_cb_path *cb)
      * on the owner thread.  The 4.1 session ref is released by
      * nfs4_cb_client_destroy() at the actual free. */
     if (nfs4_cb_client_unref(chan)) {
-        struct chimera_server_nfs_thread *owner = chan->owner_thread;
+        if (synchronous) {
+            /* Server shutdown: the threadpool is already gone, so the owner
+             * thread no longer exists to drain a marshaled free, and no
+             * concurrent reply dispatch or queued recall can race us (we run
+             * single-threaded on the main thread).  Free in-line. */
+            nfs4_cb_client_destroy(chan);
+        } else {
+            struct chimera_server_nfs_thread *owner = chan->owner_thread;
 
-        pthread_mutex_lock(&owner->cb_recall_lock);
-        chan->teardown_next      = owner->cb_teardown_queue;
-        owner->cb_teardown_queue = chan;
-        pthread_mutex_unlock(&owner->cb_recall_lock);
+            pthread_mutex_lock(&owner->cb_recall_lock);
+            chan->teardown_next      = owner->cb_teardown_queue;
+            owner->cb_teardown_queue = chan;
+            pthread_mutex_unlock(&owner->cb_recall_lock);
 
-        evpl_ring_doorbell(&owner->cb_doorbell);
+            evpl_ring_doorbell(&owner->cb_doorbell);
+        }
     }
 } /* nfs4_cb_path_teardown */
 

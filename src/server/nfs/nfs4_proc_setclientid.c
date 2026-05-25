@@ -41,7 +41,8 @@ chimera_nfs4_setclientid(
     if (scid.destroy_unified) {
         nfs_client_destroy(scid.destroy_unified,
                            &shared->nfs4_state_table,
-                           thread->vfs_thread);
+                           thread->vfs_thread,
+                           false);
     }
 
     if (scid.status != NFS4_OK) {

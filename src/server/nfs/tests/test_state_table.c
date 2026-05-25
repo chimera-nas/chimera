@@ -198,7 +198,7 @@ test_owner_state_lifecycle(void)
                                      &acquired, &acquired_type);
     CHECK(status != NFS4_OK);
 
-    nfs_client_destroy(client, &table, NULL);
+    nfs_client_destroy(client, &table, NULL, true);
     nfs_state_table_free(&table, NULL);
     printf("ok: owner_state_lifecycle\n");
 } /* test_owner_state_lifecycle */
@@ -312,7 +312,7 @@ test_share_mode_conflict(void)
     CHECK(status == NFS4_OK);
 
     nfs_open_state_destroy(state_a, &table, NULL);
-    nfs_client_destroy(client, &table, NULL);
+    nfs_client_destroy(client, &table, NULL, true);
     nfs_state_table_free(&table, NULL);
     printf("ok: share_mode_conflict\n");
 } /* test_share_mode_conflict */

@@ -669,7 +669,8 @@ void
 nfs_client_destroy(
     struct nfs_client         *client,
     struct nfs_state_table    *table,
-    struct chimera_vfs_thread *vfs_thread)
+    struct chimera_vfs_thread *vfs_thread,
+    bool                       synchronous)
 {
     if (!client) {
         return;
@@ -734,7 +735,7 @@ nfs_client_destroy(
 
     /* Free the delegation callback channel (and disconnect its outbound 4.0
      * connection) before the client struct goes away. */
-    nfs4_cb_path_teardown(&client->cb_path);
+    nfs4_cb_path_teardown(&client->cb_path, synchronous);
 
     pthread_mutex_unlock(&client->lock);
     pthread_mutex_destroy(&client->lock);
@@ -795,7 +796,9 @@ nfs_client_expire_state(
         delegation_destroy_common(deleg, table, vfs_thread, true, false);
     }
 
-    nfs4_cb_path_teardown(&client->cb_path);
+    /* Runtime lease expiry: the owner thread is still alive, so marshal the
+     * channel free to it rather than freeing in-line. */
+    nfs4_cb_path_teardown(&client->cb_path, false);
     pthread_mutex_unlock(&client->lock);
 } /* nfs_client_expire_state */
 
