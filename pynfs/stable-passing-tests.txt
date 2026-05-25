@@ -1197,9 +1197,12 @@ chimera/pynfs/lockt/LKT9_memfs_nfs4.0
 chimera/pynfs/lockt/LKTOVER_memfs_nfs4.0
 chimera/pynfs/lockt/LOCK1_memfs_nfs4.0
 chimera/pynfs/lockt/LKT1_linux_nfs4.0
+chimera/pynfs/lockt/LKT2a_linux_nfs4.0
 chimera/pynfs/lockt/LKT2b_linux_nfs4.0
+chimera/pynfs/lockt/LKT2c_linux_nfs4.0
 chimera/pynfs/lockt/LKT2d_linux_nfs4.0
 chimera/pynfs/lockt/LKT2f_linux_nfs4.0
+chimera/pynfs/lockt/LKT2s_linux_nfs4.0
 chimera/pynfs/lockt/LKT3_linux_nfs4.0
 chimera/pynfs/lockt/LKT4_linux_nfs4.0
 chimera/pynfs/lockt/LKT5_linux_nfs4.0
@@ -1210,9 +1213,12 @@ chimera/pynfs/lockt/LKT9_linux_nfs4.0
 chimera/pynfs/lockt/LKTOVER_linux_nfs4.0
 chimera/pynfs/lockt/LOCK1_linux_nfs4.0
 chimera/pynfs/lockt/LKT1_io_uring_nfs4.0
+chimera/pynfs/lockt/LKT2a_io_uring_nfs4.0
 chimera/pynfs/lockt/LKT2b_io_uring_nfs4.0
+chimera/pynfs/lockt/LKT2c_io_uring_nfs4.0
 chimera/pynfs/lockt/LKT2d_io_uring_nfs4.0
 chimera/pynfs/lockt/LKT2f_io_uring_nfs4.0
+chimera/pynfs/lockt/LKT2s_io_uring_nfs4.0
 chimera/pynfs/lockt/LKT3_io_uring_nfs4.0
 chimera/pynfs/lockt/LKT4_io_uring_nfs4.0
 chimera/pynfs/lockt/LKT5_io_uring_nfs4.0

@@ -163,7 +163,9 @@ chimera_nfs4_lockt(
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                         req->fh,
                         req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED,
+                        CHIMERA_VFS_OPEN_INFERRED |
+                        CHIMERA_VFS_OPEN_PATH |
+                        CHIMERA_VFS_OPEN_NOFOLLOW,
                         chimera_nfs4_lockt_open_complete,
                         req);
 } /* chimera_nfs4_lockt */
