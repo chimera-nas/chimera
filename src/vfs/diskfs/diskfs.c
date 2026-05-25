@@ -680,8 +680,6 @@ struct diskfs_iq_channel {
     struct diskfs_iq_channel *next_pending;
     int                       unregister_requested;
     int                       unregister_done;
-    pthread_mutex_t           registration_lock;
-    pthread_cond_t            registration_cv;
     int                       registered;
 };
 
@@ -5988,7 +5986,7 @@ diskfs_il_contig_free(struct diskfs_intent_log *il)
     uint64_t start = SM_INTENT_LOG_OFFSET;
     uint64_t end   = SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE;
 
-    if (!il->push_head) {
+    if (!il->push_cur && !il->push_head && il->redo_inflight == 0) {
         return SM_INTENT_LOG_SIZE;
     }
     if (il->log_head >= il->log_tail) {
@@ -6088,7 +6086,14 @@ diskfs_il_push_finish(struct diskfs_intent_log *il)
     free(rec->iovs);
     free(rec);
 
-    il->log_tail = il->push_head ? il->push_head->offset : il->log_head;
+    /* Redo records reserve log space before they enter push_head.  If newer
+     * redo writes are still in flight, keep log_tail conservative until those
+     * records become pushable and then finish. */
+    if (il->push_head) {
+        il->log_tail = il->push_head->offset;
+    } else if (il->redo_inflight == 0) {
+        il->log_tail = il->log_head;
+    }
 
     diskfs_il_push_kick(il);
 
@@ -6486,10 +6491,7 @@ diskfs_intent_log_drain_pending(struct diskfs_intent_log *il)
                                 il->num_channels, DISKFS_IL_MAX_CHANNELS);
         il->channels[il->num_channels++] = ch;
 
-        pthread_mutex_lock(&ch->registration_lock);
-        ch->registered = 1;
-        pthread_cond_signal(&ch->registration_cv);
-        pthread_mutex_unlock(&ch->registration_lock);
+        __atomic_store_n(&ch->registered, 1, __ATOMIC_RELEASE);
     }
 } /* diskfs_intent_log_drain_pending */
 
@@ -7858,8 +7860,6 @@ diskfs_thread_init(
      * doorbell on the worker's own evpl. */
     thread->iq_channel         = calloc(1, sizeof(*thread->iq_channel));
     thread->iq_channel->worker = thread;
-    pthread_mutex_init(&thread->iq_channel->registration_lock, NULL);
-    pthread_cond_init(&thread->iq_channel->registration_cv, NULL);
     evpl_add_doorbell(evpl, &thread->iq_channel->cq_doorbell,
                       diskfs_iq_cq_doorbell_cb);
 
@@ -7889,12 +7889,6 @@ diskfs_thread_init(
     pthread_mutex_unlock(&shared->intent_log.registration_lock);
 
     evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
-    pthread_mutex_lock(&thread->iq_channel->registration_lock);
-    while (!thread->iq_channel->registered) {
-        pthread_cond_wait(&thread->iq_channel->registration_cv,
-                          &thread->iq_channel->registration_lock);
-    }
-    pthread_mutex_unlock(&thread->iq_channel->registration_lock);
 
     return thread;
 } /* diskfs_thread_init */
@@ -7954,8 +7948,6 @@ diskfs_thread_destroy(void *private_data)
         }
 
         evpl_remove_doorbell(thread->evpl, &ch->cq_doorbell);
-        pthread_cond_destroy(&ch->registration_cv);
-        pthread_mutex_destroy(&ch->registration_lock);
         free(ch);
         thread->iq_channel = NULL;
     }
