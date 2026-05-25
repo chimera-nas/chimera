@@ -57,6 +57,15 @@
  * many but only 2 at a time and release as they go. */
 #define DISKFS_TXN_MAX_INODES     4
 
+/* Diskfs RMW writes assemble:
+ *   prefix (valid + zero) + request write iovecs +
+ *   suffix (valid + zero) + alignment padding.
+ * The largest in-tree caller-side write iovec array is CHIMERA_CLIENT_IOV_MAX
+ * (260); SMB is 256 and RPC transport receives are lower by default.
+ */
+#define DISKFS_WRITE_MAX_IOV      260
+#define DISKFS_WRITE_RMW_MAX_IOV  (DISKFS_WRITE_MAX_IOV + 5)
+
 #define chimera_diskfs_debug(...) chimera_debug("diskfs", \
                                                 __FILE__, \
                                                 __LINE__, \
@@ -9887,7 +9896,7 @@ diskfs_write_phase2(
 {
     struct evpl                   *evpl           = thread->evpl;
     struct diskfs_request_private *diskfs_private = request->plugin_data;
-    struct evpl_iovec              write_iov[66]; // prefix + data + suffix + padding
+    struct evpl_iovec              write_iov[DISKFS_WRITE_RMW_MAX_IOV];
     int                            write_niov = 0;
     uint64_t                       offset, chunk;
     uint32_t                       left;
@@ -9903,6 +9912,11 @@ diskfs_write_phase2(
      * simply re-enters phase2.  The inode lock is held until the txn is durable
      * regardless, so parking here doesn't expose dirty state. */
     if (diskfs_io_gate(thread, request, diskfs_write_phase2_resume)) {
+        return;
+    }
+
+    if (request->write.niov > DISKFS_WRITE_MAX_IOV) {
+        diskfs_op_fail(request, diskfs_private->txn, CHIMERA_VFS_EINVAL);
         return;
     }
 
@@ -9979,9 +9993,7 @@ diskfs_write_phase2(
     uint32_t padding   = (4096 - (total_len & 4095)) & 4095;
 
     if (padding > 0) {
-        // Use thread->zero without adding ref - it's persistent
-        write_iov[write_niov]        = thread->zero;
-        write_iov[write_niov].length = padding;
+        evpl_iovec_clone_segment(&write_iov[write_niov], &thread->zero, 0, padding);
         write_niov++;
     }
 
@@ -10003,7 +10015,17 @@ diskfs_write_phase2(
 
         chunk_iov = &diskfs_private->iov[diskfs_private->niov];
 
-        chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 32, chunk, 1);
+        chunk_niov = evpl_iovec_alloc(evpl, chunk, 4096, 32, 0, chunk_iov);
+        if (chunk_niov <= 0) {
+            evpl_iovecs_release(evpl, write_iov, write_niov);
+            diskfs_op_fail(request, diskfs_private->txn, CHIMERA_VFS_EIO);
+            return;
+        }
+
+        evpl_iovec_cursor_get_blob(&cursor, chunk_iov->data, chunk_iov->length);
+        for (int i = 1; i < chunk_niov; i++) {
+            evpl_iovec_cursor_get_blob(&cursor, chunk_iov[i].data, chunk_iov[i].length);
+        }
 
         diskfs_private->niov += chunk_niov;
 
