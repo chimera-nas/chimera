@@ -11,6 +11,7 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_fh.h"
+#include "vfs/vfs_lease_types.h"
 
 struct chimera_vfs_request;
 
@@ -23,162 +24,18 @@ struct chimera_vfs_request;
  * protocols (NLM, NFSv4, SMB2) acquire and release leases through this
  * layer rather than maintaining their own per-protocol tables.
  *
+ * In addition, the VFS core itself acquires an implicit SHARE lease on
+ * behalf of actors that perform I/O without requesting a protocol lease
+ * (NFSv3, S3, NFSv4 data I/O).  That lease is held lazily — kept across
+ * operations and dropped only when it goes idle or another holder needs
+ * it — so every read/write is lease-mediated.  See vfs_lease_types.h for
+ * the shared lease vocabulary.
+ *
  * Persistence is explicitly out of scope for this pass: all state lives
  * in memory and is lost on server crash.  Reclaim handshakes (NLM grace,
  * NFSv4 CLAIM_PREVIOUS, SMB3 DH2C) work across client disconnects within
  * a single server lifetime only.
  */
-
-/* -------------------------------------------------------------------- */
-/* Lease vocabulary                                                     */
-/* -------------------------------------------------------------------- */
-
-enum chimera_vfs_lease_kind {
-    CHIMERA_VFS_LEASE_RANGE   = 0, /* byte-range lock */
-    CHIMERA_VFS_LEASE_SHARE   = 1, /* whole-file share/deny reservation */
-    CHIMERA_VFS_LEASE_CACHING = 2, /* breakable caching lease */
-    CHIMERA_VFS_LEASE_KIND_MAX
-};
-
-/* Mode bits — SMB2 RWH triple, used as the lingua franca.
- *   R = read-cache / shared range lock / SMB FILE_READ_DATA share-allow
- *   W = write-cache / exclusive range lock / SMB FILE_WRITE_DATA share-allow
- *   H = handle-cache (SMB only)
- *   D = delete (SMB FILE_SHARE_DELETE)
- *
- * RANGE leases use {R} for shared, {W} for exclusive; H and D are ignored.
- * SHARE leases use granted = access bits, denied = deny bits.
- * CACHING leases use granted directly (e.g., {R,W,H} for an SMB lease).
- */
-#define CHIMERA_VFS_LEASE_MODE_R      0x01
-#define CHIMERA_VFS_LEASE_MODE_W      0x02
-#define CHIMERA_VFS_LEASE_MODE_H      0x04
-#define CHIMERA_VFS_LEASE_MODE_D      0x08
-
-struct chimera_vfs_lease_mode {
-    uint8_t granted; /* bits the holder has been granted */
-    uint8_t denied;  /* SHARE only: bits this holder denies to others */
-};
-
-/* Protocol identifiers — used in owner.protocol so the conflict matrix
- * can apply protocol-specific same-owner coalescing rules. */
-#define CHIMERA_VFS_LEASE_PROTO_NLM   1
-#define CHIMERA_VFS_LEASE_PROTO_NFSV4 2
-#define CHIMERA_VFS_LEASE_PROTO_SMB2  3
-
-struct chimera_vfs_lease;
-
-/* Break callback — invoked synchronously by vfs_state when this lease must
- * downgrade or release.  The callback is expected to kick off the protocol-
- * specific break (build SMB2 OPLOCK_BREAK, send NFSv4 CB_RECALL) and return
- * promptly; vfs_state does not wait inside the callback.  The protocol
- * server eventually calls chimera_vfs_lease_ack() (or chimera_vfs_lease_
- * revoke() on its own timeout) to unstick the pending acquire. */
-typedef void (*chimera_vfs_lease_break_cb_t)(
-    struct chimera_vfs_lease *lease,
-    uint8_t                   needed_mode,
-    void                     *private_data);
-
-/* Liveness probe — vfs_state calls this to test whether a lease's owning
- * client/session is still considered alive.  Returns false on session
- * expiry, connection drop past grace, etc.  May be NULL (always alive). */
-typedef bool (*chimera_vfs_lease_is_alive_cb_t)(
-    const struct chimera_vfs_lease *lease,
-    void                           *private_data);
-
-/* Revocation notice — vfs_state calls this when it forcibly revokes a lease
- * (recall deadline elapsed, etc.) rather than the holder releasing it.  The
- * protocol layer uses it to mark its own state revoked (e.g. so a later use of
- * an NFSv4 delegation stateid reports NFS4ERR_DELEG_REVOKED).  May be NULL.
- * Invoked outside the file lock. */
-typedef void (*chimera_vfs_lease_revoked_cb_t)(
-    struct chimera_vfs_lease *lease,
-    void                     *private_data);
-
-struct chimera_vfs_lease_owner {
-    uint32_t                        protocol;
-    uint64_t                        client_key;
-    uint64_t                        owner_lo;
-    uint64_t                        owner_hi;
-    chimera_vfs_lease_break_cb_t    break_cb;
-    chimera_vfs_lease_is_alive_cb_t is_alive_cb;
-    chimera_vfs_lease_revoked_cb_t  revoked_cb;
-    void                           *cb_private;
-};
-
-enum chimera_vfs_break_state {
-    CHIMERA_VFS_BREAK_IDLE     = 0, /* no break in progress */
-    CHIMERA_VFS_BREAK_BREAKING = 1, /* break_cb invoked, awaiting ack */
-    CHIMERA_VFS_BREAK_ACKED    = 2, /* protocol acked, lease downgraded */
-    CHIMERA_VFS_BREAK_REVOKED  = 3, /* forcibly revoked (timeout or error) */
-};
-
-struct chimera_vfs_file_state;
-
-struct chimera_vfs_lease {
-    enum chimera_vfs_lease_kind kind;
-    struct chimera_vfs_lease_mode  mode;
-    uint64_t                       offset; /* RANGE only; SHARE/CACHING use 0 */
-    uint64_t                       length; /* RANGE only; 0 = to EOF */
-    struct chimera_vfs_lease_owner owner;
-    struct chimera_vfs_file_state *file;
-
-    enum chimera_vfs_break_state break_state;
-    uint8_t                        break_needed_mode;
-    struct timespec                break_deadline;
-
-    /* For a SHARE probe only: a caching (handle) lease held under this same
-     * key is the requester's own lease (SMB2 same-client, same lease key) and
-     * must NOT be broken when acquiring the share — the opens coalesce.  Set by
-     * the SMB server when a lease-bearing open takes its share reservation;
-     * left zero (no skip) by every other caller. */
-    uint8_t                        has_break_skip_key;
-    uint64_t                       break_skip_lo;
-    uint64_t                       break_skip_hi;
-
-    /* Intrusive linkage on the appropriate file->{range,share,caching} list. */
-    struct chimera_vfs_lease      *prev;
-    struct chimera_vfs_lease      *next;
-};
-
-/* -------------------------------------------------------------------- */
-/* Lease result enum                                                    */
-/* -------------------------------------------------------------------- */
-
-/* Conflict-test result.  Returned by chimera_vfs_state_would_conflict(),
- * chimera_vfs_state_try_insert(), and chimera_vfs_lease_test(). */
-enum chimera_vfs_lease_result {
-    CHIMERA_VFS_LEASE_GRANTED  = 0, /* no conflict; lease would be / was inserted */
-    CHIMERA_VFS_LEASE_DENIED   = 1, /* hard conflict with non-breakable holder */
-    CHIMERA_VFS_LEASE_BREAKING = 2, /* breakable holder must downgrade first */
-};
-
-/* -------------------------------------------------------------------- */
-/* Async-acquire ticket                                                 */
-/* -------------------------------------------------------------------- */
-
-/* Result of an async acquire.  GRANTED carries `granted_lease`; DENIED
- * carries `conflict` (a pointer to a conflicting holder — owned by
- * vfs_state, valid only until the callback returns). */
-typedef void (*chimera_vfs_lease_acquire_cb_t)(
-    enum chimera_vfs_lease_result result,
-    struct chimera_vfs_lease     *granted_lease,
-    struct chimera_vfs_lease     *conflict,
-    void                         *private_data);
-
-/* Caller-allocated ticket holding pending-acquire bookkeeping.  Its
- * lifetime must extend until the acquire callback fires.  Protocol
- * layers typically embed this in their existing per-lock state struct
- * (nlm_lock_entry, nfs4_state, smb_open_file's lock slot). */
-struct chimera_vfs_pending_acquire {
-    struct chimera_vfs_lease           *lease;
-    chimera_vfs_lease_acquire_cb_t      cb;
-    void                               *private_data;
-    struct chimera_vfs_file_state      *file;
-    bool                                queued;
-    struct chimera_vfs_pending_acquire *prev;
-    struct chimera_vfs_pending_acquire *next;
-};
 
 /* -------------------------------------------------------------------- */
 /* Per-file state                                                       */
@@ -196,9 +53,27 @@ struct chimera_vfs_file_state {
     struct chimera_vfs_lease           *share_resvs;
     struct chimera_vfs_lease           *caching_leases;
 
+    /* Implicit lease held by chimera itself on behalf of leaseless actors
+     * (NFSv3/S3/NFSv4 data I/O).  When active it is linked into share_resvs
+     * like any other SHARE; it is kept across operations and dropped only
+     * when idle-reaped or recalled by a conflicting holder.  Guarded by
+     * file->lock.  See chimera_vfs_io_lease_acquire(). */
+    struct chimera_vfs_lease            implicit_lease;
+    uint8_t                             implicit_active;    /* linked in share_resvs */
+    uint8_t                             implicit_draining;  /* recall in progress */
+    uint32_t                            implicit_inflight;  /* in-flight ops pinning it */
+    struct timespec                     implicit_last_used; /* CLOCK_MONOTONIC */
+
     /* FIFO queue of acquires waiting on a break to complete. */
     struct chimera_vfs_pending_acquire *pending_head;
     struct chimera_vfs_pending_acquire *pending_tail;
+
+    /* FIFO queue of I/O requests waiting for the implicit lease to become
+     * grantable (a conflicting holder is mid-recall, or a prior recall of
+     * our own implicit lease is still draining).  Distinct from the
+     * pending queue above, which carries protocol-lease acquires. */
+    struct chimera_vfs_pending_acquire *io_wait_head;
+    struct chimera_vfs_pending_acquire *io_wait_tail;
 
     /* Back-pointer set on creation so ack/revoke/remove can pump the
      * pending queue without changing public-API signatures. */
@@ -218,6 +93,9 @@ struct chimera_vfs_state {
     /* Default deadline applied by chimera_vfs_lease_begin_break() when the
      * caller passes 0.  Matches SMB2 lease-break timeout convention. */
     uint32_t                        default_break_deadline_ms;
+    /* Implicit leases held this long without any I/O are dropped by
+     * chimera_vfs_state_reap_idle(). */
+    uint32_t                        implicit_idle_ms;
 };
 
 /* -------------------------------------------------------------------- */
@@ -408,16 +286,44 @@ chimera_vfs_state_break_caching(
     uint64_t                  fh_hash);
 
 /* -------------------------------------------------------------------- */
-/* I/O hook                                                             */
+/* Implicit I/O lease (held by chimera on behalf of leaseless actors)   */
 /* -------------------------------------------------------------------- */
 
-/* Called by VFS core before dispatching a READ or WRITE request.  In
- * Stage A this is a no-op pass-through that always returns 0 (success);
- * Stage B+ will enforce range-lock conflicts and break caching leases.
- * Returns 0 on permit, a CHIMERA_VFS_E* error code on deny. */
-int
-chimera_vfs_state_check_io(
+/* Mediate request through the lease layer, then invoke next(request) to
+ * proceed to dispatch.  Direction is taken from request->opcode (READ =>
+ * read access, WRITE/metadata-mutation => write access).
+ *
+ * If `owner` is non-NULL the I/O is attributed to that owner (a lease-
+ * holding client, so its own delegation/oplock is not self-recalled);
+ * otherwise chimera acquires/holds an internal implicit SHARE on the
+ * file's behalf.  Either way, conflicting holders are recalled and the
+ * request waits (parks) until every break acks/revokes, after which
+ * next(request) is invoked.  A failure (e.g. mandatory byte-range
+ * conflict) sets request->status and invokes request->complete instead
+ * of next. */
+void
+chimera_vfs_io_lease_acquire(
+    struct chimera_vfs_request           *request,
+    const struct chimera_vfs_lease_owner *owner,
+    void (                               *next )(struct chimera_vfs_request *request));
+
+/* Release the in-flight pin taken by chimera_vfs_io_lease_acquire().  Safe
+ * to call when no implicit lease was taken (fast path).  Must be called
+ * exactly once per acquire, from the operation's completion path. */
+void
+chimera_vfs_io_lease_release(
     struct chimera_vfs_request *request);
+
+/* Drop every implicit lease that has been idle (no in-flight I/O) for at
+ * least `idle_ms` milliseconds.  Driven by a periodic reaper. */
+void
+chimera_vfs_state_reap_idle(
+    struct chimera_vfs_state *state,
+    uint64_t                  idle_ms);
+
+/* -------------------------------------------------------------------- */
+/* Break-on-write                                                       */
+/* -------------------------------------------------------------------- */
 
 /* Break (to NONE) every read-caching lease invalidated by a write to the
  * file identified by (fh, fh_hash), except the writer's own write-caching

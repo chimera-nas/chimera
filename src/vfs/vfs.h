@@ -11,6 +11,7 @@
 #include "vfs_error.h"
 #include "vfs_cred.h"
 #include "vfs_pnfs.h"
+#include "vfs_lease_types.h"
 #include "evpl/evpl.h"
 
 #define CHIMERA_VFS_PATH_MAX 4096
@@ -303,41 +304,55 @@ struct chimera_vfs_request_handle {
 #define CHIMERA_VFS_REQUEST_MAX_HANDLES 3
 
 struct chimera_vfs_request {
-    struct chimera_vfs_thread        *thread;
-    const struct chimera_vfs_cred    *cred;
-    uint32_t                          opcode;
-    enum chimera_vfs_error            status;
-    chimera_vfs_complete_callback_t   complete;
-    chimera_vfs_complete_callback_t   complete_delegate;
-    struct timespec                   start_time;
-    uint64_t                          elapsed_ns;
+    struct chimera_vfs_thread         *thread;
+    const struct chimera_vfs_cred     *cred;
+    uint32_t                           opcode;
+    enum chimera_vfs_error             status;
+    chimera_vfs_complete_callback_t    complete;
+    chimera_vfs_complete_callback_t    complete_delegate;
+    struct timespec                    start_time;
+    uint64_t                           elapsed_ns;
 
     /* Points to one page of memory that the plugin may use as desired */
-    void                             *plugin_data;
+    void                              *plugin_data;
 
     /* For use by the plugin if desired, see io_uring for example */
-    struct chimera_vfs_request_handle handle[CHIMERA_VFS_REQUEST_MAX_HANDLES];
-    uint8_t                           token_count;
+    struct chimera_vfs_request_handle  handle[CHIMERA_VFS_REQUEST_MAX_HANDLES];
+    uint8_t                            token_count;
 
-    struct chimera_vfs_module        *module;
-    void                             *proto_callback;
-    void                             *proto_private_data;
+    struct chimera_vfs_module         *module;
+    void                              *proto_callback;
+    void                              *proto_private_data;
 
     /* VFS plugins may use these while processing the request */
-    struct chimera_vfs_request       *prev;
-    struct chimera_vfs_request       *next;
+    struct chimera_vfs_request        *prev;
+    struct chimera_vfs_request        *next;
 
     /* For use by vfs core only */
-    struct chimera_vfs_request       *active_prev;
-    struct chimera_vfs_request       *active_next;
+    struct chimera_vfs_request        *active_prev;
+    struct chimera_vfs_request        *active_next;
 
-    uint8_t                           fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                          fh_len;
-    uint64_t                          fh_hash;
+    uint8_t                            fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                           fh_len;
+    uint64_t                           fh_hash;
 
-    struct chimera_vfs_open_handle   *pending_handle;
+    /* Implicit I/O lease mediation (chimera_vfs_io_lease_acquire).  For a
+     * lease-holding client (NFSv4 delegation, SMB oplock) the protocol fills
+     * io_owner + io_owner_valid so the I/O coalesces with the client's own
+     * lease instead of recalling it.  io_next is the continuation invoked
+     * once the lease is held (normally chimera_vfs_dispatch); io_lease_file
+     * is the per-file state whose implicit lease this request has pinned
+     * (NULL on the fast path where nothing was pinned). */
+    struct chimera_vfs_lease_owner     io_owner;
+    uint8_t                            io_owner_valid;
+    void                               ( *io_next )(
+        struct chimera_vfs_request *request);
+    struct chimera_vfs_file_state     *io_lease_file;
+    struct chimera_vfs_pending_acquire io_lease_ticket;
 
-    void                              ( *unblock_callback )(
+    struct chimera_vfs_open_handle    *pending_handle;
+
+    void                               ( *unblock_callback )(
         struct chimera_vfs_request     *request,
         struct chimera_vfs_open_handle *handle);
 

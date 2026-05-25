@@ -315,15 +315,26 @@ chimera_nfs4_write(
     req->nfs_state_type = state_type;
     req->args_write4    = args;
 
-    chimera_vfs_write(thread->vfs_thread, &req->cred,
-                      state_handle,
-                      args->offset,
-                      args->data.length,
-                      (args->stable != UNSTABLE4),
-                      0,
-                      0,
-                      args->data.iov,
-                      args->data.niov,
-                      chimera_nfs4_write_complete,
-                      req);
+    /* Attribute the write to the client's owner so other holders' read
+     * caches are invalidated while this client's own delegation is not
+     * recalled by its own write. */
+    struct chimera_vfs_lease_owner io_owner = {
+        .protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4,
+        .client_key = open_state->owner->client->client_id,
+        .owner_lo   = state_handle->fh_hash,
+        .owner_hi   = 0,
+    };
+
+    chimera_vfs_write_owned(thread->vfs_thread, &req->cred,
+                            state_handle,
+                            args->offset,
+                            args->data.length,
+                            (args->stable != UNSTABLE4),
+                            0,
+                            0,
+                            args->data.iov,
+                            args->data.niov,
+                            &io_owner,
+                            chimera_nfs4_write_complete,
+                            req);
 } /* chimera_nfs4_write */

@@ -176,6 +176,12 @@ chimera_vfs_request_alloc_common(
     request->cred   = cred;
     request->module = module;
 
+    /* Reset implicit-lease mediation state: requests are pooled and not
+     * fully memset on reuse, so a prior op's owner/pin must not leak in. */
+    request->io_owner_valid = 0;
+    request->io_next        = NULL;
+    request->io_lease_file  = NULL;
+
     if (fh && fhlen > 0) {
         memcpy(request->fh, fh, fhlen);
     }

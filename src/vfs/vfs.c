@@ -223,6 +223,13 @@ chimera_vfs_close_thread_wake_timer(
 
     pthread_mutex_unlock(&close_thread->lock);
 
+    /* Drop implicit I/O leases that have gone idle, bounding resident
+     * per-file state for write-once / read-once workloads. */
+    if (close_thread->vfs->vfs_state) {
+        chimera_vfs_state_reap_idle(close_thread->vfs->vfs_state,
+                                    close_thread->vfs->vfs_state->implicit_idle_ms);
+    }
+
 } /* chimera_vfs_close_thread_wake */
 
 static void *
