@@ -85,6 +85,10 @@ void
 nfs_recovery_end_grace(
     struct nfs_recovery *rec);
 
+bool
+nfs_recovery_in_grace(
+    struct nfs_recovery *rec);
+
 /*
  * Persist (stub) a newly-confirmed client.  Future backends will write the
  * record to stable storage so a restart can reclaim it.

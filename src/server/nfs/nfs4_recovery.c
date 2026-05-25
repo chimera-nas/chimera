@@ -89,6 +89,18 @@ nfs_recovery_end_grace(struct nfs_recovery *rec)
     pthread_mutex_unlock(&rec->lock);
 } /* nfs_recovery_end_grace */
 
+bool
+nfs_recovery_in_grace(struct nfs_recovery *rec)
+{
+    bool in_grace;
+
+    pthread_mutex_lock(&rec->lock);
+    in_grace = rec->in_grace;
+    pthread_mutex_unlock(&rec->lock);
+
+    return in_grace;
+} /* nfs_recovery_in_grace */
+
 void
 nfs_recovery_persist(
     struct nfs_recovery     *rec,

@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <utlist.h>
 #include <netinet/in.h>
@@ -115,6 +116,7 @@ struct chimera_smb_config {
     int                            num_dialects;
     int                            num_nic_info;
     int                            soft_fail_bad_req;
+    int                            persistent_handles;
     uint32_t                       capabilities;
     uint32_t                       dialects[16];
     struct chimera_smb_nic_info    nic_info[16];
@@ -135,6 +137,15 @@ struct chimera_smb_share {
     struct chimera_smb_share          *prev;
     struct chimera_smb_share          *next;
     struct chimera_smb_sharemode_table sharemode;
+    /* Continuous-availability share: advertised to clients (SMB2_SHARE_CAP_
+     * CONTINUOUS_AVAILABILITY) and required before a persistent (as opposed to
+     * merely durable) handle may be granted.  For this initial pass it is set
+     * from the global smb_persistent_handles flag; a per-share config knob
+     * will replace that later. */
+    bool                               continuous_availability;
+    /* Set once the share's backend has been scanned for persisted handle
+     * records at first use (best-effort, idempotent recovery). */
+    bool                               durable_recovered;
 };
 
 struct chimera_smb_conn;
@@ -158,6 +169,20 @@ chimera_smb_parse_rename_info(
 void
 chimera_smb_set_info_rename_process(
     struct chimera_smb_request *request);
+
+/* SMB3 persistent-handle backend record.  Key is CHIMERA_SMB_DURABLE_KEY_PREFIX
+ * + persistent_id; the value is the serialized chimera_smb_durable_record (see
+ * below).  Defined here because the CREATE request carries scratch buffers
+ * sized by these macros. */
+#define CHIMERA_SMB_DURABLE_KEY_PREFIX     "smbdh"
+#define CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN 5
+#define CHIMERA_SMB_DURABLE_KEY_LEN        (CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN + 8)
+#define CHIMERA_SMB_DURABLE_RECORD_MAGIC   0x31484453  /* 'SDH1' LE */
+/* Fixed header bytes before the variable-length name in a serialized record:
+ * magic(4) pid(8) create_guid(16) client_guid(16) session(8) durable_flags(4)
+ * timeout(8) desired(4) share(4) name_len(4). */
+#define CHIMERA_SMB_DURABLE_REC_HDR_LEN    (4 + 8 + 16 + 16 + 8 + 4 + 8 + 4 + 4 + 4)
+#define CHIMERA_SMB_DURABLE_VALUE_MAX      (CHIMERA_SMB_DURABLE_REC_HDR_LEN + SMB_FILENAME_MAX)
 
 struct chimera_smb_request {
     uint32_t                           status;
@@ -268,6 +293,10 @@ struct chimera_smb_request {
             struct chimera_smb_open_file   *r_open_file;
             struct chimera_smb_attrs        r_attrs;
             struct chimera_vfs_attrs        set_attr;
+            /* Set by the open/mkdir callbacks when this CREATE actually created
+             * the file/dir (vs opened an existing one) — drives the OPENED vs
+             * CREATED Create Action in the reply. */
+            uint8_t                         r_created;
             /* CREATE contexts the client sent (CHIMERA_SMB_CREATE_CTX_* bits).
              * Phase-0 stubs set the bit and capture a minimum set of fields needed
              * by the response emit; Phase 1/3 will populate the rest. */
@@ -295,14 +324,22 @@ struct chimera_smb_request {
                 uint16_t epoch;
                 int      is_v2;
             } rqls;
-            uint64_t alsi_alloc_size;
-            uint64_t twrp_timestamp;
+            uint64_t                        alsi_alloc_size;
+            uint64_t                        twrp_timestamp;
             /* Backing storage for a canonical ACL decoded from a SecD create
              * context (SMB2_CREATE_SD_BUFFER); set_attr.va_acl points here. */
-            uint8_t  acl_storage[sizeof(struct chimera_acl) +
-                                 64 * sizeof(struct chimera_ace)];
-            char     parent_path[SMB_FILENAME_MAX];
-            char    *name;
+            uint8_t                         acl_storage[sizeof(struct chimera_acl) +
+                                                        64 * sizeof(struct chimera_ace)];
+            /* SMB3 persistent-handle write-through.  persist_pid != 0 marks this
+             * open as a persistent grant (fresh or cold reclaim): the record is
+             * persisted atomically with the VFS open via persist_hs, and
+             * gen_open_file adopts persist_pid as the file's persistent id. */
+            uint64_t                        persist_pid;
+            struct chimera_vfs_handle_state persist_hs;
+            uint8_t                         persist_key[CHIMERA_SMB_DURABLE_KEY_LEN];
+            uint8_t                         persist_value[CHIMERA_SMB_DURABLE_VALUE_MAX];
+            char                            parent_path[SMB_FILENAME_MAX];
+            char                           *name;
         } create;
 
         struct  {
@@ -572,6 +609,11 @@ struct chimera_smb_conn {
     uint8_t                           *ntlm_output;
     size_t                             ntlm_output_len;
     unsigned int                       flags;
+    /* Set under the owning thread's lease_break_lock while conn_free drains
+     * this connection's queued lease-break notifications, so a break_cb racing
+     * on another thread does not enqueue a send for a connection whose bind is
+     * being torn down.  Reset on reuse in chimera_smb_conn_alloc. */
+    uint8_t                            lease_break_tearing_down;
     enum evpl_protocol_id              protocol;
     uint16_t                           dialect;
     uint16_t                           smbvers;
@@ -617,25 +659,83 @@ struct chimera_smb_conn {
     char                               remote_addr[128];
 };
 
+/* Default and ceiling for a durable handle's reconnect grace window.  A v2
+ * client may request a timeout; we honor it up to the ceiling, falling back to
+ * the default when the client requests 0.  v1 handles have no timeout field on
+ * the wire and always use the default. */
+#define CHIMERA_SMB_DURABLE_TIMEOUT_DEFAULT_MS 60000
+#define CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS     300000
+
+/* One parked-or-live durable open, indexed by its (now globally unique)
+ * persistent id.  For an initial in-memory pass this object IS the durable
+ * state; the future persistence layer will serialize these fields. */
+struct chimera_smb_durable_entry {
+    uint64_t                          persistent_id; /* hash key == open_file->file_id.pid */
+    uint8_t                           create_guid[16];
+    /* Reconnect is matched on the client GUID (the connection's negotiated
+     * identity), not the session id: a durable reconnect lands on a brand-new
+     * session after the original connection dropped. */
+    uint8_t                           client_guid[16];
+    uint64_t                          session_id; /* original owning session (informational) */
+    struct timespec                   deadline;  /* reconnect grace; valid only while parked */
+    bool                              parked;    /* true => disconnected, awaiting reconnect */
+    /* persistent: the record is also persisted in the share's backend (survives
+     * server restart).  cold: recovered from the backend at startup — the open
+     * is not in memory (open_file == NULL) and must be re-opened on reclaim. */
+    bool                              persistent;
+    bool                              cold;
+    struct chimera_smb_open_file     *open_file;
+    uint32_t                          name_len;
+    char                              name[SMB_FILENAME_MAX];
+    /* Transient worklist link used by the sweeper after the entry has been
+     * removed from the hash; not valid while the entry is in the table. */
+    struct chimera_smb_durable_entry *reap_next;
+    struct UT_hash_handle             hh;
+};
+
+struct chimera_smb_durable_table {
+    pthread_mutex_t                   lock;
+    struct chimera_smb_durable_entry *by_pid;
+};
+
+struct chimera_smb_durable_record {
+    uint64_t persistent_id;
+    uint8_t  create_guid[16];
+    uint8_t  client_guid[16];
+    uint64_t session_id;
+    uint32_t durable_flags;
+    uint64_t durable_timeout_ms;
+    uint32_t desired_access;
+    uint32_t share_access;
+    uint32_t name_len;
+    char     name[SMB_FILENAME_MAX];
+};
+
 struct chimera_server_smb_shared {
-    struct chimera_smb_config   config;
-    int                         rdma;
-    enum evpl_protocol_id       tcp_protocol;
-    uint8_t                     guid[SMB2_GUID_SIZE];
-    gss_name_t                  svc;
-    gss_cred_id_t               srv_cred;
-    struct chimera_vfs         *vfs;
-    struct prometheus_metrics  *metrics;
-    struct evpl_endpoint       *endpoint;
-    struct evpl_endpoint       *endpoint_rdma;
-    struct evpl_listener       *listener;
-    struct chimera_smb_session *sessions;
-    struct chimera_smb_session *free_sessions;
-    pthread_mutex_t             sessions_lock;
-    struct chimera_smb_share   *shares;
-    pthread_mutex_t             shares_lock;
-    struct chimera_smb_tree    *free_trees;
-    pthread_mutex_t             trees_lock;
+    struct chimera_smb_config        config;
+    int                              rdma;
+    enum evpl_protocol_id            tcp_protocol;
+    uint8_t                          guid[SMB2_GUID_SIZE];
+    gss_name_t                       svc;
+    gss_cred_id_t                    srv_cred;
+    struct chimera_vfs              *vfs;
+    struct prometheus_metrics       *metrics;
+    struct evpl_endpoint            *endpoint;
+    struct evpl_endpoint            *endpoint_rdma;
+    struct evpl_listener            *listener;
+    struct chimera_smb_session      *sessions;
+    struct chimera_smb_session      *free_sessions;
+    pthread_mutex_t                  sessions_lock;
+    struct chimera_smb_share        *shares;
+    pthread_mutex_t                  shares_lock;
+    struct chimera_smb_tree         *free_trees;
+    pthread_mutex_t                  trees_lock;
+    /* Monotonic, process-global allocator for file persistent ids.  Replaces
+     * the old per-tree counter so persistent ids stay unique across tree
+     * teardowns — a precondition for durable-handle reconnect lookup. */
+    _Atomic uint64_t                 next_persistent_id;
+    /* In-memory durable/persistent handle registry (see struct above). */
+    struct chimera_smb_durable_table durable;
 };
 
 /* Forward decl so the inline open_file release paths can call into
@@ -645,24 +745,140 @@ chimera_smb_open_file_drain_locks(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
 
+/* Durable/persistent handle registry (smb_durable.c). */
+void
+chimera_smb_durable_table_init(
+    struct chimera_smb_durable_table *table);
+void
+chimera_smb_durable_table_destroy(
+    struct chimera_smb_durable_table *table);
+void
+chimera_smb_durable_register(
+    struct chimera_server_smb_shared *shared,
+    struct chimera_smb_open_file     *open_file,
+    uint64_t                          session_id,
+    const uint8_t                    *client_guid,
+    const char                       *name,
+    uint32_t                          name_len,
+    bool                              persistent);
+void
+chimera_smb_durable_forget(
+    struct chimera_server_smb_shared *shared,
+    uint64_t                          persistent_id);
+void
+chimera_smb_durable_park(
+    struct chimera_server_smb_shared *shared,
+    struct chimera_smb_open_file     *open_file);
+struct chimera_smb_open_file *
+chimera_smb_durable_claim(
+    struct chimera_server_smb_shared *shared,
+    uint64_t                          persistent_id,
+    const uint8_t                    *create_guid,
+    const uint8_t                    *client_guid,
+    const char                       *name,
+    uint32_t                          name_len,
+    bool                              has_lease_ctx,
+    const uint8_t                    *lease_key,
+    bool                             *r_cold,
+    uint32_t                         *status);
+void
+chimera_smb_durable_sweep(
+    struct chimera_server_smb_thread *thread);
+
+/* Purge a parked (disconnected) durable open by persistent id when a new
+ * conflicting open arrives.  Returns true iff found+purged.  No-op for live,
+ * persistent, cold, or unknown ids. */
+bool
+chimera_smb_durable_purge_parked(
+    struct chimera_server_smb_thread *thread,
+    uint64_t                          persistent_id);
+
+/* Scan a share's backend (routed via `fh`) for persisted handle records and
+ * rebuild cold registry entries.  Best-effort, idempotent. */
+void
+chimera_smb_durable_recover_share(
+    struct chimera_server_smb_thread *thread,
+    const void                       *fh,
+    int                               fh_len);
+
+/* Add a cold (recovered-from-backend, not-yet-reopened) entry from a record
+ * read off the backend at startup.  Idempotent on persistent_id. */
+void
+chimera_smb_durable_recover_entry(
+    struct chimera_server_smb_shared        *shared,
+    const struct chimera_smb_durable_record *record);
+
+/* Build the backend KV key for a persistent id into buf (>= CHIMERA_SMB_DURABLE_KEY_LEN). */
+uint32_t
+chimera_smb_durable_key(
+    uint8_t *buf,
+    uint64_t persistent_id);
+
+/* Serialize a record into buf; returns bytes written (0 if buf too small). */
+uint32_t
+chimera_smb_durable_serialize(
+    uint8_t                                 *buf,
+    uint32_t                                 buf_size,
+    const struct chimera_smb_durable_record *record);
+
+/* Parse a serialized record; returns 0 on success, -1 on malformed input. */
+int
+chimera_smb_durable_deserialize(
+    const uint8_t                     *buf,
+    uint32_t                           buf_len,
+    struct chimera_smb_durable_record *record);
+
+/* A queued, self-contained SMB2 OPLOCK_BREAK notification, addressed to the
+ * holder connection's owning thread. Carries values only (no pointers into
+ * lease/open state that could be freed) plus the target conn; conn_free drains
+ * any messages still queued for a connection being torn down. */
+struct chimera_smb_lease_break_msg {
+    struct chimera_smb_conn            *conn;
+    bool                                is_lease;
+    uint8_t                             lease_key[16];
+    uint8_t                             current_state;
+    uint8_t                             new_state;
+    uint16_t                            new_epoch;
+    uint64_t                            file_id_pid;
+    uint64_t                            file_id_vid;
+    uint8_t                             new_oplock_level;
+    struct chimera_smb_lease_break_msg *next;
+};
+
 struct chimera_server_smb_thread {
-    struct evpl                       *evpl;
-    struct chimera_vfs_thread         *vfs_thread;
-    struct evpl_listener_binding      *binding;
-    struct chimera_server_smb_shared  *shared;
-    struct chimera_smb_request        *free_requests;
-    struct chimera_smb_compound       *free_compounds;
-    struct chimera_smb_conn           *free_conns;
-    struct chimera_smb_session_handle *free_session_handles;
-    struct chimera_smb_open_file      *free_open_files;
-    struct chimera_smb_signing_ctx    *signing_ctx;
-    struct chimera_smb_iconv_ctx       iconv_ctx;
+    struct evpl                        *evpl;
+    struct chimera_vfs_thread          *vfs_thread;
+    struct evpl_listener_binding       *binding;
+    struct chimera_server_smb_shared   *shared;
+    struct chimera_smb_request         *free_requests;
+    struct chimera_smb_compound        *free_compounds;
+    struct chimera_smb_conn            *free_conns;
+    struct chimera_smb_session_handle  *free_session_handles;
+    struct chimera_smb_open_file       *free_open_files;
+    struct chimera_smb_signing_ctx     *signing_ctx;
+    struct chimera_smb_iconv_ctx        iconv_ctx;
 
     /* Notify doorbell: VFS callbacks push ready notify requests here,
      * then ring the doorbell so the SMB thread processes them. */
-    struct evpl_doorbell               notify_doorbell;
-    struct chimera_smb_notify_request *notify_ready;
-    pthread_mutex_t                    notify_ready_lock;
+    struct evpl_doorbell                notify_doorbell;
+    struct chimera_smb_notify_request  *notify_ready;
+    pthread_mutex_t                     notify_ready_lock;
+
+    /* Lease-break doorbell: a lease break_cb may fire on any thread (the
+     * breaker's), but the OPLOCK_BREAK notification must be sent on the holder
+     * connection's owning thread (evpl iovec pools and binds are thread-local).
+     * The break_cb enqueues a self-contained message addressed to the holder
+     * thread and rings this doorbell; the handler sends it on the right thread.
+     * Enqueue is cross-thread (lock-protected); the handler and conn_free both
+     * run on this thread, so draining on disconnect needs no extra sync. */
+    struct evpl_doorbell                lease_break_doorbell;
+    struct chimera_smb_lease_break_msg *lease_break_ready;
+    pthread_mutex_t                     lease_break_lock;
+
+    /* Periodic sweep of the shared durable-handle registry for parked opens
+     * whose reconnect grace window has expired.  Each thread sweeps the shared
+     * table; entries are claimed under the registry lock so peers never race. */
+    struct evpl_timer                   durable_sweeper;
 };
 
 
@@ -889,6 +1105,7 @@ chimera_smb_conn_alloc(struct chimera_server_smb_thread *thread)
 
     if (conn) {
         LL_DELETE(thread->free_conns, conn);
+        conn->lease_break_tearing_down = 0;
     } else {
         conn = calloc(1, sizeof(*conn));
     }
@@ -907,7 +1124,8 @@ chimera_smb_conn_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_conn          *conn)
 {
-    struct chimera_smb_session_handle *session_handle, *tmp;
+    struct chimera_smb_session_handle  *session_handle, *tmp;
+    struct chimera_smb_lease_break_msg *bmsg, **bpp;
 
     /* Drop all parked CHANGE_NOTIFY requests silently — the bind is
      * being torn down so a CANCELLED reply would race the destroy and
@@ -915,6 +1133,25 @@ chimera_smb_conn_free(
     while (conn->parked_notifies) {
         chimera_smb_notify_drop(conn->parked_notifies);
     }
+
+    /* Drain any lease-break notifications still queued for this connection and
+     * mark it tearing-down so a break_cb racing on another thread won't enqueue
+     * a send against the bind we're about to free.  This runs on conn->thread,
+     * the same thread as the lease-break doorbell handler, so the two never
+     * interleave; only the cross-thread enqueue needs the lock. */
+    pthread_mutex_lock(&thread->lease_break_lock);
+    conn->lease_break_tearing_down = 1;
+    bpp                            = &thread->lease_break_ready;
+    while (*bpp) {
+        if ((*bpp)->conn == conn) {
+            bmsg = *bpp;
+            *bpp = bmsg->next;
+            free(bmsg);
+        } else {
+            bpp = &(*bpp)->next;
+        }
+    }
+    pthread_mutex_unlock(&thread->lease_break_lock);
 
     /* Clear create_conn pointers on every open_file that references
      * this conn.  When the session refcount drops to zero below, the
@@ -1037,8 +1274,25 @@ chimera_smb_tree_free(
         HASH_ITER(hh, tree->open_files[i], open_file, tmp)
         {
             chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at tree destruction");
-            open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
             HASH_DELETE(hh, tree->open_files[i], open_file);
+
+            /* Durable/persistent opens survive the connection: keep the object
+             * allocated with its leases, share reservation, byte-range locks
+             * and VFS handle intact, and hand ownership to the durable registry
+             * with a reconnect deadline.  Do NOT mark CLOSED (a reconnect must
+             * be able to re-home it), drain locks, release sharemode, or free.
+             * The single tree reference becomes the registry's reference, so
+             * refcnt is left untouched (steady-state 1). */
+            if (open_file->durable_flags) {
+                open_file->flags      |= CHIMERA_SMB_OPEN_FILE_PARKED;
+                open_file->create_conn = NULL;
+                /* park acquires the registry lock under this bucket lock —
+                 * the bucket -> registry order is observed everywhere. */
+                chimera_smb_durable_park(shared, open_file);
+                continue;
+            }
+
+            open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
 
             if (open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE &&
                 tree->share) {
@@ -1159,6 +1413,12 @@ chimera_smb_open_file_release(
     open_file->refcnt--;
 
     if (open_file->refcnt == 0) {
+        /* Final teardown of a live durable open (e.g. an explicit CLOSE):
+         * drop its registry entry before the object is recycled. */
+        if (open_file->durable_flags) {
+            chimera_smb_durable_forget(request->compound->thread->shared,
+                                       open_file->file_id.pid);
+        }
         chimera_smb_open_file_drain_locks(request->compound->thread, open_file);
         if (open_file->handle) {
             chimera_vfs_release(request->compound->thread->vfs_thread, open_file->handle);
@@ -1196,6 +1456,9 @@ chimera_smb_open_file_release_nr(
     open_file->refcnt--;
 
     if (open_file->refcnt == 0) {
+        if (open_file->durable_flags) {
+            chimera_smb_durable_forget(thread->shared, open_file->file_id.pid);
+        }
         chimera_smb_open_file_drain_locks(thread, open_file);
         if (open_file->handle) {
             chimera_vfs_release(thread->vfs_thread, open_file->handle);

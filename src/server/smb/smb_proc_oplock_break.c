@@ -225,12 +225,33 @@ chimera_smb_lease_break_cb(
         uint8_t new_smb     = chimera_smb_vfs_to_lease_bits(new_vfs);
 
         open_file->lease_epoch++;
-        chimera_smb_send_oplock_break_lease(open_file->create_conn,
-                                            open_file->lease_key,
-                                            current_smb,
-                                            new_smb,
-                                            open_file->lease_epoch);
         open_file->lease_state = new_smb;
+
+        /* break_cb may run on the breaker's thread, but the OPLOCK_BREAK
+         * notification must be sent on the holder connection's owning thread
+         * because evpl iovec pools and binds are thread-local. */
+        {
+            struct chimera_smb_conn            *conn = open_file->create_conn;
+            struct chimera_server_smb_thread   *bt   = conn->thread;
+            struct chimera_smb_lease_break_msg *msg;
+
+            pthread_mutex_lock(&bt->lease_break_lock);
+            if (!conn->lease_break_tearing_down) {
+                msg           = calloc(1, sizeof(*msg));
+                msg->conn     = conn;
+                msg->is_lease = true;
+                memcpy(msg->lease_key, open_file->lease_key, 16);
+                msg->current_state    = current_smb;
+                msg->new_state        = new_smb;
+                msg->new_epoch        = open_file->lease_epoch;
+                msg->next             = bt->lease_break_ready;
+                bt->lease_break_ready = msg;
+                pthread_mutex_unlock(&bt->lease_break_lock);
+                evpl_ring_doorbell(&bt->lease_break_doorbell);
+            } else {
+                pthread_mutex_unlock(&bt->lease_break_lock);
+            }
+        }
     } else {
         /* Legacy oplock — §2.2.23.1 notification keyed by FileId.  Break
          * to LEVEL_II when a read cache survives, otherwise to NONE. */
@@ -238,10 +259,27 @@ chimera_smb_lease_break_cb(
                             ? SMB2_OPLOCK_LEVEL_II
                             : SMB2_OPLOCK_LEVEL_NONE;
 
-        chimera_smb_send_oplock_break_legacy(open_file->create_conn,
-                                             open_file->file_id.pid,
-                                             open_file->file_id.vid,
-                                             new_level);
+        {
+            struct chimera_smb_conn            *conn = open_file->create_conn;
+            struct chimera_server_smb_thread   *bt   = conn->thread;
+            struct chimera_smb_lease_break_msg *msg;
+
+            pthread_mutex_lock(&bt->lease_break_lock);
+            if (!conn->lease_break_tearing_down) {
+                msg                   = calloc(1, sizeof(*msg));
+                msg->conn             = conn;
+                msg->is_lease         = false;
+                msg->file_id_pid      = open_file->file_id.pid;
+                msg->file_id_vid      = open_file->file_id.vid;
+                msg->new_oplock_level = new_level;
+                msg->next             = bt->lease_break_ready;
+                bt->lease_break_ready = msg;
+                pthread_mutex_unlock(&bt->lease_break_lock);
+                evpl_ring_doorbell(&bt->lease_break_doorbell);
+            } else {
+                pthread_mutex_unlock(&bt->lease_break_lock);
+            }
+        }
         open_file->oplock_level = new_level;
     }
 
@@ -255,6 +293,69 @@ chimera_smb_lease_break_cb(
         chimera_vfs_lease_ack(lease, m);
     }
 } /* chimera_smb_lease_break_cb */
+
+/* Doorbell handler: runs on a connection-owning SMB thread and sends the
+ * lease-break notifications that break_cbs (possibly on other threads) queued
+ * for connections owned by this thread.  Runs on the same thread as conn_free,
+ * so a connection in the drained list is guaranteed live here. */
+SYMBOL_EXPORT void
+chimera_smb_lease_break_doorbell_callback(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct chimera_server_smb_thread   *thread;
+    struct chimera_smb_lease_break_msg *list, *msg;
+
+    (void) evpl;
+
+    thread = container_of(doorbell, struct chimera_server_smb_thread,
+                          lease_break_doorbell);
+
+    pthread_mutex_lock(&thread->lease_break_lock);
+    list                      = thread->lease_break_ready;
+    thread->lease_break_ready = NULL;
+    pthread_mutex_unlock(&thread->lease_break_lock);
+
+    while (list) {
+        msg  = list;
+        list = list->next;
+        if (msg->is_lease) {
+            chimera_smb_send_oplock_break_lease(msg->conn, msg->lease_key,
+                                                msg->current_state, msg->new_state,
+                                                msg->new_epoch);
+        } else {
+            chimera_smb_send_oplock_break_legacy(msg->conn,
+                                                 msg->file_id_pid,
+                                                 msg->file_id_vid,
+                                                 msg->new_oplock_level);
+        }
+        free(msg);
+    }
+} /* chimera_smb_lease_break_doorbell_callback */
+
+void
+chimera_smb_lease_break_thread_init(struct chimera_server_smb_thread *thread)
+{
+    thread->lease_break_ready = NULL;
+    pthread_mutex_init(&thread->lease_break_lock, NULL);
+    evpl_add_doorbell(thread->evpl, &thread->lease_break_doorbell,
+                      chimera_smb_lease_break_doorbell_callback);
+} /* chimera_smb_lease_break_thread_init */
+
+void
+chimera_smb_lease_break_thread_destroy(struct chimera_server_smb_thread *thread)
+{
+    struct chimera_smb_lease_break_msg *msg;
+
+    evpl_remove_doorbell(thread->evpl, &thread->lease_break_doorbell);
+
+    while (thread->lease_break_ready) {
+        msg                       = thread->lease_break_ready;
+        thread->lease_break_ready = msg->next;
+        free(msg);
+    }
+    pthread_mutex_destroy(&thread->lease_break_lock);
+} /* chimera_smb_lease_break_thread_destroy */
 
 /* ----------------------------------------------------------------------
  * Inbound SMB2 OPLOCK_BREAK Acknowledgment from client
@@ -274,7 +375,6 @@ chimera_smb_parse_oplock_break(
 {
     uint16_t reserved;
     uint32_t reserved32;
-    uint64_t reserved64;
 
     if (request->request_struct_size == SMB2_OPLOCK_BREAK_ACK_LEASE_SIZE) {
         request->oplock_break.is_lease = true;
@@ -283,7 +383,10 @@ chimera_smb_parse_oplock_break(
         evpl_iovec_cursor_copy(request_cursor, request->oplock_break.lease_key, 16);
         evpl_iovec_cursor_get_uint32(request_cursor, &reserved32);
         request->oplock_break.lease_state = (uint8_t) (reserved32 & 0xff);
-        evpl_iovec_cursor_get_uint64(request_cursor, &reserved64);
+        /* LeaseDuration (8 bytes, reserved) sits at a 4-aligned offset; the
+         * aligning get_uint64 would skip to the next 8-boundary and overrun the
+         * 36-byte request.  It is unused, so just advance past it. */
+        evpl_iovec_cursor_skip(request_cursor, 8);
     } else if (request->request_struct_size == SMB2_OPLOCK_BREAK_ACK_LEGACY_SIZE) {
         request->oplock_break.is_lease = false;
         evpl_iovec_cursor_get_uint8(request_cursor, &request->oplock_break.oplock_level);

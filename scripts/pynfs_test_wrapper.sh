@@ -35,6 +35,8 @@ RESULTS_FILE="${SESSION_DIR}/results.json"
 CHIMERA_PID=""
 CHIMERA_LOG="${SESSION_DIR}/chimera.log"
 CHIMERA_DIED_DURING_TEST=0
+PYNFS_NFS4_LEASE_TIME="${PYNFS_NFS4_LEASE_TIME:-5}"
+PYNFS_NFS4_GRACE_TIME="${PYNFS_NFS4_GRACE_TIME:-10}"
 
 cleanup() {
     if [ -n "$CHIMERA_PID" ]; then
@@ -94,7 +96,7 @@ generate_config() {
             local devices_json=""
             for i in $(seq 0 9); do
                 local device_path="${SESSION_DIR}/device-${i}.img"
-                truncate -s 256G "$device_path"
+                truncate -s 1G "$device_path"
                 if [ $i -gt 0 ]; then
                     devices_json="${devices_json},"
                 fi
@@ -104,7 +106,7 @@ generate_config() {
             BACKEND="diskfs"
             vfs_section="\"vfs\": {
                 \"diskfs\": {
-                    \"config\": {\"devices\":[$devices_json]}
+                    \"config\": {\"devices\":[$devices_json],\"unsafe_async\":true}
                 }
             },"
             ;;
@@ -124,6 +126,8 @@ generate_config() {
         "threads": 4,
         "delegation_threads": 4,
         "nfs4_delegations": $DELEG_ENABLE,
+        "nfs4_lease_time": $PYNFS_NFS4_LEASE_TIME,
+        "nfs4_grace_time": $PYNFS_NFS4_GRACE_TIME,
         $vfs_section
         "external_portmap": false
     },
@@ -194,25 +198,29 @@ export PYTHONPATH="${PYNFS_DIR}:${PYTHONPATH:-}"
 # under a second; anything past this is hung. `timeout` returns 124 when it
 # fires, which we surface explicitly below.
 PYNFS_TIMEOUT="${PYNFS_TIMEOUT:-60}"
+PYNFS_DEP_ARGS=(--force)
+if [ "${PYNFS_RUNDEPS:-0}" = "1" ]; then
+    PYNFS_DEP_ARGS=(--rundeps --force)
+fi
 
 if [ "$NFS_MINOR_VERSION" = "0" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.0/testserver.py"
     # shellcheck disable=SC2086
     timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
         ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-        --maketree --force -v --json="${RESULTS_FILE}" $FLAG_ARGS
+        --maketree "${PYNFS_DEP_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
 elif [ "$NFS_MINOR_VERSION" = "1" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.1/testserver.py"
     # shellcheck disable=SC2086
     timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
         ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-        --minorversion=1 --maketree --force -v --json="${RESULTS_FILE}" $FLAG_ARGS
+        --minorversion=1 --maketree "${PYNFS_DEP_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
 elif [ "$NFS_MINOR_VERSION" = "2" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.1/testserver.py"
     # shellcheck disable=SC2086
     timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
         ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-        --minorversion=2 --maketree --force -v --json="${RESULTS_FILE}" $FLAG_ARGS
+        --minorversion=2 --maketree "${PYNFS_DEP_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
 else
     echo "Unsupported NFS minor version: $NFS_MINOR_VERSION"
     exit 1

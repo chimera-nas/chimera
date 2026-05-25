@@ -17,6 +17,7 @@
 #include "server_internal.h"
 #include "protocol.h"
 #include "nfs/nfs.h"
+#include "nfs/nfs4_lease.h"
 #include "s3/s3.h"
 #include "smb/smb.h"
 #include "vfs/vfs.h"
@@ -57,12 +58,15 @@ struct chimera_server_config {
     int                                   cache_ttl;
     int                                   nfs4_session_slots;
     int                                   nfs4_delegations;
+    uint32_t                              nfs4_lease_time_s;
+    uint32_t                              nfs4_grace_time_s;
     int                                   num_modules;
     int                                   metrics_port;
     int                                   rest_http_port;
     int                                   rest_https_port;
     int                                   smb_num_dialects;
     uint32_t                              smb_dialects[16];
+    int                                   smb_persistent_handles;
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
@@ -135,6 +139,10 @@ chimera_server_config_init(void)
 
     config->smb_num_nic_info = 0;
 
+    /* SMB3 durable/persistent handles are off by default; they are an
+     * opt-in feature gated by the "smb_persistent_handles" config flag. */
+    config->smb_persistent_handles = 0;
+
     // SMB auth config defaults - local NTLM only
     config->smb_auth.winbind_enabled    = 0;
     config->smb_auth.kerberos_enabled   = 0;
@@ -165,7 +173,9 @@ chimera_server_config_init(void)
      * default.  When off, every OPEN returns OPEN_DELEGATE_NONE and the
      * callback channel is never established.  Distinct from the VFS
      * sync_delegation/async_delegation thread-pool knobs above. */
-    config->nfs4_delegations = 0;
+    config->nfs4_delegations  = 0;
+    config->nfs4_lease_time_s = NFS4_LEASE_TIME_DEFAULT_S;
+    config->nfs4_grace_time_s = NFS4_GRACE_TIME_DEFAULT_S;
 
     strncpy(config->nfs_rdma_hostname, "0.0.0.0", sizeof(config->nfs_rdma_hostname));
     config->nfs_rdma_port    = 20049;
@@ -243,6 +253,20 @@ chimera_server_config_set_async_delegation_threads(
 } /* chimera_server_config_set_async_delegation_threads */
 
 SYMBOL_EXPORT void
+chimera_server_config_set_smb_persistent_handles(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->smb_persistent_handles = enable;
+} /* chimera_server_config_set_smb_persistent_handles */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_persistent_handles(const struct chimera_server_config *config)
+{
+    return config->smb_persistent_handles;
+} /* chimera_server_config_get_smb_persistent_handles */
+
+SYMBOL_EXPORT void
 chimera_server_config_set_max_open_files(
     struct chimera_server_config *config,
     int                           open_files)
@@ -316,6 +340,34 @@ chimera_server_config_get_nfs4_delegations(const struct chimera_server_config *c
 {
     return config->nfs4_delegations;
 } /* chimera_server_config_get_nfs4_delegations */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs4_lease_time(
+    struct chimera_server_config *config,
+    uint32_t                      seconds)
+{
+    config->nfs4_lease_time_s = seconds;
+} /* chimera_server_config_set_nfs4_lease_time */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_nfs4_lease_time(const struct chimera_server_config *config)
+{
+    return config->nfs4_lease_time_s;
+} /* chimera_server_config_get_nfs4_lease_time */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs4_grace_time(
+    struct chimera_server_config *config,
+    uint32_t                      seconds)
+{
+    config->nfs4_grace_time_s = seconds;
+} /* chimera_server_config_set_nfs4_grace_time */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_nfs4_grace_time(const struct chimera_server_config *config)
+{
+    return config->nfs4_grace_time_s;
+} /* chimera_server_config_get_nfs4_grace_time */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_kv_module(
@@ -882,13 +934,15 @@ SYMBOL_EXPORT int
 chimera_server_create_share(
     struct chimera_server *server,
     const char            *share_name,
-    const char            *share_path)
+    const char            *share_path,
+    int                    continuous_availability)
 {
     if (!server->smb_shared) {
         return -1;
     }
 
-    chimera_smb_add_share(server->smb_shared, share_name, share_path);
+    chimera_smb_add_share(server->smb_shared, share_name, share_path,
+                          continuous_availability);
 
     return 0;
 } /* chimera_server_create_share */

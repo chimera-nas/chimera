@@ -456,7 +456,7 @@ chimera_rest_handle_shares_create(
         return;
     }
 
-    rc = chimera_server_create_share(thread->shared->server, name, path);
+    rc = chimera_server_create_share(thread->shared->server, name, path, 0);
 
     json_decref(root);
 

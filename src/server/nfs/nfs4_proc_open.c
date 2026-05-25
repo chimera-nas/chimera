@@ -13,6 +13,8 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_state.h"
+#include "vfs/vfs_access.h"
+#include "vfs/vfs_acl.h"
 
 /*
  * Acquire a cross-protocol SHARE reservation in vfs_state for a freshly
@@ -261,6 +263,7 @@ static nfsstat4
 chimera_nfs4_open_install_state(
     struct nfs_request             *req,
     struct chimera_vfs_open_handle *handle,
+    const struct chimera_vfs_attrs *attr,
     struct stateid4                *out_stateid,
     uint32_t                       *out_rflags)
 {
@@ -275,6 +278,31 @@ chimera_nfs4_open_install_state(
     if (!client) {
         chimera_vfs_release(req->thread->vfs_thread, handle);
         return NFS4ERR_STALE_CLIENTID;
+    }
+    if (client->expired) {
+        client->expired = 0;
+        nfs_client_touch(client);
+    }
+
+    /* Enforce the object's ACL against the requested share access before the
+     * share-reservation check, so a permission failure surfaces as
+     * NFS4ERR_ACCESS (not NFS4ERR_SHARE_DENIED).  `attr` is NULL on a reopen by
+     * filehandle (CLAIM_FH), where access was already established. */
+    if (attr) {
+        uint32_t required = 0;
+
+        if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
+            required |= CHIMERA_ACE_READ_DATA;
+        }
+        if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
+            required |= CHIMERA_ACE_WRITE_DATA;
+        }
+
+        if (required &&
+            !chimera_vfs_access_allowed(attr, &req->cred, required)) {
+            chimera_vfs_release(req->thread->vfs_thread, handle);
+            return NFS4ERR_ACCESS;
+        }
     }
 
     owner = nfs_open_owner_find_or_create(client,
@@ -447,7 +475,7 @@ chimera_nfs4_open_exclusive_verify(
         memcpy(req->fh, handle->fh, handle->fh_len);
         req->fhlen = handle->fh_len;
 
-        status = chimera_nfs4_open_install_state(req, handle,
+        status = chimera_nfs4_open_install_state(req, handle, attr,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -534,7 +562,7 @@ chimera_nfs4_open_at_complete(
         memcpy(req->fh, handle->fh, handle->fh_len);
         req->fhlen = handle->fh_len;
 
-        status = chimera_nfs4_open_install_state(req, handle,
+        status = chimera_nfs4_open_install_state(req, handle, attr,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -608,7 +636,7 @@ chimera_nfs4_open_claim_fh_complete(
         uint32_t install_rflags = 0;
         lock_caps = handle->vfs_module->capabilities;
 
-        status = chimera_nfs4_open_install_state(req, handle,
+        status = chimera_nfs4_open_install_state(req, handle, NULL,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -884,6 +912,10 @@ chimera_nfs4_open(
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
+        if (client->expired) {
+            client->expired = 0;
+            nfs_client_touch(client);
+        }
 
         bool                   created;
         struct nfs_open_owner *owner = nfs_open_owner_find_or_create(
@@ -938,6 +970,15 @@ chimera_nfs4_open(
         if (g_status != NFS4_OK) {
             res->status = g_status;
             chimera_nfs4_open_complete(req, g_status);
+            return;
+        }
+
+        if (req->minorversion > 0 && !is_reclaim && req->session &&
+            nfs_recovery_in_grace(&thread->shared->nfs4_recovery) &&
+            !nfs4_client_reclaim_complete(&thread->shared->nfs4_shared_clients,
+                                          req->session->nfs4_session_clientid)) {
+            res->status = NFS4ERR_GRACE;
+            chimera_nfs4_open_complete(req, res->status);
             return;
         }
     }

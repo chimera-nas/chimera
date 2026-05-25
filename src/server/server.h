@@ -81,6 +81,15 @@ chimera_server_config_set_async_delegation_threads(
     int                           threads);
 
 void
+chimera_server_config_set_smb_persistent_handles(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_smb_persistent_handles(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_cache_ttl(
     struct chimera_server_config *config,
     int                           ttl);
@@ -105,6 +114,24 @@ chimera_server_config_set_nfs4_delegations(
 
 int
 chimera_server_config_get_nfs4_delegations(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_nfs4_lease_time(
+    struct chimera_server_config *config,
+    uint32_t                      seconds);
+
+uint32_t
+chimera_server_config_get_nfs4_lease_time(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_nfs4_grace_time(
+    struct chimera_server_config *config,
+    uint32_t                      seconds);
+
+uint32_t
+chimera_server_config_get_nfs4_grace_time(
     const struct chimera_server_config *config);
 
 void
@@ -368,7 +395,8 @@ int
 chimera_server_create_share(
     struct chimera_server *server,
     const char            *share_name,
-    const char            *share_path);
+    const char            *share_path,
+    int                    continuous_availability);
 
 int
 chimera_server_share_set_access_based_enum(

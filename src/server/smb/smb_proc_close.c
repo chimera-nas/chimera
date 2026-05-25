@@ -14,6 +14,16 @@
 static void chimera_smb_close_release(
     struct chimera_smb_request *request);
 
+/* Fire-and-forget completion for the persistent-handle record delete. */
+static void
+chimera_smb_close_durable_delete_callback(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    (void) error_code;
+    (void) private_data;
+} /* chimera_smb_close_durable_delete_callback */
+
 static void
 chimera_smb_close_doc_remove_callback(
     enum chimera_vfs_error    error_code,
@@ -184,6 +194,22 @@ chimera_smb_close(struct chimera_smb_request *request)
         request->tree->share) {
         chimera_smb_sharemode_release(&request->tree->share->sharemode,
                                       request->close.open_file);
+    }
+
+    /* Persistent handle: delete its backend record so a server restart does
+    * not resurrect a handle the client explicitly closed.  Best-effort and
+    * fire-and-forget; routed to the share's backend via the file handle. */
+    if ((request->close.open_file->flags & CHIMERA_SMB_OPEN_FILE_PERSISTED) &&
+        request->close.open_file->handle) {
+        uint8_t  dkey[CHIMERA_SMB_DURABLE_KEY_LEN];
+        uint32_t dkey_len = chimera_smb_durable_key(dkey, request->close.open_file->file_id.pid);
+
+        chimera_vfs_delete_key_at(thread->vfs_thread,
+                                  &request->session_handle->session->cred,
+                                  request->close.open_file->handle->fh,
+                                  request->close.open_file->handle->fh_len,
+                                  dkey, dkey_len,
+                                  chimera_smb_close_durable_delete_callback, NULL);
     }
 
     if (request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) {

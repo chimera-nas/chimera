@@ -360,6 +360,11 @@ nfs4_client_mark_reclaim_complete(
     struct nfs4_client_table *table,
     uint64_t                  client_id);
 
+bool
+nfs4_client_reclaim_complete(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id);
+
 /* DESTROY_CLIENTID (RFC 8881 §18.50): returns NFS4ERR_STALE_CLIENTID if no
  * such client, NFS4ERR_CLIENTID_BUSY if it still owns sessions, else removes
  * the record (tearing down its unified state hierarchy) and returns NFS4_OK. */

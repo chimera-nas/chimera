@@ -5,6 +5,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_attr.h"
 #include "nfs4_status.h"
+#include "server/server.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
@@ -74,7 +75,10 @@ chimera_nfs4_readdir_callback(
                                 /* entries share the directory's backend/fs */
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,
-                                                              req->fh, req->fhlen));
+                                                              req->fh, req->fhlen),
+                                chimera_server_config_get_nfs4_delegations(
+                                    req->thread->shared->config),
+                                req->thread->shared->nfs_lease_time_s);
 
     dbuf_cur = req->encoding->dbuf->used - dbuf_before;
 

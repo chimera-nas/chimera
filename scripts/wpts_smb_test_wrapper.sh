@@ -55,9 +55,25 @@ SHARES=(SMBBasic SMBEncrypted FileShare ShareForceLevel2)
 cleanup() {
     if [ -n "$CHIMERA_PID" ]; then
         kill "$CHIMERA_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            if ! kill -0 "$CHIMERA_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        if kill -0 "$CHIMERA_PID" 2>/dev/null; then
+            kill -9 "$CHIMERA_PID" 2>/dev/null || true
+        fi
         wait "$CHIMERA_PID" 2>/dev/null || true
     fi
-    ip netns delete "${NETNS_NAME}" 2>/dev/null || true
+    for pid in $(ip netns pids "${NETNS_NAME}" 2>/dev/null); do
+        kill "$pid" 2>/dev/null || true
+    done
+    sleep 0.1
+    for pid in $(ip netns pids "${NETNS_NAME}" 2>/dev/null); do
+        kill -9 "$pid" 2>/dev/null || true
+    done
+    timeout 2s ip netns delete "${NETNS_NAME}" 2>/dev/null || true
     rm -rf "$SESSION_DIR"
 }
 trap cleanup EXIT
@@ -73,14 +89,30 @@ generate_config() {
                 ;;
         esac
         mounts="${mounts}${sep}\"${share}\": {\"module\": \"${BACKEND}\", \"path\": \"${mpath}\"}"
-        shares="${shares}${sep}\"${share}\": {\"path\": \"/${share}\"}"
+        # FileShare is the designated continuous-availability share (matches
+        # CAShareName in the ptfconfig); mark it CA so persistent handles are
+        # granted there but not on the other (non-CA) shares.
+        local share_ca=""
+        if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ] && [ "$share" = "FileShare" ]; then
+            share_ca=', "continuous_availability": true'
+        fi
+        shares="${shares}${sep}\"${share}\": {\"path\": \"/${share}\"${share_ca}}"
         sep=",
         "
     done
 
+    # Enable SMB3 durable/persistent handles when requested (the durable/
+    # persistent WPTS cases need the feature on; default off keeps the rest of
+    # the suite exercising the baseline path).
+    local persistent_line=""
+    if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ]; then
+        persistent_line='"smb_persistent_handles": true,'
+    fi
+
     cat > "$CONFIG_FILE" << EOF
 {
     "server": {
+        ${persistent_line}
         "threads": 4,
         "delegation_threads": 4,
         "external_portmap": false
@@ -148,6 +180,18 @@ fi
 cp -f "${WPTS_PTFCONFIG_DIR}/CommonTestSuite.deployment.ptfconfig" \
       "${WPTS_PTFCONFIG_DIR}/MS-SMB2_ServerTestSuite.deployment.ptfconfig" \
       "${WPTS_BIN_DIR}/"
+
+# When persistent handles are enabled, advertise the matching capability +
+# CA-share to the test driver so the DurableHandleV2 / PersistentHandle cases
+# become applicable (otherwise they are Inconclusive/skipped).
+if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ]; then
+    staged="${WPTS_BIN_DIR}/CommonTestSuite.deployment.ptfconfig"
+    sed -i \
+        -e 's#<Property name="IsPersistentHandlesSupported" value="false"/>#<Property name="IsPersistentHandlesSupported" value="true"/>#' \
+        -e 's#<Property name="CAShareName" value=""/>#<Property name="CAShareName" value="FileShare"/>#' \
+        -e "s#<Property name=\"CAShareServerName\" value=\"\"/>#<Property name=\"CAShareServerName\" value=\"${SUT_IP}\"/>#" \
+        "$staged"
+fi
 
 mkdir -p "$RESULT_DIR"
 

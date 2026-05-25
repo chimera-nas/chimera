@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/ioctl.h>
+#include <sys/xattr.h>
 #include <linux/fs.h>
 #include <uthash.h>
 #include <jansson.h>
@@ -1592,6 +1593,158 @@ chimera_linux_getparent(
 } /* chimera_linux_getparent */
 
 static void
+chimera_linux_get_xattr(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int     fd = (int) request->get_xattr.handle->vfs_private;
+    char   *name;
+    ssize_t rc;
+
+    (void) private_data;
+
+    name = malloc(request->get_xattr.namelen + 1);
+    memcpy(name, request->get_xattr.name, request->get_xattr.namelen);
+    name[request->get_xattr.namelen] = '\0';
+
+    rc = fgetxattr(fd, name, request->get_xattr.value,
+                   request->get_xattr.value_maxlen);
+    free(name);
+
+    if (rc < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+    } else {
+        request->get_xattr.r_value_len = rc;
+        request->status                = CHIMERA_VFS_OK;
+    }
+
+    request->complete(request);
+} /* chimera_linux_get_xattr */
+
+static void
+chimera_linux_set_xattr(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int         fd = (int) request->set_xattr.handle->vfs_private;
+    char       *name;
+    int         flags = 0;
+    int         rc;
+    struct stat st;
+
+    (void) private_data;
+
+    if (request->set_xattr.option == CHIMERA_VFS_XATTR_CREATE) {
+        flags = XATTR_CREATE;
+    } else if (request->set_xattr.option == CHIMERA_VFS_XATTR_REPLACE) {
+        flags = XATTR_REPLACE;
+    }
+
+    if (fstat(fd, &st) < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+    chimera_linux_stat_to_attr(&request->set_xattr.r_pre_attr, &st);
+
+    name = malloc(request->set_xattr.namelen + 1);
+    memcpy(name, request->set_xattr.name, request->set_xattr.namelen);
+    name[request->set_xattr.namelen] = '\0';
+
+    rc = fsetxattr(fd, name, request->set_xattr.value,
+                   request->set_xattr.value_len, flags);
+    free(name);
+
+    if (rc < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+    } else if (fstat(fd, &st) < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+    } else {
+        chimera_linux_stat_to_attr(&request->set_xattr.r_post_attr, &st);
+        request->status = CHIMERA_VFS_OK;
+    }
+
+    request->complete(request);
+} /* chimera_linux_set_xattr */
+
+static void
+chimera_linux_list_xattrs(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int     fd = (int) request->list_xattrs.handle->vfs_private;
+    ssize_t rc;
+    char   *p, *end;
+
+    (void) private_data;
+
+    rc = flistxattr(fd, request->list_xattrs.buffer,
+                    request->list_xattrs.max_bytes);
+    if (rc < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+    if (rc > request->list_xattrs.max_bytes) {
+        request->status = CHIMERA_VFS_ERANGE;
+        request->complete(request);
+        return;
+    }
+
+    request->list_xattrs.r_len    = rc;
+    request->list_xattrs.r_eof    = 1;
+    request->list_xattrs.r_cookie = 0;
+
+    p   = request->list_xattrs.buffer;
+    end = p + rc;
+    while (p < end) {
+        request->list_xattrs.r_count++;
+        p += strlen(p) + 1;
+    }
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_linux_list_xattrs */
+
+static void
+chimera_linux_remove_xattr(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    int         fd = (int) request->remove_xattr.handle->vfs_private;
+    char       *name;
+    int         rc;
+    struct stat st;
+
+    (void) private_data;
+
+    if (fstat(fd, &st) < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        request->complete(request);
+        return;
+    }
+    chimera_linux_stat_to_attr(&request->remove_xattr.r_pre_attr, &st);
+
+    name = malloc(request->remove_xattr.namelen + 1);
+    memcpy(name, request->remove_xattr.name, request->remove_xattr.namelen);
+    name[request->remove_xattr.namelen] = '\0';
+
+    rc = fremovexattr(fd, name);
+    free(name);
+
+    if (rc < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+    } else if (fstat(fd, &st) < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+    } else {
+        chimera_linux_stat_to_attr(&request->remove_xattr.r_post_attr, &st);
+        request->status = CHIMERA_VFS_OK;
+    }
+
+    request->complete(request);
+} /* chimera_linux_remove_xattr */
+
+static void
 chimera_linux_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
@@ -1672,6 +1825,18 @@ chimera_linux_dispatch(
         case CHIMERA_VFS_OP_GETPARENT:
             chimera_linux_getparent(request, private_data);
             break;
+        case CHIMERA_VFS_OP_GET_XATTR:
+            chimera_linux_get_xattr(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_SET_XATTR:
+            chimera_linux_set_xattr(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_LIST_XATTRS:
+            chimera_linux_list_xattrs(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_REMOVE_XATTR:
+            chimera_linux_remove_xattr(request, private_data);
+            break;
         default:
             chimera_linux_error("linux_dispatch: unknown operation %d",
                                 request->opcode);
@@ -1688,7 +1853,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_linux = {
         CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_FS_PATH_OP |
         CHIMERA_VFS_CAP_FS_LOCK | CHIMERA_VFS_CAP_RPL |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE |
-        CHIMERA_VFS_CAP_DELEGATES_DAC
+        CHIMERA_VFS_CAP_DELEGATES_DAC | CHIMERA_VFS_CAP_XATTR
     ,
     .init           = chimera_linux_init,
     .destroy        = chimera_linux_destroy,

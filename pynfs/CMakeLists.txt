@@ -5,6 +5,8 @@
 set(CHIMERA_BINARY ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 set(PYNFS_WRAPPER ${CMAKE_SOURCE_DIR}/scripts/pynfs_test_wrapper.sh)
 set(PYNFS_DIR /opt/pynfs)
+set(PYNFS_STABLE_PASS_FILE ${CMAKE_CURRENT_SOURCE_DIR}/stable-passing-tests.txt)
+option(PYNFS_ENABLE_UNSTABLE_TESTS "Enable all generated pynfs tests, including tests outside the stable pass list" OFF)
 
 set(PYNFS_BACKENDS memfs linux io_uring diskfs_io_uring)
 
@@ -35,21 +37,10 @@ set(PYNFS_FLAGS_2 ${PYNFS_FLAGS_1} copy sparse)
 
 set(PYNFS_MINOR_VERSIONS 0 1 2)
 
-# Suites known to pass cleanly today.  Everything registered but not on these
-# lists is marked DISABLED so `ctest` neither runs nor fails it (the suite is
-# still listed, so the full matrix is visible and suites can be promoted here
-# as the server gains conformance).  Keep these sorted.
-set(PYNFS_PASS_0
-    access acl commit create getattr getfh link lockt lookup lookupp nverify
-    putpubfh putrootfh readdir readlink remove rename restorefh savefh verify)
-set(PYNFS_PASS_1
-    currentstateid destroy_clientid getfh lookup putfh rename verify xattr)
-set(PYNFS_PASS_2
-    destroy_clientid getfh lookup rename sparse verify xattr)
-
-# Backends on which the pass-lists above have been validated.  Other backends
-# register the same suites but leave them DISABLED until validated.
-set(PYNFS_PASS_BACKENDS memfs)
+# Exact CTest names validated as stable by repeated full-matrix pynfs runs.
+# Everything else is still registered but marked DISABLED, so the full matrix
+# remains visible and failed/flaky tests can be promoted individually.
+file(STRINGS ${PYNFS_STABLE_PASS_FILE} PYNFS_STABLE_PASS_TESTS)
 
 # Extra pynfs flag tokens for specific suites.  pynfs excludes any test tagged
 # with a "no<flag>" token, so this drops tests a suite pulls in that the server
@@ -57,44 +48,86 @@ set(PYNFS_PASS_BACKENDS memfs)
 # is not a pNFS server, so exclude it.
 set(PYNFS_EXTRA_currentstateid nopnfs)
 
-# Per-suite wall-clock timeout overrides for pynfs_test_wrapper.sh.  The
-# readdir group includes RDDR8b, which issues 300 READDIR compounds over a
-# 100-entry long-name directory.  It passes functionally, but slow arm64 CI
-# runners can exceed the wrapper's 60s default while still making progress.
-set(PYNFS_TIMEOUT_readdir 180)
+function(pynfs_codes_for_flag flag minor out_var)
+    if("${minor}" STREQUAL "0")
+        set(testserver ${PYNFS_DIR}/nfs4.0/testserver.py)
+    else()
+        set(testserver ${PYNFS_DIR}/nfs4.1/testserver.py)
+    endif()
 
-# Register one suite, enabling it only when both the backend and the
-# flag/minor pair are on the validated pass-lists; otherwise mark it DISABLED.
-function(pynfs_add_test flag backend minor)
-    set(name chimera/pynfs/${flag}_${backend}_nfs4.${minor})
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${PYNFS_DIR}"
+                python3 ${testserver} --showcodesflags
+        RESULT_VARIABLE result
+        OUTPUT_VARIABLE output
+        ERROR_VARIABLE error)
+
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR
+            "Failed to query pynfs test codes from ${testserver}: ${error}")
+    endif()
+
+    string(REPLACE "\n" ";" lines "${output}")
+    set(codes)
+    foreach(line IN LISTS lines)
+        if(line MATCHES "^([^ ]+) FLAGS: (.*)$")
+            set(code ${CMAKE_MATCH_1})
+            set(code_flags_text ${CMAKE_MATCH_2})
+            string(REPLACE ", " ";" code_flags "${code_flags_text}")
+
+            set(selected FALSE)
+            if("${flag}" IN_LIST code_flags)
+                set(selected TRUE)
+            endif()
+
+            foreach(extra IN LISTS PYNFS_EXTRA_${flag})
+                if(extra MATCHES "^no(.+)$")
+                    set(excluded_flag ${CMAKE_MATCH_1})
+                    if("${excluded_flag}" IN_LIST code_flags)
+                        set(selected FALSE)
+                    endif()
+                endif()
+            endforeach()
+
+            if(selected)
+                list(APPEND codes ${code})
+            endif()
+        endif()
+    endforeach()
+
+    list(REMOVE_DUPLICATES codes)
+    set(${out_var} ${codes} PARENT_SCOPE)
+endfunction()
+
+# Register one PyNFS code per CTest entry, enabling it only when the exact
+# generated test name is on the validated stable-pass list.
+function(pynfs_add_code_test flag code backend minor)
+    set(name chimera/pynfs/${flag}/${code}_${backend}_nfs4.${minor})
     add_test(NAME ${name}
         COMMAND bash ${PYNFS_WRAPPER}
-                ${CHIMERA_BINARY} ${backend} ${minor} ${PYNFS_DIR} ${flag}
-                ${PYNFS_EXTRA_${flag}})
+                ${CHIMERA_BINARY} ${backend} ${minor} ${PYNFS_DIR} ${code})
     set_tests_properties(${name} PROPERTIES
         LABELS pynfs
-        ENVIRONMENT "PYTHONUNBUFFERED=1")
+        ENVIRONMENT "PYTHONUNBUFFERED=1;PYNFS_RUNDEPS=1")
 
     if(DEFINED PYNFS_TIMEOUT_${flag})
         set_tests_properties(${name} PROPERTIES
-            ENVIRONMENT "PYTHONUNBUFFERED=1;PYNFS_TIMEOUT=${PYNFS_TIMEOUT_${flag}}")
+            ENVIRONMENT
+                "PYTHONUNBUFFERED=1;PYNFS_RUNDEPS=1;PYNFS_TIMEOUT=${PYNFS_TIMEOUT_${flag}}")
     endif()
 
-    set(enabled FALSE)
-    if(("${backend}" IN_LIST PYNFS_PASS_BACKENDS) AND
-       ("${flag}" IN_LIST PYNFS_PASS_${minor}))
-        set(enabled TRUE)
-    endif()
-
-    if(NOT enabled)
+    if(NOT PYNFS_ENABLE_UNSTABLE_TESTS AND NOT "${name}" IN_LIST PYNFS_STABLE_PASS_TESTS)
         set_tests_properties(${name} PROPERTIES DISABLED TRUE)
     endif()
 endfunction()
 
 foreach(minor ${PYNFS_MINOR_VERSIONS})
     foreach(flag ${PYNFS_FLAGS_${minor}})
+        pynfs_codes_for_flag(${flag} ${minor} codes)
         foreach(backend ${PYNFS_BACKENDS})
-            pynfs_add_test(${flag} ${backend} ${minor})
+            foreach(code ${codes})
+                pynfs_add_code_test(${flag} ${code} ${backend} ${minor})
+            endforeach()
         endforeach()
     endforeach()
 endforeach()
@@ -104,8 +137,15 @@ endforeach()
 # that brings up both (memfs MDS on :2049 + memfs data_server on :2050) and runs
 # pynfs's `flex` flag against the MDS.  memfs only.
 set(PNFS_WRAPPER ${CMAKE_SOURCE_DIR}/scripts/pynfs_pnfs_test_wrapper.sh)
-add_test(NAME chimera/pynfs/flex_memfs_nfs4.1
-    COMMAND bash ${PNFS_WRAPPER} ${CHIMERA_BINARY} ${PYNFS_DIR} flex)
-set_tests_properties(chimera/pynfs/flex_memfs_nfs4.1 PROPERTIES
-    LABELS pynfs
-    ENVIRONMENT "PYTHONUNBUFFERED=1")
+pynfs_codes_for_flag(flex 1 PYNFS_FLEX_CODES)
+foreach(code ${PYNFS_FLEX_CODES})
+    set(name chimera/pynfs/flex/${code}_memfs_nfs4.1)
+    add_test(NAME ${name}
+        COMMAND bash ${PNFS_WRAPPER} ${CHIMERA_BINARY} ${PYNFS_DIR} ${code})
+    set_tests_properties(${name} PROPERTIES
+        LABELS pynfs
+        ENVIRONMENT "PYTHONUNBUFFERED=1;PYNFS_RUNDEPS=1")
+    if(NOT PYNFS_ENABLE_UNSTABLE_TESTS AND NOT "${name}" IN_LIST PYNFS_STABLE_PASS_TESTS)
+        set_tests_properties(${name} PROPERTIES DISABLED TRUE)
+    endif()
+endforeach()

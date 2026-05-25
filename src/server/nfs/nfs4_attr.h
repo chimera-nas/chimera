@@ -8,6 +8,7 @@
 
 /* XXX */
 #include <sys/stat.h>
+#include <string.h>
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_acl.h"
@@ -154,6 +155,25 @@ chimera_nfs4_attr2mask(
 
     return attr_mask;
 } /* chimera_nfs4_getattr2mask */
+
+static inline void
+chimera_nfs4_attrs_fill_filehandle(
+    struct chimera_vfs_attrs *attr,
+    uint32_t                  num_req_mask,
+    const uint32_t           *req_mask,
+    const void               *fh,
+    int                       fhlen)
+{
+    if (num_req_mask < 1 ||
+        !(req_mask[0] & (1 << FATTR4_FILEHANDLE)) ||
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        return;
+    }
+
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
+    attr->va_fh_len    = fhlen;
+    memcpy(attr->va_fh, fh, fhlen);
+} /* chimera_nfs4_attrs_fill_filehandle */
 
 static inline int
 chimera_nfs4_mask2attr(
@@ -321,7 +341,9 @@ chimera_nfs4_marshall_attrs(
     uint32_t                       *attrvals_len,
     uint32_t                        max_attrvals,
     uint8_t                         minorversion,
-    uint32_t                        pnfs_layout_type)
+    uint32_t                        pnfs_layout_type,
+    int                             nfs4_delegations,
+    uint32_t                        lease_time_s)
 {
     /* pnfs_layout_type is the single layouttype4 this file's backend supports
      * (LAYOUT4_FLEX_FILES 0x4 or LAYOUT4_BLOCK_VOLUME 0x3), or 0 when pNFS is
@@ -393,8 +415,11 @@ chimera_nfs4_marshall_attrs(
                                             (pnfs_layout_type ? (1UL << (FATTR4_FS_LAYOUT_TYPES - 32)) : 0));
 
             if (minorversion >= 1) {
-                uint32_t word2 = (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64)) |
-                    (1 << (FATTR4_OPEN_ARGUMENTS - 64));
+                uint32_t word2 = (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64));
+
+                if (nfs4_delegations) {
+                    word2 |= (1 << (FATTR4_OPEN_ARGUMENTS - 64));
+                }
 
                 /* Extended attributes (RFC 8276) are an NFSv4.2 feature. */
                 if (minorversion >= 2) {
@@ -499,7 +524,7 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[0]  |= (1 << FATTR4_LEASE_TIME);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, NFS4_LEASE_TIME_DEFAULT_S);
+            chimera_nfs4_attr_append_uint32(&attrs, lease_time_s);
         }
 
         if (req_mask[0] & (1 << FATTR4_ACL)) {
@@ -783,7 +808,8 @@ chimera_nfs4_marshall_attrs(
                                             (1UL << (FATTR4_OWNER_GROUP - 32)));
         }
 
-        if (req_mask[2] & (1 << (FATTR4_OPEN_ARGUMENTS - 64))) {
+        if (nfs4_delegations &&
+            (req_mask[2] & (1 << (FATTR4_OPEN_ARGUMENTS - 64)))) {
             rsp_mask[2]  |= (1 << (FATTR4_OPEN_ARGUMENTS - 64));
             *num_rsp_mask = 3;
 

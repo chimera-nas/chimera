@@ -370,6 +370,11 @@ main(
         chimera_server_config_set_async_delegation_threads(server_config, int_value);
     }
 
+    json_value = json_object_get(server_params, "smb_persistent_handles");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_smb_persistent_handles(server_config, json_is_true(json_value));
+    }
+
     json_value = json_object_get(server_params, "nfs4_session_slots");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);
@@ -379,6 +384,22 @@ main(
     json_value = json_object_get(server_params, "nfs4_delegations");
     if (json_is_boolean(json_value)) {
         chimera_server_config_set_nfs4_delegations(server_config, json_is_true(json_value));
+    }
+
+    json_value = json_object_get(server_params, "nfs4_lease_time");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        if (int_value > 0) {
+            chimera_server_config_set_nfs4_lease_time(server_config, (uint32_t) int_value);
+        }
+    }
+
+    json_value = json_object_get(server_params, "nfs4_grace_time");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        if (int_value > 0) {
+            chimera_server_config_set_nfs4_grace_time(server_config, (uint32_t) int_value);
+        }
     }
 
     json_value = json_object_get(server_params, "external_portmap");
@@ -679,9 +700,12 @@ main(
     if (shares) {
         json_object_foreach(shares, name, share)
         {
+            json_t *ca = json_object_get(share, "continuous_availability");
+
             path = json_string_value(json_object_get(share, "path"));
             chimera_server_info("Adding SMB share %s -> %s", name, path);
-            chimera_server_create_share(server, name, path);
+            chimera_server_create_share(server, name, path,
+                                        json_is_true(ca) ? 1 : 0);
         }
     }
 

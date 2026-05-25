@@ -25,9 +25,10 @@ chimera_nfs4_getattr_finish(
     struct nfs_request       *req,
     struct chimera_vfs_attrs *attr)
 {
-    struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
-    struct GETATTR4res  *res  = &req->res_compound.resarray[req->index].opgetattr;
-    int                  rc;
+    struct GETATTR4args     *args = &req->args_compound->argarray[req->index].opgetattr;
+    struct GETATTR4res      *res  = &req->res_compound.resarray[req->index].opgetattr;
+    struct chimera_vfs_attrs marshall_attr;
+    int                      rc;
 
     res->status = NFS4_OK;
 
@@ -42,14 +43,22 @@ chimera_nfs4_getattr_finish(
         return;
     }
 
-    /* Size the attribute buffer to hold a variable-length ACL when one is
-     * present, so FATTR4_ACL is never silently dropped for lack of space. */
-    uint32_t attrvals_cap = 4096;
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
-        attrvals_cap += chimera_nfs4_acl_wire_size(attr->va_acl);
-    } else if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
-        attrvals_cap += chimera_nfs4_acl_wire_size(NULL) +
-            8 * (4 * sizeof(uint32_t) + ((CHIMERA_IDMAP_WHO_MAX + 3) & ~3u));
+    /* Size the attribute buffer to hold a variable-length ACL, but only when
+     * the client actually requested FATTR4_ACL -- otherwise every getattr would
+     * over-reserve (e.g. a plain SIZE query that the backend answers with the
+     * full stat set), bloating large COMPOUNDs.  When the ACL is requested we
+     * size it from the object's ACL if present, or from a mode-synthesised ACL
+     * (mode-only backends) otherwise. */
+    uint32_t attrvals_cap  = 4096;
+    int      acl_requested = args->num_attr_request >= 1 &&
+        (args->attr_request[0] & (1 << FATTR4_ACL));
+    if (acl_requested) {
+        if (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+            attrvals_cap += chimera_nfs4_acl_wire_size(attr->va_acl);
+        } else {
+            attrvals_cap += chimera_nfs4_acl_wire_size(NULL) +
+                8 * (4 * sizeof(uint32_t) + ((CHIMERA_IDMAP_WHO_MAX + 3) & ~3u));
+        }
     }
 
     rc = xdr_dbuf_alloc_opaque(&res->resok4.obj_attributes.attr_vals,
@@ -65,7 +74,14 @@ chimera_nfs4_getattr_finish(
         return;
     }
 
-    chimera_nfs4_marshall_attrs(attr,
+    marshall_attr = *attr;
+    chimera_nfs4_attrs_fill_filehandle(&marshall_attr,
+                                       args->num_attr_request,
+                                       args->attr_request,
+                                       req->fh,
+                                       req->fhlen);
+
+    chimera_nfs4_marshall_attrs(&marshall_attr,
                                 args->num_attr_request,
                                 args->attr_request,
                                 &res->resok4.obj_attributes.num_attrmask,
@@ -77,7 +93,10 @@ chimera_nfs4_getattr_finish(
                                 req->minorversion,
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,
-                                                              req->fh, req->fhlen));
+                                                              req->fh, req->fhlen),
+                                chimera_server_config_get_nfs4_delegations(
+                                    req->thread->shared->config),
+                                req->thread->shared->nfs_lease_time_s);
 
     if (req->handle) {
         chimera_vfs_release(req->thread->vfs_thread, req->handle);

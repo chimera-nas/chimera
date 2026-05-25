@@ -61,6 +61,7 @@ struct nfs4_root_readdir_lookup_ctx {
     enum chimera_vfs_error error_code;
     struct entry4       *entry;
     struct READDIR4args *args;
+    uint32_t             lease_time_s;
 };
 
 static void
@@ -157,7 +158,9 @@ nfs4_root_readdir_lookup_callback(
                                 &entry->attrs.attr_vals.len,
                                 256,
                                 0,
-                                0 /* pNFS not advertised on the pseudo-fs root */);
+                                0, /* pNFS not advertised on the pseudo-fs root */
+                                0,
+                                ctx->lease_time_s);
 } /* nfs4_root_readdir_lookup_callback */
 
 struct nfs4_root_readdir_itr_ctx {
@@ -243,9 +246,10 @@ nfs4_root_readdir_itr_cb(
         ctx->error_code           = CHIMERA_VFS_EOVERFLOW;
         return -1;
     }
-    lookup_ctx.entry      = entry;
-    lookup_ctx.args       = args;
-    lookup_ctx.error_code = CHIMERA_VFS_OK;
+    lookup_ctx.entry        = entry;
+    lookup_ctx.args         = args;
+    lookup_ctx.error_code   = CHIMERA_VFS_OK;
+    lookup_ctx.lease_time_s = req->thread->shared->nfs_lease_time_s;
     chimera_vfs_lookup(ctx->vfs_thread,
                        &req->cred,
                        ctx->root_fh,

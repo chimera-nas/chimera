@@ -132,8 +132,15 @@ chimera_smb_tree_connect_reply(
         evpl_iovec_cursor_append_uint32(reply_cursor, share_flags);
     }
 
-    /* Capabilitiers */
-    evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+    /* Capabilities — advertise continuous availability for disk shares backed
+    * by a CA-enabled share (gates persistent-handle grants on the client). */
+    uint32_t share_caps = 0;
+
+    if (!request->tree_connect.is_ipc && request->tree &&
+        request->tree->share && request->tree->share->continuous_availability) {
+        share_caps |= SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY;
+    }
+    evpl_iovec_cursor_append_uint32(reply_cursor, share_caps);
 
     /* Maximal Access 0x001F01FF (ful RW) */
     evpl_iovec_cursor_append_uint32(reply_cursor, 0x001F01FF);

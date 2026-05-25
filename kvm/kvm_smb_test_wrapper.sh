@@ -87,7 +87,7 @@ generate_config() {
             local devices_json=""
             for i in $(seq 0 9); do
                 local device_path="${SESSION_DIR}/device-${i}.img"
-                truncate -s 256G "$device_path"
+                truncate -s 1G "$device_path"
                 if [ $i -gt 0 ]; then
                     devices_json="${devices_json},"
                 fi
@@ -97,7 +97,7 @@ generate_config() {
             BACKEND="diskfs"
             vfs_section="\"vfs\": {
                 \"diskfs\": {
-                    \"config\": {\"devices\":[$devices_json]}
+                    \"config\": {\"devices\":[$devices_json],\"unsafe_async\":true}
                 }
             },"
             ;;

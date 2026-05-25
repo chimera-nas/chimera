@@ -121,7 +121,7 @@ chimera_nfs4_listxattrs(
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                         req->fh,
                         req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                        CHIMERA_VFS_OPEN_INFERRED,
                         chimera_nfs4_listxattrs_open_callback,
                         req);
 } /* chimera_nfs4_listxattrs */

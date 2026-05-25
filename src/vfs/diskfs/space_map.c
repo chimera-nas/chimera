@@ -28,6 +28,9 @@
 #define sm_info(...) \
         chimera_info("space_map", __FILE__, __LINE__, __VA_ARGS__)
 
+#define SM_PERSIST_BATCH_OPS   128U
+#define SM_PERSIST_BATCH_BYTES (16ULL << 20)
+
 /*
  * Append one allocation/free delta to the AG's active log slot, journaled
  * through the current transaction (via jnl) so it rides the main redo log and
@@ -41,53 +44,96 @@
  * not yet implemented; the 4 MiB region holds ~128K deltas per AG between
  * clean unmounts, which re-condense.  Overflow aborts (TODO).
  */
-static void
-sm_ag_journal_delta(
+/*
+ * The two AG-log blocks an upcoming delta touches, claimed (and pinned into the
+ * journaling transaction) up front so the actual write never faults.  Filled by
+ * sm_ag_journal_claim; consumed by sm_ag_journal_write.  blk_buf == NULL means
+ * "no journaling" (jnl was NULL, e.g. format/bootstrap).
+ */
+struct sm_ag_jnl_slot {
+    void    *hdr_buf;
+    void    *blk_buf;
+    uint32_t in_block;
+    uint32_t idx;
+};
+
+/*
+ * Claim the AG's log header + current delta block for an upcoming delta, BEFORE
+ * any allocator state is mutated.  Caller holds ag->lock.  All disk access is
+ * async: claim_block returns NULL when the block is not resident (it parks the
+ * journaling request and issues the read), in which case this returns SM_AGAIN
+ * and the caller must unwind and retry the whole operation once resumed -- no
+ * state has changed, so the retry is clean.  Claims the header (is_new == 0, so
+ * it may need a read) first, so an SM_AGAIN there leaves nothing half-claimed;
+ * a new delta block (in_block == 0) is is_new and never reads.
+ */
+static int
+sm_ag_journal_claim(
     struct sm_ag            *ag,
     const struct sm_journal *jnl,
-    uint32_t                 op,
-    uint64_t                 offset,
-    uint64_t                 length)
+    struct sm_ag_jnl_slot   *slot)
 {
-    uint64_t                 slot_base, region_off, delta_byte, blk_off;
-    uint32_t                 idx, in_block;
-    struct sm_ag_log_header *h;
-    struct sm_ag_log_delta  *d;
-    void                    *blk_buf, *hdr_buf;
+    uint64_t slot_base, region_off, delta_byte, blk_off;
 
     if (!jnl) {
-        return;
+        slot->blk_buf = NULL;
+        return 0;
     }
 
     slot_base  = ag->log_offset + (uint64_t) ag->log_slot * SM_AG_LOG_SLOT_SIZE;
     region_off = (sizeof(struct sm_ag_log_header) +
                   (uint64_t) ag->log_base_count * sizeof(struct sm_ag_log_ext) +
                   SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
-    idx = ag->log_delta_count;
+    slot->idx = ag->log_delta_count;
 
-    delta_byte = region_off + (uint64_t) idx * sizeof(struct sm_ag_log_delta);
+    delta_byte = region_off + (uint64_t) slot->idx * sizeof(struct sm_ag_log_delta);
     sm_abort_if(delta_byte + sizeof(struct sm_ag_log_delta) > SM_AG_LOG_SLOT_SIZE,
                 "AG %u/%u delta region full (%u deltas) -- condensation TODO",
-                ag->device_id, ag->ag_index, idx);
+                ag->device_id, ag->ag_index, slot->idx);
 
-    blk_off  = slot_base + (delta_byte & ~((uint64_t) SM_BLOCK_SIZE - 1));
-    in_block = (uint32_t) (delta_byte & (SM_BLOCK_SIZE - 1));
+    blk_off        = slot_base + (delta_byte & ~((uint64_t) SM_BLOCK_SIZE - 1));
+    slot->in_block = (uint32_t) (delta_byte & (SM_BLOCK_SIZE - 1));
 
-    /* First delta in a block starts from a zeroed block; later ones modify the
-     * resident block. */
-    blk_buf   = jnl->claim_block(jnl->user, ag->device_id, blk_off, in_block == 0);
-    d         = (struct sm_ag_log_delta *) ((char *) blk_buf + in_block);
+    slot->hdr_buf = jnl->claim_block(jnl->user, ag->device_id, slot_base, 0);
+    if (!slot->hdr_buf) {
+        return SM_AGAIN;
+    }
+    slot->blk_buf = jnl->claim_block(jnl->user, ag->device_id, blk_off,
+                                     slot->in_block == 0);
+    if (!slot->blk_buf) {
+        return SM_AGAIN;
+    }
+    return 0;
+} /* sm_ag_journal_claim */
+
+/* Write the delta into the pre-claimed log blocks.  Caller holds ag->lock and
+ * has already mutated the free tree; this cannot fault. */
+static void
+sm_ag_journal_write(
+    struct sm_ag                *ag,
+    const struct sm_ag_jnl_slot *slot,
+    uint32_t                     op,
+    uint64_t                     offset,
+    uint64_t                     length)
+{
+    struct sm_ag_log_header *h;
+    struct sm_ag_log_delta  *d;
+
+    if (!slot->blk_buf) {
+        return;     /* no journaling */
+    }
+
+    d         = (struct sm_ag_log_delta *) ((char *) slot->blk_buf + slot->in_block);
     d->offset = offset;
     d->length = length;
     d->op     = op;
     d->pad    = 0;
     d->pad2   = 0;
 
-    hdr_buf             = jnl->claim_block(jnl->user, ag->device_id, slot_base, 0);
-    h                   = (struct sm_ag_log_header *) hdr_buf;
-    h->delta_count      = idx + 1;
-    ag->log_delta_count = idx + 1;
-} /* sm_ag_journal_delta */
+    h                   = (struct sm_ag_log_header *) slot->hdr_buf;
+    h->delta_count      = slot->idx + 1;
+    ag->log_delta_count = slot->idx + 1;
+} /* sm_ag_journal_write */
 
 static struct sm_extent *
 sm_extent_new(
@@ -439,19 +485,28 @@ sm_pick_and_alloc(
         pthread_mutex_unlock(&sm->lock);
 
         for (a = 0; a < dev->num_ags; a++) {
-            uint32_t      ag_idx = (start_ag + a) % dev->num_ags;
-            struct sm_ag *ag     = &dev->ags[ag_idx];
-            uint64_t      offset;
-            int           rc;
+            uint32_t              ag_idx = (start_ag + a) % dev->num_ags;
+            struct sm_ag         *ag     = &dev->ags[ag_idx];
+            struct sm_ag_jnl_slot slot;
+            uint64_t              offset;
+            int                   rc, jrc;
 
             if (ag->free_bytes < want) {
                 continue;
             }
 
             pthread_mutex_lock(&ag->lock);
+            /* Claim the log blocks before mutating: on a journal-block miss this
+             * returns SM_AGAIN with nothing changed, so the parked caller can
+             * cleanly retry the whole allocation once the read completes. */
+            jrc = sm_ag_journal_claim(ag, jnl, &slot);
+            if (jrc == SM_AGAIN) {
+                pthread_mutex_unlock(&ag->lock);
+                return SM_AGAIN;
+            }
             rc = sm_ag_alloc_locked(ag, want, &offset);
             if (rc == 0) {
-                sm_ag_journal_delta(ag, jnl, SM_AG_LOG_OP_ALLOC, offset, want);
+                sm_ag_journal_write(ag, &slot, SM_AG_LOG_OP_ALLOC, offset, want);
             }
             pthread_mutex_unlock(&ag->lock);
 
@@ -468,52 +523,54 @@ sm_pick_and_alloc(
 } /* sm_pick_and_alloc */
 
 int
-space_map_alloc(
+space_map_reserve(
     struct space_map        *sm,
     struct sm_thread_cache  *cache,
     const struct sm_journal *jnl,
-    uint64_t                 size,
-    uint32_t                *r_device_id,
-    uint64_t                *r_device_offset)
+    uint64_t                 min_bytes)
 {
-    uint64_t need = SM_ALIGN_UP(size);
+    uint64_t need = SM_ALIGN_UP(min_bytes);
     uint64_t want;
     int      rc;
 
-    sm_abort_if(need == 0, "alloc of zero bytes");
-
-    if (cache->valid && cache->length >= need) {
-        *r_device_id     = cache->device_id;
-        *r_device_offset = cache->offset;
-        cache->offset   += need;
-        cache->length   -= need;
-        if (cache->length == 0) {
-            cache->valid = 0;
-        }
+    if (need == 0 || (cache->valid && cache->length >= need)) {
         return 0;
     }
 
-    /* Cache cannot satisfy this request.  Return the unused remainder and
-     * grab a fresh reservation. */
+    /* Cache cannot cover the request.  Return the unused remainder and grab a
+     * fresh reservation.  Both the return (a FREE delta) and the refill (an
+     * ALLOC delta) journal, so either may park on a cold log block and return
+     * SM_AGAIN; the request is then parked and re-driven from the top.  This
+     * stays retry-safe: the return clears cache->valid on success, so a retry
+     * skips it, and the refill mutates nothing until its log blocks are claimed
+     * (see sm_pick_and_alloc). */
     if (cache->valid) {
-        space_map_thread_cache_return(sm, jnl, cache);
+        rc = space_map_thread_cache_return(sm, jnl, cache);
+        if (rc == SM_AGAIN) {
+            return SM_AGAIN;
+        }
     }
 
     want = need > SM_RESERVATION_MIN ? need : SM_RESERVATION_MIN;
 
-    /* If a reservation crosses an AG boundary it can't be contiguous, so cap
-     * the request to the AG size.  Callers requesting more than SM_AG_SIZE
-     * cannot be satisfied. */
+    /* A reservation can't cross an AG boundary, so cap at the AG size; a
+     * caller needing more than SM_AG_SIZE contiguous cannot be satisfied. */
     if (want > SM_AG_SIZE) {
         return -1;
     }
 
     rc = sm_pick_and_alloc(sm, jnl, want, &cache->device_id, &cache->offset);
+    if (rc == SM_AGAIN) {
+        return SM_AGAIN;
+    }
     if (rc != 0) {
         /* Try the smaller exact size before giving up, in case fragmentation
          * blocks the reservation but the caller's actual ask is small. */
         if (want != need) {
             rc = sm_pick_and_alloc(sm, jnl, need, &cache->device_id, &cache->offset);
+            if (rc == SM_AGAIN) {
+                return SM_AGAIN;
+            }
             if (rc == 0) {
                 cache->length = need;
                 cache->valid  = 1;
@@ -525,6 +582,30 @@ space_map_alloc(
     } else {
         cache->length = want;
         cache->valid  = 1;
+    }
+    return 0;
+} /* space_map_reserve */
+
+int
+space_map_alloc(
+    struct space_map        *sm,
+    struct sm_thread_cache  *cache,
+    const struct sm_journal *jnl,
+    uint64_t                 size,
+    uint32_t                *r_device_id,
+    uint64_t                *r_device_offset)
+{
+    uint64_t need = SM_ALIGN_UP(size);
+    int      rc;
+
+    sm_abort_if(need == 0, "alloc of zero bytes");
+
+    /* Ensure the cache covers `need` (refilling -- journals, may SM_AGAIN),
+     * then dole from it.  Callers that have front-loaded the reservation via
+     * space_map_reserve hit the fast path here with no journaling. */
+    rc = space_map_reserve(sm, cache, jnl, need);
+    if (rc != 0) {
+        return rc;     /* SM_AGAIN or -1 (ENOSPC) */
     }
 
     *r_device_id     = cache->device_id;
@@ -603,7 +684,7 @@ sm_free_block_range(
  * (and a still-cached/pinned metadata block from being reclaimed) before the
  * transaction that freed it has committed.
  */
-void
+int
 space_map_free_journal(
     struct space_map        *sm,
     const struct sm_journal *jnl,
@@ -611,17 +692,27 @@ space_map_free_journal(
     uint64_t                 device_offset,
     uint64_t                 length)
 {
-    uint64_t      offset, aligned;
-    struct sm_ag *ag;
+    uint64_t              offset, aligned;
+    struct sm_ag         *ag;
+    struct sm_ag_jnl_slot slot;
+    int                   jrc;
 
     if (!sm_free_block_range(device_offset, length, &offset, &aligned)) {
-        return;
+        return 0;
     }
     ag = sm_free_resolve_ag(sm, device_id, offset, aligned, "space_map_free_journal");
 
     pthread_mutex_lock(&ag->lock);
-    sm_ag_journal_delta(ag, jnl, SM_AG_LOG_OP_FREE, offset, aligned);
+    /* Claim before write; on a cold log block this parks the caller and
+     * returns SM_AGAIN with nothing changed, for a clean retry. */
+    jrc = sm_ag_journal_claim(ag, jnl, &slot);
+    if (jrc == SM_AGAIN) {
+        pthread_mutex_unlock(&ag->lock);
+        return SM_AGAIN;
+    }
+    sm_ag_journal_write(ag, &slot, SM_AG_LOG_OP_FREE, offset, aligned);
     pthread_mutex_unlock(&ag->lock);
+    return 0;
 } /* space_map_free_journal */
 
 /*
@@ -656,7 +747,7 @@ space_map_free_apply(
  * -- e.g. returning a thread's leftover reservation.  Transactional frees use
  * the pending (journal-then-apply-on-commit) path instead.
  */
-void
+int
 space_map_free(
     struct space_map        *sm,
     const struct sm_journal *jnl,
@@ -664,11 +755,16 @@ space_map_free(
     uint64_t                 device_offset,
     uint64_t                 length)
 {
-    space_map_free_journal(sm, jnl, device_id, device_offset, length);
+    /* Journal first (may park -> SM_AGAIN, nothing applied yet); only on a
+     * durable claim do we return the range to the in-memory free pool. */
+    if (space_map_free_journal(sm, jnl, device_id, device_offset, length) == SM_AGAIN) {
+        return SM_AGAIN;
+    }
     space_map_free_apply(sm, device_id, device_offset, length);
+    return 0;
 } /* space_map_free */
 
-void
+int
 space_map_thread_cache_return(
     struct space_map        *sm,
     const struct sm_journal *jnl,
@@ -676,26 +772,28 @@ space_map_thread_cache_return(
 {
     if (!cache->valid || cache->length == 0) {
         cache->valid = 0;
-        return;
+        return 0;
     }
 
-    space_map_free(sm, jnl, cache->device_id, cache->offset, cache->length);
+    /* On SM_AGAIN the cache is left valid so a retry re-attempts the return. */
+    if (space_map_free(sm, jnl, cache->device_id, cache->offset, cache->length) == SM_AGAIN) {
+        return SM_AGAIN;
+    }
     cache->valid  = 0;
     cache->length = 0;
+    return 0;
 } /* space_map_thread_cache_return */
 
 int
-space_map_write_superblock_path(
-    struct space_map *sm,
-    const char       *device_path,
-    uint64_t          fsid,
-    uint64_t          flags,
-    uint64_t          root_inum,
-    uint32_t          root_gen,
-    uint64_t          log_seq)
+space_map_write_superblock(
+    struct space_map   *sm,
+    const struct sm_io *io,
+    uint64_t            fsid,
+    uint64_t            flags,
+    uint64_t            root_inum,
+    uint32_t            root_gen,
+    uint64_t            log_seq)
 {
-    int                   fd;
-    ssize_t               n;
     uint8_t               buf[SM_SUPERBLOCK_SIZE];
     struct sm_superblock *sb = (struct sm_superblock *) buf;
 
@@ -718,25 +816,12 @@ space_map_write_superblock_path(
     sb->crc32             = 0;
     sb->crc32             = sm_crc32(buf, sizeof(buf));
 
-    fd = open(device_path, O_WRONLY);
-    if (fd < 0) {
+    if (io->write(io->user, 0, buf, sizeof(buf), SM_SUPERBLOCK_OFFSET) != 0) {
         return -1;
     }
 
-    n = pwrite(fd, buf, sizeof(buf), SM_SUPERBLOCK_OFFSET);
-    if (n != (ssize_t) sizeof(buf)) {
-        close(fd);
-        return -1;
-    }
-
-    if (fsync(fd) != 0) {
-        close(fd);
-        return -1;
-    }
-
-    close(fd);
-    return 0;
-} /* space_map_write_superblock_path */
+    return io->flush(io->user, 0);
+} /* space_map_write_superblock */
 
 /*
  * Read and validate the superblock from device 0.  Returns 0 and fills *out
@@ -744,23 +829,15 @@ space_map_write_superblock_path(
  * returns -1 (no/!valid superblock -> caller should mkfs) on any mismatch.
  */
 int
-space_map_read_superblock_path(
-    const char           *device_path,
+space_map_read_superblock(
+    const struct sm_io   *io,
     struct sm_superblock *out)
 {
-    int                   fd;
-    ssize_t               n;
     uint8_t               buf[SM_SUPERBLOCK_SIZE];
     struct sm_superblock *sb = (struct sm_superblock *) buf;
     uint32_t              stored, computed;
 
-    fd = open(device_path, O_RDONLY);
-    if (fd < 0) {
-        return -1;
-    }
-    n = pread(fd, buf, sizeof(buf), SM_SUPERBLOCK_OFFSET);
-    close(fd);
-    if (n != (ssize_t) sizeof(buf)) {
+    if (io->read(io->user, 0, buf, sizeof(buf), SM_SUPERBLOCK_OFFSET) != 0) {
         return -1;
     }
 
@@ -778,7 +855,7 @@ space_map_read_superblock_path(
 
     *out = *sb;
     return 0;
-} /* space_map_read_superblock_path */
+} /* space_map_read_superblock */
 
 /*
  * Remove the specific range [offset, offset+length) from the AG's free tree
@@ -884,6 +961,72 @@ sm_ag_reconstruct(
     ag->log_delta_count = h->delta_count;
 } /* sm_ag_reconstruct */
 
+struct sm_persist_update {
+    struct sm_ag *ag;
+    uint32_t      slot;
+    uint64_t      generation;
+    uint32_t      base_count;
+};
+
+static void
+sm_persist_batch_reset(
+    uint8_t **bufs,
+    uint32_t *count,
+    uint64_t *bytes)
+{
+    uint32_t i;
+
+    for (i = 0; i < *count; i++) {
+        free(bufs[i]);
+        bufs[i] = NULL;
+    }
+    *count = 0;
+    *bytes = 0;
+} /* sm_persist_batch_reset */
+
+static int
+sm_persist_batch_submit(
+    const struct sm_io       *io,
+    struct sm_io_write       *writes,
+    struct sm_persist_update *updates,
+    uint8_t                 **bufs,
+    uint32_t                 *count,
+    uint64_t                 *bytes)
+{
+    uint32_t i;
+    int      rc = 0;
+
+    if (*count == 0) {
+        return 0;
+    }
+
+    if (io->write_many) {
+        rc = io->write_many(io->user, writes, *count);
+    } else {
+        for (i = 0; i < *count; i++) {
+            if (io->write(io->user, writes[i].device_id, writes[i].buf,
+                          writes[i].length, writes[i].offset) != 0) {
+                rc = -1;
+                break;
+            }
+        }
+    }
+
+    if (rc == 0) {
+        for (i = 0; i < *count; i++) {
+            pthread_mutex_lock(&updates[i].ag->lock);
+            updates[i].ag->log_slot        = updates[i].slot;
+            updates[i].ag->log_generation  = updates[i].generation;
+            updates[i].ag->log_base_count  = updates[i].base_count;
+            updates[i].ag->log_delta_count = 0;
+            pthread_mutex_unlock(&updates[i].ag->lock);
+        }
+    }
+
+    sm_persist_batch_reset(bufs, count, bytes);
+    return rc;
+} /* sm_persist_batch_submit */
+
 /*
  * Persist the allocator: condense each AG's free set into the *other* slot at
  * generation+1 and switch to it.  (Per-transaction delta journaling, which
@@ -891,73 +1034,103 @@ sm_ag_reconstruct(
  * full condense is what runs at clean unmount and resets the delta log.)
  */
 int
-space_map_persist_paths(
-    struct space_map *sm,
-    char            **device_paths)
+space_map_persist(
+    struct space_map   *sm,
+    const struct sm_io *io)
 {
-    uint32_t d, a;
+    struct sm_io_write       writes[SM_PERSIST_BATCH_OPS];
+    struct sm_persist_update updates[SM_PERSIST_BATCH_OPS];
+    uint8_t                 *scratch;
+    uint8_t                 *bufs[SM_PERSIST_BATCH_OPS] = { 0 };
+    uint32_t                 count                      = 0;
+    uint64_t                 bytes                      = 0;
+    uint32_t                 d, a;
+
+    scratch = malloc(SM_AG_LOG_SLOT_SIZE);
+    if (!scratch) {
+        return -1;
+    }
 
     for (d = 0; d < sm->num_devices; d++) {
         struct sm_device *dev = &sm->devices[d];
-        int               fd  = open(device_paths[d], O_WRONLY);
-
-        if (fd < 0) {
-            return -1;
-        }
 
         for (a = 0; a < dev->num_ags; a++) {
-            struct sm_ag *ag  = &dev->ags[a];
-            uint8_t      *buf = calloc(1, SM_AG_LOG_SLOT_SIZE);
+            struct sm_ag *ag = &dev->ags[a];
+            uint8_t      *buf;
             uint32_t      slot;
             uint64_t      gen, payload, aligned, slot_off;
-            ssize_t       n;
 
             pthread_mutex_lock(&ag->lock);
             slot     = 1 - ag->log_slot;
             gen      = ag->log_generation + 1;
-            payload  = sm_ag_condense_into(ag, buf, gen);
+            payload  = sm_ag_condense_into(ag, scratch, gen);
             slot_off = ag->log_offset + (uint64_t) slot * SM_AG_LOG_SLOT_SIZE;
             aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
+            memset(scratch + payload, 0, aligned - payload);
 
-            n = pwrite(fd, buf, aligned, slot_off);
-            if (n == (ssize_t) aligned) {
-                ag->log_slot        = slot;
-                ag->log_generation  = gen;
-                ag->log_base_count  = ((struct sm_ag_log_header *) buf)->base_count;
-                ag->log_delta_count = 0;
+            if (count == SM_PERSIST_BATCH_OPS ||
+                (bytes > 0 && bytes + aligned > SM_PERSIST_BATCH_BYTES)) {
+                pthread_mutex_unlock(&ag->lock);
+                if (sm_persist_batch_submit(io, writes, updates, bufs, &count, &bytes) != 0) {
+                    free(scratch);
+                    return -1;
+                }
+                pthread_mutex_lock(&ag->lock);
+                slot     = 1 - ag->log_slot;
+                gen      = ag->log_generation + 1;
+                payload  = sm_ag_condense_into(ag, scratch, gen);
+                slot_off = ag->log_offset + (uint64_t) slot * SM_AG_LOG_SLOT_SIZE;
+                aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
+                memset(scratch + payload, 0, aligned - payload);
             }
-            pthread_mutex_unlock(&ag->lock);
-            free(buf);
-            if (n != (ssize_t) aligned) {
-                close(fd);
+
+            buf = malloc(aligned);
+            if (!buf) {
+                pthread_mutex_unlock(&ag->lock);
+                sm_persist_batch_reset(bufs, &count, &bytes);
+                free(scratch);
                 return -1;
             }
+            memcpy(buf, scratch, aligned);
+
+            writes[count].device_id   = d;
+            writes[count].buf         = buf;
+            writes[count].length      = aligned;
+            writes[count].offset      = slot_off;
+            updates[count].ag         = ag;
+            updates[count].slot       = slot;
+            updates[count].generation = gen;
+            updates[count].base_count =
+                ((struct sm_ag_log_header *) scratch)->base_count;
+            bufs[count] = buf;
+            count++;
+            bytes += aligned;
+            pthread_mutex_unlock(&ag->lock);
         }
 
-        if (fsync(fd) != 0) {
-            close(fd);
+        if (sm_persist_batch_submit(io, writes, updates, bufs, &count, &bytes) != 0) {
+            free(scratch);
             return -1;
         }
-        close(fd);
+        if (io->flush(io->user, d) != 0) {
+            free(scratch);
+            return -1;
+        }
     }
+    free(scratch);
     return 0;
-} /* space_map_persist_paths */
+} /* space_map_persist */
 
 int
-space_map_load_paths(
-    struct space_map *sm,
-    char            **device_paths)
+space_map_load(
+    struct space_map   *sm,
+    const struct sm_io *io)
 {
     uint32_t d, a;
     uint64_t free_total = 0;
 
     for (d = 0; d < sm->num_devices; d++) {
         struct sm_device *dev = &sm->devices[d];
-        int               fd  = open(device_paths[d], O_RDONLY);
-
-        if (fd < 0) {
-            return -1;
-        }
 
         for (a = 0; a < dev->num_ags; a++) {
             struct sm_ag           *ag = &dev->ags[a];
@@ -966,20 +1139,17 @@ space_map_load_paths(
             int                     best = -1;
             uint32_t                s;
             uint64_t                payload, slot_off;
-            ssize_t                 n;
 
             /* Pick the live slot: highest generation with a valid magic. */
             for (s = 0; s < SM_AG_LOG_SLOT_COUNT; s++) {
                 slot_off = ag->log_offset + (uint64_t) s * SM_AG_LOG_SLOT_SIZE;
-                n        = pread(fd, &hdr[s], sizeof(hdr[s]), slot_off);
-                if (n == (ssize_t) sizeof(hdr[s]) &&
+                if (io->read(io->user, d, &hdr[s], sizeof(hdr[s]), slot_off) == 0 &&
                     hdr[s].magic == SM_AG_LOG_MAGIC &&
                     (best < 0 || hdr[s].generation > hdr[best].generation)) {
                     best = (int) s;
                 }
             }
             if (best < 0) {
-                close(fd);
                 return -1;
             }
 
@@ -988,10 +1158,8 @@ space_map_load_paths(
                 (uint64_t) hdr[best].delta_count * sizeof(struct sm_ag_log_delta);
             buf      = malloc(payload);
             slot_off = ag->log_offset + (uint64_t) best * SM_AG_LOG_SLOT_SIZE;
-            n        = pread(fd, buf, payload, slot_off);
-            if (n != (ssize_t) payload) {
+            if (io->read(io->user, d, buf, payload, slot_off) != 0) {
                 free(buf);
-                close(fd);
                 return -1;
             }
 
@@ -1002,10 +1170,9 @@ space_map_load_paths(
             pthread_mutex_unlock(&ag->lock);
             free(buf);
         }
-        close(fd);
     }
 
     sm->used_bytes = sm->total_capacity > free_total ?
         sm->total_capacity - free_total : 0;
     return 0;
-} /* space_map_load_paths */
+} /* space_map_load */

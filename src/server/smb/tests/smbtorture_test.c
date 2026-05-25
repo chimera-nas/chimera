@@ -253,6 +253,9 @@ main(
         }
 
         json_object_set_new(cfg, "devices", devices);
+        /* unsafe_async: this test does not exercise crash recovery, so skip FUA/sync
+         * on writes to run lighter. */
+        json_object_set_new(cfg, "unsafe_async", json_true());
         json_str = json_dumps(cfg, JSON_COMPACT);
         snprintf(diskfs_cfg, sizeof(diskfs_cfg), "%s", json_str);
         free(json_str);
@@ -305,10 +308,10 @@ main(
 
     chimera_server_start(env.server);
     chimera_test_add_server_users(env.server);
-    chimera_server_create_share(env.server, "share", "share");
+    chimera_server_create_share(env.server, "share", "share", 0);
     /* Second view of the same tree with access-based enumeration enabled, for
      * smb2.acls.ACCESSBASED. */
-    chimera_server_create_share(env.server, "hideunread", "share");
+    chimera_server_create_share(env.server, "hideunread", "share", 0);
     chimera_server_share_set_access_based_enum(env.server, "hideunread");
 
     fprintf(stderr, "Server started\n");

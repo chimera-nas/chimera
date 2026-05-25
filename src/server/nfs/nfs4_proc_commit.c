@@ -39,7 +39,7 @@ chimera_nfs4_commit_complete(
 } /* chimera_nfs4_commit_complete */
 
 static void
-chimera_nfs4_commit_open_callback(
+chimera_nfs4_commit_data_open_callback(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *file_handle,
     void                           *private_data)
@@ -63,7 +63,65 @@ chimera_nfs4_commit_open_callback(
                        CHIMERA_VFS_ATTR_MODE, 0,
                        chimera_nfs4_commit_complete,
                        req);
-} /* chimera_nfs4_commit_open_callback */
+} /* chimera_nfs4_commit_data_open_callback */
+
+static void
+chimera_nfs4_commit_getattr_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct COMMIT4res  *res = &req->res_compound.resarray[req->index].opcommit;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISREG(attr->va_mode)) {
+        res->status = S_ISDIR(attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_INVAL;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED,
+                        chimera_nfs4_commit_data_open_callback,
+                        req);
+} /* chimera_nfs4_commit_getattr_complete */
+
+static void
+chimera_nfs4_commit_path_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *file_handle,
+    void                           *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct COMMIT4res  *res = &req->res_compound.resarray[req->index].opcommit;
+
+    req->handle = file_handle;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+                        file_handle,
+                        CHIMERA_VFS_ATTR_MODE,
+                        chimera_nfs4_commit_getattr_complete,
+                        req);
+} /* chimera_nfs4_commit_path_open_callback */
 
 void
 chimera_nfs4_commit(
@@ -83,7 +141,7 @@ chimera_nfs4_commit(
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                         req->fh,
                         req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs4_commit_open_callback,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,
+                        chimera_nfs4_commit_path_open_callback,
                         req);
 } /* chimera_nfs4_commit */

@@ -247,8 +247,8 @@ nfs_server_init(
     /* Phase 3: lease defaults.  Per RFC 7530 §10.2.3, the lease_time
      * attribute reported via FATTR4_LEASE_TIME governs how often 4.0 clients
      * send RENEW. */
-    shared->nfs_lease_time_s = NFS4_LEASE_TIME_DEFAULT_S;
-    shared->nfs_grace_time_s = NFS4_GRACE_TIME_DEFAULT_S;
+    shared->nfs_lease_time_s = chimera_server_config_get_nfs4_lease_time(config);
+    shared->nfs_grace_time_s = chimera_server_config_get_nfs4_grace_time(config);
 
     /* Phase 5: server-reboot recovery / grace window.  Persistence is
      * stubbed in this phase -- nfs_recovery_load loads zero records, so

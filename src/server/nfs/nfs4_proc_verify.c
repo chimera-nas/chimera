@@ -7,6 +7,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
+#include "server/server.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
@@ -54,12 +55,13 @@ chimera_nfs4_verify_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct nfs_request *req = private_data;
+    struct nfs_request      *req = private_data;
     /* VERIFY4res and NVERIFY4res are layout-identical (status only). */
-    struct VERIFY4res  *res        = &req->res_compound.resarray[req->index].opverify;
-    struct fattr4      *args       = verify_args_fattr4(req);
-    bool                is_nverify = verify_is_nverify(req);
-    nfsstat4            status;
+    struct VERIFY4res       *res        = &req->res_compound.resarray[req->index].opverify;
+    struct fattr4           *args       = verify_args_fattr4(req);
+    bool                     is_nverify = verify_is_nverify(req);
+    struct chimera_vfs_attrs marshall_attr;
+    nfsstat4                 status;
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
@@ -76,7 +78,14 @@ chimera_nfs4_verify_complete(
     uint8_t  out_buf[4096];
     uint32_t out_len = 0;
 
-    chimera_nfs4_marshall_attrs(attr,
+    marshall_attr = *attr;
+    chimera_nfs4_attrs_fill_filehandle(&marshall_attr,
+                                       args->num_attrmask,
+                                       args->attrmask,
+                                       req->fh,
+                                       req->fhlen);
+
+    chimera_nfs4_marshall_attrs(&marshall_attr,
                                 args->num_attrmask,
                                 args->attrmask,
                                 &num_out_mask,
@@ -88,7 +97,10 @@ chimera_nfs4_verify_complete(
                                 req->minorversion,
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,
-                                                              req->fh, req->fhlen));
+                                                              req->fh, req->fhlen),
+                                chimera_server_config_get_nfs4_delegations(
+                                    req->thread->shared->config),
+                                req->thread->shared->nfs_lease_time_s);
 
     bool match = (num_out_mask == args->num_attrmask) &&
         (memcmp(out_mask, args->attrmask,

@@ -13,7 +13,8 @@ void
 chimera_smb_add_share(
     void       *smb_shared,
     const char *name,
-    const char *path);
+    const char *path,
+    int         continuous_availability);
 
 /* Enable access-based directory enumeration on a named share. */
 int
