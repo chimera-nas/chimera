@@ -1231,6 +1231,10 @@ struct chimera_vfs_thread {
 
     struct chimera_vfs_request       *pending_complete_requests;
     struct chimera_vfs_request       *unblocked_requests;
+    /* Parked I/O requests being resumed on their owning thread (the lease
+     * pump runs on whatever thread released/broke a lease, but a request's
+     * dispatch+reply must run on the thread that owns its connection iovecs). */
+    struct chimera_vfs_request       *pending_io_resume;
     struct evpl_doorbell              doorbell;
     pthread_mutex_t                   lock;
     uint64_t                          anon_fh_key;

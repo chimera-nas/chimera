@@ -314,6 +314,13 @@ void
 chimera_vfs_io_lease_release(
     struct chimera_vfs_request *request);
 
+/* Resume a parked I/O/metadata request on its owning thread.  Called by the
+ * VFS thread's doorbell handler when draining pending_io_resume (the lease
+ * pump marshals parked requests here via chimera_vfs_io_resume_post). */
+void
+chimera_vfs_state_io_resume(
+    struct chimera_vfs_request *request);
+
 /* Mediate a namespace/metadata mutation (REMOVE/RENAME/LINK/SETATTR) through
  * the lease layer: recall every caching lease on the target file identified
  * by (fh, fh_hash) — regardless of owner, so even the operating client's own

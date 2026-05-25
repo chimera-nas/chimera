@@ -1528,21 +1528,28 @@ chimera_vfs_io_park_locked(
     file->io_wait_tail = ticket;
 } /* chimera_vfs_io_park_locked */
 
-/* Forward decl: io_try and pump_io are mutually recursive (a synchronous
- * conflict-clear in io_try pumps the queue, which re-runs io_try). */
+/* Forward decl: chimera_vfs_state_io_resume() and io_try's synchronous
+ * conflict-clear path both reach io_try, which is defined below. */
 static void
 chimera_vfs_io_try(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_request    *request);
 
-/* Retry every parked I/O request. */
+/* Retry every parked I/O request.  The pump can run on any thread (lease
+ * release, break ack/revoke, or the idle reaper), so each request is
+ * marshaled back to its owning thread (chimera_vfs_io_resume_post) rather than
+ * resumed inline: its dispatch and reply must run on request->thread, whose
+ * connection iovecs are thread-local.  chimera_vfs_state_io_resume() then
+ * re-runs io_try on the owning thread. */
 static void
 chimera_vfs_state_pump_io(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file)
 {
     struct chimera_vfs_pending_acquire *head, *t, *next;
+
+    (void) state;
 
     pthread_mutex_lock(&file->lock);
     head               = file->io_wait_head;
@@ -1560,9 +1567,23 @@ chimera_vfs_state_pump_io(
         t->prev = NULL;
         t->next = NULL;
 
-        chimera_vfs_io_try(state, file, request);
+        chimera_vfs_io_resume_post(request);
     }
 } /* chimera_vfs_state_pump_io */
+
+/* Resume a parked I/O request on its owning thread (called from that thread's
+ * doorbell drain).  The request carries the pinned file in io_lease_file. */
+SYMBOL_EXPORT void
+chimera_vfs_state_io_resume(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_file_state *file = request->io_lease_file;
+
+    if (!file) {
+        return;
+    }
+
+    chimera_vfs_io_try(request->thread->vfs->vfs_state, file, request);
+} /* chimera_vfs_state_io_resume */
 
 /* Acquire / upgrade the implicit lease for `request` and either proceed
  * (io_next), park (to be retried by pump_io), or fail.  `file` carries the

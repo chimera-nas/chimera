@@ -356,6 +356,24 @@ chimera_vfs_complete_delegate(struct chimera_vfs_request *request)
     evpl_ring_doorbell(&thread->doorbell);
 } /* chimera_vfs_complete_delegate */
 
+/* Marshal a parked I/O request back to its owning thread to resume.  The
+ * lease pump that unblocks it may run on any thread (the one that released a
+ * lease, acked/revoked a break, or ran the idle reaper), but the request's
+ * dispatch and reply must run on request->thread, whose connection iovecs are
+ * thread-local.  The owning thread drains pending_io_resume in
+ * chimera_vfs_process_completion(). */
+static inline void
+chimera_vfs_io_resume_post(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_thread *thread = request->thread;
+
+    pthread_mutex_lock(&thread->lock);
+    DL_APPEND(thread->pending_io_resume, request);
+    pthread_mutex_unlock(&thread->lock);
+
+    evpl_ring_doorbell(&thread->doorbell);
+} /* chimera_vfs_io_resume_post */
+
 static inline void
 chimera_vfs_post_to_delegation(
     struct chimera_vfs_request           *request,

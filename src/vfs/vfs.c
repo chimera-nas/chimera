@@ -623,13 +623,15 @@ chimera_vfs_process_completion(
     struct evpl_doorbell *doorbell)
 {
     struct chimera_vfs_thread  *thread = container_of(doorbell, struct chimera_vfs_thread, doorbell);
-    struct chimera_vfs_request *complete_requests, *unblocked_requests, *request;
+    struct chimera_vfs_request *complete_requests, *unblocked_requests, *io_resume_requests, *request;
 
     pthread_mutex_lock(&thread->lock);
     complete_requests                 = thread->pending_complete_requests;
     unblocked_requests                = thread->unblocked_requests;
+    io_resume_requests                = thread->pending_io_resume;
     thread->pending_complete_requests = NULL;
     thread->unblocked_requests        = NULL;
+    thread->pending_io_resume         = NULL;
     pthread_mutex_unlock(&thread->lock);
 
     while (complete_requests) {
@@ -642,6 +644,13 @@ chimera_vfs_process_completion(
         request = unblocked_requests;
         LL_DELETE(unblocked_requests, request);
         request->unblock_callback(request, request->pending_handle);
+    }
+
+    /* Resume parked I/O/metadata requests on this (their owning) thread. */
+    while (io_resume_requests) {
+        request = io_resume_requests;
+        DL_DELETE(io_resume_requests, request);
+        chimera_vfs_state_io_resume(request);
     }
 
 } /* chimera_vfs_process_completion */
