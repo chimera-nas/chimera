@@ -3557,6 +3557,20 @@ cairn_rename_at(
 
     old_dirent_value = old_dh.dirent;
 
+    rc = cairn_inode_get_inum(thread, old_dirent_value->inum, &target_ih);
+    if (rc) {
+        cairn_dirent_handle_release(&old_dh);
+        cairn_inode_handle_release(&old_parent_ih);
+        if (have_new_parent_ih) {
+            cairn_inode_handle_release(&new_parent_ih);
+        }
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    target_inode = target_ih.inode;
+
     new_dirent_key.keytype = CAIRN_KEY_DIRENT;
     new_dirent_key.inum    = new_parent_inode->inum;
     new_dirent_key.hash    = request->rename_at.new_name_hash;
@@ -3568,6 +3582,7 @@ cairn_rename_at(
         if (new_dh.dirent->inum == old_dirent_value->inum) {
             cairn_dirent_handle_release(&old_dh);
             cairn_dirent_handle_release(&new_dh);
+            cairn_inode_handle_release(&target_ih);
             cairn_inode_handle_release(&old_parent_ih);
             if (have_new_parent_ih) {
                 cairn_inode_handle_release(&new_parent_ih);
@@ -3584,7 +3599,45 @@ cairn_rename_at(
         rc = cairn_inode_get_inum(thread, new_dh.dirent->inum, &existing_ih);
         if (rc == 0) {
             existing_inode = existing_ih.inode;
-            existing_inode->nlink--;
+
+            if (S_ISDIR(target_inode->mode) != S_ISDIR(existing_inode->mode)) {
+                int status = S_ISDIR(existing_inode->mode)
+                             ? CHIMERA_VFS_EISDIR
+                             : CHIMERA_VFS_ENOTDIR;
+
+                cairn_inode_handle_release(&existing_ih);
+                cairn_dirent_handle_release(&new_dh);
+                cairn_dirent_handle_release(&old_dh);
+                cairn_inode_handle_release(&target_ih);
+                cairn_inode_handle_release(&old_parent_ih);
+                if (have_new_parent_ih) {
+                    cairn_inode_handle_release(&new_parent_ih);
+                }
+                request->status = status;
+                request->complete(request);
+                return;
+            }
+
+            if (S_ISDIR(existing_inode->mode)) {
+                if (!cairn_directory_is_empty(thread, existing_inode->inum)) {
+                    cairn_inode_handle_release(&existing_ih);
+                    cairn_dirent_handle_release(&new_dh);
+                    cairn_dirent_handle_release(&old_dh);
+                    cairn_inode_handle_release(&target_ih);
+                    cairn_inode_handle_release(&old_parent_ih);
+                    if (have_new_parent_ih) {
+                        cairn_inode_handle_release(&new_parent_ih);
+                    }
+                    request->status = CHIMERA_VFS_ENOTEMPTY;
+                    request->complete(request);
+                    return;
+                }
+
+                existing_inode->nlink = 0;
+                new_parent_inode->nlink--;
+            } else {
+                existing_inode->nlink--;
+            }
 
             if (existing_inode->nlink == 0) {
                 existing_inode->refcnt--;
@@ -3610,14 +3663,11 @@ cairn_rename_at(
         cairn_dirent_handle_release(&new_dh);
     }
 
-    // Get the target inode to update its ctime
-    rc = cairn_inode_get_inum(thread, old_dirent_value->inum, &target_ih);
-    if (rc == 0) {
-        target_inode        = target_ih.inode;
-        target_inode->ctime = now;
-        cairn_put_inode(thread, target_inode);
-        cairn_inode_handle_release(&target_ih);
+    target_inode->ctime = now;
+    if (cmp != 0 && S_ISDIR(target_inode->mode)) {
+        target_inode->parent_inum = new_parent_inode->inum;
     }
+    cairn_put_inode(thread, target_inode);
 
     // Create new dirent
     new_dirent_value.inum     = old_dirent_value->inum;
@@ -3633,8 +3683,7 @@ cairn_rename_at(
     new_parent_inode->mtime = now;
     new_parent_inode->ctime = now;
 
-    if (cmp != 0) {
-        /* XXX only if dir */
+    if (cmp != 0 && S_ISDIR(target_inode->mode)) {
         old_parent_inode->nlink--;
         new_parent_inode->nlink++;
     }
@@ -3646,6 +3695,7 @@ cairn_rename_at(
 
     // Cleanup
     cairn_dirent_handle_release(&old_dh);
+    cairn_inode_handle_release(&target_ih);
 
     cairn_inode_handle_release(&old_parent_ih);
 
