@@ -4424,7 +4424,35 @@ diskfs_bt_run(struct diskfs_bt_op *op)
             } else if (op->opcode == DISKFS_BT_OP_LOOKUP_EXACT) {
                 int exact, idx = diskfs_bt_leaf_search(buf, base, &op->key, &exact);
 
-                diskfs_bt_complete(op, exact ? diskfs_bt_op_emit(op, buf, base, idx) : -1);
+                if (unlikely(!exact)) {
+                    struct diskfs_bt_lslot *sl = diskfs_bt_lslots(buf, base);
+
+                    if (h->nitems > 0) {
+                        chimera_diskfs_error("b+tree exact miss inode=%lu type=%u subkey=%lu "
+                                             "leaf_items=%u leaf_first=%lu leaf_last=%lu "
+                                             "leaf_prev=%lu leaf_next=%lu insert_idx=%d",
+                                             inode->inum,
+                                             (unsigned) op->key.type,
+                                             op->key.subkey,
+                                             (unsigned) h->nitems,
+                                             sl[0].key.subkey,
+                                             sl[h->nitems - 1].key.subkey,
+                                             h->prev_leaf,
+                                             h->next_leaf,
+                                             idx);
+                    } else {
+                        chimera_diskfs_error("b+tree exact miss inode=%lu type=%u subkey=%lu "
+                                             "empty_leaf prev=%lu next=%lu",
+                                             inode->inum,
+                                             (unsigned) op->key.type,
+                                             op->key.subkey,
+                                             h->prev_leaf,
+                                             h->next_leaf);
+                    }
+                    diskfs_bt_complete(op, -1);
+                    return;
+                }
+                diskfs_bt_complete(op, diskfs_bt_op_emit(op, buf, base, idx));
                 return;
             } else if (op->opcode == DISKFS_BT_OP_LOOKUP_GE) {
                 int exact, idx = h->nitems ? diskfs_bt_leaf_search(buf, base, &op->key, &exact) : 0;
@@ -4852,6 +4880,13 @@ diskfs_dir_insert_async(
     r->gen      = child_gen;
     r->name_len = (uint16_t) namelen;
     memcpy(r->name, name, namelen);
+
+    chimera_diskfs_debug("dir_insert name=%.*s hash=%lu parent=%lu child=%lu",
+                         namelen,
+                         name,
+                         hash,
+                         dir->inum,
+                         child_inum);
 
     return diskfs_bt_insert_async(op, thread, txn, dir, &key, buf,
                                   sizeof(*r) + namelen, cb, private_data);
@@ -8660,6 +8695,13 @@ diskfs_remove_at_removed_cb(
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
+
+    chimera_diskfs_debug("remove_at removed name=%.*s hash=%lu parent=%lu child=%lu",
+                         request->remove_at.namelen,
+                         request->remove_at.name,
+                         request->remove_at.name_hash,
+                         parent->inum,
+                         inode->inum);
 
     clock_gettime(CLOCK_REALTIME, &now);
 
