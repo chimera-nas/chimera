@@ -29,6 +29,25 @@ struct nfs4_range_lease {
     struct nfs4_range_lease           *next;
 };
 
+struct nfs_lock_state;
+
+/* Byte-range lock interval management (POSIX merge on LOCK / split on LOCKU).
+ * Defined in nfs4_state.c. */
+struct nfs4_range_lease *
+nfs4_range_lease_insert(
+    struct chimera_vfs_state             *vfs_state,
+    struct nfs_lock_state                *lock_state,
+    struct chimera_vfs_file_state        *file_state,
+    const struct chimera_vfs_lease_owner *owner,
+    uint8_t                               mode,
+    uint64_t                              start,
+    uint64_t                              end);
+
+void
+nfs4_range_lease_free(
+    struct chimera_vfs_state *vfs_state,
+    struct nfs4_range_lease  *rl);
+
 /*
  * Unified NFSv4 state model.
  *
@@ -82,7 +101,7 @@ struct chimera_vfs_thread;
 struct nfs4_cb_path {
     uint32_t               cb_program;       /* client's callback program number */
     uint32_t               cb_ident;         /* 4.0 callback_ident               */
-    uint8_t                cb_minorversion;  /* 0 for 4.0, 1 for 4.1+            */
+    uint8_t                cb_minorversion;  /* NFSv4 minor version (0/1/2)      */
     char                   cb_netid[8];      /* "tcp" / "tcp6"                   */
     char                   cb_addr[64];      /* universal address h.h.h.h.p.p    */
     _Atomic uint8_t        cb_state;         /* NFS4_CB_*                        */
@@ -561,7 +580,8 @@ SYMBOL_EXPORT void
 nfs_client_destroy(
     struct nfs_client         *client,
     struct nfs_state_table    *table,
-    struct chimera_vfs_thread *vfs_thread);
+    struct chimera_vfs_thread *vfs_thread,
+    bool                       synchronous);
 
 /* Expire all state underneath a client, but keep the client record itself as
  * an expired tombstone so later clientid operations can return EXPIRED. */

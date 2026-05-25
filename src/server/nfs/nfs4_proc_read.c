@@ -273,13 +273,23 @@ chimera_nfs4_read(
     iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
-    chimera_vfs_read(thread->vfs_thread, &req->cred,
-                     state_handle,
-                     args->offset,
-                     args->count,
-                     iov,
-                     256,
-                     0,
-                     chimera_nfs4_read_complete,
-                     req);
+    /* Attribute the read to the client's owner so it is mediated against
+     * other holders without recalling this client's own delegation. */
+    struct chimera_vfs_lease_owner io_owner = {
+        .protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4,
+        .client_key = open_state->owner->client->client_id,
+        .owner_lo   = state_handle->fh_hash,
+        .owner_hi   = 0,
+    };
+
+    chimera_vfs_read_owned(thread->vfs_thread, &req->cred,
+                           state_handle,
+                           args->offset,
+                           args->count,
+                           iov,
+                           256,
+                           0,
+                           &io_owner,
+                           chimera_nfs4_read_complete,
+                           req);
 } /* chimera_nfs4_read */

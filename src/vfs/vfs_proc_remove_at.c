@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_state.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_name_cache.h"
 #include "vfs/vfs_attr_cache.h"
@@ -131,6 +132,10 @@ chimera_vfs_remove_at(
     request->proto_callback                        = callback;
     request->proto_private_data                    = private_data;
 
-    chimera_vfs_dispatch(request);
+    /* Recall any delegation/oplock on the file being removed before unlinking
+     * it (the caller supplies its FH when known). */
+    chimera_vfs_io_recall(request, child_fh, child_fh_len,
+                          child_fh_len ? chimera_vfs_hash(child_fh, child_fh_len) : 0,
+                          chimera_vfs_dispatch);
 
 } /* chimera_vfs_remove_at */

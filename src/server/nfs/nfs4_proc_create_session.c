@@ -175,7 +175,8 @@ chimera_nfs4_create_session(
         if (superseded) {
             nfs_client_destroy(superseded,
                                &shared->nfs4_state_table,
-                               thread->vfs_thread);
+                               thread->vfs_thread,
+                               false);
         }
     }
 
@@ -185,8 +186,10 @@ chimera_nfs4_create_session(
     /* RFC 8881 §18.36: when the client asks to use this connection as the
      * backchannel, record it together with the callback program number so the
      * server can deliver CB_RECALL for delegations over the fore conn.  Also
-     * stamp the callback path on the unified client (minorversion 1, no
-     * separate netid/addr -- the backchannel is the fore conn). */
+     * stamp the callback path on the unified client.  The backchannel carries
+     * the session's own minorversion: a 4.2 client rejects a CB_COMPOUND
+     * tagged minorversion 1 with NFS4ERR_MINOR_VERS_MISMATCH.  No separate
+     * netid/addr -- the backchannel is the fore conn. */
     if (args->csa_flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) {
         session->nfs4_session_cb_program       = args->csa_cb_program;
         session->nfs4_session_backchannel_conn = conn;
@@ -195,7 +198,7 @@ chimera_nfs4_create_session(
                                 args->csa_clientid,
                                 args->csa_cb_program,
                                 0,
-                                1,
+                                req->minorversion,
                                 NULL, 0, NULL, 0);
 
         /* Record the callback auth the client wants the server to use

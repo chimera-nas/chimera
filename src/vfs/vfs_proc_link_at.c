@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include "vfs_procs.h"
+#include "vfs_state.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"
@@ -108,5 +109,8 @@ chimera_vfs_link_at(
     request->proto_callback                      = callback;
     request->proto_private_data                  = private_data;
 
-    chimera_vfs_dispatch(request);
+    /* RFC 7530 §10.4.5: adding a hard link to a delegated file must recall the
+     * delegation first.  request->fh is the source file being linked. */
+    chimera_vfs_io_recall(request, request->fh, request->fh_len,
+                          request->fh_hash, chimera_vfs_dispatch);
 } /* chimera_vfs_link_at */

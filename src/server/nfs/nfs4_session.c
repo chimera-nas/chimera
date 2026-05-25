@@ -9,6 +9,7 @@
 #include "prometheus-c.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
+#include "nfs4_callback.h"
 #include "nfs_internal.h"
 #include "nfs_nlm_state.h"
 #include "nfs_common.h"
@@ -800,7 +801,7 @@ nfs4_client_destroy_clientid(
     pthread_mutex_unlock(&table->nfs4_ct_lock);
 
     if (unified) {
-        nfs_client_destroy(unified, state_table, vfs_thread);
+        nfs_client_destroy(unified, state_table, vfs_thread, false);
     }
 
     return NFS4_OK;
@@ -898,7 +899,7 @@ nfs4_client_unregister(
      * the client have no remaining state at DESTROY_CLIENTID time -- if
      * any survived, this releases their slots + dup'd VFS handles. */
     if (unified) {
-        nfs_client_destroy(unified, state_table, vfs_thread);
+        nfs_client_destroy(unified, state_table, vfs_thread, false);
     }
 } /* nfs4_client_unregister */
 
@@ -1088,7 +1089,7 @@ nfs4_client_table_destroy_unified(
     HASH_ITER(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, cur, tmp)
     {
         if (cur->unified) {
-            nfs_client_destroy(cur->unified, state_table, vfs_thread);
+            nfs_client_destroy(cur->unified, state_table, vfs_thread, true);
             cur->unified = NULL;
         }
     }
@@ -1484,7 +1485,21 @@ nfs4_client_set_cb_path(
     u  = c->unified;
     cb = &u->cb_path;
 
+    if (addr_len >= (int) sizeof(cb->cb_addr)) {
+        addr_len = sizeof(cb->cb_addr) - 1;
+    }
+
     pthread_mutex_lock(&u->lock);
+
+    /* Detect a genuine callback-address change: the client re-registered a new
+     * callback server (SETCLIENTID with the same verifier, RFC 7530 §16.33).
+     * An existing channel points at the OLD server, so it must be torn down --
+     * otherwise a pending recall would be delivered to the address the client
+     * just abandoned.  The new channel is rebuilt lazily (next delegation grant)
+     * or eagerly at SETCLIENTID_CONFIRM when delegations are already held. */
+    bool addr_changed = cb->cb_program != cb_program ||
+        (int) strlen(cb->cb_addr) != addr_len ||
+        (addr_len > 0 && memcmp(cb->cb_addr, addr, addr_len) != 0);
 
     cb->cb_program      = cb_program;
     cb->cb_ident        = cb_ident;
@@ -1498,9 +1513,6 @@ nfs4_client_set_cb_path(
     }
     cb->cb_netid[netid_len > 0 ? netid_len : 0] = '\0';
 
-    if (addr_len >= (int) sizeof(cb->cb_addr)) {
-        addr_len = sizeof(cb->cb_addr) - 1;
-    }
     if (addr_len > 0) {
         memcpy(cb->cb_addr, addr, addr_len);
     }
@@ -1508,6 +1520,10 @@ nfs4_client_set_cb_path(
 
     /* New addressing: force re-probe before the next delegation grant. */
     atomic_store_explicit(&cb->cb_state, NFS4_CB_UNINIT, memory_order_relaxed);
+
+    if (addr_changed && cb->cb_client) {
+        nfs4_cb_path_teardown(cb, false);
+    }
 
     pthread_mutex_unlock(&u->lock);
     pthread_mutex_unlock(&table->nfs4_ct_lock);

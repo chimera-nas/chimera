@@ -6159,3 +6159,32 @@ chimera/pynfs/flex/FFLS2_memfs_nfs4.1
 chimera/pynfs/flex/FFLS3_memfs_nfs4.1
 chimera/pynfs/flex/FFLS4_memfs_nfs4.1
 chimera/pynfs/flex/FFST1_memfs_nfs4.1
+
+# Delegation recall tests greened by the unified-lease branch.  4.0 recall-
+# handshake + 4.1 deleg/DELEG8 run with a longer lease (PYNFS_LEASE_OVERRIDE_*
+# in CMakeLists); the 4.2 cluster was unblocked by the CB_COMPOUND minor-version
+# fix and the shutdown callback-channel use-after-free fix.
+chimera/pynfs/delegations/DELEG1_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG4_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG5_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG7_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG9_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG14_memfs_nfs4.0
+chimera/pynfs/deleg/DELEG8_memfs_nfs4.1
+chimera/pynfs/create_session/DELEG5_memfs_nfs4.2
+chimera/pynfs/create_session/DELEG6_memfs_nfs4.2
+chimera/pynfs/create_session/DELEG7_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG1_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG2_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG3_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG5_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG6_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG7_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG23_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG24_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG25_memfs_nfs4.2
+chimera/pynfs/open/DELEG1_memfs_nfs4.2
+chimera/pynfs/open/DELEG3_memfs_nfs4.2
+chimera/pynfs/open/DELEG5_memfs_nfs4.2
+chimera/pynfs/open/DELEG6_memfs_nfs4.2
+chimera/pynfs/open/DELEG7_memfs_nfs4.2
