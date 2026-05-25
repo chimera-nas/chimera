@@ -1204,6 +1204,18 @@ chimera_vfs_break_caching_file(
                 to_break = cur;
                 break;
             }
+            /* A holder that already acked an earlier break but still retains a
+             * mode (an SMB lease downgraded to LEVEL_II, granted=R, ACKED) must
+             * be re-armed and broken again — a namespace/metadata mutation
+             * needs the cache gone entirely.  Reset to IDLE so begin_break
+             * re-fires it to NONE.  (NFSv4 delegations never sit ACKED with a
+             * retained mode — they return to NONE or are revoked — so this
+             * only affects SMB read caches.) */
+            if (cur->break_state == CHIMERA_VFS_BREAK_ACKED) {
+                cur->break_state = CHIMERA_VFS_BREAK_IDLE;
+                to_break         = cur;
+                break;
+            }
             if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
                 chimera_vfs_break_deadline_passed(cur)) {
                 to_revoke = cur;
@@ -1213,8 +1225,14 @@ chimera_vfs_break_caching_file(
         pthread_mutex_unlock(&file->lock);
 
         if (to_break) {
-            chimera_vfs_lease_begin_break(state, to_break,
-                                          to_break->mode.granted,
+            /* Break to NONE (needed_mode 0), not to the currently-granted
+             * mode: a namespace/metadata mutation invalidates the holder's
+             * cache entirely.  Passing the granted mode would let the SMB
+             * lease break_cb retain its read cache (LEVEL_II) and ack with a
+             * non-zero mode, so this loop would see granted != 0 forever and
+             * the caller would park permanently.  NFSv4 delegations recall
+             * fully regardless of needed_mode, so 0 is correct for them too. */
+            chimera_vfs_lease_begin_break(state, to_break, 0,
                                           CHIMERA_VFS_NFS_DELEG_METAOP_MS);
         } else if (to_revoke) {
             chimera_vfs_lease_revoke(to_revoke);
