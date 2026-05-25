@@ -293,18 +293,12 @@ chimera_linux_getattr(
                             &request->getattr.r_attr,
                             fd);
 
-    /* Mode-only backend: synthesise an ACL from the POSIX mode bits when the
-     * caller asked for one (lossy, one-way -- see vfs_acl.h). */
-    if ((request->getattr.r_attr.va_req_mask & CHIMERA_VFS_ATTR_ACL) &&
-        (request->getattr.r_attr.va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
-        static __thread uint8_t scratch[sizeof(struct chimera_acl) +
-                                        8 * sizeof(struct chimera_ace)];
-        struct chimera_acl     *dst = (struct chimera_acl *) scratch;
-
-        chimera_acl_from_mode(request->getattr.r_attr.va_mode, dst, 8);
-        request->getattr.r_attr.va_acl       = dst;
-        request->getattr.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_ACL;
-    }
+    /* Deliberately do NOT synthesise an ACL from the mode here: this is a
+     * mode-only backend, so leaving va_acl absent lets each protocol convey the
+     * POSIX mode in its own native way -- NFSv4 mode-synthesises the ACL in its
+     * marshaller, and SMB emits the modefromsid (S-1-5-88-3-<mode>) ACE that the
+     * cifs client reads for the unix mode/execute bits.  Returning a synthesised
+     * DACL here displaces that mode ACE and strips the execute bit over SMB. */
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
