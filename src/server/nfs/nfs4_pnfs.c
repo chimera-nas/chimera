@@ -673,8 +673,15 @@ lg_sourced_cb(
         chimera_nfs_abort_if(body == NULL || lo == NULL, "Failed to allocate space");
         body_len = chimera_nfs4_encode_block_layout(body, segments, num_segments);
 
-        lo->lo_offset           = args->loga_offset;
-        lo->lo_length           = UINT64_MAX;
+        /* Cover exactly the contiguous span the extents describe (from the
+         * requested offset to the end of the last segment); a block client
+         * rejects a layout whose lo_length doesn't match its extents. */
+        uint64_t        blk_end = segments[num_segments - 1].offset +
+            segments[num_segments - 1].length;
+
+        lo->lo_offset = args->loga_offset;
+        lo->lo_length = blk_end > args->loga_offset ?
+            blk_end - args->loga_offset : 0;
         lo->lo_iomode           = args->loga_iomode;
         lo->lo_content.loc_type = LAYOUT4_BLOCK_VOLUME;
         rc                      = xdr_dbuf_opaque_copy(&lo->lo_content.loc_body, body,

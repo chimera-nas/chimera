@@ -2380,6 +2380,11 @@ memfs_read(
 
     }
 
+    /* Read authorization is enforced by the VFS-layer ACL gate (and the
+     * credential-keyed open cache), not by an ACL-blind mode check here -- so
+     * main's memfs_cred_can_read() check is intentionally dropped on this
+     * branch (it is undefined here and would double-evaluate / ignore ACLs). */
+
     if (unlikely(inode->size <= offset)) {
         memfs_map_attrs(shared, &request->read.r_attr, inode, request->fh);
         pthread_mutex_unlock(&inode->lock);
@@ -2391,7 +2396,7 @@ memfs_read(
         return;
     }
 
-    if (offset + length > inode->size) {
+    if (offset + length >= inode->size) {
         length = inode->size > offset ? inode->size - offset : 0;
         eof    = 1;
     }

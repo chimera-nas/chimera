@@ -6,6 +6,7 @@ set(CHIMERA_BINARY ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 set(NFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_test_wrapper.sh)
 set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
 set(PNFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_test_wrapper.sh)
+set(PNFS_BLOCK_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_block_test_wrapper.sh)
 
 set(KVM_BACKENDS memfs linux)
 
@@ -20,6 +21,54 @@ endif()
 if(HAVE_LIBAIO)
     list(APPEND KVM_BACKENDS diskfs_aio)
 endif()
+
+# Backends that implement pNFS flex-files (persist the opaque layout blob):
+# memfs and diskfs.  The diskfs MDS uses a small metadata device; file data
+# still lives on the memfs data server.
+set(PNFS_BACKENDS memfs)
+if(IO_URING_ENABLED)
+    list(APPEND PNFS_BACKENDS diskfs_io_uring)
+endif()
+if(HAVE_LIBAIO)
+    list(APPEND PNFS_BACKENDS diskfs_aio)
+endif()
+
+# pNFS block layout (RFC 5663): diskfs-only (it sources block layouts).  The
+# data lives on a signed virtio-SCSI disk the client reaches directly as
+# /dev/sda; the MDS only allocates extents and never touches it.
+set(PNFS_BLOCK_BACKENDS)
+if(IO_URING_ENABLED)
+    list(APPEND PNFS_BLOCK_BACKENDS diskfs_io_uring)
+endif()
+if(HAVE_LIBAIO)
+    list(APPEND PNFS_BLOCK_BACKENDS diskfs_aio)
+endif()
+
+# Linux block-layout client bring-up, prepended to every block workload.  These
+# requirements were nailed down empirically:
+#   - rpc_pipefs must be mounted at /run/rpc_pipefs -- where this blkmapd build
+#     opens the nfs/blocklayout upcall pipe.
+#   - blocklayoutdriver must be loaded and blkmapd running before the first
+#     LAYOUTGET so it can resolve the device.
+#   - blkmapd identifies candidate disks via an SG_IO SCSI INQUIRY, so the data
+#     disk is presented as virtio-SCSI (see the wrapper); virtio-blk is invisible
+#     to it.
+# In every workload the MDS rejects inline data I/O (no access to the data disk),
+# so a drop-caches re-read that still matches proves the block layout drove the
+# I/O directly to /dev/sda.
+set(PNFS_BLOCK_SETUP "mkdir -p /run/rpc_pipefs && mount -t rpc_pipefs rpc_pipefs /run/rpc_pipefs && modprobe blocklayoutdriver && /usr/sbin/blkmapd && sleep 1 && mount -t nfs -o vers=4.1,tcp 10.0.0.1:/share /mnt")
+
+set(PNFS_BLOCK_PROGRAMS rw remove recall_truncate)
+
+# rw: write 8 MiB through the layout, assert LAYOUTGET, drop caches, read back.
+set(PNFS_BLOCK_WL_rw "mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && grep -qi LAYOUTGET /proc/self/mountstats && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && cmp /tmp/orig /mnt/test/f0")
+# remove: write via the layout, then unlink -- exercises freeing the file's
+# extents on the remote data device (relocated-AG-log allocator) + cleanup.
+set(PNFS_BLOCK_WL_remove "mkdir -p /mnt/test && dd if=/dev/urandom of=/mnt/test/f0 bs=1M count=4 2>/dev/null && sync && grep -qi LAYOUTGET /proc/self/mountstats && rm /mnt/test/f0 && ! test -e /mnt/test/f0")
+# recall_truncate: write 8 MiB, truncate to 4 MiB while a layout may be held
+# (MDS recalls + defers), then verify the surviving 4 MiB is intact -- exercises
+# the truncate path freeing remote extents past EOF + the recall machinery.
+set(PNFS_BLOCK_WL_recall_truncate "mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && grep -qi LAYOUTGET /proc/self/mountstats && truncate -s 4194304 /mnt/test/f0 && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && head -c 4194304 /tmp/orig > /tmp/orig4 && cmp /tmp/orig4 /mnt/test/f0")
 
 set(NFS_VERSIONS 3 4.0 4.1 4.2)
 
@@ -136,16 +185,33 @@ foreach(image_spec ${KVM_IMAGES})
     endif()
 
     # pNFS (NFSv4.1) tests: a metadata server steering data to a separate memfs
-    # data server, both in one netns.  memfs-only (only memfs implements
-    # layouts) and 4.1-only (pNFS requires a session).
+    # data server, both in one netns.  Flex-files backends only (memfs, diskfs)
+    # and 4.1-only (pNFS requires a session).
     foreach(prog ${PNFS_PROGRAMS})
-        add_test(NAME chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_memfs_nfs4.1
-            COMMAND bash ${PNFS_WRAPPER}
-                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
-                    ${CHIMERA_BINARY} memfs 4.1
-                    "${PNFS_CMD_${prog}}")
-        set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_memfs_nfs4.1
-            PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2)
+        foreach(pbackend ${PNFS_BACKENDS})
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_${pbackend}_nfs4.1
+                COMMAND bash ${PNFS_WRAPPER}
+                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                        ${CHIMERA_BINARY} ${pbackend} 4.1
+                        "${PNFS_CMD_${prog}}")
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_${pbackend}_nfs4.1
+                PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2)
+        endforeach()
+    endforeach()
+
+    # pNFS block layout (RFC 5663): diskfs sources block layouts; the client
+    # does data I/O directly to the signed virtio-SCSI data disk (/dev/sda),
+    # never through the MDS (which can't reach it).
+    foreach(prog ${PNFS_BLOCK_PROGRAMS})
+        foreach(pbackend ${PNFS_BLOCK_BACKENDS})
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/pnfs/block_${prog}_${pbackend}_nfs4.1
+                COMMAND bash ${PNFS_BLOCK_WRAPPER}
+                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                        ${CHIMERA_BINARY} ${pbackend}
+                        "${PNFS_BLOCK_SETUP} && ${PNFS_BLOCK_WL_${prog}}")
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/block_${prog}_${pbackend}_nfs4.1
+                PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2)
+        endforeach()
     endforeach()
 
     # SMB cthon04 tests

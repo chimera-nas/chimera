@@ -126,10 +126,30 @@ EOF
 # The metadata server runs the namespace on the requested backend, nfs-mounts
 # the data server's export at /ds0 (control path, over NFSv4 so no portmap is
 # needed), and steers file data to it via server.pnfs (backing_path "/ds0").
+#
+# In flex-files mode the MDS holds only namespace + the opaque pNFS blob per
+# file (data lives on the DS), so a diskfs MDS needs only a small metadata
+# device.  memfs needs no backing device.
 generate_mds_config() {
+    local module="$BACKEND"
+    local vfs_section=""
+
     case "$BACKEND" in
         memfs) ;;
-        *) echo "pNFS test only supports the memfs backend, got ${BACKEND}" >&2; exit 1 ;;
+        diskfs_io_uring | diskfs_aio)
+            local device_type="io_uring"
+            [ "$BACKEND" = "diskfs_aio" ] && device_type="libaio"
+            local devices_json=""
+            for i in 0 1; do
+                local device_path="${SESSION_DIR}/mds-device-${i}.img"
+                truncate -s 16G "$device_path"
+                [ "$i" -gt 0 ] && devices_json="${devices_json},"
+                devices_json="${devices_json}{\"type\":\"${device_type}\",\"size\":1,\"path\":\"${device_path}\"}"
+            done
+            module="diskfs"
+            vfs_section="\"vfs\": { \"diskfs\": { \"config\": { \"initialize\": true, \"unsafe_async\": true, \"devices\": [${devices_json}] } } },"
+            ;;
+        *) echo "pNFS flex test supports memfs/diskfs backends, got ${BACKEND}" >&2; exit 1 ;;
     esac
 
     cat > "$MDS_CONFIG" << EOF
@@ -137,6 +157,7 @@ generate_mds_config() {
     "server": {
         "threads": 4,
         "external_portmap": false,
+        ${vfs_section}
         "pnfs": {
             "enabled": true,
             "data_servers": [
@@ -145,7 +166,7 @@ generate_mds_config() {
         }
     },
     "mounts": {
-        "share": { "module": "${BACKEND}", "path": "/" },
+        "share": { "module": "${module}", "path": "/" },
         "ds0": { "module": "nfs", "path": "${DS_IP}:/ds_export", "options": "vers=4,port=${DS_PORT}" }
     },
     "exports": { "/share": { "path": "/share" } }

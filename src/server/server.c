@@ -1052,10 +1052,11 @@ chimera_server_init(
                                    config->cache_ttl,
                                    metrics);
 
-    /* Publish the pNFS data-server table into the VFS layer so both the
-     * backend (steering / layout construction) and the NFS protocol layer
-     * (GETDEVICEINFO) read from a single authoritative table. */
-    if (config->pnfs_enabled && config->pnfs_num_ds > 0) {
+    /* Enable the pNFS feature whenever configured.  Orchestrated flex-files
+     * needs a data-server table (below); a layout-sourcing backend (e.g. diskfs
+     * block mode) produces its own layouts and needs no data servers, so the
+     * feature is enabled with an empty table. */
+    if (config->pnfs_enabled) {
         chimera_vfs_pnfs_set_enabled(server->vfs, 1);
         for (i = 0; i < config->pnfs_num_ds; i++) {
             chimera_vfs_pnfs_add_device(server->vfs,

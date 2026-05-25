@@ -431,6 +431,14 @@ chimera_nfs4_marshall_attrs(
                     word2 |= (1 << (FATTR4_LAYOUT_TYPES - 64));
                 }
 
+                /* The block layout (RFC 5663) requires the server to advertise
+                 * the layout block size + alignment, or the client's block
+                 * layout driver refuses to initialize. */
+                if (pnfs_layout_type == 0x3) {
+                    word2 |= (1 << (FATTR4_LAYOUT_BLKSIZE - 64)) |
+                        (1 << (FATTR4_LAYOUT_ALIGNMENT - 64));
+                }
+
                 chimera_nfs4_attr_append_uint32(&attrs, word2);
             }
         }
@@ -781,6 +789,22 @@ chimera_nfs4_marshall_attrs(
 
             chimera_nfs4_attr_append_uint32(&attrs, 1); /* layouttype4<> count */
             chimera_nfs4_attr_append_uint32(&attrs, pnfs_layout_type); /* per-backend */
+        }
+
+        /* Block layout (RFC 5663) block size + alignment (attrs 65, 66).  The
+         * client's block layout driver requires a non-zero blksize <= PAGE_SIZE
+         * to initialize.  We allocate and align block extents to 4 KiB. */
+        if (pnfs_layout_type == 0x3 &&
+            (req_mask[2] & (1 << (FATTR4_LAYOUT_BLKSIZE - 64)))) {
+            rsp_mask[2]  |= (1 << (FATTR4_LAYOUT_BLKSIZE - 64));
+            *num_rsp_mask = 3;
+            chimera_nfs4_attr_append_uint32(&attrs, 4096);
+        }
+        if (pnfs_layout_type == 0x3 &&
+            (req_mask[2] & (1 << (FATTR4_LAYOUT_ALIGNMENT - 64)))) {
+            rsp_mask[2]  |= (1 << (FATTR4_LAYOUT_ALIGNMENT - 64));
+            *num_rsp_mask = 3;
+            chimera_nfs4_attr_append_uint32(&attrs, 4096);
         }
 
         if ((req_mask[2] & (1 << (FATTR4_XATTR_SUPPORT - 64))) &&

@@ -177,12 +177,21 @@ struct diskfs_request_private {
 };
 
 struct diskfs_device {
-    struct evpl_block_device *bdev;
+    struct evpl_block_device *bdev;            /* NULL for a REMOTE (pNFS data) device */
     uint64_t                  id;
     uint64_t                  size;
     uint64_t                  max_request_size;
     char                      name[256];
     pthread_mutex_t           lock;
+
+    /* Block-mode (pNFS) device identity.  role == SM_DEV_REMOTE means this
+     * device's storage lives outside this system: diskfs allocates space on it
+     * and hands the layout to the block client but never opens or touches it. */
+    uint32_t                  role;             /* SM_DEV_LOCAL | SM_DEV_REMOTE */
+    uint8_t                   deviceid[SM_DEVICEID_SIZE];
+    uint64_t                  sig_offset;
+    uint32_t                  sig_len;
+    uint8_t                   sig[SM_SIG_MAX];
 };
 
 struct diskfs_dirent {
@@ -452,6 +461,7 @@ enum diskfs_bt_rectype {
     DISKFS_REC_SYMLINK = 3,
     DISKFS_REC_ORPHAN  = 4,   /* orphan-list inode only: subkey = orphaned inum */
     DISKFS_REC_XATTR   = 5,
+    DISKFS_REC_PNFS    = 6,   /* regular file: opaque pNFS layout blob (flex-files) */
 };
 
 /* B+tree key: ordered by (type, subkey).  subkey is the name hash for
@@ -732,6 +742,7 @@ struct diskfs_shared {
     int                        mounted;            /* 1 = remounted existing FS (enables inode read-back) */
     uint32_t                   block_cache_blocks; /* total resident block-buffer cap (0 = default) */
     uint32_t                   inode_cache_inodes; /* total resident inode cap (0 = default) */
+    int                        block_layout;       /* config opt-in: advertise pNFS block layouts */
     uint64_t                   fsid;
     struct space_map          *space_map;
     struct diskfs_intent_log   intent_log;
@@ -746,7 +757,8 @@ struct diskfs_thread {
     struct evpl_iovec           pad;
     int                         thread_id;
     struct slab_allocator      *allocator;
-    struct sm_thread_cache      space_cache;
+    struct sm_thread_cache      space_cache;       /* metadata (LOCAL devices) */
+    struct sm_thread_cache      data_space_cache;  /* block-mode file data (REMOTE devices) */
     struct diskfs_txn          *txn_free_list;
     struct diskfs_inode_waiter *waiter_free_list;
     struct diskfs_iq_channel   *iq_channel;
@@ -2760,7 +2772,7 @@ diskfs_bt_alloc_node(
      * never journals -- hence no_suspend and the rc != 0 abort. */
     DISKFS_SM_JNL(jnl, thread, txn, diskfs_sm_no_suspend, NULL);
     rc = space_map_alloc(shared->space_map, &thread->space_cache, &jnl,
-                         DISKFS_BLOCK_SIZE, &device_id, &device_offset);
+                         SM_DEV_LOCAL, DISKFS_BLOCK_SIZE, &device_id, &device_offset);
     chimera_diskfs_abort_if(rc != 0, "b+tree node allocation failed (ENOSPC)");
 
     blk = diskfs_block_claim(thread, device_id, device_offset, 1);
@@ -4272,7 +4284,7 @@ diskfs_bt_run(struct diskfs_bt_op *op)
              * modify can never exhaust the reservation and journal. */
             DISKFS_SM_JNL(jnl, thread, op->txn, diskfs_bt_op_resume_cb, op);
             int rrc = space_map_reserve(thread->shared->space_map,
-                                        &thread->space_cache, &jnl,
+                                        &thread->space_cache, &jnl, SM_DEV_LOCAL,
                                         (uint64_t) (DISKFS_BT_MAX_DEPTH + 2) * DISKFS_BLOCK_SIZE);
 
             if (rrc == SM_AGAIN) {
@@ -5458,7 +5470,7 @@ diskfs_inode_alloc_async(
 
     DISKFS_SM_JNL(jnl, thread, txn, diskfs_inode_alloc_resume, actx);
     rc = space_map_alloc(shared->space_map, &thread->space_cache, &jnl,
-                         SM_BLOCK_SIZE, &device_id, &device_offset);
+                         SM_DEV_LOCAL, SM_BLOCK_SIZE, &device_id, &device_offset);
     if (rc == SM_AGAIN) {
         return;     /* parked; diskfs_inode_alloc_resume re-runs (owns actx) */
     }
@@ -5620,11 +5632,21 @@ diskfs_thread_alloc_space(
     void ( *resume )(struct diskfs_thread *, void *),
     void *resume_arg)
 {
-    uint32_t dev_id;
-    int      rc;
+    uint32_t                dev_id;
+    int                     rc;
+    struct space_map       *sm = thread->shared->space_map;
+
+    /* File data goes to REMOTE (pNFS data) devices when this is a block-mode
+     * filesystem, and to LOCAL devices otherwise; each class draws from its own
+     * per-thread reservation cache so a local metadata reservation and a remote
+     * data reservation never collide. */
+    int                     remote = space_map_has_remote(sm);
+    uint32_t                role   = remote ? SM_DEV_REMOTE : SM_DEV_LOCAL;
+    struct sm_thread_cache *cache  = remote ? &thread->data_space_cache :
+        &thread->space_cache;
 
     DISKFS_SM_JNL(jnl, thread, txn, resume, resume_arg);
-    rc = space_map_alloc(thread->shared->space_map, &thread->space_cache, &jnl,
+    rc = space_map_alloc(sm, cache, &jnl, role,
                          (uint64_t) desired_size, &dev_id, r_device_offset);
 
     if (rc == SM_AGAIN) {
@@ -6411,7 +6433,9 @@ diskfs_intent_log_thread_init(
     /* Open block queues on this thread's evpl for redo writes + tail-push. */
     il->queue = calloc(shared->num_devices, sizeof(*il->queue));
     for (i = 0; i < shared->num_devices; i++) {
-        il->queue[i] = evpl_block_open_queue(evpl, shared->devices[i].bdev);
+        /* Remote (pNFS data) devices have no local handle: leave queue NULL. */
+        il->queue[i] = shared->devices[i].bdev ?
+            evpl_block_open_queue(evpl, shared->devices[i].bdev) : NULL;
     }
 
     evpl_add_doorbell(evpl, &il->wake_doorbell, diskfs_intent_log_wake_cb);
@@ -6446,7 +6470,9 @@ diskfs_intent_log_thread_shutdown(
     evpl_remove_doorbell(evpl, &il->wake_doorbell);
 
     for (i = 0; i < shared->num_devices; i++) {
-        evpl_block_close_queue(evpl, il->queue[i]);
+        if (il->queue[i]) {
+            evpl_block_close_queue(evpl, il->queue[i]);
+        }
     }
     free(il->queue);
 } /* diskfs_intent_log_thread_shutdown */
@@ -6629,7 +6655,8 @@ diskfs_mount_io_open(struct diskfs_shared *shared)
     io->evpl   = evpl_create(NULL);
     io->queue  = calloc(shared->num_devices, sizeof(*io->queue));
     for (i = 0; i < shared->num_devices; i++) {
-        io->queue[i] = evpl_block_open_queue(io->evpl, shared->devices[i].bdev);
+        io->queue[i] = shared->devices[i].bdev ?
+            evpl_block_open_queue(io->evpl, shared->devices[i].bdev) : NULL;
     }
     return io;
 } /* diskfs_mount_io_open */
@@ -6640,7 +6667,9 @@ diskfs_mount_io_close(struct diskfs_mount_io *io)
     int i;
 
     for (i = 0; i < io->shared->num_devices; i++) {
-        evpl_block_close_queue(io->evpl, io->queue[i]);
+        if (io->queue[i]) {
+            evpl_block_close_queue(io->evpl, io->queue[i]);
+        }
     }
     free(io->queue);
     evpl_destroy(io->evpl);
@@ -6933,6 +6962,47 @@ diskfs_recover_log(
     return 0;
 } /* diskfs_recover_log */
 
+SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs;
+
+/*
+ * Decode a hex string (e.g. "deadbeef" or "de:ad:be:ef") into up to `max`
+ * bytes; returns the number of bytes decoded.  Used for the block-mode device
+ * id and SIMPLE-volume signature, which are configured as hex.
+ */
+static uint32_t
+diskfs_parse_hex(
+    const char *hex,
+    uint8_t    *out,
+    uint32_t    max)
+{
+    uint32_t n  = 0;
+    int      hi = -1;
+
+    if (!hex) {
+        return 0;
+    }
+    for (; *hex && n < max; hex++) {
+        int v;
+
+        if (*hex >= '0' && *hex <= '9') {
+            v = *hex - '0';
+        } else if (*hex >= 'a' && *hex <= 'f') {
+            v = *hex - 'a' + 10;
+        } else if (*hex >= 'A' && *hex <= 'F') {
+            v = *hex - 'A' + 10;
+        } else {
+            continue;   /* skip separators (':', '-', spaces) */
+        }
+        if (hi < 0) {
+            hi = v;
+        } else {
+            out[n++] = (uint8_t) ((hi << 4) | v);
+            hi       = -1;
+        }
+    }
+    return n;
+} /* diskfs_parse_hex */
+
 static void *
 diskfs_init(const char *cfgdata)
 {
@@ -6944,7 +7014,7 @@ diskfs_init(const char *cfgdata)
     int                         i, fd, rc;
     struct stat                 st;
     int64_t                     size;
-    uint64_t                   *device_sizes;
+    struct sm_device_cfg       *dev_cfg;
     json_t                     *cfg, *devices_cfg, *device_cfg;
     json_error_t                json_error;
     int                         initialize;
@@ -6962,13 +7032,49 @@ diskfs_init(const char *cfgdata)
 
     json_array_foreach(devices_cfg, i, device_cfg)
     {
+        const char *role_name;
+
         device     = &shared->devices[i];
         device->id = i;
 
         protocol_name = json_string_value(json_object_get(device_cfg, "type"));
         device_path   = json_string_value(json_object_get(device_cfg, "path"));
         size          = json_integer_value(json_object_get(device_cfg, "size"));
+        role_name     = json_string_value(json_object_get(device_cfg, "role"));
 
+        /* A "remote" device models pNFS-block data storage outside this system:
+         * diskfs tracks its free space but never opens it.  Its size, stable
+         * deviceid and SIMPLE-volume signature come from config; its AG logs are
+         * relocated onto the local metadata device by the allocator. */
+        if (role_name && strcmp(role_name, "remote") == 0) {
+            json_t *sig_cfg = json_object_get(device_cfg, "signature");
+
+            chimera_diskfs_abort_if(i == 0, "device 0 must be a local metadata device");
+
+            device->role             = SM_DEV_REMOTE;
+            device->bdev             = NULL;
+            device->size             = size;
+            device->max_request_size = 0;
+            shared->device_paths[i]  = strdup(device_path ? device_path : "");
+            snprintf(device->name, sizeof(device->name), "%s",
+                     device_path ? device_path : "remote");
+
+            diskfs_parse_hex(json_string_value(json_object_get(device_cfg, "deviceid")),
+                             device->deviceid, SM_DEVICEID_SIZE);
+            if (json_is_object(sig_cfg)) {
+                device->sig_offset = json_integer_value(json_object_get(sig_cfg, "offset"));
+                device->sig_len    = diskfs_parse_hex(
+                    json_string_value(json_object_get(sig_cfg, "bytes")),
+                    device->sig, SM_SIG_MAX);
+            }
+
+            chimera_diskfs_info("Remote data device %s size %lu sig_off %lu sig_len %u",
+                                device->name, device->size, device->sig_offset,
+                                device->sig_len);
+            continue;
+        }
+
+        device->role            = SM_DEV_LOCAL;
         shared->device_paths[i] = strdup(device_path);
 
         if (strcmp(protocol_name, "io_uring") == 0) {
@@ -7019,10 +7125,24 @@ diskfs_init(const char *cfgdata)
      * FUA/sync, so diskfs runs lighter at the cost of crash safety.  Off by
      * default; tests that do not exercise crash recovery enable it to run more
      * efficiently. */
-    initialize                 = json_object_get(cfg, "initialize") != NULL;
-    shared->unsafe_async       = json_is_true(json_object_get(cfg, "unsafe_async"));
+    initialize           = json_object_get(cfg, "initialize") != NULL;
+    shared->unsafe_async = json_is_true(json_object_get(cfg, "unsafe_async"));
+    /* Opt-in pNFS block layout mode: diskfs sources RFC 5663 block layouts and
+     * keeps file data on remote (data-only) devices. */
+    shared->block_layout       = json_is_true(json_object_get(cfg, "block_layout"));
     shared->block_cache_blocks = (uint32_t) json_integer_value(
         json_object_get(cfg, "block_cache_blocks"));
+
+    /* Block mode and orchestrated flex-files are mutually exclusive per module
+     * (the NFS server routes on CAP_LAYOUT_SOURCE before CAP_LAYOUT).  A diskfs
+     * module is loaded once per daemon with one config, so switch the module's
+     * advertised layout capability here: block mode SOURCEs block layouts,
+     * otherwise we persist the orchestrated flex blob (default). */
+    if (shared->block_layout) {
+        vfs_diskfs.capabilities &= ~(uint64_t) CHIMERA_VFS_CAP_LAYOUT;
+        vfs_diskfs.capabilities |= CHIMERA_VFS_CAP_LAYOUT_SOURCE |
+            CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK;
+    }
     shared->inode_cache_inodes = (uint32_t) json_integer_value(
         json_object_get(cfg, "inode_cache_inodes"));
 
@@ -7067,12 +7187,33 @@ diskfs_init(const char *cfgdata)
                 "diskfs superblock missing or invalid; specify initialize to format");
         }
 
-        device_sizes = calloc(shared->num_devices, sizeof(*device_sizes));
+        dev_cfg = calloc(shared->num_devices, sizeof(*dev_cfg));
         for (i = 0; i < shared->num_devices; i++) {
-            device_sizes[i] = shared->devices[i].size;
+            struct diskfs_device *dv = &shared->devices[i];
+
+            dev_cfg[i].size = dv->size;
+            dev_cfg[i].role = dv->role;
+            if (dv->role == SM_DEV_REMOTE) {
+                memcpy(dev_cfg[i].deviceid, dv->deviceid, SM_DEVICEID_SIZE);
+                dev_cfg[i].sig_offset = dv->sig_offset;
+                dev_cfg[i].sig_len    = dv->sig_len;
+                memcpy(dev_cfg[i].sig, dv->sig, dv->sig_len);
+            }
         }
-        shared->space_map = space_map_create(device_sizes, shared->num_devices);
-        free(device_sizes);
+        shared->space_map = space_map_create(dev_cfg, shared->num_devices);
+        free(dev_cfg);
+
+        /* On a persistent remount the relocated-log map is recomputed from the
+         * device cfg; it must match what the superblock recorded or the remote
+         * AG logs would be read from the wrong offsets. */
+        if (mode != 0) {
+            chimera_diskfs_abort_if(
+                sb.num_remote_devices != shared->space_map->num_remote_devices ||
+                sb.remote_log_offset != shared->space_map->remote_log_offset ||
+                sb.remote_log_size != shared->space_map->remote_log_size,
+                "device configuration changed since last mount (remote-log region "
+                "mismatch): refusing to mount to avoid corrupting relocated AG logs");
+        }
 
         if (mode == 2) {
             chimera_diskfs_info("superblock not clean: running crash recovery");
@@ -7380,7 +7521,9 @@ diskfs_destroy(void *private_data)
     }
 
     for (int i = 0; i < shared->num_devices; i++) {
-        evpl_block_close_device(shared->devices[i].bdev);
+        if (shared->devices[i].bdev) {
+            evpl_block_close_device(shared->devices[i].bdev);
+        }
     }
 
     diskfs_block_cache_destroy(shared);
@@ -7483,7 +7626,9 @@ diskfs_thread_init(
     thread->queue = calloc(shared->num_devices, sizeof(*thread->queue));
 
     for (int i = 0; i < shared->num_devices; i++) {
-        thread->queue[i] = evpl_block_open_queue(evpl, shared->devices[i].bdev);
+        /* Remote (pNFS data) devices have no local handle: leave queue NULL. */
+        thread->queue[i] = shared->devices[i].bdev ?
+            evpl_block_open_queue(evpl, shared->devices[i].bdev) : NULL;
     }
 
     thread->shared = shared;
@@ -7557,12 +7702,16 @@ diskfs_thread_destroy(void *private_data)
     slab_allocator_destroy(thread->allocator);
 
     for (int i = 0; i < shared->num_devices; i++) {
+        if (!thread->queue[i]) {
+            continue;
+        }
         evpl_block_close_queue(thread->evpl, thread->queue[i]);
     }
 
     /* No txn at thread teardown; the unused reservation tail returns to the
      * in-memory free set and is captured by the condense at clean unmount. */
     space_map_thread_cache_return(shared->space_map, NULL, &thread->space_cache);
+    space_map_thread_cache_return(shared->space_map, NULL, &thread->data_space_cache);
 
     /* Unregister the intent-log channel.  Caller must have quiesced all
      * in-flight VFS ops on this thread first. */
@@ -7653,6 +7802,25 @@ diskfs_map_attrs(
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
         attr->va_fsid      = shared->fsid;
+    }
+
+    /*
+     * Opaque pNFS layout state (flex-files), persisted verbatim for the NFS
+     * server as the single DISKFS_REC_PNFS record in this inode's b+tree.  A
+     * file that carries a layout blob has its data on the data server, never
+     * local extents, so the record always lives in the resident embedded root
+     * -- the sync lookup never suspends (same invariant as the symlink record).
+     */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) {
+        struct diskfs_bt_key pnfs_key = { .type = DISKFS_REC_PNFS, .subkey = 0 };
+        int                  len      = diskfs_bt_lookup_exact(thread, inode, &pnfs_key,
+                                                               attr->va_pnfs,
+                                                               CHIMERA_VFS_PNFS_LAYOUT_MAX);
+
+        if (len >= 0) {
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_PNFS_LAYOUT;
+            attr->va_pnfs_len  = len;
+        }
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
@@ -7946,6 +8114,32 @@ diskfs_setattr_trunc_first_cb(
     diskfs_setattr_trunc_process(request);
 } /* diskfs_setattr_trunc_first_cb */
 
+/*
+ * Completion for a setattr that also persisted a pNFS layout blob: the
+ * DISKFS_REC_PNFS record is now in the b+tree (resident root, so the insert
+ * never split), so map the post attrs and commit.
+ */
+static void
+diskfs_setattr_pnfs_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+
+    diskfs_bt_op_free(thread, op);
+
+    if (unlikely(result < 0)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EIO);
+        return;
+    }
+
+    diskfs_map_attrs(thread, &request->setattr.r_post_attr, p->inode_stash[0]);
+    diskfs_op_ok(request, p->txn);
+} /* diskfs_setattr_pnfs_cb */
+
 static void
 diskfs_setattr_inode_cb(
     struct diskfs_inode *inode,
@@ -7990,6 +8184,26 @@ diskfs_setattr_inode_cb(
     }
 
     diskfs_apply_attrs(inode, request->setattr.set_attr);
+
+    /* Persist the opaque pNFS layout blob as this inode's single PNFS record. */
+    if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) {
+        struct diskfs_bt_key key      = { .type = DISKFS_REC_PNFS, .subkey = 0 };
+        uint32_t             blob_len = request->setattr.set_attr->va_pnfs_len;
+
+        if (blob_len > CHIMERA_VFS_PNFS_LAYOUT_MAX) {
+            blob_len = CHIMERA_VFS_PNFS_LAYOUT_MAX;
+        }
+
+        p->inode_stash[0] = inode;
+        op                = diskfs_bt_op_alloc(thread);
+        if (diskfs_bt_insert_async(op, thread, p->txn, inode, &key,
+                                   request->setattr.set_attr->va_pnfs, blob_len,
+                                   diskfs_setattr_pnfs_cb, request)) {
+            diskfs_setattr_pnfs_cb(op, op->result, request);
+        }
+        return;
+    }
+
     diskfs_map_attrs(thread, &request->setattr.r_post_attr, inode);
     diskfs_op_ok(request, p->txn);
 } /* diskfs_setattr_inode_cb */
@@ -9871,8 +10085,17 @@ diskfs_read(
 {
     struct diskfs_request_private *p = request->plugin_data;
 
-    (void) shared;
     (void) private_data;
+
+    /* Block-mode shares keep all file data on remote (pNFS) devices the server
+     * can't touch, so inline reads are impossible -- the client must use a
+     * block layout.  Reject so a non-pNFS read doesn't dereference a NULL
+     * device queue. */
+    if (unlikely(shared->block_layout)) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
 
     p->opcode     = request->opcode;
     p->status     = 0;
@@ -10682,8 +10905,16 @@ diskfs_write(
 {
     struct diskfs_request_private *p = request->plugin_data;
 
-    (void) shared;
     (void) private_data;
+
+    /* Block-mode data lives on remote (pNFS) devices: writes go directly from
+     * the client to the volume via an RW layout, never inline through the
+     * server (which has no handle for those devices). */
+    if (unlikely(shared->block_layout)) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
 
     p->opcode              = request->opcode;
     p->status              = 0;
@@ -12656,6 +12887,362 @@ diskfs_remove_xattr(
                               diskfs_remove_xattr_inode_cb, request);
 } /* diskfs_remove_xattr */
 
+/* ------------------------------------------------------------------ */
+/* pNFS block layout (CHIMERA_VFS_OP_GET_LAYOUT, RFC 5663)             */
+/* ------------------------------------------------------------------ */
+/*
+ * Produce a block layout for [offset, offset+length): walk the inode's extent
+ * b+tree, emit one block segment per backed run, and (for an RW layout) allocate
+ * + record extents over unbacked gaps so the client can write directly to the
+ * remote data volume.  The allocation rides p->txn; diskfs_op_ok commits the
+ * txn (making the extent records durable) BEFORE the layout is returned, so a
+ * crash can never re-hand-out a block the client is about to write.  Block-mode
+ * shares keep file data on REMOTE devices, so blk_vol_offset is the extent's
+ * absolute device offset on that volume (the signature region is reserved out
+ * of allocation, so no extent overlaps it).  Freshly-allocated / beyond-EOF
+ * ranges are INVALID_DATA; ranges within the committed size are READ_WRITE/READ
+ * (the size advances only on LAYOUTCOMMIT).
+ */
+#define DISKFS_LAYOUT_GAP_MAX  (256ULL << 20)
+#define DISKFS_LAYOUTIOMODE_RW 2     /* LAYOUTIOMODE4_RW */
+
+static void diskfs_get_layout_process(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_layout_add_device(
+    struct chimera_vfs_request *request,
+    struct diskfs_shared       *shared,
+    uint32_t                    device_id)
+{
+    struct diskfs_device             *dev = &shared->devices[device_id];
+    struct chimera_vfs_layout_device *ld;
+    uint32_t                          i;
+
+    for (i = 0; i < request->get_layout.r_num_devices; i++) {
+        if (memcmp(request->get_layout.r_devices[i].deviceid, dev->deviceid,
+                   SM_DEVICEID_SIZE) == 0) {
+            return;
+        }
+    }
+    if (request->get_layout.r_num_devices >= CHIMERA_VFS_LAYOUT_MAX_DEVICES) {
+        return;
+    }
+    ld = &request->get_layout.r_devices[request->get_layout.r_num_devices++];
+    memset(ld, 0, sizeof(*ld));
+    memcpy(ld->deviceid, dev->deviceid, SM_DEVICEID_SIZE);
+    ld->layout_class   = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
+    ld->blk_vol_size   = dev->size;
+    ld->blk_sig_offset = dev->sig_offset;
+    ld->blk_sig_len    = dev->sig_len;
+    memcpy(ld->blk_sig, dev->sig, dev->sig_len);
+} /* diskfs_layout_add_device */
+
+/* Append one block segment [file_off, file_off+len) -> (device_id, vol_off). */
+static void
+diskfs_layout_emit(
+    struct chimera_vfs_request *request,
+    struct diskfs_shared       *shared,
+    uint64_t                    file_off,
+    uint64_t                    len,
+    uint32_t                    device_id,
+    uint64_t                    vol_off,
+    uint32_t                    state)
+{
+    struct chimera_vfs_layout_segment *seg =
+        &request->get_layout.r_segments[request->get_layout.r_num_segments++];
+
+    memset(seg, 0, sizeof(*seg));
+    seg->offset = file_off;
+    seg->length = len;
+    seg->iomode = request->get_layout.iomode;
+    memcpy(seg->deviceid, shared->devices[device_id].deviceid, SM_DEVICEID_SIZE);
+    seg->blk_vol_offset = vol_off;
+    seg->blk_state      = state;
+    diskfs_layout_add_device(request, shared, device_id);
+} /* diskfs_layout_emit */
+
+static void
+diskfs_get_layout_finish(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    request->get_layout.r_layout_class = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
+    /* Commits the txn (durably persisting any new extent records) before the
+     * layout is handed back; a pure-READ layout has nothing journaled. */
+    diskfs_op_ok(request, p->txn);
+} /* diskfs_get_layout_finish */
+
+/* Advance the walk to the next extent after the current one, then re-process. */
+static void
+diskfs_get_layout_walk_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    p->loop_have = diskfs_ext_from_op(op, result, &p->ext_iter);
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_get_layout_process(request);
+} /* diskfs_get_layout_walk_cb */
+
+static void
+diskfs_get_layout_advance(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+
+    if (diskfs_ext_next_async(op, thread, p->inode_stash[0], p->ext_iter.file_offset,
+                              p->rec_scratch, sizeof(p->rec_scratch),
+                              diskfs_get_layout_walk_cb, request)) {
+        diskfs_get_layout_walk_cb(op, op->result, request);
+    }
+} /* diskfs_get_layout_advance */
+
+/* The freshly-allocated gap extent is now in the b+tree (durable on commit);
+* emit it as INVALID_DATA and continue (the held ext_iter is still valid). */
+static void
+diskfs_get_layout_inserted_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    struct diskfs_inode           *inode   = p->inode_stash[0];
+
+    diskfs_bt_op_free(thread, op);
+
+    if (unlikely(result < 0)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EIO);
+        return;
+    }
+
+    inode->space_used += p->rmw_aligned_length;
+
+    diskfs_layout_emit(request, thread->shared, p->rmw_aligned_start,
+                       p->rmw_aligned_length, (uint32_t) p->rmw_device_id,
+                       p->rmw_device_offset, CHIMERA_VFS_BLOCK_INVALID_DATA);
+
+    p->loop_off += p->rmw_aligned_length;
+    diskfs_get_layout_process(request);
+} /* diskfs_get_layout_inserted_cb */
+
+/* Allocate one gap extent at p->loop_off (length p->rmw_aligned_length) and
+ * insert it.  Re-driven by the allocator on SM_AGAIN. */
+static void
+diskfs_get_layout_do_alloc(
+    struct diskfs_thread *thread,
+    void                 *arg)
+{
+    struct chimera_vfs_request    *request = arg;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_bt_op           *op;
+    uint64_t                       dev_id, dev_off;
+    int                            rc;
+
+    rc = diskfs_thread_alloc_space(thread, p->txn, (int64_t) p->rmw_aligned_length,
+                                   &dev_id, &dev_off,
+                                   diskfs_get_layout_do_alloc, request);
+    if (rc == SM_AGAIN) {
+        return;     /* parked; re-driven into this function */
+    }
+    if (rc != 0) {
+        diskfs_op_fail(request, p->txn, rc);
+        return;
+    }
+
+    p->rmw_device_id     = dev_id;
+    p->rmw_device_offset = dev_off;
+    p->rmw_aligned_start = p->loop_off;
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
+                                p->loop_off, p->rmw_aligned_length,
+                                (uint32_t) dev_id, dev_off,
+                                diskfs_get_layout_inserted_cb, request)) {
+        diskfs_get_layout_inserted_cb(op, op->result, request);
+    }
+} /* diskfs_get_layout_do_alloc */
+
+static void
+diskfs_get_layout_process(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_shared          *shared = thread->shared;
+    struct diskfs_inode           *inode  = p->inode_stash[0];
+    struct diskfs_extent          *ext    = &p->ext_iter;
+    int                            rw     = request->get_layout.iomode == DISKFS_LAYOUTIOMODE_RW;
+    uint64_t                       size   = inode->size;
+    uint64_t                       end    = p->loop_pos;
+
+    /* Done: range covered, or no more segment slots (client re-LAYOUTGETs). */
+    if (p->loop_off >= end ||
+        request->get_layout.r_num_segments >= request->get_layout.max_segments) {
+        diskfs_get_layout_finish(request);
+        return;
+    }
+
+    if (p->loop_have && ext->file_offset <= p->loop_off &&
+        ext->file_offset + ext->length > p->loop_off) {
+        /* Backed run at the cursor. */
+        uint64_t ext_end = ext->file_offset + ext->length;
+        uint64_t seg_end = ext_end < end ? ext_end : end;
+        uint64_t vol_off = ext->device_offset + (p->loop_off - ext->file_offset);
+
+        if (rw && p->loop_off < size && seg_end > size) {
+            /* Straddles committed size: written part then unwritten part. */
+            uint64_t split = size;
+            diskfs_layout_emit(request, shared, p->loop_off, split - p->loop_off,
+                               ext->device_id, vol_off, CHIMERA_VFS_BLOCK_READ_WRITE_DATA);
+            diskfs_layout_emit(request, shared, split, seg_end - split,
+                               ext->device_id, vol_off + (split - p->loop_off),
+                               CHIMERA_VFS_BLOCK_INVALID_DATA);
+        } else {
+            uint32_t state = rw ?
+                (p->loop_off < size ? CHIMERA_VFS_BLOCK_READ_WRITE_DATA :
+                 CHIMERA_VFS_BLOCK_INVALID_DATA) : CHIMERA_VFS_BLOCK_READ_DATA;
+            diskfs_layout_emit(request, shared, p->loop_off, seg_end - p->loop_off,
+                               ext->device_id, vol_off, state);
+        }
+        p->loop_off = seg_end;
+        diskfs_get_layout_advance(request);
+        return;
+    }
+
+    /* Gap from the cursor to the next extent (or the end of the range). */
+    {
+        uint64_t gap_end = (p->loop_have && ext->file_offset < end) ?
+            ext->file_offset : end;
+
+        if (!rw) {
+            /* Read of a hole: skip it (the client reads zeros). */
+            p->loop_off = gap_end;
+            diskfs_get_layout_process(request);
+            return;
+        }
+
+        uint64_t gap_len = gap_end - p->loop_off;
+        if (gap_len > DISKFS_LAYOUT_GAP_MAX) {
+            gap_len = DISKFS_LAYOUT_GAP_MAX;
+        }
+        p->rmw_aligned_length = gap_len;
+        diskfs_get_layout_do_alloc(thread, request);
+    }
+} /* diskfs_get_layout_process */
+
+static void
+diskfs_get_layout_first_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+
+    p->loop_have = diskfs_ext_from_op(op, result, &p->ext_iter);
+    diskfs_bt_op_free(thread, op);
+
+    /* A floor extent entirely before the cursor doesn't overlap: step to the
+     * next one so the cursor sees the first extent at or after loop_off. */
+    if (p->loop_have &&
+        p->ext_iter.file_offset + p->ext_iter.length <= p->loop_off) {
+        diskfs_get_layout_advance(request);
+        return;
+    }
+    diskfs_get_layout_process(request);
+} /* diskfs_get_layout_first_cb */
+
+static void
+diskfs_get_layout_inode_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    struct diskfs_shared          *shared  = thread->shared;
+    uint64_t                       off, end;
+    struct diskfs_bt_op           *op;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+    if (unlikely(!S_ISREG(inode->mode))) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EINVAL);
+        return;
+    }
+
+    off = request->get_layout.offset & ~(uint64_t) (DISKFS_BLOCK_SIZE - 1);
+    end = (request->get_layout.offset + request->get_layout.length +
+           DISKFS_BLOCK_SIZE - 1) & ~(uint64_t) (DISKFS_BLOCK_SIZE - 1);
+
+    /* A READ layout is never returned past the committed size (the client reads
+     * zeros for a hole / beyond EOF). */
+    if (request->get_layout.iomode != DISKFS_LAYOUTIOMODE_RW) {
+        uint64_t size_end = (inode->size + DISKFS_BLOCK_SIZE - 1) &
+            ~(uint64_t) (DISKFS_BLOCK_SIZE - 1);
+        if (end > size_end) {
+            end = size_end;
+        }
+    }
+
+    p->inode_stash[0] = inode;
+    p->loop_off       = off;
+    p->loop_pos       = end;
+
+    request->get_layout.r_layout_class = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
+    request->get_layout.r_num_segments = 0;
+    request->get_layout.r_num_devices  = 0;
+
+    if (off >= end) {
+        diskfs_get_layout_finish(request);
+        return;
+    }
+
+    (void) shared;
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_floor_async(op, thread, inode, off, p->rec_scratch,
+                               sizeof(p->rec_scratch), diskfs_get_layout_first_cb,
+                               request)) {
+        diskfs_get_layout_first_cb(op, op->result, request);
+    }
+} /* diskfs_get_layout_inode_cb */
+
+static void
+diskfs_get_layout(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+    int                            rw;
+
+    (void) private_data;
+
+    if (unlikely(!shared->block_layout)) {
+        request->status = CHIMERA_VFS_ENOTSUP;
+        request->complete(request);
+        return;
+    }
+
+    rw        = request->get_layout.iomode == DISKFS_LAYOUTIOMODE_RW;
+    p->thread = thread;
+    p->txn    = diskfs_txn_begin(thread, rw ? DISKFS_TXN_WRITE : DISKFS_TXN_READ);
+
+    diskfs_inode_get_fh_async(thread, p->txn, request->fh, request->fh_len,
+                              diskfs_get_layout_inode_cb, request);
+} /* diskfs_get_layout */
+
 static void
 diskfs_dispatch(
     struct chimera_vfs_request *request,
@@ -12772,6 +13359,9 @@ diskfs_dispatch(
         case CHIMERA_VFS_OP_REMOVE_XATTR:
             diskfs_remove_xattr(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_GET_LAYOUT:
+            diskfs_get_layout(thread, shared, request, private_data);
+            break;
         default:
             chimera_diskfs_error("diskfs_dispatch: unknown operation %d",
                                  request->opcode);
@@ -12785,7 +13375,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .name         = "diskfs",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_DISKFS,
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
-        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_XATTR,
+        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT,
     .init           = diskfs_init,
     .destroy        = diskfs_destroy,
     .thread_init    = diskfs_thread_init,

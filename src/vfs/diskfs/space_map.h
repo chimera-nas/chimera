@@ -201,6 +201,14 @@ struct sm_superblock {
     uint64_t root_inum;
     uint32_t root_gen;
     uint64_t log_seq;           /* next redo seq at clean unmount (for recovery) */
+    /* Block-mode (pNFS) relocated-AG-log region: where the AG logs for remote
+     * data devices live on the local metadata device (device 0), recorded so a
+     * persistent remount can validate the deterministic (device,ag)->slot map.
+     * remote_log_size == 0 means no remote devices (today's layout). */
+    uint32_t num_remote_devices;
+    uint32_t remote_log_device;     /* device holding relocated logs (== 0) */
+    uint64_t remote_log_offset;     /* region base on remote_log_device */
+    uint64_t remote_log_size;       /* total region bytes */
     /* Remainder of the 4 KiB block is implicit zero padding. */
 };
 
@@ -227,6 +235,36 @@ sm_crc32(
     return ~crc;
 } /* sm_crc32 */
 
+/*
+ * Device roles.  LOCAL devices hold all metadata (superblock, intent log,
+ * inodes/b+trees) and may hold data.  REMOTE devices model storage that lives
+ * outside this system for pNFS block layouts: diskfs tracks their free space
+ * but never opens them (no evpl_block handle); their AG logs are relocated onto
+ * a LOCAL device, and they hold only file data, accessed directly by the pNFS
+ * block client.  Device 0 must be LOCAL.
+ */
+#define SM_DEV_LOCAL     0
+#define SM_DEV_REMOTE    1
+
+#define SM_DEVICEID_SIZE 16
+#define SM_SIG_MAX       64
+
+/*
+ * Per-device configuration handed to space_map_create.  For LOCAL devices only
+ * `size` and `role` matter.  REMOTE devices additionally carry the stable
+ * 16-byte pNFS deviceid and an RFC 5663 SIMPLE-volume content signature
+ * {sig_offset, sig[0..sig_len)} that the block client matches against its local
+ * disks (provisioned out of band; diskfs never writes it).
+ */
+struct sm_device_cfg {
+    uint64_t size;
+    uint32_t role;
+    uint8_t  deviceid[SM_DEVICEID_SIZE];
+    uint64_t sig_offset;
+    uint32_t sig_len;
+    uint8_t  sig[SM_SIG_MAX];
+};
+
 struct sm_extent {
     struct rb_node node;
     uint64_t       offset;
@@ -238,7 +276,10 @@ struct sm_ag {
     uint32_t        ag_index;
     uint64_t        base_offset;
     uint64_t        size;
-    uint64_t        log_offset;      /* absolute device offset of this AG's log */
+    uint32_t        log_device_id;   /* device whose storage holds this AG's log
+                                      * (always LOCAL; == device_id unless this
+                                      * AG tracks a relocated REMOTE device) */
+    uint64_t        log_offset;      /* absolute offset of this AG's log on log_device_id */
     uint64_t        log_size;        /* total log bytes (both slots) */
     uint64_t        free_bytes;
     struct rb_tree  free_by_offset;
@@ -256,6 +297,11 @@ struct sm_device {
     uint64_t      size;
     uint32_t      num_ags;
     uint32_t      ag_rotor;
+    uint32_t      role;                       /* SM_DEV_LOCAL | SM_DEV_REMOTE */
+    uint8_t       deviceid[SM_DEVICEID_SIZE];  /* REMOTE: pNFS deviceid */
+    uint64_t      sig_offset;                 /* REMOTE: SIMPLE-volume signature */
+    uint32_t      sig_len;
+    uint8_t       sig[SM_SIG_MAX];
     struct sm_ag *ags;
 };
 
@@ -266,6 +312,13 @@ struct space_map {
     uint64_t          total_capacity;
     uint64_t          used_bytes;     /* atomic accounting for statfs */
     pthread_mutex_t   lock;           /* protects rotors and journaled writes */
+
+    /* Relocated remote-AG-log region on device 0 (block mode); zero if no
+     * remote devices.  Deterministic from the device cfg, recomputed on mount
+     * and cross-checked against the superblock. */
+    uint32_t          num_remote_devices;
+    uint64_t          remote_log_offset;
+    uint64_t          remote_log_size;
 };
 
 struct sm_thread_cache {
@@ -277,8 +330,8 @@ struct sm_thread_cache {
 
 struct space_map *
 space_map_create(
-    const uint64_t *device_sizes,
-    uint32_t        num_devices);
+    const struct sm_device_cfg *cfg,
+    uint32_t                    num_devices);
 
 void
 space_map_destroy(
@@ -306,16 +359,27 @@ space_map_reserve(
     struct space_map        *sm,
     struct sm_thread_cache  *cache,
     const struct sm_journal *jnl,
+    uint32_t                 role,
     uint64_t                 min_bytes);
 
+/* `role` (SM_DEV_LOCAL/SM_DEV_REMOTE) restricts the allocation to devices of
+ * that class: block mode places metadata on LOCAL and data on REMOTE devices.
+ * With no remote devices everything is LOCAL (today's single-pool behavior). */
 int
 space_map_alloc(
     struct space_map        *sm,
     struct sm_thread_cache  *cache,
     const struct sm_journal *jnl,
+    uint32_t                 role,
     uint64_t                 size,
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset);
+
+static inline int
+space_map_has_remote(const struct space_map *sm)
+{
+    return sm->num_remote_devices > 0;
+} // space_map_has_remote
 
 int
 space_map_free(
