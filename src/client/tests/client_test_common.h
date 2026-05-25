@@ -149,6 +149,7 @@ client_test_init(
                 close(fd);
             }
 
+            json_object_set_new(cfg, "initialize", json_true());
             json_object_set_new(cfg, "devices", devices);
             json_object_set_new(cfg, "unsafe_async", json_true());
             json_str = json_dumps(cfg, JSON_COMPACT);
@@ -255,6 +256,7 @@ client_test_init(
                     close(fd);
                 }
 
+                json_object_set_new(cfg, "initialize", json_true());
                 json_object_set_new(cfg, "devices", devices);
                 json_object_set_new(cfg, "unsafe_async", json_true());
                 json_str = json_dumps(cfg, JSON_COMPACT);
