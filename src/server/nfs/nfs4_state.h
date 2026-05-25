@@ -8,6 +8,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <uthash.h>
 #include <utlist.h>
@@ -274,6 +275,9 @@ struct nfs_open_owner {
 
 struct nfs_open_state {
     struct nfs_open_owner          *owner;
+    uint32_t                        principal_flavor;
+    uint32_t                        principal_machinename_len;
+    char                            principal_machinename[NFS4_OPAQUE_LIMIT];
     uint8_t                         fh[NFS4_FHSIZE];
     uint16_t                        fh_len;
     uint32_t                        share_access;       /* OPEN4_SHARE_ACCESS_* */
@@ -484,6 +488,69 @@ struct nfs_state_table {
     uint32_t               epoch;
 };
 
+static inline struct nfs_client *
+nfs_state_owner_client(
+    void   *state,
+    uint8_t type)
+{
+    switch (type) {
+        case NFS4_SLOT_TYPE_OPEN:
+            return ((struct nfs_open_state *) state)->owner->client;
+        case NFS4_SLOT_TYPE_LOCK:
+            return ((struct nfs_lock_state *) state)->lock_owner->client;
+        case NFS4_SLOT_TYPE_DELEG:
+            return ((struct nfs_delegation *) state)->client;
+        case NFS4_SLOT_TYPE_LAYOUT:
+            return ((struct nfs_layout_state *) state)->client;
+        default:
+            return NULL;
+    } // switch
+} /* nfs_state_owner_client */
+
+static inline nfsstat4
+nfs_state_check_client(
+    void              *state,
+    uint8_t            type,
+    struct nfs_client *client)
+{
+    struct nfs_client *owner = nfs_state_owner_client(state, type);
+
+    if (!owner) {
+        return NFS4ERR_ACCESS;
+    }
+
+    if (!client) {
+        return NFS4_OK;
+    }
+
+    if (owner != client) {
+        return NFS4ERR_ACCESS;
+    }
+
+    return NFS4_OK;
+} /* nfs_state_check_client */
+
+static inline bool
+nfs_open_state_check_principal(
+    const struct nfs_open_state *state,
+    uint32_t                     flavor,
+    const char                  *machinename,
+    uint32_t                     machinename_len)
+{
+    if (state->principal_flavor != flavor ||
+        state->principal_machinename_len != machinename_len) {
+        return false;
+    }
+
+    if (machinename_len == 0) {
+        return true;
+    }
+
+    return machinename &&
+           memcmp(state->principal_machinename, machinename,
+                  machinename_len) == 0;
+} /* nfs_open_state_check_principal */
+
 /*
  * Public API.
  */
@@ -616,6 +683,9 @@ nfs_open_owner_find_state(
 SYMBOL_EXPORT struct nfs_open_state *
 nfs_open_state_create(
     struct nfs_open_owner          *owner,
+    uint32_t                        principal_flavor,
+    const char                     *principal_machinename,
+    uint32_t                        principal_machinename_len,
     const uint8_t                  *fh,
     uint16_t                        fh_len,
     uint32_t                        share_access,

@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <sys/stat.h>
 #include "nfs_common.h"
 #include "nfs_internal.h"
 
@@ -43,6 +44,53 @@ nfs4_root_get_fh(
     memcpy(fh, nfs4_root_fh, nfs4_root_fh_len);
     *fh_len = nfs4_root_fh_len;
 } /* nfs4_root_get_fh */
+
+static inline int
+chimera_nfs4_cred_has_mode_access(
+    const struct chimera_vfs_attrs *attr,
+    const struct chimera_vfs_cred  *cred,
+    int                             need_read,
+    int                             need_write,
+    int                             need_exec)
+{
+    uint32_t mode = attr->va_mode;
+    int      r, w, x;
+
+    if (cred->uid == 0) {
+        r = 1;
+        w = 1;
+        x = !!(mode & (S_IXUSR | S_IXGRP | S_IXOTH));
+    } else if ((uint64_t) cred->uid == attr->va_uid) {
+        r = !!(mode & S_IRUSR);
+        w = !!(mode & S_IWUSR);
+        x = !!(mode & S_IXUSR);
+    } else {
+        int in_group = ((uint64_t) cred->gid == attr->va_gid);
+
+        if (!in_group) {
+            for (uint32_t i = 0; i < cred->ngids; i++) {
+                if ((uint64_t) cred->gids[i] == attr->va_gid) {
+                    in_group = 1;
+                    break;
+                }
+            }
+        }
+
+        if (in_group) {
+            r = !!(mode & S_IRGRP);
+            w = !!(mode & S_IWGRP);
+            x = !!(mode & S_IXGRP);
+        } else {
+            r = !!(mode & S_IROTH);
+            w = !!(mode & S_IWOTH);
+            x = !!(mode & S_IXOTH);
+        }
+    }
+
+    return (!need_read || r) &&
+           (!need_write || w) &&
+           (!need_exec || x);
+} /* chimera_nfs4_cred_has_mode_access */
 
 /**
  * Populate attributes for the NFSv4 pseudo-root directory.

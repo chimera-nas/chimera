@@ -875,6 +875,9 @@ nfs_open_share_history(uint32_t share)
 struct nfs_open_state *
 nfs_open_state_create(
     struct nfs_open_owner          *owner,
+    uint32_t                        principal_flavor,
+    const char                     *principal_machinename,
+    uint32_t                        principal_machinename_len,
     const uint8_t                  *fh,
     uint16_t                        fh_len,
     uint32_t                        share_access,
@@ -897,7 +900,16 @@ nfs_open_state_create(
     rc = nfs_state_table_alloc(table, NFS4_SLOT_TYPE_OPEN, &shard, &slot_idx, &gen);
     chimera_nfs_abort_if(rc != 0, "state table exhausted");
 
-    state->owner = owner;
+    state->owner            = owner;
+    state->principal_flavor = principal_flavor;
+    if (principal_machinename_len > NFS4_OPAQUE_LIMIT) {
+        principal_machinename_len = NFS4_OPAQUE_LIMIT;
+    }
+    state->principal_machinename_len = principal_machinename_len;
+    if (principal_machinename && principal_machinename_len) {
+        memcpy(state->principal_machinename, principal_machinename,
+               principal_machinename_len);
+    }
     memcpy(state->fh, fh, fh_len);
     state->fh_len            = fh_len;
     state->share_access      = share_access;

@@ -159,7 +159,7 @@ test_owner_state_lifecycle(void)
     CHECK(owner_again == owner);
 
     /* Create an open_state with NULL handle (no VFS). */
-    state = nfs_open_state_create(owner, fh, sizeof(fh),
+    state = nfs_open_state_create(owner, 0, NULL, 0, fh, sizeof(fh),
                                   OPEN4_SHARE_ACCESS_READ,
                                   OPEN4_SHARE_DENY_NONE,
                                   /*handle_dup*/ NULL,
@@ -268,7 +268,7 @@ test_share_mode_conflict(void)
     CHECK(owner_a != owner_b);
 
     /* Owner A opens with SHARE_DENY_WRITE. */
-    state_a = nfs_open_state_create(owner_a, fh, sizeof(fh),
+    state_a = nfs_open_state_create(owner_a, 0, NULL, 0, fh, sizeof(fh),
                                     OPEN4_SHARE_ACCESS_READ,
                                     OPEN4_SHARE_DENY_WRITE,
                                     NULL, &table, &sid_a);

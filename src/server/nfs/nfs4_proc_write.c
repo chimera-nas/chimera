@@ -244,6 +244,18 @@ chimera_nfs4_write(
         return;
     }
 
+    status = nfs_state_check_client(
+        state_void, state_type,
+        req->session ? req->session->client_unified : NULL);
+    if (status != NFS4_OK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->status = status;
+        evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     /* A (write) delegation stateid authorizes the WRITE but carries no open
      * handle; drop the ref and open the current FH on the fly. */
     if (state_type == NFS4_SLOT_TYPE_DELEG) {
@@ -311,13 +323,22 @@ chimera_nfs4_write(
         return;
     }
 
+    if (!nfs_open_state_check_principal(open_state,
+                                        req->principal_flavor,
+                                        req->principal_machinename,
+                                        req->principal_machinename_len)) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->status = NFS4ERR_ACCESS;
+        evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     req->nfs_state_ref  = state_void;
     req->nfs_state_type = state_type;
     req->args_write4    = args;
 
-    /* Attribute the write to the client's owner so other holders' read
-     * caches are invalidated while this client's own delegation is not
-     * recalled by its own write. */
     struct chimera_vfs_lease_owner io_owner = {
         .protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4,
         .client_key = open_state->owner->client->client_id,

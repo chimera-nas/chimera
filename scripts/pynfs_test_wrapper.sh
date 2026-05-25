@@ -35,6 +35,7 @@ RESULTS_FILE="${SESSION_DIR}/results.json"
 CHIMERA_PID=""
 CHIMERA_LOG="${SESSION_DIR}/chimera.log"
 CHIMERA_DIED_DURING_TEST=0
+PYNFS_PYCOMPAT_DIR="${SESSION_DIR}/pycompat"
 PYNFS_NFS4_LEASE_TIME="${PYNFS_NFS4_LEASE_TIME:-5}"
 PYNFS_NFS4_GRACE_TIME="${PYNFS_NFS4_GRACE_TIME:-10}"
 
@@ -191,8 +192,28 @@ fi
 # Run pynfs tests based on NFS minor version
 # Flags are passed as positional arguments to testserver.py
 # --jsonout writes structured results for failure detection
-# PYTHONPATH includes pynfs root for shared modules (rpc, xdr)
-export PYTHONPATH="${PYNFS_DIR}:${PYTHONPATH:-}"
+# PYTHONPATH includes pynfs root for shared modules (rpc, xdr).  Python 3.14
+# images use xdrlib3, whose pack_string requires bytes; older pynfs tests still
+# pass AUTH_SYS machine names as str.  Patch that compatibility gap in-process
+# instead of modifying the external /opt/pynfs checkout.
+mkdir -p "${PYNFS_PYCOMPAT_DIR}"
+cat > "${PYNFS_PYCOMPAT_DIR}/sitecustomize.py" <<'EOF'
+try:
+    from xdrlib3 import Packer
+except ImportError:
+    Packer = None
+
+if Packer is not None:
+    _pack_string = Packer.pack_string
+
+    def _chimera_pack_string(self, s):
+        if isinstance(s, str):
+            s = s.encode()
+        return _pack_string(self, s)
+
+    Packer.pack_string = _chimera_pack_string
+EOF
+export PYTHONPATH="${PYNFS_PYCOMPAT_DIR}:${PYNFS_DIR}:${PYTHONPATH:-}"
 
 # Hard wall-clock timeout per ctest entry. Healthy flag groups complete in
 # under a second; anything past this is hung. `timeout` returns 124 when it

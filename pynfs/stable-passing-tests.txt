@@ -2162,6 +2162,7 @@ chimera/pynfs/read/OPEN23b_memfs_nfs4.0
 chimera/pynfs/read/OPEN28_memfs_nfs4.0
 chimera/pynfs/read/RD1_memfs_nfs4.0
 chimera/pynfs/read/RD10_memfs_nfs4.0
+chimera/pynfs/read/RD12_memfs_nfs4.0
 chimera/pynfs/read/RD13_memfs_nfs4.0
 chimera/pynfs/read/RD3_memfs_nfs4.0
 chimera/pynfs/read/RD5_memfs_nfs4.0
@@ -2180,6 +2181,7 @@ chimera/pynfs/read/OPEN23b_linux_nfs4.0
 chimera/pynfs/read/OPEN28_linux_nfs4.0
 chimera/pynfs/read/RD1_linux_nfs4.0
 chimera/pynfs/read/RD10_linux_nfs4.0
+chimera/pynfs/read/RD12_linux_nfs4.0
 chimera/pynfs/read/RD13_linux_nfs4.0
 chimera/pynfs/read/RD3_linux_nfs4.0
 chimera/pynfs/read/RD5_linux_nfs4.0
@@ -2196,6 +2198,7 @@ chimera/pynfs/read/OPEN23b_io_uring_nfs4.0
 chimera/pynfs/read/OPEN28_io_uring_nfs4.0
 chimera/pynfs/read/RD1_io_uring_nfs4.0
 chimera/pynfs/read/RD10_io_uring_nfs4.0
+chimera/pynfs/read/RD12_io_uring_nfs4.0
 chimera/pynfs/read/RD3_io_uring_nfs4.0
 chimera/pynfs/read/RD5_io_uring_nfs4.0
 chimera/pynfs/read/RD7a_io_uring_nfs4.0
@@ -2211,6 +2214,7 @@ chimera/pynfs/read/OPEN23b_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/OPEN28_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/RD1_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/RD10_diskfs_io_uring_nfs4.0
+chimera/pynfs/read/RD12_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/RD13_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/RD3_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/RD5_diskfs_io_uring_nfs4.0
@@ -2229,6 +2233,7 @@ chimera/pynfs/read/OPEN23b_diskfs_aio_nfs4.0
 chimera/pynfs/read/OPEN28_diskfs_aio_nfs4.0
 chimera/pynfs/read/RD1_diskfs_aio_nfs4.0
 chimera/pynfs/read/RD10_diskfs_aio_nfs4.0
+chimera/pynfs/read/RD12_diskfs_aio_nfs4.0
 chimera/pynfs/read/RD13_diskfs_aio_nfs4.0
 chimera/pynfs/read/RD3_diskfs_aio_nfs4.0
 chimera/pynfs/read/RD5_diskfs_aio_nfs4.0
@@ -2247,6 +2252,7 @@ chimera/pynfs/read/OPEN23b_cairn_nfs4.0
 chimera/pynfs/read/OPEN28_cairn_nfs4.0
 chimera/pynfs/read/RD1_cairn_nfs4.0
 chimera/pynfs/read/RD10_cairn_nfs4.0
+chimera/pynfs/read/RD12_cairn_nfs4.0
 chimera/pynfs/read/RD13_cairn_nfs4.0
 chimera/pynfs/read/RD3_cairn_nfs4.0
 chimera/pynfs/read/RD5_cairn_nfs4.0
@@ -3581,6 +3587,7 @@ chimera/pynfs/write/OPEN27_linux_nfs4.0
 chimera/pynfs/write/WRT1_linux_nfs4.0
 chimera/pynfs/write/WRT11_linux_nfs4.0
 chimera/pynfs/write/WRT12_linux_nfs4.0
+chimera/pynfs/write/WRT19_linux_nfs4.0
 chimera/pynfs/write/WRT1b_linux_nfs4.0
 chimera/pynfs/write/WRT2_linux_nfs4.0
 chimera/pynfs/write/WRT3_linux_nfs4.0
@@ -3594,6 +3601,7 @@ chimera/pynfs/write/OPEN24_io_uring_nfs4.0
 chimera/pynfs/write/OPEN27_io_uring_nfs4.0
 chimera/pynfs/write/WRT11_io_uring_nfs4.0
 chimera/pynfs/write/WRT12_io_uring_nfs4.0
+chimera/pynfs/write/WRT19_io_uring_nfs4.0
 chimera/pynfs/write/WRT1b_io_uring_nfs4.0
 chimera/pynfs/write/WRT3_io_uring_nfs4.0
 chimera/pynfs/write/WRT4_io_uring_nfs4.0
@@ -3608,6 +3616,7 @@ chimera/pynfs/write/WRT1_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT11_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT12_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT18_diskfs_io_uring_nfs4.0
+chimera/pynfs/write/WRT19_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT1b_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT2_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT3_diskfs_io_uring_nfs4.0
@@ -3626,6 +3635,7 @@ chimera/pynfs/write/WRT1_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT11_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT12_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT18_diskfs_aio_nfs4.0
+chimera/pynfs/write/WRT19_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT1b_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT2_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT3_diskfs_aio_nfs4.0
@@ -3645,6 +3655,7 @@ chimera/pynfs/write/WRT11_cairn_nfs4.0
 chimera/pynfs/write/WRT12_cairn_nfs4.0
 chimera/pynfs/write/WRT14_cairn_nfs4.0
 chimera/pynfs/write/WRT18_cairn_nfs4.0
+chimera/pynfs/write/WRT19_cairn_nfs4.0
 chimera/pynfs/write/WRT1b_cairn_nfs4.0
 chimera/pynfs/write/WRT2_cairn_nfs4.0
 chimera/pynfs/write/WRT3_cairn_nfs4.0
