@@ -289,6 +289,12 @@ struct chimera_server_nfs_thread {
      * the response back to the requester's thread).  Protected by
      * cb_recall_lock and drained by cb_doorbell.  See nfs4_callback.c. */
     struct nfs4_cb_getattr           *cb_getattr_queue;
+    /* Callback channels whose last reference was dropped off the owner thread
+     * (e.g. the lease sweeper expiring a client).  The owner thread frees them
+     * from the cb_doorbell drain so the free cannot race in-flight CB reply
+     * handling on this thread.  Linked via nfs4_cb_client->teardown_next,
+     * protected by cb_recall_lock.  See nfs4_callback.c. */
+    struct nfs4_cb_client            *cb_teardown_queue;
     uint8_t                           cb_doorbell_armed;
 };
 

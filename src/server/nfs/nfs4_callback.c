@@ -179,6 +179,49 @@ nfs4_cb_chan_conn(struct nfs4_cb_client *chan)
     return chan->session ? chan->session->nfs4_session_backchannel_conn : NULL;
 } /* nfs4_cb_chan_conn */
 
+/* ---------------------------------------------------------------------- */
+/* Callback-channel lifetime (refcount)                                   */
+/* ---------------------------------------------------------------------- */
+
+/* Take a reference for an about-to-be-issued CB RPC; its completion drops it
+ * via nfs4_cb_client_unref_complete().  Caller runs on the owner thread. */
+static inline void
+nfs4_cb_client_ref(struct nfs4_cb_client *chan)
+{
+    atomic_fetch_add_explicit(&chan->refcount, 1, memory_order_relaxed);
+} /* nfs4_cb_client_ref */
+
+/* Free a callback channel.  MUST run on chan->owner_thread: it releases the
+ * 4.1 backchannel session ref and frees the struct whose embedded cb_prog an
+ * owner-thread reply dispatch may otherwise still reference.  (The 4.0 conn
+ * back-pointer is cleared synchronously in nfs4_cb_path_teardown.) */
+static void
+nfs4_cb_client_destroy(struct nfs4_cb_client *chan)
+{
+    if (chan->session) {
+        nfs4_session_put(chan->session);
+    }
+    free(chan);
+} /* nfs4_cb_client_destroy */
+
+/* Drop a reference; returns true iff it was the last (the caller must free). */
+static inline bool
+nfs4_cb_client_unref(struct nfs4_cb_client *chan)
+{
+    return atomic_fetch_sub_explicit(&chan->refcount, 1,
+                                     memory_order_acq_rel) == 1;
+} /* nfs4_cb_client_unref */
+
+/* Drop an in-flight CB RPC's reference from its completion (which runs on the
+ * channel's owner thread), freeing the channel here if it was the last. */
+static void
+nfs4_cb_client_unref_complete(struct nfs4_cb_client *chan)
+{
+    if (chan && nfs4_cb_client_unref(chan)) {
+        nfs4_cb_client_destroy(chan);
+    }
+} /* nfs4_cb_client_unref_complete */
+
 static void
 nfs4_cb_channel_open(
     struct chimera_server_nfs_thread *thread,
@@ -203,6 +246,7 @@ nfs4_cb_channel_open(
     chan->cb_prog.rpc2.program      = cb->cb_program;
     chan->cb_prog.rpc2.program_data = &chan->cb_prog;
     atomic_init(&chan->cb_seq, 1);
+    atomic_init(&chan->refcount, 1); /* the owning cb_path's reference */
 
     if (cb->cb_minorversion == 0) {
         char                  host[64];
@@ -326,6 +370,7 @@ nfs4_cb_ensure_probe(
 struct nfs4_cb_recall_ctx {
     struct nfs_delegation            *deleg;
     struct chimera_server_nfs_thread *thread;
+    struct nfs4_cb_client            *chan; /* ref held until this completes */
 };
 
 static void
@@ -358,6 +403,10 @@ nfs4_cb_recall_complete(
     /* Drop the transient recall ref. */
     nfs_state_table_release(&thread->shared->nfs4_state_table, deleg,
                             NFS4_SLOT_TYPE_DELEG, thread->vfs_thread);
+
+    /* Release this RPC's reference on the callback channel (runs on the
+     * owner thread; frees the channel if the path was already torn down). */
+    nfs4_cb_client_unref_complete(ctx->chan);
     free(ctx);
 } /* nfs4_cb_recall_complete */
 
@@ -426,6 +475,10 @@ nfs4_cb_recall_send(
     ctx         = calloc(1, sizeof(*ctx));
     ctx->deleg  = deleg;
     ctx->thread = thread;
+    ctx->chan   = chan;
+    /* Keep the channel (and its embedded cb_prog) alive until this RPC's
+     * reply dispatches, even if the client's lease expires meanwhile. */
+    nfs4_cb_client_ref(chan);
 
     /* Use the RPC auth the client requested for its callback channel
      * (CREATE_SESSION csa_sec_parms / BACKCHANNEL_CTL).  AUTH_NONE -> NULL
@@ -466,10 +519,11 @@ nfs4_cb_recall_send(
 #define NFS4_LAYOUT4_FLEX_FILES 0x4 /* RFC 8435; not in the generated XDR */
 
 struct nfs4_cb_layoutrecall_ctx {
-    void  (*done)(
+    void                   (*done)(
         int   cb_status,
         void *arg);
-    void *arg;
+    void                  *arg;
+    struct nfs4_cb_client *chan; /* ref held until this completes */
 };
 
 static void
@@ -488,6 +542,7 @@ nfs4_cb_layoutrecall_complete(
     /* cb_status: the callback compound result (NFS4_OK => the client will
      * LAYOUTRETURN); a negative value flags an RPC-level transport failure. */
     ctx->done((status == 0 && reply) ? (int) reply->status : -1, ctx->arg);
+    nfs4_cb_client_unref_complete(ctx->chan);
     free(ctx);
 } /* nfs4_cb_layoutrecall_complete */
 
@@ -552,6 +607,8 @@ nfs4_cb_layoutrecall(
     ctx       = calloc(1, sizeof(*ctx));
     ctx->done = done;
     ctx->arg  = arg;
+    ctx->chan = chan;
+    nfs4_cb_client_ref(chan); /* hold the channel until the reply dispatches */
 
     /* Same callback RPC auth the channel uses for CB_RECALL. */
     {
@@ -615,6 +672,7 @@ struct nfs4_cb_getattr {
     /* REQUEST item, holder thread only: */
     struct evpl_timer                 timeout_timer;
     bool                              delivered; /* result already handed back */
+    struct nfs4_cb_client            *chan;      /* ref held until RPC completes */
     struct nfs4_cb_getattr           *next;
 };
 
@@ -726,6 +784,7 @@ nfs4_cb_getattr_complete(
 
     /* The RPC is done; the request item is no longer referenced by the RPC
      * layer, so free it (the result, if any, lives in a separate RESPONSE). */
+    nfs4_cb_client_unref_complete(w->chan);
     free(w);
 } /* nfs4_cb_getattr_complete */
 
@@ -799,6 +858,12 @@ nfs4_cb_getattr_send(
             rpc_cred.authsys.machinename_len = sizeof(machinename) - 1;
             credp                            = &rpc_cred;
         }
+
+        /* Hold the channel alive until this RPC completes.  Set before the
+         * send (which may complete synchronously and run the completion that
+         * reads w->chan). */
+        w->chan = chan;
+        nfs4_cb_client_ref(chan);
 
         /* Arm the timeout before issuing the RPC: if the send completes
          * synchronously (e.g. an immediate conn error), the completion cancels
@@ -913,14 +978,17 @@ nfs4_cb_doorbell_drain(
                                               offsetof(struct chimera_server_nfs_thread, cb_doorbell));
     struct nfs_delegation            *queue;
     struct nfs4_cb_getattr           *gq;
+    struct nfs4_cb_client            *tq;
 
     (void) evpl;
 
     pthread_mutex_lock(&thread->cb_recall_lock);
-    queue                    = thread->cb_recall_queue;
-    thread->cb_recall_queue  = NULL;
-    gq                       = thread->cb_getattr_queue;
-    thread->cb_getattr_queue = NULL;
+    queue                     = thread->cb_recall_queue;
+    thread->cb_recall_queue   = NULL;
+    gq                        = thread->cb_getattr_queue;
+    thread->cb_getattr_queue  = NULL;
+    tq                        = thread->cb_teardown_queue;
+    thread->cb_teardown_queue = NULL;
     pthread_mutex_unlock(&thread->cb_recall_lock);
 
     while (queue) {
@@ -948,6 +1016,15 @@ nfs4_cb_doorbell_drain(
                                     thread->vfs_thread);
             free(w);
         }
+    }
+
+    /* Free callback channels whose last reference was dropped off this (their
+     * owner) thread.  Done last so any send above sees a consistent state. */
+    while (tq) {
+        struct nfs4_cb_client *chan = tq;
+        tq                  = chan->teardown_next;
+        chan->teardown_next = NULL;
+        nfs4_cb_client_destroy(chan);
     }
 } /* nfs4_cb_doorbell_drain */
 
@@ -1030,19 +1107,32 @@ nfs4_cb_path_teardown(struct nfs4_cb_path *cb)
     cb->cb_client = NULL;
 
     /* 4.0: if the outbound conn is still live, clear its back-pointer so a
-     * later disconnect notify does not dereference the freed channel.  We do
-     * not disconnect it; evpl drains/frees it at thread teardown, and
-     * disconnecting here would race that teardown. */
+     * later disconnect notify does not dereference the (about-to-be-freed)
+     * channel.  We do not disconnect it; evpl drains/frees it at thread
+     * teardown, and disconnecting here would race that teardown. */
     if (chan->owns_conn && chan->conn) {
         evpl_rpc2_conn_set_private_data(chan->conn, NULL);
     }
+    chan->cb_path = NULL;
 
-    /* 4.1: release the backchannel session ref taken in nfs4_cb_channel_open. */
-    if (chan->session) {
-        nfs4_session_put(chan->session);
+    /* Drop the owning path's reference.  If CB RPCs are still in flight they
+     * hold the remaining references, and their completions (which run on the
+     * owner thread) free the channel once the last reply has dispatched.  If
+     * we are the last reference we may be running on a different thread (the
+     * lease sweeper), so hand the free to the owner thread via its cb_doorbell
+     * rather than freeing here, where it could race in-flight reply handling
+     * on the owner thread.  The 4.1 session ref is released by
+     * nfs4_cb_client_destroy() at the actual free. */
+    if (nfs4_cb_client_unref(chan)) {
+        struct chimera_server_nfs_thread *owner = chan->owner_thread;
+
+        pthread_mutex_lock(&owner->cb_recall_lock);
+        chan->teardown_next      = owner->cb_teardown_queue;
+        owner->cb_teardown_queue = chan;
+        pthread_mutex_unlock(&owner->cb_recall_lock);
+
+        evpl_ring_doorbell(&owner->cb_doorbell);
     }
-
-    free(chan);
 } /* nfs4_cb_path_teardown */
 
 /* ---------------------------------------------------------------------- */
@@ -1053,7 +1143,9 @@ void
 nfs4_cb_thread_init(struct chimera_server_nfs_thread *thread)
 {
     pthread_mutex_init(&thread->cb_recall_lock, NULL);
-    thread->cb_recall_queue = NULL;
+    thread->cb_recall_queue   = NULL;
+    thread->cb_getattr_queue  = NULL;
+    thread->cb_teardown_queue = NULL;
     evpl_add_doorbell(thread->evpl, &thread->cb_doorbell, nfs4_cb_doorbell_drain);
     thread->cb_doorbell_armed = 1;
 } /* nfs4_cb_thread_init */
