@@ -4,6 +4,7 @@
             "module": "diskfs",
             "module_path": "${CMAKE_BINARY_DIR}/src/vfs/diskfs/libchimera_vfs_diskfs.so",
             "config": {
+                "initialize": true,
                 "devices": [
                     {
                         "type": "libaio",

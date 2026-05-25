@@ -10,6 +10,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "evpl/evpl.h"
+#include <sys/stat.h>
 
 static inline int
 chimera_nfs4_write_stateid_is_special(const struct stateid4 *sid)
@@ -95,6 +96,71 @@ chimera_nfs4_write_open_callback(
                       req);
 } /* chimera_nfs4_write_open_callback */
 
+static void
+chimera_nfs4_write_typecheck_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs_request *req  = private_data;
+    struct WRITE4args  *args = &req->args_compound->argarray[req->index].opwrite;
+    struct WRITE4res   *res  = &req->res_compound.resarray[req->index].opwrite;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        evpl_iovecs_release(req->thread->evpl, args->data.iov, args->data.niov);
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        req->handle = NULL;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISREG(attr->va_mode)) {
+        res->status = S_ISDIR(attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_INVAL;
+        evpl_iovecs_release(req->thread->evpl, args->data.iov, args->data.niov);
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        req->handle = NULL;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    req->handle = NULL;
+
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED,
+                        chimera_nfs4_write_open_callback,
+                        req);
+} /* chimera_nfs4_write_typecheck_complete */
+
+static void
+chimera_nfs4_write_typecheck_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req  = private_data;
+    struct WRITE4args  *args = &req->args_compound->argarray[req->index].opwrite;
+    struct WRITE4res   *res  = &req->res_compound.resarray[req->index].opwrite;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        evpl_iovecs_release(req->thread->evpl, args->data.iov, args->data.niov);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    req->handle = handle;
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+                        handle,
+                        CHIMERA_VFS_ATTR_MODE,
+                        chimera_nfs4_write_typecheck_complete,
+                        req);
+} /* chimera_nfs4_write_typecheck_open_callback */
+
 void
 chimera_nfs4_write(
     struct chimera_server_nfs_thread *thread,
@@ -162,8 +228,9 @@ chimera_nfs4_write(
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh,
                             req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED,
-                            chimera_nfs4_write_open_callback,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
+                            CHIMERA_VFS_OPEN_NOFOLLOW,
+                            chimera_nfs4_write_typecheck_open_callback,
                             req);
         return;
     }
@@ -192,8 +259,9 @@ chimera_nfs4_write(
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh,
                             req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED,
-                            chimera_nfs4_write_open_callback,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
+                            CHIMERA_VFS_OPEN_NOFOLLOW,
+                            chimera_nfs4_write_typecheck_open_callback,
                             req);
         return;
     }

@@ -257,7 +257,7 @@ chimera_nfs4_lock(
                 nfs_state_table_release(table, open_state,
                                         NFS4_SLOT_TYPE_OPEN,
                                         thread->vfs_thread);
-                chimera_nfs4_compound_complete(req, NFS4_OK);
+                chimera_nfs4_compound_complete(req, res->status);
                 return;
             }
             if (cls != NFS4_SEQID_NEW) {
@@ -353,7 +353,7 @@ chimera_nfs4_lock(
                                         NFS4_SLOT_TYPE_LOCK,
                                         thread->vfs_thread);
                 req->nfs_state_ref = NULL;
-                chimera_nfs4_compound_complete(req, NFS4_OK);
+                chimera_nfs4_compound_complete(req, res->status);
                 return;
             }
             if (cls != NFS4_SEQID_NEW) {

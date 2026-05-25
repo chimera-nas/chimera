@@ -97,7 +97,7 @@ generate_config() {
             BACKEND="diskfs"
             vfs_section="\"vfs\": {
                 \"diskfs\": {
-                    \"config\": {\"devices\":[$devices_json],\"unsafe_async\":true}
+                    \"config\": {\"initialize\":true,\"devices\":[$devices_json],\"unsafe_async\":true}
                 }
             },"
             ;;

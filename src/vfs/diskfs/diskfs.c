@@ -3290,7 +3290,10 @@ diskfs_bt_rebalance_leaf(
             psl[i] = psl[i + 1];
         }
         diskfs_bt_hdr(pbuf, pbase)->nitems = pn - 1;
-        merged                             = 1;
+        if (total > 0) {
+            psl[lidx].key = diskfs_bt_lslots(lbuf, 0)[0].key;
+        }
+        merged = 1;
 
         /* R is merged away: return its node block to the allocator (pending
          * free, applied when this txn commits). */
@@ -3339,6 +3342,7 @@ diskfs_bt_rebalance_leaf(
         rh->prev_leaf = l_bptr;
         rh->next_leaf = r_next;
 
+        psl[lidx].key = diskfs_bt_lslots(lbuf, 0)[0].key;
         psl[ridx].key = diskfs_bt_lslots(rbuf, 0)[0].key;
         merged        = 0;
     }
@@ -3412,7 +3416,10 @@ diskfs_bt_rebalance_interior(
             psl[i] = psl[i + 1];
         }
         diskfs_bt_hdr(pbuf, pbase)->nitems = pn - 1;
-        merged                             = 1;
+        if (total > 0) {
+            psl[lidx].key = diskfs_bt_islots(lbuf, 0)[0].key;
+        }
+        merged = 1;
 
         /* R is merged away: pending-free its node block. */
         diskfs_txn_free_space(thread, txn, fdev, foff, DISKFS_BLOCK_SIZE);
@@ -3428,6 +3435,7 @@ diskfs_bt_rebalance_interior(
         }
         diskfs_bt_hdr(rbuf, 0)->nitems = total - split;
 
+        psl[lidx].key = diskfs_bt_islots(lbuf, 0)[0].key;
         psl[ridx].key = diskfs_bt_islots(rbuf, 0)[0].key;
         merged        = 0;
     }
@@ -4422,6 +4430,12 @@ diskfs_bt_run(struct diskfs_bt_op *op)
                 int exact, idx = h->nitems ? diskfs_bt_leaf_search(buf, base, &op->key, &exact) : 0;
 
                 if (idx < h->nitems) {
+                    if (unlikely(diskfs_bt_key_cmp(&diskfs_bt_lslots(buf, base)[idx].key,
+                                                   &op->key) < 0)) {
+                        chimera_diskfs_error("b+tree lookup_ge routed backwards");
+                        diskfs_bt_complete(op, -1);
+                        return;
+                    }
                     diskfs_bt_complete(op, diskfs_bt_op_emit(op, buf, base, idx));
                     return;
                 }
@@ -4453,6 +4467,12 @@ diskfs_bt_run(struct diskfs_bt_op *op)
             }
         } else if (op->phase == DISKFS_BT_PHASE_WALK_NEXT) {
             if (h->nitems > 0) {
+                if (unlikely(diskfs_bt_key_cmp(&diskfs_bt_lslots(buf, base)[0].key,
+                                               &op->key) < 0)) {
+                    chimera_diskfs_error("b+tree leaf chain moved backwards during lookup_ge");
+                    diskfs_bt_complete(op, -1);
+                    return;
+                }
                 diskfs_bt_complete(op, diskfs_bt_op_emit(op, buf, 0, 0));
                 return;
             }
@@ -6927,6 +6947,7 @@ diskfs_init(const char *cfgdata)
     uint64_t                   *device_sizes;
     json_t                     *cfg, *devices_cfg, *device_cfg;
     json_error_t                json_error;
+    int                         initialize;
 
 
     cfg = json_loads(cfgdata, 0, &json_error);
@@ -6998,6 +7019,7 @@ diskfs_init(const char *cfgdata)
      * FUA/sync, so diskfs runs lighter at the cost of crash safety.  Off by
      * default; tests that do not exercise crash recovery enable it to run more
      * efficiently. */
+    initialize                 = json_object_get(cfg, "initialize") != NULL;
     shared->unsafe_async       = json_is_true(json_object_get(cfg, "unsafe_async"));
     shared->block_cache_blocks = (uint32_t) json_integer_value(
         json_object_get(cfg, "block_cache_blocks"));
@@ -7011,11 +7033,12 @@ diskfs_init(const char *cfgdata)
 
     /* Decide mkfs vs clean-mount vs crash-recovery from the superblock, just as
      * a real filesystem would:
-     *   - valid + CLEAN  -> the previous instance unmounted cleanly: reload
-     *                       its persisted free-space map and mount.
-     *   - valid + !CLEAN -> a crash: synchronously replay the intent log to
-     *                       home, then mount the now-consistent image.
-     *   - no/garbage     -> mkfs (e.g. a freshly created device image).
+     *   - initialize present -> mkfs, regardless of any existing contents.
+     *   - valid + CLEAN      -> previous instance unmounted cleanly: reload
+     *                           the persisted free-space map and mount.
+     *   - valid + !CLEAN     -> crash: replay the intent log to home, then
+     *                           mount the now-consistent image.
+     *   - no/garbage         -> fail; callers must opt in to mkfs.
      */
     {
         struct sm_superblock    sb;
@@ -7026,15 +7049,22 @@ diskfs_init(const char *cfgdata)
 
         have_sb = space_map_read_superblock(&smio, &sb) == 0;
 
-        if (have_sb && (sb.flags & SM_SB_CLEAN)) {
+        if (initialize) {
+            if (have_sb) {
+                chimera_diskfs_info(
+                    "initialize=true: ignoring existing superblock and formatting fresh");
+            }
+            mode         = 0;
+            shared->fsid = chimera_rand64();
+        } else if (have_sb && (sb.flags & SM_SB_CLEAN)) {
             mode         = 1;
             shared->fsid = sb.fsid;
         } else if (have_sb) {
             mode         = 2;
             shared->fsid = sb.fsid;
         } else {
-            mode         = 0;
-            shared->fsid = chimera_rand64();
+            chimera_diskfs_abort(
+                "diskfs superblock missing or invalid; specify initialize to format");
         }
 
         device_sizes = calloc(shared->num_devices, sizeof(*device_sizes));
@@ -7049,21 +7079,18 @@ diskfs_init(const char *cfgdata)
             diskfs_recover_log(shared, mio);
         }
 
-        /* Reload the persisted free-space map.  NOTE: after a crash this
-         * snapshot is the one from the last *clean* unmount, so it does not
-         * reflect allocations made since then -- reads are correct (the log
-         * replay made the home image consistent) but the in-memory allocator
-         * must be rebuilt (namespace-walk fsck, TODO) before writes are safe.
-         * For a clean mount the snapshot must load or we fall back to mkfs. */
+        /* Reload the persisted free-space map.  The allocator is authoritative
+         * for future writes; after recovery, mounting without it would let new
+         * allocations overlap live metadata/data until namespace-walk rebuild
+         * exists. */
         if (mode != 0 &&
             space_map_load(shared->space_map, &smio) != 0) {
             if (mode == 1) {
-                chimera_diskfs_error("space-map reload failed; treating as fresh");
-                mode = 0;
+                chimera_diskfs_abort("space-map reload failed");
             } else {
-                chimera_diskfs_error(
-                    "post-recovery space-map reload failed; allocator is fresh "
-                    "(writes unsafe until namespace-walk reconstruction)");
+                chimera_diskfs_abort(
+                    "post-recovery space-map reload failed; refusing unsafe mount "
+                    "until namespace-walk reconstruction is implemented");
             }
         }
 
@@ -7935,6 +7962,14 @@ diskfs_setattr_inode_cb(
         return;
     }
 
+    if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        !S_ISREG(inode->mode)) {
+        diskfs_op_fail(request, p->txn,
+                       S_ISDIR(inode->mode) ?
+                       CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL);
+        return;
+    }
+
     diskfs_map_attrs(thread, &request->setattr.r_pre_attr, inode);
 
     /* Handle truncation: remove/trim extents past new EOF. */
@@ -8617,6 +8652,11 @@ diskfs_remove_at_removed_cb(
     /* The dirent was located before the child fetch and the parent has been
      * write-locked throughout, so it must still be present. */
     if (unlikely(result != 1)) {
+        chimera_diskfs_error("remove_at lost dirent after lookup name=%.*s hash=%lu parent=%lu",
+                             request->remove_at.namelen,
+                             request->remove_at.name,
+                             request->remove_at.name_hash,
+                             parent->inum);
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
@@ -8718,6 +8758,11 @@ diskfs_remove_at_lookup_cb(
     diskfs_bt_op_free(thread, op);
 
     if (result < 0) {
+        chimera_diskfs_error("remove_at lookup miss name=%.*s hash=%lu parent=%lu",
+                             request->remove_at.namelen,
+                             request->remove_at.name,
+                             request->remove_at.name_hash,
+                             p->inode_stash[0]->inum);
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
@@ -8985,7 +9030,7 @@ diskfs_readdir_inode_cb(
     }
 
     if (!S_ISDIR(inode->mode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
         return;
     }
 
@@ -9068,6 +9113,12 @@ diskfs_open_fh_inode_cb(
         return;
     }
 
+    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
+        !S_ISDIR(inode->mode)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        return;
+    }
+
     inode->refcnt++;
 
     request->open_fh.r_vfs_private = (uint64_t) inode;
@@ -9132,6 +9183,12 @@ diskfs_open_at_existing_cb(
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    if ((request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
+        !S_ISDIR(inode->mode)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
         return;
     }
 
@@ -9256,7 +9313,7 @@ diskfs_open_at_parent_cb(
     }
 
     if (!S_ISDIR(parent->mode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
         return;
     }
 
