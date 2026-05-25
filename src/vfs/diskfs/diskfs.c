@@ -4484,56 +4484,6 @@ diskfs_bt_run(struct diskfs_bt_op *op)
                 int exact, idx = diskfs_bt_leaf_search(buf, base, &op->key, &exact);
 
                 if (unlikely(!exact)) {
-                    struct diskfs_bt_lslot *sl        = diskfs_bt_lslots(buf, base);
-                    int                     misrouted = h->nitems > 0 &&
-                        op->last_parent_valid &&
-                        (diskfs_bt_key_cmp(&op->key, &op->last_parent_key) < 0 ||
-                         (op->last_parent_next_child &&
-                          diskfs_bt_key_cmp(&op->key, &op->last_parent_next_key) >= 0));
-
-                    if (misrouted) {
-                        if (op->last_parent_next_child) {
-                            chimera_diskfs_error("b+tree exact miss misrouted inode=%lu type=%u subkey=%lu "
-                                                 "leaf_items=%u leaf_first=%lu leaf_last=%lu "
-                                                 "leaf_prev=%lu leaf_next=%lu insert_idx=%d "
-                                                 "parent_ci=%d parent_nitems=%d parent_key=%lu "
-                                                 "parent_child=%lu parent_next_key=%lu parent_next_child=%lu",
-                                                 inode->inum,
-                                                 (unsigned) op->key.type,
-                                                 op->key.subkey,
-                                                 (unsigned) h->nitems,
-                                                 sl[0].key.subkey,
-                                                 sl[h->nitems - 1].key.subkey,
-                                                 h->prev_leaf,
-                                                 h->next_leaf,
-                                                 idx,
-                                                 op->last_parent_ci,
-                                                 op->last_parent_nitems,
-                                                 op->last_parent_key.subkey,
-                                                 op->last_parent_child,
-                                                 op->last_parent_next_key.subkey,
-                                                 op->last_parent_next_child);
-                        } else {
-                            chimera_diskfs_error("b+tree exact miss misrouted inode=%lu type=%u subkey=%lu "
-                                                 "leaf_items=%u leaf_first=%lu leaf_last=%lu "
-                                                 "leaf_prev=%lu leaf_next=%lu insert_idx=%d "
-                                                 "parent_ci=%d parent_nitems=%d parent_key=%lu "
-                                                 "parent_child=%lu",
-                                                 inode->inum,
-                                                 (unsigned) op->key.type,
-                                                 op->key.subkey,
-                                                 (unsigned) h->nitems,
-                                                 sl[0].key.subkey,
-                                                 sl[h->nitems - 1].key.subkey,
-                                                 h->prev_leaf,
-                                                 h->next_leaf,
-                                                 idx,
-                                                 op->last_parent_ci,
-                                                 op->last_parent_nitems,
-                                                 op->last_parent_key.subkey,
-                                                 op->last_parent_child);
-                        }
-                    }
                     diskfs_bt_complete(op, -1);
                     return;
                 }
