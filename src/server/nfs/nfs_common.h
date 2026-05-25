@@ -190,6 +190,23 @@ struct nfs4_replay_metrics {
     struct prometheus_gauge_instance   *bytes_in_use;
 };
 
+#define NFS4_V40_DRC_SLOTS NFS4_MAX_REPLY_CACHE_SLOTS
+
+struct nfs4_v40_drc_entry {
+    struct evpl_rpc2_conn *conn;
+    uint32_t               xid;
+    uint32_t               len;
+    uint8_t                valid;
+    void                  *buf;
+};
+
+struct nfs4_v40_drc {
+    pthread_mutex_t           lock;
+    uint32_t                  next;
+    uint32_t                  bytes;
+    struct nfs4_v40_drc_entry entries[NFS4_V40_DRC_SLOTS];
+};
+
 struct chimera_server_nfs_shared {
 
     const struct chimera_server_config *config;
@@ -238,6 +255,7 @@ struct chimera_server_nfs_shared {
     struct prometheus_histogram        *op_histogram;
     struct prometheus_metrics          *metrics;
     struct nfs4_replay_metrics          replay_metrics;
+    struct nfs4_v40_drc                 v40_drc;
 };
 
 /* Forward decl for the per-thread lease sweeper (defined in nfs4_lease.h). */

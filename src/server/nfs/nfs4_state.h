@@ -441,11 +441,11 @@ void nfs_layout_state_put(
 #define NFS4_SLOT_TYPE_LAYOUT  5
 
 struct nfs_state_slot {
-    void                     *state;
-    uint32_t                  generation;
-    uint8_t                   type;
-    uint32_t                  replay_generation;
-    struct nfs4_replay_cache  replay;
+    void                    *state;
+    uint32_t                 generation;
+    uint8_t                  type;
+    uint32_t                 replay_generation;
+    struct nfs4_replay_cache replay;
 };
 
 struct nfs_state_shard {
@@ -521,10 +521,10 @@ SYMBOL_EXPORT nfsstat4 nfs_state_table_acquire(
  * original CLOSE invalidated the stateid, but must still receive the cached
  * owner-seqid reply. */
 SYMBOL_EXPORT nfsstat4 nfs_state_table_lookup_replay(
-    struct nfs_state_table  *table,
-    const struct stateid4   *sid,
-    uint32_t                 op,
-    uint32_t                 seqid,
+    struct nfs_state_table   *table,
+    const struct stateid4    *sid,
+    uint32_t                  op,
+    uint32_t                  seqid,
     struct nfs4_replay_cache *out_replay);
 
 /* Drop the ref taken by acquire.  If this was the last ref and the state has

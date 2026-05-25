@@ -165,10 +165,10 @@ nfs_state_table_alloc(
         slot_idx = shard->slots_used++;
     }
 
-    slot              = &shard->slots[slot_idx];
-    slot->generation += 1;          /* every (re)use advances generation */
-    slot->type        = type;
-    slot->state       = NULL;       /* installed separately */
+    slot               = &shard->slots[slot_idx];
+    slot->generation  += 1;         /* every (re)use advances generation */
+    slot->type         = type;
+    slot->state        = NULL;      /* installed separately */
     slot->replay.valid = 0;
 
     *out_shard      = shard_idx;
@@ -218,11 +218,11 @@ nfs_state_table_free_slot(
                          "free of unallocated slot %u/%u",
                          slot_idx, shard->slots_used);
 
-    slot              = &shard->slots[slot_idx];
+    slot               = &shard->slots[slot_idx];
     slot->replay.valid = 0;
-    slot->type        = NFS4_SLOT_TYPE_FREE;
-    slot->state       = NULL;
-    slot->generation += 1;          /* invalidate any extant stateid */
+    slot->type         = NFS4_SLOT_TYPE_FREE;
+    slot->state        = NULL;
+    slot->generation  += 1;         /* invalidate any extant stateid */
 
     (void) shard_push_free_locked(shard, slot_idx);
 
@@ -231,9 +231,9 @@ nfs_state_table_free_slot(
 
 static void
 nfs_state_table_free_slot_replay(
-    struct nfs_state_table        *table,
-    uint8_t                        shard_idx,
-    uint32_t                       slot_idx,
+    struct nfs_state_table         *table,
+    uint8_t                         shard_idx,
+    uint32_t                        slot_idx,
     const struct nfs4_replay_cache *replay)
 {
     struct nfs_state_shard *shard = &table->shards[shard_idx];
