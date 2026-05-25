@@ -155,8 +155,14 @@ space_map_active_log_blocks(
             delta_off = slot_base + (delta_byte & ~((uint64_t) SM_BLOCK_SIZE - 1));
             in_block  = (uint32_t) (delta_byte & (SM_BLOCK_SIZE - 1));
 
+            /* The log physically lives on log_device_id (== device_id for a
+             * local AG, but the local metadata device for a block-mode remote
+             * AG whose log is relocated); slot_base/delta_off are offsets on
+             * that device, and the journal claims these blocks under it, so the
+             * warm read and cache key must use log_device_id -- using device_id
+             * would read a queue-less remote device and crash. */
             if (count < max_blocks) {
-                blocks[count].device_id     = ag->device_id;
+                blocks[count].device_id     = ag->log_device_id;
                 blocks[count].device_offset = slot_base;
                 count++;
             }
@@ -165,7 +171,7 @@ space_map_active_log_blocks(
              * claim will create a fresh zeroed block and will not read disk.
              * Only warm the current delta block when it already exists. */
             if (in_block != 0 && delta_off != slot_base && count < max_blocks) {
-                blocks[count].device_id     = ag->device_id;
+                blocks[count].device_id     = ag->log_device_id;
                 blocks[count].device_offset = delta_off;
                 count++;
             }
