@@ -72,7 +72,7 @@ chimera_nfs4_locku(
             nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                                     thread->vfs_thread);
             req->nfs_state_ref = NULL;
-            chimera_nfs4_compound_complete(req, NFS4_OK);
+            chimera_nfs4_compound_complete(req, res->status);
             return;
         }
         if (seqid_class != NFS4_SEQID_NEW) {
@@ -101,12 +101,18 @@ chimera_nfs4_locku(
     /* NFS uses UINT64_MAX to mean "to end of file"; vfs_state uses 0. */
     vfs_length = args->length == UINT64_MAX ? 0 : args->length;
 
-    /* RFC 7530 §16.12.4: the unlock range must match a held range exactly.
-     * Find and detach it from this lock_state. */
+    /* RFC 7530 §16.12.4: unlock the specified byte range.  This server tracks
+     * granted ranges as whole extents, so handle the common full-cover case by
+     * removing the held range when it is contained in the unlock range. */
     prev  = NULL;
     match = NULL;
     for (rl = lock_state->range_leases; rl; rl = rl->next) {
-        if (rl->lease.offset == args->offset && rl->lease.length == vfs_length) {
+        uint64_t lock_start = rl->lease.offset;
+        uint64_t lock_len   = rl->lease.length;
+        uint64_t lock_end   = lock_len ? lock_start + lock_len : UINT64_MAX;
+        uint64_t unlock_end = vfs_length ? args->offset + vfs_length : UINT64_MAX;
+
+        if (args->offset <= lock_start && unlock_end >= lock_end) {
             match = rl;
             break;
         }

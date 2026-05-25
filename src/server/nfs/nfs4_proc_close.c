@@ -33,6 +33,18 @@ chimera_nfs4_close(
                                      &state_type);
 
     if (status != NFS4_OK) {
+        struct nfs4_replay_cache replay;
+
+        if (is_v40 &&
+            nfs_state_table_lookup_replay(table, &args->open_stateid,
+                                          OP_CLOSE, args->seqid,
+                                          &replay) == NFS4_OK) {
+            res->status       = replay.status;
+            res->open_stateid = replay.stateid;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+
         res->status = status;
         chimera_nfs4_compound_complete(req, res->status);
         return;

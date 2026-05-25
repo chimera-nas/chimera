@@ -169,6 +169,7 @@ nfs_state_table_alloc(
     slot->generation += 1;          /* every (re)use advances generation */
     slot->type        = type;
     slot->state       = NULL;       /* installed separately */
+    slot->replay.valid = 0;
 
     *out_shard      = shard_idx;
     *out_slot_idx   = slot_idx;
@@ -218,6 +219,7 @@ nfs_state_table_free_slot(
                          slot_idx, shard->slots_used);
 
     slot              = &shard->slots[slot_idx];
+    slot->replay.valid = 0;
     slot->type        = NFS4_SLOT_TYPE_FREE;
     slot->state       = NULL;
     slot->generation += 1;          /* invalidate any extant stateid */
@@ -226,6 +228,38 @@ nfs_state_table_free_slot(
 
     pthread_rwlock_unlock(&shard->lock);
 } /* nfs_state_table_free_slot */
+
+static void
+nfs_state_table_free_slot_replay(
+    struct nfs_state_table        *table,
+    uint8_t                        shard_idx,
+    uint32_t                       slot_idx,
+    const struct nfs4_replay_cache *replay)
+{
+    struct nfs_state_shard *shard = &table->shards[shard_idx];
+    struct nfs_state_slot  *slot;
+
+    pthread_rwlock_wrlock(&shard->lock);
+
+    chimera_nfs_abort_if(slot_idx >= shard->slots_used,
+                         "free of unallocated slot %u/%u",
+                         slot_idx, shard->slots_used);
+
+    slot = &shard->slots[slot_idx];
+    if (replay && replay->valid) {
+        slot->replay            = *replay;
+        slot->replay_generation = slot->generation;
+    } else {
+        slot->replay.valid = 0;
+    }
+    slot->type        = NFS4_SLOT_TYPE_FREE;
+    slot->state       = NULL;
+    slot->generation += 1;
+
+    (void) shard_push_free_locked(shard, slot_idx);
+
+    pthread_rwlock_unlock(&shard->lock);
+} /* nfs_state_table_free_slot_replay */
 
 /* Like nfs_state_table_free_slot, but for a slot whose owning client was
  * purged.  The generation is left unchanged so a stateid the client still
@@ -395,6 +429,49 @@ nfs_state_table_acquire(
 
     return status;
 } /* nfs_state_table_acquire */
+
+nfsstat4
+nfs_state_table_lookup_replay(
+    struct nfs_state_table   *table,
+    const struct stateid4    *sid,
+    uint32_t                  op,
+    uint32_t                  seqid,
+    struct nfs4_replay_cache *out_replay)
+{
+    struct nfs4_stateid_view view;
+    struct nfs_state_shard  *shard;
+    struct nfs_state_slot   *slot;
+
+    nfs4_stateid_decode(&view, sid);
+    if (view.epoch != table->epoch) {
+        return NFS4ERR_STALE_STATEID;
+    }
+    if (view.version != NFS4_STATEID_VERSION ||
+        view.shard >= NFS_STATE_NUM_SHARDS) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    shard = &table->shards[view.shard];
+    pthread_rwlock_rdlock(&shard->lock);
+
+    if (view.slot_idx >= shard->slots_used) {
+        pthread_rwlock_unlock(&shard->lock);
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    slot = &shard->slots[view.slot_idx];
+    if (!slot->replay.valid ||
+        slot->replay_generation != view.generation ||
+        slot->replay.op != op ||
+        slot->replay.seqid != seqid) {
+        pthread_rwlock_unlock(&shard->lock);
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    *out_replay = slot->replay;
+    pthread_rwlock_unlock(&shard->lock);
+    return NFS4_OK;
+} /* nfs_state_table_lookup_replay */
 
 /* Forward decls for cleanup paths used by release. */
 static void
@@ -567,6 +644,9 @@ open_state_destroy_locked(
 
     if (expire) {
         nfs_state_table_expire_slot(table, state->shard, state->slot_idx);
+    } else if (owner->replay.valid && owner->replay.op == OP_CLOSE) {
+        nfs_state_table_free_slot_replay(table, state->shard, state->slot_idx,
+                                         &owner->replay);
     } else {
         nfs_state_table_free_slot(table, state->shard, state->slot_idx);
     }

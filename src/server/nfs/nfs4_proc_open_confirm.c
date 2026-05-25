@@ -71,7 +71,7 @@ chimera_nfs4_open_confirm(
         pthread_mutex_unlock(&owner->lock);
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
-        chimera_nfs4_compound_complete(req, NFS4_OK);
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
