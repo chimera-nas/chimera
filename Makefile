@@ -67,14 +67,14 @@ build_clang_debug:
 	@rm -rf ${CHIMERA_BUILD_DIR}/ClangDebug
 	@mkdir -p ${CHIMERA_BUILD_DIR}/ClangDebug
 	@LC_ALL=C scan-build --status-bugs -o ${CHIMERA_BUILD_DIR}/ClangDebug/ScanReport \
-		sh -c "cmake ${CMAKE_ARGS} ${CMAKE_ARGS_DEBUG} -S . -B ${CHIMERA_BUILD_DIR}/ClangDebug && ninja -C ${CHIMERA_BUILD_DIR}/ClangDebug"
+		sh -c "cmake ${CMAKE_ARGS} ${CMAKE_ARGS_DEBUG} -D IO_URING_NVME_ENABLED=OFF -S . -B ${CHIMERA_BUILD_DIR}/ClangDebug && ninja -C ${CHIMERA_BUILD_DIR}/ClangDebug"
 
 .PHONY: build_clang_release
 build_clang_release:
 	@rm -rf ${CHIMERA_BUILD_DIR}/ClangRelease
 	@mkdir -p ${CHIMERA_BUILD_DIR}/ClangRelease
 	@LC_ALL=C scan-build --status-bugs -o ${CHIMERA_BUILD_DIR}/ClangRelease/ScanReport \
-		sh -c "cmake ${CMAKE_ARGS} ${CMAKE_ARGS_RELEASE} -S . -B ${CHIMERA_BUILD_DIR}/ClangRelease && ninja -C ${CHIMERA_BUILD_DIR}/ClangRelease"
+		sh -c "cmake ${CMAKE_ARGS} ${CMAKE_ARGS_RELEASE} -D IO_URING_NVME_ENABLED=OFF -S . -B ${CHIMERA_BUILD_DIR}/ClangRelease && ninja -C ${CHIMERA_BUILD_DIR}/ClangRelease"
 
 .PHONY: build_clang
 build_clang: build_clang_debug build_clang_release
