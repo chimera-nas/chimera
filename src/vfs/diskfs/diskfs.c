@@ -7935,6 +7935,14 @@ diskfs_setattr_inode_cb(
         return;
     }
 
+    if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        !S_ISREG(inode->mode)) {
+        diskfs_op_fail(request, p->txn,
+                       S_ISDIR(inode->mode) ?
+                       CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL);
+        return;
+    }
+
     diskfs_map_attrs(thread, &request->setattr.r_pre_attr, inode);
 
     /* Handle truncation: remove/trim extents past new EOF. */
@@ -8985,7 +8993,7 @@ diskfs_readdir_inode_cb(
     }
 
     if (!S_ISDIR(inode->mode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
         return;
     }
 
@@ -9068,6 +9076,12 @@ diskfs_open_fh_inode_cb(
         return;
     }
 
+    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
+        !S_ISDIR(inode->mode)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        return;
+    }
+
     inode->refcnt++;
 
     request->open_fh.r_vfs_private = (uint64_t) inode;
@@ -9132,6 +9146,12 @@ diskfs_open_at_existing_cb(
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    if ((request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
+        !S_ISDIR(inode->mode)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
         return;
     }
 
@@ -9256,7 +9276,7 @@ diskfs_open_at_parent_cb(
     }
 
     if (!S_ISDIR(parent->mode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
         return;
     }
 

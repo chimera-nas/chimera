@@ -1627,6 +1627,15 @@ cairn_setattr(
 
     inode = ih.inode;
 
+    if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        !S_ISREG(inode->mode)) {
+        cairn_inode_handle_release(&ih);
+        request->status = S_ISDIR(inode->mode) ?
+            CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
     cairn_map_attrs(shared, &request->setattr.r_pre_attr, inode);
 
     /* Handle truncation: remove extents past new EOF when size decreases */
@@ -2262,7 +2271,7 @@ cairn_readdir(
 
     if (!S_ISDIR(inode->mode)) {
         cairn_inode_handle_release(&ih);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
         return;
     }
@@ -2429,6 +2438,15 @@ cairn_open_fh(
     }
 
     inode = ih.inode;
+
+    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
+        !S_ISDIR(inode->mode)) {
+        cairn_inode_handle_release(&ih);
+        request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
     inode->refcnt++;
 
     request->open_fh.r_vfs_private = (uint64_t) inode->inum;
@@ -2473,7 +2491,7 @@ cairn_open_at(
 
     if (!S_ISDIR(parent_inode->mode)) {
         cairn_inode_handle_release(&parent_ih);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
         return;
     }
@@ -2544,6 +2562,16 @@ cairn_open_at(
         inode = child_ih.inode;
 
         cairn_dirent_handle_release(&dh);
+    }
+
+    if ((flags & CHIMERA_VFS_OPEN_DIRECTORY) && !S_ISDIR(inode->mode)) {
+        cairn_inode_handle_release(&parent_ih);
+        if (!is_new_inode) {
+            cairn_inode_handle_release(&child_ih);
+        }
+        request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
     }
 
     if (flags & CHIMERA_VFS_OPEN_INFERRED) {
