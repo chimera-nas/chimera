@@ -19,6 +19,7 @@
 #include "nfs4_recovery.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
+#include "nfs4_callback.h"
 
 void
 chimera_nfs4_setclientid_confirm(
@@ -73,6 +74,15 @@ chimera_nfs4_setclientid_confirm(
         if (uc) {
             uc->confirmed = 1;
             nfs_recovery_persist(&thread->shared->nfs4_recovery, uc);
+
+            /* If the client re-registered a new callback address while holding
+             * delegations (RFC 7530 §16.33), its stale channel was torn down in
+             * nfs4_client_set_cb_path.  Rebuild a channel to the new address now,
+             * on this (the client's) thread, so a subsequent recall reaches the
+             * new callback server rather than being revoked for want of a path. */
+            if (uc->delegations) {
+                nfs4_cb_ensure_probe(thread, uc, req);
+            }
         }
     }
 
