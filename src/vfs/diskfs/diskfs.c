@@ -523,7 +523,7 @@ _Static_assert(DISKFS_DIRENT_REC_MAX <= 320,
  * pairs, padded to a 4 KiB multiple.  Full-block redo: the record carries
  * the entire post-image of every dirty block in the transaction.
  */
-#define DISKFS_REDO_MAGIC     0x4F44455246534944ULL /* "DISFREDO" */
+#define DISKFS_REDO_MAGIC 0x4F44455246534944ULL     /* "DISFREDO" */
 
 /*
  * Redo record on-log layout: this header, then num_blocks
@@ -12243,7 +12243,7 @@ diskfs_set_xattr_inode_cb(
     }
 
     rec_len = sizeof(*new_rec) + request->set_xattr.namelen +
-              request->set_xattr.value_len;
+        request->set_xattr.value_len;
     if (rec_len > DISKFS_XATTR_REC_MAX) {
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_EFBIG);
         return;
@@ -12326,7 +12326,7 @@ diskfs_list_xattrs_inode_cb(
 {
     struct chimera_vfs_request    *request = private_data;
     struct diskfs_request_private *p       = request->plugin_data;
-    struct diskfs_bt_key           key = { .type = DISKFS_REC_XATTR, .subkey = 0 };
+    struct diskfs_bt_key           key     = { .type = DISKFS_REC_XATTR, .subkey = 0 };
     struct diskfs_bt_key           found;
     struct diskfs_xattr_rec       *rec;
     uint8_t                       *buf = request->list_xattrs.buffer;
@@ -12357,7 +12357,7 @@ diskfs_list_xattrs_inode_cb(
             return;
         }
         memcpy(buf + offset, rec->data, rec->name_len);
-        offset += rec->name_len;
+        offset       += rec->name_len;
         buf[offset++] = '\0';
         count++;
         if (found.subkey == UINT64_MAX) {

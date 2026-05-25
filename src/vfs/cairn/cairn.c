@@ -4122,7 +4122,7 @@ cairn_set_xattr(
     }
 
     xv_len = sizeof(*xv) + request->set_xattr.namelen +
-             request->set_xattr.value_len;
+        request->set_xattr.value_len;
     xv            = malloc(xv_len);
     xv->name_len  = request->set_xattr.namelen;
     xv->value_len = request->set_xattr.value_len;
@@ -4208,7 +4208,7 @@ cairn_list_xattrs(
                 return;
             }
             memcpy(buf + offset, xv->data, xv->name_len);
-            offset += xv->name_len;
+            offset       += xv->name_len;
             buf[offset++] = '\0';
             count++;
         }
