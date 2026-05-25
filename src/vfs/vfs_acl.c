@@ -116,8 +116,7 @@ mode_access_check(
     uint64_t                       owner_uid,
     uint64_t                       owner_gid,
     const struct chimera_vfs_cred *cred,
-    uint32_t                       requested,
-    int                            is_dir)
+    uint32_t                       requested)
 {
     int      r, w, x;
     uint32_t allowed;
@@ -138,19 +137,11 @@ mode_access_check(
 
     allowed = ACE_BASELINE | perm_class_to_mask(r, w, x);
 
-    /* POSIX governs deleting a directory entry by write+execute on the
-     * directory; map that to the canonical DELETE_CHILD bit so the namespace
-     * gate (remove/rename) authorizes mode-only directories correctly.  Without
-     * this, DELETE_CHILD -- which lives in no perm class -- would never be
-     * granted from a plain mode and every delete on a mode-only dir would be
-     * refused. */
-    if (is_dir && w && x) {
-        allowed |= CHIMERA_ACE_DELETE_CHILD;
-    }
-
     /* The owner always holds the same implicit rights as under an explicit ACL
      * (READ_CONTROL/WRITE_DAC/DELETE) -- not WRITE_ATTRIBUTES or WRITE_OWNER,
-     * which Windows grants the owner only via an explicit ACE. */
+     * which Windows grants the owner only via an explicit ACE.  (DELETE_CHILD is
+     * derived from write+execute by the caller, for both this and the ACL
+     * path.) */
     if ((uint64_t) cred->uid == owner_uid) {
         allowed |= ACE_OWNER_IMPLICIT;
     }
@@ -168,8 +159,8 @@ chimera_acl_access_check(
     uint32_t                       requested,
     int                            is_dir)
 {
-    uint32_t granted   = 0;
-    uint32_t remaining = requested;
+    uint32_t granted = 0;
+    uint32_t eval, remaining;
 
     /* Root bypasses ACL evaluation (no_root_squash semantics; squashing is
      * handled when the credential is mapped). */
@@ -177,9 +168,28 @@ chimera_acl_access_check(
         return requested;
     }
 
+    /* POSIX governs deleting a directory entry by write+execute on the
+     * directory.  Map that to DELETE_CHILD here -- in BOTH the mode and ACL
+     * paths -- so it is granted consistently whether the object is mode-only or
+     * carries a (possibly mode-synthesised) ACL; otherwise DELETE_CHILD, which
+     * lives in no perm class and is not emitted by chimera_acl_from_mode, would
+     * never be granted once an ACL is present and every rename/delete by a
+     * non-owner in a writable dir would be refused.  Evaluate write+execute even
+     * when only DELETE_CHILD was requested. */
+    eval = requested;
+    if (is_dir && (requested & CHIMERA_ACE_DELETE_CHILD)) {
+        eval |= CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE;
+    }
+    remaining = eval;
+
     if (!acl || acl->num_aces == 0) {
-        return mode_access_check(mode, owner_uid, owner_gid, cred, requested,
-                                 is_dir);
+        granted = mode_access_check(mode, owner_uid, owner_gid, cred, eval);
+
+        if (is_dir && (granted & CHIMERA_ACE_WRITE_DATA) &&
+            (granted & CHIMERA_ACE_EXECUTE)) {
+            granted |= CHIMERA_ACE_DELETE_CHILD;
+        }
+        return granted & requested;
     }
 
     uint32_t denied               = 0;
@@ -234,10 +244,17 @@ chimera_acl_access_check(
             implicit |= ACE_OWNER_IMPLICIT;
         }
 
-        granted |= implicit & requested & ~denied;
+        granted |= implicit & eval & ~denied;
     }
 
-    return granted;
+    /* Derive DELETE_CHILD from the directory's effective write+execute (see the
+     * note above); applies to mode-synthesised and explicit ACLs alike. */
+    if (is_dir && (granted & CHIMERA_ACE_WRITE_DATA) &&
+        (granted & CHIMERA_ACE_EXECUTE)) {
+        granted |= CHIMERA_ACE_DELETE_CHILD;
+    }
+
+    return granted & requested;
 } /* chimera_acl_access_check */
 
 SYMBOL_EXPORT uint32_t
