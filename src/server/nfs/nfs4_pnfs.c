@@ -27,9 +27,20 @@
 #define NFS4_PNFS_STRIPE_UNIT    1048576U /* 1 MiB                              */
 #define LAYOUT4_FLEX_FILES       0x4     /* RFC 8435; not in the generated XDR */
 #define LAYOUT4_BLOCK_VOLUME     0x3     /* RFC 5663; not in the generated XDR */
+#define LAYOUT4_SCSI             0x5     /* RFC 8154; not in the generated XDR */
 
 /* RFC 5663 §2.2.1 pnfs_block_volume_type4 */
 #define PNFS_BLOCK_VOLUME_SIMPLE 0
+
+/* RFC 8154 §2.4.1 pnfs_scsi_volume_type4 (SLICE=1, CONCAT=2, STRIPE=3, BASE=4) */
+#define PNFS_SCSI_VOLUME_BASE    4
+
+/* RFC 8154 §2.2 pnfs_scsi_code_set4 / pnfs_scsi_designator_type4 */
+#define PS_CODE_SET_BINARY       1
+#define PS_CODE_SET_ASCII        2
+#define PS_DESIGNATOR_T10        1
+#define PS_DESIGNATOR_EUI64      2
+#define PS_DESIGNATOR_NAA        3
 
 /* --- minimal XDR append helpers (network byte order) --------------------- */
 
@@ -102,6 +113,10 @@ static uint32_t
 chimera_nfs4_encode_block_device_addr(
     uint8_t                                *buf,
     const struct chimera_vfs_layout_device *dev);
+static uint32_t
+chimera_nfs4_encode_scsi_device_addr(
+    uint8_t                                *buf,
+    const struct chimera_vfs_layout_device *dev);
 static int
 nfs_pnfs_devcache_find(
     struct nfs_pnfs_devcache         *cache,
@@ -139,19 +154,37 @@ chimera_nfs4_getdeviceinfo(
     } else if (nfs_pnfs_devcache_find(&thread->shared->nfs4_pnfs_devcache,
                                       args->gdia_device_id, &dev)) {
         /* Backend-sourced: device came from a get_layout response. */
-        out_type = (dev.layout_class == CHIMERA_VFS_LAYOUT_CLASS_BLOCK)
-                   ? LAYOUT4_BLOCK_VOLUME : LAYOUT4_FLEX_FILES;
+        switch (dev.layout_class) {
+            case CHIMERA_VFS_LAYOUT_CLASS_BLOCK:
+                out_type = LAYOUT4_BLOCK_VOLUME;
+                break;
+            case CHIMERA_VFS_LAYOUT_CLASS_SCSI:
+                out_type = LAYOUT4_SCSI;
+                break;
+            default:
+                out_type = LAYOUT4_FLEX_FILES;
+                break;
+        } /* switch */
         if (args->gdia_layout_type != out_type) {
             res->gdir_status = NFS4ERR_UNKNOWN_LAYOUTTYPE;
             chimera_nfs4_compound_complete(req, res->gdir_status);
             return;
         }
-        body_len = (out_type == LAYOUT4_BLOCK_VOLUME)
-                   ? chimera_nfs4_encode_block_device_addr(body, &dev)
-                   : chimera_nfs4_encode_ff_device_addr(body, dev.netid, dev.uaddr);
+        switch (out_type) {
+            case LAYOUT4_BLOCK_VOLUME:
+                body_len = chimera_nfs4_encode_block_device_addr(body, &dev);
+                break;
+            case LAYOUT4_SCSI:
+                body_len = chimera_nfs4_encode_scsi_device_addr(body, &dev);
+                break;
+            default:
+                body_len = chimera_nfs4_encode_ff_device_addr(body, dev.netid, dev.uaddr);
+                break;
+        } /* switch */
     } else {
         res->gdir_status = (args->gdia_layout_type != LAYOUT4_FLEX_FILES &&
-                            args->gdia_layout_type != LAYOUT4_BLOCK_VOLUME)
+                            args->gdia_layout_type != LAYOUT4_BLOCK_VOLUME &&
+                            args->gdia_layout_type != LAYOUT4_SCSI)
                            ? NFS4ERR_UNKNOWN_LAYOUTTYPE : NFS4ERR_INVAL;
         chimera_nfs4_compound_complete(req, res->gdir_status);
         return;
@@ -286,6 +319,61 @@ chimera_nfs4_encode_block_device_addr(
 
     return (uint8_t *) p - buf;
 } /* chimera_nfs4_encode_block_device_addr */
+
+/*
+ * Encode a pnfs_scsi_layout4 (RFC 8154 §2.4.3) into buf for the
+ * layout_content4.loc_body opaque: sl_extents<>, one pnfs_scsi_extent4 per
+ * backend-supplied segment.  The SCSI extent is wire-identical to the block
+ * extent (deviceid, file offset/length, storage offset, state) so this mirrors
+ * chimera_nfs4_encode_block_layout exactly.
+ */
+static uint32_t
+chimera_nfs4_encode_scsi_layout(
+    uint8_t                                 *buf,
+    const struct chimera_vfs_layout_segment *segs,
+    uint32_t                                 nseg)
+{
+    void    *p = buf;
+    uint32_t i;
+
+    pnfs_put_u32(&p, nseg);                           /* sl_extents<> count    */
+
+    for (i = 0; i < nseg; i++) {
+        memcpy(p, segs[i].deviceid, NFS4_DEVICEID4_SIZE); /* se_vol_id         */
+        p += NFS4_DEVICEID4_SIZE;
+        pnfs_put_u64(&p, segs[i].offset);             /* se_file_offset        */
+        pnfs_put_u64(&p, segs[i].length);             /* se_length             */
+        pnfs_put_u64(&p, segs[i].blk_vol_offset);     /* se_storage_offset     */
+        pnfs_put_u32(&p, segs[i].blk_state);          /* se_state              */
+    }
+
+    return (uint8_t *) p - buf;
+} /* chimera_nfs4_encode_scsi_layout */
+
+/*
+ * Encode a pnfs_scsi_deviceaddr4 (RFC 8154 §2.4.1) into buf for the
+ * device_addr4.da_addr_body opaque: sda_volumes<> describing the volume
+ * topology.  v1: a single PNFS_SCSI_VOLUME_BASE volume identified by its SCSI
+ * VPD-0x83 designator (a hardware id; nothing is written to the disk) plus the
+ * persistent-reservation key the client registers with.
+ */
+static uint32_t
+chimera_nfs4_encode_scsi_device_addr(
+    uint8_t                                *buf,
+    const struct chimera_vfs_layout_device *dev)
+{
+    void *p = buf;
+
+    pnfs_put_u32(&p, 1);                              /* sda_volumes<> count   */
+    pnfs_put_u32(&p, PNFS_SCSI_VOLUME_BASE);          /* pnfs_scsi_volume4 type*/
+    /* pnfs_scsi_base_volume_info4: designator (inlined) + reservation key. */
+    pnfs_put_u32(&p, dev->scsi_code_set);             /* sbv_code_set          */
+    pnfs_put_u32(&p, dev->scsi_desig_type);           /* sbv_designator_type   */
+    pnfs_put_opaque(&p, dev->scsi_desig, dev->scsi_desig_len); /* sbv_designator<> */
+    pnfs_put_u64(&p, dev->scsi_pr_key);               /* sbv_pr_key            */
+
+    return (uint8_t *) p - buf;
+} /* chimera_nfs4_encode_scsi_device_addr */
 
 /* --- sourced-layout device cache (deviceid -> descriptor) ---------------- */
 
@@ -636,8 +724,17 @@ lg_sourced_cb(
         return;
     }
 
-    loc_type = (layout_class == CHIMERA_VFS_LAYOUT_CLASS_BLOCK)
-               ? LAYOUT4_BLOCK_VOLUME : LAYOUT4_FLEX_FILES;
+    switch (layout_class) {
+        case CHIMERA_VFS_LAYOUT_CLASS_BLOCK:
+            loc_type = LAYOUT4_BLOCK_VOLUME;
+            break;
+        case CHIMERA_VFS_LAYOUT_CLASS_SCSI:
+            loc_type = LAYOUT4_SCSI;
+            break;
+        default:
+            loc_type = LAYOUT4_FLEX_FILES;
+            break;
+    } /* switch */
     if (loc_type != args->loga_layout_type) {
         ff_lg_fail(ctx, NFS4ERR_UNKNOWN_LAYOUTTYPE);
         return;
@@ -664,26 +761,31 @@ lg_sourced_cb(
      * this layout; CB_LAYOUTRECALL rides the shared delegation channel. */
     nfs4_cb_ensure_probe(req->thread, client, req);
 
-    if (loc_type == LAYOUT4_BLOCK_VOLUME) {
+    if (loc_type == LAYOUT4_BLOCK_VOLUME || loc_type == LAYOUT4_SCSI) {
         uint8_t        *body = xdr_dbuf_alloc_space(1024, req->encoding->dbuf);
         struct layout4 *lo   = xdr_dbuf_alloc_space(sizeof(*lo), req->encoding->dbuf);
         uint32_t        body_len;
         int             rc;
 
         chimera_nfs_abort_if(body == NULL || lo == NULL, "Failed to allocate space");
-        body_len = chimera_nfs4_encode_block_layout(body, segments, num_segments);
+
+        /* The SCSI extent (RFC 8154) is wire-identical to the block extent
+        * (RFC 5663); only the layout type and device descriptor differ. */
+        body_len = (loc_type == LAYOUT4_SCSI)
+                   ? chimera_nfs4_encode_scsi_layout(body, segments, num_segments)
+                   : chimera_nfs4_encode_block_layout(body, segments, num_segments);
 
         /* Cover exactly the contiguous span the extents describe (from the
-         * requested offset to the end of the last segment); a block client
+         * requested offset to the end of the last segment); a block/SCSI client
          * rejects a layout whose lo_length doesn't match its extents. */
-        uint64_t        blk_end = segments[num_segments - 1].offset +
+        uint64_t blk_end = segments[num_segments - 1].offset +
             segments[num_segments - 1].length;
 
         lo->lo_offset = args->loga_offset;
         lo->lo_length = blk_end > args->loga_offset ?
             blk_end - args->loga_offset : 0;
         lo->lo_iomode           = args->loga_iomode;
-        lo->lo_content.loc_type = LAYOUT4_BLOCK_VOLUME;
+        lo->lo_content.loc_type = loc_type;
         rc                      = xdr_dbuf_opaque_copy(&lo->lo_content.loc_body, body,
                                                        body_len, req->encoding->dbuf);
         chimera_nfs_abort_if(rc, "Failed to copy layout body");
@@ -754,7 +856,10 @@ ff_lg_open_cb(
          * client's requested type must match it. */
         uint32_t want_class, ok_type;
 
-        if (caps & CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK) {
+        if (caps & CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI) {
+            want_class = CHIMERA_VFS_LAYOUT_CLASS_SCSI;
+            ok_type    = LAYOUT4_SCSI;
+        } else if (caps & CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK) {
             want_class = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
             ok_type    = LAYOUT4_BLOCK_VOLUME;
         } else {
@@ -812,7 +917,8 @@ chimera_nfs4_layoutget(
      * for this file depends on its backend (validated in ff_lg_open_cb once the
      * backend's capabilities are known). */
     if (args->loga_layout_type != LAYOUT4_FLEX_FILES &&
-        args->loga_layout_type != LAYOUT4_BLOCK_VOLUME) {
+        args->loga_layout_type != LAYOUT4_BLOCK_VOLUME &&
+        args->loga_layout_type != LAYOUT4_SCSI) {
         res->logr_status = NFS4ERR_UNKNOWN_LAYOUTTYPE;
         chimera_nfs4_compound_complete(req, res->logr_status);
         return;
@@ -852,7 +958,8 @@ chimera_nfs4_layoutreturn(
     }
 
     if (args->lora_layout_type != LAYOUT4_FLEX_FILES &&
-        args->lora_layout_type != LAYOUT4_BLOCK_VOLUME) {
+        args->lora_layout_type != LAYOUT4_BLOCK_VOLUME &&
+        args->lora_layout_type != LAYOUT4_SCSI) {
         res->lorr_status = NFS4ERR_UNKNOWN_LAYOUTTYPE;
         chimera_nfs4_compound_complete(req, res->lorr_status);
         return;

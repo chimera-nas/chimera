@@ -27,10 +27,10 @@
  * DS export directory under which the MDS creates backing files.
  */
 
-#define CHIMERA_PNFS_MAX_DS               8
-#define CHIMERA_VFS_DEVICEID_SIZE         16 /* == NFS4_DEVICEID4_SIZE */
-#define CHIMERA_VFS_MOUNTID_SIZE          16 /* == CHIMERA_VFS_MOUNT_ID_SIZE */
-#define CHIMERA_PNFS_BACKING_MAX          256
+#define CHIMERA_PNFS_MAX_DS             8
+#define CHIMERA_VFS_DEVICEID_SIZE       16   /* == NFS4_DEVICEID4_SIZE */
+#define CHIMERA_VFS_MOUNTID_SIZE        16   /* == CHIMERA_VFS_MOUNT_ID_SIZE */
+#define CHIMERA_PNFS_BACKING_MAX        256
 
 struct chimera_vfs;
 
@@ -44,12 +44,13 @@ struct chimera_vfs;
  * fields (a volume-relative extent); which are meaningful is set by the layout
  * class.
  */
-#define CHIMERA_VFS_LAYOUT_MAX_SEGMENTS   8
-#define CHIMERA_VFS_LAYOUT_MAX_DEVICES    4
+#define CHIMERA_VFS_LAYOUT_MAX_SEGMENTS 8
+#define CHIMERA_VFS_LAYOUT_MAX_DEVICES  4
 
 enum chimera_vfs_layout_class {
     CHIMERA_VFS_LAYOUT_CLASS_FLEX  = 1,   /* flex-files (RFC 8435)   */
     CHIMERA_VFS_LAYOUT_CLASS_BLOCK = 2,   /* block volume (RFC 5663) */
+    CHIMERA_VFS_LAYOUT_CLASS_SCSI  = 3,   /* SCSI volume (RFC 8154)  */
 };
 
 /* Block-extent state, numerically the RFC 5663 pnfs_block_extent_state4. */
@@ -88,6 +89,16 @@ struct chimera_vfs_layout_device {
     uint64_t blk_sig_offset;
     uint32_t blk_sig_len;
     uint8_t  blk_sig[64];
+
+    /* SCSI (RFC 8154): a single BASE volume the client matches to a local LU
+     * by its SCSI VPD-0x83 designator (a hardware identifier; nothing is
+     * written to the disk).  scsi_pr_key is the persistent-reservation key the
+     * client registers with -- the server does not issue reservations in v1. */
+    uint32_t scsi_code_set;                /* PS_CODE_SET_BINARY=1 / _ASCII=2         */
+    uint32_t scsi_desig_type;              /* PS_DESIGNATOR_T10=1 / _EUI64=2 / _NAA=3 */
+    uint32_t scsi_desig_len;
+    uint8_t  scsi_desig[32];
+    uint64_t scsi_pr_key;
 };
 
 struct chimera_vfs_ds {

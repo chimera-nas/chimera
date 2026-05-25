@@ -7,6 +7,7 @@ set(NFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_test_wrapper.sh)
 set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
 set(PNFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_test_wrapper.sh)
 set(PNFS_BLOCK_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_block_test_wrapper.sh)
+set(PNFS_SCSI_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_scsi_test_wrapper.sh)
 
 set(KVM_BACKENDS memfs linux)
 
@@ -69,6 +70,32 @@ set(PNFS_BLOCK_WL_remove "mkdir -p /mnt/test && dd if=/dev/urandom of=/mnt/test/
 # (MDS recalls + defers), then verify the surviving 4 MiB is intact -- exercises
 # the truncate path freeing remote extents past EOF + the recall machinery.
 set(PNFS_BLOCK_WL_recall_truncate "mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && grep -qi LAYOUTGET /proc/self/mountstats && truncate -s 4194304 /mnt/test/f0 && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && head -c 4194304 /tmp/orig > /tmp/orig4 && cmp /tmp/orig4 /mnt/test/f0")
+
+# pNFS SCSI layout (RFC 8154): diskfs-only.  Same remote-data path as block, but
+# the client matches the LU strictly by its SCSI VPD-0x83 hardware designator (a
+# NAA WWN) -- nothing is written to the data disk.  See
+# kvm_pnfs_scsi_test_wrapper.sh; the data disk is virtio-SCSI with a WWN.
+set(PNFS_SCSI_BACKENDS)
+if(IO_URING_ENABLED)
+    list(APPEND PNFS_SCSI_BACKENDS diskfs_io_uring)
+endif()
+if(HAVE_LIBAIO)
+    list(APPEND PNFS_SCSI_BACKENDS diskfs_aio)
+endif()
+
+# Linux SCSI-layout client bring-up.  Unlike block, SCSI layout resolves devices
+# in-kernel by VPD-0x83 designator (no blkmapd upcall, no rpc_pipefs); the same
+# blocklayoutdriver module registers the SCSI layout type.  As with block, the
+# MDS rejects inline data I/O, so a drop-caches re-read that still matches proves
+# the SCSI layout drove the I/O directly to the LU.
+set(PNFS_SCSI_SETUP "modprobe blocklayoutdriver && mount -t nfs -o vers=4.1,tcp 10.0.0.1:/share /mnt")
+
+# Reuse the block workloads verbatim (the layout type differs, the data path
+# does not).
+set(PNFS_SCSI_PROGRAMS rw remove recall_truncate)
+set(PNFS_SCSI_WL_rw "${PNFS_BLOCK_WL_rw}")
+set(PNFS_SCSI_WL_remove "${PNFS_BLOCK_WL_remove}")
+set(PNFS_SCSI_WL_recall_truncate "${PNFS_BLOCK_WL_recall_truncate}")
 
 set(NFS_VERSIONS 3 4.0 4.1 4.2)
 
@@ -211,6 +238,36 @@ foreach(image_spec ${KVM_IMAGES})
                         "${PNFS_BLOCK_SETUP} && ${PNFS_BLOCK_WL_${prog}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/block_${prog}_${pbackend}_nfs4.1
                 PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2)
+        endforeach()
+    endforeach()
+
+    # pNFS SCSI layout (RFC 8154): diskfs sources SCSI layouts; the client does
+    # data I/O directly to a virtio-SCSI LU it matches by WWN (VPD-0x83), never
+    # through the MDS (which can't reach it).  Nothing is written to the disk to
+    # identify it.
+    #
+    # DISABLED in this harness, by design.  Bring-up confirmed the server side
+    # works end-to-end: the Linux client parses our GETDEVICEINFO SCSI device
+    # address, matches /dev/sda by its NAA WWN ("pNFS: using block device sda"),
+    # and proceeds to LAYOUTGET.  But the Linux SCSI layout client then issues a
+    # *mandatory* SCSI PERSISTENT RESERVE OUT (REGISTER) to the LU, and qemu's
+    # emulated scsi-hd does not implement persistent reservations ("Invalid
+    # command operation code" -> "failed to register key" -> a kernel Oops in
+    # the failed-registration cleanup path).  qemu-pr-helper only forwards PR to
+    # a *real* host SCSI device, so a file-backed emulated disk cannot satisfy
+    # this; a PR-capable target (LIO/tcmu or real SAS/FC/iSCSI/NVMe-PR LU) is
+    # required.  The wrapper is kept runnable for manual use against such a
+    # target; see kvm_pnfs_scsi_test_wrapper.sh.
+    foreach(prog ${PNFS_SCSI_PROGRAMS})
+        foreach(pbackend ${PNFS_SCSI_BACKENDS})
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/pnfs/scsi_${prog}_${pbackend}_nfs4.1
+                COMMAND bash ${PNFS_SCSI_WRAPPER}
+                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                        ${CHIMERA_BINARY} ${pbackend}
+                        "${PNFS_SCSI_SETUP} && ${PNFS_SCSI_WL_${prog}}")
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/scsi_${prog}_${pbackend}_nfs4.1
+                PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2
+                           DISABLED TRUE)
         endforeach()
     endforeach()
 
