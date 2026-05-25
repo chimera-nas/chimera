@@ -8,6 +8,7 @@
 
 /* XXX */
 #include <sys/stat.h>
+#include <string.h>
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
@@ -147,6 +148,25 @@ chimera_nfs4_attr2mask(
 
     return attr_mask;
 } /* chimera_nfs4_getattr2mask */
+
+static inline void
+chimera_nfs4_attrs_fill_filehandle(
+    struct chimera_vfs_attrs *attr,
+    uint32_t                  num_req_mask,
+    const uint32_t           *req_mask,
+    const void               *fh,
+    int                       fhlen)
+{
+    if (num_req_mask < 1 ||
+        !(req_mask[0] & (1 << FATTR4_FILEHANDLE)) ||
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        return;
+    }
+
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
+    attr->va_fh_len    = fhlen;
+    memcpy(attr->va_fh, fh, fhlen);
+} /* chimera_nfs4_attrs_fill_filehandle */
 
 static inline int
 chimera_nfs4_mask2attr(

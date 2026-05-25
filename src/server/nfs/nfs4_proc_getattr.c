@@ -25,9 +25,10 @@ chimera_nfs4_getattr_finish(
     struct nfs_request       *req,
     struct chimera_vfs_attrs *attr)
 {
-    struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
-    struct GETATTR4res  *res  = &req->res_compound.resarray[req->index].opgetattr;
-    int                  rc;
+    struct GETATTR4args     *args = &req->args_compound->argarray[req->index].opgetattr;
+    struct GETATTR4res      *res  = &req->res_compound.resarray[req->index].opgetattr;
+    struct chimera_vfs_attrs marshall_attr;
+    int                      rc;
 
     res->status = NFS4_OK;
 
@@ -55,7 +56,14 @@ chimera_nfs4_getattr_finish(
         return;
     }
 
-    chimera_nfs4_marshall_attrs(attr,
+    marshall_attr = *attr;
+    chimera_nfs4_attrs_fill_filehandle(&marshall_attr,
+                                       args->num_attr_request,
+                                       args->attr_request,
+                                       req->fh,
+                                       req->fhlen);
+
+    chimera_nfs4_marshall_attrs(&marshall_attr,
                                 args->num_attr_request,
                                 args->attr_request,
                                 &res->resok4.obj_attributes.num_attrmask,
