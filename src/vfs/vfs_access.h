@@ -21,6 +21,7 @@
 
 struct chimera_vfs_attrs;
 struct chimera_vfs_cred;
+struct chimera_vfs_thread;
 
 /*
  * Return the subset of `requested` (canonical CHIMERA_ACE_* mask bits) that is
@@ -68,3 +69,47 @@ enum chimera_vfs_error chimera_vfs_gate(
     const struct chimera_vfs_attrs *attr,
     const struct chimera_vfs_cred  *cred,
     uint32_t                        required);
+
+/*
+ * Decide whether `cred` may delete the entry described by `child_attr` from the
+ * directory described by `parent_attr`, combining the NFSv4/Windows
+ * DELETE / DELETE_CHILD rule with POSIX sticky-bit (S_ISVTX) ownership.  Both
+ * attrs must carry mode/uid (+ ACL where present); `child_attr` may be NULL when
+ * only the parent's DELETE_CHILD grant matters.  Returns non-zero to allow.
+ */
+int chimera_vfs_delete_allowed(
+    const struct chimera_vfs_attrs *parent_attr,
+    const struct chimera_vfs_attrs *child_attr,
+    const struct chimera_vfs_cred  *cred);
+
+/*
+ * Async enforcement pre-steps for the namespace wrappers.  Each is a no-op
+ * (completes OK without any backend I/O) when chimera_vfs_gate_needed() is false
+ * for the target backend/cred; otherwise it fetches the object's attrs+ACL,
+ * evaluates the engine, and completes with CHIMERA_VFS_OK or CHIMERA_VFS_EACCES
+ * (or a fetch error).  The wrapper resumes its real operation from the callback.
+ */
+typedef void (*chimera_vfs_gate_callback_t)(
+    enum chimera_vfs_error status,
+    void                  *private_data);
+
+/* Require `required` (CHIMERA_ACE_* mask) on the object named by `fh`. */
+void chimera_vfs_gate_fh(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data);
+
+/* Authorize deleting `child_fh` from directory `parent_fh` (delete_allowed). */
+void chimera_vfs_gate_delete(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *parent_fh,
+    int                            parent_fhlen,
+    const void                    *child_fh,
+    int                            child_fhlen,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data);

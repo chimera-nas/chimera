@@ -317,6 +317,82 @@ test_gate(void)
     TEST_PASS("gate: enforcement scoping + owner-implicit WRITE_ACL, not WRITE_OWNER");
 } /* test_gate */
 
+#define INIT_ATTR(a, m, u, g)                                            \
+        do {                                                             \
+            memset(&(a), 0, sizeof(a));                                  \
+            (a).va_set_mask = CHIMERA_VFS_ATTR_MODE |                    \
+                CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;             \
+            (a).va_mode = (m); (a).va_uid = (u); (a).va_gid = (g);       \
+        } while (0)
+
+/*
+ * chimera_vfs_delete_allowed: NFSv4/Windows DELETE_CHILD-or-DELETE rule with
+ * the POSIX sticky-bit owner restriction.  Covers the DELETE_CHILD synthesis
+ * mode_access_check now performs on directories.
+ */
+static void
+test_delete_allowed(void)
+{
+    struct chimera_vfs_cred  dirowner   = mkcred(1000, 2000);
+    struct chimera_vfs_cred  childowner = mkcred(1001, 2001);
+    struct chimera_vfs_cred  other      = mkcred(1002, 2002);
+    struct chimera_vfs_cred  other2     = mkcred(1003, 2003);
+    struct chimera_vfs_cred  root       = mkcred(0, 0);
+    struct chimera_vfs_attrs parent, child;
+
+    INIT_ATTR(child, S_IFREG | 0644, 1001, 2001);
+
+    /* World-writable, non-sticky dir: write+execute on the dir => DELETE_CHILD
+     * for anyone, so any caller may remove the child. */
+    INIT_ATTR(parent, S_IFDIR | 0777, 1000, 2000);
+    assert(chimera_vfs_delete_allowed(&parent, &child, &other) == 1);
+
+    /* 0755 dir: only the dir owner has write (=> DELETE_CHILD).  A non-owner
+     * who is also not the child's owner is denied.  The child's *owner* is
+     * still allowed -- our canonical model is NFSv4/Windows, where the owner
+     * holds DELETE implicitly even when the parent denies DELETE_CHILD. */
+    INIT_ATTR(parent, S_IFDIR | 0755, 1000, 2000);
+    assert(chimera_vfs_delete_allowed(&parent, &child, &dirowner)   == 1);
+    assert(chimera_vfs_delete_allowed(&parent, &child, &other)      == 0);
+    assert(chimera_vfs_delete_allowed(&parent, &child, &childowner) == 1);
+
+    /* Sticky world-writable dir (/tmp-like 1777): DELETE_CHILD is granted to
+     * all, but the sticky bit restricts removal to the child owner, the dir
+     * owner, or root. */
+    INIT_ATTR(parent, S_IFDIR | 01777, 1000, 2000);
+    assert(chimera_vfs_delete_allowed(&parent, &child, &childowner) == 1);
+    assert(chimera_vfs_delete_allowed(&parent, &child, &dirowner)   == 1);
+    assert(chimera_vfs_delete_allowed(&parent, &child, &root)       == 1);
+    assert(chimera_vfs_delete_allowed(&parent, &child, &other)      == 0);
+
+    /* Per-file DELETE via an explicit child ACL: the parent denies DELETE_CHILD
+    * to everyone but the dir owner (0700), yet an ACE on the child grants
+    * DELETE to 'other' -- who may then remove it; another non-owner may not. */
+    {
+        ACL_BUF(cacl, 1);
+        cacl->num_aces            = 1;
+        cacl->ctrl_flags          = 0;
+        cacl->aces[0].type        = CHIMERA_ACE_ALLOWED;
+        cacl->aces[0].flags       = 0;
+        cacl->aces[0].access_mask = CHIMERA_ACE_DELETE;
+        cacl->aces[0].who.type    = CHIMERA_PRINCIPAL_USER;
+        cacl->aces[0].who.special = 0;
+        cacl->aces[0].who.id      = 1002;
+
+        INIT_ATTR(parent, S_IFDIR | 0700, 1000, 2000);
+        INIT_ATTR(child,  S_IFREG | 0644, 9999, 9999); /* owned by neither */
+        child.va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+        child.va_acl       = cacl;
+
+        assert(chimera_vfs_delete_allowed(&parent, &child, &other)  == 1);
+        assert(chimera_vfs_delete_allowed(&parent, &child, &other2) == 0);
+    }
+
+    TEST_PASS("delete_allowed: DELETE_CHILD synthesis / per-file DELETE / sticky");
+} /* test_delete_allowed */
+
+#undef INIT_ATTR
+
 int
 main(
     int    argc,
@@ -332,6 +408,7 @@ main(
     test_inherit_fallback();
     test_serialize_roundtrip();
     test_gate();
+    test_delete_allowed();
 
     fprintf(stderr, "All ACL engine tests passed\n");
     return 0;

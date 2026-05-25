@@ -153,6 +153,132 @@ setattr_cb(
     ctx->done   = 1;
 } /* setattr_cb */
 
+static void
+mkdir_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre,
+    struct chimera_vfs_attrs *dir_post,
+    void                     *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    if (error_code == CHIMERA_VFS_OK && attr &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
+        ctx->fh_len = attr->va_fh_len;
+    }
+    ctx->done = 1;
+} /* mkdir_cb */
+
+static void
+lookupat_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    if (error_code == CHIMERA_VFS_OK && attr &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
+        ctx->fh_len = attr->va_fh_len;
+    }
+    ctx->done = 1;
+} /* lookupat_cb */
+
+static void
+remove_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    ctx->done   = 1;
+} /* remove_cb */
+
+/* mkdir `name` under directory handle `dir` as `cred`; return the status. */
+static enum chimera_vfs_error
+mkdir_as(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir,
+    const char                     *name)
+{
+    struct chimera_vfs_attrs sattr;
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    sattr.va_mode     = 0755;
+
+    chimera_vfs_mkdir_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+                         &sattr, CHIMERA_VFS_ATTR_FH, 0, 0, mkdir_cb, ctx);
+    wait_done(ctx);
+    return ctx->status;
+} /* mkdir_as */
+
+/* Create file `name` under directory handle `dir` as `cred`; return status. */
+static enum chimera_vfs_error
+create_as(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir,
+    const char                     *name)
+{
+    struct chimera_vfs_attrs sattr;
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    sattr.va_mode     = 0644;
+
+    chimera_vfs_open_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+                        CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
+                        0, 0, openat_cb, ctx);
+    wait_done(ctx);
+    if (ctx->status == CHIMERA_VFS_OK && ctx->handle) {
+        chimera_vfs_release(ctx->vfs_thread, ctx->handle);
+    }
+    return ctx->status;
+} /* create_as */
+
+/* Look `name` up in directory handle `dir` as `cred`; return status. */
+static enum chimera_vfs_error
+lookup_as(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir,
+    const char                     *name)
+{
+    chimera_vfs_lookup_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+                          CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
+                          lookupat_cb, ctx);
+    wait_done(ctx);
+    return ctx->status;
+} /* lookup_as */
+
+/* Remove `name` (whose handle is `child_fh`) from `dir` as `cred`. */
+static enum chimera_vfs_error
+remove_as(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir,
+    const char                     *name,
+    const uint8_t                  *child_fh,
+    uint32_t                        child_fh_len)
+{
+    chimera_vfs_remove_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+                          child_fh, child_fh_len, 0, 0, remove_cb, ctx);
+    wait_done(ctx);
+    return ctx->status;
+} /* remove_as */
+
 /* Open a handle for `fh` as `cred`, run a read, return the resulting status. */
 static enum chimera_vfs_error
 read_as(
@@ -320,6 +446,69 @@ main(
     assert(chmod_as(&ctx, &other, file_fh, file_fh_len, 0640) == CHIMERA_VFS_EACCES);
     assert(chmod_as(&ctx, &owner, file_fh, file_fh_len, 0640) == CHIMERA_VFS_OK);
     TEST_PASS("chmod: non-owner denied, owner allowed");
+
+    /*
+     * Namespace operations on a 0700 directory owned by 1000: the owner may
+     * populate and traverse it, a non-owner (2000) is denied at every
+     * namespace op -- the same VFS gate every protocol funnels through.
+     */
+    {
+        struct chimera_vfs_open_handle *root_handle, *dir_handle;
+        struct chimera_vfs_attrs        dattr;
+        uint8_t                         dir_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                        dir_fh_len;
+        uint8_t                         kid_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                        kid_fh_len;
+
+        chimera_vfs_open_fh(ctx.vfs_thread, &owner, root_fh, root_fh_len,
+                            CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        root_handle = ctx.handle;
+
+        memset(&dattr, 0, sizeof(dattr));
+        dattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        dattr.va_mode     = 0700;
+        chimera_vfs_mkdir_at(ctx.vfs_thread, &owner, root_handle, "d", 1, &dattr,
+                             CHIMERA_VFS_ATTR_FH, 0, 0, mkdir_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        memcpy(dir_fh, ctx.fh, ctx.fh_len);
+        dir_fh_len = ctx.fh_len;
+        chimera_vfs_release(ctx.vfs_thread, root_handle);
+
+        chimera_vfs_open_fh(ctx.vfs_thread, &owner, dir_fh, dir_fh_len,
+                            CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        dir_handle = ctx.handle;
+
+        assert(mkdir_as(&ctx, &other, dir_handle, "sub") == CHIMERA_VFS_EACCES);
+        assert(mkdir_as(&ctx, &owner, dir_handle, "sub") == CHIMERA_VFS_OK);
+        TEST_PASS("mkdir: non-owner denied, owner allowed (0700 dir)");
+
+        /* Seed a file (as owner) for the lookup/remove checks below.  NOTE:
+         * regular-file creation via open_at is intentionally not VFS-gated
+         * (SMB applies its own create-access check; NFS file-create parent
+         * enforcement is a documented follow-up), so we do not assert a
+         * non-owner create is denied here. */
+        assert(create_as(&ctx, &owner, dir_handle, "kid") == CHIMERA_VFS_OK);
+
+        /* lookup needs EXECUTE (search) on the directory. */
+        assert(lookup_as(&ctx, &other, dir_handle, "kid") == CHIMERA_VFS_EACCES);
+        assert(lookup_as(&ctx, &owner, dir_handle, "kid") == CHIMERA_VFS_OK);
+        memcpy(kid_fh, ctx.fh, ctx.fh_len);
+        kid_fh_len = ctx.fh_len;
+        TEST_PASS("lookup: non-owner denied, owner allowed (0700 dir)");
+
+        assert(remove_as(&ctx, &other, dir_handle, "kid", kid_fh, kid_fh_len) ==
+               CHIMERA_VFS_EACCES);
+        assert(remove_as(&ctx, &owner, dir_handle, "kid", kid_fh, kid_fh_len) ==
+               CHIMERA_VFS_OK);
+        TEST_PASS("remove: non-owner denied, owner allowed (0700 dir)");
+
+        chimera_vfs_release(ctx.vfs_thread, dir_handle);
+    }
 
     chimera_vfs_thread_destroy(ctx.vfs_thread);
     chimera_vfs_destroy(ctx.vfs);

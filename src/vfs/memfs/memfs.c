@@ -741,11 +741,18 @@ memfs_init(const char *cfgdata)
     inode->uid        = 0;
     inode->gid        = 0;
     inode->nlink      = 2;
-    inode->mode       = S_IFDIR | 0755;
-    inode->atime      = now;
-    inode->mtime      = now;
-    inode->ctime      = now;
-    inode->btime      = now;
+    /* The freshly-created in-memory root has no configured ownership, so make
+     * it world-writable: a fresh memfs share is a blank scratch namespace any
+     * connecting user may populate (mirroring a writable share root).  Now that
+     * the VFS layer enforces ADD_FILE/ADD_SUBDIRECTORY on the parent, a
+     * root-owned 0755 root would (correctly) refuse all creation by non-root
+     * clients.  Subdirectories created beneath it are owned by their creator
+     * with the usual 0755. */
+    inode->mode  = S_IFDIR | 0777;
+    inode->atime = now;
+    inode->mtime = now;
+    inode->ctime = now;
+    inode->btime = now;
 
     rb_tree_init(&inode->dir.dirents);
 

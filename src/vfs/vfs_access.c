@@ -80,3 +80,48 @@ chimera_vfs_gate(
 
     return CHIMERA_VFS_EACCES;
 } /* chimera_vfs_gate */
+
+SYMBOL_EXPORT int
+chimera_vfs_delete_allowed(
+    const struct chimera_vfs_attrs *parent_attr,
+    const struct chimera_vfs_attrs *child_attr,
+    const struct chimera_vfs_cred  *cred)
+{
+    int      dc, d, allow;
+    uint32_t parent_mode;
+
+    /* NFSv4/Windows: a name may be deleted if the parent grants DELETE_CHILD or
+     * the child itself grants DELETE.  On mode-only objects DELETE_CHILD is
+     * synthesised from the directory's write+execute bits (see
+     * mode_access_check) and DELETE is held implicitly by the child's owner. */
+    dc = chimera_vfs_access_allowed(parent_attr, cred, CHIMERA_ACE_DELETE_CHILD);
+    d  = child_attr &&
+        chimera_vfs_access_allowed(child_attr, cred, CHIMERA_ACE_DELETE);
+
+    allow = dc || d;
+
+    if (!allow) {
+        return 0;
+    }
+
+    /* POSIX sticky directory (S_ISVTX): even with delete rights, only the
+     * child's owner, the directory's owner, or root may remove the entry. */
+    parent_mode = (parent_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) ?
+        parent_attr->va_mode : 0;
+
+    if (parent_mode & S_ISVTX) {
+        uint64_t child_uid = (child_attr &&
+                              (child_attr->va_set_mask & CHIMERA_VFS_ATTR_UID)) ?
+            child_attr->va_uid : (uint64_t) -1;
+        uint64_t parent_uid = (parent_attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ?
+            parent_attr->va_uid : (uint64_t) -1;
+
+        if (cred->uid != 0 &&
+            (uint64_t) cred->uid != child_uid &&
+            (uint64_t) cred->uid != parent_uid) {
+            return 0;
+        }
+    }
+
+    return 1;
+} /* chimera_vfs_delete_allowed */

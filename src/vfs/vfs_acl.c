@@ -116,7 +116,8 @@ mode_access_check(
     uint64_t                       owner_uid,
     uint64_t                       owner_gid,
     const struct chimera_vfs_cred *cred,
-    uint32_t                       requested)
+    uint32_t                       requested,
+    int                            is_dir)
 {
     int      r, w, x;
     uint32_t allowed;
@@ -136,6 +137,16 @@ mode_access_check(
     }
 
     allowed = ACE_BASELINE | perm_class_to_mask(r, w, x);
+
+    /* POSIX governs deleting a directory entry by write+execute on the
+     * directory; map that to the canonical DELETE_CHILD bit so the namespace
+     * gate (remove/rename) authorizes mode-only directories correctly.  Without
+     * this, DELETE_CHILD -- which lives in no perm class -- would never be
+     * granted from a plain mode and every delete on a mode-only dir would be
+     * refused. */
+    if (is_dir && w && x) {
+        allowed |= CHIMERA_ACE_DELETE_CHILD;
+    }
 
     /* The owner always holds the same implicit rights as under an explicit ACL
      * (READ_CONTROL/WRITE_DAC/DELETE) -- not WRITE_ATTRIBUTES or WRITE_OWNER,
@@ -160,8 +171,6 @@ chimera_acl_access_check(
     uint32_t granted   = 0;
     uint32_t remaining = requested;
 
-    (void) is_dir;
-
     /* Root bypasses ACL evaluation (no_root_squash semantics; squashing is
      * handled when the credential is mapped). */
     if (cred->uid == 0) {
@@ -169,7 +178,8 @@ chimera_acl_access_check(
     }
 
     if (!acl || acl->num_aces == 0) {
-        return mode_access_check(mode, owner_uid, owner_gid, cred, requested);
+        return mode_access_check(mode, owner_uid, owner_gid, cred, requested,
+                                 is_dir);
     }
 
     uint32_t denied               = 0;

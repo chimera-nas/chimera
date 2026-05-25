@@ -1136,10 +1136,14 @@ cairn_init(const char *cfgdata)
         inode.gid         = 0;
         inode.nlink       = 2;
         inode.rdev        = 0;
-        inode.mode        = S_IFDIR | 0755;
-        inode.atime       = now;
-        inode.mtime       = now;
-        inode.ctime       = now;
+        /* World-writable fresh root: with VFS-layer ADD_FILE/ADD_SUBDIRECTORY
+         * enforcement a root-owned 0755 root would refuse all creation by
+         * non-root clients on this engine-authoritative backend.  Subdirs are
+         * still created owned by their creator with 0755. */
+        inode.mode  = S_IFDIR | 0777;
+        inode.atime = now;
+        inode.mtime = now;
+        inode.ctime = now;
 
         super.fsid = chimera_rand64();
 

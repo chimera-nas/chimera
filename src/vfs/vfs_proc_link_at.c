@@ -3,10 +3,13 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <string.h>
+#include <stdlib.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"
+#include "vfs_access.h"
+#include "vfs_acl.h"
 #include "common/misc.h"
 #include "common/macros.h"
 static void
@@ -61,8 +64,8 @@ chimera_vfs_link_at_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_link_at_complete */
 
-SYMBOL_EXPORT void
-chimera_vfs_link_at(
+static void
+chimera_vfs_link_at_dispatch(
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
     const void                    *fh,
@@ -109,4 +112,97 @@ chimera_vfs_link_at(
     request->proto_private_data                  = private_data;
 
     chimera_vfs_dispatch(request);
+} /* chimera_vfs_link_at_dispatch */
+
+/*
+ * Enforcement pre-step context: hard-linking an existing object into a
+ * directory requires ADD_FILE on that directory.
+ */
+struct chimera_vfs_link_at_gate {
+    struct chimera_vfs_thread     *thread;
+    const struct chimera_vfs_cred *cred;
+    const void                    *fh;
+    int                            fhlen;
+    const void                    *dir_fh;
+    int                            dir_fhlen;
+    const char                    *name;
+    int                            namelen;
+    unsigned int                   replace;
+    uint64_t                       attr_mask;
+    uint64_t                       pre_attr_mask;
+    uint64_t                       post_attr_mask;
+    chimera_vfs_link_at_callback_t callback;
+    void                          *private_data;
+};
+
+static void
+chimera_vfs_link_at_gate_complete(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_vfs_link_at_gate *gate = private_data;
+
+    if (status != CHIMERA_VFS_OK) {
+        gate->callback(status, NULL, NULL, NULL, gate->private_data);
+        free(gate);
+        return;
+    }
+
+    chimera_vfs_link_at_dispatch(gate->thread, gate->cred, gate->fh, gate->fhlen,
+                                 gate->dir_fh, gate->dir_fhlen, gate->name,
+                                 gate->namelen, gate->replace, gate->attr_mask,
+                                 gate->pre_attr_mask, gate->post_attr_mask,
+                                 gate->callback, gate->private_data);
+    free(gate);
+} /* chimera_vfs_link_at_gate_complete */
+
+SYMBOL_EXPORT void
+chimera_vfs_link_at(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    const void                    *dir_fh,
+    int                            dir_fhlen,
+    const char                    *name,
+    int                            namelen,
+    unsigned int                   replace,
+    uint64_t                       attr_mask,
+    uint64_t                       pre_attr_mask,
+    uint64_t                       post_attr_mask,
+    chimera_vfs_link_at_callback_t callback,
+    void                          *private_data)
+{
+    struct chimera_vfs_module       *module;
+    struct chimera_vfs_link_at_gate *gate;
+
+    module = chimera_vfs_get_module(thread, dir_fh, dir_fhlen);
+
+    if (module && chimera_vfs_gate_needed(module->capabilities, cred)) {
+        gate                 = malloc(sizeof(*gate));
+        gate->thread         = thread;
+        gate->cred           = cred;
+        gate->fh             = fh;
+        gate->fhlen          = fhlen;
+        gate->dir_fh         = dir_fh;
+        gate->dir_fhlen      = dir_fhlen;
+        gate->name           = name;
+        gate->namelen        = namelen;
+        gate->replace        = replace;
+        gate->attr_mask      = attr_mask;
+        gate->pre_attr_mask  = pre_attr_mask;
+        gate->post_attr_mask = post_attr_mask;
+        gate->callback       = callback;
+        gate->private_data   = private_data;
+
+        chimera_vfs_gate_fh(thread, cred, dir_fh, dir_fhlen,
+                            CHIMERA_ACE_WRITE_DATA,
+                            chimera_vfs_link_at_gate_complete, gate);
+        return;
+    }
+
+    chimera_vfs_link_at_dispatch(thread, cred, fh, fhlen, dir_fh, dir_fhlen,
+                                 name, namelen, replace, attr_mask,
+                                 pre_attr_mask, post_attr_mask, callback,
+                                 private_data);
 } /* chimera_vfs_link_at */
