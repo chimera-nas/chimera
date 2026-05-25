@@ -35,7 +35,8 @@
  * The single pNFS layouttype4 this file's backend supports, for FATTR4
  * advertisement: LAYOUT4_FLEX_FILES (0x4) for an orchestrated backend
  * (CHIMERA_VFS_CAP_LAYOUT) or a flex-sourcing backend, LAYOUT4_BLOCK_VOLUME
- * (0x3) for a block-sourcing backend, or 0 when pNFS is off/unsupported.
+ * (0x3) for a block-sourcing backend, LAYOUT4_SCSI (0x5) for a SCSI-sourcing
+ * backend, or 0 when pNFS is off/unsupported.
  */
 static inline uint32_t
 chimera_nfs4_pnfs_layout_type(
@@ -53,6 +54,9 @@ chimera_nfs4_pnfs_layout_type(
     caps = chimera_vfs_module_capabilities(vfs_thread, fh, fhlen);
 
     if (caps & CHIMERA_VFS_CAP_LAYOUT_SOURCE) {
+        if (caps & CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI) {
+            return 0x5;
+        }
         return (caps & CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK) ? 0x3 : 0x4;
     }
     if (caps & CHIMERA_VFS_CAP_LAYOUT) {
@@ -362,10 +366,10 @@ chimera_nfs4_marshall_attrs(
                     word2 |= (1 << (FATTR4_LAYOUT_TYPES - 64));
                 }
 
-                /* The block layout (RFC 5663) requires the server to advertise
-                 * the layout block size + alignment, or the client's block
-                 * layout driver refuses to initialize. */
-                if (pnfs_layout_type == 0x3) {
+                /* The block (RFC 5663) and SCSI (RFC 8154) layouts require the
+                 * server to advertise the layout block size + alignment, or the
+                 * client's layout driver refuses to initialize. */
+                if (pnfs_layout_type == 0x3 || pnfs_layout_type == 0x5) {
                     word2 |= (1 << (FATTR4_LAYOUT_BLKSIZE - 64)) |
                         (1 << (FATTR4_LAYOUT_ALIGNMENT - 64));
                 }
@@ -695,16 +699,17 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, pnfs_layout_type); /* per-backend */
         }
 
-        /* Block layout (RFC 5663) block size + alignment (attrs 65, 66).  The
-         * client's block layout driver requires a non-zero blksize <= PAGE_SIZE
-         * to initialize.  We allocate and align block extents to 4 KiB. */
-        if (pnfs_layout_type == 0x3 &&
+        /* Block (RFC 5663) and SCSI (RFC 8154) layout block size + alignment
+         * (attrs 65, 66).  The client's layout driver requires a non-zero
+         * blksize <= PAGE_SIZE to initialize.  We allocate and align extents to
+         * 4 KiB. */
+        if ((pnfs_layout_type == 0x3 || pnfs_layout_type == 0x5) &&
             (req_mask[2] & (1 << (FATTR4_LAYOUT_BLKSIZE - 64)))) {
             rsp_mask[2]  |= (1 << (FATTR4_LAYOUT_BLKSIZE - 64));
             *num_rsp_mask = 3;
             chimera_nfs4_attr_append_uint32(&attrs, 4096);
         }
-        if (pnfs_layout_type == 0x3 &&
+        if ((pnfs_layout_type == 0x3 || pnfs_layout_type == 0x5) &&
             (req_mask[2] & (1 << (FATTR4_LAYOUT_ALIGNMENT - 64)))) {
             rsp_mask[2]  |= (1 << (FATTR4_LAYOUT_ALIGNMENT - 64));
             *num_rsp_mask = 3;

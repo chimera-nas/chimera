@@ -192,6 +192,15 @@ struct diskfs_device {
     uint64_t                  sig_offset;
     uint32_t                  sig_len;
     uint8_t                   sig[SM_SIG_MAX];
+
+    /* SCSI-layout (RFC 8154) hardware identity: the LU's VPD-0x83 designator a
+     * pNFS-SCSI client matches against (nothing written to the data disk).
+     * Used when the share is in scsi_layout mode instead of sig_*. */
+    uint32_t                  scsi_code_set;     /* 1=binary, 2=ascii */
+    uint32_t                  scsi_desig_type;   /* 1=T10, 2=EUI64, 3=NAA */
+    uint32_t                  scsi_desig_len;
+    uint8_t                   scsi_desig[32];
+    uint64_t                  scsi_pr_key;
 };
 
 struct diskfs_dirent {
@@ -749,6 +758,7 @@ struct diskfs_shared {
     uint32_t                   block_cache_blocks; /* total resident block-buffer cap (0 = default) */
     uint32_t                   inode_cache_inodes; /* total resident inode cap (0 = default) */
     int                        block_layout;       /* config opt-in: advertise pNFS block layouts */
+    int                        scsi_layout;        /* config opt-in: advertise pNFS SCSI layouts  */
     uint64_t                   fsid;
     struct space_map          *space_map;
     struct diskfs_intent_log   intent_log;
@@ -7182,7 +7192,8 @@ diskfs_init(const char *cfgdata)
          * deviceid and SIMPLE-volume signature come from config; its AG logs are
          * relocated onto the local metadata device by the allocator. */
         if (role_name && strcmp(role_name, "remote") == 0) {
-            json_t *sig_cfg = json_object_get(device_cfg, "signature");
+            json_t *sig_cfg  = json_object_get(device_cfg, "signature");
+            json_t *scsi_cfg = json_object_get(device_cfg, "scsi");
 
             chimera_diskfs_abort_if(i == 0, "device 0 must be a local metadata device");
 
@@ -7196,16 +7207,40 @@ diskfs_init(const char *cfgdata)
 
             diskfs_parse_hex(json_string_value(json_object_get(device_cfg, "deviceid")),
                              device->deviceid, SM_DEVICEID_SIZE);
+            /* A remote device carries either a SIMPLE-volume content signature
+             * (block layout, RFC 5663) or a SCSI VPD-0x83 designator (SCSI
+             * layout, RFC 8154); the share-level mode flag selects which. */
             if (json_is_object(sig_cfg)) {
                 device->sig_offset = json_integer_value(json_object_get(sig_cfg, "offset"));
                 device->sig_len    = diskfs_parse_hex(
                     json_string_value(json_object_get(sig_cfg, "bytes")),
                     device->sig, SM_SIG_MAX);
             }
+            if (json_is_object(scsi_cfg)) {
+                const char *dtype = json_string_value(
+                    json_object_get(scsi_cfg, "designator_type"));
+                const char *cset = json_string_value(
+                    json_object_get(scsi_cfg, "code_set"));
 
-            chimera_diskfs_info("Remote data device %s size %lu sig_off %lu sig_len %u",
-                                device->name, device->size, device->sig_offset,
-                                device->sig_len);
+                /* Default binary NAA -- the common SAS/FC/iSCSI WWID form. */
+                device->scsi_desig_type = 3; /* NAA */
+                if (dtype && strcmp(dtype, "eui64") == 0) {
+                    device->scsi_desig_type = 2;
+                } else if (dtype && strcmp(dtype, "t10") == 0) {
+                    device->scsi_desig_type = 1;
+                }
+                device->scsi_code_set  = (cset && strcmp(cset, "ascii") == 0) ? 2 : 1;
+                device->scsi_desig_len = diskfs_parse_hex(
+                    json_string_value(json_object_get(scsi_cfg, "id")),
+                    device->scsi_desig, sizeof(device->scsi_desig));
+                device->scsi_pr_key = json_integer_value(
+                    json_object_get(scsi_cfg, "pr_key"));
+            }
+
+            chimera_diskfs_info(
+                "Remote data device %s size %lu sig_len %u scsi_desig_len %u",
+                device->name, device->size, device->sig_len,
+                device->scsi_desig_len);
             continue;
         }
 
@@ -7262,21 +7297,29 @@ diskfs_init(const char *cfgdata)
      * efficiently. */
     initialize           = json_object_get(cfg, "initialize") != NULL;
     shared->unsafe_async = json_is_true(json_object_get(cfg, "unsafe_async"));
-    /* Opt-in pNFS block layout mode: diskfs sources RFC 5663 block layouts and
-     * keeps file data on remote (data-only) devices. */
+    /* Opt-in pNFS block / SCSI layout mode: diskfs sources RFC 5663 block or
+     * RFC 8154 SCSI layouts and keeps file data on remote (data-only) devices.
+     * Both share the same remote-device data path and allocator; they differ
+     * only in how the client identifies the disk (content signature vs. SCSI
+     * hardware designator) and the encoded layout type. */
     shared->block_layout       = json_is_true(json_object_get(cfg, "block_layout"));
+    shared->scsi_layout        = json_is_true(json_object_get(cfg, "scsi_layout"));
     shared->block_cache_blocks = (uint32_t) json_integer_value(
         json_object_get(cfg, "block_cache_blocks"));
 
-    /* Block mode and orchestrated flex-files are mutually exclusive per module
-     * (the NFS server routes on CAP_LAYOUT_SOURCE before CAP_LAYOUT).  A diskfs
-     * module is loaded once per daemon with one config, so switch the module's
-     * advertised layout capability here: block mode SOURCEs block layouts,
-     * otherwise we persist the orchestrated flex blob (default). */
-    if (shared->block_layout) {
+    chimera_diskfs_abort_if(shared->block_layout && shared->scsi_layout,
+                            "block_layout and scsi_layout are mutually exclusive");
+
+    /* Layout-sourcing mode and orchestrated flex-files are mutually exclusive
+     * per module (the NFS server routes on CAP_LAYOUT_SOURCE before CAP_LAYOUT).
+     * A diskfs module is loaded once per daemon with one config, so switch the
+     * module's advertised layout capability here: a sourcing mode SOURCEs block
+     * or SCSI layouts, otherwise we persist the orchestrated flex blob. */
+    if (shared->block_layout || shared->scsi_layout) {
         vfs_diskfs.capabilities &= ~(uint64_t) CHIMERA_VFS_CAP_LAYOUT;
         vfs_diskfs.capabilities |= CHIMERA_VFS_CAP_LAYOUT_SOURCE |
-            CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK;
+            (shared->scsi_layout ? CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI
+                                 : CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK);
     }
     shared->inode_cache_inodes = (uint32_t) json_integer_value(
         json_object_get(cfg, "inode_cache_inodes"));
@@ -10230,11 +10273,11 @@ diskfs_read(
 
     (void) private_data;
 
-    /* Block-mode shares keep all file data on remote (pNFS) devices the server
-     * can't touch, so inline reads are impossible -- the client must use a
-     * block layout.  Reject so a non-pNFS read doesn't dereference a NULL
-     * device queue. */
-    if (unlikely(shared->block_layout)) {
+    /* Block/SCSI-mode shares keep all file data on remote (pNFS) devices the
+     * server can't touch, so inline reads are impossible -- the client must use
+     * a layout.  Reject so a non-pNFS read doesn't dereference a NULL device
+     * queue. */
+    if (unlikely(shared->block_layout || shared->scsi_layout)) {
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
@@ -11050,10 +11093,10 @@ diskfs_write(
 
     (void) private_data;
 
-    /* Block-mode data lives on remote (pNFS) devices: writes go directly from
-     * the client to the volume via an RW layout, never inline through the
+    /* Block/SCSI-mode data lives on remote (pNFS) devices: writes go directly
+     * from the client to the volume via an RW layout, never inline through the
      * server (which has no handle for those devices). */
-    if (unlikely(shared->block_layout)) {
+    if (unlikely(shared->block_layout || shared->scsi_layout)) {
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
@@ -13074,11 +13117,26 @@ diskfs_layout_add_device(
     ld = &request->get_layout.r_devices[request->get_layout.r_num_devices++];
     memset(ld, 0, sizeof(*ld));
     memcpy(ld->deviceid, dev->deviceid, SM_DEVICEID_SIZE);
-    ld->layout_class   = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
-    ld->blk_vol_size   = dev->size;
-    ld->blk_sig_offset = dev->sig_offset;
-    ld->blk_sig_len    = dev->sig_len;
-    memcpy(ld->blk_sig, dev->sig, dev->sig_len);
+
+    if (shared->scsi_layout) {
+        /* SCSI layout (RFC 8154): the client matches the LU by its VPD-0x83
+         * hardware designator; nothing is written to the disk. */
+        ld->layout_class    = CHIMERA_VFS_LAYOUT_CLASS_SCSI;
+        ld->blk_vol_size    = dev->size;
+        ld->scsi_code_set   = dev->scsi_code_set;
+        ld->scsi_desig_type = dev->scsi_desig_type;
+        ld->scsi_desig_len  = dev->scsi_desig_len;
+        memcpy(ld->scsi_desig, dev->scsi_desig, dev->scsi_desig_len);
+        ld->scsi_pr_key = dev->scsi_pr_key;
+    } else {
+        /* Block layout (RFC 5663): the client matches the disk by a content
+         * signature read at a fixed offset. */
+        ld->layout_class   = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
+        ld->blk_vol_size   = dev->size;
+        ld->blk_sig_offset = dev->sig_offset;
+        ld->blk_sig_len    = dev->sig_len;
+        memcpy(ld->blk_sig, dev->sig, dev->sig_len);
+    }
 } /* diskfs_layout_add_device */
 
 /* Append one block segment [file_off, file_off+len) -> (device_id, vol_off). */
@@ -13110,7 +13168,8 @@ diskfs_get_layout_finish(struct chimera_vfs_request *request)
 {
     struct diskfs_request_private *p = request->plugin_data;
 
-    request->get_layout.r_layout_class = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
+    request->get_layout.r_layout_class = p->thread->shared->scsi_layout
+        ? CHIMERA_VFS_LAYOUT_CLASS_SCSI : CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
     /* Commits the txn (durably persisting any new extent records) before the
      * layout is handed back; a pure-READ layout has nothing journaled. */
     diskfs_op_ok(request, p->txn);
@@ -13342,7 +13401,8 @@ diskfs_get_layout_inode_cb(
     p->loop_off       = off;
     p->loop_pos       = end;
 
-    request->get_layout.r_layout_class = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
+    request->get_layout.r_layout_class = shared->scsi_layout
+        ? CHIMERA_VFS_LAYOUT_CLASS_SCSI : CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
     request->get_layout.r_num_segments = 0;
     request->get_layout.r_num_devices  = 0;
 
@@ -13351,7 +13411,6 @@ diskfs_get_layout_inode_cb(
         return;
     }
 
-    (void) shared;
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_ext_floor_async(op, thread, inode, off, p->rec_scratch,
                                sizeof(p->rec_scratch), diskfs_get_layout_first_cb,
@@ -13372,7 +13431,7 @@ diskfs_get_layout(
 
     (void) private_data;
 
-    if (unlikely(!shared->block_layout)) {
+    if (unlikely(!shared->block_layout && !shared->scsi_layout)) {
         request->status = CHIMERA_VFS_ENOTSUP;
         request->complete(request);
         return;

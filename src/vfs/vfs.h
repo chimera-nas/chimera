@@ -1031,6 +1031,7 @@ struct chimera_vfs_handle_state {
 #define CHIMERA_VFS_CAP_LAYOUT_SOURCE      (1U << 15)
 #define CHIMERA_VFS_CAP_LAYOUT_CLASS_FLEX  (1U << 16) /* produces flex-files (RFC 8435)  */
 #define CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK (1U << 17) /* produces block volume (RFC 5663)*/
+#define CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI  (1U << 19) /* produces SCSI volume (RFC 8154) */
 
 struct chimera_vfs_module {
     /* Required
