@@ -101,7 +101,7 @@ struct chimera_vfs_thread;
 struct nfs4_cb_path {
     uint32_t               cb_program;       /* client's callback program number */
     uint32_t               cb_ident;         /* 4.0 callback_ident               */
-    uint8_t                cb_minorversion;  /* 0 for 4.0, 1 for 4.1+            */
+    uint8_t                cb_minorversion;  /* NFSv4 minor version (0/1/2)      */
     char                   cb_netid[8];      /* "tcp" / "tcp6"                   */
     char                   cb_addr[64];      /* universal address h.h.h.h.p.p    */
     _Atomic uint8_t        cb_state;         /* NFS4_CB_*                        */
