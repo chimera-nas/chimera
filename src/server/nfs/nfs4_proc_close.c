@@ -23,6 +23,12 @@ chimera_nfs4_close(
     uint8_t                 state_type;
     nfsstat4                status;
 
+    if (req->fhlen == 0) {
+        res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
     chimera_nfs4_resolve_current_stateid(req, &args->open_stateid);
 
@@ -79,6 +85,17 @@ chimera_nfs4_close(
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
             res->status = NFS4ERR_BAD_SEQID;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+
+        status = nfs4_stateid_check_seqid(open_state->seqid,
+                                          args->open_stateid.seqid);
+        if (status != NFS4_OK) {
+            pthread_mutex_unlock(&owner->lock);
+            nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                    thread->vfs_thread);
+            res->status = status;
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
