@@ -425,10 +425,6 @@ struct diskfs_block_cache {
 #define DISKFS_BLOCK_CACHE_DEFAULT_BLOCKS (2 * DISKFS_INTENT_LOG_BLOCKS)
 #define DISKFS_BLOCK_CACHE_MIN_BLOCKS     (DISKFS_INTENT_LOG_BLOCKS + DISKFS_INTENT_LOG_BLOCKS / 2)
 
-/* Cache-warm allocator journal blocks for the AGs most likely to receive the
- * first metadata allocations.  This does not reserve or journal space. */
-#define DISKFS_AG_LOG_WARM_AGS            64
-
 /*
  * On-disk inode block layout (4 KiB):
  *   [0, DISKFS_INODE_AREA)   struct diskfs_dinode (scalar attributes)
@@ -750,7 +746,6 @@ struct diskfs_shared {
     uint8_t                    root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                   root_fhlen;
     int                        orphans_scanned;    /* mount-time orphan recovery done */
-    int                        ag_logs_warmed;     /* mount-time allocator log warmup done */
     uint64_t                   root_inum;          /* for the clean-unmount superblock */
     uint32_t                   root_gen;
     int                        unsafe_async;       /* config opt-in: submit block writes without FUA/sync (no crash safety) */
@@ -1519,48 +1514,6 @@ diskfs_inode_load_sync(
     }
     return inode;
 } /* diskfs_inode_load_sync */
-
-static void
-diskfs_warm_ag_logs(struct diskfs_thread *thread)
-{
-    struct diskfs_shared   *shared = thread->shared;
-    struct sm_log_block     blocks[DISKFS_AG_LOG_WARM_AGS * 2];
-    struct diskfs_mount_io *io;
-    uint8_t                 buf[DISKFS_BLOCK_SIZE];
-    uint32_t                nblocks;
-
-    pthread_mutex_lock(&shared->lock);
-    if (shared->ag_logs_warmed) {
-        pthread_mutex_unlock(&shared->lock);
-        return;
-    }
-    shared->ag_logs_warmed = 1;
-    pthread_mutex_unlock(&shared->lock);
-
-    nblocks = space_map_active_log_blocks(shared->space_map,
-                                          DISKFS_AG_LOG_WARM_AGS,
-                                          blocks,
-                                          sizeof(blocks) / sizeof(blocks[0]));
-    if (nblocks == 0) {
-        return;
-    }
-
-    io = diskfs_mount_io_open(shared);
-    for (uint32_t i = 0; i < nblocks; i++) {
-        struct diskfs_block *blk;
-
-        if (diskfs_mount_io_read(io, blocks[i].device_id, buf,
-                                 sizeof(buf), blocks[i].device_offset) != 0) {
-            continue;
-        }
-
-        blk = diskfs_block_claim(thread, blocks[i].device_id,
-                                 blocks[i].device_offset, 1);
-        memcpy(blk->iov.data, buf, sizeof(buf));
-        diskfs_block_unpin(thread, blk, DISKFS_BLOCK_CLEAN);
-    }
-    diskfs_mount_io_close(io);
-} /* diskfs_warm_ag_logs */
 
 /* ------------------------------------------------------------------ */
 /* Block cache                                                         */
@@ -8567,8 +8520,6 @@ diskfs_mount(
     if (unlikely(!shared->orphans_scanned)) {
         diskfs_orphan_scan(thread);
     }
-    diskfs_warm_ag_logs(thread);
-
     p->thread     = thread;
     p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
     p->op_scratch = 0;
