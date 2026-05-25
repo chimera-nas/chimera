@@ -3290,7 +3290,10 @@ diskfs_bt_rebalance_leaf(
             psl[i] = psl[i + 1];
         }
         diskfs_bt_hdr(pbuf, pbase)->nitems = pn - 1;
-        merged                             = 1;
+        if (total > 0) {
+            psl[lidx].key = diskfs_bt_lslots(lbuf, 0)[0].key;
+        }
+        merged = 1;
 
         /* R is merged away: return its node block to the allocator (pending
          * free, applied when this txn commits). */
@@ -3339,6 +3342,7 @@ diskfs_bt_rebalance_leaf(
         rh->prev_leaf = l_bptr;
         rh->next_leaf = r_next;
 
+        psl[lidx].key = diskfs_bt_lslots(lbuf, 0)[0].key;
         psl[ridx].key = diskfs_bt_lslots(rbuf, 0)[0].key;
         merged        = 0;
     }
@@ -3412,7 +3416,10 @@ diskfs_bt_rebalance_interior(
             psl[i] = psl[i + 1];
         }
         diskfs_bt_hdr(pbuf, pbase)->nitems = pn - 1;
-        merged                             = 1;
+        if (total > 0) {
+            psl[lidx].key = diskfs_bt_islots(lbuf, 0)[0].key;
+        }
+        merged = 1;
 
         /* R is merged away: pending-free its node block. */
         diskfs_txn_free_space(thread, txn, fdev, foff, DISKFS_BLOCK_SIZE);
@@ -3428,6 +3435,7 @@ diskfs_bt_rebalance_interior(
         }
         diskfs_bt_hdr(rbuf, 0)->nitems = total - split;
 
+        psl[lidx].key = diskfs_bt_islots(lbuf, 0)[0].key;
         psl[ridx].key = diskfs_bt_islots(rbuf, 0)[0].key;
         merged        = 0;
     }
@@ -4422,6 +4430,12 @@ diskfs_bt_run(struct diskfs_bt_op *op)
                 int exact, idx = h->nitems ? diskfs_bt_leaf_search(buf, base, &op->key, &exact) : 0;
 
                 if (idx < h->nitems) {
+                    if (unlikely(diskfs_bt_key_cmp(&diskfs_bt_lslots(buf, base)[idx].key,
+                                                   &op->key) < 0)) {
+                        chimera_diskfs_error("b+tree lookup_ge routed backwards");
+                        diskfs_bt_complete(op, -1);
+                        return;
+                    }
                     diskfs_bt_complete(op, diskfs_bt_op_emit(op, buf, base, idx));
                     return;
                 }
@@ -4453,6 +4467,12 @@ diskfs_bt_run(struct diskfs_bt_op *op)
             }
         } else if (op->phase == DISKFS_BT_PHASE_WALK_NEXT) {
             if (h->nitems > 0) {
+                if (unlikely(diskfs_bt_key_cmp(&diskfs_bt_lslots(buf, base)[0].key,
+                                               &op->key) < 0)) {
+                    chimera_diskfs_error("b+tree leaf chain moved backwards during lookup_ge");
+                    diskfs_bt_complete(op, -1);
+                    return;
+                }
                 diskfs_bt_complete(op, diskfs_bt_op_emit(op, buf, 0, 0));
                 return;
             }
@@ -8632,6 +8652,11 @@ diskfs_remove_at_removed_cb(
     /* The dirent was located before the child fetch and the parent has been
      * write-locked throughout, so it must still be present. */
     if (unlikely(result != 1)) {
+        chimera_diskfs_error("remove_at lost dirent after lookup name=%.*s hash=%lu parent=%lu",
+                             request->remove_at.namelen,
+                             request->remove_at.name,
+                             request->remove_at.name_hash,
+                             parent->inum);
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
@@ -8733,6 +8758,11 @@ diskfs_remove_at_lookup_cb(
     diskfs_bt_op_free(thread, op);
 
     if (result < 0) {
+        chimera_diskfs_error("remove_at lookup miss name=%.*s hash=%lu parent=%lu",
+                             request->remove_at.namelen,
+                             request->remove_at.name,
+                             request->remove_at.name_hash,
+                             p->inode_stash[0]->inum);
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
