@@ -630,10 +630,20 @@ nfs4_client_create_session_classify(
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
 
+    if (c && c->unified) {
+        /* CREATE_SESSION is client liveness on a clientid the server still
+         * holds.  If the lease sweep had marked the client courtesy-expired
+         * (e.g. its EXCHANGE_ID -> CREATE_SESSION handshake stalled past the
+         * lease under load), revive it rather than returning STALE_CLIENTID:
+         * the clientid is valid and the client is plainly alive.  Clear
+         * expired first so the renew (a no-op on an expired client) takes
+         * hold, then renew so the window to the client's first SEQUENCE cannot
+         * trip the sweep. */
+        c->unified->expired = 0;
+        nfs_client_touch(c->unified);
+    }
+
     if (!c) {
-        out->action = NFS4_CS_ERROR;
-        out->status = NFS4ERR_STALE_CLIENTID;
-    } else if (c->unified && c->unified->expired) {
         out->action = NFS4_CS_ERROR;
         out->status = NFS4ERR_STALE_CLIENTID;
     } else if (csa_sequence == c->nfs4_client_cs_seqid) {
