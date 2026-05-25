@@ -106,6 +106,81 @@ sm_ag_journal_claim(
     return 0;
 } /* sm_ag_journal_claim */
 
+uint32_t
+space_map_active_log_blocks(
+    struct space_map    *sm,
+    uint32_t             max_ags,
+    struct sm_log_block *blocks,
+    uint32_t             max_blocks)
+{
+    uint32_t count      = 0;
+    uint32_t warmed_ags = 0;
+    uint32_t start_dev;
+
+    if (!sm || !blocks || max_ags == 0 || max_blocks == 0 || sm->num_devices == 0) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&sm->lock);
+    start_dev = sm->device_rotor % sm->num_devices;
+    pthread_mutex_unlock(&sm->lock);
+
+    for (uint32_t di = 0; di < sm->num_devices && warmed_ags < max_ags; di++) {
+        struct sm_device *dev = &sm->devices[(start_dev + di) % sm->num_devices];
+        uint32_t          start_ag;
+
+        if (dev->num_ags == 0) {
+            continue;
+        }
+
+        pthread_mutex_lock(&sm->lock);
+        start_ag = dev->ag_rotor % dev->num_ags;
+        pthread_mutex_unlock(&sm->lock);
+
+        for (uint32_t ai = 0; ai < dev->num_ags && warmed_ags < max_ags; ai++) {
+            struct sm_ag *ag = &dev->ags[(start_ag + ai) % dev->num_ags];
+            uint64_t      slot_base;
+            uint64_t      region_off;
+            uint64_t      delta_byte;
+            uint64_t      delta_off;
+            uint32_t      in_block;
+
+            pthread_mutex_lock(&ag->lock);
+            slot_base  = ag->log_offset + (uint64_t) ag->log_slot * SM_AG_LOG_SLOT_SIZE;
+            region_off = (sizeof(struct sm_ag_log_header) +
+                          (uint64_t) ag->log_base_count * sizeof(struct sm_ag_log_ext) +
+                          SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
+            delta_byte = region_off +
+                (uint64_t) ag->log_delta_count * sizeof(struct sm_ag_log_delta);
+            delta_off = slot_base + (delta_byte & ~((uint64_t) SM_BLOCK_SIZE - 1));
+            in_block  = (uint32_t) (delta_byte & (SM_BLOCK_SIZE - 1));
+
+            if (count < max_blocks) {
+                blocks[count].device_id     = ag->device_id;
+                blocks[count].device_offset = slot_base;
+                count++;
+            }
+
+            /* If the next delta starts at a block boundary, the normal journal
+             * claim will create a fresh zeroed block and will not read disk.
+             * Only warm the current delta block when it already exists. */
+            if (in_block != 0 && delta_off != slot_base && count < max_blocks) {
+                blocks[count].device_id     = ag->device_id;
+                blocks[count].device_offset = delta_off;
+                count++;
+            }
+            pthread_mutex_unlock(&ag->lock);
+
+            warmed_ags++;
+            if (count == max_blocks) {
+                return count;
+            }
+        }
+    }
+
+    return count;
+} /* space_map_active_log_blocks */
+
 /* Write the delta into the pre-claimed log blocks.  Caller holds ag->lock and
  * has already mutated the free tree; this cannot fault. */
 static void
