@@ -317,6 +317,22 @@ nfs4_cb_channel_open(
     }
 
     cb->cb_client = chan;
+
+    if (cb->cb_minorversion >= 1) {
+        /* 4.1+: the backchannel rides the session's fore connection and is
+         * already bound at CREATE_SESSION (RFC 8881 §2.10.3.1), so the server
+         * may deliver callbacks on it immediately -- no CB_NULL round trip is
+         * required to validate it.  Mark the path usable now so the client's
+         * very first delegation-wanting OPEN is served, rather than racing an
+         * asynchronous probe.  Avoiding the per-session probe also keeps
+         * many-client workloads cheap (pynfs COUR7 opens 1000 sessions; a
+         * CB_NULL on each would swamp the single-threaded callback path).  A
+         * backchannel that turns out to be dead is caught by the first real
+         * CB_RECALL, which drives the path to NFS4_CB_DOWN and revokes. */
+        atomic_store_explicit(&cb->cb_state, NFS4_CB_UP, memory_order_release);
+        return;
+    }
+
     atomic_store_explicit(&cb->cb_state, NFS4_CB_PROBING, memory_order_release);
 
     ctx         = calloc(1, sizeof(*ctx));
@@ -358,8 +374,29 @@ nfs4_cb_ensure_probe(
             if (client->cb_path.cb_program == 0) {
                 return false;
             }
+
+            /* Claim the one-time channel setup: only the thread that flips
+             * UNINIT->PROBING opens the channel.  A concurrent OPEN that loses
+             * the race sees PROBING (or the final state) and skips -- a later
+             * OPEN is served once setup settles. */
+            {
+                uint8_t expect = NFS4_CB_UNINIT;
+
+                if (!atomic_compare_exchange_strong_explicit(
+                        &client->cb_path.cb_state, &expect, NFS4_CB_PROBING,
+                        memory_order_acq_rel, memory_order_acquire)) {
+                    return expect == NFS4_CB_UP;
+                }
+            }
+
             nfs4_cb_channel_open(thread, client, req);
-            return false;
+
+            /* 4.1+ binds the backchannel and marks the path UP synchronously
+             * (no CB_NULL round trip), so this very first delegation-wanting
+             * OPEN can be served.  4.0 fired an asynchronous CB_NULL and is
+             * still PROBING here. */
+            return atomic_load_explicit(&client->cb_path.cb_state,
+                                        memory_order_acquire) == NFS4_CB_UP;
     } /* switch */
 } /* nfs4_cb_ensure_probe */
 
