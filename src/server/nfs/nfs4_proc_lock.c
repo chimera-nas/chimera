@@ -114,6 +114,49 @@ chimera_nfs4_lock_complete(
     req->nfs_inflight_range = NULL;
 
     if (result == CHIMERA_VFS_LEASE_GRANTED) {
+        /* POSIX consolidation (RFC 7530 §16.10.4): coalesce this newly-granted
+         * range with any same-mode interval of the same lock-owner that it
+         * overlaps or abuts, so a single merged interval is what LOCKT reports
+         * and LOCKU operates on.  All entries on this lock_state share one
+         * lock-owner, so only the lock mode must match. */
+        uint64_t                  n_start = rl->lease.offset;
+        uint64_t                  n_end   = rl->lease.length ?
+            rl->lease.offset + rl->lease.length : UINT64_MAX;
+        uint8_t                   n_mode     = rl->lease.mode.granted;
+        uint64_t                  orig_start = n_start;
+        uint64_t                  orig_end   = n_end;
+        struct nfs4_range_lease **pp         = &lock_state->range_leases;
+
+        while (*pp) {
+            struct nfs4_range_lease *e       = *pp;
+            uint64_t                 e_start = e->lease.offset;
+            uint64_t                 e_end   = e->lease.length ?
+                e->lease.offset + e->lease.length : UINT64_MAX;
+
+            if (e->lease.mode.granted == n_mode &&
+                e_start <= n_end && n_start <= e_end) {
+                if (e_start < n_start) {
+                    n_start = e_start;
+                }
+                if (e_end > n_end) {
+                    n_end = e_end;
+                }
+                *pp = e->next;
+                nfs4_range_lease_free(vfs_state, e);
+            } else {
+                pp = &e->next;
+            }
+        }
+
+        if (n_start != orig_start || n_end != orig_end) {
+            /* Grew via merge: re-take the lease at the coalesced extent. */
+            chimera_vfs_lease_release(vfs_state, rl->file_state, &rl->lease);
+            rl->lease.offset = n_start;
+            rl->lease.length = (n_end == UINT64_MAX) ? 0 : (n_end - n_start);
+            chimera_vfs_state_try_insert(vfs_state, rl->file_state, &rl->lease,
+                                         NULL);
+        }
+
         /* Link the granted range lease onto the lock_state so LOCKU /
          * teardown can find and release it. */
         rl->next                 = lock_state->range_leases;

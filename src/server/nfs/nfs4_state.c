@@ -1319,6 +1319,55 @@ nfs_lock_state_create(
     return state;
 } /* nfs_lock_state_create */
 
+/* Insert a byte-range lock interval [start, end) (end == UINT64_MAX => to EOF)
+ * of `mode` for `owner` on `file_state` (the ref's ownership transfers to the
+ * returned entry), and link it onto lock_state->range_leases.  The interval is
+ * always a sub-region or coalesced union of locks this owner already
+ * coordinated, so the synchronous insert grants without conflict. */
+struct nfs4_range_lease *
+nfs4_range_lease_insert(
+    struct chimera_vfs_state             *vfs_state,
+    struct nfs_lock_state                *lock_state,
+    struct chimera_vfs_file_state        *file_state,
+    const struct chimera_vfs_lease_owner *owner,
+    uint8_t                               mode,
+    uint64_t                              start,
+    uint64_t                              end)
+{
+    struct nfs4_range_lease *rl = calloc(1, sizeof(*rl));
+
+    if (!rl) {
+        chimera_vfs_state_put(vfs_state, file_state);
+        return NULL;
+    }
+
+    rl->file_state         = file_state;
+    rl->lease.kind         = CHIMERA_VFS_LEASE_RANGE;
+    rl->lease.mode.granted = mode;
+    rl->lease.mode.denied  = 0;
+    rl->lease.owner        = *owner;
+    rl->lease.offset       = start;
+    rl->lease.length       = (end == UINT64_MAX) ? 0 : (end - start);
+
+    chimera_vfs_state_try_insert(vfs_state, file_state, &rl->lease, NULL);
+
+    rl->next                 = lock_state->range_leases;
+    lock_state->range_leases = rl;
+    return rl;
+} /* nfs4_range_lease_insert */
+
+/* Release the vfs_state lease backing `rl` and free it.  Caller has already
+ * unlinked it from lock_state->range_leases. */
+void
+nfs4_range_lease_free(
+    struct chimera_vfs_state *vfs_state,
+    struct nfs4_range_lease  *rl)
+{
+    chimera_vfs_lease_release(vfs_state, rl->file_state, &rl->lease);
+    chimera_vfs_state_put(vfs_state, rl->file_state);
+    free(rl);
+} /* nfs4_range_lease_free */
+
 static void
 lock_state_cleanup(
     struct nfs_lock_state     *state,

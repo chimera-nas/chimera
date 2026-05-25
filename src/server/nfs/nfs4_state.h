@@ -29,6 +29,25 @@ struct nfs4_range_lease {
     struct nfs4_range_lease           *next;
 };
 
+struct nfs_lock_state;
+
+/* Byte-range lock interval management (POSIX merge on LOCK / split on LOCKU).
+ * Defined in nfs4_state.c. */
+struct nfs4_range_lease *
+nfs4_range_lease_insert(
+    struct chimera_vfs_state             *vfs_state,
+    struct nfs_lock_state                *lock_state,
+    struct chimera_vfs_file_state        *file_state,
+    const struct chimera_vfs_lease_owner *owner,
+    uint8_t                               mode,
+    uint64_t                              start,
+    uint64_t                              end);
+
+void
+nfs4_range_lease_free(
+    struct chimera_vfs_state *vfs_state,
+    struct nfs4_range_lease  *rl);
+
 /*
  * Unified NFSv4 state model.
  *

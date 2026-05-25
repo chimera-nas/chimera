@@ -28,7 +28,7 @@ chimera_nfs4_locku(
     uint8_t                   state_type;
     struct nfs_lock_state    *lock_state;
     struct nfs_lock_owner    *lock_owner;
-    struct nfs4_range_lease  *rl, *prev, *match;
+    struct nfs4_range_lease  *rl, *match;
     uint64_t                  vfs_length;
     nfsstat4                  status;
 
@@ -117,43 +117,87 @@ chimera_nfs4_locku(
     /* NFS uses UINT64_MAX to mean "to end of file"; vfs_state uses 0. */
     vfs_length = args->length == UINT64_MAX ? 0 : args->length;
 
-    /* RFC 7530 §16.12.4: unlock the specified byte range.  This server tracks
-     * granted ranges as whole extents, so handle the common full-cover case by
-     * removing the held range when it is contained in the unlock range. */
-    prev  = NULL;
-    match = NULL;
-    for (rl = lock_state->range_leases; rl; rl = rl->next) {
-        uint64_t lock_start = rl->lease.offset;
-        uint64_t lock_len   = rl->lease.length;
-        uint64_t lock_end   = lock_len ? lock_start + lock_len : UINT64_MAX;
-        uint64_t unlock_end = vfs_length ? args->offset + vfs_length : UINT64_MAX;
+    /* RFC 7530 §16.12.4 / POSIX: remove the unlocked region [u_start, u_end)
+     * from every interval of this lock-owner that it overlaps, splitting an
+     * interval into its left and/or right remainders as needed.  Unlocking a
+     * region that holds no lock is a successful no-op (LOCKU always succeeds). */
+    {
+        uint64_t                  u_start = args->offset;
+        uint64_t                  u_end   = vfs_length ?
+            args->offset + vfs_length : UINT64_MAX;
+        struct nfs4_range_lease  *hits = NULL;
+        struct nfs4_range_lease **pp   = &lock_state->range_leases;
 
-        if (args->offset <= lock_start && unlock_end >= lock_end) {
-            match = rl;
-            break;
+        /* Detach all intervals overlapping the unlock range. */
+        while (*pp) {
+            rl = *pp;
+            uint64_t e_start = rl->lease.offset;
+            uint64_t e_end   = rl->lease.length ?
+                rl->lease.offset + rl->lease.length : UINT64_MAX;
+
+            if (e_end <= u_start || u_end <= e_start) {
+                pp = &rl->next;
+                continue;
+            }
+            *pp      = rl->next;
+            rl->next = hits;
+            hits     = rl;
         }
-        prev = rl;
-    }
 
-    if (!match) {
-        nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                thread->vfs_thread);
-        req->nfs_state_ref = NULL;
-        res->status        = NFS4ERR_LOCK_RANGE;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
+        /* Re-insert the non-unlocked remainder(s) of each detached interval. */
+        while (hits) {
+            uint64_t                       e_start = hits->lease.offset;
+            uint64_t                       e_end   = hits->lease.length ?
+                hits->lease.offset + hits->lease.length : UINT64_MAX;
+            uint8_t                        mode   = hits->lease.mode.granted;
+            struct chimera_vfs_lease_owner owner  = hits->lease.owner;
+            struct chimera_vfs_file_state *fs     = hits->file_state;
+            bool                           reused = false;
 
-    if (prev) {
-        prev->next = match->next;
-    } else {
-        lock_state->range_leases = match->next;
-    }
+            match = hits;
+            hits  = hits->next;
 
-    /* Release the lease (sync) and free the range entry. */
-    chimera_vfs_lease_release(vfs_state, match->file_state, &match->lease);
-    chimera_vfs_state_put(vfs_state, match->file_state);
-    free(match);
+            chimera_vfs_lease_release(vfs_state, fs, &match->lease);
+
+            if (e_start < u_start) {
+                /* Left remainder [e_start, u_start): reuse this entry. */
+                match->lease.offset = e_start;
+                match->lease.length = u_start - e_start;
+                chimera_vfs_state_try_insert(vfs_state, fs, &match->lease, NULL);
+                match->next              = lock_state->range_leases;
+                lock_state->range_leases = match;
+                reused                   = true;
+            }
+            if (e_end > u_end) {
+                if (!reused) {
+                    /* Right remainder [u_end, e_end): reuse this entry. */
+                    match->lease.offset = u_end;
+                    match->lease.length = (e_end == UINT64_MAX) ? 0 :
+                        e_end - u_end;
+                    chimera_vfs_state_try_insert(vfs_state, fs, &match->lease,
+                                                 NULL);
+                    match->next              = lock_state->range_leases;
+                    lock_state->range_leases = match;
+                    reused                   = true;
+                } else {
+                    /* Both remainders: the right one needs its own entry and a
+                     * fresh file_state reference. */
+                    struct chimera_vfs_file_state *fs2 =
+                        chimera_vfs_state_get(vfs_state, fs->fh, fs->fh_len,
+                                              fs->fh_hash, true);
+                    if (fs2) {
+                        nfs4_range_lease_insert(vfs_state, lock_state, fs2,
+                                                &owner, mode, u_end, e_end);
+                    }
+                }
+            }
+            if (!reused) {
+                /* Interval fully covered by the unlock: drop it. */
+                chimera_vfs_state_put(vfs_state, fs);
+                free(match);
+            }
+        }
+    }
 
     lock_state->seqid += 1;
     nfs4_stateid_encode(&res->lock_stateid, lock_state->seqid,
