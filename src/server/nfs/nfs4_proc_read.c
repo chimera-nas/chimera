@@ -11,14 +11,6 @@
 #include "vfs/vfs_release.h"
 #include <sys/stat.h>
 
-static inline int
-chimera_nfs4_stateid_is_anonymous(const struct stateid4 *sid)
-{
-    static const uint8_t zero[12] = { 0 };
-
-    return sid->seqid == 0 && memcmp(sid->other, zero, sizeof(zero)) == 0;
-} /* chimera_nfs4_stateid_is_anonymous */
-
 static void
 chimera_nfs4_read_complete(
     enum chimera_vfs_error    error_code,
@@ -165,20 +157,27 @@ chimera_nfs4_read(
     uint8_t                         state_type;
     struct chimera_vfs_open_handle *state_handle;
     struct nfs_open_state          *open_state;
+    struct nfs_lock_state          *lock_state;
     struct evpl_iovec              *iov;
+    uint32_t                        current_seqid;
     nfsstat4                        status;
 
     req->nfs_state_ref = NULL;
     req->handle        = NULL;
 
     /*
-     * RFC 7530 9.1.4.3 / RFC 8881 8.2.3 require READ to honor the
-     * anonymous stateid (all zeros).  Open the current FH on the fly
+     * NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2).
+     */
+    chimera_nfs4_resolve_current_stateid(req, &args->stateid);
+
+    /*
+     * RFC 7530 9.1.4.3 / RFC 8881 8.2.3 require READ to honor special
+     * stateids.  Open the current FH on the fly
      * instead of consulting the state table.
      */
     /* A pNFS data server serves READ by file handle without consulting its
      * (empty) state table; the MDS authorizes the I/O via the layout. */
-    if (chimera_nfs4_stateid_is_anonymous(&args->stateid) ||
+    if (nfs4_stateid_is_special(&args->stateid) ||
         chimera_server_config_get_nfs_data_server(thread->shared->config)) {
         if (req->fhlen == 0) {
             res->status = NFS4ERR_NOFILEHANDLE;
@@ -237,11 +236,25 @@ chimera_nfs4_read(
     }
 
     if (state_type == NFS4_SLOT_TYPE_OPEN) {
-        open_state   = state_void;
-        state_handle = open_state->handle;
+        open_state    = state_void;
+        state_handle  = open_state->handle;
+        current_seqid = open_state->seqid;
     } else {
-        open_state   = ((struct nfs_lock_state *) state_void)->open_state;
-        state_handle = ((struct nfs_lock_state *) state_void)->handle;
+        lock_state    = state_void;
+        open_state    = lock_state->open_state;
+        state_handle  = lock_state->handle;
+        current_seqid = lock_state->seqid;
+    }
+
+    if (req->minorversion == 0) {
+        status = nfs4_stateid_check_seqid(current_seqid, args->stateid.seqid);
+        if (status != NFS4_OK) {
+            nfs_state_table_release(table, state_void, state_type,
+                                    thread->vfs_thread);
+            res->status = status;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
     }
 
     status = nfs_open_state_check_io_denied(open_state,
