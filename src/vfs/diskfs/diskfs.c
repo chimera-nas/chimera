@@ -874,6 +874,13 @@ struct diskfs_bt_op {
     int                       depth;
     int                       removed_idx;
     int                       reb_level;
+    int                       last_parent_valid;
+    int                       last_parent_ci;
+    int                       last_parent_nitems;
+    struct diskfs_bt_key      last_parent_key;
+    struct diskfs_bt_key      last_parent_next_key;
+    uint64_t                  last_parent_child;
+    uint64_t                  last_parent_next_child;
 
     /* completion.  cb fires only when the op actually suspended (an I/O
      * deferred it); a fully-resident traversal completes inline and reports
@@ -2732,6 +2739,18 @@ diskfs_bt_interior_search(
     return ans;
 } /* diskfs_bt_interior_search */
 
+static inline struct diskfs_bt_key
+diskfs_bt_node_min_key(
+    void    *buf,
+    uint32_t base)
+{
+    struct diskfs_bt_node_hdr *h = diskfs_bt_hdr(buf, base);
+
+    chimera_diskfs_abort_if(h->nitems == 0, "b+tree empty node has no minimum key");
+    return h->level == 0 ? diskfs_bt_lslots(buf, base)[0].key :
+           diskfs_bt_islots(buf, base)[0].key;
+} /* diskfs_bt_node_min_key */
+
 /* Append a leaf record at the end (caller guarantees sorted order + room). */
 static void
 diskfs_bt_leaf_append(
@@ -3064,6 +3083,7 @@ diskfs_bt_insert_rec(
 
     csplit = diskfs_bt_insert_rec(thread, txn, child_buf, 0, DISKFS_BT_NODE_CAP,
                                   child_bptr, key, rec, reclen, &csep, &cbptr);
+    sl[ci].key = diskfs_bt_node_min_key(child_buf, 0);
     if (!csplit) {
         return 0;
     }
@@ -4393,7 +4413,19 @@ diskfs_bt_run(struct diskfs_bt_op *op)
 
         if (op->phase == DISKFS_BT_PHASE_DESCEND) {
             if (h->level > 0) {
-                int ci = diskfs_bt_interior_search(buf, base, &op->key);
+                struct diskfs_bt_islot *isl = diskfs_bt_islots(buf, base);
+                int                     ci  = diskfs_bt_interior_search(buf, base, &op->key);
+
+                op->last_parent_valid      = 1;
+                op->last_parent_ci         = ci;
+                op->last_parent_nitems     = h->nitems;
+                op->last_parent_key        = isl[ci].key;
+                op->last_parent_child      = isl[ci].child;
+                op->last_parent_next_child = 0;
+                if (ci + 1 < h->nitems) {
+                    op->last_parent_next_key   = isl[ci + 1].key;
+                    op->last_parent_next_child = isl[ci + 1].child;
+                }
 
                 if (op->opcode == DISKFS_BT_OP_INSERT ||
                     op->opcode == DISKFS_BT_OP_REMOVE) {
@@ -4404,7 +4436,7 @@ diskfs_bt_run(struct diskfs_bt_op *op)
                     op->path[op->depth].ci   = ci;
                     op->depth++;
                 }
-                op->cur_bptr = diskfs_bt_islots(buf, base)[ci].child;
+                op->cur_bptr = isl[ci].child;
                 op->use_root = 0;
                 continue;
             }
@@ -4436,7 +4468,53 @@ diskfs_bt_run(struct diskfs_bt_op *op)
             } else if (op->opcode == DISKFS_BT_OP_LOOKUP_EXACT) {
                 int exact, idx = diskfs_bt_leaf_search(buf, base, &op->key, &exact);
 
-                diskfs_bt_complete(op, exact ? diskfs_bt_op_emit(op, buf, base, idx) : -1);
+                if (unlikely(!exact)) {
+                    struct diskfs_bt_lslot *sl        = diskfs_bt_lslots(buf, base);
+                    int                     misrouted = h->nitems > 0 &&
+                        ((idx == h->nitems && h->next_leaf) ||
+                         (idx == 0 && h->prev_leaf));
+
+                    if (misrouted) {
+                        if (op->last_parent_valid && op->last_parent_next_child) {
+                            chimera_diskfs_error("b+tree exact miss misrouted inode=%lu type=%u subkey=%lu "
+                                                 "leaf_items=%u leaf_first=%lu leaf_last=%lu "
+                                                 "leaf_prev=%lu leaf_next=%lu insert_idx=%d "
+                                                 "parent_ci=%d parent_nitems=%d parent_key=%lu "
+                                                 "parent_child=%lu parent_next_key=%lu parent_next_child=%lu",
+                                                 inode->inum,
+                                                 (unsigned) op->key.type,
+                                                 op->key.subkey,
+                                                 (unsigned) h->nitems,
+                                                 sl[0].key.subkey,
+                                                 sl[h->nitems - 1].key.subkey,
+                                                 h->prev_leaf,
+                                                 h->next_leaf,
+                                                 idx,
+                                                 op->last_parent_ci,
+                                                 op->last_parent_nitems,
+                                                 op->last_parent_key.subkey,
+                                                 op->last_parent_child,
+                                                 op->last_parent_next_key.subkey,
+                                                 op->last_parent_next_child);
+                        } else if (h->nitems > 0) {
+                            chimera_diskfs_error("b+tree exact miss misrouted inode=%lu type=%u subkey=%lu "
+                                                 "leaf_items=%u leaf_first=%lu leaf_last=%lu "
+                                                 "leaf_prev=%lu leaf_next=%lu insert_idx=%d",
+                                                 inode->inum,
+                                                 (unsigned) op->key.type,
+                                                 op->key.subkey,
+                                                 (unsigned) h->nitems,
+                                                 sl[0].key.subkey,
+                                                 sl[h->nitems - 1].key.subkey,
+                                                 h->prev_leaf,
+                                                 h->next_leaf,
+                                                 idx);
+                        }
+                    }
+                    diskfs_bt_complete(op, -1);
+                    return;
+                }
+                diskfs_bt_complete(op, diskfs_bt_op_emit(op, buf, base, idx));
                 return;
             } else if (op->opcode == DISKFS_BT_OP_LOOKUP_GE) {
                 int exact, idx = h->nitems ? diskfs_bt_leaf_search(buf, base, &op->key, &exact) : 0;
@@ -7454,8 +7532,9 @@ diskfs_bootstrap(struct diskfs_thread *thread)
                                                               inode->gen,
                                                               shared->root_fh);
     }
-    shared->root_inum = inode->inum;
-    shared->root_gen  = inode->gen;
+    shared->root_inum       = inode->inum;
+    shared->root_gen        = inode->gen;
+    shared->orphans_scanned = 1;
 
     diskfs_mount_io_close(mio);
 
@@ -8339,6 +8418,13 @@ diskfs_mount(
 
     (void) private_data;
 
+    /* Resume any inode drains left pending by a crash during mount, before
+     * the export becomes usable.  Fresh bootstrap creates an empty orphan list
+     * and marks it scanned. */
+    if (unlikely(!shared->orphans_scanned)) {
+        diskfs_orphan_scan(thread);
+    }
+
     p->thread     = thread;
     p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
     p->op_scratch = 0;
@@ -8972,11 +9058,6 @@ diskfs_remove_at_lookup_cb(
     diskfs_bt_op_free(thread, op);
 
     if (result < 0) {
-        chimera_diskfs_error("remove_at lookup miss name=%.*s hash=%lu parent=%lu",
-                             request->remove_at.namelen,
-                             request->remove_at.name,
-                             request->remove_at.name_hash,
-                             p->inode_stash[0]->inum);
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
@@ -13253,11 +13334,6 @@ diskfs_dispatch(
 
     if (unlikely(shared->root_fhlen == 0)) {
         diskfs_bootstrap(thread);
-    }
-
-    /* Resume any inode drains left pending by a crash (once per mount). */
-    if (unlikely(!shared->orphans_scanned)) {
-        diskfs_orphan_scan(thread);
     }
 
     switch (request->opcode) {
