@@ -201,3 +201,5 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
 # Questions or feedback?
 
 Come say hi on [Discord](https://discord.gg/hnRkvQFecq) — it's the best place to ask questions, share what you're building, or follow along with development.
+
+We welcome contributions of all kinds, from bug reports to new VFS backends.
