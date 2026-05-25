@@ -7391,8 +7391,9 @@ diskfs_bootstrap(struct diskfs_thread *thread)
                                                               inode->gen,
                                                               shared->root_fh);
     }
-    shared->root_inum = inode->inum;
-    shared->root_gen  = inode->gen;
+    shared->root_inum       = inode->inum;
+    shared->root_gen        = inode->gen;
+    shared->orphans_scanned = 1;
 
     diskfs_mount_io_close(mio);
 
@@ -8202,6 +8203,13 @@ diskfs_mount(
     uint32_t                       gen;
 
     (void) private_data;
+
+    /* Resume any inode drains left pending by a crash during mount, before
+     * the export becomes usable.  Fresh bootstrap creates an empty orphan list
+     * and marks it scanned. */
+    if (unlikely(!shared->orphans_scanned)) {
+        diskfs_orphan_scan(thread);
+    }
 
     p->thread     = thread;
     p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
@@ -12739,11 +12747,6 @@ diskfs_dispatch(
 
     if (unlikely(shared->root_fhlen == 0)) {
         diskfs_bootstrap(thread);
-    }
-
-    /* Resume any inode drains left pending by a crash (once per mount). */
-    if (unlikely(!shared->orphans_scanned)) {
-        diskfs_orphan_scan(thread);
     }
 
     switch (request->opcode) {
