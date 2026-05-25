@@ -2265,6 +2265,13 @@ memfs_read(
 
     }
 
+    if (!memfs_cred_can_read(inode, request->cred)) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EACCES;
+        request->complete(request);
+        return;
+    }
+
     if (unlikely(inode->size <= offset)) {
         memfs_map_attrs(shared, &request->read.r_attr, inode, request->fh);
         pthread_mutex_unlock(&inode->lock);
@@ -2276,7 +2283,7 @@ memfs_read(
         return;
     }
 
-    if (offset + length > inode->size) {
+    if (offset + length >= inode->size) {
         length = inode->size > offset ? inode->size - offset : 0;
         eof    = 1;
     }
