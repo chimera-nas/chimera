@@ -3959,7 +3959,7 @@ main(
                                 device_path, strerror(errno));
                         exit(100);
                     }
-                    rc = ftruncate(fd, 256UL * 1024 * 1024 * 1024);
+                    rc = ftruncate(fd, 1024UL * 1024 * 1024);
                     if (rc < 0) {
                         fprintf(stderr, "Failed to truncate device %s: %s\n",
                                 device_path, strerror(errno));

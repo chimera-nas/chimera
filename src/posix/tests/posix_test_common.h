@@ -106,7 +106,7 @@ posix_test_configure_diskfs(
             exit(EXIT_FAILURE);
         }
 
-        rc = ftruncate(fd, 256 * 1024 * 1024 * 1024UL);
+        rc = ftruncate(fd, 1024 * 1024 * 1024UL);
 
         if (rc < 0) {
             fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));
