@@ -28,6 +28,9 @@
 #define sm_info(...) \
         chimera_info("space_map", __FILE__, __LINE__, __VA_ARGS__)
 
+#define SM_PERSIST_BATCH_OPS   128U
+#define SM_PERSIST_BATCH_BYTES (16ULL << 20)
+
 /*
  * Append one allocation/free delta to the AG's active log slot, journaled
  * through the current transaction (via jnl) so it rides the main redo log and
@@ -958,6 +961,72 @@ sm_ag_reconstruct(
     ag->log_delta_count = h->delta_count;
 } /* sm_ag_reconstruct */
 
+struct sm_persist_update {
+    struct sm_ag *ag;
+    uint32_t      slot;
+    uint64_t      generation;
+    uint32_t      base_count;
+};
+
+static void
+sm_persist_batch_reset(
+    uint8_t **bufs,
+    uint32_t *count,
+    uint64_t *bytes)
+{
+    uint32_t i;
+
+    for (i = 0; i < *count; i++) {
+        free(bufs[i]);
+        bufs[i] = NULL;
+    }
+    *count = 0;
+    *bytes = 0;
+} /* sm_persist_batch_reset */
+
+static int
+sm_persist_batch_submit(
+    const struct sm_io       *io,
+    struct sm_io_write       *writes,
+    struct sm_persist_update *updates,
+    uint8_t                 **bufs,
+    uint32_t                 *count,
+    uint64_t                 *bytes)
+{
+    uint32_t i;
+    int      rc = 0;
+
+    if (*count == 0) {
+        return 0;
+    }
+
+    if (io->write_many) {
+        rc = io->write_many(io->user, writes, *count);
+    } else {
+        for (i = 0; i < *count; i++) {
+            if (io->write(io->user, writes[i].device_id, writes[i].buf,
+                          writes[i].length, writes[i].offset) != 0) {
+                rc = -1;
+                break;
+            }
+        }
+    }
+
+    if (rc == 0) {
+        for (i = 0; i < *count; i++) {
+            pthread_mutex_lock(&updates[i].ag->lock);
+            updates[i].ag->log_slot        = updates[i].slot;
+            updates[i].ag->log_generation  = updates[i].generation;
+            updates[i].ag->log_base_count  = updates[i].base_count;
+            updates[i].ag->log_delta_count = 0;
+            pthread_mutex_unlock(&updates[i].ag->lock);
+        }
+    }
+
+    sm_persist_batch_reset(bufs, count, bytes);
+    return rc;
+} /* sm_persist_batch_submit */
+
 /*
  * Persist the allocator: condense each AG's free set into the *other* slot at
  * generation+1 and switch to it.  (Per-transaction delta journaling, which
@@ -969,43 +1038,86 @@ space_map_persist(
     struct space_map   *sm,
     const struct sm_io *io)
 {
-    uint32_t d, a;
+    struct sm_io_write       writes[SM_PERSIST_BATCH_OPS];
+    struct sm_persist_update updates[SM_PERSIST_BATCH_OPS];
+    uint8_t                 *scratch;
+    uint8_t                 *bufs[SM_PERSIST_BATCH_OPS] = { 0 };
+    uint32_t                 count                      = 0;
+    uint64_t                 bytes                      = 0;
+    uint32_t                 d, a;
+
+    scratch = malloc(SM_AG_LOG_SLOT_SIZE);
+    if (!scratch) {
+        return -1;
+    }
 
     for (d = 0; d < sm->num_devices; d++) {
         struct sm_device *dev = &sm->devices[d];
 
         for (a = 0; a < dev->num_ags; a++) {
-            struct sm_ag *ag  = &dev->ags[a];
-            uint8_t      *buf = calloc(1, SM_AG_LOG_SLOT_SIZE);
+            struct sm_ag *ag = &dev->ags[a];
+            uint8_t      *buf;
             uint32_t      slot;
             uint64_t      gen, payload, aligned, slot_off;
-            int           rc;
 
             pthread_mutex_lock(&ag->lock);
             slot     = 1 - ag->log_slot;
             gen      = ag->log_generation + 1;
-            payload  = sm_ag_condense_into(ag, buf, gen);
+            payload  = sm_ag_condense_into(ag, scratch, gen);
             slot_off = ag->log_offset + (uint64_t) slot * SM_AG_LOG_SLOT_SIZE;
             aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
+            memset(scratch + payload, 0, aligned - payload);
 
-            rc = io->write(io->user, d, buf, aligned, slot_off);
-            if (rc == 0) {
-                ag->log_slot        = slot;
-                ag->log_generation  = gen;
-                ag->log_base_count  = ((struct sm_ag_log_header *) buf)->base_count;
-                ag->log_delta_count = 0;
+            if (count == SM_PERSIST_BATCH_OPS ||
+                (bytes > 0 && bytes + aligned > SM_PERSIST_BATCH_BYTES)) {
+                pthread_mutex_unlock(&ag->lock);
+                if (sm_persist_batch_submit(io, writes, updates, bufs, &count, &bytes) != 0) {
+                    free(scratch);
+                    return -1;
+                }
+                pthread_mutex_lock(&ag->lock);
+                slot     = 1 - ag->log_slot;
+                gen      = ag->log_generation + 1;
+                payload  = sm_ag_condense_into(ag, scratch, gen);
+                slot_off = ag->log_offset + (uint64_t) slot * SM_AG_LOG_SLOT_SIZE;
+                aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
+                memset(scratch + payload, 0, aligned - payload);
             }
-            pthread_mutex_unlock(&ag->lock);
-            free(buf);
-            if (rc != 0) {
+
+            buf = malloc(aligned);
+            if (!buf) {
+                pthread_mutex_unlock(&ag->lock);
+                sm_persist_batch_reset(bufs, &count, &bytes);
+                free(scratch);
                 return -1;
             }
+            memcpy(buf, scratch, aligned);
+
+            writes[count].device_id   = d;
+            writes[count].buf         = buf;
+            writes[count].length      = aligned;
+            writes[count].offset      = slot_off;
+            updates[count].ag         = ag;
+            updates[count].slot       = slot;
+            updates[count].generation = gen;
+            updates[count].base_count =
+                ((struct sm_ag_log_header *) scratch)->base_count;
+            bufs[count] = buf;
+            count++;
+            bytes += aligned;
+            pthread_mutex_unlock(&ag->lock);
         }
 
+        if (sm_persist_batch_submit(io, writes, updates, bufs, &count, &bytes) != 0) {
+            free(scratch);
+            return -1;
+        }
         if (io->flush(io->user, d) != 0) {
+            free(scratch);
             return -1;
         }
     }
+    free(scratch);
     return 0;
 } /* space_map_persist */
 

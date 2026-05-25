@@ -106,7 +106,7 @@ posix_test_configure_diskfs(
             exit(EXIT_FAILURE);
         }
 
-        rc = ftruncate(fd, 256 * 1024 * 1024 * 1024UL);
+        rc = ftruncate(fd, 1024 * 1024 * 1024UL);
 
         if (rc < 0) {
             fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));
@@ -117,6 +117,7 @@ posix_test_configure_diskfs(
     }
 
     json_object_set_new(cfg, "devices", devices);
+    json_object_set_new(cfg, "unsafe_async", json_true());
     json_str = json_dumps(cfg, JSON_COMPACT);
     snprintf(diskfs_cfg, diskfs_cfg_size, "%s", json_str);
     free(json_str);

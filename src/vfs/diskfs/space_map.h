@@ -141,6 +141,13 @@ struct sm_journal {
  * sub-block struct), write requires a block-aligned length.  Each returns 0 on
  * success, -1 on error.
  */
+struct sm_io_write {
+    uint32_t    device_id;
+    const void *buf;
+    uint64_t    length;
+    uint64_t    offset;
+};
+
 struct sm_io {
     int   (*read)(
         void    *user,
@@ -154,6 +161,10 @@ struct sm_io {
         const void *buf,
         uint64_t    length,
         uint64_t    offset);
+    int   (*write_many)(
+        void                     *user,
+        const struct sm_io_write *writes,
+        uint32_t                  count);
     int   (*flush)(
         void    *user,
         uint32_t device_id);

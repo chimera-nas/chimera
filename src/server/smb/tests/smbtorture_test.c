@@ -253,6 +253,9 @@ main(
         }
 
         json_object_set_new(cfg, "devices", devices);
+        /* unsafe_async: this test does not exercise crash recovery, so skip FUA/sync
+         * on writes to run lighter. */
+        json_object_set_new(cfg, "unsafe_async", json_true());
         json_str = json_dumps(cfg, JSON_COMPACT);
         snprintf(diskfs_cfg, sizeof(diskfs_cfg), "%s", json_str);
         free(json_str);

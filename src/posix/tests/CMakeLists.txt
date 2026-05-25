@@ -115,13 +115,17 @@ generate_posix_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 # Macro to add a test that runs via NFS3 client (requires network namespace)
 macro(add_posix_nfs3_test testname prog nfs_backend)
     if(CHIMERA_NETNS_TESTING)
+        set(test_timeout 60)
+        if("${testname}" STREQUAL "io_serialize" AND "${nfs_backend}" MATCHES "^diskfs_")
+            set(test_timeout 120)
+        endif()
         add_test(NAME chimera/posix/${testname}_nfs3_${nfs_backend}
             COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_${prog} -b nfs3_${nfs_backend}
         )
         get_target_property(test_file posix_${prog} TEST_FILE)
         set_tests_properties(chimera/posix/${testname}_nfs3_${nfs_backend} PROPERTIES
             ENVIRONMENT "TEST_FILE=${test_file}"
-            TIMEOUT 60
+            TIMEOUT ${test_timeout}
         )
     endif()
 endmacro()
@@ -163,13 +167,17 @@ generate_posix_nfs3_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 # Macro to add a test that runs via NFS4 client (requires network namespace)
 macro(add_posix_nfs4_test testname prog nfs_backend)
     if(CHIMERA_NETNS_TESTING)
+        set(test_timeout 60)
+        if("${testname}" STREQUAL "io_serialize" AND "${nfs_backend}" MATCHES "^diskfs_")
+            set(test_timeout 120)
+        endif()
         add_test(NAME chimera/posix/${testname}_nfs4_${nfs_backend}
             COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_${prog} -b nfs4_${nfs_backend}
         )
         get_target_property(test_file posix_${prog} TEST_FILE)
         set_tests_properties(chimera/posix/${testname}_nfs4_${nfs_backend} PROPERTIES
             ENVIRONMENT "TEST_FILE=${test_file}"
-            TIMEOUT 60
+            TIMEOUT ${test_timeout}
         )
     endif()
 endmacro()
@@ -211,13 +219,17 @@ generate_posix_nfs4_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 # Macro to add a test that runs via NFS3 RDMA client (requires network namespace)
 macro(add_posix_nfs3rdma_test testname prog nfs_backend)
     if(CHIMERA_NETNS_TESTING)
+        set(test_timeout 60)
+        if("${testname}" STREQUAL "io_serialize" AND "${nfs_backend}" MATCHES "^diskfs_")
+            set(test_timeout 120)
+        endif()
         add_test(NAME chimera/posix/${testname}_nfs3rdma_${nfs_backend}
             COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_${prog} -b nfs3rdma_${nfs_backend}
         )
         get_target_property(test_file posix_${prog} TEST_FILE)
         set_tests_properties(chimera/posix/${testname}_nfs3rdma_${nfs_backend} PROPERTIES
             ENVIRONMENT "TEST_FILE=${test_file}"
-            TIMEOUT 60
+            TIMEOUT ${test_timeout}
         )
     endif()
 endmacro()

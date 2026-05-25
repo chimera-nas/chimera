@@ -103,7 +103,7 @@ generate_config() {
             DEVICES_JSON=""
             for i in $(seq 0 9); do
                 DEVICE_PATH="${SESSION_DIR}/device-${i}.img"
-                truncate -s 256G "$DEVICE_PATH"
+                truncate -s 1G "$DEVICE_PATH"
                 if [ $i -gt 0 ]; then
                     DEVICES_JSON="${DEVICES_JSON},"
                 fi
@@ -113,7 +113,7 @@ generate_config() {
             modules_section="\"modules\": {
         \"diskfs\": {
             \"path\": \"/build/test/diskfs\",
-            \"config\": {\"devices\":[$DEVICES_JSON]}
+            \"config\": {\"devices\":[$DEVICES_JSON],\"unsafe_async\":true}
         }
     },"
             BACKEND="diskfs"

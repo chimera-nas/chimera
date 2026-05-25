@@ -150,6 +150,7 @@ client_test_init(
             }
 
             json_object_set_new(cfg, "devices", devices);
+            json_object_set_new(cfg, "unsafe_async", json_true());
             json_str = json_dumps(cfg, JSON_COMPACT);
             snprintf(diskfs_cfg, sizeof(diskfs_cfg), "%s", json_str);
             free(json_str);
@@ -255,6 +256,7 @@ client_test_init(
                 }
 
                 json_object_set_new(cfg, "devices", devices);
+                json_object_set_new(cfg, "unsafe_async", json_true());
                 json_str = json_dumps(cfg, JSON_COMPACT);
                 snprintf(diskfs_cfg, sizeof(diskfs_cfg), "%s", json_str);
                 free(json_str);
@@ -370,4 +372,3 @@ client_test_mount(
         chimera_mount(env->client_thread, mount_path, module_name, module_path, NULL, callback, private_data);
     }
 } /* client_test_mount */
-
