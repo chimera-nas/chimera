@@ -87,6 +87,22 @@ chimera_nfs4_locku(
         pthread_mutex_unlock(&lock_owner->lock);
     }
 
+    /* RFC 7530 §9.1.4.2: a stale lock-stateid seqid is NFS4ERR_OLD_STATEID
+     * (and a never-issued one NFS4ERR_BAD_STATEID); this takes precedence over
+     * the byte-range check below.  Gated on 4.0 (4.1+ drops seqid coupling). */
+    if (is_v40) {
+        status = nfs4_stateid_check_seqid(lock_state->seqid,
+                                          args->lock_stateid.seqid);
+        if (status != NFS4_OK) {
+            nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
+                                    thread->vfs_thread);
+            req->nfs_state_ref = NULL;
+            res->status        = status;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+    }
+
     /* RFC 7530 §16.12.4: same length rules as LOCK */
     if (args->length == 0 ||
         (args->length != UINT64_MAX && args->offset > UINT64_MAX - args->length)) {
