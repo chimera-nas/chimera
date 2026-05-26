@@ -792,7 +792,7 @@ chimera_vfs_register(
 {
     vfs->modules[module->fh_magic] = module;
 
-    vfs->module_private[module->fh_magic] = module->init(cfgdata);
+    vfs->module_private[module->fh_magic] = module->init(cfgdata, vfs->metrics.metrics);
 
     if (vfs->module_private[module->fh_magic] == NULL) {
         chimera_vfs_error("Failed to initialize module %s", module->name);

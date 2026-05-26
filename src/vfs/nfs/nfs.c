@@ -79,8 +79,11 @@ chimera_nfs_get_mount_port(
 } /* chimera_nfs_get_mount_port */
 
 static void *
-chimera_nfs_init(const char *cfgdata)
+chimera_nfs_init(
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
 {
+    (void) metrics;
     struct chimera_nfs_shared *shared = calloc(1, sizeof(*shared));
 
     pthread_mutex_init(&shared->lock, NULL);

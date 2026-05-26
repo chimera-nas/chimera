@@ -52,8 +52,11 @@ struct chimera_linux_thread {
 };
 
 static void *
-chimera_linux_init(const char *cfgdata)
+chimera_linux_init(
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
 {
+    (void) metrics;
     struct chimera_linux_shared *shared;
 
     shared = calloc(1, sizeof(*shared));

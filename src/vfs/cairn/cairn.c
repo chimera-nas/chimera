@@ -825,8 +825,11 @@ cairn_remove_file_extents(
 } /* cairn_remove_file_extents */
 
 static void *
-cairn_init(const char *cfgdata)
+cairn_init(
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
 {
+    (void) metrics;
     struct cairn_shared *shared = calloc(1, sizeof(*shared));
     json_t              *cfg;
     json_error_t         json_error;

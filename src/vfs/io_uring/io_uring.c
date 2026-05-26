@@ -100,8 +100,11 @@ struct chimera_io_uring_thread {
 };
 
 static void *
-chimera_io_uring_init(const char *cfgdata)
+chimera_io_uring_init(
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
 {
+    (void) metrics;
     struct chimera_io_uring_shared *shared;
     struct io_uring_params          params = { 0 };
     int                             rc;
