@@ -92,6 +92,54 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_rename_at_complete */
 
+/*
+ * Recall any delegation/oplock on the doomed destination (the file being
+ * overwritten, if any) before it is replaced, then perform the rename.
+ */
+static void
+chimera_vfs_rename_at_recall_target(struct chimera_vfs_request *request)
+{
+    chimera_vfs_io_recall(request,
+                          request->rename_at.target_fh,
+                          request->rename_at.target_fh_len,
+                          request->rename_at.target_fh_len ?
+                          chimera_vfs_hash(request->rename_at.target_fh,
+                                           request->rename_at.target_fh_len) : 0,
+                          chimera_vfs_dispatch);
+} /* chimera_vfs_rename_at_recall_target */
+
+/*
+ * The source file is being moved: renaming it changes its ctime and directory
+ * linkage, which invalidates a delegation holder's cached state, so recall any
+ * delegation on it first (matching the Linux VFS, which breaks the source
+ * lease on rename).  Then fall through to the destination recall.
+ */
+static void
+chimera_vfs_rename_at_source_lookup_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    if (error_code == CHIMERA_VFS_OK && attr->va_fh_len) {
+        memcpy(request->rename_at.source_fh, attr->va_fh, attr->va_fh_len);
+        request->rename_at.source_fh_len = attr->va_fh_len;
+
+        chimera_vfs_io_recall(request,
+                              request->rename_at.source_fh,
+                              request->rename_at.source_fh_len,
+                              chimera_vfs_hash(request->rename_at.source_fh,
+                                               request->rename_at.source_fh_len),
+                              chimera_vfs_rename_at_recall_target);
+    } else {
+        /* Source not resolvable (e.g. ENOENT); the backend rename will return
+         * the appropriate error.  Just recall the destination and proceed. */
+        request->rename_at.source_fh_len = 0;
+        chimera_vfs_rename_at_recall_target(request);
+    }
+} /* chimera_vfs_rename_at_source_lookup_complete */
+
 SYMBOL_EXPORT void
 chimera_vfs_rename_at(
     struct chimera_vfs_thread       *thread,
@@ -143,10 +191,19 @@ chimera_vfs_rename_at(
     request->rename_at.r_todir_post_attr.va_set_mask   = 0;
     request->proto_callback                            = callback;
     request->proto_private_data                        = private_data;
+    request->rename_at.source_fh_len                   = 0;
 
-    /* If the rename overwrites an existing destination, recall any
-     * delegation/oplock on that doomed file before it is replaced. */
-    chimera_vfs_io_recall(request, target_fh, target_fh_len,
-                          target_fh_len ? chimera_vfs_hash(target_fh, target_fh_len) : 0,
-                          chimera_vfs_dispatch);
+    /* Recall delegations before the directory change: first on the source file
+     * being moved (its ctime/linkage changes invalidate cached state), then on
+     * any file overwritten at the destination.  Resolve the source FH only when
+     * the lease subsystem is active; otherwise go straight to the destination
+     * recall (which fast-paths to dispatch when there is nothing to break). */
+    if (thread->vfs->vfs_state) {
+        chimera_vfs_lookup(thread, cred, fh, fhlen, name, namelen,
+                           CHIMERA_VFS_ATTR_FH, 0,
+                           chimera_vfs_rename_at_source_lookup_complete,
+                           request);
+    } else {
+        chimera_vfs_rename_at_recall_target(request);
+    }
 } /* chimera_vfs_rename_at */
