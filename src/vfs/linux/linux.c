@@ -881,6 +881,7 @@ chimera_linux_read(
     int                          fd, i;
     ssize_t                      len, left = request->read.length;
     struct iovec                *iov;
+    struct stat                  st;
 
     /* Handle 0-byte reads specially - preadv with uninitialized iov causes EFAULT */
     if (request->read.length == 0) {
@@ -888,7 +889,7 @@ chimera_linux_read(
         chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->read.r_attr, fd);
         request->read.r_niov   = 0;
         request->read.r_length = 0;
-        request->read.r_eof    = 1;
+        request->read.r_eof    = 0;
         request->status        = CHIMERA_VFS_OK;
         request->complete(request);
         return;
@@ -922,6 +923,21 @@ chimera_linux_read(
                  request->read.offset);
 
     if (len < 0) {
+        if (errno == EINVAL &&
+            fstat(fd, &st) == 0 &&
+            request->read.offset >= (uint64_t) st.st_size) {
+            evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
+
+            chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->read.r_attr, fd);
+
+            request->read.r_niov   = 0;
+            request->read.r_length = 0;
+            request->read.r_eof    = 1;
+            request->status        = CHIMERA_VFS_OK;
+            request->complete(request);
+            return;
+        }
+
         request->status = chimera_linux_errno_to_status(errno);
 
         evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
@@ -938,10 +954,19 @@ chimera_linux_read(
         request->read.r_niov = 0;
     }
 
-    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->read.r_attr, fd);
+    if (fstat(fd, &st) == 0) {
+        if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+            chimera_linux_stat_to_attr(&request->read.r_attr, &st);
+        }
+
+        request->read.r_eof = (request->read.offset + len >= (uint64_t) st.st_size);
+    } else {
+        chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->read.r_attr, fd);
+
+        request->read.r_eof = (len < request->read.length);
+    }
 
     request->read.r_length = len;
-    request->read.r_eof    = (len < request->read.length);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);

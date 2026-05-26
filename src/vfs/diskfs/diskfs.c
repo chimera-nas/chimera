@@ -10229,8 +10229,11 @@ diskfs_read_inode_cb(
     offset = request->read.offset;
     length = request->read.length;
 
-    if (offset + length > inode->size) {
-        length = inode->size > offset ? inode->size - offset : 0;
+    if (offset >= inode->size) {
+        length = 0;
+        eof    = 1;
+    } else if (length >= inode->size - offset) {
+        length = inode->size - offset;
         eof    = 1;
     }
 

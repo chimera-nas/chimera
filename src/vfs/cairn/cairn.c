@@ -2751,7 +2751,7 @@ cairn_read(
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;
         request->read.r_length = 0;
-        request->read.r_eof    = 1;
+        request->read.r_eof    = 0;
         request->complete(request);
         return;
     }
@@ -2786,7 +2786,7 @@ cairn_read(
         return;
     }
 
-    if (offset + length > inode->size) {
+    if (length >= inode->size - offset) {
         length = inode->size - offset;
         eof    = 1;
     }
