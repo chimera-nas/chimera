@@ -2420,6 +2420,20 @@ memfs_write(
     }
 
     if (!S_ISREG(inode->mode)) {
+        /* FLAKEDBG: fsx_nfs4 EINVAL flake -- a WRITE resolved to a non-regular
+         * inode.  Log how it resolved (cached handle->vfs_private vs fh lookup)
+         * plus the inode identity, to distinguish a stale/reused handle from a
+         * corrupted fh.  Fires only on the bug -> no spam.  REMOVE before merge. */
+        chimera_vfs_error(
+            "FLAKEDBG memfs_write non-reg mode=0%o inum=%lu gen=%u via_private=%d "
+            "handle=%p vfs_private=0x%lx fh_len=%u off=%lu len=%u niov=%d",
+            inode->mode, inode->inum, inode->gen,
+            request->write.handle && request->write.handle->vfs_private ? 1 : 0,
+            (void *) request->write.handle,
+            (unsigned long) (request->write.handle ?
+                             request->write.handle->vfs_private : 0),
+            request->fh_len, request->write.offset, request->write.length,
+            (int) request->write.niov);
         request->status = S_ISDIR(inode->mode) ?
             CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL;
         pthread_mutex_unlock(&inode->lock);

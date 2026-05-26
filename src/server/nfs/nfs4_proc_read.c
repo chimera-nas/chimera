@@ -24,6 +24,17 @@ chimera_nfs4_read_complete(
     struct nfs_request *req = private_data;
     struct READ4res    *res = &req->res_compound.resarray[req->index].opread;
 
+    /* FLAKEDBG: capture NFS4-level READ params on any error (fsx_nfs4 EINVAL
+     * flake also hits READ).  Fires only on error.  REMOVE before merge. */
+    if (error_code != CHIMERA_VFS_OK) {
+        struct READ4args *rargs = &req->args_compound->argarray[req->index].opread;
+        chimera_nfs_error(
+            "FLAKEDBG nfs4_read err=%d off=%lu count=%u r_count=%u niov=%d "
+            "fhlen=%d handle=%p ref=%p",
+            error_code, rargs->offset, rargs->count, count, niov,
+            req->fhlen, req->handle, req->nfs_state_ref);
+    }
+
     if (error_code == CHIMERA_VFS_OK) {
         res->status             = NFS4_OK;
         res->resok4.eof         = eof;

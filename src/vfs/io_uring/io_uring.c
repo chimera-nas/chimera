@@ -413,6 +413,20 @@ chimera_io_uring_reap(
                         request->read.r_length = cqe->res;
                         request->read.r_eof    = (cqe->res < request->read.length);
                     } else {
+                        /* FLAKEDBG: fsx_nfs4 EINVAL flake (preadv -> EINVAL).
+                         * Log fd + I/O params to see if a bad iov/offset reached
+                         * the syscall.  REMOVE before merge. */
+                        if (-cqe->res == EINVAL) {
+                            chimera_vfs_error(
+                                "FLAKEDBG io_uring_read EINVAL fd=%d off=%lu len=%u "
+                                "niov=%d iov0=%p/%u",
+                                request->read.handle ?
+                                (int) request->read.handle->vfs_private : -1,
+                                request->read.offset, request->read.length,
+                                request->read.niov,
+                                request->read.niov ? request->read.iov[0].data : NULL,
+                                request->read.niov ? request->read.iov[0].length : 0);
+                        }
                         request->status = chimera_linux_errno_to_status(-cqe->res);
                     }
                 } else {
@@ -442,6 +456,20 @@ chimera_io_uring_reap(
                     request->status         = CHIMERA_VFS_OK;
                     request->write.r_length = cqe->res;
                 } else {
+                    /* FLAKEDBG: fsx_nfs4 EINVAL flake (pwritev -> EINVAL).
+                     * Log fd + I/O params to see if a bad iov/offset reached the
+                     * syscall.  REMOVE before merge. */
+                    if (-cqe->res == EINVAL) {
+                        chimera_vfs_error(
+                            "FLAKEDBG io_uring_write EINVAL fd=%d off=%lu len=%u "
+                            "niov=%d iov0=%p/%u",
+                            request->write.handle ?
+                            (int) request->write.handle->vfs_private : -1,
+                            request->write.offset, request->write.length,
+                            request->write.niov,
+                            request->write.niov ? request->write.iov[0].data : NULL,
+                            request->write.niov ? request->write.iov[0].length : 0);
+                    }
                     request->status         = chimera_linux_errno_to_status(-cqe->res);
                     request->write.r_length = 0;
                 }

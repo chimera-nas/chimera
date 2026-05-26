@@ -31,6 +31,22 @@ chimera_nfs4_write_complete(
     struct WRITE4args  *args = req->args_write4;
     struct WRITE4res   *res  = &req->res_compound.resarray[req->index].opwrite;
 
+    /* FLAKEDBG: capture NFS4-level WRITE params at the moment of any error so
+     * a CI hit of the fsx_nfs4/cthon EINVAL flake tells us whether the server
+     * received bad args (offset/length/iov) or the backend corrupted them.
+     * Fires only on error -> no steady-state spam.  REMOVE before merge. */
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs_error(
+            "FLAKEDBG nfs4_write err=%d off=%lu len=%u niov=%d iov0=%p/%u "
+            "fhlen=%d special=%d handle=%p ref=%p",
+            error_code, args->offset, args->data.length, args->data.niov,
+            args->data.niov ? args->data.iov[0].data : NULL,
+            args->data.niov ? args->data.iov[0].length : 0,
+            req->fhlen,
+            chimera_nfs4_write_stateid_is_special(&args->stateid),
+            req->handle, req->nfs_state_ref);
+    }
+
     /* Release write iovecs here on the server thread, not in VFS backend.
      * The iovecs were allocated on this thread and must be released here
      * to avoid cross-thread access to non-atomic refcounts.
