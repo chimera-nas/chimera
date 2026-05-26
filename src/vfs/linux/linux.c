@@ -880,11 +880,12 @@ chimera_linux_read(
     void                       *private_data)
 {
     struct chimera_linux_thread *thread = private_data;
-    struct evpl                 *evpl   = thread->evpl;
     int                          fd, i;
     ssize_t                      len, left = request->read.length;
     struct iovec                *iov;
     struct stat                  st;
+
+    (void) thread;
 
     /* Handle 0-byte reads specially - preadv with uninitialized iov causes EFAULT */
     if (request->read.length == 0) {
@@ -898,20 +899,29 @@ chimera_linux_read(
         return;
     }
 
-    request->read.r_niov = evpl_iovec_alloc(evpl,
-                                            request->read.length,
-                                            4096,
-                                            8,
-                                            EVPL_IOVEC_FLAG_SHARED, request->read.iov);
+    /* The VFS core allocated the read buffers on the connection thread (linux
+     * does not advertise CAP_READ_PROVIDES_BUFFERS) and placed them in
+     * request->read.iov, padded to a 4 KiB boundary on both sides.  Build the
+     * preadv vector from them: offset the first buffer by aligned_prefix so
+     * file offset `offset` lands where the VFS core trims to on completion, and
+     * cap the vector at the requested length.  The VFS core owns the buffers --
+     * linux neither allocates nor releases them. */
+    chimera_vfs_abort_if(request->read.buffers_provided == 0,
+                         "linux read dispatched without VFS-provided buffers");
 
     iov = request->plugin_data;
 
-    for (i = 0; left && i < request->read.r_niov; i++) {
+    for (i = 0; left && i < request->read.buffers_provided; i++) {
 
         iov[i].iov_base = request->read.iov[i].data;
         iov[i].iov_len  = request->read.iov[i].length;
 
-        if (iov[i].iov_len > left) {
+        if (i == 0) {
+            iov[i].iov_base = (char *) iov[i].iov_base + request->read.aligned_prefix;
+            iov[i].iov_len -= request->read.aligned_prefix;
+        }
+
+        if (iov[i].iov_len > (size_t) left) {
             iov[i].iov_len = left;
         }
 
@@ -922,18 +932,18 @@ chimera_linux_read(
 
     len = preadv(fd,
                  iov,
-                 request->read.r_niov,
+                 i,
                  request->read.offset);
 
     if (len < 0) {
+        /* Reading at/after EOF surfaces as EINVAL on some backends; report it
+         * as a clean zero-length EOF read.  The VFS core owns request->read.iov
+         * and releases it on completion (r_length stays 0 here). */
         if (errno == EINVAL &&
             fstat(fd, &st) == 0 &&
             request->read.offset >= (uint64_t) st.st_size) {
-            evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
-
             chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->read.r_attr, fd);
 
-            request->read.r_niov   = 0;
             request->read.r_length = 0;
             request->read.r_eof    = 1;
             request->status        = CHIMERA_VFS_OK;
@@ -941,20 +951,11 @@ chimera_linux_read(
             return;
         }
 
-        request->status = chimera_linux_errno_to_status(errno);
-
-        evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
-
-        request->read.r_niov   = 0;
+        request->status        = chimera_linux_errno_to_status(errno);
         request->read.r_length = 0;
         request->read.r_eof    = 0;
         request->complete(request);
         return;
-    }
-
-    if (len == 0) {
-        evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
-        request->read.r_niov = 0;
     }
 
     if (fstat(fd, &st) == 0) {
