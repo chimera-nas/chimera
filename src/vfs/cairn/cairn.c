@@ -4609,11 +4609,17 @@ cairn_dispatch(
 } /* cairn_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
-    .name         = "cairn",
-    .fh_magic     = CHIMERA_VFS_FH_MAGIC_CAIRN,
-    .capabilities = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
+    .name     = "cairn",
+    .fh_magic = CHIMERA_VFS_FH_MAGIC_CAIRN,
+    /* CAP_READ_PROVIDES_BUFFERS: cairn_read fills a single contiguous buffer it
+     * allocates itself (SHARED, so the CAP_BLOCKING worker->connection-thread
+     * release is safe).  TODO: drop this cap and convert cairn_read to scatter
+     * its RocksDB extent fill across VFS-core-provided buffers via an
+     * append-blob cursor, like diskfs/linux/io_uring, so it can use cheaper
+     * non-SHARED connection-thread buffers. */
+    .capabilities   = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE |
-        CHIMERA_VFS_CAP_XATTR,
+        CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS,
     .init           = cairn_init,
     .destroy        = cairn_destroy,
     .thread_init    = cairn_thread_init,

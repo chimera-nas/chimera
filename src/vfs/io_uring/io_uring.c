@@ -405,20 +405,15 @@ chimera_io_uring_reap(
                 break;
             case CHIMERA_VFS_OP_READ:
                 if (handle->slot == 0) {
+                    /* The VFS core owns request->read.iov (allocated on the
+                     * connection thread); it trims/releases the buffers on
+                     * completion, so io_uring only reports the outcome here. */
                     if (cqe->res >= 0) {
                         request->status        = CHIMERA_VFS_OK;
                         request->read.r_length = cqe->res;
                         request->read.r_eof    = (cqe->res < request->read.length);
-
-                        if (cqe->res == 0) {
-                            evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
-                            request->read.r_niov = 0;
-                        }
-
                     } else {
                         request->status = chimera_linux_errno_to_status(-cqe->res);
-
-                        evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
                     }
                 } else {
                     if (cqe->res == 0) {
@@ -1323,7 +1318,6 @@ chimera_io_uring_read(
 {
     struct chimera_io_uring_thread *thread = private_data;
     struct io_uring_sqe            *sqe;
-    struct evpl                    *evpl = thread->evpl;
     int                             fd, i;
     ssize_t                         left = request->read.length;
     struct iovec                   *iov;
@@ -1353,23 +1347,32 @@ chimera_io_uring_read(
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    request->read.r_niov = evpl_iovec_alloc(evpl,
-                                            request->read.length,
-                                            4096,
-                                            8,
-                                            EVPL_IOVEC_FLAG_SHARED, request->read.iov);
+    /* The VFS core allocated the read buffers on the connection thread
+     * (io_uring does not advertise CAP_READ_PROVIDES_BUFFERS) and placed them
+     * in request->read.iov, padded to a 4 KiB boundary on both sides.  Build
+     * the readv vector from them: offset the first buffer by aligned_prefix so
+     * file offset `offset` lands where the VFS core trims to on completion, and
+     * cap the vector at the requested length.  The VFS core owns the buffers --
+     * io_uring neither allocates nor releases them. */
+    chimera_io_uring_abort_if(request->read.buffers_provided == 0,
+                              "io_uring read dispatched without VFS-provided buffers");
 
     stx      = (struct statx *) scratch;
     scratch += sizeof(*stx);
 
     iov = (struct iovec *) scratch;
 
-    for (i = 0; left && i < request->read.r_niov; i++) {
+    for (i = 0; left && i < request->read.buffers_provided; i++) {
 
         iov[i].iov_base = request->read.iov[i].data;
         iov[i].iov_len  = request->read.iov[i].length;
 
-        if (iov[i].iov_len > left) {
+        if (i == 0) {
+            iov[i].iov_base = (char *) iov[i].iov_base + request->read.aligned_prefix;
+            iov[i].iov_len -= request->read.aligned_prefix;
+        }
+
+        if (iov[i].iov_len > (size_t) left) {
             iov[i].iov_len = left;
         }
 
@@ -1378,7 +1381,7 @@ chimera_io_uring_read(
 
     fd = (int) request->read.handle->vfs_private;
 
-    io_uring_prep_readv(sqe, fd, iov, request->read.r_niov, request->read.offset);
+    io_uring_prep_readv(sqe, fd, iov, i, request->read.offset);
 
     sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
     io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);

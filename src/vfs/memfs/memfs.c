@@ -2245,6 +2245,15 @@ memfs_read(
     offset = request->read.offset;
     length = request->read.length;
 
+    /* memfs advertises CAP_READ_PROVIDES_BUFFERS: it returns zero-copy refs to
+     * its own SHARED block iovecs, so the VFS core never pre-allocates buffers
+     * for it (buffers_provided is always 0).  If a future VFS data cache ever
+     * hands memfs buffers to populate, this is where memfs would memcpy its
+     * block data into request->read.iov instead of cloning refs below. */
+    chimera_memfs_abort_if(request->read.buffers_provided,
+                           "memfs read received VFS-provided buffers but only "
+                           "implements the zero-copy ref path");
+
     if (unlikely(length == 0)) {
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;
@@ -4494,7 +4503,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE |
-        CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT | CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE,
+        CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT | CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE |
+        CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

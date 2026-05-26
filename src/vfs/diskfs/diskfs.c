@@ -10557,49 +10557,12 @@ diskfs_close(
 } /* diskfs_close */
 
 /*
- * Adjust read iovecs: skip prefix padding and trim to actual read length.
- * Called after block reads complete (or when no reads needed).
+ * Read iovecs are now owned and finalized by the VFS core: it allocates the
+ * 4 KiB-aligned buffers on the connection thread (diskfs lacks
+ * CAP_READ_PROVIDES_BUFFERS), and chimera_vfs_read_complete() skips the prefix
+ * pad and trims to r_length after the request bounces back.  diskfs only fills
+ * the provided buffers and reports r_length/r_eof.
  */
-static inline void
-diskfs_read_adjust_iovecs(
-    struct chimera_vfs_request    *request,
-    struct diskfs_request_private *diskfs_private)
-{
-    if (request->read.r_niov == 0) {
-        return;
-    }
-
-    // Adjust first iovec to skip prefix (alignment padding)
-    request->read.iov[0].data   += diskfs_private->read_prefix;
-    request->read.iov[0].length -= diskfs_private->read_prefix;
-
-    // Calculate total length across all iovecs
-    uint64_t total = 0;
-
-    for (int i = 0; i < request->read.r_niov; i++) {
-        total += request->read.iov[i].length;
-    }
-
-    // Trim excess from the last iovec(s) if needed
-    // Use r_length (actual capped length), not length (original request)
-    // NOTE: Do NOT decrement r_niov here - we must keep the count of allocated
-    // iovecs so they all get properly released by the caller.
-    if (total > request->read.r_length) {
-        uint64_t excess = total - request->read.r_length;
-        int      last   = request->read.r_niov - 1;
-
-        while (excess > 0 && last >= 0) {
-            if (request->read.iov[last].length <= excess) {
-                excess                        -= request->read.iov[last].length;
-                request->read.iov[last].length = 0;
-                last--;
-            } else {
-                request->read.iov[last].length -= excess;
-                excess                          = 0;
-            }
-        }
-    }
-} /* diskfs_read_adjust_iovecs */ /* diskfs_read_adjust_iovecs */
 
 /*
  * Data-I/O admission control.  A worker submits read/write block I/O onto its
@@ -10686,10 +10649,9 @@ diskfs_io_callback(
      * not zeroed, and only diskfs_read sets the flag (fresh, per op). */
     if (diskfs_private->pending == 0 &&
         !(diskfs_private->opcode == CHIMERA_VFS_OP_READ && diskfs_private->io_reading)) {
-        if (diskfs_private->opcode == CHIMERA_VFS_OP_READ) {
-            diskfs_read_adjust_iovecs(request, diskfs_private);
-        }
-
+        /* Release the per-chunk device-I/O iovec refs (slices of the
+        * VFS-provided read buffers); the VFS core trims and releases
+        * request->read.iov itself after the request bounces back. */
         evpl_iovecs_release(thread->evpl, diskfs_private->iov, diskfs_private->niov);
 
         if (diskfs_private->status != 0) {
@@ -10731,7 +10693,6 @@ diskfs_read_finish(struct chimera_vfs_request *request)
     p->io_reading = 0;
 
     if (p->pending == 0) {
-        diskfs_read_adjust_iovecs(request, p);
         diskfs_op_ok(request, p->txn);
     } else {
         /* I/O is in flight; drop the inode lock so other ops proceed.  The
@@ -10907,7 +10868,6 @@ diskfs_read_inode_cb(
     struct chimera_vfs_request    *request        = private_data;
     struct diskfs_request_private *diskfs_private = request->plugin_data;
     struct diskfs_thread          *thread         = diskfs_private->thread;
-    struct evpl                   *evpl           = thread->evpl;
     uint64_t                       offset, length;
     uint64_t                       aligned_offset, aligned_length;
     uint32_t                       eof = 0;
@@ -10946,17 +10906,20 @@ diskfs_read_inode_cb(
     aligned_offset = offset & ~4095ULL;
     aligned_length = ((offset + length + 4095ULL) & ~4095ULL) - aligned_offset;
 
-    diskfs_private->read_prefix = offset - aligned_offset;
-    diskfs_private->read_suffix = aligned_length - length;
-
     request->read.r_length = length;
     request->read.r_eof    = eof;
 
-    request->read.r_niov = evpl_iovec_alloc(evpl, aligned_length, 4096, 1,
-                                            0, request->read.iov);
+    /* The VFS core allocated the 4 KiB-aligned read buffers on the connection
+     * thread (diskfs does not advertise CAP_READ_PROVIDES_BUFFERS) and placed
+     * them in request->read.iov.  Fill them via the cursor; the VFS core skips
+     * the prefix pad and trims to r_length on completion.  Its allocation is
+     * sized from the unclamped count, so it always covers our (EOF-clamped)
+     * aligned_length. */
+    chimera_diskfs_abort_if(request->read.buffers_provided == 0,
+                            "diskfs read dispatched without VFS-provided buffers");
 
     evpl_iovec_cursor_init(&diskfs_private->rd_cursor, request->read.iov,
-                           request->read.r_niov);
+                           request->read.buffers_provided);
 
     diskfs_private->inode_stash[0] = inode;
     diskfs_private->loop_off       = aligned_offset;
