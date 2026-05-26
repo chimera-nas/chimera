@@ -236,6 +236,13 @@ chimera_io_uring_reap(
 
                         parent_fd = request->open_at.handle->vfs_private;
 
+                        if (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
+                            if (ftruncate(cqe->res, request->open_at.set_attr->va_size) < 0) {
+                                request->status = chimera_linux_errno_to_status(errno);
+                                break;
+                            }
+                        }
+
                         sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
 
                         if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
@@ -1016,7 +1023,10 @@ chimera_io_uring_open_at(
 
     flags = 0;
 
-    if (request->open_at.flags & (CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)) {
+    if (request->open_at.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)) {
+        flags |= O_RDONLY;
+    } else if ((request->open_at.flags & CHIMERA_VFS_OPEN_READ_ONLY) &&
+               !(request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
         flags |= O_RDONLY;
     } else {
         flags |= O_RDWR;
