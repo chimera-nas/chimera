@@ -64,6 +64,7 @@ struct chimera_server_config {
     int                                   metrics_port;
     int                                   rest_http_port;
     int                                   rest_https_port;
+    int                                   rest_debug_fsops;
     int                                   smb_num_dialects;
     uint32_t                              smb_dialects[16];
     int                                   smb_persistent_handles;
@@ -129,6 +130,7 @@ chimera_server_config_init(void)
     config->external_portmap         = 0;
     config->portmap_hostname[0]      = '\0';
     config->soft_fail_bad_req        = 0;
+    config->rest_debug_fsops         = 0;
     config->tcp_flavor               = CHIMERA_TCP_FLAVOR_PLAIN;
 
     config->smb_num_dialects = 4;
@@ -632,6 +634,20 @@ chimera_server_config_get_rest_http_port(const struct chimera_server_config *con
 } /* chimera_server_config_get_rest_http_port */
 
 SYMBOL_EXPORT void
+chimera_server_config_set_rest_debug_fsops(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->rest_debug_fsops = enable;
+} /* chimera_server_config_set_rest_debug_fsops */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_rest_debug_fsops(const struct chimera_server_config *config)
+{
+    return config->rest_debug_fsops;
+} /* chimera_server_config_get_rest_debug_fsops */
+
+SYMBOL_EXPORT void
 chimera_server_config_set_rest_https_port(
     struct chimera_server_config *config,
     int                           port)
@@ -817,7 +833,7 @@ chimera_server_thread_init(
                                                                         [i]);
     }
 
-    thread->rest_thread = chimera_rest_thread_init(evpl, server->rest);
+    thread->rest_thread = chimera_rest_thread_init(evpl, server->rest, thread->vfs_thread);
 
     pthread_mutex_lock(&server->lock);
     if (++server->threads_online == server->config->core_threads) {

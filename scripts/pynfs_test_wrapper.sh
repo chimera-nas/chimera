@@ -38,6 +38,10 @@ CHIMERA_DIED_DURING_TEST=0
 PYNFS_PYCOMPAT_DIR="${SESSION_DIR}/pycompat"
 PYNFS_NFS4_LEASE_TIME="${PYNFS_NFS4_LEASE_TIME:-5}"
 PYNFS_NFS4_GRACE_TIME="${PYNFS_NFS4_GRACE_TIME:-10}"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# REST port used (loopback, inside the netns) only for delegation runs, where
+# the pynfs serverhelper drives out-of-band fs ops through the debug endpoint.
+REST_PORT="${PYNFS_REST_PORT:-7780}"
 
 cleanup() {
     if [ -n "$CHIMERA_PID" ]; then
@@ -80,6 +84,14 @@ esac
 generate_config() {
     local mount_path="/"
     local vfs_section=""
+    local rest_section=""
+
+    # For delegation runs, expose the test-only debug fsop endpoint so the
+    # pynfs serverhelper can drive out-of-band recalls (DELEG16-20).
+    if [ "$DELEG_ENABLE" = "true" ]; then
+        rest_section="\"rest_http_port\": $REST_PORT,
+        \"rest_debug_fsops\": true,"
+    fi
 
     case "$BACKEND" in
         linux|io_uring)
@@ -130,6 +142,7 @@ generate_config() {
         "nfs4_lease_time": $PYNFS_NFS4_LEASE_TIME,
         "nfs4_grace_time": $PYNFS_NFS4_GRACE_TIME,
         $vfs_section
+        $rest_section
         "external_portmap": false
     },
     "mounts": {
@@ -173,7 +186,9 @@ CHIMERA_PID=$!
 READY=0
 for i in $(seq 1 100); do
     if grep -q "Server is ready." "$CHIMERA_LOG" &&
-       ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/2049" 2>/dev/null; then
+       ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/2049" 2>/dev/null &&
+       { [ "$DELEG_ENABLE" != "true" ] ||
+         ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/${REST_PORT}" 2>/dev/null; }; then
         READY=1
         break
     fi
@@ -224,12 +239,21 @@ if [ "${PYNFS_RUNDEPS:-0}" = "1" ]; then
     PYNFS_DEP_ARGS=(--rundeps --force)
 fi
 
+# Server-side recall tests (DELEG16-20) drive out-of-band fs mutations via a
+# helper that pokes the chimera REST debug endpoint. Only wire it up for 4.0
+# delegation runs.
+SERVERHELPER_ARGS=()
+if [ "$DELEG_ENABLE" = "true" ]; then
+    SERVERHELPER_ARGS=(--serverhelper "${SCRIPT_DIR}/pynfs_serverhelper.sh"
+                       --serverhelperarg "http://127.0.0.1:${REST_PORT}")
+fi
+
 if [ "$NFS_MINOR_VERSION" = "0" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.0/testserver.py"
     # shellcheck disable=SC2086
     timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
         ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-        --maketree "${PYNFS_DEP_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
+        --maketree "${PYNFS_DEP_ARGS[@]}" "${SERVERHELPER_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
 elif [ "$NFS_MINOR_VERSION" = "1" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.1/testserver.py"
     # shellcheck disable=SC2086
