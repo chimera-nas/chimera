@@ -165,6 +165,17 @@ chimera_nfs4_setattr(
             return;
         }
 
+        status = nfs_state_check_client(
+            state_void, state_type,
+            req->session ? req->session->client_unified : NULL);
+        if (status != NFS4_OK) {
+            nfs_state_table_release(table, state_void, state_type,
+                                    thread->vfs_thread);
+            res->status = status;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+
         struct nfs_open_state *open_state = state_void;
 
         /* RFC 7530 §9.1.4.3: the stateid must name an open of the object that

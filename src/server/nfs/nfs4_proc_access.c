@@ -2,71 +2,11 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <sys/stat.h>
-
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-
-static int
-chimera_nfs4_check_access(
-    const struct chimera_vfs_attrs *attr,
-    const struct chimera_vfs_cred  *cred,
-    int                             need_read,
-    int                             need_write,
-    int                             need_exec)
-{
-    uint32_t mode = attr->va_mode;
-    int      r, w, x;
-
-    if (cred->uid == 0) {
-        /* Root can read/write anything; execute requires at least one x bit */
-        r = 1;
-        w = 1;
-        x = !!(mode & (S_IXUSR | S_IXGRP | S_IXOTH));
-    } else if ((uint64_t) cred->uid == attr->va_uid) {
-        r = !!(mode & S_IRUSR);
-        w = !!(mode & S_IWUSR);
-        x = !!(mode & S_IXUSR);
-    } else {
-        int in_group = ((uint64_t) cred->gid == attr->va_gid);
-
-        if (!in_group) {
-            for (uint32_t i = 0; i < cred->ngids; i++) {
-                if ((uint64_t) cred->gids[i] == attr->va_gid) {
-                    in_group = 1;
-                    break;
-                }
-            }
-        }
-
-        if (in_group) {
-            r = !!(mode & S_IRGRP);
-            w = !!(mode & S_IWGRP);
-            x = !!(mode & S_IXGRP);
-        } else {
-            r = !!(mode & S_IROTH);
-            w = !!(mode & S_IWOTH);
-            x = !!(mode & S_IXOTH);
-        }
-    }
-
-    if (need_read && !r) {
-        return 0;
-    }
-
-    if (need_write && !w) {
-        return 0;
-    }
-
-    if (need_exec && !x) {
-        return 0;
-    }
-
-    return 1;
-} /* chimera_nfs4_check_access */
 
 static void
 chimera_nfs4_access_complete(
@@ -102,32 +42,32 @@ chimera_nfs4_access_complete(
     requested = args->access & meaningful;
 
     if ((requested & ACCESS4_READ) &&
-        chimera_nfs4_check_access(attr, &req->cred, 1, 0, 0)) {
+        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 1, 0, 0)) {
         access |= ACCESS4_READ;
     }
 
     if ((requested & ACCESS4_LOOKUP) &&
-        chimera_nfs4_check_access(attr, &req->cred, 0, 0, 1)) {
+        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 0, 0, 1)) {
         access |= ACCESS4_LOOKUP;
     }
 
     if ((requested & ACCESS4_MODIFY) &&
-        chimera_nfs4_check_access(attr, &req->cred, 0, 1, 0)) {
+        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 0, 1, 0)) {
         access |= ACCESS4_MODIFY;
     }
 
     if ((requested & ACCESS4_EXTEND) &&
-        chimera_nfs4_check_access(attr, &req->cred, 0, 1, 0)) {
+        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 0, 1, 0)) {
         access |= ACCESS4_EXTEND;
     }
 
     if ((requested & ACCESS4_DELETE) &&
-        chimera_nfs4_check_access(attr, &req->cred, 0, 1, 0)) {
+        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 0, 1, 0)) {
         access |= ACCESS4_DELETE;
     }
 
     if ((requested & ACCESS4_EXECUTE) &&
-        chimera_nfs4_check_access(attr, &req->cred, 0, 0, 1)) {
+        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 0, 0, 1)) {
         access |= ACCESS4_EXECUTE;
     }
 
