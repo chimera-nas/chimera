@@ -313,6 +313,15 @@ chimera_server_config_get_rest_https_port(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_rest_debug_fsops(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_rest_debug_fsops(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_rest_ssl_cert(
     struct chimera_server_config *config,
     const char                   *cert_path);

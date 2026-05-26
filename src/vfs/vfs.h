@@ -724,6 +724,8 @@ struct chimera_vfs_request {
             int                      new_namelen;
             const uint8_t           *target_fh; /* Optional: target FH if known (for silly rename) */
             int                      target_fh_len; /* 0 if target_fh not provided */
+            uint8_t                  source_fh[CHIMERA_VFS_FH_SIZE]; /* resolved source FH, for delegation recall */
+            int                      source_fh_len; /* 0 if source FH could not be resolved */
             struct chimera_vfs_attrs r_fromdir_pre_attr;
             struct chimera_vfs_attrs r_fromdir_post_attr;
             struct chimera_vfs_attrs r_todir_pre_attr;

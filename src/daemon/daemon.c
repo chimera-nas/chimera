@@ -502,6 +502,14 @@ main(
         chimera_server_config_set_rest_http_port(server_config, rest_http_port);
     }
 
+    /* Test-only: enable the /api/v1/debug/fsop endpoint that performs
+     * server-side filesystem mutations (used to drive delegation recalls in
+     * the pynfs DELEG16-20 tests). Default off; never enable in production. */
+    json_t *rest_debug_fsops_value = json_object_get(server_params, "rest_debug_fsops");
+    if (json_is_true(rest_debug_fsops_value)) {
+        chimera_server_config_set_rest_debug_fsops(server_config, 1);
+    }
+
     if (rest_https_port != 0) {
         chimera_server_config_set_rest_https_port(server_config, rest_https_port);
         if (rest_ssl_cert) {

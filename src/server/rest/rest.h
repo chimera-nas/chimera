@@ -10,6 +10,7 @@ struct chimera_vfs;
 struct prometheus_metrics;
 struct evpl;
 struct chimera_rest_server;
+struct chimera_vfs_thread;
 
 /**
  * Initialize the REST API server
@@ -64,7 +65,8 @@ chimera_rest_destroy(
 void *
 chimera_rest_thread_init(
     struct evpl                *evpl,
-    struct chimera_rest_server *rest);
+    struct chimera_rest_server *rest,
+    struct chimera_vfs_thread  *vfs_thread);
 
 /**
  * Destroy per-thread REST API state
