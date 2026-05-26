@@ -304,7 +304,8 @@ chimera_io_uring_reap(
 
                         sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
 
-                        io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, dir_stx);
+                        io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                                            CHIMERA_IO_URING_STATX_MASK, dir_stx);
 
                         evpl_defer(thread->evpl, &thread->deferral);
 
@@ -375,11 +376,13 @@ chimera_io_uring_reap(
 
                     sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
 
-                    io_uring_prep_statx(sqe, parent_fd, fullname, 0, AT_STATX_SYNC_AS_STAT, stx);
+                    io_uring_prep_statx(sqe, parent_fd, fullname, AT_STATX_SYNC_AS_STAT,
+                                        CHIMERA_IO_URING_STATX_MASK, stx);
 
                     sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
 
-                    io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, dir_stx);
+                    io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                                        CHIMERA_IO_URING_STATX_MASK, dir_stx);
 
                     evpl_defer(thread->evpl, &thread->deferral);
                 } else if (handle->slot == 1) {
@@ -626,7 +629,9 @@ chimera_io_uring_getattr(
 
     stx = (struct statx *) scratch;
 
-    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW, AT_STATX_SYNC_AS_STAT, stx);
+    io_uring_prep_statx(sqe, fd, "",
+                        AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
+                        CHIMERA_IO_URING_STATX_MASK, stx);
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_getattr */
@@ -893,7 +898,8 @@ chimera_io_uring_lookup_at(
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    io_uring_prep_statx(sqe, parent_fd, fullname, AT_SYMLINK_NOFOLLOW, AT_STATX_SYNC_AS_STAT, stx);
+    io_uring_prep_statx(sqe, parent_fd, fullname, AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
+                        CHIMERA_IO_URING_STATX_MASK, stx);
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_lookup */
@@ -1346,7 +1352,8 @@ chimera_io_uring_read(
         request->read.r_eof    = 0;
         if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
             sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
-            io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
+            io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                                CHIMERA_IO_URING_STATX_MASK, stx);
             evpl_defer(thread->evpl, &thread->deferral);
         } else {
             /* No attrs requested and no readv to submit: complete inline. */
@@ -1395,7 +1402,8 @@ chimera_io_uring_read(
     io_uring_prep_readv(sqe, fd, iov, i, request->read.offset);
 
     sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
-    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
+    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                        CHIMERA_IO_URING_STATX_MASK, stx);
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_read */
