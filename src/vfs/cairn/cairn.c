@@ -2641,6 +2641,14 @@ cairn_open_at(
         }
     }
 
+    if (!is_new_inode &&
+        (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        request->open_at.set_attr->va_size == 0 &&
+        S_ISREG(inode->mode)) {
+        cairn_apply_attrs(inode, request->open_at.set_attr);
+        inode->space_used = 0;
+    }
+
     if (flags & CHIMERA_VFS_OPEN_INFERRED) {
         /* If this is an inferred open (ie an NFS3 create)
          * then we aren't returning a handle so we don't need

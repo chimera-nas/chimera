@@ -597,6 +597,14 @@ struct nfs4_open_lookup_regular_ctx {
     unsigned int              flags;
 };
 
+struct nfs4_open_unchecked_ctx {
+    struct nfs_request       *req;
+    struct chimera_vfs_attrs *attr;
+    const char               *name;
+    uint32_t                  namelen;
+    unsigned int              flags;
+};
+
 static void
 chimera_nfs4_open_lookup_regular_complete(
     enum chimera_vfs_error    error_code,
@@ -640,6 +648,52 @@ chimera_nfs4_open_lookup_regular_complete(
                         chimera_nfs4_open_at_complete,
                         req);
 } /* chimera_nfs4_open_lookup_regular_complete */
+
+static void
+chimera_nfs4_open_unchecked_lookup_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *existing_attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct nfs4_open_unchecked_ctx *ctx           = private_data;
+    struct nfs_request             *req           = ctx->req;
+    struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
+    struct chimera_vfs_open_handle *parent_handle = req->handle;
+
+    (void) existing_attr;
+    (void) dir_attr;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        /* RFC 7530 OPEN/UNCHECKED recreate: create attrs are ignored for an
+         * existing object, except size=0 truncates the file. */
+        if ((ctx->attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+            ctx->attr->va_size == 0) {
+            ctx->attr->va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+            ctx->attr->va_req_mask = CHIMERA_VFS_ATTR_SIZE;
+        } else {
+            ctx->attr->va_set_mask = 0;
+            ctx->attr->va_req_mask = 0;
+        }
+    } else if (error_code != CHIMERA_VFS_ENOENT) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                        parent_handle,
+                        ctx->name,
+                        ctx->namelen,
+                        ctx->flags,
+                        ctx->attr,
+                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
+                        CHIMERA_VFS_ATTR_MTIME,
+                        CHIMERA_VFS_ATTR_MTIME,
+                        chimera_nfs4_open_at_complete,
+                        req);
+} /* chimera_nfs4_open_unchecked_lookup_complete */
 
 static void
 chimera_nfs4_open_claim_fh_complete(
@@ -827,6 +881,29 @@ chimera_nfs4_open_parent_complete(
                 return;
             }
 
+            if (args->openhow.opentype == OPEN4_CREATE &&
+                args->openhow.how.mode == UNCHECKED4) {
+                struct nfs4_open_unchecked_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.file.data;
+                ctx->namelen = args->claim.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.file.data,
+                                      args->claim.file.len,
+                                      0,
+                                      0,
+                                      chimera_nfs4_open_unchecked_lookup_complete,
+                                      ctx);
+                return;
+            }
+
             chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
                                 parent_handle,
                                 args->claim.file.data,
@@ -871,6 +948,29 @@ chimera_nfs4_open_parent_complete(
                                       CHIMERA_VFS_ATTR_MODE,
                                       0,
                                       chimera_nfs4_open_lookup_regular_complete,
+                                      ctx);
+                return;
+            }
+
+            if (args->openhow.opentype == OPEN4_CREATE &&
+                args->openhow.how.mode == UNCHECKED4) {
+                struct nfs4_open_unchecked_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.delegate_cur_info.file.data;
+                ctx->namelen = args->claim.delegate_cur_info.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.delegate_cur_info.file.data,
+                                      args->claim.delegate_cur_info.file.len,
+                                      0,
+                                      0,
+                                      chimera_nfs4_open_unchecked_lookup_complete,
                                       ctx);
                 return;
             }

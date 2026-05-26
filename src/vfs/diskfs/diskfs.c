@@ -9594,6 +9594,13 @@ diskfs_open_at_existing_cb(
         }
     }
 
+    if ((request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        request->open_at.set_attr->va_size == 0 &&
+        S_ISREG(inode->mode)) {
+        diskfs_apply_attrs(inode, request->open_at.set_attr);
+        inode->space_used = 0;
+    }
+
     diskfs_open_at_finish(request, parent, inode);
 } /* diskfs_open_at_existing_cb */
 
