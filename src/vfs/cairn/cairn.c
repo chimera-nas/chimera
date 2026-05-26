@@ -3067,6 +3067,17 @@ cairn_write(
 
     cairn_map_attrs(shared, &request->write.r_pre_attr, inode);
 
+    if (request->write.length == 0) {
+        cairn_map_attrs(shared, &request->write.r_post_attr, inode);
+        cairn_inode_handle_release(&ih);
+
+        request->status         = CHIMERA_VFS_OK;
+        request->write.r_length = 0;
+        request->write.r_sync   = 1;
+        request->complete(request);
+        return;
+    }
+
     if (inode->size > request->write.offset) {
         cairn_punch_hole(thread, shared, inode, request->write.offset, request->write.length);
     }
