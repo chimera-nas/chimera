@@ -11762,6 +11762,15 @@ diskfs_write_inode_cb(
 
     diskfs_map_attrs(thread, &request->write.r_pre_attr, inode);
 
+    if (request->write.length == 0) {
+        diskfs_map_attrs(thread, &request->write.r_post_attr, inode);
+
+        request->write.r_length = 0;
+        request->write.r_sync   = 1;
+        diskfs_op_ok(request, diskfs_private->txn);
+        return;
+    }
+
     aligned_start  = write_start & ~4095ULL;
     aligned_end    = (write_end + 4095ULL) & ~4095ULL;
     aligned_length = aligned_end - aligned_start;
