@@ -62,6 +62,32 @@ set(PYNFS_LEASE_OVERRIDE_SECONDS 30)
 set(PYNFS_LEASE_OVERRIDE_delegations DELEG1 DELEG4 DELEG5 DELEG7 DELEG9 DELEG14)
 set(PYNFS_LEASE_OVERRIDE_deleg DELEG8)
 
+# Courteous-server tests (st_courtesy.py, COUR1-COUR7) need a longer lease for a
+# different reason, and -- unlike the delegation tests above -- they DO scale
+# their own sleeps to the lease (env.sleep(lease+10), or lease*2 for COUR1),
+# since they deliberately drive a client past lease expiry.  The flake: COUR7
+# (testExpiringManyClients) establishes 1000 clients back-to-back, and under
+# ctest -j load a single EXCHANGE_ID -> CREATE_SESSION handshake can slip past
+# the 5s default lease.  The sweep then expires that still-unconfirmed client,
+# so its own CREATE_SESSION (correctly, per RFC 8881 18.35.3 / EID9
+# testLeasePeriod) returns NFS4ERR_STALE_CLIENTID and the test fails.  A longer
+# lease makes that setup race effectively impossible.  Because the sleeps scale
+# with the lease, use a *modest* override (not the 30s above): 20s gives a 4x
+# margin over the observed race (a handshake gap would have to exceed 20s,
+# impossible across the ~8-10s setup seen in CI) without bloating the deliberate
+# sleeps (COUR7 -> ~40s, COUR1 -> ~40s in CI).  Per-flag
+# PYNFS_LEASE_OVERRIDE_SECONDS_<flag> overrides the shared default above.
+#
+# The flake is load-correlated -- a heavy ctest -j run is exactly when the 1000
+# client setup is slowest, pushing total runtime toward the 60s default wrapper
+# timeout (pynfs_test_wrapper.sh) just as the longer sleeps already cost more.
+# Raise the courteous wrapper timeout (PYNFS_TIMEOUT_<flag>, plumbed below) to
+# absorb that variance; 90s leaves ample headroom (COUR1's lease*2 = 40s sleep
+# plus even a badly inflated setup) while still flagging a genuine hang.
+set(PYNFS_LEASE_OVERRIDE_courteous COUR1 COUR2 COUR3 COUR4 COUR5 COUR6 COUR7)
+set(PYNFS_LEASE_OVERRIDE_SECONDS_courteous 20)
+set(PYNFS_TIMEOUT_courteous 90)
+
 function(pynfs_codes_for_flag flag minor out_var)
     if("${minor}" STREQUAL "0")
         set(testserver ${PYNFS_DIR}/nfs4.0/testserver.py)
@@ -127,9 +153,15 @@ function(pynfs_add_code_test flag code backend minor)
         list(APPEND test_env "PYNFS_TIMEOUT=${PYNFS_TIMEOUT_${flag}}")
     endif()
 
-    # Lease-sensitive delegation recall tests: see PYNFS_LEASE_OVERRIDE_* above.
+    # Lease-sensitive tests: see PYNFS_LEASE_OVERRIDE_* above.  A flag may set
+    # its own PYNFS_LEASE_OVERRIDE_SECONDS_<flag>; otherwise the shared default
+    # applies.
     if("${code}" IN_LIST PYNFS_LEASE_OVERRIDE_${flag})
-        list(APPEND test_env "PYNFS_NFS4_LEASE_TIME=${PYNFS_LEASE_OVERRIDE_SECONDS}")
+        set(lease_seconds ${PYNFS_LEASE_OVERRIDE_SECONDS})
+        if(DEFINED PYNFS_LEASE_OVERRIDE_SECONDS_${flag})
+            set(lease_seconds ${PYNFS_LEASE_OVERRIDE_SECONDS_${flag}})
+        endif()
+        list(APPEND test_env "PYNFS_NFS4_LEASE_TIME=${lease_seconds}")
     endif()
 
     set_tests_properties(${name} PROPERTIES
