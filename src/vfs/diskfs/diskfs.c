@@ -3589,7 +3589,10 @@ diskfs_bt_collapse_root(
  * would overflow the journal / block-I/O queue.  So we reclaim inline only the
  * BOUNDED case: an inode whose entire tree fits in the embedded root (no child
  * node blocks).  That covers small files (data extents in the root, <=~100) and
- * empty/small directories.  We always free the home block.
+ * empty/small directories.  The inode home block is not returned to the
+ * allocator yet: inode structs stay cached after unlink and generation reuse is
+ * not persisted for newly allocated inodes, so reusing an inum can collide with
+ * the cache and stale file handles.
  *
  * TODO(incremental-drain): a large inode (interior embedded root) still leaks
  * its child node blocks and their data extents here.  Draining those needs a
@@ -3604,9 +3607,6 @@ diskfs_bt_free_tree(
     struct diskfs_txn    *txn,
     struct diskfs_inode  *inode)
 {
-    uint32_t                   dev;
-    uint64_t                   off = sm_inum_to_device_offset(thread->shared->space_map,
-                                                              inode->inum, &dev);
     void                      *buf;
     struct diskfs_bt_node_hdr *h;
 
@@ -3632,9 +3632,7 @@ diskfs_bt_free_tree(
         }
     }
 
-    /* The home block stays pinned + logged (with the nlink=0 dinode); its
-     * range is reclaimed on commit. */
-    diskfs_txn_free_space(thread, txn, dev, off, DISKFS_BLOCK_SIZE);
+    /* Leave the inode home block pinned + logged with the nlink=0 dinode. */
 } /* diskfs_bt_free_tree */
 
 /* Forward declarations for helpers defined later in the file. */
@@ -3782,8 +3780,8 @@ diskfs_orphan_op_start(
 /* transaction, remove up to DISKFS_DRAIN_BATCH of the lowest b+tree    */
 /* entries (freeing a file extent's backing data; the remove itself     */
 /* reclaims emptied node blocks via merge), commit, repeat -- then a    */
-/* final transaction frees the home block + the inode struct.  Generic  */
-/* over entry type (extents, dirents, symlink).  Each transaction holds */
+/* final transaction removes the orphan record and retires the inode.   */
+/* Generic over entry type (extents, dirents, symlink). Each txn holds  */
 /* only the one inode (no multi-inode lock ordering).  The orphan inode */
 /* stays cached throughout (A5 never evicts nlink==0).                  */
 /*                                                                      */
@@ -3928,18 +3926,15 @@ diskfs_drain_final_cb(
     diskfs_drain_complete(priv);
 } /* diskfs_drain_final_cb */
 
-/* The durable orphan entry is removed; finish reclaiming the inode itself
- * (home block + struct) in the same transaction and commit. */
+/* The durable orphan entry is removed; finish retiring the inode in the same
+ * transaction and commit.  The inode home block is intentionally leaked for now;
+ * see diskfs_bt_free_tree. */
 static void
 diskfs_drain_after_unrecord(void *priv)
 {
     struct diskfs_drain *d = priv;
-    uint32_t             dev;
-    uint64_t             off = sm_inum_to_device_offset(d->thread->shared->space_map,
-                                                        d->inum, &dev);
 
     diskfs_txn_pin_inode_block(d->thread, d->txn, d->inode, 0);
-    diskfs_txn_free_space(d->thread, d->txn, dev, off, DISKFS_BLOCK_SIZE);
     diskfs_inode_free(d->thread, d->inode);
     diskfs_txn_commit(d->txn, diskfs_drain_final_cb, d);
 } /* diskfs_drain_after_unrecord */
@@ -3972,11 +3967,10 @@ diskfs_drain_looked_cb(
     struct diskfs_bt_op *rop;
 
     if (result < 0) {
-        /* Tree empty: remove the durable orphan entry, then (in the same txn)
-         * free the home block + inode struct.  Removing the orphan entry last
-         * means a crash before this commit just re-drains on the next mount
-         * (idempotent); the orphan inode (3) is acquired last (leaf -> no
-         * deadlock). */
+        /* Tree empty: remove the durable orphan entry, then retire the inode in
+         * the same txn.  Removing the orphan entry last means a crash before
+         * this commit just re-drains on the next mount (idempotent); the orphan
+         * inode (3) is acquired last (leaf -> no deadlock). */
         diskfs_bt_op_free(d->thread, op);
         diskfs_orphan_op_start(d->thread, d->txn, d->inum, d->gen, 1 /* remove */,
                                diskfs_drain_after_unrecord, d);
