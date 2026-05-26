@@ -261,6 +261,89 @@ chimera_nfs4_mount_get_root_fh(
 } /* chimera_nfs4_mount_get_root_fh */
 
 /*
+ * Callback for the RECLAIM_COMPLETE compound.
+ */
+static void
+chimera_nfs4_mount_reclaim_complete_callback(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct COMPOUND4res         *res,
+    int                          status,
+    void                        *private_data)
+{
+    struct chimera_vfs_request              *request       = private_data;
+    struct chimera_nfs4_mount_ctx           *ctx           = request->plugin_data;
+    struct chimera_nfs_client_server_thread *server_thread = ctx->server_thread;
+
+    if (status != 0) {
+        chimera_nfsclient_error("NFS4 RECLAIM_COMPLETE RPC failed: %d", status);
+        request->status = CHIMERA_VFS_EIO;
+        request->complete(request);
+        return;
+    }
+
+    /* RFC 8881 §18.51.4: a duplicate global RECLAIM_COMPLETE yields
+     * NFS4ERR_COMPLETE_ALREADY, which (like NFS4_OK) means reclaim is done.
+     * Any other compound-level failure is fatal to the mount. */
+    if (res->status != NFS4_OK &&
+        res->status != NFS4ERR_COMPLETE_ALREADY) {
+        chimera_nfsclient_error("NFS4 RECLAIM_COMPLETE compound failed: %d", res->status);
+        request->status = CHIMERA_VFS_EIO;
+        request->complete(request);
+        return;
+    }
+
+    /* Reclaim phase declared complete; proceed to resolve the export root. */
+    chimera_nfs4_mount_get_root_fh(server_thread, request);
+} /* chimera_nfs4_mount_reclaim_complete_callback */
+
+/*
+ * Send the RECLAIM_COMPLETE compound (RFC 8881 §18.51).  A client that has
+ * just established a new client ID and session must declare it has no state to
+ * reclaim before issuing non-reclaim locking operations; otherwise the server
+ * may (and chimera's server does) return NFS4ERR_GRACE for those operations.
+ */
+static void
+chimera_nfs4_mount_reclaim_complete(
+    struct chimera_nfs_client_server_thread *server_thread,
+    struct chimera_vfs_request              *request)
+{
+    struct chimera_nfs_shared          *shared  = server_thread->shared;
+    struct chimera_nfs_client_server   *server  = server_thread->server;
+    struct chimera_nfs4_client_session *session = server->nfs4_session;
+    struct COMPOUND4args                args;
+    struct nfs_argop4                   argarray[2];
+
+    memset(&args, 0, sizeof(args));
+    args.tag.len      = 0;
+    args.minorversion = 1;
+    args.argarray     = argarray;
+    args.num_argarray = 2;
+
+    /* Op 0: SEQUENCE (slot 0, shared with the mount-time root lookup). */
+    argarray[0].argop = OP_SEQUENCE;
+    memcpy(argarray[0].opsequence.sa_sessionid, session->sessionid, NFS4_SESSIONID_SIZE);
+    argarray[0].opsequence.sa_sequenceid     = chimera_nfs4_get_sequenceid(session, 0);
+    argarray[0].opsequence.sa_slotid         = 0;
+    argarray[0].opsequence.sa_highest_slotid = session->max_slots - 1;
+    argarray[0].opsequence.sa_cachethis      = 0;
+
+    /* Op 1: RECLAIM_COMPLETE, global (rca_one_fs == FALSE). */
+    argarray[1].argop                         = OP_RECLAIM_COMPLETE;
+    argarray[1].opreclaim_complete.rca_one_fs = 0;
+
+    shared->nfs_v4.send_call_NFSPROC4_COMPOUND(
+        &shared->nfs_v4.rpc2,
+        server_thread->thread->evpl,
+        server_thread->nfs_conn,
+        NULL,
+        &args,
+        0, 0, 0,
+        chimera_nfs4_mount_reclaim_complete_callback,
+        request);
+} /* chimera_nfs4_mount_reclaim_complete */
+
+/*
  * Callback for CREATE_SESSION compound
  */
 static void
@@ -321,8 +404,9 @@ chimera_nfs4_mount_create_session_callback(
     chimera_nfsclient_info("NFS4 CREATE_SESSION successful, clientid=%lu, max_slots=%u",
                            (unsigned long) session->clientid, session->max_slots);
 
-    /* Now get the root file handle */
-    chimera_nfs4_mount_get_root_fh(server_thread, request);
+    /* Declare the (empty) reclaim phase complete before any non-reclaim
+     * locking operation, then resolve the export root. */
+    chimera_nfs4_mount_reclaim_complete(server_thread, request);
 } /* chimera_nfs4_mount_create_session_callback */
 
 /*
