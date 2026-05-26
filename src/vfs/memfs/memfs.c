@@ -607,8 +607,11 @@ memfs_kv_entry_release(
 } /* memfs_kv_entry_release */
 
 static void *
-memfs_init(const char *cfgdata)
+memfs_init(
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
 {
+    (void) metrics;
     struct memfs_shared     *shared = calloc(1, sizeof(*shared));
     struct memfs_inode_list *inode_list;
     struct memfs_inode      *inode;

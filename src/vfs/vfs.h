@@ -1079,7 +1079,8 @@ struct chimera_vfs_module {
      */
 
     void      * (*init)(
-        const char *cfgdata);
+        const char                *cfgdata,
+        struct prometheus_metrics *metrics);
 
     /* Optional
      * Called once at destruction to clean up global state
