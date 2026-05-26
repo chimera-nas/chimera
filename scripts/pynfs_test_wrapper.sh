@@ -72,8 +72,17 @@ cleanup() {
 trap cleanup EXIT
 
 # Enable NFSv4 protocol delegations only for delegation test runs, so the
-# other suites exercise the default (delegations-off) behavior.
+# other suites exercise the default (delegations-off) behavior.  A few tests
+# outside the deleg/delegations flags still need delegations (e.g. the
+# destroy_session callback test DSESS9002, which drives a CB_RECALL to exercise
+# the backchannel after a session teardown); the CMake harness sets
+# PYNFS_FORCE_DELEG=1 for those so they run with delegations on.
 DELEG_ENABLE="false"
+case "${PYNFS_FORCE_DELEG:-}" in
+    1 | true | TRUE | yes)
+        DELEG_ENABLE="true"
+        ;;
+esac
 case " $FLAG_ARGS " in
     *" deleg"* | *" delegations"* | *DELEG* | *"delegations "* | *"deleg "*)
         DELEG_ENABLE="true"

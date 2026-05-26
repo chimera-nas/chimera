@@ -88,6 +88,21 @@ set(PYNFS_LEASE_OVERRIDE_courteous COUR1 COUR2 COUR3 COUR4 COUR5 COUR6 COUR7)
 set(PYNFS_LEASE_OVERRIDE_SECONDS_courteous 20)
 set(PYNFS_TIMEOUT_courteous 90)
 
+# Per-code delegation-enable override.  The wrapper enables NFSv4 protocol
+# delegations only for the deleg/delegations suites, so the other suites
+# exercise the default (delegations-off) behavior.  DSESS9002 lives in the
+# destroy_session suite but needs delegations on: it destroys and recreates a
+# client's session, grants a read delegation over the new session, then forces a
+# conflicting open to drive a CB_RECALL -- verifying the backchannel works after
+# a DESTROY_SESSION/CREATE_SESSION cycle.  Keyed by pynfs flag; listed codes get
+# PYNFS_FORCE_DELEG=1.  (DSESS9003 additionally requires the server to re-drive
+# an *unanswered* recall over the recreated session; that server support is not
+# yet in place, so it stays disabled.)  This recall test shares the delegation
+# suite's lease sensitivity -- establishing the second, conflicting client does
+# not renew the first client's lease -- so give it the longer lease too.
+set(PYNFS_FORCE_DELEG_destroy_session DSESS9002)
+set(PYNFS_LEASE_OVERRIDE_destroy_session DSESS9002)
+
 function(pynfs_codes_for_flag flag minor out_var)
     if("${minor}" STREQUAL "0")
         set(testserver ${PYNFS_DIR}/nfs4.0/testserver.py)
@@ -162,6 +177,12 @@ function(pynfs_add_code_test flag code backend minor)
             set(lease_seconds ${PYNFS_LEASE_OVERRIDE_SECONDS_${flag}})
         endif()
         list(APPEND test_env "PYNFS_NFS4_LEASE_TIME=${lease_seconds}")
+    endif()
+
+    # Delegation-sensitive tests outside the deleg suites: see
+    # PYNFS_FORCE_DELEG_* above.
+    if("${code}" IN_LIST PYNFS_FORCE_DELEG_${flag})
+        list(APPEND test_env "PYNFS_FORCE_DELEG=1")
     endif()
 
     set_tests_properties(${name} PROPERTIES
