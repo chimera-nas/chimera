@@ -3043,6 +3043,7 @@ chimera/pynfs/setattr/SATT12c_linux_nfs4.0
 chimera/pynfs/setattr/SATT12d_linux_nfs4.0
 chimera/pynfs/setattr/SATT12f_linux_nfs4.0
 chimera/pynfs/setattr/SATT12s_linux_nfs4.0
+chimera/pynfs/setattr/SATT12x_linux_nfs4.0
 chimera/pynfs/setattr/SATT13_linux_nfs4.0
 chimera/pynfs/setattr/SATT14_linux_nfs4.0
 chimera/pynfs/setattr/SATT16_linux_nfs4.0
@@ -3087,6 +3088,7 @@ chimera/pynfs/setattr/SATT12c_io_uring_nfs4.0
 chimera/pynfs/setattr/SATT12d_io_uring_nfs4.0
 chimera/pynfs/setattr/SATT12f_io_uring_nfs4.0
 chimera/pynfs/setattr/SATT12s_io_uring_nfs4.0
+chimera/pynfs/setattr/SATT12x_io_uring_nfs4.0
 chimera/pynfs/setattr/SATT13_io_uring_nfs4.0
 chimera/pynfs/setattr/SATT14_io_uring_nfs4.0
 chimera/pynfs/setattr/SATT16_io_uring_nfs4.0
