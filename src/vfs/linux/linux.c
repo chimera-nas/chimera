@@ -641,6 +641,15 @@ chimera_linux_open_at(
     if (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         mode                                    = request->open_at.set_attr->va_mode;
         request->open_at.set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
+        /* The explicit mode -- applied atomically by the openat() below -- is
+         * authoritative on this mode-only backend.  An SMB create SD commonly
+         * carries BOTH the modefromsid mode (recovered into va_mode) and a
+         * Windows DACL; if we left va_acl set, chimera_linux_set_attrs() would
+         * run its ACL->mode projection (now that ATTR_MODE is cleared) and
+         * overwrite the requested mode with a lossy ACL-derived one -- e.g. a
+         * 0755 binary copied over CIFS would lose +x and could no longer be
+         * executed.  The ACL cannot be stored here anyway, so drop it. */
+        request->open_at.set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
     } else {
         mode = 0600;
     }
