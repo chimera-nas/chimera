@@ -589,6 +589,58 @@ chimera_nfs4_open_at_complete(
     chimera_nfs4_open_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_at_complete */
 
+struct nfs4_open_lookup_regular_ctx {
+    struct nfs_request       *req;
+    struct chimera_vfs_attrs *attr;
+    const char               *name;
+    uint32_t                  namelen;
+    unsigned int              flags;
+};
+
+static void
+chimera_nfs4_open_lookup_regular_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct nfs4_open_lookup_regular_ctx *ctx           = private_data;
+    struct nfs_request                  *req           = ctx->req;
+    struct OPEN4res                     *res           = &req->res_compound.resarray[req->index].opopen;
+    struct chimera_vfs_open_handle      *parent_handle = req->handle;
+
+    (void) dir_attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    /* OPEN4_NOCREATE must classify special objects by type before the
+     * backend tries to open them.  Native opens of FIFOs, sockets, and
+     * devices can otherwise block or report backend-specific errors. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISREG(attr->va_mode)) {
+        res->status = S_ISDIR(attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_SYMLINK;
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                        parent_handle,
+                        ctx->name,
+                        ctx->namelen,
+                        ctx->flags,
+                        ctx->attr,
+                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
+                        CHIMERA_VFS_ATTR_MTIME,
+                        CHIMERA_VFS_ATTR_MTIME,
+                        chimera_nfs4_open_at_complete,
+                        req);
+} /* chimera_nfs4_open_lookup_regular_complete */
+
 static void
 chimera_nfs4_open_claim_fh_complete(
     enum chimera_vfs_error          error_code,
@@ -753,6 +805,28 @@ chimera_nfs4_open_parent_complete(
                 return;
             }
 
+            if (args->openhow.opentype == OPEN4_NOCREATE) {
+                struct nfs4_open_lookup_regular_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.file.data;
+                ctx->namelen = args->claim.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.file.data,
+                                      args->claim.file.len,
+                                      CHIMERA_VFS_ATTR_MODE,
+                                      0,
+                                      chimera_nfs4_open_lookup_regular_complete,
+                                      ctx);
+                return;
+            }
+
             chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
                                 parent_handle,
                                 args->claim.file.data,
@@ -777,6 +851,27 @@ chimera_nfs4_open_parent_complete(
                 chimera_vfs_release(req->thread->vfs_thread, parent_handle);
                 res->status = status;
                 chimera_nfs4_open_complete(req, status);
+                return;
+            }
+            if (args->openhow.opentype == OPEN4_NOCREATE) {
+                struct nfs4_open_lookup_regular_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.delegate_cur_info.file.data;
+                ctx->namelen = args->claim.delegate_cur_info.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.delegate_cur_info.file.data,
+                                      args->claim.delegate_cur_info.file.len,
+                                      CHIMERA_VFS_ATTR_MODE,
+                                      0,
+                                      chimera_nfs4_open_lookup_regular_complete,
+                                      ctx);
                 return;
             }
             chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
