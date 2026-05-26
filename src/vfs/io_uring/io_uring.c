@@ -422,7 +422,23 @@ chimera_io_uring_reap(
                     }
                 } else {
                     if (cqe->res == 0) {
-                        chimera_linux_statx_to_attr(&request->read.r_attr, (struct statx *) request->plugin_data);
+                        stx = (struct statx *) request->plugin_data;
+
+                        if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+                            chimera_linux_statx_to_attr(&request->read.r_attr, stx);
+                        }
+
+                        if (request->status == CHIMERA_VFS_OK) {
+                            request->read.r_eof =
+                                (request->read.length > 0 &&
+                                 request->read.offset + request->read.r_length >= stx->stx_size);
+                        } else if (request->status == CHIMERA_VFS_EINVAL &&
+                                   request->read.offset >= stx->stx_size) {
+                            request->status        = CHIMERA_VFS_OK;
+                            request->read.r_length = 0;
+                            request->read.r_niov   = 0;
+                            request->read.r_eof    = 1;
+                        }
                     }
                 }
                 break;
@@ -1322,7 +1338,7 @@ chimera_io_uring_read(
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;
         request->read.r_length = 0;
-        request->read.r_eof    = 1;
+        request->read.r_eof    = 0;
         if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
             sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
             io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
@@ -1364,10 +1380,8 @@ chimera_io_uring_read(
 
     io_uring_prep_readv(sqe, fd, iov, request->read.r_niov, request->read.offset);
 
-    if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
-        sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
-        io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
-    }
+    sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
+    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_read */

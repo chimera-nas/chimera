@@ -2286,8 +2286,8 @@ memfs_read(
         return;
     }
 
-    if (offset + length >= inode->size) {
-        length = inode->size > offset ? inode->size - offset : 0;
+    if (length >= inode->size - offset) {
+        length = inode->size - offset;
         eof    = 1;
     }
 
