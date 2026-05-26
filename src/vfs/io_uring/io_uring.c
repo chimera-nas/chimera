@@ -735,6 +735,17 @@ chimera_io_uring_setattr(
     }
 
     if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
+        // A size that does not fit in a signed off_t cannot be set on any
+        // backing filesystem (truncate would see it as negative and fail
+        // EINVAL).  Report it as "file too large" so NFS returns FBIG rather
+        // than INVAL.
+        if (request->setattr.set_attr->va_size > (uint64_t) INT64_MAX) {
+            chimera_restore_privilege(request->cred);
+            request->status = CHIMERA_VFS_EFBIG;
+            request->complete(request);
+            return;
+        }
+
         // fd might be O_PATH which doesn't support ftruncate directly,
         // so use truncate() on /proc/self/fd/N path which follows the symlink
         char procpath[64];
