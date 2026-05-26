@@ -669,7 +669,8 @@ void
 nfs_client_destroy(
     struct nfs_client         *client,
     struct nfs_state_table    *table,
-    struct chimera_vfs_thread *vfs_thread)
+    struct chimera_vfs_thread *vfs_thread,
+    bool                       synchronous)
 {
     if (!client) {
         return;
@@ -734,7 +735,7 @@ nfs_client_destroy(
 
     /* Free the delegation callback channel (and disconnect its outbound 4.0
      * connection) before the client struct goes away. */
-    nfs4_cb_path_teardown(&client->cb_path);
+    nfs4_cb_path_teardown(&client->cb_path, synchronous);
 
     pthread_mutex_unlock(&client->lock);
     pthread_mutex_destroy(&client->lock);
@@ -795,7 +796,9 @@ nfs_client_expire_state(
         delegation_destroy_common(deleg, table, vfs_thread, true, false);
     }
 
-    nfs4_cb_path_teardown(&client->cb_path);
+    /* Runtime lease expiry: the owner thread is still alive, so marshal the
+     * channel free to it rather than freeing in-line. */
+    nfs4_cb_path_teardown(&client->cb_path, false);
     pthread_mutex_unlock(&client->lock);
 } /* nfs_client_expire_state */
 
@@ -872,6 +875,9 @@ nfs_open_share_history(uint32_t share)
 struct nfs_open_state *
 nfs_open_state_create(
     struct nfs_open_owner          *owner,
+    uint32_t                        principal_flavor,
+    const char                     *principal_machinename,
+    uint32_t                        principal_machinename_len,
     const uint8_t                  *fh,
     uint16_t                        fh_len,
     uint32_t                        share_access,
@@ -894,7 +900,16 @@ nfs_open_state_create(
     rc = nfs_state_table_alloc(table, NFS4_SLOT_TYPE_OPEN, &shard, &slot_idx, &gen);
     chimera_nfs_abort_if(rc != 0, "state table exhausted");
 
-    state->owner = owner;
+    state->owner            = owner;
+    state->principal_flavor = principal_flavor;
+    if (principal_machinename_len > NFS4_OPAQUE_LIMIT) {
+        principal_machinename_len = NFS4_OPAQUE_LIMIT;
+    }
+    state->principal_machinename_len = principal_machinename_len;
+    if (principal_machinename && principal_machinename_len) {
+        memcpy(state->principal_machinename, principal_machinename,
+               principal_machinename_len);
+    }
     memcpy(state->fh, fh, fh_len);
     state->fh_len            = fh_len;
     state->share_access      = share_access;
@@ -1318,6 +1333,55 @@ nfs_lock_state_create(
                         table->epoch);
     return state;
 } /* nfs_lock_state_create */
+
+/* Insert a byte-range lock interval [start, end) (end == UINT64_MAX => to EOF)
+ * of `mode` for `owner` on `file_state` (the ref's ownership transfers to the
+ * returned entry), and link it onto lock_state->range_leases.  The interval is
+ * always a sub-region or coalesced union of locks this owner already
+ * coordinated, so the synchronous insert grants without conflict. */
+struct nfs4_range_lease *
+nfs4_range_lease_insert(
+    struct chimera_vfs_state             *vfs_state,
+    struct nfs_lock_state                *lock_state,
+    struct chimera_vfs_file_state        *file_state,
+    const struct chimera_vfs_lease_owner *owner,
+    uint8_t                               mode,
+    uint64_t                              start,
+    uint64_t                              end)
+{
+    struct nfs4_range_lease *rl = calloc(1, sizeof(*rl));
+
+    if (!rl) {
+        chimera_vfs_state_put(vfs_state, file_state);
+        return NULL;
+    }
+
+    rl->file_state         = file_state;
+    rl->lease.kind         = CHIMERA_VFS_LEASE_RANGE;
+    rl->lease.mode.granted = mode;
+    rl->lease.mode.denied  = 0;
+    rl->lease.owner        = *owner;
+    rl->lease.offset       = start;
+    rl->lease.length       = (end == UINT64_MAX) ? 0 : (end - start);
+
+    chimera_vfs_state_try_insert(vfs_state, file_state, &rl->lease, NULL);
+
+    rl->next                 = lock_state->range_leases;
+    lock_state->range_leases = rl;
+    return rl;
+} /* nfs4_range_lease_insert */
+
+/* Release the vfs_state lease backing `rl` and free it.  Caller has already
+ * unlinked it from lock_state->range_leases. */
+void
+nfs4_range_lease_free(
+    struct chimera_vfs_state *vfs_state,
+    struct nfs4_range_lease  *rl)
+{
+    chimera_vfs_lease_release(vfs_state, rl->file_state, &rl->lease);
+    chimera_vfs_state_put(vfs_state, rl->file_state);
+    free(rl);
+} /* nfs4_range_lease_free */
 
 static void
 lock_state_cleanup(

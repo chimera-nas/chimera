@@ -2162,6 +2162,7 @@ chimera/pynfs/read/OPEN23b_memfs_nfs4.0
 chimera/pynfs/read/OPEN28_memfs_nfs4.0
 chimera/pynfs/read/RD1_memfs_nfs4.0
 chimera/pynfs/read/RD10_memfs_nfs4.0
+chimera/pynfs/read/RD12_memfs_nfs4.0
 chimera/pynfs/read/RD13_memfs_nfs4.0
 chimera/pynfs/read/RD3_memfs_nfs4.0
 chimera/pynfs/read/RD5_memfs_nfs4.0
@@ -2180,6 +2181,7 @@ chimera/pynfs/read/OPEN23b_linux_nfs4.0
 chimera/pynfs/read/OPEN28_linux_nfs4.0
 chimera/pynfs/read/RD1_linux_nfs4.0
 chimera/pynfs/read/RD10_linux_nfs4.0
+chimera/pynfs/read/RD12_linux_nfs4.0
 chimera/pynfs/read/RD13_linux_nfs4.0
 chimera/pynfs/read/RD3_linux_nfs4.0
 chimera/pynfs/read/RD5_linux_nfs4.0
@@ -2196,6 +2198,7 @@ chimera/pynfs/read/OPEN23b_io_uring_nfs4.0
 chimera/pynfs/read/OPEN28_io_uring_nfs4.0
 chimera/pynfs/read/RD1_io_uring_nfs4.0
 chimera/pynfs/read/RD10_io_uring_nfs4.0
+chimera/pynfs/read/RD12_io_uring_nfs4.0
 chimera/pynfs/read/RD3_io_uring_nfs4.0
 chimera/pynfs/read/RD5_io_uring_nfs4.0
 chimera/pynfs/read/RD7a_io_uring_nfs4.0
@@ -2211,6 +2214,7 @@ chimera/pynfs/read/OPEN23b_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/OPEN28_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/RD1_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/RD10_diskfs_io_uring_nfs4.0
+chimera/pynfs/read/RD12_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/RD13_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/RD3_diskfs_io_uring_nfs4.0
 chimera/pynfs/read/RD5_diskfs_io_uring_nfs4.0
@@ -2229,6 +2233,7 @@ chimera/pynfs/read/OPEN23b_diskfs_aio_nfs4.0
 chimera/pynfs/read/OPEN28_diskfs_aio_nfs4.0
 chimera/pynfs/read/RD1_diskfs_aio_nfs4.0
 chimera/pynfs/read/RD10_diskfs_aio_nfs4.0
+chimera/pynfs/read/RD12_diskfs_aio_nfs4.0
 chimera/pynfs/read/RD13_diskfs_aio_nfs4.0
 chimera/pynfs/read/RD3_diskfs_aio_nfs4.0
 chimera/pynfs/read/RD5_diskfs_aio_nfs4.0
@@ -2247,6 +2252,7 @@ chimera/pynfs/read/OPEN23b_cairn_nfs4.0
 chimera/pynfs/read/OPEN28_cairn_nfs4.0
 chimera/pynfs/read/RD1_cairn_nfs4.0
 chimera/pynfs/read/RD10_cairn_nfs4.0
+chimera/pynfs/read/RD12_cairn_nfs4.0
 chimera/pynfs/read/RD13_cairn_nfs4.0
 chimera/pynfs/read/RD3_cairn_nfs4.0
 chimera/pynfs/read/RD5_cairn_nfs4.0
@@ -3581,6 +3587,7 @@ chimera/pynfs/write/OPEN27_linux_nfs4.0
 chimera/pynfs/write/WRT1_linux_nfs4.0
 chimera/pynfs/write/WRT11_linux_nfs4.0
 chimera/pynfs/write/WRT12_linux_nfs4.0
+chimera/pynfs/write/WRT19_linux_nfs4.0
 chimera/pynfs/write/WRT1b_linux_nfs4.0
 chimera/pynfs/write/WRT2_linux_nfs4.0
 chimera/pynfs/write/WRT3_linux_nfs4.0
@@ -3594,6 +3601,7 @@ chimera/pynfs/write/OPEN24_io_uring_nfs4.0
 chimera/pynfs/write/OPEN27_io_uring_nfs4.0
 chimera/pynfs/write/WRT11_io_uring_nfs4.0
 chimera/pynfs/write/WRT12_io_uring_nfs4.0
+chimera/pynfs/write/WRT19_io_uring_nfs4.0
 chimera/pynfs/write/WRT1b_io_uring_nfs4.0
 chimera/pynfs/write/WRT3_io_uring_nfs4.0
 chimera/pynfs/write/WRT4_io_uring_nfs4.0
@@ -3608,6 +3616,7 @@ chimera/pynfs/write/WRT1_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT11_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT12_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT18_diskfs_io_uring_nfs4.0
+chimera/pynfs/write/WRT19_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT1b_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT2_diskfs_io_uring_nfs4.0
 chimera/pynfs/write/WRT3_diskfs_io_uring_nfs4.0
@@ -3626,6 +3635,7 @@ chimera/pynfs/write/WRT1_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT11_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT12_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT18_diskfs_aio_nfs4.0
+chimera/pynfs/write/WRT19_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT1b_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT2_diskfs_aio_nfs4.0
 chimera/pynfs/write/WRT3_diskfs_aio_nfs4.0
@@ -3645,6 +3655,7 @@ chimera/pynfs/write/WRT11_cairn_nfs4.0
 chimera/pynfs/write/WRT12_cairn_nfs4.0
 chimera/pynfs/write/WRT14_cairn_nfs4.0
 chimera/pynfs/write/WRT18_cairn_nfs4.0
+chimera/pynfs/write/WRT19_cairn_nfs4.0
 chimera/pynfs/write/WRT1b_cairn_nfs4.0
 chimera/pynfs/write/WRT2_cairn_nfs4.0
 chimera/pynfs/write/WRT3_cairn_nfs4.0
@@ -6159,3 +6170,32 @@ chimera/pynfs/flex/FFLS2_memfs_nfs4.1
 chimera/pynfs/flex/FFLS3_memfs_nfs4.1
 chimera/pynfs/flex/FFLS4_memfs_nfs4.1
 chimera/pynfs/flex/FFST1_memfs_nfs4.1
+
+# Delegation recall tests greened by the unified-lease branch.  4.0 recall-
+# handshake + 4.1 deleg/DELEG8 run with a longer lease (PYNFS_LEASE_OVERRIDE_*
+# in CMakeLists); the 4.2 cluster was unblocked by the CB_COMPOUND minor-version
+# fix and the shutdown callback-channel use-after-free fix.
+chimera/pynfs/delegations/DELEG1_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG4_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG5_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG7_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG9_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG14_memfs_nfs4.0
+chimera/pynfs/deleg/DELEG8_memfs_nfs4.1
+chimera/pynfs/create_session/DELEG5_memfs_nfs4.2
+chimera/pynfs/create_session/DELEG6_memfs_nfs4.2
+chimera/pynfs/create_session/DELEG7_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG1_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG2_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG3_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG5_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG6_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG7_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG23_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG24_memfs_nfs4.2
+chimera/pynfs/deleg/DELEG25_memfs_nfs4.2
+chimera/pynfs/open/DELEG1_memfs_nfs4.2
+chimera/pynfs/open/DELEG3_memfs_nfs4.2
+chimera/pynfs/open/DELEG5_memfs_nfs4.2
+chimera/pynfs/open/DELEG6_memfs_nfs4.2
+chimera/pynfs/open/DELEG7_memfs_nfs4.2

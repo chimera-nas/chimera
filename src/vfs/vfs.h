@@ -11,6 +11,7 @@
 #include "vfs_error.h"
 #include "vfs_cred.h"
 #include "vfs_pnfs.h"
+#include "vfs_lease_types.h"
 #include "evpl/evpl.h"
 
 #define CHIMERA_VFS_PATH_MAX 4096
@@ -313,41 +314,59 @@ struct chimera_vfs_request_handle {
 #define CHIMERA_VFS_REQUEST_MAX_HANDLES 3
 
 struct chimera_vfs_request {
-    struct chimera_vfs_thread        *thread;
-    const struct chimera_vfs_cred    *cred;
-    uint32_t                          opcode;
-    enum chimera_vfs_error            status;
-    chimera_vfs_complete_callback_t   complete;
-    chimera_vfs_complete_callback_t   complete_delegate;
-    struct timespec                   start_time;
-    uint64_t                          elapsed_ns;
+    struct chimera_vfs_thread         *thread;
+    const struct chimera_vfs_cred     *cred;
+    uint32_t                           opcode;
+    enum chimera_vfs_error             status;
+    chimera_vfs_complete_callback_t    complete;
+    chimera_vfs_complete_callback_t    complete_delegate;
+    struct timespec                    start_time;
+    uint64_t                           elapsed_ns;
 
     /* Points to one page of memory that the plugin may use as desired */
-    void                             *plugin_data;
+    void                              *plugin_data;
 
     /* For use by the plugin if desired, see io_uring for example */
-    struct chimera_vfs_request_handle handle[CHIMERA_VFS_REQUEST_MAX_HANDLES];
-    uint8_t                           token_count;
+    struct chimera_vfs_request_handle  handle[CHIMERA_VFS_REQUEST_MAX_HANDLES];
+    uint8_t                            token_count;
 
-    struct chimera_vfs_module        *module;
-    void                             *proto_callback;
-    void                             *proto_private_data;
+    struct chimera_vfs_module         *module;
+    void                              *proto_callback;
+    void                              *proto_private_data;
 
     /* VFS plugins may use these while processing the request */
-    struct chimera_vfs_request       *prev;
-    struct chimera_vfs_request       *next;
+    struct chimera_vfs_request        *prev;
+    struct chimera_vfs_request        *next;
 
     /* For use by vfs core only */
-    struct chimera_vfs_request       *active_prev;
-    struct chimera_vfs_request       *active_next;
+    struct chimera_vfs_request        *active_prev;
+    struct chimera_vfs_request        *active_next;
 
-    uint8_t                           fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                          fh_len;
-    uint64_t                          fh_hash;
+    uint8_t                            fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                           fh_len;
+    uint64_t                           fh_hash;
 
-    struct chimera_vfs_open_handle   *pending_handle;
+    /* Implicit I/O lease mediation (chimera_vfs_io_lease_acquire).  For a
+     * lease-holding client (NFSv4 delegation, SMB oplock) the protocol fills
+     * io_owner + io_owner_valid so the I/O coalesces with the client's own
+     * lease instead of recalling it.  io_next is the continuation invoked
+     * once the lease is held (normally chimera_vfs_dispatch); io_lease_file
+     * is the per-file state whose implicit lease this request has pinned
+     * (NULL on the fast path where nothing was pinned). */
+    struct chimera_vfs_lease_owner     io_owner;
+    uint8_t                            io_owner_valid;
+    /* Set by chimera_vfs_io_recall(): this request is a namespace/metadata
+     * mutation that must recall every caching lease on a target file (regardless
+     * of owner) rather than hold an implicit lease. */
+    uint8_t                            io_recall_all;
+    void                               ( *io_next )(
+        struct chimera_vfs_request *request);
+    struct chimera_vfs_file_state     *io_lease_file;
+    struct chimera_vfs_pending_acquire io_lease_ticket;
 
-    void                              ( *unblock_callback )(
+    struct chimera_vfs_open_handle    *pending_handle;
+
+    void                               ( *unblock_callback )(
         struct chimera_vfs_request     *request,
         struct chimera_vfs_open_handle *handle);
 
@@ -1041,12 +1060,13 @@ struct chimera_vfs_handle_state {
 #define CHIMERA_VFS_CAP_LAYOUT_SOURCE      (1U << 15)
 #define CHIMERA_VFS_CAP_LAYOUT_CLASS_FLEX  (1U << 16) /* produces flex-files (RFC 8435)  */
 #define CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK (1U << 17) /* produces block volume (RFC 5663)*/
+#define CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI  (1U << 19) /* produces SCSI volume (RFC 8154) */
 
 /* If set, the module stores the canonical Windows/NFSv4 ACL (via va_acl)
  * losslessly.  If unset, the module is mode-only: the VFS translates ACLs to
  * and from UNIX mode bits on its behalf.  There is no POSIX.1e capability by
  * design -- Chimera carries a single ACL model (see vfs_acl.h). */
-#define CHIMERA_VFS_CAP_ACL_NATIVE         (1U << 18)
+#define CHIMERA_VFS_CAP_ACL_NATIVE         (1U << 20)
 
 /* If set, the module delegates discretionary access control to a real
  * underlying enforcer (e.g. the host kernel, via the seteuid/setegid
@@ -1060,7 +1080,7 @@ struct chimera_vfs_handle_state {
  * ACL for them.  Note this is orthogonal to CAP_ACL_NATIVE: "stores the ACL"
  * and "enforces the ACL" are different properties (memfs/cairn store but do not
  * enforce; linux/io_uring enforce in-kernel but do not store the rich ACL). */
-#define CHIMERA_VFS_CAP_DELEGATES_DAC      (1U << 19)
+#define CHIMERA_VFS_CAP_DELEGATES_DAC      (1U << 21)
 
 struct chimera_vfs_module {
     /* Required
@@ -1244,6 +1264,10 @@ struct chimera_vfs_thread {
     struct chimera_vfs_request          *pending_complete_requests;
     struct chimera_vfs_request          *unblocked_requests;
     struct chimera_vfs_identity_request *pending_identity;
+    /* Parked I/O requests being resumed on their owning thread (the lease
+     * pump runs on whatever thread released/broke a lease, but a request's
+     * dispatch+reply must run on the thread that owns its connection iovecs). */
+    struct chimera_vfs_request          *pending_io_resume;
     struct evpl_doorbell                 doorbell;
     pthread_mutex_t                      lock;
     uint64_t                             anon_fh_key;

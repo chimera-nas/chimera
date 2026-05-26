@@ -328,11 +328,6 @@ struct sm_thread_cache {
     int      valid;
 };
 
-struct sm_log_block {
-    uint32_t device_id;
-    uint64_t device_offset;
-};
-
 struct space_map *
 space_map_create(
     const struct sm_device_cfg *cfg,
@@ -416,13 +411,6 @@ space_map_thread_cache_return(
     struct space_map        *sm,
     const struct sm_journal *jnl,
     struct sm_thread_cache  *cache);
-
-uint32_t
-space_map_active_log_blocks(
-    struct space_map    *sm,
-    uint32_t             max_ags,
-    struct sm_log_block *blocks,
-    uint32_t             max_blocks);
 
 /*
  * Write a stub superblock to offset 0 of device 0 through the mount-time

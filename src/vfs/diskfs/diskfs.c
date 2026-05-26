@@ -192,6 +192,15 @@ struct diskfs_device {
     uint64_t                  sig_offset;
     uint32_t                  sig_len;
     uint8_t                   sig[SM_SIG_MAX];
+
+    /* SCSI-layout (RFC 8154) hardware identity: the LU's VPD-0x83 designator a
+     * pNFS-SCSI client matches against (nothing written to the data disk).
+     * Used when the share is in scsi_layout mode instead of sig_*. */
+    uint32_t                  scsi_code_set;     /* 1=binary, 2=ascii */
+    uint32_t                  scsi_desig_type;   /* 1=T10, 2=EUI64, 3=NAA */
+    uint32_t                  scsi_desig_len;
+    uint8_t                   scsi_desig[32];
+    uint64_t                  scsi_pr_key;
 };
 
 struct diskfs_dirent {
@@ -415,10 +424,6 @@ struct diskfs_block_cache {
 #define DISKFS_INTENT_LOG_BLOCKS          (SM_INTENT_LOG_SIZE / SM_BLOCK_SIZE)
 #define DISKFS_BLOCK_CACHE_DEFAULT_BLOCKS (2 * DISKFS_INTENT_LOG_BLOCKS)
 #define DISKFS_BLOCK_CACHE_MIN_BLOCKS     (DISKFS_INTENT_LOG_BLOCKS + DISKFS_INTENT_LOG_BLOCKS / 2)
-
-/* Cache-warm allocator journal blocks for the AGs most likely to receive the
- * first metadata allocations.  This does not reserve or journal space. */
-#define DISKFS_AG_LOG_WARM_AGS            64
 
 /*
  * On-disk inode block layout (4 KiB):
@@ -741,7 +746,6 @@ struct diskfs_shared {
     uint8_t                    root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                   root_fhlen;
     int                        orphans_scanned;    /* mount-time orphan recovery done */
-    int                        ag_logs_warmed;     /* mount-time allocator log warmup done */
     uint64_t                   root_inum;          /* for the clean-unmount superblock */
     uint32_t                   root_gen;
     int                        unsafe_async;       /* config opt-in: submit block writes without FUA/sync (no crash safety) */
@@ -749,6 +753,7 @@ struct diskfs_shared {
     uint32_t                   block_cache_blocks; /* total resident block-buffer cap (0 = default) */
     uint32_t                   inode_cache_inodes; /* total resident inode cap (0 = default) */
     int                        block_layout;       /* config opt-in: advertise pNFS block layouts */
+    int                        scsi_layout;        /* config opt-in: advertise pNFS SCSI layouts  */
     uint64_t                   fsid;
     struct space_map          *space_map;
     struct diskfs_intent_log   intent_log;
@@ -1509,48 +1514,6 @@ diskfs_inode_load_sync(
     }
     return inode;
 } /* diskfs_inode_load_sync */
-
-static void
-diskfs_warm_ag_logs(struct diskfs_thread *thread)
-{
-    struct diskfs_shared   *shared = thread->shared;
-    struct sm_log_block     blocks[DISKFS_AG_LOG_WARM_AGS * 2];
-    struct diskfs_mount_io *io;
-    uint8_t                 buf[DISKFS_BLOCK_SIZE];
-    uint32_t                nblocks;
-
-    pthread_mutex_lock(&shared->lock);
-    if (shared->ag_logs_warmed) {
-        pthread_mutex_unlock(&shared->lock);
-        return;
-    }
-    shared->ag_logs_warmed = 1;
-    pthread_mutex_unlock(&shared->lock);
-
-    nblocks = space_map_active_log_blocks(shared->space_map,
-                                          DISKFS_AG_LOG_WARM_AGS,
-                                          blocks,
-                                          sizeof(blocks) / sizeof(blocks[0]));
-    if (nblocks == 0) {
-        return;
-    }
-
-    io = diskfs_mount_io_open(shared);
-    for (uint32_t i = 0; i < nblocks; i++) {
-        struct diskfs_block *blk;
-
-        if (diskfs_mount_io_read(io, blocks[i].device_id, buf,
-                                 sizeof(buf), blocks[i].device_offset) != 0) {
-            continue;
-        }
-
-        blk = diskfs_block_claim(thread, blocks[i].device_id,
-                                 blocks[i].device_offset, 1);
-        memcpy(blk->iov.data, buf, sizeof(buf));
-        diskfs_block_unpin(thread, blk, DISKFS_BLOCK_CLEAN);
-    }
-    diskfs_mount_io_close(io);
-} /* diskfs_warm_ag_logs */
 
 /* ------------------------------------------------------------------ */
 /* Block cache                                                         */
@@ -3652,7 +3615,8 @@ diskfs_bt_free_tree(
     h   = diskfs_bt_hdr(buf, DISKFS_BT_ROOT_BASE);
 
     if (h->level == 0 && S_ISREG(inode->mode)) {
-        /* Small file: every data extent is recorded in the embedded root. */
+        /* Small file: data extents are recorded in the embedded root, mixed
+         * with non-space records such as xattrs. */
         struct diskfs_bt_lslot *s = diskfs_bt_lslots(buf, DISKFS_BT_ROOT_BASE);
         int                     i;
 
@@ -3660,6 +3624,9 @@ diskfs_bt_free_tree(
             struct diskfs_extent_rec *e =
                 (struct diskfs_extent_rec *) ((char *) buf + DISKFS_BT_ROOT_BASE + s[i].off);
 
+            if (s[i].key.type != DISKFS_REC_EXTENT) {
+                continue;
+            }
             diskfs_txn_free_space(thread, txn, e->device_id, e->device_offset,
                                   SM_ALIGN_UP(e->length));
         }
@@ -4517,56 +4484,6 @@ diskfs_bt_run(struct diskfs_bt_op *op)
                 int exact, idx = diskfs_bt_leaf_search(buf, base, &op->key, &exact);
 
                 if (unlikely(!exact)) {
-                    struct diskfs_bt_lslot *sl        = diskfs_bt_lslots(buf, base);
-                    int                     misrouted = h->nitems > 0 &&
-                        op->last_parent_valid &&
-                        (diskfs_bt_key_cmp(&op->key, &op->last_parent_key) < 0 ||
-                         (op->last_parent_next_child &&
-                          diskfs_bt_key_cmp(&op->key, &op->last_parent_next_key) >= 0));
-
-                    if (misrouted) {
-                        if (op->last_parent_next_child) {
-                            chimera_diskfs_error("b+tree exact miss misrouted inode=%lu type=%u subkey=%lu "
-                                                 "leaf_items=%u leaf_first=%lu leaf_last=%lu "
-                                                 "leaf_prev=%lu leaf_next=%lu insert_idx=%d "
-                                                 "parent_ci=%d parent_nitems=%d parent_key=%lu "
-                                                 "parent_child=%lu parent_next_key=%lu parent_next_child=%lu",
-                                                 inode->inum,
-                                                 (unsigned) op->key.type,
-                                                 op->key.subkey,
-                                                 (unsigned) h->nitems,
-                                                 sl[0].key.subkey,
-                                                 sl[h->nitems - 1].key.subkey,
-                                                 h->prev_leaf,
-                                                 h->next_leaf,
-                                                 idx,
-                                                 op->last_parent_ci,
-                                                 op->last_parent_nitems,
-                                                 op->last_parent_key.subkey,
-                                                 op->last_parent_child,
-                                                 op->last_parent_next_key.subkey,
-                                                 op->last_parent_next_child);
-                        } else {
-                            chimera_diskfs_error("b+tree exact miss misrouted inode=%lu type=%u subkey=%lu "
-                                                 "leaf_items=%u leaf_first=%lu leaf_last=%lu "
-                                                 "leaf_prev=%lu leaf_next=%lu insert_idx=%d "
-                                                 "parent_ci=%d parent_nitems=%d parent_key=%lu "
-                                                 "parent_child=%lu",
-                                                 inode->inum,
-                                                 (unsigned) op->key.type,
-                                                 op->key.subkey,
-                                                 (unsigned) h->nitems,
-                                                 sl[0].key.subkey,
-                                                 sl[h->nitems - 1].key.subkey,
-                                                 h->prev_leaf,
-                                                 h->next_leaf,
-                                                 idx,
-                                                 op->last_parent_ci,
-                                                 op->last_parent_nitems,
-                                                 op->last_parent_key.subkey,
-                                                 op->last_parent_child);
-                        }
-                    }
                     diskfs_bt_complete(op, -1);
                     return;
                 }
@@ -5972,7 +5889,7 @@ diskfs_il_contig_free(struct diskfs_intent_log *il)
     uint64_t start = SM_INTENT_LOG_OFFSET;
     uint64_t end   = SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE;
 
-    if (!il->push_head) {
+    if (!il->push_cur && !il->push_head && il->redo_inflight == 0) {
         return SM_INTENT_LOG_SIZE;
     }
     if (il->log_head >= il->log_tail) {
@@ -6072,7 +5989,14 @@ diskfs_il_push_finish(struct diskfs_intent_log *il)
     free(rec->iovs);
     free(rec);
 
-    il->log_tail = il->push_head ? il->push_head->offset : il->log_head;
+    /* Redo records reserve log space before they enter push_head.  If newer
+     * redo writes are still in flight, keep log_tail conservative until those
+     * records become pushable and then finish. */
+    if (il->push_head) {
+        il->log_tail = il->push_head->offset;
+    } else if (il->redo_inflight == 0) {
+        il->log_tail = il->log_head;
+    }
 
     diskfs_il_push_kick(il);
 
@@ -6469,6 +6393,7 @@ diskfs_intent_log_drain_pending(struct diskfs_intent_log *il)
                                 "intent log: too many channels (%u >= %u)",
                                 il->num_channels, DISKFS_IL_MAX_CHANNELS);
         il->channels[il->num_channels++] = ch;
+
         __atomic_store_n(&ch->registered, 1, __ATOMIC_RELEASE);
     }
 } /* diskfs_intent_log_drain_pending */
@@ -6825,9 +6750,18 @@ diskfs_mount_io_read(
     uint64_t length,
     uint64_t offset)
 {
-    struct diskfs_mount_io *io     = user;
-    uint64_t                maxreq = io->shared->devices[device_id].max_request_size;
-    uint64_t                done   = 0;
+    struct diskfs_mount_io *io = user;
+    uint64_t                maxreq;
+    uint64_t                done = 0;
+
+    if (device_id >= (uint32_t) io->shared->num_devices ||
+        !io->queue[device_id]) {
+        return -1;
+    }
+    maxreq = io->shared->devices[device_id].max_request_size;
+    if (maxreq == 0) {
+        return -1;
+    }
 
     while (done < length) {
         struct evpl_iovec           iov;
@@ -6867,9 +6801,18 @@ diskfs_mount_io_write(
     uint64_t    length,
     uint64_t    offset)
 {
-    struct diskfs_mount_io *io     = user;
-    uint64_t                maxreq = io->shared->devices[device_id].max_request_size;
-    uint64_t                done   = 0;
+    struct diskfs_mount_io *io = user;
+    uint64_t                maxreq;
+    uint64_t                done = 0;
+
+    if (device_id >= (uint32_t) io->shared->num_devices ||
+        !io->queue[device_id]) {
+        return -1;
+    }
+    maxreq = io->shared->devices[device_id].max_request_size;
+    if (maxreq == 0) {
+        return -1;
+    }
 
     while (done < length) {
         struct evpl_iovec           iov;
@@ -6920,9 +6863,17 @@ diskfs_mount_io_write_many(
     }
 
     for (i = 0; i < count; i++) {
-        struct diskfs_device *dev = &io->shared->devices[writes[i].device_id];
+        struct diskfs_device *dev;
 
-        if (writes[i].length > dev->max_request_size) {
+        if (writes[i].device_id >= (uint32_t) io->shared->num_devices ||
+            !io->queue[writes[i].device_id]) {
+            rc    = -1;
+            count = i;
+            goto out;
+        }
+        dev = &io->shared->devices[writes[i].device_id];
+
+        if (dev->max_request_size == 0 || writes[i].length > dev->max_request_size) {
             rc    = -1;
             count = i;
             goto out;
@@ -6969,6 +6920,11 @@ diskfs_mount_io_flush(
 {
     struct diskfs_mount_io     *io = user;
     struct diskfs_mount_io_wait w  = { 0, 0 };
+
+    if (device_id >= (uint32_t) io->shared->num_devices ||
+        !io->queue[device_id]) {
+        return -1;
+    }
 
     evpl_block_flush(io->evpl, io->queue[device_id], diskfs_mount_io_complete, &w);
     while (!w.done) {
@@ -7182,7 +7138,8 @@ diskfs_init(const char *cfgdata)
          * deviceid and SIMPLE-volume signature come from config; its AG logs are
          * relocated onto the local metadata device by the allocator. */
         if (role_name && strcmp(role_name, "remote") == 0) {
-            json_t *sig_cfg = json_object_get(device_cfg, "signature");
+            json_t *sig_cfg  = json_object_get(device_cfg, "signature");
+            json_t *scsi_cfg = json_object_get(device_cfg, "scsi");
 
             chimera_diskfs_abort_if(i == 0, "device 0 must be a local metadata device");
 
@@ -7196,16 +7153,40 @@ diskfs_init(const char *cfgdata)
 
             diskfs_parse_hex(json_string_value(json_object_get(device_cfg, "deviceid")),
                              device->deviceid, SM_DEVICEID_SIZE);
+            /* A remote device carries either a SIMPLE-volume content signature
+             * (block layout, RFC 5663) or a SCSI VPD-0x83 designator (SCSI
+             * layout, RFC 8154); the share-level mode flag selects which. */
             if (json_is_object(sig_cfg)) {
                 device->sig_offset = json_integer_value(json_object_get(sig_cfg, "offset"));
                 device->sig_len    = diskfs_parse_hex(
                     json_string_value(json_object_get(sig_cfg, "bytes")),
                     device->sig, SM_SIG_MAX);
             }
+            if (json_is_object(scsi_cfg)) {
+                const char *dtype = json_string_value(
+                    json_object_get(scsi_cfg, "designator_type"));
+                const char *cset = json_string_value(
+                    json_object_get(scsi_cfg, "code_set"));
 
-            chimera_diskfs_info("Remote data device %s size %lu sig_off %lu sig_len %u",
-                                device->name, device->size, device->sig_offset,
-                                device->sig_len);
+                /* Default binary NAA -- the common SAS/FC/iSCSI WWID form. */
+                device->scsi_desig_type = 3; /* NAA */
+                if (dtype && strcmp(dtype, "eui64") == 0) {
+                    device->scsi_desig_type = 2;
+                } else if (dtype && strcmp(dtype, "t10") == 0) {
+                    device->scsi_desig_type = 1;
+                }
+                device->scsi_code_set  = (cset && strcmp(cset, "ascii") == 0) ? 2 : 1;
+                device->scsi_desig_len = diskfs_parse_hex(
+                    json_string_value(json_object_get(scsi_cfg, "id")),
+                    device->scsi_desig, sizeof(device->scsi_desig));
+                device->scsi_pr_key = json_integer_value(
+                    json_object_get(scsi_cfg, "pr_key"));
+            }
+
+            chimera_diskfs_info(
+                "Remote data device %s size %lu sig_len %u scsi_desig_len %u",
+                device->name, device->size, device->sig_len,
+                device->scsi_desig_len);
             continue;
         }
 
@@ -7262,21 +7243,29 @@ diskfs_init(const char *cfgdata)
      * efficiently. */
     initialize           = json_object_get(cfg, "initialize") != NULL;
     shared->unsafe_async = json_is_true(json_object_get(cfg, "unsafe_async"));
-    /* Opt-in pNFS block layout mode: diskfs sources RFC 5663 block layouts and
-     * keeps file data on remote (data-only) devices. */
+    /* Opt-in pNFS block / SCSI layout mode: diskfs sources RFC 5663 block or
+     * RFC 8154 SCSI layouts and keeps file data on remote (data-only) devices.
+     * Both share the same remote-device data path and allocator; they differ
+     * only in how the client identifies the disk (content signature vs. SCSI
+     * hardware designator) and the encoded layout type. */
     shared->block_layout       = json_is_true(json_object_get(cfg, "block_layout"));
+    shared->scsi_layout        = json_is_true(json_object_get(cfg, "scsi_layout"));
     shared->block_cache_blocks = (uint32_t) json_integer_value(
         json_object_get(cfg, "block_cache_blocks"));
 
-    /* Block mode and orchestrated flex-files are mutually exclusive per module
-     * (the NFS server routes on CAP_LAYOUT_SOURCE before CAP_LAYOUT).  A diskfs
-     * module is loaded once per daemon with one config, so switch the module's
-     * advertised layout capability here: block mode SOURCEs block layouts,
-     * otherwise we persist the orchestrated flex blob (default). */
-    if (shared->block_layout) {
+    chimera_diskfs_abort_if(shared->block_layout && shared->scsi_layout,
+                            "block_layout and scsi_layout are mutually exclusive");
+
+    /* Layout-sourcing mode and orchestrated flex-files are mutually exclusive
+     * per module (the NFS server routes on CAP_LAYOUT_SOURCE before CAP_LAYOUT).
+     * A diskfs module is loaded once per daemon with one config, so switch the
+     * module's advertised layout capability here: a sourcing mode SOURCEs block
+     * or SCSI layouts, otherwise we persist the orchestrated flex blob. */
+    if (shared->block_layout || shared->scsi_layout) {
         vfs_diskfs.capabilities &= ~(uint64_t) CHIMERA_VFS_CAP_LAYOUT;
         vfs_diskfs.capabilities |= CHIMERA_VFS_CAP_LAYOUT_SOURCE |
-            CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK;
+            (shared->scsi_layout ? CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI
+                                 : CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK);
     }
     shared->inode_cache_inodes = (uint32_t) json_integer_value(
         json_object_get(cfg, "inode_cache_inodes"));
@@ -7807,10 +7796,6 @@ diskfs_thread_init(
     pthread_mutex_unlock(&shared->intent_log.registration_lock);
 
     evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
-    while (!__atomic_load_n(&thread->iq_channel->registered, __ATOMIC_ACQUIRE)) {
-        /* Wait until the intent-log thread has installed this channel so the
-         * first write does not also pay channel registration latency. */
-    }
 
     return thread;
 } /* diskfs_thread_init */
@@ -8489,8 +8474,6 @@ diskfs_mount(
     if (unlikely(!shared->orphans_scanned)) {
         diskfs_orphan_scan(thread);
     }
-    diskfs_warm_ag_logs(thread);
-
     p->thread     = thread;
     p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
     p->op_scratch = 0;
@@ -10234,11 +10217,11 @@ diskfs_read(
 
     (void) private_data;
 
-    /* Block-mode shares keep all file data on remote (pNFS) devices the server
-     * can't touch, so inline reads are impossible -- the client must use a
-     * block layout.  Reject so a non-pNFS read doesn't dereference a NULL
-     * device queue. */
-    if (unlikely(shared->block_layout)) {
+    /* Block/SCSI-mode shares keep all file data on remote (pNFS) devices the
+     * server can't touch, so inline reads are impossible -- the client must use
+     * a layout.  Reject so a non-pNFS read doesn't dereference a NULL device
+     * queue. */
+    if (unlikely(shared->block_layout || shared->scsi_layout)) {
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
@@ -11054,10 +11037,10 @@ diskfs_write(
 
     (void) private_data;
 
-    /* Block-mode data lives on remote (pNFS) devices: writes go directly from
-     * the client to the volume via an RW layout, never inline through the
+    /* Block/SCSI-mode data lives on remote (pNFS) devices: writes go directly
+     * from the client to the volume via an RW layout, never inline through the
      * server (which has no handle for those devices). */
-    if (unlikely(shared->block_layout)) {
+    if (unlikely(shared->block_layout || shared->scsi_layout)) {
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
@@ -13078,11 +13061,26 @@ diskfs_layout_add_device(
     ld = &request->get_layout.r_devices[request->get_layout.r_num_devices++];
     memset(ld, 0, sizeof(*ld));
     memcpy(ld->deviceid, dev->deviceid, SM_DEVICEID_SIZE);
-    ld->layout_class   = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
-    ld->blk_vol_size   = dev->size;
-    ld->blk_sig_offset = dev->sig_offset;
-    ld->blk_sig_len    = dev->sig_len;
-    memcpy(ld->blk_sig, dev->sig, dev->sig_len);
+
+    if (shared->scsi_layout) {
+        /* SCSI layout (RFC 8154): the client matches the LU by its VPD-0x83
+         * hardware designator; nothing is written to the disk. */
+        ld->layout_class    = CHIMERA_VFS_LAYOUT_CLASS_SCSI;
+        ld->blk_vol_size    = dev->size;
+        ld->scsi_code_set   = dev->scsi_code_set;
+        ld->scsi_desig_type = dev->scsi_desig_type;
+        ld->scsi_desig_len  = dev->scsi_desig_len;
+        memcpy(ld->scsi_desig, dev->scsi_desig, dev->scsi_desig_len);
+        ld->scsi_pr_key = dev->scsi_pr_key;
+    } else {
+        /* Block layout (RFC 5663): the client matches the disk by a content
+         * signature read at a fixed offset. */
+        ld->layout_class   = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
+        ld->blk_vol_size   = dev->size;
+        ld->blk_sig_offset = dev->sig_offset;
+        ld->blk_sig_len    = dev->sig_len;
+        memcpy(ld->blk_sig, dev->sig, dev->sig_len);
+    }
 } /* diskfs_layout_add_device */
 
 /* Append one block segment [file_off, file_off+len) -> (device_id, vol_off). */
@@ -13114,7 +13112,8 @@ diskfs_get_layout_finish(struct chimera_vfs_request *request)
 {
     struct diskfs_request_private *p = request->plugin_data;
 
-    request->get_layout.r_layout_class = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
+    request->get_layout.r_layout_class = p->thread->shared->scsi_layout
+        ? CHIMERA_VFS_LAYOUT_CLASS_SCSI : CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
     /* Commits the txn (durably persisting any new extent records) before the
      * layout is handed back; a pure-READ layout has nothing journaled. */
     diskfs_op_ok(request, p->txn);
@@ -13346,7 +13345,8 @@ diskfs_get_layout_inode_cb(
     p->loop_off       = off;
     p->loop_pos       = end;
 
-    request->get_layout.r_layout_class = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
+    request->get_layout.r_layout_class = shared->scsi_layout
+        ? CHIMERA_VFS_LAYOUT_CLASS_SCSI : CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
     request->get_layout.r_num_segments = 0;
     request->get_layout.r_num_devices  = 0;
 
@@ -13355,7 +13355,6 @@ diskfs_get_layout_inode_cb(
         return;
     }
 
-    (void) shared;
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_ext_floor_async(op, thread, inode, off, p->rec_scratch,
                                sizeof(p->rec_scratch), diskfs_get_layout_first_cb,
@@ -13376,7 +13375,7 @@ diskfs_get_layout(
 
     (void) private_data;
 
-    if (unlikely(!shared->block_layout)) {
+    if (unlikely(!shared->block_layout && !shared->scsi_layout)) {
         request->status = CHIMERA_VFS_ENOTSUP;
         request->complete(request);
         return;

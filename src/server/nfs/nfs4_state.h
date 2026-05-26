@@ -8,6 +8,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <uthash.h>
 #include <utlist.h>
@@ -28,6 +29,25 @@ struct nfs4_range_lease {
     struct chimera_vfs_file_state     *file_state;
     struct nfs4_range_lease           *next;
 };
+
+struct nfs_lock_state;
+
+/* Byte-range lock interval management (POSIX merge on LOCK / split on LOCKU).
+ * Defined in nfs4_state.c. */
+struct nfs4_range_lease *
+nfs4_range_lease_insert(
+    struct chimera_vfs_state             *vfs_state,
+    struct nfs_lock_state                *lock_state,
+    struct chimera_vfs_file_state        *file_state,
+    const struct chimera_vfs_lease_owner *owner,
+    uint8_t                               mode,
+    uint64_t                              start,
+    uint64_t                              end);
+
+void
+nfs4_range_lease_free(
+    struct chimera_vfs_state *vfs_state,
+    struct nfs4_range_lease  *rl);
 
 /*
  * Unified NFSv4 state model.
@@ -82,7 +102,7 @@ struct chimera_vfs_thread;
 struct nfs4_cb_path {
     uint32_t               cb_program;       /* client's callback program number */
     uint32_t               cb_ident;         /* 4.0 callback_ident               */
-    uint8_t                cb_minorversion;  /* 0 for 4.0, 1 for 4.1+            */
+    uint8_t                cb_minorversion;  /* NFSv4 minor version (0/1/2)      */
     char                   cb_netid[8];      /* "tcp" / "tcp6"                   */
     char                   cb_addr[64];      /* universal address h.h.h.h.p.p    */
     _Atomic uint8_t        cb_state;         /* NFS4_CB_*                        */
@@ -255,6 +275,9 @@ struct nfs_open_owner {
 
 struct nfs_open_state {
     struct nfs_open_owner          *owner;
+    uint32_t                        principal_flavor;
+    uint32_t                        principal_machinename_len;
+    char                            principal_machinename[NFS4_OPAQUE_LIMIT];
     uint8_t                         fh[NFS4_FHSIZE];
     uint16_t                        fh_len;
     uint32_t                        share_access;       /* OPEN4_SHARE_ACCESS_* */
@@ -465,6 +488,69 @@ struct nfs_state_table {
     uint32_t               epoch;
 };
 
+static inline struct nfs_client *
+nfs_state_owner_client(
+    void   *state,
+    uint8_t type)
+{
+    switch (type) {
+        case NFS4_SLOT_TYPE_OPEN:
+            return ((struct nfs_open_state *) state)->owner->client;
+        case NFS4_SLOT_TYPE_LOCK:
+            return ((struct nfs_lock_state *) state)->lock_owner->client;
+        case NFS4_SLOT_TYPE_DELEG:
+            return ((struct nfs_delegation *) state)->client;
+        case NFS4_SLOT_TYPE_LAYOUT:
+            return ((struct nfs_layout_state *) state)->client;
+        default:
+            return NULL;
+    } // switch
+} /* nfs_state_owner_client */
+
+static inline nfsstat4
+nfs_state_check_client(
+    void              *state,
+    uint8_t            type,
+    struct nfs_client *client)
+{
+    struct nfs_client *owner = nfs_state_owner_client(state, type);
+
+    if (!owner) {
+        return NFS4ERR_ACCESS;
+    }
+
+    if (!client) {
+        return NFS4_OK;
+    }
+
+    if (owner != client) {
+        return NFS4ERR_ACCESS;
+    }
+
+    return NFS4_OK;
+} /* nfs_state_check_client */
+
+static inline bool
+nfs_open_state_check_principal(
+    const struct nfs_open_state *state,
+    uint32_t                     flavor,
+    const char                  *machinename,
+    uint32_t                     machinename_len)
+{
+    if (state->principal_flavor != flavor ||
+        state->principal_machinename_len != machinename_len) {
+        return false;
+    }
+
+    if (machinename_len == 0) {
+        return true;
+    }
+
+    return machinename &&
+           memcmp(state->principal_machinename, machinename,
+                  machinename_len) == 0;
+} /* nfs_open_state_check_principal */
+
 /*
  * Public API.
  */
@@ -561,7 +647,8 @@ SYMBOL_EXPORT void
 nfs_client_destroy(
     struct nfs_client         *client,
     struct nfs_state_table    *table,
-    struct chimera_vfs_thread *vfs_thread);
+    struct chimera_vfs_thread *vfs_thread,
+    bool                       synchronous);
 
 /* Expire all state underneath a client, but keep the client record itself as
  * an expired tombstone so later clientid operations can return EXPIRED. */
@@ -596,6 +683,9 @@ nfs_open_owner_find_state(
 SYMBOL_EXPORT struct nfs_open_state *
 nfs_open_state_create(
     struct nfs_open_owner          *owner,
+    uint32_t                        principal_flavor,
+    const char                     *principal_machinename,
+    uint32_t                        principal_machinename_len,
     const uint8_t                  *fh,
     uint16_t                        fh_len,
     uint32_t                        share_access,

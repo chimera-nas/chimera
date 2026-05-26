@@ -48,6 +48,20 @@ file(STRINGS ${PYNFS_STABLE_PASS_FILE} PYNFS_STABLE_PASS_TESTS)
 # is not a pNFS server, so exclude it.
 set(PYNFS_EXTRA_currentstateid nopnfs)
 
+# Per-code NFSv4 lease-time override (seconds).  Delegation recall-handshake
+# tests open a file as one client, then drive a *second* client's conflicting
+# OPEN to force a CB_RECALL.  Establishing that second client (SETCLIENTID /
+# EXCHANGE_ID + CREATE_SESSION) does not renew the first client's lease, so under
+# ctest -j load the default 5s lease can lapse mid-test and the delegation is
+# revoked before the recall round-trips -- a load-dependent false failure.  These
+# tests perform no lease-scaled sleeps, so a longer lease adds no wall-clock cost.
+# Keyed by pynfs flag; listed codes get PYNFS_LEASE_OVERRIDE_SECONDS.  DELEG6
+# (4.0 testRenew) is deliberately excluded: it scales its own sleeps to the lease
+# period, so a longer lease would slow it down / trip the per-test timeout.
+set(PYNFS_LEASE_OVERRIDE_SECONDS 30)
+set(PYNFS_LEASE_OVERRIDE_delegations DELEG1 DELEG4 DELEG5 DELEG7 DELEG9 DELEG14)
+set(PYNFS_LEASE_OVERRIDE_deleg DELEG8)
+
 function(pynfs_codes_for_flag flag minor out_var)
     if("${minor}" STREQUAL "0")
         set(testserver ${PYNFS_DIR}/nfs4.0/testserver.py)
@@ -106,15 +120,21 @@ function(pynfs_add_code_test flag code backend minor)
     add_test(NAME ${name}
         COMMAND bash ${PYNFS_WRAPPER}
                 ${CHIMERA_BINARY} ${backend} ${minor} ${PYNFS_DIR} ${code})
-    set_tests_properties(${name} PROPERTIES
-        LABELS pynfs
-        ENVIRONMENT "PYTHONUNBUFFERED=1;PYNFS_RUNDEPS=1")
+
+    set(test_env "PYTHONUNBUFFERED=1" "PYNFS_RUNDEPS=1")
 
     if(DEFINED PYNFS_TIMEOUT_${flag})
-        set_tests_properties(${name} PROPERTIES
-            ENVIRONMENT
-                "PYTHONUNBUFFERED=1;PYNFS_RUNDEPS=1;PYNFS_TIMEOUT=${PYNFS_TIMEOUT_${flag}}")
+        list(APPEND test_env "PYNFS_TIMEOUT=${PYNFS_TIMEOUT_${flag}}")
     endif()
+
+    # Lease-sensitive delegation recall tests: see PYNFS_LEASE_OVERRIDE_* above.
+    if("${code}" IN_LIST PYNFS_LEASE_OVERRIDE_${flag})
+        list(APPEND test_env "PYNFS_NFS4_LEASE_TIME=${PYNFS_LEASE_OVERRIDE_SECONDS}")
+    endif()
+
+    set_tests_properties(${name} PROPERTIES
+        LABELS pynfs
+        ENVIRONMENT "${test_env}")
 
     if(NOT PYNFS_ENABLE_UNSTABLE_TESTS AND NOT "${name}" IN_LIST PYNFS_STABLE_PASS_TESTS)
         set_tests_properties(${name} PROPERTIES DISABLED TRUE)

@@ -867,17 +867,109 @@ test_lease_test(void)
     chimera_vfs_state_destroy(state);
 } /* test_lease_test */
 
-/* Test 17: I/O hook is a no-op pass-through for Stage A ------------ */
+/* Test 17: a breakable SHARE holder (chimera's implicit I/O lease) is
+ * recalled rather than hard-denied when a conflicting client open or
+ * delegation arrives. ------------------------------------------------- */
 static void
-test_io_hook_passthrough(void)
+test_breakable_share_recall(void)
 {
-    int rc;
+    struct chimera_vfs_state      *state;
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease       impl, deny, deleg;
+    enum chimera_vfs_lease_result  r;
+    struct chimera_vfs_lease      *conflict;
+    struct break_recorder          rec = { 0 };
 
-    fprintf(stderr, "\ntest_io_hook_passthrough\n");
+    fprintf(stderr, "\ntest_breakable_share_recall\n");
 
-    rc = chimera_vfs_state_check_io(NULL);
-    CHECK(rc == 0, "Stage A I/O hook returns 0 (permit)");
-} /* test_io_hook_passthrough */
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    /* Chimera's implicit lease: deny-nothing SHARE granting W, breakable. */
+    memset(&impl, 0, sizeof(impl));
+    impl.kind         = CHIMERA_VFS_LEASE_SHARE;
+    impl.mode.granted = CHIMERA_VFS_LEASE_MODE_W;
+    impl.mode.denied  = 0;
+    init_owner(&impl.owner, CHIMERA_VFS_LEASE_PROTO_INTERNAL, 0, 1);
+    impl.owner.break_cb   = recording_break_cb;
+    impl.owner.cb_private = &rec;
+
+    r = chimera_vfs_state_try_insert(state, file, &impl, &conflict);
+    CHECK(r == CHIMERA_VFS_LEASE_GRANTED, "implicit deny=0 share granted");
+
+    /* A real client open that denies write conflicts with the implicit W
+     * share — but because the holder is breakable, it is recalled, not
+     * denied. */
+    memset(&deny, 0, sizeof(deny));
+    deny.kind         = CHIMERA_VFS_LEASE_SHARE;
+    deny.mode.granted = CHIMERA_VFS_LEASE_MODE_W;
+    deny.mode.denied  = CHIMERA_VFS_LEASE_MODE_W;
+    init_owner(&deny.owner, CHIMERA_VFS_LEASE_PROTO_SMB2, 0xB, 2);
+
+    r = chimera_vfs_state_try_insert(state, file, &deny, &conflict);
+    CHECK(r == CHIMERA_VFS_LEASE_BREAKING,
+          "client deny-W open recalls implicit share (not denied)");
+    CHECK(rec.fired == 1, "implicit share break_cb fired once");
+
+    /* An NFSv4 write-delegation grant likewise recalls the implicit share
+     * (CACHING-vs-SHARE path). */
+    rec.fired        = 0;
+    impl.break_state = CHIMERA_VFS_BREAK_IDLE; /* make it recallable again */
+
+    memset(&deleg, 0, sizeof(deleg));
+    deleg.kind         = CHIMERA_VFS_LEASE_CACHING;
+    deleg.mode.granted = CHIMERA_VFS_LEASE_MODE_W;
+    init_owner(&deleg.owner, CHIMERA_VFS_LEASE_PROTO_NFSV4, 0xC, 0);
+
+    r = chimera_vfs_state_try_insert(state, file, &deleg, &conflict);
+    CHECK(r == CHIMERA_VFS_LEASE_BREAKING,
+          "NFSv4 deleg grant recalls implicit share (not denied)");
+    CHECK(rec.fired == 1, "implicit share break_cb fired for deleg conflict");
+
+    chimera_vfs_state_remove(state, file, &impl);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_breakable_share_recall */
+
+/* Test 18: a non-breakable SHARE holder (an ordinary client open) still
+ * hard-denies a conflicting acquire. --------------------------------- */
+static void
+test_nonbreakable_share_denies(void)
+{
+    struct chimera_vfs_state      *state;
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease       a, b;
+    enum chimera_vfs_lease_result  r;
+    struct chimera_vfs_lease      *conflict;
+
+    fprintf(stderr, "\ntest_nonbreakable_share_denies\n");
+
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    /* Ordinary client open, deny-W, NOT breakable. */
+    memset(&a, 0, sizeof(a));
+    a.kind         = CHIMERA_VFS_LEASE_SHARE;
+    a.mode.granted = CHIMERA_VFS_LEASE_MODE_R;
+    a.mode.denied  = CHIMERA_VFS_LEASE_MODE_W;
+    init_owner(&a.owner, CHIMERA_VFS_LEASE_PROTO_SMB2, 0xA, 1);
+
+    r = chimera_vfs_state_try_insert(state, file, &a, &conflict);
+    CHECK(r == CHIMERA_VFS_LEASE_GRANTED, "non-breakable share granted");
+
+    memset(&b, 0, sizeof(b));
+    b.kind         = CHIMERA_VFS_LEASE_SHARE;
+    b.mode.granted = CHIMERA_VFS_LEASE_MODE_W;
+    init_owner(&b.owner, CHIMERA_VFS_LEASE_PROTO_SMB2, 0xB, 2);
+
+    r = chimera_vfs_state_try_insert(state, file, &b, &conflict);
+    CHECK(r == CHIMERA_VFS_LEASE_DENIED,
+          "non-breakable deny-W share still denies");
+
+    chimera_vfs_state_remove(state, file, &a);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_nonbreakable_share_denies */
 
 /* Main ---------------------------------------------------------------- */
 int
@@ -906,7 +998,8 @@ main(
     test_async_acquire_cancel();
     test_release_pumps_pending();
     test_lease_test();
-    test_io_hook_passthrough();
+    test_breakable_share_recall();
+    test_nonbreakable_share_denies();
 
     fprintf(stderr, "\n========================================\n");
     fprintf(stderr, "Results: %d passed, %d failed\n", passed, failed);

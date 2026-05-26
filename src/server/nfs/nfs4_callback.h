@@ -65,6 +65,15 @@ struct nfs4_cb_client {
     uint32_t                          cb_ident;    /* 4.0 callback_ident */
     uint8_t                           sessionid[NFS4_SESSIONID_SIZE]; /* 4.1 */
     _Atomic uint32_t                  cb_seq;      /* 4.1 CB_SEQUENCE slot-0 seqid */
+    /* Lifetime: 1 reference for the owning cb_path plus one per in-flight CB
+     * RPC (CB_RECALL / CB_GETATTR / CB_LAYOUTRECALL), each of which keeps
+     * &cb_prog alive until its reply dispatches.  The path ref is dropped by
+     * nfs4_cb_path_teardown(); RPC refs by their completions.  Whoever drops
+     * the last ref frees the channel, but the free always runs on owner_thread
+     * (completions run there; teardown marshals via cb_doorbell) so it cannot
+     * race reply handling on the owner thread. */
+    _Atomic uint32_t                  refcount;
+    struct nfs4_cb_client            *teardown_next; /* cb_teardown_queue link */
 };
 
 /* Invalidate a 4.0 callback channel whose outbound connection has dropped.
@@ -76,9 +85,13 @@ void nfs4_cb_conn_lost(
 struct nfs4_cb_path;
 
 /* Tear down a client's callback channel (free the channel struct, disconnect a
- * 4.0 outbound connection).  Called from nfs_client_destroy. */
+ * 4.0 outbound connection).  Called from nfs_client_destroy.  When synchronous
+ * is true (server shutdown) the channel is freed in-line because the owner
+ * thread no longer exists; otherwise the free is marshaled to the owner thread
+ * via its cb_doorbell. */
 void nfs4_cb_path_teardown(
-    struct nfs4_cb_path *cb);
+    struct nfs4_cb_path *cb,
+    bool                 synchronous);
 
 /* Per-thread doorbell + recall queue setup/teardown. */
 void nfs4_cb_thread_init(

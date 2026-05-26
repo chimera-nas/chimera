@@ -106,20 +106,9 @@ chimera_nfs4_link(
         return;
     }
 
-    /* RFC 7530 §10.4.5: adding a hard link to a delegated file (the SAVEFH
-     * source) must recall the delegation first. */
-    if (chimera_server_config_get_nfs4_delegations(thread->shared->config)) {
-        uint64_t fh_hash = XXH3_64bits(req->saved_fh, req->saved_fhlen) & INT64_MAX;
-
-        if (chimera_vfs_state_break_caching(thread->vfs->vfs_state,
-                                            req->saved_fh, req->saved_fhlen,
-                                            fh_hash)) {
-            res->status = NFS4ERR_DELAY;
-            chimera_nfs4_compound_complete(req, NFS4ERR_DELAY);
-            return;
-        }
-    }
-
+    /* RFC 7530 §10.4.5 (hard link to a delegated file must recall the
+     * delegation) is now enforced centrally by chimera_vfs_link_at(), which
+     * recalls any caching lease on the SAVEFH source before linking. */
     chimera_vfs_open_fh(thread->vfs_thread,
                         &req->cred,
                         req->fh,

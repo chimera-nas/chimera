@@ -350,6 +350,9 @@ chimera_nfs4_open_install_state(
         nfsstat4               share_status;
 
         new_state = nfs_open_state_create(owner,
+                                          req->principal_flavor,
+                                          req->principal_machinename,
+                                          req->principal_machinename_len,
                                           handle->fh, handle->fh_len,
                                           args->share_access, args->share_deny,
                                           handle,

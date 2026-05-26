@@ -158,7 +158,6 @@ chimera_nfs4_read(
     struct chimera_vfs_open_handle *state_handle;
     struct nfs_open_state          *open_state;
     struct nfs_lock_state          *lock_state;
-    struct evpl_iovec              *iov;
     uint32_t                        current_seqid;
     nfsstat4                        status;
 
@@ -210,6 +209,17 @@ chimera_nfs4_read(
     status = nfs_state_table_acquire(table, &args->stateid, 0,
                                      &state_void, &state_type);
     if (status != NFS4_OK) {
+        res->status = status;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    status = nfs_state_check_client(
+        state_void, state_type,
+        req->session ? req->session->client_unified : NULL);
+    if (status != NFS4_OK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
         res->status = status;
         chimera_nfs4_compound_complete(req, res->status);
         return;
@@ -267,19 +277,38 @@ chimera_nfs4_read(
         return;
     }
 
+    if (!nfs_open_state_check_principal(open_state,
+                                        req->principal_flavor,
+                                        req->principal_machinename,
+                                        req->principal_machinename_len)) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->status = NFS4ERR_ACCESS;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     req->nfs_state_ref  = state_void;
     req->nfs_state_type = state_type;
 
-    iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
+    struct chimera_vfs_lease_owner io_owner = {
+        .protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4,
+        .client_key = open_state->owner->client->client_id,
+        .owner_lo   = state_handle->fh_hash,
+        .owner_hi   = 0,
+    };
+    struct evpl_iovec             *iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256,
+                                                              req->encoding->dbuf);
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
-    chimera_vfs_read(thread->vfs_thread, &req->cred,
-                     state_handle,
-                     args->offset,
-                     args->count,
-                     iov,
-                     256,
-                     0,
-                     chimera_nfs4_read_complete,
-                     req);
+    chimera_vfs_read_owned(thread->vfs_thread, &req->cred,
+                           state_handle,
+                           args->offset,
+                           args->count,
+                           iov,
+                           256,
+                           0,
+                           &io_owner,
+                           chimera_nfs4_read_complete,
+                           req);
 } /* chimera_nfs4_read */

@@ -4,6 +4,7 @@
 
 #include <stdlib.h>
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_state.h"
 #include "vfs_internal.h"
 #include "vfs_open_cache.h"
 #include "vfs_attr_cache.h"
@@ -16,6 +17,9 @@ chimera_vfs_write_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_write_callback_t callback = request->proto_callback;
 
+    /* Release the implicit-lease pin taken before dispatch (no-op when none
+     * was taken). */
+    chimera_vfs_io_lease_release(request);
 
     if (request->status == CHIMERA_VFS_OK) {
         chimera_vfs_attr_cache_insert(request->thread->vfs->vfs_attr_cache,
@@ -39,18 +43,19 @@ chimera_vfs_write_complete(struct chimera_vfs_request *request)
 
 static void
 chimera_vfs_write_dispatch(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        offset,
-    uint32_t                        count,
-    uint32_t                        sync,
-    uint64_t                        pre_attr_mask,
-    uint64_t                        post_attr_mask,
-    struct evpl_iovec              *iov,
-    int                             niov,
-    chimera_vfs_write_callback_t    callback,
-    void                           *private_data)
+    struct chimera_vfs_thread            *thread,
+    const struct chimera_vfs_cred        *cred,
+    struct chimera_vfs_open_handle       *handle,
+    uint64_t                              offset,
+    uint32_t                              count,
+    uint32_t                              sync,
+    uint64_t                              pre_attr_mask,
+    uint64_t                              post_attr_mask,
+    struct evpl_iovec                    *iov,
+    int                                   niov,
+    const struct chimera_vfs_lease_owner *io_owner,
+    chimera_vfs_write_callback_t          callback,
+    void                                 *private_data)
 {
     struct chimera_vfs_request *request;
 
@@ -76,23 +81,27 @@ chimera_vfs_write_dispatch(
     request->proto_callback                = callback;
     request->proto_private_data            = private_data;
 
-    chimera_vfs_dispatch(request);
+    /* Mediate the write through the lease layer (acquire/hold the implicit
+     * lease for a leaseless actor, or break other holders' read caches for a
+     * lease-holding client), then dispatch. */
+    chimera_vfs_io_lease_acquire(request, io_owner, chimera_vfs_dispatch);
 } /* chimera_vfs_write_dispatch */
 
 /* Continuation for the first gated write on a handle (see read counterpart). */
 struct chimera_vfs_write_gate {
-    struct chimera_vfs_thread      *thread;
-    const struct chimera_vfs_cred  *cred;
-    struct chimera_vfs_open_handle *handle;
-    uint64_t                        offset;
-    uint32_t                        count;
-    uint32_t                        sync;
-    uint64_t                        pre_attr_mask;
-    uint64_t                        post_attr_mask;
-    struct evpl_iovec              *iov;
-    int                             niov;
-    chimera_vfs_write_callback_t    callback;
-    void                           *private_data;
+    struct chimera_vfs_thread            *thread;
+    const struct chimera_vfs_cred        *cred;
+    struct chimera_vfs_open_handle       *handle;
+    uint64_t                              offset;
+    uint32_t                              count;
+    uint32_t                              sync;
+    uint64_t                              pre_attr_mask;
+    uint64_t                              post_attr_mask;
+    struct evpl_iovec                    *iov;
+    int                                   niov;
+    const struct chimera_vfs_lease_owner *io_owner;
+    chimera_vfs_write_callback_t          callback;
+    void                                 *private_data;
 };
 
 static void
@@ -122,25 +131,26 @@ chimera_vfs_write_gate_complete(
     chimera_vfs_write_dispatch(gate->thread, gate->cred, gate->handle,
                                gate->offset, gate->count, gate->sync,
                                gate->pre_attr_mask, gate->post_attr_mask,
-                               gate->iov, gate->niov, gate->callback,
-                               gate->private_data);
+                               gate->iov, gate->niov, gate->io_owner,
+                               gate->callback, gate->private_data);
     free(gate);
 } /* chimera_vfs_write_gate_complete */
 
 SYMBOL_EXPORT void
-chimera_vfs_write(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        offset,
-    uint32_t                        count,
-    uint32_t                        sync,
-    uint64_t                        pre_attr_mask,
-    uint64_t                        post_attr_mask,
-    struct evpl_iovec              *iov,
-    int                             niov,
-    chimera_vfs_write_callback_t    callback,
-    void                           *private_data)
+chimera_vfs_write_owned(
+    struct chimera_vfs_thread            *thread,
+    const struct chimera_vfs_cred        *cred,
+    struct chimera_vfs_open_handle       *handle,
+    uint64_t                              offset,
+    uint32_t                              count,
+    uint32_t                              sync,
+    uint64_t                              pre_attr_mask,
+    uint64_t                              post_attr_mask,
+    struct evpl_iovec                    *iov,
+    int                                   niov,
+    const struct chimera_vfs_lease_owner *io_owner,
+    chimera_vfs_write_callback_t          callback,
+    void                                 *private_data)
 {
     struct chimera_vfs_write_gate *gate;
 
@@ -163,6 +173,7 @@ chimera_vfs_write(
             gate->post_attr_mask = post_attr_mask;
             gate->iov            = iov;
             gate->niov           = niov;
+            gate->io_owner       = io_owner;
             gate->callback       = callback;
             gate->private_data   = private_data;
 
@@ -175,5 +186,25 @@ chimera_vfs_write(
 
     chimera_vfs_write_dispatch(thread, cred, handle, offset, count, sync,
                                pre_attr_mask, post_attr_mask, iov, niov,
-                               callback, private_data);
+                               io_owner, callback, private_data);
+} /* chimera_vfs_write_owned */
+
+SYMBOL_EXPORT void
+chimera_vfs_write(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        count,
+    uint32_t                        sync,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    struct evpl_iovec              *iov,
+    int                             niov,
+    chimera_vfs_write_callback_t    callback,
+    void                           *private_data)
+{
+    chimera_vfs_write_owned(thread, cred, handle, offset, count, sync,
+                            pre_attr_mask, post_attr_mask, iov, niov,
+                            NULL, callback, private_data);
 } /* chimera_vfs_write */
