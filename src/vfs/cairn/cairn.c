@@ -1576,6 +1576,53 @@ cairn_apply_attrs(
 
 } /* cairn_apply_attrs */
 
+static bool
+cairn_cred_can_access(
+    const struct cairn_inode      *inode,
+    const struct chimera_vfs_cred *cred,
+    uint32_t                       user_bit,
+    uint32_t                       group_bit,
+    uint32_t                       other_bit)
+{
+    if (cred->uid == 0) {
+        return true;
+    }
+
+    if ((uint64_t) cred->uid == inode->uid) {
+        return !!(inode->mode & user_bit);
+    }
+
+    bool in_group = ((uint64_t) cred->gid == inode->gid);
+
+    for (uint32_t i = 0; !in_group && i < cred->ngids; i++) {
+        if ((uint64_t) cred->gids[i] == inode->gid) {
+            in_group = true;
+        }
+    }
+
+    if (in_group) {
+        return !!(inode->mode & group_bit);
+    }
+
+    return !!(inode->mode & other_bit);
+} /* cairn_cred_can_access */
+
+static bool
+cairn_cred_can_read(
+    const struct cairn_inode      *inode,
+    const struct chimera_vfs_cred *cred)
+{
+    return cairn_cred_can_access(inode, cred, S_IRUSR, S_IRGRP, S_IROTH);
+} /* cairn_cred_can_read */
+
+static bool
+cairn_cred_can_write(
+    const struct cairn_inode      *inode,
+    const struct chimera_vfs_cred *cred)
+{
+    return cairn_cred_can_access(inode, cred, S_IWUSR, S_IWGRP, S_IWOTH);
+} /* cairn_cred_can_write */
+
 static void
 cairn_getattr(
     struct cairn_thread        *thread,
@@ -2572,6 +2619,26 @@ cairn_open_at(
         request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
         return;
+    }
+
+    if (!(flags & CHIMERA_VFS_OPEN_INFERRED)) {
+        bool allowed;
+
+        if (flags & CHIMERA_VFS_OPEN_READ_ONLY) {
+            allowed = cairn_cred_can_read(inode, request->cred);
+        } else {
+            allowed = cairn_cred_can_write(inode, request->cred);
+        }
+
+        if (!allowed) {
+            cairn_inode_handle_release(&parent_ih);
+            if (!is_new_inode) {
+                cairn_inode_handle_release(&child_ih);
+            }
+            request->status = CHIMERA_VFS_EACCES;
+            request->complete(request);
+            return;
+        }
     }
 
     if (flags & CHIMERA_VFS_OPEN_INFERRED) {
