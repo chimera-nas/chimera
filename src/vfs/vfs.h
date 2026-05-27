@@ -13,6 +13,8 @@
 #include "vfs_pnfs.h"
 #include "vfs_lease_types.h"
 #include "evpl/evpl.h"
+#include "prometheus-c.h"
+#include "vfs_clock.h"
 
 #define CHIMERA_VFS_PATH_MAX 4096
 #define CHIMERA_VFS_NAME_MAX 256
@@ -161,7 +163,7 @@ struct chimera_vfs_open_handle {
         struct chimera_vfs_request     *request,
         struct chimera_vfs_open_handle *handle);
     struct chimera_vfs_request     *request;
-    struct timespec                 timestamp;
+    uint64_t                        timestamp; /* stopwatch ticks */
     struct chimera_vfs_open_handle *bucket_next;
     struct chimera_vfs_open_handle *bucket_prev;
     struct chimera_vfs_open_handle *prev;
@@ -320,7 +322,7 @@ struct chimera_vfs_request {
     enum chimera_vfs_error             status;
     chimera_vfs_complete_callback_t    complete;
     chimera_vfs_complete_callback_t    complete_delegate;
-    struct timespec                    start_time;
+    struct prometheus_stopwatch        start_time;
     uint64_t                           elapsed_ns;
 
     /* Points to one page of memory that the plugin may use as desired */
@@ -656,6 +658,16 @@ struct chimera_vfs_request {
             uint32_t                        r_length;
             uint32_t                        r_eof;
             struct chimera_vfs_attrs        r_attr;
+            /* Set by the VFS core when it pre-allocated the read buffers on the
+             * connection thread (backend lacks CAP_READ_PROVIDES_BUFFERS).
+             * buffers_provided = number of iovecs placed in iov[]; aligned_prefix
+             * = offset - (offset & ~4095), the leading pad bytes the backend read
+             * but the client did not ask for.  The backend fills the buffers
+             * (data for file offset `offset` lands at buffer position
+             * aligned_prefix) and sets r_length/r_eof; the VFS core trims the
+             * prefix/tail and sets r_niov in chimera_vfs_read_complete(). */
+            int                             buffers_provided;
+            uint32_t                        aligned_prefix;
         } read;
 
         struct {
@@ -724,6 +736,8 @@ struct chimera_vfs_request {
             int                      new_namelen;
             const uint8_t           *target_fh; /* Optional: target FH if known (for silly rename) */
             int                      target_fh_len; /* 0 if target_fh not provided */
+            uint8_t                  source_fh[CHIMERA_VFS_FH_SIZE]; /* resolved source FH, for delegation recall */
+            int                      source_fh_len; /* 0 if source FH could not be resolved */
             struct chimera_vfs_attrs r_fromdir_pre_attr;
             struct chimera_vfs_attrs r_fromdir_post_attr;
             struct chimera_vfs_attrs r_todir_pre_attr;
@@ -1037,19 +1051,19 @@ struct chimera_vfs_handle_state {
  * chimera_vfs_get_xattr / set_xattr / list_xattrs / remove_xattr.
  * Surfaced over NFSv4.2 (RFC 8276). Modules that leave this unset
  * cause the VFS layer to return ENOTSUP. */
-#define CHIMERA_VFS_CAP_XATTR              (1U << 18)
+#define CHIMERA_VFS_CAP_XATTR                 (1U << 18)
 
 /* setxattr_option4 values (RFC 8276 §8) passed to chimera_vfs_set_xattr().
  * Kept numerically identical to the on-the-wire NFSv4.2 enum. */
-#define CHIMERA_VFS_XATTR_EITHER           0  /* create or replace */
-#define CHIMERA_VFS_XATTR_CREATE           1  /* must not already exist */
-#define CHIMERA_VFS_XATTR_REPLACE          2  /* must already exist */
+#define CHIMERA_VFS_XATTR_EITHER              0 /* create or replace */
+#define CHIMERA_VFS_XATTR_CREATE              1 /* must not already exist */
+#define CHIMERA_VFS_XATTR_REPLACE             2 /* must already exist */
 
 /* Module persists the opaque CHIMERA_VFS_ATTR_PNFS_LAYOUT attribute, so the NFS
  * server can store per-file pNFS layout state on it and hand out pNFS layouts.
  * This is the "orchestrated" model: the module is a passive vessel and the NFS
  * server produces the layout (creating data-server backing files itself). */
-#define CHIMERA_VFS_CAP_LAYOUT             (1U << 14)
+#define CHIMERA_VFS_CAP_LAYOUT                (1U << 14)
 
 /* Module SOURCES the layout itself: it already knows where a file's data
  * physically lives and synthesizes a protocol-neutral layout via
@@ -1057,10 +1071,22 @@ struct chimera_vfs_handle_state {
  * what the module returns) and does NO orchestration.  Mutually exclusive in
  * effect with CHIMERA_VFS_CAP_LAYOUT for a given file.  Exactly one of the
  * class bits below should accompany it. */
-#define CHIMERA_VFS_CAP_LAYOUT_SOURCE      (1U << 15)
-#define CHIMERA_VFS_CAP_LAYOUT_CLASS_FLEX  (1U << 16) /* produces flex-files (RFC 8435)  */
-#define CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK (1U << 17) /* produces block volume (RFC 5663)*/
-#define CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI  (1U << 19) /* produces SCSI volume (RFC 8154) */
+#define CHIMERA_VFS_CAP_LAYOUT_SOURCE         (1U << 15)
+#define CHIMERA_VFS_CAP_LAYOUT_CLASS_FLEX     (1U << 16) /* produces flex-files (RFC 8435)  */
+#define CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK    (1U << 17) /* produces block volume (RFC 5663)*/
+#define CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI     (1U << 19) /* produces SCSI volume (RFC 8154) */
+
+/* If set, the backend provides the memory for READ data itself (e.g. memfs
+ * returns refs to its in-memory SHARED block iovecs; the nfs proxy returns the
+ * buffers handed up by its upstream RPC reply).  If UNSET, the VFS core
+ * allocates the read buffers on the connection thread BEFORE dispatch and
+ * places them in request->read.iov (request->read.buffers_provided != 0); the
+ * backend MUST read into those buffers and must NOT allocate its own.  Keeping
+ * read-buffer ownership on the connection thread is what makes the delegation
+ * (worker-thread) read path safe without SHARED iovecs -- the buffers are
+ * allocated and released on the same (connection) thread.  See
+ * chimera_vfs_read_owned() / chimera_vfs_read_complete(). */
+#define CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS (1U << 20)
 
 /* If set, the module stores the canonical Windows/NFSv4 ACL (via va_acl)
  * losslessly.  If unset, the module is mode-only: the VFS translates ACLs to
@@ -1109,7 +1135,8 @@ struct chimera_vfs_module {
      */
 
     void      * (*init)(
-        const char *cfgdata);
+        const char                *cfgdata,
+        struct prometheus_metrics *metrics);
 
     /* Optional
      * Called once at destruction to clean up global state

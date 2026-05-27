@@ -940,8 +940,11 @@ cairn_remove_file_extents(
 } /* cairn_remove_file_extents */
 
 static void *
-cairn_init(const char *cfgdata)
+cairn_init(
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
 {
+    (void) metrics;
     struct cairn_shared *shared = calloc(1, sizeof(*shared));
     json_t              *cfg;
     json_error_t         json_error;
@@ -1694,6 +1697,53 @@ cairn_apply_attrs(
     inode->ctime = now;
 
 } /* cairn_apply_attrs */
+
+static bool
+cairn_cred_can_access(
+    const struct cairn_inode      *inode,
+    const struct chimera_vfs_cred *cred,
+    uint32_t                       user_bit,
+    uint32_t                       group_bit,
+    uint32_t                       other_bit)
+{
+    if (cred->uid == 0) {
+        return true;
+    }
+
+    if ((uint64_t) cred->uid == inode->uid) {
+        return !!(inode->mode & user_bit);
+    }
+
+    bool in_group = ((uint64_t) cred->gid == inode->gid);
+
+    for (uint32_t i = 0; !in_group && i < cred->ngids; i++) {
+        if ((uint64_t) cred->gids[i] == inode->gid) {
+            in_group = true;
+        }
+    }
+
+    if (in_group) {
+        return !!(inode->mode & group_bit);
+    }
+
+    return !!(inode->mode & other_bit);
+} /* cairn_cred_can_access */
+
+static bool
+cairn_cred_can_read(
+    const struct cairn_inode      *inode,
+    const struct chimera_vfs_cred *cred)
+{
+    return cairn_cred_can_access(inode, cred, S_IRUSR, S_IRGRP, S_IROTH);
+} /* cairn_cred_can_read */
+
+static bool
+cairn_cred_can_write(
+    const struct cairn_inode      *inode,
+    const struct chimera_vfs_cred *cred)
+{
+    return cairn_cred_can_access(inode, cred, S_IWUSR, S_IWGRP, S_IWOTH);
+} /* cairn_cred_can_write */
 
 static void
 cairn_getattr(
@@ -2723,6 +2773,34 @@ cairn_open_at(
         return;
     }
 
+    if (!(flags & CHIMERA_VFS_OPEN_INFERRED)) {
+        bool allowed;
+
+        if (flags & CHIMERA_VFS_OPEN_READ_ONLY) {
+            allowed = cairn_cred_can_read(inode, request->cred);
+        } else {
+            allowed = cairn_cred_can_write(inode, request->cred);
+        }
+
+        if (!allowed) {
+            cairn_inode_handle_release(&parent_ih);
+            if (!is_new_inode) {
+                cairn_inode_handle_release(&child_ih);
+            }
+            request->status = CHIMERA_VFS_EACCES;
+            request->complete(request);
+            return;
+        }
+    }
+
+    if (!is_new_inode &&
+        (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        request->open_at.set_attr->va_size == 0 &&
+        S_ISREG(inode->mode)) {
+        cairn_apply_attrs(inode, request->open_at.set_attr);
+        inode->space_used = 0;
+    }
+
     if (flags & CHIMERA_VFS_OPEN_INFERRED) {
         /* If this is an inferred open (ie an NFS3 create)
          * then we aren't returning a handle so we don't need
@@ -2826,7 +2904,7 @@ cairn_read(
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;
         request->read.r_length = 0;
-        request->read.r_eof    = 1;
+        request->read.r_eof    = 0;
         request->complete(request);
         return;
     }
@@ -2861,7 +2939,7 @@ cairn_read(
         return;
     }
 
-    if (offset + length > inode->size) {
+    if (length >= inode->size - offset) {
         length = inode->size - offset;
         eof    = 1;
     }
@@ -3138,6 +3216,17 @@ cairn_write(
     inode = ih.inode;
 
     cairn_map_attrs(shared, &request->write.r_pre_attr, inode);
+
+    if (request->write.length == 0) {
+        cairn_map_attrs(shared, &request->write.r_post_attr, inode);
+        cairn_inode_handle_release(&ih);
+
+        request->status         = CHIMERA_VFS_OK;
+        request->write.r_length = 0;
+        request->write.r_sync   = 1;
+        request->complete(request);
+        return;
+    }
 
     if (inode->size > request->write.offset) {
         cairn_punch_hole(thread, shared, inode, request->write.offset, request->write.length);
@@ -4671,11 +4760,18 @@ cairn_dispatch(
 } /* cairn_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
-    .name         = "cairn",
-    .fh_magic     = CHIMERA_VFS_FH_MAGIC_CAIRN,
-    .capabilities = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
+    .name     = "cairn",
+    .fh_magic = CHIMERA_VFS_FH_MAGIC_CAIRN,
+    /* CAP_READ_PROVIDES_BUFFERS: cairn_read fills a single contiguous buffer it
+     * allocates itself (SHARED, so the CAP_BLOCKING worker->connection-thread
+     * release is safe).  TODO: drop this cap and convert cairn_read to scatter
+     * its RocksDB extent fill across VFS-core-provided buffers via an
+     * append-blob cursor, like diskfs/linux/io_uring, so it can use cheaper
+     * non-SHARED connection-thread buffers. */
+    .capabilities   = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_ACL_NATIVE |
-        CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE | CHIMERA_VFS_CAP_XATTR,
+        CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE |
+        CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS,
     .init           = cairn_init,
     .destroy        = cairn_destroy,
     .thread_init    = cairn_thread_init,

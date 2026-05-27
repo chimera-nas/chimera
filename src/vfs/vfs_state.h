@@ -62,7 +62,7 @@ struct chimera_vfs_file_state {
     uint8_t                             implicit_active;    /* linked in share_resvs */
     uint8_t                             implicit_draining;  /* recall in progress */
     uint32_t                            implicit_inflight;  /* in-flight ops pinning it */
-    struct timespec                     implicit_last_used; /* CLOCK_MONOTONIC */
+    uint64_t                            implicit_last_used; /* stopwatch ticks */
 
     /* FIFO queue of acquires waiting on a break to complete. */
     struct chimera_vfs_pending_acquire *pending_head;

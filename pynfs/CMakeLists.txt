@@ -56,11 +56,62 @@ set(PYNFS_EXTRA_currentstateid nopnfs)
 # revoked before the recall round-trips -- a load-dependent false failure.  These
 # tests perform no lease-scaled sleeps, so a longer lease adds no wall-clock cost.
 # Keyed by pynfs flag; listed codes get PYNFS_LEASE_OVERRIDE_SECONDS.  DELEG6
-# (4.0 testRenew) is deliberately excluded: it scales its own sleeps to the lease
-# period, so a longer lease would slow it down / trip the per-test timeout.
+# (4.0 testRenew) also scales its own sleeps to the lease period, but it first
+# drives an unanswered CB_RECALL; with the wrapper's 5s default lease, Chimera's
+# 15s recall-failure path can expire the delegation holder before the test sends
+# RENEW.  Give it a lease beyond the recall window and a matching timeout.
 set(PYNFS_LEASE_OVERRIDE_SECONDS 30)
-set(PYNFS_LEASE_OVERRIDE_delegations DELEG1 DELEG4 DELEG5 DELEG7 DELEG9 DELEG14)
+set(PYNFS_LEASE_OVERRIDE_delegations DELEG1 DELEG4 DELEG5 DELEG6 DELEG7 DELEG9 DELEG14)
+set(PYNFS_LEASE_OVERRIDE_SECONDS_delegations 40)
+set(PYNFS_TIMEOUT_delegations 180)
 set(PYNFS_LEASE_OVERRIDE_deleg DELEG8)
+
+# Courteous-server tests (st_courtesy.py, COUR1-COUR7) need a longer lease for a
+# different reason, and -- unlike the delegation tests above -- they DO scale
+# their own sleeps to the lease (env.sleep(lease+10), or lease*2 for COUR1),
+# since they deliberately drive a client past lease expiry.  The flake: COUR7
+# (testExpiringManyClients) establishes 1000 clients back-to-back, and under
+# ctest -j load a single EXCHANGE_ID -> CREATE_SESSION handshake can slip past
+# the 5s default lease.  The sweep then expires that still-unconfirmed client,
+# so its own CREATE_SESSION (correctly, per RFC 8881 18.35.3 / EID9
+# testLeasePeriod) returns NFS4ERR_STALE_CLIENTID and the test fails.  A longer
+# lease makes that setup race effectively impossible.  Because the sleeps scale
+# with the lease, use a *modest* override (not the 30s above): 20s gives a 4x
+# margin over the observed race (a handshake gap would have to exceed 20s,
+# impossible across the ~8-10s setup seen in CI) without bloating the deliberate
+# sleeps (COUR7 -> ~40s, COUR1 -> ~40s in CI).  Per-flag
+# PYNFS_LEASE_OVERRIDE_SECONDS_<flag> overrides the shared default above.
+#
+# The flake is load-correlated -- a heavy ctest -j run is exactly when the 1000
+# client setup is slowest, pushing total runtime toward the 60s default wrapper
+# timeout (pynfs_test_wrapper.sh) just as the longer sleeps already cost more.
+# Raise the courteous wrapper timeout (PYNFS_TIMEOUT_<flag>, plumbed below) to
+# absorb that variance; 90s leaves ample headroom (COUR1's lease*2 = 40s sleep
+# plus even a badly inflated setup) while still flagging a genuine hang.
+set(PYNFS_LEASE_OVERRIDE_courteous COUR1 COUR2 COUR3 COUR4 COUR5 COUR6 COUR7)
+set(PYNFS_LEASE_OVERRIDE_SECONDS_courteous 20)
+set(PYNFS_TIMEOUT_courteous 90)
+
+# Per-code delegation-enable override.  The wrapper enables NFSv4 protocol
+# delegations only for the deleg/delegations suites, so the other suites
+# exercise the default (delegations-off) behavior.  DSESS9002/DSESS9003 live in
+# the destroy_session suite but need delegations on: each destroys and recreates
+# a client's session and drives a CB_RECALL to verify the backchannel survives a
+# DESTROY_SESSION/CREATE_SESSION cycle.  DSESS9002 grants the delegation over the
+# new session; DSESS9003 grants it over the old session, leaves the recall
+# unanswered, then expects the server to re-drive that recall over the recreated
+# session (see nfs4_cb_resend_recalls_on_rebind).  Keyed by pynfs flag; listed
+# codes get PYNFS_FORCE_DELEG=1.  These recall tests share the delegation suite's
+# lease/timeout sensitivity: DSESS9003 in particular drives an *unanswered*
+# CB_RECALL (so chimera's 15s recall-failure window is in play) and then a recall
+# round-trip over the recreated session, which under a heavy ctest -j ASan run
+# can run long.  Mirror the delegations suite -- a 40s lease (beyond the recall
+# window) and a 180s wrapper timeout -- so the handshake has headroom and the
+# first client's lease cannot lapse mid-test.
+set(PYNFS_FORCE_DELEG_destroy_session DSESS9002 DSESS9003)
+set(PYNFS_LEASE_OVERRIDE_destroy_session DSESS9002 DSESS9003)
+set(PYNFS_LEASE_OVERRIDE_SECONDS_destroy_session 40)
+set(PYNFS_TIMEOUT_destroy_session 180)
 
 function(pynfs_codes_for_flag flag minor out_var)
     if("${minor}" STREQUAL "0")
@@ -127,9 +178,21 @@ function(pynfs_add_code_test flag code backend minor)
         list(APPEND test_env "PYNFS_TIMEOUT=${PYNFS_TIMEOUT_${flag}}")
     endif()
 
-    # Lease-sensitive delegation recall tests: see PYNFS_LEASE_OVERRIDE_* above.
+    # Lease-sensitive tests: see PYNFS_LEASE_OVERRIDE_* above.  A flag may set
+    # its own PYNFS_LEASE_OVERRIDE_SECONDS_<flag>; otherwise the shared default
+    # applies.
     if("${code}" IN_LIST PYNFS_LEASE_OVERRIDE_${flag})
-        list(APPEND test_env "PYNFS_NFS4_LEASE_TIME=${PYNFS_LEASE_OVERRIDE_SECONDS}")
+        set(lease_seconds ${PYNFS_LEASE_OVERRIDE_SECONDS})
+        if(DEFINED PYNFS_LEASE_OVERRIDE_SECONDS_${flag})
+            set(lease_seconds ${PYNFS_LEASE_OVERRIDE_SECONDS_${flag}})
+        endif()
+        list(APPEND test_env "PYNFS_NFS4_LEASE_TIME=${lease_seconds}")
+    endif()
+
+    # Delegation-sensitive tests outside the deleg suites: see
+    # PYNFS_FORCE_DELEG_* above.
+    if("${code}" IN_LIST PYNFS_FORCE_DELEG_${flag})
+        list(APPEND test_env "PYNFS_FORCE_DELEG=1")
     endif()
 
     set_tests_properties(${name} PROPERTIES

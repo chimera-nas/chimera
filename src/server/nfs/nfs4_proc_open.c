@@ -72,6 +72,12 @@ chimera_nfs4_open_acquire_share(
     state->share_lease.owner.owner_lo   = XXH3_64bits(state->owner->owner,
                                                       state->owner->owner_len);
     state->share_lease.owner.owner_hi = 0;
+    /* Courteous server: report this share reservation dead once the owning
+     * client's lease lapses, so a conflicting open reclaims it; reclaim flags
+     * the client for sweep teardown. */
+    state->share_lease.owner.is_alive_cb = nfs_client_lease_alive;
+    state->share_lease.owner.revoked_cb  = nfs_client_lease_revoked_cb;
+    state->share_lease.owner.cb_private  = state->owner->client;
 
     result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                           &state->share_lease, &conflict);
@@ -193,15 +199,18 @@ chimera_nfs4_open_grant_delegation(
                                   &thread->shared->nfs4_state_table,
                                   &deleg_stateid);
 
-    deleg->lease.kind              = CHIMERA_VFS_LEASE_CACHING;
-    deleg->lease.mode.granted      = lease_mode;
-    deleg->lease.mode.denied       = 0;
-    deleg->lease.owner.protocol    = CHIMERA_VFS_LEASE_PROTO_NFSV4;
-    deleg->lease.owner.client_key  = client->client_id;
-    deleg->lease.owner.owner_lo    = fh_hash;
-    deleg->lease.owner.owner_hi    = 0;
-    deleg->lease.owner.break_cb    = nfs4_delegation_break_cb;
-    deleg->lease.owner.is_alive_cb = NULL;
+    deleg->lease.kind             = CHIMERA_VFS_LEASE_CACHING;
+    deleg->lease.mode.granted     = lease_mode;
+    deleg->lease.mode.denied      = 0;
+    deleg->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4;
+    deleg->lease.owner.client_key = client->client_id;
+    deleg->lease.owner.owner_lo   = fh_hash;
+    deleg->lease.owner.owner_hi   = 0;
+    deleg->lease.owner.break_cb   = nfs4_delegation_break_cb;
+    /* Courteous server: report the delegation dead once the owning client's
+     * lease lapses, so a conflicting open revokes it outright rather than
+     * attempting a CB_RECALL to a client that is gone. */
+    deleg->lease.owner.is_alive_cb = nfs_delegation_lease_alive;
     deleg->lease.owner.revoked_cb  = nfs_delegation_revoked_cb;
     deleg->lease.owner.cb_private  = deleg;
 
@@ -613,6 +622,112 @@ chimera_nfs4_open_at_complete(
     chimera_nfs4_open_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_at_complete */
 
+struct nfs4_open_lookup_regular_ctx {
+    struct nfs_request       *req;
+    struct chimera_vfs_attrs *attr;
+    const char               *name;
+    uint32_t                  namelen;
+    unsigned int              flags;
+};
+
+struct nfs4_open_unchecked_ctx {
+    struct nfs_request       *req;
+    struct chimera_vfs_attrs *attr;
+    const char               *name;
+    uint32_t                  namelen;
+    unsigned int              flags;
+};
+
+static void
+chimera_nfs4_open_lookup_regular_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct nfs4_open_lookup_regular_ctx *ctx           = private_data;
+    struct nfs_request                  *req           = ctx->req;
+    struct OPEN4res                     *res           = &req->res_compound.resarray[req->index].opopen;
+    struct chimera_vfs_open_handle      *parent_handle = req->handle;
+
+    (void) dir_attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    /* OPEN4_NOCREATE must classify special objects by type before the
+     * backend tries to open them.  Native opens of FIFOs, sockets, and
+     * devices can otherwise block or report backend-specific errors. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISREG(attr->va_mode)) {
+        res->status = S_ISDIR(attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_SYMLINK;
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                        parent_handle,
+                        ctx->name,
+                        ctx->namelen,
+                        ctx->flags,
+                        ctx->attr,
+                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
+                        CHIMERA_VFS_ATTR_MTIME,
+                        CHIMERA_VFS_ATTR_MTIME,
+                        chimera_nfs4_open_at_complete,
+                        req);
+} /* chimera_nfs4_open_lookup_regular_complete */
+
+static void
+chimera_nfs4_open_unchecked_lookup_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *existing_attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct nfs4_open_unchecked_ctx *ctx           = private_data;
+    struct nfs_request             *req           = ctx->req;
+    struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
+    struct chimera_vfs_open_handle *parent_handle = req->handle;
+
+    (void) existing_attr;
+    (void) dir_attr;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        /* RFC 7530 OPEN/UNCHECKED recreate: create attrs are ignored for an
+         * existing object, except size=0 truncates the file. */
+        if ((ctx->attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+            ctx->attr->va_size == 0) {
+            ctx->attr->va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+            ctx->attr->va_req_mask = CHIMERA_VFS_ATTR_SIZE;
+        } else {
+            ctx->attr->va_set_mask = 0;
+            ctx->attr->va_req_mask = 0;
+        }
+    } else if (error_code != CHIMERA_VFS_ENOENT) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                        parent_handle,
+                        ctx->name,
+                        ctx->namelen,
+                        ctx->flags,
+                        ctx->attr,
+                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
+                        CHIMERA_VFS_ATTR_MTIME,
+                        CHIMERA_VFS_ATTR_MTIME,
+                        chimera_nfs4_open_at_complete,
+                        req);
+} /* chimera_nfs4_open_unchecked_lookup_complete */
+
 static void
 chimera_nfs4_open_claim_fh_complete(
     enum chimera_vfs_error          error_code,
@@ -802,6 +917,51 @@ chimera_nfs4_open_parent_complete(
                 return;
             }
 
+            if (args->openhow.opentype == OPEN4_NOCREATE) {
+                struct nfs4_open_lookup_regular_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.file.data;
+                ctx->namelen = args->claim.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.file.data,
+                                      args->claim.file.len,
+                                      CHIMERA_VFS_ATTR_MODE,
+                                      0,
+                                      chimera_nfs4_open_lookup_regular_complete,
+                                      ctx);
+                return;
+            }
+
+            if (args->openhow.opentype == OPEN4_CREATE &&
+                args->openhow.how.mode == UNCHECKED4) {
+                struct nfs4_open_unchecked_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.file.data;
+                ctx->namelen = args->claim.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.file.data,
+                                      args->claim.file.len,
+                                      0,
+                                      0,
+                                      chimera_nfs4_open_unchecked_lookup_complete,
+                                      ctx);
+                return;
+            }
+
             chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
                                 parent_handle,
                                 args->claim.file.data,
@@ -826,6 +986,50 @@ chimera_nfs4_open_parent_complete(
                 chimera_vfs_release(req->thread->vfs_thread, parent_handle);
                 res->status = status;
                 chimera_nfs4_open_complete(req, status);
+                return;
+            }
+            if (args->openhow.opentype == OPEN4_NOCREATE) {
+                struct nfs4_open_lookup_regular_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.delegate_cur_info.file.data;
+                ctx->namelen = args->claim.delegate_cur_info.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.delegate_cur_info.file.data,
+                                      args->claim.delegate_cur_info.file.len,
+                                      CHIMERA_VFS_ATTR_MODE,
+                                      0,
+                                      chimera_nfs4_open_lookup_regular_complete,
+                                      ctx);
+                return;
+            }
+
+            if (args->openhow.opentype == OPEN4_CREATE &&
+                args->openhow.how.mode == UNCHECKED4) {
+                struct nfs4_open_unchecked_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.delegate_cur_info.file.data;
+                ctx->namelen = args->claim.delegate_cur_info.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.delegate_cur_info.file.data,
+                                      args->claim.delegate_cur_info.file.len,
+                                      0,
+                                      0,
+                                      chimera_nfs4_open_unchecked_lookup_complete,
+                                      ctx);
                 return;
             }
             chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
@@ -960,9 +1164,20 @@ chimera_nfs4_open(
         req->open_4_0_owner = owner;
     }
 
-    /* Phase 5: gate non-reclaim OPENs during the grace window.  Stubbed
-     * persistence makes this a no-op in practice today (to_reclaim is empty
-     * at boot so begin_grace short-circuits in_grace=false). */
+    /* Gate OPEN during recovery.  Two distinct rules apply:
+     *
+     *   1. Server-reboot grace window (nfs_recovery_open_check): non-reclaim
+     *      OPENs are refused while in_grace, and CLAIM_PREVIOUS reclaims are
+     *      refused outside it.  Persistence is stubbed so in_grace is false in
+     *      practice today, leaving only the reclaim-outside-grace NO_GRACE leg
+     *      live.
+     *
+     *   2. Per-client reclaim completion (RFC 8881 §18.51.3): once a 4.1+
+     *      client establishes a new client ID it MUST send RECLAIM_COMPLETE
+     *      before performing any non-reclaim locking operation.  Until it does,
+     *      a non-reclaim OPEN is refused with NFS4ERR_GRACE.  This is a
+     *      per-client obligation independent of the server-wide grace window,
+     *      so it is enforced whether or not in_grace is set. */
     {
         bool     is_reclaim = (args->claim.claim == CLAIM_PREVIOUS);
         nfsstat4 g_status   = nfs_recovery_open_check(
@@ -977,7 +1192,6 @@ chimera_nfs4_open(
         }
 
         if (req->minorversion > 0 && !is_reclaim && req->session &&
-            nfs_recovery_in_grace(&thread->shared->nfs4_recovery) &&
             !nfs4_client_reclaim_complete(&thread->shared->nfs4_shared_clients,
                                           req->session->nfs4_session_clientid)) {
             res->status = NFS4ERR_GRACE;

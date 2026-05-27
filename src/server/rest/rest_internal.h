@@ -6,6 +6,8 @@
 
 #include "common/logging.h"
 
+struct chimera_vfs_thread;
+
 #define chimera_rest_debug(...) chimera_debug("rest", __FILE__, __LINE__, __VA_ARGS__)
 #define chimera_rest_info(...)  chimera_info("rest", __FILE__, __LINE__, __VA_ARGS__)
 #define chimera_rest_error(...) chimera_error("rest", __FILE__, __LINE__, __VA_ARGS__)
@@ -18,6 +20,7 @@ struct chimera_rest_server {
     struct evpl_listener  *http_listener;
     struct evpl_listener  *https_listener;
     struct chimera_server *server;
+    int                    debug_fsops;
 };
 
 struct chimera_rest_thread {
@@ -26,4 +29,5 @@ struct chimera_rest_thread {
     struct evpl_http_agent     *agent;
     struct evpl_http_server    *http_server;
     struct evpl_http_server    *https_server;
+    struct chimera_vfs_thread  *vfs_thread;
 };

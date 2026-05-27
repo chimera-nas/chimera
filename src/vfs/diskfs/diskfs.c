@@ -26,6 +26,7 @@
 #include "slab_allocator.h"
 
 #include "evpl/evpl.h"
+#include "prometheus-c.h"
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
@@ -238,6 +239,153 @@ struct diskfs_txn;
 struct diskfs_inode;
 struct diskfs_inode_waiter;
 struct diskfs_block;
+
+enum diskfs_metric_inode_cache_op {
+    DISKFS_METRIC_INODE_CACHE_HIT,
+    DISKFS_METRIC_INODE_CACHE_MISS,
+    DISKFS_METRIC_INODE_CACHE_STALE,
+    DISKFS_METRIC_INODE_CACHE_LOAD,
+    DISKFS_METRIC_INODE_CACHE_INSERT,
+    DISKFS_METRIC_INODE_CACHE_WAIT,
+    DISKFS_METRIC_INODE_CACHE_NUM,
+};
+
+enum diskfs_metric_block_cache_op {
+    DISKFS_METRIC_BLOCK_CACHE_HIT,
+    DISKFS_METRIC_BLOCK_CACHE_MISS,
+    DISKFS_METRIC_BLOCK_CACHE_NEW,
+    DISKFS_METRIC_BLOCK_CACHE_WAIT,
+    DISKFS_METRIC_BLOCK_CACHE_COW,
+    DISKFS_METRIC_BLOCK_CACHE_RECYCLE,
+    DISKFS_METRIC_BLOCK_CACHE_NUM,
+};
+
+enum diskfs_metric_io_dir {
+    DISKFS_METRIC_IO_READ,
+    DISKFS_METRIC_IO_WRITE,
+    DISKFS_METRIC_IO_NUM_DIRS,
+};
+
+enum diskfs_metric_io_class {
+    DISKFS_METRIC_IO_DATA,
+    DISKFS_METRIC_IO_RMW,
+    DISKFS_METRIC_IO_INODE,
+    DISKFS_METRIC_IO_BTREE,
+    DISKFS_METRIC_IO_METADATA,
+    DISKFS_METRIC_IO_INTENT_LOG,
+    DISKFS_METRIC_IO_TAIL_PUSH,
+    DISKFS_METRIC_IO_NUM_CLASSES,
+};
+
+enum diskfs_metric_txn_phase {
+    DISKFS_METRIC_TXN_QUEUE_TO_SUBMIT,
+    DISKFS_METRIC_TXN_SUBMIT_TO_DURABLE,
+    DISKFS_METRIC_TXN_QUEUE_TO_DURABLE,
+    DISKFS_METRIC_TXN_DURABLE_TO_CALLBACK,
+    DISKFS_METRIC_TXN_QUEUE_TO_CALLBACK,
+    DISKFS_METRIC_TXN_NUM_PHASES,
+};
+
+static const char *diskfs_metric_inode_cache_op_names[] = {
+    "hit",
+    "miss",
+    "stale",
+    "load",
+    "insert",
+    "wait",
+};
+
+static const char *diskfs_metric_block_cache_op_names[] = {
+    "hit",
+    "miss",
+    "new",
+    "wait",
+    "cow",
+    "recycle",
+};
+
+static const char *diskfs_metric_io_dir_names[] = {
+    "read",
+    "write",
+};
+
+static const char *diskfs_metric_io_class_names[] = {
+    "data",
+    "rmw",
+    "inode",
+    "btree",
+    "metadata",
+    "intent_log",
+    "tail_push",
+};
+
+static const char *diskfs_metric_txn_phase_names[] = {
+    "queue_to_submit",
+    "submit_to_durable",
+    "queue_to_durable",
+    "durable_to_callback",
+    "queue_to_callback",
+};
+
+struct diskfs_metrics {
+    struct prometheus_metrics          *metrics;
+    int                                 num_devices;
+    struct prometheus_counter          *inode_cache;
+    struct prometheus_counter_series   *inode_cache_series[DISKFS_METRIC_INODE_CACHE_NUM];
+    struct prometheus_counter          *block_cache;
+    struct prometheus_counter_series   *block_cache_series[DISKFS_METRIC_BLOCK_CACHE_NUM];
+    struct prometheus_counter          *block_io_ops;
+    struct prometheus_counter_series *block_io_ops_series[DISKFS_METRIC_IO_NUM_DIRS][DISKFS_METRIC_IO_NUM_CLASSES];
+    struct prometheus_counter          *block_io_bytes;
+    struct prometheus_counter_series *block_io_bytes_series[DISKFS_METRIC_IO_NUM_DIRS][DISKFS_METRIC_IO_NUM_CLASSES];
+    struct prometheus_counter          *block_io_device_ops;
+    struct prometheus_counter_series  **block_io_device_ops_series;
+    struct prometheus_counter          *block_io_device_bytes;
+    struct prometheus_counter_series  **block_io_device_bytes_series;
+    struct prometheus_counter          *txn;
+    struct prometheus_counter_series   *txn_series[3];
+    struct prometheus_histogram        *txn_blocks;
+    struct prometheus_histogram_series *txn_blocks_series;
+    struct prometheus_histogram        *txn_bytes;
+    struct prometheus_histogram_series *txn_bytes_series;
+    struct prometheus_histogram        *txn_latency;
+    struct prometheus_histogram_series *txn_latency_series[DISKFS_METRIC_TXN_NUM_PHASES];
+    struct prometheus_gauge            *pending_io;
+    struct prometheus_gauge_series     *pending_io_series;
+    struct prometheus_gauge            *intent_log;
+    struct prometheus_gauge_series     *intent_log_series[9];
+};
+
+struct diskfs_thread_metrics {
+    struct prometheus_counter_instance   *inode_cache[DISKFS_METRIC_INODE_CACHE_NUM];
+    struct prometheus_counter_instance   *block_cache[DISKFS_METRIC_BLOCK_CACHE_NUM];
+    struct prometheus_counter_instance *block_io_ops[DISKFS_METRIC_IO_NUM_DIRS][DISKFS_METRIC_IO_NUM_CLASSES];
+    struct prometheus_counter_instance *block_io_bytes[DISKFS_METRIC_IO_NUM_DIRS][DISKFS_METRIC_IO_NUM_CLASSES];
+    struct prometheus_counter_instance  **block_io_device_ops;
+    struct prometheus_counter_instance  **block_io_device_bytes;
+    struct prometheus_counter_instance   *txn[3];
+    struct prometheus_histogram_instance *txn_blocks;
+    struct prometheus_histogram_instance *txn_bytes;
+    struct prometheus_histogram_instance *txn_latency[DISKFS_METRIC_TXN_NUM_PHASES];
+    struct prometheus_gauge_instance     *pending_io;
+};
+
+struct diskfs_intent_log_metrics {
+    struct prometheus_counter_instance *block_io_ops[DISKFS_METRIC_IO_NUM_DIRS][DISKFS_METRIC_IO_NUM_CLASSES];
+    struct prometheus_counter_instance *block_io_bytes[DISKFS_METRIC_IO_NUM_DIRS][DISKFS_METRIC_IO_NUM_CLASSES];
+    struct prometheus_counter_instance  **block_io_device_ops;
+    struct prometheus_counter_instance  **block_io_device_bytes;
+    struct prometheus_histogram_instance *txn_latency[DISKFS_METRIC_TXN_NUM_PHASES];
+    struct prometheus_gauge_instance     *redo_inflight;
+    struct prometheus_gauge_instance     *iocbs_inflight;
+    struct prometheus_gauge_instance     *push_outstanding;
+    struct prometheus_gauge_instance     *log_used_bytes;
+    struct prometheus_gauge_instance     *registered_channels;
+    struct prometheus_gauge_instance     *redo_inflight_high_water;
+    struct prometheus_gauge_instance     *iocbs_inflight_high_water;
+    struct prometheus_gauge_instance     *push_outstanding_high_water;
+    struct prometheus_gauge_instance     *log_used_bytes_high_water;
+};
 
 /* Logical lock mode for an inode held by a transaction. */
 enum diskfs_inode_lock_mode {
@@ -648,10 +796,13 @@ struct diskfs_txn {
 #define DISKFS_IQ_RING_MASK (DISKFS_IQ_RING_SIZE - 1)
 
 struct diskfs_iq_entry {
-    struct diskfs_txn     *txn;
-    diskfs_txn_commit_cb_t cb;
-    void                  *private_data;
-    int                    status;
+    struct diskfs_txn          *txn;
+    diskfs_txn_commit_cb_t      cb;
+    void                       *private_data;
+    struct prometheus_stopwatch enqueue_time;
+    struct prometheus_stopwatch submit_time;
+    struct prometheus_stopwatch durable_time;
+    int                         status;
 };
 
 struct diskfs_iq_ring {
@@ -703,35 +854,40 @@ struct diskfs_il_record {
 };
 
 struct diskfs_intent_log {
-    struct evpl_doorbell      wake_doorbell;
-    struct evpl              *evpl;
-    struct evpl_thread       *thread;
-    int                       ready;             /* atomic */
-    int                       shutdown;          /* atomic */
-    uint32_t                  num_channels;      /* slots[] count, intent log thread only */
-    struct diskfs_iq_channel *channels[DISKFS_IL_MAX_CHANNELS];
-    pthread_mutex_t           registration_lock;
-    struct diskfs_iq_channel *pending_head;
+    struct evpl_doorbell             wake_doorbell;
+    struct evpl                     *evpl;
+    struct evpl_thread              *thread;
+    int                              ready;      /* atomic */
+    int                              shutdown;   /* atomic */
+    uint32_t                         num_channels; /* slots[] count, intent log thread only */
+    struct diskfs_iq_channel        *channels[DISKFS_IL_MAX_CHANNELS];
+    pthread_mutex_t                  registration_lock;
+    struct diskfs_iq_channel        *pending_head;
 
     /* Block queues on the intent-log thread's own evpl (one per device),
      * used both to write redo records into the intent-log region and to
      * tail-push logged blocks to their final on-disk locations. */
-    struct evpl_block_queue **queue;
-    uint64_t                  log_head;          /* next free byte in the intent-log region */
-    uint64_t                  log_tail;          /* oldest un-pushed record (trim point) */
-    uint64_t                  log_seq;           /* next redo record sequence number */
+    struct evpl_block_queue        **queue;
+    uint64_t                         log_head;   /* next free byte in the intent-log region */
+    uint64_t                         log_tail;   /* oldest un-pushed record (trim point) */
+    uint64_t                         log_seq;    /* next redo record sequence number */
 
     /* Tail-pusher (runs on this thread): FIFO of durably-logged records whose
     * blocks have not yet been written to their final locations.  Processed
     * strictly oldest-first so a re-logged block's newest image lands last. */
-    struct diskfs_il_record  *push_head;
-    struct diskfs_il_record  *push_tail;
-    struct diskfs_il_record  *push_cur;          /* record currently being pushed */
-    uint32_t                  push_next;         /* next block index of push_cur to issue */
-    int                       push_outstanding;  /* home writes in flight for push_cur */
-    int                       redo_inflight;     /* redo writes issued, not yet in FIFO */
-    int                       iocbs_inflight;    /* block writes (redo + push) on the queue, not yet completed */
-    int                       sync;              /* sync flag passed to redo/push block writes (0 in unsafe_async mode) */
+    struct diskfs_il_record         *push_head;
+    struct diskfs_il_record         *push_tail;
+    struct diskfs_il_record         *push_cur;   /* record currently being pushed */
+    uint32_t                         push_next;  /* next block index of push_cur to issue */
+    int                              push_outstanding; /* home writes in flight for push_cur */
+    int                              redo_inflight; /* redo writes issued, not yet in FIFO */
+    int                              iocbs_inflight; /* block writes (redo + push) on the queue, not yet completed */
+    int                              redo_inflight_high_water;
+    int                              iocbs_inflight_high_water;
+    int                              push_outstanding_high_water;
+    uint64_t                         log_used_bytes_high_water;
+    int                              sync;       /* sync flag passed to redo/push block writes (0 in unsafe_async mode) */
+    struct diskfs_intent_log_metrics metrics;
 };
 
 struct diskfs_shared {
@@ -757,57 +913,498 @@ struct diskfs_shared {
     uint64_t                   fsid;
     struct space_map          *space_map;
     struct diskfs_intent_log   intent_log;
+    struct diskfs_metrics      metrics;
     pthread_mutex_t            lock;
 };
 
 struct diskfs_thread {
-    struct evpl                *evpl;
-    struct diskfs_shared       *shared;
-    struct evpl_block_queue   **queue;
-    struct evpl_iovec           zero;
-    struct evpl_iovec           pad;
-    int                         thread_id;
-    struct slab_allocator      *allocator;
-    struct sm_thread_cache      space_cache;       /* metadata (LOCAL devices) */
-    struct sm_thread_cache      data_space_cache;  /* block-mode file data (REMOTE devices) */
-    struct diskfs_txn          *txn_free_list;
-    struct diskfs_inode_waiter *waiter_free_list;
-    struct diskfs_iq_channel   *iq_channel;
-    int                         pending_io;
+    struct evpl                 *evpl;
+    struct diskfs_shared        *shared;
+    struct evpl_block_queue    **queue;
+    struct evpl_iovec            zero;
+    struct evpl_iovec            pad;
+    int                          thread_id;
+    struct slab_allocator       *allocator;
+    struct sm_thread_cache       space_cache;      /* metadata (LOCAL devices) */
+    struct sm_thread_cache       data_space_cache; /* block-mode file data (REMOTE devices) */
+    struct diskfs_txn           *txn_free_list;
+    struct diskfs_inode_waiter  *waiter_free_list;
+    struct diskfs_iq_channel    *iq_channel;
+    int                          pending_io;
 
     /* Cross-thread lock-grant delivery: any thread that releases an inode
      * and grants it to a waiter belonging to this worker enqueues the
      * granted waiter here and rings grant_doorbell, so the continuation
      * runs back on this worker. */
-    pthread_mutex_t             grant_lock;
-    struct diskfs_inode_waiter *grant_head;
-    struct diskfs_inode_waiter *grant_tail;
-    struct evpl_doorbell        grant_doorbell;
+    pthread_mutex_t              grant_lock;
+    struct diskfs_inode_waiter  *grant_head;
+    struct diskfs_inode_waiter  *grant_tail;
+    struct evpl_doorbell         grant_doorbell;
 
     /* Cross-thread continuation resumption: when a block this worker has
      * waiters on finishes loading (possibly on another worker that issued the
      * read), the ready waiters are queued here.  Same-worker resumptions drain
      * via the deferral (no eventfd); cross-worker ones ring the doorbell. */
-    pthread_mutex_t             resume_lock;
-    struct diskfs_block_waiter *resume_head;
-    struct diskfs_block_waiter *resume_tail;
-    struct evpl_doorbell        resume_doorbell;
-    struct evpl_deferral        resume_deferral;
-    struct diskfs_bt_op        *bt_op_free_list;
-    struct diskfs_block_waiter *block_waiter_free_list;
+    pthread_mutex_t              resume_lock;
+    struct diskfs_block_waiter  *resume_head;
+    struct diskfs_block_waiter  *resume_tail;
+    struct evpl_doorbell         resume_doorbell;
+    struct evpl_deferral         resume_deferral;
+    struct diskfs_bt_op         *bt_op_free_list;
+    struct diskfs_block_waiter  *block_waiter_free_list;
 
     /* Background reclaim of large deleted inodes: a queue of orphan drain
      * contexts processed one at a time on this worker (each drains its inode's
      * b+tree in bounded batches across transactions). */
-    struct diskfs_drain        *drain_head, *drain_tail;
-    int                         draining;
+    struct diskfs_drain         *drain_head, *drain_tail;
+    int                          draining;
 
     /* Data-I/O admission control: the per-thread block queues have a bounded
      * submission ring, so a burst of concurrent (or heavily fragmented) reads
      * and writes can overrun it.  Requests that would exceed the in-flight cap
      * park here and are resumed from a block-I/O completion as capacity frees. */
-    struct chimera_vfs_request *io_wait_head, *io_wait_tail;
+    struct chimera_vfs_request  *io_wait_head, *io_wait_tail;
+    struct diskfs_thread_metrics metrics;
 };
+
+static void
+diskfs_metrics_init(
+    struct diskfs_shared      *shared,
+    struct prometheus_metrics *metrics)
+{
+    struct diskfs_metrics *m               = &shared->metrics;
+    static const char     *op_label[]      = { "op" };
+    static const char     *phase_label[]   = { "phase" };
+    static const char     *io_labels[]     = { "direction", "class" };
+    static const char     *io_dev_labels[] = { "direction", "class", "device" };
+    static const char     *intent_label[]  = { "name" };
+    static const char     *txn_label[]     = { "name" };
+    static const char     *txn_names[]     = { "write", "blocks", "bytes" };
+    static const char     *intent_names[]  = {
+        "redo_inflight",
+        "iocbs_inflight",
+        "push_outstanding",
+        "log_used_bytes",
+        "registered_channels",
+        "redo_inflight_high_water",
+        "iocbs_inflight_high_water",
+        "push_outstanding_high_water",
+        "log_used_bytes_high_water",
+    };
+
+    if (!metrics) {
+        return;
+    }
+
+    m->metrics     = metrics;
+    m->num_devices = shared->num_devices;
+    m->inode_cache = prometheus_metrics_create_counter(
+        metrics, "chimera_diskfs_inode_cache",
+        "Diskfs inode cache events");
+    m->block_cache = prometheus_metrics_create_counter(
+        metrics, "chimera_diskfs_block_cache",
+        "Diskfs block cache events");
+    m->block_io_ops = prometheus_metrics_create_counter(
+        metrics, "chimera_diskfs_block_io_ops",
+        "Diskfs classified block I/O submissions");
+    m->block_io_bytes = prometheus_metrics_create_counter(
+        metrics, "chimera_diskfs_block_io_bytes",
+        "Diskfs classified block I/O submitted bytes");
+    m->block_io_device_ops = prometheus_metrics_create_counter(
+        metrics, "chimera_diskfs_block_io_device_ops",
+        "Diskfs classified block I/O submissions by device");
+    m->block_io_device_bytes = prometheus_metrics_create_counter(
+        metrics, "chimera_diskfs_block_io_device_bytes",
+        "Diskfs classified block I/O submitted bytes by device");
+    m->txn = prometheus_metrics_create_counter(
+        metrics, "chimera_diskfs_txn",
+        "Diskfs transaction counters");
+    m->txn_blocks = prometheus_metrics_create_histogram_exponential(
+        metrics, "chimera_diskfs_txn_blocks",
+        "Diskfs dirty blocks per transaction", 24);
+    m->txn_bytes = prometheus_metrics_create_histogram_exponential(
+        metrics, "chimera_diskfs_txn_bytes",
+        "Diskfs dirty bytes per transaction", 32);
+    m->txn_latency = prometheus_metrics_create_histogram_time(
+        metrics, "chimera_diskfs_txn_latency_nanoseconds",
+        "Diskfs transaction latency in nanoseconds", 34);
+    m->pending_io = prometheus_metrics_create_gauge(
+        metrics, "chimera_diskfs_pending_io",
+        "Diskfs outstanding worker block I/O");
+    m->intent_log = prometheus_metrics_create_gauge(
+        metrics, "chimera_diskfs_intent_log",
+        "Diskfs intent-log pressure gauges");
+    for (int i = 0; i < DISKFS_METRIC_INODE_CACHE_NUM; i++) {
+        m->inode_cache_series[i] = prometheus_counter_create_series(
+            m->inode_cache, op_label, &diskfs_metric_inode_cache_op_names[i], 1);
+    }
+    for (int i = 0; i < DISKFS_METRIC_BLOCK_CACHE_NUM; i++) {
+        m->block_cache_series[i] = prometheus_counter_create_series(
+            m->block_cache, op_label, &diskfs_metric_block_cache_op_names[i], 1);
+    }
+    for (int d = 0; d < DISKFS_METRIC_IO_NUM_DIRS; d++) {
+        for (int c = 0; c < DISKFS_METRIC_IO_NUM_CLASSES; c++) {
+            const char *values[] = {
+                diskfs_metric_io_dir_names[d],
+                diskfs_metric_io_class_names[c],
+            };
+
+            m->block_io_ops_series[d][c] = prometheus_counter_create_series(
+                m->block_io_ops, io_labels, values, 2);
+            m->block_io_bytes_series[d][c] = prometheus_counter_create_series(
+                m->block_io_bytes, io_labels, values, 2);
+        }
+    }
+    m->block_io_device_ops_series = calloc(
+        (size_t) shared->num_devices * DISKFS_METRIC_IO_NUM_DIRS *
+        DISKFS_METRIC_IO_NUM_CLASSES, sizeof(*m->block_io_device_ops_series));
+    m->block_io_device_bytes_series = calloc(
+        (size_t) shared->num_devices * DISKFS_METRIC_IO_NUM_DIRS *
+        DISKFS_METRIC_IO_NUM_CLASSES, sizeof(*m->block_io_device_bytes_series));
+    for (int dev = 0; dev < shared->num_devices; dev++) {
+        for (int d = 0; d < DISKFS_METRIC_IO_NUM_DIRS; d++) {
+            for (int c = 0; c < DISKFS_METRIC_IO_NUM_CLASSES; c++) {
+                size_t      idx = ((size_t) dev * DISKFS_METRIC_IO_NUM_DIRS + d) *
+                    DISKFS_METRIC_IO_NUM_CLASSES + c;
+                const char *values[] = {
+                    diskfs_metric_io_dir_names[d],
+                    diskfs_metric_io_class_names[c],
+                    shared->devices[dev].name,
+                };
+
+                m->block_io_device_ops_series[idx] = prometheus_counter_create_series(
+                    m->block_io_device_ops, io_dev_labels, values, 3);
+                m->block_io_device_bytes_series[idx] = prometheus_counter_create_series(
+                    m->block_io_device_bytes, io_dev_labels, values, 3);
+            }
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        m->txn_series[i] = prometheus_counter_create_series(
+            m->txn, txn_label, &txn_names[i], 1);
+    }
+    m->txn_blocks_series = prometheus_histogram_create_series(m->txn_blocks, NULL, NULL, 0);
+    m->txn_bytes_series  = prometheus_histogram_create_series(m->txn_bytes, NULL, NULL, 0);
+    for (int i = 0; i < DISKFS_METRIC_TXN_NUM_PHASES; i++) {
+        m->txn_latency_series[i] = prometheus_histogram_create_series(
+            m->txn_latency, phase_label, &diskfs_metric_txn_phase_names[i], 1);
+    }
+    m->pending_io_series = prometheus_gauge_create_series(m->pending_io, NULL, NULL, 0);
+    for (int i = 0; i < 9; i++) {
+        m->intent_log_series[i] = prometheus_gauge_create_series(
+            m->intent_log, intent_label, &intent_names[i], 1);
+    }
+} /* diskfs_metrics_init */
+
+static void
+diskfs_thread_metrics_init(struct diskfs_thread *thread)
+{
+    struct diskfs_metrics        *m  = &thread->shared->metrics;
+    struct diskfs_thread_metrics *tm = &thread->metrics;
+
+    if (!m->metrics) {
+        return;
+    }
+
+    for (int i = 0; i < DISKFS_METRIC_INODE_CACHE_NUM; i++) {
+        tm->inode_cache[i] = prometheus_counter_series_create_instance(m->inode_cache_series[i]);
+    }
+    for (int i = 0; i < DISKFS_METRIC_BLOCK_CACHE_NUM; i++) {
+        tm->block_cache[i] = prometheus_counter_series_create_instance(m->block_cache_series[i]);
+    }
+    for (int d = 0; d < DISKFS_METRIC_IO_NUM_DIRS; d++) {
+        for (int c = 0; c < DISKFS_METRIC_IO_NUM_CLASSES; c++) {
+            tm->block_io_ops[d][c] =
+                prometheus_counter_series_create_instance(m->block_io_ops_series[d][c]);
+            tm->block_io_bytes[d][c] =
+                prometheus_counter_series_create_instance(m->block_io_bytes_series[d][c]);
+        }
+    }
+    tm->block_io_device_ops = calloc(
+        (size_t) m->num_devices * DISKFS_METRIC_IO_NUM_DIRS *
+        DISKFS_METRIC_IO_NUM_CLASSES, sizeof(*tm->block_io_device_ops));
+    tm->block_io_device_bytes = calloc(
+        (size_t) m->num_devices * DISKFS_METRIC_IO_NUM_DIRS *
+        DISKFS_METRIC_IO_NUM_CLASSES, sizeof(*tm->block_io_device_bytes));
+    for (int dev = 0; dev < m->num_devices; dev++) {
+        for (int d = 0; d < DISKFS_METRIC_IO_NUM_DIRS; d++) {
+            for (int c = 0; c < DISKFS_METRIC_IO_NUM_CLASSES; c++) {
+                size_t idx = ((size_t) dev * DISKFS_METRIC_IO_NUM_DIRS + d) *
+                    DISKFS_METRIC_IO_NUM_CLASSES + c;
+
+                tm->block_io_device_ops[idx] =
+                    prometheus_counter_series_create_instance(
+                        m->block_io_device_ops_series[idx]);
+                tm->block_io_device_bytes[idx] =
+                    prometheus_counter_series_create_instance(
+                        m->block_io_device_bytes_series[idx]);
+            }
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        tm->txn[i] = prometheus_counter_series_create_instance(m->txn_series[i]);
+    }
+    tm->txn_blocks = prometheus_histogram_series_create_instance(m->txn_blocks_series);
+    tm->txn_bytes  = prometheus_histogram_series_create_instance(m->txn_bytes_series);
+    for (int i = 0; i < DISKFS_METRIC_TXN_NUM_PHASES; i++) {
+        tm->txn_latency[i] = prometheus_histogram_series_create_instance(m->txn_latency_series[i]);
+    }
+    tm->pending_io = prometheus_gauge_series_create_instance(m->pending_io_series);
+} /* diskfs_thread_metrics_init */
+
+static void
+diskfs_intent_log_metrics_init(struct diskfs_intent_log *il)
+{
+    struct diskfs_shared  *shared = container_of(il, struct diskfs_shared, intent_log);
+    struct diskfs_metrics *m      = &shared->metrics;
+
+    if (!m->metrics) {
+        return;
+    }
+
+    for (int d = 0; d < DISKFS_METRIC_IO_NUM_DIRS; d++) {
+        for (int c = 0; c < DISKFS_METRIC_IO_NUM_CLASSES; c++) {
+            il->metrics.block_io_ops[d][c] =
+                prometheus_counter_series_create_instance(m->block_io_ops_series[d][c]);
+            il->metrics.block_io_bytes[d][c] =
+                prometheus_counter_series_create_instance(m->block_io_bytes_series[d][c]);
+        }
+    }
+    il->metrics.block_io_device_ops = calloc(
+        (size_t) m->num_devices * DISKFS_METRIC_IO_NUM_DIRS *
+        DISKFS_METRIC_IO_NUM_CLASSES, sizeof(*il->metrics.block_io_device_ops));
+    il->metrics.block_io_device_bytes = calloc(
+        (size_t) m->num_devices * DISKFS_METRIC_IO_NUM_DIRS *
+        DISKFS_METRIC_IO_NUM_CLASSES, sizeof(*il->metrics.block_io_device_bytes));
+    for (int dev = 0; dev < m->num_devices; dev++) {
+        for (int d = 0; d < DISKFS_METRIC_IO_NUM_DIRS; d++) {
+            for (int c = 0; c < DISKFS_METRIC_IO_NUM_CLASSES; c++) {
+                size_t idx = ((size_t) dev * DISKFS_METRIC_IO_NUM_DIRS + d) *
+                    DISKFS_METRIC_IO_NUM_CLASSES + c;
+
+                il->metrics.block_io_device_ops[idx] =
+                    prometheus_counter_series_create_instance(
+                        m->block_io_device_ops_series[idx]);
+                il->metrics.block_io_device_bytes[idx] =
+                    prometheus_counter_series_create_instance(
+                        m->block_io_device_bytes_series[idx]);
+            }
+        }
+    }
+    for (int i = 0; i < DISKFS_METRIC_TXN_NUM_PHASES; i++) {
+        il->metrics.txn_latency[i] =
+            prometheus_histogram_series_create_instance(m->txn_latency_series[i]);
+    }
+    il->metrics.redo_inflight =
+        prometheus_gauge_series_create_instance(m->intent_log_series[0]);
+    il->metrics.iocbs_inflight =
+        prometheus_gauge_series_create_instance(m->intent_log_series[1]);
+    il->metrics.push_outstanding =
+        prometheus_gauge_series_create_instance(m->intent_log_series[2]);
+    il->metrics.log_used_bytes =
+        prometheus_gauge_series_create_instance(m->intent_log_series[3]);
+    il->metrics.registered_channels =
+        prometheus_gauge_series_create_instance(m->intent_log_series[4]);
+    il->metrics.redo_inflight_high_water =
+        prometheus_gauge_series_create_instance(m->intent_log_series[5]);
+    il->metrics.iocbs_inflight_high_water =
+        prometheus_gauge_series_create_instance(m->intent_log_series[6]);
+    il->metrics.push_outstanding_high_water =
+        prometheus_gauge_series_create_instance(m->intent_log_series[7]);
+    il->metrics.log_used_bytes_high_water =
+        prometheus_gauge_series_create_instance(m->intent_log_series[8]);
+} /* diskfs_intent_log_metrics_init */
+
+static inline void
+diskfs_metric_counter_inc(struct prometheus_counter_instance *inst)
+{
+    if (inst) {
+        prometheus_counter_increment(inst);
+    }
+} /* diskfs_metric_counter_inc */
+
+static inline void
+diskfs_metric_counter_add(
+    struct prometheus_counter_instance *inst,
+    uint64_t                            value)
+{
+    if (inst) {
+        prometheus_counter_add(inst, value);
+    }
+} /* diskfs_metric_counter_add */
+
+static inline void
+diskfs_metric_il_block_io(
+    struct diskfs_intent_log   *il,
+    enum diskfs_metric_io_dir   dir,
+    enum diskfs_metric_io_class class,
+    uint64_t                    bytes)
+{
+    diskfs_metric_counter_inc(il->metrics.block_io_ops[dir][class]);
+    diskfs_metric_counter_add(il->metrics.block_io_bytes[dir][class], bytes);
+} /* diskfs_metric_il_block_io */
+
+static inline size_t
+diskfs_metric_io_device_idx(
+    uint32_t                    device_id,
+    enum diskfs_metric_io_dir   dir,
+    enum diskfs_metric_io_class class)
+{
+    return ((size_t) device_id * DISKFS_METRIC_IO_NUM_DIRS + dir) *
+           DISKFS_METRIC_IO_NUM_CLASSES + class;
+} /* diskfs_metric_io_device_idx */
+
+static inline void
+diskfs_metric_il_block_io_device(
+    struct diskfs_intent_log   *il,
+    uint32_t                    device_id,
+    enum diskfs_metric_io_dir   dir,
+    enum diskfs_metric_io_class class,
+    uint64_t                    bytes)
+{
+    struct diskfs_shared *shared = container_of(il, struct diskfs_shared, intent_log);
+    size_t                idx;
+
+    if (!il->metrics.block_io_device_ops || device_id >= (uint32_t) shared->num_devices) {
+        return;
+    }
+    idx = diskfs_metric_io_device_idx(device_id, dir, class);
+    diskfs_metric_counter_inc(il->metrics.block_io_device_ops[idx]);
+    diskfs_metric_counter_add(il->metrics.block_io_device_bytes[idx], bytes);
+} /* diskfs_metric_il_block_io_device */
+
+static inline void
+diskfs_metric_gauge_set(
+    struct prometheus_gauge_instance *inst,
+    int64_t                           value)
+{
+    if (inst) {
+        prometheus_gauge_set(inst, value);
+    }
+} /* diskfs_metric_gauge_set */
+
+static inline uint64_t
+diskfs_il_used_bytes(struct diskfs_intent_log *il)
+{
+    if (il->log_head >= il->log_tail) {
+        return il->log_head - il->log_tail;
+    }
+    return SM_INTENT_LOG_SIZE - (il->log_tail - il->log_head);
+} /* diskfs_il_used_bytes */
+
+static inline void
+diskfs_il_metrics_update(struct diskfs_intent_log *il)
+{
+    uint64_t used = diskfs_il_used_bytes(il);
+
+    if (il->redo_inflight > il->redo_inflight_high_water) {
+        il->redo_inflight_high_water = il->redo_inflight;
+    }
+    if (il->iocbs_inflight > il->iocbs_inflight_high_water) {
+        il->iocbs_inflight_high_water = il->iocbs_inflight;
+    }
+    if (il->push_outstanding > il->push_outstanding_high_water) {
+        il->push_outstanding_high_water = il->push_outstanding;
+    }
+    if (used > il->log_used_bytes_high_water) {
+        il->log_used_bytes_high_water = used;
+    }
+
+    diskfs_metric_gauge_set(il->metrics.redo_inflight, il->redo_inflight);
+    diskfs_metric_gauge_set(il->metrics.iocbs_inflight, il->iocbs_inflight);
+    diskfs_metric_gauge_set(il->metrics.push_outstanding, il->push_outstanding);
+    diskfs_metric_gauge_set(il->metrics.log_used_bytes, used);
+    diskfs_metric_gauge_set(il->metrics.registered_channels, il->num_channels);
+    diskfs_metric_gauge_set(il->metrics.redo_inflight_high_water,
+                            il->redo_inflight_high_water);
+    diskfs_metric_gauge_set(il->metrics.iocbs_inflight_high_water,
+                            il->iocbs_inflight_high_water);
+    diskfs_metric_gauge_set(il->metrics.push_outstanding_high_water,
+                            il->push_outstanding_high_water);
+    diskfs_metric_gauge_set(il->metrics.log_used_bytes_high_water,
+                            il->log_used_bytes_high_water);
+} /* diskfs_il_metrics_update */
+
+static inline void
+diskfs_metric_histogram_sample(
+    struct prometheus_histogram_instance *inst,
+    uint64_t                              value)
+{
+    if (inst) {
+        prometheus_histogram_sample(inst, value ? (int64_t) value : 1);
+    }
+} /* diskfs_metric_histogram_sample */
+
+static inline void
+diskfs_metric_time_sample(
+    struct prometheus_histogram_instance *inst,
+    struct prometheus_stopwatch          *sw)
+{
+    if (inst) {
+        prometheus_time_histogram_sample(inst, sw);
+    }
+} /* diskfs_metric_time_sample */
+
+static inline void
+diskfs_metric_inode_cache(
+    struct diskfs_thread             *thread,
+    enum diskfs_metric_inode_cache_op op)
+{
+    if (thread) {
+        diskfs_metric_counter_inc(thread->metrics.inode_cache[op]);
+    }
+} /* diskfs_metric_inode_cache */
+
+static inline void
+diskfs_metric_block_cache(
+    struct diskfs_thread             *thread,
+    enum diskfs_metric_block_cache_op op)
+{
+    if (thread) {
+        diskfs_metric_counter_inc(thread->metrics.block_cache[op]);
+    }
+} /* diskfs_metric_block_cache */
+
+static inline void
+diskfs_metric_block_io(
+    struct diskfs_thread       *thread,
+    enum diskfs_metric_io_dir   dir,
+    enum diskfs_metric_io_class class,
+    uint64_t                    bytes)
+{
+    if (thread) {
+        diskfs_metric_counter_inc(thread->metrics.block_io_ops[dir][class]);
+        diskfs_metric_counter_add(thread->metrics.block_io_bytes[dir][class], bytes);
+    }
+} /* diskfs_metric_block_io */
+
+static inline void
+diskfs_metric_block_io_device(
+    struct diskfs_thread       *thread,
+    uint32_t                    device_id,
+    enum diskfs_metric_io_dir   dir,
+    enum diskfs_metric_io_class class,
+    uint64_t                    bytes)
+{
+    size_t idx;
+
+    if (!thread || !thread->metrics.block_io_device_ops ||
+        device_id >= (uint32_t) thread->shared->num_devices) {
+        return;
+    }
+    idx = diskfs_metric_io_device_idx(device_id, dir, class);
+    diskfs_metric_counter_inc(thread->metrics.block_io_device_ops[idx]);
+    diskfs_metric_counter_add(thread->metrics.block_io_device_bytes[idx], bytes);
+} /* diskfs_metric_block_io_device */
+
+static inline void
+diskfs_pending_io_add(
+    struct diskfs_thread *thread,
+    int                   delta)
+{
+    thread->pending_io += delta;
+    diskfs_metric_gauge_set(thread->metrics.pending_io, thread->pending_io);
+} /* diskfs_pending_io_add */
 
 /* ------------------------------------------------------------------ */
 /* Async b+tree operation context                                      */
@@ -1305,6 +1902,7 @@ diskfs_inode_acquire(
 
     if (unlikely(inode && inode->gen != gen)) {
         /* Cached under a different generation: the handle is stale. */
+        diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_STALE);
         pthread_mutex_unlock(&shard->lock);
         cb(NULL, CHIMERA_VFS_ENOENT, private_data);
         return;
@@ -1317,6 +1915,7 @@ diskfs_inode_acquire(
          * validates inum/gen/nlink and yields ENOENT if it isn't really there.
          * (This must not gate on `mounted` -- a freshly-formatted FS evicts
          * too, so a miss is not necessarily ENOENT.) */
+        diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_MISS);
         pthread_mutex_unlock(&shard->lock);
         if (sm_inum_valid(thread->shared->space_map, inum)) {
             diskfs_inode_load(thread, txn, inum, gen, mode, cb, private_data);
@@ -1327,6 +1926,7 @@ diskfs_inode_acquire(
     }
 
     if (diskfs_inode_lock_compatible(inode, mode)) {
+        diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_HIT);
         diskfs_inode_lock_grant(inode, mode);
         diskfs_inode_lru_unlink(shard, inode);     /* busy now, not a candidate */
         pthread_mutex_unlock(&shard->lock);
@@ -1341,7 +1941,8 @@ diskfs_inode_acquire(
         return;
     }
 
-    w               = diskfs_waiter_alloc(thread);
+    w = diskfs_waiter_alloc(thread);
+    diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_WAIT);
     w->txn          = txn;
     w->mode         = mode;
     w->gen          = gen;
@@ -1501,6 +2102,7 @@ diskfs_inode_load_sync(
         inode->parent_gen  = di->parent_gen;
         rb_tree_insert(&shard->inodes, inum, inode);
         shard->ninodes++;
+        diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_LOAD);
     }
     pthread_mutex_unlock(&shard->lock);
 
@@ -1610,7 +2212,9 @@ diskfs_block_lru_unlink(
  * than block and hang.
  */
 static struct diskfs_block *
-diskfs_block_recycle(struct diskfs_block_shard *shard)
+diskfs_block_recycle(
+    struct diskfs_thread      *thread,
+    struct diskfs_block_shard *shard)
 {
     struct diskfs_block *blk = shard->lru_head;
     struct diskfs_block *cur, *prev;
@@ -1620,6 +2224,7 @@ diskfs_block_recycle(struct diskfs_block_shard *shard)
                             "block cache shard exhausted: every buffer pinned "
                             "(raise block_cache_blocks above the intent-log size, "
                             "or a pin was leaked)");
+    diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_RECYCLE);
 
     diskfs_block_lru_unlink(shard, blk);
 
@@ -1814,7 +2419,8 @@ diskfs_block_claim(
 
     blk = diskfs_block_lookup_locked(shard, bucket, device_id, device_offset);
     if (!blk) {
-        blk                = diskfs_block_recycle(shard);
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_MISS);
+        blk                = diskfs_block_recycle(thread, shard);
         blk->device_id     = device_id;
         blk->device_offset = device_offset;
         blk->state         = DISKFS_BLOCK_CLEAN;
@@ -1822,6 +2428,9 @@ diskfs_block_claim(
         blk->wait_head     = NULL;
         blk->wait_tail     = NULL;
         diskfs_block_ensure_iov(thread, blk);
+        if (is_new) {
+            diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_NEW);
+        }
 
         /* is_new starts from a zeroed buffer.  A non-resident is_new==0 claim
          * would need a synchronous disk read, which no longer happens: every
@@ -1838,6 +2447,7 @@ diskfs_block_claim(
         blk->hash_next         = shard->buckets[bucket];
         shard->buckets[bucket] = blk;
     } else if (blk->on_lru) {
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
         diskfs_block_lru_unlink(shard, blk);
     } else if (blk->state == DISKFS_BLOCK_LOGGED) {
         /* COW: this buffer is still referenced by an un-pushed redo record (and
@@ -1853,6 +2463,9 @@ diskfs_block_claim(
         evpl_iovec_release(thread->evpl, &blk->iov);
         evpl_iovec_move(&blk->iov, &nv);
         blk->state = DISKFS_BLOCK_CLEAN;
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_COW);
+    } else {
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
     }
 
     blk->pin_count++;
@@ -2213,7 +2826,7 @@ diskfs_block_load_complete(
     blk->wait_tail = NULL;
     pthread_mutex_unlock(&shard->lock);
 
-    self->pending_io--;
+    diskfs_pending_io_add(self, -1);
     free(ld);
 
     while (waiters) {
@@ -2266,13 +2879,15 @@ diskfs_bt_block_get(
     pthread_mutex_lock(&shard->lock);
     blk = diskfs_block_lookup_locked(shard, bucket, device_id, device_offset);
     if (blk && blk->state != DISKFS_BLOCK_LOADING) {
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
         diskfs_bt_op_pin(op, shard, blk);
         pthread_mutex_unlock(&shard->lock);
         return blk;
     }
 
     if (!blk) {
-        blk                    = diskfs_block_recycle(shard);
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_MISS);
+        blk                    = diskfs_block_recycle(thread, shard);
         blk->device_id         = device_id;
         blk->device_offset     = device_offset;
         blk->state             = DISKFS_BLOCK_LOADING;
@@ -2282,6 +2897,8 @@ diskfs_bt_block_get(
         blk->hash_next         = shard->buckets[bucket];
         shard->buckets[bucket] = blk;
         issue                  = 1;
+    } else {
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_WAIT);
     }
 
     /* Park this op on the block's waiter list (via a continuation that
@@ -2308,7 +2925,11 @@ diskfs_bt_block_get(
         ld         = malloc(sizeof(*ld));
         ld->blk    = blk;
         ld->thread = thread;
-        thread->pending_io++;
+        diskfs_pending_io_add(thread, 1);
+        diskfs_metric_block_io(thread, DISKFS_METRIC_IO_READ,
+                               DISKFS_METRIC_IO_BTREE, DISKFS_BLOCK_SIZE);
+        diskfs_metric_block_io_device(thread, device_id, DISKFS_METRIC_IO_READ,
+                                      DISKFS_METRIC_IO_BTREE, DISKFS_BLOCK_SIZE);
         evpl_block_read(thread->evpl, thread->queue[device_id], &blk->iov, 1,
                         device_offset, diskfs_block_load_complete, ld);
     }
@@ -2350,6 +2971,7 @@ diskfs_block_claim_async(
 
     if (blk && blk->state == DISKFS_BLOCK_LOADING) {
         /* A read is already in flight: park and resume when it lands. */
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_WAIT);
         w         = diskfs_block_waiter_alloc(thread);
         w->thread = thread;
         w->resume = resume;
@@ -2365,7 +2987,8 @@ diskfs_block_claim_async(
     }
 
     if (!blk) {
-        blk                = diskfs_block_recycle(shard);
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_MISS);
+        blk                = diskfs_block_recycle(thread, shard);
         blk->device_id     = device_id;
         blk->device_offset = device_offset;
         blk->seq           = 0;
@@ -2373,6 +2996,7 @@ diskfs_block_claim_async(
         blk->wait_tail     = NULL;
 
         if (is_new) {
+            diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_NEW);
             blk->state = DISKFS_BLOCK_CLEAN;
             diskfs_block_ensure_iov(thread, blk);
             memset(blk->iov.data, 0, DISKFS_BLOCK_SIZE);
@@ -2395,6 +3019,7 @@ diskfs_block_claim_async(
         blk->wait_tail         = w;
         issue                  = 1;
     } else if (blk->on_lru) {
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
         diskfs_block_lru_unlink(shard, blk);
     } else if (blk->state == DISKFS_BLOCK_LOGGED) {
         /* COW (see diskfs_block_claim): fork a private writable copy. */
@@ -2406,6 +3031,9 @@ diskfs_block_claim_async(
         evpl_iovec_release(thread->evpl, &blk->iov);
         evpl_iovec_move(&blk->iov, &nv);
         blk->state = DISKFS_BLOCK_CLEAN;
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_COW);
+    } else {
+        diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
     }
 
     if (issue) {
@@ -2414,7 +3042,11 @@ diskfs_block_claim_async(
         ld         = malloc(sizeof(*ld));
         ld->blk    = blk;
         ld->thread = thread;
-        thread->pending_io++;
+        diskfs_pending_io_add(thread, 1);
+        diskfs_metric_block_io(thread, DISKFS_METRIC_IO_READ,
+                               DISKFS_METRIC_IO_METADATA, DISKFS_BLOCK_SIZE);
+        diskfs_metric_block_io_device(thread, device_id, DISKFS_METRIC_IO_READ,
+                                      DISKFS_METRIC_IO_METADATA, DISKFS_BLOCK_SIZE);
         evpl_block_read(thread->evpl, thread->queue[device_id], &blk->iov, 1,
                         device_offset, diskfs_block_load_complete, ld);
         return NULL;
@@ -3589,7 +4221,10 @@ diskfs_bt_collapse_root(
  * would overflow the journal / block-I/O queue.  So we reclaim inline only the
  * BOUNDED case: an inode whose entire tree fits in the embedded root (no child
  * node blocks).  That covers small files (data extents in the root, <=~100) and
- * empty/small directories.  We always free the home block.
+ * empty/small directories.  The inode home block is not returned to the
+ * allocator yet: inode structs stay cached after unlink and generation reuse is
+ * not persisted for newly allocated inodes, so reusing an inum can collide with
+ * the cache and stale file handles.
  *
  * TODO(incremental-drain): a large inode (interior embedded root) still leaks
  * its child node blocks and their data extents here.  Draining those needs a
@@ -3604,9 +4239,6 @@ diskfs_bt_free_tree(
     struct diskfs_txn    *txn,
     struct diskfs_inode  *inode)
 {
-    uint32_t                   dev;
-    uint64_t                   off = sm_inum_to_device_offset(thread->shared->space_map,
-                                                              inode->inum, &dev);
     void                      *buf;
     struct diskfs_bt_node_hdr *h;
 
@@ -3632,9 +4264,7 @@ diskfs_bt_free_tree(
         }
     }
 
-    /* The home block stays pinned + logged (with the nlink=0 dinode); its
-     * range is reclaimed on commit. */
-    diskfs_txn_free_space(thread, txn, dev, off, DISKFS_BLOCK_SIZE);
+    /* Leave the inode home block pinned + logged with the nlink=0 dinode. */
 } /* diskfs_bt_free_tree */
 
 /* Forward declarations for helpers defined later in the file. */
@@ -3782,8 +4412,8 @@ diskfs_orphan_op_start(
 /* transaction, remove up to DISKFS_DRAIN_BATCH of the lowest b+tree    */
 /* entries (freeing a file extent's backing data; the remove itself     */
 /* reclaims emptied node blocks via merge), commit, repeat -- then a    */
-/* final transaction frees the home block + the inode struct.  Generic  */
-/* over entry type (extents, dirents, symlink).  Each transaction holds */
+/* final transaction removes the orphan record and retires the inode.   */
+/* Generic over entry type (extents, dirents, symlink). Each txn holds  */
 /* only the one inode (no multi-inode lock ordering).  The orphan inode */
 /* stays cached throughout (A5 never evicts nlink==0).                  */
 /*                                                                      */
@@ -3928,18 +4558,15 @@ diskfs_drain_final_cb(
     diskfs_drain_complete(priv);
 } /* diskfs_drain_final_cb */
 
-/* The durable orphan entry is removed; finish reclaiming the inode itself
- * (home block + struct) in the same transaction and commit. */
+/* The durable orphan entry is removed; finish retiring the inode in the same
+ * transaction and commit.  The inode home block is intentionally leaked for now;
+ * see diskfs_bt_free_tree. */
 static void
 diskfs_drain_after_unrecord(void *priv)
 {
     struct diskfs_drain *d = priv;
-    uint32_t             dev;
-    uint64_t             off = sm_inum_to_device_offset(d->thread->shared->space_map,
-                                                        d->inum, &dev);
 
     diskfs_txn_pin_inode_block(d->thread, d->txn, d->inode, 0);
-    diskfs_txn_free_space(d->thread, d->txn, dev, off, DISKFS_BLOCK_SIZE);
     diskfs_inode_free(d->thread, d->inode);
     diskfs_txn_commit(d->txn, diskfs_drain_final_cb, d);
 } /* diskfs_drain_after_unrecord */
@@ -3972,11 +4599,10 @@ diskfs_drain_looked_cb(
     struct diskfs_bt_op *rop;
 
     if (result < 0) {
-        /* Tree empty: remove the durable orphan entry, then (in the same txn)
-         * free the home block + inode struct.  Removing the orphan entry last
-         * means a crash before this commit just re-drains on the next mount
-         * (idempotent); the orphan inode (3) is acquired last (leaf -> no
-         * deadlock). */
+        /* Tree empty: remove the durable orphan entry, then retire the inode in
+         * the same txn.  Removing the orphan entry last means a crash before
+         * this commit just re-drains on the next mount (idempotent); the orphan
+         * inode (3) is acquired last (leaf -> no deadlock). */
         diskfs_bt_op_free(d->thread, op);
         diskfs_orphan_op_start(d->thread, d->txn, d->inum, d->gen, 1 /* remove */,
                                diskfs_drain_after_unrecord, d);
@@ -5422,6 +6048,7 @@ diskfs_inode_load_complete(
         inode->parent_gen  = di->parent_gen;
         rb_tree_insert(&shard->inodes, inum, inode);
         shard->ninodes++;
+        diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_LOAD);
     }
     pthread_mutex_unlock(&shard->lock);
 
@@ -5475,6 +6102,10 @@ diskfs_inode_load(
     lc->private_data = private_data;
 
     evpl_iovec_alloc(thread->evpl, DISKFS_BLOCK_SIZE, DISKFS_BLOCK_SIZE, 1, 0, &lc->iov);
+    diskfs_metric_block_io(thread, DISKFS_METRIC_IO_READ,
+                           DISKFS_METRIC_IO_INODE, DISKFS_BLOCK_SIZE);
+    diskfs_metric_block_io_device(thread, dev, DISKFS_METRIC_IO_READ,
+                                  DISKFS_METRIC_IO_INODE, DISKFS_BLOCK_SIZE);
     evpl_block_read(thread->evpl, thread->queue[dev], &lc->iov, 1, off,
                     diskfs_inode_load_complete, lc);
 } /* diskfs_inode_load */
@@ -5538,6 +6169,7 @@ diskfs_inode_alloc_async(
     inode->writer = 1;
 
     diskfs_inode_cache_insert(shared, inode);
+    diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_INSERT);
     diskfs_txn_add_slot(txn, inode, DISKFS_INODE_LOCK_WRITE);
 
     /* Claim and pin the inode's freshly-allocated home block. */
@@ -5997,6 +6629,7 @@ diskfs_il_push_finish(struct diskfs_intent_log *il)
     } else if (il->redo_inflight == 0) {
         il->log_tail = il->log_head;
     }
+    diskfs_il_metrics_update(il);
 
     diskfs_il_push_kick(il);
 
@@ -6022,8 +6655,10 @@ diskfs_il_push_block_cb(
     if (--il->iocbs_inflight == DISKFS_IL_IOCB_LOWAT) {
         evpl_ring_doorbell(&il->wake_doorbell);
     }
+    diskfs_il_metrics_update(il);
 
     --il->push_outstanding;
+    diskfs_il_metrics_update(il);
 
     /* Capacity freed: issue any of this record's remaining home writes that the
      * cap held back. */
@@ -6095,7 +6730,13 @@ diskfs_il_push_issue(struct diskfs_intent_log *il)
         il->push_next++;
         il->push_outstanding++;
         il->iocbs_inflight++;
+        diskfs_il_metrics_update(il);
 
+        diskfs_metric_il_block_io(il, DISKFS_METRIC_IO_WRITE,
+                                  DISKFS_METRIC_IO_TAIL_PUSH, DISKFS_BLOCK_SIZE);
+        diskfs_metric_il_block_io_device(il, bh->device_id, DISKFS_METRIC_IO_WRITE,
+                                         DISKFS_METRIC_IO_TAIL_PUSH,
+                                         DISKFS_BLOCK_SIZE);
         evpl_block_write(il->evpl, il->queue[bh->device_id], &rec->iovs[1 + idx], 1,
                          bh->device_offset, il->sync, diskfs_il_push_block_cb, il);
     }
@@ -6131,10 +6772,20 @@ diskfs_redo_write_cb(
     /* One chunk of a possibly multi-chunk journal write landed; only the last
      * makes the whole record durable. */
     if (--ctx->segments > 0) {
+        diskfs_il_metrics_update(il);
         return;
     }
 
+    prometheus_stopwatch_start(&ctx->entry.durable_time);
+    diskfs_metric_time_sample(
+        il->metrics.txn_latency[DISKFS_METRIC_TXN_SUBMIT_TO_DURABLE],
+        &ctx->entry.submit_time);
+    diskfs_metric_time_sample(
+        il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_DURABLE],
+        &ctx->entry.enqueue_time);
+
     il->redo_inflight--;
+    diskfs_il_metrics_update(il);
 
     diskfs_txn_unpin_blocks(ctx->entry.txn, DISKFS_BLOCK_LOGGED);
     /* Record now durable: the freed metadata blocks are LOGGED + unpinned, so
@@ -6279,6 +6930,7 @@ diskfs_il_write_redo(
     ch->cq_inflight++;
     il->redo_inflight++;
     il->iocbs_inflight += ctx->segments;     /* one block write per chunk below */
+    diskfs_il_metrics_update(il);
 
     /* Issue the record in <=DISKFS_IL_MAX_IOV-iovec chunks to consecutive
      * offsets (the on-log record is contiguous); all chunks share ctx and the
@@ -6302,6 +6954,11 @@ diskfs_il_write_redo(
             evpl_block_write(il->evpl, il->queue[SM_INTENT_LOG_DEVICE],
                              &rec->iovs[done], cnt, woff, il->sync,
                              diskfs_redo_write_cb, ctx);
+            diskfs_metric_il_block_io(il, DISKFS_METRIC_IO_WRITE,
+                                      DISKFS_METRIC_IO_INTENT_LOG, bytes);
+            diskfs_metric_il_block_io_device(il, SM_INTENT_LOG_DEVICE,
+                                             DISKFS_METRIC_IO_WRITE,
+                                             DISKFS_METRIC_IO_INTENT_LOG, bytes);
             woff += bytes;
             done += cnt;
         }
@@ -6363,6 +7020,11 @@ diskfs_iq_process_channel(struct diskfs_iq_channel *ch)
         sq_head++;
         entry.status = 0;
 
+        prometheus_stopwatch_start(&entry.submit_time);
+        diskfs_metric_time_sample(
+            il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_SUBMIT],
+            &entry.enqueue_time);
+
         /* Issue a durable redo write; the completion drops pins/locks and
          * pushes the CQE (see diskfs_redo_write_cb). */
         diskfs_il_write_redo(il, ch, &entry);
@@ -6396,6 +7058,7 @@ diskfs_intent_log_drain_pending(struct diskfs_intent_log *il)
 
         __atomic_store_n(&ch->registered, 1, __ATOMIC_RELEASE);
     }
+    diskfs_il_metrics_update(il);
 } /* diskfs_intent_log_drain_pending */
 
 static void
@@ -6425,6 +7088,7 @@ diskfs_intent_log_wake_cb(
             il->channels[last] = NULL;
             il->num_channels   = last;
             __atomic_store_n(&ch->unregister_done, 1, __ATOMIC_RELEASE);
+            diskfs_il_metrics_update(il);
             continue;     /* re-process index i (now a different channel) */
         }
         i++;
@@ -6454,6 +7118,13 @@ diskfs_iq_cq_doorbell_cb(
         head++;
         drained++;
 
+        diskfs_metric_time_sample(
+            ch->worker->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_CALLBACK],
+            &entry.enqueue_time);
+        diskfs_metric_time_sample(
+            ch->worker->metrics.txn_latency[DISKFS_METRIC_TXN_DURABLE_TO_CALLBACK],
+            &entry.durable_time);
+
         /* The txn's logical inode locks were already dropped by the intent
          * log thread (diskfs_iq_process_channel); just deliver completion. */
         entry.cb(entry.txn, entry.status, entry.private_data);
@@ -6477,18 +7148,24 @@ diskfs_intent_log_thread_init(
     struct diskfs_shared     *shared = container_of(il, struct diskfs_shared, intent_log);
     int                       i;
 
-    il->evpl             = evpl;
-    il->log_head         = SM_INTENT_LOG_OFFSET;
-    il->log_tail         = SM_INTENT_LOG_OFFSET;
-    il->log_seq          = 0;
-    il->push_head        = NULL;
-    il->push_tail        = NULL;
-    il->push_cur         = NULL;
-    il->push_next        = 0;
-    il->push_outstanding = 0;
-    il->redo_inflight    = 0;
-    il->iocbs_inflight   = 0;
-    il->sync             = !shared->unsafe_async;
+    il->evpl                        = evpl;
+    il->log_head                    = SM_INTENT_LOG_OFFSET;
+    il->log_tail                    = SM_INTENT_LOG_OFFSET;
+    il->log_seq                     = 0;
+    il->push_head                   = NULL;
+    il->push_tail                   = NULL;
+    il->push_cur                    = NULL;
+    il->push_next                   = 0;
+    il->push_outstanding            = 0;
+    il->redo_inflight               = 0;
+    il->iocbs_inflight              = 0;
+    il->redo_inflight_high_water    = 0;
+    il->iocbs_inflight_high_water   = 0;
+    il->push_outstanding_high_water = 0;
+    il->log_used_bytes_high_water   = 0;
+    il->sync                        = !shared->unsafe_async;
+    diskfs_intent_log_metrics_init(il);
+    diskfs_il_metrics_update(il);
 
     /* Open block queues on this thread's evpl for redo writes + tail-push. */
     il->queue = calloc(shared->num_devices, sizeof(*il->queue));
@@ -6534,6 +7211,8 @@ diskfs_intent_log_thread_shutdown(
             evpl_block_close_queue(evpl, il->queue[i]);
         }
     }
+    free(il->metrics.block_io_device_ops);
+    free(il->metrics.block_io_device_bytes);
     free(il->queue);
 } /* diskfs_intent_log_thread_shutdown */
 
@@ -6566,10 +7245,18 @@ diskfs_txn_commit_finish(
      * record by diskfs_il_write_redo. */
     {
         struct diskfs_txn_block *tb;
+        uint64_t                 blocks = 0;
 
         for (tb = txn->blocks; tb; tb = tb->next) {
             evpl_iovec_clone(&tb->snap, &tb->block->iov);
+            blocks++;
         }
+        diskfs_metric_counter_inc(thread->metrics.txn[0]);
+        diskfs_metric_counter_add(thread->metrics.txn[1], blocks);
+        diskfs_metric_counter_add(thread->metrics.txn[2], blocks * DISKFS_BLOCK_SIZE);
+        diskfs_metric_histogram_sample(thread->metrics.txn_blocks, blocks);
+        diskfs_metric_histogram_sample(thread->metrics.txn_bytes,
+                                       blocks * DISKFS_BLOCK_SIZE);
     }
 
     /* Write txn -> intent log thread via this worker's SQ.  The intent
@@ -6597,6 +7284,7 @@ diskfs_txn_commit_finish(
     slot->cb           = cb;
     slot->private_data = private_data;
     slot->status       = 0;
+    prometheus_stopwatch_start(&slot->enqueue_time);
 
     __atomic_store_n(&ch->sq.tail, tail + 1, __ATOMIC_RELEASE);
 
@@ -7095,7 +7783,9 @@ diskfs_parse_hex(
 } /* diskfs_parse_hex */
 
 static void *
-diskfs_init(const char *cfgdata)
+diskfs_init(
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
 {
     struct diskfs_shared       *shared = calloc(1, sizeof(*shared));
     struct diskfs_device       *device;
@@ -7192,6 +7882,7 @@ diskfs_init(const char *cfgdata)
 
         device->role            = SM_DEV_LOCAL;
         shared->device_paths[i] = strdup(device_path);
+        snprintf(device->name, sizeof(device->name), "%s", device_path);
 
         if (strcmp(protocol_name, "io_uring") == 0) {
             protocol_id = EVPL_BLOCK_PROTOCOL_IO_URING;
@@ -7274,6 +7965,7 @@ diskfs_init(const char *cfgdata)
 
 
     pthread_mutex_init(&shared->lock, NULL);
+    diskfs_metrics_init(shared, metrics);
 
     /* Decide mkfs vs clean-mount vs crash-recovery from the superblock, just as
      * a real filesystem would:
@@ -7663,6 +8355,8 @@ diskfs_destroy(void *private_data)
         free(shared->device_paths[i]);
     }
     free(shared->device_paths);
+    free(shared->metrics.block_io_device_ops_series);
+    free(shared->metrics.block_io_device_bytes_series);
 
     pthread_mutex_destroy(&shared->lock);
     free(shared->devices);
@@ -7788,6 +8482,7 @@ diskfs_thread_init(
     pthread_mutex_lock(&shared->lock);
     thread->thread_id = shared->num_active_threads++;
     pthread_mutex_unlock(&shared->lock);
+    diskfs_thread_metrics_init(thread);
 
     /* Hand the channel to the intent log thread via the pending list. */
     pthread_mutex_lock(&shared->intent_log.registration_lock);
@@ -7889,6 +8584,8 @@ diskfs_thread_destroy(void *private_data)
         free(w);
     }
 
+    free(thread->metrics.block_io_device_ops);
+    free(thread->metrics.block_io_device_bytes);
     free(thread->queue);
     free(thread);
 } /* diskfs_thread_destroy */
@@ -8023,6 +8720,53 @@ diskfs_apply_attrs(
     inode->ctime_nsec = now.tv_nsec;
 
 } /* diskfs_apply_attrs */
+
+static bool
+diskfs_cred_can_access(
+    const struct diskfs_inode     *inode,
+    const struct chimera_vfs_cred *cred,
+    uint32_t                       user_bit,
+    uint32_t                       group_bit,
+    uint32_t                       other_bit)
+{
+    if (cred->uid == 0) {
+        return true;
+    }
+
+    if ((uint64_t) cred->uid == inode->uid) {
+        return !!(inode->mode & user_bit);
+    }
+
+    bool in_group = ((uint64_t) cred->gid == inode->gid);
+
+    for (uint32_t i = 0; !in_group && i < cred->ngids; i++) {
+        if ((uint64_t) cred->gids[i] == inode->gid) {
+            in_group = true;
+        }
+    }
+
+    if (in_group) {
+        return !!(inode->mode & group_bit);
+    }
+
+    return !!(inode->mode & other_bit);
+} /* diskfs_cred_can_access */
+
+static bool
+diskfs_cred_can_read(
+    const struct diskfs_inode     *inode,
+    const struct chimera_vfs_cred *cred)
+{
+    return diskfs_cred_can_access(inode, cred, S_IRUSR, S_IRGRP, S_IROTH);
+} /* diskfs_cred_can_read */
+
+static bool
+diskfs_cred_can_write(
+    const struct diskfs_inode     *inode,
+    const struct chimera_vfs_cred *cred)
+{
+    return diskfs_cred_can_access(inode, cred, S_IWUSR, S_IWGRP, S_IWOTH);
+} /* diskfs_cred_can_write */
 
 static void
 diskfs_getattr_inode_cb(
@@ -9536,6 +10280,28 @@ diskfs_open_at_existing_cb(
         return;
     }
 
+    if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
+        bool allowed;
+
+        if (request->open_at.flags & CHIMERA_VFS_OPEN_READ_ONLY) {
+            allowed = diskfs_cred_can_read(inode, request->cred);
+        } else {
+            allowed = diskfs_cred_can_write(inode, request->cred);
+        }
+
+        if (!allowed) {
+            diskfs_op_fail(request, p->txn, CHIMERA_VFS_EACCES);
+            return;
+        }
+    }
+
+    if ((request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        request->open_at.set_attr->va_size == 0 &&
+        S_ISREG(inode->mode)) {
+        diskfs_apply_attrs(inode, request->open_at.set_attr);
+        inode->space_used = 0;
+    }
+
     diskfs_open_at_finish(request, parent, inode);
 } /* diskfs_open_at_existing_cb */
 
@@ -9800,49 +10566,12 @@ diskfs_close(
 } /* diskfs_close */
 
 /*
- * Adjust read iovecs: skip prefix padding and trim to actual read length.
- * Called after block reads complete (or when no reads needed).
+ * Read iovecs are now owned and finalized by the VFS core: it allocates the
+ * 4 KiB-aligned buffers on the connection thread (diskfs lacks
+ * CAP_READ_PROVIDES_BUFFERS), and chimera_vfs_read_complete() skips the prefix
+ * pad and trims to r_length after the request bounces back.  diskfs only fills
+ * the provided buffers and reports r_length/r_eof.
  */
-static inline void
-diskfs_read_adjust_iovecs(
-    struct chimera_vfs_request    *request,
-    struct diskfs_request_private *diskfs_private)
-{
-    if (request->read.r_niov == 0) {
-        return;
-    }
-
-    // Adjust first iovec to skip prefix (alignment padding)
-    request->read.iov[0].data   += diskfs_private->read_prefix;
-    request->read.iov[0].length -= diskfs_private->read_prefix;
-
-    // Calculate total length across all iovecs
-    uint64_t total = 0;
-
-    for (int i = 0; i < request->read.r_niov; i++) {
-        total += request->read.iov[i].length;
-    }
-
-    // Trim excess from the last iovec(s) if needed
-    // Use r_length (actual capped length), not length (original request)
-    // NOTE: Do NOT decrement r_niov here - we must keep the count of allocated
-    // iovecs so they all get properly released by the caller.
-    if (total > request->read.r_length) {
-        uint64_t excess = total - request->read.r_length;
-        int      last   = request->read.r_niov - 1;
-
-        while (excess > 0 && last >= 0) {
-            if (request->read.iov[last].length <= excess) {
-                excess                        -= request->read.iov[last].length;
-                request->read.iov[last].length = 0;
-                last--;
-            } else {
-                request->read.iov[last].length -= excess;
-                excess                          = 0;
-            }
-        }
-    }
-} /* diskfs_read_adjust_iovecs */ /* diskfs_read_adjust_iovecs */
 
 /*
  * Data-I/O admission control.  A worker submits read/write block I/O onto its
@@ -9921,7 +10650,7 @@ diskfs_io_callback(
     }
 
     diskfs_private->pending--;
-    thread->pending_io--;
+    diskfs_pending_io_add(thread, -1);
 
     /* Don't finalize a read whose extent walk is still in progress (parked on
      * the admission gate): its remaining reads have yet to be issued.  The
@@ -9929,10 +10658,9 @@ diskfs_io_callback(
      * not zeroed, and only diskfs_read sets the flag (fresh, per op). */
     if (diskfs_private->pending == 0 &&
         !(diskfs_private->opcode == CHIMERA_VFS_OP_READ && diskfs_private->io_reading)) {
-        if (diskfs_private->opcode == CHIMERA_VFS_OP_READ) {
-            diskfs_read_adjust_iovecs(request, diskfs_private);
-        }
-
+        /* Release the per-chunk device-I/O iovec refs (slices of the
+        * VFS-provided read buffers); the VFS core trims and releases
+        * request->read.iov itself after the request bounces back. */
         evpl_iovecs_release(thread->evpl, diskfs_private->iov, diskfs_private->niov);
 
         if (diskfs_private->status != 0) {
@@ -9974,7 +10702,6 @@ diskfs_read_finish(struct chimera_vfs_request *request)
     p->io_reading = 0;
 
     if (p->pending == 0) {
-        diskfs_read_adjust_iovecs(request, p);
         diskfs_op_ok(request, p->txn);
     } else {
         /* I/O is in flight; drop the inode lock so other ops proceed.  The
@@ -10085,8 +10812,13 @@ diskfs_read_process(struct chimera_vfs_request *request)
 
         p->niov += chunk_niov;
         p->pending++;
-        thread->pending_io++;
+        diskfs_pending_io_add(thread, 1);
 
+        diskfs_metric_block_io(thread, DISKFS_METRIC_IO_READ,
+                               DISKFS_METRIC_IO_DATA, chunk);
+        diskfs_metric_block_io_device(thread, extent->device_id,
+                                      DISKFS_METRIC_IO_READ,
+                                      DISKFS_METRIC_IO_DATA, chunk);
         evpl_block_read(evpl, thread->queue[extent->device_id], chunk_iov,
                         chunk_niov, dev_offset, diskfs_io_callback, request);
 
@@ -10145,7 +10877,6 @@ diskfs_read_inode_cb(
     struct chimera_vfs_request    *request        = private_data;
     struct diskfs_request_private *diskfs_private = request->plugin_data;
     struct diskfs_thread          *thread         = diskfs_private->thread;
-    struct evpl                   *evpl           = thread->evpl;
     uint64_t                       offset, length;
     uint64_t                       aligned_offset, aligned_length;
     uint32_t                       eof = 0;
@@ -10164,8 +10895,11 @@ diskfs_read_inode_cb(
     offset = request->read.offset;
     length = request->read.length;
 
-    if (offset + length > inode->size) {
-        length = inode->size > offset ? inode->size - offset : 0;
+    if (offset >= inode->size) {
+        length = 0;
+        eof    = 1;
+    } else if (length >= inode->size - offset) {
+        length = inode->size - offset;
         eof    = 1;
     }
 
@@ -10181,17 +10915,20 @@ diskfs_read_inode_cb(
     aligned_offset = offset & ~4095ULL;
     aligned_length = ((offset + length + 4095ULL) & ~4095ULL) - aligned_offset;
 
-    diskfs_private->read_prefix = offset - aligned_offset;
-    diskfs_private->read_suffix = aligned_length - length;
-
     request->read.r_length = length;
     request->read.r_eof    = eof;
 
-    request->read.r_niov = evpl_iovec_alloc(evpl, aligned_length, 4096, 1,
-                                            0, request->read.iov);
+    /* The VFS core allocated the 4 KiB-aligned read buffers on the connection
+     * thread (diskfs does not advertise CAP_READ_PROVIDES_BUFFERS) and placed
+     * them in request->read.iov.  Fill them via the cursor; the VFS core skips
+     * the prefix pad and trims to r_length on completion.  Its allocation is
+     * sized from the unclamped count, so it always covers our (EOF-clamped)
+     * aligned_length. */
+    chimera_diskfs_abort_if(request->read.buffers_provided == 0,
+                            "diskfs read dispatched without VFS-provided buffers");
 
     evpl_iovec_cursor_init(&diskfs_private->rd_cursor, request->read.iov,
-                           request->read.r_niov);
+                           request->read.buffers_provided);
 
     diskfs_private->inode_stash[0] = inode;
     diskfs_private->loop_off       = aligned_offset;
@@ -10272,7 +11009,7 @@ diskfs_write_rmw_read_callback(
     }
 
     diskfs_private->pending--;
-    thread->pending_io--;
+    diskfs_pending_io_add(thread, -1);
 
     /* Queue capacity freed: let any parked requests resume submitting. */
     diskfs_io_resume_waiters(thread);
@@ -10440,8 +11177,13 @@ diskfs_write_phase2(
         diskfs_private->niov += chunk_niov;
 
         diskfs_private->pending++;
-        thread->pending_io++;
+        diskfs_pending_io_add(thread, 1);
 
+        diskfs_metric_block_io(thread, DISKFS_METRIC_IO_WRITE,
+                               DISKFS_METRIC_IO_DATA, chunk);
+        diskfs_metric_block_io_device(thread, diskfs_private->rmw_device_id,
+                                      DISKFS_METRIC_IO_WRITE,
+                                      DISKFS_METRIC_IO_DATA, chunk);
         evpl_block_write(evpl,
                          thread->queue[diskfs_private->rmw_device_id],
                          chunk_iov,
@@ -10523,8 +11265,15 @@ diskfs_write_inserted_cb(
                                         &diskfs_private->rmw_prefix_iov);
             if (niov > 0) {
                 diskfs_private->pending++;
-                thread->pending_io++;
+                diskfs_pending_io_add(thread, 1);
                 diskfs_private->rmw_prefix_pending = 1;
+                diskfs_metric_block_io(thread, DISKFS_METRIC_IO_READ,
+                                       DISKFS_METRIC_IO_RMW, DISKFS_BLOCK_SIZE);
+                diskfs_metric_block_io_device(thread,
+                                              diskfs_private->prefix_device_id,
+                                              DISKFS_METRIC_IO_READ,
+                                              DISKFS_METRIC_IO_RMW,
+                                              DISKFS_BLOCK_SIZE);
                 evpl_block_read(evpl, thread->queue[diskfs_private->prefix_device_id],
                                 &diskfs_private->rmw_prefix_iov, 1,
                                 diskfs_private->prefix_device_offset,
@@ -10536,8 +11285,15 @@ diskfs_write_inserted_cb(
                                         &diskfs_private->rmw_suffix_iov);
             if (niov > 0) {
                 diskfs_private->pending++;
-                thread->pending_io++;
+                diskfs_pending_io_add(thread, 1);
                 diskfs_private->rmw_suffix_pending = 1;
+                diskfs_metric_block_io(thread, DISKFS_METRIC_IO_READ,
+                                       DISKFS_METRIC_IO_RMW, DISKFS_BLOCK_SIZE);
+                diskfs_metric_block_io_device(thread,
+                                              diskfs_private->suffix_device_id,
+                                              DISKFS_METRIC_IO_READ,
+                                              DISKFS_METRIC_IO_RMW,
+                                              DISKFS_BLOCK_SIZE);
                 evpl_block_read(evpl, thread->queue[diskfs_private->suffix_device_id],
                                 &diskfs_private->rmw_suffix_iov, 1,
                                 diskfs_private->suffix_device_offset,
@@ -10977,6 +11733,15 @@ diskfs_write_inode_cb(
     }
 
     diskfs_map_attrs(thread, &request->write.r_pre_attr, inode);
+
+    if (request->write.length == 0) {
+        diskfs_map_attrs(thread, &request->write.r_post_attr, inode);
+
+        request->write.r_length = 0;
+        request->write.r_sync   = 1;
+        diskfs_op_ok(request, diskfs_private->txn);
+        return;
+    }
 
     aligned_start  = write_start & ~4095ULL;
     aligned_end    = (write_end + 4095ULL) & ~4095ULL;

@@ -647,8 +647,11 @@ memfs_kv_entry_release(
 } /* memfs_kv_entry_release */
 
 static void *
-memfs_init(const char *cfgdata)
+memfs_init(
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
 {
+    (void) metrics;
     struct memfs_shared     *shared = calloc(1, sizeof(*shared));
     struct memfs_inode_list *inode_list;
     struct memfs_inode      *inode;
@@ -656,7 +659,7 @@ memfs_init(const char *cfgdata)
     struct timespec          now;
     uint32_t                 block_size = CHIMERA_MEMFS_BLOCK_SIZE_DEFAULT;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     pthread_mutex_init(&shared->lock, NULL);
 
@@ -997,7 +1000,7 @@ memfs_apply_attrs(
     struct timespec now;
     uint64_t        set_mask = attr->va_set_mask;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
@@ -1602,7 +1605,7 @@ memfs_mkdir_at(
     struct timespec           now;
     uint64_t                  hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->mkdir_at.name_hash;
 
@@ -1718,7 +1721,7 @@ memfs_mknod_at(
     struct timespec           now;
     uint64_t                  hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->mknod_at.name_hash;
 
@@ -1829,7 +1832,7 @@ memfs_remove_at(
     struct timespec      now;
     uint64_t             hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->remove_at.name_hash;
 
@@ -2129,7 +2132,7 @@ memfs_open_at(
     struct timespec      now;
     uint64_t             hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->open_at.name_hash;
 
@@ -2278,7 +2281,7 @@ memfs_create_unlinked(
     struct memfs_inode *inode = NULL;
     struct timespec     now;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     inode = memfs_inode_alloc_thread(thread);
 
@@ -2352,10 +2355,19 @@ memfs_read(
     int                      niov = 0;
     struct timespec          now;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     offset = request->read.offset;
     length = request->read.length;
+
+    /* memfs advertises CAP_READ_PROVIDES_BUFFERS: it returns zero-copy refs to
+     * its own SHARED block iovecs, so the VFS core never pre-allocates buffers
+     * for it (buffers_provided is always 0).  If a future VFS data cache ever
+     * hands memfs buffers to populate, this is where memfs would memcpy its
+     * block data into request->read.iov instead of cloning refs below. */
+    chimera_memfs_abort_if(request->read.buffers_provided,
+                           "memfs read received VFS-provided buffers but only "
+                           "implements the zero-copy ref path");
 
     if (unlikely(length == 0)) {
         request->status        = CHIMERA_VFS_OK;
@@ -2396,8 +2408,8 @@ memfs_read(
         return;
     }
 
-    if (offset + length >= inode->size) {
-        length = inode->size > offset ? inode->size - offset : 0;
+    if (length >= inode->size - offset) {
+        length = inode->size - offset;
         eof    = 1;
     }
 
@@ -2493,7 +2505,7 @@ memfs_write(
     uint32_t                 block_offset, left, block_len;
     struct timespec          now;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     const uint32_t           block_size  = shared->block_size;
     const uint32_t           block_shift = shared->block_shift;
@@ -2683,7 +2695,7 @@ memfs_allocate(
     struct memfs_inode *inode;
     struct timespec     now;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     if (request->allocate.handle->vfs_private) {
         inode = (struct memfs_inode *) request->allocate.handle->vfs_private;
@@ -2960,7 +2972,7 @@ memfs_copy_range(
         }
     }
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     /* Lock in deterministic order to avoid AB/BA deadlock */
     if (src_inode == dst_inode) {
@@ -3163,7 +3175,7 @@ memfs_move_range(
         }
     }
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     if (src_inode == dst_inode) {
         pthread_mutex_lock(&src_inode->lock);
@@ -3305,7 +3317,7 @@ memfs_clone_range(
         }
     }
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     if (src_inode == dst_inode) {
         pthread_mutex_lock(&src_inode->lock);
@@ -3523,7 +3535,7 @@ memfs_symlink_at(
     struct timespec      now;
     uint64_t             hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->symlink_at.name_hash;
 
@@ -3668,7 +3680,7 @@ memfs_rename_at(
     struct timespec      now;
     uint64_t             hash, new_hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash     = request->rename_at.name_hash;
     new_hash = request->rename_at.new_name_hash;
@@ -3900,7 +3912,7 @@ memfs_link_at(
     struct timespec      now;
     uint64_t             hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->link_at.name_hash;
 
@@ -4367,7 +4379,7 @@ memfs_set_xattr(
         inode->xattrs = xattr;
     }
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
     inode->ctime = now;
 
     memfs_map_attrs(shared, &request->set_xattr.r_post_attr, inode, request->fh);
@@ -4466,7 +4478,7 @@ memfs_remove_xattr(
     free(xattr->value);
     free(xattr);
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
     inode->ctime = now;
 
     memfs_map_attrs(shared, &request->remove_xattr.r_post_attr, inode, request->fh);
@@ -4601,7 +4613,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
         CHIMERA_VFS_CAP_FS_RELATIVE_OP |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE |
         CHIMERA_VFS_CAP_ACL_NATIVE | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
-        CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE,
+        CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

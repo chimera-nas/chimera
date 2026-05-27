@@ -81,6 +81,8 @@ chimera_io_uring_dispatch(
 #define chimera_io_uring_abort_if(cond, ...) \
         chimera_abort_if(cond, "io_uring", __FILE__, __LINE__, __VA_ARGS__)
 
+#define CHIMERA_IO_URING_STATX_MASK STATX_BASIC_STATS
+
 struct chimera_io_uring_shared {
     struct io_uring ring;
     int             readdir_verifier;
@@ -186,8 +188,11 @@ chimera_io_uring_get_personality(
 } /* chimera_io_uring_get_personality */
 
 static void *
-chimera_io_uring_init(const char *cfgdata)
+chimera_io_uring_init(
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
 {
+    (void) metrics;
     struct chimera_io_uring_shared *shared;
     struct io_uring_params          params = { 0 };
     int                             rc;
@@ -259,12 +264,55 @@ chimera_io_uring_get_sqe(
     return sge;
 } /* chimera_io_uring_get_sqe */
 
+static int
+chimera_io_uring_set_open_attrs(
+    int                       fd,
+    struct chimera_vfs_attrs *attr)
+{
+    uint64_t set_mask = attr->va_set_mask;
+
+    if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
+        if (ftruncate(fd, attr->va_size) < 0) {
+            return errno;
+        }
+    }
+
+    if (set_mask & (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME)) {
+        struct timespec times[2];
+
+        if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
+            times[0] = attr->va_atime;
+            if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+                times[0].tv_nsec = UTIME_NOW;
+            }
+        } else {
+            times[0].tv_nsec = UTIME_OMIT;
+        }
+
+        if (set_mask & CHIMERA_VFS_ATTR_MTIME) {
+            times[1] = attr->va_mtime;
+            if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+                times[1].tv_nsec = UTIME_NOW;
+            }
+        } else {
+            times[1].tv_nsec = UTIME_OMIT;
+        }
+
+        if (futimens(fd, times) < 0) {
+            return errno;
+        }
+    }
+
+    return 0;
+} /* chimera_io_uring_set_open_attrs */
+
 static void
 chimera_io_uring_reap(
     struct evpl                    *evpl,
     struct chimera_io_uring_thread *thread)
 {
     struct io_uring_cqe               *cqe;
+    int                                rc;
     int                                parent_fd;
     struct chimera_vfs_request        *request;
     struct chimera_vfs_request_handle *handle;
@@ -322,20 +370,28 @@ chimera_io_uring_reap(
 
                         parent_fd = request->open_at.handle->vfs_private;
 
+                        rc = chimera_io_uring_set_open_attrs(
+                            cqe->res, request->open_at.set_attr);
+                        if (rc != 0) {
+                            request->status = chimera_linux_errno_to_status(rc);
+                            break;
+                        }
+
                         sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
 
                         if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
                             io_uring_prep_statx(sqe, cqe->res, "",
-                                                AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW,
-                                                AT_STATX_SYNC_AS_STAT, stx);
+                                                AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
+                                                CHIMERA_IO_URING_STATX_MASK, stx);
                         } else {
-                            io_uring_prep_statx(sqe, parent_fd, name, 0,
-                                                AT_STATX_SYNC_AS_STAT, stx);
+                            io_uring_prep_statx(sqe, parent_fd, name, AT_STATX_SYNC_AS_STAT,
+                                                CHIMERA_IO_URING_STATX_MASK, stx);
                         }
 
                         sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
 
-                        io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, dir_stx);
+                        io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                                            CHIMERA_IO_URING_STATX_MASK, dir_stx);
 
                         evpl_defer(thread->evpl, &thread->deferral);
 
@@ -406,11 +462,13 @@ chimera_io_uring_reap(
 
                     sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
 
-                    io_uring_prep_statx(sqe, parent_fd, fullname, 0, AT_STATX_SYNC_AS_STAT, stx);
+                    io_uring_prep_statx(sqe, parent_fd, fullname, AT_STATX_SYNC_AS_STAT,
+                                        CHIMERA_IO_URING_STATX_MASK, stx);
 
                     sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
 
-                    io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, dir_stx);
+                    io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                                        CHIMERA_IO_URING_STATX_MASK, dir_stx);
 
                     evpl_defer(thread->evpl, &thread->deferral);
                 } else if (handle->slot == 1) {
@@ -436,24 +494,35 @@ chimera_io_uring_reap(
                 break;
             case CHIMERA_VFS_OP_READ:
                 if (handle->slot == 0) {
+                    /* The VFS core owns request->read.iov (allocated on the
+                     * connection thread); it trims/releases the buffers on
+                     * completion, so io_uring only reports the outcome here. */
                     if (cqe->res >= 0) {
                         request->status        = CHIMERA_VFS_OK;
                         request->read.r_length = cqe->res;
                         request->read.r_eof    = (cqe->res < request->read.length);
-
-                        if (cqe->res == 0) {
-                            evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
-                            request->read.r_niov = 0;
-                        }
-
                     } else {
                         request->status = chimera_linux_errno_to_status(-cqe->res);
-
-                        evpl_iovecs_release(evpl, request->read.iov, request->read.r_niov);
                     }
                 } else {
                     if (cqe->res == 0) {
-                        chimera_linux_statx_to_attr(&request->read.r_attr, (struct statx *) request->plugin_data);
+                        stx = (struct statx *) request->plugin_data;
+
+                        if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+                            chimera_linux_statx_to_attr(&request->read.r_attr, stx);
+                        }
+
+                        if (request->status == CHIMERA_VFS_OK) {
+                            request->read.r_eof =
+                                (request->read.length > 0 &&
+                                 request->read.offset + request->read.r_length >= stx->stx_size);
+                        } else if (request->status == CHIMERA_VFS_EINVAL &&
+                                   request->read.offset >= stx->stx_size) {
+                            request->status        = CHIMERA_VFS_OK;
+                            request->read.r_length = 0;
+                            request->read.r_niov   = 0;
+                            request->read.r_eof    = 1;
+                        }
                     }
                 }
                 break;
@@ -664,7 +733,9 @@ chimera_io_uring_getattr(
 
     stx = (struct statx *) scratch;
 
-    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW, AT_STATX_SYNC_AS_STAT, stx);
+    io_uring_prep_statx(sqe, fd, "",
+                        AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
+                        CHIMERA_IO_URING_STATX_MASK, stx);
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_getattr */
@@ -773,6 +844,17 @@ chimera_io_uring_setattr(
     }
 
     if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
+        // A size that does not fit in a signed off_t cannot be set on any
+        // backing filesystem (truncate would see it as negative and fail
+        // EINVAL).  Report it as "file too large" so NFS returns FBIG rather
+        // than INVAL.
+        if (request->setattr.set_attr->va_size > (uint64_t) INT64_MAX) {
+            chimera_restore_privilege(request->cred);
+            request->status = CHIMERA_VFS_EFBIG;
+            request->complete(request);
+            return;
+        }
+
         // fd might be O_PATH which doesn't support ftruncate directly,
         // so use truncate() on /proc/self/fd/N path which follows the symlink
         char procpath[64];
@@ -920,7 +1002,8 @@ chimera_io_uring_lookup_at(
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    io_uring_prep_statx(sqe, parent_fd, fullname, AT_SYMLINK_NOFOLLOW, AT_STATX_SYNC_AS_STAT, stx);
+    io_uring_prep_statx(sqe, parent_fd, fullname, AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
+                        CHIMERA_IO_URING_STATX_MASK, stx);
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_lookup */
@@ -1120,7 +1203,10 @@ chimera_io_uring_open_at(
 
     flags = 0;
 
-    if (request->open_at.flags & (CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)) {
+    if (request->open_at.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)) {
+        flags |= O_RDONLY;
+    } else if ((request->open_at.flags & CHIMERA_VFS_OPEN_READ_ONLY) &&
+               !(request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
         flags |= O_RDONLY;
     } else {
         flags |= O_RDWR;
@@ -1373,7 +1459,6 @@ chimera_io_uring_read(
 {
     struct chimera_io_uring_thread *thread = private_data;
     struct io_uring_sqe            *sqe;
-    struct evpl                    *evpl = thread->evpl;
     int                             fd, i;
     ssize_t                         left = request->read.length;
     struct iovec                   *iov;
@@ -1388,10 +1473,11 @@ chimera_io_uring_read(
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;
         request->read.r_length = 0;
-        request->read.r_eof    = 1;
+        request->read.r_eof    = 0;
         if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
             sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
-            io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
+            io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                                CHIMERA_IO_URING_STATX_MASK, stx);
             evpl_defer(thread->evpl, &thread->deferral);
         } else {
             /* No attrs requested and no readv to submit: complete inline. */
@@ -1403,23 +1489,32 @@ chimera_io_uring_read(
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    request->read.r_niov = evpl_iovec_alloc(evpl,
-                                            request->read.length,
-                                            4096,
-                                            8,
-                                            EVPL_IOVEC_FLAG_SHARED, request->read.iov);
+    /* The VFS core allocated the read buffers on the connection thread
+     * (io_uring does not advertise CAP_READ_PROVIDES_BUFFERS) and placed them
+     * in request->read.iov, padded to a 4 KiB boundary on both sides.  Build
+     * the readv vector from them: offset the first buffer by aligned_prefix so
+     * file offset `offset` lands where the VFS core trims to on completion, and
+     * cap the vector at the requested length.  The VFS core owns the buffers --
+     * io_uring neither allocates nor releases them. */
+    chimera_io_uring_abort_if(request->read.buffers_provided == 0,
+                              "io_uring read dispatched without VFS-provided buffers");
 
     stx      = (struct statx *) scratch;
     scratch += sizeof(*stx);
 
     iov = (struct iovec *) scratch;
 
-    for (i = 0; left && i < request->read.r_niov; i++) {
+    for (i = 0; left && i < request->read.buffers_provided; i++) {
 
         iov[i].iov_base = request->read.iov[i].data;
         iov[i].iov_len  = request->read.iov[i].length;
 
-        if (iov[i].iov_len > left) {
+        if (i == 0) {
+            iov[i].iov_base = (char *) iov[i].iov_base + request->read.aligned_prefix;
+            iov[i].iov_len -= request->read.aligned_prefix;
+        }
+
+        if (iov[i].iov_len > (size_t) left) {
             iov[i].iov_len = left;
         }
 
@@ -1428,12 +1523,11 @@ chimera_io_uring_read(
 
     fd = (int) request->read.handle->vfs_private;
 
-    io_uring_prep_readv(sqe, fd, iov, request->read.r_niov, request->read.offset);
+    io_uring_prep_readv(sqe, fd, iov, i, request->read.offset);
 
-    if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
-        sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
-        io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, AT_STATX_SYNC_AS_STAT, stx);
-    }
+    sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
+    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                        CHIMERA_IO_URING_STATX_MASK, stx);
 
     evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_read */

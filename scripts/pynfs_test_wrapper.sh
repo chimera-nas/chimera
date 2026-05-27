@@ -38,6 +38,10 @@ CHIMERA_DIED_DURING_TEST=0
 PYNFS_PYCOMPAT_DIR="${SESSION_DIR}/pycompat"
 PYNFS_NFS4_LEASE_TIME="${PYNFS_NFS4_LEASE_TIME:-5}"
 PYNFS_NFS4_GRACE_TIME="${PYNFS_NFS4_GRACE_TIME:-10}"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# REST port used (loopback, inside the netns) only for delegation runs, where
+# the pynfs serverhelper drives out-of-band fs ops through the debug endpoint.
+REST_PORT="${PYNFS_REST_PORT:-7780}"
 
 cleanup() {
     if [ -n "$CHIMERA_PID" ]; then
@@ -68,8 +72,17 @@ cleanup() {
 trap cleanup EXIT
 
 # Enable NFSv4 protocol delegations only for delegation test runs, so the
-# other suites exercise the default (delegations-off) behavior.
+# other suites exercise the default (delegations-off) behavior.  A few tests
+# outside the deleg/delegations flags still need delegations (e.g. the
+# destroy_session callback test DSESS9002, which drives a CB_RECALL to exercise
+# the backchannel after a session teardown); the CMake harness sets
+# PYNFS_FORCE_DELEG=1 for those so they run with delegations on.
 DELEG_ENABLE="false"
+case "${PYNFS_FORCE_DELEG:-}" in
+    1 | true | TRUE | yes)
+        DELEG_ENABLE="true"
+        ;;
+esac
 case " $FLAG_ARGS " in
     *" deleg"* | *" delegations"* | *DELEG* | *"delegations "* | *"deleg "*)
         DELEG_ENABLE="true"
@@ -80,6 +93,14 @@ esac
 generate_config() {
     local mount_path="/"
     local vfs_section=""
+    local rest_section=""
+
+    # For delegation runs, expose the test-only debug fsop endpoint so the
+    # pynfs serverhelper can drive out-of-band recalls (DELEG16-20).
+    if [ "$DELEG_ENABLE" = "true" ]; then
+        rest_section="\"rest_http_port\": $REST_PORT,
+        \"rest_debug_fsops\": true,"
+    fi
 
     case "$BACKEND" in
         linux|io_uring)
@@ -130,6 +151,7 @@ generate_config() {
         "nfs4_lease_time": $PYNFS_NFS4_LEASE_TIME,
         "nfs4_grace_time": $PYNFS_NFS4_GRACE_TIME,
         $vfs_section
+        $rest_section
         "external_portmap": false
     },
     "mounts": {
@@ -173,7 +195,9 @@ CHIMERA_PID=$!
 READY=0
 for i in $(seq 1 100); do
     if grep -q "Server is ready." "$CHIMERA_LOG" &&
-       ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/2049" 2>/dev/null; then
+       ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/2049" 2>/dev/null &&
+       { [ "$DELEG_ENABLE" != "true" ] ||
+         ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/${REST_PORT}" 2>/dev/null; }; then
         READY=1
         break
     fi
@@ -212,6 +236,52 @@ if Packer is not None:
         return _pack_string(self, s)
 
     Packer.pack_string = _chimera_pack_string
+
+# pynfs's nfs4lib.SSVContext (used by the SP4_SSV exchange_id test, EID50) is
+# still Python-2 era: the initial SSV is the str "'\0' * ssv_len" and str_xor
+# builds a str via chr(ord(...)), so hmac.new() and the XOR both blow up on
+# Python 3 (hmac keys must be bytes; iterating bytes yields ints).  Coerce both
+# to bytes.  nfs4lib is not importable at interpreter startup (the testserver
+# adds its own dir to sys.path only once it runs), and the 4.0/4.1 trees each
+# ship their own copy, so patch via a post-import hook keyed on the module name
+# rather than importing it here -- that way we patch whichever nfs4lib the
+# running testserver actually loaded, without perturbing sys.path.
+import sys as _sys
+import builtins as _builtins
+
+_ssv_patched = [False]
+
+def _chimera_patch_nfs4lib(m):
+    def _str_xor(a, b):
+        if isinstance(a, str):
+            a = a.encode("latin-1")
+        if isinstance(b, str):
+            b = b.encode("latin-1")
+        return bytes(x ^ y for x, y in zip(a, b))
+    m.str_xor = _str_xor
+
+    ssv = getattr(m, "SSVContext", None)
+    if ssv is not None:
+        _orig_subkey = ssv._subkey
+
+        def _subkey(self, val, i):
+            if isinstance(val, str):
+                val = val.encode("latin-1")
+            return _orig_subkey(self, val, i)
+        ssv._subkey = _subkey
+
+_real_import = _builtins.__import__
+
+def _chimera_import(name, *args, **kwargs):
+    mod = _real_import(name, *args, **kwargs)
+    if not _ssv_patched[0]:
+        m = _sys.modules.get("nfs4lib")
+        if m is not None and hasattr(m, "SSVContext"):
+            _chimera_patch_nfs4lib(m)
+            _ssv_patched[0] = True
+    return mod
+
+_builtins.__import__ = _chimera_import
 EOF
 export PYTHONPATH="${PYNFS_PYCOMPAT_DIR}:${PYNFS_DIR}:${PYTHONPATH:-}"
 
@@ -224,12 +294,21 @@ if [ "${PYNFS_RUNDEPS:-0}" = "1" ]; then
     PYNFS_DEP_ARGS=(--rundeps --force)
 fi
 
+# Server-side recall tests (DELEG16-20) drive out-of-band fs mutations via a
+# helper that pokes the chimera REST debug endpoint. Only wire it up for 4.0
+# delegation runs.
+SERVERHELPER_ARGS=()
+if [ "$DELEG_ENABLE" = "true" ]; then
+    SERVERHELPER_ARGS=(--serverhelper "${SCRIPT_DIR}/pynfs_serverhelper.sh"
+                       --serverhelperarg "http://127.0.0.1:${REST_PORT}")
+fi
+
 if [ "$NFS_MINOR_VERSION" = "0" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.0/testserver.py"
     # shellcheck disable=SC2086
     timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
         ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-        --maketree "${PYNFS_DEP_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
+        --maketree "${PYNFS_DEP_ARGS[@]}" "${SERVERHELPER_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
 elif [ "$NFS_MINOR_VERSION" = "1" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.1/testserver.py"
     # shellcheck disable=SC2086

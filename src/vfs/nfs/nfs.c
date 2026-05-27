@@ -79,8 +79,11 @@ chimera_nfs_get_mount_port(
 } /* chimera_nfs_get_mount_port */
 
 static void *
-chimera_nfs_init(const char *cfgdata)
+chimera_nfs_init(
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
 {
+    (void) metrics;
     struct chimera_nfs_shared *shared = calloc(1, sizeof(*shared));
 
     pthread_mutex_init(&shared->lock, NULL);
@@ -302,10 +305,13 @@ chimera_nfs_dispatch(
 } /* chimera_nfs_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_nfs = {
-    .name         = "nfs",
-    .fh_magic     = CHIMERA_VFS_FH_MAGIC_NFS,
-    .capabilities = CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
-        CHIMERA_VFS_CAP_FS_LOCK,
+    .name     = "nfs",
+    .fh_magic = CHIMERA_VFS_FH_MAGIC_NFS,
+    /* CAP_READ_PROVIDES_BUFFERS: the proxy returns the data buffers handed up
+     * by its upstream RPC reply (it reassigns request->read.iov), so the VFS
+     * core must not pre-allocate buffers for it. */
+    .capabilities   = CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
+        CHIMERA_VFS_CAP_FS_LOCK | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS,
     .init           = chimera_nfs_init,
     .destroy        = chimera_nfs_destroy,
     .thread_init    = chimera_nfs_thread_init,

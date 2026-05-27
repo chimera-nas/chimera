@@ -135,6 +135,15 @@ chimera_server_config_get_nfs4_grace_time(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_nfs4_courtesy_time(
+    struct chimera_server_config *config,
+    uint32_t                      seconds);
+
+uint32_t
+chimera_server_config_get_nfs4_courtesy_time(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_kv_module(
     struct chimera_server_config *config,
     const char                   *kv_module);
@@ -310,6 +319,15 @@ chimera_server_config_set_rest_https_port(
 
 int
 chimera_server_config_get_rest_https_port(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_rest_debug_fsops(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_rest_debug_fsops(
     const struct chimera_server_config *config);
 
 void

@@ -370,7 +370,30 @@ state_table_lookup_locked(
          * TEST_STATEID/FREE_STATEID can act on it) but any use of it as a
          * delegation reports NFS4ERR_DELEG_REVOKED (RFC 8881 §8.2.4). */
         status = NFS4ERR_DELEG_REVOKED;
-    } else {
+    } else if (slot->state) {
+        /* Courteous-server reclaim: if a conflicting acquirer reclaimed this
+         * state's (courtesy) client, the client has lost its lease.  Its slots
+         * are not torn down until the next lease sweep, so report EXPIRED here
+         * rather than handing back state the client no longer owns. */
+        struct nfs_client *owner_client = NULL;
+
+        if (slot->type == NFS4_SLOT_TYPE_OPEN) {
+            struct nfs_open_state *os = slot->state;
+            owner_client = os->owner ? os->owner->client : NULL;
+        } else if (slot->type == NFS4_SLOT_TYPE_LOCK) {
+            struct nfs_lock_state *ls = slot->state;
+            owner_client = ls->lock_owner ? ls->lock_owner->client : NULL;
+        } else if (slot->type == NFS4_SLOT_TYPE_DELEG) {
+            owner_client = ((struct nfs_delegation *) slot->state)->client;
+        }
+
+        if (owner_client &&
+            atomic_load_explicit(&owner_client->reclaim_pending,
+                                 memory_order_acquire)) {
+            pthread_rwlock_unlock(&shard->lock);
+            return NFS4ERR_EXPIRED;
+        }
+
         *out_state = slot->state;
         if (out_type) {
             *out_type = slot->type;
@@ -389,6 +412,15 @@ state_table_lookup_locked(
                     &((struct nfs_delegation *) slot->state)->refcount, 1,
                     memory_order_acq_rel);
             }
+        }
+        status = NFS4_OK;
+    } else {
+        /* Slot resolves but no state pointer is installed yet (e.g. the
+         * validate path, which only confirms the slot exists).  Return OK with
+         * a NULL state and no refcount bump, exactly as before. */
+        *out_state = NULL;
+        if (out_type) {
+            *out_type = slot->type;
         }
         status = NFS4_OK;
     }
@@ -413,17 +445,19 @@ nfs_state_table_acquire(
          * lease.  Both state types reach their client through their owner. */
         if (*out_type == NFS4_SLOT_TYPE_OPEN) {
             struct nfs_open_state *os = *out_state;
-            if (os->owner) {
+            if (os && os->owner) {
                 nfs_client_touch(os->owner->client);
             }
         } else if (*out_type == NFS4_SLOT_TYPE_LOCK) {
             struct nfs_lock_state *ls = *out_state;
-            if (ls->lock_owner) {
+            if (ls && ls->lock_owner) {
                 nfs_client_touch(ls->lock_owner->client);
             }
         } else if (*out_type == NFS4_SLOT_TYPE_DELEG) {
             struct nfs_delegation *d = *out_state;
-            nfs_client_touch(d->client);
+            if (d) {
+                nfs_client_touch(d->client);
+            }
         }
     }
 
@@ -1489,6 +1523,7 @@ nfs_delegation_create(
     deleg->seqid      = 1;
     deleg->lease_held = false;
     atomic_init(&deleg->cb_recall_state, NFS4_DELEG_ACTIVE);
+    atomic_init(&deleg->cb_recall_retries, 0);
     atomic_init(&deleg->refcount, 1);
     atomic_init(&deleg->destroyed, 0);
 
@@ -1603,6 +1638,46 @@ nfs_delegation_revoked_cb(
                                   memory_order_acq_rel);
     }
 } /* nfs_delegation_revoked_cb */
+
+SYMBOL_EXPORT bool
+nfs_client_lease_alive(
+    const struct chimera_vfs_lease *lease,
+    void                           *private_data)
+{
+    const struct nfs_client *client = private_data;
+
+    (void) lease;
+
+    /* Dead (reclaimable) once the lease has lapsed into courtesy state. */
+    return !atomic_load_explicit(&client->courtesy, memory_order_relaxed);
+} /* nfs_client_lease_alive */
+
+SYMBOL_EXPORT void
+nfs_client_lease_revoked_cb(
+    struct chimera_vfs_lease *lease,
+    void                     *private_data)
+{
+    struct nfs_client *client = private_data;
+
+    (void) lease;
+
+    /* A conflicting acquirer reclaimed a lease this courtesy client still
+     * held.  Flag it so the next lease sweep tears the client down; until
+     * then its other leases stay reclaimable (still in courtesy). */
+    atomic_store_explicit(&client->reclaim_pending, 1, memory_order_release);
+} /* nfs_client_lease_revoked_cb */
+
+SYMBOL_EXPORT bool
+nfs_delegation_lease_alive(
+    const struct chimera_vfs_lease *lease,
+    void                           *private_data)
+{
+    const struct nfs_delegation *deleg = private_data;
+
+    (void) lease;
+
+    return !atomic_load_explicit(&deleg->client->courtesy, memory_order_relaxed);
+} /* nfs_delegation_lease_alive */
 
 /* FREE_STATEID support: if `sid` names a force-revoked delegation, tear it
 * down (freeing the slot and clearing the client's revoked count) and return
