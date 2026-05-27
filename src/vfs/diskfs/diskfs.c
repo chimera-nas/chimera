@@ -1537,12 +1537,26 @@ diskfs_fh_to_inum(
         ((txn)->type == DISKFS_TXN_WRITE ? DISKFS_INODE_LOCK_WRITE \
                                          : DISKFS_INODE_LOCK_READ)
 
+/*
+ * Mix the inum before selecting the shard.  inums are
+ * (disk<<56 | ag<<32 | block_idx) where block_idx is a small, often dense or
+ * stride-correlated integer, so the raw low bits have little entropy and
+ * cluster inodes onto a handful of the 256 shards -- concentrating contention
+ * on those few shard mutexes.  Run it through the VFS XXH3 helper (as used
+ * elsewhere in the tree) so inodes spread evenly across shards.
+ */
+static inline uint64_t
+diskfs_inum_hash(uint64_t inum)
+{
+    return chimera_vfs_hash(&inum, sizeof(inum));
+} /* diskfs_inum_hash */
+
 static inline struct diskfs_inode_shard *
 diskfs_inode_shard(
     struct diskfs_shared *shared,
     uint64_t              inum)
 {
-    return &shared->inode_cache->shards[inum & DISKFS_INODE_CACHE_MASK];
+    return &shared->inode_cache->shards[diskfs_inum_hash(inum) & DISKFS_INODE_CACHE_MASK];
 } /* diskfs_inode_shard */
 
 static inline struct diskfs_inode_waiter *
