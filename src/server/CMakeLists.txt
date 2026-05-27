@@ -2,6 +2,11 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
+# Inline the liburcu read-side primitives for the server TUs that touch the RCU
+# caches (nfs/s3/smb/rest + server.c).  See src/vfs/CMakeLists.txt; deliberately
+# not set for the GPL fio plugin.  chimera is LGPL-2.1.
+add_compile_definitions(_LGPL_SOURCE)
+
 add_library(chimera_server SHARED server.c)
 target_link_libraries(chimera_server chimera_nfs chimera_s3 chimera_smb chimera_rest chimera_vfs evpl unwind)
 
