@@ -14,6 +14,7 @@
 #include "vfs_lease_types.h"
 #include "evpl/evpl.h"
 #include "prometheus-c.h"
+#include "vfs_clock.h"
 
 #define CHIMERA_VFS_PATH_MAX 4096
 #define CHIMERA_VFS_NAME_MAX 256
@@ -152,7 +153,7 @@ struct chimera_vfs_open_handle {
         struct chimera_vfs_request     *request,
         struct chimera_vfs_open_handle *handle);
     struct chimera_vfs_request     *request;
-    struct timespec                 timestamp;
+    uint64_t                        timestamp; /* stopwatch ticks */
     struct chimera_vfs_open_handle *bucket_next;
     struct chimera_vfs_open_handle *bucket_prev;
     struct chimera_vfs_open_handle *prev;

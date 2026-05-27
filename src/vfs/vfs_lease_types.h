@@ -117,7 +117,7 @@ struct chimera_vfs_lease {
 
     enum chimera_vfs_break_state break_state;
     uint8_t                        break_needed_mode;
-    struct timespec                break_deadline;
+    uint64_t                       break_deadline; /* stopwatch ticks */
 
     /* For a SHARE probe only: a caching (handle) lease held under this same
      * key is the requester's own lease (SMB2 same-client, same lease key) and

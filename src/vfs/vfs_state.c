@@ -53,32 +53,21 @@ chimera_vfs_state_pump_io(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file);
 
-/* Milliseconds elapsed from `then` to `now` (both CLOCK_MONOTONIC).  Clamps
+/* Milliseconds elapsed from `then` to `now` (both stopwatch ticks).  Clamps
  * to 0 if `now` precedes `then`. */
 static inline uint64_t
 chimera_vfs_elapsed_ms(
-    const struct timespec *then,
-    const struct timespec *now)
+    uint64_t then,
+    uint64_t now)
 {
-    if (now->tv_sec < then->tv_sec ||
-        (now->tv_sec == then->tv_sec && now->tv_nsec < then->tv_nsec)) {
-        return 0;
-    }
-    return (uint64_t) (now->tv_sec - then->tv_sec) * 1000ULL +
-           (uint64_t) (now->tv_nsec - then->tv_nsec) / 1000000ULL;
+    return now > then ? chimera_vfs_ticks_to_ns(now - then) / 1000000ULL : 0;
 } /* chimera_vfs_elapsed_ms */
 
-/* True if `lease`'s break deadline has elapsed (CLOCK_MONOTONIC). */
+/* True if `lease`'s break deadline has elapsed (stopwatch ticks). */
 static inline bool
 chimera_vfs_break_deadline_passed(const struct chimera_vfs_lease *lease)
 {
-    struct timespec now;
-
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    if (now.tv_sec != lease->break_deadline.tv_sec) {
-        return now.tv_sec > lease->break_deadline.tv_sec;
-    }
-    return now.tv_nsec >= lease->break_deadline.tv_nsec;
+    return chimera_vfs_now_ticks() >= lease->break_deadline;
 } /* chimera_vfs_break_deadline_passed */
 
 /* -------------------------------------------------------------------- */
@@ -1066,7 +1055,6 @@ chimera_vfs_lease_begin_break(
     uint32_t                  deadline_ms)
 {
     struct chimera_vfs_file_state *file = lease->file;
-    struct timespec                now;
     chimera_vfs_lease_break_cb_t   cb;
     void                          *cb_priv;
     bool                           should_invoke;
@@ -1085,16 +1073,10 @@ chimera_vfs_lease_begin_break(
     if (should_invoke) {
         lease->break_state       = CHIMERA_VFS_BREAK_BREAKING;
         lease->break_needed_mode = needed_mode;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        now.tv_sec  += deadline_ms / 1000;
-        now.tv_nsec += (long) (deadline_ms % 1000) * 1000000L;
-        if (now.tv_nsec >= 1000000000L) {
-            now.tv_sec  += 1;
-            now.tv_nsec -= 1000000000L;
-        }
-        lease->break_deadline = now;
-        cb                    = lease->owner.break_cb;
-        cb_priv               = lease->owner.cb_private;
+        lease->break_deadline    = chimera_vfs_now_ticks() +
+            chimera_vfs_ns_to_ticks((uint64_t) deadline_ms * 1000000ULL);
+        cb      = lease->owner.break_cb;
+        cb_priv = lease->owner.cb_private;
     } else {
         cb      = NULL;
         cb_priv = NULL;
@@ -1663,7 +1645,7 @@ chimera_vfs_io_try(
             file->implicit_lease.mode.granted = target;
         }
         file->implicit_inflight++;
-        clock_gettime(CLOCK_MONOTONIC, &file->implicit_last_used);
+        file->implicit_last_used = chimera_vfs_now_ticks();
         pthread_mutex_unlock(&file->lock);
 
         if (activated) {
@@ -1816,10 +1798,8 @@ chimera_vfs_state_reap_idle(
     uint64_t                  idle_ms)
 {
 #define CHIMERA_VFS_STATE_REAP_BATCH 64
-    struct timespec now;
-    int             b;
-
-    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t now = chimera_vfs_now_ticks();
+    int      b;
 
     for (b = 0; b < CHIMERA_VFS_STATE_NUM_BUCKETS; b++) {
         struct chimera_vfs_state_bucket *bucket = &state->buckets[b];
@@ -1852,7 +1832,7 @@ chimera_vfs_state_reap_idle(
             reapable = file->implicit_active &&
                 !file->implicit_draining &&
                 file->implicit_inflight == 0 &&
-                chimera_vfs_elapsed_ms(&file->implicit_last_used, &now) >= idle_ms;
+                chimera_vfs_elapsed_ms(file->implicit_last_used, now) >= idle_ms;
             if (reapable) {
                 file->implicit_draining = 1;
             }

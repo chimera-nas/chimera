@@ -311,7 +311,7 @@ chimera_vfs_open_cache_release(
                                   close_hash, NULL, NULL);
                 return;
             }
-            clock_gettime(CLOCK_MONOTONIC, &handle->timestamp);
+            handle->timestamp = chimera_vfs_now_ticks();
             DL_APPEND(shard->pending_close, handle);
         }
     }
@@ -623,7 +623,7 @@ chimera_vfs_open_cache_insert(
 static inline struct chimera_vfs_open_handle *
 chimera_vfs_open_cache_defer_close(
     struct vfs_open_cache *cache,
-    struct timespec       *timestamp,
+    uint64_t               now_ticks,
     uint64_t               min_age,
     uint64_t              *r_count)
 {
@@ -640,7 +640,8 @@ chimera_vfs_open_cache_defer_close(
 
             handle = shard->pending_close;
 
-            elapsed = chimera_get_elapsed_ns(timestamp, &handle->timestamp);
+            elapsed = now_ticks > handle->timestamp ?
+                chimera_vfs_ticks_to_ns(now_ticks - handle->timestamp) : 0;
 
             if (elapsed < min_age) {
                 break;
@@ -717,8 +718,7 @@ chimera_vfs_open_cache_mark_for_close_by_mount(
         for (handle = shard->handles; handle; handle = handle->bucket_next) {
             if (memcmp(handle->fh, mount_id, CHIMERA_VFS_MOUNT_ID_SIZE) == 0) {
                 /* Set timestamp to 0 so it will be closed immediately */
-                handle->timestamp.tv_sec  = 0;
-                handle->timestamp.tv_nsec = 0;
+                handle->timestamp = 0;
                 count++;
             }
         }
@@ -953,7 +953,7 @@ chimera_vfs_open_cache_release_doc(
                               close_hash, NULL, NULL);
             return 0;
         }
-        clock_gettime(CLOCK_MONOTONIC, &handle->timestamp);
+        handle->timestamp = chimera_vfs_now_ticks();
         DL_APPEND(shard->pending_close, handle);
     }
 
