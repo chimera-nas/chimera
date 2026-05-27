@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -14,7 +14,7 @@ struct chimera_vfs_name_cache_entry {
     uint8_t         child_fh_len;
     uint16_t        name_len;
     int64_t         score;
-    struct timespec expiration;
+    uint64_t        expiration; /* stopwatch ticks */
     struct rcu_head rcu;
     union {
         struct chimera_vfs_name_cache_entry *next; /* when on the free list */
@@ -187,9 +187,7 @@ chimera_vfs_name_cache_lookup(
     struct chimera_vfs_name_cache_entry **slot, **slot_end;
     uint64_t                              key = fh_hash ^ name_hash;
     int                                   rc;
-    struct timespec                       now;
-
-    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t                              now = chimera_vfs_now_ticks();
 
     shard = &cache->shards[key & cache->num_shards_mask];
 
@@ -205,7 +203,7 @@ chimera_vfs_name_cache_lookup(
         entry = rcu_dereference(*slot);
 
         if (entry && entry->key == key &&
-            chimera_timespec_cmp(&entry->expiration, &now) >= 0 &&
+            entry->expiration >= now &&
             chimera_memequal(entry->parent_fh, entry->parent_fh_len, fh, fh_len) &&
             chimera_memequal(entry->child_name, entry->name_len, name, name_len)) {
 
@@ -258,9 +256,7 @@ chimera_vfs_name_cache_insert(
     struct chimera_vfs_name_cache_shard  *shard;
     struct chimera_vfs_name_cache_entry **slot, **slot_end, **slot_best;
     uint64_t                              key = fh_hash ^ name_hash;
-    struct timespec                       now;
-
-    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t                              now = chimera_vfs_now_ticks();
 
     shard = &cache->shards[key & cache->num_shards_mask];
 
@@ -292,8 +288,7 @@ chimera_vfs_name_cache_insert(
     entry->shard         = shard;
     entry->score         = 0;
 
-    entry->expiration.tv_sec  = now.tv_sec + cache->ttl;
-    entry->expiration.tv_nsec = now.tv_nsec;
+    entry->expiration = now + chimera_vfs_ns_to_ticks((uint64_t) cache->ttl * 1000000000ULL);
 
     memcpy(entry->parent_fh, fh, fh_len);
 
@@ -339,7 +334,7 @@ chimera_vfs_name_cache_insert(
             continue;
         }
 
-        if (chimera_timespec_cmp(&best_entry->expiration, &now) < 0) {
+        if (best_entry->expiration < now) {
             /* This entry is expired, so its effectively empty */
             old_entry->score = -1;
         }
@@ -350,7 +345,7 @@ chimera_vfs_name_cache_insert(
 
         if ((best_entry->score > old_entry->score) ||
             (best_entry->score == old_entry->score &&
-             chimera_timespec_cmp(&best_entry->expiration, &old_entry->expiration) < 0)) {
+             best_entry->expiration < old_entry->expiration)) {
             best_entry = old_entry;
             slot_best  = slot;
         }

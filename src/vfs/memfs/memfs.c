@@ -619,7 +619,7 @@ memfs_init(
     struct timespec          now;
     uint32_t                 block_size = CHIMERA_MEMFS_BLOCK_SIZE_DEFAULT;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     pthread_mutex_init(&shared->lock, NULL);
 
@@ -929,7 +929,7 @@ memfs_apply_attrs(
     struct timespec now;
     uint64_t        set_mask = attr->va_set_mask;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
@@ -1487,7 +1487,7 @@ memfs_mkdir_at(
     struct timespec           now;
     uint64_t                  hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->mkdir_at.name_hash;
 
@@ -1597,7 +1597,7 @@ memfs_mknod_at(
     struct timespec           now;
     uint64_t                  hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->mknod_at.name_hash;
 
@@ -1708,7 +1708,7 @@ memfs_remove_at(
     struct timespec      now;
     uint64_t             hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->remove_at.name_hash;
 
@@ -2008,7 +2008,7 @@ memfs_open_at(
     struct timespec      now;
     uint64_t             hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->open_at.name_hash;
 
@@ -2166,7 +2166,7 @@ memfs_create_unlinked(
     struct memfs_inode *inode = NULL;
     struct timespec     now;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     inode = memfs_inode_alloc_thread(thread);
 
@@ -2240,7 +2240,7 @@ memfs_read(
     int                      niov = 0;
     struct timespec          now;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     offset = request->read.offset;
     length = request->read.length;
@@ -2392,7 +2392,7 @@ memfs_write(
     uint32_t                 block_offset, left, block_len;
     struct timespec          now;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     const uint32_t           block_size  = shared->block_size;
     const uint32_t           block_shift = shared->block_shift;
@@ -2586,7 +2586,7 @@ memfs_allocate(
     struct memfs_inode *inode;
     struct timespec     now;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     if (request->allocate.handle->vfs_private) {
         inode = (struct memfs_inode *) request->allocate.handle->vfs_private;
@@ -2863,7 +2863,7 @@ memfs_copy_range(
         }
     }
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     /* Lock in deterministic order to avoid AB/BA deadlock */
     if (src_inode == dst_inode) {
@@ -3066,7 +3066,7 @@ memfs_move_range(
         }
     }
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     if (src_inode == dst_inode) {
         pthread_mutex_lock(&src_inode->lock);
@@ -3208,7 +3208,7 @@ memfs_clone_range(
         }
     }
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     if (src_inode == dst_inode) {
         pthread_mutex_lock(&src_inode->lock);
@@ -3426,7 +3426,7 @@ memfs_symlink_at(
     struct timespec      now;
     uint64_t             hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->symlink_at.name_hash;
 
@@ -3571,7 +3571,7 @@ memfs_rename_at(
     struct timespec      now;
     uint64_t             hash, new_hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash     = request->rename_at.name_hash;
     new_hash = request->rename_at.new_name_hash;
@@ -3803,7 +3803,7 @@ memfs_link_at(
     struct timespec      now;
     uint64_t             hash;
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
 
     hash = request->link_at.name_hash;
 
@@ -4270,7 +4270,7 @@ memfs_set_xattr(
         inode->xattrs = xattr;
     }
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
     inode->ctime = now;
 
     memfs_map_attrs(shared, &request->set_xattr.r_post_attr, inode, request->fh);
@@ -4369,7 +4369,7 @@ memfs_remove_xattr(
     free(xattr->value);
     free(xattr);
 
-    clock_gettime(CLOCK_REALTIME, &now);
+    chimera_vfs_realtime(&now);
     inode->ctime = now;
 
     memfs_map_attrs(shared, &request->remove_xattr.r_post_attr, inode, request->fh);

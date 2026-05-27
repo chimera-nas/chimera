@@ -28,7 +28,7 @@ struct chimera_vfs_rpl_cache_entry {
     uint16_t        parent_fh_len;
     uint16_t        name_len;
     int64_t         score;
-    struct timespec expiration;
+    uint64_t        expiration; /* stopwatch ticks */
     struct rcu_head rcu;
     union {
         struct chimera_vfs_rpl_cache_entry *next;  /* when on free list */
@@ -180,9 +180,7 @@ chimera_vfs_rpl_cache_lookup(
     struct chimera_vfs_rpl_cache_shard  *shard;
     struct chimera_vfs_rpl_cache_entry **slot, **slot_end;
     uint64_t                             key = child_fh_hash;
-    struct timespec                      now;
-
-    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t                             now = chimera_vfs_now_ticks();
 
     shard = &cache->shards[key & cache->num_shards_mask];
 
@@ -195,7 +193,7 @@ chimera_vfs_rpl_cache_lookup(
         entry = rcu_dereference(*slot);
 
         if (entry && entry->fwd_key == key &&
-            chimera_timespec_cmp(&entry->expiration, &now) >= 0 &&
+            entry->expiration >= now &&
             chimera_memequal(entry->child_fh, entry->child_fh_len,
                              child_fh, child_fh_len)) {
 
@@ -310,9 +308,7 @@ chimera_vfs_rpl_cache_insert(
     struct chimera_vfs_rpl_cache_entry **slot, **slot_end, **slot_best;
     uint64_t                             fwd_key = child_fh_hash;
     uint64_t                             rev_key = parent_fh_hash ^ name_hash;
-    struct timespec                      now;
-
-    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t                             now     = chimera_vfs_now_ticks();
 
     shard = &cache->shards[fwd_key & cache->num_shards_mask];
 
@@ -336,8 +332,7 @@ chimera_vfs_rpl_cache_insert(
     entry->shard         = shard;
     entry->score         = 0;
 
-    entry->expiration.tv_sec  = now.tv_sec + cache->ttl;
-    entry->expiration.tv_nsec = now.tv_nsec;
+    entry->expiration = now + chimera_vfs_ns_to_ticks((uint64_t) cache->ttl * 1000000000ULL);
 
     memcpy(entry->child_fh, child_fh, child_fh_len);
     memcpy(entry->parent_fh, parent_fh, parent_fh_len);
@@ -377,13 +372,13 @@ chimera_vfs_rpl_cache_insert(
             continue;
         }
 
-        if (chimera_timespec_cmp(&old_entry->expiration, &now) < 0) {
+        if (old_entry->expiration < now) {
             old_entry->score = -1;
         }
 
         if ((best_entry->score > old_entry->score) ||
             (best_entry->score == old_entry->score &&
-             chimera_timespec_cmp(&best_entry->expiration, &old_entry->expiration) < 0)) {
+             best_entry->expiration < old_entry->expiration)) {
             best_entry = old_entry;
             slot_best  = slot;
         }

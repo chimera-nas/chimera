@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -13,7 +13,7 @@ struct chimera_vfs_attr_cache_entry {
     uint64_t                 key;
     uint64_t                 score;
     struct rcu_head          rcu;
-    struct timespec          expiration;
+    uint64_t                 expiration; /* stopwatch ticks */
     union {
         struct chimera_vfs_attr_cache_entry *next; /* when on the free list */
         struct chimera_vfs_attr_cache_shard *shard; /* when not in the free list */
@@ -177,9 +177,8 @@ chimera_vfs_attr_cache_lookup(
     struct chimera_vfs_attr_cache_shard  *shard;
     struct chimera_vfs_attr_cache_entry **slot, **slot_end;
     int                                   rc;
-    struct timespec                       now;
+    uint64_t                              now = chimera_vfs_now_ticks();
 
-    clock_gettime(CLOCK_MONOTONIC, &now);
     shard = &cache->shards[fh_hash & cache->num_shards_mask];
 
     slot = &shard->entries[(fh_hash & cache->num_slots_mask) << cache->num_entries_bits];
@@ -195,7 +194,7 @@ chimera_vfs_attr_cache_lookup(
 
         if (entry &&
             entry->key == fh_hash &&
-            chimera_timespec_cmp(&entry->expiration, &now) >= 0 &&
+            entry->expiration >= now &&
             chimera_memequal(entry->attr.va_fh, entry->attr.va_fh_len, fh, fh_len)) {
 
             *r_attr = entry->attr;
@@ -271,8 +270,8 @@ chimera_vfs_attr_cache_insert(
         entry->score = 0;
         entry->attr  = *attr;
 
-        clock_gettime(CLOCK_MONOTONIC, &entry->expiration);
-        entry->expiration.tv_sec += cache->ttl;
+        entry->expiration = chimera_vfs_now_ticks() +
+            chimera_vfs_ns_to_ticks((uint64_t) cache->ttl * 1000000000ULL);
 
         entry->attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
         memcpy(entry->attr.va_fh, fh, fh_len);

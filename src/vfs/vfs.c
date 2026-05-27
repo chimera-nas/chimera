@@ -41,6 +41,33 @@
 #include "common/macros.h"
 #include "prometheus-c.h"
 
+SYMBOL_EXPORT struct chimera_vfs_clock chimera_vfs_clock;
+
+SYMBOL_EXPORT void
+chimera_vfs_clock_init(void)
+{
+    struct timespec ts;
+
+    if (chimera_vfs_clock.initialized) {
+        return; /* process-global singleton; first vfs wins */
+    }
+
+    stopwatch_context_init(&chimera_vfs_clock.ctx);
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    chimera_vfs_clock.base_wall_ns = (uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec;
+    stopwatch_start(&chimera_vfs_clock.ctx, &chimera_vfs_clock.base_sw);
+    chimera_vfs_clock.delta_ns         = 0;
+    chimera_vfs_clock.last_refresh     = 0;
+    chimera_vfs_clock.refresh_interval = chimera_vfs_ns_to_ticks(1000000000ULL); /* ~1s */
+    chimera_vfs_clock.initialized      = 1;
+} /* chimera_vfs_clock_init */
+
+SYMBOL_EXPORT void
+chimera_vfs_clock_shutdown(void)
+{
+    chimera_vfs_clock.initialized = 0;
+} /* chimera_vfs_clock_shutdown */
 
 static void
 chimera_vfs_delegation_drain(struct chimera_vfs_delegation_thread *delegation_thread)
@@ -144,13 +171,10 @@ chimera_vfs_close_thread_sweep(
     uint64_t                         min_age)
 {
     struct chimera_vfs_thread      *thread = close_thread->vfs_thread;
-    struct timespec                 now;
-    uint64_t                        count = 0;
+    uint64_t                        count  = 0;
     struct chimera_vfs_open_handle *handles, *handle;
 
-    clock_gettime(CLOCK_MONOTONIC, &now);
-
-    handles = chimera_vfs_open_cache_defer_close(cache, &now, min_age, &count);
+    handles = chimera_vfs_open_cache_defer_close(cache, chimera_vfs_now_ticks(), min_age, &count);
 
     while (handles) {
 
@@ -387,6 +411,9 @@ chimera_vfs_init(
     void                      *handle;
     const char                *effective_kv_module;
 
+    /* Bring up the process-wide TSC clock before any cache/timestamp use. */
+    chimera_vfs_clock_init();
+
     vfs = calloc(1, sizeof(*vfs));
 
     /* Synthesize machine name for identification */
@@ -613,6 +640,8 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
         free(vfs->metrics.op_latency_series);
         prometheus_histogram_destroy(vfs->metrics.metrics, vfs->metrics.op_latency);
     }
+
+    chimera_vfs_clock_shutdown();
 
     free(vfs);
 } /* chimera_vfs_destroy */

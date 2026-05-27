@@ -139,7 +139,7 @@ chimera_vfs_root_getattr(
     attr->va_uid   = 0;
     attr->va_gid   = 0;
     attr->va_size  = 4096;
-    clock_gettime(CLOCK_REALTIME, &attr->va_atime);
+    chimera_vfs_realtime(&attr->va_atime);
     attr->va_mtime = attr->va_atime;
     attr->va_ctime = attr->va_atime;
     attr->va_ino   = 2;
@@ -204,7 +204,7 @@ chimera_vfs_root_lookup_getattr_callback(
         dir_attr->va_uid   = 0;
         dir_attr->va_gid   = 0;
         dir_attr->va_size  = 4096;
-        clock_gettime(CLOCK_REALTIME, &dir_attr->va_atime);
+        chimera_vfs_realtime(&dir_attr->va_atime);
         dir_attr->va_mtime = dir_attr->va_atime;
         dir_attr->va_ctime = dir_attr->va_atime;
         dir_attr->va_ino   = 2;
@@ -310,7 +310,7 @@ chimera_vfs_root_mount(
     attr->va_uid   = 0;
     attr->va_gid   = 0;
     attr->va_size  = 4096;
-    clock_gettime(CLOCK_REALTIME, &attr->va_atime);
+    chimera_vfs_realtime(&attr->va_atime);
     attr->va_mtime = attr->va_atime;
     attr->va_ctime = attr->va_atime;
     attr->va_ino   = 2;
