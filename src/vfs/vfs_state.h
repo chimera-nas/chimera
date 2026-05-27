@@ -41,7 +41,11 @@ struct chimera_vfs_request;
 /* Per-file state                                                       */
 /* -------------------------------------------------------------------- */
 
-#define CHIMERA_VFS_STATE_NUM_BUCKETS 64
+/* Must be a power of two (bucket selection masks with NUM_BUCKETS-1).  Sized
+ * generously: the per-I/O implicit-lease path locks one bucket per op, so too
+ * few buckets serialize all leaseless I/O across threads (was 64 -> a futex
+ * storm at high IOPS). */
+#define CHIMERA_VFS_STATE_NUM_BUCKETS 4096
 
 struct chimera_vfs_file_state {
     uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
