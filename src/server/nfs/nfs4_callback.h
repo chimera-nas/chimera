@@ -121,6 +121,21 @@ bool nfs4_cb_ensure_probe(
 void nfs4_cb_recall(
     struct nfs_delegation *deleg);
 
+/*
+ * Re-drive any outstanding (un-returned) delegation recalls for `client` over
+ * the backchannel `req->session` just bound by CREATE_SESSION (RFC 8881
+ * §20.4.1 -- a recall the client did not answer over a now-destroyed session is
+ * re-sent over the new one).  Rebuilds the client's callback channel against the
+ * new session first.  A no-op unless the client has a recall that was attempted
+ * and did not land (so it is a cheap scan when delegations are idle/disabled).
+ * Must run on the thread that owns the new fore connection (the CREATE_SESSION
+ * handler thread).
+ */
+void nfs4_cb_resend_recalls_on_rebind(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_client                *client,
+    struct nfs_request               *req);
+
 /* vfs_state break_cb wired onto every delegation's CACHING lease. */
 void nfs4_delegation_break_cb(
     struct chimera_vfs_lease *lease,

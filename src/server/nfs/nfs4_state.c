@@ -1523,6 +1523,7 @@ nfs_delegation_create(
     deleg->seqid      = 1;
     deleg->lease_held = false;
     atomic_init(&deleg->cb_recall_state, NFS4_DELEG_ACTIVE);
+    atomic_init(&deleg->cb_recall_retries, 0);
     atomic_init(&deleg->refcount, 1);
     atomic_init(&deleg->destroyed, 0);
 
