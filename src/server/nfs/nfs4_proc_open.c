@@ -70,6 +70,12 @@ chimera_nfs4_open_acquire_share(
     state->share_lease.owner.owner_lo   = XXH3_64bits(state->owner->owner,
                                                       state->owner->owner_len);
     state->share_lease.owner.owner_hi = 0;
+    /* Courteous server: report this share reservation dead once the owning
+     * client's lease lapses, so a conflicting open reclaims it; reclaim flags
+     * the client for sweep teardown. */
+    state->share_lease.owner.is_alive_cb = nfs_client_lease_alive;
+    state->share_lease.owner.revoked_cb  = nfs_client_lease_revoked_cb;
+    state->share_lease.owner.cb_private  = state->owner->client;
 
     result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                           &state->share_lease, &conflict);
@@ -191,15 +197,18 @@ chimera_nfs4_open_grant_delegation(
                                   &thread->shared->nfs4_state_table,
                                   &deleg_stateid);
 
-    deleg->lease.kind              = CHIMERA_VFS_LEASE_CACHING;
-    deleg->lease.mode.granted      = lease_mode;
-    deleg->lease.mode.denied       = 0;
-    deleg->lease.owner.protocol    = CHIMERA_VFS_LEASE_PROTO_NFSV4;
-    deleg->lease.owner.client_key  = client->client_id;
-    deleg->lease.owner.owner_lo    = fh_hash;
-    deleg->lease.owner.owner_hi    = 0;
-    deleg->lease.owner.break_cb    = nfs4_delegation_break_cb;
-    deleg->lease.owner.is_alive_cb = NULL;
+    deleg->lease.kind             = CHIMERA_VFS_LEASE_CACHING;
+    deleg->lease.mode.granted     = lease_mode;
+    deleg->lease.mode.denied      = 0;
+    deleg->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4;
+    deleg->lease.owner.client_key = client->client_id;
+    deleg->lease.owner.owner_lo   = fh_hash;
+    deleg->lease.owner.owner_hi   = 0;
+    deleg->lease.owner.break_cb   = nfs4_delegation_break_cb;
+    /* Courteous server: report the delegation dead once the owning client's
+     * lease lapses, so a conflicting open revokes it outright rather than
+     * attempting a CB_RECALL to a client that is gone. */
+    deleg->lease.owner.is_alive_cb = nfs_delegation_lease_alive;
     deleg->lease.owner.revoked_cb  = nfs_delegation_revoked_cb;
     deleg->lease.owner.cb_private  = deleg;
 

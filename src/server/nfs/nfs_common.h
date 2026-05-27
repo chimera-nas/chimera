@@ -245,6 +245,7 @@ struct chimera_server_nfs_shared {
      * config knobs would override these in nfs_server_init. */
     uint32_t                            nfs_lease_time_s;
     uint32_t                            nfs_grace_time_s;
+    uint32_t                            nfs_courtesy_time_s;
 
     struct nfs4_client_table            nfs4_shared_clients;
     struct nfs_state_table              nfs4_state_table;

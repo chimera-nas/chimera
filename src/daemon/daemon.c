@@ -402,6 +402,14 @@ main(
         }
     }
 
+    json_value = json_object_get(server_params, "nfs4_courtesy_time");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        if (int_value > 0) {
+            chimera_server_config_set_nfs4_courtesy_time(server_config, (uint32_t) int_value);
+        }
+    }
+
     json_value = json_object_get(server_params, "external_portmap");
     if (json_is_true(json_value)) {
         chimera_server_info("Enabling external portmap/rpcbind support");
