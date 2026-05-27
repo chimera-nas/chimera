@@ -396,10 +396,10 @@ chimera_vfs_init(
 
     if (metrics) {
         vfs->metrics.metrics    = metrics;
-        vfs->metrics.op_latency = prometheus_metrics_create_histogram_exponential(metrics,
-                                                                                  "chimera_vfs_op_latency",
-                                                                                  "The latency of VFS operations",
-                                                                                  24);
+        vfs->metrics.op_latency = prometheus_metrics_create_histogram_time(metrics,
+                                                                           "chimera_vfs_op_latency_nanoseconds",
+                                                                           "The latency of VFS operations in nanoseconds",
+                                                                           34);
 
         vfs->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_series *));
 
@@ -659,7 +659,6 @@ SYMBOL_EXPORT void
 chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
 {
     struct chimera_vfs_request *request;
-    struct timespec             now;
     uint64_t                    elapsed;
 
     request = thread->active_requests;
@@ -668,9 +667,7 @@ chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
         return;
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &now);
-
-    elapsed = chimera_get_elapsed_ns(&now, &request->start_time);
+    elapsed = prometheus_stopwatch_elapsed_ns(&request->start_time);
 
     if (elapsed > 10000000000UL) {
         chimera_vfs_debug("oldest request has been active for %lu ns", elapsed);

@@ -796,13 +796,13 @@ struct diskfs_txn {
 #define DISKFS_IQ_RING_MASK (DISKFS_IQ_RING_SIZE - 1)
 
 struct diskfs_iq_entry {
-    struct diskfs_txn     *txn;
-    diskfs_txn_commit_cb_t cb;
-    void                  *private_data;
-    struct timespec        enqueue_time;
-    struct timespec        submit_time;
-    struct timespec        durable_time;
-    int                    status;
+    struct diskfs_txn          *txn;
+    diskfs_txn_commit_cb_t      cb;
+    void                       *private_data;
+    struct prometheus_stopwatch enqueue_time;
+    struct prometheus_stopwatch submit_time;
+    struct prometheus_stopwatch durable_time;
+    int                         status;
 };
 
 struct diskfs_iq_ring {
@@ -1025,9 +1025,9 @@ diskfs_metrics_init(
     m->txn_bytes = prometheus_metrics_create_histogram_exponential(
         metrics, "chimera_diskfs_txn_bytes",
         "Diskfs dirty bytes per transaction", 32);
-    m->txn_latency = prometheus_metrics_create_histogram_exponential(
-        metrics, "chimera_diskfs_txn_latency",
-        "Diskfs transaction latency in nanoseconds", 32);
+    m->txn_latency = prometheus_metrics_create_histogram_time(
+        metrics, "chimera_diskfs_txn_latency_nanoseconds",
+        "Diskfs transaction latency in nanoseconds", 34);
     m->pending_io = prometheus_metrics_create_gauge(
         metrics, "chimera_diskfs_pending_io",
         "Diskfs outstanding worker block I/O");
@@ -1334,6 +1334,16 @@ diskfs_metric_histogram_sample(
         prometheus_histogram_sample(inst, value ? (int64_t) value : 1);
     }
 } /* diskfs_metric_histogram_sample */
+
+static inline void
+diskfs_metric_time_sample(
+    struct prometheus_histogram_instance *inst,
+    struct prometheus_stopwatch          *sw)
+{
+    if (inst) {
+        prometheus_time_histogram_sample(inst, sw);
+    }
+} /* diskfs_metric_time_sample */
 
 static inline void
 diskfs_metric_inode_cache(
@@ -6766,13 +6776,13 @@ diskfs_redo_write_cb(
         return;
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &ctx->entry.durable_time);
-    diskfs_metric_histogram_sample(
+    prometheus_stopwatch_start(&ctx->entry.durable_time);
+    diskfs_metric_time_sample(
         il->metrics.txn_latency[DISKFS_METRIC_TXN_SUBMIT_TO_DURABLE],
-        chimera_get_elapsed_ns(&ctx->entry.durable_time, &ctx->entry.submit_time));
-    diskfs_metric_histogram_sample(
+        &ctx->entry.submit_time);
+    diskfs_metric_time_sample(
         il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_DURABLE],
-        chimera_get_elapsed_ns(&ctx->entry.durable_time, &ctx->entry.enqueue_time));
+        &ctx->entry.enqueue_time);
 
     il->redo_inflight--;
     diskfs_il_metrics_update(il);
@@ -7010,10 +7020,10 @@ diskfs_iq_process_channel(struct diskfs_iq_channel *ch)
         sq_head++;
         entry.status = 0;
 
-        clock_gettime(CLOCK_MONOTONIC, &entry.submit_time);
-        diskfs_metric_histogram_sample(
+        prometheus_stopwatch_start(&entry.submit_time);
+        diskfs_metric_time_sample(
             il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_SUBMIT],
-            chimera_get_elapsed_ns(&entry.submit_time, &entry.enqueue_time));
+            &entry.enqueue_time);
 
         /* Issue a durable redo write; the completion drops pins/locks and
          * pushes the CQE (see diskfs_redo_write_cb). */
@@ -7105,20 +7115,15 @@ diskfs_iq_cq_doorbell_cb(
 
     while (head != tail) {
         struct diskfs_iq_entry entry = ch->cq.entries[head & DISKFS_IQ_RING_MASK];
-        struct timespec        now;
-        uint64_t               elapsed;
-
         head++;
         drained++;
 
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        elapsed = chimera_get_elapsed_ns(&now, &entry.enqueue_time);
-        diskfs_metric_histogram_sample(
+        diskfs_metric_time_sample(
             ch->worker->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_CALLBACK],
-            elapsed);
-        diskfs_metric_histogram_sample(
+            &entry.enqueue_time);
+        diskfs_metric_time_sample(
             ch->worker->metrics.txn_latency[DISKFS_METRIC_TXN_DURABLE_TO_CALLBACK],
-            chimera_get_elapsed_ns(&now, &entry.durable_time));
+            &entry.durable_time);
 
         /* The txn's logical inode locks were already dropped by the intent
          * log thread (diskfs_iq_process_channel); just deliver completion. */
@@ -7279,7 +7284,7 @@ diskfs_txn_commit_finish(
     slot->cb           = cb;
     slot->private_data = private_data;
     slot->status       = 0;
-    clock_gettime(CLOCK_MONOTONIC, &slot->enqueue_time);
+    prometheus_stopwatch_start(&slot->enqueue_time);
 
     __atomic_store_n(&ch->sq.tail, tail + 1, __ATOMIC_RELEASE);
 

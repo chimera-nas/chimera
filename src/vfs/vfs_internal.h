@@ -191,7 +191,7 @@ chimera_vfs_request_alloc_common(
     request->active_prev = NULL;
     request->active_next = NULL;
 
-    clock_gettime(CLOCK_MONOTONIC, &request->start_time);
+    prometheus_stopwatch_start(&request->start_time);
 
     thread->num_active_requests++;
     DL_APPEND2(thread->active_requests, request, active_prev, active_next);
@@ -313,14 +313,11 @@ chimera_vfs_complete(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread *thread = request->thread;
 
-    struct timespec            now;
-
-    clock_gettime(CLOCK_MONOTONIC, &now);
-
-    request->elapsed_ns = chimera_get_elapsed_ns(&now, &request->start_time);
+    request->elapsed_ns = prometheus_stopwatch_elapsed_ns(&request->start_time);
 
     if (thread->metrics.op_latency_series) {
-        prometheus_histogram_sample(thread->metrics.op_latency_series[request->opcode], request->elapsed_ns);
+        prometheus_time_histogram_sample(thread->metrics.op_latency_series[request->opcode],
+                                         &request->start_time);
     }
 
     chimera_vfs_dump_reply(request);

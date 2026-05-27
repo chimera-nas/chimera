@@ -13,6 +13,7 @@
 #include "vfs_pnfs.h"
 #include "vfs_lease_types.h"
 #include "evpl/evpl.h"
+#include "prometheus-c.h"
 
 #define CHIMERA_VFS_PATH_MAX 4096
 #define CHIMERA_VFS_NAME_MAX 256
@@ -310,7 +311,7 @@ struct chimera_vfs_request {
     enum chimera_vfs_error             status;
     chimera_vfs_complete_callback_t    complete;
     chimera_vfs_complete_callback_t    complete_delegate;
-    struct timespec                    start_time;
+    struct prometheus_stopwatch        start_time;
     uint64_t                           elapsed_ns;
 
     /* Points to one page of memory that the plugin may use as desired */
