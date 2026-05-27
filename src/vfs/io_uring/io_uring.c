@@ -81,7 +81,7 @@ chimera_io_uring_dispatch(
 #define chimera_io_uring_abort_if(cond, ...) \
         chimera_abort_if(cond, "io_uring", __FILE__, __LINE__, __VA_ARGS__)
 
-#define CHIMERA_IO_URING_STATX_MASK STATX_BASIC_STATS
+#define CHIMERA_IO_URING_STATX_MASK        STATX_BASIC_STATS
 
 struct chimera_io_uring_shared {
     struct io_uring ring;

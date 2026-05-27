@@ -104,6 +104,14 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
                 /* A conflicting acquirer reclaimed one of this courtesy
                  * client's leases: tear it down now. */
                 reap = true;
+            } else if (!cur->nfs4_client_confirmed) {
+                /* RFC 8881 §18.35.3: an unconfirmed EXCHANGE_ID record that
+                 * is not confirmed by CREATE_SESSION within a lease period is
+                 * stale.  Courtesy only applies after the client has proven
+                 * possession of the clientid. */
+                if (now_ns - last > lease_ns) {
+                    reap = true;
+                }
             } else if (courtesy) {
                 /* Already in courtesy: reap once the courtesy window closes. */
                 if (now_ns >= uc->courtesy_deadline_ns) {

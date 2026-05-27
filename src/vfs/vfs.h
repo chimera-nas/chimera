@@ -1092,7 +1092,7 @@ struct chimera_vfs_handle_state {
  * losslessly.  If unset, the module is mode-only: the VFS translates ACLs to
  * and from UNIX mode bits on its behalf.  There is no POSIX.1e capability by
  * design -- Chimera carries a single ACL model (see vfs_acl.h). */
-#define CHIMERA_VFS_CAP_ACL_NATIVE         (1U << 20)
+#define CHIMERA_VFS_CAP_ACL_NATIVE            (1U << 20)
 
 /* If set, the module delegates discretionary access control to a real
  * underlying enforcer (e.g. the host kernel, via the seteuid/setegid
@@ -1106,7 +1106,7 @@ struct chimera_vfs_handle_state {
  * ACL for them.  Note this is orthogonal to CAP_ACL_NATIVE: "stores the ACL"
  * and "enforces the ACL" are different properties (memfs/cairn store but do not
  * enforce; linux/io_uring enforce in-kernel but do not store the rich ACL). */
-#define CHIMERA_VFS_CAP_DELEGATES_DAC      (1U << 21)
+#define CHIMERA_VFS_CAP_DELEGATES_DAC         (1U << 21)
 
 struct chimera_vfs_module {
     /* Required

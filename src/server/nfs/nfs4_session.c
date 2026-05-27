@@ -631,7 +631,9 @@ nfs4_client_create_session_classify(
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
 
-    if (c && c->unified && !c->nfs4_client_confirmed && c->unified->expired) {
+    if (c && c->unified && !c->nfs4_client_confirmed &&
+        (c->unified->expired ||
+         atomic_load_explicit(&c->unified->courtesy, memory_order_acquire))) {
         out->action = NFS4_CS_ERROR;
         out->status = NFS4ERR_STALE_CLIENTID;
         goto out_unlock;
