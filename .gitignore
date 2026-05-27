@@ -32,3 +32,4 @@ dist/
 venv/
 .pytest_cache/
 .plan
+.claude/scheduled_tasks.lock

@@ -23,8 +23,16 @@
  * state acquires.  Phase 5+ may add active reclamation.
  */
 
-#define NFS4_LEASE_TIME_DEFAULT_S 90
-#define NFS4_GRACE_TIME_DEFAULT_S 180
+#define NFS4_LEASE_TIME_DEFAULT_S    90
+#define NFS4_GRACE_TIME_DEFAULT_S    180
+
+/* Courtesy period (RFC 8881-style courteous server).  When a client's lease
+ * lapses, its state is retained ("courtesy") rather than revoked, so the
+ * client can resume if it returns; a conflicting request from another client
+ * reclaims the courtesy state on demand.  This bounds how long an unreturned
+ * courtesy client lingers before the sweep reaps it.  Generous by default
+ * (matching Linux nfsd's 24h courtesy lifetime); configurable. */
+#define NFS4_COURTESY_TIME_DEFAULT_S 86400
 
 struct chimera_server_nfs_shared;
 struct chimera_server_nfs_thread;

@@ -230,6 +230,20 @@ struct nfs_client {
     uint8_t                  recovering    : 1;
     uint8_t                  soft_revoked  : 1;
     uint8_t                  minor; /* 0/1/2 */
+    /* Courteous-server state: the lease has lapsed but the client's locks,
+     * opens and delegations are retained ("courtesy") rather than revoked, so
+     * the client resumes seamlessly if it returns (revive clears this).  While
+     * courtesy is set, the client's VFS leases report is_alive_cb()==false, so
+     * a conflicting request from another client reclaims them on demand.  The
+     * sweep reaps a courtesy client outright once courtesy_deadline_ns passes.
+     * Read relaxed cross-thread from is_alive_cb, so make it atomic. */
+    _Atomic uint8_t          courtesy;
+    uint64_t                 courtesy_deadline_ns;
+    /* Set (by a vfs_state revoked_cb) when a conflicting acquire reclaimed
+     * one of this courtesy client's leases.  The client has lost its lease;
+     * the next lease sweep tears its state down (tombstoning its stateids).
+     * A reclaimed client is not revived by a returning op. */
+    _Atomic uint8_t          reclaim_pending;
     uint64_t                 last_touch_ns;
 
     /* Owners are hashed by their byte string. */
@@ -800,6 +814,29 @@ nfs_delegation_revoked_cb(
     struct chimera_vfs_lease *lease,
     void                     *private_data);
 
+/* vfs_state is_alive_cb for a lease owned by an nfs_client (private_data is the
+ * struct nfs_client *).  Reports the client dead while it is in courtesy state
+ * (lease lapsed), so a conflicting acquire reclaims the lease on demand. */
+SYMBOL_EXPORT bool
+nfs_client_lease_alive(
+    const struct chimera_vfs_lease *lease,
+    void                           *private_data);
+
+/* vfs_state revoked_cb for an nfs_client's lock/share leases (private_data is
+ * the struct nfs_client *).  Flags the courtesy client reclaimed so the lease
+ * sweep tears it down (its stateids then report NFS4ERR_EXPIRED). */
+SYMBOL_EXPORT void
+nfs_client_lease_revoked_cb(
+    struct chimera_vfs_lease *lease,
+    void                     *private_data);
+
+/* vfs_state is_alive_cb for delegation leases (private_data is the struct
+ * nfs_delegation *); reports the owning client dead while in courtesy. */
+SYMBOL_EXPORT bool
+nfs_delegation_lease_alive(
+    const struct chimera_vfs_lease *lease,
+    void                           *private_data);
+
 /* FREE_STATEID: free a force-revoked delegation named by `sid`.  Returns
  * NFS4_OK on success, NFS4ERR_LOCKS_HELD for a live state, or a BAD/STALE/
  * EXPIRED stateid error. */
@@ -855,6 +892,18 @@ nfs_client_touch(struct nfs_client *client)
     }
     if (client->expired) {
         return;
+    }
+    /* A reclaimed courtesy client has already lost its lease to a conflicting
+     * acquirer; do not revive it.  The lease sweep tears it down and its
+     * stateids report EXPIRED. */
+    if (atomic_load_explicit(&client->reclaim_pending, memory_order_acquire)) {
+        return;
+    }
+    /* Courteous-server revival (RFC 8881 §8.3 courtesy): a client that returns
+     * within the courtesy window resumes its retained locks/opens/delegations
+     * as if the lease never lapsed. */
+    if (atomic_load_explicit(&client->courtesy, memory_order_relaxed)) {
+        atomic_store_explicit(&client->courtesy, 0, memory_order_relaxed);
     }
     atomic_store_explicit((_Atomic uint64_t *) &client->last_touch_ns,
                           nfs_lease_now_ns(), memory_order_relaxed);

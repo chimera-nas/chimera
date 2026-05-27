@@ -502,6 +502,12 @@ chimera_nfs4_lock(
         rl->lease.owner.owner_lo   = XXH3_64bits(lock_state->lock_owner->owner,
                                                  lock_state->lock_owner->owner_len);
         rl->lease.owner.owner_hi = 0;
+        /* Courteous server: report this lock dead once the owning client's
+         * lease lapses, so a conflicting acquire reclaims it; reclaim flags
+         * the client for sweep teardown. */
+        rl->lease.owner.is_alive_cb = nfs_client_lease_alive;
+        rl->lease.owner.revoked_cb  = nfs_client_lease_revoked_cb;
+        rl->lease.owner.cb_private  = lock_state->lock_owner->client;
 
         req->nfs_inflight_range = rl;
 
