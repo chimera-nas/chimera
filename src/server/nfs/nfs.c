@@ -158,8 +158,8 @@ nfs_server_init(
     NLM_V4_init(&shared->nlm_v4);
 
     shared->metrics      = metrics;
-    shared->op_histogram = prometheus_metrics_create_histogram_exponential(metrics, "chimera_nfs_op_latency",
-                                                                           "The latency of NFS operations", 24);
+    shared->op_histogram = prometheus_metrics_create_histogram_time(metrics, "chimera_nfs_op_latency_nanoseconds",
+                                                                    "The latency of NFS operations in nanoseconds", 34);
 
     /* NFS4.1 SEQUENCE replay cache metrics.  One counter with an "op"
      * label distinguishes outcomes; a gauge tracks total bytes held in
