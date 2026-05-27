@@ -1106,9 +1106,20 @@ chimera_nfs4_open(
         req->open_4_0_owner = owner;
     }
 
-    /* Phase 5: gate non-reclaim OPENs during the grace window.  Stubbed
-     * persistence makes this a no-op in practice today (to_reclaim is empty
-     * at boot so begin_grace short-circuits in_grace=false). */
+    /* Gate OPEN during recovery.  Two distinct rules apply:
+     *
+     *   1. Server-reboot grace window (nfs_recovery_open_check): non-reclaim
+     *      OPENs are refused while in_grace, and CLAIM_PREVIOUS reclaims are
+     *      refused outside it.  Persistence is stubbed so in_grace is false in
+     *      practice today, leaving only the reclaim-outside-grace NO_GRACE leg
+     *      live.
+     *
+     *   2. Per-client reclaim completion (RFC 8881 §18.51.3): once a 4.1+
+     *      client establishes a new client ID it MUST send RECLAIM_COMPLETE
+     *      before performing any non-reclaim locking operation.  Until it does,
+     *      a non-reclaim OPEN is refused with NFS4ERR_GRACE.  This is a
+     *      per-client obligation independent of the server-wide grace window,
+     *      so it is enforced whether or not in_grace is set. */
     {
         bool     is_reclaim = (args->claim.claim == CLAIM_PREVIOUS);
         nfsstat4 g_status   = nfs_recovery_open_check(
@@ -1123,7 +1134,6 @@ chimera_nfs4_open(
         }
 
         if (req->minorversion > 0 && !is_reclaim && req->session &&
-            nfs_recovery_in_grace(&thread->shared->nfs4_recovery) &&
             !nfs4_client_reclaim_complete(&thread->shared->nfs4_shared_clients,
                                           req->session->nfs4_session_clientid)) {
             res->status = NFS4ERR_GRACE;
