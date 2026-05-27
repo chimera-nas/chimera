@@ -387,6 +387,11 @@ struct nfs_delegation {
     bool                           lease_held;
 
     _Atomic uint8_t                cb_recall_state;  /* NFS4_DELEG_* */
+    /* Count of CB_RECALL retransmits attempted because the client's callback
+     * session was not yet usable (CB_SEQUENCE returned NFS4ERR_BADSESSION right
+     * after a CREATE_SESSION, before the client finished registering the new
+     * session).  Bounds the retransmit loop below the recall deadline. */
+    _Atomic uint8_t                cb_recall_retries;
     /* Set when the delegation was force-revoked (recall unanswered /
      * conflicting access) rather than returned.  A revoked stateid resolves to
      * NFS4ERR_DELEG_REVOKED until the client FREE_STATEIDs it. */

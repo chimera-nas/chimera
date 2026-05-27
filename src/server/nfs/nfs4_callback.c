@@ -410,6 +410,49 @@ struct nfs4_cb_recall_ctx {
     struct nfs4_cb_client            *chan; /* ref held until this completes */
 };
 
+static void nfs4_cb_recall_enqueue(
+    struct nfs_delegation *deleg);
+
+/* Backchannel CB_RECALL retransmit (BADSESSION race).  A client that has just
+ * CREATE_SESSION'd a new session may not have finished registering its
+ * backchannel when the server re-drives a pending recall over it, so it rejects
+ * the recall's CB_SEQUENCE with NFS4ERR_BADSESSION -- without consuming the
+ * slot.  We reset the slot sequence and retransmit after a short delay until the
+ * session becomes usable, bounded so a genuinely unreachable client still falls
+ * through to the vfs_state recall deadline / lease-expiry revocation. */
+#define NFS4_CB_RECALL_RETRY_DELAY_US 250000  /* 250ms between retransmits */
+#define NFS4_CB_RECALL_RETRY_MAX      50      /* ~12.5s, under the 15s deadline */
+
+struct nfs4_cb_recall_retry {
+    struct evpl_timer                 timer;
+    struct nfs_delegation            *deleg; /* ref held until the timer fires */
+    struct chimera_server_nfs_thread *thread;
+};
+
+/* One-shot timer (owner thread): retransmit the recall over the client's
+ * current callback channel. */
+static void
+nfs4_cb_recall_retry_fire(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct nfs4_cb_recall_retry      *r =
+        (struct nfs4_cb_recall_retry *) ((char *) timer -
+                                         offsetof(struct nfs4_cb_recall_retry, timer));
+    struct nfs_delegation            *deleg  = r->deleg;
+    struct chimera_server_nfs_thread *thread = r->thread;
+
+    (void) evpl;
+
+    atomic_store_explicit(&deleg->cb_recall_state, NFS4_DELEG_RECALLING,
+                          memory_order_release);
+    nfs4_cb_recall_enqueue(deleg);
+
+    nfs_state_table_release(&thread->shared->nfs4_state_table, deleg,
+                            NFS4_SLOT_TYPE_DELEG, thread->vfs_thread);
+    free(r);
+} /* nfs4_cb_recall_retry_fire */
+
 static void
 nfs4_cb_recall_complete(
     struct evpl                 *evpl,
@@ -425,16 +468,54 @@ nfs4_cb_recall_complete(
     (void) evpl;
     (void) verf;
 
-    /* RPC-level failure or a callback compound error means the client cannot
-     * (or will not) return the delegation in-band.  Revoke the backing lease
-     * so the conflicting acquirer makes progress; the delegation stateid is
-     * left to be torn down by DELEGRETURN/close/expiry. */
+    /* An RPC-level failure or a callback compound error means this recall
+     * attempt did not land.  Do NOT revoke the delegation here: a 4.1 client may
+     * have lost its backchannel (e.g. it destroyed the session mid-recall) and
+     * will present a new one via CREATE_SESSION, at which point the recall is
+     * re-driven (see nfs4_cb_resend_recalls_on_rebind).  Move the delegation
+     * back to ACTIVE so the rebind path (and any fresh conflict) can re-arm the
+     * one-shot recall.  The backing lease stays BREAKING with its bounded recall
+     * deadline, so a stuck delegation is still revoked by the vfs_state deadline
+     * (a conflicting acquirer's retry) or by client lease expiry -- nothing
+     * leaks. */
     if (status != 0 || (reply && reply->status != NFS4_OK)) {
-        if (deleg->lease_held) {
-            chimera_vfs_lease_revoke(&deleg->lease);
+        bool    badsession = (status == 0 && reply &&
+                              reply->status == NFS4ERR_BADSESSION);
+        bool    same_chan = (ctx->chan == deleg->client->cb_path.cb_client);
+        uint8_t expected  = NFS4_DELEG_RECALLING;
+
+        atomic_compare_exchange_strong_explicit(
+            &deleg->cb_recall_state, &expected, NFS4_DELEG_ACTIVE,
+            memory_order_acq_rel, memory_order_acquire);
+
+        if (badsession && same_chan && deleg->lease_held &&
+            deleg->lease.break_state == CHIMERA_VFS_BREAK_BREAKING &&
+            atomic_fetch_add_explicit(&deleg->cb_recall_retries, 1,
+                                      memory_order_acq_rel) <
+            NFS4_CB_RECALL_RETRY_MAX) {
+            /* The client just created this session and rejected the recall's
+            * CB_SEQUENCE with BADSESSION before its backchannel was usable --
+            * the slot was not consumed.  Reset the slot-0 sequence and
+            * retransmit over the same channel after a short delay (the path is
+            * fine, the client is just catching up).  Do NOT mark it DOWN. */
+            struct nfs4_cb_recall_retry *r = calloc(1, sizeof(*r));
+
+            chimera_nfs_abort_if(r == NULL, "recall retry alloc failed");
+            atomic_store_explicit(&ctx->chan->cb_seq, 1, memory_order_release);
+            r->deleg  = deleg;
+            r->thread = thread;
+            atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_acq_rel);
+            evpl_add_oneshot_timer(thread->evpl, &r->timer,
+                                   nfs4_cb_recall_retry_fire,
+                                   NFS4_CB_RECALL_RETRY_DELAY_US);
+        } else if (same_chan) {
+            /* Non-retryable failure (or retry budget exhausted): the path is
+             * unusable for granting new delegations.  Mark it DOWN only if this
+             * channel is still the client's current one -- a stale completion
+             * must not clobber a path a rebind already rebuilt UP. */
+            atomic_store_explicit(&deleg->client->cb_path.cb_state,
+                                  NFS4_CB_DOWN, memory_order_release);
         }
-        atomic_store_explicit(&deleg->client->cb_path.cb_state, NFS4_CB_DOWN,
-                              memory_order_release);
     }
 
     /* Drop the transient recall ref. */
@@ -463,10 +544,18 @@ nfs4_cb_recall_send(
     int                        nops = 0;
 
     if (!conn) {
-        /* No path: revoke so the conflicting acquirer proceeds, drop ref. */
-        if (deleg->lease_held) {
-            chimera_vfs_lease_revoke(&deleg->lease);
-        }
+        /* The backchannel went away before this queued recall could be sent
+         * (e.g. the client destroyed the session in the DESTROY/CREATE gap).
+         * Do NOT revoke: move the delegation back to ACTIVE so a subsequent
+         * CREATE_SESSION rebind re-drives the recall over the new backchannel.
+         * The lease stays BREAKING under its recall deadline, so the vfs_state
+         * deadline / client lease expiry remain the revocation backstop. */
+        uint8_t expected = NFS4_DELEG_RECALLING;
+
+        atomic_compare_exchange_strong_explicit(
+            &deleg->cb_recall_state, &expected, NFS4_DELEG_ACTIVE,
+            memory_order_acq_rel, memory_order_acquire);
+
         nfs_state_table_release(&thread->shared->nfs4_state_table, deleg,
                                 NFS4_SLOT_TYPE_DELEG, thread->vfs_thread);
         return;
@@ -1083,34 +1172,24 @@ nfs4_delegation_break_cb(
     nfs4_cb_recall(deleg);
 } /* nfs4_delegation_break_cb */
 
-void
-nfs4_cb_recall(struct nfs_delegation *deleg)
+/* Marshal a CB_RECALL send for `deleg` to its callback channel's owner thread
+ * (the doorbell drain calls nfs4_cb_recall_send).  Takes a transient ref so the
+ * delegation survives until the recall completes.  Caller is responsible for the
+ * cb_recall_state bookkeeping; this does no CAS, so it can re-send a recall that
+ * is already RECALLING (used by the rebind resend path).  No-op if no callback
+ * channel currently exists. */
+static void
+nfs4_cb_recall_enqueue(struct nfs_delegation *deleg)
 {
-    struct nfs4_cb_client            *chan;
+    struct nfs4_cb_client            *chan = deleg->client->cb_path.cb_client;
     struct chimera_server_nfs_thread *owner;
-    uint8_t                           expected = NFS4_DELEG_ACTIVE;
 
-    /* Only the first recall on a delegation does work. */
-    if (!atomic_compare_exchange_strong_explicit(
-            &deleg->cb_recall_state, &expected, NFS4_DELEG_RECALLING,
-            memory_order_acq_rel, memory_order_acquire)) {
-        return;
-    }
-
-    chan = deleg->client->cb_path.cb_client;
     if (!chan) {
-        /* No channel was ever established (delegation should not have been
-         * granted, but be defensive): revoke so the breaker proceeds. */
-        if (deleg->lease_held) {
-            chimera_vfs_lease_revoke(&deleg->lease);
-        }
         return;
     }
 
     owner = chan->owner_thread;
 
-    /* Take a transient ref so the delegation survives until the recall
-     * completes on the owner thread. */
     atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_acq_rel);
 
     pthread_mutex_lock(&owner->cb_recall_lock);
@@ -1119,7 +1198,130 @@ nfs4_cb_recall(struct nfs_delegation *deleg)
     pthread_mutex_unlock(&owner->cb_recall_lock);
 
     evpl_ring_doorbell(&owner->cb_doorbell);
+} /* nfs4_cb_recall_enqueue */
+
+void
+nfs4_cb_recall(struct nfs_delegation *deleg)
+{
+    uint8_t expected = NFS4_DELEG_ACTIVE;
+
+    /* Only the first recall on a delegation does work. */
+    if (!atomic_compare_exchange_strong_explicit(
+            &deleg->cb_recall_state, &expected, NFS4_DELEG_RECALLING,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return;
+    }
+
+    if (!deleg->client->cb_path.cb_client) {
+        /* No channel was ever established (delegation should not have been
+         * granted, but be defensive): revoke so the breaker proceeds. */
+        if (deleg->lease_held) {
+            chimera_vfs_lease_revoke(&deleg->lease);
+        }
+        return;
+    }
+
+    nfs4_cb_recall_enqueue(deleg);
 } /* nfs4_cb_recall */
+
+void
+nfs4_cb_resend_recalls_on_rebind(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_client                *client,
+    struct nfs_request               *req)
+{
+    struct nfs_delegation  *deleg;
+    struct nfs_delegation **pending  = NULL;
+    size_t                  count    = 0;
+    size_t                  capacity = 0;
+
+    if (!client) {
+        return;
+    }
+
+    /* Fast path: collect delegations with an outstanding recall -- a still-
+     * BREAKING backing lease that has not been returned.  In the common case --
+     * and always when delegations are disabled -- there are none, so this is a
+     * cheap scan-and-return.  Pin each survivor with a transient ref so it
+     * cannot be freed once we drop client->lock.  We deliberately do NOT filter
+     * on cb_recall_state: the prior recall's completion (which moves the deleg
+     * back to ACTIVE) runs asynchronously on the channel owner thread and races
+     * this CREATE_SESSION, so the deleg may still read RECALLING here -- keying
+     * off the lease's BREAK state instead makes the resend independent of that
+     * race.  (Reading lease.break_state under client->lock, without the file
+     * lock, matches the existing nfs_deleg_recall_timeout_check pattern -- a
+     * benign racy read of an enum used only to decide whether to retry.) */
+    pthread_mutex_lock(&client->lock);
+    LL_FOREACH2(client->delegations, deleg, next_in_client)
+    {
+        if (atomic_load_explicit(&deleg->cb_recall_state,
+                                 memory_order_acquire) == NFS4_DELEG_RETURNED) {
+            continue;
+        }
+        if (!deleg->lease_held ||
+            deleg->lease.break_state != CHIMERA_VFS_BREAK_BREAKING) {
+            continue;
+        }
+
+        if (count == capacity) {
+            size_t                  new_cap = capacity ? capacity * 2 : 4;
+            struct nfs_delegation **np      =
+                realloc(pending, new_cap * sizeof(*np));
+            chimera_nfs_abort_if(np == NULL, "recall resend list realloc failed");
+            pending  = np;
+            capacity = new_cap;
+        }
+        atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_acq_rel);
+        pending[count++] = deleg;
+    }
+    pthread_mutex_unlock(&client->lock);
+
+    if (count == 0) {
+        free(pending);
+        return;
+    }
+
+    /* The stale callback channel still references the destroyed session (whose
+     * backchannel_conn is now NULL), so it cannot carry a recall.  Tear it down
+     * and rebuild against the new session: nfs4_client_set_cb_path already reset
+     * the path to NFS4_CB_UNINIT, so ensure_probe binds the new backchannel and
+     * (4.1) marks it UP without a CB_NULL round trip.  Done outside client->lock
+     * to avoid a client->lock -> cb_recall_lock ordering. */
+    if (client->cb_path.cb_client) {
+        nfs4_cb_path_teardown(&client->cb_path, false);
+    }
+
+    /* Force the path back to UNINIT before rebuilding.  The failed first
+     * recall's completion may have stored NFS4_CB_DOWN (it races this rebind),
+     * and ensure_probe refuses to (re)build a DOWN path -- which would silently
+     * drop the resend.  The teardown above already cleared cb_client, so a later
+     * stale completion can no longer match-and-re-DOWN the path. */
+    atomic_store_explicit(&client->cb_path.cb_state, NFS4_CB_UNINIT,
+                          memory_order_release);
+
+    if (nfs4_cb_ensure_probe(thread, client, req)) {
+        /* Re-drive each outstanding recall over the freshly-bound channel.  Use
+         * the CAS-free enqueue (not nfs4_cb_recall) and stamp RECALLING
+         * directly: the deleg may legitimately already be RECALLING here (the
+         * prior recall's completion has not run yet), and the one-shot CAS in
+         * nfs4_cb_recall would silently drop the re-send in that case -- exactly
+         * the race that left DSESS9003 hanging.  A duplicate CB_RECALL (if the
+         * prior one is still in flight) is protocol-legal. */
+        for (size_t i = 0; i < count; i++) {
+            atomic_store_explicit(&pending[i]->cb_recall_state,
+                                  NFS4_DELEG_RECALLING, memory_order_release);
+            nfs4_cb_recall_enqueue(pending[i]);
+        }
+    }
+    /* else: no usable backchannel even now -- leave the recalls pending; the
+     * vfs_state recall deadline / client lease expiry will revoke. */
+
+    for (size_t i = 0; i < count; i++) {
+        nfs_state_table_release(&thread->shared->nfs4_state_table, pending[i],
+                                NFS4_SLOT_TYPE_DELEG, thread->vfs_thread);
+    }
+    free(pending);
+} /* nfs4_cb_resend_recalls_on_rebind */
 
 void
 nfs4_cb_conn_lost(struct nfs4_cb_client *chan)

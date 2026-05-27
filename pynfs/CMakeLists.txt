@@ -94,18 +94,24 @@ set(PYNFS_TIMEOUT_courteous 90)
 
 # Per-code delegation-enable override.  The wrapper enables NFSv4 protocol
 # delegations only for the deleg/delegations suites, so the other suites
-# exercise the default (delegations-off) behavior.  DSESS9002 lives in the
-# destroy_session suite but needs delegations on: it destroys and recreates a
-# client's session, grants a read delegation over the new session, then forces a
-# conflicting open to drive a CB_RECALL -- verifying the backchannel works after
-# a DESTROY_SESSION/CREATE_SESSION cycle.  Keyed by pynfs flag; listed codes get
-# PYNFS_FORCE_DELEG=1.  (DSESS9003 additionally requires the server to re-drive
-# an *unanswered* recall over the recreated session; that server support is not
-# yet in place, so it stays disabled.)  This recall test shares the delegation
-# suite's lease sensitivity -- establishing the second, conflicting client does
-# not renew the first client's lease -- so give it the longer lease too.
-set(PYNFS_FORCE_DELEG_destroy_session DSESS9002)
-set(PYNFS_LEASE_OVERRIDE_destroy_session DSESS9002)
+# exercise the default (delegations-off) behavior.  DSESS9002/DSESS9003 live in
+# the destroy_session suite but need delegations on: each destroys and recreates
+# a client's session and drives a CB_RECALL to verify the backchannel survives a
+# DESTROY_SESSION/CREATE_SESSION cycle.  DSESS9002 grants the delegation over the
+# new session; DSESS9003 grants it over the old session, leaves the recall
+# unanswered, then expects the server to re-drive that recall over the recreated
+# session (see nfs4_cb_resend_recalls_on_rebind).  Keyed by pynfs flag; listed
+# codes get PYNFS_FORCE_DELEG=1.  These recall tests share the delegation suite's
+# lease/timeout sensitivity: DSESS9003 in particular drives an *unanswered*
+# CB_RECALL (so chimera's 15s recall-failure window is in play) and then a recall
+# round-trip over the recreated session, which under a heavy ctest -j ASan run
+# can run long.  Mirror the delegations suite -- a 40s lease (beyond the recall
+# window) and a 180s wrapper timeout -- so the handshake has headroom and the
+# first client's lease cannot lapse mid-test.
+set(PYNFS_FORCE_DELEG_destroy_session DSESS9002 DSESS9003)
+set(PYNFS_LEASE_OVERRIDE_destroy_session DSESS9002 DSESS9003)
+set(PYNFS_LEASE_OVERRIDE_SECONDS_destroy_session 40)
+set(PYNFS_TIMEOUT_destroy_session 180)
 
 function(pynfs_codes_for_flag flag minor out_var)
     if("${minor}" STREQUAL "0")

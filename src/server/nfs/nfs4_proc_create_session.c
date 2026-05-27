@@ -4,6 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
+#include "nfs4_callback.h"
 #include "server/server.h"
 
 /* Flag bits a client may set in csa_flags (RFC 8881 §18.36.3). */
@@ -216,6 +217,12 @@ chimera_nfs4_create_session(
                                    args->csa_clientid, 0,
                                    sp->cb_secflavor, uid, gid);
         }
+
+        /* If this client destroyed a session while a delegation recall was
+         * still outstanding, re-drive that recall over the freshly-bound
+         * backchannel (RFC 8881 §20.4.1; pynfs DSESS9003).  No-op unless a
+         * recall is actually pending. */
+        nfs4_cb_resend_recalls_on_rebind(thread, session->client_unified, req);
     }
 
     res->csr_status = NFS4_OK;
