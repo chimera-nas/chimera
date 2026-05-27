@@ -6255,9 +6255,15 @@ chimera/pynfs/flex/FFST1_memfs_nfs4.1
 chimera/pynfs/delegations/DELEG1_memfs_nfs4.0
 chimera/pynfs/delegations/DELEG4_memfs_nfs4.0
 chimera/pynfs/delegations/DELEG5_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG6_memfs_nfs4.0
 chimera/pynfs/delegations/DELEG7_memfs_nfs4.0
 chimera/pynfs/delegations/DELEG9_memfs_nfs4.0
 chimera/pynfs/delegations/DELEG14_memfs_nfs4.0
+chimera/pynfs/delegations/DELEG6_linux_nfs4.0
+chimera/pynfs/delegations/DELEG6_io_uring_nfs4.0
+chimera/pynfs/delegations/DELEG6_diskfs_io_uring_nfs4.0
+chimera/pynfs/delegations/DELEG6_diskfs_aio_nfs4.0
+chimera/pynfs/delegations/DELEG6_cairn_nfs4.0
 chimera/pynfs/deleg/DELEG8_memfs_nfs4.1
 chimera/pynfs/create_session/DELEG5_memfs_nfs4.2
 chimera/pynfs/create_session/DELEG6_memfs_nfs4.2

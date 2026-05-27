@@ -56,10 +56,14 @@ set(PYNFS_EXTRA_currentstateid nopnfs)
 # revoked before the recall round-trips -- a load-dependent false failure.  These
 # tests perform no lease-scaled sleeps, so a longer lease adds no wall-clock cost.
 # Keyed by pynfs flag; listed codes get PYNFS_LEASE_OVERRIDE_SECONDS.  DELEG6
-# (4.0 testRenew) is deliberately excluded: it scales its own sleeps to the lease
-# period, so a longer lease would slow it down / trip the per-test timeout.
+# (4.0 testRenew) also scales its own sleeps to the lease period, but it first
+# drives an unanswered CB_RECALL; with the wrapper's 5s default lease, Chimera's
+# 15s recall-failure path can expire the delegation holder before the test sends
+# RENEW.  Give it a lease beyond the recall window and a matching timeout.
 set(PYNFS_LEASE_OVERRIDE_SECONDS 30)
-set(PYNFS_LEASE_OVERRIDE_delegations DELEG1 DELEG4 DELEG5 DELEG7 DELEG9 DELEG14)
+set(PYNFS_LEASE_OVERRIDE_delegations DELEG1 DELEG4 DELEG5 DELEG6 DELEG7 DELEG9 DELEG14)
+set(PYNFS_LEASE_OVERRIDE_SECONDS_delegations 40)
+set(PYNFS_TIMEOUT_delegations 180)
 set(PYNFS_LEASE_OVERRIDE_deleg DELEG8)
 
 # Courteous-server tests (st_courtesy.py, COUR1-COUR7) need a longer lease for a
