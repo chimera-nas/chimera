@@ -93,25 +93,39 @@ cat > "$MDS_CONFIG" << EOF
 }
 EOF
 
-wait_for_port() {
-    local port="$1" pid="$2"
-    for i in $(seq 1 50); do
-        ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/${port}" 2>/dev/null && return 0
+# Wait until a chimera daemon is genuinely ready: both its log says so and the
+# NFS port accepts.  The port can start listening during protocol init -- before
+# a metadata server has mounted the data server and resolved its backing root --
+# so gating on the port alone races under load (the MDS appears "up" while it is
+# still resolving /ds0).  Requiring "Server is ready." (logged only after the
+# mount + backing-root resolution complete) closes that window.
+wait_for_ready() {
+    local port="$1" pid="$2" log="$3"
+    for i in $(seq 1 100); do
+        if grep -q "Server is ready." "$log" 2>/dev/null &&
+           ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/${port}" 2>/dev/null; then
+            return 0
+        fi
         kill -0 "$pid" 2>/dev/null || { echo "chimera (pid $pid) exited early" >&2; return 1; }
         sleep 0.1
     done
-    echo "timed out waiting for 127.0.0.1:${port}" >&2; return 1
+    echo "timed out waiting for 127.0.0.1:${port} to become ready" >&2; return 1
 }
 
 ip netns add "${NETNS_NAME}"
 ip netns exec "${NETNS_NAME}" ip link set lo up
 
+# The data server must be fully ready before the metadata server starts, since
+# the MDS nfs-mounts it during its own startup.
 DS_PID=$(run_chimera "$DS_CONFIG" "$DS_LOG")
-wait_for_port "$DS_PORT" "$DS_PID" || exit 1
+wait_for_ready "$DS_PORT" "$DS_PID" "$DS_LOG" || exit 1
 echo "=== pNFS data server up on 127.0.0.1:${DS_PORT} ==="
 
+# The MDS logs "backing root resolved" before "Server is ready.", so once it is
+# ready the backing root is guaranteed resolved -- the grep below is then a hard
+# confirmation rather than a racy probe.
 MDS_PID=$(run_chimera "$MDS_CONFIG" "$MDS_LOG")
-wait_for_port "$MDS_PORT" "$MDS_PID" || exit 1
+wait_for_ready "$MDS_PORT" "$MDS_PID" "$MDS_LOG" || exit 1
 grep -q "backing root resolved" "$MDS_LOG" || {
     echo "MDS did not resolve its data-server backing root:" >&2
     grep -iE "pNFS|backing|nfs|error" "$MDS_LOG" | tail -10 >&2; exit 1
