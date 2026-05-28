@@ -5,8 +5,6 @@
 set(CHIMERA_BINARY ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 set(PYNFS_WRAPPER ${CMAKE_SOURCE_DIR}/scripts/pynfs_test_wrapper.sh)
 set(PYNFS_DIR /opt/pynfs)
-set(PYNFS_STABLE_PASS_FILE ${CMAKE_CURRENT_SOURCE_DIR}/stable-passing-tests.txt)
-option(PYNFS_ENABLE_UNSTABLE_TESTS "Enable all generated pynfs tests, including tests outside the stable pass list" OFF)
 
 set(PYNFS_BACKENDS memfs linux io_uring diskfs_io_uring)
 
@@ -36,11 +34,6 @@ set(PYNFS_FLAGS_1
 set(PYNFS_FLAGS_2 ${PYNFS_FLAGS_1} copy sparse)
 
 set(PYNFS_MINOR_VERSIONS 0 1 2)
-
-# Exact CTest names validated as stable by repeated full-matrix pynfs runs.
-# Everything else is still registered but marked DISABLED, so the full matrix
-# remains visible and failed/flaky tests can be promoted individually.
-file(STRINGS ${PYNFS_STABLE_PASS_FILE} PYNFS_STABLE_PASS_TESTS)
 
 # Extra pynfs flag tokens for specific suites.  pynfs excludes any test tagged
 # with a "no<flag>" token, so this drops tests a suite pulls in that the server
@@ -198,10 +191,6 @@ function(pynfs_add_code_test flag code backend minor)
     set_tests_properties(${name} PROPERTIES
         LABELS pynfs
         ENVIRONMENT "${test_env}")
-
-    if(NOT PYNFS_ENABLE_UNSTABLE_TESTS AND NOT "${name}" IN_LIST PYNFS_STABLE_PASS_TESTS)
-        set_tests_properties(${name} PROPERTIES DISABLED TRUE)
-    endif()
 endfunction()
 
 foreach(minor ${PYNFS_MINOR_VERSIONS})
@@ -228,7 +217,4 @@ foreach(code ${PYNFS_FLEX_CODES})
     set_tests_properties(${name} PROPERTIES
         LABELS pynfs
         ENVIRONMENT "PYTHONUNBUFFERED=1;PYNFS_RUNDEPS=1")
-    if(NOT PYNFS_ENABLE_UNSTABLE_TESTS AND NOT "${name}" IN_LIST PYNFS_STABLE_PASS_TESTS)
-        set_tests_properties(${name} PROPERTIES DISABLED TRUE)
-    endif()
 endforeach()
