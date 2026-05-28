@@ -156,6 +156,55 @@ chimera_smb_set_info_link_process(struct chimera_smb_request *request)
     }
 } /* chimera_smb_set_info_link_process */
 
+/* Resolve a FileAllocationInformation set once the current size is known.
+ * Truncate (and advance LastWriteTime) only when the requested allocation is
+ * below the current EOF; otherwise leave the data/EOF alone and just touch the
+ * inode so ChangeTime advances. */
+static void
+chimera_smb_set_info_allocation_getattr_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request    = private_data;
+    uint64_t                    alloc_size = request->set_info.vfs_attrs.va_size;
+    uint64_t                    cur_size;
+
+    if (unlikely(error_code)) {
+        chimera_smb_open_file_release(request, request->set_info.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        return;
+    }
+
+    cur_size = attr->va_size;
+
+    request->set_info.vfs_attrs.va_req_mask = CHIMERA_VFS_ATTR_SIZE;
+    request->set_info.vfs_attrs.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+
+    if (alloc_size < cur_size) {
+        request->set_info.vfs_attrs.va_size = alloc_size;
+        if (!(request->set_info.open_file->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY)) {
+            request->set_info.vfs_attrs.va_mtime.tv_nsec = CHIMERA_VFS_TIME_NOW;
+            request->set_info.vfs_attrs.va_req_mask     |= CHIMERA_VFS_ATTR_MTIME;
+            request->set_info.vfs_attrs.va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
+        }
+    } else {
+        /* No EOF change: re-set the unchanged size so the backend advances
+         * ChangeTime without disturbing LastWriteTime. */
+        request->set_info.vfs_attrs.va_size = cur_size;
+    }
+
+    chimera_vfs_setattr(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred,
+        request->set_info.open_file->handle,
+        &request->set_info.vfs_attrs,
+        0,
+        0,
+        chimera_smb_set_info_callback,
+        request);
+} /* chimera_smb_set_info_allocation_getattr_callback */
+
 void
 chimera_smb_set_info(struct chimera_smb_request *request)
 {
@@ -174,6 +223,13 @@ chimera_smb_set_info(struct chimera_smb_request *request)
 
                     chimera_smb_unmarshal_basic_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
+                    /* An explicit (non-sentinel) write-time set hands control of
+                     * the LastWriteTime to this handle: its own subsequent writes
+                     * and size-sets must stop advancing it (MS-FSA sticky mtime). */
+                    if (request->set_info.vfs_attrs.va_set_mask & CHIMERA_VFS_ATTR_MTIME) {
+                        request->set_info.open_file->flags |= CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY;
+                    }
+
                     chimera_vfs_setattr(
                         request->compound->thread->vfs_thread,
                         &request->session_handle->session->cred,
@@ -185,12 +241,16 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         request);
                     break;
                 case SMB2_FILE_ENDOFFILE_INFO:
-                case SMB2_FILE_ALLOCATION_INFO:
-                    /* AllocationInfo strictly only truncates when alloc <
-                     * EOF (MS-FSCC §2.4.4).  We collapse it to setattr(size)
-                     * because Windows always follows up with set-EOF in the
-                     * save flow, and a stand-alone shrink still truncates. */
                     chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
+
+                    /* Setting EndOfFile advances the LastWriteTime (it changes
+                     * the file's data extent), unless this handle has taken
+                     * sticky control of the write time. */
+                    if (!(request->set_info.open_file->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY)) {
+                        request->set_info.vfs_attrs.va_mtime.tv_nsec = CHIMERA_VFS_TIME_NOW;
+                        request->set_info.vfs_attrs.va_req_mask     |= CHIMERA_VFS_ATTR_MTIME;
+                        request->set_info.vfs_attrs.va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
+                    }
 
                     chimera_vfs_setattr(
                         request->compound->thread->vfs_thread,
@@ -200,6 +260,23 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         0,
                         0,
                         chimera_smb_set_info_callback,
+                        request);
+                    break;
+                case SMB2_FILE_ALLOCATION_INFO:
+                    /* AllocationInfo only changes the file when the requested
+                     * allocation is below the current EOF, in which case the
+                     * file is truncated to it (MS-FSCC §2.4.4).  A truncation
+                     * advances LastWriteTime; a grow/hint only touches
+                     * ChangeTime.  Both need the current size to decide, so this
+                     * is resolved in the getattr callback. */
+                    chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
+
+                    chimera_vfs_getattr(
+                        request->compound->thread->vfs_thread,
+                        &request->session_handle->session->cred,
+                        request->set_info.open_file->handle,
+                        CHIMERA_VFS_ATTR_SIZE,
+                        chimera_smb_set_info_allocation_getattr_callback,
                         request);
                     break;
                 case SMB2_FILE_DISPOSITION_INFO:

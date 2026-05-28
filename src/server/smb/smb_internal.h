@@ -371,6 +371,10 @@ struct chimera_smb_request {
             uint32_t                        r_rdma_status;
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_open_file   *open_file;
+            /* Holds the pre-write mtime restored after a write through a
+             * write-time-sticky handle (chimera_vfs_setattr keeps this pointer
+             * across the async call, so it must live in the request). */
+            struct chimera_vfs_attrs        restore_attrs;
             struct chimera_smb_rdma_element rdma_elements[8];
             struct evpl_iovec               iov[256];
             struct evpl_iovec               chunk_iov[256];

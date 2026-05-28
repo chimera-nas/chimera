@@ -9,6 +9,33 @@
 #include "vfs/vfs_notify.h"
 #include "vfs/vfs_state.h"
 
+/* A write-time-sticky handle needs the pre-write mtime back from the VFS so the
+ * write callback can restore it; otherwise no pre-attrs are requested. */
+static inline uint64_t
+chimera_smb_write_pre_attr_mask(const struct chimera_smb_open_file *open_file)
+{
+    return (open_file->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY)
+           ? CHIMERA_VFS_ATTR_MTIME : 0;
+} /* chimera_smb_write_pre_attr_mask */
+
+/* Completion for the mtime-restore setattr issued after a write through a
+ * write-time-sticky handle.  The write itself already succeeded; a failed
+ * restore leaves a slightly-advanced write time but is not worth failing the
+ * write over, so we always report success. */
+static void
+chimera_smb_write_sticky_restore_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    chimera_smb_open_file_release(request, request->write.open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_write_sticky_restore_callback */
+
 static void
 chimera_smb_write_callback(
     enum chimera_vfs_error    error_code,
@@ -35,6 +62,28 @@ chimera_smb_write_callback(
                                 request->write.open_file->name,
                                 request->write.open_file->name_len,
                                 NULL, 0);
+    }
+
+    /* A handle that explicitly set its write time has "taken control" of it:
+     * the backend bumped mtime as a side effect of this write, so restore it to
+     * the pre-write value (reported in pre_attr) to keep it frozen. */
+    if (!error_code &&
+        (request->write.open_file->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY) &&
+        (pre_attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+
+        request->write.restore_attrs.va_req_mask = 0;
+        request->write.restore_attrs.va_set_mask = CHIMERA_VFS_ATTR_MTIME;
+        request->write.restore_attrs.va_mtime    = pre_attr->va_mtime;
+
+        chimera_vfs_setattr(thread->vfs_thread,
+                            &request->session_handle->session->cred,
+                            request->write.open_file->handle,
+                            &request->write.restore_attrs,
+                            0,
+                            0,
+                            chimera_smb_write_sticky_restore_callback,
+                            request);
+        return;
     }
 
     chimera_smb_open_file_release(private_data, request->write.open_file);
@@ -89,7 +138,7 @@ chimera_smb_rdma_read_callback(
             request->write.offset,
             request->write.length,
             !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH),
-            0,
+            chimera_smb_write_pre_attr_mask(request->write.open_file),
             0,
             request->write.iov,
             request->write.niov,
@@ -179,7 +228,7 @@ chimera_smb_write(struct chimera_smb_request *request)
             request->write.offset,
             request->write.length,
             !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH),
-            0,
+            chimera_smb_write_pre_attr_mask(request->write.open_file),
             0,
             request->write.iov,
             request->write.niov,
