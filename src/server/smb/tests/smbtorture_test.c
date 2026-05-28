@@ -188,6 +188,10 @@ main(
     int                           rc;
     int                           i;
 
+    /* Print a symbolized backtrace if the in-process server crashes, so a
+     * failure on a remote/CI runner is diagnosable from the log alone. */
+    chimera_enable_crash_handler();
+
     /* Parse arguments - options first, then positional test names */
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
