@@ -303,7 +303,7 @@ static const struct chimera_smb_negotiate_response_emitter smb_negotiate_respons
       build_encryption_capabilities_response },
     { CHIMERA_SMB_NEGOTIATE_CTX_SIGNING,    SMB2_SIGNING_CAPABILITIES,
       build_signing_capabilities_response },
-    { 0,                                    0,                                     NULL}
+    { 0,                                    0,                                     NULL }
 };
 
 /* Build the negotiate context list into ctx_buf. Returns total bytes written
