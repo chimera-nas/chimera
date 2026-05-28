@@ -646,6 +646,13 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
                  request->smb2_hdr.command != SMB2_TREE_CONNECT &&
                  request->smb2_hdr.command != SMB2_TREE_DISCONNECT &&
                  request->smb2_hdr.command != SMB2_ECHO)) {
+        /* A WRITE parsed before this point cloned its payload iovecs; the
+         * write handler that would normally release them is being skipped, so
+         * free them here to avoid leaking the data buffer on the reject path
+         * (e.g. a write against an invalid/foreign TID). */
+        if (request->smb2_hdr.command == SMB2_WRITE) {
+            evpl_iovecs_release(compound->thread->evpl, request->write.iov, request->write.niov);
+        }
         chimera_smb_complete_request(request, SMB2_STATUS_NETWORK_NAME_DELETED);
         return;
     }
@@ -867,10 +874,16 @@ chimera_smb_server_handle_smb2(
                                sizeof(request->session_handle->signing_key));
 
                     } else {
+                        /* The header names a session id that no longer maps to
+                         * a live session (e.g. one that has been logged off, or
+                         * a bogus id).  Per MS-SMB2 3.3.5.2.9 this is answered
+                         * with STATUS_USER_SESSION_DELETED rather than tearing
+                         * down the transport. */
                         chimera_smb_error("Received SMB2 message with invalid session id %lx", request->smb2_hdr.
                                           session_id);
-                        chimera_smb_request_free(thread, request);
-                        evpl_close(evpl, conn->bind);
+                        request->session_handle                      = NULL;
+                        compound->requests[compound->num_requests++] = request;
+                        chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
                         return;
                     }
                 }

@@ -12,8 +12,12 @@ chimera_smb_tree_disconnect(struct chimera_smb_request *request)
     struct chimera_server_smb_thread *thread  = request->compound->thread;
     struct chimera_smb_session       *session = request->session_handle->session;
 
+    /* A TREE_DISCONNECT carrying a TreeId that does not map to a live tree
+     * connection on this session (e.g. an already-disconnected or never-valid
+     * TID) must be rejected with NETWORK_NAME_DELETED rather than silently
+     * succeeding (MS-SMB2 3.3.5.7). */
     if (!request->tree) {
-        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        chimera_smb_complete_request(request, SMB2_STATUS_NETWORK_NAME_DELETED);
         return;
     }
 
