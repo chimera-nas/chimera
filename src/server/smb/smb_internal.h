@@ -1023,7 +1023,12 @@ chimera_smb_session_release(
     struct chimera_smb_tree *tree;
     int                      destroy = 0;
 
-    pthread_mutex_lock(&session->lock);
+    /* refcnt and shared->sessions membership are guarded by sessions_lock,
+     * the same lock chimera_smb_session_alloc/lookup/authorize hold when they
+     * set, increment, or HASH_ADD.  Releasing under session->lock instead would
+     * race the lookup refcnt++ (lost update -> premature free) and modify the
+     * shared hash unprotected (double HASH_DEL on an emptied table crashes). */
+    pthread_mutex_lock(&shared->sessions_lock);
 
     chimera_smb_abort_if(session->refcnt == 0, "session refcnt is 0 at release");
 
@@ -1036,7 +1041,7 @@ chimera_smb_session_release(
         }
     }
 
-    pthread_mutex_unlock(&session->lock);
+    pthread_mutex_unlock(&shared->sessions_lock);
 
     if (destroy) {
 
