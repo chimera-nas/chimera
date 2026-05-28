@@ -314,6 +314,8 @@ fio_chimera_init(struct thread_data *td)
 
             if (mounts) {
 
+                mount_ctx.total = json_array_size(mounts);
+
                 json_array_foreach(mounts, i, mount)
                 {
                     module      = json_object_get(mount, "module");
@@ -325,14 +327,19 @@ fio_chimera_init(struct thread_data *td)
                         return EINVAL;
                     }
 
-                    fprintf(stderr, "Mounting %s:%s at %s\n", json_string_value(module),
-                            json_string_value(module_path), json_string_value(mount_point));
+                    /* Optional comma-separated mount options (e.g. "rdma", "vers=4", "port=20049"). */
+                    json_t     *mount_opts = json_object_get(mount, "options");
+                    const char *opts_str   = mount_opts ? json_string_value(mount_opts) : NULL;
+
+                    fprintf(stderr, "Mounting %s:%s at %s options=%s\n", json_string_value(module),
+                            json_string_value(module_path), json_string_value(mount_point),
+                            opts_str ? opts_str : "");
 
                     chimera_mount(client_thread,
                                   json_string_value(mount_point),
                                   json_string_value(module),
                                   json_string_value(module_path),
-                                  NULL,
+                                  opts_str,
                                   mount_callback,
                                   &mount_ctx);
                 }
@@ -568,7 +575,7 @@ SYMBOL_EXPORT struct ioengine_ops ioengine =
 {
     .name               = "chimera",
     .version            = FIO_IOOPS_VERSION,
-    .flags              = 0,
+    .flags              = FIO_DISKLESSIO,
     .init               = fio_chimera_init,
     .post_init          = fio_chimera_post_init,
     .cleanup            = fio_chimera_cleanup,
