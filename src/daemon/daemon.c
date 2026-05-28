@@ -703,7 +703,14 @@ main(
                                 module, path, name,
                                 mount_options ? " options=" : "",
                                 mount_options ? mount_options : "");
-            chimera_server_mount(server, name, module, path, mount_options);
+
+            if (chimera_server_mount(server, name, module, path, mount_options) != 0) {
+                /* A silently-failed mount leaves shares/exports pointing at a
+                 * nonexistent root, so clients later see confusing errors
+                 * (e.g. SMB NETWORK_NAME_DELETED).  Surface it here instead. */
+                chimera_server_error("Failed to mount %s://%s to /%s",
+                                     module, path, name);
+            }
         }
     }
 
