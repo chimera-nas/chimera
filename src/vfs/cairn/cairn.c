@@ -1799,9 +1799,11 @@ cairn_setattr(
 
     if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
         !S_ISREG(inode->mode)) {
-        cairn_inode_handle_release(&ih);
+        /* `inode` points into the pinned RocksDB slice owned by `ih`, so read
+         * inode->mode before releasing the handle -- releasing frees the slice. */
         request->status = S_ISDIR(inode->mode) ?
             CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL;
+        cairn_inode_handle_release(&ih);
         request->complete(request);
         return;
     }
