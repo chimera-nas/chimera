@@ -349,6 +349,7 @@ set(SMBTORTURE_ENABLED_memfs
 # filesystem must support name_to_handle_at(2) (see smbtorture_test.c).
 set(SMBTORTURE_ENABLED_linux
     smb2.check-sharemode
+    smb2.compound_find
     smb2.create_no_streams
     smb2.deny
     smb2.notify-inotify
@@ -356,12 +357,14 @@ set(SMBTORTURE_ENABLED_linux
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
+    smb2.tcon
     smb2.winattr2
     # smb2.acls_non_canonical passes on x86_64 but, like memfs, is left disabled
     # pending the arm64 difference.
 )
 set(SMBTORTURE_ENABLED_io_uring
     smb2.check-sharemode
+    smb2.compound_find
     smb2.create_no_streams
     smb2.deny
     smb2.notify-inotify
@@ -369,6 +372,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
+    smb2.tcon
     smb2.winattr2
 )
 # The engine backends store their own data and stamp a new object's owner from
@@ -378,29 +382,38 @@ set(SMBTORTURE_ENABLED_io_uring
 # fixed (see chimera_smb_create_check_access).
 set(SMBTORTURE_ENABLED_cairn
     smb2.check-sharemode
+    smb2.compound_find
     smb2.create_no_streams
+    smb2.notify-inotify
     smb2.secleak
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
+    smb2.tcon
     smb2.winattr2
 )
 # diskfs has no FSCTL_SET_SPARSE support yet, so smb2.set-sparse-ioctl stays
 # disabled; the rest match the cairn set.
 set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.check-sharemode
+    smb2.compound_find
     smb2.create_no_streams
+    smb2.notify-inotify
     smb2.secleak
     smb2.session.signing-aes-128-cmac
     smb2.sharemode
+    smb2.tcon
     smb2.winattr2
 )
 set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.check-sharemode
+    smb2.compound_find
     smb2.create_no_streams
+    smb2.notify-inotify
     smb2.secleak
     smb2.session.signing-aes-128-cmac
     smb2.sharemode
+    smb2.tcon
     smb2.winattr2
 )
 

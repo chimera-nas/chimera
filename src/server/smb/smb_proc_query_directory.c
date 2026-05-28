@@ -8,6 +8,7 @@
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_release.h"
 #include "xxhash.h"
 
 static unsigned int
@@ -35,6 +36,13 @@ chimera_smb_query_directory_readdir_complete(
     void                           *private_data)
 {
     struct chimera_smb_request *request = private_data;
+
+    /* Drop the extra handle reference taken in chimera_smb_query_directory.  Do
+     * this before releasing the open_file: once the readdir is done with the
+     * handle it is safe to let a racing CLOSE finish tearing it down. */
+    if (handle && handle->cache_id != CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
+        chimera_vfs_release(request->compound->thread->vfs_thread, handle);
+    }
 
     if (request->query_directory.last_file_offset) {
         *request->query_directory.last_file_offset = 0;
@@ -344,6 +352,19 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
                      4096,
                      1,
                      0, &request->query_directory.iov);
+
+    /* Hold an extra reference on the directory's VFS handle for the duration of
+     * the readdir.  The readdir is async (e.g. diskfs walks the directory's
+     * b+tree across block I/O), so a separate, pipelined CLOSE for the same
+     * file id can run before it completes.  Without this reference that CLOSE
+     * drops the handle's last open count and -- if the handle was detached (a
+     * second open of the same fh, which the file-creation path does to the
+     * parent directory) -- closes the backend handle immediately, tearing down
+     * the directory inode while the readdir is still iterating it.  The matching
+     * release is in chimera_smb_query_directory_readdir_complete. */
+    if (request->query_directory.open_file->handle->cache_id != CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
+        chimera_vfs_dup_handle(thread->vfs_thread, request->query_directory.open_file->handle);
+    }
 
     chimera_vfs_readdir(
         thread->vfs_thread,
