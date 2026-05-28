@@ -271,6 +271,21 @@ chimera_io_uring_set_open_attrs(
 {
     uint64_t set_mask = attr->va_set_mask;
 
+    /* Apply ownership requested via the attribute set.  For an AUTH_ATTR
+     * credential, chimera_setup_credential() injects the caller's UID/GID here
+     * (rather than impersonating with setfsuid), so without this fchown a newly
+     * created file would be owned by the server identity instead of the client
+     * -- which then fails the owner access check on a root-run server.  Mirrors
+     * the linux backend's chimera_linux_set_attrs(). */
+    if ((set_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID))) {
+        uid_t uid = (set_mask & CHIMERA_VFS_ATTR_UID) ? (uid_t) attr->va_uid : (uid_t) -1;
+        gid_t gid = (set_mask & CHIMERA_VFS_ATTR_GID) ? (gid_t) attr->va_gid : (gid_t) -1;
+
+        if (fchown(fd, uid, gid) < 0) {
+            return errno;
+        }
+    }
+
     if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
         if (ftruncate(fd, attr->va_size) < 0) {
             return errno;
@@ -1245,6 +1260,16 @@ chimera_io_uring_open_at(
             request->complete(request);
             return;
         }
+    }
+
+    /* chimera_setup_credential injects the AUTH_ATTR caller's UID/GID into
+     * set_attr; ownership is only meaningful when this open creates the object.
+     * Drop the injected UID/GID for a non-creating open so set_open_attrs does
+     * not fchown an already-existing file (which would also fail on the O_PATH
+     * metadata-only handle used for some opens). */
+    if (!(request->open_at.flags & CHIMERA_VFS_OPEN_CREATE)) {
+        request->open_at.set_attr->va_set_mask &=
+            ~(CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID);
     }
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
