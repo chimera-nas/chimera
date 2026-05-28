@@ -960,6 +960,35 @@ chimera_smb_create_check_access(
         return SMB2_STATUS_SUCCESS;
     }
 
+    /* Windows owner semantics on a mode-only object: a file's owner always holds
+     * an implicit WRITE_DAC, so it can rewrite the security descriptor at will
+     * and is therefore granted the access it asks for over its own object.  The
+     * engine backends (e.g. memfs) encode this as an owner-full-control default
+     * DACL stamped on an SMB-created object, so this check passes naturally
+     * there.  The mode-only backends (linux/io_uring/cairn/diskfs) report only
+     * the POSIX mode and no explicit ACL; under POSIX mode evaluation the owner
+     * is NOT granted the WRITE_OWNER / WRITE_ATTRIBUTES / SYNCHRONIZE / EXECUTE
+     * bits a Windows CREATE routinely requests with FILE_ALL_ACCESS, so an owner
+     * opening its own file would be wrongly denied.  Recognise the owner of a
+     * no-explicit-ACL object here and grant it, matching the owner-full-control
+     * default DACL the engine backends materialise.  POSIX (NFS/S3) evaluation
+     * is unaffected -- this is the SMB protocol layer applying Windows owner
+     * rules, not a change to the shared engine.  A *different* caller still falls
+     * through to the normal mode/ACL evaluation below and is gated correctly. */
+    {
+        const struct chimera_vfs_cred *cred =
+            &request->session_handle->session->cred;
+        int                            has_acl = (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) &&
+            attr->va_acl && attr->va_acl->num_aces > 0;
+
+        if (!has_acl &&
+            cred->flavor != CHIMERA_VFS_AUTH_NONE &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
+            (uint64_t) cred->uid == attr->va_uid) {
+            return SMB2_STATUS_SUCCESS;
+        }
+    }
+
     /* Evaluate the full grantable universe and require every requested bit to
      * be present; a requested right outside what the ACL grants (e.g. an
      * undefined specific bit) is therefore denied. */

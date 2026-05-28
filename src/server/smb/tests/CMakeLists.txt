@@ -365,9 +365,38 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.sharemode
     smb2.winattr2
 )
-set(SMBTORTURE_ENABLED_diskfs_io_uring)
-set(SMBTORTURE_ENABLED_diskfs_aio)
-set(SMBTORTURE_ENABLED_cairn)
+# The engine backends store their own data and stamp a new object's owner from
+# the calling credential, so they behave consistently regardless of the server's
+# own uid (unlike the setfsuid/personality passthrough backends).  The suites
+# below were verified green end-to-end once the SMB CREATE owner access check was
+# fixed (see chimera_smb_create_check_access).
+set(SMBTORTURE_ENABLED_cairn
+    smb2.check-sharemode
+    smb2.create_no_streams
+    smb2.secleak
+    smb2.session.signing-aes-128-cmac
+    smb2.set-sparse-ioctl
+    smb2.sharemode
+    smb2.winattr2
+)
+# diskfs has no FSCTL_SET_SPARSE support yet, so smb2.set-sparse-ioctl stays
+# disabled; the rest match the cairn set.
+set(SMBTORTURE_ENABLED_diskfs_io_uring
+    smb2.check-sharemode
+    smb2.create_no_streams
+    smb2.secleak
+    smb2.session.signing-aes-128-cmac
+    smb2.sharemode
+    smb2.winattr2
+)
+set(SMBTORTURE_ENABLED_diskfs_aio
+    smb2.check-sharemode
+    smb2.create_no_streams
+    smb2.secleak
+    smb2.session.signing-aes-128-cmac
+    smb2.sharemode
+    smb2.winattr2
+)
 
 macro(add_smbtorture_backend_tests backend)
     foreach(SUITE ${SMBTORTURE_SUITES})
