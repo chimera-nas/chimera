@@ -360,6 +360,67 @@ chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
     }
 } /* chimera_smb_durable_sweep */
 
+/* Release every registry entry's live open at thread shutdown.  A parked
+ * durable/persistent handle keeps its VFS open handle referenced
+ * indefinitely; without this the VFS close thread can never reach a
+ * quiescent (zero open handles) state and chimera_vfs_destroy hangs.
+ *
+ * Runs from the SMB thread-destroy path, which still has a live vfs_thread
+ * (protocols are destroyed before the VFS, precisely so they can release
+ * their open handles).  By that point all connections are gone, so any
+ * remaining entry with a live open_file is orphaned state to reclaim --
+ * persistent handles included (their in-memory open must be released even
+ * though the on-disk record is intentionally left for restart recovery).
+ * Cold entries (open_file == NULL) only hold bookkeeping, freed by
+ * chimera_smb_durable_table_destroy.
+ *
+ * Only the VFS open handle is released here; the open's leases / share
+ * reservation / byte-range locks are deliberately NOT drained.  Draining a
+ * lease pumps any pending acquire queued behind it (e.g. a blocking lock
+ * whose connection already dropped), whose completion callback would try to
+ * send a reply -- allocating a reply iovec on this teardown thread for a
+ * dead connection, which trips the cross-thread iovec guard.  At shutdown
+ * those pending waiters have no live connection to answer, so dropping them
+ * is correct; the leftover lease objects are reclaimed wholesale when
+ * chimera_vfs_state_destroy frees the per-file state (it never walks the
+ * lease lists), and no operation runs after thread destroy to observe a
+ * dangling lease. */
+SYMBOL_EXPORT void
+chimera_smb_durable_drain_all(struct chimera_server_smb_thread *thread)
+{
+    struct chimera_server_smb_shared *shared = thread->shared;
+    struct chimera_smb_durable_entry *entry, *tmp;
+    struct chimera_smb_durable_entry *reap = NULL;
+
+    pthread_mutex_lock(&shared->durable.lock);
+
+    HASH_ITER(hh, shared->durable.by_pid, entry, tmp)
+    {
+        if (!entry->open_file) {
+            continue;
+        }
+        HASH_DELETE(hh, shared->durable.by_pid, entry);
+        entry->reap_next = reap;
+        reap             = entry;
+    }
+
+    pthread_mutex_unlock(&shared->durable.lock);
+
+    while (reap) {
+        struct chimera_smb_open_file *open_file = reap->open_file;
+        entry = reap;
+        reap  = reap->reap_next;
+
+        if (open_file->handle) {
+            chimera_vfs_release(thread->vfs_thread, open_file->handle);
+            open_file->handle = NULL;
+        }
+        chimera_smb_open_file_free(thread, open_file);
+
+        free(entry);
+    }
+} /* chimera_smb_durable_drain_all */
+
 /* ------------------------------------------------------------------ *
 *  Record (de)serialization for backend persistence                  *
 * ------------------------------------------------------------------ */

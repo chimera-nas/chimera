@@ -324,6 +324,12 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.compound_find
     smb2.connect
     smb2.create_no_streams
+    # SMB3 durable/persistent handle suites that pass end-to-end on memfs with
+    # the in-memory durable registry (the harness runs the server with
+    # persistent handles enabled).  smb2.durable-open / -v2-open still have
+    # individual gaps and stay disabled until fully green.
+    smb2.durable-open-disconnect
+    smb2.durable-v2-delay
     smb2.notify-inotify
     smb2.secleak
     smb2.session.signing-aes-128-cmac

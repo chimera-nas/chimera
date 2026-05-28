@@ -27,7 +27,10 @@ chimera_smb_tree_disconnect(struct chimera_smb_request *request)
 
     if (request->tree->refcnt == 0) {
         session->trees[request->tree->tree_id] = NULL;
-        chimera_smb_tree_free(thread, thread->shared, request->tree);
+        /* A graceful TREE_DISCONNECT relinquishes every open on the tree
+         * (MS-SMB2 3.3.5.7); durable handles are closed, not preserved
+         * (preserve_durable = false). */
+        chimera_smb_tree_free(thread, thread->shared, request->tree, false);
     }
 
     pthread_mutex_unlock(&session->lock);

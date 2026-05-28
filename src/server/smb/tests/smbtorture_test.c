@@ -265,6 +265,13 @@ main(
     /* Initialize server configuration */
     config = chimera_server_config_init();
 
+    /* Exercise the real SMB3 durable/persistent-handle path (as the WPTS
+     * harness does via CHIMERA_SMB_PERSISTENT).  Without it the server refuses
+     * every durable grant, and the durable smbtorture suites take their
+     * not-granted failure branch -- which in several tests leaves a tree/session
+     * pointer NULL and then dereferences it in cleanup, crashing the client. */
+    chimera_server_config_set_smb_persistent_handles(config, 1);
+
     /* Configure backend-specific modules */
     if (strcmp(backend, "diskfs_io_uring") == 0 ||
         strcmp(backend, "diskfs_aio") == 0) {
