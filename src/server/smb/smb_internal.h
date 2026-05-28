@@ -146,6 +146,14 @@ struct chimera_smb_conn;
 
 #define CHIMERA_SMB_REQUEST_FLAG_SIGN 0x01
 
+/* MaxTransactSize advertised in NEGOTIATE.  QUERY_DIRECTORY / QUERY_INFO
+ * output is bounded by this per MS-SMB2, so it doubles as the cap on the
+ * single contiguous reply buffer the server allocates for a FIND.  It must
+ * stay <= the libevpl per-buffer size (2 MiB) because that reply buffer is
+ * allocated as a single iovec (max_iovecs == 1); a request larger than one
+ * evpl buffer cannot be satisfied with one iovec. */
+#define CHIMERA_SMB_MAX_TRANSACT_SIZE (1 * 1024 * 1024)
+
 struct chimera_smb_rename_info {
     uint8_t                         replace_if_exist;
     struct chimera_vfs_open_handle *new_parent_handle;

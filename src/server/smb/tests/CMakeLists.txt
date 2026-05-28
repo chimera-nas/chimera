@@ -295,6 +295,7 @@ set(SMBTORTURE_SUITES
 # verified against them.
 set(SMBTORTURE_ENABLED_memfs
     smb2.check-sharemode
+    smb2.compound_find
     smb2.connect
     smb2.create_no_streams
     smb2.notify-inotify
