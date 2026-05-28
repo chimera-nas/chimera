@@ -62,6 +62,12 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_definitions(-O3)
 endif()
 
+# Keep frame pointers in every build type so that perf and other
+# frame-pointer-based profilers can unwind call stacks (the cost at -O3 is
+# negligible and the unwind reliability is worth it for production profiling).
+# Mirrors the same setting in the bundled libevpl.
+add_definitions(-fno-omit-frame-pointer)
+
 add_definitions(-g -Wall -Werror -Wno-unused-function)
 add_definitions(-fvisibility=hidden)
 
