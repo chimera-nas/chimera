@@ -290,9 +290,9 @@ set(SMBTORTURE_SUITES
 # in the same change.  This lets the remaining work be parallelized across
 # branches without a perpetually-red test run.
 #
-# Only the memfs backend is seeded today (mirroring the WPTS suite, which also
-# runs memfs-only).  The other backends start fully disabled; populate their
-# lists as suites are verified against them.
+# The memfs and passthrough (linux/io_uring) backends are seeded today.  The
+# remaining backends start fully disabled; populate their lists as suites are
+# verified against them.
 set(SMBTORTURE_ENABLED_memfs
     smb2.check-sharemode
     smb2.connect
@@ -307,11 +307,36 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.acls_non_canonical and smb2.async_dosmode pass on x86_64 but fail on
     # arm64 CI; left disabled until the arch difference is understood.
 )
-set(SMBTORTURE_ENABLED_linux)
+# The linux and io_uring passthrough backends share an implementation and pass
+# the same set.  They expose the share root as a real local directory whose
+# filesystem must support name_to_handle_at(2) (see smbtorture_test.c).
+set(SMBTORTURE_ENABLED_linux
+    smb2.check-sharemode
+    smb2.create_no_streams
+    smb2.deny
+    smb2.notify-inotify
+    smb2.secleak
+    smb2.session.signing-aes-128-cmac
+    smb2.set-sparse-ioctl
+    smb2.sharemode
+    smb2.winattr2
+    # smb2.acls_non_canonical passes on x86_64 but, like memfs, is left disabled
+    # pending the arm64 difference.
+)
+set(SMBTORTURE_ENABLED_io_uring
+    smb2.check-sharemode
+    smb2.create_no_streams
+    smb2.deny
+    smb2.notify-inotify
+    smb2.secleak
+    smb2.session.signing-aes-128-cmac
+    smb2.set-sparse-ioctl
+    smb2.sharemode
+    smb2.winattr2
+)
 set(SMBTORTURE_ENABLED_diskfs_io_uring)
 set(SMBTORTURE_ENABLED_diskfs_aio)
 set(SMBTORTURE_ENABLED_cairn)
-set(SMBTORTURE_ENABLED_io_uring)
 
 macro(add_smbtorture_backend_tests backend)
     foreach(SUITE ${SMBTORTURE_SUITES})
