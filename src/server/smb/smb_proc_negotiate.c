@@ -260,6 +260,31 @@ build_signing_capabilities_response(
     return 4;
 } /* build_signing_capabilities_response */
 
+/* Build the SMB2_ENCRYPTION_CAPABILITIES response context:
+ *   CipherCount(2)=1, Ciphers[1](2)=selected cipher.
+ * The selected cipher is echoed so the client's per-session nonce bookkeeping
+ * is well-formed; Chimera does not activate encryption (see cipher selection
+ * in chimera_smb_select_negotiated_algorithms). */
+static int
+build_encryption_capabilities_response(
+    struct chimera_smb_conn    *conn,
+    struct chimera_smb_request *request,
+    uint8_t                    *out,
+    uint32_t                    out_size)
+{
+    (void) request;
+
+    if (conn->negotiated.cipher_id == 0 || out_size < 4) {
+        return -1;
+    }
+
+    out[0] = 1; out[1] = 0; /* CipherCount */
+    out[2] = conn->negotiated.cipher_id & 0xff;
+    out[3] = (conn->negotiated.cipher_id >> 8) & 0xff;
+
+    return 4;
+} /* build_encryption_capabilities_response */
+
 /* The negotiate-response context emitters. Only consulted when the negotiated
  * dialect is 3.1.1; each entry emits only if the client sent the matching
  * request context (need_mask_bit).
@@ -267,14 +292,18 @@ build_signing_capabilities_response(
  * PreauthIntegrity is implemented: the server selects SHA-512, returns a salt,
  * maintains Connection.PreauthIntegrityHashValue across NEGOTIATE/SESSION_SETUP
  * (smb.c), and derives the 3.1.1 signing key bound to that hash. AES-CMAC
- * signing negotiation is implemented; GMAC, encryption, compression and
+ * signing negotiation is implemented. The encryption context echoes a selected
+ * cipher (required so the client's session nonce bookkeeping is well-formed)
+ * but Chimera does not activate encryption; GMAC, compression and
  * RdmaTransform contexts are not yet emitted. */
 static const struct chimera_smb_negotiate_response_emitter smb_negotiate_response_emitters[] = {
-    { CHIMERA_SMB_NEGOTIATE_CTX_PREAUTH, SMB2_PREAUTH_INTEGRITY_CAPABILITIES,
+    { CHIMERA_SMB_NEGOTIATE_CTX_PREAUTH,    SMB2_PREAUTH_INTEGRITY_CAPABILITIES,
       build_preauth_integrity_response },
-    { CHIMERA_SMB_NEGOTIATE_CTX_SIGNING, SMB2_SIGNING_CAPABILITIES,
+    { CHIMERA_SMB_NEGOTIATE_CTX_ENCRYPTION, SMB2_ENCRYPTION_CAPABILITIES,
+      build_encryption_capabilities_response },
+    { CHIMERA_SMB_NEGOTIATE_CTX_SIGNING,    SMB2_SIGNING_CAPABILITIES,
       build_signing_capabilities_response },
-    { 0,                                 0,                                  NULL }
+    { 0,                                    0,                                     NULL}
 };
 
 /* Build the negotiate context list into ctx_buf. Returns total bytes written
@@ -739,6 +768,41 @@ chimera_smb_select_negotiated_algorithms(
             if (request->negotiate.signing_in.algs[i] == SMB2_SIGNING_AES_CMAC) {
                 conn->negotiated.signing_alg = SMB2_SIGNING_AES_CMAC;
                 break;
+            }
+        }
+    }
+
+    /* SMB 3.1.1: when the client offers an ENCRYPTION_CAPABILITIES context, the
+     * server MUST select a cipher and echo it back in the response context (or
+     * return AES-128-CCM as a default per MS-SMB2 3.3.5.4). The selected cipher
+     * is NOT used to actually encrypt traffic here — encryption is only ever
+     * activated when the server also advertises SMB2_GLOBAL_CAP_ENCRYPTION or
+     * sets SMB2_SESSION_FLAG_ENCRYPT_DATA, neither of which Chimera does.
+     *
+     * Selecting a cipher is nonetheless required for protocol correctness: a
+     * Samba client (smbtorture) records Connection.CipherId from this context
+     * and uses it to size the per-session AEAD nonce space.  Leaving CipherId
+     * at 0 makes the client compute a zero nonce-space, and a later
+     * shallow-copy of the session (smb2.compound.related1, durable-open,
+     * replay) then aborts — crashing the client.  Echo a chosen cipher so the
+     * client's session bookkeeping is well-formed. */
+    if (conn->dialect == SMB2_DIALECT_3_1_1 &&
+        (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_ENCRYPTION)) {
+        static const uint16_t preferred[] = {
+            SMB2_ENCRYPTION_AES_128_GCM,
+            SMB2_ENCRYPTION_AES_256_GCM,
+            SMB2_ENCRYPTION_AES_128_CCM,
+            SMB2_ENCRYPTION_AES_256_CCM,
+        };
+        int                   i, j;
+
+        for (i = 0; i < (int) (sizeof(preferred) / sizeof(preferred[0])) &&
+             conn->negotiated.cipher_id == 0; i++) {
+            for (j = 0; j < request->negotiate.encryption_in.cipher_count; j++) {
+                if (request->negotiate.encryption_in.ciphers[j] == preferred[i]) {
+                    conn->negotiated.cipher_id = preferred[i];
+                    break;
+                }
             }
         }
     }
