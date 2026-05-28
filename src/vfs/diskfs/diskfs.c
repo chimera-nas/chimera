@@ -138,6 +138,15 @@ struct diskfs_request_private {
     uint32_t                    rd_gen;
     int                         rd_namelen;
     char                        rd_name[256];
+    /* readdir trampoline state: when the b+tree and child inodes are all
+     * cache-resident, each step completes synchronously and the
+     * iter_inode_cb -> iter_step tail call would otherwise recurse once per
+     * entry and overflow the stack on a large directory.  rd_looping marks
+     * that an iteration loop is active; rd_advance asks it for another step;
+     * rd_done flags that the walk finished (completed by the loop, not inline). */
+    int                         rd_looping;
+    int                         rd_advance;
+    int                         rd_done;
 
     /* Scratch buffer for handlers that parse a looked-up b+tree record
      * (e.g. a dirent's inum/gen) in their async continuation.  Sized to hold
@@ -9950,13 +9959,30 @@ static void diskfs_readdir_iter_step(
     struct chimera_vfs_request *request);
 
 static void
-diskfs_readdir_complete(struct chimera_vfs_request *request)
+diskfs_readdir_finish(struct chimera_vfs_request *request)
 {
     struct diskfs_request_private *p     = request->plugin_data;
     struct diskfs_inode           *inode = p->inode_stash[0];
 
     diskfs_map_attrs(p->thread, &request->readdir.r_dir_attr, inode);
     diskfs_op_ok(request, p->txn);
+} /* diskfs_readdir_finish */
+
+static void
+diskfs_readdir_complete(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    /* If a synchronous iteration loop is driving the walk (see
+     * diskfs_readdir_iter_step), only flag completion: the loop calls
+     * diskfs_readdir_finish() once it unwinds.  Finishing inline here would
+     * commit the txn and free the request out from under the active loop. */
+    if (p->rd_looping) {
+        p->rd_done = 1;
+        return;
+    }
+
+    diskfs_readdir_finish(request);
 } /* diskfs_readdir_complete */
 
 static void
@@ -10039,12 +10065,34 @@ diskfs_readdir_iter_step(struct chimera_vfs_request *request)
     struct diskfs_request_private *p      = request->plugin_data;
     struct diskfs_thread          *thread = p->thread;
     struct diskfs_inode           *inode  = p->inode_stash[0];
-    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+    struct diskfs_bt_op           *op;
 
-    if (diskfs_dir_next_async(op, thread, inode, p->rd_from_hash, &op->found_key,
-                              p->rec_scratch, sizeof(p->rec_scratch),
-                              diskfs_readdir_next_cb, request)) {
-        diskfs_readdir_next_cb(op, op->result, request);
+    /* A re-entrant call from a step that completed synchronously: don't
+    * recurse, just ask the active loop to advance to the next entry. */
+    if (p->rd_looping) {
+        p->rd_advance = 1;
+        return;
+    }
+
+    p->rd_looping = 1;
+    do {
+        p->rd_advance = 0;
+        op            = diskfs_bt_op_alloc(thread);
+        if (diskfs_dir_next_async(op, thread, inode, p->rd_from_hash, &op->found_key,
+                                  p->rec_scratch, sizeof(p->rec_scratch),
+                                  diskfs_readdir_next_cb, request)) {
+            diskfs_readdir_next_cb(op, op->result, request);
+        }
+        /* rd_advance: the step finished inline; loop for the next entry.
+         * rd_done:    the walk completed (terminal dirent or full buffer).
+         * neither:    the step suspended on block I/O; its completion will
+         *             re-enter this function with rd_looping clear. */
+    } while (p->rd_advance && !p->rd_done);
+
+    p->rd_looping = 0;
+
+    if (p->rd_done) {
+        diskfs_readdir_finish(request);
     }
 } /* diskfs_readdir_iter_step */
 
@@ -10193,8 +10241,11 @@ diskfs_readdir(
     (void) shared;
     (void) private_data;
 
-    p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->thread     = thread;
+    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->rd_looping = 0;
+    p->rd_advance = 0;
+    p->rd_done    = 0;
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
