@@ -473,6 +473,18 @@ chimera_smb_sign_compound(
                 return -1;
             }
 
+            /* A signed response MUST advertise SMB2_FLAGS_SIGNED (MS-SMB2
+             * 3.3.4.1.1), and the signature is computed over the header *with*
+             * that flag set.  The reply header inherits the request's flags, so
+             * a response to a request the client itself signed already carries
+             * the bit — but the final SESSION_SETUP response is signed by the
+             * server even though the establishing request was unsigned.  Set
+             * the flag here, before computing the MAC, so (a) the value we sign
+             * matches the bytes the client verifies and (b) a client with
+             * signing required does not treat the response as unsigned (which
+             * mishandles channel/session setup and can crash it). */
+            hdr->flags |= SMB2_FLAGS_SIGNED;
+
             switch (conn->dialect) {
                 case SMB2_DIALECT_2_0_2:
                 case SMB2_DIALECT_2_1:
