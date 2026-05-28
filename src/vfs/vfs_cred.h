@@ -7,14 +7,11 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/fsuid.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <errno.h>
 #include "vfs_attrs.h"
-
-/* setgroups is gated behind _GNU_SOURCE in <grp.h>; declare it directly */
-extern int setgroups(
-    size_t       size,
-    const gid_t *list);
 
 /*
  * Maximum number of supplementary groups in VFS credentials.
@@ -55,6 +52,42 @@ struct chimera_vfs_cred {
     uint32_t                     ngids;
     uint32_t                     gids[CHIMERA_VFS_CRED_MAX_GIDS];
 };
+
+/*
+ * Compact identity hash for a credential, used to key the open-handle cache so
+ * each distinct caller gets its own handle (and its own authorization result).
+ * Mixes flavor, uid, gid and the supplementary gids (FNV-1a).  Two requests
+ * from the same caller hash equal; a hash collision between distinct callers
+ * would at worst share a handle (no security boundary under AUTH_SYS, which the
+ * client asserts anyway), so a 64-bit mix is ample.
+ */
+static inline uint64_t
+chimera_vfs_cred_hash(const struct chimera_vfs_cred *cred)
+{
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
+    uint32_t words[3];
+    uint32_t i;
+
+    /* Internal/server opens may carry no credential; they are exempt from
+     * engine enforcement anyway, so share a single cache bucket. */
+    if (!cred) {
+        return h;
+    }
+
+    words[0] = (uint32_t) cred->flavor;
+    words[1] = cred->uid;
+    words[2] = cred->gid;
+
+    for (i = 0; i < 3; i++) {
+        h = (h ^ words[i]) * 1099511628211ULL;
+    }
+
+    for (i = 0; i < cred->ngids; i++) {
+        h = (h ^ cred->gids[i]) * 1099511628211ULL;
+    }
+
+    return h;
+} /* chimera_vfs_cred_hash */
 
 /*
  * Return a pointer to the cached server process credentials.
@@ -155,9 +188,17 @@ chimera_vfs_cred_init_attr(
 
 
 /*
- * Apply a client credential to the current thread.
+ * Apply a client credential to the *calling thread* for filesystem access.
  *
- * For UNIX credentials, impersonates the client by calling seteuid/setegid.
+ * For UNIX credentials this impersonates the client with setfsuid/setfsgid and
+ * a raw setgroups syscall.  These are deliberately per-thread: glibc's
+ * seteuid/setegid/setgroups broadcast the change to every thread in the process
+ * (POSIX setxid semantics), which would let concurrent delegation threads
+ * impersonating different users clobber each other's identity mid-syscall.
+ * setfsuid/setfsgid set only the filesystem ids the kernel checks for file
+ * access (which is all a passthrough backend needs) and the raw setgroups
+ * syscall touches only the calling task's credentials.
+ *
  * If the client identity matches the server identity, the call is a no-op.
  * For ATTR credentials, injects UID/GID into set_attrs if not already set.
  *
@@ -182,16 +223,23 @@ chimera_setup_credential(
                 (cred->gid == sc->gid)) {
                 return 0;
             }
-            if (cred->ngids > 0) {
-                if (setgroups(cred->ngids, cred->gids) < 0) {
-                    return errno;
-                }
-            }
-            if (setegid(cred->gid) < 0) {
+            /* Per-thread supplementary groups: the raw syscall sets only this
+             * thread (glibc setgroups() would broadcast to all threads). */
+            if (syscall(SYS_setgroups, (size_t) cred->ngids,
+                        cred->ngids ? cred->gids : NULL) < 0) {
                 return errno;
             }
-            if (seteuid(cred->uid) < 0) {
-                return errno;
+            /* fsgid before fsuid so we keep the privilege to set the gid. */
+            setfsgid(cred->gid);
+            setfsuid(cred->uid);
+            /* setfsuid silently no-ops without privilege; it returns the
+             * previous fsuid, so a second call returns the now-current one --
+             * verify the impersonation actually took effect. */
+            if ((uint32_t) setfsuid(cred->uid) != cred->uid) {
+                setfsuid(sc->uid);
+                setfsgid(sc->gid);
+                syscall(SYS_setgroups, (size_t) 0, NULL);
+                return EPERM;
             }
             break;
         case CHIMERA_VFS_AUTH_ATTR:
@@ -214,11 +262,11 @@ chimera_setup_credential(
 } /* chimera_setup_credential */
 
 /*
- * Restore the server process credentials after client impersonation.
+ * Restore the calling thread's filesystem credentials after impersonation.
  *
- * Reverses the effect of chimera_setup_credential() by restoring the
- * server's original UID, GID, and supplementary groups. If the client
- * credential matched the server identity, the call is a no-op.
+ * Reverses chimera_setup_credential() by restoring the server's fsuid/fsgid and
+ * clearing the supplementary groups for this thread.  If the client credential
+ * matched the server identity, the call is a no-op.
  *
  * @param cred  The client credential that was previously applied
  * @return 0 on success, errno value on failure
@@ -234,14 +282,9 @@ chimera_restore_privilege(const struct chimera_vfs_cred *cred)
             (cred->gid == sc->gid)) {
             return 0;
         }
-        if (seteuid(sc->uid) < 0) {
-            return errno;
-        }
-        if (setegid(sc->gid) < 0) {
-            return errno;
-        }
-
-        if (setgroups(0, NULL) < 0) {
+        setfsuid(sc->uid);
+        setfsgid(sc->gid);
+        if (syscall(SYS_setgroups, (size_t) 0, NULL) < 0) {
             return errno;
         }
     }

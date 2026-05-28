@@ -11,6 +11,8 @@
 #include <string.h>
 
 #include "vfs/vfs.h"
+#include "vfs/vfs_acl.h"
+#include "vfs/vfs_idmap.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_pnfs.h"
 #include "nfs4_lease.h"
@@ -91,6 +93,11 @@ chimera_nfs4_attr2mask(
                         break;
                     case FATTR4_SIZE:
                         attr_mask |= CHIMERA_VFS_ATTR_SIZE;
+                        break;
+                    case FATTR4_ACL:
+                        /* Also request MODE so mode-only backends can have an
+                         * ACL synthesised from their permission bits. */
+                        attr_mask |= CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_MODE;
                         break;
                     case FATTR4_LINK_SUPPORT:
                         attr_mask |= CHIMERA_VFS_ATTR_NLINK;
@@ -265,6 +272,67 @@ chimera_nfs4_attr_append_utf8str_from_uint64(
 
 } /* chimera_nfs4_attr_append_utf8str_from_uintt64 */
 
+/*
+ * Safe upper bound on the wire size of a fattr4_acl<> encoding of `acl`:
+ * a uint32 count, then per ACE three uint32s (type/flag/mask) plus a
+ * length-prefixed, 4-byte-padded who string capped at CHIMERA_IDMAP_WHO_MAX.
+ */
+static inline uint32_t
+chimera_nfs4_acl_wire_size(const struct chimera_acl *acl)
+{
+    uint32_t per_ace = 3 * sizeof(uint32_t) + sizeof(uint32_t) +
+        ((CHIMERA_IDMAP_WHO_MAX + 3) & ~3u);
+
+    return sizeof(uint32_t) + (acl ? acl->num_aces : 0) * per_ace;
+} /* chimera_nfs4_acl_wire_size */
+
+/*
+ * Encode a canonical ACL as a fattr4_acl<> (nfsace4 array) at *attrs.  The
+ * canonical type/flag/mask values are identical to the NFSv4 ACE4_* layout, so
+ * they pass through directly; the who principal is rendered via the idmap and
+ * ACE4_IDENTIFIER_GROUP is forced to match the principal type.
+ */
+static inline void
+chimera_nfs4_attr_append_acl(
+    void                    **attrs,
+    const struct chimera_acl *acl,
+    const char               *domain)
+{
+    uint32_t num = acl ? acl->num_aces : 0;
+
+    chimera_nfs4_attr_append_uint32(attrs, num);
+
+    for (uint32_t i = 0; i < num; i++) {
+        const struct chimera_ace *ace = &acl->aces[i];
+        char                      who[CHIMERA_IDMAP_WHO_MAX];
+        int                       wholen;
+        uint32_t                  flag = ace->flags;
+        int                       is_group;
+
+        is_group = (ace->who.type == CHIMERA_PRINCIPAL_GROUP) ||
+            (ace->who.type == CHIMERA_PRINCIPAL_SPECIAL &&
+             ace->who.special == CHIMERA_WHO_GROUP);
+
+        if (is_group) {
+            flag |= CHIMERA_ACE_FLAG_IDENTIFIER_GROUP;
+        } else {
+            flag &= ~CHIMERA_ACE_FLAG_IDENTIFIER_GROUP;
+        }
+
+        wholen = chimera_idmap_principal_to_who(&ace->who, domain,
+                                                who, sizeof(who));
+        if (wholen < 0) {
+            /* Should not happen; emit EVERYONE@ as a safe fallback. */
+            wholen = snprintf(who, sizeof(who), "EVERYONE@");
+        }
+
+        chimera_nfs4_attr_append_uint32(attrs, ace->type);
+        chimera_nfs4_attr_append_uint32(attrs, flag);
+        chimera_nfs4_attr_append_uint32(attrs, ace->access_mask);
+        chimera_nfs4_attr_append_utf8str(attrs, who, wholen);
+    }
+} /* chimera_nfs4_attr_append_acl */
+
 static int
 chimera_nfs4_marshall_attrs(
     const struct chimera_vfs_attrs *attr,
@@ -275,6 +343,7 @@ chimera_nfs4_marshall_attrs(
     uint32_t                        max_rsp_mask,
     void                           *attrs,
     uint32_t                       *attrvals_len,
+    uint32_t                        max_attrvals,
     uint8_t                         minorversion,
     uint32_t                        pnfs_layout_type,
     int                             nfs4_delegations,
@@ -312,7 +381,7 @@ chimera_nfs4_marshall_attrs(
                                             (1 << FATTR4_UNIQUE_HANDLES) |
                                             (1 << FATTR4_LEASE_TIME) |
                                             (1 << FATTR4_RDATTR_ERROR) |
-                                            /* acl */
+                                            (1 << FATTR4_ACL) |
                                             (1 << FATTR4_ACLSUPPORT) |
                                             (1 << FATTR4_ARCHIVE) |
                                             (1 << FATTR4_CANSETTIME) |
@@ -470,11 +539,38 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, lease_time_s);
         }
 
+        if (req_mask[0] & (1 << FATTR4_ACL)) {
+            /* Encode the stored canonical ACL, or synthesise one from the mode
+             * bits for mode-only backends.  Omit the attribute (rather than
+             * overflow the reply buffer) if it does not fit. */
+            uint8_t                   synthbuf[sizeof(struct chimera_acl) +
+                                               8 * sizeof(struct chimera_ace)];
+            struct chimera_acl       *synth   = (struct chimera_acl *) synthbuf;
+            const struct chimera_acl *enc_acl = NULL;
+            uint32_t                  used    = (uint32_t) ((char *) attrs -
+                                                            (char *) attrbase);
+
+            if (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+                enc_acl = attr->va_acl;
+            } else if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+                chimera_acl_from_mode(attr->va_mode, synth, 8);
+                enc_acl = synth;
+            }
+
+            if (used + chimera_nfs4_acl_wire_size(enc_acl) <= max_attrvals) {
+                rsp_mask[0]  |= (1 << FATTR4_ACL);
+                *num_rsp_mask = 1;
+                chimera_nfs4_attr_append_acl(&attrs, enc_acl, NULL);
+            }
+        }
+
         if (req_mask[0] & (1 << FATTR4_ACLSUPPORT)) {
             rsp_mask[0]  |= (1 << FATTR4_ACLSUPPORT);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, 0);
+            chimera_nfs4_attr_append_uint32(&attrs,
+                                            ACL4_SUPPORT_ALLOW_ACL |
+                                            ACL4_SUPPORT_DENY_ACL);
         }
 
         if (req_mask[0] & (1 << FATTR4_ARCHIVE)) {
@@ -788,7 +884,9 @@ chimera_nfs4_unmarshall_attrs(
     uint32_t                  num_req_mask,
     uint32_t                 *req_mask,
     void                     *attrs,
-    uint32_t                  attrvals_len)
+    uint32_t                  attrvals_len,
+    struct chimera_acl       *acl_buf,
+    unsigned                  acl_buf_max_aces)
 {
     void    *attrsend = attrs + attrvals_len;
     uint32_t set_it;
@@ -805,6 +903,62 @@ chimera_nfs4_unmarshall_attrs(
             attr->va_size      = chimera_nfs_ntoh64(*(uint64_t *) attrs);
             attrs             += sizeof(uint64_t);
             attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
+        }
+
+        /* FATTR4_ACL (bit 12) decodes after SIZE (bit 4) in attribute order. */
+        if (req_mask[0] & (1 << FATTR4_ACL)) {
+            uint32_t nace;
+
+            if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
+                return NFS4ERR_BADXDR;
+            }
+            nace   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
+            attrs += sizeof(uint32_t);
+
+            if (unlikely(!acl_buf || nace > acl_buf_max_aces)) {
+                return NFS4ERR_RESOURCE;
+            }
+
+            for (uint32_t i = 0; i < nace; i++) {
+                uint32_t type, flag, mask, wholen, padded;
+                int      is_group;
+
+                if (unlikely(attrs + 4 * sizeof(uint32_t) > attrsend)) {
+                    return NFS4ERR_BADXDR;
+                }
+                type   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
+                attrs += sizeof(uint32_t);
+                flag   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
+                attrs += sizeof(uint32_t);
+                mask   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
+                attrs += sizeof(uint32_t);
+                wholen = chimera_nfs_ntoh32(*(uint32_t *) attrs);
+                attrs += sizeof(uint32_t);
+
+                padded = (wholen + 3) & ~3u;
+                if (unlikely(attrs + padded > attrsend || wholen == 0)) {
+                    return NFS4ERR_BADXDR;
+                }
+
+                is_group = !!(flag & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP);
+
+                acl_buf->aces[i].type        = (uint16_t) type;
+                acl_buf->aces[i].flags       = (uint16_t) flag;
+                acl_buf->aces[i].access_mask = mask;
+
+                if (chimera_idmap_who_to_principal(attrs, wholen, is_group,
+                                                   NULL,
+                                                   &acl_buf->aces[i].who) != 0) {
+                    return NFS4ERR_BADOWNER;
+                }
+
+                attrs += padded;
+            }
+
+            acl_buf->num_aces   = (uint16_t) nace;
+            acl_buf->ctrl_flags = 0;
+            attr->va_acl        = acl_buf;
+            attr->va_set_mask  |= CHIMERA_VFS_ATTR_ACL;
         }
     }
 
@@ -964,7 +1118,7 @@ chimera_nfs4_validate_createattrs(
         (1 << FATTR4_UNIQUE_HANDLES) |
         (1 << FATTR4_LEASE_TIME) |
         (1 << FATTR4_RDATTR_ERROR) |
-        /* no FATTR4_ACL = 12 */
+        (1 << FATTR4_ACL) |
         (1 << FATTR4_ACLSUPPORT) |
         (1 << FATTR4_ARCHIVE) |
         (1 << FATTR4_CANSETTIME) |
@@ -997,7 +1151,8 @@ chimera_nfs4_validate_createattrs(
         (1 << (FATTR4_TIME_MODIFY_SET - 32));
 
     static const uint32_t writable_word0 =
-        (1 << FATTR4_SIZE);
+        (1 << FATTR4_SIZE) |
+        (1 << FATTR4_ACL);
 
     static const uint32_t writable_word1 =
         (1 << (FATTR4_MODE - 32)) |

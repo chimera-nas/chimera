@@ -8206,7 +8206,11 @@ diskfs_bootstrap(struct diskfs_thread *thread)
     inode->uid        = 0;
     inode->gid        = 0;
     inode->nlink      = 2;
-    inode->mode       = S_IFDIR | 0755;
+    /* World-writable fresh root: with VFS-layer ADD_FILE/ADD_SUBDIRECTORY
+     * enforcement a root-owned 0755 root would refuse all creation by non-root
+     * clients on this engine-authoritative backend (matches memfs/cairn).
+     * Subdirs are still created owned by their creator with 0755. */
+    inode->mode       = S_IFDIR | 0777;
     inode->atime_sec  = now.tv_sec;
     inode->atime_nsec = now.tv_nsec;
     inode->mtime_sec  = now.tv_sec;

@@ -156,6 +156,7 @@ nfs4_root_readdir_lookup_callback(
                                 3,
                                 entry->attrs.attr_vals.data,
                                 &entry->attrs.attr_vals.len,
+                                256,
                                 0,
                                 0, /* pNFS not advertised on the pseudo-fs root */
                                 0,

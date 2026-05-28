@@ -932,6 +932,12 @@ foreach(prog ${POSIX_TEST_PROGRAMS})
     add_posix_test_myuser(${test_name}_linux    ${prog} linux)
     add_posix_nfs3_test_myuser(${test_name}     ${prog} linux)
     add_posix_nfs3rdma_test_myuser(${test_name} ${prog} linux)
+    # io_uring carries the non-root identity to the kernel via a registered
+    # personality on each async open/mkdir; run the suite as 'myuser' to cover
+    # that path (the linux backend covers the per-thread setfsuid path).
+    if(CHIMERA_VFS_IO_URING)
+        add_posix_test_myuser(${test_name}_io_uring ${prog} io_uring)
+    endif()
 endforeach()
 
 foreach(prog test_fcntl test_lockf)

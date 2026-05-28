@@ -24,6 +24,7 @@
 #include <linux/version.h>
 #include "vfs/vfs_error.h"
 #include "vfs/vfs_internal.h"
+#include "vfs/vfs_acl.h"
 
 // fchmodat support for AT_SYMLINK_NOFOLLOW was added in Linux 6.6
 #if defined(LINUX_VERSION_CODE) && defined(KERNEL_VERSION)
@@ -145,6 +146,15 @@ chimera_linux_set_attrs(
 {
     int      rc;
     uint64_t set_mask = attr->va_set_mask;
+
+    /* Mode-only backend: a set-ACL request is down-projected to the equivalent
+    * POSIX mode and applied as a chmod (lossy, by design -- see vfs_acl.h). */
+    if ((set_mask & CHIMERA_VFS_ATTR_ACL) &&
+        !(set_mask & CHIMERA_VFS_ATTR_MODE) && attr->va_acl) {
+        attr->va_mode = (attr->va_mode & S_IFMT) |
+            chimera_acl_to_mode(attr->va_acl);
+        set_mask |= CHIMERA_VFS_ATTR_MODE;
+    }
 
     if (set_mask & CHIMERA_VFS_ATTR_MODE) {
 #ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW
@@ -293,6 +303,25 @@ chimera_linux_getattr(
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                             &request->getattr.r_attr,
                             fd);
+
+    /* Mode-only backend: synthesise an ACL from the POSIX mode bits when the
+     * caller asked for one (lossy, one-way -- see vfs_acl.h).  This makes the
+     * SMB security-descriptor path emit a DACL (no S-1-5-88-3 modefromsid ACE),
+     * exactly like the engine backends (memfs/cairn/diskfs): under the cthon
+     * 'modefromsid' cifs mount, a SD with no modefromsid ACE leaves the client
+     * on its mount-default file_mode (0755), so copied binaries stay
+     * executable.  Emitting the modefromsid ACE instead conveys the real 0644
+     * mode and strips +x over SMB (cthon 'special' could not exec). */
+    if ((request->getattr.r_attr.va_req_mask & CHIMERA_VFS_ATTR_ACL) &&
+        (request->getattr.r_attr.va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+        static __thread uint8_t scratch[sizeof(struct chimera_acl) +
+                                        8 * sizeof(struct chimera_ace)];
+        struct chimera_acl     *dst = (struct chimera_acl *) scratch;
+
+        chimera_acl_from_mode(request->getattr.r_attr.va_mode, dst, 8);
+        request->getattr.r_attr.va_acl       = dst;
+        request->getattr.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+    }
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -623,6 +652,15 @@ chimera_linux_open_at(
     if (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         mode                                    = request->open_at.set_attr->va_mode;
         request->open_at.set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
+        /* The explicit mode -- applied atomically by the openat() below -- is
+         * authoritative on this mode-only backend.  An SMB create SD commonly
+         * carries BOTH the modefromsid mode (recovered into va_mode) and a
+         * Windows DACL; if we left va_acl set, chimera_linux_set_attrs() would
+         * run its ACL->mode projection (now that ATTR_MODE is cleared) and
+         * overwrite the requested mode with a lossy ACL-derived one -- e.g. a
+         * 0755 binary copied over CIFS would lose +x and could no longer be
+         * executed.  The ACL cannot be stored here anyway, so drop it. */
+        request->open_at.set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
     } else {
         mode = 0600;
     }
@@ -1867,7 +1905,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_linux = {
         CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_FS_PATH_OP |
         CHIMERA_VFS_CAP_FS_LOCK | CHIMERA_VFS_CAP_RPL |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE |
-        CHIMERA_VFS_CAP_XATTR
+        CHIMERA_VFS_CAP_DELEGATES_DAC | CHIMERA_VFS_CAP_XATTR
     ,
     .init           = chimera_linux_init,
     .destroy        = chimera_linux_destroy,

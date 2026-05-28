@@ -117,11 +117,22 @@ chimera_nfs4_create_open_callback(
     attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
     chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
+    struct chimera_acl               *acl_buf      = NULL;
+    unsigned                          acl_buf_aces = 0;
+    if (args->createattrs.num_attrmask >= 1 &&
+        (args->createattrs.attrmask[0] & (1 << FATTR4_ACL))) {
+        acl_buf = xdr_dbuf_alloc_space(chimera_acl_size(CHIMERA_ACL_MAX_ACES),
+                                       req->encoding->dbuf);
+        acl_buf_aces = acl_buf ? CHIMERA_ACL_MAX_ACES : 0;
+    }
+
     chimera_nfs4_unmarshall_attrs(attr,
                                   args->createattrs.num_attrmask,
                                   args->createattrs.attrmask,
                                   args->createattrs.attr_vals.data,
-                                  args->createattrs.attr_vals.len);
+                                  args->createattrs.attr_vals.len,
+                                  acl_buf,
+                                  acl_buf_aces);
 
     if (error_code == CHIMERA_VFS_OK) {
 

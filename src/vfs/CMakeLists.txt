@@ -12,6 +12,7 @@
 add_compile_definitions(_LGPL_SOURCE)
 
 add_library(chimera_vfs SHARED vfs.c vfs_lsan.c
+            vfs_acl.c vfs_acl_serialize.c vfs_access.c vfs_idmap.c vfs_identity.c
             vfs_proc_mount.c vfs_proc_umount.c
             vfs_proc_mkdir_at.c vfs_proc_mknod_at.c vfs_proc_close.c vfs_proc_open_fh.c
             vfs_proc_readdir.c vfs_proc_getattr.c vfs_proc_lookup_at.c
@@ -19,6 +20,7 @@ add_library(chimera_vfs SHARED vfs.c vfs_lsan.c
             vfs_proc_remove_at.c vfs_proc_write.c vfs_proc_commit.c
             vfs_proc_open_at.c vfs_proc_symlink_at.c vfs_proc_link_at.c
             vfs_proc_readlink.c vfs_proc_rename_at.c vfs_proc_setattr.c
+            vfs_proc_gate.c
             vfs_proc_create.c vfs_proc_create_unlinked.c
             vfs_proc_open.c vfs_proc_mkdir.c vfs_proc_remove.c
             vfs_proc_rename.c vfs_proc_symlink.c vfs_proc_link.c

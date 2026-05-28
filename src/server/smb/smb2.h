@@ -601,6 +601,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_SIGNING_ENABLED                        0x01
 #define SMB2_SIGNING_REQUIRED                       0x02
 
+// SMB2 TREE_CONNECT response ShareFlags
+#define SMB2_SHAREFLAG_ACCESS_BASED_DIRECTORY_ENUM  0x00000800
+
 // SMB2/3 Negotiate Capabilities
 #define SMB2_GLOBAL_CAP_DFS                         0x00000001 // Server supports DFS
 #define SMB2_GLOBAL_CAP_LEASING                     0x00000002 // Supports leasing (SMB 2.1+)

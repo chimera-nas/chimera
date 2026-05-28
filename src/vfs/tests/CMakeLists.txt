@@ -27,3 +27,19 @@ add_test(chimera/vfs/notify_test vfs_notify_test)
 add_executable(vfs_state_test vfs_state_test.c)
 target_link_libraries(vfs_state_test chimera_vfs)
 add_test(chimera/vfs/state_test vfs_state_test)
+
+add_executable(vfs_acl_test vfs_acl_test.c)
+target_link_libraries(vfs_acl_test chimera_vfs)
+add_test(chimera/vfs/acl_test vfs_acl_test)
+
+add_executable(vfs_enforce_test vfs_enforce_test.c)
+target_link_libraries(vfs_enforce_test chimera_vfs chimera_vfs_memfs evpl)
+add_test(chimera/vfs/enforce_test vfs_enforce_test)
+
+add_executable(vfs_idmap_test vfs_idmap_test.c)
+target_link_libraries(vfs_idmap_test chimera_vfs)
+add_test(chimera/vfs/idmap_test vfs_idmap_test)
+
+add_executable(vfs_identity_test vfs_identity_test.c)
+target_link_libraries(vfs_identity_test chimera_vfs chimera_vfs_memfs evpl urcu)
+add_test(chimera/vfs/identity_test vfs_identity_test)

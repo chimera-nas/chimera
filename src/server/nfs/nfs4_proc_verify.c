@@ -93,6 +93,7 @@ chimera_nfs4_verify_complete(
                                 3,
                                 out_buf,
                                 &out_len,
+                                sizeof(out_buf),
                                 req->minorversion,
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,

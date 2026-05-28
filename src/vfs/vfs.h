@@ -147,6 +147,16 @@ struct chimera_vfs_open_handle {
      * create path immediately afterwards to report OPENED vs CREATED. */
     uint8_t                         r_created;
     uint32_t                        opencnt;
+    /* Identity hash of the credential that opened this handle: the open cache
+     * is keyed by (fh, access_mode, cred_hash) so each caller gets its own
+     * handle and its own authorization result (chimera_vfs_cred_hash). */
+    uint64_t                        cred_hash;
+    /* Cached effective access mask for this handle's credential, computed once
+     * (lazily, on the first gated read/write) and reused for the handle's life
+     * so the ACL check amortises across a caller's I/O.  granted_valid is 0
+     * until computed. */
+    uint32_t                        granted_access;
+    uint8_t                         granted_valid;
     struct chimera_vfs_request     *blocked_requests;
     uint64_t                        vfs_private;
     void                            ( *callback )(
@@ -1078,6 +1088,26 @@ struct chimera_vfs_handle_state {
  * chimera_vfs_read_owned() / chimera_vfs_read_complete(). */
 #define CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS (1U << 20)
 
+/* If set, the module stores the canonical Windows/NFSv4 ACL (via va_acl)
+ * losslessly.  If unset, the module is mode-only: the VFS translates ACLs to
+ * and from UNIX mode bits on its behalf.  There is no POSIX.1e capability by
+ * design -- Chimera carries a single ACL model (see vfs_acl.h). */
+#define CHIMERA_VFS_CAP_ACL_NATIVE            (1U << 20)
+
+/* If set, the module delegates discretionary access control to a real
+ * underlying enforcer (e.g. the host kernel, via the seteuid/setegid
+ * impersonation in chimera_setup_credential).  The central VFS access gate
+ * (chimera_vfs_gate) is then a no-op for this module, since enforcing in the
+ * engine on top of the kernel would double-evaluate and -- on a mode-only
+ * backend whose ACL is mode-derived -- could only ever agree with it anyway.
+ *
+ * Modules WITHOUT this bit (memfs, cairn, ...) have no native DAC, so the VFS
+ * engine is their sole authorization point and the gate enforces the canonical
+ * ACL for them.  Note this is orthogonal to CAP_ACL_NATIVE: "stores the ACL"
+ * and "enforces the ACL" are different properties (memfs/cairn store but do not
+ * enforce; linux/io_uring enforce in-kernel but do not store the rich ACL). */
+#define CHIMERA_VFS_CAP_DELEGATES_DAC         (1U << 21)
+
 struct chimera_vfs_module {
     /* Required
      * Short name for the module to be used in creating shares
@@ -1233,6 +1263,7 @@ struct chimera_vfs {
     struct chimera_vfs_name_cache        *vfs_name_cache;
     struct chimera_vfs_attr_cache        *vfs_attr_cache;
     struct chimera_vfs_user_cache        *vfs_user_cache;
+    struct chimera_vfs_identity          *identity;
     struct chimera_vfs_notify            *vfs_notify;
     struct chimera_vfs_state             *vfs_state;
     struct chimera_vfs_mount_table       *mount_table;
@@ -1248,26 +1279,27 @@ struct chimera_vfs {
 };
 
 struct chimera_vfs_thread {
-    struct evpl                      *evpl;
-    struct chimera_vfs               *vfs;
-    void                             *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
-    struct chimera_vfs_find_result   *free_find_results;
-    struct chimera_vfs_request       *free_requests;
-    struct chimera_vfs_request       *active_requests;
-    uint64_t                          num_active_requests;
-    struct chimera_vfs_open_handle   *free_synth_handles;
+    struct evpl                         *evpl;
+    struct chimera_vfs                  *vfs;
+    void                                *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
+    struct chimera_vfs_find_result      *free_find_results;
+    struct chimera_vfs_request          *free_requests;
+    struct chimera_vfs_request          *active_requests;
+    uint64_t                             num_active_requests;
+    struct chimera_vfs_open_handle      *free_synth_handles;
 
-    struct chimera_vfs_request       *pending_complete_requests;
-    struct chimera_vfs_request       *unblocked_requests;
+    struct chimera_vfs_request          *pending_complete_requests;
+    struct chimera_vfs_request          *unblocked_requests;
+    struct chimera_vfs_identity_request *pending_identity;
     /* Parked I/O requests being resumed on their owning thread (the lease
      * pump runs on whatever thread released/broke a lease, but a request's
      * dispatch+reply must run on the thread that owns its connection iovecs). */
-    struct chimera_vfs_request       *pending_io_resume;
-    struct evpl_doorbell              doorbell;
-    pthread_mutex_t                   lock;
-    uint64_t                          anon_fh_key;
+    struct chimera_vfs_request          *pending_io_resume;
+    struct evpl_doorbell                 doorbell;
+    pthread_mutex_t                      lock;
+    uint64_t                             anon_fh_key;
 
-    struct chimera_vfs_thread_metrics metrics;
+    struct chimera_vfs_thread_metrics    metrics;
 };
 
 struct chimera_vfs_module_cfg {
@@ -1344,6 +1376,28 @@ chimera_vfs_user_is_member(
     struct chimera_vfs *vfs,
     uint32_t            uid,
     uint32_t            gid);
+
+/*
+ * Identity bridge used by ACL marshalling to round-trip *real* Windows SIDs
+ * through the user cache (the single identity authority).  uid_to_sid copies
+ * the cached SID for `uid` into `buf` and returns its length, or -1 when the
+ * user has no known real SID (the caller then falls back to the algorithmic
+ * idmap SID).  sid_to_uid resolves a SID string to its cached uid (0 on
+ * success, -1 on miss).  Both are RCU-safe and must be called from a
+ * VFS-registered thread.
+ */
+int
+chimera_vfs_identity_uid_to_sid(
+    struct chimera_vfs *vfs,
+    uint32_t            uid,
+    char               *buf,
+    int                 buflen);
+
+int
+chimera_vfs_identity_sid_to_uid(
+    struct chimera_vfs *vfs,
+    const char         *sid,
+    uint32_t           *uid);
 
 
 typedef int (*chimera_vfs_user_iterate_cb)(

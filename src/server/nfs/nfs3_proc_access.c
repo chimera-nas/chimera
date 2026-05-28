@@ -7,7 +7,37 @@
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_acl.h"
+#include "vfs/vfs_access.h"
 #include "nfs3_dump.h"
+
+/* Map the meaningful ACCESS3_* request bits to the canonical ACE mask. */
+static uint32_t
+chimera_nfs3_access3_to_mask(uint32_t access)
+{
+    uint32_t mask = 0;
+
+    if (access & ACCESS3_READ) {
+        mask |= CHIMERA_ACE_READ_DATA;
+    }
+    if (access & ACCESS3_LOOKUP) {
+        mask |= CHIMERA_ACE_EXECUTE;
+    }
+    if (access & ACCESS3_MODIFY) {
+        mask |= CHIMERA_ACE_WRITE_DATA;
+    }
+    if (access & ACCESS3_EXTEND) {
+        mask |= CHIMERA_ACE_APPEND_DATA;
+    }
+    if (access & ACCESS3_DELETE) {
+        mask |= CHIMERA_ACE_DELETE;
+    }
+    if (access & ACCESS3_EXECUTE) {
+        mask |= CHIMERA_ACE_EXECUTE;
+    }
+
+    return mask;
+} /* chimera_nfs3_access3_to_mask */
 
 static void
 chimera_nfs3_access_complete(
@@ -28,35 +58,32 @@ chimera_nfs3_access_complete(
     if (res.status == NFS3_OK) {
         chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
 
+        /* Evaluate the canonical ACL (or mode fallback) once via the shared
+         * gate -- this honours the caller's full credential rather than the
+         * legacy owner-bits-only check. */
+        uint32_t granted = chimera_vfs_access_check(
+            attr, &req->cred,
+            chimera_nfs3_access3_to_mask(args->access));
+
         res.resok.access = 0;
 
-        if (args->access & ACCESS3_READ) {
-            if (attr->va_mode & S_IRUSR) {
-                res.resok.access |= ACCESS3_READ;
-            }
+        if ((args->access & ACCESS3_READ) && (granted & CHIMERA_ACE_READ_DATA)) {
+            res.resok.access |= ACCESS3_READ;
         }
-
-        if (args->access & (ACCESS3_DELETE | ACCESS3_MODIFY | ACCESS3_EXTEND)) {
-            if (attr->va_mode & S_IWUSR) {
-                if (args->access & ACCESS3_DELETE) {
-                    res.resok.access |= ACCESS3_DELETE;
-                }
-                if (args->access & ACCESS3_MODIFY) {
-                    res.resok.access |= ACCESS3_MODIFY;
-                }
-                if (args->access & ACCESS3_EXTEND) {
-                    res.resok.access |= ACCESS3_EXTEND;
-                }
-            }
+        if ((args->access & ACCESS3_LOOKUP) && (granted & CHIMERA_ACE_EXECUTE)) {
+            res.resok.access |= ACCESS3_LOOKUP;
         }
-
-        if (args->access & (ACCESS3_EXECUTE | ACCESS3_LOOKUP)) {
-            if (attr->va_mode & S_IXUSR) {
-                res.resok.access |= ACCESS3_EXECUTE;
-            }
-            if (attr->va_mode & S_IXUSR) {
-                res.resok.access |= ACCESS3_LOOKUP;
-            }
+        if ((args->access & ACCESS3_MODIFY) && (granted & CHIMERA_ACE_WRITE_DATA)) {
+            res.resok.access |= ACCESS3_MODIFY;
+        }
+        if ((args->access & ACCESS3_EXTEND) && (granted & CHIMERA_ACE_APPEND_DATA)) {
+            res.resok.access |= ACCESS3_EXTEND;
+        }
+        if ((args->access & ACCESS3_DELETE) && (granted & CHIMERA_ACE_DELETE)) {
+            res.resok.access |= ACCESS3_DELETE;
+        }
+        if ((args->access & ACCESS3_EXECUTE) && (granted & CHIMERA_ACE_EXECUTE)) {
+            res.resok.access |= ACCESS3_EXECUTE;
         }
     } else {
         chimera_nfs3_set_post_op_attr(&res.resfail.obj_attributes, attr);
@@ -88,7 +115,7 @@ chimera_nfs3_access_open_callback(
 
         chimera_vfs_getattr(thread->vfs_thread, &req->cred,
                             handle,
-                            CHIMERA_NFS3_ATTR_MASK,
+                            CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_ACL,
                             chimera_nfs3_access_complete,
                             req);
     } else {

@@ -104,6 +104,10 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     request->query_info.output_length = SMB2_FILE_EA_INFO_SIZE;
                     getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
                     break;
+                case SMB2_FILE_ACCESS_INFO:
+                    /* GrantedAccess of this handle; no backend attrs needed. */
+                    request->query_info.output_length = SMB2_FILE_ACCESS_INFO_SIZE;
+                    break;
                 case SMB2_FILE_COMPRESSION_INFO:
                     request->query_info.output_length = SMB2_FILE_COMPRESSION_INFO_SIZE;
                     getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
@@ -217,6 +221,11 @@ chimera_smb_query_info_reply(
                     break;
                 case SMB2_FILE_ATTRIBUTE_TAG_INFO:
                     chimera_smb_append_attribute_tag_info(reply_cursor, &request->query_info.r_attrs);
+                    break;
+                case SMB2_FILE_ACCESS_INFO:
+                    evpl_iovec_cursor_append_uint32(
+                        reply_cursor,
+                        request->query_info.open_file->granted_access);
                     break;
                 case SMB2_FILE_ALL_INFO:
                     chimera_smb_append_all_info(reply_cursor, request->query_info.open_file, &request->query_info.

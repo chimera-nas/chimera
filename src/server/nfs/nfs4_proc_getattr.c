@@ -43,8 +43,26 @@ chimera_nfs4_getattr_finish(
         return;
     }
 
+    /* Size the attribute buffer to hold a variable-length ACL, but only when
+     * the client actually requested FATTR4_ACL -- otherwise every getattr would
+     * over-reserve (e.g. a plain SIZE query that the backend answers with the
+     * full stat set), bloating large COMPOUNDs.  When the ACL is requested we
+     * size it from the object's ACL if present, or from a mode-synthesised ACL
+     * (mode-only backends) otherwise. */
+    uint32_t attrvals_cap  = 4096;
+    int      acl_requested = args->num_attr_request >= 1 &&
+        (args->attr_request[0] & (1 << FATTR4_ACL));
+    if (acl_requested) {
+        if (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+            attrvals_cap += chimera_nfs4_acl_wire_size(attr->va_acl);
+        } else {
+            attrvals_cap += chimera_nfs4_acl_wire_size(NULL) +
+                8 * (4 * sizeof(uint32_t) + ((CHIMERA_IDMAP_WHO_MAX + 3) & ~3u));
+        }
+    }
+
     rc = xdr_dbuf_alloc_opaque(&res->resok4.obj_attributes.attr_vals,
-                               4096,
+                               attrvals_cap,
                                req->encoding->dbuf);
 
     if (rc) {
@@ -71,6 +89,7 @@ chimera_nfs4_getattr_finish(
                                 3,
                                 res->resok4.obj_attributes.attr_vals.data,
                                 &res->resok4.obj_attributes.attr_vals.len,
+                                attrvals_cap,
                                 req->minorversion,
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,

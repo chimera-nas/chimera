@@ -93,6 +93,28 @@ chimera_smb_query_directory_readdir_callback(
     if (!match) {
         return 0;
     }
+
+
+    /* Access-based directory enumeration: hide an entry the caller cannot read.
+     * Windows requires the DACL itself to grant the read rights (DATA + EA +
+     * ATTRIBUTES), so evaluate the raw ACL -- not the engine's implicit grants.
+     * "." and ".." (the directory the caller already opened) are never hidden. */
+    if (request->tree && request->tree->share &&
+        request->tree->share->access_based_enum &&
+        !(namelen == 1 && name[0] == '.') &&
+        !(namelen == 2 && name[0] == '.' && name[1] == '.')) {
+        uint32_t want = CHIMERA_ACE_READ_DATA | CHIMERA_ACE_READ_NAMED_ATTRS |
+            CHIMERA_ACE_READ_ATTRIBUTES;
+        uint32_t got = chimera_acl_access_raw(
+            (attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) ? attrs->va_acl : NULL,
+            attrs->va_uid, attrs->va_gid,
+            &request->session_handle->session->cred, want);
+
+        if ((got & want) != want) {
+            return 0;
+        }
+    }
+
     smb_attrs.smb_attr_mask = 0;
 
     file_index = (uint32_t) (XXH3_64bits(name, namelen) & 0xffffffff);
@@ -110,7 +132,9 @@ chimera_smb_query_directory_readdir_callback(
 
     switch (request->query_directory.info_class) {
         case SMB2_FILE_DIRECTORY_INFORMATION:
-            expected_length = 4 + namelen_padded;
+            /* NextEntryOffset(4) + FileIndex(4) + 6x time/size(48) +
+             * FileAttributes(4) + FileNameLength(4) = 64, then the name. */
+            expected_length = 64 + namelen_padded;
             break;
         case SMB2_FILE_BOTH_DIRECTORY_INFORMATION:
             expected_length = 94 + namelen_padded;
@@ -325,7 +349,12 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         thread->vfs_thread,
         &request->session_handle->session->cred,
         request->query_directory.open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
+        /* Access-based enumeration needs each entry's ACL to decide
+         * visibility. */
+        (request->tree && request->tree->share &&
+         request->tree->share->access_based_enum) ?
+        (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME | CHIMERA_VFS_ATTR_ACL) :
+        (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME),
         0, /* dir_attr_mask */
         request->query_directory.open_file->position,
         0, /* verifier */

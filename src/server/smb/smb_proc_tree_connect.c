@@ -112,8 +112,16 @@ chimera_smb_tree_connect_reply(
     /* reserved */
     evpl_iovec_cursor_append_uint8(reply_cursor, 0);
 
-    /* Share Flags*/
-    evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+    /* Share Flags */
+    {
+        uint32_t share_flags = 0;
+
+        if (request->tree && request->tree->share &&
+            request->tree->share->access_based_enum) {
+            share_flags |= SMB2_SHAREFLAG_ACCESS_BASED_DIRECTORY_ENUM;
+        }
+        evpl_iovec_cursor_append_uint32(reply_cursor, share_flags);
+    }
 
     /* Capabilities — advertise continuous availability for disk shares backed
     * by a CA-enabled share (gates persistent-handle grants on the client). */

@@ -7,6 +7,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "vfs/vfs_identity.h"
+
+struct chimera_vfs_user;
+
 #define SMB_WBCLIENT_MAX_GROUPS  32
 #define SMB_WBCLIENT_SID_MAX_LEN 80
 
@@ -46,3 +50,14 @@ int smb_wbclient_map_principal(
 // Returns: 1 if available, 0 if not
 int smb_wbclient_available(
     void);
+
+// Identity-resolver miss handler backed by winbind.  Resolves BY_UID / BY_SID /
+// BY_NAME to a full user record (uid/gid/groups/name/real SID) via libwbclient.
+// Registered with the VFS identity authority at SMB server init when winbind is
+// enabled.  Matches the chimera_vfs_identity_handler signature.
+int smb_wbclient_identity_handler(
+    enum chimera_vfs_identity_key key,
+    uint32_t                      id,
+    const char                   *name,
+    struct chimera_vfs_user      *out,
+    void                         *private_data);

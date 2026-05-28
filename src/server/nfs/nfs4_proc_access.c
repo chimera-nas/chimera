@@ -7,6 +7,41 @@
 #include "nfs4_attr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_acl.h"
+#include "vfs/vfs_access.h"
+
+/*
+ * Translate the meaningful ACCESS4_* request bits into the canonical ACE mask
+ * the central engine understands.  LOOKUP (directory search) and EXECUTE (file
+ * execute) both map to ACE_EXECUTE; they are never meaningful for the same
+ * object type, so they do not collide on the way back out.
+ */
+static uint32_t
+chimera_nfs4_access4_to_mask(uint32_t access)
+{
+    uint32_t mask = 0;
+
+    if (access & ACCESS4_READ) {
+        mask |= CHIMERA_ACE_READ_DATA;
+    }
+    if (access & ACCESS4_LOOKUP) {
+        mask |= CHIMERA_ACE_EXECUTE;
+    }
+    if (access & ACCESS4_MODIFY) {
+        mask |= CHIMERA_ACE_WRITE_DATA;
+    }
+    if (access & ACCESS4_EXTEND) {
+        mask |= CHIMERA_ACE_APPEND_DATA;
+    }
+    if (access & ACCESS4_DELETE) {
+        mask |= CHIMERA_ACE_DELETE;
+    }
+    if (access & ACCESS4_EXECUTE) {
+        mask |= CHIMERA_ACE_EXECUTE;
+    }
+
+    return mask;
+} /* chimera_nfs4_access4_to_mask */
 
 static void
 chimera_nfs4_access_complete(
@@ -18,7 +53,7 @@ chimera_nfs4_access_complete(
     struct ACCESS4args *args   = &req->args_compound->argarray[req->index].opaccess;
     struct ACCESS4res  *res    = &req->res_compound.resarray[req->index].opaccess;
     uint32_t            access = 0;
-    uint32_t            meaningful, requested;
+    uint32_t            meaningful, requested, granted;
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
@@ -41,33 +76,27 @@ chimera_nfs4_access_complete(
 
     requested = args->access & meaningful;
 
-    if ((requested & ACCESS4_READ) &&
-        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 1, 0, 0)) {
+    /* Evaluate the canonical ACL (or mode fallback) once via the shared gate,
+     * then map the granted ACE bits back to the ACCESS4_* result bits. */
+    granted = chimera_vfs_access_check(attr, &req->cred,
+                                       chimera_nfs4_access4_to_mask(requested));
+
+    if ((requested & ACCESS4_READ) && (granted & CHIMERA_ACE_READ_DATA)) {
         access |= ACCESS4_READ;
     }
-
-    if ((requested & ACCESS4_LOOKUP) &&
-        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 0, 0, 1)) {
+    if ((requested & ACCESS4_LOOKUP) && (granted & CHIMERA_ACE_EXECUTE)) {
         access |= ACCESS4_LOOKUP;
     }
-
-    if ((requested & ACCESS4_MODIFY) &&
-        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 0, 1, 0)) {
+    if ((requested & ACCESS4_MODIFY) && (granted & CHIMERA_ACE_WRITE_DATA)) {
         access |= ACCESS4_MODIFY;
     }
-
-    if ((requested & ACCESS4_EXTEND) &&
-        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 0, 1, 0)) {
+    if ((requested & ACCESS4_EXTEND) && (granted & CHIMERA_ACE_APPEND_DATA)) {
         access |= ACCESS4_EXTEND;
     }
-
-    if ((requested & ACCESS4_DELETE) &&
-        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 0, 1, 0)) {
+    if ((requested & ACCESS4_DELETE) && (granted & CHIMERA_ACE_DELETE)) {
         access |= ACCESS4_DELETE;
     }
-
-    if ((requested & ACCESS4_EXECUTE) &&
-        chimera_nfs4_cred_has_mode_access(attr, &req->cred, 0, 0, 1)) {
+    if ((requested & ACCESS4_EXECUTE) && (granted & CHIMERA_ACE_EXECUTE)) {
         access |= ACCESS4_EXECUTE;
     }
 
@@ -95,7 +124,7 @@ chimera_nfs4_access_open_callback(
 
     chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
                         handle,
-                        CHIMERA_VFS_ATTR_MASK_STAT,
+                        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
                         chimera_nfs4_access_complete,
                         req);
 } /* chimera_nfs4_access_open_callback */

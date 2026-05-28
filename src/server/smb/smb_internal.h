@@ -26,6 +26,8 @@
 #include "smb_ntlm.h"
 #include "smb_gssapi.h"
 #include "smb_sharemode.h"
+#include "vfs/vfs_acl.h"
+#include "vfs/vfs_idmap.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_notify.h"
 
@@ -128,6 +130,10 @@ struct netbios_header {
 struct chimera_smb_share {
     char                               name[81];
     char                               path[CHIMERA_VFS_PATH_MAX];
+    /* Access-based directory enumeration: hide directory entries the caller
+     * cannot read.  Advertised to clients via SMB2_SHAREFLAG_ACCESS_BASED_
+     * DIRECTORY_ENUM and enforced in QUERY_DIRECTORY. */
+    int                                access_based_enum;
     struct chimera_smb_share          *prev;
     struct chimera_smb_share          *next;
     struct chimera_smb_sharemode_table sharemode;
@@ -328,6 +334,10 @@ struct chimera_smb_request {
             } rqls;
             uint64_t                        alsi_alloc_size;
             uint64_t                        twrp_timestamp;
+            /* Backing storage for a canonical ACL decoded from a SecD create
+             * context (SMB2_CREATE_SD_BUFFER); set_attr.va_acl points here. */
+            uint8_t                         acl_storage[sizeof(struct chimera_acl) +
+                                                        64 * sizeof(struct chimera_ace)];
             /* SMB3 persistent-handle write-through.  persist_pid != 0 marks this
              * open as a persistent grant (fresh or cold reclaim): the record is
              * persisted atomically with the VFS open via persist_hs, and
@@ -497,6 +507,21 @@ struct chimera_smb_request {
             struct chimera_smb_attrs      r_attrs;
             struct chimera_smb_fs_attrs   r_fs_attrs;
             struct chimera_smb_open_file *open_file;
+            /* Security descriptor built in the getattr callback and emitted by
+             * the reply builder (SMB2_INFO_SECURITY). */
+            uint8_t                       sec_buf[2048];
+            uint32_t                      sec_buf_len;
+            /* When the SD references identities not yet in the cache, the
+             * getattr'd owner/group/mode + ACL are copied here so the SD can be
+             * built after an async identity resolve completes (the live attrs
+             * are only valid during the getattr callback). */
+            uint32_t                      sd_uid;
+            uint32_t                      sd_gid;
+            uint32_t                      sd_mode;
+            int                           sd_has_acl;
+            int                           sd_pending;
+            uint8_t                       sd_acl_storage[sizeof(struct chimera_acl) +
+                                                         64 * sizeof(struct chimera_ace)];
         } query_info;
 
         struct {
@@ -514,8 +539,15 @@ struct chimera_smb_request {
             /* Rename information */
             struct chimera_smb_rename_info  rename_info;
             /* Security descriptor buffer for SMB2_INFO_SECURITY */
-            uint8_t                         sec_buf[256];
+            uint8_t                         sec_buf[2048];
             uint32_t                        sec_buf_len;
+            /* Outstanding async identity resolves before the SD is decoded for
+             * the final time (fan-out join guard). */
+            int                             sd_pending;
+            /* Backing storage for the canonical ACL decoded from the incoming
+             * security descriptor; vfs_attrs.va_acl points here. */
+            uint8_t                         acl_storage[sizeof(struct chimera_acl) +
+                                                        64 * sizeof(struct chimera_ace)];
         } set_info;
 
         struct {

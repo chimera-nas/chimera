@@ -49,8 +49,13 @@ chimera_nfs4_readdir_callback(
         return -1;
     }
 
+    uint32_t attrvals_cap = 256;
+    if (attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+        attrvals_cap += chimera_nfs4_acl_wire_size(attrs->va_acl);
+    }
+
     rc = xdr_dbuf_alloc_opaque(&entry->attrs.attr_vals,
-                               256,
+                               attrvals_cap,
                                req->encoding->dbuf);
     if (rc) {
         req->encoding->dbuf->used = dbuf_before;
@@ -65,6 +70,7 @@ chimera_nfs4_readdir_callback(
                                 3,
                                 entry->attrs.attr_vals.data,
                                 &entry->attrs.attr_vals.len,
+                                attrvals_cap,
                                 req->minorversion,
                                 /* entries share the directory's backend/fs */
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,

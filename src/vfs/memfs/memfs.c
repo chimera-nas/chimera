@@ -18,6 +18,7 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
+#include "vfs/vfs_acl.h"
 #include "memfs.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -139,6 +140,7 @@ struct memfs_inode {
     uint32_t             gid;
     uint64_t             rdev;
     uint32_t             dos_attributes;
+    struct chimera_acl  *acl; /* NULL => mode-derived; CAP_ACL_NATIVE storage */
     struct timespec      atime;
     struct timespec      mtime;
     struct timespec      ctime;
@@ -369,7 +371,7 @@ memfs_inode_alloc(
             }
         }
 
-        inodes = malloc(CHIMERA_MEMFS_INODE_BLOCK * sizeof(*inodes));
+        inodes = calloc(CHIMERA_MEMFS_INODE_BLOCK, sizeof(*inodes));
 
         base_id = bi << CHIMERA_MEMFS_INODE_BLOCK_SHIFT;
 
@@ -408,12 +410,35 @@ memfs_inode_alloc(
     inode->refcnt         = 1;
     inode->mode           = 0;
     inode->dos_attributes = 0;
+    inode->acl            = NULL;
     inode->xattrs         = NULL;
     inode->remote         = NULL;
 
     return inode;
 
 } /* memfs_inode_alloc */
+
+/*
+ * Replace inode->acl with a deep copy of `src` (NULL clears it).  Caller holds
+ * the inode lock.
+ */
+static inline void
+memfs_inode_set_acl(
+    struct memfs_inode       *inode,
+    const struct chimera_acl *src)
+{
+    if (inode->acl) {
+        free(inode->acl);
+        inode->acl = NULL;
+    }
+
+    if (src && src->num_aces) {
+        size_t sz = chimera_acl_size(src->num_aces);
+
+        inode->acl = malloc(sz);
+        memcpy(inode->acl, src, sz);
+    }
+} /* memfs_inode_set_acl */
 
 static inline struct memfs_inode *
 memfs_inode_alloc_thread(struct memfs_thread *thread)
@@ -424,6 +449,11 @@ memfs_inode_alloc_thread(struct memfs_thread *thread)
 
     return memfs_inode_alloc(shared, list_id);
 } /* memfs_inode_alloc */
+
+static void
+memfs_dirent_release(
+    struct rb_node *node,
+    void           *private_data);
 
 static inline void
 memfs_xattr_free_all(struct memfs_inode *inode)
@@ -476,11 +506,21 @@ memfs_inode_free(
 
     inode_list = &shared->inode_list[list_id];
 
+    if (inode->acl) {
+        free(inode->acl);
+        inode->acl = NULL;
+    }
+
     if (S_ISREG(inode->mode)) {
         memfs_inode_truncate_blocks(thread, inode);
     } else if (S_ISLNK(inode->mode)) {
         memfs_symlink_target_free(thread, inode->symlink.target);
         inode->symlink.target = NULL;
+    } else if (S_ISDIR(inode->mode)) {
+        /* Release any remaining directory entries.  For a normally-removed
+         * (empty) directory this is a no-op; it also prevents leaking the
+         * entries of a directory torn down while still populated. */
+        rb_tree_destroy(&inode->dir.dirents, memfs_dirent_release, thread);
     }
 
     /* Extended attributes hang off every inode type. */
@@ -704,11 +744,18 @@ memfs_init(
     inode->uid        = 0;
     inode->gid        = 0;
     inode->nlink      = 2;
-    inode->mode       = S_IFDIR | 0755;
-    inode->atime      = now;
-    inode->mtime      = now;
-    inode->ctime      = now;
-    inode->btime      = now;
+    /* The freshly-created in-memory root has no configured ownership, so make
+     * it world-writable: a fresh memfs share is a blank scratch namespace any
+     * connecting user may populate (mirroring a writable share root).  Now that
+     * the VFS layer enforces ADD_FILE/ADD_SUBDIRECTORY on the parent, a
+     * root-owned 0755 root would (correctly) refuse all creation by non-root
+     * clients.  Subdirectories created beneath it are owned by their creator
+     * with the usual 0755. */
+    inode->mode  = S_IFDIR | 0777;
+    inode->atime = now;
+    inode->mtime = now;
+    inode->ctime = now;
+    inode->btime = now;
 
     rb_tree_init(&inode->dir.dirents);
 
@@ -745,6 +792,10 @@ memfs_destroy(void *private_data)
                     continue;
                 }
 
+                if (inode->acl) {
+                    free(inode->acl);
+                    inode->acl = NULL;
+                }
                 memfs_xattr_free_all(inode);
 
                 if (S_ISDIR(inode->mode)) {
@@ -889,6 +940,26 @@ memfs_map_attrs(
         attr->va_dos_attributes = inode->dos_attributes;
     }
 
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_ACL) {
+        /* Copy into a per-thread scratch buffer: memfs releases the inode lock
+         * before the (synchronous) completion runs, so we must not hand out the
+         * live inode->acl pointer.  The scratch is valid through completion
+         * because each memfs thread serves one request at a time. */
+        static __thread uint8_t acl_scratch[
+            sizeof(struct chimera_acl) +
+            CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
+        struct chimera_acl     *dst = (struct chimera_acl *) acl_scratch;
+
+        if (inode->acl) {
+            memcpy(dst, inode->acl, chimera_acl_size(inode->acl->num_aces));
+        } else {
+            chimera_acl_from_mode(inode->mode, dst, CHIMERA_ACL_MAX_ACES);
+        }
+
+        attr->va_acl       = dst;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+    }
+
     /* Birth time is optional and lives outside MASK_STAT, so report it under
      * its own request bit. */
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_BTIME) {
@@ -976,6 +1047,29 @@ memfs_apply_attrs(
         }
     }
 
+    /* ACL coherence.  An explicit ACL set replaces storage and re-derives mode;
+     * a bare chmod (MODE without ACL) regenerates the special-who ACEs of any
+     * existing rich ACL while preserving named entries. */
+    if (set_mask & CHIMERA_VFS_ATTR_ACL) {
+        memfs_inode_set_acl(inode, attr->va_acl);
+        if (inode->acl) {
+            inode->mode = (inode->mode & S_IFMT) | chimera_acl_to_mode(inode->acl);
+        }
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+    } else if ((set_mask & CHIMERA_VFS_ATTR_MODE) && inode->acl) {
+        unsigned            cap = inode->acl->num_aces + 8;
+        struct chimera_acl *tmp = malloc(chimera_acl_size(cap));
+        int                 n   = chimera_acl_chmod(inode->acl, inode->mode,
+                                                    tmp, cap);
+
+        if (n >= 0) {
+            free(inode->acl);
+            inode->acl = tmp;
+        } else {
+            free(tmp);
+        }
+    }
+
     if (set_mask & CHIMERA_VFS_ATTR_BTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
         if (attr->va_btime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
@@ -1001,52 +1095,76 @@ memfs_apply_attrs(
 
 } /* memfs_apply_attrs */
 
-static int
-memfs_cred_can_access(
-    const struct memfs_inode      *inode,
-    const struct chimera_vfs_cred *cred,
-    uint32_t                       user_bit,
-    uint32_t                       group_bit,
-    uint32_t                       other_bit)
+/*
+ * Seed a freshly-created child's ACL.  Precedence:
+ *   1. An explicit ACL supplied at create (e.g. an SMB SD) is kept as-is.
+ *   2. Otherwise, if the parent holds ACEs inheritable for the child's type,
+ *      compute the inherited ACL via the shared engine and store it, re-deriving
+ *      the mode from it (Windows inheritance defines the child's access).
+ *   3. Otherwise, for an SMB-originated create (`windows_default`), store a
+ *      Windows-style default DACL granting the owner full control while leaving
+ *      the POSIX mode intact, so a Windows client sees owner-full-control (plain
+ *      mode would deny e.g. FILE_EXECUTE on a 0644 file).
+ *   4. Otherwise (NFS/POSIX create, no inheritance) the child stays mode-derived
+ *      (acl == NULL) -- matching legacy and mode-only-backend behaviour.
+ * Both inodes are held locked by the caller.
+ */
+static void
+memfs_inherit_acl(
+    struct memfs_inode *child,
+    struct memfs_inode *parent,
+    int                 windows_default)
 {
-    if (cred->uid == 0) {
-        return 1;
+    int      is_dir = S_ISDIR(child->mode);
+    uint16_t want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
+        (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
+    int      has_inh = 0;
+
+    if (child->acl) {
+        return;
     }
 
-    if ((uint64_t) cred->uid == inode->uid) {
-        return !!(inode->mode & user_bit);
-    }
-
-    int in_group = ((uint64_t) cred->gid == inode->gid);
-
-    for (uint32_t i = 0; !in_group && i < cred->ngids; i++) {
-        if ((uint64_t) cred->gids[i] == inode->gid) {
-            in_group = 1;
+    if (parent->acl) {
+        for (unsigned i = 0; i < parent->acl->num_aces; i++) {
+            if (parent->acl->aces[i].flags & want) {
+                has_inh = 1;
+                break;
+            }
         }
     }
 
-    if (in_group) {
-        return !!(inode->mode & group_bit);
+    if (has_inh) {
+        /* A directory child can yield up to two ACEs per inheritable parent ACE
+         * (an effective entry plus an inherit-only continuation). */
+        unsigned            cap = parent->acl->num_aces * 2;
+        struct chimera_acl *tmp = malloc(chimera_acl_size(cap));
+        int                 n   = chimera_acl_inherit(parent->acl, is_dir,
+                                                      child->mode & 07777, tmp, cap);
+
+        if (n > 0) {
+            memfs_inode_set_acl(child, tmp);
+            child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(child->acl);
+        }
+        free(tmp);
+
+        if (child->acl) {
+            return;
+        }
+        /* Nothing actually inherited (e.g. an OBJECT_INHERIT-only ACE on a new
+         * directory): fall through to the default below. */
     }
 
-    return !!(inode->mode & other_bit);
-} /* memfs_cred_can_access */
+    if (windows_default) {
+        uint8_t             buf[sizeof(struct chimera_acl) +
+                                4 * sizeof(struct chimera_ace)];
+        struct chimera_acl *def = (struct chimera_acl *) buf;
 
-static int
-memfs_cred_can_read(
-    const struct memfs_inode      *inode,
-    const struct chimera_vfs_cred *cred)
-{
-    return memfs_cred_can_access(inode, cred, S_IRUSR, S_IRGRP, S_IROTH);
-} /* memfs_cred_can_read */
+        if (chimera_acl_default_acl(child->mode & 07777, def, 4) > 0) {
+            memfs_inode_set_acl(child, def);
+        }
+    }
+} /* memfs_inherit_acl */
 
-static int
-memfs_cred_can_write(
-    const struct memfs_inode      *inode,
-    const struct chimera_vfs_cred *cred)
-{
-    return memfs_cred_can_access(inode, cred, S_IWUSR, S_IWGRP, S_IWOTH);
-} /* memfs_cred_can_write */
 
 static void
 memfs_getattr(
@@ -1541,6 +1659,12 @@ memfs_mkdir_at(
     /* Set parent pointer for .. lookup support */
     inode->dir.parent_inum = parent_inode->inum;
     inode->dir.parent_gen  = parent_inode->gen;
+
+    /* Inherit the parent's inheritable ACEs (or seed a Windows default DACL for
+     * SMB creates); refresh the child's attrs since the mode may have changed. */
+    memfs_inherit_acl(inode, parent_inode,
+                      request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
+    memfs_map_attrs(shared, r_attr, inode, request->fh);
 
     memfs_map_attrs(shared, r_dir_pre_attr, parent_inode, request->fh);
 
@@ -2058,6 +2182,9 @@ memfs_open_at(
 
         memfs_apply_attrs(inode, request->open_at.set_attr);
 
+        memfs_inherit_acl(inode, parent_inode,
+                          request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
+
         dirent = memfs_dirent_alloc(thread,
                                     inode->inum,
                                     inode->gen,
@@ -2110,23 +2237,11 @@ memfs_open_at(
         return;
     }
 
-    if (!(flags & CHIMERA_VFS_OPEN_INFERRED)) {
-        bool allowed;
-
-        if (flags & CHIMERA_VFS_OPEN_READ_ONLY) {
-            allowed = memfs_cred_can_read(inode, request->cred);
-        } else {
-            allowed = memfs_cred_can_write(inode, request->cred);
-        }
-
-        if (!allowed) {
-            pthread_mutex_unlock(&inode->lock);
-            pthread_mutex_unlock(&parent_inode->lock);
-            request->status = CHIMERA_VFS_EACCES;
-            request->complete(request);
-            return;
-        }
-    }
+    /* Access is enforced at the VFS layer (the credential-keyed gate in
+    * chimera_vfs_read/write and the protocol's own create-time check), which
+    * is ACL-aware and honors each protocol's access semantics; memfs does not
+    * re-check here -- a coarse read/write test would mis-handle SMB opens that
+    * carry only control rights (e.g. WRITE_DAC) and not data access. */
 
     if (flags & CHIMERA_VFS_OPEN_INFERRED) {
         /* If this is an inferred open (ie an NFS3 create)
@@ -2277,12 +2392,10 @@ memfs_read(
 
     }
 
-    if (!memfs_cred_can_read(inode, request->cred)) {
-        pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_EACCES;
-        request->complete(request);
-        return;
-    }
+    /* Read authorization is enforced by the VFS-layer ACL gate (and the
+     * credential-keyed open cache), not by an ACL-blind mode check here -- so
+     * main's memfs_cred_can_read() check is intentionally dropped on this
+     * branch (it is undefined here and would double-evaluate / ignore ACLs). */
 
     if (unlikely(inode->size <= offset)) {
         memfs_map_attrs(shared, &request->read.r_attr, inode, request->fh);
@@ -2427,12 +2540,8 @@ memfs_write(
         return;
     }
 
-    if (!memfs_cred_can_write(inode, request->cred)) {
-        request->status = CHIMERA_VFS_EACCES;
-        pthread_mutex_unlock(&inode->lock);
-        request->complete(request);
-        return;
-    }
+    /* Write access is enforced at the VFS layer (credential-keyed gate); see
+     * the note in memfs_open_at. */
 
     memfs_map_attrs(shared, &request->write.r_pre_attr, inode, request->fh);
 
@@ -4503,8 +4612,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE |
-        CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT | CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE |
-        CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS,
+        CHIMERA_VFS_CAP_ACL_NATIVE | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
+        CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

@@ -31,6 +31,8 @@ void rocksdb_flush_wal(
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
+#include "vfs/vfs_acl.h"
+#include "vfs/vfs_acl_serialize.h"
 #include "cairn.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -44,6 +46,7 @@ void rocksdb_flush_wal(
 #define CAIRN_KEY_SUPER          4
 #define CAIRN_KEY_KV             5
 #define CAIRN_KEY_XATTR          6
+#define CAIRN_KEY_ACL            7
 
 /*
  * Storage layout:
@@ -114,6 +117,11 @@ struct cairn_extent_key {
     uint8_t  keytype;
     uint64_t inum;
     uint64_t offset;
+} __attribute__((packed));
+
+struct cairn_acl_key {
+    uint8_t  keytype;
+    uint64_t inum;
 } __attribute__((packed));
 
 struct cairn_xattr_key {
@@ -724,6 +732,113 @@ cairn_remove_symlink_target(
     chimera_cairn_abort_if(err, "Error deleting symlink target: %s\n", err);
 } /* cairn_remove_symlink_target */
 
+/* Scratch big enough to (de)serialize the largest permitted ACL. */
+#define CAIRN_ACL_SCRATCH        (CHIMERA_ACL_SERIAL_HDR + \
+                                  CHIMERA_ACL_MAX_ACES * CHIMERA_ACL_SERIAL_ACE)
+#define CAIRN_ACL_STRUCT_SCRATCH (sizeof(struct chimera_acl) + \
+                                  CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace))
+
+static inline void
+cairn_put_acl(
+    struct cairn_thread      *thread,
+    uint64_t                  inum,
+    const struct chimera_acl *acl)
+{
+    rocksdb_transaction_t  *txn = cairn_get_meta_txn(thread);
+    char                   *err = NULL;
+    struct cairn_acl_key    key;
+    static __thread uint8_t buf[CAIRN_ACL_SCRATCH];
+    int                     len;
+
+    len = chimera_acl_serialize(acl, buf, sizeof(buf));
+    if (len < 0) {
+        return;
+    }
+
+    key.keytype = CAIRN_KEY_ACL;
+    key.inum    = inum;
+
+    rocksdb_transaction_put(txn, (const char *) &key, sizeof(key),
+                            (const char *) buf, len, &err);
+    chimera_cairn_abort_if(err, "Error putting acl: %s\n", err);
+} /* cairn_put_acl */
+
+static inline void
+cairn_remove_acl(
+    struct cairn_thread *thread,
+    uint64_t             inum)
+{
+    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
+    char                  *err = NULL;
+    struct cairn_acl_key   key;
+
+    key.keytype = CAIRN_KEY_ACL;
+    key.inum    = inum;
+
+    rocksdb_transaction_delete(txn, (const char *) &key, sizeof(key), &err);
+    chimera_cairn_abort_if(err, "Error deleting acl: %s\n", err);
+} /* cairn_remove_acl */
+
+/*
+ * Load the stored ACL for `inum` into `out` (capacity for CHIMERA_ACL_MAX_ACES
+ * ACEs); returns 1 if a stored ACL was found, 0 otherwise.
+ */
+static inline int
+cairn_load_acl(
+    struct cairn_thread *thread,
+    uint64_t             inum,
+    struct chimera_acl  *out)
+{
+    rocksdb_pinnableslice_t *slice;
+    struct cairn_acl_key     key;
+    char                    *err = NULL;
+    const char              *blob;
+    size_t                   len;
+    int                      found = 0;
+
+    key.keytype = CAIRN_KEY_ACL;
+    key.inum    = inum;
+
+    slice = cairn_meta_get_pinned(thread, &key, sizeof(key), &err);
+    chimera_cairn_abort_if(err, "Error getting acl: %s\n", err);
+
+    if (slice) {
+        blob = rocksdb_pinnableslice_value(slice, &len);
+        if (chimera_acl_deserialize(blob, len, out, CHIMERA_ACL_MAX_ACES) >= 0) {
+            found = 1;
+        }
+        rocksdb_pinnableslice_destroy(slice);
+    }
+
+    return found;
+} /* cairn_load_acl */
+
+/*
+ * Populate attr->va_acl when CHIMERA_VFS_ATTR_ACL is requested: the stored ACL
+ * if present, else one synthesised from the inode mode.  Uses a per-thread
+ * scratch buffer valid for the duration of the (synchronous) completion.
+ */
+static inline void
+cairn_map_acl(
+    struct cairn_thread      *thread,
+    struct chimera_vfs_attrs *attr,
+    const struct cairn_inode *inode)
+{
+    static __thread uint8_t scratch[CAIRN_ACL_STRUCT_SCRATCH];
+    struct chimera_acl     *dst = (struct chimera_acl *) scratch;
+
+    if (!(attr->va_req_mask & CHIMERA_VFS_ATTR_ACL)) {
+        return;
+    }
+
+    if (!cairn_load_acl(thread, inode->inum, dst)) {
+        chimera_acl_from_mode(inode->mode, dst, CHIMERA_ACL_MAX_ACES);
+    }
+
+    attr->va_acl       = dst;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+} /* cairn_map_acl */
+
 static inline void
 cairn_remove_directory_contents(
     struct cairn_thread *thread,
@@ -1024,10 +1139,14 @@ cairn_init(
         inode.gid         = 0;
         inode.nlink       = 2;
         inode.rdev        = 0;
-        inode.mode        = S_IFDIR | 0755;
-        inode.atime       = now;
-        inode.mtime       = now;
-        inode.ctime       = now;
+        /* World-writable fresh root: with VFS-layer ADD_FILE/ADD_SUBDIRECTORY
+         * enforcement a root-owned 0755 root would refuse all creation by
+         * non-root clients on this engine-authoritative backend.  Subdirs are
+         * still created owned by their creator with 0755. */
+        inode.mode  = S_IFDIR | 0777;
+        inode.atime = now;
+        inode.mtime = now;
+        inode.ctime = now;
 
         super.fsid = chimera_rand64();
 
@@ -1648,6 +1767,7 @@ cairn_getattr(
     inode = ih.inode;
 
     cairn_map_attrs(shared, &request->getattr.r_attr, inode);
+    cairn_map_acl(thread, &request->getattr.r_attr, inode);
 
     cairn_inode_handle_release(&ih);
 
@@ -1700,6 +1820,34 @@ cairn_setattr(
     }
 
     cairn_apply_attrs(inode, request->setattr.set_attr);
+
+    /* ACL coherence (mirrors memfs): an explicit ACL set is persisted and the
+     * mode re-derived; a bare chmod regenerates the special-who ACEs of any
+     * stored ACL while preserving named entries. */
+    {
+        struct chimera_vfs_attrs *sa = request->setattr.set_attr;
+
+        if (sa->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+            if (sa->va_acl && sa->va_acl->num_aces) {
+                cairn_put_acl(thread, inode->inum, sa->va_acl);
+                inode->mode = (inode->mode & S_IFMT) |
+                    chimera_acl_to_mode(sa->va_acl);
+            } else {
+                cairn_remove_acl(thread, inode->inum);
+            }
+        } else if (sa->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+            static __thread uint8_t old_buf[CAIRN_ACL_STRUCT_SCRATCH];
+            static __thread uint8_t new_buf[CAIRN_ACL_STRUCT_SCRATCH];
+            struct chimera_acl     *old_acl = (struct chimera_acl *) old_buf;
+            struct chimera_acl     *new_acl = (struct chimera_acl *) new_buf;
+
+            if (cairn_load_acl(thread, inode->inum, old_acl) &&
+                chimera_acl_chmod(old_acl, inode->mode, new_acl,
+                                  CHIMERA_ACL_MAX_ACES) >= 0) {
+                cairn_put_acl(thread, inode->inum, new_acl);
+            }
+        }
+    }
 
     cairn_map_attrs(shared, &request->setattr.r_post_attr, inode);
 
@@ -2258,6 +2406,7 @@ cairn_remove_at(
             }
 
             cairn_remove_inode(thread, inode);
+            cairn_remove_acl(thread, inode->inum);
         } else {
             cairn_put_inode(thread, inode);
         }
@@ -2713,6 +2862,7 @@ cairn_close(
         }
 
         cairn_remove_inode(thread, inode);
+        cairn_remove_acl(thread, inode->inum);
     } else {
         cairn_put_inode(thread, inode);
     }
@@ -3768,6 +3918,7 @@ cairn_rename_at(
                     }
 
                     cairn_remove_inode(thread, existing_inode);
+                    cairn_remove_acl(thread, existing_inode->inum);
                 } else {
                     cairn_put_inode(thread, existing_inode);
                 }
@@ -4618,7 +4769,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
      * append-blob cursor, like diskfs/linux/io_uring, so it can use cheaper
      * non-SHARED connection-thread buffers. */
     .capabilities   = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
-        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE |
+        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_ACL_NATIVE |
+        CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE |
         CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS,
     .init           = cairn_init,
     .destroy        = cairn_destroy,
