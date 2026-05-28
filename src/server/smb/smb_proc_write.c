@@ -113,6 +113,11 @@ chimera_smb_write(struct chimera_smb_request *request)
     request->write.open_file = chimera_smb_open_file_resolve(request, &request->write.file_id);
 
     if (unlikely(!request->write.open_file)) {
+        /* The file id does not resolve to a live open under this tree (e.g. a
+         * write issued against a foreign/wrong TID).  Release the write payload
+         * iovecs that parse cloned, since the normal completion path in
+         * chimera_smb_write_callback is being skipped. */
+        evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
         return;
     }

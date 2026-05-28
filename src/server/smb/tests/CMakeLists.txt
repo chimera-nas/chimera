@@ -295,12 +295,14 @@ set(SMBTORTURE_SUITES
 # lists as suites are verified against them.
 set(SMBTORTURE_ENABLED_memfs
     smb2.check-sharemode
+    smb2.connect
     smb2.create_no_streams
     smb2.notify-inotify
     smb2.secleak
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
+    smb2.tcon
     smb2.winattr2
     # smb2.acls_non_canonical and smb2.async_dosmode pass on x86_64 but fail on
     # arm64 CI; left disabled until the arch difference is understood.
