@@ -12,7 +12,11 @@ ARG ENABLE_CLAUDE=1
 ARG ENABLE_CODEX=1
 ARG ENABLE_UV=1
 ARG ENABLE_WPTS=1
-ARG PYNFS_REF=chimera-fast-ci
+# Pinned to an exact chimera-nas/pynfs commit (on branch chimera-fast-ci).  Using
+# a SHA rather than a moving branch makes the image reproducible and, critically,
+# busts the Docker layer cache whenever pynfs is bumped -- otherwise the cached
+# clone layer keeps shipping a stale pynfs.  Bump this SHA when pynfs changes.
+ARG PYNFS_REF=c4bf18d62947e793752c1f77ab180ce75533f14d
 # Pinned Microsoft Windows Protocol Test Suites (WPTS) FileServer release.
 ARG WPTS_VERSION=4.26.3.0
 
@@ -91,8 +95,8 @@ RUN apt-get -y update && \
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends install python3-ply python3-gssapi python3-pip && \
     pip3 install --break-system-packages xdrlib3 && \
-    git clone --depth 1 --branch "$PYNFS_REF" https://github.com/chimera-nas/pynfs.git /opt/pynfs && \
-    cd /opt/pynfs && python3 ./setup.py build && \
+    git clone https://github.com/chimera-nas/pynfs.git /opt/pynfs && \
+    cd /opt/pynfs && git checkout "$PYNFS_REF" && python3 ./setup.py build && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN if [ "$ENABLE_UV" = "1" ] ; then \
