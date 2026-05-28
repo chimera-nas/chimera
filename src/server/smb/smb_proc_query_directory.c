@@ -302,6 +302,19 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         request->query_directory.open_file->position = 0;
     }
 
+    /* The reply buffer is allocated below as a single contiguous iovec
+     * (max_iovecs == 1).  A client may advertise an OutputBufferLength far
+     * larger than the negotiated MaxTransactSize (smbtorture's
+     * compound_find_close uses 8 MiB), which cannot be satisfied by one
+     * libevpl buffer and would otherwise spin evpl_iovec_alloc() forever.
+     * Cap the buffer at MaxTransactSize; the readdir callback honours the
+     * same bound, and a client that wants more simply re-issues the FIND
+     * for the next batch (MS-SMB2 §3.3.5.18 allows returning fewer bytes
+     * than OutputBufferLength). */
+    if (request->query_directory.max_output_length > CHIMERA_SMB_MAX_TRANSACT_SIZE) {
+        request->query_directory.max_output_length = CHIMERA_SMB_MAX_TRANSACT_SIZE;
+    }
+
     evpl_iovec_alloc(evpl,
                      request->query_directory.max_output_length,
                      4096,
