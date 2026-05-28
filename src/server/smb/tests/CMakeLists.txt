@@ -392,9 +392,12 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.tcon
     smb2.winattr2
 )
-# diskfs has no FSCTL_SET_SPARSE support yet, so smb2.set-sparse-ioctl stays
-# disabled; the rest match the cairn set.
-set(SMBTORTURE_ENABLED_diskfs_io_uring
+# diskfs is a native-ACL backend: it stores each inode's ACL as a
+# DISKFS_REC_ACL b+tree record and seeds/inherits it on create, so it adds the
+# smb2.acls subtests on top of the suites enabled above.  smb2.set-sparse-ioctl
+# stays disabled (no FSCTL_SET_SPARSE support yet); both block backends share
+# the diskfs module and enable the same set.
+set(SMBTORTURE_ENABLED_diskfs_common
     smb2.check-sharemode
     smb2.compound_find
     smb2.create_no_streams
@@ -404,18 +407,10 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.sharemode
     smb2.tcon
     smb2.winattr2
+    ${SMBTORTURE_ACLS_SUBTESTS}
 )
-set(SMBTORTURE_ENABLED_diskfs_aio
-    smb2.check-sharemode
-    smb2.compound_find
-    smb2.create_no_streams
-    smb2.notify-inotify
-    smb2.secleak
-    smb2.session.signing-aes-128-cmac
-    smb2.sharemode
-    smb2.tcon
-    smb2.winattr2
-)
+set(SMBTORTURE_ENABLED_diskfs_io_uring ${SMBTORTURE_ENABLED_diskfs_common})
+set(SMBTORTURE_ENABLED_diskfs_aio ${SMBTORTURE_ENABLED_diskfs_common})
 
 macro(add_smbtorture_backend_tests backend)
     foreach(SUITE ${SMBTORTURE_SUITES})
