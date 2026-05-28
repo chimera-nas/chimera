@@ -336,6 +336,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.tcon
+    smb2.timestamps
     smb2.winattr2
     # Unified-ACL coverage: every smb2.acls subtest runs green individually.
     # The combined smb2.acls suite stays disabled (shared-process deltree

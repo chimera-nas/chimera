@@ -34,6 +34,11 @@ struct chimera_smb_file_id {
  * (atomically with the open).  On final close the record must be deleted from
  * that backend so a restart doesn't resurrect a closed handle. */
 #define CHIMERA_SMB_OPEN_FILE_PERSISTED            0x00000010
+/* The client explicitly set the LastWriteTime on this handle (a real value, not
+ * an omit/freeze sentinel).  Per MS-FSA, the handle has "taken control" of the
+ * write time: subsequent implicit updates from this handle (data writes,
+ * EndOfFile/Allocation sets) must not advance it for the life of the open. */
+#define CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY    0x00000020
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases
