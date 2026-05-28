@@ -36,12 +36,18 @@ chimera_smb_read_callback(
     request->read.niov     = niov;
     request->read.r_length = count;
 
+    /* The data iovecs the VFS filled into request->read.iov are injected into
+     * the reply (and so released) only on the SUCCESS path below.  Any path
+     * that completes with an error status emits a bare SMB2 error response
+     * instead, so those iovecs must be released here to avoid a leak. */
     if (error_code) {
+        evpl_iovecs_release(evpl, request->read.iov, niov);
         chimera_smb_complete_request(private_data, SMB2_STATUS_INTERNAL_ERROR);
         return;
     }
 
     if (count == 0 && request->read.length > 0) {
+        evpl_iovecs_release(evpl, request->read.iov, niov);
         chimera_smb_complete_request(private_data, SMB2_STATUS_END_OF_FILE);
         return;
     }
@@ -49,6 +55,7 @@ chimera_smb_read_callback(
     /* MS-SMB2 §3.3.5.12: if MinimumCount is set and the actual bytes read
      * is less than MinimumCount, return STATUS_END_OF_FILE. */
     if (request->read.minimum > 0 && count < request->read.minimum) {
+        evpl_iovecs_release(evpl, request->read.iov, niov);
         chimera_smb_complete_request(private_data, SMB2_STATUS_END_OF_FILE);
         return;
     }
@@ -115,13 +122,17 @@ chimera_smb_read(struct chimera_smb_request *request)
         return;
     }
 
-    /* MS-SMB2: FileOffset > 0x7FFFFFFFFFFFFFFF, offset+length overflows,
-     * length exceeds MaxReadSize, or MinimumCount > Length must fail with
-     * INVALID_PARAMETER. */
+    /* MS-SMB2 3.3.5.12: fail with INVALID_PARAMETER when the starting offset
+     * is beyond the maximum file size (INT64_MAX), when the last byte to read
+     * would extend past it, or when Length exceeds MaxReadSize.  A
+     * MinimumCount larger than Length (or than the bytes actually available)
+     * is NOT a parameter error: the read proceeds and the callback returns
+     * END_OF_FILE when fewer than MinimumCount bytes are read.  Because the
+     * first clause bounds offset to INT64_MAX, the offset+length sum cannot
+     * overflow uint64. */
     if (request->read.offset > 0x7FFFFFFFFFFFFFFFULL ||
-        request->read.offset + request->read.length < request->read.offset ||
-        request->read.length > (8 * 1024 * 1024) ||
-        request->read.minimum > request->read.length) {
+        request->read.offset + request->read.length > 0x7FFFFFFFFFFFFFFFULL ||
+        request->read.length > (8 * 1024 * 1024)) {
         chimera_smb_open_file_release(request, request->read.open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
