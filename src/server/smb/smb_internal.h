@@ -645,10 +645,18 @@ struct chimera_smb_conn {
     uint8_t                            client_guid[16];
     uint8_t                            client_security_mode;
     uint32_t                           client_capabilities;
-    /* SMB 3.1.1 preauth-integrity running hash (SHA-512), extended over the
-     * NEGOTIATE and SESSION_SETUP request/response chain. Reset per connection
-     * at accept. Only consumed when the negotiated dialect is 3.1.1. */
+    /* SMB 3.1.1 preauth-integrity running hash (SHA-512).  preauth_hash is the
+     * per-session-setup running value: it is reset to negotiate_preauth_hash at
+     * the start of every new authentication (a SESSION_SETUP whose header
+     * SessionId is 0) and then extended over that session's SESSION_SETUP
+     * request/response chain, so the signing key derives over the per-session
+     * hash MS-SMB2 3.3.5.5.3 mandates -- not a value that keeps accumulating
+     * across multiple sessions / logoff-reauth on the same connection.
+     * negotiate_preauth_hash is the post-NEGOTIATE baseline (MS-SMB2
+     * Connection.PreauthIntegrityHashValue).  Both reset per connection at
+     * accept; only consumed when the negotiated dialect is 3.1.1. */
     uint8_t                            preauth_hash[SMB2_PREAUTH_HASH_SIZE];
+    uint8_t                            negotiate_preauth_hash[SMB2_PREAUTH_HASH_SIZE];
     uint32_t                           requests_completed;
     int                                rdma_max_send;
     int                                rdma_niov;
@@ -807,6 +815,13 @@ void
 chimera_smb_durable_sweep(
     struct chimera_server_smb_thread *thread);
 
+/* Release every registry entry's live open at thread shutdown so the VFS
+ * close thread can drain.  Without this a parked durable handle's VFS open
+ * handle leaks and chimera_vfs_destroy hangs waiting for it. */
+void
+chimera_smb_durable_drain_all(
+    struct chimera_server_smb_thread *thread);
+
 /* Purge a parked (disconnected) durable open by persistent id when a new
  * conflicting open arrives.  Returns true iff found+purged.  No-op for live,
  * persistent, cold, or unknown ids. */
@@ -908,7 +923,8 @@ static inline void
 chimera_smb_tree_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_server_smb_shared *shared,
-    struct chimera_smb_tree          *tree);
+    struct chimera_smb_tree          *tree,
+    bool                              preserve_durable);
 
 /*
  * Open-file lifetime model (current; Phase 3 will change this):
@@ -1058,7 +1074,8 @@ static inline void
 chimera_smb_session_release(
     struct chimera_server_smb_thread *thread,
     struct chimera_server_smb_shared *shared,
-    struct chimera_smb_session       *session)
+    struct chimera_smb_session       *session,
+    bool                              preserve_durable)
 {
     struct chimera_smb_tree *tree;
     int                      destroy = 0;
@@ -1090,7 +1107,7 @@ chimera_smb_session_release(
 
             if (tree) {
                 session->trees[i] = NULL;
-                chimera_smb_tree_free(thread, shared, tree);
+                chimera_smb_tree_free(thread, shared, tree, preserve_durable);
             }
         }
 
@@ -1229,7 +1246,10 @@ chimera_smb_conn_free(
             session_handle->ctx = GSS_C_NO_CONTEXT;
         }
 
-        chimera_smb_session_release(thread, thread->shared, session_handle->session);
+        /* The transport for this connection has dropped: any durable handle
+         * left open on a session whose last channel this was must be preserved
+         * for reconnect (preserve_durable = true). */
+        chimera_smb_session_release(thread, thread->shared, session_handle->session, true);
 
         chimera_smb_session_handle_free(thread, session_handle);
     }
@@ -1289,7 +1309,8 @@ static inline void
 chimera_smb_tree_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_server_smb_shared *shared,
-    struct chimera_smb_tree          *tree)
+    struct chimera_smb_tree          *tree,
+    bool                              preserve_durable)
 {
     struct chimera_smb_open_file *open_file, *tmp;
     int                           i;
@@ -1303,14 +1324,22 @@ chimera_smb_tree_free(
             chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at tree destruction");
             HASH_DELETE(hh, tree->open_files[i], open_file);
 
-            /* Durable/persistent opens survive the connection: keep the object
-             * allocated with its leases, share reservation, byte-range locks
-             * and VFS handle intact, and hand ownership to the durable registry
-             * with a reconnect deadline.  Do NOT mark CLOSED (a reconnect must
-             * be able to re-home it), drain locks, release sharemode, or free.
-             * The single tree reference becomes the registry's reference, so
-             * refcnt is left untouched (steady-state 1). */
-            if (open_file->durable_flags) {
+            /* A durable/persistent open survives the teardown of its session
+             * (connection loss or a graceful LOGOFF, MS-SMB2 3.3.5.6): keep the
+             * object allocated with its leases, share reservation, byte-range
+             * locks and VFS handle intact, and hand ownership to the durable
+             * registry with a reconnect deadline.  Do NOT mark CLOSED (a
+             * reconnect must be able to re-home it), drain locks, release
+             * sharemode, or free.  The single tree reference becomes the
+             * registry's reference, so refcnt is left untouched (steady-state 1).
+             *
+             * A TREE_DISCONNECT (preserve_durable == false) is the client
+             * explicitly relinquishing every open on that tree (MS-SMB2
+             * 3.3.5.7); the durable property does not apply, so fall through to
+             * the normal close path, which also forgets the registry entry --
+             * a later durable reconnect with the stale FileId then correctly
+             * returns OBJECT_NAME_NOT_FOUND. */
+            if (open_file->durable_flags && preserve_durable) {
                 open_file->flags      |= CHIMERA_SMB_OPEN_FILE_PARKED;
                 open_file->create_conn = NULL;
                 /* park acquires the registry lock under this bucket lock —
@@ -1330,6 +1359,13 @@ chimera_smb_tree_free(
             open_file->refcnt--;
 
             if (open_file->refcnt == 0) {
+                /* Final teardown of a live durable open on a graceful
+                 * tree/session teardown: drop its registry entry so a later
+                 * reconnect with the stale FileId is not matched against a
+                 * freed open_file. */
+                if (open_file->durable_flags) {
+                    chimera_smb_durable_forget(shared, open_file->file_id.pid);
+                }
                 chimera_smb_open_file_drain_locks(thread, open_file);
                 if (open_file->handle) {
                     chimera_vfs_release(thread->vfs_thread, open_file->handle);

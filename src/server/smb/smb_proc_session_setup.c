@@ -285,7 +285,9 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
              * remove it there before freeing — otherwise connection teardown
              * iterates it again and double-releases the session. */
             HASH_DEL(conn->session_handles, request->session_handle);
-            chimera_smb_session_release(thread, shared, request->session_handle->session);
+            /* Auth failed: the session was never authorized and holds no
+             * durable opens, so nothing to preserve. */
+            chimera_smb_session_release(thread, shared, request->session_handle->session, false);
             chimera_smb_session_handle_free(thread, request->session_handle);
             request->session_handle   = NULL;
             conn->last_session_handle = NULL;

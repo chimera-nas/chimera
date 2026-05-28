@@ -490,6 +490,15 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         chimera_smb_preauth_extend(conn->preauth_hash,
                                    (uint8_t *) evpl_iovec_data(&reply_iov[0]) + reply_hdr_len,
                                    preauth_fold_len);
+
+        /* Once the NEGOTIATE response is folded in, conn->preauth_hash holds
+         * the post-NEGOTIATE baseline (MS-SMB2 Connection.PreauthIntegrity
+         * HashValue).  Snapshot it so each subsequent session's preauth hash
+         * can restart from here (see the request-fold path). */
+        if (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE) {
+            memcpy(conn->negotiate_preauth_hash, conn->preauth_hash,
+                   sizeof(conn->negotiate_preauth_hash));
+        }
     }
 
     if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
@@ -1059,12 +1068,24 @@ chimera_smb_server_handle_smb2(
     /* SMB 3.1.1 preauth integrity: fold the raw NEGOTIATE / SESSION_SETUP
      * request into the running hash before dispatch, so the SESSION_SETUP
      * handler derives the signing key over a hash that includes this request.
-     * Maintained unconditionally for these commands; only consumed at 3.1.1. */
+     * Maintained unconditionally for these commands; only consumed at 3.1.1.
+     *
+     * A SESSION_SETUP whose header SessionId is 0 starts a brand-new
+     * authentication (the first leg of a new session, including a re-auth
+     * after LOGOFF on the same connection).  Per MS-SMB2 3.3.5.5.3 that
+     * session's preauth hash restarts from the post-NEGOTIATE baseline, not
+     * from whatever earlier sessions accumulated -- otherwise the signing key
+     * is derived over the wrong hash and the client rejects the session. */
     if (compound->num_requests > 0 &&
         (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE ||
          compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP)) {
         uint8_t *msg = malloc(length);
         if (msg) {
+            if (compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP &&
+                compound->requests[0]->smb2_hdr.session_id == 0) {
+                memcpy(conn->preauth_hash, conn->negotiate_preauth_hash,
+                       sizeof(conn->preauth_hash));
+            }
             evpl_iovec_cursor_copy(&preauth_cursor, msg, length);
             chimera_smb_preauth_extend(conn->preauth_hash, msg, length);
             free(msg);
@@ -1419,6 +1440,7 @@ chimera_smb_server_accept(
     memset(&conn->gssapi_ctx, 0, sizeof(conn->gssapi_ctx));
     /* SMB 3.1.1 preauth-integrity hash starts at zero for each connection. */
     memset(conn->preauth_hash, 0, sizeof(conn->preauth_hash));
+    memset(conn->negotiate_preauth_hash, 0, sizeof(conn->negotiate_preauth_hash));
     conn->rdma_niov   = 0;
     conn->rdma_length = 0;
 
@@ -1492,6 +1514,15 @@ chimera_smb_server_thread_destroy(void *data)
     struct chimera_smb_conn           *conn;
     struct chimera_smb_compound       *compound;
     struct chimera_smb_session_handle *session_handle;
+
+    /* Release any durable/persistent handles still parked in the shared
+     * registry while this thread's vfs_thread is alive.  Each parked open
+     * pins a VFS open handle; leaving it referenced makes the VFS close
+     * thread spin and chimera_vfs_destroy hang.  Must run before the
+     * free_open_files drain below so the released opens are reclaimed. */
+    if (thread->shared->config.persistent_handles) {
+        chimera_smb_durable_drain_all(thread);
+    }
 
     while (thread->free_compounds) {
         compound = thread->free_compounds;
