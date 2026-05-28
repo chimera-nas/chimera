@@ -69,6 +69,7 @@ struct chimera_server_config {
     int                                   smb_num_dialects;
     uint32_t                              smb_dialects[16];
     int                                   smb_persistent_handles;
+    int                                   smb_named_streams;
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
@@ -145,6 +146,11 @@ chimera_server_config_init(void)
     /* SMB3 durable/persistent handles are off by default; they are an
      * opt-in feature gated by the "smb_persistent_handles" config flag. */
     config->smb_persistent_handles = 0;
+
+    /* Named streams (SMB ADS) are off by default; opt-in via the
+     * "smb_named_streams" config flag and only honored on backends that
+     * advertise CHIMERA_VFS_CAP_NAMED_STREAMS. */
+    config->smb_named_streams = 0;
 
     // SMB auth config defaults - local NTLM only
     config->smb_auth.winbind_enabled    = 0;
@@ -269,6 +275,20 @@ chimera_server_config_get_smb_persistent_handles(const struct chimera_server_con
 {
     return config->smb_persistent_handles;
 } /* chimera_server_config_get_smb_persistent_handles */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_named_streams(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->smb_named_streams = enable;
+} /* chimera_server_config_set_smb_named_streams */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_named_streams(const struct chimera_server_config *config)
+{
+    return config->smb_named_streams;
+} /* chimera_server_config_get_smb_named_streams */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_max_open_files(

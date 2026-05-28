@@ -39,6 +39,10 @@ struct chimera_smb_file_id {
  * write time: subsequent implicit updates from this handle (data writes,
  * EndOfFile/Allocation sets) must not advance it for the life of the open. */
 #define CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY    0x00000020
+/* This open targets a named stream (SMB ADS).  open_file->handle is the VFS
+ * stream handle; stream_name + base_fh identify the stream for enumeration and
+ * delete-on-close (which removes only the stream, not the base file). */
+#define CHIMERA_SMB_OPEN_FILE_FLAG_STREAM          0x00000040
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases
@@ -140,6 +144,13 @@ struct chimera_smb_open_file {
     uint8_t                          parent_fh[CHIMERA_VFS_FH_SIZE];
     char                             name[SMB_FILENAME_MAX];
     uint16_t                         pattern[SMB_FILENAME_MAX];
+    /* Named-stream (ADS) identity, valid when CHIMERA_SMB_OPEN_FILE_FLAG_STREAM
+     * is set.  base_fh is the file the stream hangs off (open_file->handle's fh
+     * points at the stream itself). */
+    uint16_t                         stream_name_len;
+    char                             stream_name[SMB_FILENAME_MAX];
+    uint16_t                         base_fh_len;
+    uint8_t                          base_fh[CHIMERA_VFS_FH_SIZE];
 };
 
 #define CHIMERA_SMB_OPEN_FILE_BUCKETS     256

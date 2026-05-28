@@ -284,21 +284,31 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     if (request->set_info.attrs.smb_disposition) {
                         request->set_info.open_file->flags |=
                             CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE;
-                        /* Propagate to VFS handle for final-close deletion */
-                        chimera_vfs_set_delete_on_close(
-                            request->compound->thread->vfs_thread,
-                            request->set_info.open_file->handle,
-                            request->set_info.open_file->parent_fh,
-                            request->set_info.open_file->parent_fh_len,
-                            request->set_info.open_file->name,
-                            request->set_info.open_file->name_len,
-                            &request->session_handle->session->cred);
+                        /* A named-stream delete-on-close removes only the stream
+                         * (via chimera_vfs_remove_stream in the close handler),
+                         * never the base file -- so do NOT arm the VFS doc
+                         * mechanism (which would remove_at the whole file). */
+                        if (!(request->set_info.open_file->flags &
+                              CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
+                            /* Propagate to VFS handle for final-close deletion */
+                            chimera_vfs_set_delete_on_close(
+                                request->compound->thread->vfs_thread,
+                                request->set_info.open_file->handle,
+                                request->set_info.open_file->parent_fh,
+                                request->set_info.open_file->parent_fh_len,
+                                request->set_info.open_file->name,
+                                request->set_info.open_file->name_len,
+                                &request->session_handle->session->cred);
+                        }
                     } else {
                         request->set_info.open_file->flags &=
                             ~CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE;
-                        chimera_vfs_clear_delete_on_close(
-                            request->compound->thread->vfs_thread,
-                            request->set_info.open_file->handle);
+                        if (!(request->set_info.open_file->flags &
+                              CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
+                            chimera_vfs_clear_delete_on_close(
+                                request->compound->thread->vfs_thread,
+                                request->set_info.open_file->handle);
+                        }
                     }
                     chimera_smb_open_file_release(request, request->set_info.open_file);
                     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);

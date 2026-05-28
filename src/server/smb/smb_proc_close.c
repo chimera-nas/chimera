@@ -100,6 +100,57 @@ chimera_smb_close_doc_open_parent_callback(
         request);
 } /* chimera_smb_close_doc_open_parent_callback */
 
+/* Completion of a stream delete-on-close remove_stream. */
+static void
+chimera_smb_close_stream_remove_callback(
+    enum chimera_vfs_error          error_code,
+    const struct chimera_vfs_attrs *pre_attr,
+    const struct chimera_vfs_attrs *post_attr,
+    void                           *private_data)
+{
+    struct chimera_smb_request *request    = private_data;
+    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+
+    if (error_code) {
+        chimera_smb_debug("stream delete-on-close: remove_stream failed (error %d)",
+                          error_code);
+    }
+
+    chimera_vfs_release(vfs_thread, request->close.parent_handle);
+    chimera_smb_open_file_release(request, request->close.open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_close_stream_remove_callback */
+
+/* The base file is open; remove the named stream that was flagged
+ * delete-on-close. */
+static void
+chimera_smb_close_stream_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request   *request    = private_data;
+    struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_open_file *open_file  = request->close.open_file;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
+    request->close.parent_handle = oh;
+
+    chimera_vfs_remove_stream(
+        vfs_thread,
+        &request->session_handle->session->cred,
+        oh,
+        open_file->stream_name,
+        open_file->stream_name_len,
+        chimera_smb_close_stream_remove_callback,
+        request);
+} /* chimera_smb_close_stream_open_callback */
+
 /*
  * Release the VFS handle and check for delete-on-close.
  *
@@ -113,6 +164,7 @@ chimera_smb_close_release(struct chimera_smb_request *request)
     struct chimera_smb_open_file *open_file  = request->close.open_file;
     struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
     int                           need_doc;
+    int                           stream_delete;
 
     if (!open_file->handle) {
         chimera_smb_open_file_release(request, open_file);
@@ -120,12 +172,33 @@ chimera_smb_close_release(struct chimera_smb_request *request)
         return;
     }
 
+    /* A named stream flagged delete-on-close removes only the stream (never
+     * the base file) and never armed the VFS doc mechanism. */
+    stream_delete = (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) &&
+        (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) &&
+        open_file->base_fh_len > 0;
+
     need_doc = chimera_vfs_release_doc(vfs_thread,
                                        open_file->handle,
                                        &request->close.doc_info);
 
     /* Detach VFS handle — it has been released (or consumed by DOC) */
     open_file->handle = NULL;
+
+    if (stream_delete) {
+        /* The stream handle is released above; open the base file and remove
+         * the stream.  open_file (with stream_name/base_fh) stays valid until
+         * the remove completes. */
+        chimera_vfs_open_fh(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            open_file->base_fh,
+            open_file->base_fh_len,
+            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+            chimera_smb_close_stream_open_callback,
+            request);
+        return;
+    }
 
     if (need_doc && request->close.doc_info.parent_fh_len > 0) {
         chimera_vfs_open_fh(
