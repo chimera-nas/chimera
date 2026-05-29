@@ -1220,19 +1220,25 @@ chimera_smb_create_open_getattr_callback(
         request->create.r_open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY;
     }
 
-    uint32_t access_status = chimera_smb_create_check_access(request, attr);
+    /* A durable reconnect reclaims an already-open handle: access was granted at
+     * the original open and the reconnect's DesiredAccess field is ignored
+     * (MS-SMB2 3.3.5.9.7/.12), so do not re-run the ACL check or recompute the
+     * granted/maximal access — the surviving open carries them already. */
+    if (!request->create.reconnect) {
+        uint32_t access_status = chimera_smb_create_check_access(request, attr);
 
-    if (access_status != SMB2_STATUS_SUCCESS) {
-        chimera_smb_open_file_release(request, request->create.r_open_file);
-        chimera_smb_complete_request(request, access_status);
-        return;
+        if (access_status != SMB2_STATUS_SUCCESS) {
+            chimera_smb_open_file_release(request, request->create.r_open_file);
+            chimera_smb_complete_request(request, access_status);
+            return;
+        }
+
+        request->create.r_open_file->granted_access =
+            chimera_smb_create_granted_access(request, attr);
+        request->create.r_open_file->maximal_access =
+            chimera_vfs_access_check(attr, &request->session_handle->session->cred,
+                                     CHIMERA_ACE_MASK_ALL);
     }
-
-    request->create.r_open_file->granted_access =
-        chimera_smb_create_granted_access(request, attr);
-    request->create.r_open_file->maximal_access =
-        chimera_vfs_access_check(attr, &request->session_handle->session->cred,
-                                 CHIMERA_ACE_MASK_ALL);
 
     chimera_smb_open_file_release(request, request->create.r_open_file);
 
@@ -1783,6 +1789,7 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
 
     request->create.r_open_file        = open_file;
     request->create.create_disposition = SMB2_FILE_OPEN; /* reply emits OPENED */
+    request->create.reconnect          = 1; /* skip ACL re-check on the reply path */
     request->compound->saved_file_id   = open_file->file_id;
 
     /* Refresh the network-open-info from the surviving handle, then reply.
@@ -1940,10 +1947,21 @@ chimera_smb_create(struct chimera_smb_request *request)
         }
     }
 
+    /* A durable-handle reconnect (DH2C/DHnC) reclaims an already-open handle and
+     * ignores the create fields entirely -- CreateDisposition, file name, access
+     * and the rest are not interpreted (MS-SMB2 3.3.5.9.7/.12) -- so the field
+     * validations below must not run for it; it is dispatched straight to
+     * chimera_smb_durable_reconnect. */
+    bool is_durable_reconnect =
+        request->compound->thread->shared->config.persistent_handles &&
+        (request->create.ctx_present_mask &
+         (CHIMERA_SMB_CREATE_CTX_DH2C | CHIMERA_SMB_CREATE_CTX_DHNC)) != 0;
+
     /* Reject create dispositions outside the defined range
      * (SUPERSEDE..OVERWRITE_IF).  MS-SMB2 returns STATUS_INVALID_PARAMETER for
      * an undefined CreateDisposition. */
-    if (request->create.create_disposition > SMB2_FILE_OVERWRITE_IF) {
+    if (!is_durable_reconnect &&
+        request->create.create_disposition > SMB2_FILE_OVERWRITE_IF) {
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
@@ -1954,10 +1972,11 @@ chimera_smb_create(struct chimera_smb_request *request)
      * passthrough backends).  MS-SMB2 returns STATUS_OBJECT_PATH_SYNTAX_BAD.
      * Completed here (not in parse) so the client gets a response rather than a
      * connection drop. */
-    if ((request->create.name_len == 2 &&
-         request->create.name[0] == '.' && request->create.name[1] == '.') ||
-        chimera_smb_path_has_dotdot(request->create.parent_path,
-                                    request->create.parent_path_len)) {
+    if (!is_durable_reconnect &&
+        ((request->create.name_len == 2 &&
+          request->create.name[0] == '.' && request->create.name[1] == '.') ||
+         chimera_smb_path_has_dotdot(request->create.parent_path,
+                                     request->create.parent_path_len))) {
         chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_SYNTAX_BAD);
         return;
     }
@@ -1965,6 +1984,7 @@ chimera_smb_create(struct chimera_smb_request *request)
     /* No persistent-handle grant by default; set by the reconnect path (cold
      * reclaim) or chimera_smb_create_persist_prepare for a fresh grant. */
     request->create.persist_pid = 0;
+    request->create.reconnect   = 0;
 
     if (request->tree->type == CHIMERA_SMB_TREE_TYPE_PIPE) {
 
@@ -1997,6 +2017,14 @@ chimera_smb_create(struct chimera_smb_request *request)
 
     } else {
 
+        /* Durable-handle reconnect short-circuits the normal open path: the
+         * file is already open (parked); we just reclaim and re-home it.  It
+         * ignores all create fields, so it runs before the DOC access check. */
+        if (is_durable_reconnect) {
+            chimera_smb_durable_reconnect(request);
+            return;
+        }
+
         /* MS-SMB2 3.3.5.9: if FILE_DELETE_ON_CLOSE is set in CreateOptions,
          * the create must also request DELETE access (DELETE, GENERIC_ALL, or
          * MAXIMUM_ALLOWED, which resolves to a superset). Otherwise fail with
@@ -2005,15 +2033,6 @@ chimera_smb_create(struct chimera_smb_request *request)
             !(request->create.desired_access &
               (SMB2_DELETE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED))) {
             chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
-            return;
-        }
-
-        /* Durable-handle reconnect short-circuits the normal open path: the
-         * file is already open (parked); we just reclaim and re-home it. */
-        if (request->compound->thread->shared->config.persistent_handles &&
-            (request->create.ctx_present_mask &
-             (CHIMERA_SMB_CREATE_CTX_DH2C | CHIMERA_SMB_CREATE_CTX_DHNC))) {
-            chimera_smb_durable_reconnect(request);
             return;
         }
 
