@@ -312,10 +312,10 @@ struct chimera_smb_request {
              * CREATED Create Action in the reply. */
             uint8_t                         r_created;
             /* Set by the durable-reconnect path: this CREATE is reclaiming a
-             * surviving open, not opening a new one.  The access was granted at
-             * the original open, and MS-SMB2 has the reconnect ignore the
-             * DesiredAccess / CreateOptions / etc. fields entirely, so the
-             * getattr-reply callback must not re-run the ACL access check. */
+            * surviving open, not opening a new one.  The access was granted at
+            * the original open, and MS-SMB2 has the reconnect ignore the
+            * DesiredAccess / CreateOptions / etc. fields entirely, so the
+            * getattr-reply callback must not re-run the ACL access check. */
             uint8_t                         reconnect;
             /* CREATE contexts the client sent (CHIMERA_SMB_CREATE_CTX_* bits).
              * Phase-0 stubs set the bit and capture a minimum set of fields needed
