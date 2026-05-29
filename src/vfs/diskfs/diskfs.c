@@ -30,6 +30,8 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
+#include "vfs/vfs_acl.h"
+#include "vfs/vfs_acl_serialize.h"
 #include "diskfs.h"
 #include "space_map.h"
 #include "common/logging.h"
@@ -628,6 +630,7 @@ enum diskfs_bt_rectype {
     DISKFS_REC_ORPHAN  = 4,   /* orphan-list inode only: subkey = orphaned inum */
     DISKFS_REC_XATTR   = 5,
     DISKFS_REC_PNFS    = 6,   /* regular file: opaque pNFS layout blob (flex-files) */
+    DISKFS_REC_ACL     = 7,   /* single record: serialized NFSv4/Windows ACL (subkey 0) */
 };
 
 /* B+tree key: ordered by (type, subkey).  subkey is the name hash for
@@ -8613,6 +8616,158 @@ diskfs_thread_destroy(void *private_data)
     free(thread);
 } /* diskfs_thread_destroy */
 
+/* ------------------------------------------------------------------ */
+/* ACLs: one serialized NFSv4/Windows ACL per inode, stored as the single
+ * DISKFS_REC_ACL record in the inode's b+tree (mirrors the memfs/cairn
+ * native-ACL stores).  Read/written with the sync b+tree wrappers, the same
+ * convention the pNFS-layout record (read in diskfs_map_attrs) and the xattr
+ * records (written from their inode callbacks) already use on a loaded
+ * inode. */
+
+/* The biggest ACL whose serialized form still fits one b+tree record. */
+#define DISKFS_ACL_REC_MAX \
+        (DISKFS_BT_ROOT_CAP - sizeof(struct diskfs_bt_node_hdr) - sizeof(struct diskfs_bt_lslot))
+#define DISKFS_ACL_REC_MAX_ACES \
+        (((DISKFS_ACL_REC_MAX) -CHIMERA_ACL_SERIAL_HDR) / CHIMERA_ACL_SERIAL_ACE)
+
+static const struct diskfs_bt_key diskfs_acl_key = {
+    .type = DISKFS_REC_ACL, .subkey = 0
+};
+
+/*
+ * Decode a serialized ACL record (serial[0..len), len<0 == no record) into a
+ * per-thread scratch chimera_acl and point attr->va_acl at it.  When no ACL is
+ * stored the ACL is synthesised from the mode, so a caller always sees an ACL
+ * for an inode (identical to memfs/cairn).  The scratch is valid through the
+ * synchronous completion that consumes it.
+ */
+static void
+diskfs_acl_decode_into(
+    struct chimera_vfs_attrs *attr,
+    const uint8_t            *serial,
+    int                       len,
+    uint32_t                  mode)
+{
+    static __thread uint8_t scratch[sizeof(struct chimera_acl) +
+                                    CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
+    struct chimera_acl     *dst = (struct chimera_acl *) scratch;
+
+    if (len < 0 ||
+        chimera_acl_deserialize((const char *) serial, len, dst,
+                                CHIMERA_ACL_MAX_ACES) < 0) {
+        chimera_acl_from_mode(mode, dst, CHIMERA_ACL_MAX_ACES);
+    }
+
+    attr->va_acl       = dst;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+} /* diskfs_acl_decode_into */
+
+/*
+ * Persist `acl` as inode's ACL record (replacing any existing one), or remove
+ * the record when `acl` is NULL/empty (revert to mode-derived).  The b+tree
+ * insert aborts on a duplicate key, so an existing record is removed first --
+ * the same lookup/remove/insert sequence the xattr writes use.  All sync: the
+ * inode (and, for a fresh create, its empty tree) is resident in this write
+ * txn, matching the xattr-record convention.
+ */
+static void
+diskfs_acl_store(
+    struct diskfs_thread     *thread,
+    struct diskfs_txn        *txn,
+    struct diskfs_inode      *inode,
+    const struct chimera_acl *acl)
+{
+    uint8_t probe[1];
+
+    /* Remove any existing record (insert won't overwrite a duplicate key).
+     * The probe length is irrelevant -- the lookup reports the full record
+     * length even when the copy is truncated, so >= 0 means present. */
+    if (diskfs_bt_lookup_exact(thread, inode, &diskfs_acl_key, probe,
+                               sizeof(probe)) >= 0) {
+        diskfs_bt_remove(thread, txn, inode, &diskfs_acl_key);
+    }
+
+    if (acl && acl->num_aces && acl->num_aces <= DISKFS_ACL_REC_MAX_ACES) {
+        uint8_t buf[DISKFS_ACL_REC_MAX];
+        int     len = chimera_acl_serialize(acl, buf, sizeof(buf));
+
+        if (len >= 0) {
+            diskfs_bt_insert(thread, txn, inode, &diskfs_acl_key, buf, len);
+        }
+    }
+} /* diskfs_acl_store */
+
+/*
+ * Seed a freshly-created child's ACL (mirrors memfs/cairn).  Precedence:
+ *   1. parent has ACEs inheritable for the child's type -> store the inherited
+ *      ACL and re-derive the child mode from it (Windows inheritance);
+ *   2. otherwise, for an SMB create (windows_default) -> store a Windows-style
+ *      owner-full-control default DACL, leaving the POSIX mode intact;
+ *   3. otherwise (NFS/POSIX create) -> no record, child stays mode-derived.
+ * The child is brand new (empty resident b+tree), so the writes are sync; the
+ * parent's ACL is read with the sync wrapper like diskfs_map_attrs does.
+ */
+static void
+diskfs_inherit_acl(
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *child,
+    struct diskfs_inode  *parent,
+    int                   windows_default)
+{
+    int                 is_dir = S_ISDIR(child->mode);
+    uint16_t            want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
+        (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
+    uint8_t             pserial[DISKFS_ACL_REC_MAX];
+    int                 plen = diskfs_bt_lookup_exact(thread, parent, &diskfs_acl_key,
+                                                      pserial, sizeof(pserial));
+    uint8_t             pbuf[sizeof(struct chimera_acl) +
+                             DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+    struct chimera_acl *parent_acl = (struct chimera_acl *) pbuf;
+    int                 has_inh    = 0;
+
+    if (plen < 0 ||
+        chimera_acl_deserialize((const char *) pserial, plen, parent_acl,
+                                DISKFS_ACL_REC_MAX_ACES) < 0) {
+        parent_acl = NULL;
+    }
+
+    if (parent_acl) {
+        for (unsigned i = 0; i < parent_acl->num_aces; i++) {
+            if (parent_acl->aces[i].flags & want) {
+                has_inh = 1;
+                break;
+            }
+        }
+    }
+
+    if (has_inh) {
+        uint8_t             tbuf[sizeof(struct chimera_acl) +
+                                 DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+        struct chimera_acl *tmp = (struct chimera_acl *) tbuf;
+        int                 n   = chimera_acl_inherit(parent_acl, is_dir,
+                                                      child->mode & 07777, tmp,
+                                                      DISKFS_ACL_REC_MAX_ACES);
+
+        if (n > 0) {
+            diskfs_acl_store(thread, txn, child, tmp);
+            child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(tmp);
+            return;
+        }
+        /* Nothing actually inherited: fall through to the default below. */
+    }
+
+    if (windows_default) {
+        uint8_t             dbuf[sizeof(struct chimera_acl) +
+                                 4 * sizeof(struct chimera_ace)];
+        struct chimera_acl *def = (struct chimera_acl *) dbuf;
+
+        if (chimera_acl_default_acl(child->mode & 07777, def, 4) > 0) {
+            diskfs_acl_store(thread, txn, child, def);
+        }
+    }
+} /* diskfs_inherit_acl */
+
 static inline void
 diskfs_map_attrs(
     struct diskfs_thread     *thread,
@@ -8670,6 +8825,24 @@ diskfs_map_attrs(
             attr->va_set_mask |= CHIMERA_VFS_ATTR_PNFS_LAYOUT;
             attr->va_pnfs_len  = len;
         }
+    }
+
+    /*
+     * Native ACL: the single DISKFS_REC_ACL record (or, when absent, an ACL
+     * synthesised from the mode) so SMB/NFS callers always see one.  Read with
+     * the sync wrapper, like the pNFS record above and the xattr records.
+     * Unlike pNFS/symlink the ACL coexists with dirents/extents, so on a large
+     * inode whose tree has split it may not sit in the resident embedded root;
+     * the sync read then relies on that leaf being cached (it aborts on a true
+     * cache miss).  An async ACL read is the hardening follow-up, shared with
+     * the broader "sync b+tree op under block-cache eviction" concern.
+     */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_ACL) {
+        uint8_t serial[DISKFS_ACL_REC_MAX];
+        int     len = diskfs_bt_lookup_exact(thread, inode, &diskfs_acl_key,
+                                             serial, sizeof(serial));
+
+        diskfs_acl_decode_into(attr, serial, len, inode->mode);
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
@@ -8743,53 +8916,6 @@ diskfs_apply_attrs(
     inode->ctime_nsec = now.tv_nsec;
 
 } /* diskfs_apply_attrs */
-
-static bool
-diskfs_cred_can_access(
-    const struct diskfs_inode     *inode,
-    const struct chimera_vfs_cred *cred,
-    uint32_t                       user_bit,
-    uint32_t                       group_bit,
-    uint32_t                       other_bit)
-{
-    if (cred->uid == 0) {
-        return true;
-    }
-
-    if ((uint64_t) cred->uid == inode->uid) {
-        return !!(inode->mode & user_bit);
-    }
-
-    bool in_group = ((uint64_t) cred->gid == inode->gid);
-
-    for (uint32_t i = 0; !in_group && i < cred->ngids; i++) {
-        if ((uint64_t) cred->gids[i] == inode->gid) {
-            in_group = true;
-        }
-    }
-
-    if (in_group) {
-        return !!(inode->mode & group_bit);
-    }
-
-    return !!(inode->mode & other_bit);
-} /* diskfs_cred_can_access */
-
-static bool
-diskfs_cred_can_read(
-    const struct diskfs_inode     *inode,
-    const struct chimera_vfs_cred *cred)
-{
-    return diskfs_cred_can_access(inode, cred, S_IRUSR, S_IRGRP, S_IROTH);
-} /* diskfs_cred_can_read */
-
-static bool
-diskfs_cred_can_write(
-    const struct diskfs_inode     *inode,
-    const struct chimera_vfs_cred *cred)
-{
-    return diskfs_cred_can_access(inode, cred, S_IWUSR, S_IWGRP, S_IWOTH);
-} /* diskfs_cred_can_write */
 
 static void
 diskfs_getattr_inode_cb(
@@ -9046,6 +9172,10 @@ diskfs_setattr_inode_cb(
     struct diskfs_request_private *p       = request->plugin_data;
     struct diskfs_thread          *thread  = p->thread;
     struct diskfs_bt_op           *op;
+    /* diskfs_apply_attrs() rewrites set_attr->va_set_mask (resets to ATOMIC,
+     * re-adds only the scalar bits), dropping the ACL bit -- capture the
+     * caller's original mask first. */
+    uint64_t                       orig_mask = request->setattr.set_attr->va_set_mask;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         diskfs_op_fail(request, p->txn, status);
@@ -9098,6 +9228,42 @@ diskfs_setattr_inode_cb(
             diskfs_setattr_pnfs_cb(op, op->result, request);
         }
         return;
+    }
+
+    /*
+     * ACL coherence (mirrors memfs/cairn): an explicit ACL set is persisted and
+     * the mode re-derived; a bare chmod regenerates the special-who ACEs of any
+     * stored ACL while preserving named entries.  diskfs_acl_store does the
+     * lookup/remove/insert synchronously, the same convention the xattr-record
+     * writes use after loading the inode.
+     */
+    if (orig_mask & CHIMERA_VFS_ATTR_ACL) {
+        const struct chimera_acl *acl = request->setattr.set_attr->va_acl;
+
+        if (acl && acl->num_aces) {
+            inode->mode = (inode->mode & S_IFMT) | chimera_acl_to_mode(acl);
+        }
+        diskfs_acl_store(thread, p->txn, inode, acl);
+    } else if (orig_mask & CHIMERA_VFS_ATTR_MODE) {
+        uint8_t serial[DISKFS_ACL_REC_MAX];
+        int     slen = diskfs_bt_lookup_exact(thread, inode, &diskfs_acl_key,
+                                              serial, sizeof(serial));
+
+        if (slen >= 0) {
+            uint8_t             obuf[sizeof(struct chimera_acl) +
+                                     DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+            uint8_t             nbuf[sizeof(struct chimera_acl) +
+                                     DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+            struct chimera_acl *old_acl = (struct chimera_acl *) obuf;
+            struct chimera_acl *new_acl = (struct chimera_acl *) nbuf;
+
+            if (chimera_acl_deserialize((const char *) serial, slen, old_acl,
+                                        DISKFS_ACL_REC_MAX_ACES) >= 0 &&
+                chimera_acl_chmod(old_acl, inode->mode, new_acl,
+                                  DISKFS_ACL_REC_MAX_ACES) >= 0) {
+                diskfs_acl_store(thread, p->txn, inode, new_acl);
+            }
+        }
     }
 
     diskfs_map_attrs(thread, &request->setattr.r_post_attr, inode);
@@ -9456,6 +9622,13 @@ diskfs_mkdir_at_alloc_cb(
     inode->parent_gen  = parent->gen;
 
     diskfs_apply_attrs(inode, request->mkdir_at.set_attr);
+
+    /* Seed the new directory's ACL (inherited, or a Windows default DACL for
+     * SMB creates) before mapping attrs so r_attr reflects any inherited mode
+     * and carries the freshly-stored ACL. */
+    diskfs_inherit_acl(thread, p->txn, inode, parent,
+                       request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
+
     diskfs_map_attrs(thread, &request->mkdir_at.r_attr, inode);
 
     parent->nlink++;
@@ -10345,20 +10518,13 @@ diskfs_open_at_existing_cb(
         return;
     }
 
-    if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
-        bool allowed;
-
-        if (request->open_at.flags & CHIMERA_VFS_OPEN_READ_ONLY) {
-            allowed = diskfs_cred_can_read(inode, request->cred);
-        } else {
-            allowed = diskfs_cred_can_write(inode, request->cred);
-        }
-
-        if (!allowed) {
-            diskfs_op_fail(request, p->txn, CHIMERA_VFS_EACCES);
-            return;
-        }
-    }
+    /* Access is enforced at the VFS layer (the credential-keyed gate in
+     * chimera_vfs_read/write and the protocol's own create-time check), which
+     * is ACL-aware and honors each protocol's access semantics; diskfs does not
+     * re-check here -- a coarse mode-based read/write test would mis-handle SMB
+     * opens that carry only control rights (e.g. WRITE_DAC) and not data access,
+     * and would ignore a stored ACL that grants more (or less) than the mode.
+     * (Mirrors the memfs and cairn backends.) */
 
     if ((request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
         request->open_at.set_attr->va_size == 0 &&
@@ -10418,6 +10584,11 @@ diskfs_open_at_alloc_cb(
     inode->ctime_nsec = now.tv_nsec;
 
     diskfs_apply_attrs(inode, request->open_at.set_attr);
+
+    /* Seed the new file's ACL (inherited from the parent, or a Windows default
+     * DACL for SMB creates) into the child's fresh, resident b+tree. */
+    diskfs_inherit_acl(thread, p->txn, inode, parent,
+                       request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
 
     parent->mtime_sec  = now.tv_sec;
     parent->mtime_nsec = now.tv_nsec;
