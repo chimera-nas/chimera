@@ -178,6 +178,7 @@ struct cairn_inode {
     struct timespec atime;
     struct timespec mtime;
     struct timespec ctime;
+    struct timespec btime;
 };
 
 struct cairn_inode_handle {
@@ -1216,6 +1217,7 @@ cairn_init(
         inode.atime = now;
         inode.mtime = now;
         inode.ctime = now;
+        inode.btime = now;
 
         super.fsid = chimera_rand64();
 
@@ -1696,6 +1698,13 @@ cairn_map_attrs(
         attr->va_rdev       = inode->rdev;
     }
 
+    /* Birth time (SMB create time) is tracked natively but lives outside
+     * MASK_STAT, so map it only when explicitly requested. */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+        attr->va_btime     = inode->btime;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
         attr->va_fsid      = shared->fsid;
@@ -1760,6 +1769,15 @@ cairn_apply_attrs(
             inode->mtime = now;
         } else {
             inode->mtime = attr->va_mtime;
+        }
+    }
+
+    if (set_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+        if (attr->va_btime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+            inode->btime = now;
+        } else {
+            inode->btime = attr->va_btime;
         }
     }
 
@@ -2238,6 +2256,7 @@ cairn_mkdir_at(
     inode.atime       = now;
     inode.mtime       = now;
     inode.ctime       = now;
+    inode.btime       = now;
 
     cairn_apply_attrs(&inode, request->mkdir_at.set_attr);
 
@@ -2341,6 +2360,7 @@ cairn_mknod_at(
     inode.atime       = now;
     inode.mtime       = now;
     inode.ctime       = now;
+    inode.btime       = now;
 
     /* Set mode (including file type bits) and rdev from set_attr */
     if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
@@ -2800,6 +2820,7 @@ cairn_open_at(
         new_inode.atime      = now;
         new_inode.mtime      = now;
         new_inode.ctime      = now;
+        new_inode.btime      = now;
         new_inode.refcnt     = 1;
 
         cairn_apply_attrs(&new_inode, request->open_at.set_attr);
@@ -3661,6 +3682,7 @@ cairn_symlink_at(
     new_inode.atime      = now;
     new_inode.mtime      = now;
     new_inode.ctime      = now;
+    new_inode.btime      = now;
 
     dirent_value.inum     = new_inode.inum;
     dirent_value.name_len = request->symlink_at.namelen;

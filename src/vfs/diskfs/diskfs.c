@@ -454,9 +454,11 @@ struct diskfs_inode {
     uint64_t                    atime_sec;
     uint64_t                    ctime_sec;
     uint64_t                    mtime_sec;
+    uint64_t                    btime_sec;
     uint32_t                    atime_nsec;
     uint32_t                    ctime_nsec;
     uint32_t                    mtime_nsec;
+    uint32_t                    btime_nsec;
 
     /* Inode-cache linkage, keyed by inum.  Lock state and the wait list
      * below are protected by the owning shard's mutex, never held across
@@ -611,9 +613,11 @@ struct diskfs_dinode {
     uint64_t atime_sec;
     uint64_t mtime_sec;
     uint64_t ctime_sec;
+    uint64_t btime_sec;
     uint32_t atime_nsec;
     uint32_t mtime_nsec;
     uint32_t ctime_nsec;
+    uint32_t btime_nsec;
     uint64_t parent_inum;     /* directories only */
     uint32_t parent_gen;
 };
@@ -2124,6 +2128,8 @@ diskfs_inode_load_sync(
         inode->mtime_nsec  = di->mtime_nsec;
         inode->ctime_sec   = di->ctime_sec;
         inode->ctime_nsec  = di->ctime_nsec;
+        inode->btime_sec   = di->btime_sec;
+        inode->btime_nsec  = di->btime_nsec;
         inode->parent_inum = di->parent_inum;
         inode->parent_gen  = di->parent_gen;
         rb_tree_insert(&shard->inodes, inum, inode);
@@ -3208,9 +3214,11 @@ diskfs_inode_flush(struct diskfs_inode *inode)
     di->atime_sec  = inode->atime_sec;
     di->mtime_sec  = inode->mtime_sec;
     di->ctime_sec  = inode->ctime_sec;
+    di->btime_sec  = inode->btime_sec;
     di->atime_nsec = inode->atime_nsec;
     di->mtime_nsec = inode->mtime_nsec;
     di->ctime_nsec = inode->ctime_nsec;
+    di->btime_nsec = inode->btime_nsec;
     if (S_ISDIR(inode->mode)) {
         di->parent_inum = inode->parent_inum;
         di->parent_gen  = inode->parent_gen;
@@ -6070,6 +6078,8 @@ diskfs_inode_load_complete(
         inode->mtime_nsec  = di->mtime_nsec;
         inode->ctime_sec   = di->ctime_sec;
         inode->ctime_nsec  = di->ctime_nsec;
+        inode->btime_sec   = di->btime_sec;
+        inode->btime_nsec  = di->btime_nsec;
         inode->parent_inum = di->parent_inum;
         inode->parent_gen  = di->parent_gen;
         rb_tree_insert(&shard->inodes, inum, inode);
@@ -8229,6 +8239,8 @@ diskfs_bootstrap(struct diskfs_thread *thread)
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     /* Root directory's parent is itself for ".." lookup */
     inode->parent_inum = inode->inum;
@@ -8273,6 +8285,8 @@ diskfs_bootstrap(struct diskfs_thread *thread)
         oin->mtime_nsec  = now.tv_nsec;
         oin->ctime_sec   = now.tv_sec;
         oin->ctime_nsec  = now.tv_nsec;
+        oin->btime_sec   = now.tv_sec;
+        oin->btime_nsec  = now.tv_nsec;
         oin->parent_inum = DISKFS_ORPHAN_INUM;
         oin->parent_gen  = oin->gen;
 
@@ -8803,6 +8817,14 @@ diskfs_map_attrs(
         attr->va_rdev          = inode->rdev;
     }
 
+    /* Birth time (SMB create time) is tracked natively but lives outside
+     * MASK_STAT, so map it only when explicitly requested. */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask     |= CHIMERA_VFS_ATTR_BTIME;
+        attr->va_btime.tv_sec  = inode->btime_sec;
+        attr->va_btime.tv_nsec = inode->btime_nsec;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
         attr->va_fsid      = shared->fsid;
@@ -8909,6 +8931,17 @@ diskfs_apply_attrs(
         } else {
             inode->mtime_sec  = attr->va_mtime.tv_sec;
             inode->mtime_nsec = attr->va_mtime.tv_nsec;
+        }
+    }
+
+    if (set_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+        if (attr->va_btime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+            inode->btime_sec  = now.tv_sec;
+            inode->btime_nsec = now.tv_nsec;
+        } else {
+            inode->btime_sec  = attr->va_btime.tv_sec;
+            inode->btime_nsec = attr->va_btime.tv_nsec;
         }
     }
 
@@ -9617,6 +9650,8 @@ diskfs_mkdir_at_alloc_cb(
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     inode->parent_inum = parent->inum;
     inode->parent_gen  = parent->gen;
@@ -9791,6 +9826,8 @@ diskfs_mknod_at_alloc_cb(
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         inode->mode = request->mknod_at.set_attr->va_mode;
@@ -10582,6 +10619,8 @@ diskfs_open_at_alloc_cb(
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     diskfs_apply_attrs(inode, request->open_at.set_attr);
 
@@ -10726,6 +10765,8 @@ diskfs_create_unlinked_alloc_cb(
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     diskfs_apply_attrs(inode, request->create_unlinked.set_attr);
 
@@ -12680,6 +12721,8 @@ diskfs_symlink_at_alloc_cb(
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     diskfs_map_attrs(thread, &request->symlink_at.r_attr, inode);
 
