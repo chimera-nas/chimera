@@ -455,6 +455,15 @@ chimera_vfs_state_would_conflict(
                 if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
                     continue;
                 }
+                /* A byte-range lock and a caching lease held by the SAME open do
+                 * not break each other: an SMB open's caching lease is keyed by
+                 * its lease key while its range locks are keyed by the file id,
+                 * so owner_equal does not catch them, but cb_private points at
+                 * the common owning open on both. */
+                if (probe->owner.cb_private &&
+                    cur->owner.cb_private == probe->owner.cb_private) {
+                    continue;
+                }
                 /* A read range lock conflicts with a W cache on another
                  * client (their writes may be cached); a write range lock
                  * conflicts with any R/W cache on another client. */

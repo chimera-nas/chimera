@@ -269,6 +269,14 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             chimera_smb_session_authorize(shared, session);
         }
 
+        /* If the client named a previous session (reconnect on a fresh
+         * transport), close it now that this one is established. */
+        if (request->session_setup.prev_session_id) {
+            chimera_smb_session_invalidate_previous(thread, shared,
+                                                    request->session_setup.prev_session_id,
+                                                    session);
+        }
+
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
     } else if (rc == 1) {
         // Continue needed

@@ -180,6 +180,11 @@ struct chimera_smb_tree {
 };
 
 #define CHIMERA_SMB_SESSION_AUTHORIZED 0x1
+/* The session was closed out from under its connection by a SESSION_SETUP that
+ * named it in PreviousSessionId (MS-SMB2 3.3.5.5.3).  It is unlinked from the
+ * global table but kept alive while its original connection still references it;
+ * requests arriving on that connection are answered STATUS_USER_SESSION_DELETED. */
+#define CHIMERA_SMB_SESSION_DELETED    0x2
 
 struct chimera_smb_session {
     uint64_t                    session_id;

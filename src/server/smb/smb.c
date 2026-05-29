@@ -927,6 +927,22 @@ chimera_smb_server_handle_smb2(
             request->session_handle = NULL;
         }
 
+        /* A session closed by a PreviousSessionId reconnect lingers, still
+         * referenced by its original connection, until that connection drops.
+         * Requests that resolve to it are answered USER_SESSION_DELETED
+         * (MS-SMB2 3.3.5.2.9).  Defer the failure exactly like the invalid-id
+         * case above: completing it inline would advance complete_requests out
+         * of order within a compound. */
+        if (unlikely(request->session_handle &&
+                     (request->session_handle->session->flags &
+                      CHIMERA_SMB_SESSION_DELETED))) {
+            request->session_handle                      = NULL;
+            request->status                              = SMB2_STATUS_USER_SESSION_DELETED;
+            request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+            compound->requests[compound->num_requests++] = request;
+            goto next_compound_request;
+        }
+
         if (request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) {
             uint8_t *signing_key;
 

@@ -311,6 +311,12 @@ struct chimera_smb_request {
              * the file/dir (vs opened an existing one) — drives the OPENED vs
              * CREATED Create Action in the reply. */
             uint8_t                         r_created;
+            /* Set by the durable-reconnect path: this CREATE is reclaiming a
+            * surviving open, not opening a new one.  The access was granted at
+            * the original open, and MS-SMB2 has the reconnect ignore the
+            * DesiredAccess / CreateOptions / etc. fields entirely, so the
+            * getattr-reply callback must not re-run the ACL access check. */
+            uint8_t                         reconnect;
             /* CREATE contexts the client sent (CHIMERA_SMB_CREATE_CTX_* bits).
              * Phase-0 stubs set the bit and capture a minimum set of fields needed
              * by the response emit; Phase 1/3 will populate the rest. */
@@ -1146,6 +1152,121 @@ chimera_smb_session_release(
     }
 } /* chimera_smb_session_free */
 
+/* MS-SMB2 3.3.4.4 open-preservation rule: a durable open holding byte-range
+ * locks survives a disconnect only if it also holds a batch oplock or a
+ * WRITE-caching lease -- otherwise the locks cannot be safely maintained across
+ * the gap, so the open is closed rather than parked (a later reconnect then gets
+ * OBJECT_NAME_NOT_FOUND).  Every other durable open is preservable. */
+static inline bool
+chimera_smb_durable_open_preservable(const struct chimera_smb_open_file *open_file)
+{
+    if (open_file->lock_entries) {
+        bool write_caching =
+            (open_file->oplock_level == SMB2_OPLOCK_LEVEL_BATCH) ||
+            (open_file->lease_state & SMB2_LEASE_WRITE_CACHING);
+
+        if (!write_caching) {
+            return false;
+        }
+    }
+    return true;
+} /* chimera_smb_durable_open_preservable */
+
+/* Park every durable/persistent open held by `session` for reconnect, leaving
+ * the rest of the session in place.  Used when a PreviousSessionId reconnect
+ * closes this session out from under its still-live connection (MS-SMB2
+ * 3.3.5.5.3): the durable handles must be parked immediately so the new
+ * connection can reclaim them, while the session's remaining (non-durable) opens
+ * and trees are torn down normally when the old connection finally drops -- on
+ * its own thread, avoiding a cross-thread VFS-handle release.  Parking is pure
+ * shared-state manipulation under the bucket and registry locks, so it is safe
+ * to run from the new connection's thread. */
+static inline void
+chimera_smb_session_park_durables(
+    struct chimera_server_smb_shared *shared,
+    struct chimera_smb_session       *session)
+{
+    int i, b;
+
+    pthread_mutex_lock(&session->lock);
+
+    for (i = 0; i < session->max_trees; i++) {
+        struct chimera_smb_tree      *tree = session->trees[i];
+        struct chimera_smb_open_file *open_file, *tmp;
+
+        if (!tree) {
+            continue;
+        }
+
+        for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS; b++) {
+            pthread_mutex_lock(&tree->open_files_lock[b]);
+            HASH_ITER(hh, tree->open_files[b], open_file, tmp)
+            {
+                if (!open_file->durable_flags ||
+                    (open_file->flags & CHIMERA_SMB_OPEN_FILE_PARKED) ||
+                    !chimera_smb_durable_open_preservable(open_file)) {
+                    continue;
+                }
+                HASH_DELETE(hh, tree->open_files[b], open_file);
+                open_file->flags      |= CHIMERA_SMB_OPEN_FILE_PARKED;
+                open_file->create_conn = NULL;
+                chimera_smb_durable_park(shared, open_file);
+            }
+            pthread_mutex_unlock(&tree->open_files_lock[b]);
+        }
+    }
+
+    pthread_mutex_unlock(&session->lock);
+} /* chimera_smb_session_park_durables */
+
+/* MS-SMB2 3.3.5.5.3: a SESSION_SETUP carrying a non-zero PreviousSessionId asks
+ * the server to close that earlier session of the same user once the new one is
+ * established (a client reconnecting on a fresh transport, e.g. for durable-
+ * handle reclaim).  Mark the prior session deleted and unlink it from the global
+ * table without freeing it: its original connection still holds a reference, so
+ * requests still arriving there get STATUS_USER_SESSION_DELETED.  Its durable
+ * handles are parked immediately so the new connection can reclaim them.  Never
+ * invalidate the new session itself, and only act when the requesting user
+ * matches the prior session's owner. */
+static inline void
+chimera_smb_session_invalidate_previous(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_server_smb_shared *shared,
+    uint64_t                          prev_session_id,
+    struct chimera_smb_session       *new_session)
+{
+    struct chimera_smb_session *prev;
+
+    if (prev_session_id == 0 || prev_session_id == new_session->session_id) {
+        return;
+    }
+
+    pthread_mutex_lock(&shared->sessions_lock);
+
+    HASH_FIND(hh, shared->sessions, &prev_session_id, sizeof(uint64_t), prev);
+
+    if (prev && prev != new_session &&
+        (prev->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
+        prev->cred.uid == new_session->cred.uid) {
+        /* Clear AUTHORIZED and unlink here so the later refcnt-driven
+         * chimera_smb_session_release() does not HASH_DEL a second time.  Hold a
+         * reference across the park so a concurrent release cannot free it. */
+        prev->flags |= CHIMERA_SMB_SESSION_DELETED;
+        prev->flags &= ~CHIMERA_SMB_SESSION_AUTHORIZED;
+        HASH_DEL(shared->sessions, prev);
+        prev->refcnt++;
+    } else {
+        prev = NULL;
+    }
+
+    pthread_mutex_unlock(&shared->sessions_lock);
+
+    if (prev) {
+        chimera_smb_session_park_durables(shared, prev);
+        chimera_smb_session_release(thread, shared, prev, true);
+    }
+} /* chimera_smb_session_invalidate_previous */
+
 
 static inline struct chimera_smb_session_handle *
 chimera_smb_session_handle_alloc(struct chimera_server_smb_thread *thread)
@@ -1366,7 +1487,8 @@ chimera_smb_tree_free(
              * the normal close path, which also forgets the registry entry --
              * a later durable reconnect with the stale FileId then correctly
              * returns OBJECT_NAME_NOT_FOUND. */
-            if (open_file->durable_flags && preserve_durable) {
+            if (open_file->durable_flags && preserve_durable &&
+                chimera_smb_durable_open_preservable(open_file)) {
                 open_file->flags      |= CHIMERA_SMB_OPEN_FILE_PARKED;
                 open_file->create_conn = NULL;
                 /* park acquires the registry lock under this bucket lock —

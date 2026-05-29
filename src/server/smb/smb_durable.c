@@ -267,10 +267,16 @@ chimera_smb_durable_claim(
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (create_guid && memcmp(entry->create_guid, create_guid, 16) != 0) {
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
-    } else if (client_guid && memcmp(entry->client_guid, client_guid, 16) != 0) {
-        /* Reconnect from a different client.  MS-SMB2 3.3.5.9.7: a ClientGuid
-         * mismatch must fail with STATUS_OBJECT_NAME_NOT_FOUND (the handle is
-         * simply not visible to this client), not ACCESS_DENIED. */
+    } else if ((had_lease || entry->persistent) && client_guid &&
+               memcmp(entry->client_guid, client_guid, 16) != 0) {
+        /* Reconnect from a different client.  MS-SMB2 3.3.5.9.7 binds the
+         * ClientGuid check to leased opens: when the surviving open holds a
+         * lease, a ClientGuid mismatch fails with STATUS_OBJECT_NAME_NOT_FOUND
+         * (the handle is not visible to this client).  An oplock-only *durable*
+         * handle has no such binding — it may be reconnected from a new
+         * transport with a different ClientGuid (identity is the persistent id,
+         * plus the create_guid for v2).  Persistent handles keep the check
+         * regardless (their reclaim is governed by create_guid + owner). */
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (had_lease && !has_lease_ctx) {
         /* 3.3.5.9.7: open holds a lease but the reconnect omitted the lease
@@ -280,10 +286,15 @@ chimera_smb_durable_claim(
                memcmp(entry->open_file->lease_key, lease_key, 16) != 0) {
         /* 3.3.5.9.7: lease key in the reconnect does not match the open's. */
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
-    } else if (entry->name_len != name_len || memcmp(entry->name, name, name_len) != 0) {
-        /* Filename mismatch: with a lease this is INVALID_PARAMETER (3.3.5.9.7),
-         * otherwise the handle simply isn't found under that name. */
-        *status = had_lease ? SMB2_STATUS_INVALID_PARAMETER : SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    } else if (had_lease && name_len > 0 &&
+               (entry->name_len != name_len ||
+                memcmp(entry->name, name, name_len) != 0)) {
+        /* A leased reconnect that names a (non-empty) file other than the one
+         * the handle was opened on is malformed (MS-SMB2 3.3.5.9.7).  An empty
+         * name -- the usual durable-reconnect form, always so for v2 -- and a
+         * non-lease (oplock) reconnect both ignore the name entirely: the
+         * handle's identity is its persistent id, plus the create_guid for v2. */
+        *status = SMB2_STATUS_INVALID_PARAMETER;
     } else if (entry->cold) {
         /* Recovered-after-restart entry: there is no live open to re-home.
          * Remove it and tell the caller to re-open the file (cold reclaim);
