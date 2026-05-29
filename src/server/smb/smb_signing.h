@@ -26,6 +26,22 @@ chimera_smb_derive_signing_key(
     size_t         session_key_len,
     const uint8_t *preauth_hash);
 
+/*
+ * SP800-108 counter-mode KDF (HMAC-SHA256), the primitive behind SMB3 signing
+ * and encryption key derivation.  Returns 1 on success, 0 on failure.  Pass
+ * label/context lengths INCLUDING any trailing NUL the spec requires.
+ */
+int
+kdf_counter_hmac_sha256_ossl3(
+    const uint8_t *key,
+    size_t         key_len,
+    const void    *label,
+    size_t         label_len,
+    const uint8_t *context,
+    size_t         ctx_len,
+    uint8_t       *out,
+    size_t         out_len);
+
 /* Extend an SMB 3.1.1 preauth-integrity hash in place: hash = SHA512(hash||msg). */
 void
 chimera_smb_preauth_extend(
@@ -60,6 +76,7 @@ int
 chimera_smb_sign_message(
     struct chimera_smb_signing_ctx *ctx,
     int                             dialect,
+    int                             signing_alg,
     const uint8_t                  *signing_key,
     uint8_t                        *smb2_buf,
     int                             smb2_len);

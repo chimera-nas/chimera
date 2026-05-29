@@ -1089,8 +1089,14 @@ chimera_smb_create_check_access(
      * the file-open level here -- doing so would wrongly deny an owner removing
      * a child whose inherited ACL omits DELETE.  (Full parent DELETE_CHILD
      * evaluation is a follow-up.) */
+    /* SYNCHRONIZE is not a meaningful open-time access gate: Windows includes it
+     * in every generic right and clients request it on essentially every open,
+     * so it is always grantable on a successful open.  Treat it like
+     * MAXIMUM_ALLOWED and do not require an explicit ACE for it (otherwise a
+     * plain mode-derived object such as a freshly mounted share root, whose
+     * synthesised ACEs carry no SYNCHRONIZE bit, would deny every open). */
     req = da & ~(SMB2_MAXIMUM_ALLOWED | SMB2_ACCESS_SYSTEM_SECURITY |
-                 SMB2_DELETE |
+                 SMB2_DELETE | SMB2_SYNCHRONIZE |
                  SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
                  SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL);
 

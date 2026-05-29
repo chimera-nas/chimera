@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <uthash.h>
 
@@ -179,12 +180,13 @@ struct chimera_smb_tree {
     uint8_t                       fh[CHIMERA_VFS_FH_SIZE];
 };
 
-#define CHIMERA_SMB_SESSION_AUTHORIZED 0x1
+#define CHIMERA_SMB_SESSION_AUTHORIZED   0x1
 /* The session was closed out from under its connection by a SESSION_SETUP that
  * named it in PreviousSessionId (MS-SMB2 3.3.5.5.3).  It is unlinked from the
  * global table but kept alive while its original connection still references it;
  * requests arriving on that connection are answered STATUS_USER_SESSION_DELETED. */
-#define CHIMERA_SMB_SESSION_DELETED    0x2
+#define CHIMERA_SMB_SESSION_DELETED      0x2
+#define CHIMERA_SMB_SESSION_ENCRYPT_DATA 0x4
 
 struct chimera_smb_session {
     uint64_t                    session_id;
@@ -199,6 +201,17 @@ struct chimera_smb_session {
 
     int                         max_trees;
     uint8_t                     signing_key[16];
+
+    /* SMB3 transport encryption (set when CHIMERA_SMB_SESSION_ENCRYPT_DATA).
+     * enc_key encrypts server->client responses; dec_key decrypts
+     * client->server requests.  enc_nonce_counter is the server's strictly
+     * monotonic per-session message counter (never reused for a key — GCM nonce
+     * reuse is catastrophic), shared across all channels of the session. */
+    uint8_t                     enc_key[32];
+    uint8_t                     dec_key[32];
+    size_t                      enc_key_len;
+    uint16_t                    cipher_id;
+    _Atomic uint64_t            enc_nonce_counter;
 
     struct chimera_vfs_cred     cred;
 };

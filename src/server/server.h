@@ -99,6 +99,24 @@ chimera_server_config_get_smb_named_streams(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_smb_signing_required(
+    struct chimera_server_config *config,
+    int                           required);
+
+int
+chimera_server_config_get_smb_signing_required(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_encryption(
+    struct chimera_server_config *config,
+    int                           mode);
+
+int
+chimera_server_config_get_smb_encryption(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_cache_ttl(
     struct chimera_server_config *config,
     int                           ttl);

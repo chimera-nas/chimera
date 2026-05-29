@@ -337,6 +337,8 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.durable-v2-delay
     smb2.notify-inotify
     smb2.secleak
+    smb2.session-id
+    smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode

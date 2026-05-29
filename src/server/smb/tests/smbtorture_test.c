@@ -356,6 +356,17 @@ main(
                                          "/build/test/cairn", cairn_cfg);
     }
 
+    /* The smb2.session-require-signing suite checks that the server advertises
+     * mandatory signing (security_mode SIGNING_REQUIRED|ENABLED).  That is a
+     * per-server policy, so enable it only when running that suite to avoid
+     * forcing signing on every other suite's connections. */
+    for (i = 0; i < num_tests; i++) {
+        if (strstr(tests[i], "session-require-signing") != NULL) {
+            chimera_server_config_set_smb_signing_required(config, 1);
+            break;
+        }
+    }
+
     /* Initialize server */
     env.server = chimera_server_init(config, env.metrics);
     if (!env.server) {

@@ -5,6 +5,7 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_signing.h"
+#include "smb_encrypt.h"
 #include "smb_auth.h"
 #include "smb_wbclient.h"
 #include "vfs/vfs.h"
@@ -173,6 +174,13 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         int         is_ad_user = 0;
         char        sid_buf[SMB_WBCLIENT_SID_MAX_LEN];
 
+        /* Raw session key saved for SMB3 encryption key derivation below; an
+         * anonymous/guest (null) session has no usable key and is never
+         * encrypted. */
+        uint8_t     session_key_saved[32];
+        size_t      session_key_saved_len = 0;
+        int         is_anonymous          = 0;
+
         if (mech == SMB_AUTH_MECH_NTLM) {
             uint8_t session_key[SMB_NTLM_SESSION_KEY_SIZE];
 
@@ -183,6 +191,8 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                                                SMB_NTLM_SESSION_KEY_SIZE,
                                                conn->dialect == SMB2_DIALECT_3_1_1 ?
                                                conn->preauth_hash : NULL);
+                memcpy(session_key_saved, session_key, SMB_NTLM_SESSION_KEY_SIZE);
+                session_key_saved_len = SMB_NTLM_SESSION_KEY_SIZE;
             }
 
             uid        = smb_ntlm_get_uid(&conn->ntlm_ctx);
@@ -216,6 +226,8 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                                                SMB_GSSAPI_SESSION_KEY_SIZE,
                                                conn->dialect == SMB2_DIALECT_3_1_1 ?
                                                conn->preauth_hash : NULL);
+                memcpy(session_key_saved, session_key, SMB_GSSAPI_SESSION_KEY_SIZE);
+                session_key_saved_len = SMB_GSSAPI_SESSION_KEY_SIZE;
             }
 
             // Map Kerberos principal to Unix credentials via winbind
@@ -264,8 +276,39 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         // Set session credentials
         chimera_vfs_cred_init_attr(&session->cred, uid, gid, ngids, gids);
 
+        /* SMB3 transport encryption: derive per-session keys from the raw
+         * session key.  Skipped for anonymous/guest (null) sessions, which have
+         * no usable key and are never encrypted (MS-SMB2 §3.3.5.5.3). */
+        if (shared->config.encryption &&
+            conn->negotiated.cipher_id != 0 &&
+            conn->dialect >= SMB2_DIALECT_3_0 &&
+            session_key_saved_len > 0 &&
+            !is_anonymous) {
+            size_t klen = 0;
+
+            if (chimera_smb_derive_encryption_keys(
+                    conn->dialect, conn->negotiated.cipher_id,
+                    session_key_saved, session_key_saved_len,
+                    conn->dialect == SMB2_DIALECT_3_1_1 ? conn->preauth_hash : NULL,
+                    session_handle->enc_key, session_handle->dec_key, &klen) == 0) {
+                session_handle->enc_key_len = klen;
+                session_handle->cipher_id   = conn->negotiated.cipher_id;
+                session->flags             |= CHIMERA_SMB_SESSION_ENCRYPT_DATA;
+            }
+        }
+
         if (!(session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
             memcpy(session->signing_key, session_handle->signing_key, sizeof(session_handle->signing_key));
+            if (session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA) {
+                memcpy(session->enc_key, session_handle->enc_key, sizeof(session->enc_key));
+                memcpy(session->dec_key, session_handle->dec_key, sizeof(session->dec_key));
+                session->enc_key_len = session_handle->enc_key_len;
+                session->cipher_id   = session_handle->cipher_id;
+                /* Seed the server's monotonic per-session nonce counter.  It is
+                 * never reset for the session's lifetime; reusing a GCM nonce
+                 * would be catastrophic. */
+                atomic_store(&session->enc_nonce_counter, 1);
+            }
             chimera_smb_session_authorize(shared, session);
         }
 
@@ -315,10 +358,18 @@ chimera_smb_session_setup_reply(
     struct chimera_smb_conn *conn                   = request->compound->conn;
     uint16_t                 security_buffer_offset = sizeof(struct smb2_header) + 8;
     uint16_t                 security_buffer_length = conn->ntlm_output_len;
+    uint16_t                 session_flags          = 0;
+
+    /* SessionFlags (MS-SMB2 §2.2.6): advertise per-session encryption so the
+     * client encrypts subsequent requests on this session. */
+    if (request->session_handle &&
+        (request->session_handle->session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA)) {
+        session_flags |= SMB2_SESSION_FLAG_ENCRYPT_DATA;
+    }
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_SESSION_SETUP_REPLY_SIZE);
 
-    evpl_iovec_cursor_append_uint16(reply_cursor, 0);
+    evpl_iovec_cursor_append_uint16(reply_cursor, session_flags);
 
     evpl_iovec_cursor_append_uint16(reply_cursor, security_buffer_offset);
 
