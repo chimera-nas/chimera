@@ -837,6 +837,24 @@ chimera_smb_server_handle_smb2(
 
     while (left) {
 
+        /* A well-formed SMB2 message always begins with a 64-byte header
+        * followed by at least the 2-byte StructureSize.  A frame too short
+        * to contain that is malformed -- e.g. the 5-byte Samba "exit"+code
+        * "suicide" packet that several torture tests (oplock.levelII502,
+        * etc.) send to make a forked smbd drop the connection.  chimera is
+        * threaded, so blindly copying the header out of a short buffer trips
+        * evpl_iovec_cursor_copy's abort() and takes down the whole server.
+        * Recycle the compound and close just this connection instead. */
+        if (unlikely(left < (int) (sizeof(request->smb2_hdr) +
+                                   sizeof(request->request_struct_size)))) {
+            chimera_smb_error(
+                "Received SMB2 frame too short for a header (%d bytes); "
+                "closing connection", left);
+            chimera_smb_compound_free(thread, compound);
+            evpl_close(evpl, conn->bind);
+            return;
+        }
+
         evpl_iovec_cursor_reset_consumed(request_cursor);
 
         request = chimera_smb_request_alloc(thread);
