@@ -285,6 +285,11 @@ chimera_smb_lock(struct chimera_smb_request *request)
      * independently, matching Windows handle-based lock semantics. */
     entry->lease.owner.owner_lo = open_file->file_id.pid;
     entry->lease.owner.owner_hi = open_file->file_id.vid;
+    /* Point at the owning open so the range-vs-caching conflict check can tell
+     * that a byte-range lock and the same open's caching lease (whose owner
+     * identity is the lease key, not the file id) belong together and must not
+     * break each other. */
+    entry->lease.owner.cb_private = open_file;
 
     request->lock.entry = entry;
 

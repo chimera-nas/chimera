@@ -1152,6 +1152,26 @@ chimera_smb_session_release(
     }
 } /* chimera_smb_session_free */
 
+/* MS-SMB2 3.3.4.4 open-preservation rule: a durable open holding byte-range
+ * locks survives a disconnect only if it also holds a batch oplock or a
+ * WRITE-caching lease -- otherwise the locks cannot be safely maintained across
+ * the gap, so the open is closed rather than parked (a later reconnect then gets
+ * OBJECT_NAME_NOT_FOUND).  Every other durable open is preservable. */
+static inline bool
+chimera_smb_durable_open_preservable(const struct chimera_smb_open_file *open_file)
+{
+    if (open_file->lock_entries) {
+        bool write_caching =
+            (open_file->oplock_level == SMB2_OPLOCK_LEVEL_BATCH) ||
+            (open_file->lease_state & SMB2_LEASE_WRITE_CACHING);
+
+        if (!write_caching) {
+            return false;
+        }
+    }
+    return true;
+} /* chimera_smb_durable_open_preservable */
+
 /* Park every durable/persistent open held by `session` for reconnect, leaving
  * the rest of the session in place.  Used when a PreviousSessionId reconnect
  * closes this session out from under its still-live connection (MS-SMB2
@@ -1183,7 +1203,8 @@ chimera_smb_session_park_durables(
             HASH_ITER(hh, tree->open_files[b], open_file, tmp)
             {
                 if (!open_file->durable_flags ||
-                    (open_file->flags & CHIMERA_SMB_OPEN_FILE_PARKED)) {
+                    (open_file->flags & CHIMERA_SMB_OPEN_FILE_PARKED) ||
+                    !chimera_smb_durable_open_preservable(open_file)) {
                     continue;
                 }
                 HASH_DELETE(hh, tree->open_files[b], open_file);
@@ -1466,7 +1487,8 @@ chimera_smb_tree_free(
              * the normal close path, which also forgets the registry entry --
              * a later durable reconnect with the stale FileId then correctly
              * returns OBJECT_NAME_NOT_FOUND. */
-            if (open_file->durable_flags && preserve_durable) {
+            if (open_file->durable_flags && preserve_durable &&
+                chimera_smb_durable_open_preservable(open_file)) {
                 open_file->flags      |= CHIMERA_SMB_OPEN_FILE_PARKED;
                 open_file->create_conn = NULL;
                 /* park acquires the registry lock under this bucket lock —
