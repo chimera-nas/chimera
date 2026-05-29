@@ -27,6 +27,7 @@ chimera_smb_cancel(struct chimera_smb_request *request)
 {
     struct chimera_smb_conn           *conn = request->compound->conn;
     struct chimera_smb_notify_request *nr;
+    struct chimera_smb_request        *parked;
     uint64_t                           target_id;
 
     /* CANCEL targets either an async_id (if ASYNC flag set) or message_id */
@@ -40,10 +41,22 @@ chimera_smb_cancel(struct chimera_smb_request *request)
     for (nr = conn->parked_notifies; nr; nr = nr->next) {
         if (nr->async_id == target_id) {
             chimera_smb_notify_cancel(nr);
+            goto done;
+        }
+    }
+
+    /* Search async-interim-armed I/O requests on this connection.  For now
+     * the underlying VFS op is not cancellable from SMB2_CANCEL; absorb the
+     * cancel silently.  A future phase can plumb through to
+     * chimera_vfs_*_cancel where backends support it. */
+    for (parked = conn->parked_requests; parked;
+         parked = parked->async.park_next) {
+        if (parked->async_id == target_id) {
             break;
         }
     }
 
+ done:
     /* CANCEL has no response per MS-SMB2.  Use STATUS_PENDING so the
      * compound reply builder skips this slot — no reply body is ever
      * emitted for SMB2_CANCEL.  (There is therefore no

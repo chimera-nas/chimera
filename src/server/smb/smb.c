@@ -20,6 +20,7 @@
 #include "server/server.h"
 #include "evpl/evpl.h"
 #include "smb_internal.h"
+#include "smb_async_interim.h"
 #include "smb_wbclient.h"
 #include "smb_procs.h"
 #include "smb_notify.h"
@@ -571,6 +572,15 @@ chimera_smb_complete_request(
 {
     struct chimera_smb_compound *compound = request->compound;
 
+    /* If an async-interim timer is armed, cancel it first.  If the timer has
+     * not yet fired this is a synchronous fast path -- no interim was sent
+     * and the request will reply normally below.  If the timer already fired,
+     * an interim is on the wire, request->async_id is set, and the reply
+     * builder will tag the final response with SMB2_FLAGS_ASYNC_COMMAND. */
+    if (unlikely(request->async.armed)) {
+        chimera_smb_async_interim_cancel(request);
+    }
+
     request->status = status;
 
     compound->complete_requests++;
@@ -673,6 +683,37 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
         }
         chimera_smb_complete_request(request, SMB2_STATUS_NETWORK_NAME_DELETED);
         return;
+    }
+
+    /* Arm an async-interim timer for READ / WRITE / FLUSH when this request is
+     * the tail of a compound (or a singleton).  If the handler completes within
+     * the defer window, chimera_smb_complete_request cancels the timer and no
+     * interim is sent.  If the underlying VFS op takes longer, the timer fires
+     * a standalone STATUS_PENDING with SMB2_FLAGS_ASYNC_COMMAND and an AsyncId
+     * the client can use to correlate the eventual final response (and to
+     * cancel via SMB2_CANCEL).
+     *
+     * Mid-compound async on the same commands is NOT enforced as
+     * STATUS_INTERNAL_ERROR here: chimera handlers for these commands either
+     * complete in-line on fast backends or via a callback that marshals back to
+     * the conn thread.  Either way no interim fires mid-chain, and a
+     * mid-chain ban would falsely fail a legitimately-fast mid-compound
+     * FLUSH/WRITE/READ.  When a future producer (oplock break, lease break)
+     * adds a genuinely long-running mid-chain op, the mid-chain ban can be
+     * added alongside it. */
+    if (compound->complete_requests + 1 == compound->num_requests) {
+        switch (request->smb2_hdr.command) {
+            case SMB2_READ:
+            case SMB2_WRITE:
+            case SMB2_FLUSH:
+                /* Samba uses 500us for READ/WRITE; FLUSH gets the same
+                 * threshold (the suite's flush-flush test allows OK or
+                 * INTERNAL_ERROR on a deferred flush). */
+                chimera_smb_async_interim_arm(request, 500);
+                break;
+            default:
+                break;
+        } /* switch */
     }
 
     switch (request->smb2_hdr.command) {
