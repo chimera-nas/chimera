@@ -360,6 +360,11 @@ set(SMBTORTURE_ENABLED_memfs
 # The linux and io_uring passthrough backends share an implementation and pass
 # the same set.  They expose the share root as a real local directory whose
 # filesystem must support name_to_handle_at(2) (see smbtorture_test.c).
+# smb2.timestamps stays disabled here: the suite sets an arbitrary create time
+# (incl. far-future / pre-1970 values) and reads it back, but a real Linux
+# filesystem has no API to set a file's birth time, so the create-time
+# round-trip is unsupportable on the passthrough backends (it works on the
+# native backends, which persist btime in their own inode metadata).
 set(SMBTORTURE_ENABLED_linux
     smb2.read
     smb2.rw
@@ -409,6 +414,9 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.tcon
+    # Native btime storage in the cairn inode lets the SMB create-time round-trip
+    # and the LastWriteTime write-time/sticky semantics pass end-to-end.
+    smb2.timestamps
     smb2.winattr2
 )
 # diskfs is a native-ACL backend: it stores each inode's ACL as a
@@ -427,6 +435,10 @@ set(SMBTORTURE_ENABLED_diskfs_common
     smb2.session.signing-aes-128-cmac
     smb2.sharemode
     smb2.tcon
+    # Native btime storage in the diskfs inode (in-memory + on-disk dinode) lets
+    # the SMB create-time round-trip and LastWriteTime semantics pass; both block
+    # backends share the diskfs module.
+    smb2.timestamps
     smb2.winattr2
     ${SMBTORTURE_ACLS_SUBTESTS}
 )
