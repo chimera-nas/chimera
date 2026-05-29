@@ -1468,6 +1468,13 @@ chimera_smb_open_file_resolve(
         file_id->vid = request->compound->saved_file_id.vid;
     }
 
+    /* Record the FileId this request resolved against, so a subsequent related
+     * request with FileId=UINT64_MAX inherits it (MS-SMB2 3.3.5.2.7.2,
+     * matching Samba's compat_chain_fsp update on every successful resolve).
+     * Set before the hash lookup: a failed lookup still legitimately advances
+     * the chain pointer to the FileId the client referenced. */
+    request->compound->saved_file_id = *file_id;
+
     open_file_bucket = file_id->vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
     pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
@@ -1597,6 +1604,10 @@ chimera_smb_open_file_close(
         }
         file_id->vid = request->compound->saved_file_id.vid;
     }
+
+    /* Record the FileId this request resolved against so a subsequent related
+     * request with FileId=UINT64_MAX inherits it.  See chimera_smb_open_file_resolve. */
+    request->compound->saved_file_id = *file_id;
 
     open_file_bucket = file_id->vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
