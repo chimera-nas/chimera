@@ -320,6 +320,7 @@ set(SMBTORTURE_SUITES
 # remaining backends start fully disabled; populate their lists as suites are
 # verified against them.
 set(SMBTORTURE_ENABLED_memfs
+    smb2.openattr
     smb2.read
     smb2.rw
     smb2.check-sharemode
