@@ -100,6 +100,25 @@ run_smbtorture(
                         " --option=torture:localdir=%s", session_dir);
     }
 
+    /* compound_async.{write_write,read_read} branch on torture:smbd: when true
+     * (the default) they assert that the tail of the compound emits a
+     * STATUS_PENDING interim before the final response, which Samba only meets
+     * against the special aio_delay_inject share (the test source comments,
+     * compound.c:2540 and :2576-2580, spell this out).  Chimera, like Windows
+     * and other non-smbd servers, completes the I/O fast enough that no
+     * interim is sent; report ourselves as not-smbd so the test takes the
+     * "Windows and other servers don't go async" branch that just collects
+     * the final response.  Scoped to compound_async to keep the smbd
+     * identification true for every other suite. */
+    for (i = 0; i < num_tests; i++) {
+        if (strncmp(tests[i], "smb2.compound_async",
+                    sizeof("smb2.compound_async") - 1) == 0) {
+            off += snprintf(cmd + off, sizeof(cmd) - off,
+                            " --option=torture:smbd=no");
+            break;
+        }
+    }
+
     for (i = 0; i < num_tests; i++) {
         off += snprintf(cmd + off, sizeof(cmd) - off, " %s", tests[i]);
     }
