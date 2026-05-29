@@ -1767,53 +1767,6 @@ cairn_apply_attrs(
 
 } /* cairn_apply_attrs */
 
-static bool
-cairn_cred_can_access(
-    const struct cairn_inode      *inode,
-    const struct chimera_vfs_cred *cred,
-    uint32_t                       user_bit,
-    uint32_t                       group_bit,
-    uint32_t                       other_bit)
-{
-    if (cred->uid == 0) {
-        return true;
-    }
-
-    if ((uint64_t) cred->uid == inode->uid) {
-        return !!(inode->mode & user_bit);
-    }
-
-    bool in_group = ((uint64_t) cred->gid == inode->gid);
-
-    for (uint32_t i = 0; !in_group && i < cred->ngids; i++) {
-        if ((uint64_t) cred->gids[i] == inode->gid) {
-            in_group = true;
-        }
-    }
-
-    if (in_group) {
-        return !!(inode->mode & group_bit);
-    }
-
-    return !!(inode->mode & other_bit);
-} /* cairn_cred_can_access */
-
-static bool
-cairn_cred_can_read(
-    const struct cairn_inode      *inode,
-    const struct chimera_vfs_cred *cred)
-{
-    return cairn_cred_can_access(inode, cred, S_IRUSR, S_IRGRP, S_IROTH);
-} /* cairn_cred_can_read */
-
-static bool
-cairn_cred_can_write(
-    const struct cairn_inode      *inode,
-    const struct chimera_vfs_cred *cred)
-{
-    return cairn_cred_can_access(inode, cred, S_IWUSR, S_IWGRP, S_IWOTH);
-} /* cairn_cred_can_write */
-
 static void
 cairn_getattr(
     struct cairn_thread        *thread,
@@ -1890,7 +1843,19 @@ cairn_setattr(
         cairn_punch_hole(thread, shared, inode, new_size, old_size - new_size);
     }
 
+    /* cairn_apply_attrs() rewrites set_attr->va_set_mask down to the scalar
+     * bits it consumes (it drops the ACL bit), so capture the caller's original
+     * mask first -- the ACL-coherence block below keys off it. */
+    uint64_t orig_set_mask = request->setattr.set_attr->va_set_mask;
+
     cairn_apply_attrs(inode, request->setattr.set_attr);
+
+    /* Restore the caller's mask: on an optimistic-commit conflict cairn rolls
+     * back and re-dispatches this queued request, and the replay re-reads
+     * orig_set_mask from this field.  If it stayed scalar-only the ACL re-put
+     * would be skipped and the replayed transaction would drop the descriptor
+     * (an intermittent, load-dependent read-your-writes failure for SET-ACL). */
+    request->setattr.set_attr->va_set_mask = orig_set_mask;
 
     /* ACL coherence (mirrors memfs): an explicit ACL set is persisted and the
      * mode re-derived; a bare chmod regenerates the special-who ACEs of any
@@ -1898,7 +1863,7 @@ cairn_setattr(
     {
         struct chimera_vfs_attrs *sa = request->setattr.set_attr;
 
-        if (sa->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+        if (orig_set_mask & CHIMERA_VFS_ATTR_ACL) {
             if (sa->va_acl && sa->va_acl->num_aces) {
                 cairn_put_acl(thread, inode->inum, sa->va_acl);
                 inode->mode = (inode->mode & S_IFMT) |
@@ -1906,7 +1871,7 @@ cairn_setattr(
             } else {
                 cairn_remove_acl(thread, inode->inum);
             }
-        } else if (sa->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        } else if (orig_set_mask & CHIMERA_VFS_ATTR_MODE) {
             static __thread uint8_t old_buf[CAIRN_ACL_STRUCT_SCRATCH];
             static __thread uint8_t new_buf[CAIRN_ACL_STRUCT_SCRATCH];
             struct chimera_acl     *old_acl = (struct chimera_acl *) old_buf;
@@ -2652,6 +2617,7 @@ cairn_readdir(
         dirent_inode = dirent_ih.inode;
 
         cairn_map_attrs(shared, &attr, dirent_inode);
+        cairn_map_acl(thread, &attr, dirent_inode);
 
         cairn_inode_handle_release(&dirent_ih);
 
@@ -2853,25 +2819,10 @@ cairn_open_at(
         return;
     }
 
-    if (!(flags & CHIMERA_VFS_OPEN_INFERRED)) {
-        bool allowed;
-
-        if (flags & CHIMERA_VFS_OPEN_READ_ONLY) {
-            allowed = cairn_cred_can_read(inode, request->cred);
-        } else {
-            allowed = cairn_cred_can_write(inode, request->cred);
-        }
-
-        if (!allowed) {
-            cairn_inode_handle_release(&parent_ih);
-            if (!is_new_inode) {
-                cairn_inode_handle_release(&child_ih);
-            }
-            request->status = CHIMERA_VFS_EACCES;
-            request->complete(request);
-            return;
-        }
-    }
+    /* No coarse mode-based open access check here: it is ACL-blind (it would
+     * deny e.g. a Windows owner-full-control DACL on a 0644 file) and
+     * mishandles SMB control-only opens.  Access is enforced by the ACL-aware
+     * VFS gate and the protocol create-time check, as on memfs/diskfs. */
 
     if (!is_new_inode &&
         (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
