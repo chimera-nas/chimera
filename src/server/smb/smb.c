@@ -659,6 +659,13 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
         }
     }
 
+    /* A request the parser could not set up (e.g. invalid session id) carries a
+     * deferred status; complete it here, in order, rather than dispatching. */
+    if (unlikely(request->flags & CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED)) {
+        chimera_smb_complete_request(request, request->status);
+        return;
+    }
+
     /* Reject commands that require a valid tree connection */
     if (unlikely(!request->tree &&
                  request->smb2_hdr.command != SMB2_NEGOTIATE &&
@@ -899,13 +906,20 @@ chimera_smb_server_handle_smb2(
                          * a live session (e.g. one that has been logged off, or
                          * a bogus id).  Per MS-SMB2 3.3.5.2.9 this is answered
                          * with STATUS_USER_SESSION_DELETED rather than tearing
-                         * down the transport. */
+                         * down the transport.  Defer the failure: mark the
+                         * request and let the dispatcher complete it in order.
+                         * Completing it here would advance complete_requests out
+                         * of order (this request is not at the head of the
+                         * chain), leaving an earlier compounded request never
+                         * dispatched yet still replied to -- e.g. a CREATE whose
+                         * response is then built over uninitialized attributes. */
                         chimera_smb_error("Received SMB2 message with invalid session id %lx", request->smb2_hdr.
                                           session_id);
                         request->session_handle                      = NULL;
+                        request->status                              = SMB2_STATUS_USER_SESSION_DELETED;
+                        request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
                         compound->requests[compound->num_requests++] = request;
-                        chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
-                        return;
+                        goto next_compound_request;
                     }
                 }
             }
@@ -1053,6 +1067,7 @@ chimera_smb_server_handle_smb2(
             return;
         }
 
+ next_compound_request:
         more_requests = request->smb2_hdr.next_command != 0;
 
         if (more_requests) {

@@ -151,7 +151,12 @@ struct chimera_smb_share {
 
 struct chimera_smb_conn;
 
-#define CHIMERA_SMB_REQUEST_FLAG_SIGN 0x01
+#define CHIMERA_SMB_REQUEST_FLAG_SIGN         0x01
+/* Set during compound parsing when a request cannot be set up (e.g. its header
+* names an invalid session id).  The request is still added to the compound so
+* the dispatcher completes it -- in order -- with request->status, instead of
+* the parser completing it out of order and corrupting the compound counter. */
+#define CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED 0x02
 
 /* MaxTransactSize advertised in NEGOTIATE.  QUERY_DIRECTORY / QUERY_INFO
  * output is bounded by this per MS-SMB2, so it doubles as the cap on the
@@ -159,7 +164,7 @@ struct chimera_smb_conn;
  * stay <= the libevpl per-buffer size (2 MiB) because that reply buffer is
  * allocated as a single iovec (max_iovecs == 1); a request larger than one
  * evpl buffer cannot be satisfied with one iovec. */
-#define CHIMERA_SMB_MAX_TRANSACT_SIZE (1 * 1024 * 1024)
+#define CHIMERA_SMB_MAX_TRANSACT_SIZE         (1 * 1024 * 1024)
 
 struct chimera_smb_rename_info {
     uint8_t                         replace_if_exist;
