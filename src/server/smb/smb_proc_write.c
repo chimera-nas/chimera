@@ -9,6 +9,11 @@
 #include "vfs/vfs_notify.h"
 #include "vfs/vfs_state.h"
 
+/* Maximum supported file size, matching the Windows/Samba value
+ * (0xFFFFFFF0000 == 2^44 - 2^16).  A write whose last byte would extend past
+ * this is rejected with INVALID_PARAMETER. */
+#define CHIMERA_SMB_MAX_FILE_SIZE 0xfffffff0000ULL
+
 /* A write-time-sticky handle needs the pre-write mtime back from the VFS so the
  * write callback can restore it; otherwise no pre-attrs are requested. */
 static inline uint64_t
@@ -168,6 +173,20 @@ chimera_smb_write(struct chimera_smb_request *request)
          * chimera_smb_write_callback is being skipped. */
         evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
+    }
+
+    /* MS-SMB2 3.3.5.13: reject writes whose offset is beyond the maximum file
+    * size (INT64_MAX) and writes whose last byte would extend past the
+    * server's maximum supported file size.  A zero-length write at any
+    * in-range offset is permitted (it changes nothing).  The first clause
+    * bounds offset to INT64_MAX, so the offset+length sum cannot overflow. */
+    if (request->write.offset > 0x7FFFFFFFFFFFFFFFULL ||
+        (request->write.length > 0 &&
+         request->write.offset + request->write.length > CHIMERA_SMB_MAX_FILE_SIZE)) {
+        evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+        chimera_smb_open_file_release(request, request->write.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
 

@@ -164,7 +164,9 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             break;
 
         default:
-            chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
+            /* MS-SMB2 3.3.5.15: an FSCTL the server does not implement is
+             * rejected with STATUS_NOT_SUPPORTED. */
+            chimera_smb_complete_request(request, SMB2_STATUS_NOT_SUPPORTED);
             break;
     } /* switch */
 } /* chimera_smb_ioctl */

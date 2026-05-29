@@ -2915,7 +2915,11 @@ memfs_write(
             new_max_blocks <<= 1;
         }
 
-        new_blocks = malloc(new_max_blocks * sizeof(struct memfs_block *));
+        /* calloc (not malloc+memset) so a sparse write at a high block index
+         * does not force the whole pointer array resident: large allocations
+         * are served by mmap and the unwritten tail stays backed by the zero
+         * page until a block is actually stored there. */
+        new_blocks = calloc(new_max_blocks, sizeof(struct memfs_block *));
 
         if (!new_blocks) {
             pthread_mutex_unlock(&inode->lock);
@@ -2929,11 +2933,6 @@ memfs_write(
                    fork->num_blocks * sizeof(struct memfs_block *));
             free(blocks);
         }
-
-        memset(new_blocks + fork->num_blocks,
-               0,
-               (new_max_blocks - fork->num_blocks) *
-               sizeof(struct memfs_block *));
 
         fork->blocks     = new_blocks;
         fork->max_blocks = new_max_blocks;

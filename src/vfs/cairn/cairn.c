@@ -839,6 +839,75 @@ cairn_map_acl(
     attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
 } /* cairn_map_acl */
 
+/*
+ * Seed a freshly-created child's ACL, mirroring memfs_inherit_acl():
+ *   1. An explicit ACL supplied at create is stored as-is.
+ *   2. Otherwise inherit the parent's inheritable ACEs, if any.
+ *   3. Otherwise, for an SMB-originated create (windows_default), store a
+ *      Windows-style default DACL granting the owner full control while
+ *      leaving the POSIX mode intact (plain mode would deny e.g. FILE_EXECUTE
+ *      and WRITE_OWNER on a 0644 file).
+ *   4. Otherwise leave the child mode-derived (no stored ACL).
+ * The ACL is written into the current meta transaction, so the create's own
+ * attribute readback (cairn_map_acl) reflects it immediately.
+ */
+static void
+cairn_inherit_acl(
+    struct cairn_thread            *thread,
+    struct cairn_inode             *child,
+    uint64_t                        parent_inum,
+    const struct chimera_vfs_attrs *set_attr,
+    int                             windows_default)
+{
+    static __thread uint8_t pbuf[CAIRN_ACL_STRUCT_SCRATCH];
+    struct chimera_acl     *pacl   = (struct chimera_acl *) pbuf;
+    int                     is_dir = S_ISDIR(child->mode);
+    uint16_t                want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
+        (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
+
+    if ((set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) &&
+        set_attr->va_acl && set_attr->va_acl->num_aces) {
+        cairn_put_acl(thread, child->inum, set_attr->va_acl);
+        child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(set_attr->va_acl);
+        return;
+    }
+
+    if (cairn_load_acl(thread, parent_inum, pacl)) {
+        int has_inh = 0;
+
+        for (unsigned i = 0; i < pacl->num_aces; i++) {
+            if (pacl->aces[i].flags & want) {
+                has_inh = 1;
+                break;
+            }
+        }
+
+        if (has_inh) {
+            unsigned            cap = pacl->num_aces * 2;
+            struct chimera_acl *tmp = malloc(chimera_acl_size(cap));
+            int                 n   = chimera_acl_inherit(pacl, is_dir,
+                                                          child->mode & 07777, tmp, cap);
+
+            if (n > 0) {
+                cairn_put_acl(thread, child->inum, tmp);
+                child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(tmp);
+                free(tmp);
+                return;
+            }
+            free(tmp);
+        }
+    }
+
+    if (windows_default) {
+        uint8_t             buf[sizeof(struct chimera_acl) + 4 * sizeof(struct chimera_ace)];
+        struct chimera_acl *def = (struct chimera_acl *) buf;
+
+        if (chimera_acl_default_acl(child->mode & 07777, def, 4) > 0) {
+            cairn_put_acl(thread, child->inum, def);
+        }
+    }
+} /* cairn_inherit_acl */
+
 static inline void
 cairn_remove_directory_contents(
     struct cairn_thread *thread,
@@ -2172,7 +2241,12 @@ cairn_mkdir_at(
 
     cairn_apply_attrs(&inode, request->mkdir_at.set_attr);
 
+    cairn_inherit_acl(thread, &inode, parent_inode->inum,
+                      request->mkdir_at.set_attr,
+                      request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
+
     cairn_map_attrs(shared, &request->mkdir_at.r_attr, &inode);
+    cairn_map_acl(thread, &request->mkdir_at.r_attr, &inode);
 
     dirent_value.inum     = inode.inum;
     dirent_value.name_len = request->mkdir_at.name_len;
@@ -2730,6 +2804,10 @@ cairn_open_at(
 
         cairn_apply_attrs(&new_inode, request->open_at.set_attr);
 
+        cairn_inherit_acl(thread, &new_inode, parent_inode->inum,
+                          request->open_at.set_attr,
+                          request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
+
         new_dirent_value.inum     = new_inode.inum;
         new_dirent_value.name_len = request->open_at.namelen;
         memcpy(new_dirent_value.name, request->open_at.name, request->open_at.namelen);
@@ -2817,6 +2895,7 @@ cairn_open_at(
 
     cairn_map_attrs(shared, &request->open_at.r_dir_post_attr, parent_inode);
     cairn_map_attrs(shared, &request->open_at.r_attr, inode);
+    cairn_map_acl(thread, &request->open_at.r_attr, inode);
 
     cairn_put_inode(thread, parent_inode);
     cairn_put_inode(thread, inode);

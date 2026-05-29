@@ -320,6 +320,8 @@ set(SMBTORTURE_SUITES
 # remaining backends start fully disabled; populate their lists as suites are
 # verified against them.
 set(SMBTORTURE_ENABLED_memfs
+    smb2.read
+    smb2.rw
     smb2.check-sharemode
     smb2.compound_find
     smb2.connect
@@ -359,6 +361,8 @@ set(SMBTORTURE_ENABLED_memfs
 # the same set.  They expose the share root as a real local directory whose
 # filesystem must support name_to_handle_at(2) (see smbtorture_test.c).
 set(SMBTORTURE_ENABLED_linux
+    smb2.read
+    smb2.rw
     smb2.check-sharemode
     smb2.compound_find
     smb2.create_no_streams
@@ -374,6 +378,8 @@ set(SMBTORTURE_ENABLED_linux
     # pending the arm64 difference.
 )
 set(SMBTORTURE_ENABLED_io_uring
+    smb2.read
+    smb2.rw
     smb2.check-sharemode
     smb2.compound_find
     smb2.create_no_streams
@@ -392,6 +398,8 @@ set(SMBTORTURE_ENABLED_io_uring
 # below were verified green end-to-end once the SMB CREATE owner access check was
 # fixed (see chimera_smb_create_check_access).
 set(SMBTORTURE_ENABLED_cairn
+    smb2.read
+    smb2.rw
     smb2.check-sharemode
     smb2.compound_find
     smb2.create_no_streams
@@ -409,6 +417,8 @@ set(SMBTORTURE_ENABLED_cairn
 # stays disabled (no FSCTL_SET_SPARSE support yet); both block backends share
 # the diskfs module and enable the same set.
 set(SMBTORTURE_ENABLED_diskfs_common
+    smb2.read
+    smb2.rw
     smb2.check-sharemode
     smb2.compound_find
     smb2.create_no_streams
