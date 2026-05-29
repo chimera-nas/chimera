@@ -1394,9 +1394,15 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
             case SMB2_FILE_OVERWRITE:
                 /* Open existing only; never create. */
                 break;
+            case SMB2_FILE_CREATE:
+                /* FILE_CREATE must fail if the file already exists; open it
+                 * exclusively so the backend returns EEXIST
+                 * (-> OBJECT_NAME_COLLISION) rather than opening the existing
+                 * file. */
+                flags |= CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_EXCLUSIVE;
+                break;
             case SMB2_FILE_SUPERSEDE:
             case SMB2_FILE_OPEN_IF:
-            case SMB2_FILE_CREATE:
             case SMB2_FILE_OVERWRITE_IF:
                 flags |= CHIMERA_VFS_OPEN_CREATE;
                 break;
@@ -1883,6 +1889,14 @@ chimera_smb_create(struct chimera_smb_request *request)
             request->create.stream_name_len = sname_len;
             memcpy(request->create.stream_name, sname, sname_len);
         }
+    }
+
+    /* Reject create dispositions outside the defined range
+     * (SUPERSEDE..OVERWRITE_IF).  MS-SMB2 returns STATUS_INVALID_PARAMETER for
+     * an undefined CreateDisposition. */
+    if (request->create.create_disposition > SMB2_FILE_OVERWRITE_IF) {
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
     }
 
     /* No persistent-handle grant by default; set by the reconnect path (cold
