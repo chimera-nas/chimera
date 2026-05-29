@@ -42,15 +42,6 @@ chimera_smb_is_error_status(unsigned int status)
            status != SMB2_STATUS_NOTIFY_ENUM_DIR;
 } /* chimera_smb_is_error_status */
 
-static inline int
-chimera_smb_status_should_abort(unsigned int status)
-{
-    return status != SMB2_STATUS_SUCCESS &&
-           status != SMB2_STATUS_MORE_PROCESSING_REQUIRED &&
-           status != SMB2_STATUS_NO_MORE_FILES &&
-           status != SMB2_STATUS_NOTIFY_ENUM_DIR;
-} /* chimera_smb_status_should_abort */
-
 static void *
 chimera_smb_server_init(
     const struct chimera_server_config *config,
@@ -573,34 +564,6 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     chimera_smb_compound_free(thread, compound);
 } /* chimera_smb_compound_reply */
 
-static inline void
-chimera_smb_compound_abort(struct chimera_smb_compound *compound)
-{
-    struct chimera_smb_request *next;
-
-    if (compound->complete_requests < compound->num_requests) {
-        next = compound->requests[compound->complete_requests];
-
-        /* Propagate session/tree from prior request for related operations,
-         * even on the abort path.  Otherwise an aborted related Close (for
-         * example, after a failed Create in a Create+Close compound) will
-         * have a NULL session_handle and the signing pass will fail,
-         * causing the entire connection to be torn down. */
-        if (next->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) {
-            if (!next->session_handle && compound->saved_session_handle) {
-                next->session_handle = compound->saved_session_handle;
-            }
-            if (!next->tree && compound->saved_tree) {
-                next->tree = compound->saved_tree;
-            }
-        }
-
-        chimera_smb_complete_request(next, SMB2_STATUS_REQUEST_ABORTED);
-    } else {
-        chimera_smb_compound_reply(compound);
-    }
-} /* chimera_smb_compound_abort */
-
 void
 chimera_smb_complete_request(
     struct chimera_smb_request *request,
@@ -626,11 +589,14 @@ chimera_smb_complete_request(
         compound->saved_tree    = request->tree;
     }
 
-    if (chimera_smb_status_should_abort(status)) {
-        chimera_smb_compound_abort(compound);
-    } else {
-        chimera_smb_compound_advance(compound);
-    }
+    /* Always advance to the next compounded request -- even after a failure.
+     * MS-SMB2 processes every request in the chain: a related request inherits
+     * the prior (possibly now-invalid) FileId/Session/Tree and fails naturally
+     * (e.g. STATUS_FILE_CLOSED), an unrelated request is independent.  Aborting
+     * the remainder with STATUS_REQUEST_ABORTED is non-conformant (no client
+     * expects it) and skipped earlier requests entirely.  Every command handler
+     * already completes gracefully when its FileId does not resolve. */
+    chimera_smb_compound_advance(compound);
 } /* chimera_smb_complete_request */
 
 static inline void
@@ -649,14 +615,38 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
 
     request = compound->requests[compound->complete_requests];
 
-    /* Propagate session/tree from previous request for compound related operations */
     if (request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) {
+        /* A related request inherits the session and tree from the preceding
+         * request in the chain (MS-SMB2 3.3.5.2.7.2). */
         if (compound->saved_session_handle) {
             request->session_handle = compound->saved_session_handle;
         }
         if (compound->saved_tree) {
             request->tree = compound->saved_tree;
         }
+
+        /* If the preceding request established no session -- because it failed,
+         * or because the chain illegally opened with a related request -- the
+         * inherited context is invalid.  Windows/Samba answer this with
+         * STATUS_INVALID_PARAMETER (the chained-request session check in
+         * source3/smbd/smb2_server.c), not NETWORK_NAME_DELETED. */
+        if (unlikely(!request->session_handle)) {
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            return;
+        }
+    } else {
+        /* An unrelated request breaks the related chain: clear the saved
+         * context so a following related request cannot inherit stale session,
+         * tree, or FileId state from before this request.  This mirrors Samba
+         * resetting last_session_id and compat_chain_fsp on every non-chained
+         * request; it is what makes an unrelated request that fails to resolve
+         * its session leave a subsequent related request with no session. */
+        compound->saved_session_handle = NULL;
+        compound->saved_tree           = NULL;
+        compound->saved_session_id     = UINT64_MAX;
+        compound->saved_tree_id        = UINT64_MAX;
+        compound->saved_file_id.pid    = UINT64_MAX;
+        compound->saved_file_id.vid    = UINT64_MAX;
     }
 
     /* A request the parser could not set up (e.g. invalid session id) carries a
@@ -744,7 +734,9 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
             chimera_smb_oplock_break(request);
             break;
         default:
-            chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
+            /* Opcode outside the valid SMB2 range (0x00..0x12); Windows/Samba
+             * fail an unknown command with STATUS_INVALID_PARAMETER. */
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
             break;
     } /* switch */
 
