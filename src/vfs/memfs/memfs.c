@@ -1856,8 +1856,19 @@ memfs_lookup_at(
         return;
     }
 
-    /* Handle ".." - return the parent directory */
+    /* Handle ".." - return the parent directory.  The root directory is its
+     * own parent, so locking the parent here would re-lock the inode we
+     * already hold and deadlock on the non-recursive mutex; resolve ".." to
+     * the directory itself in that case (mirrors the readdir ".." handling). */
     if (namelen == 2 && name[0] == '.' && name[1] == '.') {
+        if (inode->dir.parent_inum == inode->inum &&
+            inode->dir.parent_gen == inode->gen) {
+            memfs_map_attrs(shared, &request->lookup_at.r_attr, inode, request->fh);
+            pthread_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_OK;
+            request->complete(request);
+            return;
+        }
         child = memfs_inode_get_inum(shared, inode->dir.parent_inum, inode->dir.parent_gen);
         if (unlikely(!child)) {
             pthread_mutex_unlock(&inode->lock);
