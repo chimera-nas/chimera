@@ -943,6 +943,7 @@ test_durable_register_park_claim(void)
     uint8_t                           guid[16];
     uint8_t                           cguid[16];
     uint8_t                           other[16];
+    uint8_t                           lkey[16];
     uint32_t                          status;
     bool                              cold;
     int                               i;
@@ -954,6 +955,7 @@ test_durable_register_park_claim(void)
         guid[i]  = (uint8_t) (0x10 + i);
         cguid[i] = (uint8_t) (0x20 + i);
         other[i] = (uint8_t) (0x90 + i);
+        lkey[i]  = (uint8_t) (0x30 + i);
     }
     of.file_id.pid        = 0xABCDEF;
     of.durable_flags      = CHIMERA_SMB_DURABLE_V2;
@@ -982,21 +984,37 @@ test_durable_register_park_claim(void)
         TEST_PASS("durable: create-guid mismatch rejected");
     }
 
-    /* Wrong client GUID is ACCESS_DENIED. */
+    /* An oplock-only (no-lease) durable handle is not bound to the ClientGuid:
+     * a reconnect from a different ClientGuid reclaims it (MS-SMB2 3.3.5.9.7
+     * binds the GUID check to leased opens).  of.oplock_level is 0 here. */
     claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, other, "foo.txt", 7, false, NULL, &cold, &status);
-    if (claimed != NULL || status != SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
-        TEST_FAIL("durable: client-guid mismatch -> OBJECT_NAME_NOT_FOUND");
+    if (claimed == &of && status == SMB2_STATUS_SUCCESS) {
+        TEST_PASS("durable: oplock reconnect ignores client-guid");
     } else {
-        TEST_PASS("durable: client-guid mismatch -> OBJECT_NAME_NOT_FOUND");
+        TEST_FAIL("durable: oplock reconnect ignores client-guid");
     }
 
-    /* Matching reconnect succeeds and returns the surviving open. */
-    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, false, NULL, &cold, &status);
+    /* The reclaim above made the handle live again; re-park it. */
+    chimera_smb_durable_park(shared, &of);
+
+    /* A *leased* handle IS bound to the ClientGuid: a mismatch is rejected. */
+    of.oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
+    memcpy(of.lease_key, lkey, 16);
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, other, "foo.txt", 7, true, lkey, &cold, &status);
+    if (claimed != NULL || status != SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
+        TEST_FAIL("durable: leased reconnect rejects client-guid mismatch");
+    } else {
+        TEST_PASS("durable: leased reconnect rejects client-guid mismatch");
+    }
+
+    /* Matching reconnect (correct ClientGuid + lease key) reclaims the open. */
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, true, lkey, &cold, &status);
     if (claimed == &of && status == SMB2_STATUS_SUCCESS) {
         TEST_PASS("durable: matching reconnect reclaims the open");
     } else {
         TEST_FAIL("durable: matching reconnect reclaims the open");
     }
+    of.oplock_level = 0;
 
     /* A second reconnect must fail — the handle is now live again. */
     claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, false, NULL, &cold, &status);

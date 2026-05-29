@@ -267,15 +267,16 @@ chimera_smb_durable_claim(
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (create_guid && memcmp(entry->create_guid, create_guid, 16) != 0) {
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
-    } else if (had_lease && client_guid &&
+    } else if ((had_lease || entry->persistent) && client_guid &&
                memcmp(entry->client_guid, client_guid, 16) != 0) {
         /* Reconnect from a different client.  MS-SMB2 3.3.5.9.7 binds the
-         * ClientGuid check to leased opens only: when the surviving open holds a
+         * ClientGuid check to leased opens: when the surviving open holds a
          * lease, a ClientGuid mismatch fails with STATUS_OBJECT_NAME_NOT_FOUND
-         * (the handle is not visible to this client).  An oplock-only durable
+         * (the handle is not visible to this client).  An oplock-only *durable*
          * handle has no such binding — it may be reconnected from a new
          * transport with a different ClientGuid (identity is the persistent id,
-         * plus the create_guid for v2). */
+         * plus the create_guid for v2).  Persistent handles keep the check
+         * regardless (their reclaim is governed by create_guid + owner). */
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (had_lease && !has_lease_ctx) {
         /* 3.3.5.9.7: open holds a lease but the reconnect omitted the lease
