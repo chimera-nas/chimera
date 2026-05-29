@@ -32,6 +32,8 @@ add_library(chimera_vfs SHARED vfs.c vfs_lsan.c
             vfs_proc_getparent.c vfs_notify.c vfs_state.c vfs_dump.c
             vfs_proc_get_xattr.c vfs_proc_set_xattr.c
             vfs_proc_list_xattrs.c vfs_proc_remove_xattr.c
+            vfs_proc_open_stream.c vfs_proc_list_streams.c
+            vfs_proc_remove_stream.c
             vfs_pnfs.c vfs_proc_get_layout.c)
 
 target_compile_definitions(chimera_vfs PRIVATE

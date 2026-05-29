@@ -153,9 +153,14 @@ chimera_smb_server_init(
 
     shared->config.soft_fail_bad_req  = chimera_server_config_get_soft_fail_bad_req(config);
     shared->config.persistent_handles = chimera_server_config_get_smb_persistent_handles(config);
+    shared->config.named_streams      = chimera_server_config_get_smb_named_streams(config);
 
     if (shared->config.persistent_handles) {
         chimera_smb_info("SMB3 durable/persistent handles enabled (in-memory state)");
+    }
+
+    if (shared->config.named_streams) {
+        chimera_smb_info("SMB named streams (ADS) enabled");
     }
 
     shared->vfs     = vfs;

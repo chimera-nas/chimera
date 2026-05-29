@@ -117,6 +117,7 @@ struct chimera_smb_config {
     int                            num_nic_info;
     int                            soft_fail_bad_req;
     int                            persistent_handles;
+    int                            named_streams;
     uint32_t                       capabilities;
     uint32_t                       dialects[16];
     struct chimera_smb_nic_info    nic_info[16];
@@ -348,6 +349,15 @@ struct chimera_smb_request {
             uint8_t                         persist_value[CHIMERA_SMB_DURABLE_VALUE_MAX];
             char                            parent_path[SMB_FILENAME_MAX];
             char                           *name;
+            /* Named-stream (ADS) suffix parsed off the final path component.
+             * has_stream is set when the create targets "file:stream[:$DATA]";
+             * stream_name holds the bare stream name and `name`/name_len are
+             * trimmed to the base file.  base_oh is the base file's open handle
+             * held across the chained chimera_vfs_open_stream. */
+            uint8_t                         has_stream;
+            uint16_t                        stream_name_len;
+            char                            stream_name[SMB_FILENAME_MAX];
+            struct chimera_vfs_open_handle *base_oh;
         } create;
 
         struct  {
@@ -502,30 +512,38 @@ struct chimera_smb_request {
             }                               cc_chunks[CHIMERA_SMB_COPYCHUNK_MAX];
         } ioctl;
         struct {
-            uint8_t                       info_type;
-            uint8_t                       info_class;
-            uint32_t                      addl_info;
-            uint32_t                      flags;
-            uint32_t                      output_length;
-            struct chimera_smb_file_id    file_id;
-            struct chimera_smb_attrs      r_attrs;
-            struct chimera_smb_fs_attrs   r_fs_attrs;
-            struct chimera_smb_open_file *open_file;
+            uint8_t                         info_type;
+            uint8_t                         info_class;
+            uint32_t                        addl_info;
+            uint32_t                        flags;
+            uint32_t                        output_length;
+            struct chimera_smb_file_id      file_id;
+            struct chimera_smb_attrs        r_attrs;
+            struct chimera_smb_fs_attrs     r_fs_attrs;
+            struct chimera_smb_open_file   *open_file;
             /* Security descriptor built in the getattr callback and emitted by
              * the reply builder (SMB2_INFO_SECURITY). */
-            uint8_t                       sec_buf[2048];
-            uint32_t                      sec_buf_len;
+            uint8_t                         sec_buf[2048];
+            uint32_t                        sec_buf_len;
             /* When the SD references identities not yet in the cache, the
              * getattr'd owner/group/mode + ACL are copied here so the SD can be
              * built after an async identity resolve completes (the live attrs
              * are only valid during the getattr callback). */
-            uint32_t                      sd_uid;
-            uint32_t                      sd_gid;
-            uint32_t                      sd_mode;
-            int                           sd_has_acl;
-            int                           sd_pending;
-            uint8_t                       sd_acl_storage[sizeof(struct chimera_acl) +
-                                                         64 * sizeof(struct chimera_ace)];
+            uint32_t                        sd_uid;
+            uint32_t                        sd_gid;
+            uint32_t                        sd_mode;
+            int                             sd_has_acl;
+            int                             sd_pending;
+            uint8_t                         sd_acl_storage[sizeof(struct chimera_acl) +
+                                                           64 * sizeof(struct chimera_ace)];
+            /* FileStreamInformation: the packed VFS list_streams records are
+             * held here from the list_streams callback until the reply builder
+             * emits them as MS-FSCC FILE_STREAM_INFORMATION entries.
+             * stream_base_handle is a temporary handle on the base file. */
+            struct chimera_vfs_open_handle *stream_base_handle;
+            uint32_t                        stream_record_len;
+            uint32_t                        stream_record_count;
+            uint8_t                         stream_records[4096];
         } query_info;
 
         struct {

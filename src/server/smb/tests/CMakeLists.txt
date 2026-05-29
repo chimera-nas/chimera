@@ -338,6 +338,16 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.tcon
     smb2.timestamps
     smb2.winattr2
+    # Named-stream (ADS) support is implemented on memfs (config-gated
+    # smb_named_streams + CHIMERA_VFS_CAP_NAMED_STREAMS): create/read/write/
+    # enumerate (FileStreamInformation)/delete of named streams all work and
+    # several smb2.streams subtests pass (sharemodes, rename, create-disposition,
+    # zero-byte).  The full smb2.streams / smb2.sdread / smb2.ioctl-on-stream
+    # suites are NOT yet green -- remaining gaps are stream share-mode/sharing-
+    # violation semantics, FILE_ATTRIBUTE reporting on stream handles, stream-
+    # name validation edge cases, directory-stream handling, and rename-with-an-
+    # open-stream -- so those suites stay disabled until fully passing.  The test
+    # harness (smbtorture_test.c) already flips smb_named_streams on for them.
     # Unified-ACL coverage: every smb2.acls subtest runs green individually.
     # The combined smb2.acls suite stays disabled (shared-process deltree
     # cleanup cascade, see above).

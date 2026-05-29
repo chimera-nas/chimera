@@ -7,6 +7,8 @@
 #include "smb_string.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_procs.h"
+#include "vfs/vfs_release.h"
 
 static void
 chimera_smb_query_info_getattr_callback(
@@ -68,6 +70,180 @@ chimera_smb_query_info_getattr_callback(
     }
 } /* chimera_smb_query_info_getattr_callback */
 
+/* Walk the packed VFS list_streams records and either measure (cursor == NULL)
+ * or emit MS-FSCC 2.4.43 FILE_STREAM_INFORMATION entries.  Each entry is
+ *   NextEntryOffset(4) StreamNameLength(4) StreamSize(8) StreamAllocationSize(8)
+ *   StreamName(UTF-16LE)
+ * where the name is ":<stream>:$DATA" (the default fork is "::$DATA").  Returns
+ * the total output byte length. */
+static uint32_t
+chimera_smb_emit_stream_info(
+    struct chimera_smb_iconv_ctx *iconv,
+    const uint8_t                *records,
+    uint32_t                      records_len,
+    uint32_t                      count,
+    struct evpl_iovec_cursor     *cursor)
+{
+    uint32_t in      = 0;
+    uint32_t out     = 0;
+    uint32_t emitted = 0;
+
+    while (in < records_len && emitted < count) {
+        struct chimera_vfs_stream_entry entry;
+        const char                     *sname;
+        char                            disp[SMB_FILENAME_MAX + 8];
+        uint16_t                        name16[SMB_FILENAME_MAX + 8];
+        int                             name16_len;
+        uint32_t                        disp_len, entry_size, aligned, next, p;
+
+        memcpy(&entry, records + in, sizeof(entry));
+        sname = (const char *) (records + in + sizeof(entry));
+
+        /* ":" + stream-name + ":$DATA"  (default fork name_len == 0 -> "::$DATA") */
+        disp[0] = ':';
+        memcpy(disp + 1, sname, entry.name_len);
+        memcpy(disp + 1 + entry.name_len, ":$DATA", 6);
+        disp_len = 1 + entry.name_len + 6;
+
+        name16_len = chimera_smb_utf8_to_utf16le(iconv, disp, disp_len,
+                                                 name16, sizeof(name16));
+        if (name16_len < 0) {
+            name16_len = 0;
+        }
+
+        entry_size = 24 + (uint32_t) name16_len;
+        aligned    = (entry_size + 7) & ~7u;
+
+        emitted++;
+        next = (emitted < count) ? aligned : 0;
+
+        if (cursor) {
+            evpl_iovec_cursor_append_uint32(cursor, next);
+            evpl_iovec_cursor_append_uint32(cursor, (uint32_t) name16_len);
+            evpl_iovec_cursor_append_uint64(cursor, entry.size);
+            evpl_iovec_cursor_append_uint64(cursor, entry.alloc);
+            if (name16_len > 0) {
+                evpl_iovec_cursor_append_blob_unaligned(cursor, name16, name16_len);
+            }
+            for (p = entry_size; p < aligned; p++) {
+                evpl_iovec_cursor_append_uint8(cursor, 0);
+            }
+        }
+
+        out += aligned;
+        in  += (sizeof(entry) + entry.name_len + 7) & ~7u;
+    }
+
+    return out;
+} /* chimera_smb_emit_stream_info */
+
+static void
+chimera_smb_query_stream_info_list_callback(
+    enum chimera_vfs_error error_code,
+    const void            *records,
+    uint32_t               records_len,
+    uint32_t               count,
+    uint32_t               eof,
+    uint64_t               cookie,
+    void                  *private_data)
+{
+    struct chimera_smb_request *request    = private_data;
+    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+
+    chimera_vfs_release(vfs_thread, request->query_info.stream_base_handle);
+    request->query_info.stream_base_handle = NULL;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, request->query_info.open_file);
+        chimera_smb_complete_request(request,
+                                     error_code == CHIMERA_VFS_ERANGE ?
+                                     SMB2_STATUS_INFO_LENGTH_MISMATCH :
+                                     SMB2_STATUS_INTERNAL_ERROR);
+        return;
+    }
+
+    memcpy(request->query_info.stream_records, records, records_len);
+    request->query_info.stream_record_len   = records_len;
+    request->query_info.stream_record_count = count;
+
+    request->query_info.output_length = chimera_smb_emit_stream_info(
+        &request->compound->thread->iconv_ctx,
+        request->query_info.stream_records,
+        records_len,
+        count,
+        NULL);
+
+    chimera_smb_open_file_release(request, request->query_info.open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_query_stream_info_list_callback */
+
+static void
+chimera_smb_query_stream_info_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request       *request = private_data;
+    struct chimera_server_smb_thread *thread  = request->compound->thread;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, request->query_info.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        return;
+    }
+
+    request->query_info.stream_base_handle = oh;
+
+    chimera_vfs_list_streams(
+        thread->vfs_thread,
+        &request->session_handle->session->cred,
+        oh,
+        0,
+        request->query_info.stream_records,
+        sizeof(request->query_info.stream_records),
+        chimera_smb_query_stream_info_list_callback,
+        request);
+} /* chimera_smb_query_stream_info_open_callback */
+
+static void
+chimera_smb_query_stream_info(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct chimera_smb_open_file     *open_file = request->query_info.open_file;
+    const uint8_t                    *base_fh;
+    uint32_t                          base_fh_len;
+
+    /* Gate: named streams must be enabled and the backend must support them;
+     * otherwise behave as before (class not implemented). */
+    if (!thread->shared->config.named_streams ||
+        !(open_file->handle->vfs_module->capabilities & CHIMERA_VFS_CAP_NAMED_STREAMS)) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
+        return;
+    }
+
+    /* Enumerate the streams of the BASE file.  For a stream open the base fh is
+     * stored on the open_file; otherwise the open's own handle is the base. */
+    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) {
+        base_fh     = open_file->base_fh;
+        base_fh_len = open_file->base_fh_len;
+    } else {
+        base_fh     = open_file->handle->fh;
+        base_fh_len = open_file->handle->fh_len;
+    }
+
+    request->query_info.stream_base_handle = NULL;
+
+    chimera_vfs_open_fh(
+        thread->vfs_thread,
+        &request->session_handle->session->cred,
+        base_fh,
+        base_fh_len,
+        CHIMERA_VFS_OPEN_PATH,
+        chimera_smb_query_stream_info_open_callback,
+        request);
+} /* chimera_smb_query_stream_info */
+
 void
 chimera_smb_query_info(struct chimera_smb_request *request)
 {
@@ -128,6 +304,11 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                 case SMB2_FILE_FULL_EA_INFO:
                     request->query_info.output_length = 8;
                     break;
+                case SMB2_FILE_STREAM_INFO:
+                    /* Output length depends on the enumerated stream set, so
+                     * this class drives its own async list_streams flow. */
+                    chimera_smb_query_stream_info(request);
+                    return;
                 default:
                     status = SMB2_STATUS_NOT_IMPLEMENTED;
                     break;
@@ -233,6 +414,14 @@ chimera_smb_query_info_reply(
                 case SMB2_FILE_FULL_EA_INFO:
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+                    break;
+                case SMB2_FILE_STREAM_INFO:
+                    chimera_smb_emit_stream_info(
+                        &request->compound->thread->iconv_ctx,
+                        request->query_info.stream_records,
+                        request->query_info.stream_record_len,
+                        request->query_info.stream_record_count,
+                        reply_cursor);
                     break;
                 default:
                     chimera_smb_abort("%s: unsupported file information class: %d",

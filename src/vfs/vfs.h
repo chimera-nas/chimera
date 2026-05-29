@@ -84,7 +84,10 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_LIST_XATTRS      34
 #define CHIMERA_VFS_OP_REMOVE_XATTR     35
 #define CHIMERA_VFS_OP_GET_LAYOUT       36
-#define CHIMERA_VFS_OP_NUM              37
+#define CHIMERA_VFS_OP_OPEN_STREAM      37
+#define CHIMERA_VFS_OP_LIST_STREAMS     38
+#define CHIMERA_VFS_OP_REMOVE_STREAM    39
+#define CHIMERA_VFS_OP_NUM              40
 
 #define CHIMERA_VFS_OPEN_CREATE         (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH           (1U << 1)
@@ -314,6 +317,15 @@ struct chimera_vfs_request_handle {
 };
 
 #define CHIMERA_VFS_REQUEST_MAX_HANDLES 3
+
+/* One enumerated named stream, packed back-to-back in the list_streams reply
+ * buffer.  `name_len` bytes of (un-terminated) stream name follow this header;
+ * the next record begins at the following 8-byte-aligned offset. */
+struct chimera_vfs_stream_entry {
+    uint64_t size;        /* stream end-of-file */
+    uint64_t alloc;       /* stream allocation size */
+    uint16_t name_len;    /* bytes of name that follow this struct */
+};
 
 struct chimera_vfs_request {
     struct chimera_vfs_thread         *thread;
@@ -895,6 +907,45 @@ struct chimera_vfs_request {
             struct chimera_vfs_attrs        r_post_attr;
         } remove_xattr;
 
+        /* Named streams (SMB Alternate Data Streams).  Gated by
+         * CHIMERA_VFS_CAP_NAMED_STREAMS.  open_stream opens/creates a named
+         * data fork on the base file referenced by `handle`; it returns a
+         * file handle (in r_attr.va_fh) and r_vfs_private exactly like open_at
+         * so the VFS open cache can wrap it.  list_streams enumerates the
+         * file's streams (the default unnamed fork first), each as a packed
+         * struct chimera_vfs_stream_entry. */
+        struct {
+            struct chimera_vfs_open_handle *handle;       /* base file handle */
+            const char                     *name;         /* stream name (no ":$DATA") */
+            uint32_t                        namelen;
+            uint32_t                        flags;        /* CHIMERA_VFS_OPEN_* */
+            struct chimera_vfs_attrs       *set_attr;
+            struct chimera_vfs_attrs        r_attr;       /* base meta + stream size; va_fh = stream fh */
+            uint64_t                        r_vfs_private;
+            uint8_t                         r_created;
+        } open_stream;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;       /* base file handle */
+            uint64_t                        cookie;
+            void                           *buffer;       /* caller-provided buffer */
+            uint32_t                        max_bytes;
+            /* buffer is filled with packed chimera_vfs_stream_entry records,
+             * each followed by name_len bytes of (un-terminated) name. */
+            uint32_t                        r_len;        /* bytes written to buffer */
+            uint32_t                        r_count;      /* number of streams written */
+            uint32_t                        r_eof;
+            uint64_t                        r_cookie;
+        } list_streams;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;       /* base file handle */
+            const char                     *name;
+            uint32_t                        namelen;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
+        } remove_stream;
+
         /* pNFS: a layout-sourcing backend (CHIMERA_VFS_CAP_LAYOUT_SOURCE)
          * describes where the file's data physically lives.  The NFS server
          * encodes the returned segments/devices into a flex-files or block
@@ -1107,6 +1158,14 @@ struct chimera_vfs_handle_state {
  * and "enforces the ACL" are different properties (memfs/cairn store but do not
  * enforce; linux/io_uring enforce in-kernel but do not store the rich ACL). */
 #define CHIMERA_VFS_CAP_DELEGATES_DAC         (1U << 21)
+
+/* If set, the module supports named streams (SMB Alternate Data Streams) on
+ * regular files via chimera_vfs_open_stream / list_streams / remove_stream.
+ * A named stream is an independent data fork addressed by name; it shares the
+ * base file's metadata (mode/owner/timestamps/ACL) but has its own size and
+ * content.  Modules that leave this unset cause the VFS layer to return
+ * ENOTSUP.  Currently only memfs advertises it. */
+#define CHIMERA_VFS_CAP_NAMED_STREAMS         (1U << 22)
 
 struct chimera_vfs_module {
     /* Required

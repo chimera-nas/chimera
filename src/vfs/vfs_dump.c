@@ -48,6 +48,9 @@ chimera_vfs_op_name(unsigned int opcode)
         case CHIMERA_VFS_OP_LIST_XATTRS: return "ListXattrs";
         case CHIMERA_VFS_OP_REMOVE_XATTR: return "RemoveXattr";
         case CHIMERA_VFS_OP_GET_LAYOUT: return "GetLayout";
+        case CHIMERA_VFS_OP_OPEN_STREAM: return "OpenStream";
+        case CHIMERA_VFS_OP_LIST_STREAMS: return "ListStreams";
+        case CHIMERA_VFS_OP_REMOVE_STREAM: return "RemoveStream";
         default: return "Unknown";
     } /* switch */
 
