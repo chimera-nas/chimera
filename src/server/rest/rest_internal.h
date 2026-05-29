@@ -4,9 +4,13 @@
 
 #pragma once
 
+#include <jansson.h>
+
 #include "common/logging.h"
 
 struct chimera_vfs_thread;
+struct evpl;
+struct evpl_http_request;
 
 #define chimera_rest_debug(...) chimera_debug("rest", __FILE__, __LINE__, __VA_ARGS__)
 #define chimera_rest_info(...)  chimera_info("rest", __FILE__, __LINE__, __VA_ARGS__)
@@ -31,3 +35,38 @@ struct chimera_rest_thread {
     struct evpl_http_server    *https_server;
     struct chimera_vfs_thread  *vfs_thread;
 };
+
+/**
+ * Serialize a JSON object as a compact response body and dispatch it.
+ *
+ * Takes ownership of @obj and releases it (json_decref) before returning.
+ *
+ * @param evpl    Event loop for this thread
+ * @param request HTTP request being responded to
+ * @param status  HTTP status code to dispatch
+ * @param obj     JSON object to serialize as the response body
+ */
+void
+chimera_rest_send_json(
+    struct evpl              *evpl,
+    struct evpl_http_request *request,
+    int                       status,
+    json_t                   *obj);
+
+/**
+ * Dispatch a standard JSON error response of the form
+ * {"error": <error>, "message": <message>}.
+ *
+ * @param evpl    Event loop for this thread
+ * @param request HTTP request being responded to
+ * @param status  HTTP status code to dispatch
+ * @param error   Short error label (e.g. "Bad Request")
+ * @param message Human-readable error description
+ */
+void
+chimera_rest_send_error(
+    struct evpl              *evpl,
+    struct evpl_http_request *request,
+    int                       status,
+    const char               *error,
+    const char               *message);
