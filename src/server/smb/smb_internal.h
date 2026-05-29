@@ -1448,17 +1448,21 @@ chimera_smb_open_file_resolve(
 
     chimera_smb_abort_if(!tree, "tree is NULL");
 
+    /* A UINT64_MAX FileId inherits the previous request's FileId, but only in a
+     * related compound (MS-SMB2 3.3.5.2.7.2).  For an unrelated request it is
+     * just an invalid handle and must resolve to FILE_CLOSED, not the prior
+     * request's file. */
     if (unlikely(file_id->pid == UINT64_MAX)) {
-        if (request->compound->saved_file_id.pid == UINT64_MAX) {
-            chimera_smb_error("Attempted to lookup invalid file id");
+        if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
+            request->compound->saved_file_id.pid == UINT64_MAX) {
             return NULL;
         }
         file_id->pid = request->compound->saved_file_id.pid;
     }
 
     if (unlikely(file_id->vid == UINT64_MAX)) {
-        if (request->compound->saved_file_id.vid == UINT64_MAX) {
-            chimera_smb_error("Attempted to lookup invalid file id");
+        if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
+            request->compound->saved_file_id.vid == UINT64_MAX) {
             return NULL;
         }
         file_id->vid = request->compound->saved_file_id.vid;
@@ -1575,17 +1579,20 @@ chimera_smb_open_file_close(
 
     chimera_smb_abort_if(!tree, "tree is NULL");
 
+    /* Only a related compound request inherits the previous request's FileId
+     * from a UINT64_MAX placeholder; for an unrelated request it is an invalid
+     * handle and must report FILE_CLOSED (MS-SMB2 3.3.5.2.7.2). */
     if (unlikely(file_id->pid == UINT64_MAX)) {
-        if (request->compound->saved_file_id.pid == UINT64_MAX) {
-            chimera_smb_error("Attempted to close invalid file id");
+        if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
+            request->compound->saved_file_id.pid == UINT64_MAX) {
             return NULL;
         }
         file_id->pid = request->compound->saved_file_id.pid;
     }
 
     if (unlikely(file_id->vid == UINT64_MAX)) {
-        if (request->compound->saved_file_id.vid == UINT64_MAX) {
-            chimera_smb_error("Attempted to close invalid file id");
+        if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
+            request->compound->saved_file_id.vid == UINT64_MAX) {
             return NULL;
         }
         file_id->vid = request->compound->saved_file_id.vid;
