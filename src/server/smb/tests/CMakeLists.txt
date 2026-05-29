@@ -321,6 +321,7 @@ set(SMBTORTURE_SUITES
 # verified against them.
 set(SMBTORTURE_ENABLED_memfs
     smb2.maximum_allowed
+    smb2.mkdir
     smb2.openattr
     smb2.read
     smb2.rw
@@ -368,6 +369,7 @@ set(SMBTORTURE_ENABLED_memfs
 # round-trip is unsupportable on the passthrough backends (it works on the
 # native backends, which persist btime in their own inode metadata).
 set(SMBTORTURE_ENABLED_linux
+    smb2.mkdir
     smb2.read
     smb2.rw
     smb2.check-sharemode
@@ -385,6 +387,7 @@ set(SMBTORTURE_ENABLED_linux
     # pending the arm64 difference.
 )
 set(SMBTORTURE_ENABLED_io_uring
+    smb2.mkdir
     smb2.read
     smb2.rw
     smb2.check-sharemode
@@ -405,6 +408,7 @@ set(SMBTORTURE_ENABLED_io_uring
 # below were verified green end-to-end once the SMB CREATE owner access check was
 # fixed (see chimera_smb_create_check_access).
 set(SMBTORTURE_ENABLED_cairn
+    smb2.mkdir
     smb2.read
     smb2.rw
     smb2.check-sharemode
@@ -427,6 +431,7 @@ set(SMBTORTURE_ENABLED_cairn
 # stays disabled (no FSCTL_SET_SPARSE support yet); both block backends share
 # the diskfs module and enable the same set.
 set(SMBTORTURE_ENABLED_diskfs_common
+    smb2.mkdir
     smb2.read
     smb2.rw
     smb2.check-sharemode

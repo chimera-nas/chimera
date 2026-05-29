@@ -1864,6 +1864,33 @@ chimera_smb_parse_stream_name(
     return SMB2_STATUS_SUCCESS;
 } /* chimera_smb_parse_stream_name */
 
+/* Return non-zero if a '/'-separated path contains a ".." component.  After
+ * parsing, the CREATE parent path is '/'-separated (the wire backslashes were
+ * converted), so this scans for an exact ".." between separators. */
+static inline int
+chimera_smb_path_has_dotdot(
+    const char *path,
+    int         len)
+{
+    const char *p   = path;
+    const char *end = path + len;
+
+    while (p < end) {
+        const char *comp = p;
+
+        while (p < end && *p != '/') {
+            p++;
+        }
+        if (p - comp == 2 && comp[0] == '.' && comp[1] == '.') {
+            return 1;
+        }
+        if (p < end) {
+            p++;
+        }
+    }
+    return 0;
+} /* chimera_smb_path_has_dotdot */
+
 void
 chimera_smb_create(struct chimera_smb_request *request)
 {
@@ -1918,6 +1945,20 @@ chimera_smb_create(struct chimera_smb_request *request)
      * an undefined CreateDisposition. */
     if (request->create.create_disposition > SMB2_FILE_OVERWRITE_IF) {
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    /* Reject any ".." path component.  Windows clients canonicalize these away
+     * before sending, so the server never needs to resolve one; letting it
+     * reach the VFS would walk above the share root (a traversal escape on the
+     * passthrough backends).  MS-SMB2 returns STATUS_OBJECT_PATH_SYNTAX_BAD.
+     * Completed here (not in parse) so the client gets a response rather than a
+     * connection drop. */
+    if ((request->create.name_len == 2 &&
+         request->create.name[0] == '.' && request->create.name[1] == '.') ||
+        chimera_smb_path_has_dotdot(request->create.parent_path,
+                                    request->create.parent_path_len)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_SYNTAX_BAD);
         return;
     }
 
