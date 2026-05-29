@@ -1469,6 +1469,7 @@ chimera_smb_create_overwrite_check_callback(
         /* OVERWRITE requires an existing file; OVERWRITE_IF / SUPERSEDE
          * create it. */
         if (request->create.create_disposition == SMB2_FILE_OVERWRITE) {
+            chimera_smb_create_release_parent(request);
             chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
             return;
         }
@@ -1477,6 +1478,7 @@ chimera_smb_create_overwrite_check_callback(
     }
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
         return;
     }
@@ -1490,6 +1492,7 @@ chimera_smb_create_overwrite_check_callback(
          !(requested & SMB2_FILE_ATTRIBUTE_HIDDEN)) ||
         ((existing & SMB2_FILE_ATTRIBUTE_SYSTEM) &&
          !(requested & SMB2_FILE_ATTRIBUTE_SYSTEM))) {
+        chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
         return;
     }
