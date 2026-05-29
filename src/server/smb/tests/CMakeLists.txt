@@ -406,7 +406,9 @@ set(SMBTORTURE_ENABLED_io_uring
 # the calling credential, so they behave consistently regardless of the server's
 # own uid (unlike the setfsuid/personality passthrough backends).  The suites
 # below were verified green end-to-end once the SMB CREATE owner access check was
-# fixed (see chimera_smb_create_check_access).
+# fixed (see chimera_smb_create_check_access).  cairn stores ACLs natively in its
+# KV (like diskfs), so it also runs the smb2.acls subtests now that set_security
+# (cairn_setattr SET-ACL) persists the descriptor.
 set(SMBTORTURE_ENABLED_cairn
     smb2.mkdir
     smb2.read
@@ -424,6 +426,7 @@ set(SMBTORTURE_ENABLED_cairn
     # and the LastWriteTime write-time/sticky semantics pass end-to-end.
     smb2.timestamps
     smb2.winattr2
+    ${SMBTORTURE_ACLS_SUBTESTS}
 )
 # diskfs is a native-ACL backend: it stores each inode's ACL as a
 # DISKFS_REC_ACL b+tree record and seeds/inherits it on create, so it adds the
