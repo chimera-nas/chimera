@@ -252,6 +252,14 @@ chimera_vfs_state_put(
     free(file);
 } /* chimera_vfs_state_put */
 
+SYMBOL_EXPORT void
+chimera_vfs_file_state_release(struct chimera_vfs_file_state *file)
+{
+    if (file) {
+        chimera_vfs_state_put(file->state, file);
+    }
+} /* chimera_vfs_file_state_release */
+
 /* -------------------------------------------------------------------- */
 /* Conflict matrix                                                      */
 /* -------------------------------------------------------------------- */
@@ -1738,7 +1746,11 @@ chimera_vfs_io_try(
     if (result == CHIMERA_VFS_LEASE_DENIED) {
         pthread_mutex_unlock(&file->lock);
         request->io_lease_file = NULL;
-        chimera_vfs_state_put(state, file);
+        /* Only drop the reference if this request owns it; on the pinned-handle
+         * fast path the handle owns the long-lived ref. */
+        if (request->io_owns_lease_ref) {
+            chimera_vfs_state_put(state, file);
+        }
         request->status = CHIMERA_VFS_EACCES;
         request->complete(request);
         return;
@@ -1791,8 +1803,46 @@ chimera_vfs_io_lease_acquire(
         return;
     }
 
-    /* Leaseless actor: chimera holds an implicit lease on its behalf.  The
-     * reference taken here is carried by the request until release. */
+    /* Fast path: a cached open handle anchors the per-file state for its whole
+     * lifetime, so we attach it once (lazily, racing other first-I/O threads via
+     * an acquire/release CAS) and thereafter borrow the handle's reference per
+     * I/O -- skipping the bucket-locked state_get/put entirely.  The handle's
+     * long-lived ref plus opencnt>0 for the duration of this op (the protocol
+     * drops opencnt only after the read/write callback returns, strictly after
+     * io_lease_release) keep `file` alive.  io_owns_lease_ref stays 0 so release
+     * does not state_put.  Synthetic/transient handles are not cached, so they
+     * fall through to the legacy per-I/O path. */
+    if (request->io_handle &&
+        request->io_handle->cache_id != CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
+        struct chimera_vfs_open_handle *handle = request->io_handle;
+
+        file = __atomic_load_n(&handle->file_state, __ATOMIC_ACQUIRE);
+        if (!file) {
+            struct chimera_vfs_file_state *expected = NULL;
+
+            file = chimera_vfs_state_get(state, request->fh, request->fh_len,
+                                         request->fh_hash, true);
+            if (file &&
+                !__atomic_compare_exchange_n(&handle->file_state, &expected, file,
+                                             false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                /* Lost the attach race: another thread installed it first.  Drop
+                 * our ref and borrow the winner's (the handle owns that one). */
+                chimera_vfs_state_put(state, file);
+                file = expected;
+            }
+        }
+
+        if (file) {
+            request->io_owns_lease_ref = 0;
+            chimera_vfs_io_try(state, file, request);
+            return;
+        }
+        /* state_get failed; fall through to the legacy path. */
+    }
+
+    /* Legacy per-I/O path (synthetic handle, or no handle): chimera holds an
+     * implicit lease on its behalf.  The reference taken here is owned by the
+     * request and dropped by io_lease_release. */
     file = chimera_vfs_state_get(state, request->fh, request->fh_len,
                                  request->fh_hash, true);
     if (!file) {
@@ -1800,6 +1850,7 @@ chimera_vfs_io_lease_acquire(
         return;
     }
 
+    request->io_owns_lease_ref = 1;
     chimera_vfs_io_try(state, file, request);
 } /* chimera_vfs_io_lease_acquire */
 
@@ -1814,9 +1865,10 @@ chimera_vfs_io_recall(
     struct chimera_vfs_state      *state = request->thread->vfs->vfs_state;
     struct chimera_vfs_file_state *file;
 
-    request->io_next       = next;
-    request->io_lease_file = NULL;
-    request->io_recall_all = 1;
+    request->io_next           = next;
+    request->io_lease_file     = NULL;
+    request->io_recall_all     = 1;
+    request->io_owns_lease_ref = 1;
 
     /* Fast path: no per-file state means no caching lease to recall. */
     if (!state || fh_len == 0) {
@@ -1860,7 +1912,12 @@ chimera_vfs_io_lease_release(struct chimera_vfs_request *request)
         chimera_vfs_implicit_finish_drain(state, file);
     }
 
-    chimera_vfs_state_put(state, file);
+    /* On the pinned-handle fast path the handle owns the long-lived reference,
+     * so only the inflight pin (decremented above) was this op's; the ref is
+     * released at handle teardown via chimera_vfs_file_state_release(). */
+    if (request->io_owns_lease_ref) {
+        chimera_vfs_state_put(state, file);
+    }
 } /* chimera_vfs_io_lease_release */
 
 SYMBOL_EXPORT void

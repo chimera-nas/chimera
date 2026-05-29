@@ -191,6 +191,10 @@ chimera_vfs_close_thread_sweep(
                           chimera_vfs_close_thread_callback,
                           close_thread);
 
+        /* defer_close removed the handle from the bucket but frees the struct
+         * here (not via open_cache_free), so drop its anchored lease ref. */
+        chimera_vfs_file_state_release(handle->file_state);
+
         free(handle);
     }
 
