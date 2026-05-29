@@ -79,7 +79,9 @@ class ChimeraAdminClient:
         except requests.exceptions.HTTPError as e:
             raise ChimeraAdminError(
                 f"HTTP error: {e}",
-                status_code=e.response.status_code if e.response else None,
+                status_code=e.response.status_code
+                if e.response is not None
+                else None,
             ) from e
         except requests.exceptions.RequestException as e:
             raise ChimeraAdminError(f"Request failed: {e}") from e
@@ -97,6 +99,17 @@ class ChimeraAdminClient:
             ChimeraAdminError: If the request fails
         """
         return self._request("GET", "/version")
+
+    def get_openapi(self) -> dict:
+        """Get the server's OpenAPI specification.
+
+        Returns:
+            The OpenAPI 3.0 document describing the REST API.
+
+        Raises:
+            ChimeraAdminError: If the request fails
+        """
+        return self._request("GET", "/api/openapi.json")
 
     # Users API
 
@@ -128,30 +141,44 @@ class ChimeraAdminClient:
     def create_user(
         self,
         username: str,
-        uid: int,
-        gid: int,
+        uid: Optional[int] = None,
+        gid: Optional[int] = None,
         password: Optional[str] = None,
+        smbpasswd: Optional[str] = None,
         gids: Optional[list] = None,
     ) -> dict:
         """Create a new builtin user.
 
         Args:
-            username: Username for the new user.
-            uid: User ID.
-            gid: Primary group ID.
+            username: Username for the new user (required).
+            uid: User ID. Optional; the server defaults to 0 when omitted.
+            gid: Primary group ID. Optional; the server defaults to 0 when
+                omitted.
             password: Optional password.
-            gids: Optional list of supplementary group IDs.
+            smbpasswd: Optional SMB/NTLM password hash.
+            gids: Optional list of supplementary group IDs (at most 64).
 
         Returns:
             Response message.
 
         Raises:
-            ChimeraAdminError: If the request fails
+            ValueError: If more than 64 supplementary group IDs are given.
+            ChimeraAdminError: If the request fails (e.g. 400 for missing or
+                invalid fields, 500 if the server fails to create the user).
         """
-        data = {"username": username, "uid": uid, "gid": gid}
+        if gids is not None and len(gids) > 64:
+            raise ValueError("at most 64 supplementary groups are allowed")
+
+        data = {"username": username}
+        if uid is not None:
+            data["uid"] = uid
+        if gid is not None:
+            data["gid"] = gid
         if password:
             data["password"] = password
-        if gids:
+        if smbpasswd:
+            data["smbpasswd"] = smbpasswd
+        if gids is not None:
             data["gids"] = gids
         return self._request("POST", "/api/v1/users", json=data)
 
@@ -352,7 +379,9 @@ class ChimeraAdminClient:
         except requests.exceptions.HTTPError as e:
             raise ChimeraAdminError(
                 f"HTTP error: {e}",
-                status_code=e.response.status_code if e.response else None,
+                status_code=e.response.status_code
+                if e.response is not None
+                else None,
             ) from e
         except requests.exceptions.RequestException as e:
             raise ChimeraAdminError(f"Request failed: {e}") from e

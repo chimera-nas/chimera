@@ -99,6 +99,7 @@ check: syntax-check build_release test_release build_debug test_debug build_clan
 
 .PHONY: docs
 docs:
+	@echo "API reference: docs/api-reference.md"
 	@echo "API documentation: docs/api.html"
 	@echo "OpenAPI spec: docs/openapi.json"
 	@echo "Run 'cd docs && python3 -m http.server' to preview locally"

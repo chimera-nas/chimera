@@ -38,7 +38,8 @@ RUN apt-get -y update && \
     libxxhash-dev liburcu-dev librdmacm-dev liburing-dev libaio-dev libunwind-dev librocksdb-dev libcurl4-openssl-dev clangd uthash-dev libnuma-dev \
     libcurl4-openssl-dev build-essential ruby-full autoconf automake make libtool pkg-config libs3-dev gh npm reuse libssl-dev openssl \
     libkrb5-3 libkrb5-dev libgssapi-krb5-2 libwbclient-dev curl jq libicu-dev awscli \
-    krb5-kdc krb5-admin-server krb5-user python3-pip python3-setuptools \
+    krb5-kdc krb5-admin-server krb5-user python3-pip python3-setuptools python3-venv \
+    dh-python pybuild-plugin-pyproject debhelper-compat \
     samba samba-ad-dc samba-ad-provision samba-vfs-modules smbclient samba-testsuite && \
     gem install jekyll bundler
 

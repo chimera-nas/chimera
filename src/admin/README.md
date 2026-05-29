@@ -31,6 +31,22 @@ with ChimeraAdminClient(host="localhost", port=8080) as client:
     print(client.get_version())
 ```
 
+### User management
+
+```python
+with ChimeraAdminClient(host="localhost", port=8080) as client:
+    # uid/gid default to 0 when omitted; gids is capped at 64 entries
+    client.create_user("alice", uid=1000, gid=1000, gids=[27, 44])
+
+    # A minimal user (uid/gid default to 0)
+    client.create_user("svc")
+
+    print(client.list_users())
+    print(client.get_user("alice"))
+
+    client.delete_user("svc")
+```
+
 ## Configuration
 
 The REST API must be enabled in the Chimera server configuration:

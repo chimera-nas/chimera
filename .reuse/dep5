@@ -27,3 +27,8 @@ License: Unlicense
 Files: src/server/rest/swagger/swagger-ui-bundle.min.js src/server/rest/swagger/swagger-ui-standalone-preset.min.js src/server/rest/swagger/swagger-ui.min.css
 Copyright: SmartBear Software
 License: Apache-2.0
+
+# Debian packaging metadata for the chimera-admin package
+Files: src/admin/debian/* src/admin/debian/source/format
+Copyright: 2025-2026 Chimera-NAS Project Contributors
+License: Apache-2.0

@@ -52,28 +52,13 @@ chimera_rest_handle_users_list(
     struct chimera_rest_thread *thread)
 {
     struct user_list_ctx ctx;
-    char                *json_str;
-    struct evpl_iovec    iov;
-    int                  len;
 
     ctx.array = json_array();
 
     chimera_server_iterate_users(thread->shared->server,
                                  user_to_json_callback, &ctx);
 
-    json_str = json_dumps(ctx.array, JSON_COMPACT);
-    json_decref(ctx.array);
-
-    len = strlen(json_str);
-    evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
-    memcpy(evpl_iovec_data(&iov), json_str, len);
-    evpl_iovec_set_length(&iov, len);
-    free(json_str);
-
-    evpl_http_request_add_header(request, "Content-Type", "application/json");
-    evpl_http_request_add_datav(request, &iov, 1);
-    evpl_http_server_set_response_length(request, len);
-    evpl_http_server_dispatch_default(request, 200);
+    chimera_rest_send_json(evpl, request, 200, ctx.array);
 } /* chimera_rest_handle_users_list */
 
 void
@@ -86,31 +71,12 @@ chimera_rest_handle_users_get(
     const struct chimera_vfs_user *user;
     json_t                        *obj;
     json_t                        *gids_array;
-    char                          *json_str;
-    struct evpl_iovec              iov;
-    int                            len;
     uint32_t                       i;
 
     user = chimera_server_get_user(thread->shared->server, username);
     if (!user) {
-        obj = json_object();
-        json_object_set_new(obj, "error", json_string("Not Found"));
-        json_object_set_new(obj, "message",
-                            json_string("User does not exist"));
-        json_str = json_dumps(obj, JSON_COMPACT);
-        json_decref(obj);
-
-        len = strlen(json_str);
-        evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
-        memcpy(evpl_iovec_data(&iov), json_str, len);
-        evpl_iovec_set_length(&iov, len);
-        free(json_str);
-
-        evpl_http_request_add_header(request, "Content-Type",
-                                     "application/json");
-        evpl_http_request_add_datav(request, &iov, 1);
-        evpl_http_server_set_response_length(request, len);
-        evpl_http_server_dispatch_default(request, 404);
+        chimera_rest_send_error(evpl, request, 404, "Not Found",
+                                "User does not exist");
         return;
     }
 
@@ -126,19 +92,7 @@ chimera_rest_handle_users_get(
     }
     json_object_set_new(obj, "gids", gids_array);
 
-    json_str = json_dumps(obj, JSON_COMPACT);
-    json_decref(obj);
-
-    len = strlen(json_str);
-    evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
-    memcpy(evpl_iovec_data(&iov), json_str, len);
-    evpl_iovec_set_length(&iov, len);
-    free(json_str);
-
-    evpl_http_request_add_header(request, "Content-Type", "application/json");
-    evpl_http_request_add_datav(request, &iov, 1);
-    evpl_http_server_set_response_length(request, len);
-    evpl_http_server_dispatch_default(request, 200);
+    chimera_rest_send_json(evpl, request, 200, obj);
 } /* chimera_rest_handle_users_get */
 
 void
@@ -149,130 +103,68 @@ chimera_rest_handle_users_create(
     const char                 *body,
     int                         body_len)
 {
-    json_t           *root;
-    json_error_t      error;
-    const char       *username;
-    const char       *password = NULL;
-    json_int_t        uid, gid;
-    json_t           *gids_array;
-    uint32_t          gids[64];
-    uint32_t          ngids = 0;
-    int               rc;
-    json_t           *obj;
-    char             *json_str;
-    struct evpl_iovec iov;
-    int               len;
-    size_t            i;
+    json_t      *root;
+    json_error_t error;
+    const char  *username;
+    const char  *password = NULL;
+    const char  *smbpasswd_val;
+    json_int_t   uid, gid;
+    json_t      *gids_array;
+    uint32_t     gids[64];
+    uint32_t     ngids = 0;
+    int          rc;
+    json_t      *obj;
+    size_t       i;
 
     root = json_loadb(body, body_len, 0, &error);
     if (!root) {
-        obj = json_object();
-        json_object_set_new(obj, "error", json_string("Bad Request"));
-        json_object_set_new(obj, "message", json_string(error.text));
-        json_str = json_dumps(obj, JSON_COMPACT);
-        json_decref(obj);
-
-        len = strlen(json_str);
-        evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
-        memcpy(evpl_iovec_data(&iov), json_str, len);
-        evpl_iovec_set_length(&iov, len);
-        free(json_str);
-
-        evpl_http_request_add_header(request, "Content-Type",
-                                     "application/json");
-        evpl_http_request_add_datav(request, &iov, 1);
-        evpl_http_server_set_response_length(request, len);
-        evpl_http_server_dispatch_default(request, 400);
+        chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                error.text);
         return;
     }
 
     username = json_string_value(json_object_get(root, "username"));
     if (!username) {
         json_decref(root);
-        obj = json_object();
-        json_object_set_new(obj, "error", json_string("Bad Request"));
-        json_object_set_new(obj, "message",
-                            json_string("Missing required field: username"));
-        json_str = json_dumps(obj, JSON_COMPACT);
-        json_decref(obj);
-
-        len = strlen(json_str);
-        evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
-        memcpy(evpl_iovec_data(&iov), json_str, len);
-        evpl_iovec_set_length(&iov, len);
-        free(json_str);
-
-        evpl_http_request_add_header(request, "Content-Type",
-                                     "application/json");
-        evpl_http_request_add_datav(request, &iov, 1);
-        evpl_http_server_set_response_length(request, len);
-        evpl_http_server_dispatch_default(request, 400);
+        chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                "Missing required field: username");
         return;
     }
 
-    password = json_string_value(json_object_get(root, "password"));
-    uid      = json_integer_value(json_object_get(root, "uid"));
-    gid      = json_integer_value(json_object_get(root, "gid"));
+    password      = json_string_value(json_object_get(root, "password"));
+    uid           = json_integer_value(json_object_get(root, "uid"));
+    gid           = json_integer_value(json_object_get(root, "gid"));
+    smbpasswd_val = json_string_value(json_object_get(root, "smbpasswd"));
 
-    {
-        const char *smbpasswd_val;
-        smbpasswd_val = json_string_value(json_object_get(root, "smbpasswd"));
-
-        gids_array = json_object_get(root, "gids");
-        if (gids_array && json_is_array(gids_array)) {
-            ngids = json_array_size(gids_array);
-            if (ngids > 64) {
-                ngids = 64;
-            }
-            for (i = 0; i < ngids; i++) {
-                gids[i] = json_integer_value(json_array_get(gids_array, i));
-            }
+    gids_array = json_object_get(root, "gids");
+    if (gids_array && json_is_array(gids_array)) {
+        ngids = json_array_size(gids_array);
+        if (ngids > 64) {
+            json_decref(root);
+            chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                    "Too many supplementary groups (maximum 64)");
+            return;
         }
-
-        rc = chimera_server_add_user(thread->shared->server, username,
-                                     password, smbpasswd_val, NULL, uid, gid,
-                                     ngids, gids, 1);
+        for (i = 0; i < ngids; i++) {
+            gids[i] = json_integer_value(json_array_get(gids_array, i));
+        }
     }
+
+    rc = chimera_server_add_user(thread->shared->server, username,
+                                 password, smbpasswd_val, NULL, uid, gid,
+                                 ngids, gids, 1);
 
     json_decref(root);
 
     if (rc != 0) {
-        obj = json_object();
-        json_object_set_new(obj, "error", json_string("Internal Server Error"));
-        json_object_set_new(obj, "message",
-                            json_string("Failed to create user"));
-        json_str = json_dumps(obj, JSON_COMPACT);
-        json_decref(obj);
-
-        len = strlen(json_str);
-        evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
-        memcpy(evpl_iovec_data(&iov), json_str, len);
-        evpl_iovec_set_length(&iov, len);
-        free(json_str);
-
-        evpl_http_request_add_header(request, "Content-Type",
-                                     "application/json");
-        evpl_http_request_add_datav(request, &iov, 1);
-        evpl_http_server_set_response_length(request, len);
-        evpl_http_server_dispatch_default(request, 500);
+        chimera_rest_send_error(evpl, request, 500, "Internal Server Error",
+                                "Failed to create user");
         return;
     }
 
     obj = json_object();
     json_object_set_new(obj, "message", json_string("User created"));
-    json_str = json_dumps(obj, JSON_COMPACT);
-    json_decref(obj);
-
-    len = strlen(json_str);
-    evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
-    memcpy(evpl_iovec_data(&iov), json_str, len);
-    evpl_iovec_set_length(&iov, len);
-    free(json_str);
-
-    evpl_http_request_add_header(request, "Content-Type", "application/json");
-    evpl_http_request_add_datav(request, &iov, 1);
-    evpl_http_server_set_response_length(request, len);
-    evpl_http_server_dispatch_default(request, 201);
+    chimera_rest_send_json(evpl, request, 201, obj);
 } /* chimera_rest_handle_users_create */
 
 void
@@ -282,33 +174,13 @@ chimera_rest_handle_users_delete(
     struct chimera_rest_thread *thread,
     const char                 *username)
 {
-    int               rc;
-    json_t           *obj;
-    char             *json_str;
-    struct evpl_iovec iov;
-    int               len;
+    int rc;
 
     rc = chimera_server_remove_user(thread->shared->server, username);
 
     if (rc != 0) {
-        obj = json_object();
-        json_object_set_new(obj, "error", json_string("Not Found"));
-        json_object_set_new(obj, "message",
-                            json_string("User does not exist"));
-        json_str = json_dumps(obj, JSON_COMPACT);
-        json_decref(obj);
-
-        len = strlen(json_str);
-        evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
-        memcpy(evpl_iovec_data(&iov), json_str, len);
-        evpl_iovec_set_length(&iov, len);
-        free(json_str);
-
-        evpl_http_request_add_header(request, "Content-Type",
-                                     "application/json");
-        evpl_http_request_add_datav(request, &iov, 1);
-        evpl_http_server_set_response_length(request, len);
-        evpl_http_server_dispatch_default(request, 404);
+        chimera_rest_send_error(evpl, request, 404, "Not Found",
+                                "User does not exist");
         return;
     }
 

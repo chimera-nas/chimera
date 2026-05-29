@@ -44,3 +44,17 @@ class TestVersion:
                 client.get_version()
 
         assert "Connection failed" in str(exc_info.value)
+
+
+class TestOpenAPI:
+    """Tests for the OpenAPI specification endpoint."""
+
+    def test_get_openapi(self, chimera_server):
+        """Test that we can retrieve the OpenAPI specification."""
+        host, port = chimera_server
+
+        with ChimeraAdminClient(host=host, port=port) as client:
+            spec = client.get_openapi()
+
+        assert spec["openapi"].startswith("3.")
+        assert "/users" in spec["paths"]
