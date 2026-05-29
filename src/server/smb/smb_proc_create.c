@@ -960,12 +960,15 @@ chimera_smb_create_open_at_callback(
      * implicitly holds it and we do not gate it here.  A newly-created object
      * reached via OPEN_IF/OVERWRITE_IF/SUPERSEDE carries the owner-full-control
      * default (or inherited) ACL, so the creator passes this check naturally. */
-    if (request->create.create_disposition != SMB2_FILE_CREATE &&
-        chimera_smb_create_check_access(request, attr) != SMB2_STATUS_SUCCESS) {
-        chimera_vfs_release(vfs_thread, oh);
-        chimera_vfs_release(vfs_thread, request->create.parent_handle);
-        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
-        return;
+    if (request->create.create_disposition != SMB2_FILE_CREATE) {
+        uint32_t access_status = chimera_smb_create_check_access(request, attr);
+
+        if (access_status != SMB2_STATUS_SUCCESS) {
+            chimera_vfs_release(vfs_thread, oh);
+            chimera_vfs_release(vfs_thread, request->create.parent_handle);
+            chimera_smb_complete_request(request, access_status);
+            return;
+        }
     }
 
     /* Named-stream open: the base file is now open; open the stream on it and
@@ -1059,6 +1062,15 @@ chimera_smb_create_check_access(
     uint32_t req;
     uint32_t granted;
 
+    /* ACCESS_SYSTEM_SECURITY (open a handle to the SACL) requires
+     * SeSecurityPrivilege.  chimera has no privilege model and grants it to no
+     * unprivileged caller, so deny it as Windows does -- STATUS_PRIVILEGE_NOT_HELD
+     * -- rather than silently ignoring the bit. */
+    if ((da & SMB2_ACCESS_SYSTEM_SECURITY) &&
+        request->session_handle->session->cred.uid != 0) {
+        return SMB2_STATUS_PRIVILEGE_NOT_HELD;
+    }
+
     /* Requested rights, with the four NT generic bits expanded to their
      * specific rights and the generic bits themselves dropped.  MAXIMUM_ALLOWED
      * and ACCESS_SYSTEM_SECURITY are not gated here.  Any other requested bit
@@ -1083,7 +1095,12 @@ chimera_smb_create_check_access(
         req |= 0x00120116; /* WRITE_DATA|APPEND|WRITE_NAMED_ATTRS|WRITE_ATTRS|READ_ACL|SYNC */
     }
     if (da & SMB2_GENERIC_EXECUTE) {
-        req |= 0x001200a0; /* EXECUTE|READ_ATTRS|READ_ACL|SYNC */
+        /* FILE_GENERIC_EXECUTE without the standalone FILE_EXECUTE data right:
+         * a caller able to read a file may also open it for generic-execute, so
+         * its required bits are a subset of GENERIC_READ.  (A bare FILE_EXECUTE
+         * request keeps the 0x20 bit below and is still gated on an execute
+         * grant.) */
+        req |= 0x00120080; /* READ_ATTRS|READ_ACL|SYNC */
     }
     if (da & SMB2_GENERIC_ALL) {
         req |= CHIMERA_ACE_MASK_ALL;
@@ -1203,9 +1220,11 @@ chimera_smb_create_open_getattr_callback(
         request->create.r_open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY;
     }
 
-    if (chimera_smb_create_check_access(request, attr) != SMB2_STATUS_SUCCESS) {
+    uint32_t access_status = chimera_smb_create_check_access(request, attr);
+
+    if (access_status != SMB2_STATUS_SUCCESS) {
         chimera_smb_open_file_release(request, request->create.r_open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        chimera_smb_complete_request(request, access_status);
         return;
     }
 

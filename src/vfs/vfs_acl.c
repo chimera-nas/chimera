@@ -88,6 +88,12 @@ ace_applies(
                     return cred_in_group(cred, owner_gid);
                 case CHIMERA_WHO_EVERYONE:
                     return 1;
+                case CHIMERA_WHO_AUTHENTICATED:
+                    /* AUTHENTICATED@ (S-1-5-11, "Authenticated Users") matches
+                     * any caller with an established, non-anonymous identity.
+                     * AUTH_NONE is short-circuited to a full grant before ACL
+                     * evaluation, so a cred reaching here is authenticated. */
+                    return cred->flavor != CHIMERA_VFS_AUTH_NONE;
                 case CHIMERA_WHO_OWNER_RIGHTS:
                     /* OWNER RIGHTS matches the caller when it is the owner. */
                     return (uint64_t) cred->uid == owner_uid;
