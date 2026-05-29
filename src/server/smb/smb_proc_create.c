@@ -386,7 +386,13 @@ chimera_smb_create_gen_open_file(
         bool backend_copy_safe =
             (oh->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE) != 0;
 
-        if (req_vfs != 0 && caching_touches_data && backend_copy_safe) {
+        /* An explicitly requested SMB2 lease (RqLs) is acquired even for an
+         * attribute-only ("stat") open: a handle/read-caching lease is about the
+         * handle, not data access, and such an open is still eligible for a
+         * durable handle (MS-SMB2).  The caching_touches_data gate only governs
+         * the implicit legacy-oplock path, where an attribute probe must not
+         * acquire an oplock. */
+        if (req_vfs != 0 && (caching_touches_data || via_rqls) && backend_copy_safe) {
             file_state = chimera_vfs_state_get(vfs_state,
                                                oh->fh, oh->fh_len,
                                                oh->fh_hash, true);
@@ -1731,8 +1737,19 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
     bool                              cold = false;
     int                               bucket;
 
-    /* MS-SMB2 3.3.5.9.7: a v1 durable reconnect (DHnC) that also carries a v2
-     * durable request/reconnect context is malformed. */
+    /* Reject malformed reconnect-context combinations:
+     *   - DH2C (3.3.5.9.12) must stand alone: combining it with ANY other
+     *     durable context (DHnQ, DH2Q, or DHnC) is INVALID_PARAMETER.
+     *   - DHnC (3.3.5.9.7) may carry a v1 durable *request* (DHnQ) -- the request
+     *     is simply ignored -- but combining it with a v2 context (DH2Q or DH2C)
+     *     is INVALID_PARAMETER.
+     * So a lone DHnC, a lone DH2C, or DHnC+DHnQ are all valid reconnects. */
+    if ((ctx & CHIMERA_SMB_CREATE_CTX_DH2C) &&
+        (ctx & (CHIMERA_SMB_CREATE_CTX_DHNQ | CHIMERA_SMB_CREATE_CTX_DH2Q |
+                CHIMERA_SMB_CREATE_CTX_DHNC))) {
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
     if ((ctx & CHIMERA_SMB_CREATE_CTX_DHNC) &&
         (ctx & (CHIMERA_SMB_CREATE_CTX_DH2Q | CHIMERA_SMB_CREATE_CTX_DH2C))) {
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
