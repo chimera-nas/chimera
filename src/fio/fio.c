@@ -20,6 +20,7 @@
 #include "optgroup.h"
 
 #include "common/macros.h"
+#include "common/common_config.h"
 
 
 #define chimera_fio_debug(...) chimera_debug("fio", __FILE__, __LINE__, __VA_ARGS__)
@@ -303,6 +304,17 @@ fio_chimera_init(struct thread_data *td)
 
         struct chimera_vfs_cred root_cred;
         chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+
+        /* Initialize evpl before the client (and the first evpl_create below),
+         * applying the shared "common" config (huge pages / slab size) from the
+         * loaded config.  `config` may be NULL when no config file was given. */
+        {
+            struct evpl_global_config *evpl_config = evpl_global_config_init();
+
+            chimera_apply_common_config(config, evpl_config);
+            evpl_init(evpl_config);
+        }
+
         ChimeraClient = chimera_client_init(ChimeraClientConfig, &root_cred, ChimeraMetrics);
 
         evpl          = evpl_create(NULL);
