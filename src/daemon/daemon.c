@@ -795,6 +795,16 @@ main(
 
     chimera_server_destroy(server);
 
+    /* Optionally persist a final metrics scrape (common.metrics_file) before
+     * tearing down the registry, so short-lived runs keep their metrics. */
+    {
+        const char *metrics_file = chimera_common_metrics_file(config);
+
+        if (metrics_file) {
+            chimera_metrics_dump_file(chimera_metrics_get(metrics), metrics_file);
+        }
+    }
+
     chimera_metrics_destroy(metrics);
 
     chimera_server_info("Server shutdown complete.");
