@@ -364,6 +364,7 @@ struct chimera_client_config {
     int                           async_delegation_threads;
     int                           cache_ttl;
     int                           max_fds;
+    enum chimera_tcp_flavor       tcp_flavor;
     char                          kv_module[64];
     struct chimera_vfs_module_cfg modules[CHIMERA_CLIENT_MAX_MODULES];
     int                           num_modules;

@@ -92,6 +92,9 @@ chimera_nfs_init(
     shared->servers     = calloc(shared->max_servers, sizeof(*shared->servers));
     shared->servers_map = NULL;
 
+    /* Default until the common tcp_flavor is observed at mount time. */
+    shared->tcp_protocol = EVPL_STREAM_SOCKET_TCP;
+
     PORTMAP_V2_init(&shared->portmap_v2);
     NFS_MOUNT_V3_init(&shared->mount_v3);
     NFS_V3_init(&shared->nfs_v3);
@@ -243,6 +246,10 @@ chimera_nfs_dispatch(
     int                               nfsvers;
 
     if (request->opcode == CHIMERA_VFS_OP_MOUNT) {
+        /* Resolve the common TCP flavor for outbound connections from the
+         * VFS once we have a thread/vfs in hand. Constant per process. */
+        shared->tcp_protocol = chimera_tcp_flavor_to_protocol(request->thread->vfs->tcp_flavor);
+
         nfsvers = chimera_nfs_get_mount_version(&request->mount.options);
         if (nfsvers < 0) {
             chimera_nfsclient_error("Invalid NFS version in mount options");

@@ -327,6 +327,10 @@ fio_chimera_init(struct thread_data *td)
             }
         }
 
+        /* Honor the shared common tcp_flavor for outbound client connections. */
+        chimera_client_config_set_tcp_flavor(ChimeraClientConfig,
+                                             chimera_common_tcp_flavor(config));
+
         struct chimera_vfs_cred root_cred;
         chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
 

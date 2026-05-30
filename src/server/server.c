@@ -863,15 +863,7 @@ chimera_server_config_get_tcp_flavor(const struct chimera_server_config *config)
 SYMBOL_EXPORT enum evpl_protocol_id
 chimera_server_config_get_tcp_stream_protocol(const struct chimera_server_config *config)
 {
-    switch (config->tcp_flavor) {
-        case CHIMERA_TCP_FLAVOR_IO_URING:
-            return EVPL_STREAM_IO_URING_TCP;
-        case CHIMERA_TCP_FLAVOR_XLIO:
-            return EVPL_STREAM_XLIO_TCP;
-        case CHIMERA_TCP_FLAVOR_PLAIN:
-        default:
-            return EVPL_STREAM_SOCKET_TCP;
-    } /* switch */
+    return chimera_tcp_flavor_to_protocol(config->tcp_flavor);
 } /* chimera_server_config_get_tcp_stream_protocol */
 
 static void
@@ -1142,6 +1134,10 @@ chimera_server_init(
                                    config->kv_module,
                                    config->cache_ttl,
                                    metrics);
+
+    /* Propagate the common TCP flavor so VFS client modules (e.g. nfs)
+     * open outbound connections with the same transport. */
+    chimera_vfs_set_tcp_flavor(server->vfs, config->tcp_flavor);
 
     /* Enable the pNFS feature whenever configured.  Orchestrated flex-files
      * needs a data-server table (below); a layout-sourcing backend (e.g. diskfs

@@ -249,31 +249,8 @@ main(
     evpl_global_config_set_huge_pages(evpl_global_config, 1);
     evpl_global_config_set_libaio_max_pending(evpl_global_config, 1024);
 
-    /* Only enable XLIO in libevpl when we actually plan to use it.
-     * libevpl defaults xlio_enabled=1 and starts XLIO's polling
-     * machinery in every worker thread regardless of whether any
-     * socket binds to EVPL_STREAM_XLIO_TCP — that's pure overhead
-     * for plain-TCP and RDMA deployments.
-     */
-    {
-        enum chimera_tcp_flavor flavor = CHIMERA_TCP_FLAVOR_PLAIN;
-        json_t                 *flavor_value;
-
-        if (server_params) {
-            flavor_value = json_object_get(server_params, "tcp_flavor");
-            if (flavor_value && json_is_string(flavor_value)) {
-                const char *s = json_string_value(flavor_value);
-                if (strcasecmp(s, "xlio") == 0) {
-                    flavor = CHIMERA_TCP_FLAVOR_XLIO;
-                } else if (strcasecmp(s, "io_uring") == 0) {
-                    flavor = CHIMERA_TCP_FLAVOR_IO_URING;
-                }
-            }
-        }
-
-        evpl_global_config_set_xlio_enabled(evpl_global_config,
-                                            flavor == CHIMERA_TCP_FLAVOR_XLIO);
-    }
+    /* XLIO enable/disable is derived from the common tcp_flavor and applied
+     * by chimera_apply_common_config() below, before evpl_init(). */
 
     if (server_params) {
         json_t *prealloc_slabs_value   = json_object_get(server_params, "preallocate_slabs");
@@ -564,19 +541,7 @@ main(
         chimera_server_config_set_soft_fail_bad_req(server_config, 1);
     }
 
-    json_value = json_object_get(server_params, "tcp_flavor");
-    if (json_is_string(json_value)) {
-        str_value = json_string_value(json_value);
-        if (strcasecmp(str_value, "plain") == 0) {
-            chimera_server_config_set_tcp_flavor(server_config, CHIMERA_TCP_FLAVOR_PLAIN);
-        } else if (strcasecmp(str_value, "io_uring") == 0) {
-            chimera_server_config_set_tcp_flavor(server_config, CHIMERA_TCP_FLAVOR_IO_URING);
-        } else if (strcasecmp(str_value, "xlio") == 0) {
-            chimera_server_config_set_tcp_flavor(server_config, CHIMERA_TCP_FLAVOR_XLIO);
-        } else {
-            chimera_server_error("Unknown tcp_flavor '%s', defaulting to plain", str_value);
-        }
-    }
+    chimera_server_config_set_tcp_flavor(server_config, chimera_common_tcp_flavor(config));
 
     // Parse SMB auth configuration
     json_t *smb_auth = json_object_get(server_params, "smb_auth");

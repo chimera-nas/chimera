@@ -31,12 +31,6 @@ struct chimera_server_config_smb_nic {
     uint8_t  rdma;
 };
 
-enum chimera_tcp_flavor {
-    CHIMERA_TCP_FLAVOR_PLAIN    = 0,
-    CHIMERA_TCP_FLAVOR_IO_URING = 1,
-    CHIMERA_TCP_FLAVOR_XLIO     = 2,
-};
-
 
 struct chimera_server_config *
 chimera_server_config_init(

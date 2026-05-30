@@ -29,6 +29,11 @@ chimera_client_config_add_module(
     const char                   *module_path,
     const char                   *config_data);
 
+void
+chimera_client_config_set_tcp_flavor(
+    struct chimera_client_config *config,
+    enum chimera_tcp_flavor       flavor);
+
 struct chimera_client *
 chimera_client_init(
     const struct chimera_client_config *config,

@@ -6,9 +6,47 @@
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <strings.h>
 #include <jansson.h>
 
 #include "evpl/evpl.h"
+#include "common/tcp_flavor.h"
+
+/*
+ * Read the TCP transport flavor from the top-level "common" section.  This is
+ * the shared setting honored by both the server (listen sockets) and the
+ * client (outbound connections).  Defaults to CHIMERA_TCP_FLAVOR_PLAIN when
+ * absent or unrecognized.  `root` is the parsed top-level config (may be NULL).
+ */
+static inline enum chimera_tcp_flavor
+chimera_common_tcp_flavor(json_t *root)
+{
+    json_t *common, *val;
+    const char *s;
+
+    if (!root) {
+        return CHIMERA_TCP_FLAVOR_PLAIN;
+    }
+
+    common = json_object_get(root, "common");
+    if (!json_is_object(common)) {
+        return CHIMERA_TCP_FLAVOR_PLAIN;
+    }
+
+    val = json_object_get(common, "tcp_flavor");
+    if (!json_is_string(val)) {
+        return CHIMERA_TCP_FLAVOR_PLAIN;
+    }
+
+    s = json_string_value(val);
+    if (strcasecmp(s, "xlio") == 0) {
+        return CHIMERA_TCP_FLAVOR_XLIO;
+    } else if (strcasecmp(s, "io_uring") == 0) {
+        return CHIMERA_TCP_FLAVOR_IO_URING;
+    }
+
+    return CHIMERA_TCP_FLAVOR_PLAIN;
+} /* chimera_common_tcp_flavor */
 
 /*
  * Parse a size from a JSON value.  A bare integer is taken as a byte count; a
@@ -86,6 +124,12 @@ chimera_apply_common_config(
 {
     json_t  *common, *val;
     uint64_t size;
+
+    /* Only enable XLIO in libevpl when the common tcp_flavor selects it;
+     * libevpl otherwise spins up XLIO polling in every worker thread. Done
+     * unconditionally (chimera_common_tcp_flavor handles a missing section). */
+    evpl_global_config_set_xlio_enabled(cfg,
+                                        chimera_common_tcp_flavor(root) == CHIMERA_TCP_FLAVOR_XLIO);
 
     if (!root) {
         return;
