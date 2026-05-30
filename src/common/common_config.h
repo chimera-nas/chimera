@@ -112,4 +112,14 @@ chimera_apply_common_config(
     if (val && chimera_parse_size(val, &size) == 0) {
         evpl_global_config_set_slab_size(cfg, size);
     }
+
+    val = json_object_get(common, "preallocate_slabs");
+    if (json_is_integer(val)) {
+        evpl_global_config_set_preallocate_slabs(cfg, json_integer_value(val));
+    }
+
+    val = json_object_get(common, "preallocate_threads");
+    if (json_is_integer(val)) {
+        evpl_global_config_set_preallocate_threads(cfg, json_integer_value(val));
+    }
 } /* chimera_apply_common_config */
