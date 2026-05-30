@@ -12891,8 +12891,14 @@ diskfs_allocate_floor_cb(
     diskfs_bt_op_free(thread, op);
 
     if (have && e.file_offset + e.length > p->loop_off) {
-        /* Already backed (written or unwritten): skip past this extent. */
-        p->loop_off = e.file_offset + e.length;
+        /* Already backed (written or unwritten): skip past this extent.  Round
+         * up to the next block: an extent that ends mid-block (e.g. a partial
+         * last block left by truncate) physically owns the rest of that block,
+         * so a gap allocation must start at the next block boundary.  Starting
+         * at an unaligned file_offset would pair it with a block-aligned device
+         * offset from the space map, breaking the file==device block alignment
+         * that diskfs's block I/O relies on. */
+        p->loop_off = (e.file_offset + e.length + 4095) & ~4095ULL;
         diskfs_allocate_reserve_step(request);
         return;
     }
