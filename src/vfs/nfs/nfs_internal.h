@@ -115,6 +115,7 @@ struct chimera_nfs_client_server {
     int                                 nfsvers;
     int                                 index;
     int                                 use_rdma;
+    int                                 nolock;
     enum evpl_protocol_id               rdma_protocol;
 
     struct evpl_endpoint               *portmap_endpoint;
