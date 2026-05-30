@@ -21,6 +21,7 @@
 #include "vfs/vfs_pnfs.h"
 #include "server/server_internal.h"
 #include "common/logging.h"
+#include "common/common_config.h"
 #include "metrics/metrics.h"
 #include "daemon.h"
 
@@ -314,6 +315,10 @@ main(
             rest_ssl_key  = auto_key_path;
         }
     }
+
+    /* Apply the shared "common" config section (huge pages / slab size) parsed
+     * from the same file, last, so it overrides the hardcoded defaults above. */
+    chimera_apply_common_config(config, evpl_global_config);
 
     evpl_init(evpl_global_config);
 
