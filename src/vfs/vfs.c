@@ -207,33 +207,40 @@ chimera_vfs_close_thread_wake_shutdown(
     struct evpl_doorbell *doorbell)
 {
     struct chimera_vfs_close_thread *close_thread = container_of(doorbell, struct chimera_vfs_close_thread, doorbell);
+    int                              shutdown     = close_thread->shutdown;
     uint64_t                         min_age, count;
 
-    pthread_mutex_lock(&close_thread->lock);
+    min_age = shutdown ? 0 : 100000000UL;
 
-    if (close_thread->shutdown) {
-        min_age = 0;
-    } else {
-        min_age = 100000000UL;
-    }
-
+    /* Sweep OUTSIDE close_thread->lock.  A close can re-enter this thread's
+     * event loop -- diskfs commit drains its submission queue with a nested
+     * evpl_continue() -- which re-fires this doorbell (and the periodic timer)
+     * on this same thread; holding the lock across the sweep would self-deadlock
+     * when the re-entrant callback tries to re-acquire it.  The lock guards only
+     * the shutdown cond handshake with chimera_vfs_destroy, and the sweep state
+     * it touches (num_pending, the open caches) is owned by this thread / the
+     * per-shard cache locks, so it needs no protection here. */
     count  = chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_path_cache, min_age);
     count += chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_file_cache, min_age);
 
-    if (close_thread->shutdown && count == 0 && close_thread->num_pending == 0) {
-        pthread_cond_signal(&close_thread->cond);
+    if (!shutdown) {
+        return;
+    }
+
+    if (count == 0 && close_thread->num_pending == 0) {
+        /* Fully drained: hand off to the waiter in chimera_vfs_destroy.  Signal
+         * under the lock so the wakeup can't be lost against its cond_wait. */
+        pthread_mutex_lock(&close_thread->lock);
         close_thread->signaled = 1;
+        pthread_cond_signal(&close_thread->cond);
         pthread_mutex_unlock(&close_thread->lock);
         return;
     }
 
-    if (close_thread->shutdown) {
-        evpl_ring_doorbell(doorbell);
-    }
+    /* Closes still in flight -- keep sweeping until they complete. */
+    evpl_ring_doorbell(doorbell);
 
-    pthread_mutex_unlock(&close_thread->lock);
-
-} /* chimera_vfs_close_thread_wake */
+} /* chimera_vfs_close_thread_wake_shutdown */
 
 static void
 chimera_vfs_close_thread_wake_timer(
@@ -243,14 +250,14 @@ chimera_vfs_close_thread_wake_timer(
     struct chimera_vfs_close_thread *close_thread = container_of(timer, struct chimera_vfs_close_thread, timer);
     uint64_t                         min_age;
 
-    pthread_mutex_lock(&close_thread->lock);
-
     min_age = 100000000UL;
 
+    /* No lock: the periodic sweep touches only this thread's state (num_pending)
+     * and the open caches (guarded by their own per-shard locks).  Holding
+     * close_thread->lock here would self-deadlock if a close re-enters the event
+     * loop and re-fires this timer (see chimera_vfs_close_thread_wake_shutdown). */
     chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_path_cache, min_age);
     chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_file_cache, min_age);
-
-    pthread_mutex_unlock(&close_thread->lock);
 
     /* Drop implicit I/O leases that have gone idle, bounding resident
      * per-file state for write-once / read-once workloads. */
