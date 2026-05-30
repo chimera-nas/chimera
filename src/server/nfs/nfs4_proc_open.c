@@ -113,8 +113,16 @@ chimera_nfs4_open_acquire_share(
  *     lease conflict matrix).
  * Otherwise the response carries OPEN_DELEGATE_NONE.  Must be called on the
  * client's connection thread (it may kick a CB_NULL probe).
+ *
+ * Returns true when the OPEN's response has been parked on the cb_path's
+ * probe-waiters list (a CB_NULL probe is in flight for this client and a
+ * concurrent earlier OPEN already triggered it).  In that case the caller
+ * MUST NOT call chimera_nfs4_open_complete -- the probe completion will
+ * resume the OPEN via chimera_nfs4_open_resume_after_probe.  Returns false
+ * for the normal path (granted or not), where the caller continues with
+ * chimera_nfs4_open_complete.
  */
-static void
+static bool
 chimera_nfs4_open_grant_delegation(
     struct nfs_request *req,
     struct OPEN4res    *res)
@@ -139,13 +147,13 @@ chimera_nfs4_open_grant_delegation(
     res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
 
     if (!chimera_server_config_get_nfs4_delegations(thread->shared->config)) {
-        return;
+        return false;
     }
     if (!client) {
-        return;
+        return false;
     }
     if (args->claim.claim != CLAIM_NULL && args->claim.claim != CLAIM_FH) {
-        return;
+        return false;
     }
 
     /* RFC 8881 §18.16: honor an explicit "no delegation wanted" request.  On
@@ -157,7 +165,7 @@ chimera_nfs4_open_grant_delegation(
             res->resok4.delegation.od_whynone.ond_why                    = WND4_NOT_WANTED;
             res->resok4.delegation.od_whynone.ond_server_will_push_deleg = 0;
         }
-        return;
+        return false;
     }
 
     /* A write open earns a write delegation; otherwise a pure-read open earns
@@ -169,12 +177,27 @@ chimera_nfs4_open_grant_delegation(
         deleg_type = OPEN_DELEGATE_READ;
         lease_mode = CHIMERA_VFS_LEASE_MODE_R;
     } else {
-        return;
+        return false;
     }
 
-    if (!nfs4_cb_ensure_probe(thread, client, req)) {
-        return;
-    }
+    /* Tri-state probe gate.  PATH_UP grants below; NO_PATH is the historical
+     * "no delegation this time" path (either DOWN, or this very OPEN just
+     * kicked the probe); DEFER parks the OPEN on the cb_path until the in-
+     * flight CB_NULL probe completes (handled by nfs4_cb_null_complete via
+     * chimera_nfs4_open_resume_after_probe).  Deferring is what lets a
+     * second OPEN that lands during the probe still receive a delegation,
+     * without changing the kicking OPEN's behavior -- so pynfs DELEG22's
+     * second OPEN gets the delegation it expects, while DELEG15d's plain
+     * c.create_file (which kicks the probe) continues to receive none. */
+    switch (nfs4_cb_grant_probe(thread, client, req)) {
+        case NFS4_CB_GRANT_PATH_UP:
+            break;
+        case NFS4_CB_GRANT_NO_PATH:
+            return false;
+        case NFS4_CB_GRANT_DEFER:
+            nfs4_cb_probe_park(client, req);
+            return true;
+    } /* switch */
 
     /* fh_hash must match the open-cache / SHARE-lease hashing so the
      * delegation and conflicting opens land on the same file_state. */
@@ -191,7 +214,7 @@ chimera_nfs4_open_grant_delegation(
     }
     pthread_mutex_unlock(&client->lock);
     if (exists) {
-        return;
+        return false;
     }
 
     deleg = nfs_delegation_create(client, deleg_type,
@@ -219,7 +242,7 @@ chimera_nfs4_open_grant_delegation(
     if (!file_state) {
         nfs_delegation_destroy(deleg, &thread->shared->nfs4_state_table,
                                thread->vfs_thread);
-        return;
+        return false;
     }
     deleg->file_state = file_state;
 
@@ -231,7 +254,7 @@ chimera_nfs4_open_grant_delegation(
         deleg->file_state = NULL;
         nfs_delegation_destroy(deleg, &thread->shared->nfs4_state_table,
                                thread->vfs_thread);
-        return;
+        return false;
     }
     deleg->lease_held = true;
 
@@ -255,6 +278,7 @@ chimera_nfs4_open_grant_delegation(
     perms->access_mask = ACE4_READ_DATA;
     perms->who.len     = sizeof(everyone) - 1;
     perms->who.data    = (void *) everyone;
+    return false;
 } /* chimera_nfs4_open_grant_delegation */
 
 /*
@@ -433,6 +457,24 @@ chimera_nfs4_open_complete(
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_open_complete */
 
+/*
+ * Resume an OPEN that parked on the cb_path probe-waiters list while a
+ * 4.0 CB_NULL probe was in flight.  Called by nfs4_cb_null_complete on the
+ * channel's owner thread, once cb_state has settled to UP or DOWN.  Re-runs
+ * the grant decision -- it can no longer DEFER -- and completes the OPEN.
+ */
+void
+chimera_nfs4_open_resume_after_probe(struct nfs_request *req)
+{
+    struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+    bool             deferred;
+
+    deferred = chimera_nfs4_open_grant_delegation(req, res);
+    chimera_nfs_abort_if(deferred,
+                         "OPEN resume after probe re-deferred");
+    chimera_nfs4_open_complete(req, NFS4_OK);
+} /* chimera_nfs4_open_resume_after_probe */
+
 static void
 chimera_nfs4_open_exclusive_verify(
     enum chimera_vfs_error          error_code,
@@ -506,9 +548,14 @@ chimera_nfs4_open_exclusive_verify(
              OPEN4_RESULT_LOCKTYPE_POSIX : 0);
     }
     res->resok4.num_attrset = 0;
-    chimera_nfs4_open_grant_delegation(req, res);
 
+    /* Release the parent handle before grant_delegation so the cb-probe
+    * defer path (which returns without completing the OPEN) does not leak
+    * it -- the resume callback only knows how to call open_complete. */
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+    if (chimera_nfs4_open_grant_delegation(req, res)) {
+        return; /* parked; resume from nfs4_cb_null_complete */
+    }
     chimera_nfs4_open_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_exclusive_verify */
 
@@ -593,7 +640,6 @@ chimera_nfs4_open_at_complete(
              OPEN4_RESULT_LOCKTYPE_POSIX : 0);
     }
     res->resok4.num_attrset = 0;
-    chimera_nfs4_open_grant_delegation(req, res);
 
     if (args->openhow.opentype == OPEN4_CREATE &&
         (args->openhow.how.mode == UNCHECKED4 || args->openhow.how.mode == GUARDED4)) {
@@ -617,7 +663,13 @@ chimera_nfs4_open_at_complete(
 
     chimera_nfs4_set_changeinfo(&res->resok4.cinfo, dir_pre_attr, dir_post_attr);
 
+    /* Release the parent handle before grant_delegation so the cb-probe
+    * defer path (which returns without completing the OPEN) does not leak
+    * it -- the resume callback only knows how to call open_complete. */
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+    if (chimera_nfs4_open_grant_delegation(req, res)) {
+        return; /* parked; resume from nfs4_cb_null_complete */
+    }
 
     chimera_nfs4_open_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_at_complete */
@@ -773,10 +825,14 @@ chimera_nfs4_open_claim_fh_complete(
              OPEN4_RESULT_LOCKTYPE_POSIX : 0);
     }
     res->resok4.num_attrset = 0;
-    chimera_nfs4_open_grant_delegation(req, res);
 
+    /* Release the parent handle before grant_delegation so the cb-probe
+    * defer path (which returns without completing the OPEN) does not leak
+    * it -- the resume callback only knows how to call open_complete. */
     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
-
+    if (chimera_nfs4_open_grant_delegation(req, res)) {
+        return; /* parked; resume from nfs4_cb_null_complete */
+    }
     chimera_nfs4_open_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_claim_fh_complete */
 

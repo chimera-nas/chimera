@@ -112,6 +112,34 @@ bool nfs4_cb_ensure_probe(
     struct nfs_request               *req);
 
 /*
+ * Tri-state grant decision: like nfs4_cb_ensure_probe, but distinguishes the
+ * just-triggered-probe case (NO_PATH; current behavior — the OPEN proceeds
+ * without a delegation) from someone-else-already-probing (DEFER; the OPEN
+ * parks until the probe completes, then resumes via nfs4_cb_probe_resume_open).
+ * Used by the OPEN delegation-grant path.
+ */
+enum nfs4_cb_grant_decision {
+    NFS4_CB_GRANT_PATH_UP,   /* cb_state == UP: grant may proceed */
+    NFS4_CB_GRANT_NO_PATH,   /* cb_state DOWN, or UNINIT->PROBING just kicked */
+    NFS4_CB_GRANT_DEFER,     /* cb_state == PROBING: caller must park */
+};
+
+enum nfs4_cb_grant_decision nfs4_cb_grant_probe(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_client                *client,
+    struct nfs_request               *req);
+
+/*
+ * Park `req` on `client`'s cb_path probe-waiters list, to be resumed when the
+ * in-flight CB_NULL probe completes.  Must be called immediately after
+ * nfs4_cb_grant_probe returns NFS4_CB_GRANT_DEFER, on the channel's owner
+ * thread (the OPEN handler runs there).
+ */
+void nfs4_cb_probe_park(
+    struct nfs_client  *client,
+    struct nfs_request *req);
+
+/*
  * Begin recalling `deleg` by sending CB_RECALL to its client.  Safe to call
  * from any thread; the work is marshalled to the channel's owner thread.
  * Takes a transient ref on `deleg` for the in-flight recall.  If no usable
