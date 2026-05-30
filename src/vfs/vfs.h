@@ -162,6 +162,14 @@ struct chimera_vfs_open_handle {
     uint8_t                         granted_valid;
     struct chimera_vfs_request     *blocked_requests;
     uint64_t                        vfs_private;
+    /* Backend-generic per-file lease/state anchor.  Attached lazily (once) on
+     * the first I/O through this cached handle via an acquire/release CAS in
+     * chimera_vfs_io_lease_acquire, and holds one long-lived reference for the
+     * handle's lifetime so per-I/O lease acquire/release can skip the
+     * bucket-locked chimera_vfs_state_get/put.  NULL for synthetic/transient
+     * handles and until the first I/O.  Released (state_put) at handle teardown,
+     * outside the open-cache shard lock. */
+    struct chimera_vfs_file_state  *file_state;
     void                            ( *callback )(
         struct chimera_vfs_request     *request,
         struct chimera_vfs_open_handle *handle);
@@ -183,6 +191,13 @@ struct chimera_vfs_open_handle {
     uint8_t                         doc_parent_fh[CHIMERA_VFS_FH_SIZE];
     char                            doc_name[CHIMERA_VFS_NAME_MAX];
 };
+
+/* Drop the per-file lease-state reference an open handle holds in
+ * handle->file_state (see that field).  Uses the file_state's own back-pointer
+ * to the owning state, so the open-cache teardown can release it without
+ * threading the state through.  No-op safe to call with a NULL argument. */
+void chimera_vfs_file_state_release(
+    struct chimera_vfs_file_state *file);
 
 
 typedef void (*chimera_vfs_lookup_callback_t)(
@@ -376,6 +391,14 @@ struct chimera_vfs_request {
     void                               ( *io_next )(
         struct chimera_vfs_request *request);
     struct chimera_vfs_file_state     *io_lease_file;
+    /* Cached open handle backing this I/O, set by the read/write dispatch.  When
+     * present (and non-synthetic) chimera_vfs_io_lease_acquire attaches the
+     * per-file lease state to handle->file_state once and reuses it, skipping the
+     * per-I/O bucket-locked chimera_vfs_state_get.  io_owns_lease_ref is then 0
+     * (the handle owns the long-lived reference, so io_lease_release must not
+     * state_put); 1 = the legacy path that takes and drops its own per-I/O ref. */
+    struct chimera_vfs_open_handle    *io_handle;
+    uint8_t                            io_owns_lease_ref;
     struct chimera_vfs_pending_acquire io_lease_ticket;
 
     struct chimera_vfs_open_handle    *pending_handle;

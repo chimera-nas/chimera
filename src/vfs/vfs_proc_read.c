@@ -138,9 +138,11 @@ chimera_vfs_read_dispatch(
         return;
     }
 
-    request->opcode                  = CHIMERA_VFS_OP_READ;
-    request->complete                = chimera_vfs_read_complete;
-    request->read.handle             = handle;
+    request->opcode      = CHIMERA_VFS_OP_READ;
+    request->complete    = chimera_vfs_read_complete;
+    request->read.handle = handle;
+    /* Anchor the implicit lease on the cached handle (chimera_vfs_io_lease_acquire). */
+    request->io_handle               = handle;
     request->read.offset             = offset;
     request->read.length             = count;
     request->read.iov                = iov;

@@ -216,6 +216,16 @@ chimera_vfs_open_cache_free(
     struct vfs_open_cache_shard    *shard,
     struct chimera_vfs_open_handle *handle)
 {
+    /* Drop the per-file lease-state reference the handle anchored, if any (see
+     * chimera_vfs_open_handle::file_state).  Safe under the shard lock:
+     * chimera_vfs_state_put takes a vfs_state bucket lock and no path takes a
+     * shard lock while holding a bucket lock, so there is no ordering cycle.
+     * NULL the field afterwards because the free list is reused without memset,
+     * so a recycled handle struct must not carry a stale pointer. */
+    if (handle->file_state) {
+        chimera_vfs_file_state_release(handle->file_state);
+        handle->file_state = NULL;
+    }
     LL_PREPEND(shard->free_handles, handle);
 } /* chimera_vfs_open_cache_free */
 

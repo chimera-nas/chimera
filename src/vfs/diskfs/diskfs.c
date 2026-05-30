@@ -1558,13 +1558,21 @@ diskfs_fh_to_inum(
  * (disk<<56 | ag<<32 | block_idx) where block_idx is a small, often dense or
  * stride-correlated integer, so the raw low bits have little entropy and
  * cluster inodes onto a handful of the 256 shards -- concentrating contention
- * on those few shard mutexes.  Run it through the VFS XXH3 helper (as used
- * elsewhere in the tree) so inodes spread evenly across shards.
+ * on those few shard mutexes.  Use the SplitMix64 finalizer to spread them
+ * evenly.  (This is a pure-integer mix rather than hashing &inum through XXH3:
+ * the byte-wise XXH3 read of a stack scalar trips -Werror=maybe-uninitialized
+ * when this is deeply inlined on some toolchains, and an integer finalizer is
+ * both immune to that and faster.)
  */
 static inline uint64_t
 diskfs_inum_hash(uint64_t inum)
 {
-    return chimera_vfs_hash(&inum, sizeof(inum));
+    uint64_t x = inum;
+
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    x =  x ^ (x >> 31);
+    return x;
 } /* diskfs_inum_hash */
 
 static inline struct diskfs_inode_shard *
@@ -1898,6 +1906,64 @@ static void diskfs_pin_cont_resume(
     struct diskfs_thread *thread,
     void                 *arg);
 
+/*
+ * Grant (or enqueue a waiter for) `inode` with the shard lock already held, and
+ * release the lock before returning.  Shared by diskfs_inode_acquire (after the
+ * rb-tree lookup) and diskfs_inode_acquire_pinned (lookup skipped because an
+ * open handle pins the inode).  On a compatible WRITE grant this pins the home
+ * block, which may async-load it and defer the callback.  `gen` is recorded on
+ * a parked waiter so a later grant can detect a stale generation.
+ */
+static void
+diskfs_inode_grant_locked(
+    struct diskfs_thread       *thread,
+    struct diskfs_txn          *txn,
+    struct diskfs_inode_shard  *shard,
+    struct diskfs_inode        *inode,
+    uint32_t                    gen,
+    enum diskfs_inode_lock_mode mode,
+    diskfs_inode_cb_t           cb,
+    void                       *private_data)
+{
+    struct diskfs_inode_waiter *w;
+
+    if (diskfs_inode_lock_compatible(inode, mode)) {
+        diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_HIT);
+        diskfs_inode_lock_grant(inode, mode);
+        diskfs_inode_lru_unlink(shard, inode);     /* busy now, not a candidate */
+        pthread_mutex_unlock(&shard->lock);
+        diskfs_txn_add_slot(txn, inode, mode);
+        if (mode == DISKFS_INODE_LOCK_WRITE) {
+            /* Pin the home block before reporting the grant; may async-load it
+             * (and defer cb) if it was evicted while the inode stayed cached. */
+            diskfs_inode_finish_write_pin(thread, txn, inode, cb, private_data);
+        } else {
+            cb(inode, CHIMERA_VFS_OK, private_data);
+        }
+        return;
+    }
+
+    w = diskfs_waiter_alloc(thread);
+    diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_WAIT);
+    w->txn          = txn;
+    w->mode         = mode;
+    w->gen          = gen;
+    w->cb           = cb;
+    w->private_data = private_data;
+    w->inode        = inode;
+    w->status       = CHIMERA_VFS_OK;
+    w->next         = NULL;
+
+    if (inode->wait_tail) {
+        inode->wait_tail->next = w;
+    } else {
+        inode->wait_head = w;
+    }
+    inode->wait_tail = w;
+
+    pthread_mutex_unlock(&shard->lock);
+} /* diskfs_inode_grant_locked */
+
 static void
 diskfs_inode_acquire(
     struct diskfs_thread       *thread,
@@ -1908,10 +1974,9 @@ diskfs_inode_acquire(
     diskfs_inode_cb_t           cb,
     void                       *private_data)
 {
-    struct diskfs_inode_shard  *shard;
-    struct diskfs_inode        *inode;
-    struct diskfs_inode_waiter *w;
-    int                         i;
+    struct diskfs_inode_shard *shard;
+    struct diskfs_inode       *inode;
+    int                        i;
 
     for (i = 0; i < txn->num_inodes; i++) {
         inode = txn->inodes[i].inode;
@@ -1955,42 +2020,43 @@ diskfs_inode_acquire(
         return;
     }
 
-    if (diskfs_inode_lock_compatible(inode, mode)) {
-        diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_HIT);
-        diskfs_inode_lock_grant(inode, mode);
-        diskfs_inode_lru_unlink(shard, inode);     /* busy now, not a candidate */
-        pthread_mutex_unlock(&shard->lock);
-        diskfs_txn_add_slot(txn, inode, mode);
-        if (mode == DISKFS_INODE_LOCK_WRITE) {
-            /* Pin the home block before reporting the grant; may async-load it
-             * (and defer cb) if it was evicted while the inode stayed cached. */
-            diskfs_inode_finish_write_pin(thread, txn, inode, cb, private_data);
-        } else {
-            cb(inode, CHIMERA_VFS_OK, private_data);
-        }
-        return;
-    }
-
-    w = diskfs_waiter_alloc(thread);
-    diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_WAIT);
-    w->txn          = txn;
-    w->mode         = mode;
-    w->gen          = gen;
-    w->cb           = cb;
-    w->private_data = private_data;
-    w->inode        = inode;
-    w->status       = CHIMERA_VFS_OK;
-    w->next         = NULL;
-
-    if (inode->wait_tail) {
-        inode->wait_tail->next = w;
-    } else {
-        inode->wait_head = w;
-    }
-    inode->wait_tail = w;
-
-    pthread_mutex_unlock(&shard->lock);
+    diskfs_inode_grant_locked(thread, txn, shard, inode, gen, mode, cb, private_data);
 } /* diskfs_inode_acquire */
+
+/*
+ * Acquire the inode lock on an inode already pinned by an open handle (its
+ * refcnt was bumped in diskfs_open_fh_inode_cb, so it is resident and will not
+ * be freed; gen bumps only on free).  This skips the fh->inum decode and the
+ * inode-cache rb-tree lookup -- the hot per-I/O cost on a warm handle -- but
+ * still takes the shard lock to serialize the lock-state grant against the
+ * concurrent release/completion path.
+ */
+static void
+diskfs_inode_acquire_pinned(
+    struct diskfs_thread       *thread,
+    struct diskfs_txn          *txn,
+    struct diskfs_inode        *inode,
+    enum diskfs_inode_lock_mode mode,
+    diskfs_inode_cb_t           cb,
+    void                       *private_data)
+{
+    struct diskfs_inode_shard *shard;
+    int                        i;
+
+    /* Already locked in this txn: reuse the held grant (matches the txn-slot
+     * fast path in diskfs_inode_acquire). */
+    for (i = 0; i < txn->num_inodes; i++) {
+        if (txn->inodes[i].inode == inode) {
+            cb(inode, CHIMERA_VFS_OK, private_data);
+            return;
+        }
+    }
+
+    shard = diskfs_inode_shard(thread->shared, inode->inum);
+    pthread_mutex_lock(&shard->lock);
+    diskfs_inode_grant_locked(thread, txn, shard, inode, inode->gen, mode, cb,
+                              private_data);
+} /* diskfs_inode_acquire_pinned */
 
 static inline void
 diskfs_inode_get_inum_async(
@@ -10478,7 +10544,10 @@ diskfs_open_fh_inode_cb(
 
     if ((request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
         !S_ISDIR(inode->mode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        /* A directory open of a symlink is NFS4ERR_SYMLINK, not NOTDIR (e.g.
+         * LOOKUP/LOOKUPP through a symlink); other non-dirs are NOTDIR. */
+        diskfs_op_fail(request, p->txn,
+                       S_ISLNK(inode->mode) ? CHIMERA_VFS_ESYMLINK : CHIMERA_VFS_ENOTDIR);
         return;
     }
 
@@ -10518,14 +10587,13 @@ diskfs_open_at_finish(
 {
     struct diskfs_request_private *p      = request->plugin_data;
     struct diskfs_thread          *thread = p->thread;
-    unsigned int                   flags  = request->open_at.flags;
 
-    if (flags & CHIMERA_VFS_OPEN_INFERRED) {
-        request->open_at.r_vfs_private = 0xdeadbeefUL;
-    } else {
-        inode->refcnt++;
-        request->open_at.r_vfs_private = (uint64_t) inode;
-    }
+    /* diskfs is CAP_OPEN_FILE_REQUIRED: every open (inferred or not) yields a
+     * cached handle matched by a diskfs_close, so always pin the inode and stash
+     * the real pointer in vfs_private.  read/write reuse it (and close releases
+     * the pin); there is no throwaway/synthetic open_at for this backend. */
+    inode->refcnt++;
+    request->open_at.r_vfs_private = (uint64_t) inode;
 
     diskfs_map_attrs(thread, &request->open_at.r_dir_post_attr, parent);
 
@@ -10551,7 +10619,8 @@ diskfs_open_at_existing_cb(
 
     if ((request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
         !S_ISDIR(inode->mode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        diskfs_op_fail(request, p->txn,
+                       S_ISLNK(inode->mode) ? CHIMERA_VFS_ESYMLINK : CHIMERA_VFS_ENOTDIR);
         return;
     }
 
@@ -11249,9 +11318,20 @@ diskfs_read(
     p->io_reading = 1;     /* cleared in diskfs_read_finish when the walk ends */
     p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
-                              request->fh, request->fh_len,
-                              diskfs_read_inode_cb, request);
+    /* Warm-handle fast path: diskfs advertises CAP_OPEN_FILE_REQUIRED, so a read
+     * is preceded by a real open that pinned the inode and stashed it in
+     * handle->vfs_private.  Reuse it to skip the fh->inum decode + rb-tree
+     * lookup.  Fall back to the by-fh resolve for any handle that lacks it. */
+    if (request->read.handle && request->read.handle->vfs_private) {
+        diskfs_inode_acquire_pinned(thread, p->txn,
+                                    (struct diskfs_inode *) request->read.handle->vfs_private,
+                                    DISKFS_INODE_MODE_FOR_TXN(p->txn),
+                                    diskfs_read_inode_cb, request);
+    } else {
+        diskfs_inode_get_fh_async(thread, p->txn,
+                                  request->fh, request->fh_len,
+                                  diskfs_read_inode_cb, request);
+    }
 } /* diskfs_read */
 
 // Forward declaration
@@ -12103,9 +12183,19 @@ diskfs_write(
     p->rmw_suffix_valid    = 0;
     p->txn                 = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
-                              request->fh, request->fh_len,
-                              diskfs_write_inode_cb, request);
+    /* Warm-handle fast path (see diskfs_read): reuse the inode pinned at open
+    * via handle->vfs_private, skipping the by-fh resolve.  The WRITE-mode grant
+    * (incl. the home-block pin) is preserved by diskfs_inode_grant_locked. */
+    if (request->write.handle && request->write.handle->vfs_private) {
+        diskfs_inode_acquire_pinned(thread, p->txn,
+                                    (struct diskfs_inode *) request->write.handle->vfs_private,
+                                    DISKFS_INODE_MODE_FOR_TXN(p->txn),
+                                    diskfs_write_inode_cb, request);
+    } else {
+        diskfs_inode_get_fh_async(thread, p->txn,
+                                  request->fh, request->fh_len,
+                                  diskfs_write_inode_cb, request);
+    }
 } /* diskfs_write */
 
 
@@ -14560,7 +14650,11 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .name         = "diskfs",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_DISKFS,
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
-        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT,
+        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
+        /* Require a real open so every file op carries a pinned inode in
+         * handle->vfs_private (diskfs_open_fh_inode_cb), which read/write reuse
+         * to skip per-I/O inode resolution. */
+        CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED,
     .init           = diskfs_init,
     .destroy        = diskfs_destroy,
     .thread_init    = diskfs_thread_init,
