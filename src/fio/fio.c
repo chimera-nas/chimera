@@ -57,6 +57,7 @@ struct chimera_fio_thread {
 struct chimera_options {
     void *pad;
     char *config;
+    char *logfile;
 };
 
 static struct fio_option options[] = {
@@ -66,6 +67,16 @@ static struct fio_option options[] = {
         .type     = FIO_OPT_STR_STORE,
         .off1     = offsetof(struct chimera_options, config),
         .help     = "Set path to chimera config file",
+        .category = FIO_OPT_C_ENGINE,
+        .group    = FIO_OPT_G_INVALID,
+    },
+    {
+        .name  = "chimera_log",
+        .lname = "Chimera Log Filename",
+        .type  = FIO_OPT_STR_STORE,
+        .off1  = offsetof(struct chimera_options, logfile),
+        .help  =
+            "Direct chimera and evpl log output to this file (truncated at start of run); if unset, chimera logging is disabled",
         .category = FIO_OPT_C_ENGINE,
         .group    = FIO_OPT_G_INVALID,
     },
@@ -246,6 +257,20 @@ fio_chimera_init(struct thread_data *td)
     pthread_mutex_lock(&ChimeraClientMutex);
 
     if (ChimeraClient == NULL) {
+
+        if (o->logfile) {
+            FILE *logfp = fopen(o->logfile, "w");
+
+            if (!logfp) {
+                fprintf(stderr, "Failed to open chimera log file %s\n", o->logfile);
+                pthread_mutex_unlock(&ChimeraClientMutex);
+                return EINVAL;
+            }
+
+            chimera_log_set_file(logfp);
+        } else {
+            chimera_log_disable();
+        }
 
         chimera_log_init();
 
