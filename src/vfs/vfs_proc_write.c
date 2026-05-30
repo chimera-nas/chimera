@@ -22,7 +22,7 @@ chimera_vfs_write_complete(struct chimera_vfs_request *request)
     chimera_vfs_io_lease_release(request);
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(request->thread->vfs->vfs_attr_cache,
+        chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
                                       request->write.handle->fh_hash,
                                       request->write.handle->fh,
                                       request->write.handle->fh_len,

@@ -20,7 +20,7 @@ chimera_vfs_mknod_at_complete(struct chimera_vfs_request *request)
     chimera_vfs_mknod_at_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_name_cache_insert(cache,
+        chimera_vfs_name_cache_insert(thread, cache,
                                       request->mknod_at.handle->fh_hash,
                                       request->mknod_at.handle->fh,
                                       request->mknod_at.handle->fh_len,
@@ -30,13 +30,13 @@ chimera_vfs_mknod_at_complete(struct chimera_vfs_request *request)
                                       request->mknod_at.r_attr.va_fh,
                                       request->mknod_at.r_attr.va_fh_len);
 
-        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                       request->mknod_at.handle->fh_hash,
                                       request->mknod_at.handle->fh,
                                       request->mknod_at.handle->fh_len,
                                       &request->mknod_at.r_dir_post_attr);
 
-        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                       chimera_vfs_hash(request->mknod_at.r_attr.va_fh, request->mknod_at.r_attr.
                                                        va_fh_len)
                                       ,

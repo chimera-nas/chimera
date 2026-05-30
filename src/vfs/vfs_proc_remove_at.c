@@ -59,7 +59,7 @@ chimera_vfs_remove_at_complete(struct chimera_vfs_request *request)
                                 request->remove_at.namelen,
                                 NULL, 0);
 
-        chimera_vfs_name_cache_insert(name_cache,
+        chimera_vfs_name_cache_insert(thread, name_cache,
                                       request->remove_at.handle->fh_hash,
                                       request->remove_at.handle->fh,
                                       request->remove_at.handle->fh_len,
@@ -69,14 +69,14 @@ chimera_vfs_remove_at_complete(struct chimera_vfs_request *request)
                                       NULL,
                                       0);
 
-        chimera_vfs_attr_cache_insert(attr_cache,
+        chimera_vfs_attr_cache_insert(thread, attr_cache,
                                       request->remove_at.handle->fh_hash,
                                       request->remove_at.handle->fh,
                                       request->remove_at.handle->fh_len,
                                       &request->remove_at.r_dir_post_attr);
 
         if (request->remove_at.r_removed_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
-            chimera_vfs_attr_cache_insert(attr_cache,
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
                                           chimera_vfs_hash(request->remove_at.r_removed_attr.va_fh, request->remove_at.
                                                            r_removed_attr.va_fh_len),
                                           request->remove_at.r_removed_attr.va_fh,

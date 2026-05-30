@@ -26,6 +26,24 @@ struct chimera_vfs_user;
 struct chimera_vfs_user_cache;
 struct prometheus_metrics;
 
+/* RCU recycle pools: one per fungible cache (attr/name/rpl).  The per-thread
+ * magazine type is defined here (no urcu dependency) so chimera_vfs_thread can
+ * embed it; the pool itself and the helpers live in vfs_rcu_pool.h. */
+enum chimera_rcu_pool_id {
+    CHIMERA_RCU_POOL_ATTR = 0,
+    CHIMERA_RCU_POOL_NAME,
+    CHIMERA_RCU_POOL_RPL,
+    CHIMERA_RCU_POOL_COUNT
+};
+
+#define CHIMERA_RCU_MAGAZINE_CAP 64
+
+struct chimera_rcu_node;
+struct chimera_rcu_magazine {
+    struct chimera_rcu_node *head;
+    uint32_t                 count;
+};
+
 /* FSSTAT values used with builtin backends until statvfs tracking is implemented */
 #define CHIMERA_VFS_SYNTHETIC_FS_BYTES   ((uint64_t) 100 * 1024 * 1024 * 1024)
 #define CHIMERA_VFS_SYNTHETIC_FS_INODES  (1024 * 1024)
@@ -1366,6 +1384,8 @@ struct chimera_vfs_thread {
     struct evpl                         *evpl;
     struct chimera_vfs                  *vfs;
     void                                *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
+    /* Thread-local recycle magazines for the fungible RCU caches. */
+    struct chimera_rcu_magazine          rcu_magazines[CHIMERA_RCU_POOL_COUNT];
     struct chimera_vfs_find_result      *free_find_results;
     struct chimera_vfs_request          *free_requests;
     struct chimera_vfs_request          *active_requests;

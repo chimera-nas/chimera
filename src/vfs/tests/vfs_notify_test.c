@@ -420,6 +420,7 @@ static void
 test_rpl_cache_cross_shard_invalidate(void)
 {
     struct chimera_vfs_rpl_cache *cache;
+    struct chimera_vfs_thread     thread = { 0 }; /* zeroed magazines */
     uint8_t                       child_fh[CHIMERA_VFS_FH_SIZE];
     uint8_t                       parent_fh[CHIMERA_VFS_FH_SIZE];
     char                          name[]   = "myfile";
@@ -464,7 +465,7 @@ test_rpl_cache_cross_shard_invalidate(void)
     CHECK(found_cross_shard,
           "found a child_fh / parent_fh pair landing in different shards");
 
-    chimera_vfs_rpl_cache_insert(cache,
+    chimera_vfs_rpl_cache_insert(&thread, cache,
                                  child_hash,
                                  child_fh, sizeof(child_fh),
                                  parent_fh, sizeof(parent_fh),
