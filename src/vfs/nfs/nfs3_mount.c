@@ -66,6 +66,31 @@ chimera_nfs_mount_get_port(
     return default_port;
 } /* chimera_nfs_mount_get_port */
 
+/*
+ * Get the nolock mount option - returns 1 if locking (NLM) should be
+ * disabled, 0 otherwise.  Mirrors the Linux NFS client "nolock" option:
+ * when present the client does not contact the server's lock manager and
+ * byte-range lock operations are not forwarded over the wire.  Locking is
+ * enabled by default ("lock").
+ */
+static int
+chimera_nfs_mount_get_nolock(const struct chimera_vfs_mount_options *options)
+{
+    int i;
+
+    for (i = 0; i < options->num_options; i++) {
+        if (strcmp(options->options[i].key, "nolock") == 0) {
+            return 1;
+        }
+        /* Accept an explicit "lock" as the positive form (the default). */
+        if (strcmp(options->options[i].key, "lock") == 0) {
+            return 0;
+        }
+    }
+
+    return 0;
+} /* chimera_nfs_mount_get_nolock */
+
 static void
 chimera_mount_mountd_mnt_callback(
     struct evpl                 *evpl,
@@ -242,6 +267,14 @@ chimera_nfs3_mount_nfs_null_callback(
 
     if (status != 0) {
         chimera_nfs3_mount_discover_callback(server_thread, status);
+        return;
+    }
+
+    /* "nolock" mount option: skip NLM discovery entirely.  nlm_endpoint is
+     * left NULL so no lock-manager connection is made and byte-range lock
+     * operations short-circuit to ENOTSUP (see chimera_nfs3_lock). */
+    if (server_thread->server->nolock) {
+        chimera_nfs3_mount_discover_callback(server_thread, 0);
         return;
     }
 
@@ -492,6 +525,8 @@ chimera_nfs3_mount(
         if (server->use_rdma) {
             server->nfs_port = chimera_nfs_mount_get_port(&request->mount.options, CHIMERA_NFS_RDMA_PORT);
         }
+
+        server->nolock = chimera_nfs_mount_get_nolock(&request->mount.options);
 
         strncpy(server->hostname, hostname, hostnamelen);
 
