@@ -12024,8 +12024,7 @@ diskfs_write_suffix_cb(
 
     if (have && p->ext_iter.file_offset <= write_end &&
         write_end < p->ext_iter.file_offset + p->ext_iter.length) {
-        uint64_t suffix_block = write_end & ~4095ULL;
-        uint64_t ee           = p->ext_iter.file_offset + p->ext_iter.length;
+        uint64_t ee = p->ext_iter.file_offset + p->ext_iter.length;
 
         if (ee >= aend) {
             p->rmw_suffix_valid = p->rmw_suffix_len;
@@ -12035,17 +12034,18 @@ diskfs_write_suffix_cb(
             p->rmw_suffix_valid = 0;
         }
 
-        if (suffix_block >= p->ext_iter.file_offset) {
-            p->need_suffix_read     = 1;
-            p->suffix_device_id     = p->ext_iter.device_id;
-            p->suffix_device_offset = p->ext_iter.device_offset +
-                (suffix_block - p->ext_iter.file_offset);
-        } else {
-            p->need_suffix_read     = 1;
-            p->suffix_device_id     = p->ext_iter.device_id;
-            p->suffix_device_offset = p->ext_iter.device_offset;
-            p->rmw_suffix_adjust    = p->ext_iter.file_offset - suffix_block;
-        }
+        /* Read the block-aligned device offset that physically holds write_end.
+         * The extent maps file write_end to device_offset + (write_end -
+         * file_offset); rounding that down to a block gives a 4 KiB-aligned
+         * read (required by O_DIRECT/libaio) whose write_end byte sits at
+         * index (write_end & 4095) -- so no separate adjust is needed even
+         * when the extent starts mid-block (e.g. a punch-created extent whose
+         * file_offset/device_offset are unaligned but congruent mod 4096). */
+        p->need_suffix_read     = 1;
+        p->suffix_device_id     = p->ext_iter.device_id;
+        p->suffix_device_offset = (p->ext_iter.device_offset +
+                                   (write_end - p->ext_iter.file_offset)) & ~4095ULL;
+        p->rmw_suffix_adjust = 0;
     }
 
     diskfs_write_trim_start(request);
