@@ -187,6 +187,13 @@ struct diskfs_request_private {
     int                         need_suffix_read;
     uint64_t                    prefix_device_id, prefix_device_offset;
     uint64_t                    suffix_device_id, suffix_device_offset;
+
+    /* Coalescing-insert descriptor (diskfs_ext_put): the extent to record,
+     * merged with a contiguous predecessor when possible; ci_cont runs after. */
+    uint64_t                    ci_off, ci_len, ci_devoff;
+    uint32_t                    ci_devid, ci_flags;
+    void                        (*ci_cont)(
+        struct chimera_vfs_request *);
 };
 
 struct diskfs_device {
@@ -11511,14 +11518,121 @@ static void diskfs_write_trim_process(
 static void diskfs_write_trim_done(
     struct chimera_vfs_request *request);
 
-/* Tail: inode metadata, unlock, RMW reads, phase2. */
+/*
+ * Insert a data extent, coalescing it with the immediately-preceding extent
+ * when the two are logically + physically contiguous and share the same
+ * written-ness -- so a sequential run of writes/allocations collapses into a
+ * single extent record instead of one record per write.  The descriptor
+ * (ci_off/ci_len/ci_devid/ci_devoff/ci_flags) and the continuation (ci_cont)
+ * live in the request private.  bt_insert aborts on a duplicate key, so a
+ * merge removes the predecessor and re-inserts the widened extent at its key.
+ */
 static void
-diskfs_write_inserted_cb(
+diskfs_ext_put_insert(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_ext_put_inserted_cb(
     struct diskfs_bt_op *op,
     int                  result,
     void                *private_data)
 {
-    struct chimera_vfs_request    *request        = private_data;
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    p->ci_cont(request);
+} /* diskfs_ext_put_inserted_cb */
+
+static void
+diskfs_ext_put_insert(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+
+    if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
+                                p->ci_off, p->ci_len, p->ci_devid, p->ci_devoff,
+                                p->ci_flags, diskfs_ext_put_inserted_cb, request)) {
+        diskfs_ext_put_inserted_cb(op, op->result, request);
+    }
+} /* diskfs_ext_put_insert */
+
+static void
+diskfs_ext_put_removed_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_ext_put_insert(request);
+} /* diskfs_ext_put_removed_cb */
+
+static void
+diskfs_ext_put_floor_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    struct diskfs_extent           prev;
+    int                            have;
+
+    have = diskfs_ext_from_op(op, result, &prev);
+    diskfs_bt_op_free(thread, op);
+
+    if (have && prev.flags == p->ci_flags && prev.device_id == p->ci_devid &&
+        prev.file_offset + prev.length == p->ci_off &&
+        prev.device_offset + prev.length == p->ci_devoff) {
+        /* Contiguous predecessor: widen it (remove then re-insert at its key). */
+        p->ci_off    = prev.file_offset;
+        p->ci_len   += prev.length;
+        p->ci_devoff = prev.device_offset;
+
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0],
+                                    prev.file_offset, diskfs_ext_put_removed_cb,
+                                    request)) {
+            diskfs_ext_put_removed_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    diskfs_ext_put_insert(request);
+} /* diskfs_ext_put_floor_cb */
+
+static void
+diskfs_ext_put(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op;
+
+    if (p->ci_off == 0) {
+        diskfs_ext_put_insert(request);     /* nothing precedes offset 0 */
+        return;
+    }
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_floor_async(op, thread, p->inode_stash[0], p->ci_off - 1,
+                               p->rec_scratch, sizeof(p->rec_scratch),
+                               diskfs_ext_put_floor_cb, request)) {
+        diskfs_ext_put_floor_cb(op, op->result, request);
+    }
+} /* diskfs_ext_put */
+
+/* Tail shared by every write path (in-place, unwritten-split, redirect):
+ * stamp inode metadata, then RMW reads (if any) -> phase2 data write. */
+static void
+diskfs_write_finish_map(struct chimera_vfs_request *request)
+{
     struct diskfs_request_private *diskfs_private = request->plugin_data;
     struct diskfs_thread          *thread         = diskfs_private->thread;
     struct diskfs_shared          *shared         = thread->shared;
@@ -11526,9 +11640,6 @@ diskfs_write_inserted_cb(
     struct diskfs_inode           *inode          = diskfs_private->inode_stash[0];
     uint64_t                       write_end      = request->write.offset + request->write.length;
     struct timespec                now;
-
-    (void) result;
-    diskfs_bt_op_free(thread, op);
 
     if (inode->size < write_end) {
         inode->size       = write_end;
@@ -11607,21 +11718,22 @@ diskfs_write_inserted_cb(
         diskfs_private->rmw_phase = 2;
         diskfs_write_phase2(thread, shared, request);
     }
-} /* diskfs_write_inserted_cb */
+} /* diskfs_write_finish_map */
 
+/* Redirect path: record the freshly-allocated extent (coalescing it with a
+ * contiguous predecessor -- e.g. a sequential append), then run the tail. */
 static void
 diskfs_write_trim_done(struct chimera_vfs_request *request)
 {
-    struct diskfs_request_private *p      = request->plugin_data;
-    struct diskfs_thread          *thread = p->thread;
-    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+    struct diskfs_request_private *p = request->plugin_data;
 
-    if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
-                                p->rmw_aligned_start, p->rmw_aligned_length,
-                                p->rmw_device_id, p->rmw_device_offset, 0,
-                                diskfs_write_inserted_cb, request)) {
-        diskfs_write_inserted_cb(op, op->result, request);
-    }
+    p->ci_off    = p->rmw_aligned_start;
+    p->ci_len    = p->rmw_aligned_length;
+    p->ci_devid  = (uint32_t) p->rmw_device_id;
+    p->ci_devoff = p->rmw_device_offset;
+    p->ci_flags  = 0;
+    p->ci_cont   = diskfs_write_finish_map;
+    diskfs_ext_put(request);
 } /* diskfs_write_trim_done */
 
 static void
@@ -11799,15 +11911,27 @@ diskfs_write_trim_process(struct chimera_vfs_request *request)
         return;
     }
 
+    /* The aligned region's data is being redirected to freshly-allocated
+     * blocks (rmw_device_offset), so the old device blocks backing the part of
+     * this extent that the region covers are now garbage and must be freed --
+     * otherwise every overwrite leaks space.  (The in-place paths never reach
+     * here; they reuse the existing blocks and free nothing.) */
     if (es >= astart && ee <= aend) {
-        /* Completely inside the aligned region: remove, then advance. */
+        /* Completely inside the aligned region: free + remove, then advance. */
+        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset,
+                                 SM_ALIGN_UP(p->ext_iter.length));
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_write_trim_advance_cb, request)) {
             diskfs_write_trim_advance_cb(op, op->result, request);
         }
     } else if (es < astart && ee > aend) {
-        /* Spans the region: insert tail at aligned_end first. */
+        /* Spans the region: free the covered middle, then insert tail at
+         * aligned_end first. */
+        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset + (astart - es),
+                                 p->rmw_aligned_length);
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], aend,
                                     ee - aend, p->ext_iter.device_id,
@@ -11817,14 +11941,21 @@ diskfs_write_trim_process(struct chimera_vfs_request *request)
             diskfs_write_trim_spans_after_cb(op, op->result, request);
         }
     } else if (es < astart && ee > astart) {
-        /* Overlaps the left edge: remove, reinsert the head. */
+        /* Overlaps the left edge: free the covered tail, remove, reinsert the
+         * head. */
+        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset + (astart - es),
+                                 ee - astart);
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_write_trim_oleft_removed_cb, request)) {
             diskfs_write_trim_oleft_removed_cb(op, op->result, request);
         }
     } else if (es < aend && ee > aend) {
-        /* Starts within, extends past: remove, reinsert tail at aligned_end. */
+        /* Starts within, extends past: free the covered head, remove, reinsert
+         * tail at aligned_end. */
+        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset, aend - es);
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_write_trim_oright_removed_cb, request)) {
@@ -11996,41 +12127,56 @@ diskfs_write_prefix_lookup(struct chimera_vfs_request *request)
     }
 } /* diskfs_write_prefix_lookup */
 
-/* Retry context for the write's data-space allocation when a reservation
- * refill parks on a cold AG-log block; the continuation re-enters
- * diskfs_write_inode_cb with the (already write-locked) inode. */
-struct diskfs_write_alloc_ctx {
-    struct diskfs_inode        *inode;
-    struct chimera_vfs_request *request;
-};
-
+/* Forward declarations for the write classify -> placement chain. */
+static void diskfs_write_classify_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data);
+static void diskfs_write_redirect_alloc(
+    struct chimera_vfs_request *request);
 static void diskfs_write_alloc_resume(
     struct diskfs_thread *thread,
     void                 *arg);
+static void diskfs_write_split_start(
+    struct chimera_vfs_request *request);
 
+/*
+ * A write is dispatched here with the inode write-locked.  Compute the 4 KiB-
+ * aligned region, then classify it (diskfs_write_classify_cb) against the
+ * extent at/just-before aligned_start:
+ *
+ *   - one existing extent fully covers the region -> overwrite IN PLACE:
+ *       written   -> no map mutation at all (the hot random-overwrite path:
+ *                    no allocate, no free, no b+tree churn);
+ *       unwritten -> overwrite in place + split the covered range to written
+ *                    (fallocate first-touch);
+ *   - otherwise (hole / partial / multi-extent span) -> allocate fresh blocks
+ *     and redirect, freeing the old covered blocks (diskfs_write_trim_*).
+ *
+ * Multi-extent-cover redirects for now; coalescing keeps written runs in a
+ * single extent so contiguous regions collapse to the in-place case.
+ */
 static void
 diskfs_write_inode_cb(
     struct diskfs_inode *inode,
     int                  status,
     void                *private_data)
 {
-    struct chimera_vfs_request    *request        = private_data;
-    struct diskfs_request_private *diskfs_private = request->plugin_data;
-    struct diskfs_thread          *thread         = diskfs_private->thread;
-    uint64_t                       write_start    = request->write.offset;
-    uint64_t                       write_end      = write_start + request->write.length;
-    uint64_t                       aligned_start, aligned_end, aligned_length;
-    uint64_t                       device_id, device_offset;
-    struct diskfs_write_alloc_ctx *wctx;
-    int                            rc;
+    struct chimera_vfs_request    *request     = private_data;
+    struct diskfs_request_private *p           = request->plugin_data;
+    struct diskfs_thread          *thread      = p->thread;
+    uint64_t                       write_start = request->write.offset;
+    uint64_t                       write_end   = write_start + request->write.length;
+    uint64_t                       aligned_start, aligned_end;
+    struct diskfs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
-        diskfs_op_fail(request, diskfs_private->txn, status);
+        diskfs_op_fail(request, p->txn, status);
         return;
     }
 
     if (unlikely(!S_ISREG(inode->mode))) {
-        diskfs_op_fail(request, diskfs_private->txn, CHIMERA_VFS_EINVAL);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EINVAL);
         return;
     }
 
@@ -12041,56 +12187,257 @@ diskfs_write_inode_cb(
 
         request->write.r_length = 0;
         request->write.r_sync   = 1;
-        diskfs_op_ok(request, diskfs_private->txn);
+        diskfs_op_ok(request, p->txn);
         return;
     }
 
-    aligned_start  = write_start & ~4095ULL;
-    aligned_end    = (write_end + 4095ULL) & ~4095ULL;
-    aligned_length = aligned_end - aligned_start;
+    aligned_start = write_start & ~4095ULL;
+    aligned_end   = (write_end + 4095ULL) & ~4095ULL;
 
-    wctx          = malloc(sizeof(*wctx));
-    wctx->inode   = inode;
-    wctx->request = request;
-    rc            = diskfs_thread_alloc_space(thread, diskfs_private->txn, aligned_length,
-                                              &device_id, &device_offset,
-                                              diskfs_write_alloc_resume, wctx);
+    p->rmw_prefix_len     = write_start - aligned_start;
+    p->rmw_suffix_len     = aligned_end - write_end;
+    p->rmw_aligned_start  = aligned_start;
+    p->rmw_aligned_length = aligned_end - aligned_start;
+    p->rmw_prefix_valid   = 0;
+    p->rmw_suffix_valid   = 0;
+    p->rmw_suffix_adjust  = 0;
+    p->need_prefix_read   = 0;
+    p->need_suffix_read   = 0;
+    p->inode_stash[0]     = inode;
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_floor_async(op, thread, inode, aligned_start, p->rec_scratch,
+                               sizeof(p->rec_scratch), diskfs_write_classify_cb,
+                               request)) {
+        diskfs_write_classify_cb(op, op->result, request);
+    }
+} /* diskfs_write_inode_cb */
+
+static void
+diskfs_write_classify_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    uint64_t                       astart  = p->rmw_aligned_start;
+    uint64_t                       aend    = astart + p->rmw_aligned_length;
+    struct diskfs_extent           e;
+    int                            have;
+
+    have = diskfs_ext_from_op(op, result, &e);
+    diskfs_bt_op_free(thread, op);
+
+    if (have && e.file_offset <= astart && e.file_offset + e.length >= aend) {
+        /* Single extent fully covers the region: overwrite its blocks in
+         * place at the matching device offset. */
+        p->rmw_device_id     = e.device_id;
+        p->rmw_device_offset = e.device_offset + (astart - e.file_offset);
+
+        if (e.flags & DISKFS_EXT_UNWRITTEN) {
+            /* The un-overwritten bytes of the first/last block are zeros (not
+             * stale data), so phase2 zero-fills the prefix/suffix -- no RMW
+             * read.  Split the covered range to written. */
+            p->ext_iter = e;
+            diskfs_write_split_start(request);
+        } else {
+            /* RMW the partial first/last blocks from these same in-place
+             * blocks; the extent map is left untouched. */
+            if (p->rmw_prefix_len) {
+                p->need_prefix_read     = 1;
+                p->prefix_device_id     = e.device_id;
+                p->prefix_device_offset = p->rmw_device_offset;
+                p->rmw_prefix_valid     = p->rmw_prefix_len;
+            }
+            if (p->rmw_suffix_len) {
+                uint64_t write_end    = request->write.offset + request->write.length;
+                uint64_t suffix_block = write_end & ~4095ULL;
+
+                p->need_suffix_read     = 1;
+                p->suffix_device_id     = e.device_id;
+                p->suffix_device_offset = e.device_offset +
+                    (suffix_block - e.file_offset);
+                p->rmw_suffix_valid = p->rmw_suffix_len;
+            }
+            diskfs_write_finish_map(request);
+        }
+        return;
+    }
+
+    /* Hole / partial / multi-extent span: allocate fresh blocks and redirect. */
+    diskfs_write_redirect_alloc(request);
+} /* diskfs_write_classify_cb */
+
+static void
+diskfs_write_redirect_alloc(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    uint64_t                       dev_id, dev_off;
+    int                            rc;
+
+    rc = diskfs_thread_alloc_space(thread, p->txn,
+                                   (int64_t) p->rmw_aligned_length,
+                                   &dev_id, &dev_off,
+                                   diskfs_write_alloc_resume, request);
     if (rc == SM_AGAIN) {
-        return;     /* parked; diskfs_write_alloc_resume re-runs (owns wctx) */
+        return;     /* parked; diskfs_write_alloc_resume re-runs */
     }
-    free(wctx);
     if (rc) {
-        diskfs_op_fail(request, diskfs_private->txn, CHIMERA_VFS_ENOSPC);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOSPC);
         return;
     }
 
-    diskfs_private->rmw_prefix_len     = write_start - aligned_start;
-    diskfs_private->rmw_suffix_len     = aligned_end - write_end;
-    diskfs_private->rmw_aligned_start  = aligned_start;
-    diskfs_private->rmw_aligned_length = aligned_length;
-    diskfs_private->rmw_device_id      = device_id;
-    diskfs_private->rmw_device_offset  = device_offset;
-    diskfs_private->rmw_prefix_valid   = 0;
-    diskfs_private->rmw_suffix_valid   = 0;
-    diskfs_private->rmw_suffix_adjust  = 0;
-    diskfs_private->need_prefix_read   = 0;
-    diskfs_private->need_suffix_read   = 0;
-    diskfs_private->inode_stash[0]     = inode;
+    p->rmw_device_id     = dev_id;
+    p->rmw_device_offset = dev_off;
 
     diskfs_write_prefix_lookup(request);
-} /* diskfs_write_inode_cb */
+} /* diskfs_write_redirect_alloc */
 
 static void
 diskfs_write_alloc_resume(
     struct diskfs_thread *thread,
     void                 *arg)
 {
-    struct diskfs_write_alloc_ctx c = *(struct diskfs_write_alloc_ctx *) arg;
-
     (void) thread;
-    free(arg);
-    diskfs_write_inode_cb(c.inode, CHIMERA_VFS_OK, c.request);
+    diskfs_write_redirect_alloc((struct chimera_vfs_request *) arg);
 } /* diskfs_write_alloc_resume */
+
+/*
+ * Unwritten-extent in-place split: the write lands inside a reserved-but-
+ * unwritten extent e=[es,ee) (stashed in p->ext_iter).  Its blocks are
+ * overwritten in place; re-record the map as
+ *     [es,astart) unwritten | [astart,aend) written | [aend,ee) unwritten
+ * (head/tail only when non-empty; the written middle reuses e's blocks at
+ * rmw_device_offset).  remove -> insert middle -> [head] -> [tail] -> tail.
+ */
+static void
+diskfs_write_split_tail_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_write_finish_map(request);
+} /* diskfs_write_split_tail_cb */
+
+static void
+diskfs_write_split_finish_tail(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    uint64_t                       es     = p->ext_iter.file_offset;
+    uint64_t                       ee     = es + p->ext_iter.length;
+    uint64_t                       aend   = p->rmw_aligned_start + p->rmw_aligned_length;
+    struct diskfs_bt_op           *op;
+
+    if (ee > aend) {
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], aend,
+                                    ee - aend, p->ext_iter.device_id,
+                                    p->ext_iter.device_offset + (aend - es),
+                                    DISKFS_EXT_UNWRITTEN,
+                                    diskfs_write_split_tail_cb, request)) {
+            diskfs_write_split_tail_cb(op, op->result, request);
+        }
+    } else {
+        diskfs_write_finish_map(request);
+    }
+} /* diskfs_write_split_finish_tail */
+
+static void
+diskfs_write_split_head_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_write_split_finish_tail(request);
+} /* diskfs_write_split_head_cb */
+
+static void
+diskfs_write_split_finish_head(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    uint64_t                       es     = p->ext_iter.file_offset;
+    uint64_t                       astart = p->rmw_aligned_start;
+    struct diskfs_bt_op           *op;
+
+    if (es < astart) {
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], es,
+                                    astart - es, p->ext_iter.device_id,
+                                    p->ext_iter.device_offset,
+                                    DISKFS_EXT_UNWRITTEN,
+                                    diskfs_write_split_head_cb, request)) {
+            diskfs_write_split_head_cb(op, op->result, request);
+        }
+    } else {
+        diskfs_write_split_finish_tail(request);
+    }
+} /* diskfs_write_split_finish_head */
+
+static void
+diskfs_write_split_mid_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_write_split_finish_head(request);
+} /* diskfs_write_split_mid_cb */
+
+static void
+diskfs_write_split_removed_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+
+    (void) result;
+    diskfs_bt_op_free(thread, op);
+
+    /* Insert the written middle, reusing e's blocks (rmw_device_offset). */
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
+                                p->rmw_aligned_start, p->rmw_aligned_length,
+                                (uint32_t) p->rmw_device_id, p->rmw_device_offset, 0,
+                                diskfs_write_split_mid_cb, request)) {
+        diskfs_write_split_mid_cb(op, op->result, request);
+    }
+} /* diskfs_write_split_removed_cb */
+
+static void
+diskfs_write_split_start(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+
+    if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0],
+                                p->ext_iter.file_offset,
+                                diskfs_write_split_removed_cb, request)) {
+        diskfs_write_split_removed_cb(op, op->result, request);
+    }
+} /* diskfs_write_split_start */
 
 
 static void
@@ -12457,31 +12804,23 @@ diskfs_allocate_alloc_resume(
 } /* diskfs_allocate_alloc_resume */
 
 static void
-diskfs_allocate_inserted_cb(
-    struct diskfs_bt_op *op,
-    int                  result,
-    void                *private_data)
+diskfs_allocate_next(struct chimera_vfs_request *request)
 {
-    struct chimera_vfs_request    *request = private_data;
-    struct diskfs_request_private *p       = request->plugin_data;
-
-    (void) result;
-    diskfs_bt_op_free(p->thread, op);
+    struct diskfs_request_private *p = request->plugin_data;
 
     if (p->loop_off < p->loop_left) {
         diskfs_allocate_do_alloc(request);      /* more of this gap */
     } else {
         diskfs_allocate_reserve_step(request);  /* on to the next gap */
     }
-} /* diskfs_allocate_inserted_cb */
+} /* diskfs_allocate_next */
 
 static void
 diskfs_allocate_do_alloc(struct chimera_vfs_request *request)
 {
     struct diskfs_request_private *p      = request->plugin_data;
     struct diskfs_thread          *thread = p->thread;
-    struct diskfs_bt_op           *op;
-    uint64_t                       off = p->loop_off;
+    uint64_t                       off    = p->loop_off;
     uint64_t                       dev_id, dev_off, chunk;
     int                            rc;
 
@@ -12501,17 +12840,17 @@ diskfs_allocate_do_alloc(struct chimera_vfs_request *request)
         return;
     }
 
-    /* Advance before inserting: the insert may complete inline and re-enter
-     * diskfs_allocate_inserted_cb, which reads loop_off. */
-    p->loop_off = off + chunk;
-
-    op = diskfs_bt_op_alloc(thread);
-    if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
-                                off, chunk, (uint32_t) dev_id, dev_off,
-                                DISKFS_EXT_UNWRITTEN,
-                                diskfs_allocate_inserted_cb, request)) {
-        diskfs_allocate_inserted_cb(op, op->result, request);
-    }
+    /* Advance before recording: diskfs_ext_put may complete inline and run
+     * diskfs_allocate_next, which reads loop_off.  Record the reserved chunk
+     * as an unwritten extent, coalescing contiguous chunks into one. */
+    p->loop_off  = off + chunk;
+    p->ci_off    = off;
+    p->ci_len    = chunk;
+    p->ci_devid  = (uint32_t) dev_id;
+    p->ci_devoff = dev_off;
+    p->ci_flags  = DISKFS_EXT_UNWRITTEN;
+    p->ci_cont   = diskfs_allocate_next;
+    diskfs_ext_put(request);
 } /* diskfs_allocate_do_alloc */
 
 static void
