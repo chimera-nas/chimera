@@ -790,7 +790,7 @@ chimera_nfs4_mount(
         /* Create NFS endpoint and connect */
         server->nfs_endpoint = evpl_endpoint_create(server->hostname, server->nfs_port);
 
-        proto = server->use_rdma ? server->rdma_protocol : EVPL_STREAM_SOCKET_TCP;
+        proto = server->use_rdma ? server->rdma_protocol : server_thread->shared->tcp_protocol;
 
         server_thread->nfs_conn = evpl_rpc2_client_connect(
             thread->rpc2_thread,

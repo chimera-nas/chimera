@@ -15,6 +15,7 @@
 #include "evpl/evpl.h"
 #include "prometheus-c.h"
 #include "vfs_clock.h"
+#include "common/tcp_flavor.h"
 
 #define CHIMERA_VFS_PATH_MAX 4096
 #define CHIMERA_VFS_NAME_MAX 256
@@ -1356,6 +1357,7 @@ struct chimera_vfs {
     struct chimera_vfs_delegation_thread *async_delegation_threads;
     struct chimera_vfs_close_thread       close_thread;
     struct chimera_vfs_metrics            metrics;
+    enum chimera_tcp_flavor               tcp_flavor;
     int                                   machine_name_len;
     char                                  machine_name[256];
 };
@@ -1403,6 +1405,14 @@ chimera_vfs_init(
 void
 chimera_vfs_destroy(
     struct chimera_vfs *vfs);
+
+/* Select the TCP transport flavor used for outbound (client) connections.
+ * Defaults to CHIMERA_TCP_FLAVOR_PLAIN; honored by VFS modules that open
+ * their own TCP connections (e.g. the NFS client). */
+void
+chimera_vfs_set_tcp_flavor(
+    struct chimera_vfs     *vfs,
+    enum chimera_tcp_flavor flavor);
 
 /* Get the root pseudo-filesystem's file handle */
 void

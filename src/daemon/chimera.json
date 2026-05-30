@@ -1,4 +1,7 @@
 {
+    "common": {
+	"tcp_flavor": "plain"
+    },
     "server": {
 	"threads": 16,
 	"sync_delegation": true,
