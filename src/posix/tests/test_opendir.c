@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -185,8 +185,7 @@ test_seekdir_telldir(void)
         fprintf(stderr, "Second readdir failed\n");
         exit(1);
     }
-    strncpy(saved_name, entry->d_name, sizeof(saved_name) - 1);
-    saved_name[sizeof(saved_name) - 1] = '\0';
+    snprintf(saved_name, sizeof(saved_name), "%s", entry->d_name);
     fprintf(stderr, "Second entry: %s\n", saved_name);
 
     // Seek back to saved position
