@@ -70,6 +70,8 @@ struct chimera_server_config {
     uint32_t                              smb_dialects[16];
     int                                   smb_persistent_handles;
     int                                   smb_named_streams;
+    int                                   smb_signing_required;
+    int                                   smb_encryption;
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
@@ -151,6 +153,15 @@ chimera_server_config_init(void)
      * "smb_named_streams" config flag and only honored on backends that
      * advertise CHIMERA_VFS_CAP_NAMED_STREAMS. */
     config->smb_named_streams = 0;
+
+    /* Server signing is advertised as enabled-but-optional by default; the
+     * "smb_signing_required" config flag makes the server advertise signing as
+     * mandatory (SMB2_SIGNING_REQUIRED). */
+    config->smb_signing_required = 0;
+
+    /* SMB3 transport encryption is off by default; the "smb_encryption" config
+     * flag enables (1) or requires (2) it. */
+    config->smb_encryption = 0;
 
     // SMB auth config defaults - local NTLM only
     config->smb_auth.winbind_enabled    = 0;
@@ -289,6 +300,34 @@ chimera_server_config_get_smb_named_streams(const struct chimera_server_config *
 {
     return config->smb_named_streams;
 } /* chimera_server_config_get_smb_named_streams */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_signing_required(
+    struct chimera_server_config *config,
+    int                           required)
+{
+    config->smb_signing_required = required;
+} /* chimera_server_config_set_smb_signing_required */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_signing_required(const struct chimera_server_config *config)
+{
+    return config->smb_signing_required;
+} /* chimera_server_config_get_smb_signing_required */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_encryption(
+    struct chimera_server_config *config,
+    int                           mode)
+{
+    config->smb_encryption = mode;
+} /* chimera_server_config_set_smb_encryption */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_encryption(const struct chimera_server_config *config)
+{
+    return config->smb_encryption;
+} /* chimera_server_config_get_smb_encryption */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_max_open_files(

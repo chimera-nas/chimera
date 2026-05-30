@@ -380,6 +380,27 @@ main(
         chimera_server_config_set_smb_named_streams(server_config, json_is_true(json_value));
     }
 
+    /* smb_encryption: "off"|"enabled"|"required" (or a boolean/integer 0/1/2). */
+    json_value = json_object_get(server_params, "smb_encryption");
+    if (json_is_string(json_value)) {
+        const char *enc  = json_string_value(json_value);
+        int         mode = 0;
+        if (strcmp(enc, "required") == 0) {
+            mode = 2;
+        } else if (strcmp(enc, "enabled") == 0 || strcmp(enc, "on") == 0) {
+            mode = 1;
+        } else if (strcmp(enc, "off") == 0 || strcmp(enc, "disabled") == 0) {
+            mode = 0;
+        } else {
+            chimera_server_error("Invalid smb_encryption value '%s' (expected off/enabled/required)", enc);
+        }
+        chimera_server_config_set_smb_encryption(server_config, mode);
+    } else if (json_is_integer(json_value)) {
+        chimera_server_config_set_smb_encryption(server_config, (int) json_integer_value(json_value));
+    } else if (json_is_boolean(json_value)) {
+        chimera_server_config_set_smb_encryption(server_config, json_is_true(json_value) ? 1 : 0);
+    }
+
     json_value = json_object_get(server_params, "nfs4_session_slots");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);

@@ -25,6 +25,7 @@
 #include "smb_notify.h"
 #include "smb_dump.h"
 #include "smb_signing.h"
+#include "smb_encrypt.h"
 #include "xxhash.h"
 
 static const uint8_t SMB2_PROTOCOL_ID[4] = { 0xFE, 'S', 'M', 'B' };
@@ -145,6 +146,8 @@ chimera_smb_server_init(
     shared->config.soft_fail_bad_req  = chimera_server_config_get_soft_fail_bad_req(config);
     shared->config.persistent_handles = chimera_server_config_get_smb_persistent_handles(config);
     shared->config.named_streams      = chimera_server_config_get_smb_named_streams(config);
+    shared->config.signing_required   = chimera_server_config_get_smb_signing_required(config);
+    shared->config.encryption         = chimera_server_config_get_smb_encryption(config);
 
     if (shared->config.persistent_handles) {
         chimera_smb_info("SMB3 durable/persistent handles enabled (in-memory state)");
@@ -497,6 +500,70 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         }
     }
 
+    /* SMB3 transport encryption: wrap the signed reply in a TRANSFORM header
+     * when the request arrived encrypted, or when the session negotiated
+     * encryption.  The NEGOTIATE / SESSION_SETUP responses themselves precede
+     * key establishment and are always sent signed-but-plaintext. */
+    {
+        struct chimera_smb_session *enc_session = NULL;
+
+        if (compound->num_requests > 0 && compound->requests[0]->session_handle) {
+            enc_session = compound->requests[0]->session_handle->session;
+        }
+
+        if (enc_session && (enc_session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA)) {
+            uint16_t cmd0 = compound->requests[0]->smb2_hdr.command;
+
+            if (compound->received_encrypted ||
+                (cmd0 != SMB2_NEGOTIATE && cmd0 != SMB2_SESSION_SETUP)) {
+                struct evpl_iovec enc_iov;
+                uint64_t          nonce;
+                int               enc_total;
+
+                if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
+                    /* SMB-Direct encryption is not yet implemented. */
+                    chimera_smb_error("SMB3 encryption over RDMA is not supported");
+                    evpl_iovecs_release(evpl, reply_iov, reply_niov);
+                    evpl_close(evpl, conn->bind);
+                    chimera_smb_compound_free(thread, compound);
+                    return;
+                }
+
+                nonce = atomic_fetch_add(&enc_session->enc_nonce_counter, 1);
+
+                rc = chimera_smb_encrypt_compound(thread->encrypt_ctx, evpl,
+                                                  enc_session->cipher_id,
+                                                  enc_session->enc_key,
+                                                  enc_session->enc_key_len,
+                                                  nonce, enc_session->session_id,
+                                                  reply_iov, reply_niov,
+                                                  reply_payload_length, reply_hdr_len,
+                                                  &enc_iov);
+
+                if (rc != 0) {
+                    evpl_iovecs_release(evpl, reply_iov, reply_niov);
+                    evpl_close(evpl, conn->bind);
+                    chimera_smb_compound_free(thread, compound);
+                    return;
+                }
+
+                enc_total = reply_hdr_len + (int) sizeof(struct smb2_transform_header) +
+                    reply_payload_length;
+
+                /* The encrypted message length excludes the NetBIOS framing. */
+                netbios_hdr       = evpl_iovec_data(&enc_iov);
+                netbios_hdr->word = __builtin_bswap32(
+                    (int) sizeof(struct smb2_transform_header) + reply_payload_length);
+
+                evpl_sendv(evpl, conn->bind, &enc_iov, 1, enc_total, EVPL_SEND_FLAG_TAKE_REF);
+
+                evpl_iovecs_release(evpl, reply_iov, reply_niov);
+                chimera_smb_compound_free(thread, compound);
+                return;
+            }
+        }
+    }
+
     if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
 
         /* direct_hdr was set above under this same protocol check; assert the
@@ -663,6 +730,13 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
                  request->smb2_hdr.command != SMB2_LOGOFF &&
                  request->smb2_hdr.command != SMB2_TREE_CONNECT &&
                  request->smb2_hdr.command != SMB2_TREE_DISCONNECT &&
+                 /* SMB2_CANCEL of an async request carries an AsyncId in the
+                  * header where a sync request carries the TreeId, so it never
+                  * resolves a tree.  It targets a parked request on the
+                  * connection (looked up by async_id), not a share, and emits
+                  * no reply — let it through with a NULL tree rather than
+                  * bouncing it with NETWORK_NAME_DELETED. */
+                 request->smb2_hdr.command != SMB2_CANCEL &&
                  request->smb2_hdr.command != SMB2_ECHO)) {
         /* A WRITE parsed before this point cloned its payload iovecs; the
          * write handler that would normally release them is being skipped, so
@@ -798,7 +872,8 @@ chimera_smb_server_handle_smb2(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_conn          *conn,
     struct evpl_iovec_cursor         *request_cursor,
-    int                               length)
+    int                               length,
+    int                               received_encrypted)
 {
     struct chimera_smb_compound       *compound;
     struct chimera_smb_request        *request;
@@ -822,8 +897,9 @@ chimera_smb_server_handle_smb2(
     compound->saved_session_handle = NULL;
     compound->saved_tree           = NULL;
 
-    compound->num_requests      = 0;
-    compound->complete_requests = 0;
+    compound->num_requests       = 0;
+    compound->complete_requests  = 0;
+    compound->received_encrypted = received_encrypted;
 
     left = length;
 
@@ -953,7 +1029,13 @@ chimera_smb_server_handle_smb2(
             goto next_compound_request;
         }
 
-        if (request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) {
+        /* SESSION_SETUP requests are never signature-verified at dispatch: the
+         * final NTLM message is signed with a session key the server only
+         * derives while *processing* this very request, so the key isn't
+         * available here yet.  The NTLM exchange authenticates the request, and
+         * the success reply is signed (proving the server's key). */
+        if ((request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) &&
+            request->smb2_hdr.command != SMB2_SESSION_SETUP) {
             uint8_t *signing_key;
 
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
@@ -1245,8 +1327,9 @@ chimera_smb_server_handle_smb1(
     compound->saved_session_handle = NULL;
     compound->saved_tree           = NULL;
 
-    compound->num_requests      = 0;
-    compound->complete_requests = 0;
+    compound->num_requests       = 0;
+    compound->complete_requests  = 0;
+    compound->received_encrypted = 0;
 
     request->compound       = compound;
     request->session_handle = NULL;
@@ -1340,13 +1423,79 @@ chimera_smb_server_handle_rdma(
 
     if (direct_hdr->remaining_length == 0) {
         evpl_iovec_cursor_init(&request_cursor, conn->rdma_iov, conn->rdma_niov);
-        chimera_smb_server_handle_smb2(evpl, thread, conn, &request_cursor, conn->rdma_length);
+        chimera_smb_server_handle_smb2(evpl, thread, conn, &request_cursor, conn->rdma_length, 0);
         conn->rdma_niov   = 0;
         conn->rdma_length = 0;
     }
 
 } /* chimera_smb_server_handle_rdma */
 
+
+/*
+ * Decrypt a TRANSFORM-wrapped (SMB3 encrypted) message and feed the plaintext
+ * SMB2 message into the normal dispatch path.  request_cursor is positioned at
+ * the transform header (after the 4-byte NetBIOS framing); length is the
+ * transform header plus ciphertext byte count.
+ */
+static void
+chimera_smb_server_handle_transform(
+    struct evpl                      *evpl,
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_conn          *conn,
+    struct evpl_iovec_cursor         *request_cursor,
+    int                               length)
+{
+    struct smb2_transform_header th;
+    struct evpl_iovec_cursor     peek_cursor = *request_cursor;
+    struct evpl_iovec_cursor     plain_cursor;
+    struct chimera_smb_session  *session;
+    struct evpl_iovec            plain_iov;
+    int                          plain_len, rc;
+
+    if (length < (int) sizeof(th)) {
+        chimera_smb_error("Truncated SMB3 transform message (%d bytes)", length);
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    /* Peek the transform header for its SessionId, then look up the session for
+     * its decryption key and negotiated cipher. */
+    evpl_iovec_cursor_copy(&peek_cursor, &th, sizeof(th));
+
+    session = chimera_smb_session_lookup(thread->shared, th.session_id);
+
+    if (!session || !(session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA)) {
+        chimera_smb_error("Encrypted SMB2 message for unknown/non-encrypting session %lx",
+                          th.session_id);
+        if (session) {
+            chimera_smb_session_release(thread, thread->shared, session, true);
+        }
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    rc = chimera_smb_decrypt_message(thread->encrypt_ctx, evpl,
+                                     session->cipher_id, session->dec_key,
+                                     session->enc_key_len, request_cursor, length,
+                                     &plain_iov, &plain_len);
+
+    chimera_smb_session_release(thread, thread->shared, session, true);
+
+    if (rc != 0) {
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    /* The decrypted plaintext is a complete (possibly compound) SMB2 message.
+     * Dispatch it as if received in the clear, flagging the compound so its
+     * reply is encrypted.  Request handlers that outlive this call take their
+     * own refs on the buffer, so releasing our initial ref here is safe. */
+    evpl_iovec_cursor_init(&plain_cursor, &plain_iov, 1);
+
+    chimera_smb_server_handle_smb2(evpl, thread, conn, &plain_cursor, plain_len, 1);
+
+    evpl_iovec_release(evpl, &plain_iov);
+} /* chimera_smb_server_handle_transform */
 
 static void
 chimera_smb_server_handle_tcp(
@@ -1364,17 +1513,25 @@ chimera_smb_server_handle_tcp(
     evpl_iovec_cursor_init(&request_cursor, iov, niov);
     evpl_iovec_cursor_copy(&request_cursor, &netbios_hdr, sizeof(netbios_hdr));
 
-    if (likely(conn->smbvers == 2)) {
-        chimera_smb_server_handle_smb2(evpl, thread, conn, &request_cursor, length - 4);
-        return;
-    }
-
+    /* Peek the protocol id up front (even on the smbvers==2 fast path): once a
+     * 3.x dialect is negotiated, encrypted TRANSFORM messages (0xFD 'S' 'M' 'B')
+     * can arrive interleaved with plaintext SMB2 (0xFE 'S' 'M' 'B'). */
     peek_cursor = request_cursor;
     evpl_iovec_cursor_get_uint32(&peek_cursor, &smb_hdr);
 
+    if (smb_hdr == 0x424d53fd) {
+        chimera_smb_server_handle_transform(evpl, thread, conn, &request_cursor, length - 4);
+        return;
+    }
+
+    if (likely(conn->smbvers == 2)) {
+        chimera_smb_server_handle_smb2(evpl, thread, conn, &request_cursor, length - 4, 0);
+        return;
+    }
+
     if (smb_hdr == 0x424d53fe) {
         conn->smbvers = 2;
-        chimera_smb_server_handle_smb2(evpl, thread, conn, &request_cursor, length - 4);
+        chimera_smb_server_handle_smb2(evpl, thread, conn, &request_cursor, length - 4, 0);
     } else if (smb_hdr == 0x424d53ff) {
         chimera_smb_server_handle_smb1(evpl, thread, conn, iov, niov, length);
     } else {
@@ -1531,6 +1688,7 @@ chimera_smb_server_thread_init(
     thread->shared      = shared;
     thread->evpl        = evpl;
     thread->signing_ctx = chimera_smb_signing_ctx_create();
+    thread->encrypt_ctx = chimera_smb_encrypt_ctx_create();
 
     chimera_smb_iconv_init(&thread->iconv_ctx);
     chimera_smb_notify_thread_init(thread);
@@ -1610,6 +1768,7 @@ chimera_smb_server_thread_destroy(void *data)
 
     chimera_smb_iconv_destroy(&thread->iconv_ctx);
     chimera_smb_signing_ctx_destroy(thread->signing_ctx);
+    chimera_smb_encrypt_ctx_destroy(thread->encrypt_ctx);
 
     free(thread);
 } /* smb_server_thread_destroy */

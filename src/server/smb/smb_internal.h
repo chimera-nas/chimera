@@ -118,6 +118,13 @@ struct chimera_smb_config {
     int                            soft_fail_bad_req;
     int                            persistent_handles;
     int                            named_streams;
+    /* When set, the server advertises signing as mandatory
+     * (SMB2_SIGNING_REQUIRED) in NEGOTIATE and FSCTL_VALIDATE_NEGOTIATE_INFO,
+     * so conforming clients sign every request. */
+    int                            signing_required;
+    /* SMB3 transport encryption policy: 0 = off (no encryption advertised),
+     * 1 = enabled (offered, used when the client opts in), 2 = required. */
+    int                            encryption;
     uint32_t                       capabilities;
     uint32_t                       dialects[16];
     struct chimera_smb_nic_info    nic_info[16];
@@ -617,6 +624,9 @@ struct chimera_smb_request {
 struct chimera_smb_compound {
     int                                num_requests;
     int                                complete_requests;
+    /* Set when this compound arrived wrapped in a TRANSFORM header; its reply
+     * MUST then be encrypted (MS-SMB2 §3.3.4.1.4). */
+    int                                received_encrypted;
     uint64_t                           saved_session_id;
     uint64_t                           saved_tree_id;
     struct chimera_smb_file_id         saved_file_id;
@@ -632,6 +642,10 @@ struct chimera_smb_session_handle {
     uint64_t                           session_id;
     struct chimera_smb_session        *session;
     uint8_t                            signing_key[16];
+    uint8_t                            enc_key[32];
+    uint8_t                            dec_key[32];
+    size_t                             enc_key_len;
+    uint16_t                           cipher_id;
     struct UT_hash_handle              hh;
     struct chimera_smb_session_handle *next;
     gss_ctx_id_t                       ctx;
@@ -926,6 +940,7 @@ struct chimera_server_smb_thread {
     struct chimera_smb_session_handle  *free_session_handles;
     struct chimera_smb_open_file       *free_open_files;
     struct chimera_smb_signing_ctx     *signing_ctx;
+    struct chimera_smb_encrypt_ctx     *encrypt_ctx;
     struct chimera_smb_iconv_ctx        iconv_ctx;
 
     /* Notify doorbell: VFS callbacks push ready notify requests here,
@@ -1057,9 +1072,16 @@ chimera_smb_session_alloc(struct chimera_server_smb_shared *shared)
         pthread_mutex_init(&session->lock, NULL);
     }
 
-    session->session_id = chimera_rand64();
-    session->flags      = 0;
-    session->refcnt     = 1;
+    /* Keep the session id within 32 bits (non-zero).  The wire field is 64
+     * bits, but Windows/Samba hand out small ids and some clients (and the
+     * smb2.session-id torture test) round-trip the id through a uint32_t.  A
+     * full 64-bit random id would be silently truncated by such clients and
+     * then fail to match on the next request. */
+    do {
+        session->session_id = chimera_rand64() & 0xFFFFFFFFULL;
+    } while (session->session_id == 0);
+    session->flags  = 0;
+    session->refcnt = 1;
 
     pthread_mutex_unlock(&shared->sessions_lock);
 

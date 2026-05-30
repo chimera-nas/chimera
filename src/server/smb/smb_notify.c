@@ -320,6 +320,7 @@ chimera_smb_notify_send_interim(struct chimera_smb_notify_request *nr)
     if (nr->signed_session) {
         chimera_smb_sign_message(nr->thread->signing_ctx,
                                  nr->conn->dialect,
+                                 nr->conn->negotiated.signing_alg,
                                  nr->signing_key,
                                  buf + 4,
                                  smb2_len);
@@ -565,6 +566,7 @@ chimera_smb_notify_send_response(struct chimera_smb_notify_request *nr)
     if (nr->signed_session) {
         chimera_smb_sign_message(nr->thread->signing_ctx,
                                  nr->conn->dialect,
+                                 nr->conn->negotiated.signing_alg,
                                  nr->signing_key,
                                  buf + 4,
                                  smb2_len);
@@ -673,6 +675,7 @@ chimera_smb_notify_cancel(struct chimera_smb_notify_request *nr)
     if (nr->signed_session) {
         chimera_smb_sign_message(nr->thread->signing_ctx,
                                  nr->conn->dialect,
+                                 nr->conn->negotiated.signing_alg,
                                  nr->signing_key,
                                  buf + 4,
                                  smb2_len);
