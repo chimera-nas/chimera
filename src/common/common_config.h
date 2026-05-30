@@ -123,3 +123,34 @@ chimera_apply_common_config(
         evpl_global_config_set_preallocate_threads(cfg, json_integer_value(val));
     }
 } /* chimera_apply_common_config */
+
+/*
+ * Return the path configured in the shared "common" section's "metrics_file"
+ * key, or NULL if the section or key is absent (or not a string).  This is the
+ * file into which a process dumps a final Prometheus scrape at shutdown -- the
+ * same exposition served live at :PORT/metrics -- so that metrics survive
+ * process exit even when a run is too short to scrape while it is running.  The
+ * returned pointer is owned by `root` and is only valid until json_decref(root);
+ * copy it if it must outlive the parsed config.
+ */
+static inline const char *
+chimera_common_metrics_file(json_t *root)
+{
+    json_t *common, *val;
+
+    if (!root) {
+        return NULL;
+    }
+
+    common = json_object_get(root, "common");
+    if (!json_is_object(common)) {
+        return NULL;
+    }
+
+    val = json_object_get(common, "metrics_file");
+    if (json_is_string(val)) {
+        return json_string_value(val);
+    }
+
+    return NULL;
+} /* chimera_common_metrics_file */

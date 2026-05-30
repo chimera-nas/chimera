@@ -41,6 +41,7 @@ int                           ChimeraNumClients   = 0;
 struct prometheus_metrics    *ChimeraMetrics      = NULL;
 struct chimera_client_config *ChimeraClientConfig = NULL;
 struct chimera_client        *ChimeraClient       = NULL;
+char                         *ChimeraMetricsFile  = NULL;
 
 struct chimera_fio_thread {
     int                              event_head;
@@ -215,8 +216,17 @@ fio_chimera_atexit(void)
 
     if (ChimeraNumClients == 0) {
 
+        /* Persist a final metrics scrape (common.metrics_file) before the
+         * registry is destroyed; fio runs are often too short to scrape live. */
+        if (ChimeraMetricsFile) {
+            chimera_metrics_dump_file(ChimeraMetrics, ChimeraMetricsFile);
+        }
+
         chimera_destroy(ChimeraClient);
         prometheus_metrics_destroy(ChimeraMetrics);
+
+        free(ChimeraMetricsFile);
+        ChimeraMetricsFile = NULL;
     }
 
     pthread_mutex_unlock(&ChimeraClientMutex);
@@ -338,6 +348,16 @@ fio_chimera_init(struct thread_data *td)
 
             chimera_apply_common_config(config, evpl_config);
             evpl_init(evpl_config);
+        }
+
+        /* Stash the shutdown metrics-dump path while the config is still
+         * loaded; it is consumed in fio_chimera_atexit() after config is freed. */
+        {
+            const char *metrics_file = chimera_common_metrics_file(config);
+
+            if (metrics_file) {
+                ChimeraMetricsFile = strdup(metrics_file);
+            }
         }
 
         ChimeraClient = chimera_client_init(ChimeraClientConfig, &root_cred, ChimeraMetrics);
