@@ -818,8 +818,7 @@ build_canonical_request_v4(
     char       *saveptr;
     char        header_lower[256];
 
-    strncpy(signed_headers_copy, signed_headers, sizeof(signed_headers_copy) - 1);
-    signed_headers_copy[sizeof(signed_headers_copy) - 1] = '\0';
+    snprintf(signed_headers_copy, sizeof(signed_headers_copy), "%s", signed_headers);
 
     header_name = strtok_r(signed_headers_copy, ";", &saveptr);
     while (header_name) {
