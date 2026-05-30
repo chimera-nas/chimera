@@ -1558,13 +1558,21 @@ diskfs_fh_to_inum(
  * (disk<<56 | ag<<32 | block_idx) where block_idx is a small, often dense or
  * stride-correlated integer, so the raw low bits have little entropy and
  * cluster inodes onto a handful of the 256 shards -- concentrating contention
- * on those few shard mutexes.  Run it through the VFS XXH3 helper (as used
- * elsewhere in the tree) so inodes spread evenly across shards.
+ * on those few shard mutexes.  Use the SplitMix64 finalizer to spread them
+ * evenly.  (This is a pure-integer mix rather than hashing &inum through XXH3:
+ * the byte-wise XXH3 read of a stack scalar trips -Werror=maybe-uninitialized
+ * when this is deeply inlined on some toolchains, and an integer finalizer is
+ * both immune to that and faster.)
  */
 static inline uint64_t
 diskfs_inum_hash(uint64_t inum)
 {
-    return chimera_vfs_hash(&inum, sizeof(inum));
+    uint64_t x = inum;
+
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    x =  x ^ (x >> 31);
+    return x;
 } /* diskfs_inum_hash */
 
 static inline struct diskfs_inode_shard *
@@ -10536,7 +10544,10 @@ diskfs_open_fh_inode_cb(
 
     if ((request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
         !S_ISDIR(inode->mode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        /* A directory open of a symlink is NFS4ERR_SYMLINK, not NOTDIR (e.g.
+         * LOOKUP/LOOKUPP through a symlink); other non-dirs are NOTDIR. */
+        diskfs_op_fail(request, p->txn,
+                       S_ISLNK(inode->mode) ? CHIMERA_VFS_ESYMLINK : CHIMERA_VFS_ENOTDIR);
         return;
     }
 
@@ -10608,7 +10619,8 @@ diskfs_open_at_existing_cb(
 
     if ((request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
         !S_ISDIR(inode->mode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        diskfs_op_fail(request, p->txn,
+                       S_ISLNK(inode->mode) ? CHIMERA_VFS_ESYMLINK : CHIMERA_VFS_ENOTDIR);
         return;
     }
 
