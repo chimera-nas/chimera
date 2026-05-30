@@ -123,12 +123,14 @@ static const char *level_string[] = {
 #define CHIMERA_LOG_BUF_SIZE 1024 * 1024
 
 char              *ChimeraLogBuffers[2];
-int                ChimeraLogIndex   = 0;
-char              *ChimeraLogBuf     = NULL;
-char              *ChimeraLogBufPtr  = NULL;
-volatile int       ChimeraLogRun     = 1;
-SYMBOL_EXPORT int  ChimeraLogLevel   = CHIMERA_LOG_INFO;
-pthread_mutex_t    ChimeraLogBufLock = PTHREAD_MUTEX_INITIALIZER;
+int                ChimeraLogIndex    = 0;
+char              *ChimeraLogBuf      = NULL;
+char              *ChimeraLogBufPtr   = NULL;
+volatile int       ChimeraLogRun      = 1;
+SYMBOL_EXPORT int  ChimeraLogLevel    = CHIMERA_LOG_INFO;
+FILE              *ChimeraLogFile     = NULL; /* NULL => write to stdout */
+int                ChimeraLogDisabled = 0;
+pthread_mutex_t    ChimeraLogBufLock  = PTHREAD_MUTEX_INITIALIZER;
 pthread_t          ChimeraLogThread;
 pthread_once_t     ChimeraLogOnce = PTHREAD_ONCE_INIT;
 
@@ -137,6 +139,7 @@ chimera_log_thread(void *arg)
 {
     int   i;
     char *tmp;
+    FILE *out = ChimeraLogFile ? ChimeraLogFile : stdout;
 
     while (ChimeraLogRun || ChimeraLogBufPtr > ChimeraLogBuf) {
 
@@ -149,14 +152,19 @@ chimera_log_thread(void *arg)
             ChimeraLogBufPtr = ChimeraLogBuf;
             pthread_mutex_unlock(&ChimeraLogBufLock);
 
-            fprintf(stdout, "%s", tmp);
-            fflush(stdout);
+            fprintf(out, "%s", tmp);
+            fflush(out);
         }
         usleep(1000);
     }
 
     for (i = 0; i < 2; ++i) {
         free(ChimeraLogBuffers[i]);
+    }
+
+    if (ChimeraLogFile) {
+        fclose(ChimeraLogFile);
+        ChimeraLogFile = NULL;
     }
 
     return NULL;
@@ -219,6 +227,16 @@ chimera_log_thread_init(void)
 {
     int i;
 
+    if (ChimeraLogDisabled) {
+        /*
+         * Logging is disabled: don't allocate buffers or start the logging
+         * thread.  Clear ChimeraLogRun so chimera_log_flush()/the atexit
+         * handler don't try to join a thread that was never created.
+         */
+        ChimeraLogRun = 0;
+        return;
+    }
+
     for (i = 0; i < 2; ++i) {
         ChimeraLogBuffers[i] = calloc(CHIMERA_LOG_BUF_SIZE, sizeof(char));
     }
@@ -246,6 +264,19 @@ chimera_log_init(void)
 } /* chimera_log_init */
 
 SYMBOL_EXPORT void
+chimera_log_set_file(FILE *fp)
+{
+    ChimeraLogFile     = fp;
+    ChimeraLogDisabled = 0;
+} /* chimera_log_set_file */
+
+SYMBOL_EXPORT void
+chimera_log_disable(void)
+{
+    ChimeraLogDisabled = 1;
+} /* chimera_log_disable */
+
+SYMBOL_EXPORT void
 chimera_vlog(
     const char *level,
     const char *mod,
@@ -257,6 +288,10 @@ chimera_vlog(
     struct timespec ts;
     struct tm       tm_info;
     uint64_t        pid, tid;
+
+    if (ChimeraLogDisabled) {
+        return;
+    }
 
     clock_gettime(CLOCK_REALTIME, &ts);
 

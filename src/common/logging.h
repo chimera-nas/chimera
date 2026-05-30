@@ -1,10 +1,11 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
 
 #include <stdarg.h>
+#include <stdio.h>
 
 extern int ChimeraLogLevel;
 
@@ -14,6 +15,21 @@ extern int ChimeraLogLevel;
 #define CHIMERA_LOG_DEBUG 4
 
 void chimera_log_init(
+    void);
+
+/*
+ * Redirect chimera (and any evpl logging routed through chimera_vlog) output to
+ * the given stream instead of the default stdout.  The stream is closed when
+ * logging is flushed/torn down.  Must be called before chimera_log_init().
+ */
+void chimera_log_set_file(
+    FILE *fp);
+
+/*
+ * Disable logging entirely: chimera_vlog drops all messages and no logging
+ * thread is started.  Must be called before chimera_log_init().
+ */
+void chimera_log_disable(
     void);
 
 void chimera_enable_crash_handler(
