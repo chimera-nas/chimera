@@ -138,3 +138,44 @@ struct chimera_vfs_attrs {
      */
     uint8_t             va_fh[CHIMERA_VFS_FH_SIZE + 16];
 };
+
+/* relatime: update atime on a read at most once per this period when the file
+ * is otherwise idle (matches the Linux default). */
+#define CHIMERA_VFS_RELATIME_PERIOD_SEC (24 * 60 * 60)
+
+static inline int
+chimera_vfs_timespec_ge(
+    const struct timespec *a,
+    const struct timespec *b)
+{
+    if (a->tv_sec != b->tv_sec) {
+        return a->tv_sec > b->tv_sec;
+    }
+    return a->tv_nsec >= b->tv_nsec;
+} /* chimera_vfs_timespec_ge */
+
+/*
+ * relatime policy: should a read bump atime?  Update only if the file was
+ * modified or its metadata changed since the last access (mtime/ctime >= atime),
+ * or the recorded atime is more than a day stale.  Mirrors the Linux kernel's
+ * relatime_need_update.  The resulting bump must touch atime ONLY -- never ctime
+ * -- so that after a bump conditions 1 and 2 are false until the next write.
+ */
+static inline int
+chimera_vfs_relatime_needs_update(
+    const struct timespec *atime,
+    const struct timespec *mtime,
+    const struct timespec *ctime,
+    const struct timespec *now)
+{
+    if (chimera_vfs_timespec_ge(mtime, atime)) {
+        return 1;
+    }
+    if (chimera_vfs_timespec_ge(ctime, atime)) {
+        return 1;
+    }
+    if (now->tv_sec - atime->tv_sec >= CHIMERA_VFS_RELATIME_PERIOD_SEC) {
+        return 1;
+    }
+    return 0;
+} /* chimera_vfs_relatime_needs_update */

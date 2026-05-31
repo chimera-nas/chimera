@@ -229,6 +229,7 @@ struct memfs_shared {
     uint32_t                 block_size;
     uint32_t                 block_shift;
     uint32_t                 block_mask;
+    int                      noatime;     /* config: disable atime updates on read */
     pthread_mutex_t          lock;
 };
 
@@ -937,6 +938,10 @@ memfs_init(
                 shared->fsid = strtoull(json_string_value(fsid_cfg), NULL, 0);
             }
         }
+
+        /* noatime disables read atime updates entirely; default (off) keeps
+         * relatime semantics. */
+        shared->noatime = json_is_true(json_object_get(cfg, "noatime"));
 
         json_decref(cfg);
     }
@@ -2829,7 +2834,13 @@ memfs_read(
         left        -= block_len;
     }
 
-    inode->atime = now;
+    /* relatime: only advance atime when the file changed since last access or
+     * the recorded atime is a day stale, so steady-state reads return identical
+     * attrs (and stop churning the VFS attr cache). */
+    if (!shared->noatime &&
+        chimera_vfs_relatime_needs_update(&inode->atime, &inode->mtime, &inode->ctime, &now)) {
+        inode->atime = now;
+    }
 
     memfs_map_attrs_fork(shared, &request->read.r_attr, inode, stream, request->fh);
 
