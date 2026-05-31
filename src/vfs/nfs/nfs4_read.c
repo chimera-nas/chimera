@@ -151,6 +151,19 @@ chimera_nfs4_read(
                                request->thread->vfs->machine_name,
                                request->thread->vfs->machine_name_len);
 
+    /* read_into over RDMA: land the READ reply data directly in the caller's
+     * destination buffer (the COMPOUND's RDMA write chunk) and tell the VFS core
+     * to skip the copy.  The write chunk carries the READ4resok data field the
+     * same way as the internally-allocated chunk; only the buffer source
+     * changes.  Single-iovec dest only; otherwise fall back to copy. */
+    if (server_thread->nfs_conn->rdma && request->read.dest_provided &&
+        request->read.dest_niov == 1) {
+        evpl_rpc2_conn_set_write_chunk_dest(server_thread->nfs_conn,
+                                            request->read.dest_iov,
+                                            request->read.dest_niov);
+        request->read.landed_in_dest = 1;
+    }
+
     shared->nfs_v4.send_call_NFSPROC4_COMPOUND(
         &shared->nfs_v4.rpc2,
         thread->evpl,
