@@ -57,10 +57,11 @@ struct chimera_fio_thread {
 };
 
 struct chimera_options {
-    void *pad;
-    char *config;
-    char *logfile;
-    int   debug;
+    void              *pad;
+    char              *config;
+    char              *logfile;
+    int                debug;
+    unsigned long long buffer_size;
 };
 
 static struct fio_option options[] = {
@@ -89,6 +90,16 @@ static struct fio_option options[] = {
         .type     = FIO_OPT_BOOL,
         .off1     = offsetof(struct chimera_options, debug),
         .help     = "Enable debug-level chimera logging (same as the daemon's -d)",
+        .def      = "0",
+        .category = FIO_OPT_C_ENGINE,
+        .group    = FIO_OPT_G_INVALID,
+    },
+    {
+        .name     = "chimera_buffer_size",
+        .lname    = "Chimera evpl buffer size",
+        .type     = FIO_OPT_STR_VAL,
+        .off1     = offsetof(struct chimera_options, buffer_size),
+        .help     = "Override the libevpl buffer size in bytes; 0 (default) auto-sizes to the largest job's iodepth*bs",
         .def      = "0",
         .category = FIO_OPT_C_ENGINE,
         .group    = FIO_OPT_G_INVALID,
@@ -199,8 +210,20 @@ fio_chimera_iomem_alloc(
     size_t              total_mem)
 {
     struct chimera_fio_thread *chimera_thread = td->io_ops_data;
+    int                        niov;
 
-    evpl_iovec_alloc(chimera_thread->evpl, total_mem, 4096, 1, 0, &chimera_thread->iov);
+    /* The whole I/O pool must fit in one contiguous registered evpl buffer.
+     * buffer_size was sized for the largest job at init, so this should always
+     * succeed; fail loudly rather than hand fio a garbage orig_buffer if it
+     * ever doesn't (e.g. a pool larger than the configured buffer). */
+    niov = evpl_iovec_alloc(chimera_thread->evpl, total_mem, 4096, 1, 0, &chimera_thread->iov);
+
+    if (niov != 1) {
+        chimera_fio_fatal(
+            "I/O buffer pool of %zu bytes exceeds the libevpl buffer size; "
+            "raise chimera_buffer_size", total_mem);
+        return 1;
+    }
 
     td->orig_buffer = evpl_iovec_data(&chimera_thread->iov);
 
@@ -362,8 +385,49 @@ fio_chimera_init(struct thread_data *td)
          * loaded config.  `config` may be NULL when no config file was given. */
         {
             struct evpl_global_config *evpl_config = evpl_global_config_init();
+            uint64_t                   buffer_size = 2 * 1024 * 1024; /* evpl default */
+            uint64_t                   page        = (uint64_t) sysconf(_SC_PAGESIZE);
+            uint64_t                   slab_size;
 
             chimera_apply_common_config(config, evpl_config);
+
+            /* The engine backs each fio thread's entire I/O buffer pool
+             * (iodepth * bs) with a SINGLE contiguous, RDMA-registered evpl
+             * iovec, so the evpl buffer must be at least as large as the
+             * biggest job's pool.  evpl_init() bakes the buffer size in and
+             * runs once for the whole process, so size it here for the largest
+             * job across all jobs (matches fio's own sizing in backend.c). */
+            for_each_td(t)
+            {
+                struct chimera_options *to   = t->eo;
+                uint64_t                pool = (uint64_t) t->o.iodepth * td_max_bs(t);
+
+                if (t->o.odirect || t->o.mem_align) {
+                    pool += page + t->o.mem_align;
+                }
+                if (pool > buffer_size) {
+                    buffer_size = pool;
+                }
+                if (to && to->buffer_size > buffer_size) {
+                    buffer_size = to->buffer_size;
+                }
+            }
+            end_for_each();
+
+            /* Round up to a 2 MiB multiple. */
+            buffer_size = (buffer_size + (2 * 1024 * 1024 - 1)) & ~((uint64_t) (2 * 1024 * 1024) - 1);
+
+            evpl_global_config_set_buffer_size(evpl_config, buffer_size);
+
+            /* Keep several buffers per slab (buffers_per_slab = slab / buffer). */
+            slab_size = 4 * buffer_size;
+            if (slab_size > (uint64_t) 1024 * 1024 * 1024) {
+                evpl_global_config_set_slab_size(evpl_config, slab_size);
+            }
+
+            chimera_fio_info("evpl buffer size %lu bytes (largest fio I/O pool)",
+                             (unsigned long) buffer_size);
+
             evpl_init(evpl_config);
         }
 
