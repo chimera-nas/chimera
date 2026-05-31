@@ -59,6 +59,22 @@ chimera_vfs_remove_at_complete(struct chimera_vfs_request *request)
                                 request->remove_at.namelen,
                                 NULL, 0);
 
+        /* Signal any CHANGE_NOTIFY armed on a handle to the object that was
+         * just removed (its own FH, distinct from the parent emit above) so
+         * that pending request completes with STATUS_DELETE_PENDING rather
+         * than parking forever.  Prefer the caller-supplied child FH; fall
+         * back to the FH the backend reported for the removed entry. */
+        if (request->remove_at.child_fh && request->remove_at.child_fh_len > 0) {
+            chimera_vfs_notify_emit_delete(thread->vfs->vfs_notify,
+                                           request->remove_at.child_fh,
+                                           request->remove_at.child_fh_len);
+        } else if (request->remove_at.r_removed_attr.va_set_mask &
+                   CHIMERA_VFS_ATTR_FH) {
+            chimera_vfs_notify_emit_delete(thread->vfs->vfs_notify,
+                                           request->remove_at.r_removed_attr.va_fh,
+                                           request->remove_at.r_removed_attr.va_fh_len);
+        }
+
         chimera_vfs_name_cache_insert(thread, name_cache,
                                       request->remove_at.handle->fh_hash,
                                       request->remove_at.handle->fh,

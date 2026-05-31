@@ -53,6 +53,10 @@ struct chimera_vfs_notify_watch {
     int                              ring_head;  /* next write position */
     int                              ring_count; /* number of pending events */
     int                              overflowed;
+    /* Set when the watched object itself was removed.  Drained via
+     * chimera_vfs_notify_watch_take_deleted(); the SMB layer maps it to
+     * STATUS_DELETE_PENDING on the pending CHANGE_NOTIFY. */
+    int                              deleted;
 
     chimera_vfs_notify_callback_t    callback;
     void                            *private_data;
@@ -184,6 +188,16 @@ chimera_vfs_notify_drain(
     int                              max_events,
     int                             *overflowed);
 
+/*
+ * Atomically read and clear a watch's "deleted" flag.  Returns non-zero if
+ * the watched object had been removed since the last call.  The SMB layer
+ * polls this alongside drain to complete a pending CHANGE_NOTIFY with
+ * STATUS_DELETE_PENDING.
+ */
+int
+chimera_vfs_notify_watch_take_deleted(
+    struct chimera_vfs_notify_watch *watch);
+
 void
 chimera_vfs_notify_emit(
     struct chimera_vfs_notify *notify,
@@ -194,3 +208,15 @@ chimera_vfs_notify_emit(
     uint16_t                   name_len,
     const char                *old_name,
     uint16_t                   old_name_len);
+
+/*
+ * Signal that the object identified by `fh` was itself removed.  Marks every
+ * exact watch on that FH deleted and fires its callback, so a pending
+ * CHANGE_NOTIFY on a handle to the now-deleted directory completes with
+ * STATUS_DELETE_PENDING instead of parking forever.
+ */
+void
+chimera_vfs_notify_emit_delete(
+    struct chimera_vfs_notify *notify,
+    const uint8_t             *fh,
+    uint16_t                   fh_len);

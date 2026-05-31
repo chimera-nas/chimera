@@ -72,6 +72,7 @@ struct chimera_server_config {
     int                                   smb_named_streams;
     int                                   smb_signing_required;
     int                                   smb_encryption;
+    int                                   smb_notify_disabled;
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
@@ -162,6 +163,10 @@ chimera_server_config_init(void)
     /* SMB3 transport encryption is off by default; the "smb_encryption" config
      * flag enables (1) or requires (2) it. */
     config->smb_encryption = 0;
+
+    /* CHANGE_NOTIFY is enabled by default; the "smb_notify_disabled" flag makes
+     * the server reject CHANGE_NOTIFY with STATUS_NOT_IMPLEMENTED. */
+    config->smb_notify_disabled = 0;
 
     // SMB auth config defaults - local NTLM only
     config->smb_auth.winbind_enabled    = 0;
@@ -328,6 +333,20 @@ chimera_server_config_get_smb_encryption(const struct chimera_server_config *con
 {
     return config->smb_encryption;
 } /* chimera_server_config_get_smb_encryption */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_notify_disabled(
+    struct chimera_server_config *config,
+    int                           disabled)
+{
+    config->smb_notify_disabled = disabled;
+} /* chimera_server_config_set_smb_notify_disabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_notify_disabled(const struct chimera_server_config *config)
+{
+    return config->smb_notify_disabled;
+} /* chimera_server_config_get_smb_notify_disabled */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_max_open_files(

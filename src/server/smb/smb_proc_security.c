@@ -684,6 +684,24 @@ chimera_smb_set_security_setattr_callback(
     struct chimera_smb_request *request = private_data;
     unsigned int                status;
 
+    /* A successful security-descriptor change is an attribute change on the
+     * object; fire a CHANGE_NOTIFY (ATTRS_CHANGED, which the SECURITY/ALL
+     * completion filter maps to) on the parent so watchers see it — same as
+     * the basic-info setattr path (smb2.notify.security).  Emit before
+     * releasing the open_file since we read its parent_fh/name. */
+    if (error_code == CHIMERA_VFS_OK &&
+        request->set_info.open_file->parent_fh_len > 0) {
+        struct chimera_server_smb_thread *thread = request->compound->thread;
+
+        chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
+                                request->set_info.open_file->parent_fh,
+                                request->set_info.open_file->parent_fh_len,
+                                CHIMERA_VFS_NOTIFY_ATTRS_CHANGED,
+                                request->set_info.open_file->name,
+                                request->set_info.open_file->name_len,
+                                NULL, 0);
+    }
+
     chimera_smb_open_file_release(request, request->set_info.open_file);
 
     switch (error_code) {
