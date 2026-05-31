@@ -357,3 +357,15 @@ chimera_vfs_state_break_on_write(
     uint8_t                               fh_len,
     uint64_t                              fh_hash,
     const struct chimera_vfs_lease_owner *writer);
+
+/* Break-on-open: downgrade any exclusive (W) or batch (W|H) caching lease held
+ * by a *different* owner on (fh, fh_hash) to a shared read cache (LEVEL_II),
+ * leaving pure read-cache holders untouched.  Drives the SMB2 "second open
+ * breaks the oplock to level II" semantic for a non-modifying opener. */
+void
+chimera_vfs_state_break_on_open(
+    struct chimera_vfs_state             *state,
+    const uint8_t                        *fh,
+    uint8_t                               fh_len,
+    uint64_t                              fh_hash,
+    const struct chimera_vfs_lease_owner *opener);
