@@ -280,6 +280,49 @@ chimera_smb_create_gen_open_file(
     open_file->stream_name_len = 0;
     open_file->base_fh_len     = 0;
 
+    /* A *batch* (handle-caching) oplock breaks BEFORE the share-mode check:
+     * the holder may close its deferred handle in response, after which the
+     * sharing conflict disappears.  Fire that break here so it happens even
+     * when this open is ultimately refused with a sharing violation (MS-FSA
+     * drives the break off the access attempt -- smb2.oplock.batch5 expects
+     * the break AND a SHARING_VIOLATION).  An exclusive (W-only) oplock is
+     * different: it breaks only once the open is granted (handled after the
+     * share-mode check), so we do NOT touch W-only holders here.  A truncating
+     * disposition replaces the data, so a batch holder breaks to NONE;
+     * otherwise it drops to LEVEL_II.  Pure attribute/EA opens break nothing
+     * (stat-open).  No-op on the first open; skips the opener's own lease. */
+    if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share && oh) {
+        uint32_t da   = open_file->desired_access;
+        uint32_t disp = request->create.create_disposition;
+        bool     truncates =
+            disp == SMB2_FILE_OVERWRITE ||
+            disp == SMB2_FILE_OVERWRITE_IF ||
+            disp == SMB2_FILE_SUPERSEDE;
+        bool break_trigger =
+            (da & (SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
+                   SMB2_FILE_APPEND_DATA | SMB2_FILE_EXECUTE |
+                   SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
+                   SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL |
+                   SMB2_MAXIMUM_ALLOWED | SMB2_DELETE)) ||
+            (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
+            truncates;
+
+        if (break_trigger) {
+            struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
+            struct chimera_vfs_lease_owner io_owner  = {
+                .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
+                .client_key = request->session_handle->session->session_id,
+                .owner_lo   = open_file->file_id.pid,
+                .owner_hi   = open_file->file_id.vid,
+            };
+
+            chimera_vfs_state_break_caching_for_open(vfs_state, oh->fh, oh->fh_len,
+                                                     oh->fh_hash, &io_owner,
+                                                     CHIMERA_VFS_LEASE_MODE_H,
+                                                     truncates ? 0 : CHIMERA_VFS_LEASE_MODE_R);
+        }
+    }
+
     /* Check share mode conflicts for regular file opens.
      * Attribute-only opens (READ_ATTRIBUTES, SYNCHRONIZE, etc.)
      * bypass share mode enforcement, matching Windows/NTFS behavior.
@@ -625,13 +668,19 @@ chimera_smb_create_gen_open_file(
                                                       &open_file->caching_lease,
                                                       &conflict);
 
-                /* A breakable conflict means another handle already holds a
-                 * caching oplock/lease.  try_insert has kicked off the break
-                 * (downgrading that holder to a shared read / LEVEL_II).  We
-                 * cannot keep an exclusive/write cache, but we can settle for
-                 * a shared read lease, which coexists with the downgraded
-                 * holder — this is how a 2nd open ends up with LEVEL_II. */
-                if (result == CHIMERA_VFS_LEASE_BREAKING) {
+                /* Another handle already holds a caching oplock/lease.  We
+                 * cannot keep an exclusive/write cache, but we can settle for a
+                 * shared read lease, which coexists with the (now downgraded)
+                 * holder -- this is how a 2nd open ends up with LEVEL_II.
+                 *   - BREAKING: try_insert just kicked off the holder's break.
+                 *   - DENIED: the holder was already broken to a shared read by
+                 *     the break-on-open above (its lease is ACKED, no longer
+                 *     IDLE-breakable), so a write cache is refused; a read cache
+                 *     still coexists.
+                 * Either way, retry for read-only caching (LEVEL_II). */
+                if ((result == CHIMERA_VFS_LEASE_BREAKING ||
+                     result == CHIMERA_VFS_LEASE_DENIED) &&
+                    req_vfs != CHIMERA_VFS_LEASE_MODE_R) {
                     req_vfs                               = CHIMERA_VFS_LEASE_MODE_R;
                     open_file->caching_lease.mode.granted = req_vfs;
                     result                                = chimera_vfs_state_try_insert(vfs_state, file_state,
@@ -696,37 +745,34 @@ chimera_smb_create_gen_open_file(
                 open_file->oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
             }
 
-            /* This open requested no caching lease of its own, but it can
-             * still break an oplock another open holds.  A data-modifying or
-             * deleting open breaks every holder all the way to NONE; a plain
-             * (non-modifying) data open downgrades an exclusive/batch holder to
-             * LEVEL_II.  A pure attribute-only open (caching_touches_data ==
-             * false) breaks nothing -- it must leave a stat-open holder's
-             * oplock intact. */
-            bool modifying =
-                (request->create.desired_access &
-                 (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
-                  SMB2_GENERIC_WRITE | SMB2_GENERIC_ALL |
-                  SMB2_DELETE | SMB2_MAXIMUM_ALLOWED)) ||
-                (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
-                request->create.create_disposition == SMB2_FILE_OVERWRITE ||
-                request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
-                request->create.create_disposition == SMB2_FILE_SUPERSEDE;
-
-            if (modifying || caching_touches_data) {
+            /* The open has now been granted (it passed the share-mode check
+             * above).  Break a conflicting *exclusive* (W) holder: unlike a
+             * batch holder (already handled before the share check), an
+             * exclusive oplock breaks only once the conflicting open succeeds.
+             * A truncating open invalidates all cached data (break to NONE);
+             * any other data/delete open downgrades the holder to LEVEL_II.  A
+             * pure attribute/EA open (not caching_touches_data) breaks
+             * nothing.  Skips the opener's own lease (distinct owner). */
+            if (caching_touches_data) {
                 struct chimera_vfs_lease_owner io_owner = {
                     .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
                     .client_key = request->session_handle->session->session_id,
                     .owner_lo   = open_file->file_id.pid,
                     .owner_hi   = open_file->file_id.vid,
                 };
+                bool truncates =
+                    request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+                    request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
+                    request->create.create_disposition == SMB2_FILE_SUPERSEDE;
 
-                if (modifying) {
+                if (truncates) {
                     chimera_vfs_state_break_on_write(vfs_state, oh->fh, oh->fh_len,
                                                      oh->fh_hash, &io_owner);
                 } else {
-                    chimera_vfs_state_break_on_open(vfs_state, oh->fh, oh->fh_len,
-                                                    oh->fh_hash, &io_owner);
+                    chimera_vfs_state_break_caching_for_open(
+                        vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &io_owner,
+                        CHIMERA_VFS_LEASE_MODE_W | CHIMERA_VFS_LEASE_MODE_H,
+                        CHIMERA_VFS_LEASE_MODE_R);
                 }
             }
         }
