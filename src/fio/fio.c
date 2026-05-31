@@ -60,6 +60,7 @@ struct chimera_options {
     void *pad;
     char *config;
     char *logfile;
+    int   debug;
 };
 
 static struct fio_option options[] = {
@@ -79,6 +80,16 @@ static struct fio_option options[] = {
         .off1  = offsetof(struct chimera_options, logfile),
         .help  =
             "Direct chimera and evpl log output to this file (truncated at start of run); if unset, chimera logging is disabled",
+        .category = FIO_OPT_C_ENGINE,
+        .group    = FIO_OPT_G_INVALID,
+    },
+    {
+        .name     = "chimera_debug",
+        .lname    = "Chimera Debug Logging",
+        .type     = FIO_OPT_BOOL,
+        .off1     = offsetof(struct chimera_options, debug),
+        .help     = "Enable debug-level chimera logging (same as the daemon's -d)",
+        .def      = "0",
         .category = FIO_OPT_C_ENGINE,
         .group    = FIO_OPT_G_INVALID,
     },
@@ -285,7 +296,9 @@ fio_chimera_init(struct thread_data *td)
 
         chimera_log_init();
 
-        //ChimeraLogLevel = CHIMERA_LOG_DEBUG;
+        if (o->debug) {
+            ChimeraLogLevel = CHIMERA_LOG_DEBUG;
+        }
 
         evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 
