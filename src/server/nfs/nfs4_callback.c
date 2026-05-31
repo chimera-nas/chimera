@@ -27,6 +27,7 @@
 #include "nfs4_callback.h"
 #include "nfs4_state.h"
 #include "nfs4_session.h"
+#include "nfs4_procs.h"
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_state.h"
@@ -140,6 +141,7 @@ nfs4_cb_null_complete(
 {
     struct nfs4_cb_probe_ctx *ctx    = private_data;
     struct nfs_client        *client = ctx->client;
+    struct nfs_request       *waiters;
 
     (void) evpl;
     (void) verf;
@@ -152,6 +154,19 @@ nfs4_cb_null_complete(
                               memory_order_release);
         chimera_nfs_error("NFS4 callback path probe failed (status %d) for client %lu",
                           status, client->client_id);
+    }
+
+    /* Resume any OPENs that parked while the probe was in flight.  Runs on
+     * the channel's owner thread (this completion fires from this thread's
+     * evpl), the same thread the OPEN parked from, so the list mutation is
+     * race-free without a lock. */
+    waiters                       = client->cb_path.probe_waiters;
+    client->cb_path.probe_waiters = NULL;
+    while (waiters) {
+        struct nfs_request *req = waiters;
+        waiters         = req->probe_next;
+        req->probe_next = NULL;
+        chimera_nfs4_open_resume_after_probe(req);
     }
 
     free(ctx);
@@ -347,58 +362,124 @@ nfs4_cb_channel_open(
                                     ctx);
 } /* nfs4_cb_channel_open */
 
+/*
+ * Internal driver.  Returns the post-action cb_state so callers can decide
+ * what to do with it; also reports (via *triggered_out) whether THIS call
+ * was the one that flipped UNINIT->PROBING.
+ */
+static uint8_t
+nfs4_cb_probe_drive(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_client                *client,
+    struct nfs_request               *req,
+    bool                             *triggered_out)
+{
+    uint8_t state;
+
+    if (triggered_out) {
+        *triggered_out = false;
+    }
+
+    state = atomic_load_explicit(&client->cb_path.cb_state,
+                                 memory_order_acquire);
+
+    if (state != NFS4_CB_UNINIT) {
+        return state;
+    }
+
+    /* No callback program captured at all -> client never asked to be able
+     * to receive callbacks; report DOWN so callers skip delegation. */
+    if (client->cb_path.cb_program == 0) {
+        return NFS4_CB_DOWN;
+    }
+
+    /* Claim the one-time channel setup: only the thread that flips
+     * UNINIT->PROBING opens the channel.  A concurrent OPEN that loses the
+     * race sees the post-CAS state and reacts to that instead. */
+    {
+        uint8_t expect = NFS4_CB_UNINIT;
+
+        if (!atomic_compare_exchange_strong_explicit(
+                &client->cb_path.cb_state, &expect, NFS4_CB_PROBING,
+                memory_order_acq_rel, memory_order_acquire)) {
+            return expect;
+        }
+    }
+
+    if (triggered_out) {
+        *triggered_out = true;
+    }
+
+    nfs4_cb_channel_open(thread, client, req);
+
+    /* 4.1+ binds the backchannel and marks the path UP synchronously (no
+     * CB_NULL round trip).  4.0 fired an asynchronous CB_NULL and is still
+     * PROBING here. */
+    return atomic_load_explicit(&client->cb_path.cb_state,
+                                memory_order_acquire);
+} /* nfs4_cb_probe_drive */
+
 bool
 nfs4_cb_ensure_probe(
     struct chimera_server_nfs_thread *thread,
     struct nfs_client                *client,
     struct nfs_request               *req)
 {
-    uint8_t state;
-
     if (!client) {
         return false;
     }
+    return nfs4_cb_probe_drive(thread, client, req, NULL) == NFS4_CB_UP;
+} /* nfs4_cb_ensure_probe */
 
-    state = atomic_load_explicit(&client->cb_path.cb_state, memory_order_acquire);
+enum nfs4_cb_grant_decision
+nfs4_cb_grant_probe(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_client                *client,
+    struct nfs_request               *req)
+{
+    uint8_t state;
+    bool triggered = false;
+
+    if (!client) {
+        return NFS4_CB_GRANT_NO_PATH;
+    }
+
+    state = nfs4_cb_probe_drive(thread, client, req, &triggered);
 
     switch (state) {
         case NFS4_CB_UP:
-            return true;
+            return NFS4_CB_GRANT_PATH_UP;
         case NFS4_CB_PROBING:
+            /* If THIS call kicked the probe, preserve the historical
+             * behavior: the kicking OPEN proceeds without a delegation.
+             * (This is how chimera has always behaved on 4.0 -- the very
+             * first delegation-wanting OPEN never gets a delegation, and a
+             * follow-up OPEN is the one that lands it.  Changing that for
+             * the kicking OPEN itself would also start handing out
+             * delegations on OPENs that historically did not get them,
+             * which some pynfs tests rely on -- e.g. DELEG15d sets up an
+             * undelegated file via a plain c.create_file before requesting
+             * a delegation on a different file.)  Only OPENs that find the
+             * probe already in flight defer. */
+            return triggered ? NFS4_CB_GRANT_NO_PATH : NFS4_CB_GRANT_DEFER;
         case NFS4_CB_DOWN:
-            return false;
-        case NFS4_CB_UNINIT:
         default:
-            /* No callback program captured at all -> client never asked to be
-             * able to receive callbacks; cannot delegate. */
-            if (client->cb_path.cb_program == 0) {
-                return false;
-            }
-
-            /* Claim the one-time channel setup: only the thread that flips
-             * UNINIT->PROBING opens the channel.  A concurrent OPEN that loses
-             * the race sees PROBING (or the final state) and skips -- a later
-             * OPEN is served once setup settles. */
-            {
-                uint8_t expect = NFS4_CB_UNINIT;
-
-                if (!atomic_compare_exchange_strong_explicit(
-                        &client->cb_path.cb_state, &expect, NFS4_CB_PROBING,
-                        memory_order_acq_rel, memory_order_acquire)) {
-                    return expect == NFS4_CB_UP;
-                }
-            }
-
-            nfs4_cb_channel_open(thread, client, req);
-
-            /* 4.1+ binds the backchannel and marks the path UP synchronously
-             * (no CB_NULL round trip), so this very first delegation-wanting
-             * OPEN can be served.  4.0 fired an asynchronous CB_NULL and is
-             * still PROBING here. */
-            return atomic_load_explicit(&client->cb_path.cb_state,
-                                        memory_order_acquire) == NFS4_CB_UP;
+            return NFS4_CB_GRANT_NO_PATH;
     } /* switch */
-} /* nfs4_cb_ensure_probe */
+} /* nfs4_cb_grant_probe */
+
+void
+nfs4_cb_probe_park(
+    struct nfs_client  *client,
+    struct nfs_request *req)
+{
+    /* probe_waiters is owned by chan->owner_thread; the OPEN handler runs on
+     * the same thread, and the only producer of completions (nfs4_cb_null_
+     * complete) runs there too, so no lock is needed.  LIFO is fine -- the
+     * order in which deferred OPENs resume doesn't affect correctness. */
+    req->probe_next               = client->cb_path.probe_waiters;
+    client->cb_path.probe_waiters = req;
+} /* nfs4_cb_probe_park */
 
 /* ---------------------------------------------------------------------- */
 /* CB_RECALL                                                              */

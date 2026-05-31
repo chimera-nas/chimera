@@ -16,6 +16,8 @@
 #include "nfs4_xdr.h"
 #include "nfs4_stateid.h"
 #include "nfs4_lease.h"
+
+struct nfs_request;
 #include "vfs/vfs.h"
 #include "vfs/vfs_state.h"
 #include "common/macros.h"
@@ -115,6 +117,13 @@ struct nfs4_cb_path {
     /* Lazily-established outbound channel (4.0) or borrowed backchannel (4.1).
      * Owned/serviced by a single NFS thread; see nfs4_callback.c. */
     struct nfs4_cb_client *cb_client;
+    /* OPENs deferred while a 4.0 CB_NULL probe is in flight: the very first
+     * delegation-wanting OPEN flips UNINIT->PROBING and skips the grant
+     * (current behavior); a second OPEN that arrives during PROBING parks
+     * here instead of skipping, and nfs4_cb_null_complete resumes them all
+     * with the final cb_state.  Linked via nfs_request->probe_next.  Owned
+     * by chan->owner_thread; no extra synchronization needed. */
+    struct nfs_request    *probe_waiters;
 };
 
 /*

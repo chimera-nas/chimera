@@ -35,6 +35,14 @@
 #define TEST_SLOTS   4
 #define TEST_MAXRESP 4096
 
+/* nfs4_callback.c references this from nfs4_cb_null_complete, which this
+ * unit test never exercises -- stub it to satisfy the link. */
+void
+chimera_nfs4_open_resume_after_probe(struct nfs_request *req)
+{
+    (void) req;
+} /* chimera_nfs4_open_resume_after_probe */
+
 /*
  * Build a session attached to a fresh client table.  Caller frees with
  * destroy_session_table().  No NFS conn / encoding is created here --
