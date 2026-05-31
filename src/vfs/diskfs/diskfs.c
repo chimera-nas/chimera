@@ -880,42 +880,101 @@ struct diskfs_il_record {
     * must fork a still-referenced block (COW), never on the log/push path. */
     struct evpl_iovec       *iovs;
     struct diskfs_il_record *next;
+    /* Push-thread lifetime: a record is freed only after it is logically
+     * retired (trimmed from the log) AND no in-flight home write still reads
+     * its iovs (inflight_refs == 0). */
+    int                      inflight_refs;
+    int                      retired;
 };
 
+/*
+ * Push-side per-(device,offset) pending home write: the newest logged image of
+ * a block that is not yet durably home.  Lives on the push thread only.
+ * `iov`/`owner` track the newest image; the `issued_*` fields snapshot the
+ * in-flight write's source, so an image that supersedes mid-flight is re-issued
+ * on completion (newest lands last) and the in-flight write's source record
+ * stays pinned (inflight_refs) until that write lands.
+ */
+struct diskfs_pending {
+    struct diskfs_intent_log *il;          /* owner (recovered in the block-write cb) */
+    uint32_t                  device_id;
+    uint64_t                  device_offset;
+    uint64_t                  seq;         /* newest pending image seq */
+    struct evpl_iovec        *iov;         /* newest image (points into owner->iovs) */
+    struct diskfs_il_record  *owner;       /* record owning the newest image */
+    int                       inflight;    /* a home write is in flight for this block */
+    uint64_t                  issued_seq;  /* seq of the in-flight write */
+    struct diskfs_il_record  *issued_owner; /* record the in-flight write reads from */
+    int                       on_ready;    /* queued on ready list */
+    struct diskfs_pending    *hnext;       /* hash chain */
+    struct diskfs_pending    *rnext;       /* ready-queue / free-list link */
+};
+
+/*
+ * Commit-side retirement-ring slot: a submitted redo record awaiting in-order
+ * retirement.  `done` is set when the record's journal write(s) complete; the
+ * ring retires strictly in submission (== log) order, so ACKs to workers and
+ * the hand-off to the push thread happen in order -- replay stops at the first
+ * torn record, so a later record is not recoverable until every earlier record
+ * is durable.
+ */
+struct diskfs_retire_slot {
+    struct diskfs_redo_ctx *ctx;
+    int                     done;
+};
+
+#define DISKFS_RETIRE_RING_SIZE  1024   /* >= DISKFS_COMMIT_WATERMARK */
+#define DISKFS_RETIRE_RING_MASK  (DISKFS_RETIRE_RING_SIZE - 1)
+/* > max records the log can ever hold (one record is >= one 4 KiB block, so a
+ * 64 MiB log holds < 16384 records); sized so the ring can never fill. */
+#define DISKFS_HANDOFF_RING_SIZE 32768
+#define DISKFS_HANDOFF_RING_MASK (DISKFS_HANDOFF_RING_SIZE - 1)
+
 struct diskfs_intent_log {
-    struct evpl_doorbell             wake_doorbell;
-    struct evpl                     *evpl;
-    struct evpl_thread              *thread;
-    int                              ready;      /* atomic */
-    int                              shutdown;   /* atomic */
-    uint32_t                         num_channels; /* slots[] count, intent log thread only */
+    /* ---------- commit thread ---------- */
+    struct evpl_doorbell             wake_doorbell;   /* workers + push-trim ring this */
+    struct evpl                     *evpl;            /* commit thread evpl */
+    struct evpl_thread              *thread;          /* commit thread */
+    int                              ready;           /* atomic: commit thread up */
+    int                              shutdown;        /* atomic */
+    uint32_t                         num_channels;
     struct diskfs_iq_channel        *channels[DISKFS_IL_MAX_CHANNELS];
     pthread_mutex_t                  registration_lock;
     struct diskfs_iq_channel        *pending_head;
+    struct evpl_block_queue         *log_queue;       /* redo writes -> intent-log device */
+    uint64_t                         log_seq;         /* next redo seq (commit only) */
+    struct diskfs_retire_slot       *retire;          /* [DISKFS_RETIRE_RING_SIZE] */
+    uint64_t                         retire_head;     /* next slot to retire (in order) */
+    uint64_t                         retire_tail;     /* next submission index */
+    int                              redo_inflight;   /* redo block writes in flight (commit watermark) */
 
-    /* Block queues on the intent-log thread's own evpl (one per device),
-     * used both to write redo records into the intent-log region and to
-     * tail-push logged blocks to their final on-disk locations. */
-    struct evpl_block_queue        **queue;
-    uint64_t                         log_head;   /* next free byte in the intent-log region */
-    uint64_t                         log_tail;   /* oldest un-pushed record (trim point) */
-    uint64_t                         log_seq;    /* next redo record sequence number */
-
-    /* Tail-pusher (runs on this thread): FIFO of durably-logged records whose
-    * blocks have not yet been written to their final locations.  Processed
-    * strictly oldest-first so a re-logged block's newest image lands last. */
-    struct diskfs_il_record         *push_head;
+    /* ---------- push thread ---------- */
+    struct evpl_doorbell             push_doorbell;   /* commit rings after hand-off */
+    struct evpl                     *push_evpl;
+    struct evpl_thread              *push_thread;
+    int                              push_ready;      /* atomic */
+    struct evpl_block_queue        **home_queue;      /* [num_devices] home writes */
+    struct diskfs_il_record         *push_head;       /* record FIFO (log order, for trim) */
     struct diskfs_il_record         *push_tail;
-    struct diskfs_il_record         *push_cur;   /* record currently being pushed */
-    uint32_t                         push_next;  /* next block index of push_cur to issue */
-    int                              push_outstanding; /* home writes in flight for push_cur */
-    int                              redo_inflight; /* redo writes issued, not yet in FIFO */
-    int                              iocbs_inflight; /* block writes (redo + push) on the queue, not yet completed */
+    struct diskfs_pending          **phash;           /* [phash_mask+1] (dev,off) buckets */
+    uint32_t                         phash_mask;
+    struct diskfs_pending           *ready_head;      /* FIFO of pending entries to issue */
+    struct diskfs_pending           *ready_tail;
+    struct diskfs_pending           *pfree;           /* pending entry free list */
+    int                              push_outstanding; /* home writes in flight (push watermark) */
+
+    /* ---------- shared (cross-thread) ---------- */
+    struct diskfs_il_record        **handoff;         /* SPSC ring of record* (commit -> push) */
+    uint32_t                         handoff_head;    /* atomic: push consumer */
+    uint32_t                         handoff_tail;    /* atomic: commit producer */
+    uint64_t                         log_head;        /* atomic: commit-written (next free byte) */
+    uint64_t                         log_tail;        /* atomic: push-written (trim point) */
+    int                              sync;            /* FUA/sync flag (0 in unsafe_async) */
+
+    /* ---------- metrics ---------- */
     int                              redo_inflight_high_water;
-    int                              iocbs_inflight_high_water;
     int                              push_outstanding_high_water;
     uint64_t                         log_used_bytes_high_water;
-    int                              sync;       /* sync flag passed to redo/push block writes (0 in unsafe_async mode) */
     struct diskfs_intent_log_metrics metrics;
 };
 
@@ -1316,44 +1375,47 @@ diskfs_metric_gauge_set(
 static inline uint64_t
 diskfs_il_used_bytes(struct diskfs_intent_log *il)
 {
-    if (il->log_head >= il->log_tail) {
-        return il->log_head - il->log_tail;
+    uint64_t head = __atomic_load_n(&il->log_head, __ATOMIC_RELAXED);
+    uint64_t tail = __atomic_load_n(&il->log_tail, __ATOMIC_RELAXED);
+
+    if (head >= tail) {
+        return head - tail;
     }
-    return SM_INTENT_LOG_SIZE - (il->log_tail - il->log_head);
+    return SM_INTENT_LOG_SIZE - (tail - head);
 } /* diskfs_il_used_bytes */
 
+/* Commit-thread metrics: redo write depth + registered channels. */
 static inline void
-diskfs_il_metrics_update(struct diskfs_intent_log *il)
+diskfs_il_commit_metrics(struct diskfs_intent_log *il)
 {
-    uint64_t used = diskfs_il_used_bytes(il);
-
     if (il->redo_inflight > il->redo_inflight_high_water) {
         il->redo_inflight_high_water = il->redo_inflight;
     }
-    if (il->iocbs_inflight > il->iocbs_inflight_high_water) {
-        il->iocbs_inflight_high_water = il->iocbs_inflight;
-    }
+    diskfs_metric_gauge_set(il->metrics.redo_inflight, il->redo_inflight);
+    diskfs_metric_gauge_set(il->metrics.registered_channels, il->num_channels);
+    diskfs_metric_gauge_set(il->metrics.redo_inflight_high_water,
+                            il->redo_inflight_high_water);
+} /* diskfs_il_commit_metrics */
+
+/* Push-thread metrics: home write depth + log occupancy. */
+static inline void
+diskfs_il_push_metrics(struct diskfs_intent_log *il)
+{
+    uint64_t used = diskfs_il_used_bytes(il);
+
     if (il->push_outstanding > il->push_outstanding_high_water) {
         il->push_outstanding_high_water = il->push_outstanding;
     }
     if (used > il->log_used_bytes_high_water) {
         il->log_used_bytes_high_water = used;
     }
-
-    diskfs_metric_gauge_set(il->metrics.redo_inflight, il->redo_inflight);
-    diskfs_metric_gauge_set(il->metrics.iocbs_inflight, il->iocbs_inflight);
     diskfs_metric_gauge_set(il->metrics.push_outstanding, il->push_outstanding);
     diskfs_metric_gauge_set(il->metrics.log_used_bytes, used);
-    diskfs_metric_gauge_set(il->metrics.registered_channels, il->num_channels);
-    diskfs_metric_gauge_set(il->metrics.redo_inflight_high_water,
-                            il->redo_inflight_high_water);
-    diskfs_metric_gauge_set(il->metrics.iocbs_inflight_high_water,
-                            il->iocbs_inflight_high_water);
     diskfs_metric_gauge_set(il->metrics.push_outstanding_high_water,
                             il->push_outstanding_high_water);
     diskfs_metric_gauge_set(il->metrics.log_used_bytes_high_water,
                             il->log_used_bytes_high_water);
-} /* diskfs_il_metrics_update */
+} /* diskfs_il_push_metrics */
 
 static inline void
 diskfs_metric_histogram_sample(
@@ -6588,6 +6650,7 @@ struct diskfs_redo_ctx {
     struct diskfs_iq_entry    entry;
     struct diskfs_il_record  *rec;     /* owns the record image (iovs) */
     int                       segments; /* outstanding journal writes (see below) */
+    uint64_t                  retire_idx; /* slot in the commit retirement ring */
 };
 
 /*
@@ -6596,7 +6659,7 @@ struct diskfs_redo_ctx {
  * txn is issued in consecutive chunks sharing one redo_ctx; the record is
  * durable only when the last chunk completes.
  */
-#define DISKFS_IL_MAX_IOV    64
+#define DISKFS_IL_MAX_IOV       64
 
 /*
  * The intent-log thread submits all its block writes (redo records + tail-push
@@ -6608,8 +6671,17 @@ struct diskfs_redo_ctx {
  * in flight, and resume from a completion once it drains back to the low
  * watermark -- leaving headroom for the in-flight tail-push record's writes.
  */
-#define DISKFS_IL_IOCB_CAP   128
-#define DISKFS_IL_IOCB_LOWAT 64
+/*
+ * Each thread keeps its own block writes pipelined.  The commit thread targets
+ * this many outstanding redo writes on the log device; the push thread targets
+ * this many outstanding home writes across the data devices.  Both gate
+ * submission at the high watermark and resume from a completion at the low
+ * watermark.  (The libaio/io_uring submission ring defaults to 256 pending.)
+ */
+#define DISKFS_COMMIT_WATERMARK 256
+#define DISKFS_COMMIT_LOWAT     128
+#define DISKFS_PUSH_WATERMARK   256
+#define DISKFS_PUSH_LOWAT       128
 
 /*
  * On-log record layout (all 4 KiB-aligned for zero-copy scatter-gather):
@@ -6636,22 +6708,27 @@ diskfs_il_hdr_len(uint32_t nblocks)
  * of the log region; a short run at the end is simply left unused until the
  * tail laps it).  The log is empty exactly when no record is pending.
  */
+/* Commit thread owns log_head; the push thread advances log_tail (trim) and
+ * the commit thread reads it here to check space.  head == tail means empty
+ * (place() always leaves the wrap gap, so the ring never reads full as empty). */
 static uint64_t
 diskfs_il_contig_free(struct diskfs_intent_log *il)
 {
     uint64_t start = SM_INTENT_LOG_OFFSET;
     uint64_t end   = SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE;
+    uint64_t head  = il->log_head;     /* commit-owned */
+    uint64_t tail  = __atomic_load_n(&il->log_tail, __ATOMIC_ACQUIRE);
 
-    if (!il->push_cur && !il->push_head && il->redo_inflight == 0) {
-        return SM_INTENT_LOG_SIZE;
+    if (head == tail) {
+        return SM_INTENT_LOG_SIZE;     /* empty */
     }
-    if (il->log_head >= il->log_tail) {
-        uint64_t run_end   = end - il->log_head;
-        uint64_t run_start = il->log_tail - start;
+    if (head >= tail) {
+        uint64_t run_end   = end - head;
+        uint64_t run_start = tail - start;
 
         return run_end > run_start ? run_end : run_start;
     }
-    return il->log_tail - il->log_head;
+    return tail - head;
 } /* diskfs_il_contig_free */
 
 static int
@@ -6668,200 +6745,403 @@ diskfs_il_place(
     struct diskfs_intent_log *il,
     uint64_t                  reclen)
 {
-    uint64_t end = SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE;
+    uint64_t end  = SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE;
+    uint64_t head = il->log_head;
     uint64_t offset;
 
-    if (il->log_head + reclen > end) {
-        il->log_head = SM_INTENT_LOG_OFFSET;     /* wrap; tail of region unused */
+    if (head + reclen > end) {
+        head = SM_INTENT_LOG_OFFSET;     /* wrap; tail of region unused */
     }
-    offset       = il->log_head;
-    il->log_head = offset + reclen;
+    offset = head;
+    __atomic_store_n(&il->log_head, head + reclen, __ATOMIC_RELEASE);
     return offset;
 } /* diskfs_il_place */
 
-static void diskfs_il_push_kick(
-    struct diskfs_intent_log *il);
+/* ================================================================== */
+/* Tail-push thread: per-block coalescing home writes + in-order trim  */
+/* ================================================================== */
 
-/*
- * A record's block images are now durably home.  Transition the corresponding
- * cache blocks LOGGED -> CLEAN so they become evictable -- but only if the
- * block hasn't been re-logged since (blk->seq still equals this record's seq)
- * and isn't currently pinned by an active transaction.  Checked under the
- * shard lock so it serializes against diskfs_block_claim re-dirtying the block.
- * (A3 will additionally enqueue the cleaned block on the shard LRU and wake a
- * buffer waiter.)
- */
+static inline uint32_t
+diskfs_il_pow2(uint32_t v)
+{
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    return v + 1;
+} /* diskfs_il_pow2 */
+
+/* Hash a home location to a pending-map bucket. */
+static inline uint32_t
+diskfs_il_home_hash(
+    uint32_t device_id,
+    uint64_t device_offset,
+    uint32_t mask)
+{
+    uint64_t k = (device_offset / DISKFS_BLOCK_SIZE) ^ ((uint64_t) device_id << 48);
+
+    k *= 0x9E3779B97F4A7C15ULL;
+    return (uint32_t) (k >> 32) & mask;
+} /* diskfs_il_home_hash */
+
+static struct diskfs_pending *
+diskfs_pending_lookup(
+    struct diskfs_intent_log *il,
+    uint32_t                  dev,
+    uint64_t                  off)
+{
+    struct diskfs_pending *p = il->phash[diskfs_il_home_hash(dev, off, il->phash_mask)];
+
+    for (; p; p = p->hnext) {
+        if (p->device_id == dev && p->device_offset == off) {
+            return p;
+        }
+    }
+    return NULL;
+} /* diskfs_pending_lookup */
+
+static struct diskfs_pending *
+diskfs_pending_alloc(struct diskfs_intent_log *il)
+{
+    struct diskfs_pending *p = il->pfree;
+
+    if (p) {
+        il->pfree = p->rnext;
+    } else {
+        p = malloc(sizeof(*p));
+    }
+    p->il       = il;
+    p->inflight = 0;
+    p->on_ready = 0;
+    return p;
+} /* diskfs_pending_alloc */
+
 static void
-diskfs_il_clean_pushed_record(
+diskfs_pending_insert(
+    struct diskfs_intent_log *il,
+    struct diskfs_pending    *p)
+{
+    uint32_t b = diskfs_il_home_hash(p->device_id, p->device_offset, il->phash_mask);
+
+    p->hnext     = il->phash[b];
+    il->phash[b] = p;
+} /* diskfs_pending_insert */
+
+static void
+diskfs_pending_remove(
+    struct diskfs_intent_log *il,
+    struct diskfs_pending    *p)
+{
+    uint32_t                b  = diskfs_il_home_hash(p->device_id, p->device_offset, il->phash_mask);
+    struct diskfs_pending **pp = &il->phash[b];
+
+    while (*pp && *pp != p) {
+        pp = &(*pp)->hnext;
+    }
+    if (*pp) {
+        *pp = p->hnext;
+    }
+    p->rnext  = il->pfree;     /* recycle onto the free list */
+    il->pfree = p;
+} /* diskfs_pending_remove */
+
+static void
+diskfs_ready_push(
+    struct diskfs_intent_log *il,
+    struct diskfs_pending    *p)
+{
+    if (p->on_ready) {
+        return;
+    }
+    p->on_ready = 1;
+    p->rnext    = NULL;
+    if (il->ready_tail) {
+        il->ready_tail->rnext = p;
+    } else {
+        il->ready_head = p;
+    }
+    il->ready_tail = p;
+} /* diskfs_ready_push */
+
+static struct diskfs_pending *
+diskfs_ready_pop(struct diskfs_intent_log *il)
+{
+    struct diskfs_pending *p = il->ready_head;
+
+    if (!p) {
+        return NULL;
+    }
+    il->ready_head = p->rnext;
+    if (!il->ready_head) {
+        il->ready_tail = NULL;
+    }
+    p->on_ready = 0;
+    p->rnext    = NULL;
+    return p;
+} /* diskfs_ready_pop */
+
+static void
+diskfs_il_free_record(
     struct diskfs_intent_log *il,
     struct diskfs_il_record  *rec)
 {
-    struct diskfs_shared      *shared = container_of(il, struct diskfs_shared, intent_log);
-    struct diskfs_block_cache *cache  = shared->block_cache;
-    char                      *p      = (char *) rec->iovs[0].data + sizeof(struct diskfs_redo_header);
-    uint32_t                   i;
+    evpl_iovecs_release(il->push_evpl, rec->iovs, rec->niov);
+    free(rec->iovs);
+    free(rec);
+} /* diskfs_il_free_record */
+
+/*
+ * Fold one durable record's blocks into the pending map.  Records are folded in
+ * log/seq order, so a later record's image of a block supersedes an earlier
+ * one (the coalescing win: a block logged by many queued commits is written
+ * home once).  A newly-pending block is queued for issue; a block already in
+ * flight is left for its completion to re-issue the newer image.
+ */
+static void
+diskfs_push_fold_record(
+    struct diskfs_intent_log *il,
+    struct diskfs_il_record  *rec)
+{
+    char    *p = (char *) rec->iovs[0].data + sizeof(struct diskfs_redo_header);
+    uint32_t i;
 
     for (i = 0; i < rec->num_blocks; i++) {
         struct diskfs_redo_block_header *bh = (struct diskfs_redo_block_header *) p;
-        struct diskfs_block_shard       *shard;
-        struct diskfs_block             *blk;
-        uint32_t                         bucket;
+        struct diskfs_pending           *e;
 
         p += sizeof(*bh);
 
-        shard  = diskfs_block_shard(cache, bh->device_id, bh->device_offset);
-        bucket = diskfs_block_bucket(bh->device_id, bh->device_offset);
-
-        pthread_mutex_lock(&shard->lock);
-        blk = diskfs_block_lookup_locked(shard, bucket, bh->device_id, bh->device_offset);
-        if (blk && blk->state == DISKFS_BLOCK_LOGGED &&
-            blk->seq == rec->seq && blk->pin_count == 0) {
-            blk->state = DISKFS_BLOCK_CLEAN;
-            if (!blk->on_lru) {
-                diskfs_block_lru_push_tail(shard, blk);
+        e = diskfs_pending_lookup(il, bh->device_id, bh->device_offset);
+        if (!e) {
+            e                = diskfs_pending_alloc(il);
+            e->device_id     = bh->device_id;
+            e->device_offset = bh->device_offset;
+            e->seq           = rec->seq;
+            e->iov           = &rec->iovs[1 + i];
+            e->owner         = rec;
+            diskfs_pending_insert(il, e);
+            diskfs_ready_push(il, e);
+        } else {
+            e->seq   = rec->seq;     /* newest image supersedes */
+            e->iov   = &rec->iovs[1 + i];
+            e->owner = rec;
+            if (!e->inflight) {
+                diskfs_ready_push(il, e);
             }
         }
-        pthread_mutex_unlock(&shard->lock);
     }
-} /* diskfs_il_clean_pushed_record */
+} /* diskfs_push_fold_record */
 
-static void diskfs_il_push_issue(
-    struct diskfs_intent_log *il);
-
-/* Finish the current record: mark its blocks evictable, release the record's
-* iovecs (header + all block clones), advance the tail, and kick the next. */
+/* A block is durably home at `seq`: LOGGED -> CLEAN if it has not been
+ * re-logged since (blk->seq still == seq) and isn't pinned.  Under the shard
+ * lock so it serializes against diskfs_block_claim re-dirtying the block. */
 static void
-diskfs_il_push_finish(struct diskfs_intent_log *il)
+diskfs_push_clean_block(
+    struct diskfs_intent_log *il,
+    uint32_t                  dev,
+    uint64_t                  off,
+    uint64_t                  seq)
 {
-    struct diskfs_il_record *rec = il->push_cur;
+    struct diskfs_shared      *shared = container_of(il, struct diskfs_shared, intent_log);
+    struct diskfs_block_cache *cache  = shared->block_cache;
+    struct diskfs_block_shard *shard  = diskfs_block_shard(cache, dev, off);
+    uint32_t                   bucket = diskfs_block_bucket(dev, off);
+    struct diskfs_block       *blk;
 
-    diskfs_il_clean_pushed_record(il, rec);
-
-    il->push_cur = NULL;
-    evpl_iovecs_release(il->evpl, rec->iovs, rec->niov);
-    free(rec->iovs);
-    free(rec);
-
-    /* Redo records reserve log space before they enter push_head.  If newer
-     * redo writes are still in flight, keep log_tail conservative until those
-     * records become pushable and then finish. */
-    if (il->push_head) {
-        il->log_tail = il->push_head->offset;
-    } else if (il->redo_inflight == 0) {
-        il->log_tail = il->log_head;
+    pthread_mutex_lock(&shard->lock);
+    blk = diskfs_block_lookup_locked(shard, bucket, dev, off);
+    if (blk && blk->state == DISKFS_BLOCK_LOGGED &&
+        __atomic_load_n(&blk->seq, __ATOMIC_ACQUIRE) == seq && blk->pin_count == 0) {
+        blk->state = DISKFS_BLOCK_CLEAN;
+        if (!blk->on_lru) {
+            diskfs_block_lru_push_tail(shard, blk);
+        }
     }
-    diskfs_il_metrics_update(il);
+    pthread_mutex_unlock(&shard->lock);
+} /* diskfs_push_clean_block */
 
-    diskfs_il_push_kick(il);
+/*
+ * Record R is coverable iff every block it logged is either home at its newest
+ * seq (absent from pending) or superseded by a later still-logged record
+ * (pending seq > R.seq).  pending[X].seq == R.seq means R's own image is still
+ * the newest pending and not yet home, so R must wait.
+ */
+static int
+diskfs_push_record_covered(
+    struct diskfs_intent_log *il,
+    struct diskfs_il_record  *rec)
+{
+    char    *p = (char *) rec->iovs[0].data + sizeof(struct diskfs_redo_header);
+    uint32_t i;
 
-    /* Space freed: re-poke channel processing in case a writer was blocked
-     * on a full log. */
-    evpl_ring_doorbell(&il->wake_doorbell);
-} /* diskfs_il_push_finish */
+    for (i = 0; i < rec->num_blocks; i++) {
+        struct diskfs_redo_block_header *bh = (struct diskfs_redo_block_header *) p;
+        struct diskfs_pending           *e;
 
-/* One home-write of a logged block completed.  private_data is the il (all
- * outstanding writes belong to the single current record). */
+        p += sizeof(*bh);
+        e  = diskfs_pending_lookup(il, bh->device_id, bh->device_offset);
+        if (e && e->seq == rec->seq) {
+            return 0;
+        }
+    }
+    return 1;
+} /* diskfs_push_record_covered */
+
+/* Advance the trim point over the contiguous prefix of fully-covered records,
+ * freeing each once no in-flight home write still reads its image. */
 static void
-diskfs_il_push_block_cb(
+diskfs_push_trim(struct diskfs_intent_log *il)
+{
+    int advanced = 0;
+
+    while (il->push_head && diskfs_push_record_covered(il, il->push_head)) {
+        struct diskfs_il_record *rec = il->push_head;
+
+        il->push_head = rec->next;
+        if (!il->push_head) {
+            il->push_tail = NULL;
+        }
+
+        /* Trim point = start of the oldest record we have not retired: the next
+         * record in the FIFO, or (FIFO drained) the oldest record the commit
+         * thread has handed off but we have not yet consumed.  If neither is
+         * known, leave log_tail unchanged (conservative -- the next hand-off
+         * advances it). */
+        if (il->push_head) {
+            __atomic_store_n(&il->log_tail, il->push_head->offset, __ATOMIC_RELEASE);
+        } else {
+            uint32_t hh = il->handoff_head;
+            uint32_t ht = __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE);
+            if (hh != ht) {
+                __atomic_store_n(&il->log_tail,
+                                 il->handoff[hh & DISKFS_HANDOFF_RING_MASK]->offset,
+                                 __ATOMIC_RELEASE);
+            }
+        }
+
+        rec->retired = 1;
+        if (rec->inflight_refs == 0) {
+            diskfs_il_free_record(il, rec);
+        }
+        advanced = 1;
+    }
+
+    if (advanced) {
+        diskfs_il_push_metrics(il);
+        evpl_ring_doorbell(&il->wake_doorbell);  /* freed log space -> resume commit */
+    }
+} /* diskfs_push_trim */
+
+static void diskfs_push_block_cb(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data);
+
+/* Issue ready home writes up to the push watermark, one per unique block. */
+static void
+diskfs_push_issue(struct diskfs_intent_log *il)
+{
+    while (il->push_outstanding < DISKFS_PUSH_WATERMARK) {
+        struct diskfs_pending *e = diskfs_ready_pop(il);
+
+        if (!e) {
+            break;
+        }
+
+        e->inflight     = 1;
+        e->issued_seq   = e->seq;
+        e->issued_owner = e->owner;
+        e->owner->inflight_refs++;
+        il->push_outstanding++;
+        diskfs_il_push_metrics(il);
+
+        diskfs_metric_il_block_io(il, DISKFS_METRIC_IO_WRITE,
+                                  DISKFS_METRIC_IO_TAIL_PUSH, DISKFS_BLOCK_SIZE);
+        diskfs_metric_il_block_io_device(il, e->device_id, DISKFS_METRIC_IO_WRITE,
+                                         DISKFS_METRIC_IO_TAIL_PUSH, DISKFS_BLOCK_SIZE);
+        evpl_block_write(il->push_evpl, il->home_queue[e->device_id], e->iov, 1,
+                         e->device_offset, il->sync, diskfs_push_block_cb, e);
+    }
+} /* diskfs_push_issue */
+
+/* One home write completed (push thread). */
+static void
+diskfs_push_block_cb(
     struct evpl *evpl,
     int          status,
     void        *private_data)
 {
-    struct diskfs_intent_log *il = private_data;
+    struct diskfs_pending    *e  = private_data;
+    struct diskfs_intent_log *il = e->il;
+    struct diskfs_il_record  *io = e->issued_owner;
 
     (void) evpl;
     chimera_diskfs_abort_if(status, "tail-push home write failed: %d", status);
 
-    /* One home write drained from the queue; resume redo at the low watermark. */
-    if (--il->iocbs_inflight == DISKFS_IL_IOCB_LOWAT) {
-        evpl_ring_doorbell(&il->wake_doorbell);
-    }
-    diskfs_il_metrics_update(il);
+    il->push_outstanding--;
 
-    --il->push_outstanding;
-    diskfs_il_metrics_update(il);
-
-    /* Capacity freed: issue any of this record's remaining home writes that the
-     * cap held back. */
-    if (il->push_cur && il->push_next < il->push_cur->num_blocks) {
-        diskfs_il_push_issue(il);
+    /* Release the record the in-flight write read from; free it if it has been
+     * retired and no other in-flight write still reads it. */
+    if (--io->inflight_refs == 0 && io->retired) {
+        diskfs_il_free_record(il, io);
     }
 
-    /* All of the current record's blocks are issued and durably home. */
-    if (il->push_outstanding == 0 &&
-        il->push_cur && il->push_next == il->push_cur->num_blocks) {
-        diskfs_il_push_finish(il);
+    e->inflight = 0;
+
+    if (e->seq > e->issued_seq) {
+        /* A newer image arrived mid-flight: re-issue it (newest lands last). */
+        diskfs_ready_push(il, e);
+    } else {
+        /* Durably home at its newest seq: mark CLEAN and drop the entry. */
+        diskfs_push_clean_block(il, e->device_id, e->device_offset, e->issued_seq);
+        diskfs_pending_remove(il, e);
     }
-} /* diskfs_il_push_block_cb */
+
+    diskfs_il_push_metrics(il);
+    diskfs_push_issue(il);
+    diskfs_push_trim(il);
+} /* diskfs_push_block_cb */
 
 /*
- * Start pushing the oldest pending record (if idle).  Writes each block's
- * post-image straight from the record's zero-copy clone of the cache buffer
- * to its final (device, offset) -- no copy.  Strict oldest-first ordering
- * means a block re-logged in a later record gets its newest image last.
+ * Push-thread doorbell: drain the hand-off ring into the record FIFO and the
+ * pending map, then issue and trim.  Rung by the commit thread after it hands
+ * off durable records.
  */
 static void
-diskfs_il_push_kick(struct diskfs_intent_log *il)
+diskfs_il_push_doorbell_cb(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
 {
-    struct diskfs_il_record *rec;
+    struct diskfs_intent_log *il = container_of(doorbell,
+                                                struct diskfs_intent_log,
+                                                push_doorbell);
+    uint32_t                  head = il->handoff_head;
+    uint32_t                  tail = __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE);
 
-    if (il->push_cur || !il->push_head) {
-        return;
+    (void) evpl;
+
+    while (head != tail) {
+        struct diskfs_il_record *rec = il->handoff[head & DISKFS_HANDOFF_RING_MASK];
+
+        head++;
+        rec->next          = NULL;
+        rec->inflight_refs = 0;
+        rec->retired       = 0;
+        if (il->push_tail) {
+            il->push_tail->next = rec;
+        } else {
+            il->push_head = rec;
+        }
+        il->push_tail = rec;
+        diskfs_push_fold_record(il, rec);
     }
+    __atomic_store_n(&il->handoff_head, head, __ATOMIC_RELEASE);
 
-    rec           = il->push_head;
-    il->push_head = rec->next;
-    if (!il->push_head) {
-        il->push_tail = NULL;
-    }
-    rec->next            = NULL;
-    il->push_cur         = rec;
-    il->push_next        = 0;
-    il->push_outstanding = 0;
-
-    if (rec->num_blocks == 0) {
-        diskfs_il_push_finish(il);
-        return;
-    }
-
-    diskfs_il_push_issue(il);
-} /* diskfs_il_push_kick */
-
-/*
- * Issue as many of the current record's remaining home writes as the block
- * queue's in-flight cap allows.  A large metadata txn can have more blocks than
- * the submission ring holds, so the rest are issued from diskfs_il_push_block_cb
- * as completions free capacity.  Shares the iocb budget with redo writes (both
- * gate on iocbs_inflight) so the IL thread never overruns the queue.
- */
-static void
-diskfs_il_push_issue(struct diskfs_intent_log *il)
-{
-    struct diskfs_il_record         *rec  = il->push_cur;
-    char                            *base = (char *) rec->iovs[0].data +
-        sizeof(struct diskfs_redo_header);
-    struct diskfs_redo_block_header *bh;
-
-    while (il->push_next < rec->num_blocks &&
-           il->iocbs_inflight < DISKFS_IL_IOCB_CAP) {
-        uint32_t idx = il->push_next;
-
-        bh = (struct diskfs_redo_block_header *) (base + (size_t) idx * sizeof(*bh));
-
-        il->push_next++;
-        il->push_outstanding++;
-        il->iocbs_inflight++;
-        diskfs_il_metrics_update(il);
-
-        diskfs_metric_il_block_io(il, DISKFS_METRIC_IO_WRITE,
-                                  DISKFS_METRIC_IO_TAIL_PUSH, DISKFS_BLOCK_SIZE);
-        diskfs_metric_il_block_io_device(il, bh->device_id, DISKFS_METRIC_IO_WRITE,
-                                         DISKFS_METRIC_IO_TAIL_PUSH,
-                                         DISKFS_BLOCK_SIZE);
-        evpl_block_write(il->evpl, il->queue[bh->device_id], &rec->iovs[1 + idx], 1,
-                         bh->device_offset, il->sync, diskfs_il_push_block_cb, il);
-    }
-} /* diskfs_il_push_issue */
+    diskfs_push_issue(il);
+    diskfs_push_trim(il);
+} /* diskfs_il_push_doorbell_cb */
 
 /*
  * Runs on the intent-log thread when a redo record has been written
@@ -6875,68 +7155,83 @@ diskfs_redo_write_cb(
     int          status,
     void        *private_data)
 {
-    struct diskfs_redo_ctx   *ctx = private_data;
-    struct diskfs_iq_channel *ch  = ctx->ch;
-    struct diskfs_intent_log *il  = ctx->il;
-    struct diskfs_il_record  *rec = ctx->rec;
-    uint32_t                  cq_tail;
+    struct diskfs_redo_ctx   *ctx        = private_data;
+    struct diskfs_intent_log *il         = ctx->il;
+    int                       handed_off = 0;
 
     (void) evpl;
     chimera_diskfs_abort_if(status, "redo record write failed: %d", status);
 
-    /* One block write (one chunk) drained from the queue.  Resume redo
-     * submission once the queue has bled back down to the low watermark. */
-    if (--il->iocbs_inflight == DISKFS_IL_IOCB_LOWAT) {
+    /* One redo block write (one chunk) drained from the log queue.  Resume SQ
+     * draining once redo writes bleed back down to the low watermark. */
+    if (--il->redo_inflight == DISKFS_COMMIT_LOWAT) {
         evpl_ring_doorbell(&il->wake_doorbell);
     }
 
-    /* One chunk of a possibly multi-chunk journal write landed; only the last
-     * makes the whole record durable. */
+    /* One chunk of a possibly multi-chunk journal write landed; the record is
+     * durable only when its last chunk completes. */
     if (--ctx->segments > 0) {
-        diskfs_il_metrics_update(il);
+        diskfs_il_commit_metrics(il);
         return;
     }
 
-    prometheus_stopwatch_start(&ctx->entry.durable_time);
-    diskfs_metric_time_sample(
-        il->metrics.txn_latency[DISKFS_METRIC_TXN_SUBMIT_TO_DURABLE],
-        &ctx->entry.submit_time);
-    diskfs_metric_time_sample(
-        il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_DURABLE],
-        &ctx->entry.enqueue_time);
+    /* Mark this record done; retire the contiguous completed prefix strictly in
+     * submission (== log) order.  Replay stops at the first torn record, so a
+     * later record is not recoverable -- nor ACKable -- until every earlier
+     * record is durable. */
+    il->retire[ctx->retire_idx & DISKFS_RETIRE_RING_MASK].done = 1;
 
-    il->redo_inflight--;
-    diskfs_il_metrics_update(il);
+    while (il->retire_head != il->retire_tail &&
+           il->retire[il->retire_head & DISKFS_RETIRE_RING_MASK].done) {
+        struct diskfs_retire_slot *slot = &il->retire[il->retire_head & DISKFS_RETIRE_RING_MASK];
+        struct diskfs_redo_ctx    *rc   = slot->ctx;
+        struct diskfs_iq_channel  *ch   = rc->ch;
+        struct diskfs_il_record   *rec  = rc->rec;
+        uint32_t                   cq_tail, ht;
 
-    diskfs_txn_unpin_blocks(ctx->entry.txn, DISKFS_BLOCK_LOGGED);
-    /* Record now durable: the freed metadata blocks are LOGGED + unpinned, so
-     * returning their ranges to the allocator can no longer collide with a
-     * still-pinned block (a re-claim COWs cleanly). */
-    diskfs_txn_apply_frees(ctx->entry.txn);
-    diskfs_txn_unlock_all(ctx->entry.txn);
+        prometheus_stopwatch_start(&rc->entry.durable_time);
+        diskfs_metric_time_sample(
+            il->metrics.txn_latency[DISKFS_METRIC_TXN_SUBMIT_TO_DURABLE],
+            &rc->entry.submit_time);
+        diskfs_metric_time_sample(
+            il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_DURABLE],
+            &rc->entry.enqueue_time);
 
-    ctx->entry.status = status;
+        /* Record durable & recoverable: drop block pins (-> LOGGED), return
+         * freed ranges to the allocator, release the inode locks. */
+        diskfs_txn_unpin_blocks(rc->entry.txn, DISKFS_BLOCK_LOGGED);
+        diskfs_txn_apply_frees(rc->entry.txn);
+        diskfs_txn_unlock_all(rc->entry.txn);
 
-    cq_tail                                       = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
-    ch->cq.entries[cq_tail & DISKFS_IQ_RING_MASK] = ctx->entry;
-    __atomic_store_n(&ch->cq.tail, cq_tail + 1, __ATOMIC_RELEASE);
+        /* ACK the worker. */
+        rc->entry.status                              = 0;
+        cq_tail                                       = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
+        ch->cq.entries[cq_tail & DISKFS_IQ_RING_MASK] = rc->entry;
+        __atomic_store_n(&ch->cq.tail, cq_tail + 1, __ATOMIC_RELEASE);
+        ch->cq_inflight--;
+        evpl_ring_doorbell(&ch->cq_doorbell);
 
-    ch->cq_inflight--;
+        /* Hand the durable record to the push thread, in log order.  The
+         * hand-off ring is sized larger than the log can ever hold, so it
+         * cannot fill before the log does. */
+        ht = il->handoff_tail;
+        chimera_diskfs_abort_if(ht - __atomic_load_n(&il->handoff_head, __ATOMIC_ACQUIRE) >=
+                                DISKFS_HANDOFF_RING_SIZE, "intent-log hand-off ring overflow");
+        il->handoff[ht & DISKFS_HANDOFF_RING_MASK] = rec;
+        __atomic_store_n(&il->handoff_tail, ht + 1, __ATOMIC_RELEASE);
+        handed_off = 1;
 
-    /* The record (which owns its on-log image) is now durable; queue it for
-     * the tail-pusher.  Its iovec stays in place -- never struct-copied. */
-    rec->next = NULL;
-    if (il->push_tail) {
-        il->push_tail->next = rec;
-    } else {
-        il->push_head = rec;
+        slot->ctx  = NULL;
+        slot->done = 0;
+        free(rc);
+        il->retire_head++;
     }
-    il->push_tail = rec;
 
-    free(ctx);
+    diskfs_il_commit_metrics(il);
 
-    diskfs_il_push_kick(il);
-    evpl_ring_doorbell(&ch->cq_doorbell);
+    if (handed_off) {
+        evpl_ring_doorbell(&il->push_doorbell);
+    }
 } /* diskfs_redo_write_cb */
 
 /*
@@ -6999,7 +7294,7 @@ diskfs_il_write_redo(
     hdr->csum_lo    = 0;
     hdr->csum_hi    = 0;
     hdr->seq        = il->log_seq++;
-    hdr->tail       = il->log_tail;
+    hdr->tail       = __atomic_load_n(&il->log_tail, __ATOMIC_ACQUIRE);
     hdr->num_blocks = nblocks;
     hdr->reclen     = (uint32_t) reclen;
     p              += sizeof(*hdr);
@@ -7009,9 +7304,10 @@ diskfs_il_write_redo(
         struct diskfs_block *blk = tb->block;
 
         /* Stamp the block with this record's seq so the tail-pusher can tell,
-        * on push completion, whether the block has been re-logged since (a
-        * higher seq) -- if not, it can be marked CLEAN and made evictable. */
-        blk->seq = rec->seq;
+         * on push completion, whether the block has been re-logged since (a
+         * higher seq) -- if not, it can be marked CLEAN and made evictable.
+         * Atomic: the push thread reads blk->seq under the shard lock. */
+        __atomic_store_n(&blk->seq, rec->seq, __ATOMIC_RELEASE);
 
         bh                = (struct diskfs_redo_block_header *) p;
         bh->device_id     = blk->device_id;
@@ -7048,10 +7344,17 @@ diskfs_il_write_redo(
 
     ctx->segments = (rec->niov + DISKFS_IL_MAX_IOV - 1) / DISKFS_IL_MAX_IOV;
 
+    /* Reserve this record's retirement-ring slot (in submission/log order) so
+     * the completion can retire the contiguous done-prefix in order.  Caller
+     * (diskfs_iq_process_channel) guaranteed ring space before issuing. */
+    ctx->retire_idx                                            = il->retire_tail;
+    il->retire[il->retire_tail & DISKFS_RETIRE_RING_MASK].ctx  = ctx;
+    il->retire[il->retire_tail & DISKFS_RETIRE_RING_MASK].done = 0;
+    il->retire_tail++;
+
     ch->cq_inflight++;
-    il->redo_inflight++;
-    il->iocbs_inflight += ctx->segments;     /* one block write per chunk below */
-    diskfs_il_metrics_update(il);
+    il->redo_inflight += ctx->segments;     /* one redo block write per chunk below */
+    diskfs_il_commit_metrics(il);
 
     /* Issue the record in <=DISKFS_IL_MAX_IOV-iovec chunks to consecutive
      * offsets (the on-log record is contiguous); all chunks share ctx and the
@@ -7072,7 +7375,7 @@ diskfs_il_write_redo(
                 bytes += rec->iovs[done + k].length;
             }
 
-            evpl_block_write(il->evpl, il->queue[SM_INTENT_LOG_DEVICE],
+            evpl_block_write(il->evpl, il->log_queue,
                              &rec->iovs[done], cnt, woff, il->sync,
                              diskfs_redo_write_cb, ctx);
             diskfs_metric_il_block_io(il, DISKFS_METRIC_IO_WRITE,
@@ -7112,12 +7415,14 @@ diskfs_iq_process_channel(struct diskfs_iq_channel *ch)
         struct diskfs_iq_entry  entry;
         uint32_t                cq_tail, cq_head;
 
-        /* Don't overrun the block queue's submission ring.  A redo record is a
-         * handful of writes; stop consuming the SQ once we're at the cap and
-         * let a write completion ring the wake doorbell to resume us.  When the
-         * queue is idle, always issue at least one record so we make progress
-         * even if a single record exceeds the cap. */
-        if (il->iocbs_inflight >= DISKFS_IL_IOCB_CAP) {
+        /* Keep redo writes pipelined up to the commit watermark; a completion
+         * rings the wake doorbell at the low watermark to resume us. */
+        if (il->redo_inflight >= DISKFS_COMMIT_WATERMARK) {
+            break;
+        }
+
+        /* Need a free retirement-ring slot for this record. */
+        if (il->retire_tail - il->retire_head >= DISKFS_RETIRE_RING_SIZE) {
             break;
         }
 
@@ -7179,7 +7484,7 @@ diskfs_intent_log_drain_pending(struct diskfs_intent_log *il)
 
         __atomic_store_n(&ch->registered, 1, __ATOMIC_RELEASE);
     }
-    diskfs_il_metrics_update(il);
+    diskfs_il_commit_metrics(il);
 } /* diskfs_intent_log_drain_pending */
 
 static void
@@ -7209,7 +7514,7 @@ diskfs_intent_log_wake_cb(
             il->channels[last] = NULL;
             il->num_channels   = last;
             __atomic_store_n(&ch->unregister_done, 1, __ATOMIC_RELEASE);
-            diskfs_il_metrics_update(il);
+            diskfs_il_commit_metrics(il);
             continue;     /* re-process index i (now a different channel) */
         }
         i++;
@@ -7273,29 +7578,29 @@ diskfs_intent_log_thread_init(
     il->log_head                    = SM_INTENT_LOG_OFFSET;
     il->log_tail                    = SM_INTENT_LOG_OFFSET;
     il->log_seq                     = 0;
-    il->push_head                   = NULL;
-    il->push_tail                   = NULL;
-    il->push_cur                    = NULL;
-    il->push_next                   = 0;
-    il->push_outstanding            = 0;
     il->redo_inflight               = 0;
-    il->iocbs_inflight              = 0;
     il->redo_inflight_high_water    = 0;
-    il->iocbs_inflight_high_water   = 0;
+    il->push_outstanding            = 0;
     il->push_outstanding_high_water = 0;
     il->log_used_bytes_high_water   = 0;
     il->sync                        = !shared->unsafe_async;
+
+    /* In-order retirement ring + cross-thread hand-off ring to the push thread. */
+    il->retire      = calloc(DISKFS_RETIRE_RING_SIZE, sizeof(*il->retire));
+    il->retire_head = 0;
+    il->retire_tail = 0;
+    il->handoff     = calloc(DISKFS_HANDOFF_RING_SIZE, sizeof(*il->handoff));
+    __atomic_store_n(&il->handoff_head, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&il->handoff_tail, 0, __ATOMIC_RELAXED);
+
     diskfs_intent_log_metrics_init(il);
-    diskfs_il_metrics_update(il);
+    diskfs_il_commit_metrics(il);
 
-    /* Open block queues on this thread's evpl for redo writes + tail-push. */
-    il->queue = calloc(shared->num_devices, sizeof(*il->queue));
-    for (i = 0; i < shared->num_devices; i++) {
-        /* Remote (pNFS data) devices have no local handle: leave queue NULL. */
-        il->queue[i] = shared->devices[i].bdev ?
-            evpl_block_open_queue(evpl, shared->devices[i].bdev) : NULL;
-    }
+    /* Redo records are written only to the intent-log device. */
+    il->log_queue = shared->devices[SM_INTENT_LOG_DEVICE].bdev ?
+        evpl_block_open_queue(evpl, shared->devices[SM_INTENT_LOG_DEVICE].bdev) : NULL;
 
+    (void) i;
     evpl_add_doorbell(evpl, &il->wake_doorbell, diskfs_intent_log_wake_cb);
     __atomic_store_n(&il->ready, 1, __ATOMIC_RELEASE);
     return il;
@@ -7306,36 +7611,91 @@ diskfs_intent_log_thread_shutdown(
     struct evpl *evpl,
     void        *private_data)
 {
-    struct diskfs_intent_log *il     = private_data;
-    struct diskfs_shared     *shared = container_of(il, struct diskfs_shared, intent_log);
-    int                       i;
+    struct diskfs_intent_log *il = private_data;
 
-    /* By the time this runs the VFS layer has destroyed the worker threads,
-     * which freed their channels, so no new SQ work can arrive.
-     *
-     * Clean unmount: drain everything to its final on-disk location so the
-     * filesystem is fully consistent at home offsets (no replay needed).
-     * Pump our evpl until all in-flight redo writes have landed in the push
-     * FIFO and the tail-pusher has flushed every record home.  Drain *before*
-     * dropping the wake doorbell: an in-flight redo/push write completing here
-     * rings the doorbell to resume submission, so it must still be open. */
-    while (il->redo_inflight || il->push_cur || il->push_head) {
-        diskfs_il_push_kick(il);
+    /* Workers are gone, so no new SQ work arrives.  Drain every in-flight redo
+     * write and retire (hand off, in order) every record to the push thread --
+     * which is still running and will flush them home before it is itself shut
+     * down (the push thread is destroyed after this one). */
+    while (il->redo_inflight || il->retire_head != il->retire_tail) {
         evpl_continue(evpl);
     }
 
-    /* All writes durable and no submitter remains; now drop the doorbell. */
     evpl_remove_doorbell(evpl, &il->wake_doorbell);
+    if (il->log_queue) {
+        evpl_block_close_queue(evpl, il->log_queue);
+    }
+    free(il->retire);
+} /* diskfs_intent_log_thread_shutdown */
+
+static void *
+diskfs_il_push_thread_init(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_intent_log *il     = private_data;
+    struct diskfs_shared     *shared = container_of(il, struct diskfs_shared, intent_log);
+    uint32_t                  cap;
+    int                       i;
+
+    il->push_evpl  = evpl;
+    il->push_head  = NULL;
+    il->push_tail  = NULL;
+    il->ready_head = NULL;
+    il->ready_tail = NULL;
+    il->pfree      = NULL;
+
+    /* Pending map: one bucket budget per distinct block the log can hold. */
+    cap            = diskfs_il_pow2((SM_INTENT_LOG_SIZE / DISKFS_BLOCK_SIZE) * 2);
+    il->phash_mask = cap - 1;
+    il->phash      = calloc(cap, sizeof(*il->phash));
+
+    /* Home writes can target any device. */
+    il->home_queue = calloc(shared->num_devices, sizeof(*il->home_queue));
+    for (i = 0; i < shared->num_devices; i++) {
+        il->home_queue[i] = shared->devices[i].bdev ?
+            evpl_block_open_queue(evpl, shared->devices[i].bdev) : NULL;
+    }
+
+    evpl_add_doorbell(evpl, &il->push_doorbell, diskfs_il_push_doorbell_cb);
+    __atomic_store_n(&il->push_ready, 1, __ATOMIC_RELEASE);
+    return il;
+} /* diskfs_il_push_thread_init */
+
+static void
+diskfs_il_push_thread_shutdown(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_intent_log *il     = private_data;
+    struct diskfs_shared     *shared = container_of(il, struct diskfs_shared, intent_log);
+    struct diskfs_pending    *p;
+    int                       i;
+
+    /* The commit thread is already gone, so no new hand-offs arrive.  Drain
+     * every handed-off record home and trim the log fully (clean unmount => no
+     * replay needed). */
+    while (il->handoff_head != __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE) ||
+           il->push_head || il->push_outstanding) {
+        diskfs_il_push_doorbell_cb(evpl, &il->push_doorbell);
+        evpl_continue(evpl);
+    }
+
+    evpl_remove_doorbell(evpl, &il->push_doorbell);
 
     for (i = 0; i < shared->num_devices; i++) {
-        if (il->queue[i]) {
-            evpl_block_close_queue(evpl, il->queue[i]);
+        if (il->home_queue[i]) {
+            evpl_block_close_queue(evpl, il->home_queue[i]);
         }
     }
-    free(il->metrics.block_io_device_ops);
-    free(il->metrics.block_io_device_bytes);
-    free(il->queue);
-} /* diskfs_intent_log_thread_shutdown */
+    free(il->home_queue);
+
+    while ((p = il->pfree)) {
+        il->pfree = p->rnext;
+        free(p);
+    }
+    free(il->phash);
+} /* diskfs_il_push_thread_shutdown */
 
 /*
  * The post-free-flush half of commit: serialize the dirty inodes, snapshot the
@@ -8255,16 +8615,27 @@ diskfs_init(
      * the wake doorbell, since workers will start ringing it as soon as
      * they begin processing requests. */
     shared->intent_log.ready        = 0;
+    shared->intent_log.push_ready   = 0;
     shared->intent_log.shutdown     = 0;
     shared->intent_log.num_channels = 0;
     shared->intent_log.pending_head = NULL;
     pthread_mutex_init(&shared->intent_log.registration_lock, NULL);
 
+    /* Commit thread first: it allocates the cross-thread hand-off ring the
+     * push thread consumes, and opens the intent-log device queue. */
     shared->intent_log.thread = evpl_thread_create(NULL,
                                                    diskfs_intent_log_thread_init,
                                                    diskfs_intent_log_thread_shutdown,
                                                    &shared->intent_log);
     while (!__atomic_load_n(&shared->intent_log.ready, __ATOMIC_ACQUIRE)) {
+        /* spin briefly */
+    }
+
+    shared->intent_log.push_thread = evpl_thread_create(NULL,
+                                                        diskfs_il_push_thread_init,
+                                                        diskfs_il_push_thread_shutdown,
+                                                        &shared->intent_log);
+    while (!__atomic_load_n(&shared->intent_log.push_ready, __ATOMIC_ACQUIRE)) {
         /* spin briefly */
     }
 
@@ -8435,12 +8806,20 @@ diskfs_destroy(void *private_data)
         pthread_mutex_destroy(&shared->inode_cache->shards[i].lock);
     }
 
-    /* Shut down the intent log thread before tearing down anything it
+    /* Shut down the intent-log threads before tearing down anything they
      * might still touch.  Worker threads have already unregistered their
-     * channels via the unregister handshake at this point. */
+     * channels via the unregister handshake at this point.  Order matters: the
+     * commit thread first (it drains all redo writes and hands every record to
+     * the push thread), then the push thread (it flushes every record home and
+     * trims the log).  Only then are the shared rings and device-metric arrays
+     * safe to free. */
     __atomic_store_n(&shared->intent_log.shutdown, 1, __ATOMIC_RELEASE);
     evpl_thread_destroy(shared->intent_log.thread);
+    evpl_thread_destroy(shared->intent_log.push_thread);
     pthread_mutex_destroy(&shared->intent_log.registration_lock);
+    free(shared->intent_log.handoff);
+    free(shared->intent_log.metrics.block_io_device_ops);
+    free(shared->intent_log.metrics.block_io_device_bytes);
 
     /* Clean unmount: the intent-log thread already drained every logged block
      * to its home location, so persist the free-space map and stamp the
