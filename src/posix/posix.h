@@ -19,6 +19,7 @@
 struct chimera_posix_client;
 struct chimera_client_config;
 struct prometheus_metrics;
+struct evpl_iovec;
 
 struct chimera_posix_client *
 chimera_posix_init(
@@ -151,6 +152,25 @@ chimera_posix_pread64(
     void   *buf,
     size_t  count,
     int64_t offset);
+
+/* Native zero-copy reads into caller-provided evpl_iovec(s).  The data lands
+ * directly in `iov` (no copy into a separate buffer); the caller owns `iov` and
+ * must allocate it from the evpl allocator so it is RDMA-registered.  Returns
+ * the byte count read, or -1 with errno set. */
+ssize_t
+chimera_posix_read_into(
+    int                fd,
+    struct evpl_iovec *iov,
+    int                niov,
+    size_t             count);
+
+ssize_t
+chimera_posix_pread_into(
+    int                fd,
+    struct evpl_iovec *iov,
+    int                niov,
+    size_t             count,
+    off_t              offset);
 
 ssize_t
 chimera_posix_pwrite(
