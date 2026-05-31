@@ -95,11 +95,11 @@ chimera_vfs_read_complete(struct chimera_vfs_request *request)
      * inserting here would only evict a valid entry. */
     if (request->status == CHIMERA_VFS_OK &&
         (request->read.r_attr.va_set_mask & CHIMERA_VFS_ATTR_MASK_STAT) == CHIMERA_VFS_ATTR_MASK_STAT) {
-        chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
-                                      request->read.handle->fh_hash,
-                                      request->read.handle->fh,
-                                      request->read.handle->fh_len,
-                                      &request->read.r_attr);
+        chimera_vfs_attr_cache_refresh(request->thread, request->thread->vfs->vfs_attr_cache,
+                                       request->read.handle->fh_hash,
+                                       request->read.handle->fh,
+                                       request->read.handle->fh_len,
+                                       &request->read.r_attr);
     }
 
     chimera_vfs_complete(request);

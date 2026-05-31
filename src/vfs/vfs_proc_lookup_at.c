@@ -33,18 +33,18 @@ chimera_vfs_lookup_at_complete(struct chimera_vfs_request *request)
                                       request->lookup_at.r_attr.va_fh,
                                       request->lookup_at.r_attr.va_fh_len);
 
-        chimera_vfs_attr_cache_insert(thread, attr_cache,
-                                      chimera_vfs_hash(request->lookup_at.r_attr.va_fh, request->lookup_at.r_attr.
-                                                       va_fh_len),
-                                      request->lookup_at.r_attr.va_fh,
-                                      request->lookup_at.r_attr.va_fh_len,
-                                      &request->lookup_at.r_attr);
+        chimera_vfs_attr_cache_refresh(thread, attr_cache,
+                                       chimera_vfs_hash(request->lookup_at.r_attr.va_fh, request->lookup_at.r_attr.
+                                                        va_fh_len),
+                                       request->lookup_at.r_attr.va_fh,
+                                       request->lookup_at.r_attr.va_fh_len,
+                                       &request->lookup_at.r_attr);
 
-        chimera_vfs_attr_cache_insert(thread, attr_cache,
-                                      request->lookup_at.handle->fh_hash,
-                                      request->lookup_at.handle->fh,
-                                      request->lookup_at.handle->fh_len,
-                                      &request->lookup_at.r_dir_attr);
+        chimera_vfs_attr_cache_refresh(thread, attr_cache,
+                                       request->lookup_at.handle->fh_hash,
+                                       request->lookup_at.handle->fh,
+                                       request->lookup_at.handle->fh_len,
+                                       &request->lookup_at.r_dir_attr);
     }
 
     chimera_vfs_complete(request);
