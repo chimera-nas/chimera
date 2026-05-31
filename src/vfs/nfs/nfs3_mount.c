@@ -207,7 +207,7 @@ chimera_nfs3_mount_process_mount(
                                               server_thread->mount_conn,
                                               NULL,
                                               &mount_arg,
-                                              0, 0, 0,
+                                              0, 0, NULL, 0, 0,
                                               chimera_mount_mountd_mnt_callback, mount);
 }     /* chimera_nfs3_mount_process_mount */
 
@@ -289,7 +289,7 @@ chimera_nfs3_mount_nfs_null_callback(
                                                   server_thread->portmap_conn,
                                                   NULL,
                                                   &mapping,
-                                                  0, 0, 0,
+                                                  0, 0, NULL, 0, 0,
                                                   chimera_portmap_getport_nlm_callback, server_thread);
 } /* chimera_nfs3_mount_nfs_null_callback */
 
@@ -323,7 +323,7 @@ chimera_portmap_getport_nfs_callback(
                                            server_thread->thread->evpl,
                                            server_thread->nfs_conn,
                                            NULL,
-                                           0, 0, 0,
+                                           0, 0, NULL, 0, 0,
                                            chimera_nfs3_mount_nfs_null_callback, server_thread);
 
 } /* chimera_portmap_getport_nfs_callback */
@@ -360,7 +360,7 @@ chimera_mount_mountd_null_callback(
                                                server_thread->thread->evpl,
                                                server_thread->nfs_conn,
                                                NULL,
-                                               0, 0, 0,
+                                               0, 0, NULL, 0, 0,
                                                chimera_nfs3_mount_nfs_null_callback, server_thread);
     } else {
         /* For TCP, use portmap to discover NFS port */
@@ -374,7 +374,7 @@ chimera_mount_mountd_null_callback(
                                                       server_thread->portmap_conn,
                                                       NULL,
                                                       &mapping,
-                                                      0, 0, 0,
+                                                      0, 0, NULL, 0, 0,
                                                       chimera_portmap_getport_nfs_callback, server_thread);
     }
 } /* chimera_mount_mountd_null_callback */
@@ -409,7 +409,7 @@ chimera_portmap_getport_mountd_callback(
                                                server_thread->thread->evpl,
                                                server_thread->mount_conn,
                                                NULL,
-                                               0, 0, 0,
+                                               0, 0, NULL, 0, 0,
                                                chimera_mount_mountd_null_callback, server_thread);
 } /* chimera_portmap_getport_mountd_callback */
 
@@ -441,7 +441,7 @@ chimera_portmap_null_callback(
                                                   server_thread->portmap_conn,
                                                   NULL,
                                                   &mapping,
-                                                  0, 0, 0,
+                                                  0, 0, NULL, 0, 0,
                                                   chimera_portmap_getport_mountd_callback, server_thread);
 } /* chimera_portmap_null_callback */
 
@@ -575,7 +575,7 @@ chimera_nfs3_mount(
                                                    thread->evpl,
                                                    server_thread->portmap_conn,
                                                    NULL,
-                                                   0, 0, 0,
+                                                   0, 0, NULL, 0, 0,
                                                    chimera_portmap_null_callback, server_thread);
     }
 } /* chimera_nfs3_mount */

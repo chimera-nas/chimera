@@ -181,7 +181,8 @@ chimera_nfs3_open_at(
 
         shared->nfs_v3.send_call_NFSPROC3_CREATE(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred
                                                  ,
-                                                 &create_args, 0, 0, 0, chimera_nfs3_open_at_create_callback, request);
+                                                 &create_args, 0, 0, NULL, 0, 0, chimera_nfs3_open_at_create_callback,
+                                                 request);
     } else {
         chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
@@ -193,7 +194,7 @@ chimera_nfs3_open_at(
         shared->nfs_v3.send_call_NFSPROC3_LOOKUP(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred
                                                  ,
                                                  &lookup_args,
-                                                 0, 0, 0,
+                                                 0, 0, NULL, 0, 0,
                                                  chimera_nfs3_open_at_lookup_callback, request);
 
     }

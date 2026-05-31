@@ -357,7 +357,7 @@ nfs4_cb_channel_open(
                                     thread->evpl,
                                     nfs4_cb_chan_conn(chan),
                                     NULL,
-                                    0, 0, 0,
+                                    0, 0, NULL, 0, 0,
                                     nfs4_cb_null_complete,
                                     ctx);
 } /* nfs4_cb_channel_open */
@@ -713,7 +713,7 @@ nfs4_cb_recall_send(
                                             conn,
                                             credp,
                                             &args,
-                                            0, 0, 0,
+                                            0, 0, NULL, 0, 0,
                                             nfs4_cb_recall_complete,
                                             ctx);
     }
@@ -841,7 +841,7 @@ nfs4_cb_layoutrecall(
                                             conn,
                                             credp,
                                             &args,
-                                            0, 0, 0,
+                                            0, 0, NULL, 0, 0,
                                             nfs4_cb_layoutrecall_complete,
                                             ctx);
     }
@@ -1084,7 +1084,7 @@ nfs4_cb_getattr_send(
                                             conn,
                                             credp,
                                             &args,
-                                            0, 0, 0,
+                                            0, 0, NULL, 0, 0,
                                             nfs4_cb_getattr_complete,
                                             w);
     }

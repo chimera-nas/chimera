@@ -138,7 +138,7 @@ chimera_nfs4_remove_at(
         server_thread->nfs_conn,
         &rpc2_cred,
         &args,
-        0, 0, 0,
+        0, 0, NULL, 0, 0,
         chimera_nfs4_remove_callback,
         request);
 } /* chimera_nfs4_remove_at */

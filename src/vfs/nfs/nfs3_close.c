@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -85,7 +85,7 @@ chimera_nfs3_close_do_silly_remove(
 
     ctx->shared->nfs_v3.send_call_NFSPROC3_REMOVE(&ctx->shared->nfs_v3.rpc2, ctx->thread->evpl,
                                                   server_thread->nfs_conn, &rpc2_cred, &args,
-                                                  0, 0, 0,
+                                                  0, 0, NULL, 0, 0,
                                                   chimera_nfs3_close_remove_callback, request);
 } /* chimera_nfs3_close_do_silly_remove */
 
@@ -154,7 +154,7 @@ chimera_nfs3_close_do_commit(
 
     ctx->shared->nfs_v3.send_call_NFSPROC3_COMMIT(&ctx->shared->nfs_v3.rpc2, ctx->thread->evpl,
                                                   server_thread->nfs_conn, &rpc2_cred, &args,
-                                                  0, 0, 0,
+                                                  0, 0, NULL, 0, 0,
                                                   chimera_nfs3_close_commit_callback, request);
 } /* chimera_nfs3_close_do_commit */
 

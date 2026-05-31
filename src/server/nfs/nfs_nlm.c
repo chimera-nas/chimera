@@ -189,7 +189,7 @@ chimera_nfs_nlm4_test_open_cb(
 
     if (ctx->proc == 16) {
         shared->nlm_v4.send_call_NLMPROC4_TEST_RES(&shared->nlm_v4.rpc2, evpl,
-                                                   ctx->conn, NULL, &res, 0, 0, 0,
+                                                   ctx->conn, NULL, &res, 0, 0, NULL, 0, 0,
                                                    NULL, NULL);
     } else {
         rc = shared->nlm_v4.send_reply_NLMPROC4_TEST(evpl, NULL, &res, encoding);
@@ -264,7 +264,8 @@ chimera_nfs_nlm4_lock_acquire_cb(
             rc = shared->nlm_v4.send_reply_NLMPROC4_LOCK(evpl, NULL, &res, encoding);
             break;
         case 17:
-            shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, 0, NULL,
+            shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, NULL, 0,
+                                                       0, NULL,
                                                        NULL);
             break;
         default:
@@ -307,7 +308,8 @@ chimera_nfs_nlm4_lock_open_cb(
                 rc = shared->nlm_v4.send_reply_NLMPROC4_LOCK(evpl, NULL, &res, encoding);
                 break;
             case 17:
-                shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, 0,
+                shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, NULL
+                                                           , 0, 0,
                                                            NULL, NULL);
                 break;
             default:
@@ -339,7 +341,8 @@ chimera_nfs_nlm4_lock_open_cb(
                 rc = shared->nlm_v4.send_reply_NLMPROC4_LOCK(evpl, NULL, &res, encoding);
                 break;
             case 17:
-                shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, 0,
+                shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, NULL
+                                                           , 0, 0,
                                                            NULL, NULL);
                 break;
             default:
@@ -428,7 +431,8 @@ chimera_nfs_nlm4_do_test(
         err_res.cookie.data    = args->cookie.data;
         err_res.test_stat.stat = NLM4_DENIED_NOLOCKS;
         if (proc == 16) {
-            shared->nlm_v4.send_call_NLMPROC4_TEST_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &err_res, 0, 0, 0, NULL,
+            shared->nlm_v4.send_call_NLMPROC4_TEST_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &err_res, 0, 0, NULL, 0,
+                                                       0, NULL,
                                                        NULL);
         } else {
             int oom_rc = shared->nlm_v4.send_reply_NLMPROC4_TEST(evpl, NULL, &err_res, encoding);
@@ -587,7 +591,8 @@ chimera_nfs_nlm4_do_lock(
                 rc = shared->nlm_v4.send_reply_NLMPROC4_LOCK(evpl, NULL, &res, encoding);
                 break;
             case 17:
-                shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, 0, NULL,
+                shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0,
+                                                           0, NULL,
                                                            NULL);
                 break;
             default:
@@ -634,7 +639,8 @@ chimera_nfs_nlm4_do_lock(
                 rc = shared->nlm_v4.send_reply_NLMPROC4_LOCK(evpl, NULL, &res, encoding);
                 break;
             case 17:
-                shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, 0,
+                shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, NULL
+                                                           , 0, 0,
                                                            NULL, NULL);
                 break;
             default:
@@ -809,7 +815,8 @@ chimera_nfs_nlm4_do_unlock(
         res.cookie.data = args->cookie.data;
         res.stat        = NLM4_GRANTED;
         if (proc == 18) {
-            shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, 0, NULL,
+            shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0,
+                                                         NULL,
                                                          NULL);
         } else {
             rc = shared->nlm_v4.send_reply_NLMPROC4_UNLOCK(evpl, NULL, &res, encoding);
@@ -834,7 +841,8 @@ chimera_nfs_nlm4_do_unlock(
         res.cookie.data = args->cookie.data;
         res.stat        = NLM4_GRANTED;
         if (proc == 18) {
-            shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, 0, NULL,
+            shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0,
+                                                         NULL,
                                                          NULL);
         } else {
             rc = shared->nlm_v4.send_reply_NLMPROC4_UNLOCK(evpl, NULL, &res, encoding);
@@ -869,7 +877,8 @@ chimera_nfs_nlm4_do_unlock(
     res.stat        = NLM4_GRANTED;
 
     if (proc == 18) {
-        shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, 0, NULL,
+        shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0,
+                                                     NULL,
                                                      NULL);
     } else {
         rc = shared->nlm_v4.send_reply_NLMPROC4_UNLOCK(evpl, NULL, &res, encoding);
@@ -978,7 +987,8 @@ chimera_nfs_nlm4_cancel_msg(
     res.cookie.len  = args->cookie.len;
     res.cookie.data = args->cookie.data;
     res.stat        = NLM4_GRANTED;
-    shared->nlm_v4.send_call_NLMPROC4_CANCEL_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, 0, NULL, NULL);
+    shared->nlm_v4.send_call_NLMPROC4_CANCEL_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0, NULL,
+                                                 NULL);
 } /* chimera_nfs_nlm4_cancel_msg */
 
 void
