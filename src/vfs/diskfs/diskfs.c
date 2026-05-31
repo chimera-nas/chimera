@@ -934,6 +934,7 @@ struct diskfs_shared {
     uint64_t                   root_inum;          /* for the clean-unmount superblock */
     uint32_t                   root_gen;
     int                        unsafe_async;       /* config opt-in: submit block writes without FUA/sync (no crash safety) */
+    int                        noatime;            /* config opt-in: never update atime on read (default: relatime) */
     int                        mounted;            /* 1 = remounted existing FS (enables inode read-back) */
     uint32_t                   block_cache_blocks; /* total resident block-buffer cap (0 = default) */
     uint32_t                   inode_cache_inodes; /* total resident inode cap (0 = default) */
@@ -8054,6 +8055,7 @@ diskfs_init(
      * efficiently. */
     initialize           = json_object_get(cfg, "initialize") != NULL;
     shared->unsafe_async = json_is_true(json_object_get(cfg, "unsafe_async"));
+    shared->noatime      = json_is_true(json_object_get(cfg, "noatime"));
     /* Opt-in pNFS block / SCSI layout mode: diskfs sources RFC 5663 block or
      * RFC 8154 SCSI layouts and keeps file data on remote (data-only) devices.
      * Both share the same remote-device data path and allocator; they differ
@@ -11067,11 +11069,15 @@ diskfs_read_finish(struct chimera_vfs_request *request)
 
     if (p->pending == 0) {
         diskfs_op_ok(request, p->txn);
-    } else {
+    } else if (p->txn->type == DISKFS_TXN_READ) {
         /* I/O is in flight; drop the inode lock so other ops proceed.  The
          * txn commits from diskfs_io_callback once all reads complete. */
         diskfs_txn_unlock_inode(p->txn, inode);
     }
+    /* A relatime atime bump upgraded this read to a WRITE txn: keep the inode
+     * locked until the redo is durable (like the write path) -- io_callback
+     * runs diskfs_op_ok at pending==0 and the intent-log thread releases the
+     * lock once committed. */
 } /* diskfs_read_finish */
 
 static void
@@ -11284,6 +11290,49 @@ diskfs_read_inode_cb(
         request->read.r_eof    = eof;
         diskfs_op_ok(request, diskfs_private->txn);
         return;
+    }
+
+    /*
+     * relatime atime maintenance (data-returning reads only).  Reads run as a
+     * READ txn; if relatime says atime is due for a bump we can't journal it
+     * under a read lock, so abort and re-run the whole read under a WRITE txn.
+     * On the (rare) re-entry the txn is already WRITE: pin the inode block and
+     * stamp atime only (never ctime); the WRITE commit journals it.
+     */
+    if (diskfs_private->txn->type == DISKFS_TXN_WRITE) {
+        struct timespec now;
+
+        chimera_vfs_realtime(&now);
+        diskfs_txn_pin_inode_block(thread, diskfs_private->txn, inode, 0);
+        inode->atime_sec  = now.tv_sec;
+        inode->atime_nsec = now.tv_nsec;
+    } else if (!thread->shared->noatime) {
+        struct timespec atime = { inode->atime_sec, inode->atime_nsec };
+        struct timespec mtime = { inode->mtime_sec, inode->mtime_nsec };
+        struct timespec ctime = { inode->ctime_sec, inode->ctime_nsec };
+        struct timespec now;
+
+        chimera_vfs_realtime(&now);
+
+        if (chimera_vfs_relatime_needs_update(&atime, &mtime, &ctime, &now)) {
+            struct diskfs_inode *pinned =
+                (request->read.handle && request->read.handle->vfs_private) ?
+                (struct diskfs_inode *) request->read.handle->vfs_private : NULL;
+
+            diskfs_txn_abort(diskfs_private->txn);
+            diskfs_private->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+
+            if (pinned) {
+                diskfs_inode_acquire_pinned(thread, diskfs_private->txn, pinned,
+                                            DISKFS_INODE_MODE_FOR_TXN(diskfs_private->txn),
+                                            diskfs_read_inode_cb, request);
+            } else {
+                diskfs_inode_get_fh_async(thread, diskfs_private->txn,
+                                          request->fh, request->fh_len,
+                                          diskfs_read_inode_cb, request);
+            }
+            return;
+        }
     }
 
     aligned_offset = offset & ~4095ULL;
