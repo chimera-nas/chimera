@@ -24,6 +24,7 @@ struct chimera_vfs_attr_cache_shard {
     struct prometheus_counter_instance   *insert;
     struct prometheus_counter_instance   *hit;
     struct prometheus_counter_instance   *miss;
+    struct prometheus_counter_instance   *skip;
 };
 
 struct chimera_vfs_attr_cache {
@@ -44,6 +45,7 @@ struct chimera_vfs_attr_cache {
     struct prometheus_counter_series    *insert_series;
     struct prometheus_counter_series    *hit_series;
     struct prometheus_counter_series    *miss_series;
+    struct prometheus_counter_series    *skip_series;
 };
 
 static inline struct chimera_vfs_attr_cache *
@@ -92,6 +94,9 @@ chimera_vfs_attr_cache_create(
         cache->miss_series = prometheus_counter_create_series(cache->attr_cache,
                                                               (const char *[]) { "op" },
                                                               (const char *[]) { "miss" }, 1);
+        cache->skip_series = prometheus_counter_create_series(cache->attr_cache,
+                                                              (const char *[]) { "op" },
+                                                              (const char *[]) { "skip" }, 1);
     }
 
     for (i = 0; i < cache->num_shards; i++) {
@@ -105,6 +110,7 @@ chimera_vfs_attr_cache_create(
             shard->insert = prometheus_counter_series_create_instance(cache->insert_series);
             shard->hit    = prometheus_counter_series_create_instance(cache->hit_series);
             shard->miss   = prometheus_counter_series_create_instance(cache->miss_series);
+            shard->skip   = prometheus_counter_series_create_instance(cache->skip_series);
         }
     }
 
@@ -126,6 +132,7 @@ chimera_vfs_attr_cache_destroy(struct chimera_vfs_attr_cache *cache)
         prometheus_counter_series_destroy_instance(cache->insert_series, shard->insert);
         prometheus_counter_series_destroy_instance(cache->hit_series, shard->hit);
         prometheus_counter_series_destroy_instance(cache->miss_series, shard->miss);
+        prometheus_counter_series_destroy_instance(cache->skip_series, shard->skip);
 
         for (j = 0; j < cache->num_slots * cache->num_entries; j++) {
             if (shard->entries[j]) {
@@ -145,6 +152,7 @@ chimera_vfs_attr_cache_destroy(struct chimera_vfs_attr_cache *cache)
         prometheus_counter_destroy_series(cache->attr_cache, cache->insert_series);
         prometheus_counter_destroy_series(cache->attr_cache, cache->hit_series);
         prometheus_counter_destroy_series(cache->attr_cache, cache->miss_series);
+        prometheus_counter_destroy_series(cache->attr_cache, cache->skip_series);
         prometheus_counter_destroy(cache->metrics, cache->attr_cache);
     }
 
@@ -281,3 +289,88 @@ chimera_vfs_attr_cache_insert(
     }
 
 } /* chimera_vfs_attr_cache_insert */
+
+/*
+ * Do two attr sets carry the same change-significant fields?  ctime is the
+ * metadata catch-all (it advances on any mode/uid/gid/size/mtime change), mtime
+ * covers data writes, size guards truncate/append, and atime is included so a
+ * relatime atime bump is treated as a change and refreshes the entry.
+ */
+static inline int
+chimera_vfs_attrs_times_equal(
+    const struct chimera_vfs_attrs *a,
+    const struct chimera_vfs_attrs *b)
+{
+    return a->va_size == b->va_size &&
+           a->va_mtime.tv_sec == b->va_mtime.tv_sec &&
+           a->va_mtime.tv_nsec == b->va_mtime.tv_nsec &&
+           a->va_ctime.tv_sec == b->va_ctime.tv_sec &&
+           a->va_ctime.tv_nsec == b->va_ctime.tv_nsec &&
+           a->va_atime.tv_sec == b->va_atime.tv_sec &&
+           a->va_atime.tv_nsec == b->va_atime.tv_nsec;
+} /* chimera_vfs_attrs_times_equal */
+
+/*
+ * Refresh the cached attrs for a non-mutating op (read/getattr/lookup/commit).
+ * Such ops almost never change the attributes, so instead of unconditionally
+ * inserting (alloc + shard mutex + RCU retire) we first do a lock-free RCU
+ * lookup; if a live entry already holds these exact change-significant fields,
+ * there is nothing to do.  Only on a miss / expiry / genuine change do we fall
+ * through to the full insert.  Mutating ops should call _insert directly -- for
+ * them the compare would always miss and just waste an RCU scan.
+ *
+ * Skipping does not refresh the entry's TTL (the entry was already live), so a
+ * hot read-only object re-inserts at most once per TTL.
+ */
+static inline void
+chimera_vfs_attr_cache_refresh(
+    struct chimera_vfs_thread     *thread,
+    struct chimera_vfs_attr_cache *cache,
+    uint64_t                       fh_hash,
+    const void                    *fh,
+    int                            fh_len,
+    struct chimera_vfs_attrs      *attr)
+{
+    struct chimera_vfs_attr_cache_entry  *entry;
+    struct chimera_vfs_attr_cache_shard  *shard;
+    struct chimera_vfs_attr_cache_entry **slot, **slot_end;
+    int                                   unchanged = 0;
+    uint64_t                              now       = chimera_vfs_now_ticks();
+
+    /* Only stat-complete attrs are cacheable (same gate as _insert). */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MASK_STAT) != CHIMERA_VFS_ATTR_MASK_STAT) {
+        return;
+    }
+
+    shard = &cache->shards[fh_hash & cache->num_shards_mask];
+
+    slot = &shard->entries[(fh_hash & cache->num_slots_mask) << cache->num_entries_bits];
+
+    slot_end = slot + cache->num_entries;
+
+    urcu_memb_read_lock();
+
+    while (slot < slot_end) {
+        entry = rcu_dereference(*slot);
+
+        if (entry &&
+            entry->key == fh_hash &&
+            entry->expiration >= now &&
+            chimera_memequal(entry->attr.va_fh, entry->attr.va_fh_len, fh, fh_len)) {
+
+            unchanged = chimera_vfs_attrs_times_equal(&entry->attr, attr);
+            break;
+        }
+
+        slot++;
+    }
+
+    urcu_memb_read_unlock();
+
+    if (unchanged) {
+        prometheus_counter_increment(shard->skip);
+        return;
+    }
+
+    chimera_vfs_attr_cache_insert(thread, cache, fh_hash, fh, fh_len, attr);
+} /* chimera_vfs_attr_cache_refresh */

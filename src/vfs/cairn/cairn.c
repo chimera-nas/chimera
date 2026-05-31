@@ -2980,6 +2980,12 @@ cairn_read(
 
     inode = ih.inode;
 
+    /* relatime: only stamp atime when the file changed since last access or the
+     * recorded atime is a day stale, so steady-state reads neither rewrite the
+     * inode to RocksDB nor churn the VFS attr cache. */
+    need_atime = need_atime &&
+        chimera_vfs_relatime_needs_update(&inode->atime, &inode->mtime, &inode->ctime, &now);
+
     if (offset >= inode->size) {
         cairn_map_attrs(shared, &request->read.r_attr, inode);
         cairn_inode_handle_release(&ih);
