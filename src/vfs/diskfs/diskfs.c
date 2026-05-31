@@ -937,6 +937,7 @@ struct diskfs_intent_log {
     struct evpl_thread              *thread;          /* commit thread */
     int                              ready;           /* atomic: commit thread up */
     int                              shutdown;        /* atomic */
+    int                              commit_alive;    /* atomic: 1 while the commit thread's wake_doorbell is live; the push thread must not ring it once 0 (cleared before the commit thread is destroyed, which closes that fd) */
     uint32_t                         num_channels;
     struct diskfs_iq_channel        *channels[DISKFS_IL_MAX_CHANNELS];
     pthread_mutex_t                  registration_lock;
@@ -7030,7 +7031,15 @@ diskfs_push_trim(struct diskfs_intent_log *il)
 
     if (advanced) {
         diskfs_il_push_metrics(il);
-        evpl_ring_doorbell(&il->wake_doorbell);  /* freed log space -> resume commit */
+        /* Freed log space -> resume the commit thread, but only while its
+         * doorbell is still live.  The commit thread is destroyed before the
+         * push thread (the push thread drains the records it handed off), which
+         * closes wake_doorbell's fd; ringing it after that aborts.  commit_alive
+         * is cleared before that teardown, and during shutdown the commit thread
+         * makes progress by self-pumping, so a skipped wake is harmless. */
+        if (__atomic_load_n(&il->commit_alive, __ATOMIC_ACQUIRE)) {
+            evpl_ring_doorbell(&il->wake_doorbell);
+        }
     }
 } /* diskfs_push_trim */
 
@@ -8617,6 +8626,7 @@ diskfs_init(
     shared->intent_log.ready        = 0;
     shared->intent_log.push_ready   = 0;
     shared->intent_log.shutdown     = 0;
+    shared->intent_log.commit_alive = 1;
     shared->intent_log.num_channels = 0;
     shared->intent_log.pending_head = NULL;
     pthread_mutex_init(&shared->intent_log.registration_lock, NULL);
@@ -8814,6 +8824,11 @@ diskfs_destroy(void *private_data)
      * trims the log).  Only then are the shared rings and device-metric arrays
      * safe to free. */
     __atomic_store_n(&shared->intent_log.shutdown, 1, __ATOMIC_RELEASE);
+    /* Stop the push thread from ringing the commit thread's wake_doorbell:
+     * destroying the commit thread closes that fd, and the push thread (torn
+     * down afterwards, to drain what the commit thread handed off) would
+     * otherwise abort writing to it. */
+    __atomic_store_n(&shared->intent_log.commit_alive, 0, __ATOMIC_RELEASE);
     evpl_thread_destroy(shared->intent_log.thread);
     evpl_thread_destroy(shared->intent_log.push_thread);
     pthread_mutex_destroy(&shared->intent_log.registration_lock);
