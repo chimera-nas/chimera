@@ -259,6 +259,13 @@ chimera_smb_lease_break_cb(
                             ? SMB2_OPLOCK_LEVEL_II
                             : SMB2_OPLOCK_LEVEL_NONE;
 
+        /* Breaking an exclusive/batch oplock expects the client to
+         * acknowledge; breaking a LEVEL_II oplock (to NONE) does not -- a
+         * client ack for that is a protocol error (see the ack handler). */
+        open_file->oplock_break_ack_required =
+            (open_file->oplock_level == SMB2_OPLOCK_LEVEL_EXCLUSIVE ||
+             open_file->oplock_level == SMB2_OPLOCK_LEVEL_BATCH);
+
         {
             struct chimera_smb_conn            *conn = open_file->create_conn;
             struct chimera_server_smb_thread   *bt   = conn->thread;
@@ -407,9 +414,49 @@ chimera_smb_parse_oplock_break(
 SYMBOL_EXPORT void
 chimera_smb_oplock_break(struct chimera_smb_request *request)
 {
-    /* The lease was already optimistically acked inside the break_cb.
-     * Nothing else to do besides letting the dispatcher emit the
-     * reply packet. */
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct chimera_vfs_state         *vfs_state = thread->vfs_thread->vfs->vfs_state;
+    struct chimera_smb_open_file     *open_file;
+
+    if (request->oplock_break.is_lease) {
+        /* Lease-break ack: the lease was optimistically downgraded in the
+         * break_cb.  Honoring the client's exact NewLeaseState verbatim is a
+         * future refinement; just emit the response packet. */
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
+    open_file = chimera_smb_open_file_resolve(request, &request->oplock_break.file_id);
+
+    if (open_file) {
+        if (!open_file->oplock_break_ack_required) {
+            /* No acknowledgment was expected for this break -- e.g. it broke a
+             * LEVEL_II oplock to NONE, which MS-SMB2 says the client must not
+             * acknowledge.  Reply with the protocol error (3.3.5.22.2). */
+            chimera_smb_open_file_release(request, open_file);
+            chimera_smb_complete_request(request,
+                                         SMB2_STATUS_INVALID_OPLOCK_PROTOCOL);
+            return;
+        }
+
+        /* Apply the oplock level the client chose to keep (it may drop further
+         * than the server's optimistic downgrade -- e.g. straight to NONE). */
+        if (open_file->caching_lease_inserted) {
+            uint8_t kept =
+                (request->oplock_break.oplock_level == SMB2_OPLOCK_LEVEL_II)
+                ? CHIMERA_VFS_LEASE_MODE_R : 0;
+
+            chimera_vfs_lease_client_downgrade(vfs_state,
+                                               open_file->caching_file_state,
+                                               &open_file->caching_lease, kept);
+        }
+
+        open_file->oplock_level              = request->oplock_break.oplock_level;
+        open_file->oplock_break_ack_required = 0;
+
+        chimera_smb_open_file_release(request, open_file);
+    }
+
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_oplock_break */
 
