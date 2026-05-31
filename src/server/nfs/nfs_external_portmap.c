@@ -158,7 +158,7 @@ register_service(
                                            ctx->portmap_conn,
                                            NULL,
                                            &mapping,
-                                           0, 0, 0,
+                                           0, 0, NULL, 0, 0,
                                            portmap_set_callback, ctx);
 } /* register_service */
 
@@ -186,7 +186,7 @@ unregister_service(
                                              ctx->portmap_conn,
                                              NULL,
                                              &mapping,
-                                             0, 0, 0,
+                                             0, 0, NULL, 0, 0,
                                              portmap_unset_callback, ctx);
 } /* unregister_service */
 
