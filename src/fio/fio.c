@@ -537,43 +537,24 @@ static void
 fio_chimera_read_callback(
     struct chimera_client_thread *thread,
     enum chimera_vfs_error        status,
-    struct evpl_iovec            *iov,
-    int                           niov,
+    uint32_t                      count,
+    uint32_t                      eof,
     void                         *private_data)
 {
     struct io_u               *io_u           = private_data;
     struct thread_data        *td             = io_u->mmap_data;
     struct chimera_fio_thread *chimera_thread = td->io_ops_data;
-    uint64_t                   returned       = 0;
-    uint32_t                   left, chunk, i;
-    void                      *p;
 
-    if (td->o.verify) {
-        left = io_u->xfer_buflen;
-        p    = io_u->xfer_buf;
-
-        for (i = 0; i < niov && left; i++) {
-
-            chunk = left < iov[i].length ? left : iov[i].length;
-            memcpy(p, iov[i].data, chunk);
-            p    += chunk;
-            left -= chunk;
-        }
-    }
-
-    for (i = 0; i < niov; i++) {
-        returned += iov[i].length;
-        evpl_iovec_release(chimera_thread->evpl, &iov[i]);
-    }
-
-    /* Report what actually came back rather than blindly crediting the full
+    /* The data has already landed directly in io_u->xfer_buf (chimera_read_into
+     * targeted it), so there is no copy here -- fio's verify reads it in place.
+     * Report what actually came back rather than blindly crediting the full
      * request: a backend error fails the I/O, and a short read (e.g. past EOF)
      * leaves a residual so fio only counts the bytes that were really moved. */
     if (status != CHIMERA_VFS_OK) {
         io_u->error = EIO;
     } else {
         io_u->error = 0;
-        io_u->resid = returned < io_u->xfer_buflen ? io_u->xfer_buflen - returned : 0;
+        io_u->resid = count < io_u->xfer_buflen ? io_u->xfer_buflen - count : 0;
     }
 
     fio_chimera_ring_enqueue(chimera_thread, io_u);
@@ -617,9 +598,21 @@ fio_chimera_queue(
 
     switch (io_u->ddir) {
         case DDIR_READ:
-            chimera_read(chimera_thread->client, fh, io_u->offset, io_u->xfer_buflen,
-                         fio_chimera_read_callback, io_u);
-            break;
+        {
+            unsigned int buf_offset = (unsigned int) ((char *) io_u->xfer_buf -
+                                                      (char *) evpl_iovec_data(&chimera_thread->iov));
+
+            /* Land the read directly in io_u's slice of our registered buffer.
+            * read_into borrows the iovec; the underlying buffer stays alive via
+            * chimera_thread->iov, so we can release this clone immediately. */
+            evpl_iovec_clone_segment(&iov, &chimera_thread->iov, buf_offset, io_u->xfer_buflen);
+
+            chimera_read_into(chimera_thread->client, fh, io_u->offset, io_u->xfer_buflen,
+                              &iov, 1, fio_chimera_read_callback, io_u);
+
+            evpl_iovec_release(chimera_thread->evpl, &iov);
+        }
+        break;
         case DDIR_WRITE:
         {
             unsigned int buf_offset = (unsigned int) ((char *) io_u->xfer_buf -

@@ -457,6 +457,28 @@ chimera_vfs_read_owned(
     chimera_vfs_read_callback_t           callback,
     void                                 *private_data);
 
+/* As chimera_vfs_read(), but the caller supplies its own destination buffers
+ * (dest_iov/dest_niov) for the data to land in.  work_iov/work_niov is scratch
+ * the core/backend reads through; on completion the data is guaranteed to be in
+ * dest_iov (zero-copy where a backend can land it there directly, a scatter-
+ * copy otherwise).  The caller retains ownership of dest_iov (borrow): it must
+ * keep the buffers alive until the callback and release them afterwards.  The
+ * callback's iov/niov reference dest_iov. */
+void
+chimera_vfs_read_into(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        count,
+    struct evpl_iovec              *work_iov,
+    int                             work_niov,
+    struct evpl_iovec              *dest_iov,
+    int                             dest_niov,
+    uint64_t                        attrmask,
+    chimera_vfs_read_callback_t     callback,
+    void                           *private_data);
+
 typedef void (*chimera_vfs_write_callback_t)(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,

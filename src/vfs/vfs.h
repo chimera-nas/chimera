@@ -722,6 +722,17 @@ struct chimera_vfs_request {
              * prefix/tail and sets r_niov in chimera_vfs_read_complete(). */
             int                             buffers_provided;
             uint32_t                        aligned_prefix;
+            /* read_into: the caller supplied its own destination buffers
+             * (dest_iov/dest_niov) and wants the data landed there.  iov/niov
+             * above are the scratch the core/backend works in.  On completion
+             * the VFS core scatter-copies the result into dest_iov -- unless a
+             * backend was able to land the data directly in dest (e.g. the NFS
+             * proxy used dest as the RDMA write chunk), in which case it sets
+             * landed_in_dest and the core skips the copy. */
+            struct evpl_iovec              *dest_iov;
+            int                             dest_niov;
+            int                             dest_provided;
+            int                             landed_in_dest;
         } read;
 
         struct {
