@@ -60,6 +60,7 @@ struct chimera_options {
     void *pad;
     char *config;
     char *logfile;
+    int   debug;
 };
 
 static struct fio_option options[] = {
@@ -79,6 +80,16 @@ static struct fio_option options[] = {
         .off1  = offsetof(struct chimera_options, logfile),
         .help  =
             "Direct chimera and evpl log output to this file (truncated at start of run); if unset, chimera logging is disabled",
+        .category = FIO_OPT_C_ENGINE,
+        .group    = FIO_OPT_G_INVALID,
+    },
+    {
+        .name     = "chimera_debug",
+        .lname    = "Chimera Debug Logging",
+        .type     = FIO_OPT_BOOL,
+        .off1     = offsetof(struct chimera_options, debug),
+        .help     = "Enable debug-level chimera logging (same as the daemon's -d)",
+        .def      = "0",
         .category = FIO_OPT_C_ENGINE,
         .group    = FIO_OPT_G_INVALID,
     },
@@ -285,7 +296,9 @@ fio_chimera_init(struct thread_data *td)
 
         chimera_log_init();
 
-        //ChimeraLogLevel = CHIMERA_LOG_DEBUG;
+        if (o->debug) {
+            ChimeraLogLevel = CHIMERA_LOG_DEBUG;
+        }
 
         evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 
@@ -467,6 +480,7 @@ fio_chimera_read_callback(
     struct io_u               *io_u           = private_data;
     struct thread_data        *td             = io_u->mmap_data;
     struct chimera_fio_thread *chimera_thread = td->io_ops_data;
+    uint64_t                   returned       = 0;
     uint32_t                   left, chunk, i;
     void                      *p;
 
@@ -484,13 +498,24 @@ fio_chimera_read_callback(
     }
 
     for (i = 0; i < niov; i++) {
+        returned += iov[i].length;
         evpl_iovec_release(chimera_thread->evpl, &iov[i]);
+    }
+
+    /* Report what actually came back rather than blindly crediting the full
+     * request: a backend error fails the I/O, and a short read (e.g. past EOF)
+     * leaves a residual so fio only counts the bytes that were really moved. */
+    if (status != CHIMERA_VFS_OK) {
+        io_u->error = EIO;
+    } else {
+        io_u->error = 0;
+        io_u->resid = returned < io_u->xfer_buflen ? io_u->xfer_buflen - returned : 0;
     }
 
     fio_chimera_ring_enqueue(chimera_thread, io_u);
 
 
-} /* fio_chmera_io_callback */
+} /* fio_chimera_read_callback */
 
 
 static void
@@ -503,10 +528,12 @@ fio_chimera_write_callback(
     struct thread_data        *td             = io_u->mmap_data;
     struct chimera_fio_thread *chimera_thread = td->io_ops_data;
 
+    io_u->error = status != CHIMERA_VFS_OK ? EIO : 0;
+
     fio_chimera_ring_enqueue(chimera_thread, io_u);
 
 
-} /* fio_chmera_io_callback */
+} /* fio_chimera_write_callback */
 
 static enum fio_q_status
 fio_chimera_queue(
@@ -632,6 +659,33 @@ fio_chimera_cleanup(struct thread_data *td)
     pthread_mutex_unlock(&ChimeraClientMutex);
 } /* fio_chimera_file_cleanup */
 
+/*
+ * Report the file size from the job options so fio's setup is satisfied for a
+ * diskless engine and never falls back to laying the files out on the client's
+ * local filesystem.  The files themselves live in the chimera namespace and are
+ * created/written through the engine.
+ */
+static int
+fio_chimera_get_file_size(
+    struct thread_data *td,
+    struct fio_file    *f)
+{
+    unsigned long long size = td->o.file_size_low;
+
+    if (fio_file_size_known(f)) {
+        return 0;
+    }
+
+    if (!size && td->o.size && td->o.nr_files) {
+        size = td->o.size / td->o.nr_files;
+    }
+
+    f->real_file_size = size;
+    fio_file_set_size_known(f);
+
+    return 0;
+} /* fio_chimera_get_file_size */
+
 SYMBOL_EXPORT struct ioengine_ops ioengine =
 {
     .name               = "chimera",
@@ -639,6 +693,7 @@ SYMBOL_EXPORT struct ioengine_ops ioengine =
     .flags              = FIO_DISKLESSIO,
     .init               = fio_chimera_init,
     .post_init          = fio_chimera_post_init,
+    .get_file_size      = fio_chimera_get_file_size,
     .cleanup            = fio_chimera_cleanup,
     .iomem_alloc        = fio_chimera_iomem_alloc,
     .iomem_free         = fio_chimera_iomem_free,
