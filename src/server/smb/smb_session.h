@@ -117,6 +117,11 @@ struct chimera_smb_open_file {
     /* Phase-0 plumbing: fields populated by later phases. Zeroed on alloc. */
     uint32_t                         ctx_present_mask;
     uint8_t                          oplock_level;
+    /* Set when an outstanding legacy oplock break to this handle expects an
+     * acknowledgment (it broke an exclusive/batch oplock).  A break from
+     * LEVEL_II to NONE is NOT acknowledged; a client ack for one is a protocol
+     * error (MS-SMB2 -> NT_STATUS_INVALID_OPLOCK_PROTOCOL). */
+    uint8_t                          oplock_break_ack_required;
     uint8_t                          lease_state;
     uint16_t                         lease_epoch;
     uint32_t                         lease_flags;

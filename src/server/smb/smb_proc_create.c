@@ -292,13 +292,13 @@ chimera_smb_create_gen_open_file(
      * otherwise it drops to LEVEL_II.  Pure attribute/EA opens break nothing
      * (stat-open).  No-op on the first open; skips the opener's own lease. */
     if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share && oh) {
-        uint32_t da   = open_file->desired_access;
-        uint32_t disp = request->create.create_disposition;
+        uint32_t da        = open_file->desired_access;
+        uint32_t disp      = request->create.create_disposition;
         bool     truncates =
             disp == SMB2_FILE_OVERWRITE ||
             disp == SMB2_FILE_OVERWRITE_IF ||
             disp == SMB2_FILE_SUPERSEDE;
-        bool break_trigger =
+        bool     break_trigger =
             (da & (SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
                    SMB2_FILE_APPEND_DATA | SMB2_FILE_EXECUTE |
                    SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
@@ -529,10 +529,10 @@ chimera_smb_create_gen_open_file(
     if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && oh) {
         struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
         struct chimera_vfs_file_state *file_state;
-        uint8_t                        req_smb         = 0;
-        uint8_t                        req_vfs         = 0;
-        bool                           via_rqls        = false;
-        struct chimera_vfs_lease      *conflict        = NULL;
+        uint8_t                        req_smb  = 0;
+        uint8_t                        req_vfs  = 0;
+        bool                           via_rqls = false;
+        struct chimera_vfs_lease      *conflict = NULL;
         enum chimera_vfs_lease_result  result;
 
         if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
@@ -559,23 +559,23 @@ chimera_smb_create_gen_open_file(
         }
 
         /* SMB lease bits use R=0x01, H=0x02, W=0x04 — a different layout from
-        * vfs_state's R/W/H mask, so map field-by-field.  We grant the full
-        * requested set: read caching (R → LEVEL_II), write caching
-        * (W → EXCLUSIVE) and handle caching (H → BATCH).  The vfs_state
-        * conflict matrix keeps W single-writer-exclusive and H
-        * single-holder-exclusive, and the SMB layer breaks holders when a
-        * conflicting open / write / byte-range-lock / delete arrives.
-        *
-        * The two coherence hazards that previously forced a read-only policy
-        * (W and H withheld) are now handled in the break path rather than by
-        * withholding the cache:
-        *   - delete-of-open-file: unlink / rename / delete-on-close break the
-        *     H (handle-caching) holder so its deferred-close handle is recalled
-        *     before the remove (smb_proc_close.c / set_info / rename) — fixes
-        *     the old cthon op_unlk EBUSY.
-        *   - server-side copy: COPYCHUNK breaks the source's caching lease to
-        *     force a flush before it reads (smb_proc_copychunk.c) — fixes the
-        *     old fsx READ BAD DATA. */
+         * vfs_state's R/W/H mask, so map field-by-field.  We grant the full
+         * requested set: read caching (R → LEVEL_II), write caching
+         * (W → EXCLUSIVE) and handle caching (H → BATCH).  The vfs_state
+         * conflict matrix keeps W single-writer-exclusive and H
+         * single-holder-exclusive, and the SMB layer breaks holders when a
+         * conflicting open / write / byte-range-lock / delete arrives.
+         *
+         * The two coherence hazards that previously forced a read-only policy
+         * (W and H withheld) are now handled in the break path rather than by
+         * withholding the cache:
+         *   - delete-of-open-file: unlink / rename / delete-on-close break the
+         *     H (handle-caching) holder so its deferred-close handle is recalled
+         *     before the remove (smb_proc_close.c / set_info / rename) — fixes
+         *     the old cthon op_unlk EBUSY.
+         *   - server-side copy: COPYCHUNK breaks the source's caching lease to
+         *     force a flush before it reads (smb_proc_copychunk.c) — fixes the
+         *     old fsx READ BAD DATA. */
         if (req_smb & SMB2_LEASE_READ_CACHING) {
             req_vfs |= CHIMERA_VFS_LEASE_MODE_R;
         }
@@ -668,20 +668,28 @@ chimera_smb_create_gen_open_file(
                                                       &open_file->caching_lease,
                                                       &conflict);
 
-                /* Another handle already holds a caching oplock/lease.  We
-                 * cannot keep an exclusive/write cache, but we can settle for a
-                 * shared read lease, which coexists with the (now downgraded)
-                 * holder -- this is how a 2nd open ends up with LEVEL_II.
-                 *   - BREAKING: try_insert just kicked off the holder's break.
-                 *   - DENIED: the holder was already broken to a shared read by
-                 *     the break-on-open above (its lease is ACKED, no longer
-                 *     IDLE-breakable), so a write cache is refused; a read cache
-                 *     still coexists.
-                 * Either way, retry for read-only caching (LEVEL_II). */
-                if ((result == CHIMERA_VFS_LEASE_BREAKING ||
-                     result == CHIMERA_VFS_LEASE_DENIED) &&
-                    req_vfs != CHIMERA_VFS_LEASE_MODE_R) {
-                    req_vfs                               = CHIMERA_VFS_LEASE_MODE_R;
+                /* Settle on the strongest caching lease actually grantable.
+                 * A conflict has two flavors:
+                 *   - BREAKING: try_insert kicked off a holder's break.  The
+                 *     break is optimistic (the holder downgrades to a shared
+                 *     read immediately), so simply retrying the SAME mode now
+                 *     usually succeeds; if it still conflicts we step down.
+                 *   - DENIED: an exclusive/batch grant is refused because
+                 *     another client has the file open (sole-access rule) or a
+                 *     holder is mid-downgrade; step the request down to a shared
+                 *     read (LEVEL_II), which coexists.
+                 * Loop, stepping W|H -> R, until granted or nothing is left to
+                 * try.  Bounded by the W->R step plus a few optimistic-break
+                 * retries. */
+                int settle_guard = 6;
+                while (result != CHIMERA_VFS_LEASE_GRANTED && settle_guard-- > 0) {
+                    if (req_vfs != CHIMERA_VFS_LEASE_MODE_R) {
+                        req_vfs = CHIMERA_VFS_LEASE_MODE_R;
+                    } else if (result != CHIMERA_VFS_LEASE_BREAKING) {
+                        /* Already at R and not merely waiting on an optimistic
+                         * break -- a shared read cache is unobtainable. */
+                        break;
+                    }
                     open_file->caching_lease.mode.granted = req_vfs;
                     result                                = chimera_vfs_state_try_insert(vfs_state, file_state,
                                                                                          &open_file->caching_lease,
@@ -760,7 +768,7 @@ chimera_smb_create_gen_open_file(
                     .owner_lo   = open_file->file_id.pid,
                     .owner_hi   = open_file->file_id.vid,
                 };
-                bool truncates =
+                bool                           truncates =
                     request->create.create_disposition == SMB2_FILE_OVERWRITE ||
                     request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
                     request->create.create_disposition == SMB2_FILE_SUPERSEDE;
