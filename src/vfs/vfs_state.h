@@ -265,6 +265,18 @@ chimera_vfs_lease_ack(
     struct chimera_vfs_lease     *lease,
     struct chimera_vfs_lease_mode resulting);
 
+/* Apply the lease state a client selected in its (legacy or lease) oplock-break
+ * acknowledgment.  The server already optimistically settled the lease at the
+ * maximum the holder could keep; the client may keep less.  `kept_mode` is what
+ * the client retains (R for LEVEL_II, 0 for NONE); the lease's granted mode is
+ * intersected down to it and re-armed if anything survives. */
+void
+chimera_vfs_lease_client_downgrade(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_lease      *lease,
+    uint8_t                        kept_mode);
+
 /* Forcibly revoke a lease — called by vfs_state when the break deadline
  * expires, or by the protocol server when it gives up on the client. */
 void
