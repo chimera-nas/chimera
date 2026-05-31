@@ -1407,6 +1407,67 @@ chimera_vfs_state_break_on_write(
     chimera_vfs_state_put(state, file);
 } /* chimera_vfs_state_break_on_write */
 
+/* Break-on-open: a conflicting open by a *different* owner that is not itself
+ * data-modifying downgrades an exclusive (W) or batch (W|H) holder to a shared
+ * read cache (LEVEL_II).  We break every other-owner caching lease that holds
+ * W or H, retaining only the read bit (needed_mode = R), and leave pure
+ * read-cache (LEVEL_II) holders untouched -- multiple readers coexist with a
+ * new opener.  This is the SMB break-on-second-open semantic; it is optimistic
+ * (the break is queued and the opener proceeds immediately). */
+static void
+chimera_vfs_break_caching_for_open(
+    struct chimera_vfs_state             *state,
+    struct chimera_vfs_file_state        *file,
+    const struct chimera_vfs_lease_owner *opener)
+{
+    struct chimera_vfs_lease *cur;
+    struct chimera_vfs_lease *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    int                       n = 0;
+    int                       i;
+
+    pthread_mutex_lock(&file->lock);
+
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        if ((cur->mode.granted & (CHIMERA_VFS_LEASE_MODE_W |
+                                  CHIMERA_VFS_LEASE_MODE_H)) == 0) {
+            continue;
+        }
+        if (chimera_vfs_lease_owner_equal(&cur->owner, opener)) {
+            continue;
+        }
+        if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
+            to_break[n++] = cur;
+        }
+    }
+
+    pthread_mutex_unlock(&file->lock);
+
+    for (i = 0; i < n; i++) {
+        chimera_vfs_lease_begin_break(state, to_break[i],
+                                      CHIMERA_VFS_LEASE_MODE_R, 0);
+    }
+} /* chimera_vfs_break_caching_for_open */
+
+SYMBOL_EXPORT void
+chimera_vfs_state_break_on_open(
+    struct chimera_vfs_state             *state,
+    const uint8_t                        *fh,
+    uint8_t                               fh_len,
+    uint64_t                              fh_hash,
+    const struct chimera_vfs_lease_owner *opener)
+{
+    struct chimera_vfs_file_state *file;
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return;
+    }
+
+    chimera_vfs_break_caching_for_open(state, file, opener);
+
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_state_break_on_open */
+
 /* -------------------------------------------------------------------- */
 /* Implicit I/O lease                                                   */
 /* -------------------------------------------------------------------- */
