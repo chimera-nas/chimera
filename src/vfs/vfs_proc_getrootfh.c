@@ -18,7 +18,7 @@ chimera_vfs_getrootfh_complete(struct chimera_vfs_request *request)
 
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(attr_cache,
+        chimera_vfs_attr_cache_insert(thread, attr_cache,
                                       request->fh_hash,
                                       request->fh,
                                       request->fh_len,

@@ -21,7 +21,7 @@ chimera_vfs_open_at_hdl_callback(
     chimera_vfs_open_at_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_name_cache_insert(cache,
+        chimera_vfs_name_cache_insert(thread, cache,
                                       request->open_at.handle->fh_hash,
                                       request->open_at.handle->fh,
                                       request->open_at.handle->fh_len,
@@ -31,13 +31,13 @@ chimera_vfs_open_at_hdl_callback(
                                       request->open_at.r_attr.va_fh,
                                       request->open_at.r_attr.va_fh_len);
 
-        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                       request->open_at.handle->fh_hash,
                                       request->open_at.handle->fh,
                                       request->open_at.handle->fh_len,
                                       &request->open_at.r_dir_post_attr);
 
-        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                       chimera_vfs_hash(request->open_at.r_attr.va_fh, request->open_at.r_attr.
                                                        va_fh_len),
                                       request->open_at.r_attr.va_fh,

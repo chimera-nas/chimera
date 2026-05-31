@@ -426,6 +426,16 @@ chimera_vfs_init(
     /* Bring up the process-wide TSC clock before any cache/timestamp use. */
     chimera_vfs_clock_init();
 
+    /* Scale RCU reclaim across CPUs: spawn one call_rcu worker per CPU so the
+     * fungible-cache retire callbacks (attr/name/rpl) keep up with per-request
+     * churn.  Without this liburcu uses a single default worker for the whole
+     * process.  Best-effort -- on failure call_rcu falls back to that default
+     * worker. */
+    if (create_all_cpu_call_rcu_data(0) != 0) {
+        chimera_vfs_error("Failed to create per-CPU call_rcu workers; "
+                          "falling back to the default RCU reclaim thread");
+    }
+
     vfs = calloc(1, sizeof(*vfs));
 
     /* Synthesize machine name for identification */
@@ -662,6 +672,10 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     chimera_vfs_open_cache_destroy(vfs->vfs_open_path_cache);
     chimera_vfs_open_cache_destroy(vfs->vfs_open_file_cache);
 
+    /* All RCU caches are destroyed above and each drained via rcu_barrier(), so
+     * no callbacks remain; tear down the per-CPU call_rcu workers. */
+    free_all_cpu_call_rcu_data();
+
     if (vfs->metrics.op_latency) {
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
             prometheus_histogram_destroy_series(vfs->metrics.op_latency, vfs->metrics.op_latency_series[i]);
@@ -835,6 +849,12 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
                                                          thread->metrics.op_latency_series[i]);
         }
         free(thread->metrics.op_latency_series);
+    }
+
+    /* Return this thread's recycled RCU cache entries to their pool depots so
+     * they are reclaimed at cache destroy (the pools outlive the threads). */
+    for (i = 0; i < CHIMERA_RCU_POOL_COUNT; i++) {
+        chimera_rcu_magazine_drain(&thread->rcu_magazines[i]);
     }
 
     free(thread);

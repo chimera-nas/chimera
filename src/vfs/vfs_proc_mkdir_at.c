@@ -29,7 +29,7 @@ chimera_vfs_mkdir_at_complete(struct chimera_vfs_request *request)
                                 request->mkdir_at.name_len,
                                 NULL, 0);
 
-        chimera_vfs_name_cache_insert(cache,
+        chimera_vfs_name_cache_insert(thread, cache,
                                       request->mkdir_at.handle->fh_hash,
                                       request->mkdir_at.handle->fh,
                                       request->mkdir_at.handle->fh_len,
@@ -39,13 +39,13 @@ chimera_vfs_mkdir_at_complete(struct chimera_vfs_request *request)
                                       request->mkdir_at.r_attr.va_fh,
                                       request->mkdir_at.r_attr.va_fh_len);
 
-        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                       request->mkdir_at.handle->fh_hash,
                                       request->mkdir_at.handle->fh,
                                       request->mkdir_at.handle->fh_len,
                                       &request->mkdir_at.r_dir_post_attr);
 
-        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                       chimera_vfs_hash(request->mkdir_at.r_attr.va_fh, request->mkdir_at.r_attr.
                                                        va_fh_len)
                                       ,

@@ -333,8 +333,14 @@ chimera_vfs_notify_resolve_getparent_cb(
         return;
     }
 
-    /* Cache the result for future events */
-    chimera_vfs_rpl_cache_insert(notify->rpl_cache,
+    /* Cache the result for future events.  This callback runs on the same
+     * worker thread chimera_vfs_notify_resolve dispatched getparent on, so its
+     * magazine is the correct thread-local pool to recycle from. */
+    struct chimera_vfs_thread *rpl_thread = notify->vfs->num_sync_delegation_threads > 0 ?
+        notify->vfs->sync_delegation_threads[0].vfs_thread :
+        notify->vfs->close_thread.vfs_thread;
+
+    chimera_vfs_rpl_cache_insert(rpl_thread, notify->rpl_cache,
                                  chimera_vfs_hash(pev->walk_fh, pev->walk_fh_len),
                                  pev->walk_fh,
                                  pev->walk_fh_len,
