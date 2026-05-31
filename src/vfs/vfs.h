@@ -42,6 +42,11 @@ struct chimera_rcu_node;
 struct chimera_rcu_magazine {
     struct chimera_rcu_node *head;
     uint32_t                 count;
+    /* Stable depot stripe for this thread+pool, assigned once at thread init.
+     * An entry's recycle home follows the thread that allocated it (carried in
+     * the entry), not the transient CPU, so a worker that migrates across CPUs
+     * still recovers its own retired entries instead of stranding them. */
+    uint32_t                 stripe;
 };
 
 /* FSSTAT values used with builtin backends until statvfs tracking is implemented */

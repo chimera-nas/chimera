@@ -12,15 +12,18 @@
  * The pool decouples the producer (call_rcu reclaim workers, one per CPU) from
  * the consumers (per-request inserts on the VFS worker threads):
  *
- *   - The depot is striped per CPU: an array of liburcu wait-free stacks, one
- *     per CPU, each on its own cache line.  Because the per-CPU call_rcu worker
- *     reclaims an entry on the same CPU the read retired it on, and the next
- *     read on that CPU re-allocates it, an entry's whole recycle lifecycle
- *     stays on one core's stack -- near-zero cross-core traffic.  Retire pushes
- *     with cds_wfs_push (wait-free, no lock).
+ *   - The depot is striped, one liburcu wait-free stack per stripe on its own
+ *     cache line.  A stripe is owned by a worker thread (assigned once at thread
+ *     init), NOT by a CPU: each entry records the stripe of the thread that
+ *     allocated it (home_stripe), and the grace-period reclaim worker returns it
+ *     to that stripe.  So an entry's whole recycle lifecycle stays on its owner
+ *     thread's stripe even though the worker migrates across CPUs and the
+ *     reclaim worker runs on an unrelated CPU -- contention-free in the common
+ *     case, and crucially no stranding.  Retire pushes with cds_wfs_push
+ *     (wait-free, no lock).
  *   - Each VFS worker thread keeps a thread-local magazine (a plain LIFO, no
  *     atomics).  Alloc pops from the magazine; on a miss it refills up to
- *     CHIMERA_RCU_MAGAZINE_CAP entries from this CPU's depot stripe under a
+ *     CHIMERA_RCU_MAGAZINE_CAP entries from this thread's depot stripe under a
  *     single pop-lock acquisition (bounded work -- it never walks the whole
  *     stack).  On a cold stripe it falls back to calloc (one-time; entries are
  *     recycled forever after).
@@ -40,10 +43,6 @@
 
 #include "vfs/vfs.h" /* enum chimera_rcu_pool_id, struct chimera_rcu_magazine */
 
-/* sched_getcpu() without forcing _GNU_SOURCE on every includer of this header. */
-extern int sched_getcpu(
-    void);
-
 struct chimera_rcu_pool;
 
 /*
@@ -55,20 +54,22 @@ struct chimera_rcu_pool;
 struct chimera_rcu_node {
     struct rcu_head          rcu;   /* deferred-free grace-period linkage */
     struct chimera_rcu_pool *pool;  /* pool this entry returns to */
+    uint32_t                 home_stripe; /* depot stripe of the allocating thread */
     union {
         struct cds_wfs_node      wfs;      /* linked on a depot stripe */
         struct chimera_rcu_node *mag_next; /* linked on a thread magazine */
     };
 };
 
-/* One depot stripe per CPU, each on its own cache line to avoid false sharing
- * of the adjacent pop locks. */
+/* One depot stripe per slot (the count is sized to the CPU count, but a stripe
+ * is owned by a worker thread, see header comment), each on its own cache line
+ * to avoid false sharing of the adjacent pop locks. */
 struct chimera_rcu_depot {
     struct cds_wfs_stack stack;
 } __attribute__((aligned(64)));
 
 struct chimera_rcu_pool {
-    struct chimera_rcu_depot *depots; /* [n_stripes], one per CPU */
+    struct chimera_rcu_depot *depots; /* [n_stripes] */
     uint32_t                  stripe_mask;
     uint32_t                  n_stripes;
     size_t                    entry_size;
@@ -89,15 +90,6 @@ chimera_rcu_round_pow2(uint32_t v)
     v |= v >> 16;
     return v + 1;
 } /* chimera_rcu_round_pow2 */
-
-/* Depot stripe for the calling CPU. */
-static inline uint32_t
-chimera_rcu_stripe(const struct chimera_rcu_pool *pool)
-{
-    int cpu = sched_getcpu();
-
-    return (cpu < 0 ? 0u : (uint32_t) cpu) & pool->stripe_mask;
-} /* chimera_rcu_stripe */
 
 static inline void
 chimera_rcu_pool_init(
@@ -125,7 +117,13 @@ chimera_rcu_pool_init(
 
 /*
  * call_rcu callback: a retired entry has cleared its grace period; return it to
- * this CPU's depot stripe.  Wait-free; safe from any per-CPU reclaim worker.
+ * the depot stripe of the thread that allocated it (home_stripe), NOT the CPU
+ * this reclaim worker happens to run on.  This is the crux: the per-CPU
+ * reclaim worker runs on an arbitrary CPU relative to the (unpinned, migrating)
+ * worker thread that will re-allocate the entry, so keying the stripe off the
+ * current CPU stranded entries in stripes the consumer never popped.  Routing
+ * by home_stripe returns the entry to the exact stripe its owner refills from.
+ * Wait-free; safe from any reclaim worker.
  */
 static inline void
 chimera_rcu_pool_retire(struct rcu_head *head)
@@ -133,7 +131,7 @@ chimera_rcu_pool_retire(struct rcu_head *head)
     struct chimera_rcu_node *node = caa_container_of(head, struct chimera_rcu_node, rcu);
 
     cds_wfs_node_init(&node->wfs);
-    cds_wfs_push(&node->pool->depots[chimera_rcu_stripe(node->pool)].stack, &node->wfs);
+    cds_wfs_push(&node->pool->depots[node->home_stripe].stack, &node->wfs);
 } /* chimera_rcu_pool_retire */
 
 /*
@@ -146,11 +144,12 @@ chimera_rcu_pool_alloc(
     struct chimera_rcu_pool     *pool)
 {
     struct chimera_rcu_node *node;
+    uint32_t                 stripe = mag->stripe & pool->stripe_mask;
 
     if (!mag->head) {
-        /* Refill up to the cap from this CPU's stripe under one pop-lock
-        * acquisition.  Bounded work -- we never walk the whole stack. */
-        struct cds_wfs_stack *depot = &pool->depots[chimera_rcu_stripe(pool)].stack;
+        /* Refill up to the cap from this THREAD's stable stripe under one
+         * pop-lock acquisition.  Bounded work -- we never walk the whole stack. */
+        struct cds_wfs_stack *depot = &pool->depots[stripe].stack;
         struct cds_wfs_node  *wn;
 
         cds_wfs_pop_lock(depot);
@@ -175,7 +174,8 @@ chimera_rcu_pool_alloc(
         node = calloc(1, pool->entry_size);
     }
 
-    node->pool = pool;
+    node->pool        = pool;
+    node->home_stripe = stripe; /* retire returns the entry to this thread's stripe */
     return node;
 } /* chimera_rcu_pool_alloc */
 
@@ -189,7 +189,7 @@ chimera_rcu_magazine_drain(struct chimera_rcu_magazine *mag)
         node      = mag->head;
         mag->head = node->mag_next;
         cds_wfs_node_init(&node->wfs);
-        cds_wfs_push(&node->pool->depots[chimera_rcu_stripe(node->pool)].stack, &node->wfs);
+        cds_wfs_push(&node->pool->depots[node->home_stripe].stack, &node->wfs);
     }
     mag->count = 0;
 } /* chimera_rcu_magazine_drain */

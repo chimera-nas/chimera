@@ -764,6 +764,20 @@ chimera_vfs_thread_init(
     thread->evpl = evpl;
     thread->vfs  = vfs;
 
+    /* Assign this thread a stable RCU recycle stripe (shared across its pools).
+     * Entries it allocates record this stripe and are returned to it after the
+     * grace period, so its recycle traffic stays on one stripe regardless of
+     * CPU migration -- and never strands in a stripe nothing pops. */
+    {
+        static uint32_t rcu_stripe_seq;
+        uint32_t        s = __atomic_fetch_add(&rcu_stripe_seq, 1, __ATOMIC_RELAXED);
+        int             p;
+
+        for (p = 0; p < CHIMERA_RCU_POOL_COUNT; p++) {
+            thread->rcu_magazines[p].stripe = s;
+        }
+    }
+
     if (vfs->metrics.metrics) {
         thread->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_instance *));
 
