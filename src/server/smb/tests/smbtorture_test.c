@@ -367,6 +367,17 @@ main(
         }
     }
 
+    /* The change_notify_disabled suite expects the server to reject
+     * CHANGE_NOTIFY with STATUS_NOT_IMPLEMENTED (the "change notify = no"
+     * share policy).  Enable that policy only for that suite — every other
+     * suite needs CHANGE_NOTIFY working. */
+    for (i = 0; i < num_tests; i++) {
+        if (strstr(tests[i], "change_notify_disabled") != NULL) {
+            chimera_server_config_set_smb_notify_disabled(config, 1);
+            break;
+        }
+    }
+
     /* Initialize server */
     env.server = chimera_server_init(config, env.metrics);
     if (!env.server) {

@@ -687,6 +687,11 @@ chimera_smb_create_release_parent(struct chimera_smb_request *request)
     }
 } /* chimera_smb_create_release_parent */
 
+static inline uint32_t
+chimera_smb_create_granted_access(
+    struct chimera_smb_request     *request,
+    const struct chimera_vfs_attrs *attr);
+
 static inline void
 chimera_smb_create_mkdir_open_callback(
     enum chimera_vfs_error          error_code,
@@ -720,6 +725,20 @@ chimera_smb_create_mkdir_open_callback(
     }
 
     request->create.r_open_file = open_file;
+
+    /* Record the access this open was granted.  The other create/open
+     * completion paths do this; without it a freshly-created directory
+     * handle carries a stale granted_access (a recycled open_file can hold
+     * 0), which breaks any access decision keyed on it (e.g. the
+     * FILE_LIST_DIRECTORY gate on CHANGE_NOTIFY).  The creator of a new
+     * object holds full control, so MAXIMUM_ALLOWED resolves to the full
+     * mask; a specific-bits open was granted exactly what it requested. */
+    if (request->create.desired_access & SMB2_MAXIMUM_ALLOWED) {
+        open_file->granted_access = CHIMERA_ACE_MASK_ALL;
+    } else {
+        open_file->granted_access = chimera_smb_create_granted_access(request, NULL);
+    }
+    open_file->maximal_access = CHIMERA_ACE_MASK_ALL;
 
     chimera_smb_create_release_parent(request);
     chimera_smb_open_file_release(request, open_file);

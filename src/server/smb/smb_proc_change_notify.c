@@ -50,6 +50,15 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
     int                                nevents;
     struct chimera_vfs_notify         *vfs_notify;
 
+    /* When change notify is disabled for the server's shares (the Windows
+     * "change notify = no" behaviour), reject the request outright with
+     * STATUS_NOT_IMPLEMENTED rather than arming a watch that would never
+     * fire — matching MS-SMB2 and smb2.change_notify_disabled. */
+    if (thread->shared->config.notify_disabled) {
+        chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
+        return;
+    }
+
     /* Resolve the open file */
     open_file = chimera_smb_open_file_resolve(request, &request->change_notify.file_id);
 
@@ -62,6 +71,15 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
     if (!(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY)) {
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    /* MS-SMB2 3.3.5.19: the open must hold FILE_LIST_DIRECTORY (== READ_DATA)
+     * to watch the directory; otherwise reject with STATUS_ACCESS_DENIED
+     * (smb2.notify.handle-permissions). */
+    if (!(open_file->granted_access & SMB2_FILE_LIST_DIRECTORY)) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
         return;
     }
 

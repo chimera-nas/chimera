@@ -673,6 +673,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_ENCRYPTION_AES_256_CCM                 0x0003
 #define SMB2_ENCRYPTION_AES_256_GCM                 0x0004
 
+/* SMB2 SESSION_SETUP request Flags (MS-SMB2 §2.2.5) */
+#define SMB2_SESSION_FLAG_BINDING                   0x01
+
 /* SMB2 SESSION_SETUP response SessionFlags (MS-SMB2 §2.2.6) */
 #define SMB2_SESSION_FLAG_IS_GUEST                  0x0001
 #define SMB2_SESSION_FLAG_IS_NULL                   0x0002

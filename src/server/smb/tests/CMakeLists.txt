@@ -243,9 +243,38 @@ set(SMBTORTURE_ACLS_SUBTESTS
     smb2.acls.OVERWRITE_READ_ONLY_FILE
 )
 
+# Like smb2.acls, the combined smb2.notify suite shares one server process and
+# trips over the same smb2_deltree per-subtest cleanup cascade (a non-empty
+# directory whose delete-on-close is believed to have succeeded lingers and the
+# stale state breaks later subtests).  Each subtest passes cleanly in its own
+# server process, so the notify behaviour is covered by registering the
+# individual subtests as separate ctests.  The combined suite stays visible but
+# disabled (see below); greening it is tracked as the shared deltree follow-up.
+set(SMBTORTURE_NOTIFY_SUBTESTS
+    smb2.notify.tcon
+    smb2.notify.dir
+    smb2.notify.mask
+    smb2.notify.tdis
+    smb2.notify.tdis1
+    smb2.notify.close
+    smb2.notify.logoff
+    smb2.notify.invalid-reauth
+    smb2.notify.basedir
+    smb2.notify.double
+    smb2.notify.file
+    smb2.notify.tcp
+    smb2.notify.overflow
+    smb2.notify.rmdir1
+    smb2.notify.rmdir2
+    smb2.notify.rmdir3
+    smb2.notify.rmdir4
+    smb2.notify.handle-permissions
+)
+
 set(SMBTORTURE_SUITES
     smb2.acls
     ${SMBTORTURE_ACLS_SUBTESTS}
+    ${SMBTORTURE_NOTIFY_SUBTESTS}
     smb2.acls_non_canonical
     smb2.async_dosmode
     smb2.change_notify_disabled
@@ -320,6 +349,7 @@ set(SMBTORTURE_SUITES
 # remaining backends start fully disabled; populate their lists as suites are
 # verified against them.
 set(SMBTORTURE_ENABLED_memfs
+    smb2.change_notify_disabled
     smb2.maximum_allowed
     smb2.mkdir
     smb2.openattr
@@ -359,6 +389,12 @@ set(SMBTORTURE_ENABLED_memfs
     # The combined smb2.acls suite stays disabled (shared-process deltree
     # cleanup cascade, see above).
     ${SMBTORTURE_ACLS_SUBTESTS}
+    # CHANGE_NOTIFY coverage: these notify subtests pass individually on memfs.
+    # The combined smb2.notify suite stays disabled (same deltree cascade).
+    # Remaining notify subtests (valid-req, mask-change, session-reconnect,
+    # tree, rec) need deeper features (recursive-buffer accuracy, per-session
+    # preauth for PreviousSessionId) and are left disabled.
+    ${SMBTORTURE_NOTIFY_SUBTESTS}
     # smb2.acls_non_canonical and smb2.async_dosmode pass on x86_64 but fail on
     # arm64 CI; left disabled until the arch difference is understood.
 )
@@ -371,6 +407,7 @@ set(SMBTORTURE_ENABLED_memfs
 # round-trip is unsupportable on the passthrough backends (it works on the
 # native backends, which persist btime in their own inode metadata).
 set(SMBTORTURE_ENABLED_linux
+    smb2.change_notify_disabled
     smb2.mkdir
     smb2.read
     smb2.rw
@@ -389,6 +426,7 @@ set(SMBTORTURE_ENABLED_linux
     # pending the arm64 difference.
 )
 set(SMBTORTURE_ENABLED_io_uring
+    smb2.change_notify_disabled
     smb2.mkdir
     smb2.read
     smb2.rw
@@ -412,6 +450,7 @@ set(SMBTORTURE_ENABLED_io_uring
 # KV (like diskfs), so it also runs the smb2.acls subtests now that set_security
 # (cairn_setattr SET-ACL) persists the descriptor.
 set(SMBTORTURE_ENABLED_cairn
+    smb2.change_notify_disabled
     smb2.mkdir
     smb2.read
     smb2.rw
@@ -436,6 +475,7 @@ set(SMBTORTURE_ENABLED_cairn
 # stays disabled (no FSCTL_SET_SPARSE support yet); both block backends share
 # the diskfs module and enable the same set.
 set(SMBTORTURE_ENABLED_diskfs_common
+    smb2.change_notify_disabled
     smb2.mkdir
     smb2.read
     smb2.rw

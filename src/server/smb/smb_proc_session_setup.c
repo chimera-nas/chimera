@@ -329,15 +329,33 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         chimera_smb_error("Authentication failed (mechanism: %s)", smb_auth_mech_name(mech));
         chimera_smb_complete_request(request, SMB2_STATUS_LOGON_FAILURE);
 
+        /* A failed channel-bind (SMB2_SESSION_FLAG_BINDING) must NOT tear the
+         * existing session down — the established channel(s) survive.  Only a
+         * failed initial auth (never-authorized session) or a failed non-binding
+         * REAUTH invalidates the session. */
+        int is_binding = (request->session_setup.flags &
+                          SMB2_SESSION_FLAG_BINDING) != 0;
+
         if (request->session_handle &&
-            (!(request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED))) {
+            !((request->session_handle->session->flags &
+               CHIMERA_SMB_SESSION_AUTHORIZED) && is_binding)) {
             /* The handle was registered in conn->session_handles when the
              * session was allocated (possibly on an earlier interim leg), so
              * remove it there before freeing — otherwise connection teardown
-             * iterates it again and double-releases the session. */
+             * iterates it again and double-releases the session.
+             *
+             * This tears the session down on auth failure in two cases:
+             *   - a brand-new session whose initial authentication failed
+             *     (never authorized);
+             *   - a failed REAUTH of an already-authorized session, which
+             *     MS-SMB2 invalidates.  The LOGON_FAILURE reply above was
+             *     already built with the still-valid handle; releasing the
+             *     session now frees its trees, which completes any pending
+             *     CHANGE_NOTIFY with STATUS_NOTIFY_CLEANUP
+             *     (smb2.notify.invalid-reauth) and makes the SessionId
+             *     invalid for subsequent requests.  A failed auth holds no
+             *     preservable durable opens, so nothing to preserve. */
             HASH_DEL(conn->session_handles, request->session_handle);
-            /* Auth failed: the session was never authorized and holds no
-             * durable opens, so nothing to preserve. */
             chimera_smb_session_release(thread, shared, request->session_handle->session, false);
             chimera_smb_session_handle_free(thread, request->session_handle);
             request->session_handle   = NULL;

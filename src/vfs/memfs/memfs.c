@@ -1814,6 +1814,100 @@ memfs_umount(
     request->complete(request);
 } /* memfs_umount */
 
+/*
+ * Reverse-path-lookup: given a directory FH, return its parent's FH and the
+ * directory's own name within that parent.  The change-notify subtree
+ * resolver walks the ancestor directory chain with this (memfs advertises
+ * CHIMERA_VFS_CAP_RPL), so it only ever needs to resolve directories — which
+ * track their parent via dir.parent_inum/parent_gen.
+ */
+static void
+memfs_getparent(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct memfs_inode  *inode, *parent_inode;
+    struct memfs_dirent *dirent;
+    uint64_t             parent_inum;
+    uint32_t             parent_gen;
+    uint64_t             child_inum;
+    uint32_t             child_gen;
+    int                  found = 0;
+
+    inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
+
+    if (unlikely(!inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    if (unlikely(!S_ISDIR(inode->mode))) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
+    child_inum  = inode->inum;
+    child_gen   = inode->gen;
+    parent_inum = inode->dir.parent_inum;
+    parent_gen  = inode->dir.parent_gen;
+
+    pthread_mutex_unlock(&inode->lock);
+
+    /* Encode the parent FH using the child FH as the magic/mount template. */
+    request->getparent.r_parent_fh_len =
+        chimera_vfs_encode_fh_inum_parent(request->fh, parent_inum, parent_gen,
+                                          request->getparent.r_parent_fh);
+    request->getparent.r_name_len = 0;
+
+    /* The root directory is its own parent: there is no enclosing name.  The
+     * resolver detects the mount root by FH and stops, so an empty name is
+     * fine here. */
+    if (parent_inum == child_inum && parent_gen == child_gen) {
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    parent_inode = memfs_inode_get_inum(shared, parent_inum, parent_gen);
+
+    if (unlikely(!parent_inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    /* Scan the parent's entries for the one pointing back at this child. */
+    rb_tree_first(&parent_inode->dir.dirents, dirent);
+
+    while (dirent) {
+        if (dirent->inum == child_inum && dirent->gen == child_gen) {
+            uint16_t nlen = dirent->name_len;
+            if (nlen > sizeof(request->getparent.r_name)) {
+                nlen = sizeof(request->getparent.r_name);
+            }
+            memcpy(request->getparent.r_name, dirent->name, nlen);
+            request->getparent.r_name_len = nlen;
+            found                         = 1;
+            break;
+        }
+        dirent = rb_tree_next(&parent_inode->dir.dirents, dirent);
+    }
+
+    pthread_mutex_unlock(&parent_inode->lock);
+
+    /* A missing name (child unlinked from the parent mid-walk) is not fatal
+     * for the resolver — it still has the parent FH to continue upward. */
+    (void) found;
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_getparent */
+
 static void
 memfs_lookup_at(
     struct memfs_thread        *thread,
@@ -5106,6 +5200,9 @@ memfs_dispatch(
         case CHIMERA_VFS_OP_LOOKUP_AT:
             memfs_lookup_at(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_GETPARENT:
+            memfs_getparent(thread, shared, request, private_data);
+            break;
         case CHIMERA_VFS_OP_GETATTR:
             memfs_getattr(thread, shared, request, private_data);
             break;
@@ -5222,7 +5319,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE |
         CHIMERA_VFS_CAP_ACL_NATIVE | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
         CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS |
-        CHIMERA_VFS_CAP_NAMED_STREAMS,
+        CHIMERA_VFS_CAP_NAMED_STREAMS | CHIMERA_VFS_CAP_RPL,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

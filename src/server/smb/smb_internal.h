@@ -26,6 +26,7 @@
 #include "smb_ntlm.h"
 #include "smb_gssapi.h"
 #include "smb_sharemode.h"
+#include "smb_notify.h"
 #include "vfs/vfs_acl.h"
 #include "vfs/vfs_idmap.h"
 #include "vfs/vfs_release.h"
@@ -125,6 +126,11 @@ struct chimera_smb_config {
     /* SMB3 transport encryption policy: 0 = off (no encryption advertised),
      * 1 = enabled (offered, used when the client opts in), 2 = required. */
     int                            encryption;
+    /* When set, CHANGE_NOTIFY is disabled for the server's shares: the
+     * handler returns STATUS_NOT_IMPLEMENTED immediately instead of arming
+     * a watch (the "change notify = no" share behaviour Windows exposes;
+     * smb2.change_notify_disabled expects this). */
+    int                            notify_disabled;
     uint32_t                       capabilities;
     uint32_t                       dialects[16];
     struct chimera_smb_nic_info    nic_info[16];
@@ -1482,8 +1488,10 @@ chimera_smb_tree_free(
     struct chimera_smb_tree          *tree,
     bool                              preserve_durable)
 {
-    struct chimera_smb_open_file *open_file, *tmp;
-    int                           i;
+    struct chimera_smb_open_file    *open_file, *tmp;
+    struct chimera_smb_notify_state *gc_states = NULL;
+    struct chimera_smb_notify_state *nstate;
+    int                              i;
 
     for (i = 0; i < CHIMERA_SMB_OPEN_FILE_BUCKETS; i++) {
 
@@ -1519,6 +1527,22 @@ chimera_smb_tree_free(
                 continue;
             }
 
+            /* Detach any CHANGE_NOTIFY watch/parked request from this open and
+             * defer its teardown until after the bucket lock is dropped:
+             * completing a parked request releases the open_file reference it
+             * holds, which re-takes this same bucket lock.  A parked request
+             * keeps refcnt > 0, so the open_file is NOT freed in this loop —
+             * its final release happens in the deferred chimera_smb_notify_close
+             * below.  A watch with no parked request holds no reference, so the
+             * open_file is freed here and the deferred close just frees the
+             * detached state + destroys the VFS watch. */
+            nstate = open_file->notify_state;
+            if (nstate) {
+                open_file->notify_state = NULL;
+                nstate->gc_next         = gc_states;
+                gc_states               = nstate;
+            }
+
             open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
 
             if (open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE &&
@@ -1546,6 +1570,19 @@ chimera_smb_tree_free(
         }
 
         pthread_mutex_unlock(&tree->open_files_lock[i]);
+    }
+
+    /* Tear down notify state detached above, now that no bucket lock is held.
+     * For a still-parked request this sends STATUS_NOTIFY_CLEANUP (the
+     * connection is alive on a TREE_DISCONNECT / LOGOFF) and releases the
+     * open_file reference it held — its final reference, so the open is freed
+     * here.  During hard connection teardown chimera_smb_conn_free has already
+     * dropped the parked requests silently, so there is nothing to send and
+     * only the watch + state are freed. */
+    while (gc_states) {
+        nstate    = gc_states;
+        gc_states = nstate->gc_next;
+        chimera_smb_notify_close(shared->vfs->vfs_notify, nstate);
     }
 
     pthread_mutex_lock(&shared->trees_lock);
