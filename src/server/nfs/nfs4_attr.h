@@ -67,6 +67,23 @@ chimera_nfs4_pnfs_layout_type(
     return 0;
 } /* chimera_nfs4_pnfs_layout_type */
 
+/*
+ * Returns 1 if the file identified by fh is backed by a VFS module that
+ * implements extended attributes (CHIMERA_VFS_CAP_XATTR), else 0. Used to set
+ * the per-object NFSv4.2 FATTR4_XATTR_SUPPORT value (RFC 8276) from the actual
+ * backend capability rather than a constant. Unlike pNFS, xattr has no
+ * server-wide feature gate, so the capability bit is the sole signal.
+ */
+static inline int
+chimera_nfs4_xattr_supported(
+    struct chimera_vfs_thread *vfs_thread,
+    const void                *fh,
+    int                        fhlen)
+{
+    return (chimera_vfs_module_capabilities(vfs_thread, fh, fhlen) &
+            CHIMERA_VFS_CAP_XATTR) ? 1 : 0;
+} /* chimera_nfs4_xattr_supported */
+
 static inline uint64_t
 chimera_nfs4_attr2mask(
     uint32_t *words,
@@ -346,6 +363,7 @@ chimera_nfs4_marshall_attrs(
     uint32_t                        max_attrvals,
     uint8_t                         minorversion,
     uint32_t                        pnfs_layout_type,
+    int                             xattr_supported,
     int                             nfs4_delegations,
     uint32_t                        lease_time_s)
 {
@@ -817,8 +835,9 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[2]  |= (1 << (FATTR4_XATTR_SUPPORT - 64));
             *num_rsp_mask = 3;
 
-            /* memfs and the other validated backends support xattrs. */
-            chimera_nfs4_attr_append_uint32(&attrs, 1);
+            /* Per-object: TRUE only if this file's backend implements xattrs
+             * (CHIMERA_VFS_CAP_XATTR). See RFC 8276 sec 8.2.1 - per-fs attribute. */
+            chimera_nfs4_attr_append_uint32(&attrs, xattr_supported);
         }
 
         if (req_mask[2] & (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64))) {

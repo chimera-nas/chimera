@@ -76,6 +76,8 @@ chimera_nfs4_readdir_callback(
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,
                                                               req->fh, req->fhlen),
+                                chimera_nfs4_xattr_supported(req->thread->vfs_thread,
+                                                             req->fh, req->fhlen),
                                 chimera_server_config_get_nfs4_delegations(
                                     req->thread->shared->config),
                                 req->thread->shared->nfs_lease_time_s);
