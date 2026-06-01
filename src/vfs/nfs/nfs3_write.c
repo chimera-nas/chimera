@@ -83,7 +83,7 @@ chimera_nfs3_write(
     args.file.data.len  = fhlen;
     args.offset         = request->write.offset;
     args.count          = request->write.length;
-    args.stable         = request->write.sync ? FILE_SYNC : UNSTABLE;
+    args.stable         = request->write.sync;     /* 3-level UNSTABLE/DATA_SYNC/FILE_SYNC */
     args.data.iov       = request->write.iov;
     args.data.niov      = request->write.niov;
     args.data.length    = request->write.length;

@@ -366,6 +366,18 @@ struct chimera_vfs_stream_entry {
     uint16_t name_len;    /* bytes of name that follow this struct */
 };
 
+/*
+ * Requested/achieved write stability, carried in write.sync (request) and
+ * returned in write.r_sync (achieved).  Values match the NFS3/NFS4 stable_how
+ * enums (UNSTABLE/DATA_SYNC/FILE_SYNC = 0/1/2), so backends that only test
+ * truthiness for FUA still behave correctly (UNSTABLE=0 is the only falsy one).
+ * A backend that makes data durable but defers metadata durability returns
+ * DATASYNC; one that makes everything durable returns FILESYNC.
+ */
+#define CHIMERA_VFS_WRITE_UNSTABLE 0
+#define CHIMERA_VFS_WRITE_DATASYNC 1
+#define CHIMERA_VFS_WRITE_FILESYNC 2
+
 struct chimera_vfs_request {
     struct chimera_vfs_thread         *thread;
     const struct chimera_vfs_cred     *cred;

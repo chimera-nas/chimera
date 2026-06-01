@@ -185,6 +185,10 @@ struct diskfs_request_private {
     /* Carried across the async prefix/suffix lookups + trim walk. */
     int                         need_prefix_read;
     int                         need_suffix_read;
+    /* Set when the write hit a single already-WRITTEN extent fully covering the
+     * range (in-place overwrite, extent map untouched): the only inode change
+     * is the mtime/ctime bump, so a non-FILE_SYNC write can defer it. */
+    int                         inplace_written;
     uint64_t                    prefix_device_id, prefix_device_offset;
     uint64_t                    suffix_device_id, suffix_device_offset;
 
@@ -482,6 +486,16 @@ struct diskfs_inode {
     struct diskfs_inode        *lru_prev, *lru_next;
     int                         on_lru;
 
+    /* Deferred mtime/ctime: a non-FILE_SYNC in-place overwrite bumps the
+     * timestamps in memory and links the inode on its shard's mtime-dirty list
+     * (holding an extra refcnt to keep it resident) instead of logging the
+     * inode block per write; a periodic flusher coalesces them durable.  All
+     * under the shard lock; an inode is never on both the LRU and this list
+     * (mtime_dirty implies refcnt > 1, so it is not idle). */
+    struct diskfs_inode        *mdirty_prev, *mdirty_next;
+    int                         mtime_dirty;
+    uint64_t                    mtime_dirty_since;  /* monotonic tick of first dirty */
+
     /* This inode's 4 KiB metadata home block in the block cache; pinned
      * while the inode is dirty in a transaction.  NULL until first claimed.
      * Directory entries, extents and the symlink target all live as keyed
@@ -498,6 +512,7 @@ struct diskfs_inode_shard {
     struct rb_tree       inodes;       /* keyed by inum */
     struct diskfs_inode *lru_head, *lru_tail; /* idle (recycle) candidates, LRU-first */
     uint32_t             ninodes;      /* resident inodes in this shard */
+    struct diskfs_inode *mdirty_head, *mdirty_tail; /* deferred-mtime queue (FIFO) */
 };
 
 struct diskfs_inode_cache {
@@ -995,6 +1010,7 @@ struct diskfs_shared {
     uint32_t                   root_gen;
     int                        unsafe_async;       /* config opt-in: submit block writes without FUA/sync (no crash safety) */
     int                        noatime;            /* config opt-in: never update atime on read (default: relatime) */
+    uint64_t                   mtime_defer_us;     /* coalesce non-FILE_SYNC in-place mtime updates: flush each dirty inode at most once per this many us (0 = disabled, log every write); default 1s */
     int                        mounted;            /* 1 = remounted existing FS (enables inode read-back) */
     uint32_t                   block_cache_blocks; /* total resident block-buffer cap (0 = default) */
     uint32_t                   inode_cache_inodes; /* total resident inode cap (0 = default) */
@@ -1048,6 +1064,16 @@ struct diskfs_thread {
      * b+tree in bounded batches across transactions). */
     struct diskfs_drain         *drain_head, *drain_tail;
     int                          draining;
+
+    /* Deferred-mtime flusher: this worker owns inode-cache shards where
+     * (shard % num_active_threads) == thread_id.  The periodic timer kicks the
+     * driver, which flushes eligible dirty inodes one txn at a time (drain
+     * style); a flush re-logs one inode's block, coalescing all the writes
+     * since it went dirty. */
+    struct evpl_timer            mtime_timer;
+    int                          mtime_flushing;     /* a flush txn is in flight */
+    int                          mtime_flush_all;    /* unmount: ignore the age gate, flush everything */
+    uint32_t                     mtime_scan_shard;   /* round-robin cursor over owned shards */
 
     /* Data-I/O admission control: the per-thread block queues have a bounded
      * submission ring, so a burst of concurrent (or heavily fragmented) reads
@@ -1788,6 +1814,66 @@ diskfs_inode_idle(const struct diskfs_inode *inode)
     return inode->refcnt == 1 && inode->readers == 0 &&
            inode->writer == 0 && inode->nlink > 0;
 } /* diskfs_inode_idle */
+
+/*
+ * Caller holds the inode's shard lock.  Queue a freshly-dirtied inode on the
+ * shard's deferred-mtime list, taking a refcnt pin so it stays resident until
+ * the flusher logs it.  Idempotent: a re-dirty of an already-queued inode is a
+ * no-op (the flusher serializes whatever in-memory mtime is current at flush
+ * time, coalescing every write since it went dirty).  now_ns is the realtime
+ * clock the write already read for mtime.
+ */
+static inline void
+diskfs_inode_mtime_dirty_locked(
+    struct diskfs_inode_shard *shard,
+    struct diskfs_inode       *inode,
+    uint64_t                   now_ns)
+{
+    if (inode->mtime_dirty) {
+        return;
+    }
+    inode->mtime_dirty       = 1;
+    inode->mtime_dirty_since = now_ns;
+    inode->refcnt++;                          /* keep resident until flushed */
+    diskfs_inode_lru_unlink(shard, inode);    /* refcnt > 1: no longer idle */
+
+    inode->mdirty_prev = shard->mdirty_tail;
+    inode->mdirty_next = NULL;
+    if (shard->mdirty_tail) {
+        shard->mdirty_tail->mdirty_next = inode;
+    } else {
+        shard->mdirty_head = inode;
+    }
+    shard->mdirty_tail = inode;
+} /* diskfs_inode_mtime_dirty_locked */
+
+/*
+ * Caller holds the shard lock.  Unlink from the deferred-mtime list and clear
+ * the flag.  Does NOT drop the refcnt pin -- the flusher does that after the
+ * flush commits (a concurrent write that re-dirties between this unlink and the
+ * flush commit simply re-queues with a fresh pin).
+ */
+static inline void
+diskfs_inode_mtime_unlink_locked(
+    struct diskfs_inode_shard *shard,
+    struct diskfs_inode       *inode)
+{
+    if (!inode->mtime_dirty) {
+        return;
+    }
+    inode->mtime_dirty = 0;
+    if (inode->mdirty_prev) {
+        inode->mdirty_prev->mdirty_next = inode->mdirty_next;
+    } else {
+        shard->mdirty_head = inode->mdirty_next;
+    }
+    if (inode->mdirty_next) {
+        inode->mdirty_next->mdirty_prev = inode->mdirty_prev;
+    } else {
+        shard->mdirty_tail = inode->mdirty_prev;
+    }
+    inode->mdirty_prev = inode->mdirty_next = NULL;
+} /* diskfs_inode_mtime_unlink_locked */
 
 /* Caller must hold the inode's shard lock. */
 static inline int
@@ -3332,6 +3418,38 @@ diskfs_txn_pin_inode_block(
                             DISKFS_BT_ROOT_CAP, 0);
     }
 } /* diskfs_txn_pin_inode_block */
+
+/*
+ * Inverse of the write-lock home-block pin, for the deferred-mtime path: detach
+ * the inode's home block from the txn and unpin it so the txn commits with no
+ * durable block (the mtime bump is held in memory and logged later by the
+ * coalescing flusher).  The block stays in the cache (CLEAN/evictable) and is
+ * re-claimed when something next needs it.  Only valid when the block is clean
+ * (the deferred path makes no on-block change), which an in-place overwrite of
+ * an already-written extent guarantees.
+ */
+static void
+diskfs_txn_drop_inode_block(
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *inode)
+{
+    struct diskfs_txn_block **pp, *tb;
+
+    if (!inode->block) {
+        return;
+    }
+    for (pp = &txn->blocks; *pp; pp = &(*pp)->next) {
+        if ((*pp)->block == inode->block) {
+            tb  = *pp;
+            *pp = tb->next;
+            free(tb);
+            break;
+        }
+    }
+    diskfs_block_release(thread, inode->block);
+    inode->block = NULL;
+} /* diskfs_txn_drop_inode_block */
 
 /* Serialize an inode's durable attributes into the front of its block. */
 static void
@@ -7812,6 +7930,19 @@ diskfs_txn_commit(
         return;
     }
 
+    /* A write txn with no dirty blocks and no deferred frees has nothing to
+     * make durable -- e.g. an in-place overwrite whose only inode change was a
+     * deferred mtime/ctime bump (logged later by the coalescing flusher), or
+     * whose data went straight to the device.  Unlock inline like a read txn;
+     * routing it through the intent log would write a header-only record per
+     * write and defeat the deferral. */
+    if (!txn->blocks && !txn->pending_frees) {
+        diskfs_txn_unlock_all(txn);
+        cb(txn, 0, private_data);
+        diskfs_txn_release(txn);
+        return;
+    }
+
     /* Journal the deferred FREE deltas before block serialization + snapshot,
      * so the FREE-delta log blocks ride this txn's redo.  The journal claim is
      * async: a cold log block parks the request and the flush returns SM_AGAIN,
@@ -8425,6 +8556,11 @@ diskfs_init(
     initialize           = json_object_get(cfg, "initialize") != NULL;
     shared->unsafe_async = json_is_true(json_object_get(cfg, "unsafe_async"));
     shared->noatime      = json_is_true(json_object_get(cfg, "noatime"));
+    {
+        /* Deferred-mtime coalescing window (ms in config); 0 disables it. */
+        json_t *mdv = json_object_get(cfg, "mtime_defer_ms");
+        shared->mtime_defer_us = mdv ? (uint64_t) json_integer_value(mdv) * 1000 : 1000000;
+    }
     /* Opt-in pNFS block / SCSI layout mode: diskfs sources RFC 5663 block or
      * RFC 8154 SCSI layouts and keeps file data on remote (data-only) devices.
      * Both share the same remote-device data path and allocator; they differ
@@ -8951,6 +9087,199 @@ diskfs_grant_doorbell_cb(
     }
 } /* diskfs_grant_doorbell_cb */
 
+/* ================================================================== */
+/* Deferred-mtime flusher: coalesce per-write inode timestamp updates  */
+/* ================================================================== */
+
+/* This worker owns inode-cache shards where (shard % num_active_threads) ==
+ * thread_id; flushing each shard on a single worker keeps two flushers off the
+ * same inode without a cross-thread lock. */
+static inline int
+diskfs_mtime_owns_shard(
+    const struct diskfs_thread *thread,
+    uint32_t                    shard)
+{
+    int n = thread->shared->num_active_threads;
+
+    return (int) (shard % (uint32_t) (n > 0 ? n : 1)) == thread->thread_id;
+} /* diskfs_mtime_owns_shard */
+
+/*
+ * Claim the oldest deferred-mtime inode from this worker's owned shards that
+ * has been dirty at least the coalescing window (or any, when flushing for
+ * unmount).  Claiming unlinks it and clears the flag but KEEPS the dirty-pin
+ * (now owned by the in-flight flush); a concurrent re-dirty re-queues with a
+ * fresh pin.  Round-robins the shard cursor so no shard starves.
+ */
+static struct diskfs_inode *
+diskfs_mtime_flush_pick(struct diskfs_thread *thread)
+{
+    struct diskfs_shared *shared    = thread->shared;
+    uint64_t              period_ns = shared->mtime_defer_us * 1000;
+    struct timespec       ts;
+    uint64_t              now_ns;
+    uint32_t              n;
+
+    if ((uint32_t) thread->thread_id >= DISKFS_INODE_CACHE_SHARDS) {
+        return NULL;     /* more workers than shards: this one owns none */
+    }
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    now_ns = (uint64_t) ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+
+    for (n = 0; n < DISKFS_INODE_CACHE_SHARDS; n++) {
+        uint32_t                   s = thread->mtime_scan_shard;
+        struct diskfs_inode_shard *shard;
+        struct diskfs_inode       *inode = NULL;
+
+        /* Advance the cursor to this worker's next owned shard. */
+        do {
+            thread->mtime_scan_shard = (thread->mtime_scan_shard + 1) &
+                DISKFS_INODE_CACHE_MASK;
+        } while (!diskfs_mtime_owns_shard(thread, thread->mtime_scan_shard));
+
+        if (!diskfs_mtime_owns_shard(thread, s)) {
+            continue;
+        }
+
+        shard = &shared->inode_cache->shards[s];
+        pthread_mutex_lock(&shard->lock);
+        if (shard->mdirty_head &&
+            (thread->mtime_flush_all ||
+             now_ns - shard->mdirty_head->mtime_dirty_since >= period_ns)) {
+            inode = shard->mdirty_head;
+            diskfs_inode_mtime_unlink_locked(shard, inode);   /* keeps the pin */
+        }
+        pthread_mutex_unlock(&shard->lock);
+
+        if (inode) {
+            return inode;
+        }
+    }
+    return NULL;
+} /* diskfs_mtime_flush_pick */
+
+/* Any deferred-mtime work left in this worker's owned shards? (unmount drain) */
+static int
+diskfs_mtime_any_dirty(struct diskfs_thread *thread)
+{
+    struct diskfs_shared *shared = thread->shared;
+    uint32_t              s;
+
+    for (s = 0; s < DISKFS_INODE_CACHE_SHARDS; s++) {
+        if (!diskfs_mtime_owns_shard(thread, s)) {
+            continue;
+        }
+        if (shared->inode_cache->shards[s].mdirty_head) {
+            return 1;
+        }
+    }
+    return 0;
+} /* diskfs_mtime_any_dirty */
+
+/* Drop the dirty-pin on a flushed inode, re-LRUing it if it became idle. */
+static void
+diskfs_mtime_flush_drop_pin(
+    struct diskfs_thread *thread,
+    struct diskfs_inode  *inode)
+{
+    struct diskfs_inode_shard *shard = diskfs_inode_shard(thread->shared, inode->inum);
+
+    pthread_mutex_lock(&shard->lock);
+    --inode->refcnt;
+    if (diskfs_inode_idle(inode) && !inode->on_lru) {
+        diskfs_inode_lru_push_tail(shard, inode);
+    }
+    pthread_mutex_unlock(&shard->lock);
+} /* diskfs_mtime_flush_drop_pin */
+
+struct diskfs_mtime_flush {
+    struct diskfs_thread *thread;
+    struct diskfs_inode  *inode;
+    struct diskfs_txn    *txn;
+};
+
+static void diskfs_mtime_flush_kick(
+    struct diskfs_thread *thread);
+
+static void
+diskfs_mtime_flush_committed_cb(
+    struct diskfs_txn *txn,
+    int                status,
+    void              *priv)
+{
+    struct diskfs_mtime_flush *f      = priv;
+    struct diskfs_thread      *thread = f->thread;
+
+    (void) txn;
+    (void) status;
+
+    diskfs_mtime_flush_drop_pin(thread, f->inode);
+    free(f);
+    thread->mtime_flushing = 0;
+    diskfs_mtime_flush_kick(thread);     /* next eligible inode, if any */
+} /* diskfs_mtime_flush_committed_cb */
+
+static void
+diskfs_mtime_flush_acquired_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *priv)
+{
+    struct diskfs_mtime_flush *f      = priv;
+    struct diskfs_thread      *thread = f->thread;
+
+    if (status != CHIMERA_VFS_OK) {
+        /* Should not happen for a pinned inode; release the pin and move on. */
+        diskfs_txn_abort(f->txn);
+        diskfs_mtime_flush_drop_pin(thread, inode);
+        free(f);
+        thread->mtime_flushing = 0;
+        diskfs_mtime_flush_kick(thread);
+        return;
+    }
+
+    /* Pin the home block; commit serializes the current in-memory mtime/ctime
+     * (coalescing every write since it went dirty) into it and logs it. */
+    diskfs_txn_pin_inode_block(thread, f->txn, inode, 0);
+    diskfs_txn_commit(f->txn, diskfs_mtime_flush_committed_cb, f);
+} /* diskfs_mtime_flush_acquired_cb */
+
+static void
+diskfs_mtime_flush_kick(struct diskfs_thread *thread)
+{
+    struct diskfs_mtime_flush *f;
+    struct diskfs_inode       *inode;
+
+    if (thread->mtime_flushing) {
+        return;     /* one flush txn at a time per worker */
+    }
+
+    inode = diskfs_mtime_flush_pick(thread);
+    if (!inode) {
+        return;     /* nothing ready; the timer re-kicks next tick */
+    }
+
+    thread->mtime_flushing = 1;
+    f                      = malloc(sizeof(*f));
+    f->thread              = thread;
+    f->inode               = inode;
+    f->txn                 = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    diskfs_inode_acquire_pinned(thread, f->txn, inode, DISKFS_INODE_LOCK_WRITE,
+                                diskfs_mtime_flush_acquired_cb, f);
+} /* diskfs_mtime_flush_kick */
+
+static void
+diskfs_mtime_flush_timer_cb(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct diskfs_thread *thread = container_of(timer, struct diskfs_thread, mtime_timer);
+
+    (void) evpl;
+    diskfs_mtime_flush_kick(thread);
+} /* diskfs_mtime_flush_timer_cb */
+
 static void *
 diskfs_thread_init(
     struct evpl *evpl,
@@ -9004,6 +9333,14 @@ diskfs_thread_init(
     pthread_mutex_unlock(&shared->lock);
     diskfs_thread_metrics_init(thread);
 
+    /* Deferred-mtime coalescing flusher: scan from this worker's first owned
+     * shard, and fire the flush driver every coalescing window. */
+    thread->mtime_scan_shard = (uint32_t) thread->thread_id & DISKFS_INODE_CACHE_MASK;
+    if (shared->mtime_defer_us > 0) {
+        evpl_add_timer(evpl, &thread->mtime_timer, diskfs_mtime_flush_timer_cb,
+                       shared->mtime_defer_us);
+    }
+
     /* Hand the channel to the intent log thread via the pending list. */
     pthread_mutex_lock(&shared->intent_log.registration_lock);
     thread->iq_channel->next_pending = shared->intent_log.pending_head;
@@ -9020,6 +9357,20 @@ diskfs_thread_destroy(void *private_data)
 {
     struct diskfs_thread *thread = private_data;
     struct diskfs_shared *shared = thread->shared;
+
+    /* Flush every deferred-mtime inode this worker owns so the latest timestamps
+     * are durable before teardown (clean unmount => no replay).  The intent-log
+     * thread is still alive to complete the flush txns.  Stop the periodic timer
+     * and drive the flusher directly, ignoring the age gate. */
+    if (shared->mtime_defer_us > 0) {
+        evpl_remove_timer(thread->evpl, &thread->mtime_timer);
+    }
+    thread->mtime_flush_all = 1;
+    diskfs_mtime_flush_kick(thread);
+    while (thread->mtime_flushing || diskfs_mtime_any_dirty(thread)) {
+        diskfs_mtime_flush_kick(thread);
+        evpl_continue(thread->evpl);
+    }
 
     /* Quiesce background inode drains first: their transactions reference this
      * thread (and, unlike VFS ops, nothing else waits for them), so they must
@@ -12163,8 +12514,10 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
     struct diskfs_inode           *inode          = diskfs_private->inode_stash[0];
     uint64_t                       write_end      = request->write.offset + request->write.length;
     struct timespec                now;
+    int                            size_grew = write_end > inode->size;
+    int                            deferrable;
 
-    if (inode->size < write_end) {
+    if (size_grew) {
         inode->size       = write_end;
         inode->space_used = (inode->size + 4095) & ~4095;
     }
@@ -12178,7 +12531,37 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
     diskfs_map_attrs(thread, &request->write.r_post_attr, inode);
 
     request->write.r_length = request->write.length;
-    request->write.r_sync   = 1;
+
+    /*
+     * Deferred metadata durability.  For an in-place overwrite of an
+     * already-written extent (extent map untouched), no size growth, and a
+     * non-FILE_SYNC write, the only inode change is the timestamp bump (already
+     * applied to the in-memory inode above, so WCC/GETATTR observe it).  Queue
+     * the inode on the coalescing flusher and drop its home block from the txn
+     * so this write logs nothing -- the data block is still written FUA below,
+     * so data is durable; only mtime/ctime durability is deferred.  Report
+     * DATA_SYNC (data durable, metadata deferred).  Everything else (size
+     * growth, extent/allocation changes, FILE_SYNC) logs the inode block
+     * synchronously as before and reports FILE_SYNC.
+     */
+    deferrable = diskfs_private->inplace_written &&
+        !size_grew &&
+        request->write.sync != CHIMERA_VFS_WRITE_FILESYNC &&
+        shared->mtime_defer_us > 0;
+
+    if (deferrable) {
+        struct diskfs_inode_shard *shard  = diskfs_inode_shard(shared, inode->inum);
+        uint64_t                   now_ns = (uint64_t) now.tv_sec * 1000000000ULL + now.tv_nsec;
+
+        pthread_mutex_lock(&shard->lock);
+        diskfs_inode_mtime_dirty_locked(shard, inode, now_ns);
+        pthread_mutex_unlock(&shard->lock);
+
+        diskfs_txn_drop_inode_block(thread, diskfs_private->txn, inode);
+        request->write.r_sync = CHIMERA_VFS_WRITE_DATASYNC;
+    } else {
+        request->write.r_sync = CHIMERA_VFS_WRITE_FILESYNC;
+    }
 
     /* Do NOT release the inode lock here.  The dirty b+tree/inode blocks are
      * not yet protected by the intent log, so exposing them to another thread
@@ -12767,7 +13150,9 @@ diskfs_write_classify_cb(
             diskfs_write_split_start(request);
         } else {
             /* RMW the partial first/last blocks from these same in-place
-             * blocks; the extent map is left untouched. */
+             * blocks; the extent map is left untouched -- the only inode change
+             * is the timestamp bump, which a non-FILE_SYNC write may defer. */
+            p->inplace_written = 1;
             if (p->rmw_prefix_len) {
                 p->need_prefix_read     = 1;
                 p->prefix_device_id     = e.device_id;
@@ -12996,6 +13381,9 @@ diskfs_write(
     p->rmw_prefix_valid    = 0;
     p->rmw_suffix_adjust   = 0;
     p->rmw_suffix_valid    = 0;
+    p->need_prefix_read    = 0;
+    p->need_suffix_read    = 0;
+    p->inplace_written     = 0;
     p->txn                 = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
     /* Warm-handle fast path (see diskfs_read): reuse the inode pinned at open
@@ -15511,6 +15899,74 @@ diskfs_get_layout(
                               diskfs_get_layout_inode_cb, request);
 } /* diskfs_get_layout */
 
+/*
+ * COMMIT.  Data is already durable (written FUA), so COMMIT's only remaining
+ * job is to make any deferred mtime/ctime durable for a committing client.  If
+ * the file has a pending deferred timestamp, fold its inode block into a write
+ * txn so the commit logs it; otherwise (or with the flusher disabled) it is the
+ * old inline no-op.  The write lock serializes against the background flusher,
+ * so a concurrent flush either completes first (COMMIT then sees it clean) or
+ * waits behind COMMIT.
+ */
+static void
+diskfs_commit_acquired_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *priv)
+{
+    struct chimera_vfs_request    *request = priv;
+    struct diskfs_request_private *cp      = request->plugin_data;
+    struct diskfs_thread          *thread  = cp->thread;
+    struct diskfs_inode_shard     *shard;
+
+    if (status != CHIMERA_VFS_OK) {
+        diskfs_txn_abort(cp->txn);
+        request->status = status;
+        request->complete(request);
+        return;
+    }
+
+    shard = diskfs_inode_shard(thread->shared, inode->inum);
+    pthread_mutex_lock(&shard->lock);
+    if (inode->mtime_dirty) {
+        diskfs_inode_mtime_unlink_locked(shard, inode);
+        --inode->refcnt;     /* drop the dirty-pin; the txn write lock holds it */
+        pthread_mutex_unlock(&shard->lock);
+        diskfs_txn_pin_inode_block(thread, cp->txn, inode, 0);
+    } else {
+        pthread_mutex_unlock(&shard->lock);
+    }
+
+    diskfs_op_ok(request, cp->txn);     /* logs the inode if pinned, else inline */
+} /* diskfs_commit_acquired_cb */
+
+static void
+diskfs_commit(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_request_private *cp = request->plugin_data;
+    struct diskfs_inode           *warm;
+
+    (void) private_data;
+    cp->thread = thread;
+
+    warm = (request->commit.handle && request->commit.handle->vfs_private) ?
+        (struct diskfs_inode *) request->commit.handle->vfs_private : NULL;
+
+    if (!warm || shared->mtime_defer_us == 0) {
+        cp->txn = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+        diskfs_op_ok(request, cp->txn);
+        return;
+    }
+
+    cp->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    diskfs_inode_acquire_pinned(thread, cp->txn, warm, DISKFS_INODE_LOCK_WRITE,
+                                diskfs_commit_acquired_cb, request);
+} /* diskfs_commit */
+
 static void
 diskfs_dispatch(
     struct chimera_vfs_request *request,
@@ -15570,16 +16026,8 @@ diskfs_dispatch(
             diskfs_write(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_COMMIT:
-        {
-            /* No-op today: writes already wait for durability before
-             * acking.  Once a real intent log lands, COMMIT will fence
-             * on outstanding intent log records. */
-            struct diskfs_request_private *cp = request->plugin_data;
-            cp->thread = thread;
-            cp->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
-            diskfs_op_ok(request, cp->txn);
-        }
-        break;
+            diskfs_commit(thread, shared, request, private_data);
+            break;
         case CHIMERA_VFS_OP_ALLOCATE:
             diskfs_allocate(thread, shared, request, private_data);
             break;

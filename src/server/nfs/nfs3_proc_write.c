@@ -39,11 +39,10 @@ chimera_nfs3_write_complete(
     if (res.status == NFS3_OK) {
         res.resok.count = length;
 
-        if (sync) {
-            res.resok.committed = FILE_SYNC;
-        } else {
-            res.resok.committed = UNSTABLE;
-        }
+        /* Report the durability actually achieved (the backend may make data
+         * durable but defer metadata): sync is one of UNSTABLE/DATA_SYNC/
+         * FILE_SYNC (0/1/2), which match the stable_how enum directly. */
+        res.resok.committed = sync;
 
         memcpy(res.resok.verf,
                &shared->nfs_verifier,
@@ -84,7 +83,7 @@ chimera_nfs3_write_open_callback(
                           handle,
                           args->offset,
                           args->count,
-                          (args->stable != UNSTABLE),
+                          args->stable,           /* 3-level requested stability */
                           CHIMERA_NFS3_ATTR_WCC_MASK,
                           CHIMERA_NFS3_ATTR_MASK,
                           args->data.iov,
