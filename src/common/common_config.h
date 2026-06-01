@@ -112,7 +112,9 @@ chimera_parse_size(
 /*
  * Apply the shared "common" config section -- parsed identically by the server
  * and the client -- onto an evpl global config, before evpl_init().  Recognised
- * keys: huge_pages (bool), huge_page_size (size), slab_size (size).  A missing
+ * keys: huge_pages (bool), huge_page_size (size), slab_size (size),
+ * preallocate_slabs/threads (int), rdmacm_tos (int, RoCEv2 ToS byte =
+ * DSCP << 2; e.g. 104 for DSCP 26).  A missing
  * "common" section, missing keys, or malformed values leave the corresponding
  * evpl defaults untouched.  `root` is the parsed top-level config object (may be
  * NULL).
@@ -165,6 +167,15 @@ chimera_apply_common_config(
     val = json_object_get(common, "preallocate_threads");
     if (json_is_integer(val)) {
         evpl_global_config_set_preallocate_threads(cfg, json_integer_value(val));
+    }
+
+    /* RoCEv2 traffic class: stamp this ToS byte on every RDMA QP so the fabric's
+     * lossless priority (PFC) actually carries chimera traffic.  ToS = DSCP << 2,
+     * so DSCP 26 -> 104.  Without it QPs default to ToS 0 (DSCP 0) and land in
+     * the switch's default, lossy class regardless of PFC config. */
+    val = json_object_get(common, "rdmacm_tos");
+    if (json_is_integer(val)) {
+        evpl_global_config_set_rdmacm_tos(cfg, (uint8_t) json_integer_value(val));
     }
 } /* chimera_apply_common_config */
 
