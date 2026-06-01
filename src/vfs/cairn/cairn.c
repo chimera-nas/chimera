@@ -3282,7 +3282,7 @@ cairn_write(
 
         request->status         = CHIMERA_VFS_OK;
         request->write.r_length = 0;
-        request->write.r_sync   = 1;
+        request->write.r_sync   = CHIMERA_VFS_WRITE_FILESYNC;
         request->complete(request);
         return;
     }
@@ -3332,7 +3332,7 @@ cairn_write(
 
     request->status         = CHIMERA_VFS_OK;
     request->write.r_length = request->write.length;
-    request->write.r_sync   = 1;
+    request->write.r_sync   = CHIMERA_VFS_WRITE_FILESYNC;
 
     /* Note: Write iovecs are NOT released here. They were allocated on the
      * server thread and must be released there. The server's write completion
