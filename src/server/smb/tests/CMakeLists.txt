@@ -395,8 +395,14 @@ set(SMBTORTURE_ENABLED_memfs
     # tree, rec) need deeper features (recursive-buffer accuracy, per-session
     # preauth for PreviousSessionId) and are left disabled.
     ${SMBTORTURE_NOTIFY_SUBTESTS}
-    # smb2.acls_non_canonical and smb2.async_dosmode pass on x86_64 but fail on
-    # arm64 CI; left disabled until the arch difference is understood.
+    # Non-canonical AUTO_INHERITED semantics: with the
+    # smb_acl_inherited_canonicalize knob set to 0 (the harness flips it for
+    # this suite only), SECINFO_DACL set+get round-trips the AUTO_INHERITED
+    # bit verbatim instead of stripping it when AUTO_INHERIT_REQ is absent
+    # (Samba's "acl flag inherited canonicalization = no" mode).
+    smb2.acls_non_canonical
+    # smb2.async_dosmode passes on x86_64 but fails on arm64 CI; left
+    # disabled until the arch difference is understood.
 )
 # The linux and io_uring passthrough backends share an implementation and pass
 # the same set.  They expose the share root as a real local directory whose
@@ -445,8 +451,9 @@ set(SMBTORTURE_ENABLED_linux
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
-    # smb2.acls_non_canonical passes on x86_64 but, like memfs, is left disabled
-    # pending the arm64 difference.
+    # smb2.acls_non_canonical stays disabled here: the passthrough backends
+    # don't persist ACLs (set is projected to POSIX mode, get is synthesised
+    # from mode bits), so the AUTO_INHERITED control bit can't round-trip.
 )
 set(SMBTORTURE_ENABLED_io_uring
     smb2.change_notify_disabled
@@ -531,6 +538,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.notify.tdis
     smb2.notify.tdis1
     ${SMBTORTURE_ACLS_SUBTESTS}
+    smb2.acls_non_canonical
 )
 # diskfs is a native-ACL backend: it stores each inode's ACL as a
 # DISKFS_REC_ACL b+tree record and seeds/inherits it on create, so it adds the
@@ -580,6 +588,7 @@ set(SMBTORTURE_ENABLED_diskfs_common
     smb2.notify.tdis
     smb2.notify.tdis1
     ${SMBTORTURE_ACLS_SUBTESTS}
+    smb2.acls_non_canonical
 )
 set(SMBTORTURE_ENABLED_diskfs_io_uring ${SMBTORTURE_ENABLED_diskfs_common})
 set(SMBTORTURE_ENABLED_diskfs_aio ${SMBTORTURE_ENABLED_diskfs_common})

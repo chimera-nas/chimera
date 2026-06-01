@@ -284,6 +284,19 @@ main(
         }
     }
 
+    /* The smb2.acls_non_canonical suite asserts Samba's
+     * "acl flag inherited canonicalization = no" behaviour: the
+     * DACL_AUTO_INHERITED bit round-trips verbatim even when the client
+     * sets it without AUTO_INHERIT_REQ.  The smb2.acls.INHERITFLAGS suite
+     * asserts the opposite (Windows-canonical) behaviour, so the knob is
+     * flipped only for the non-canonical suite. */
+    for (i = 0; i < num_tests; i++) {
+        if (strcmp(tests[i], "smb2.acls_non_canonical") == 0) {
+            chimera_server_config_set_smb_acl_inherited_canonicalize(config, 0);
+            break;
+        }
+    }
+
     /* Configure backend-specific modules */
     if (strcmp(backend, "diskfs_io_uring") == 0 ||
         strcmp(backend, "diskfs_aio") == 0) {
