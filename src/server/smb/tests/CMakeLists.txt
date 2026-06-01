@@ -406,6 +406,11 @@ set(SMBTORTURE_ENABLED_memfs
 # filesystem has no API to set a file's birth time, so the create-time
 # round-trip is unsupportable on the passthrough backends (it works on the
 # native backends, which persist btime in their own inode metadata).
+# smb2.openattr stays disabled for the same reason: it round-trips DOS
+# attributes (READONLY/HIDDEN/SYSTEM/ARCHIVE) that a real Linux filesystem has
+# no native API to store, so they cannot be persisted on a passthrough mount
+# (it works on the native backends, which persist dos_attributes in their inode
+# metadata).
 set(SMBTORTURE_ENABLED_linux
     smb2.change_notify_disabled
     smb2.mkdir
@@ -452,6 +457,9 @@ set(SMBTORTURE_ENABLED_io_uring
 set(SMBTORTURE_ENABLED_cairn
     smb2.change_notify_disabled
     smb2.mkdir
+    # Native DOS-attribute storage in the cairn inode lets the SMB
+    # create/overwrite-truncate attribute round-trip pass end-to-end.
+    smb2.openattr
     smb2.read
     smb2.rw
     smb2.check-sharemode
@@ -477,6 +485,9 @@ set(SMBTORTURE_ENABLED_cairn
 set(SMBTORTURE_ENABLED_diskfs_common
     smb2.change_notify_disabled
     smb2.mkdir
+    # Native DOS-attribute storage in the diskfs inode (in-memory + on-disk
+    # dinode) lets the SMB create/overwrite-truncate attribute round-trip pass.
+    smb2.openattr
     smb2.read
     smb2.rw
     smb2.check-sharemode

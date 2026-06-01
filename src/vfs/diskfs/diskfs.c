@@ -467,6 +467,7 @@ struct diskfs_inode {
     uint32_t                    ctime_nsec;
     uint32_t                    mtime_nsec;
     uint32_t                    btime_nsec;
+    uint32_t                    dos_attributes;
 
     /* Inode-cache linkage, keyed by inum.  Lock state and the wait list
      * below are protected by the owning shard's mutex, never held across
@@ -626,6 +627,7 @@ struct diskfs_dinode {
     uint32_t mtime_nsec;
     uint32_t ctime_nsec;
     uint32_t btime_nsec;
+    uint32_t dos_attributes;
     uint64_t parent_inum;     /* directories only */
     uint32_t parent_gen;
 };
@@ -2254,27 +2256,28 @@ diskfs_inode_load_sync(
     rb_tree_query_exact(&shard->inodes, inum, inum, inode);
     if (!inode) {
         diskfs_inode_cache_recycle_locked(shared, shard);
-        inode              = calloc(1, sizeof(*inode));
-        inode->inum        = inum;
-        inode->refcnt      = 1;
-        inode->gen         = di->gen;
-        inode->mode        = di->mode;
-        inode->nlink       = di->nlink;
-        inode->uid         = di->uid;
-        inode->gid         = di->gid;
-        inode->rdev        = di->rdev;
-        inode->size        = di->size;
-        inode->space_used  = di->space_used;
-        inode->atime_sec   = di->atime_sec;
-        inode->atime_nsec  = di->atime_nsec;
-        inode->mtime_sec   = di->mtime_sec;
-        inode->mtime_nsec  = di->mtime_nsec;
-        inode->ctime_sec   = di->ctime_sec;
-        inode->ctime_nsec  = di->ctime_nsec;
-        inode->btime_sec   = di->btime_sec;
-        inode->btime_nsec  = di->btime_nsec;
-        inode->parent_inum = di->parent_inum;
-        inode->parent_gen  = di->parent_gen;
+        inode                 = calloc(1, sizeof(*inode));
+        inode->inum           = inum;
+        inode->refcnt         = 1;
+        inode->gen            = di->gen;
+        inode->mode           = di->mode;
+        inode->nlink          = di->nlink;
+        inode->uid            = di->uid;
+        inode->gid            = di->gid;
+        inode->rdev           = di->rdev;
+        inode->size           = di->size;
+        inode->space_used     = di->space_used;
+        inode->atime_sec      = di->atime_sec;
+        inode->atime_nsec     = di->atime_nsec;
+        inode->mtime_sec      = di->mtime_sec;
+        inode->mtime_nsec     = di->mtime_nsec;
+        inode->ctime_sec      = di->ctime_sec;
+        inode->ctime_nsec     = di->ctime_nsec;
+        inode->btime_sec      = di->btime_sec;
+        inode->btime_nsec     = di->btime_nsec;
+        inode->dos_attributes = di->dos_attributes;
+        inode->parent_inum    = di->parent_inum;
+        inode->parent_gen     = di->parent_gen;
         rb_tree_insert(&shard->inodes, inum, inode);
         shard->ninodes++;
         diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_LOAD);
@@ -3345,23 +3348,24 @@ diskfs_inode_flush(struct diskfs_inode *inode)
 
     di = inode->block->iov.data;
 
-    di->inum       = inode->inum;
-    di->gen        = inode->gen;
-    di->mode       = inode->mode;
-    di->nlink      = inode->nlink;
-    di->uid        = inode->uid;
-    di->gid        = inode->gid;
-    di->rdev       = inode->rdev;
-    di->size       = inode->size;
-    di->space_used = inode->space_used;
-    di->atime_sec  = inode->atime_sec;
-    di->mtime_sec  = inode->mtime_sec;
-    di->ctime_sec  = inode->ctime_sec;
-    di->btime_sec  = inode->btime_sec;
-    di->atime_nsec = inode->atime_nsec;
-    di->mtime_nsec = inode->mtime_nsec;
-    di->ctime_nsec = inode->ctime_nsec;
-    di->btime_nsec = inode->btime_nsec;
+    di->inum           = inode->inum;
+    di->gen            = inode->gen;
+    di->mode           = inode->mode;
+    di->nlink          = inode->nlink;
+    di->uid            = inode->uid;
+    di->gid            = inode->gid;
+    di->rdev           = inode->rdev;
+    di->size           = inode->size;
+    di->space_used     = inode->space_used;
+    di->atime_sec      = inode->atime_sec;
+    di->mtime_sec      = inode->mtime_sec;
+    di->ctime_sec      = inode->ctime_sec;
+    di->btime_sec      = inode->btime_sec;
+    di->atime_nsec     = inode->atime_nsec;
+    di->mtime_nsec     = inode->mtime_nsec;
+    di->ctime_nsec     = inode->ctime_nsec;
+    di->btime_nsec     = inode->btime_nsec;
+    di->dos_attributes = inode->dos_attributes;
     if (S_ISDIR(inode->mode)) {
         di->parent_inum = inode->parent_inum;
         di->parent_gen  = inode->parent_gen;
@@ -6211,25 +6215,26 @@ diskfs_inode_load_complete(
     rb_tree_query_exact(&shard->inodes, lc->inum, inum, inode);
     if (!inode) {
         diskfs_inode_cache_recycle_locked(shared, shard);
-        inode              = diskfs_inode_struct_new(lc->inum);
-        inode->gen         = di->gen;
-        inode->mode        = di->mode;
-        inode->nlink       = di->nlink;
-        inode->uid         = di->uid;
-        inode->gid         = di->gid;
-        inode->rdev        = di->rdev;
-        inode->size        = di->size;
-        inode->space_used  = di->space_used;
-        inode->atime_sec   = di->atime_sec;
-        inode->atime_nsec  = di->atime_nsec;
-        inode->mtime_sec   = di->mtime_sec;
-        inode->mtime_nsec  = di->mtime_nsec;
-        inode->ctime_sec   = di->ctime_sec;
-        inode->ctime_nsec  = di->ctime_nsec;
-        inode->btime_sec   = di->btime_sec;
-        inode->btime_nsec  = di->btime_nsec;
-        inode->parent_inum = di->parent_inum;
-        inode->parent_gen  = di->parent_gen;
+        inode                 = diskfs_inode_struct_new(lc->inum);
+        inode->gen            = di->gen;
+        inode->mode           = di->mode;
+        inode->nlink          = di->nlink;
+        inode->uid            = di->uid;
+        inode->gid            = di->gid;
+        inode->rdev           = di->rdev;
+        inode->size           = di->size;
+        inode->space_used     = di->space_used;
+        inode->atime_sec      = di->atime_sec;
+        inode->atime_nsec     = di->atime_nsec;
+        inode->mtime_sec      = di->mtime_sec;
+        inode->mtime_nsec     = di->mtime_nsec;
+        inode->ctime_sec      = di->ctime_sec;
+        inode->ctime_nsec     = di->ctime_nsec;
+        inode->btime_sec      = di->btime_sec;
+        inode->btime_nsec     = di->btime_nsec;
+        inode->dos_attributes = di->dos_attributes;
+        inode->parent_inum    = di->parent_inum;
+        inode->parent_gen     = di->parent_gen;
         rb_tree_insert(&shard->inodes, inum, inode);
         shard->ninodes++;
         diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_LOAD);
@@ -8699,15 +8704,16 @@ diskfs_bootstrap(struct diskfs_thread *thread)
      * enforcement a root-owned 0755 root would refuse all creation by non-root
      * clients on this engine-authoritative backend (matches memfs/cairn).
      * Subdirs are still created owned by their creator with 0755. */
-    inode->mode       = S_IFDIR | 0777;
-    inode->atime_sec  = now.tv_sec;
-    inode->atime_nsec = now.tv_nsec;
-    inode->mtime_sec  = now.tv_sec;
-    inode->mtime_nsec = now.tv_nsec;
-    inode->ctime_sec  = now.tv_sec;
-    inode->ctime_nsec = now.tv_nsec;
-    inode->btime_sec  = now.tv_sec;
-    inode->btime_nsec = now.tv_nsec;
+    inode->mode           = S_IFDIR | 0777;
+    inode->atime_sec      = now.tv_sec;
+    inode->atime_nsec     = now.tv_nsec;
+    inode->mtime_sec      = now.tv_sec;
+    inode->mtime_nsec     = now.tv_nsec;
+    inode->ctime_sec      = now.tv_sec;
+    inode->ctime_nsec     = now.tv_nsec;
+    inode->btime_sec      = now.tv_sec;
+    inode->btime_nsec     = now.tv_nsec;
+    inode->dos_attributes = 0;
 
     /* Root directory's parent is itself for ".." lookup */
     inode->parent_inum = inode->inum;
@@ -8742,20 +8748,21 @@ diskfs_bootstrap(struct diskfs_thread *thread)
                                                              DISKFS_ORPHAN_INUM, &odev);
         struct diskfs_inode *oin = diskfs_inode_struct_new(DISKFS_ORPHAN_INUM);
 
-        oin->size        = 4096;
-        oin->space_used  = 4096;
-        oin->nlink       = 1;
-        oin->mode        = S_IFDIR | 0700;
-        oin->atime_sec   = now.tv_sec;
-        oin->atime_nsec  = now.tv_nsec;
-        oin->mtime_sec   = now.tv_sec;
-        oin->mtime_nsec  = now.tv_nsec;
-        oin->ctime_sec   = now.tv_sec;
-        oin->ctime_nsec  = now.tv_nsec;
-        oin->btime_sec   = now.tv_sec;
-        oin->btime_nsec  = now.tv_nsec;
-        oin->parent_inum = DISKFS_ORPHAN_INUM;
-        oin->parent_gen  = oin->gen;
+        oin->size           = 4096;
+        oin->space_used     = 4096;
+        oin->nlink          = 1;
+        oin->mode           = S_IFDIR | 0700;
+        oin->atime_sec      = now.tv_sec;
+        oin->atime_nsec     = now.tv_nsec;
+        oin->mtime_sec      = now.tv_sec;
+        oin->mtime_nsec     = now.tv_nsec;
+        oin->ctime_sec      = now.tv_sec;
+        oin->ctime_nsec     = now.tv_nsec;
+        oin->btime_sec      = now.tv_sec;
+        oin->btime_nsec     = now.tv_nsec;
+        oin->dos_attributes = 0;
+        oin->parent_inum    = DISKFS_ORPHAN_INUM;
+        oin->parent_gen     = oin->gen;
 
         diskfs_inode_cache_insert(shared, oin);
 
@@ -9295,6 +9302,11 @@ diskfs_map_attrs(
         attr->va_ino           = inode->inum;
         attr->va_dev           = (42UL << 32) | 42;
         attr->va_rdev          = inode->rdev;
+
+        /* diskfs persists DOS attributes natively (in-memory + on-disk
+         * dinode), so report them alongside stat (matching memfs/cairn). */
+        attr->va_set_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        attr->va_dos_attributes = inode->dos_attributes;
     }
 
     /* Birth time (SMB create time) is tracked natively but lives outside
@@ -9423,6 +9435,11 @@ diskfs_apply_attrs(
             inode->btime_sec  = attr->va_btime.tv_sec;
             inode->btime_nsec = attr->va_btime.tv_nsec;
         }
+    }
+
+    if (set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) {
+        attr->va_set_mask    |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        inode->dos_attributes = attr->va_dos_attributes;
     }
 
     inode->ctime_sec  = now.tv_sec;
@@ -10118,20 +10135,21 @@ diskfs_mkdir_at_alloc_cb(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    inode->size       = 4096;
-    inode->space_used = 4096;
-    inode->uid        = request->cred->uid;
-    inode->gid        = request->cred->gid;
-    inode->nlink      = 2;
-    inode->mode       = S_IFDIR | 0755;
-    inode->atime_sec  = now.tv_sec;
-    inode->atime_nsec = now.tv_nsec;
-    inode->mtime_sec  = now.tv_sec;
-    inode->mtime_nsec = now.tv_nsec;
-    inode->ctime_sec  = now.tv_sec;
-    inode->ctime_nsec = now.tv_nsec;
-    inode->btime_sec  = now.tv_sec;
-    inode->btime_nsec = now.tv_nsec;
+    inode->size           = 4096;
+    inode->space_used     = 4096;
+    inode->uid            = request->cred->uid;
+    inode->gid            = request->cred->gid;
+    inode->nlink          = 2;
+    inode->mode           = S_IFDIR | 0755;
+    inode->atime_sec      = now.tv_sec;
+    inode->atime_nsec     = now.tv_nsec;
+    inode->mtime_sec      = now.tv_sec;
+    inode->mtime_nsec     = now.tv_nsec;
+    inode->ctime_sec      = now.tv_sec;
+    inode->ctime_nsec     = now.tv_nsec;
+    inode->btime_sec      = now.tv_sec;
+    inode->btime_nsec     = now.tv_nsec;
+    inode->dos_attributes = 0;
 
     inode->parent_inum = parent->inum;
     inode->parent_gen  = parent->gen;
@@ -10294,20 +10312,21 @@ diskfs_mknod_at_alloc_cb(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    inode->size       = 0;
-    inode->space_used = 0;
-    inode->uid        = request->cred->uid;
-    inode->gid        = request->cred->gid;
-    inode->nlink      = 1;
-    inode->rdev       = 0;
-    inode->atime_sec  = now.tv_sec;
-    inode->atime_nsec = now.tv_nsec;
-    inode->mtime_sec  = now.tv_sec;
-    inode->mtime_nsec = now.tv_nsec;
-    inode->ctime_sec  = now.tv_sec;
-    inode->ctime_nsec = now.tv_nsec;
-    inode->btime_sec  = now.tv_sec;
-    inode->btime_nsec = now.tv_nsec;
+    inode->size           = 0;
+    inode->space_used     = 0;
+    inode->uid            = request->cred->uid;
+    inode->gid            = request->cred->gid;
+    inode->nlink          = 1;
+    inode->rdev           = 0;
+    inode->atime_sec      = now.tv_sec;
+    inode->atime_nsec     = now.tv_nsec;
+    inode->mtime_sec      = now.tv_sec;
+    inode->mtime_nsec     = now.tv_nsec;
+    inode->ctime_sec      = now.tv_sec;
+    inode->ctime_nsec     = now.tv_nsec;
+    inode->btime_sec      = now.tv_sec;
+    inode->btime_nsec     = now.tv_nsec;
+    inode->dos_attributes = 0;
 
     if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         inode->mode = request->mknod_at.set_attr->va_mode;
@@ -11046,11 +11065,20 @@ diskfs_open_at_existing_cb(
      * and would ignore a stored ACL that grants more (or less) than the mode.
      * (Mirrors the memfs and cairn backends.) */
 
-    if ((request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
-        request->open_at.set_attr->va_size == 0 &&
-        S_ISREG(inode->mode)) {
-        diskfs_apply_attrs(inode, request->open_at.set_attr);
+    /* Overwrite/supersede disposition: replace the existing file's contents
+     * (truncate to zero) and apply the new attributes (including DOS
+     * attributes), mirroring memfs/cairn.  The SMB layer conveys the truncate
+     * via the OPEN_TRUNCATE flag rather than a SIZE=0 set_attr, so honor both.
+     * As with the pre-existing SIZE=0 path, this resets EOF without reclaiming
+     * the data extents here (the open flow finishes synchronously); a non-empty
+     * file's extents are reclaimed lazily / on the async setattr-truncate path. */
+    if (S_ISREG(inode->mode) &&
+        ((request->open_at.flags & CHIMERA_VFS_OPEN_TRUNCATE) ||
+         ((request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+          request->open_at.set_attr->va_size == 0))) {
+        inode->size       = 0;
         inode->space_used = 0;
+        diskfs_apply_attrs(inode, request->open_at.set_attr);
     }
 
     diskfs_open_at_finish(request, parent, inode);
@@ -11090,20 +11118,21 @@ diskfs_open_at_alloc_cb(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    inode->size       = 0;
-    inode->space_used = 0;
-    inode->uid        = request->cred->uid;
-    inode->gid        = request->cred->gid;
-    inode->nlink      = 1;
-    inode->mode       = S_IFREG | 0644;
-    inode->atime_sec  = now.tv_sec;
-    inode->atime_nsec = now.tv_nsec;
-    inode->mtime_sec  = now.tv_sec;
-    inode->mtime_nsec = now.tv_nsec;
-    inode->ctime_sec  = now.tv_sec;
-    inode->ctime_nsec = now.tv_nsec;
-    inode->btime_sec  = now.tv_sec;
-    inode->btime_nsec = now.tv_nsec;
+    inode->size           = 0;
+    inode->space_used     = 0;
+    inode->uid            = request->cred->uid;
+    inode->gid            = request->cred->gid;
+    inode->nlink          = 1;
+    inode->mode           = S_IFREG | 0644;
+    inode->atime_sec      = now.tv_sec;
+    inode->atime_nsec     = now.tv_nsec;
+    inode->mtime_sec      = now.tv_sec;
+    inode->mtime_nsec     = now.tv_nsec;
+    inode->ctime_sec      = now.tv_sec;
+    inode->ctime_nsec     = now.tv_nsec;
+    inode->btime_sec      = now.tv_sec;
+    inode->btime_nsec     = now.tv_nsec;
+    inode->dos_attributes = 0;
 
     diskfs_apply_attrs(inode, request->open_at.set_attr);
 
@@ -11236,20 +11265,21 @@ diskfs_create_unlinked_alloc_cb(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    inode->size       = 0;
-    inode->space_used = 0;
-    inode->uid        = request->cred->uid;
-    inode->gid        = request->cred->gid;
-    inode->nlink      = 0;
-    inode->mode       = S_IFREG | 0644;
-    inode->atime_sec  = now.tv_sec;
-    inode->atime_nsec = now.tv_nsec;
-    inode->mtime_sec  = now.tv_sec;
-    inode->mtime_nsec = now.tv_nsec;
-    inode->ctime_sec  = now.tv_sec;
-    inode->ctime_nsec = now.tv_nsec;
-    inode->btime_sec  = now.tv_sec;
-    inode->btime_nsec = now.tv_nsec;
+    inode->size           = 0;
+    inode->space_used     = 0;
+    inode->uid            = request->cred->uid;
+    inode->gid            = request->cred->gid;
+    inode->nlink          = 0;
+    inode->mode           = S_IFREG | 0644;
+    inode->atime_sec      = now.tv_sec;
+    inode->atime_nsec     = now.tv_nsec;
+    inode->mtime_sec      = now.tv_sec;
+    inode->mtime_nsec     = now.tv_nsec;
+    inode->ctime_sec      = now.tv_sec;
+    inode->ctime_nsec     = now.tv_nsec;
+    inode->btime_sec      = now.tv_sec;
+    inode->btime_nsec     = now.tv_nsec;
+    inode->dos_attributes = 0;
 
     diskfs_apply_attrs(inode, request->create_unlinked.set_attr);
 
@@ -13787,20 +13817,21 @@ diskfs_symlink_at_alloc_cb(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    inode->size       = request->symlink_at.targetlen;
-    inode->space_used = request->symlink_at.targetlen;
-    inode->uid        = request->cred->uid;
-    inode->gid        = request->cred->gid;
-    inode->nlink      = 1;
-    inode->mode       = S_IFLNK | 0755;
-    inode->atime_sec  = now.tv_sec;
-    inode->atime_nsec = now.tv_nsec;
-    inode->mtime_sec  = now.tv_sec;
-    inode->mtime_nsec = now.tv_nsec;
-    inode->ctime_sec  = now.tv_sec;
-    inode->ctime_nsec = now.tv_nsec;
-    inode->btime_sec  = now.tv_sec;
-    inode->btime_nsec = now.tv_nsec;
+    inode->size           = request->symlink_at.targetlen;
+    inode->space_used     = request->symlink_at.targetlen;
+    inode->uid            = request->cred->uid;
+    inode->gid            = request->cred->gid;
+    inode->nlink          = 1;
+    inode->mode           = S_IFLNK | 0755;
+    inode->atime_sec      = now.tv_sec;
+    inode->atime_nsec     = now.tv_nsec;
+    inode->mtime_sec      = now.tv_sec;
+    inode->mtime_nsec     = now.tv_nsec;
+    inode->ctime_sec      = now.tv_sec;
+    inode->ctime_nsec     = now.tv_nsec;
+    inode->btime_sec      = now.tv_sec;
+    inode->btime_nsec     = now.tv_nsec;
+    inode->dos_attributes = 0;
 
     diskfs_map_attrs(thread, &request->symlink_at.r_attr, inode);
 
