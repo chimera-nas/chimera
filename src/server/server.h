@@ -120,6 +120,15 @@ chimera_server_config_get_smb_notify_disabled(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_smb_acl_inherited_canonicalize(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_smb_acl_inherited_canonicalize(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_cache_ttl(
     struct chimera_server_config *config,
     int                           ttl);

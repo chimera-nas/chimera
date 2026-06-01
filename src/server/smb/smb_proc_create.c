@@ -2455,9 +2455,21 @@ parse_ctx_secd(
     uint32_t                    data_len,
     struct chimera_smb_request *request)
 {
+    /* The create-context parser is also exercised standalone by
+     * phase0_contexts_test with a zeroed request (no compound/thread/shared),
+     * so fall back to canonical behaviour when the server context is not
+     * reachable. */
+    int canonicalize = 1;
+
+    if (request->compound) {
+        canonicalize = request->compound->thread->shared->config.
+            acl_inherited_canonicalize;
+    }
+
     chimera_smb_parse_sd_to_acl(data, data_len, &request->create.set_attr,
                                 request->create.acl_storage,
-                                sizeof(request->create.acl_storage));
+                                sizeof(request->create.acl_storage),
+                                canonicalize);
 } /* parse_ctx_secd */
 
 static void

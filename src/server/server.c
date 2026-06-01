@@ -73,6 +73,7 @@ struct chimera_server_config {
     int                                   smb_signing_required;
     int                                   smb_encryption;
     int                                   smb_notify_disabled;
+    int                                   smb_acl_inherited_canonicalize;
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
@@ -167,6 +168,15 @@ chimera_server_config_init(void)
     /* CHANGE_NOTIFY is enabled by default; the "smb_notify_disabled" flag makes
      * the server reject CHANGE_NOTIFY with STATUS_NOT_IMPLEMENTED. */
     config->smb_notify_disabled = 0;
+
+    /* Windows-style canonicalisation of the DACL_AUTO_INHERITED bit on
+     * SET_SECURITY: a client-supplied AUTO_INHERITED without the matching
+     * AUTO_INHERIT_REQ is silently stripped before storage (the default,
+     * matching Samba's "acl flag inherited canonicalization = yes" and the
+     * Windows server reference behaviour).  Set to 0 to preserve the bit
+     * verbatim (Samba's "= no" mode that the smb2.acls_non_canonical suite
+     * exercises). */
+    config->smb_acl_inherited_canonicalize = 1;
 
     // SMB auth config defaults - local NTLM only
     config->smb_auth.winbind_enabled    = 0;
@@ -347,6 +357,20 @@ chimera_server_config_get_smb_notify_disabled(const struct chimera_server_config
 {
     return config->smb_notify_disabled;
 } /* chimera_server_config_get_smb_notify_disabled */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_acl_inherited_canonicalize(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->smb_acl_inherited_canonicalize = enable;
+} /* chimera_server_config_set_smb_acl_inherited_canonicalize */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_acl_inherited_canonicalize(const struct chimera_server_config *config)
+{
+    return config->smb_acl_inherited_canonicalize;
+} /* chimera_server_config_get_smb_acl_inherited_canonicalize */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_max_open_files(

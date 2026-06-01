@@ -333,7 +333,8 @@ chimera_smb_sd_to_acl(
     struct chimera_acl       *acl,
     unsigned                  acl_max_aces,
     struct chimera_vfs       *vfs,
-    struct smb_unres_sids    *unres)
+    struct smb_unres_sids    *unres,
+    int                       canonicalize_inherited)
 {
     uint32_t offset_owner, offset_group, offset_dacl;
     uint32_t value;
@@ -458,12 +459,20 @@ chimera_smb_sd_to_acl(
 
         acl->num_aces   = n;
         acl->ctrl_flags = 0;
-        /* The stored DACL is in auto-inherit mode only when the client both
-         * requested it (AUTO_INHERIT_REQ) and marked the descriptor as
-         * auto-inherited (AUTO_INHERITED) -- REQ alone does not.  PROTECTED is
-         * stored as-is. */
-        if ((sd_control & SE_DACL_AUTO_INHERIT_REQ) &&
-            (sd_control & SE_DACL_AUTO_INHERITED)) {
+        /* AUTO_INHERITED canonicalisation.  Canonical (Windows / Samba's
+         * "acl flag inherited canonicalization = yes" default) requires the
+         * client to set both AUTO_INHERIT_REQ and AUTO_INHERITED for the
+         * stored DACL to be in auto-inherit mode -- AUTO_INHERITED alone is
+         * stripped (the smb2.acls.INHERITFLAGS suite enforces this).
+         * Non-canonical (Samba's "= no" mode the smb2.acls_non_canonical
+         * suite exercises) preserves AUTO_INHERITED verbatim regardless of
+         * REQ.  PROTECTED is stored as-is in both modes. */
+        if (canonicalize_inherited) {
+            if ((sd_control & SE_DACL_AUTO_INHERIT_REQ) &&
+                (sd_control & SE_DACL_AUTO_INHERITED)) {
+                acl->ctrl_flags |= CHIMERA_ACL_CTRL_AUTO_INHERITED;
+            }
+        } else if (sd_control & SE_DACL_AUTO_INHERITED) {
             acl->ctrl_flags |= CHIMERA_ACL_CTRL_AUTO_INHERITED;
         }
         if (sd_control & SE_DACL_PROTECTED) {
@@ -785,7 +794,8 @@ chimera_smb_parse_sd_to_acl(
     uint32_t                  sd_len,
     struct chimera_vfs_attrs *attrs,
     void                     *acl_buf,
-    uint32_t                  acl_buf_len)
+    uint32_t                  acl_buf_len,
+    int                       canonicalize_inherited)
 {
     struct chimera_acl *acl     = acl_buf;
     unsigned            acl_max = (acl_buf_len - sizeof(struct chimera_acl)) /
@@ -793,7 +803,8 @@ chimera_smb_parse_sd_to_acl(
 
     /* Create-time SD parse: algorithmic/well-known SIDs only (no authority
      * handle here); real-SID resolution happens on SET_SECURITY. */
-    chimera_smb_sd_to_acl(sd_buf, sd_len, attrs, acl, acl_max, NULL, NULL);
+    chimera_smb_sd_to_acl(sd_buf, sd_len, attrs, acl, acl_max, NULL, NULL,
+                          canonicalize_inherited);
 } /* chimera_smb_parse_sd_to_acl */
 
 /* Decode the (saved) security descriptor into vfs_attrs + ACL.  Returns the
@@ -816,7 +827,9 @@ chimera_smb_set_decode_sd(
     chimera_smb_sd_to_acl(request->set_info.sec_buf,
                           request->set_info.sec_buf_len,
                           vfs_attrs, acl_buf, acl_max,
-                          request->compound->thread->shared->vfs, unres);
+                          request->compound->thread->shared->vfs, unres,
+                          request->compound->thread->shared->config.
+                          acl_inherited_canonicalize);
 } /* chimera_smb_set_decode_sd */
 
 /* Apply the decoded vfs_attrs (or complete early if nothing changed). */
