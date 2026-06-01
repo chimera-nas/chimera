@@ -413,15 +413,38 @@ set(SMBTORTURE_ENABLED_linux
     smb2.rw
     smb2.check-sharemode
     smb2.compound_find
+    smb2.connect
     smb2.create_no_streams
     smb2.deny
     smb2.notify-inotify
     smb2.secleak
+    smb2.session-id
+    smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.tcon
     smb2.winattr2
+    # CHANGE_NOTIFY subtests run cleanly in isolation; the combined smb2.notify
+    # suite still trips the shared-process deltree cascade.
+    smb2.notify.basedir
+    smb2.notify.close
+    smb2.notify.dir
+    smb2.notify.double
+    smb2.notify.file
+    smb2.notify.handle-permissions
+    smb2.notify.invalid-reauth
+    smb2.notify.logoff
+    smb2.notify.mask
+    smb2.notify.overflow
+    smb2.notify.rmdir1
+    smb2.notify.rmdir2
+    smb2.notify.rmdir3
+    smb2.notify.rmdir4
+    smb2.notify.tcon
+    smb2.notify.tcp
+    smb2.notify.tdis
+    smb2.notify.tdis1
     # smb2.acls_non_canonical passes on x86_64 but, like memfs, is left disabled
     # pending the arm64 difference.
 )
@@ -432,15 +455,32 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.rw
     smb2.check-sharemode
     smb2.compound_find
+    smb2.connect
     smb2.create_no_streams
     smb2.deny
     smb2.notify-inotify
     smb2.secleak
+    smb2.session-id
+    smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.tcon
     smb2.winattr2
+    # io_uring passes a subset of the CHANGE_NOTIFY subtests; the rest
+    # (notify.close/dir/invalid-reauth/logoff/mask/rmdir1/rmdir3) still fail
+    # here despite passing on the plain linux passthrough, pending a follow-up.
+    smb2.notify.basedir
+    smb2.notify.double
+    smb2.notify.file
+    smb2.notify.handle-permissions
+    smb2.notify.overflow
+    smb2.notify.rmdir2
+    smb2.notify.rmdir4
+    smb2.notify.tcon
+    smb2.notify.tcp
+    smb2.notify.tdis
+    smb2.notify.tdis1
 )
 # The engine backends store their own data and stamp a new object's owner from
 # the calling credential, so they behave consistently regardless of the server's
@@ -456,9 +496,12 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.rw
     smb2.check-sharemode
     smb2.compound_find
+    smb2.connect
     smb2.create_no_streams
     smb2.notify-inotify
     smb2.secleak
+    smb2.session-id
+    smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
@@ -467,6 +510,26 @@ set(SMBTORTURE_ENABLED_cairn
     # and the LastWriteTime write-time/sticky semantics pass end-to-end.
     smb2.timestamps
     smb2.winattr2
+    # CHANGE_NOTIFY subtests run cleanly in isolation (combined smb2.notify
+    # suite still trips the shared-process deltree cascade).  cairn does not
+    # support the notify.basedir case yet.
+    smb2.notify.close
+    smb2.notify.dir
+    smb2.notify.double
+    smb2.notify.file
+    smb2.notify.handle-permissions
+    smb2.notify.invalid-reauth
+    smb2.notify.logoff
+    smb2.notify.mask
+    smb2.notify.overflow
+    smb2.notify.rmdir1
+    smb2.notify.rmdir2
+    smb2.notify.rmdir3
+    smb2.notify.rmdir4
+    smb2.notify.tcon
+    smb2.notify.tcp
+    smb2.notify.tdis
+    smb2.notify.tdis1
     ${SMBTORTURE_ACLS_SUBTESTS}
 )
 # diskfs is a native-ACL backend: it stores each inode's ACL as a
@@ -481,10 +544,14 @@ set(SMBTORTURE_ENABLED_diskfs_common
     smb2.rw
     smb2.check-sharemode
     smb2.compound_find
+    smb2.connect
     smb2.create_no_streams
     smb2.notify-inotify
     smb2.secleak
+    smb2.session-id
+    smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
+    smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.tcon
     # Native btime storage in the diskfs inode (in-memory + on-disk dinode) lets
@@ -492,6 +559,26 @@ set(SMBTORTURE_ENABLED_diskfs_common
     # backends share the diskfs module.
     smb2.timestamps
     smb2.winattr2
+    # CHANGE_NOTIFY subtests run cleanly in isolation (combined smb2.notify
+    # suite still trips the shared-process deltree cascade).  diskfs does not
+    # support the notify.basedir case yet.
+    smb2.notify.close
+    smb2.notify.dir
+    smb2.notify.double
+    smb2.notify.file
+    smb2.notify.handle-permissions
+    smb2.notify.invalid-reauth
+    smb2.notify.logoff
+    smb2.notify.mask
+    smb2.notify.overflow
+    smb2.notify.rmdir1
+    smb2.notify.rmdir2
+    smb2.notify.rmdir3
+    smb2.notify.rmdir4
+    smb2.notify.tcon
+    smb2.notify.tcp
+    smb2.notify.tdis
+    smb2.notify.tdis1
     ${SMBTORTURE_ACLS_SUBTESTS}
 )
 set(SMBTORTURE_ENABLED_diskfs_io_uring ${SMBTORTURE_ENABLED_diskfs_common})
