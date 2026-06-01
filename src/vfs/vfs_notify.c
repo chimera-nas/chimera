@@ -333,8 +333,14 @@ chimera_vfs_notify_resolve_getparent_cb(
         return;
     }
 
-    /* Cache the result for future events */
-    chimera_vfs_rpl_cache_insert(notify->rpl_cache,
+    /* Cache the result for future events.  This callback runs on the same
+     * worker thread chimera_vfs_notify_resolve dispatched getparent on, so its
+     * magazine is the correct thread-local pool to recycle from. */
+    struct chimera_vfs_thread *rpl_thread = notify->vfs->num_sync_delegation_threads > 0 ?
+        notify->vfs->sync_delegation_threads[0].vfs_thread :
+        notify->vfs->close_thread.vfs_thread;
+
+    chimera_vfs_rpl_cache_insert(rpl_thread, notify->rpl_cache,
                                  chimera_vfs_hash(pev->walk_fh, pev->walk_fh_len),
                                  pev->walk_fh,
                                  pev->walk_fh_len,
@@ -720,11 +726,19 @@ chimera_vfs_notify_watch_update(
      * exact-mode events carry a bare filename.  Delivering a stale path
      * to a non-tree consumer (or vice versa) would mislead the client,
      * and we have no per-event mode tag to filter selectively.  Force
-     * the client to rescan via overflow semantics. */
+     * the client to rescan via overflow semantics — but ONLY if there is
+     * actually something queued (or an overflow already pending).  When
+     * the ring is empty (the common case of a client re-arming a fresh
+     * watch with a different recursion flag) signalling a spurious
+     * overflow would make the very next CHANGE_NOTIFY complete
+     * immediately with STATUS_NOTIFY_ENUM_DIR instead of parking
+     * (smb2.notify.rec / mask-change). */
     pthread_mutex_lock(&watch->lock);
-    watch->ring_head  = 0;
-    watch->ring_count = 0;
-    watch->overflowed = 1;
+    if (watch->ring_count > 0 || watch->overflowed) {
+        watch->ring_head  = 0;
+        watch->ring_count = 0;
+        watch->overflowed = 1;
+    }
     pthread_mutex_unlock(&watch->lock);
 
     /* watch_tree flipped — relink in mount entries' subtree list. */
@@ -859,6 +873,19 @@ chimera_vfs_notify_drain(
 
     return count;
 } /* chimera_vfs_notify_drain */
+
+SYMBOL_EXPORT int
+chimera_vfs_notify_watch_take_deleted(struct chimera_vfs_notify_watch *watch)
+{
+    int deleted;
+
+    pthread_mutex_lock(&watch->lock);
+    deleted        = watch->deleted;
+    watch->deleted = 0;
+    pthread_mutex_unlock(&watch->lock);
+
+    return deleted;
+} /* chimera_vfs_notify_watch_take_deleted */
 
 /*
  * Lock invariants for the emit/destroy/callback dance:
@@ -1141,3 +1168,45 @@ chimera_vfs_notify_emit(
     /* Start the resolve chain */
     chimera_vfs_notify_resolve(pev);
 } /* chimera_vfs_notify_emit */
+
+SYMBOL_EXPORT void
+chimera_vfs_notify_emit_delete(
+    struct chimera_vfs_notify *notify,
+    const uint8_t             *fh,
+    uint16_t                   fh_len)
+{
+    struct chimera_vfs_notify_bucket *bucket;
+    struct chimera_vfs_notify_watch  *watch;
+    uint64_t                          fh_hash;
+    int                               bi;
+
+    if (!notify) {
+        return;
+    }
+
+    /* Only exact watches matter: CHANGE_NOTIFY is armed on a handle to the
+     * object itself, so a watch keyed on the removed object's own FH is the
+     * one that must learn it is gone.  (Subtree watchers on an ancestor are
+     * handled by the regular DIR_REMOVED emit on the parent.) */
+    fh_hash = chimera_vfs_hash(fh, fh_len);
+    bi      = chimera_vfs_notify_bucket_index(fh_hash);
+    bucket  = &notify->buckets[bi];
+
+    pthread_mutex_lock(&bucket->lock);
+
+    for (watch = bucket->watches; watch; watch = watch->next) {
+        if (watch->dir_fh_len == fh_len &&
+            memcmp(watch->dir_fh, fh, fh_len) == 0) {
+
+            pthread_mutex_lock(&watch->lock);
+            watch->deleted = 1;
+            pthread_mutex_unlock(&watch->lock);
+
+            if (watch->callback) {
+                watch->callback(watch, watch->private_data);
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&bucket->lock);
+} /* chimera_vfs_notify_emit_delete */

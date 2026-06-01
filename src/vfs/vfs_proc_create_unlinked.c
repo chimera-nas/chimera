@@ -20,7 +20,7 @@ chimera_vfs_create_unlinked_hdl_callback(
     chimera_vfs_create_unlinked_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                       chimera_vfs_hash(request->create_unlinked.r_attr.va_fh, request->create_unlinked.
                                                        r_attr.
                                                        va_fh_len),

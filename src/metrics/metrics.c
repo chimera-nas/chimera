@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "evpl/evpl.h"
@@ -192,3 +193,67 @@ chimera_metrics_get(struct chimera_metrics *metrics)
 {
     return metrics->metrics;
 } /* chimera_metrics_get */
+
+SYMBOL_EXPORT int
+chimera_metrics_dump_file(
+    struct prometheus_metrics *metrics,
+    const char                *path)
+{
+    FILE  *fp;
+    char  *buf;
+    int    cap = 4 * 1024 * 1024;
+    int    len, evpl_len;
+    size_t written;
+
+    if (!path) {
+        return 0;
+    }
+
+    buf = malloc(cap);
+
+    if (!buf) {
+        chimera_metrics_error("Failed to allocate buffer to dump metrics to %s", path);
+        return -1;
+    }
+
+    /* Same concatenation the live /metrics endpoint produces: chimera's own
+     * registry first, then libevpl's appended into the remaining space.  Both
+     * emit Prometheus text format with disjoint name prefixes (chimera_* vs
+     * evpl_*), so the result is a single valid exposition page.
+     */
+    len = prometheus_metrics_scrape(metrics, buf, cap);
+
+    if (len < 0) {
+        chimera_metrics_error("Failed to scrape chimera metrics for %s", path);
+        free(buf);
+        return -1;
+    }
+
+    evpl_len = evpl_metrics_scrape(buf + len, cap - len);
+
+    if (evpl_len > 0) {
+        len += evpl_len;
+    }
+
+    fp = fopen(path, "w");
+
+    if (!fp) {
+        chimera_metrics_error("Failed to open metrics file %s for writing", path);
+        free(buf);
+        return -1;
+    }
+
+    written = fwrite(buf, 1, len, fp);
+
+    fclose(fp);
+    free(buf);
+
+    if (written != (size_t) len) {
+        chimera_metrics_error("Short write dumping metrics to %s", path);
+        return -1;
+    }
+
+    chimera_metrics_info("Wrote %d bytes of metrics to %s", len, path);
+
+    return 0;
+} /* chimera_metrics_dump_file */

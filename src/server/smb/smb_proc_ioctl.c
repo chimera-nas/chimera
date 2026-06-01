@@ -89,8 +89,14 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
 
             request->ioctl.r_capabilities = conn->capabilities;
             memcpy(request->ioctl.r_guid, shared->guid, 16);
+            /* Must echo the SecurityMode advertised in NEGOTIATE; a mismatch
+             * looks like a downgrade attack and the client drops the
+             * connection (MS-SMB2 3.3.5.15.12). */
             request->ioctl.r_security_mode = SMB2_SIGNING_ENABLED;
-            request->ioctl.r_dialect       = conn->dialect;
+            if (shared->config.signing_required) {
+                request->ioctl.r_security_mode |= SMB2_SIGNING_REQUIRED;
+            }
+            request->ioctl.r_dialect = conn->dialect;
 
             chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
             break;
@@ -164,7 +170,9 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             break;
 
         default:
-            chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
+            /* MS-SMB2 3.3.5.15: an FSCTL the server does not implement is
+             * rejected with STATUS_NOT_SUPPORTED. */
+            chimera_smb_complete_request(request, SMB2_STATUS_NOT_SUPPORTED);
             break;
     } /* switch */
 } /* chimera_smb_ioctl */

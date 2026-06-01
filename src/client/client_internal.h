@@ -146,6 +146,23 @@ struct chimera_client_request {
             struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
         } read;
 
+        /* For chimera_read_into - caller provides destination evpl_iovec(s).
+         * dest_iov is a borrowed shallow copy of the caller's buffers (the
+         * caller keeps its own refs alive until the callback); iov is scratch
+         * the VFS core/backend works through. */
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        length;
+            uint32_t                        result_count;
+            uint32_t                        result_eof;
+            int                             dest_niov;
+            chimera_read_into_callback_t    callback;
+            void                           *private_data;
+            struct evpl_iovec               dest_iov[CHIMERA_CLIENT_IOV_MAX];
+            struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
+        } read_into;
+
         /* For chimera_write - caller provides a simple buffer */
         struct {
             struct chimera_vfs_open_handle *handle;
@@ -364,6 +381,7 @@ struct chimera_client_config {
     int                           async_delegation_threads;
     int                           cache_ttl;
     int                           max_fds;
+    enum chimera_tcp_flavor       tcp_flavor;
     char                          kv_module[64];
     struct chimera_vfs_module_cfg modules[CHIMERA_CLIENT_MAX_MODULES];
     int                           num_modules;

@@ -163,7 +163,7 @@ chimera_nfs3_do_lock(
 
         shared->nlm_v4.send_call_NLMPROC4_UNLOCK(&shared->nlm_v4.rpc2, thread->evpl,
                                                  server_thread->nlm_conn, &rpc2_cred,
-                                                 &args, 0, 0, 0,
+                                                 &args, 0, 0, NULL, 0, 0,
                                                  chimera_nfs3_unlock_callback, request);
 
     } else if (request->lock.flags & CHIMERA_VFS_LOCK_TEST) {
@@ -185,7 +185,7 @@ chimera_nfs3_do_lock(
 
         shared->nlm_v4.send_call_NLMPROC4_TEST(&shared->nlm_v4.rpc2, thread->evpl,
                                                server_thread->nlm_conn, &rpc2_cred,
-                                               &args, 0, 0, 0,
+                                               &args, 0, 0, NULL, 0, 0,
                                                chimera_nfs3_test_callback, request);
 
     } else {
@@ -210,7 +210,7 @@ chimera_nfs3_do_lock(
 
         shared->nlm_v4.send_call_NLMPROC4_LOCK(&shared->nlm_v4.rpc2, thread->evpl,
                                                server_thread->nlm_conn, &rpc2_cred,
-                                               &args, 0, 0, 0,
+                                               &args, 0, 0, NULL, 0, 0,
                                                chimera_nfs3_lock_callback, request);
     }
 } /* chimera_nfs3_do_lock */
@@ -308,7 +308,7 @@ chimera_nfs3_lock(
 
         shared->nfs_v3.send_call_NFSPROC3_GETATTR(&shared->nfs_v3.rpc2, thread->evpl,
                                                   server_thread->nfs_conn, &rpc2_cred,
-                                                  &getattr_args, 0, 0, 0,
+                                                  &getattr_args, 0, 0, NULL, 0, 0,
                                                   chimera_nfs3_lock_getattr_callback, request);
     } else {
         chimera_nfs3_do_lock(thread, shared, server_thread, request);

@@ -81,6 +81,6 @@ chimera_nfs3_link_at(
                                request->thread->vfs->machine_name_len);
 
     shared->nfs_v3.send_call_NFSPROC3_LINK(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
-                                           &args, 0, 0, 0, chimera_nfs3_link_callback, request);
+                                           &args, 0, 0, NULL, 0, 0, chimera_nfs3_link_callback, request);
 } /* chimera_nfs3_link_at */
 

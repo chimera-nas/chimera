@@ -73,6 +73,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Failed to create user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -198,6 +208,16 @@
           },
           "400": {
             "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to create export",
             "content": {
               "application/json": {
                 "schema": {
@@ -337,6 +357,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Failed to create share",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -469,6 +499,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Failed to create bucket",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -577,30 +617,35 @@
       },
       "UserCreate": {
         "type": "object",
-        "required": ["username", "uid", "gid"],
+        "required": ["username"],
         "properties": {
           "username": {
             "type": "string",
-            "description": "Username"
+            "description": "Username (required)"
           },
           "password": {
             "type": "string",
-            "description": "Password"
+            "description": "Password (optional)"
+          },
+          "smbpasswd": {
+            "type": "string",
+            "description": "SMB/NTLM password hash (optional)"
           },
           "uid": {
             "type": "integer",
-            "description": "User ID"
+            "description": "User ID (optional, defaults to 0 if omitted)"
           },
           "gid": {
             "type": "integer",
-            "description": "Primary group ID"
+            "description": "Primary group ID (optional, defaults to 0 if omitted)"
           },
           "gids": {
             "type": "array",
             "items": {
               "type": "integer"
             },
-            "description": "Supplementary group IDs"
+            "maxItems": 64,
+            "description": "Supplementary group IDs (optional, at most 64; more than 64 returns 400 Bad Request)"
           }
         }
       },

@@ -15,8 +15,9 @@
 #include "smb2.h"
 
 struct chimera_smb_signing_ctx {
-    EVP_MAC *hmac_mac;
-    EVP_MAC *cmac_mac;
+    EVP_MAC    *hmac_mac;
+    EVP_MAC    *cmac_mac;
+    EVP_CIPHER *gcm;        /* AES-128-GCM, used as GMAC for AES-128-GMAC signing */
 };
 
 struct chimera_smb_signing_ctx *
@@ -36,6 +37,10 @@ chimera_smb_signing_ctx_create(void)
 
     chimera_smb_abort_if(!ctx->cmac_mac, "Failed to fetch CMAC MAC");
 
+    ctx->gcm = EVP_CIPHER_fetch(NULL, "AES-128-GCM", NULL);
+
+    chimera_smb_abort_if(!ctx->gcm, "Failed to fetch AES-128-GCM cipher");
+
     return ctx;
 } /* chimera_smb_signing_ctx_new */
 
@@ -44,6 +49,7 @@ chimera_smb_signing_ctx_destroy(struct chimera_smb_signing_ctx *ctx)
 {
     EVP_MAC_free(ctx->hmac_mac);
     EVP_MAC_free(ctx->cmac_mac);
+    EVP_CIPHER_free(ctx->gcm);
     free(ctx);
 } /* chimera_smb_signing_ctx_destroy */
 
@@ -343,6 +349,142 @@ chimera_smb_request_cmac_aes_128_cbc(
     return ok;
 }   // evpl_iovec_cursor_cmac_aes_128_cbc
 
+/*
+ * AES-128-GMAC over the SMB2 message (MS-SMB2 §3.1.4.1).  GMAC is AES-128-GCM
+ * used purely as a MAC: the entire message is fed as associated data with no
+ * plaintext, and the 16-byte authentication tag is the signature.
+ *
+ * The 12-byte IV is the 64-bit MessageId followed by a 32-bit value carrying
+ * the SERVER_TO_REDIR flag (and ASYNC for CANCEL).  The associated data is the
+ * SMB2 header with its signature field zeroed, followed by the message body —
+ * identical to feeding the full 64-byte header (signature already zero) plus
+ * the body, which is how the HMAC/CMAC paths above operate.
+ */
+static inline int
+chimera_smb_request_gmac_aes_128(
+    struct chimera_smb_signing_ctx *ctx,
+    struct smb2_header             *hdr,
+    struct evpl_iovec_cursor       *cursor,
+    int                             length,
+    const uint8_t                  *key,
+    size_t                          keylen,
+    uint8_t                        *out_sig16)
+{
+    int             ok = -1, chunk, left = length, outl;
+    EVP_CIPHER_CTX *c = NULL;
+    uint8_t         iv[12];
+    uint32_t        high_bits;
+
+    high_bits = hdr->flags & SMB2_FLAGS_SERVER_TO_REDIR;
+    if (hdr->command == SMB2_CANCEL) {
+        high_bits |= SMB2_FLAGS_ASYNC_COMMAND;
+    }
+
+    memset(iv, 0, sizeof(iv));
+    memcpy(iv, &hdr->message_id, 8);   /* MessageId, little-endian on host */
+    iv[8]  = (uint8_t) (high_bits & 0xff);
+    iv[9]  = (uint8_t) ((high_bits >> 8) & 0xff);
+    iv[10] = (uint8_t) ((high_bits >> 16) & 0xff);
+    iv[11] = (uint8_t) ((high_bits >> 24) & 0xff);
+
+    c = EVP_CIPHER_CTX_new();
+    if (!c) {
+        goto done;
+    }
+
+    if (EVP_EncryptInit_ex(c, ctx->gcm, NULL, NULL, NULL) != 1 ||
+        EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_IVLEN, sizeof(iv), NULL) != 1 ||
+        EVP_EncryptInit_ex(c, NULL, NULL, key, iv) != 1) {
+        goto done;
+    }
+
+    if (keylen < 16) {
+        goto done;
+    }
+
+    /* AAD: the 64-byte header (signature field zero) ... */
+    if (EVP_EncryptUpdate(c, NULL, &outl, (uint8_t *) hdr, sizeof(*hdr)) != 1) {
+        goto done;
+    }
+
+    /* ... followed by the message body. */
+    while (left && cursor->niov) {
+
+        chunk = cursor->iov->length - cursor->offset;
+
+        if (left < chunk) {
+            chunk = left;
+        }
+
+        if (EVP_EncryptUpdate(c, NULL, &outl, cursor->iov->data + cursor->offset, chunk) != 1) {
+            goto done;
+        }
+
+        left             -= chunk;
+        cursor->offset   += chunk;
+        cursor->consumed += chunk;
+
+        if (cursor->offset == cursor->iov->length) {
+            cursor->iov++;
+            cursor->niov--;
+            cursor->offset = 0;
+        }
+    }
+
+    if (left) {
+        goto done;
+    }
+
+    if (EVP_EncryptFinal_ex(c, NULL, &outl) != 1 ||
+        EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_GET_TAG, 16, out_sig16) != 1) {
+        goto done;
+    }
+
+    ok = 0;
+
+ done:
+    if (c) {
+        EVP_CIPHER_CTX_free(c);
+    }
+    return ok;
+} /* chimera_smb_request_gmac_aes_128 */
+
+/*
+ * Compute the SMB2 signature for a message using the algorithm negotiated for
+ * the connection: HMAC-SHA256 for 2.x, AES-128-CMAC for 3.0/3.0.2, and the
+ * SMB 3.1.1 negotiated signing algorithm (GMAC / CMAC / HMAC-SHA256) for 3.1.1.
+ */
+static int
+chimera_smb_compute_signature(
+    struct chimera_smb_signing_ctx *ctx,
+    struct chimera_smb_conn        *conn,
+    struct smb2_header             *hdr,
+    struct evpl_iovec_cursor       *cursor,
+    int                             length,
+    const uint8_t                  *key,
+    uint8_t                        *out_sig16)
+{
+    switch (conn->dialect) {
+        case SMB2_DIALECT_2_0_2:
+        case SMB2_DIALECT_2_1:
+            return chimera_smb_request_hmac_sha256(ctx, hdr, cursor, length, key, 16, out_sig16);
+        case SMB2_DIALECT_3_0:
+        case SMB2_DIALECT_3_0_2:
+            return chimera_smb_request_cmac_aes_128_cbc(ctx, hdr, cursor, length, key, 16, out_sig16);
+        case SMB2_DIALECT_3_1_1:
+            switch (conn->negotiated.signing_alg) {
+                case SMB2_SIGNING_AES_GMAC:
+                    return chimera_smb_request_gmac_aes_128(ctx, hdr, cursor, length, key, 16, out_sig16);
+                case SMB2_SIGNING_HMAC_SHA256:
+                    return chimera_smb_request_hmac_sha256(ctx, hdr, cursor, length, key, 16, out_sig16);
+                default:
+                    return chimera_smb_request_cmac_aes_128_cbc(ctx, hdr, cursor, length, key, 16, out_sig16);
+            } /* switch */
+        default:
+            return -1;
+    } /* switch */
+} /* chimera_smb_compute_signature */
+
 int
 chimera_smb_verify_signature(
     struct chimera_smb_signing_ctx *ctx,
@@ -361,44 +503,13 @@ chimera_smb_verify_signature(
     memcpy(&signature, &request->smb2_hdr.signature, sizeof(signature));
     memset(request->smb2_hdr.signature, 0, sizeof(request->smb2_hdr.signature));
 
-    switch (conn->dialect) {
-        case SMB2_DIALECT_2_0_2:
-        case SMB2_DIALECT_2_1:
-            rc = chimera_smb_request_hmac_sha256(
-                ctx,
-                &request->smb2_hdr,
-                cursor,
-                length,
-                signing_key,
-                16,
-                calculated);
+    rc = chimera_smb_compute_signature(ctx, conn, &request->smb2_hdr, cursor,
+                                       length, signing_key, calculated);
 
-            if (unlikely(rc != 0)) {
-                chimera_smb_error("Failed to calculate sha256 signature");
-                return rc;
-            }
-            break;
-        case SMB2_DIALECT_3_0:
-        case SMB2_DIALECT_3_0_2:
-        case SMB2_DIALECT_3_1_1:
-            rc = chimera_smb_request_cmac_aes_128_cbc(
-                ctx,
-                &request->smb2_hdr,
-                cursor,
-                length,
-                signing_key,
-                16,
-                calculated);
-
-            if (unlikely(rc != 0)) {
-                chimera_smb_error("Failed to calculate cmac_aes_128_cbc signature");
-                return rc;
-            }
-            break;
-        default:
-            chimera_smb_error("Signed messages with unsupported dialect %x", conn->dialect);
-            return -1;
-    } /* switch */
+    if (unlikely(rc != 0)) {
+        chimera_smb_error("Failed to calculate signature for dialect %x", conn->dialect);
+        return rc;
+    }
 
     if (unlikely(memcmp(signature, calculated, sizeof(signature)) != 0)) {
         format_hex(recv_sig, sizeof(recv_sig), signature, sizeof(signature));
@@ -473,45 +584,27 @@ chimera_smb_sign_compound(
                 return -1;
             }
 
-            switch (conn->dialect) {
-                case SMB2_DIALECT_2_0_2:
-                case SMB2_DIALECT_2_1:
+            /* A signed response MUST advertise SMB2_FLAGS_SIGNED (MS-SMB2
+             * 3.3.4.1.1), and the signature is computed over the header *with*
+             * that flag set.  The reply header inherits the request's flags, so
+             * a response to a request the client itself signed already carries
+             * the bit — but the final SESSION_SETUP response is signed by the
+             * server even though the establishing request was unsigned.  Set
+             * the flag here, before computing the MAC, so (a) the value we sign
+             * matches the bytes the client verifies and (b) a client with
+             * signing required does not treat the response as unsigned (which
+             * mishandles channel/session setup and can crash it). */
+            hdr->flags |= SMB2_FLAGS_SIGNED;
 
-                    rc = chimera_smb_request_hmac_sha256(
-                        ctx,
-                        hdr,
-                        &cursor,
-                        payload_length,
-                        session_handle->signing_key,
-                        16,
-                        signature);
+            rc = chimera_smb_compute_signature(ctx, conn, hdr, &cursor,
+                                               payload_length,
+                                               session_handle->signing_key,
+                                               signature);
 
-                    if (unlikely(rc != 0)) {
-                        chimera_smb_error("Failed to calculate signature");
-                        return rc;
-                    }
-                    break;
-                case SMB2_DIALECT_3_0:
-                case SMB2_DIALECT_3_0_2:
-                case SMB2_DIALECT_3_1_1:
-                    rc = chimera_smb_request_cmac_aes_128_cbc(
-                        ctx,
-                        hdr,
-                        &cursor,
-                        payload_length,
-                        session_handle->signing_key,
-                        16,
-                        signature);
-
-                    if (unlikely(rc != 0)) {
-                        chimera_smb_error("Failed to calculate signature");
-                        return rc;
-                    }
-                    break;
-                default:
-                    chimera_smb_error("Unsupported dialect for signing %x", conn->dialect);
-                    return -1;
-            } /* switch */
+            if (unlikely(rc != 0)) {
+                chimera_smb_error("Failed to calculate signature for dialect %x", conn->dialect);
+                return rc;
+            }
 
             memcpy(hdr->signature, signature, sizeof(signature));
         } else {
@@ -541,6 +634,7 @@ int
 chimera_smb_sign_message(
     struct chimera_smb_signing_ctx *ctx,
     int                             dialect,
+    int                             signing_alg,
     const uint8_t                  *signing_key,
     uint8_t                        *smb2_buf,
     int                             smb2_len)
@@ -572,10 +666,28 @@ chimera_smb_sign_message(
             break;
         case SMB2_DIALECT_3_0:
         case SMB2_DIALECT_3_0_2:
-        case SMB2_DIALECT_3_1_1:
             rc = chimera_smb_request_cmac_aes_128_cbc(ctx, hdr, &cursor,
                                                       body_len,
                                                       signing_key, 16, signature);
+            break;
+        case SMB2_DIALECT_3_1_1:
+            switch (signing_alg) {
+                case SMB2_SIGNING_AES_GMAC:
+                    rc = chimera_smb_request_gmac_aes_128(ctx, hdr, &cursor,
+                                                          body_len,
+                                                          signing_key, 16, signature);
+                    break;
+                case SMB2_SIGNING_HMAC_SHA256:
+                    rc = chimera_smb_request_hmac_sha256(ctx, hdr, &cursor,
+                                                         body_len,
+                                                         signing_key, 16, signature);
+                    break;
+                default:
+                    rc = chimera_smb_request_cmac_aes_128_cbc(ctx, hdr, &cursor,
+                                                              body_len,
+                                                              signing_key, 16, signature);
+                    break;
+            } /* switch */
             break;
         default:
             return -1;

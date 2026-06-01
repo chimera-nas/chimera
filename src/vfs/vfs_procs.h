@@ -457,6 +457,28 @@ chimera_vfs_read_owned(
     chimera_vfs_read_callback_t           callback,
     void                                 *private_data);
 
+/* As chimera_vfs_read(), but the caller supplies its own destination buffers
+ * (dest_iov/dest_niov) for the data to land in.  work_iov/work_niov is scratch
+ * the core/backend reads through; on completion the data is guaranteed to be in
+ * dest_iov (zero-copy where a backend can land it there directly, a scatter-
+ * copy otherwise).  The caller retains ownership of dest_iov (borrow): it must
+ * keep the buffers alive until the callback and release them afterwards.  The
+ * callback's iov/niov reference dest_iov. */
+void
+chimera_vfs_read_into(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        count,
+    struct evpl_iovec              *work_iov,
+    int                             work_niov,
+    struct evpl_iovec              *dest_iov,
+    int                             dest_niov,
+    uint64_t                        attrmask,
+    chimera_vfs_read_callback_t     callback,
+    void                           *private_data);
+
 typedef void (*chimera_vfs_write_callback_t)(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
@@ -917,3 +939,74 @@ chimera_vfs_remove_xattr(
     uint32_t                            namelen,
     chimera_vfs_remove_xattr_callback_t callback,
     void                               *private_data);
+
+/*
+ * Named-stream (SMB Alternate Data Stream) operations.
+ * Gated by CHIMERA_VFS_CAP_NAMED_STREAMS.
+ */
+
+/* Open (and optionally create/truncate) a named data fork on the base file
+ * referenced by `handle`.  On success `oh` is a VFS open handle for the
+ * stream: read/write/getattr/setattr against it operate on the stream's own
+ * data and size, while metadata (mode/owner/timestamps) mirror the base file.
+ * `set_attr` may be NULL.  Stream-open `flags` use CHIMERA_VFS_OPEN_* (CREATE/
+ * EXCLUSIVE/TRUNCATE) with the same semantics as chimera_vfs_open_at. */
+typedef void (*chimera_vfs_open_stream_callback_t)(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data);
+
+void
+chimera_vfs_open_stream(
+    struct chimera_vfs_thread         *thread,
+    const struct chimera_vfs_cred     *cred,
+    struct chimera_vfs_open_handle    *handle,
+    const char                        *name,
+    uint32_t                           namelen,
+    uint32_t                           flags,
+    struct chimera_vfs_attrs          *set_attr,
+    uint64_t                           attr_mask,
+    chimera_vfs_open_stream_callback_t callback,
+    void                              *private_data);
+
+/* Enumerate the named streams of the base file referenced by `handle`.  The
+ * buffer is filled with packed struct chimera_vfs_stream_entry records (each
+ * followed by name_len name bytes); the default unnamed data fork is reported
+ * first as an entry with an empty name and the file's size. */
+typedef void (*chimera_vfs_list_streams_callback_t)(
+    enum chimera_vfs_error error_code,
+    const void            *records,  /* packed chimera_vfs_stream_entry + names */
+    uint32_t               records_len,
+    uint32_t               count,
+    uint32_t               eof,
+    uint64_t               cookie,
+    void                  *private_data);
+
+void
+chimera_vfs_list_streams(
+    struct chimera_vfs_thread          *thread,
+    const struct chimera_vfs_cred      *cred,
+    struct chimera_vfs_open_handle     *handle,
+    uint64_t                            cookie,
+    void                               *buffer,
+    uint32_t                            max_bytes,
+    chimera_vfs_list_streams_callback_t callback,
+    void                               *private_data);
+
+/* Remove a single named stream from the base file referenced by `handle`. */
+typedef void (*chimera_vfs_remove_stream_callback_t)(
+    enum chimera_vfs_error          error_code,
+    const struct chimera_vfs_attrs *pre_attr,
+    const struct chimera_vfs_attrs *post_attr,
+    void                           *private_data);
+
+void
+chimera_vfs_remove_stream(
+    struct chimera_vfs_thread           *thread,
+    const struct chimera_vfs_cred       *cred,
+    struct chimera_vfs_open_handle      *handle,
+    const char                          *name,
+    uint32_t                             namelen,
+    chimera_vfs_remove_stream_callback_t callback,
+    void                                *private_data);

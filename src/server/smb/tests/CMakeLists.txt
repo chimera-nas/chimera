@@ -243,9 +243,38 @@ set(SMBTORTURE_ACLS_SUBTESTS
     smb2.acls.OVERWRITE_READ_ONLY_FILE
 )
 
+# Like smb2.acls, the combined smb2.notify suite shares one server process and
+# trips over the same smb2_deltree per-subtest cleanup cascade (a non-empty
+# directory whose delete-on-close is believed to have succeeded lingers and the
+# stale state breaks later subtests).  Each subtest passes cleanly in its own
+# server process, so the notify behaviour is covered by registering the
+# individual subtests as separate ctests.  The combined suite stays visible but
+# disabled (see below); greening it is tracked as the shared deltree follow-up.
+set(SMBTORTURE_NOTIFY_SUBTESTS
+    smb2.notify.tcon
+    smb2.notify.dir
+    smb2.notify.mask
+    smb2.notify.tdis
+    smb2.notify.tdis1
+    smb2.notify.close
+    smb2.notify.logoff
+    smb2.notify.invalid-reauth
+    smb2.notify.basedir
+    smb2.notify.double
+    smb2.notify.file
+    smb2.notify.tcp
+    smb2.notify.overflow
+    smb2.notify.rmdir1
+    smb2.notify.rmdir2
+    smb2.notify.rmdir3
+    smb2.notify.rmdir4
+    smb2.notify.handle-permissions
+)
+
 set(SMBTORTURE_SUITES
     smb2.acls
     ${SMBTORTURE_ACLS_SUBTESTS}
+    ${SMBTORTURE_NOTIFY_SUBTESTS}
     smb2.acls_non_canonical
     smb2.async_dosmode
     smb2.change_notify_disabled
@@ -316,17 +345,127 @@ set(SMBTORTURE_SUITES
 # in the same change.  This lets the remaining work be parallelized across
 # branches without a perpetually-red test run.
 #
-# Only the memfs backend is seeded today (mirroring the WPTS suite, which also
-# runs memfs-only).  The other backends start fully disabled; populate their
-# lists as suites are verified against them.
+# The memfs and passthrough (linux/io_uring) backends are seeded today.  The
+# remaining backends start fully disabled; populate their lists as suites are
+# verified against them.
 set(SMBTORTURE_ENABLED_memfs
+    smb2.change_notify_disabled
+    smb2.maximum_allowed
+    smb2.mkdir
+    smb2.openattr
+    smb2.read
+    smb2.rw
     smb2.check-sharemode
+    smb2.compound_find
+    smb2.connect
+    smb2.create_no_streams
+    # SMB3 durable/persistent handle suites that pass end-to-end on memfs with
+    # the in-memory durable registry (the harness runs the server with
+    # persistent handles enabled).  smb2.durable-open / -v2-open still have
+    # individual gaps and stay disabled until fully green.
+    smb2.durable-open-disconnect
+    smb2.durable-v2-delay
+    smb2.notify-inotify
+    smb2.secleak
+    smb2.session-id
+    smb2.session-require-signing
+    smb2.session.signing-aes-128-cmac
+    smb2.set-sparse-ioctl
+    smb2.sharemode
+    smb2.tcon
+    smb2.timestamps
+    smb2.winattr2
+    # Named-stream (ADS) support is implemented on memfs (config-gated
+    # smb_named_streams + CHIMERA_VFS_CAP_NAMED_STREAMS): create/read/write/
+    # enumerate (FileStreamInformation)/delete of named streams all work and
+    # several smb2.streams subtests pass (sharemodes, rename, create-disposition,
+    # zero-byte).  The full smb2.streams / smb2.sdread / smb2.ioctl-on-stream
+    # suites are NOT yet green -- remaining gaps are stream share-mode/sharing-
+    # violation semantics, FILE_ATTRIBUTE reporting on stream handles, stream-
+    # name validation edge cases, directory-stream handling, and rename-with-an-
+    # open-stream -- so those suites stay disabled until fully passing.  The test
+    # harness (smbtorture_test.c) already flips smb_named_streams on for them.
+    # Unified-ACL coverage: every smb2.acls subtest runs green individually.
+    # The combined smb2.acls suite stays disabled (shared-process deltree
+    # cleanup cascade, see above).
+    ${SMBTORTURE_ACLS_SUBTESTS}
+    # CHANGE_NOTIFY coverage: these notify subtests pass individually on memfs.
+    # The combined smb2.notify suite stays disabled (same deltree cascade).
+    # Remaining notify subtests (valid-req, mask-change, session-reconnect,
+    # tree, rec) need deeper features (recursive-buffer accuracy, per-session
+    # preauth for PreviousSessionId) and are left disabled.
+    ${SMBTORTURE_NOTIFY_SUBTESTS}
+    # smb2.acls_non_canonical and smb2.async_dosmode pass on x86_64 but fail on
+    # arm64 CI; left disabled until the arch difference is understood.
+)
+# The linux and io_uring passthrough backends share an implementation and pass
+# the same set.  They expose the share root as a real local directory whose
+# filesystem must support name_to_handle_at(2) (see smbtorture_test.c).
+# smb2.timestamps stays disabled here: the suite sets an arbitrary create time
+# (incl. far-future / pre-1970 values) and reads it back, but a real Linux
+# filesystem has no API to set a file's birth time, so the create-time
+# round-trip is unsupportable on the passthrough backends (it works on the
+# native backends, which persist btime in their own inode metadata).
+set(SMBTORTURE_ENABLED_linux
+    smb2.change_notify_disabled
+    smb2.mkdir
+    smb2.read
+    smb2.rw
+    smb2.check-sharemode
+    smb2.compound_find
+    smb2.create_no_streams
+    smb2.deny
+    smb2.notify-inotify
+    smb2.secleak
+    smb2.session.signing-aes-128-cmac
+    smb2.set-sparse-ioctl
+    smb2.sharemode
+    smb2.tcon
+    smb2.winattr2
+    # smb2.acls_non_canonical passes on x86_64 but, like memfs, is left disabled
+    # pending the arm64 difference.
+)
+set(SMBTORTURE_ENABLED_io_uring
+    smb2.change_notify_disabled
+    smb2.mkdir
+    smb2.read
+    smb2.rw
+    smb2.check-sharemode
+    smb2.compound_find
+    smb2.create_no_streams
+    smb2.deny
+    smb2.notify-inotify
+    smb2.secleak
+    smb2.session.signing-aes-128-cmac
+    smb2.set-sparse-ioctl
+    smb2.sharemode
+    smb2.tcon
+    smb2.winattr2
+)
+# The engine backends store their own data and stamp a new object's owner from
+# the calling credential, so they behave consistently regardless of the server's
+# own uid (unlike the setfsuid/personality passthrough backends).  The suites
+# below were verified green end-to-end once the SMB CREATE owner access check was
+# fixed (see chimera_smb_create_check_access).  cairn stores ACLs natively in its
+# KV (like diskfs), so it also runs the smb2.acls subtests now that set_security
+# (cairn_setattr SET-ACL) persists the descriptor.
+set(SMBTORTURE_ENABLED_cairn
+    smb2.change_notify_disabled
+    smb2.mkdir
+    smb2.read
+    smb2.rw
+    smb2.check-sharemode
+    smb2.compound_find
     smb2.create_no_streams
     smb2.notify-inotify
     smb2.secleak
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
+    smb2.tcon
+    # Native btime storage in the cairn inode lets the SMB create-time round-trip
+    # and the LastWriteTime write-time/sticky semantics pass end-to-end.
+    smb2.timestamps
     smb2.winattr2
     # Unified-ACL coverage: every smb2.acls subtest runs green individually.
     # The combined smb2.acls suite stays disabled (shared-process deltree
@@ -335,11 +474,33 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.acls_non_canonical and smb2.async_dosmode pass on x86_64 but fail on
     # arm64 CI; left disabled until the arch difference is understood.
 )
-set(SMBTORTURE_ENABLED_linux)
-set(SMBTORTURE_ENABLED_diskfs_io_uring)
-set(SMBTORTURE_ENABLED_diskfs_aio)
-set(SMBTORTURE_ENABLED_cairn)
-set(SMBTORTURE_ENABLED_io_uring)
+# diskfs is a native-ACL backend: it stores each inode's ACL as a
+# DISKFS_REC_ACL b+tree record and seeds/inherits it on create, so it adds the
+# smb2.acls subtests on top of the suites enabled above.  smb2.set-sparse-ioctl
+# stays disabled (no FSCTL_SET_SPARSE support yet); both block backends share
+# the diskfs module and enable the same set.
+set(SMBTORTURE_ENABLED_diskfs_common
+    smb2.change_notify_disabled
+    smb2.mkdir
+    smb2.read
+    smb2.rw
+    smb2.check-sharemode
+    smb2.compound_find
+    smb2.create_no_streams
+    smb2.notify-inotify
+    smb2.secleak
+    smb2.session.signing-aes-128-cmac
+    smb2.sharemode
+    smb2.tcon
+    # Native btime storage in the diskfs inode (in-memory + on-disk dinode) lets
+    # the SMB create-time round-trip and LastWriteTime semantics pass; both block
+    # backends share the diskfs module.
+    smb2.timestamps
+    smb2.winattr2
+    ${SMBTORTURE_ACLS_SUBTESTS}
+)
+set(SMBTORTURE_ENABLED_diskfs_io_uring ${SMBTORTURE_ENABLED_diskfs_common})
+set(SMBTORTURE_ENABLED_diskfs_aio ${SMBTORTURE_ENABLED_diskfs_common})
 
 macro(add_smbtorture_backend_tests backend)
     foreach(SUITE ${SMBTORTURE_SUITES})

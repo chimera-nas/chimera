@@ -1,0 +1,16 @@
+Source: chimera-admin
+Section: python
+Priority: optional
+Maintainer: Chimera-NAS Project Contributors <chimera-nas@googlegroups.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-python,
+               python3-all,
+               python3-setuptools,
+               pybuild-plugin-pyproject
+Standards-Version: 4.6.2
+
+Package: python3-chimera-admin
+Architecture: all
+Depends: ${python3:Depends}, ${misc:Depends}
+Description: Chimera admin tooling
+ Python SDK for the Chimera NAS REST API.

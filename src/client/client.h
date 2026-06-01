@@ -29,6 +29,11 @@ chimera_client_config_add_module(
     const char                   *module_path,
     const char                   *config_data);
 
+void
+chimera_client_config_set_tcp_flavor(
+    struct chimera_client_config *config,
+    enum chimera_tcp_flavor       flavor);
+
 struct chimera_client *
 chimera_client_init(
     const struct chimera_client_config *config,
@@ -194,6 +199,29 @@ chimera_writerv(
     struct evpl_iovec              *iov,
     int                             niov,
     chimera_write_callback_t        callback,
+    void                           *private_data);
+
+/* Zero-copy read into caller-provided evpl_iovec(s).  Like chimera_read(), but
+ * the data lands directly in `iov` (over RDMA the buffers become the server's
+ * write target -- no copy).  The caller owns `iov` (borrow): keep the buffers
+ * alive until the callback fires, then release them.  The callback reports the
+ * byte count and eof; the data is already in the caller's buffers. */
+typedef void (*chimera_read_into_callback_t)(
+    struct chimera_client_thread *thread,
+    enum chimera_vfs_error        status,
+    uint32_t                      count,
+    uint32_t                      eof,
+    void                         *private_data);
+
+void
+chimera_read_into(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        length,
+    struct evpl_iovec              *iov,
+    int                             niov,
+    chimera_read_into_callback_t    callback,
     void                           *private_data);
 
 

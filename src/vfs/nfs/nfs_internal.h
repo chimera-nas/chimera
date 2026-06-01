@@ -115,6 +115,7 @@ struct chimera_nfs_client_server {
     int                                 nfsvers;
     int                                 index;
     int                                 use_rdma;
+    int                                 nolock;
     enum evpl_protocol_id               rdma_protocol;
 
     struct evpl_endpoint               *portmap_endpoint;
@@ -169,6 +170,11 @@ struct chimera_nfs_shared {
 
     struct prometheus_histogram       *op_histogram;
     struct prometheus_metrics         *metrics;
+
+    /* evpl stream protocol for outbound plain-TCP connections, resolved from
+     * the common tcp_flavor setting (chimera_vfs->tcp_flavor) at mount time.
+     * Defaults to EVPL_STREAM_SOCKET_TCP. */
+    enum evpl_protocol_id tcp_protocol;
 };
 
 struct chimera_nfs_thread {
@@ -251,7 +257,7 @@ chimera_nfs_thread_get_server_thread(
     if (unlikely(!server_thread->nfs_conn)) {
         enum evpl_protocol_id proto = server_thread->server->use_rdma
                                       ? server_thread->server->rdma_protocol
-                                      : EVPL_STREAM_SOCKET_TCP;
+                                      : server_thread->shared->tcp_protocol;
         server_thread->nfs_conn = evpl_rpc2_client_connect(thread->rpc2_thread,
                                                            proto,
                                                            server_thread->server->nfs_endpoint,
@@ -260,7 +266,7 @@ chimera_nfs_thread_get_server_thread(
 
     if (unlikely(!server_thread->nlm_conn && server_thread->server->nlm_endpoint)) {
         server_thread->nlm_conn = evpl_rpc2_client_connect(thread->rpc2_thread,
-                                                           EVPL_STREAM_SOCKET_TCP,
+                                                           server_thread->shared->tcp_protocol,
                                                            server_thread->server->nlm_endpoint,
                                                            NULL, 0, NULL);
     }

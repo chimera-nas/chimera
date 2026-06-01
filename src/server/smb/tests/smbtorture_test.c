@@ -18,6 +18,7 @@
  *                  diskfs_aio, cairn) - default: memfs
  */
 
+#define _GNU_SOURCE
 #include "common/logging.h"
 #include "prometheus-c.h"
 #include "server/server.h"
@@ -117,6 +118,49 @@ run_smbtorture(
     return -1;
 } /* run_smbtorture */
 
+/* The linux and io_uring passthrough backends derive their VFS file handles
+* from name_to_handle_at(2).  A container/overlay rootfs (and the /tmp that
+* sits on it) returns EOPNOTSUPP for that call, which makes the passthrough
+* mount fail -- after which every CREATE against the share root resolves to
+* nothing and the server replies NETWORK_NAME_DELETED.  Such backends need
+* their share root on a filesystem that supports file handles (e.g. tmpfs).
+* Backends that store their own data (memfs/diskfs/cairn) are unaffected. */
+static int
+fs_supports_file_handles(const char *dir)
+{
+    struct {
+        struct file_handle fh;
+        unsigned char      buf[MAX_HANDLE_SZ];
+    } h;
+    int mount_id;
+
+    h.fh.handle_bytes = MAX_HANDLE_SZ;
+
+    return name_to_handle_at(AT_FDCWD, dir, &h.fh, &mount_id, 0) == 0;
+} /* fs_supports_file_handles */
+
+/* Pick a base directory for the session.  Passthrough backends require one
+ * whose filesystem supports name_to_handle_at(2); everything else keeps the
+ * historical /tmp.  Returns NULL if no suitable directory is available. */
+static const char *
+pick_session_base(int needs_file_handles)
+{
+    static const char *candidates[] = { "/tmp", "/dev/shm" };
+    unsigned           i;
+
+    if (!needs_file_handles) {
+        return "/tmp";
+    }
+
+    for (i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if (fs_supports_file_handles(candidates[i])) {
+            return candidates[i];
+        }
+    }
+
+    return NULL;
+} /* pick_session_base */
+
 static void
 print_usage(const char *prog)
 {
@@ -194,10 +238,22 @@ main(
         return EXIT_FAILURE;
     }
 
-    /* Create session directory */
+    /* Create session directory.  Passthrough backends need it on a
+     * file-handle-capable filesystem (see pick_session_base). */
+    int         needs_file_handles = strcmp(backend, "linux") == 0 ||
+        strcmp(backend, "io_uring") == 0;
+    const char *session_base = pick_session_base(needs_file_handles);
+
+    if (!session_base) {
+        fprintf(stderr,
+                "No filesystem supporting name_to_handle_at(2) found for the "
+                "'%s' passthrough backend (tried /tmp, /dev/shm)\n", backend);
+        return EXIT_FAILURE;
+    }
+
     clock_gettime(CLOCK_MONOTONIC, &tv);
     snprintf(env.session_dir, sizeof(env.session_dir),
-             "/tmp/smbtorture_test_%d_%lu", getpid(), tv.tv_sec);
+             "%s/smbtorture_test_%d_%lu", session_base, getpid(), tv.tv_sec);
 
     if (mkdir(env.session_dir, 0755) < 0 && errno != EEXIST) {
         fprintf(stderr, "Failed to create session directory: %s\n", strerror(errno));
@@ -208,6 +264,25 @@ main(
 
     /* Initialize server configuration */
     config = chimera_server_config_init();
+
+    /* Exercise the real SMB3 durable/persistent-handle path (as the WPTS
+     * harness does via CHIMERA_SMB_PERSISTENT).  Without it the server refuses
+     * every durable grant, and the durable smbtorture suites take their
+     * not-granted failure branch -- which in several tests leaves a tree/session
+     * pointer NULL and then dereferences it in cleanup, crashing the client. */
+    chimera_server_config_set_smb_persistent_handles(config, 1);
+
+    /* CTest invokes this binary once per suite.  Enable named-stream (ADS)
+     * support only for the stream suites, so the negative smb2.create_no_streams
+     * suite still runs with the feature off on the same backend. */
+    for (i = 0; i < num_tests; i++) {
+        if (strcmp(tests[i], "smb2.streams") == 0 ||
+            strcmp(tests[i], "smb2.ioctl-on-stream") == 0 ||
+            strcmp(tests[i], "smb2.sdread") == 0) {
+            chimera_server_config_set_smb_named_streams(config, 1);
+            break;
+        }
+    }
 
     /* Configure backend-specific modules */
     if (strcmp(backend, "diskfs_io_uring") == 0 ||
@@ -281,6 +356,28 @@ main(
                                          "/build/test/cairn", cairn_cfg);
     }
 
+    /* The smb2.session-require-signing suite checks that the server advertises
+     * mandatory signing (security_mode SIGNING_REQUIRED|ENABLED).  That is a
+     * per-server policy, so enable it only when running that suite to avoid
+     * forcing signing on every other suite's connections. */
+    for (i = 0; i < num_tests; i++) {
+        if (strstr(tests[i], "session-require-signing") != NULL) {
+            chimera_server_config_set_smb_signing_required(config, 1);
+            break;
+        }
+    }
+
+    /* The change_notify_disabled suite expects the server to reject
+     * CHANGE_NOTIFY with STATUS_NOT_IMPLEMENTED (the "change notify = no"
+     * share policy).  Enable that policy only for that suite — every other
+     * suite needs CHANGE_NOTIFY working. */
+    for (i = 0; i < num_tests; i++) {
+        if (strstr(tests[i], "change_notify_disabled") != NULL) {
+            chimera_server_config_set_smb_notify_disabled(config, 1);
+            break;
+        }
+    }
+
     /* Initialize server */
     env.server = chimera_server_init(config, env.metrics);
     if (!env.server) {
@@ -290,20 +387,31 @@ main(
     }
 
     /* Mount filesystem */
+    int mount_rc;
+
     if (strcmp(backend, "memfs") == 0) {
-        chimera_server_mount(env.server, "share", "memfs", "/", NULL);
+        mount_rc = chimera_server_mount(env.server, "share", "memfs", "/", NULL);
     } else if (strcmp(backend, "linux") == 0) {
-        chimera_server_mount(env.server, "share", "linux", env.session_dir, NULL);
+        mount_rc = chimera_server_mount(env.server, "share", "linux", env.session_dir, NULL);
     } else if (strcmp(backend, "io_uring") == 0) {
-        chimera_server_mount(env.server, "share", "io_uring", env.session_dir, NULL);
+        mount_rc = chimera_server_mount(env.server, "share", "io_uring", env.session_dir, NULL);
     } else if (strcmp(backend, "diskfs_io_uring") == 0 ||
                strcmp(backend, "diskfs_aio") == 0) {
-        chimera_server_mount(env.server, "share", "diskfs", "/", NULL);
+        mount_rc = chimera_server_mount(env.server, "share", "diskfs", "/", NULL);
     } else if (strcmp(backend, "cairn") == 0) {
-        chimera_server_mount(env.server, "share", "cairn", "/", NULL);
+        mount_rc = chimera_server_mount(env.server, "share", "cairn", "/", NULL);
     } else {
         fprintf(stderr, "Unknown backend: %s\n", backend);
         test_cleanup(&env, 0);
+        return EXIT_FAILURE;
+    }
+
+    /* A failed mount leaves the share pointing at nothing, so every CREATE
+     * would come back as NETWORK_NAME_DELETED.  Fail loudly instead. */
+    if (mount_rc != 0) {
+        fprintf(stderr, "Failed to mount '%s' backend at %s: vfs error %d\n",
+                backend, env.session_dir, mount_rc);
+        test_cleanup(&env, 1);
         return EXIT_FAILURE;
     }
 

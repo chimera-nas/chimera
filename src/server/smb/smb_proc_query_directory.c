@@ -8,6 +8,7 @@
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_release.h"
 #include "xxhash.h"
 
 static unsigned int
@@ -35,6 +36,13 @@ chimera_smb_query_directory_readdir_complete(
     void                           *private_data)
 {
     struct chimera_smb_request *request = private_data;
+
+    /* Drop the extra handle reference taken in chimera_smb_query_directory.  Do
+     * this before releasing the open_file: once the readdir is done with the
+     * handle it is safe to let a racing CLOSE finish tearing it down. */
+    if (handle && handle->cache_id != CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
+        chimera_vfs_release(request->compound->thread->vfs_thread, handle);
+    }
 
     if (request->query_directory.last_file_offset) {
         *request->query_directory.last_file_offset = 0;
@@ -326,11 +334,37 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         request->query_directory.open_file->position = 0;
     }
 
+    /* The reply buffer is allocated below as a single contiguous iovec
+     * (max_iovecs == 1).  A client may advertise an OutputBufferLength far
+     * larger than the negotiated MaxTransactSize (smbtorture's
+     * compound_find_close uses 8 MiB), which cannot be satisfied by one
+     * libevpl buffer and would otherwise spin evpl_iovec_alloc() forever.
+     * Cap the buffer at MaxTransactSize; the readdir callback honours the
+     * same bound, and a client that wants more simply re-issues the FIND
+     * for the next batch (MS-SMB2 §3.3.5.18 allows returning fewer bytes
+     * than OutputBufferLength). */
+    if (request->query_directory.max_output_length > CHIMERA_SMB_MAX_TRANSACT_SIZE) {
+        request->query_directory.max_output_length = CHIMERA_SMB_MAX_TRANSACT_SIZE;
+    }
+
     evpl_iovec_alloc(evpl,
                      request->query_directory.max_output_length,
                      4096,
                      1,
                      0, &request->query_directory.iov);
+
+    /* Hold an extra reference on the directory's VFS handle for the duration of
+     * the readdir.  The readdir is async (e.g. diskfs walks the directory's
+     * b+tree across block I/O), so a separate, pipelined CLOSE for the same
+     * file id can run before it completes.  Without this reference that CLOSE
+     * drops the handle's last open count and -- if the handle was detached (a
+     * second open of the same fh, which the file-creation path does to the
+     * parent directory) -- closes the backend handle immediately, tearing down
+     * the directory inode while the readdir is still iterating it.  The matching
+     * release is in chimera_smb_query_directory_readdir_complete. */
+    if (request->query_directory.open_file->handle->cache_id != CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
+        chimera_vfs_dup_handle(thread->vfs_thread, request->query_directory.open_file->handle);
+    }
 
     chimera_vfs_readdir(
         thread->vfs_thread,

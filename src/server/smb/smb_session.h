@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <uthash.h>
 
@@ -34,6 +35,15 @@ struct chimera_smb_file_id {
  * (atomically with the open).  On final close the record must be deleted from
  * that backend so a restart doesn't resurrect a closed handle. */
 #define CHIMERA_SMB_OPEN_FILE_PERSISTED            0x00000010
+/* The client explicitly set the LastWriteTime on this handle (a real value, not
+ * an omit/freeze sentinel).  Per MS-FSA, the handle has "taken control" of the
+ * write time: subsequent implicit updates from this handle (data writes,
+ * EndOfFile/Allocation sets) must not advance it for the life of the open. */
+#define CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY    0x00000020
+/* This open targets a named stream (SMB ADS).  open_file->handle is the VFS
+ * stream handle; stream_name + base_fh identify the stream for enumeration and
+ * delete-on-close (which removes only the stream, not the base file). */
+#define CHIMERA_SMB_OPEN_FILE_FLAG_STREAM          0x00000040
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases
@@ -135,6 +145,13 @@ struct chimera_smb_open_file {
     uint8_t                          parent_fh[CHIMERA_VFS_FH_SIZE];
     char                             name[SMB_FILENAME_MAX];
     uint16_t                         pattern[SMB_FILENAME_MAX];
+    /* Named-stream (ADS) identity, valid when CHIMERA_SMB_OPEN_FILE_FLAG_STREAM
+     * is set.  base_fh is the file the stream hangs off (open_file->handle's fh
+     * points at the stream itself). */
+    uint16_t                         stream_name_len;
+    char                             stream_name[SMB_FILENAME_MAX];
+    uint16_t                         base_fh_len;
+    uint8_t                          base_fh[CHIMERA_VFS_FH_SIZE];
 };
 
 #define CHIMERA_SMB_OPEN_FILE_BUCKETS     256
@@ -163,7 +180,13 @@ struct chimera_smb_tree {
     uint8_t                       fh[CHIMERA_VFS_FH_SIZE];
 };
 
-#define CHIMERA_SMB_SESSION_AUTHORIZED 0x1
+#define CHIMERA_SMB_SESSION_AUTHORIZED   0x1
+/* The session was closed out from under its connection by a SESSION_SETUP that
+ * named it in PreviousSessionId (MS-SMB2 3.3.5.5.3).  It is unlinked from the
+ * global table but kept alive while its original connection still references it;
+ * requests arriving on that connection are answered STATUS_USER_SESSION_DELETED. */
+#define CHIMERA_SMB_SESSION_DELETED      0x2
+#define CHIMERA_SMB_SESSION_ENCRYPT_DATA 0x4
 
 struct chimera_smb_session {
     uint64_t                    session_id;
@@ -178,6 +201,17 @@ struct chimera_smb_session {
 
     int                         max_trees;
     uint8_t                     signing_key[16];
+
+    /* SMB3 transport encryption (set when CHIMERA_SMB_SESSION_ENCRYPT_DATA).
+     * enc_key encrypts server->client responses; dec_key decrypts
+     * client->server requests.  enc_nonce_counter is the server's strictly
+     * monotonic per-session message counter (never reused for a key — GCM nonce
+     * reuse is catastrophic), shared across all channels of the session. */
+    uint8_t                     enc_key[32];
+    uint8_t                     dec_key[32];
+    size_t                      enc_key_len;
+    uint16_t                    cipher_id;
+    _Atomic uint64_t            enc_nonce_counter;
 
     struct chimera_vfs_cred     cred;
 };

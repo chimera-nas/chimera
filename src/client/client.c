@@ -14,6 +14,7 @@
 #include "client.h"
 #include "client_internal.h"
 #include "common/macros.h"
+#include "common/common_config.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "prometheus-c.h"
@@ -80,6 +81,14 @@ chimera_client_config_add_module(
 
     config->num_modules++;
 } /* chimera_client_config_add_module */
+
+SYMBOL_EXPORT void
+chimera_client_config_set_tcp_flavor(
+    struct chimera_client_config *config,
+    enum chimera_tcp_flavor       flavor)
+{
+    config->tcp_flavor = flavor;
+} /* chimera_client_config_set_tcp_flavor */
 
 SYMBOL_EXPORT struct chimera_client_thread *
 chimera_client_thread_init(
@@ -150,6 +159,10 @@ chimera_client_init(
                                    config->cache_ttl,
                                    metrics);
 
+    /* Propagate the common TCP flavor so VFS client modules (e.g. nfs)
+     * open outbound connections with the same transport. */
+    chimera_vfs_set_tcp_flavor(client->vfs, config->tcp_flavor);
+
     /* Initialize the root file handle after VFS is initialized */
     chimera_vfs_get_root_fh(client->root_fh, &client->root_fh_len);
 
@@ -197,6 +210,9 @@ chimera_client_init_json(
         free(config);
         return NULL;
     }
+
+    /* TCP transport flavor lives in the shared top-level "common" section. */
+    config->tcp_flavor = chimera_common_tcp_flavor(root);
 
     config_section = json_object_get(root, "config");
 

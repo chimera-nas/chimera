@@ -570,6 +570,35 @@ struct smb2_header {
     uint8_t  signature[16];
 };
 
+/*
+ * SMB2 TRANSFORM_HEADER (MS-SMB2 §2.2.41) — prepended to an AEAD-encrypted SMB2
+ * message.  The 16-byte signature field holds the AEAD authentication tag; the
+ * AEAD associated data (AAD) is exactly the 32 bytes starting at the nonce
+ * field (offset 20) through the end of the header.  The ciphertext follows the
+ * header and is original_message_size bytes long.
+ */
+struct smb2_transform_header {
+    uint8_t  protocol_id[4]; /* 0xFD 'S' 'M' 'B' */
+    uint8_t  signature[16];  /* AEAD tag */
+    uint8_t  nonce[16];      /* AAD begins here */
+    uint32_t original_message_size;
+    uint16_t reserved;
+    uint16_t flags;          /* 3.1.1: encrypted flag; 3.0.x: encryption algorithm */
+    uint64_t session_id;     /* AAD ends after this field */
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct smb2_transform_header) == 52,
+               "SMB2 TRANSFORM_HEADER must be 52 bytes");
+
+/* TransformHeader.ProtocolId and Flags (MS-SMB2 §2.2.41) */
+#define SMB2_TRANSFORM_PROTO_ID        { 0xFD, 'S', 'M', 'B' }
+#define SMB2_TRANSFORM_FLAGS_ENCRYPTED 0x0001
+
+/* Byte offset and length of the AEAD associated data within the transform
+ * header: from the Nonce field (offset 20) through the end of the header. */
+#define SMB2_TRANSFORM_AAD_OFFSET      20
+#define SMB2_TRANSFORM_AAD_SIZE        32
+
 enum smb2_command {
     SMB2_NEGOTIATE       = 0,
     SMB2_SESSION_SETUP   = 1,
@@ -643,6 +672,14 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_ENCRYPTION_AES_128_GCM                 0x0002
 #define SMB2_ENCRYPTION_AES_256_CCM                 0x0003
 #define SMB2_ENCRYPTION_AES_256_GCM                 0x0004
+
+/* SMB2 SESSION_SETUP request Flags (MS-SMB2 §2.2.5) */
+#define SMB2_SESSION_FLAG_BINDING                   0x01
+
+/* SMB2 SESSION_SETUP response SessionFlags (MS-SMB2 §2.2.6) */
+#define SMB2_SESSION_FLAG_IS_GUEST                  0x0001
+#define SMB2_SESSION_FLAG_IS_NULL                   0x0002
+#define SMB2_SESSION_FLAG_ENCRYPT_DATA              0x0004
 
 /* SMB2_SIGNING_CAPABILITIES Algorithm IDs */
 #define SMB2_SIGNING_HMAC_SHA256                    0x0000

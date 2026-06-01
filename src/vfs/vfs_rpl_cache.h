@@ -5,6 +5,7 @@
 #pragma once
 
 #include "vfs/vfs.h"
+#include "vfs/vfs_rcu_pool.h"
 #include "vfs_internal.h"
 #include "common/misc.h"
 #include <urcu.h>
@@ -22,29 +23,23 @@
  */
 
 struct chimera_vfs_rpl_cache_entry {
-    uint64_t        fwd_key;        /* hash(child_fh) */
-    uint64_t        rev_key;        /* hash(parent_fh) ^ hash(name) */
-    uint16_t        child_fh_len;
-    uint16_t        parent_fh_len;
-    uint16_t        name_len;
-    int64_t         score;
-    uint64_t        expiration; /* stopwatch ticks */
-    struct rcu_head rcu;
-    union {
-        struct chimera_vfs_rpl_cache_entry *next;  /* when on free list */
-        struct chimera_vfs_rpl_cache_shard *shard; /* when active */
-    };
-    uint8_t         child_fh[CHIMERA_VFS_FH_SIZE];
-    uint8_t         parent_fh[CHIMERA_VFS_FH_SIZE];
-    char            name[CHIMERA_VFS_NAME_MAX];
+    struct chimera_rcu_node rnode; /* must be first: aliases the entry pointer */
+    uint64_t                fwd_key; /* hash(child_fh) */
+    uint64_t                rev_key; /* hash(parent_fh) ^ hash(name) */
+    uint16_t                child_fh_len;
+    uint16_t                parent_fh_len;
+    uint16_t                name_len;
+    int64_t                 score;
+    uint64_t                expiration; /* stopwatch ticks */
+    uint8_t                 child_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                 parent_fh[CHIMERA_VFS_FH_SIZE];
+    char                    name[CHIMERA_VFS_NAME_MAX];
 };
 
 struct chimera_vfs_rpl_cache_shard {
     struct chimera_vfs_rpl_cache_entry **fwd_entries; /* forward index slots */
     struct chimera_vfs_rpl_cache_entry **rev_entries; /* reverse index slots */
-    struct chimera_vfs_rpl_cache_entry  *free_entries;
     pthread_mutex_t                      entry_lock;
-    pthread_mutex_t                      free_lock;
 };
 
 struct chimera_vfs_rpl_cache {
@@ -58,6 +53,7 @@ struct chimera_vfs_rpl_cache {
     uint32_t                            num_shards_mask;
     uint32_t                            num_entries_mask;
     uint64_t                            ttl;
+    struct chimera_rcu_pool             pool;
     struct chimera_vfs_rpl_cache_shard *shards;
 };
 
@@ -70,8 +66,7 @@ chimera_vfs_rpl_cache_create(
 {
     struct chimera_vfs_rpl_cache       *cache;
     struct chimera_vfs_rpl_cache_shard *shard;
-    struct chimera_vfs_rpl_cache_entry *entry;
-    int                                 i, j;
+    int                                 i;
 
     cache = calloc(1, sizeof(*cache));
 
@@ -79,9 +74,13 @@ chimera_vfs_rpl_cache_create(
     cache->num_slots_bits   = num_slots_bits;
     cache->num_entries_bits = entries_per_slot_bits;
     cache->ttl              = ttl;
-    cache->num_shards       = 1 << num_shards_bits;
-    cache->num_slots        = 1 << num_slots_bits;
-    cache->num_entries      = 1 << entries_per_slot_bits;
+
+    chimera_rcu_pool_init(&cache->pool, CHIMERA_RCU_POOL_RPL,
+                          sizeof(struct chimera_vfs_rpl_cache_entry));
+
+    cache->num_shards  = 1 << num_shards_bits;
+    cache->num_slots   = 1 << num_slots_bits;
+    cache->num_entries = 1 << entries_per_slot_bits;
 
     cache->num_slots_mask   = cache->num_slots - 1;
     cache->num_shards_mask  = cache->num_shards - 1;
@@ -98,13 +97,7 @@ chimera_vfs_rpl_cache_create(
         shard->rev_entries = calloc(cache->num_slots * cache->num_entries,
                                     sizeof(struct chimera_vfs_rpl_cache_entry *));
 
-        for (j = 0; j < cache->num_slots * cache->num_entries; j++) {
-            entry = calloc(1, sizeof(*entry));
-            LL_PREPEND(shard->free_entries, entry);
-        }
-
         pthread_mutex_init(&shard->entry_lock, NULL);
-        pthread_mutex_init(&shard->free_lock, NULL);
     }
 
     return cache;
@@ -114,7 +107,6 @@ static inline void
 chimera_vfs_rpl_cache_destroy(struct chimera_vfs_rpl_cache *cache)
 {
     struct chimera_vfs_rpl_cache_shard *shard;
-    struct chimera_vfs_rpl_cache_entry *entry;
     int                                 i, j;
 
     if (!cache) {
@@ -135,31 +127,14 @@ chimera_vfs_rpl_cache_destroy(struct chimera_vfs_rpl_cache *cache)
         free(shard->fwd_entries);
         free(shard->rev_entries);
 
-        while (shard->free_entries) {
-            entry               = shard->free_entries;
-            shard->free_entries = entry->next;
-            free(entry);
-        }
-
         pthread_mutex_destroy(&shard->entry_lock);
-        pthread_mutex_destroy(&shard->free_lock);
     }
+
+    chimera_rcu_pool_destroy(&cache->pool);
 
     free(cache->shards);
     free(cache);
 } /* chimera_vfs_rpl_cache_destroy */
-
-static inline void
-chimera_vfs_rpl_cache_free_entry_rcu(struct rcu_head *head)
-{
-    struct chimera_vfs_rpl_cache_entry *entry =
-        container_of(head, struct chimera_vfs_rpl_cache_entry, rcu);
-    struct chimera_vfs_rpl_cache_shard *shard = entry->shard;
-
-    pthread_mutex_lock(&shard->free_lock);
-    LL_PREPEND(shard->free_entries, entry);
-    pthread_mutex_unlock(&shard->free_lock);
-} /* chimera_vfs_rpl_cache_free_entry_rcu */
 
 /*
  * Forward lookup: child_fh -> (parent_fh, name)
@@ -292,6 +267,7 @@ chimera_vfs_rpl_cache_rev_insert(
  */
 static inline void
 chimera_vfs_rpl_cache_insert(
+    struct chimera_vfs_thread    *thread,
     struct chimera_vfs_rpl_cache *cache,
     uint64_t                      child_fh_hash,
     const void                   *child_fh,
@@ -312,24 +288,15 @@ chimera_vfs_rpl_cache_insert(
 
     shard = &cache->shards[fwd_key & cache->num_shards_mask];
 
-    /* Allocate entry from free list */
-    pthread_mutex_lock(&shard->free_lock);
-    entry = shard->free_entries;
-    if (entry) {
-        LL_DELETE(shard->free_entries, entry);
-    }
-    pthread_mutex_unlock(&shard->free_lock);
-
-    if (!entry) {
-        entry = calloc(1, sizeof(*entry));
-    }
+    /* Recycle an entry from the pool (thread magazine -> depot -> calloc) */
+    entry = (struct chimera_vfs_rpl_cache_entry *)
+        chimera_rcu_pool_alloc(&thread->rcu_magazines[CHIMERA_RCU_POOL_RPL], &cache->pool);
 
     entry->fwd_key       = fwd_key;
     entry->rev_key       = rev_key;
     entry->child_fh_len  = child_fh_len;
     entry->parent_fh_len = parent_fh_len;
     entry->name_len      = name_len;
-    entry->shard         = shard;
     entry->score         = 0;
 
     entry->expiration = now + chimera_vfs_ns_to_ticks((uint64_t) cache->ttl * 1000000000ULL);
@@ -400,7 +367,7 @@ chimera_vfs_rpl_cache_insert(
     urcu_memb_read_unlock();
 
     if (best_entry) {
-        call_rcu(&best_entry->rcu, chimera_vfs_rpl_cache_free_entry_rcu);
+        call_rcu(&best_entry->rnode.rcu, chimera_rcu_pool_retire);
     }
 } /* chimera_vfs_rpl_cache_insert */
 
@@ -485,6 +452,6 @@ chimera_vfs_rpl_cache_invalidate(
     urcu_memb_read_unlock();
 
     if (removed_entry) {
-        call_rcu(&removed_entry->rcu, chimera_vfs_rpl_cache_free_entry_rcu);
+        call_rcu(&removed_entry->rnode.rcu, chimera_rcu_pool_retire);
     }
 } /* chimera_vfs_rpl_cache_invalidate */

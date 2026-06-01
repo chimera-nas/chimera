@@ -20,6 +20,7 @@
 #include "optgroup.h"
 
 #include "common/macros.h"
+#include "common/common_config.h"
 
 
 #define chimera_fio_debug(...) chimera_debug("fio", __FILE__, __LINE__, __VA_ARGS__)
@@ -40,6 +41,7 @@ int                           ChimeraNumClients   = 0;
 struct prometheus_metrics    *ChimeraMetrics      = NULL;
 struct chimera_client_config *ChimeraClientConfig = NULL;
 struct chimera_client        *ChimeraClient       = NULL;
+char                         *ChimeraMetricsFile  = NULL;
 
 struct chimera_fio_thread {
     int                              event_head;
@@ -55,8 +57,11 @@ struct chimera_fio_thread {
 };
 
 struct chimera_options {
-    void *pad;
-    char *config;
+    void              *pad;
+    char              *config;
+    char              *logfile;
+    int                debug;
+    unsigned long long buffer_size;
 };
 
 static struct fio_option options[] = {
@@ -66,6 +71,36 @@ static struct fio_option options[] = {
         .type     = FIO_OPT_STR_STORE,
         .off1     = offsetof(struct chimera_options, config),
         .help     = "Set path to chimera config file",
+        .category = FIO_OPT_C_ENGINE,
+        .group    = FIO_OPT_G_INVALID,
+    },
+    {
+        .name  = "chimera_log",
+        .lname = "Chimera Log Filename",
+        .type  = FIO_OPT_STR_STORE,
+        .off1  = offsetof(struct chimera_options, logfile),
+        .help  =
+            "Direct chimera and evpl log output to this file (truncated at start of run); if unset, chimera logging is disabled",
+        .category = FIO_OPT_C_ENGINE,
+        .group    = FIO_OPT_G_INVALID,
+    },
+    {
+        .name     = "chimera_debug",
+        .lname    = "Chimera Debug Logging",
+        .type     = FIO_OPT_BOOL,
+        .off1     = offsetof(struct chimera_options, debug),
+        .help     = "Enable debug-level chimera logging (same as the daemon's -d)",
+        .def      = "0",
+        .category = FIO_OPT_C_ENGINE,
+        .group    = FIO_OPT_G_INVALID,
+    },
+    {
+        .name     = "chimera_buffer_size",
+        .lname    = "Chimera evpl buffer size",
+        .type     = FIO_OPT_STR_VAL,
+        .off1     = offsetof(struct chimera_options, buffer_size),
+        .help     = "Override the libevpl buffer size in bytes; 0 (default) auto-sizes to the largest job's iodepth*bs",
+        .def      = "0",
         .category = FIO_OPT_C_ENGINE,
         .group    = FIO_OPT_G_INVALID,
     },
@@ -175,8 +210,20 @@ fio_chimera_iomem_alloc(
     size_t              total_mem)
 {
     struct chimera_fio_thread *chimera_thread = td->io_ops_data;
+    int                        niov;
 
-    evpl_iovec_alloc(chimera_thread->evpl, total_mem, 4096, 1, 0, &chimera_thread->iov);
+    /* The whole I/O pool must fit in one contiguous registered evpl buffer.
+     * buffer_size was sized for the largest job at init, so this should always
+     * succeed; fail loudly rather than hand fio a garbage orig_buffer if it
+     * ever doesn't (e.g. a pool larger than the configured buffer). */
+    niov = evpl_iovec_alloc(chimera_thread->evpl, total_mem, 4096, 1, 0, &chimera_thread->iov);
+
+    if (niov != 1) {
+        chimera_fio_fatal(
+            "I/O buffer pool of %zu bytes exceeds the libevpl buffer size; "
+            "raise chimera_buffer_size", total_mem);
+        return 1;
+    }
 
     td->orig_buffer = evpl_iovec_data(&chimera_thread->iov);
 
@@ -203,8 +250,17 @@ fio_chimera_atexit(void)
 
     if (ChimeraNumClients == 0) {
 
+        /* Persist a final metrics scrape (common.metrics_file) before the
+         * registry is destroyed; fio runs are often too short to scrape live. */
+        if (ChimeraMetricsFile) {
+            chimera_metrics_dump_file(ChimeraMetrics, ChimeraMetricsFile);
+        }
+
         chimera_destroy(ChimeraClient);
         prometheus_metrics_destroy(ChimeraMetrics);
+
+        free(ChimeraMetricsFile);
+        ChimeraMetricsFile = NULL;
     }
 
     pthread_mutex_unlock(&ChimeraClientMutex);
@@ -247,9 +303,25 @@ fio_chimera_init(struct thread_data *td)
 
     if (ChimeraClient == NULL) {
 
+        if (o->logfile) {
+            FILE *logfp = fopen(o->logfile, "w");
+
+            if (!logfp) {
+                fprintf(stderr, "Failed to open chimera log file %s\n", o->logfile);
+                pthread_mutex_unlock(&ChimeraClientMutex);
+                return EINVAL;
+            }
+
+            chimera_log_set_file(logfp);
+        } else {
+            chimera_log_disable();
+        }
+
         chimera_log_init();
 
-        //ChimeraLogLevel = CHIMERA_LOG_DEBUG;
+        if (o->debug) {
+            ChimeraLogLevel = CHIMERA_LOG_DEBUG;
+        }
 
         evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 
@@ -301,8 +373,74 @@ fio_chimera_init(struct thread_data *td)
             }
         }
 
+        /* Honor the shared common tcp_flavor for outbound client connections. */
+        chimera_client_config_set_tcp_flavor(ChimeraClientConfig,
+                                             chimera_common_tcp_flavor(config));
+
         struct chimera_vfs_cred root_cred;
         chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+
+        /* Initialize evpl before the client (and the first evpl_create below),
+         * applying the shared "common" config (huge pages / slab size) from the
+         * loaded config.  `config` may be NULL when no config file was given. */
+        {
+            struct evpl_global_config *evpl_config = evpl_global_config_init();
+            uint64_t                   buffer_size = 2 * 1024 * 1024; /* evpl default */
+            uint64_t                   page        = (uint64_t) sysconf(_SC_PAGESIZE);
+            uint64_t                   slab_size;
+
+            chimera_apply_common_config(config, evpl_config);
+
+            /* The engine backs each fio thread's entire I/O buffer pool
+             * (iodepth * bs) with a SINGLE contiguous, RDMA-registered evpl
+             * iovec, so the evpl buffer must be at least as large as the
+             * biggest job's pool.  evpl_init() bakes the buffer size in and
+             * runs once for the whole process, so size it here for the largest
+             * job across all jobs (matches fio's own sizing in backend.c). */
+            for_each_td(t)
+            {
+                struct chimera_options *to   = t->eo;
+                uint64_t                pool = (uint64_t) t->o.iodepth * td_max_bs(t);
+
+                if (t->o.odirect || t->o.mem_align) {
+                    pool += page + t->o.mem_align;
+                }
+                if (pool > buffer_size) {
+                    buffer_size = pool;
+                }
+                if (to && to->buffer_size > buffer_size) {
+                    buffer_size = to->buffer_size;
+                }
+            }
+            end_for_each();
+
+            /* Round up to a 2 MiB multiple. */
+            buffer_size = (buffer_size + (2 * 1024 * 1024 - 1)) & ~((uint64_t) (2 * 1024 * 1024) - 1);
+
+            evpl_global_config_set_buffer_size(evpl_config, buffer_size);
+
+            /* Keep several buffers per slab (buffers_per_slab = slab / buffer). */
+            slab_size = 4 * buffer_size;
+            if (slab_size > (uint64_t) 1024 * 1024 * 1024) {
+                evpl_global_config_set_slab_size(evpl_config, slab_size);
+            }
+
+            chimera_fio_info("evpl buffer size %lu bytes (largest fio I/O pool)",
+                             (unsigned long) buffer_size);
+
+            evpl_init(evpl_config);
+        }
+
+        /* Stash the shutdown metrics-dump path while the config is still
+         * loaded; it is consumed in fio_chimera_atexit() after config is freed. */
+        {
+            const char *metrics_file = chimera_common_metrics_file(config);
+
+            if (metrics_file) {
+                ChimeraMetricsFile = strdup(metrics_file);
+            }
+        }
+
         ChimeraClient = chimera_client_init(ChimeraClientConfig, &root_cred, ChimeraMetrics);
 
         evpl          = evpl_create(NULL);
@@ -313,6 +451,8 @@ fio_chimera_init(struct thread_data *td)
             mounts = json_object_get(config, "mounts");
 
             if (mounts) {
+
+                mount_ctx.total = json_array_size(mounts);
 
                 json_array_foreach(mounts, i, mount)
                 {
@@ -325,14 +465,19 @@ fio_chimera_init(struct thread_data *td)
                         return EINVAL;
                     }
 
-                    fprintf(stderr, "Mounting %s:%s at %s\n", json_string_value(module),
-                            json_string_value(module_path), json_string_value(mount_point));
+                    /* Optional comma-separated mount options (e.g. "rdma", "vers=4", "port=20049"). */
+                    json_t     *mount_opts = json_object_get(mount, "options");
+                    const char *opts_str   = mount_opts ? json_string_value(mount_opts) : NULL;
+
+                    fprintf(stderr, "Mounting %s:%s at %s options=%s\n", json_string_value(module),
+                            json_string_value(module_path), json_string_value(mount_point),
+                            opts_str ? opts_str : "");
 
                     chimera_mount(client_thread,
                                   json_string_value(mount_point),
                                   json_string_value(module),
                                   json_string_value(module_path),
-                                  NULL,
+                                  opts_str,
                                   mount_callback,
                                   &mount_ctx);
                 }
@@ -392,37 +537,30 @@ static void
 fio_chimera_read_callback(
     struct chimera_client_thread *thread,
     enum chimera_vfs_error        status,
-    struct evpl_iovec            *iov,
-    int                           niov,
+    uint32_t                      count,
+    uint32_t                      eof,
     void                         *private_data)
 {
     struct io_u               *io_u           = private_data;
     struct thread_data        *td             = io_u->mmap_data;
     struct chimera_fio_thread *chimera_thread = td->io_ops_data;
-    uint32_t                   left, chunk, i;
-    void                      *p;
 
-    if (td->o.verify) {
-        left = io_u->xfer_buflen;
-        p    = io_u->xfer_buf;
-
-        for (i = 0; i < niov && left; i++) {
-
-            chunk = left < iov[i].length ? left : iov[i].length;
-            memcpy(p, iov[i].data, chunk);
-            p    += chunk;
-            left -= chunk;
-        }
-    }
-
-    for (i = 0; i < niov; i++) {
-        evpl_iovec_release(chimera_thread->evpl, &iov[i]);
+    /* The data has already landed directly in io_u->xfer_buf (chimera_read_into
+     * targeted it), so there is no copy here -- fio's verify reads it in place.
+     * Report what actually came back rather than blindly crediting the full
+     * request: a backend error fails the I/O, and a short read (e.g. past EOF)
+     * leaves a residual so fio only counts the bytes that were really moved. */
+    if (status != CHIMERA_VFS_OK) {
+        io_u->error = EIO;
+    } else {
+        io_u->error = 0;
+        io_u->resid = count < io_u->xfer_buflen ? io_u->xfer_buflen - count : 0;
     }
 
     fio_chimera_ring_enqueue(chimera_thread, io_u);
 
 
-} /* fio_chmera_io_callback */
+} /* fio_chimera_read_callback */
 
 
 static void
@@ -435,10 +573,12 @@ fio_chimera_write_callback(
     struct thread_data        *td             = io_u->mmap_data;
     struct chimera_fio_thread *chimera_thread = td->io_ops_data;
 
+    io_u->error = status != CHIMERA_VFS_OK ? EIO : 0;
+
     fio_chimera_ring_enqueue(chimera_thread, io_u);
 
 
-} /* fio_chmera_io_callback */
+} /* fio_chimera_write_callback */
 
 static enum fio_q_status
 fio_chimera_queue(
@@ -458,9 +598,21 @@ fio_chimera_queue(
 
     switch (io_u->ddir) {
         case DDIR_READ:
-            chimera_read(chimera_thread->client, fh, io_u->offset, io_u->xfer_buflen,
-                         fio_chimera_read_callback, io_u);
-            break;
+        {
+            unsigned int buf_offset = (unsigned int) ((char *) io_u->xfer_buf -
+                                                      (char *) evpl_iovec_data(&chimera_thread->iov));
+
+            /* Land the read directly in io_u's slice of our registered buffer.
+            * read_into borrows the iovec; the underlying buffer stays alive via
+            * chimera_thread->iov, so we can release this clone immediately. */
+            evpl_iovec_clone_segment(&iov, &chimera_thread->iov, buf_offset, io_u->xfer_buflen);
+
+            chimera_read_into(chimera_thread->client, fh, io_u->offset, io_u->xfer_buflen,
+                              &iov, 1, fio_chimera_read_callback, io_u);
+
+            evpl_iovec_release(chimera_thread->evpl, &iov);
+        }
+        break;
         case DDIR_WRITE:
         {
             unsigned int buf_offset = (unsigned int) ((char *) io_u->xfer_buf -
@@ -564,13 +716,41 @@ fio_chimera_cleanup(struct thread_data *td)
     pthread_mutex_unlock(&ChimeraClientMutex);
 } /* fio_chimera_file_cleanup */
 
+/*
+ * Report the file size from the job options so fio's setup is satisfied for a
+ * diskless engine and never falls back to laying the files out on the client's
+ * local filesystem.  The files themselves live in the chimera namespace and are
+ * created/written through the engine.
+ */
+static int
+fio_chimera_get_file_size(
+    struct thread_data *td,
+    struct fio_file    *f)
+{
+    unsigned long long size = td->o.file_size_low;
+
+    if (fio_file_size_known(f)) {
+        return 0;
+    }
+
+    if (!size && td->o.size && td->o.nr_files) {
+        size = td->o.size / td->o.nr_files;
+    }
+
+    f->real_file_size = size;
+    fio_file_set_size_known(f);
+
+    return 0;
+} /* fio_chimera_get_file_size */
+
 SYMBOL_EXPORT struct ioengine_ops ioengine =
 {
     .name               = "chimera",
     .version            = FIO_IOOPS_VERSION,
-    .flags              = 0,
+    .flags              = FIO_DISKLESSIO,
     .init               = fio_chimera_init,
     .post_init          = fio_chimera_post_init,
+    .get_file_size      = fio_chimera_get_file_size,
     .cleanup            = fio_chimera_cleanup,
     .iomem_alloc        = fio_chimera_iomem_alloc,
     .iomem_free         = fio_chimera_iomem_free,

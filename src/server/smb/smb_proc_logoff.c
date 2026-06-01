@@ -20,7 +20,10 @@ chimera_smb_logoff(struct chimera_smb_request *request)
 
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 
-    chimera_smb_session_release(thread, thread->shared, session_handle->session);
+    /* MS-SMB2 3.3.5.6: LOGOFF closes the session's non-durable opens but
+     * DISASSOCIATES (preserves) any durable/persistent handle so a later
+     * session on the same transport can durably reconnect it. */
+    chimera_smb_session_release(thread, thread->shared, session_handle->session, true);
 
     HASH_DELETE(hh, conn->session_handles, session_handle);
 

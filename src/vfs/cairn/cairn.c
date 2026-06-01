@@ -178,6 +178,7 @@ struct cairn_inode {
     struct timespec atime;
     struct timespec mtime;
     struct timespec ctime;
+    struct timespec btime;
 };
 
 struct cairn_inode_handle {
@@ -839,6 +840,75 @@ cairn_map_acl(
     attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
 } /* cairn_map_acl */
 
+/*
+ * Seed a freshly-created child's ACL, mirroring memfs_inherit_acl():
+ *   1. An explicit ACL supplied at create is stored as-is.
+ *   2. Otherwise inherit the parent's inheritable ACEs, if any.
+ *   3. Otherwise, for an SMB-originated create (windows_default), store a
+ *      Windows-style default DACL granting the owner full control while
+ *      leaving the POSIX mode intact (plain mode would deny e.g. FILE_EXECUTE
+ *      and WRITE_OWNER on a 0644 file).
+ *   4. Otherwise leave the child mode-derived (no stored ACL).
+ * The ACL is written into the current meta transaction, so the create's own
+ * attribute readback (cairn_map_acl) reflects it immediately.
+ */
+static void
+cairn_inherit_acl(
+    struct cairn_thread            *thread,
+    struct cairn_inode             *child,
+    uint64_t                        parent_inum,
+    const struct chimera_vfs_attrs *set_attr,
+    int                             windows_default)
+{
+    static __thread uint8_t pbuf[CAIRN_ACL_STRUCT_SCRATCH];
+    struct chimera_acl     *pacl   = (struct chimera_acl *) pbuf;
+    int                     is_dir = S_ISDIR(child->mode);
+    uint16_t                want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
+        (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
+
+    if ((set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) &&
+        set_attr->va_acl && set_attr->va_acl->num_aces) {
+        cairn_put_acl(thread, child->inum, set_attr->va_acl);
+        child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(set_attr->va_acl);
+        return;
+    }
+
+    if (cairn_load_acl(thread, parent_inum, pacl)) {
+        int has_inh = 0;
+
+        for (unsigned i = 0; i < pacl->num_aces; i++) {
+            if (pacl->aces[i].flags & want) {
+                has_inh = 1;
+                break;
+            }
+        }
+
+        if (has_inh) {
+            unsigned            cap = pacl->num_aces * 2;
+            struct chimera_acl *tmp = malloc(chimera_acl_size(cap));
+            int                 n   = chimera_acl_inherit(pacl, is_dir,
+                                                          child->mode & 07777, tmp, cap);
+
+            if (n > 0) {
+                cairn_put_acl(thread, child->inum, tmp);
+                child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(tmp);
+                free(tmp);
+                return;
+            }
+            free(tmp);
+        }
+    }
+
+    if (windows_default) {
+        uint8_t             buf[sizeof(struct chimera_acl) + 4 * sizeof(struct chimera_ace)];
+        struct chimera_acl *def = (struct chimera_acl *) buf;
+
+        if (chimera_acl_default_acl(child->mode & 07777, def, 4) > 0) {
+            cairn_put_acl(thread, child->inum, def);
+        }
+    }
+} /* cairn_inherit_acl */
+
 static inline void
 cairn_remove_directory_contents(
     struct cairn_thread *thread,
@@ -1147,6 +1217,7 @@ cairn_init(
         inode.atime = now;
         inode.mtime = now;
         inode.ctime = now;
+        inode.btime = now;
 
         super.fsid = chimera_rand64();
 
@@ -1627,6 +1698,13 @@ cairn_map_attrs(
         attr->va_rdev       = inode->rdev;
     }
 
+    /* Birth time (SMB create time) is tracked natively but lives outside
+     * MASK_STAT, so map it only when explicitly requested. */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+        attr->va_btime     = inode->btime;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
         attr->va_fsid      = shared->fsid;
@@ -1694,56 +1772,18 @@ cairn_apply_attrs(
         }
     }
 
-    inode->ctime = now;
-
-} /* cairn_apply_attrs */
-
-static bool
-cairn_cred_can_access(
-    const struct cairn_inode      *inode,
-    const struct chimera_vfs_cred *cred,
-    uint32_t                       user_bit,
-    uint32_t                       group_bit,
-    uint32_t                       other_bit)
-{
-    if (cred->uid == 0) {
-        return true;
-    }
-
-    if ((uint64_t) cred->uid == inode->uid) {
-        return !!(inode->mode & user_bit);
-    }
-
-    bool in_group = ((uint64_t) cred->gid == inode->gid);
-
-    for (uint32_t i = 0; !in_group && i < cred->ngids; i++) {
-        if ((uint64_t) cred->gids[i] == inode->gid) {
-            in_group = true;
+    if (set_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+        if (attr->va_btime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+            inode->btime = now;
+        } else {
+            inode->btime = attr->va_btime;
         }
     }
 
-    if (in_group) {
-        return !!(inode->mode & group_bit);
-    }
+    inode->ctime = now;
 
-    return !!(inode->mode & other_bit);
-} /* cairn_cred_can_access */
-
-static bool
-cairn_cred_can_read(
-    const struct cairn_inode      *inode,
-    const struct chimera_vfs_cred *cred)
-{
-    return cairn_cred_can_access(inode, cred, S_IRUSR, S_IRGRP, S_IROTH);
-} /* cairn_cred_can_read */
-
-static bool
-cairn_cred_can_write(
-    const struct cairn_inode      *inode,
-    const struct chimera_vfs_cred *cred)
-{
-    return cairn_cred_can_access(inode, cred, S_IWUSR, S_IWGRP, S_IWOTH);
-} /* cairn_cred_can_write */
+} /* cairn_apply_attrs */
 
 static void
 cairn_getattr(
@@ -1799,9 +1839,11 @@ cairn_setattr(
 
     if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
         !S_ISREG(inode->mode)) {
-        cairn_inode_handle_release(&ih);
+        /* `inode` points into the pinned RocksDB slice owned by `ih`, so read
+         * inode->mode before releasing the handle -- releasing frees the slice. */
         request->status = S_ISDIR(inode->mode) ?
             CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL;
+        cairn_inode_handle_release(&ih);
         request->complete(request);
         return;
     }
@@ -1819,7 +1861,19 @@ cairn_setattr(
         cairn_punch_hole(thread, shared, inode, new_size, old_size - new_size);
     }
 
+    /* cairn_apply_attrs() rewrites set_attr->va_set_mask down to the scalar
+     * bits it consumes (it drops the ACL bit), so capture the caller's original
+     * mask first -- the ACL-coherence block below keys off it. */
+    uint64_t orig_set_mask = request->setattr.set_attr->va_set_mask;
+
     cairn_apply_attrs(inode, request->setattr.set_attr);
+
+    /* Restore the caller's mask: on an optimistic-commit conflict cairn rolls
+     * back and re-dispatches this queued request, and the replay re-reads
+     * orig_set_mask from this field.  If it stayed scalar-only the ACL re-put
+     * would be skipped and the replayed transaction would drop the descriptor
+     * (an intermittent, load-dependent read-your-writes failure for SET-ACL). */
+    request->setattr.set_attr->va_set_mask = orig_set_mask;
 
     /* ACL coherence (mirrors memfs): an explicit ACL set is persisted and the
      * mode re-derived; a bare chmod regenerates the special-who ACEs of any
@@ -1827,7 +1881,7 @@ cairn_setattr(
     {
         struct chimera_vfs_attrs *sa = request->setattr.set_attr;
 
-        if (sa->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+        if (orig_set_mask & CHIMERA_VFS_ATTR_ACL) {
             if (sa->va_acl && sa->va_acl->num_aces) {
                 cairn_put_acl(thread, inode->inum, sa->va_acl);
                 inode->mode = (inode->mode & S_IFMT) |
@@ -1835,7 +1889,7 @@ cairn_setattr(
             } else {
                 cairn_remove_acl(thread, inode->inum);
             }
-        } else if (sa->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        } else if (orig_set_mask & CHIMERA_VFS_ATTR_MODE) {
             static __thread uint8_t old_buf[CAIRN_ACL_STRUCT_SCRATCH];
             static __thread uint8_t new_buf[CAIRN_ACL_STRUCT_SCRATCH];
             struct chimera_acl     *old_acl = (struct chimera_acl *) old_buf;
@@ -2167,10 +2221,16 @@ cairn_mkdir_at(
     inode.atime       = now;
     inode.mtime       = now;
     inode.ctime       = now;
+    inode.btime       = now;
 
     cairn_apply_attrs(&inode, request->mkdir_at.set_attr);
 
+    cairn_inherit_acl(thread, &inode, parent_inode->inum,
+                      request->mkdir_at.set_attr,
+                      request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
+
     cairn_map_attrs(shared, &request->mkdir_at.r_attr, &inode);
+    cairn_map_acl(thread, &request->mkdir_at.r_attr, &inode);
 
     dirent_value.inum     = inode.inum;
     dirent_value.name_len = request->mkdir_at.name_len;
@@ -2265,6 +2325,7 @@ cairn_mknod_at(
     inode.atime       = now;
     inode.mtime       = now;
     inode.ctime       = now;
+    inode.btime       = now;
 
     /* Set mode (including file type bits) and rdev from set_attr */
     if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
@@ -2576,6 +2637,7 @@ cairn_readdir(
         dirent_inode = dirent_ih.inode;
 
         cairn_map_attrs(shared, &attr, dirent_inode);
+        cairn_map_acl(thread, &attr, dirent_inode);
 
         cairn_inode_handle_release(&dirent_ih);
 
@@ -2724,9 +2786,14 @@ cairn_open_at(
         new_inode.atime      = now;
         new_inode.mtime      = now;
         new_inode.ctime      = now;
+        new_inode.btime      = now;
         new_inode.refcnt     = 1;
 
         cairn_apply_attrs(&new_inode, request->open_at.set_attr);
+
+        cairn_inherit_acl(thread, &new_inode, parent_inode->inum,
+                          request->open_at.set_attr,
+                          request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
 
         new_dirent_value.inum     = new_inode.inum;
         new_dirent_value.name_len = request->open_at.namelen;
@@ -2773,25 +2840,10 @@ cairn_open_at(
         return;
     }
 
-    if (!(flags & CHIMERA_VFS_OPEN_INFERRED)) {
-        bool allowed;
-
-        if (flags & CHIMERA_VFS_OPEN_READ_ONLY) {
-            allowed = cairn_cred_can_read(inode, request->cred);
-        } else {
-            allowed = cairn_cred_can_write(inode, request->cred);
-        }
-
-        if (!allowed) {
-            cairn_inode_handle_release(&parent_ih);
-            if (!is_new_inode) {
-                cairn_inode_handle_release(&child_ih);
-            }
-            request->status = CHIMERA_VFS_EACCES;
-            request->complete(request);
-            return;
-        }
-    }
+    /* No coarse mode-based open access check here: it is ACL-blind (it would
+     * deny e.g. a Windows owner-full-control DACL on a 0644 file) and
+     * mishandles SMB control-only opens.  Access is enforced by the ACL-aware
+     * VFS gate and the protocol create-time check, as on memfs/diskfs. */
 
     if (!is_new_inode &&
         (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
@@ -2815,6 +2867,7 @@ cairn_open_at(
 
     cairn_map_attrs(shared, &request->open_at.r_dir_post_attr, parent_inode);
     cairn_map_attrs(shared, &request->open_at.r_attr, inode);
+    cairn_map_acl(thread, &request->open_at.r_attr, inode);
 
     cairn_put_inode(thread, parent_inode);
     cairn_put_inode(thread, inode);
@@ -2926,6 +2979,12 @@ cairn_read(
     }
 
     inode = ih.inode;
+
+    /* relatime: only stamp atime when the file changed since last access or the
+     * recorded atime is a day stale, so steady-state reads neither rewrite the
+     * inode to RocksDB nor churn the VFS attr cache. */
+    need_atime = need_atime &&
+        chimera_vfs_relatime_needs_update(&inode->atime, &inode->mtime, &inode->ctime, &now);
 
     if (offset >= inode->size) {
         cairn_map_attrs(shared, &request->read.r_attr, inode);
@@ -3580,6 +3639,7 @@ cairn_symlink_at(
     new_inode.atime      = now;
     new_inode.mtime      = now;
     new_inode.ctime      = now;
+    new_inode.btime      = now;
 
     dirent_value.inum     = new_inode.inum;
     dirent_value.name_len = request->symlink_at.namelen;

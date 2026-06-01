@@ -31,12 +31,6 @@ struct chimera_server_config_smb_nic {
     uint8_t  rdma;
 };
 
-enum chimera_tcp_flavor {
-    CHIMERA_TCP_FLAVOR_PLAIN    = 0,
-    CHIMERA_TCP_FLAVOR_IO_URING = 1,
-    CHIMERA_TCP_FLAVOR_XLIO     = 2,
-};
-
 
 struct chimera_server_config *
 chimera_server_config_init(
@@ -87,6 +81,42 @@ chimera_server_config_set_smb_persistent_handles(
 
 int
 chimera_server_config_get_smb_persistent_handles(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_named_streams(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_smb_named_streams(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_signing_required(
+    struct chimera_server_config *config,
+    int                           required);
+
+int
+chimera_server_config_get_smb_signing_required(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_encryption(
+    struct chimera_server_config *config,
+    int                           mode);
+
+int
+chimera_server_config_get_smb_encryption(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_notify_disabled(
+    struct chimera_server_config *config,
+    int                           disabled);
+
+int
+chimera_server_config_get_smb_notify_disabled(
     const struct chimera_server_config *config);
 
 void

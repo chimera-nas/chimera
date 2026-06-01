@@ -320,6 +320,7 @@ chimera_smb_notify_send_interim(struct chimera_smb_notify_request *nr)
     if (nr->signed_session) {
         chimera_smb_sign_message(nr->thread->signing_ctx,
                                  nr->conn->dialect,
+                                 nr->conn->negotiated.signing_alg,
                                  nr->signing_key,
                                  buf + 4,
                                  smb2_len);
@@ -375,20 +376,35 @@ chimera_smb_notify_callback(
 /* ----------------------------------------------------------------
  * Build and send an async CHANGE_NOTIFY response with events.
  * Must be called on the SMB thread that owns the connection.
+ *
+ * cleanup == 0: normal event delivery.  A spurious wakeup (no matching
+ *   events drained) leaves the request parked for the next event and
+ *   returns without sending.  Status is SUCCESS (NOTIFY_ENUM_DIR on
+ *   overflow).
+ *
+ * cleanup == 1: the watched open is being torn down (explicit CLOSE,
+ *   TREE_DISCONNECT, LOGOFF).  The request is ALWAYS completed — never
+ *   left parked.  Any buffered events are still drained and returned, but
+ *   the status is STATUS_NOTIFY_CLEANUP (MS-SMB2 3.3.4.4) so the client
+ *   learns the watch is gone.  Windows returns the buffered records
+ *   alongside CLEANUP (smb2.notify.dir expects num_changes > 0 with
+ *   NOTIFY_CLEANUP), so we serialize them exactly as the SUCCESS path does.
  * ---------------------------------------------------------------- */
-void
-chimera_smb_notify_send_response(struct chimera_smb_notify_request *nr)
+static void
+chimera_smb_notify_do_send_response(
+    struct chimera_smb_notify_request *nr,
+    struct chimera_smb_notify_state   *state,
+    int                                cleanup)
 {
-    struct chimera_smb_open_file    *open_file = nr->open_file;
-    struct chimera_smb_notify_state *state     = open_file->notify_state;
-    struct chimera_vfs_notify_event  events[16];
-    int                              overflowed = 0;
-    int                              nevents;
-    struct evpl_iovec                iov;
-    uint8_t                         *buf, *p;
-    int                              total_alloc;
-    int                              notify_data_len;
-    uint32_t                         status;
+    struct chimera_vfs_notify_event events[16];
+    int                             overflowed = 0;
+    int                             deleted    = 0;
+    int                             nevents;
+    struct evpl_iovec               iov;
+    uint8_t                        *buf, *p;
+    int                             total_alloc;
+    int                             notify_data_len;
+    uint32_t                        status;
 
     if (!state || !state->watch) {
         /* close already tore down the state behind us; nr was reaped
@@ -412,9 +428,16 @@ chimera_smb_notify_send_response(struct chimera_smb_notify_request *nr)
 
     nevents = chimera_vfs_notify_drain(state->watch, events, 16, &overflowed);
 
-    if (nevents == 0 && !overflowed) {
+    /* The watched directory may have been removed out from under this
+     * request (delete-on-close on another handle).  That terminates the
+     * notify with STATUS_DELETE_PENDING and, like the cleanup path, must
+     * complete the request rather than leave it parked. */
+    deleted = chimera_vfs_notify_watch_take_deleted(state->watch);
+
+    if (nevents == 0 && !overflowed && !cleanup && !deleted) {
         /* Spurious wakeup — leave nr parked so the next event re-arms
-         * the ready queue via the callback.  Just clear the queued flag. */
+         * the ready queue via the callback.  Just clear the queued flag.
+         * On the cleanup/deleted paths we must complete the request. */
         nr->on_ready_queue = 0;
         pthread_mutex_unlock(&state->lock);
         return;
@@ -440,19 +463,43 @@ chimera_smb_notify_send_response(struct chimera_smb_notify_request *nr)
         nevents = j;
     }
 
-    if (nevents == 0 && !overflowed) {
+    if (nevents == 0 && !overflowed && !cleanup && !deleted) {
         /* All drained events were filtered out — treat as a spurious
          * wakeup.  Leave state->pending == nr so the next matching
          * event (which by then will satisfy emit's enqueue-time filter,
-         * since watch_update narrowed the mask) rewakes us. */
+         * since watch_update narrowed the mask) rewakes us.  On the
+         * cleanup/deleted paths we must still complete the request. */
         nr->on_ready_queue = 0;
         pthread_mutex_unlock(&state->lock);
         return;
     }
 
-    /* Claim the request before sending the response. */
-    state->pending     = NULL;
-    nr->on_ready_queue = 0;
+    /* Claim the request before sending the response.  If a VFS callback
+     * queued nr on the thread ready list (the cleanup path can reach here
+     * with on_ready_queue still set, since it is not entered from the
+     * doorbell), pluck it out so the doorbell handler never dispatches a
+     * freed nr.  When we ARE called from the doorbell, nr has already been
+     * removed from thread->notify_ready and the search is a harmless
+     * no-op.  state->lock (outer) -> notify_ready_lock (inner) matches the
+     * order taken by chimera_smb_notify_callback. */
+    state->pending = NULL;
+    if (nr->on_ready_queue) {
+        struct chimera_server_smb_thread   *thread = nr->thread;
+        struct chimera_smb_notify_request **pp;
+
+        pthread_mutex_lock(&thread->notify_ready_lock);
+        pp = &thread->notify_ready;
+        while (*pp) {
+            if (*pp == nr) {
+                *pp            = nr->ready_next;
+                nr->ready_next = NULL;
+                break;
+            }
+            pp = &(*pp)->ready_next;
+        }
+        pthread_mutex_unlock(&thread->notify_ready_lock);
+        nr->on_ready_queue = 0;
+    }
 
     pthread_mutex_unlock(&state->lock);
 
@@ -494,7 +541,9 @@ chimera_smb_notify_send_response(struct chimera_smb_notify_request *nr)
     /* Serialize FILE_NOTIFY_INFORMATION records */
     uint8_t *data_start = p;
 
-    if (overflowed) {
+    /* A deleted watch (or an overflow) returns no records — the client
+     * learns the outcome from the status code alone. */
+    if (overflowed || deleted) {
         nevents = 0;
     }
 
@@ -544,7 +593,17 @@ chimera_smb_notify_send_response(struct chimera_smb_notify_request *nr)
      * with no notify data so the client knows to rescan the directory.
      * Returning STATUS_SUCCESS with zero records would be ambiguous —
      * some clients interpret that as "no events". */
-    status = overflowed ? SMB2_STATUS_NOTIFY_ENUM_DIR : SMB2_STATUS_SUCCESS;
+    /* DELETE_PENDING (watched object removed) takes precedence over the
+     * overflow/cleanup/success classification. */
+    if (deleted) {
+        status = SMB2_STATUS_DELETE_PENDING;
+    } else if (overflowed) {
+        status = SMB2_STATUS_NOTIFY_ENUM_DIR;
+    } else if (cleanup) {
+        status = SMB2_STATUS_NOTIFY_CLEANUP;
+    } else {
+        status = SMB2_STATUS_SUCCESS;
+    }
     chimera_smb_notify_build_header(buf, nr, status);
 
     /* Fill in reply body */
@@ -565,6 +624,7 @@ chimera_smb_notify_send_response(struct chimera_smb_notify_request *nr)
     if (nr->signed_session) {
         chimera_smb_sign_message(nr->thread->signing_ctx,
                                  nr->conn->dialect,
+                                 nr->conn->negotiated.signing_alg,
                                  nr->signing_key,
                                  buf + 4,
                                  smb2_len);
@@ -576,7 +636,30 @@ chimera_smb_notify_send_response(struct chimera_smb_notify_request *nr)
 
     chimera_smb_notify_unlink(nr);
     chimera_smb_notify_request_free(nr);
+} /* chimera_smb_notify_do_send_response */
+
+void
+chimera_smb_notify_send_response(struct chimera_smb_notify_request *nr)
+{
+    /* Doorbell path: the watch state is still attached to the open file. */
+    chimera_smb_notify_do_send_response(nr, nr->open_file->notify_state, 0);
 } /* chimera_smb_notify_send_response */
+
+/*
+ * Complete a parked CHANGE_NOTIFY because its watched open is being torn
+ * down (CLOSE / TREE_DISCONNECT / LOGOFF).  Sends STATUS_NOTIFY_CLEANUP
+ * with any buffered events and frees the request.  `state` is passed
+ * explicitly because the teardown caller may have already detached it from
+ * open_file->notify_state (see chimera_smb_tree_free) to preserve the
+ * free-list invariant that a recycled open_file has notify_state == NULL.
+ */
+void
+chimera_smb_notify_complete_cleanup(
+    struct chimera_smb_notify_request *nr,
+    struct chimera_smb_notify_state   *state)
+{
+    chimera_smb_notify_do_send_response(nr, state, 1);
+} /* chimera_smb_notify_complete_cleanup */
 
 /* ----------------------------------------------------------------
  * Reap a notify request from any state it may be in:
@@ -673,6 +756,7 @@ chimera_smb_notify_cancel(struct chimera_smb_notify_request *nr)
     if (nr->signed_session) {
         chimera_smb_sign_message(nr->thread->signing_ctx,
                                  nr->conn->dialect,
+                                 nr->conn->negotiated.signing_alg,
                                  nr->signing_key,
                                  buf + 4,
                                  smb2_len);
@@ -730,18 +814,23 @@ chimera_smb_notify_close(
         return;
     }
 
-    /* Take a non-owning peek at the outstanding nr — chimera_smb_notify_cancel
-     * does the actual claim under state->lock, which also extracts nr from
+    /* Take a non-owning peek at the outstanding nr — complete_cleanup does
+     * the actual claim under state->lock, which also extracts nr from
      * thread->notify_ready if a callback already queued it.  This is the
-     * key fix for the "ready-queued notify lost on close" race: cancel is
-     * the only path that can pluck a queued-but-not-yet-dispatched request
-     * out of the ready queue. */
+     * key fix for the "ready-queued notify lost on close" race: the
+     * completion path is the only one that can pluck a queued-but-not-yet-
+     * dispatched request out of the ready queue.
+     *
+     * Per MS-SMB2 3.3.4.4, a pending CHANGE_NOTIFY whose handle is closed
+     * (or whose tree/session is torn down) completes with
+     * STATUS_NOTIFY_CLEANUP, carrying any buffered records — NOT
+     * STATUS_CANCELLED, which is reserved for an explicit SMB2 CANCEL. */
     pthread_mutex_lock(&state->lock);
     nr = state->pending;
     pthread_mutex_unlock(&state->lock);
 
     if (nr) {
-        chimera_smb_notify_cancel(nr);
+        chimera_smb_notify_complete_cleanup(nr, state);
     }
 
     if (state->watch) {

@@ -72,6 +72,11 @@ struct chimera_smb_notify_state {
     pthread_mutex_t                    lock;
     struct chimera_vfs_notify_watch   *watch;
     struct chimera_smb_notify_request *pending;  /* parked request, or NULL */
+    /* Transient single-threaded linkage used only by tree/session teardown
+     * (chimera_smb_tree_free) to collect detached states and tear them down
+     * after the open_files bucket lock is released — chimera_smb_notify_close
+     * re-takes that lock via the parked request's open_file release. */
+    struct chimera_smb_notify_state   *gc_next;
 };
 
 /*
@@ -131,6 +136,18 @@ chimera_smb_notify_cancel(
 void
 chimera_smb_notify_drop(
     struct chimera_smb_notify_request *nr);
+
+/*
+ * Complete a parked CHANGE_NOTIFY because its watched open is being torn
+ * down (CLOSE / TREE_DISCONNECT / LOGOFF).  Sends STATUS_NOTIFY_CLEANUP
+ * with any buffered events and frees the request.  Use this instead of
+ * chimera_smb_notify_cancel (which is reserved for an explicit SMB2
+ * CANCEL and returns STATUS_CANCELLED).
+ */
+void
+chimera_smb_notify_complete_cleanup(
+    struct chimera_smb_notify_request *nr,
+    struct chimera_smb_notify_state   *state);
 
 /*
  * Clean up notify state for an open file being closed.

@@ -212,6 +212,48 @@ chimera_rest_notify(
     free(ctx);
 } /* chimera_rest_notify */
 
+void
+chimera_rest_send_json(
+    struct evpl              *evpl,
+    struct evpl_http_request *request,
+    int                       status,
+    json_t                   *obj)
+{
+    char             *json_str;
+    struct evpl_iovec iov;
+    int               len;
+
+    json_str = json_dumps(obj, JSON_COMPACT);
+    json_decref(obj);
+
+    len = strlen(json_str);
+    evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
+    memcpy(evpl_iovec_data(&iov), json_str, len);
+    evpl_iovec_set_length(&iov, len);
+    free(json_str);
+
+    evpl_http_request_add_header(request, "Content-Type", "application/json");
+    evpl_http_request_add_datav(request, &iov, 1);
+    evpl_http_server_set_response_length(request, len);
+    evpl_http_server_dispatch_default(request, status);
+} /* chimera_rest_send_json */
+
+void
+chimera_rest_send_error(
+    struct evpl              *evpl,
+    struct evpl_http_request *request,
+    int                       status,
+    const char               *error,
+    const char               *message)
+{
+    json_t *obj = json_object();
+
+    json_object_set_new(obj, "error", json_string(error));
+    json_object_set_new(obj, "message", json_string(message));
+
+    chimera_rest_send_json(evpl, request, status, obj);
+} /* chimera_rest_send_error */
+
 static void
 chimera_rest_send_json_response(
     struct evpl              *evpl,

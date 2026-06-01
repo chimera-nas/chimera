@@ -17,11 +17,11 @@ chimera_vfs_getattr_complete(struct chimera_vfs_request *request)
     chimera_vfs_getattr_callback_t callback   = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(attr_cache,
-                                      request->getattr.handle->fh_hash,
-                                      request->getattr.handle->fh,
-                                      request->getattr.handle->fh_len,
-                                      &request->getattr.r_attr);
+        chimera_vfs_attr_cache_refresh(thread, attr_cache,
+                                       request->getattr.handle->fh_hash,
+                                       request->getattr.handle->fh,
+                                       request->getattr.handle->fh_len,
+                                       &request->getattr.r_attr);
     }
 
     chimera_vfs_complete(request);

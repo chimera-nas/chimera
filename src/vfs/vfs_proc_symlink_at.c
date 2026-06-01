@@ -23,7 +23,7 @@ chimera_vfs_symlink_at_complete(struct chimera_vfs_request *request)
 
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_name_cache_insert(name_cache,
+        chimera_vfs_name_cache_insert(thread, name_cache,
                                       request->fh_hash,
                                       request->fh,
                                       request->fh_len,
@@ -33,13 +33,13 @@ chimera_vfs_symlink_at_complete(struct chimera_vfs_request *request)
                                       request->symlink_at.r_attr.va_fh,
                                       request->symlink_at.r_attr.va_fh_len);
 
-        chimera_vfs_attr_cache_insert(attr_cache,
+        chimera_vfs_attr_cache_insert(thread, attr_cache,
                                       request->fh_hash,
                                       request->fh,
                                       request->fh_len,
                                       &request->symlink_at.r_dir_post_attr);
 
-        chimera_vfs_attr_cache_insert(attr_cache,
+        chimera_vfs_attr_cache_insert(thread, attr_cache,
                                       chimera_vfs_hash(request->symlink_at.r_attr.va_fh, request->symlink_at.r_attr.
                                                        va_fh_len),
                                       request->symlink_at.r_attr.va_fh,

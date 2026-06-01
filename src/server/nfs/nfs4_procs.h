@@ -276,6 +276,17 @@ chimera_nfs4_open(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop);
 
+/*
+ * Resume an OPEN that parked on a 4.0 CB_NULL probe (see
+ * NFS4_CB_GRANT_DEFER in nfs4_callback.h).  Called by
+ * nfs4_cb_null_complete on the channel's owner thread, once cb_state has
+ * been written to UP or DOWN.  Re-runs the delegation grant decision and
+ * completes the OPEN.
+ */
+void
+chimera_nfs4_open_resume_after_probe(
+    struct nfs_request *req);
+
 void
 chimera_nfs4_create(
     struct chimera_server_nfs_thread *thread,

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -76,7 +76,23 @@ chimera_nfs3_read(
                                request->thread->vfs->machine_name,
                                request->thread->vfs->machine_name_len);
 
+    /* read_into over RDMA: have the server RDMA-write the reply data straight
+     * into the caller's destination buffer (the RPC write chunk) instead of an
+     * internally allocated one, and tell the VFS core the data landed in dest so
+     * it skips the copy.  Single-iovec dest only; otherwise fall back to copy
+     * (write_chunk_iov NULL -> libevpl allocates the chunk). */
+    struct evpl_iovec *write_chunk_iov  = NULL;
+    int                write_chunk_niov = 0;
+
+    if (server_thread->nfs_conn->rdma && request->read.dest_provided &&
+        request->read.dest_niov == 1) {
+        write_chunk_iov              = request->read.dest_iov;
+        write_chunk_niov             = request->read.dest_niov;
+        request->read.landed_in_dest = 1;
+    }
+
     shared->nfs_v3.send_call_NFSPROC3_READ(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
-                                           &args, 0, request->read.length, 0, chimera_nfs3_read_callback, request);
+                                           &args, 0, request->read.length, write_chunk_iov, write_chunk_niov, 0,
+                                           chimera_nfs3_read_callback, request);
 } /* chimera_nfs3_read */
 

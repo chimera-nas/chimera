@@ -2,6 +2,15 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
+# Give liburcu the inlined read-side primitives (rcu_read_lock/unlock,
+# rcu_dereference): without _LGPL_SOURCE liburcu links the out-of-line
+# cross-library functions, adding a PLT call + barrier per RCU op on the hot
+# paths.  Applies to this directory and all subdirectories (the VFS core, the
+# RCU caches, and the backend modules under it -- every urcu user lives here or
+# under src/server).  Deliberately NOT set for src/fio (the GPL fio plugin,
+# which does not use urcu directly).  chimera is LGPL-2.1.
+add_compile_definitions(_LGPL_SOURCE)
+
 add_library(chimera_vfs SHARED vfs.c vfs_lsan.c
             vfs_acl.c vfs_acl_serialize.c vfs_access.c vfs_idmap.c vfs_identity.c
             vfs_proc_mount.c vfs_proc_umount.c
@@ -23,6 +32,8 @@ add_library(chimera_vfs SHARED vfs.c vfs_lsan.c
             vfs_proc_getparent.c vfs_notify.c vfs_state.c vfs_dump.c
             vfs_proc_get_xattr.c vfs_proc_set_xattr.c
             vfs_proc_list_xattrs.c vfs_proc_remove_xattr.c
+            vfs_proc_open_stream.c vfs_proc_list_streams.c
+            vfs_proc_remove_stream.c
             vfs_pnfs.c vfs_proc_get_layout.c)
 
 target_compile_definitions(chimera_vfs PRIVATE

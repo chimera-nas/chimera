@@ -94,7 +94,7 @@ chimera_nfs3_rename_do_rename(
 
     ctx->shared->nfs_v3.send_call_NFSPROC3_RENAME(&ctx->shared->nfs_v3.rpc2, ctx->thread->evpl,
                                                   server_thread->nfs_conn, &rpc2_cred, &args,
-                                                  0, 0, 0,
+                                                  0, 0, NULL, 0, 0,
                                                   chimera_nfs3_rename_callback, request);
 } /* chimera_nfs3_rename_do_rename */
 
@@ -164,7 +164,7 @@ chimera_nfs3_rename_do_silly_link(
 
     ctx->shared->nfs_v3.send_call_NFSPROC3_LINK(&ctx->shared->nfs_v3.rpc2, ctx->thread->evpl,
                                                 server_thread->nfs_conn, &rpc2_cred, &args,
-                                                0, 0, 0,
+                                                0, 0, NULL, 0, 0,
                                                 chimera_nfs3_rename_link_callback, request);
 } /* chimera_nfs3_rename_do_silly_link */
 

@@ -26,6 +26,7 @@
 #include "smb_ntlm.h"
 #include "smb_gssapi.h"
 #include "smb_sharemode.h"
+#include "smb_notify.h"
 #include "vfs/vfs_acl.h"
 #include "vfs/vfs_idmap.h"
 #include "vfs/vfs_release.h"
@@ -117,6 +118,19 @@ struct chimera_smb_config {
     int                            num_nic_info;
     int                            soft_fail_bad_req;
     int                            persistent_handles;
+    int                            named_streams;
+    /* When set, the server advertises signing as mandatory
+     * (SMB2_SIGNING_REQUIRED) in NEGOTIATE and FSCTL_VALIDATE_NEGOTIATE_INFO,
+     * so conforming clients sign every request. */
+    int                            signing_required;
+    /* SMB3 transport encryption policy: 0 = off (no encryption advertised),
+     * 1 = enabled (offered, used when the client opts in), 2 = required. */
+    int                            encryption;
+    /* When set, CHANGE_NOTIFY is disabled for the server's shares: the
+     * handler returns STATUS_NOT_IMPLEMENTED immediately instead of arming
+     * a watch (the "change notify = no" share behaviour Windows exposes;
+     * smb2.change_notify_disabled expects this). */
+    int                            notify_disabled;
     uint32_t                       capabilities;
     uint32_t                       dialects[16];
     struct chimera_smb_nic_info    nic_info[16];
@@ -150,7 +164,20 @@ struct chimera_smb_share {
 
 struct chimera_smb_conn;
 
-#define CHIMERA_SMB_REQUEST_FLAG_SIGN 0x01
+#define CHIMERA_SMB_REQUEST_FLAG_SIGN         0x01
+/* Set during compound parsing when a request cannot be set up (e.g. its header
+* names an invalid session id).  The request is still added to the compound so
+* the dispatcher completes it -- in order -- with request->status, instead of
+* the parser completing it out of order and corrupting the compound counter. */
+#define CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED 0x02
+
+/* MaxTransactSize advertised in NEGOTIATE.  QUERY_DIRECTORY / QUERY_INFO
+ * output is bounded by this per MS-SMB2, so it doubles as the cap on the
+ * single contiguous reply buffer the server allocates for a FIND.  It must
+ * stay <= the libevpl per-buffer size (2 MiB) because that reply buffer is
+ * allocated as a single iovec (max_iovecs == 1); a request larger than one
+ * evpl buffer cannot be satisfied with one iovec. */
+#define CHIMERA_SMB_MAX_TRANSACT_SIZE         (1 * 1024 * 1024)
 
 struct chimera_smb_rename_info {
     uint8_t                         replace_if_exist;
@@ -297,6 +324,12 @@ struct chimera_smb_request {
              * the file/dir (vs opened an existing one) — drives the OPENED vs
              * CREATED Create Action in the reply. */
             uint8_t                         r_created;
+            /* Set by the durable-reconnect path: this CREATE is reclaiming a
+            * surviving open, not opening a new one.  The access was granted at
+            * the original open, and MS-SMB2 has the reconnect ignore the
+            * DesiredAccess / CreateOptions / etc. fields entirely, so the
+            * getattr-reply callback must not re-run the ACL access check. */
+            uint8_t                         reconnect;
             /* CREATE contexts the client sent (CHIMERA_SMB_CREATE_CTX_* bits).
              * Phase-0 stubs set the bit and capture a minimum set of fields needed
              * by the response emit; Phase 1/3 will populate the rest. */
@@ -340,6 +373,15 @@ struct chimera_smb_request {
             uint8_t                         persist_value[CHIMERA_SMB_DURABLE_VALUE_MAX];
             char                            parent_path[SMB_FILENAME_MAX];
             char                           *name;
+            /* Named-stream (ADS) suffix parsed off the final path component.
+             * has_stream is set when the create targets "file:stream[:$DATA]";
+             * stream_name holds the bare stream name and `name`/name_len are
+             * trimmed to the base file.  base_oh is the base file's open handle
+             * held across the chained chimera_vfs_open_stream. */
+            uint8_t                         has_stream;
+            uint16_t                        stream_name_len;
+            char                            stream_name[SMB_FILENAME_MAX];
+            struct chimera_vfs_open_handle *base_oh;
         } create;
 
         struct  {
@@ -363,6 +405,10 @@ struct chimera_smb_request {
             uint32_t                        r_rdma_status;
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_open_file   *open_file;
+            /* Holds the pre-write mtime restored after a write through a
+             * write-time-sticky handle (chimera_vfs_setattr keeps this pointer
+             * across the async call, so it must live in the request). */
+            struct chimera_vfs_attrs        restore_attrs;
             struct chimera_smb_rdma_element rdma_elements[8];
             struct evpl_iovec               iov[256];
             struct evpl_iovec               chunk_iov[256];
@@ -490,30 +536,38 @@ struct chimera_smb_request {
             }                               cc_chunks[CHIMERA_SMB_COPYCHUNK_MAX];
         } ioctl;
         struct {
-            uint8_t                       info_type;
-            uint8_t                       info_class;
-            uint32_t                      addl_info;
-            uint32_t                      flags;
-            uint32_t                      output_length;
-            struct chimera_smb_file_id    file_id;
-            struct chimera_smb_attrs      r_attrs;
-            struct chimera_smb_fs_attrs   r_fs_attrs;
-            struct chimera_smb_open_file *open_file;
+            uint8_t                         info_type;
+            uint8_t                         info_class;
+            uint32_t                        addl_info;
+            uint32_t                        flags;
+            uint32_t                        output_length;
+            struct chimera_smb_file_id      file_id;
+            struct chimera_smb_attrs        r_attrs;
+            struct chimera_smb_fs_attrs     r_fs_attrs;
+            struct chimera_smb_open_file   *open_file;
             /* Security descriptor built in the getattr callback and emitted by
              * the reply builder (SMB2_INFO_SECURITY). */
-            uint8_t                       sec_buf[2048];
-            uint32_t                      sec_buf_len;
+            uint8_t                         sec_buf[2048];
+            uint32_t                        sec_buf_len;
             /* When the SD references identities not yet in the cache, the
              * getattr'd owner/group/mode + ACL are copied here so the SD can be
              * built after an async identity resolve completes (the live attrs
              * are only valid during the getattr callback). */
-            uint32_t                      sd_uid;
-            uint32_t                      sd_gid;
-            uint32_t                      sd_mode;
-            int                           sd_has_acl;
-            int                           sd_pending;
-            uint8_t                       sd_acl_storage[sizeof(struct chimera_acl) +
-                                                         64 * sizeof(struct chimera_ace)];
+            uint32_t                        sd_uid;
+            uint32_t                        sd_gid;
+            uint32_t                        sd_mode;
+            int                             sd_has_acl;
+            int                             sd_pending;
+            uint8_t                         sd_acl_storage[sizeof(struct chimera_acl) +
+                                                           64 * sizeof(struct chimera_ace)];
+            /* FileStreamInformation: the packed VFS list_streams records are
+             * held here from the list_streams callback until the reply builder
+             * emits them as MS-FSCC FILE_STREAM_INFORMATION entries.
+             * stream_base_handle is a temporary handle on the base file. */
+            struct chimera_vfs_open_handle *stream_base_handle;
+            uint32_t                        stream_record_len;
+            uint32_t                        stream_record_count;
+            uint8_t                         stream_records[4096];
         } query_info;
 
         struct {
@@ -576,6 +630,9 @@ struct chimera_smb_request {
 struct chimera_smb_compound {
     int                                num_requests;
     int                                complete_requests;
+    /* Set when this compound arrived wrapped in a TRANSFORM header; its reply
+     * MUST then be encrypted (MS-SMB2 §3.3.4.1.4). */
+    int                                received_encrypted;
     uint64_t                           saved_session_id;
     uint64_t                           saved_tree_id;
     struct chimera_smb_file_id         saved_file_id;
@@ -591,6 +648,10 @@ struct chimera_smb_session_handle {
     uint64_t                           session_id;
     struct chimera_smb_session        *session;
     uint8_t                            signing_key[16];
+    uint8_t                            enc_key[32];
+    uint8_t                            dec_key[32];
+    size_t                             enc_key_len;
+    uint16_t                           cipher_id;
     struct UT_hash_handle              hh;
     struct chimera_smb_session_handle *next;
     gss_ctx_id_t                       ctx;
@@ -637,10 +698,18 @@ struct chimera_smb_conn {
     uint8_t                            client_guid[16];
     uint8_t                            client_security_mode;
     uint32_t                           client_capabilities;
-    /* SMB 3.1.1 preauth-integrity running hash (SHA-512), extended over the
-     * NEGOTIATE and SESSION_SETUP request/response chain. Reset per connection
-     * at accept. Only consumed when the negotiated dialect is 3.1.1. */
+    /* SMB 3.1.1 preauth-integrity running hash (SHA-512).  preauth_hash is the
+     * per-session-setup running value: it is reset to negotiate_preauth_hash at
+     * the start of every new authentication (a SESSION_SETUP whose header
+     * SessionId is 0) and then extended over that session's SESSION_SETUP
+     * request/response chain, so the signing key derives over the per-session
+     * hash MS-SMB2 3.3.5.5.3 mandates -- not a value that keeps accumulating
+     * across multiple sessions / logoff-reauth on the same connection.
+     * negotiate_preauth_hash is the post-NEGOTIATE baseline (MS-SMB2
+     * Connection.PreauthIntegrityHashValue).  Both reset per connection at
+     * accept; only consumed when the negotiated dialect is 3.1.1. */
     uint8_t                            preauth_hash[SMB2_PREAUTH_HASH_SIZE];
+    uint8_t                            negotiate_preauth_hash[SMB2_PREAUTH_HASH_SIZE];
     uint32_t                           requests_completed;
     int                                rdma_max_send;
     int                                rdma_niov;
@@ -799,6 +868,13 @@ void
 chimera_smb_durable_sweep(
     struct chimera_server_smb_thread *thread);
 
+/* Release every registry entry's live open at thread shutdown so the VFS
+ * close thread can drain.  Without this a parked durable handle's VFS open
+ * handle leaks and chimera_vfs_destroy hangs waiting for it. */
+void
+chimera_smb_durable_drain_all(
+    struct chimera_server_smb_thread *thread);
+
 /* Purge a parked (disconnected) durable open by persistent id when a new
  * conflicting open arrives.  Returns true iff found+purged.  No-op for live,
  * persistent, cold, or unknown ids. */
@@ -870,6 +946,7 @@ struct chimera_server_smb_thread {
     struct chimera_smb_session_handle  *free_session_handles;
     struct chimera_smb_open_file       *free_open_files;
     struct chimera_smb_signing_ctx     *signing_ctx;
+    struct chimera_smb_encrypt_ctx     *encrypt_ctx;
     struct chimera_smb_iconv_ctx        iconv_ctx;
 
     /* Notify doorbell: VFS callbacks push ready notify requests here,
@@ -900,7 +977,8 @@ static inline void
 chimera_smb_tree_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_server_smb_shared *shared,
-    struct chimera_smb_tree          *tree);
+    struct chimera_smb_tree          *tree,
+    bool                              preserve_durable);
 
 /*
  * Open-file lifetime model (current; Phase 3 will change this):
@@ -1000,9 +1078,16 @@ chimera_smb_session_alloc(struct chimera_server_smb_shared *shared)
         pthread_mutex_init(&session->lock, NULL);
     }
 
-    session->session_id = chimera_rand64();
-    session->flags      = 0;
-    session->refcnt     = 1;
+    /* Keep the session id within 32 bits (non-zero).  The wire field is 64
+     * bits, but Windows/Samba hand out small ids and some clients (and the
+     * smb2.session-id torture test) round-trip the id through a uint32_t.  A
+     * full 64-bit random id would be silently truncated by such clients and
+     * then fail to match on the next request. */
+    do {
+        session->session_id = chimera_rand64() & 0xFFFFFFFFULL;
+    } while (session->session_id == 0);
+    session->flags  = 0;
+    session->refcnt = 1;
 
     pthread_mutex_unlock(&shared->sessions_lock);
 
@@ -1050,12 +1135,18 @@ static inline void
 chimera_smb_session_release(
     struct chimera_server_smb_thread *thread,
     struct chimera_server_smb_shared *shared,
-    struct chimera_smb_session       *session)
+    struct chimera_smb_session       *session,
+    bool                              preserve_durable)
 {
     struct chimera_smb_tree *tree;
     int                      destroy = 0;
 
-    pthread_mutex_lock(&session->lock);
+    /* refcnt and shared->sessions membership are guarded by sessions_lock,
+     * the same lock chimera_smb_session_alloc/lookup/authorize hold when they
+     * set, increment, or HASH_ADD.  Releasing under session->lock instead would
+     * race the lookup refcnt++ (lost update -> premature free) and modify the
+     * shared hash unprotected (double HASH_DEL on an emptied table crashes). */
+    pthread_mutex_lock(&shared->sessions_lock);
 
     chimera_smb_abort_if(session->refcnt == 0, "session refcnt is 0 at release");
 
@@ -1068,7 +1159,7 @@ chimera_smb_session_release(
         }
     }
 
-    pthread_mutex_unlock(&session->lock);
+    pthread_mutex_unlock(&shared->sessions_lock);
 
     if (destroy) {
 
@@ -1077,7 +1168,7 @@ chimera_smb_session_release(
 
             if (tree) {
                 session->trees[i] = NULL;
-                chimera_smb_tree_free(thread, shared, tree);
+                chimera_smb_tree_free(thread, shared, tree, preserve_durable);
             }
         }
 
@@ -1088,6 +1179,121 @@ chimera_smb_session_release(
         pthread_mutex_unlock(&shared->sessions_lock);
     }
 } /* chimera_smb_session_free */
+
+/* MS-SMB2 3.3.4.4 open-preservation rule: a durable open holding byte-range
+ * locks survives a disconnect only if it also holds a batch oplock or a
+ * WRITE-caching lease -- otherwise the locks cannot be safely maintained across
+ * the gap, so the open is closed rather than parked (a later reconnect then gets
+ * OBJECT_NAME_NOT_FOUND).  Every other durable open is preservable. */
+static inline bool
+chimera_smb_durable_open_preservable(const struct chimera_smb_open_file *open_file)
+{
+    if (open_file->lock_entries) {
+        bool write_caching =
+            (open_file->oplock_level == SMB2_OPLOCK_LEVEL_BATCH) ||
+            (open_file->lease_state & SMB2_LEASE_WRITE_CACHING);
+
+        if (!write_caching) {
+            return false;
+        }
+    }
+    return true;
+} /* chimera_smb_durable_open_preservable */
+
+/* Park every durable/persistent open held by `session` for reconnect, leaving
+ * the rest of the session in place.  Used when a PreviousSessionId reconnect
+ * closes this session out from under its still-live connection (MS-SMB2
+ * 3.3.5.5.3): the durable handles must be parked immediately so the new
+ * connection can reclaim them, while the session's remaining (non-durable) opens
+ * and trees are torn down normally when the old connection finally drops -- on
+ * its own thread, avoiding a cross-thread VFS-handle release.  Parking is pure
+ * shared-state manipulation under the bucket and registry locks, so it is safe
+ * to run from the new connection's thread. */
+static inline void
+chimera_smb_session_park_durables(
+    struct chimera_server_smb_shared *shared,
+    struct chimera_smb_session       *session)
+{
+    int i, b;
+
+    pthread_mutex_lock(&session->lock);
+
+    for (i = 0; i < session->max_trees; i++) {
+        struct chimera_smb_tree      *tree = session->trees[i];
+        struct chimera_smb_open_file *open_file, *tmp;
+
+        if (!tree) {
+            continue;
+        }
+
+        for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS; b++) {
+            pthread_mutex_lock(&tree->open_files_lock[b]);
+            HASH_ITER(hh, tree->open_files[b], open_file, tmp)
+            {
+                if (!open_file->durable_flags ||
+                    (open_file->flags & CHIMERA_SMB_OPEN_FILE_PARKED) ||
+                    !chimera_smb_durable_open_preservable(open_file)) {
+                    continue;
+                }
+                HASH_DELETE(hh, tree->open_files[b], open_file);
+                open_file->flags      |= CHIMERA_SMB_OPEN_FILE_PARKED;
+                open_file->create_conn = NULL;
+                chimera_smb_durable_park(shared, open_file);
+            }
+            pthread_mutex_unlock(&tree->open_files_lock[b]);
+        }
+    }
+
+    pthread_mutex_unlock(&session->lock);
+} /* chimera_smb_session_park_durables */
+
+/* MS-SMB2 3.3.5.5.3: a SESSION_SETUP carrying a non-zero PreviousSessionId asks
+ * the server to close that earlier session of the same user once the new one is
+ * established (a client reconnecting on a fresh transport, e.g. for durable-
+ * handle reclaim).  Mark the prior session deleted and unlink it from the global
+ * table without freeing it: its original connection still holds a reference, so
+ * requests still arriving there get STATUS_USER_SESSION_DELETED.  Its durable
+ * handles are parked immediately so the new connection can reclaim them.  Never
+ * invalidate the new session itself, and only act when the requesting user
+ * matches the prior session's owner. */
+static inline void
+chimera_smb_session_invalidate_previous(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_server_smb_shared *shared,
+    uint64_t                          prev_session_id,
+    struct chimera_smb_session       *new_session)
+{
+    struct chimera_smb_session *prev;
+
+    if (prev_session_id == 0 || prev_session_id == new_session->session_id) {
+        return;
+    }
+
+    pthread_mutex_lock(&shared->sessions_lock);
+
+    HASH_FIND(hh, shared->sessions, &prev_session_id, sizeof(uint64_t), prev);
+
+    if (prev && prev != new_session &&
+        (prev->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
+        prev->cred.uid == new_session->cred.uid) {
+        /* Clear AUTHORIZED and unlink here so the later refcnt-driven
+         * chimera_smb_session_release() does not HASH_DEL a second time.  Hold a
+         * reference across the park so a concurrent release cannot free it. */
+        prev->flags |= CHIMERA_SMB_SESSION_DELETED;
+        prev->flags &= ~CHIMERA_SMB_SESSION_AUTHORIZED;
+        HASH_DEL(shared->sessions, prev);
+        prev->refcnt++;
+    } else {
+        prev = NULL;
+    }
+
+    pthread_mutex_unlock(&shared->sessions_lock);
+
+    if (prev) {
+        chimera_smb_session_park_durables(shared, prev);
+        chimera_smb_session_release(thread, shared, prev, true);
+    }
+} /* chimera_smb_session_invalidate_previous */
 
 
 static inline struct chimera_smb_session_handle *
@@ -1216,7 +1422,10 @@ chimera_smb_conn_free(
             session_handle->ctx = GSS_C_NO_CONTEXT;
         }
 
-        chimera_smb_session_release(thread, thread->shared, session_handle->session);
+        /* The transport for this connection has dropped: any durable handle
+         * left open on a session whose last channel this was must be preserved
+         * for reconnect (preserve_durable = true). */
+        chimera_smb_session_release(thread, thread->shared, session_handle->session, true);
 
         chimera_smb_session_handle_free(thread, session_handle);
     }
@@ -1276,10 +1485,13 @@ static inline void
 chimera_smb_tree_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_server_smb_shared *shared,
-    struct chimera_smb_tree          *tree)
+    struct chimera_smb_tree          *tree,
+    bool                              preserve_durable)
 {
-    struct chimera_smb_open_file *open_file, *tmp;
-    int                           i;
+    struct chimera_smb_open_file    *open_file, *tmp;
+    struct chimera_smb_notify_state *gc_states = NULL;
+    struct chimera_smb_notify_state *nstate;
+    int                              i;
 
     for (i = 0; i < CHIMERA_SMB_OPEN_FILE_BUCKETS; i++) {
 
@@ -1290,20 +1502,45 @@ chimera_smb_tree_free(
             chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at tree destruction");
             HASH_DELETE(hh, tree->open_files[i], open_file);
 
-            /* Durable/persistent opens survive the connection: keep the object
-             * allocated with its leases, share reservation, byte-range locks
-             * and VFS handle intact, and hand ownership to the durable registry
-             * with a reconnect deadline.  Do NOT mark CLOSED (a reconnect must
-             * be able to re-home it), drain locks, release sharemode, or free.
-             * The single tree reference becomes the registry's reference, so
-             * refcnt is left untouched (steady-state 1). */
-            if (open_file->durable_flags) {
+            /* A durable/persistent open survives the teardown of its session
+             * (connection loss or a graceful LOGOFF, MS-SMB2 3.3.5.6): keep the
+             * object allocated with its leases, share reservation, byte-range
+             * locks and VFS handle intact, and hand ownership to the durable
+             * registry with a reconnect deadline.  Do NOT mark CLOSED (a
+             * reconnect must be able to re-home it), drain locks, release
+             * sharemode, or free.  The single tree reference becomes the
+             * registry's reference, so refcnt is left untouched (steady-state 1).
+             *
+             * A TREE_DISCONNECT (preserve_durable == false) is the client
+             * explicitly relinquishing every open on that tree (MS-SMB2
+             * 3.3.5.7); the durable property does not apply, so fall through to
+             * the normal close path, which also forgets the registry entry --
+             * a later durable reconnect with the stale FileId then correctly
+             * returns OBJECT_NAME_NOT_FOUND. */
+            if (open_file->durable_flags && preserve_durable &&
+                chimera_smb_durable_open_preservable(open_file)) {
                 open_file->flags      |= CHIMERA_SMB_OPEN_FILE_PARKED;
                 open_file->create_conn = NULL;
                 /* park acquires the registry lock under this bucket lock —
                  * the bucket -> registry order is observed everywhere. */
                 chimera_smb_durable_park(shared, open_file);
                 continue;
+            }
+
+            /* Detach any CHANGE_NOTIFY watch/parked request from this open and
+             * defer its teardown until after the bucket lock is dropped:
+             * completing a parked request releases the open_file reference it
+             * holds, which re-takes this same bucket lock.  A parked request
+             * keeps refcnt > 0, so the open_file is NOT freed in this loop —
+             * its final release happens in the deferred chimera_smb_notify_close
+             * below.  A watch with no parked request holds no reference, so the
+             * open_file is freed here and the deferred close just frees the
+             * detached state + destroys the VFS watch. */
+            nstate = open_file->notify_state;
+            if (nstate) {
+                open_file->notify_state = NULL;
+                nstate->gc_next         = gc_states;
+                gc_states               = nstate;
             }
 
             open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
@@ -1317,6 +1554,13 @@ chimera_smb_tree_free(
             open_file->refcnt--;
 
             if (open_file->refcnt == 0) {
+                /* Final teardown of a live durable open on a graceful
+                 * tree/session teardown: drop its registry entry so a later
+                 * reconnect with the stale FileId is not matched against a
+                 * freed open_file. */
+                if (open_file->durable_flags) {
+                    chimera_smb_durable_forget(shared, open_file->file_id.pid);
+                }
                 chimera_smb_open_file_drain_locks(thread, open_file);
                 if (open_file->handle) {
                     chimera_vfs_release(thread->vfs_thread, open_file->handle);
@@ -1326,6 +1570,19 @@ chimera_smb_tree_free(
         }
 
         pthread_mutex_unlock(&tree->open_files_lock[i]);
+    }
+
+    /* Tear down notify state detached above, now that no bucket lock is held.
+     * For a still-parked request this sends STATUS_NOTIFY_CLEANUP (the
+     * connection is alive on a TREE_DISCONNECT / LOGOFF) and releases the
+     * open_file reference it held — its final reference, so the open is freed
+     * here.  During hard connection teardown chimera_smb_conn_free has already
+     * dropped the parked requests silently, so there is nothing to send and
+     * only the watch + state are freed. */
+    while (gc_states) {
+        nstate    = gc_states;
+        gc_states = nstate->gc_next;
+        chimera_smb_notify_close(shared->vfs->vfs_notify, nstate);
     }
 
     pthread_mutex_lock(&shared->trees_lock);
@@ -1372,17 +1629,21 @@ chimera_smb_open_file_resolve(
 
     chimera_smb_abort_if(!tree, "tree is NULL");
 
+    /* A UINT64_MAX FileId inherits the previous request's FileId, but only in a
+     * related compound (MS-SMB2 3.3.5.2.7.2).  For an unrelated request it is
+     * just an invalid handle and must resolve to FILE_CLOSED, not the prior
+     * request's file. */
     if (unlikely(file_id->pid == UINT64_MAX)) {
-        if (request->compound->saved_file_id.pid == UINT64_MAX) {
-            chimera_smb_error("Attempted to lookup invalid file id");
+        if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
+            request->compound->saved_file_id.pid == UINT64_MAX) {
             return NULL;
         }
         file_id->pid = request->compound->saved_file_id.pid;
     }
 
     if (unlikely(file_id->vid == UINT64_MAX)) {
-        if (request->compound->saved_file_id.vid == UINT64_MAX) {
-            chimera_smb_error("Attempted to lookup invalid file id");
+        if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
+            request->compound->saved_file_id.vid == UINT64_MAX) {
             return NULL;
         }
         file_id->vid = request->compound->saved_file_id.vid;
@@ -1499,17 +1760,20 @@ chimera_smb_open_file_close(
 
     chimera_smb_abort_if(!tree, "tree is NULL");
 
+    /* Only a related compound request inherits the previous request's FileId
+     * from a UINT64_MAX placeholder; for an unrelated request it is an invalid
+     * handle and must report FILE_CLOSED (MS-SMB2 3.3.5.2.7.2). */
     if (unlikely(file_id->pid == UINT64_MAX)) {
-        if (request->compound->saved_file_id.pid == UINT64_MAX) {
-            chimera_smb_error("Attempted to close invalid file id");
+        if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
+            request->compound->saved_file_id.pid == UINT64_MAX) {
             return NULL;
         }
         file_id->pid = request->compound->saved_file_id.pid;
     }
 
     if (unlikely(file_id->vid == UINT64_MAX)) {
-        if (request->compound->saved_file_id.vid == UINT64_MAX) {
-            chimera_smb_error("Attempted to close invalid file id");
+        if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
+            request->compound->saved_file_id.vid == UINT64_MAX) {
             return NULL;
         }
         file_id->vid = request->compound->saved_file_id.vid;

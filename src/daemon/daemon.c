@@ -21,6 +21,7 @@
 #include "vfs/vfs_pnfs.h"
 #include "server/server_internal.h"
 #include "common/logging.h"
+#include "common/common_config.h"
 #include "metrics/metrics.h"
 #include "daemon.h"
 
@@ -248,46 +249,8 @@ main(
     evpl_global_config_set_huge_pages(evpl_global_config, 1);
     evpl_global_config_set_libaio_max_pending(evpl_global_config, 1024);
 
-    /* Only enable XLIO in libevpl when we actually plan to use it.
-     * libevpl defaults xlio_enabled=1 and starts XLIO's polling
-     * machinery in every worker thread regardless of whether any
-     * socket binds to EVPL_STREAM_XLIO_TCP — that's pure overhead
-     * for plain-TCP and RDMA deployments.
-     */
-    {
-        enum chimera_tcp_flavor flavor = CHIMERA_TCP_FLAVOR_PLAIN;
-        json_t                 *flavor_value;
-
-        if (server_params) {
-            flavor_value = json_object_get(server_params, "tcp_flavor");
-            if (flavor_value && json_is_string(flavor_value)) {
-                const char *s = json_string_value(flavor_value);
-                if (strcasecmp(s, "xlio") == 0) {
-                    flavor = CHIMERA_TCP_FLAVOR_XLIO;
-                } else if (strcasecmp(s, "io_uring") == 0) {
-                    flavor = CHIMERA_TCP_FLAVOR_IO_URING;
-                }
-            }
-        }
-
-        evpl_global_config_set_xlio_enabled(evpl_global_config,
-                                            flavor == CHIMERA_TCP_FLAVOR_XLIO);
-    }
-
-    if (server_params) {
-        json_t *prealloc_slabs_value   = json_object_get(server_params, "preallocate_slabs");
-        json_t *prealloc_threads_value = json_object_get(server_params, "preallocate_threads");
-
-        if (prealloc_slabs_value && json_is_integer(prealloc_slabs_value)) {
-            evpl_global_config_set_preallocate_slabs(evpl_global_config,
-                                                     json_integer_value(prealloc_slabs_value));
-        }
-
-        if (prealloc_threads_value && json_is_integer(prealloc_threads_value)) {
-            evpl_global_config_set_preallocate_threads(evpl_global_config,
-                                                       json_integer_value(prealloc_threads_value));
-        }
-    }
+    /* XLIO enable/disable is derived from the common tcp_flavor and applied
+     * by chimera_apply_common_config() below, before evpl_init(). */
 
     /* Configure TLS if HTTPS is enabled */
     if (rest_https_port != 0) {
@@ -314,6 +277,10 @@ main(
             rest_ssl_key  = auto_key_path;
         }
     }
+
+    /* Apply the shared "common" config section (huge pages / slab size) parsed
+     * from the same file, last, so it overrides the hardcoded defaults above. */
+    chimera_apply_common_config(config, evpl_global_config);
 
     evpl_init(evpl_global_config);
 
@@ -373,6 +340,32 @@ main(
     json_value = json_object_get(server_params, "smb_persistent_handles");
     if (json_is_boolean(json_value)) {
         chimera_server_config_set_smb_persistent_handles(server_config, json_is_true(json_value));
+    }
+
+    json_value = json_object_get(server_params, "smb_named_streams");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_smb_named_streams(server_config, json_is_true(json_value));
+    }
+
+    /* smb_encryption: "off"|"enabled"|"required" (or a boolean/integer 0/1/2). */
+    json_value = json_object_get(server_params, "smb_encryption");
+    if (json_is_string(json_value)) {
+        const char *enc  = json_string_value(json_value);
+        int         mode = 0;
+        if (strcmp(enc, "required") == 0) {
+            mode = 2;
+        } else if (strcmp(enc, "enabled") == 0 || strcmp(enc, "on") == 0) {
+            mode = 1;
+        } else if (strcmp(enc, "off") == 0 || strcmp(enc, "disabled") == 0) {
+            mode = 0;
+        } else {
+            chimera_server_error("Invalid smb_encryption value '%s' (expected off/enabled/required)", enc);
+        }
+        chimera_server_config_set_smb_encryption(server_config, mode);
+    } else if (json_is_integer(json_value)) {
+        chimera_server_config_set_smb_encryption(server_config, (int) json_integer_value(json_value));
+    } else if (json_is_boolean(json_value)) {
+        chimera_server_config_set_smb_encryption(server_config, json_is_true(json_value) ? 1 : 0);
     }
 
     json_value = json_object_get(server_params, "nfs4_session_slots");
@@ -533,19 +526,7 @@ main(
         chimera_server_config_set_soft_fail_bad_req(server_config, 1);
     }
 
-    json_value = json_object_get(server_params, "tcp_flavor");
-    if (json_is_string(json_value)) {
-        str_value = json_string_value(json_value);
-        if (strcasecmp(str_value, "plain") == 0) {
-            chimera_server_config_set_tcp_flavor(server_config, CHIMERA_TCP_FLAVOR_PLAIN);
-        } else if (strcasecmp(str_value, "io_uring") == 0) {
-            chimera_server_config_set_tcp_flavor(server_config, CHIMERA_TCP_FLAVOR_IO_URING);
-        } else if (strcasecmp(str_value, "xlio") == 0) {
-            chimera_server_config_set_tcp_flavor(server_config, CHIMERA_TCP_FLAVOR_XLIO);
-        } else {
-            chimera_server_error("Unknown tcp_flavor '%s', defaulting to plain", str_value);
-        }
-    }
+    chimera_server_config_set_tcp_flavor(server_config, chimera_common_tcp_flavor(config));
 
     // Parse SMB auth configuration
     json_t *smb_auth = json_object_get(server_params, "smb_auth");
@@ -703,7 +684,14 @@ main(
                                 module, path, name,
                                 mount_options ? " options=" : "",
                                 mount_options ? mount_options : "");
-            chimera_server_mount(server, name, module, path, mount_options);
+
+            if (chimera_server_mount(server, name, module, path, mount_options) != 0) {
+                /* A silently-failed mount leaves shares/exports pointing at a
+                 * nonexistent root, so clients later see confusing errors
+                 * (e.g. SMB NETWORK_NAME_DELETED).  Surface it here instead. */
+                chimera_server_error("Failed to mount %s://%s to /%s",
+                                     module, path, name);
+            }
         }
     }
 
@@ -756,6 +744,16 @@ main(
     chimera_server_info("Shutting down server (signal=%d)...", SigInt);
 
     chimera_server_destroy(server);
+
+    /* Optionally persist a final metrics scrape (common.metrics_file) before
+     * tearing down the registry, so short-lived runs keep their metrics. */
+    {
+        const char *metrics_file = chimera_common_metrics_file(config);
+
+        if (metrics_file) {
+            chimera_metrics_dump_file(chimera_metrics_get(metrics), metrics_file);
+        }
+    }
 
     chimera_metrics_destroy(metrics);
 

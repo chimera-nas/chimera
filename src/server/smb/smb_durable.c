@@ -267,10 +267,16 @@ chimera_smb_durable_claim(
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (create_guid && memcmp(entry->create_guid, create_guid, 16) != 0) {
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
-    } else if (client_guid && memcmp(entry->client_guid, client_guid, 16) != 0) {
-        /* Reconnect from a different client.  MS-SMB2 3.3.5.9.7: a ClientGuid
-         * mismatch must fail with STATUS_OBJECT_NAME_NOT_FOUND (the handle is
-         * simply not visible to this client), not ACCESS_DENIED. */
+    } else if ((had_lease || entry->persistent) && client_guid &&
+               memcmp(entry->client_guid, client_guid, 16) != 0) {
+        /* Reconnect from a different client.  MS-SMB2 3.3.5.9.7 binds the
+         * ClientGuid check to leased opens: when the surviving open holds a
+         * lease, a ClientGuid mismatch fails with STATUS_OBJECT_NAME_NOT_FOUND
+         * (the handle is not visible to this client).  An oplock-only *durable*
+         * handle has no such binding — it may be reconnected from a new
+         * transport with a different ClientGuid (identity is the persistent id,
+         * plus the create_guid for v2).  Persistent handles keep the check
+         * regardless (their reclaim is governed by create_guid + owner). */
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (had_lease && !has_lease_ctx) {
         /* 3.3.5.9.7: open holds a lease but the reconnect omitted the lease
@@ -280,10 +286,15 @@ chimera_smb_durable_claim(
                memcmp(entry->open_file->lease_key, lease_key, 16) != 0) {
         /* 3.3.5.9.7: lease key in the reconnect does not match the open's. */
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
-    } else if (entry->name_len != name_len || memcmp(entry->name, name, name_len) != 0) {
-        /* Filename mismatch: with a lease this is INVALID_PARAMETER (3.3.5.9.7),
-         * otherwise the handle simply isn't found under that name. */
-        *status = had_lease ? SMB2_STATUS_INVALID_PARAMETER : SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    } else if (had_lease && name_len > 0 &&
+               (entry->name_len != name_len ||
+                memcmp(entry->name, name, name_len) != 0)) {
+        /* A leased reconnect that names a (non-empty) file other than the one
+         * the handle was opened on is malformed (MS-SMB2 3.3.5.9.7).  An empty
+         * name -- the usual durable-reconnect form, always so for v2 -- and a
+         * non-lease (oplock) reconnect both ignore the name entirely: the
+         * handle's identity is its persistent id, plus the create_guid for v2. */
+        *status = SMB2_STATUS_INVALID_PARAMETER;
     } else if (entry->cold) {
         /* Recovered-after-restart entry: there is no live open to re-home.
          * Remove it and tell the caller to re-open the file (cold reclaim);
@@ -359,6 +370,67 @@ chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
         free(entry);
     }
 } /* chimera_smb_durable_sweep */
+
+/* Release every registry entry's live open at thread shutdown.  A parked
+ * durable/persistent handle keeps its VFS open handle referenced
+ * indefinitely; without this the VFS close thread can never reach a
+ * quiescent (zero open handles) state and chimera_vfs_destroy hangs.
+ *
+ * Runs from the SMB thread-destroy path, which still has a live vfs_thread
+ * (protocols are destroyed before the VFS, precisely so they can release
+ * their open handles).  By that point all connections are gone, so any
+ * remaining entry with a live open_file is orphaned state to reclaim --
+ * persistent handles included (their in-memory open must be released even
+ * though the on-disk record is intentionally left for restart recovery).
+ * Cold entries (open_file == NULL) only hold bookkeeping, freed by
+ * chimera_smb_durable_table_destroy.
+ *
+ * Only the VFS open handle is released here; the open's leases / share
+ * reservation / byte-range locks are deliberately NOT drained.  Draining a
+ * lease pumps any pending acquire queued behind it (e.g. a blocking lock
+ * whose connection already dropped), whose completion callback would try to
+ * send a reply -- allocating a reply iovec on this teardown thread for a
+ * dead connection, which trips the cross-thread iovec guard.  At shutdown
+ * those pending waiters have no live connection to answer, so dropping them
+ * is correct; the leftover lease objects are reclaimed wholesale when
+ * chimera_vfs_state_destroy frees the per-file state (it never walks the
+ * lease lists), and no operation runs after thread destroy to observe a
+ * dangling lease. */
+SYMBOL_EXPORT void
+chimera_smb_durable_drain_all(struct chimera_server_smb_thread *thread)
+{
+    struct chimera_server_smb_shared *shared = thread->shared;
+    struct chimera_smb_durable_entry *entry, *tmp;
+    struct chimera_smb_durable_entry *reap = NULL;
+
+    pthread_mutex_lock(&shared->durable.lock);
+
+    HASH_ITER(hh, shared->durable.by_pid, entry, tmp)
+    {
+        if (!entry->open_file) {
+            continue;
+        }
+        HASH_DELETE(hh, shared->durable.by_pid, entry);
+        entry->reap_next = reap;
+        reap             = entry;
+    }
+
+    pthread_mutex_unlock(&shared->durable.lock);
+
+    while (reap) {
+        struct chimera_smb_open_file *open_file = reap->open_file;
+        entry = reap;
+        reap  = reap->reap_next;
+
+        if (open_file->handle) {
+            chimera_vfs_release(thread->vfs_thread, open_file->handle);
+            open_file->handle = NULL;
+        }
+        chimera_smb_open_file_free(thread, open_file);
+
+        free(entry);
+    }
+} /* chimera_smb_durable_drain_all */
 
 /* ------------------------------------------------------------------ *
 *  Record (de)serialization for backend persistence                  *

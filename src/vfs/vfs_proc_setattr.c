@@ -78,7 +78,7 @@ chimera_vfs_setattr_complete(struct chimera_vfs_request *request)
     chimera_vfs_setattr_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(thread->vfs->vfs_attr_cache,
+        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                       request->fh_hash,
                                       request->fh,
                                       request->fh_len,

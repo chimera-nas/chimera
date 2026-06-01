@@ -100,6 +100,16 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
                                                    memory_order_acquire);
             bool    reap = false;
 
+            /* `now_ns` is sampled once before the table lock is taken, while
+             * `last` (a client's last_touch_ns) is stamped by EXCHANGE_ID /
+             * SEQUENCE / RENEW on other threads.  A client created or touched
+             * after that sample therefore has last > now_ns, and `now_ns - last`
+             * is unsigned -- so a naive `now_ns - last > lease_ns` underflows to
+             * a huge value and spuriously treats a brand-new client as lapsed.
+             * Guard the subtraction: a client whose last touch is at or after
+             * `now_ns` is freshly active, never lapsed. */
+            bool lease_lapsed = now_ns > last && (now_ns - last) > lease_ns;
+
             if (reclaim) {
                 /* A conflicting acquirer reclaimed one of this courtesy
                  * client's leases: tear it down now. */
@@ -109,7 +119,7 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
                  * is not confirmed by CREATE_SESSION within a lease period is
                  * stale.  Courtesy only applies after the client has proven
                  * possession of the clientid. */
-                if (now_ns - last > lease_ns) {
+                if (lease_lapsed) {
                     reap = true;
                 }
             } else if (courtesy) {
@@ -117,7 +127,7 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
                 if (now_ns >= uc->courtesy_deadline_ns) {
                     reap = true;
                 }
-            } else if (now_ns - last > lease_ns) {
+            } else if (lease_lapsed) {
                 /* Lease lapsed for the first time: enter courtesy rather than
                  * revoking, so the client resumes seamlessly if it returns and
                  * a conflicting request can reclaim its state on demand

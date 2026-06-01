@@ -41,6 +41,12 @@ if(CHIMERA_NETNS_TESTING)
     add_test(NAME chimera/client/basic COMMAND client_basic)
 endif()
 
+add_executable(client_read_into read_into.c)
+target_link_libraries(client_read_into chimera_client evpl prometheus-c)
+if(CHIMERA_NETNS_TESTING)
+    add_test(NAME chimera/client/read_into COMMAND client_read_into)
+endif()
+
 # List of test programs
 set(CLIENT_TEST_PROGRAMS
     test_symlink

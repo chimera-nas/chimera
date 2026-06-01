@@ -66,6 +66,31 @@ chimera_nfs_mount_get_port(
     return default_port;
 } /* chimera_nfs_mount_get_port */
 
+/*
+ * Get the nolock mount option - returns 1 if locking (NLM) should be
+ * disabled, 0 otherwise.  Mirrors the Linux NFS client "nolock" option:
+ * when present the client does not contact the server's lock manager and
+ * byte-range lock operations are not forwarded over the wire.  Locking is
+ * enabled by default ("lock").
+ */
+static int
+chimera_nfs_mount_get_nolock(const struct chimera_vfs_mount_options *options)
+{
+    int i;
+
+    for (i = 0; i < options->num_options; i++) {
+        if (strcmp(options->options[i].key, "nolock") == 0) {
+            return 1;
+        }
+        /* Accept an explicit "lock" as the positive form (the default). */
+        if (strcmp(options->options[i].key, "lock") == 0) {
+            return 0;
+        }
+    }
+
+    return 0;
+} /* chimera_nfs_mount_get_nolock */
+
 static void
 chimera_mount_mountd_mnt_callback(
     struct evpl                 *evpl,
@@ -182,7 +207,7 @@ chimera_nfs3_mount_process_mount(
                                               server_thread->mount_conn,
                                               NULL,
                                               &mount_arg,
-                                              0, 0, 0,
+                                              0, 0, NULL, 0, 0,
                                               chimera_mount_mountd_mnt_callback, mount);
 }     /* chimera_nfs3_mount_process_mount */
 
@@ -245,6 +270,14 @@ chimera_nfs3_mount_nfs_null_callback(
         return;
     }
 
+    /* "nolock" mount option: skip NLM discovery entirely.  nlm_endpoint is
+     * left NULL so no lock-manager connection is made and byte-range lock
+     * operations short-circuit to ENOTSUP (see chimera_nfs3_lock). */
+    if (server_thread->server->nolock) {
+        chimera_nfs3_mount_discover_callback(server_thread, 0);
+        return;
+    }
+
     /* Query portmap for NLM port (program 100021, version 4, TCP) */
     mapping.prog = 100021;
     mapping.vers = 4;
@@ -256,7 +289,7 @@ chimera_nfs3_mount_nfs_null_callback(
                                                   server_thread->portmap_conn,
                                                   NULL,
                                                   &mapping,
-                                                  0, 0, 0,
+                                                  0, 0, NULL, 0, 0,
                                                   chimera_portmap_getport_nlm_callback, server_thread);
 } /* chimera_nfs3_mount_nfs_null_callback */
 
@@ -282,7 +315,7 @@ chimera_portmap_getport_nfs_callback(
     server->nfs_endpoint = evpl_endpoint_create(server->hostname, port);
 
     server_thread->nfs_conn = evpl_rpc2_client_connect(server_thread->thread->rpc2_thread,
-                                                       EVPL_STREAM_SOCKET_TCP,
+                                                       server_thread->shared->tcp_protocol,
                                                        server->nfs_endpoint,
                                                        NULL, 0, NULL);
 
@@ -290,7 +323,7 @@ chimera_portmap_getport_nfs_callback(
                                            server_thread->thread->evpl,
                                            server_thread->nfs_conn,
                                            NULL,
-                                           0, 0, 0,
+                                           0, 0, NULL, 0, 0,
                                            chimera_nfs3_mount_nfs_null_callback, server_thread);
 
 } /* chimera_portmap_getport_nfs_callback */
@@ -327,7 +360,7 @@ chimera_mount_mountd_null_callback(
                                                server_thread->thread->evpl,
                                                server_thread->nfs_conn,
                                                NULL,
-                                               0, 0, 0,
+                                               0, 0, NULL, 0, 0,
                                                chimera_nfs3_mount_nfs_null_callback, server_thread);
     } else {
         /* For TCP, use portmap to discover NFS port */
@@ -341,7 +374,7 @@ chimera_mount_mountd_null_callback(
                                                       server_thread->portmap_conn,
                                                       NULL,
                                                       &mapping,
-                                                      0, 0, 0,
+                                                      0, 0, NULL, 0, 0,
                                                       chimera_portmap_getport_nfs_callback, server_thread);
     }
 } /* chimera_mount_mountd_null_callback */
@@ -368,7 +401,7 @@ chimera_portmap_getport_mountd_callback(
     server->mount_endpoint = evpl_endpoint_create(server->hostname, port);
 
     server_thread->mount_conn = evpl_rpc2_client_connect(server_thread->thread->rpc2_thread,
-                                                         EVPL_STREAM_SOCKET_TCP,
+                                                         server_thread->shared->tcp_protocol,
                                                          server->mount_endpoint,
                                                          NULL, 0, NULL);
 
@@ -376,7 +409,7 @@ chimera_portmap_getport_mountd_callback(
                                                server_thread->thread->evpl,
                                                server_thread->mount_conn,
                                                NULL,
-                                               0, 0, 0,
+                                               0, 0, NULL, 0, 0,
                                                chimera_mount_mountd_null_callback, server_thread);
 } /* chimera_portmap_getport_mountd_callback */
 
@@ -408,7 +441,7 @@ chimera_portmap_null_callback(
                                                   server_thread->portmap_conn,
                                                   NULL,
                                                   &mapping,
-                                                  0, 0, 0,
+                                                  0, 0, NULL, 0, 0,
                                                   chimera_portmap_getport_mountd_callback, server_thread);
 } /* chimera_portmap_null_callback */
 
@@ -493,6 +526,8 @@ chimera_nfs3_mount(
             server->nfs_port = chimera_nfs_mount_get_port(&request->mount.options, CHIMERA_NFS_RDMA_PORT);
         }
 
+        server->nolock = chimera_nfs_mount_get_nolock(&request->mount.options);
+
         strncpy(server->hostname, hostname, hostnamelen);
 
         shared->servers[idx] = server;
@@ -527,7 +562,7 @@ chimera_nfs3_mount(
         server->portmap_endpoint = evpl_endpoint_create(server->hostname, 111);
 
         server_thread->portmap_conn = evpl_rpc2_client_connect(thread->rpc2_thread,
-                                                               EVPL_STREAM_SOCKET_TCP,
+                                                               server_thread->shared->tcp_protocol,
                                                                server->portmap_endpoint,
                                                                NULL, 0, NULL);
 
@@ -540,7 +575,7 @@ chimera_nfs3_mount(
                                                    thread->evpl,
                                                    server_thread->portmap_conn,
                                                    NULL,
-                                                   0, 0, 0,
+                                                   0, 0, NULL, 0, 0,
                                                    chimera_portmap_null_callback, server_thread);
     }
 } /* chimera_nfs3_mount */

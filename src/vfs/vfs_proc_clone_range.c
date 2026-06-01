@@ -14,7 +14,7 @@ chimera_vfs_clone_range_complete(struct chimera_vfs_request *request)
     chimera_vfs_clone_range_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(request->thread->vfs->vfs_attr_cache,
+        chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
                                       request->clone_range.dst_handle->fh_hash,
                                       request->clone_range.dst_handle->fh,
                                       request->clone_range.dst_handle->fh_len,

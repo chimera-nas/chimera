@@ -360,6 +360,21 @@ chimera_smb_marshal_fs_full_size_info(
 
 } /* chimera_smb_marshal_fs_full_size_info */
 
+/* A timestamp field in a SET FileBasicInformation request carries one of
+ * three sentinel values that all mean "do not change this field":
+ *   0                 (NTTIME_OMIT)   - leave unchanged
+ *   0xFFFFFFFFFFFFFFFF (NTTIME_FREEZE) - leave unchanged, stop auto-updates
+ *   0xFFFFFFFFFFFFFFFE (NTTIME_THAW)   - leave unchanged, resume auto-updates
+ * Any other value is a real timestamp to store.  (MS-FSCC 2.4.7; the
+ * freeze/thaw values are exercised by smbtorture's smb2.timestamps.) */
+static inline int
+chimera_smb_time_is_omit(uint64_t nttime)
+{
+    return nttime == 0 ||
+           nttime == UINT64_MAX ||
+           nttime == UINT64_MAX - 1;
+} /* chimera_smb_time_is_omit */
+
 static inline void
 chimera_smb_unmarshal_basic_info(
     const struct chimera_smb_attrs *smb_attrs,
@@ -368,18 +383,27 @@ chimera_smb_unmarshal_basic_info(
     attr->va_req_mask = 0;
     attr->va_set_mask = 0;
 
-    chimera_nt_to_epoch(smb_attrs->smb_atime, &attr->va_atime);
-    chimera_nt_to_epoch(smb_attrs->smb_mtime, &attr->va_mtime);
-    chimera_nt_to_epoch(smb_attrs->smb_ctime, &attr->va_ctime);
+    /* Each timestamp is only applied when the client supplied a real value;
+     * the omit/freeze/thaw sentinels leave the stored value alone. */
+    if (!chimera_smb_time_is_omit(smb_attrs->smb_atime)) {
+        chimera_nt_to_epoch(smb_attrs->smb_atime, &attr->va_atime);
+        attr->va_req_mask |= CHIMERA_VFS_ATTR_ATIME;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
+    }
 
-    attr->va_req_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME | CHIMERA_VFS_ATTR_CTIME;
-    attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME | CHIMERA_VFS_ATTR_CTIME;
+    if (!chimera_smb_time_is_omit(smb_attrs->smb_mtime)) {
+        chimera_nt_to_epoch(smb_attrs->smb_mtime, &attr->va_mtime);
+        attr->va_req_mask |= CHIMERA_VFS_ATTR_MTIME;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
+    }
 
-    /* Creation/birth time: 0 means "no change" and -1 (0xFFFF...) means
-     * "do not change, and freeze against system updates" (MS-FSCC 2.4.7).
-     * In both cases leave the stored value alone. */
-    if (smb_attrs->smb_crttime != 0 &&
-        smb_attrs->smb_crttime != UINT64_MAX) {
+    if (!chimera_smb_time_is_omit(smb_attrs->smb_ctime)) {
+        chimera_nt_to_epoch(smb_attrs->smb_ctime, &attr->va_ctime);
+        attr->va_req_mask |= CHIMERA_VFS_ATTR_CTIME;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
+    }
+
+    if (!chimera_smb_time_is_omit(smb_attrs->smb_crttime)) {
         chimera_nt_to_epoch(smb_attrs->smb_crttime, &attr->va_btime);
         attr->va_req_mask |= CHIMERA_VFS_ATTR_BTIME;
         attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;

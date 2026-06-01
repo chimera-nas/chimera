@@ -30,6 +30,8 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
+#include "vfs/vfs_acl.h"
+#include "vfs/vfs_acl_serialize.h"
 #include "diskfs.h"
 #include "space_map.h"
 #include "common/logging.h"
@@ -99,6 +101,7 @@ struct diskfs_extent {
     uint32_t              length;
     uint64_t              device_offset;
     uint64_t              file_offset;
+    uint32_t              flags;       /* DISKFS_EXT_* */
     void                 *buffer;
     struct rb_node        node;
     struct diskfs_extent *next;
@@ -138,6 +141,15 @@ struct diskfs_request_private {
     uint32_t                    rd_gen;
     int                         rd_namelen;
     char                        rd_name[256];
+    /* readdir trampoline state: when the b+tree and child inodes are all
+     * cache-resident, each step completes synchronously and the
+     * iter_inode_cb -> iter_step tail call would otherwise recurse once per
+     * entry and overflow the stack on a large directory.  rd_looping marks
+     * that an iteration loop is active; rd_advance asks it for another step;
+     * rd_done flags that the walk finished (completed by the loop, not inline). */
+    int                         rd_looping;
+    int                         rd_advance;
+    int                         rd_done;
 
     /* Scratch buffer for handlers that parse a looked-up b+tree record
      * (e.g. a dirent's inum/gen) in their async continuation.  Sized to hold
@@ -175,6 +187,13 @@ struct diskfs_request_private {
     int                         need_suffix_read;
     uint64_t                    prefix_device_id, prefix_device_offset;
     uint64_t                    suffix_device_id, suffix_device_offset;
+
+    /* Coalescing-insert descriptor (diskfs_ext_put): the extent to record,
+     * merged with a contiguous predecessor when possible; ci_cont runs after. */
+    uint64_t                    ci_off, ci_len, ci_devoff;
+    uint32_t                    ci_devid, ci_flags;
+    void                        (*ci_cont)(
+        struct chimera_vfs_request *);
 };
 
 struct diskfs_device {
@@ -443,9 +462,11 @@ struct diskfs_inode {
     uint64_t                    atime_sec;
     uint64_t                    ctime_sec;
     uint64_t                    mtime_sec;
+    uint64_t                    btime_sec;
     uint32_t                    atime_nsec;
     uint32_t                    ctime_nsec;
     uint32_t                    mtime_nsec;
+    uint32_t                    btime_nsec;
 
     /* Inode-cache linkage, keyed by inum.  Lock state and the wait list
      * below are protected by the owning shard's mutex, never held across
@@ -600,9 +621,11 @@ struct diskfs_dinode {
     uint64_t atime_sec;
     uint64_t mtime_sec;
     uint64_t ctime_sec;
+    uint64_t btime_sec;
     uint32_t atime_nsec;
     uint32_t mtime_nsec;
     uint32_t ctime_nsec;
+    uint32_t btime_nsec;
     uint64_t parent_inum;     /* directories only */
     uint32_t parent_gen;
 };
@@ -619,6 +642,7 @@ enum diskfs_bt_rectype {
     DISKFS_REC_ORPHAN  = 4,   /* orphan-list inode only: subkey = orphaned inum */
     DISKFS_REC_XATTR   = 5,
     DISKFS_REC_PNFS    = 6,   /* regular file: opaque pNFS layout blob (flex-files) */
+    DISKFS_REC_ACL     = 7,   /* single record: serialized NFSv4/Windows ACL (subkey 0) */
 };
 
 /* B+tree key: ordered by (type, subkey).  subkey is the name hash for
@@ -664,10 +688,15 @@ struct diskfs_dirent_rec {
     char     name[];
 } __attribute__((packed));
 
+/* extent_rec.flags bits */
+#define DISKFS_EXT_UNWRITTEN 0x1u   /* space reserved (e.g. fallocate) but never
+                                     * written: reads return zeros, the first
+                                     * write clears the bit */
+
 struct diskfs_extent_rec {
     uint64_t length;
     uint32_t device_id;
-    uint32_t pad;
+    uint32_t flags;
     uint64_t device_offset;
 } __attribute__((packed));
 
@@ -851,42 +880,102 @@ struct diskfs_il_record {
     * must fork a still-referenced block (COW), never on the log/push path. */
     struct evpl_iovec       *iovs;
     struct diskfs_il_record *next;
+    /* Push-thread lifetime: a record is freed only after it is logically
+     * retired (trimmed from the log) AND no in-flight home write still reads
+     * its iovs (inflight_refs == 0). */
+    int                      inflight_refs;
+    int                      retired;
 };
 
+/*
+ * Push-side per-(device,offset) pending home write: the newest logged image of
+ * a block that is not yet durably home.  Lives on the push thread only.
+ * `iov`/`owner` track the newest image; the `issued_*` fields snapshot the
+ * in-flight write's source, so an image that supersedes mid-flight is re-issued
+ * on completion (newest lands last) and the in-flight write's source record
+ * stays pinned (inflight_refs) until that write lands.
+ */
+struct diskfs_pending {
+    struct diskfs_intent_log *il;          /* owner (recovered in the block-write cb) */
+    uint32_t                  device_id;
+    uint64_t                  device_offset;
+    uint64_t                  seq;         /* newest pending image seq */
+    struct evpl_iovec        *iov;         /* newest image (points into owner->iovs) */
+    struct diskfs_il_record  *owner;       /* record owning the newest image */
+    int                       inflight;    /* a home write is in flight for this block */
+    uint64_t                  issued_seq;  /* seq of the in-flight write */
+    struct diskfs_il_record  *issued_owner; /* record the in-flight write reads from */
+    int                       on_ready;    /* queued on ready list */
+    struct diskfs_pending    *hnext;       /* hash chain */
+    struct diskfs_pending    *rnext;       /* ready-queue / free-list link */
+};
+
+/*
+ * Commit-side retirement-ring slot: a submitted redo record awaiting in-order
+ * retirement.  `done` is set when the record's journal write(s) complete; the
+ * ring retires strictly in submission (== log) order, so ACKs to workers and
+ * the hand-off to the push thread happen in order -- replay stops at the first
+ * torn record, so a later record is not recoverable until every earlier record
+ * is durable.
+ */
+struct diskfs_retire_slot {
+    struct diskfs_redo_ctx *ctx;
+    int                     done;
+};
+
+#define DISKFS_RETIRE_RING_SIZE  1024   /* >= DISKFS_COMMIT_WATERMARK */
+#define DISKFS_RETIRE_RING_MASK  (DISKFS_RETIRE_RING_SIZE - 1)
+/* > max records the log can ever hold (one record is >= one 4 KiB block, so a
+ * 64 MiB log holds < 16384 records); sized so the ring can never fill. */
+#define DISKFS_HANDOFF_RING_SIZE 32768
+#define DISKFS_HANDOFF_RING_MASK (DISKFS_HANDOFF_RING_SIZE - 1)
+
 struct diskfs_intent_log {
-    struct evpl_doorbell             wake_doorbell;
-    struct evpl                     *evpl;
-    struct evpl_thread              *thread;
-    int                              ready;      /* atomic */
-    int                              shutdown;   /* atomic */
-    uint32_t                         num_channels; /* slots[] count, intent log thread only */
+    /* ---------- commit thread ---------- */
+    struct evpl_doorbell             wake_doorbell;   /* workers + push-trim ring this */
+    struct evpl                     *evpl;            /* commit thread evpl */
+    struct evpl_thread              *thread;          /* commit thread */
+    int                              ready;           /* atomic: commit thread up */
+    int                              shutdown;        /* atomic */
+    int                              commit_alive;    /* atomic: 1 while the commit thread's wake_doorbell is live; the push thread must not ring it once 0 (cleared before the commit thread is destroyed, which closes that fd) */
+    uint32_t                         num_channels;
     struct diskfs_iq_channel        *channels[DISKFS_IL_MAX_CHANNELS];
     pthread_mutex_t                  registration_lock;
     struct diskfs_iq_channel        *pending_head;
+    struct evpl_block_queue         *log_queue;       /* redo writes -> intent-log device */
+    uint64_t                         log_seq;         /* next redo seq (commit only) */
+    struct diskfs_retire_slot       *retire;          /* [DISKFS_RETIRE_RING_SIZE] */
+    uint64_t                         retire_head;     /* next slot to retire (in order) */
+    uint64_t                         retire_tail;     /* next submission index */
+    int                              redo_inflight;   /* redo block writes in flight (commit watermark) */
 
-    /* Block queues on the intent-log thread's own evpl (one per device),
-     * used both to write redo records into the intent-log region and to
-     * tail-push logged blocks to their final on-disk locations. */
-    struct evpl_block_queue        **queue;
-    uint64_t                         log_head;   /* next free byte in the intent-log region */
-    uint64_t                         log_tail;   /* oldest un-pushed record (trim point) */
-    uint64_t                         log_seq;    /* next redo record sequence number */
-
-    /* Tail-pusher (runs on this thread): FIFO of durably-logged records whose
-    * blocks have not yet been written to their final locations.  Processed
-    * strictly oldest-first so a re-logged block's newest image lands last. */
-    struct diskfs_il_record         *push_head;
+    /* ---------- push thread ---------- */
+    struct evpl_doorbell             push_doorbell;   /* commit rings after hand-off */
+    struct evpl                     *push_evpl;
+    struct evpl_thread              *push_thread;
+    int                              push_ready;      /* atomic */
+    struct evpl_block_queue        **home_queue;      /* [num_devices] home writes */
+    struct diskfs_il_record         *push_head;       /* record FIFO (log order, for trim) */
     struct diskfs_il_record         *push_tail;
-    struct diskfs_il_record         *push_cur;   /* record currently being pushed */
-    uint32_t                         push_next;  /* next block index of push_cur to issue */
-    int                              push_outstanding; /* home writes in flight for push_cur */
-    int                              redo_inflight; /* redo writes issued, not yet in FIFO */
-    int                              iocbs_inflight; /* block writes (redo + push) on the queue, not yet completed */
+    struct diskfs_pending          **phash;           /* [phash_mask+1] (dev,off) buckets */
+    uint32_t                         phash_mask;
+    struct diskfs_pending           *ready_head;      /* FIFO of pending entries to issue */
+    struct diskfs_pending           *ready_tail;
+    struct diskfs_pending           *pfree;           /* pending entry free list */
+    int                              push_outstanding; /* home writes in flight (push watermark) */
+
+    /* ---------- shared (cross-thread) ---------- */
+    struct diskfs_il_record        **handoff;         /* SPSC ring of record* (commit -> push) */
+    uint32_t                         handoff_head;    /* atomic: push consumer */
+    uint32_t                         handoff_tail;    /* atomic: commit producer */
+    uint64_t                         log_head;        /* atomic: commit-written (next free byte) */
+    uint64_t                         log_tail;        /* atomic: push-written (trim point) */
+    int                              sync;            /* FUA/sync flag (0 in unsafe_async) */
+
+    /* ---------- metrics ---------- */
     int                              redo_inflight_high_water;
-    int                              iocbs_inflight_high_water;
     int                              push_outstanding_high_water;
     uint64_t                         log_used_bytes_high_water;
-    int                              sync;       /* sync flag passed to redo/push block writes (0 in unsafe_async mode) */
     struct diskfs_intent_log_metrics metrics;
 };
 
@@ -905,6 +994,7 @@ struct diskfs_shared {
     uint64_t                   root_inum;          /* for the clean-unmount superblock */
     uint32_t                   root_gen;
     int                        unsafe_async;       /* config opt-in: submit block writes without FUA/sync (no crash safety) */
+    int                        noatime;            /* config opt-in: never update atime on read (default: relatime) */
     int                        mounted;            /* 1 = remounted existing FS (enables inode read-back) */
     uint32_t                   block_cache_blocks; /* total resident block-buffer cap (0 = default) */
     uint32_t                   inode_cache_inodes; /* total resident inode cap (0 = default) */
@@ -1286,44 +1376,47 @@ diskfs_metric_gauge_set(
 static inline uint64_t
 diskfs_il_used_bytes(struct diskfs_intent_log *il)
 {
-    if (il->log_head >= il->log_tail) {
-        return il->log_head - il->log_tail;
+    uint64_t head = __atomic_load_n(&il->log_head, __ATOMIC_RELAXED);
+    uint64_t tail = __atomic_load_n(&il->log_tail, __ATOMIC_RELAXED);
+
+    if (head >= tail) {
+        return head - tail;
     }
-    return SM_INTENT_LOG_SIZE - (il->log_tail - il->log_head);
+    return SM_INTENT_LOG_SIZE - (tail - head);
 } /* diskfs_il_used_bytes */
 
+/* Commit-thread metrics: redo write depth + registered channels. */
 static inline void
-diskfs_il_metrics_update(struct diskfs_intent_log *il)
+diskfs_il_commit_metrics(struct diskfs_intent_log *il)
 {
-    uint64_t used = diskfs_il_used_bytes(il);
-
     if (il->redo_inflight > il->redo_inflight_high_water) {
         il->redo_inflight_high_water = il->redo_inflight;
     }
-    if (il->iocbs_inflight > il->iocbs_inflight_high_water) {
-        il->iocbs_inflight_high_water = il->iocbs_inflight;
-    }
+    diskfs_metric_gauge_set(il->metrics.redo_inflight, il->redo_inflight);
+    diskfs_metric_gauge_set(il->metrics.registered_channels, il->num_channels);
+    diskfs_metric_gauge_set(il->metrics.redo_inflight_high_water,
+                            il->redo_inflight_high_water);
+} /* diskfs_il_commit_metrics */
+
+/* Push-thread metrics: home write depth + log occupancy. */
+static inline void
+diskfs_il_push_metrics(struct diskfs_intent_log *il)
+{
+    uint64_t used = diskfs_il_used_bytes(il);
+
     if (il->push_outstanding > il->push_outstanding_high_water) {
         il->push_outstanding_high_water = il->push_outstanding;
     }
     if (used > il->log_used_bytes_high_water) {
         il->log_used_bytes_high_water = used;
     }
-
-    diskfs_metric_gauge_set(il->metrics.redo_inflight, il->redo_inflight);
-    diskfs_metric_gauge_set(il->metrics.iocbs_inflight, il->iocbs_inflight);
     diskfs_metric_gauge_set(il->metrics.push_outstanding, il->push_outstanding);
     diskfs_metric_gauge_set(il->metrics.log_used_bytes, used);
-    diskfs_metric_gauge_set(il->metrics.registered_channels, il->num_channels);
-    diskfs_metric_gauge_set(il->metrics.redo_inflight_high_water,
-                            il->redo_inflight_high_water);
-    diskfs_metric_gauge_set(il->metrics.iocbs_inflight_high_water,
-                            il->iocbs_inflight_high_water);
     diskfs_metric_gauge_set(il->metrics.push_outstanding_high_water,
                             il->push_outstanding_high_water);
     diskfs_metric_gauge_set(il->metrics.log_used_bytes_high_water,
                             il->log_used_bytes_high_water);
-} /* diskfs_il_metrics_update */
+} /* diskfs_il_push_metrics */
 
 static inline void
 diskfs_metric_histogram_sample(
@@ -1537,12 +1630,34 @@ diskfs_fh_to_inum(
         ((txn)->type == DISKFS_TXN_WRITE ? DISKFS_INODE_LOCK_WRITE \
                                          : DISKFS_INODE_LOCK_READ)
 
+/*
+ * Mix the inum before selecting the shard.  inums are
+ * (disk<<56 | ag<<32 | block_idx) where block_idx is a small, often dense or
+ * stride-correlated integer, so the raw low bits have little entropy and
+ * cluster inodes onto a handful of the 256 shards -- concentrating contention
+ * on those few shard mutexes.  Use the SplitMix64 finalizer to spread them
+ * evenly.  (This is a pure-integer mix rather than hashing &inum through XXH3:
+ * the byte-wise XXH3 read of a stack scalar trips -Werror=maybe-uninitialized
+ * when this is deeply inlined on some toolchains, and an integer finalizer is
+ * both immune to that and faster.)
+ */
+static inline uint64_t
+diskfs_inum_hash(uint64_t inum)
+{
+    uint64_t x = inum;
+
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    x =  x ^ (x >> 31);
+    return x;
+} /* diskfs_inum_hash */
+
 static inline struct diskfs_inode_shard *
 diskfs_inode_shard(
     struct diskfs_shared *shared,
     uint64_t              inum)
 {
-    return &shared->inode_cache->shards[inum & DISKFS_INODE_CACHE_MASK];
+    return &shared->inode_cache->shards[diskfs_inum_hash(inum) & DISKFS_INODE_CACHE_MASK];
 } /* diskfs_inode_shard */
 
 static inline struct diskfs_inode_waiter *
@@ -1868,6 +1983,64 @@ static void diskfs_pin_cont_resume(
     struct diskfs_thread *thread,
     void                 *arg);
 
+/*
+ * Grant (or enqueue a waiter for) `inode` with the shard lock already held, and
+ * release the lock before returning.  Shared by diskfs_inode_acquire (after the
+ * rb-tree lookup) and diskfs_inode_acquire_pinned (lookup skipped because an
+ * open handle pins the inode).  On a compatible WRITE grant this pins the home
+ * block, which may async-load it and defer the callback.  `gen` is recorded on
+ * a parked waiter so a later grant can detect a stale generation.
+ */
+static void
+diskfs_inode_grant_locked(
+    struct diskfs_thread       *thread,
+    struct diskfs_txn          *txn,
+    struct diskfs_inode_shard  *shard,
+    struct diskfs_inode        *inode,
+    uint32_t                    gen,
+    enum diskfs_inode_lock_mode mode,
+    diskfs_inode_cb_t           cb,
+    void                       *private_data)
+{
+    struct diskfs_inode_waiter *w;
+
+    if (diskfs_inode_lock_compatible(inode, mode)) {
+        diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_HIT);
+        diskfs_inode_lock_grant(inode, mode);
+        diskfs_inode_lru_unlink(shard, inode);     /* busy now, not a candidate */
+        pthread_mutex_unlock(&shard->lock);
+        diskfs_txn_add_slot(txn, inode, mode);
+        if (mode == DISKFS_INODE_LOCK_WRITE) {
+            /* Pin the home block before reporting the grant; may async-load it
+             * (and defer cb) if it was evicted while the inode stayed cached. */
+            diskfs_inode_finish_write_pin(thread, txn, inode, cb, private_data);
+        } else {
+            cb(inode, CHIMERA_VFS_OK, private_data);
+        }
+        return;
+    }
+
+    w = diskfs_waiter_alloc(thread);
+    diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_WAIT);
+    w->txn          = txn;
+    w->mode         = mode;
+    w->gen          = gen;
+    w->cb           = cb;
+    w->private_data = private_data;
+    w->inode        = inode;
+    w->status       = CHIMERA_VFS_OK;
+    w->next         = NULL;
+
+    if (inode->wait_tail) {
+        inode->wait_tail->next = w;
+    } else {
+        inode->wait_head = w;
+    }
+    inode->wait_tail = w;
+
+    pthread_mutex_unlock(&shard->lock);
+} /* diskfs_inode_grant_locked */
+
 static void
 diskfs_inode_acquire(
     struct diskfs_thread       *thread,
@@ -1878,10 +2051,9 @@ diskfs_inode_acquire(
     diskfs_inode_cb_t           cb,
     void                       *private_data)
 {
-    struct diskfs_inode_shard  *shard;
-    struct diskfs_inode        *inode;
-    struct diskfs_inode_waiter *w;
-    int                         i;
+    struct diskfs_inode_shard *shard;
+    struct diskfs_inode       *inode;
+    int                        i;
 
     for (i = 0; i < txn->num_inodes; i++) {
         inode = txn->inodes[i].inode;
@@ -1925,42 +2097,43 @@ diskfs_inode_acquire(
         return;
     }
 
-    if (diskfs_inode_lock_compatible(inode, mode)) {
-        diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_HIT);
-        diskfs_inode_lock_grant(inode, mode);
-        diskfs_inode_lru_unlink(shard, inode);     /* busy now, not a candidate */
-        pthread_mutex_unlock(&shard->lock);
-        diskfs_txn_add_slot(txn, inode, mode);
-        if (mode == DISKFS_INODE_LOCK_WRITE) {
-            /* Pin the home block before reporting the grant; may async-load it
-             * (and defer cb) if it was evicted while the inode stayed cached. */
-            diskfs_inode_finish_write_pin(thread, txn, inode, cb, private_data);
-        } else {
-            cb(inode, CHIMERA_VFS_OK, private_data);
-        }
-        return;
-    }
-
-    w = diskfs_waiter_alloc(thread);
-    diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_WAIT);
-    w->txn          = txn;
-    w->mode         = mode;
-    w->gen          = gen;
-    w->cb           = cb;
-    w->private_data = private_data;
-    w->inode        = inode;
-    w->status       = CHIMERA_VFS_OK;
-    w->next         = NULL;
-
-    if (inode->wait_tail) {
-        inode->wait_tail->next = w;
-    } else {
-        inode->wait_head = w;
-    }
-    inode->wait_tail = w;
-
-    pthread_mutex_unlock(&shard->lock);
+    diskfs_inode_grant_locked(thread, txn, shard, inode, gen, mode, cb, private_data);
 } /* diskfs_inode_acquire */
+
+/*
+ * Acquire the inode lock on an inode already pinned by an open handle (its
+ * refcnt was bumped in diskfs_open_fh_inode_cb, so it is resident and will not
+ * be freed; gen bumps only on free).  This skips the fh->inum decode and the
+ * inode-cache rb-tree lookup -- the hot per-I/O cost on a warm handle -- but
+ * still takes the shard lock to serialize the lock-state grant against the
+ * concurrent release/completion path.
+ */
+static void
+diskfs_inode_acquire_pinned(
+    struct diskfs_thread       *thread,
+    struct diskfs_txn          *txn,
+    struct diskfs_inode        *inode,
+    enum diskfs_inode_lock_mode mode,
+    diskfs_inode_cb_t           cb,
+    void                       *private_data)
+{
+    struct diskfs_inode_shard *shard;
+    int                        i;
+
+    /* Already locked in this txn: reuse the held grant (matches the txn-slot
+     * fast path in diskfs_inode_acquire). */
+    for (i = 0; i < txn->num_inodes; i++) {
+        if (txn->inodes[i].inode == inode) {
+            cb(inode, CHIMERA_VFS_OK, private_data);
+            return;
+        }
+    }
+
+    shard = diskfs_inode_shard(thread->shared, inode->inum);
+    pthread_mutex_lock(&shard->lock);
+    diskfs_inode_grant_locked(thread, txn, shard, inode, inode->gen, mode, cb,
+                              private_data);
+} /* diskfs_inode_acquire_pinned */
 
 static inline void
 diskfs_inode_get_inum_async(
@@ -2098,6 +2271,8 @@ diskfs_inode_load_sync(
         inode->mtime_nsec  = di->mtime_nsec;
         inode->ctime_sec   = di->ctime_sec;
         inode->ctime_nsec  = di->ctime_nsec;
+        inode->btime_sec   = di->btime_sec;
+        inode->btime_nsec  = di->btime_nsec;
         inode->parent_inum = di->parent_inum;
         inode->parent_gen  = di->parent_gen;
         rb_tree_insert(&shard->inodes, inum, inode);
@@ -3182,9 +3357,11 @@ diskfs_inode_flush(struct diskfs_inode *inode)
     di->atime_sec  = inode->atime_sec;
     di->mtime_sec  = inode->mtime_sec;
     di->ctime_sec  = inode->ctime_sec;
+    di->btime_sec  = inode->btime_sec;
     di->atime_nsec = inode->atime_nsec;
     di->mtime_nsec = inode->mtime_nsec;
     di->ctime_nsec = inode->ctime_nsec;
+    di->btime_nsec = inode->btime_nsec;
     if (S_ISDIR(inode->mode)) {
         di->parent_inum = inode->parent_inum;
         di->parent_gen  = inode->parent_gen;
@@ -5623,12 +5800,13 @@ diskfs_ext_insert(
     uint64_t              file_offset,
     uint64_t              length,
     uint32_t              device_id,
-    uint64_t              device_offset)
+    uint64_t              device_offset,
+    uint32_t              flags)
 {
     struct diskfs_extent_rec rec = {
         .length        = length,
         .device_id     = device_id,
-        .pad           = 0,
+        .flags         = flags,
         .device_offset = device_offset,
     };
     struct diskfs_bt_key     key = diskfs_extent_key(file_offset);
@@ -5671,6 +5849,7 @@ diskfs_ext_floor(
     out->length        = (uint32_t) rec.length;
     out->device_id     = rec.device_id;
     out->device_offset = rec.device_offset;
+    out->flags         = rec.flags;
     return 1;
 } /* diskfs_ext_floor */
 
@@ -5696,6 +5875,7 @@ diskfs_ext_ceil(
     out->length        = (uint32_t) rec.length;
     out->device_id     = rec.device_id;
     out->device_offset = rec.device_offset;
+    out->flags         = rec.flags;
     return 1;
 } /* diskfs_ext_ceil */
 
@@ -5777,13 +5957,14 @@ diskfs_ext_insert_async(
     uint64_t              length,
     uint32_t              device_id,
     uint64_t              device_offset,
+    uint32_t              flags,
     diskfs_bt_cb_t        cb,
     void                 *private_data)
 {
     struct diskfs_extent_rec rec = {
         .length        = length,
         .device_id     = device_id,
-        .pad           = 0,
+        .flags         = flags,
         .device_offset = device_offset,
     };
     struct diskfs_bt_key     key = diskfs_extent_key(file_offset);
@@ -5825,6 +6006,7 @@ diskfs_ext_from_op(
     out->length        = (uint32_t) rec->length;
     out->device_id     = rec->device_id;
     out->device_offset = rec->device_offset;
+    out->flags         = rec->flags;
     return 1;
 } /* diskfs_ext_from_op */
 
@@ -6044,6 +6226,8 @@ diskfs_inode_load_complete(
         inode->mtime_nsec  = di->mtime_nsec;
         inode->ctime_sec   = di->ctime_sec;
         inode->ctime_nsec  = di->ctime_nsec;
+        inode->btime_sec   = di->btime_sec;
+        inode->btime_nsec  = di->btime_nsec;
         inode->parent_inum = di->parent_inum;
         inode->parent_gen  = di->parent_gen;
         rb_tree_insert(&shard->inodes, inum, inode);
@@ -6467,6 +6651,7 @@ struct diskfs_redo_ctx {
     struct diskfs_iq_entry    entry;
     struct diskfs_il_record  *rec;     /* owns the record image (iovs) */
     int                       segments; /* outstanding journal writes (see below) */
+    uint64_t                  retire_idx; /* slot in the commit retirement ring */
 };
 
 /*
@@ -6475,7 +6660,7 @@ struct diskfs_redo_ctx {
  * txn is issued in consecutive chunks sharing one redo_ctx; the record is
  * durable only when the last chunk completes.
  */
-#define DISKFS_IL_MAX_IOV    64
+#define DISKFS_IL_MAX_IOV       64
 
 /*
  * The intent-log thread submits all its block writes (redo records + tail-push
@@ -6487,8 +6672,17 @@ struct diskfs_redo_ctx {
  * in flight, and resume from a completion once it drains back to the low
  * watermark -- leaving headroom for the in-flight tail-push record's writes.
  */
-#define DISKFS_IL_IOCB_CAP   128
-#define DISKFS_IL_IOCB_LOWAT 64
+/*
+ * Each thread keeps its own block writes pipelined.  The commit thread targets
+ * this many outstanding redo writes on the log device; the push thread targets
+ * this many outstanding home writes across the data devices.  Both gate
+ * submission at the high watermark and resume from a completion at the low
+ * watermark.  (The libaio/io_uring submission ring defaults to 256 pending.)
+ */
+#define DISKFS_COMMIT_WATERMARK 256
+#define DISKFS_COMMIT_LOWAT     128
+#define DISKFS_PUSH_WATERMARK   256
+#define DISKFS_PUSH_LOWAT       128
 
 /*
  * On-log record layout (all 4 KiB-aligned for zero-copy scatter-gather):
@@ -6515,22 +6709,27 @@ diskfs_il_hdr_len(uint32_t nblocks)
  * of the log region; a short run at the end is simply left unused until the
  * tail laps it).  The log is empty exactly when no record is pending.
  */
+/* Commit thread owns log_head; the push thread advances log_tail (trim) and
+ * the commit thread reads it here to check space.  head == tail means empty
+ * (place() always leaves the wrap gap, so the ring never reads full as empty). */
 static uint64_t
 diskfs_il_contig_free(struct diskfs_intent_log *il)
 {
     uint64_t start = SM_INTENT_LOG_OFFSET;
     uint64_t end   = SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE;
+    uint64_t head  = il->log_head;     /* commit-owned */
+    uint64_t tail  = __atomic_load_n(&il->log_tail, __ATOMIC_ACQUIRE);
 
-    if (!il->push_cur && !il->push_head && il->redo_inflight == 0) {
-        return SM_INTENT_LOG_SIZE;
+    if (head == tail) {
+        return SM_INTENT_LOG_SIZE;     /* empty */
     }
-    if (il->log_head >= il->log_tail) {
-        uint64_t run_end   = end - il->log_head;
-        uint64_t run_start = il->log_tail - start;
+    if (head >= tail) {
+        uint64_t run_end   = end - head;
+        uint64_t run_start = tail - start;
 
         return run_end > run_start ? run_end : run_start;
     }
-    return il->log_tail - il->log_head;
+    return tail - head;
 } /* diskfs_il_contig_free */
 
 static int
@@ -6547,200 +6746,411 @@ diskfs_il_place(
     struct diskfs_intent_log *il,
     uint64_t                  reclen)
 {
-    uint64_t end = SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE;
+    uint64_t end  = SM_INTENT_LOG_OFFSET + SM_INTENT_LOG_SIZE;
+    uint64_t head = il->log_head;
     uint64_t offset;
 
-    if (il->log_head + reclen > end) {
-        il->log_head = SM_INTENT_LOG_OFFSET;     /* wrap; tail of region unused */
+    if (head + reclen > end) {
+        head = SM_INTENT_LOG_OFFSET;     /* wrap; tail of region unused */
     }
-    offset       = il->log_head;
-    il->log_head = offset + reclen;
+    offset = head;
+    __atomic_store_n(&il->log_head, head + reclen, __ATOMIC_RELEASE);
     return offset;
 } /* diskfs_il_place */
 
-static void diskfs_il_push_kick(
-    struct diskfs_intent_log *il);
+/* ================================================================== */
+/* Tail-push thread: per-block coalescing home writes + in-order trim  */
+/* ================================================================== */
 
-/*
- * A record's block images are now durably home.  Transition the corresponding
- * cache blocks LOGGED -> CLEAN so they become evictable -- but only if the
- * block hasn't been re-logged since (blk->seq still equals this record's seq)
- * and isn't currently pinned by an active transaction.  Checked under the
- * shard lock so it serializes against diskfs_block_claim re-dirtying the block.
- * (A3 will additionally enqueue the cleaned block on the shard LRU and wake a
- * buffer waiter.)
- */
+static inline uint32_t
+diskfs_il_pow2(uint32_t v)
+{
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    return v + 1;
+} /* diskfs_il_pow2 */
+
+/* Hash a home location to a pending-map bucket. */
+static inline uint32_t
+diskfs_il_home_hash(
+    uint32_t device_id,
+    uint64_t device_offset,
+    uint32_t mask)
+{
+    uint64_t k = (device_offset / DISKFS_BLOCK_SIZE) ^ ((uint64_t) device_id << 48);
+
+    k *= 0x9E3779B97F4A7C15ULL;
+    return (uint32_t) (k >> 32) & mask;
+} /* diskfs_il_home_hash */
+
+static struct diskfs_pending *
+diskfs_pending_lookup(
+    struct diskfs_intent_log *il,
+    uint32_t                  dev,
+    uint64_t                  off)
+{
+    struct diskfs_pending *p = il->phash[diskfs_il_home_hash(dev, off, il->phash_mask)];
+
+    for (; p; p = p->hnext) {
+        if (p->device_id == dev && p->device_offset == off) {
+            return p;
+        }
+    }
+    return NULL;
+} /* diskfs_pending_lookup */
+
+static struct diskfs_pending *
+diskfs_pending_alloc(struct diskfs_intent_log *il)
+{
+    struct diskfs_pending *p = il->pfree;
+
+    if (p) {
+        il->pfree = p->rnext;
+    } else {
+        p = malloc(sizeof(*p));
+    }
+    p->il       = il;
+    p->inflight = 0;
+    p->on_ready = 0;
+    return p;
+} /* diskfs_pending_alloc */
+
 static void
-diskfs_il_clean_pushed_record(
+diskfs_pending_insert(
+    struct diskfs_intent_log *il,
+    struct diskfs_pending    *p)
+{
+    uint32_t b = diskfs_il_home_hash(p->device_id, p->device_offset, il->phash_mask);
+
+    p->hnext     = il->phash[b];
+    il->phash[b] = p;
+} /* diskfs_pending_insert */
+
+static void
+diskfs_pending_remove(
+    struct diskfs_intent_log *il,
+    struct diskfs_pending    *p)
+{
+    uint32_t                b  = diskfs_il_home_hash(p->device_id, p->device_offset, il->phash_mask);
+    struct diskfs_pending **pp = &il->phash[b];
+
+    while (*pp && *pp != p) {
+        pp = &(*pp)->hnext;
+    }
+    if (*pp) {
+        *pp = p->hnext;
+    }
+    p->rnext  = il->pfree;     /* recycle onto the free list */
+    il->pfree = p;
+} /* diskfs_pending_remove */
+
+static void
+diskfs_ready_push(
+    struct diskfs_intent_log *il,
+    struct diskfs_pending    *p)
+{
+    if (p->on_ready) {
+        return;
+    }
+    p->on_ready = 1;
+    p->rnext    = NULL;
+    if (il->ready_tail) {
+        il->ready_tail->rnext = p;
+    } else {
+        il->ready_head = p;
+    }
+    il->ready_tail = p;
+} /* diskfs_ready_push */
+
+static struct diskfs_pending *
+diskfs_ready_pop(struct diskfs_intent_log *il)
+{
+    struct diskfs_pending *p = il->ready_head;
+
+    if (!p) {
+        return NULL;
+    }
+    il->ready_head = p->rnext;
+    if (!il->ready_head) {
+        il->ready_tail = NULL;
+    }
+    p->on_ready = 0;
+    p->rnext    = NULL;
+    return p;
+} /* diskfs_ready_pop */
+
+static void
+diskfs_il_free_record(
     struct diskfs_intent_log *il,
     struct diskfs_il_record  *rec)
 {
-    struct diskfs_shared      *shared = container_of(il, struct diskfs_shared, intent_log);
-    struct diskfs_block_cache *cache  = shared->block_cache;
-    char                      *p      = (char *) rec->iovs[0].data + sizeof(struct diskfs_redo_header);
-    uint32_t                   i;
+    evpl_iovecs_release(il->push_evpl, rec->iovs, rec->niov);
+    free(rec->iovs);
+    free(rec);
+} /* diskfs_il_free_record */
+
+/*
+ * Fold one durable record's blocks into the pending map.  Records are folded in
+ * log/seq order, so a later record's image of a block supersedes an earlier
+ * one (the coalescing win: a block logged by many queued commits is written
+ * home once).  A newly-pending block is queued for issue; a block already in
+ * flight is left for its completion to re-issue the newer image.
+ */
+static void
+diskfs_push_fold_record(
+    struct diskfs_intent_log *il,
+    struct diskfs_il_record  *rec)
+{
+    char    *p = (char *) rec->iovs[0].data + sizeof(struct diskfs_redo_header);
+    uint32_t i;
 
     for (i = 0; i < rec->num_blocks; i++) {
         struct diskfs_redo_block_header *bh = (struct diskfs_redo_block_header *) p;
-        struct diskfs_block_shard       *shard;
-        struct diskfs_block             *blk;
-        uint32_t                         bucket;
+        struct diskfs_pending           *e;
 
         p += sizeof(*bh);
 
-        shard  = diskfs_block_shard(cache, bh->device_id, bh->device_offset);
-        bucket = diskfs_block_bucket(bh->device_id, bh->device_offset);
-
-        pthread_mutex_lock(&shard->lock);
-        blk = diskfs_block_lookup_locked(shard, bucket, bh->device_id, bh->device_offset);
-        if (blk && blk->state == DISKFS_BLOCK_LOGGED &&
-            blk->seq == rec->seq && blk->pin_count == 0) {
-            blk->state = DISKFS_BLOCK_CLEAN;
-            if (!blk->on_lru) {
-                diskfs_block_lru_push_tail(shard, blk);
+        e = diskfs_pending_lookup(il, bh->device_id, bh->device_offset);
+        if (!e) {
+            e                = diskfs_pending_alloc(il);
+            e->device_id     = bh->device_id;
+            e->device_offset = bh->device_offset;
+            e->seq           = rec->seq;
+            e->iov           = &rec->iovs[1 + i];
+            e->owner         = rec;
+            diskfs_pending_insert(il, e);
+            diskfs_ready_push(il, e);
+        } else {
+            e->seq   = rec->seq;     /* newest image supersedes */
+            e->iov   = &rec->iovs[1 + i];
+            e->owner = rec;
+            if (!e->inflight) {
+                diskfs_ready_push(il, e);
             }
         }
-        pthread_mutex_unlock(&shard->lock);
     }
-} /* diskfs_il_clean_pushed_record */
+} /* diskfs_push_fold_record */
 
-static void diskfs_il_push_issue(
-    struct diskfs_intent_log *il);
-
-/* Finish the current record: mark its blocks evictable, release the record's
-* iovecs (header + all block clones), advance the tail, and kick the next. */
+/* A block is durably home at `seq`: LOGGED -> CLEAN if it has not been
+ * re-logged since (blk->seq still == seq) and isn't pinned.  Under the shard
+ * lock so it serializes against diskfs_block_claim re-dirtying the block. */
 static void
-diskfs_il_push_finish(struct diskfs_intent_log *il)
+diskfs_push_clean_block(
+    struct diskfs_intent_log *il,
+    uint32_t                  dev,
+    uint64_t                  off,
+    uint64_t                  seq)
 {
-    struct diskfs_il_record *rec = il->push_cur;
+    struct diskfs_shared      *shared = container_of(il, struct diskfs_shared, intent_log);
+    struct diskfs_block_cache *cache  = shared->block_cache;
+    struct diskfs_block_shard *shard  = diskfs_block_shard(cache, dev, off);
+    uint32_t                   bucket = diskfs_block_bucket(dev, off);
+    struct diskfs_block       *blk;
 
-    diskfs_il_clean_pushed_record(il, rec);
-
-    il->push_cur = NULL;
-    evpl_iovecs_release(il->evpl, rec->iovs, rec->niov);
-    free(rec->iovs);
-    free(rec);
-
-    /* Redo records reserve log space before they enter push_head.  If newer
-     * redo writes are still in flight, keep log_tail conservative until those
-     * records become pushable and then finish. */
-    if (il->push_head) {
-        il->log_tail = il->push_head->offset;
-    } else if (il->redo_inflight == 0) {
-        il->log_tail = il->log_head;
+    pthread_mutex_lock(&shard->lock);
+    blk = diskfs_block_lookup_locked(shard, bucket, dev, off);
+    if (blk && blk->state == DISKFS_BLOCK_LOGGED &&
+        __atomic_load_n(&blk->seq, __ATOMIC_ACQUIRE) == seq && blk->pin_count == 0) {
+        blk->state = DISKFS_BLOCK_CLEAN;
+        if (!blk->on_lru) {
+            diskfs_block_lru_push_tail(shard, blk);
+        }
     }
-    diskfs_il_metrics_update(il);
+    pthread_mutex_unlock(&shard->lock);
+} /* diskfs_push_clean_block */
 
-    diskfs_il_push_kick(il);
+/*
+ * Record R is coverable iff every block it logged is either home at its newest
+ * seq (absent from pending) or superseded by a later still-logged record
+ * (pending seq > R.seq).  pending[X].seq == R.seq means R's own image is still
+ * the newest pending and not yet home, so R must wait.
+ */
+static int
+diskfs_push_record_covered(
+    struct diskfs_intent_log *il,
+    struct diskfs_il_record  *rec)
+{
+    char    *p = (char *) rec->iovs[0].data + sizeof(struct diskfs_redo_header);
+    uint32_t i;
 
-    /* Space freed: re-poke channel processing in case a writer was blocked
-     * on a full log. */
-    evpl_ring_doorbell(&il->wake_doorbell);
-} /* diskfs_il_push_finish */
+    for (i = 0; i < rec->num_blocks; i++) {
+        struct diskfs_redo_block_header *bh = (struct diskfs_redo_block_header *) p;
+        struct diskfs_pending           *e;
 
-/* One home-write of a logged block completed.  private_data is the il (all
- * outstanding writes belong to the single current record). */
+        p += sizeof(*bh);
+        e  = diskfs_pending_lookup(il, bh->device_id, bh->device_offset);
+        if (e && e->seq == rec->seq) {
+            return 0;
+        }
+    }
+    return 1;
+} /* diskfs_push_record_covered */
+
+/* Advance the trim point over the contiguous prefix of fully-covered records,
+ * freeing each once no in-flight home write still reads its image. */
 static void
-diskfs_il_push_block_cb(
+diskfs_push_trim(struct diskfs_intent_log *il)
+{
+    int advanced = 0;
+
+    while (il->push_head && diskfs_push_record_covered(il, il->push_head)) {
+        struct diskfs_il_record *rec = il->push_head;
+
+        il->push_head = rec->next;
+        if (!il->push_head) {
+            il->push_tail = NULL;
+        }
+
+        /* Trim point = start of the oldest record we have not retired: the next
+         * record in the FIFO, or (FIFO drained) the oldest record the commit
+         * thread has handed off but we have not yet consumed.  If neither is
+         * known, leave log_tail unchanged (conservative -- the next hand-off
+         * advances it). */
+        if (il->push_head) {
+            __atomic_store_n(&il->log_tail, il->push_head->offset, __ATOMIC_RELEASE);
+        } else {
+            uint32_t hh = il->handoff_head;
+            uint32_t ht = __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE);
+            if (hh != ht) {
+                __atomic_store_n(&il->log_tail,
+                                 il->handoff[hh & DISKFS_HANDOFF_RING_MASK]->offset,
+                                 __ATOMIC_RELEASE);
+            }
+        }
+
+        rec->retired = 1;
+        if (rec->inflight_refs == 0) {
+            diskfs_il_free_record(il, rec);
+        }
+        advanced = 1;
+    }
+
+    if (advanced) {
+        diskfs_il_push_metrics(il);
+        /* Freed log space -> resume the commit thread, but only while its
+         * doorbell is still live.  The commit thread is destroyed before the
+         * push thread (the push thread drains the records it handed off), which
+         * closes wake_doorbell's fd; ringing it after that aborts.  commit_alive
+         * is cleared before that teardown, and during shutdown the commit thread
+         * makes progress by self-pumping, so a skipped wake is harmless. */
+        if (__atomic_load_n(&il->commit_alive, __ATOMIC_ACQUIRE)) {
+            evpl_ring_doorbell(&il->wake_doorbell);
+        }
+    }
+} /* diskfs_push_trim */
+
+static void diskfs_push_block_cb(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data);
+
+/* Issue ready home writes up to the push watermark, one per unique block. */
+static void
+diskfs_push_issue(struct diskfs_intent_log *il)
+{
+    while (il->push_outstanding < DISKFS_PUSH_WATERMARK) {
+        struct diskfs_pending *e = diskfs_ready_pop(il);
+
+        if (!e) {
+            break;
+        }
+
+        e->inflight     = 1;
+        e->issued_seq   = e->seq;
+        e->issued_owner = e->owner;
+        e->owner->inflight_refs++;
+        il->push_outstanding++;
+        diskfs_il_push_metrics(il);
+
+        diskfs_metric_il_block_io(il, DISKFS_METRIC_IO_WRITE,
+                                  DISKFS_METRIC_IO_TAIL_PUSH, DISKFS_BLOCK_SIZE);
+        diskfs_metric_il_block_io_device(il, e->device_id, DISKFS_METRIC_IO_WRITE,
+                                         DISKFS_METRIC_IO_TAIL_PUSH, DISKFS_BLOCK_SIZE);
+        evpl_block_write(il->push_evpl, il->home_queue[e->device_id], e->iov, 1,
+                         e->device_offset, il->sync, diskfs_push_block_cb, e);
+    }
+} /* diskfs_push_issue */
+
+/* One home write completed (push thread). */
+static void
+diskfs_push_block_cb(
     struct evpl *evpl,
     int          status,
     void        *private_data)
 {
-    struct diskfs_intent_log *il = private_data;
+    struct diskfs_pending    *e  = private_data;
+    struct diskfs_intent_log *il = e->il;
+    struct diskfs_il_record  *io = e->issued_owner;
 
     (void) evpl;
     chimera_diskfs_abort_if(status, "tail-push home write failed: %d", status);
 
-    /* One home write drained from the queue; resume redo at the low watermark. */
-    if (--il->iocbs_inflight == DISKFS_IL_IOCB_LOWAT) {
-        evpl_ring_doorbell(&il->wake_doorbell);
-    }
-    diskfs_il_metrics_update(il);
+    il->push_outstanding--;
 
-    --il->push_outstanding;
-    diskfs_il_metrics_update(il);
-
-    /* Capacity freed: issue any of this record's remaining home writes that the
-     * cap held back. */
-    if (il->push_cur && il->push_next < il->push_cur->num_blocks) {
-        diskfs_il_push_issue(il);
+    /* Release the record the in-flight write read from; free it if it has been
+     * retired and no other in-flight write still reads it. */
+    if (--io->inflight_refs == 0 && io->retired) {
+        diskfs_il_free_record(il, io);
     }
 
-    /* All of the current record's blocks are issued and durably home. */
-    if (il->push_outstanding == 0 &&
-        il->push_cur && il->push_next == il->push_cur->num_blocks) {
-        diskfs_il_push_finish(il);
+    e->inflight = 0;
+
+    if (e->seq > e->issued_seq) {
+        /* A newer image arrived mid-flight: re-issue it (newest lands last). */
+        diskfs_ready_push(il, e);
+    } else {
+        /* Durably home at its newest seq: mark CLEAN and drop the entry. */
+        diskfs_push_clean_block(il, e->device_id, e->device_offset, e->issued_seq);
+        diskfs_pending_remove(il, e);
     }
-} /* diskfs_il_push_block_cb */
+
+    diskfs_il_push_metrics(il);
+    diskfs_push_issue(il);
+    diskfs_push_trim(il);
+} /* diskfs_push_block_cb */
 
 /*
- * Start pushing the oldest pending record (if idle).  Writes each block's
- * post-image straight from the record's zero-copy clone of the cache buffer
- * to its final (device, offset) -- no copy.  Strict oldest-first ordering
- * means a block re-logged in a later record gets its newest image last.
+ * Push-thread doorbell: drain the hand-off ring into the record FIFO and the
+ * pending map, then issue and trim.  Rung by the commit thread after it hands
+ * off durable records.
  */
 static void
-diskfs_il_push_kick(struct diskfs_intent_log *il)
+diskfs_il_push_doorbell_cb(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
 {
-    struct diskfs_il_record *rec;
+    struct diskfs_intent_log *il = container_of(doorbell,
+                                                struct diskfs_intent_log,
+                                                push_doorbell);
+    uint32_t                  head = il->handoff_head;
+    uint32_t                  tail = __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE);
 
-    if (il->push_cur || !il->push_head) {
-        return;
+    (void) evpl;
+
+    while (head != tail) {
+        struct diskfs_il_record *rec = il->handoff[head & DISKFS_HANDOFF_RING_MASK];
+
+        head++;
+        rec->next          = NULL;
+        rec->inflight_refs = 0;
+        rec->retired       = 0;
+        if (il->push_tail) {
+            il->push_tail->next = rec;
+        } else {
+            il->push_head = rec;
+        }
+        il->push_tail = rec;
+        diskfs_push_fold_record(il, rec);
     }
+    __atomic_store_n(&il->handoff_head, head, __ATOMIC_RELEASE);
 
-    rec           = il->push_head;
-    il->push_head = rec->next;
-    if (!il->push_head) {
-        il->push_tail = NULL;
-    }
-    rec->next            = NULL;
-    il->push_cur         = rec;
-    il->push_next        = 0;
-    il->push_outstanding = 0;
-
-    if (rec->num_blocks == 0) {
-        diskfs_il_push_finish(il);
-        return;
-    }
-
-    diskfs_il_push_issue(il);
-} /* diskfs_il_push_kick */
-
-/*
- * Issue as many of the current record's remaining home writes as the block
- * queue's in-flight cap allows.  A large metadata txn can have more blocks than
- * the submission ring holds, so the rest are issued from diskfs_il_push_block_cb
- * as completions free capacity.  Shares the iocb budget with redo writes (both
- * gate on iocbs_inflight) so the IL thread never overruns the queue.
- */
-static void
-diskfs_il_push_issue(struct diskfs_intent_log *il)
-{
-    struct diskfs_il_record         *rec  = il->push_cur;
-    char                            *base = (char *) rec->iovs[0].data +
-        sizeof(struct diskfs_redo_header);
-    struct diskfs_redo_block_header *bh;
-
-    while (il->push_next < rec->num_blocks &&
-           il->iocbs_inflight < DISKFS_IL_IOCB_CAP) {
-        uint32_t idx = il->push_next;
-
-        bh = (struct diskfs_redo_block_header *) (base + (size_t) idx * sizeof(*bh));
-
-        il->push_next++;
-        il->push_outstanding++;
-        il->iocbs_inflight++;
-        diskfs_il_metrics_update(il);
-
-        diskfs_metric_il_block_io(il, DISKFS_METRIC_IO_WRITE,
-                                  DISKFS_METRIC_IO_TAIL_PUSH, DISKFS_BLOCK_SIZE);
-        diskfs_metric_il_block_io_device(il, bh->device_id, DISKFS_METRIC_IO_WRITE,
-                                         DISKFS_METRIC_IO_TAIL_PUSH,
-                                         DISKFS_BLOCK_SIZE);
-        evpl_block_write(il->evpl, il->queue[bh->device_id], &rec->iovs[1 + idx], 1,
-                         bh->device_offset, il->sync, diskfs_il_push_block_cb, il);
-    }
-} /* diskfs_il_push_issue */
+    diskfs_push_issue(il);
+    diskfs_push_trim(il);
+} /* diskfs_il_push_doorbell_cb */
 
 /*
  * Runs on the intent-log thread when a redo record has been written
@@ -6754,68 +7164,83 @@ diskfs_redo_write_cb(
     int          status,
     void        *private_data)
 {
-    struct diskfs_redo_ctx   *ctx = private_data;
-    struct diskfs_iq_channel *ch  = ctx->ch;
-    struct diskfs_intent_log *il  = ctx->il;
-    struct diskfs_il_record  *rec = ctx->rec;
-    uint32_t                  cq_tail;
+    struct diskfs_redo_ctx   *ctx        = private_data;
+    struct diskfs_intent_log *il         = ctx->il;
+    int                       handed_off = 0;
 
     (void) evpl;
     chimera_diskfs_abort_if(status, "redo record write failed: %d", status);
 
-    /* One block write (one chunk) drained from the queue.  Resume redo
-     * submission once the queue has bled back down to the low watermark. */
-    if (--il->iocbs_inflight == DISKFS_IL_IOCB_LOWAT) {
+    /* One redo block write (one chunk) drained from the log queue.  Resume SQ
+     * draining once redo writes bleed back down to the low watermark. */
+    if (--il->redo_inflight == DISKFS_COMMIT_LOWAT) {
         evpl_ring_doorbell(&il->wake_doorbell);
     }
 
-    /* One chunk of a possibly multi-chunk journal write landed; only the last
-     * makes the whole record durable. */
+    /* One chunk of a possibly multi-chunk journal write landed; the record is
+     * durable only when its last chunk completes. */
     if (--ctx->segments > 0) {
-        diskfs_il_metrics_update(il);
+        diskfs_il_commit_metrics(il);
         return;
     }
 
-    prometheus_stopwatch_start(&ctx->entry.durable_time);
-    diskfs_metric_time_sample(
-        il->metrics.txn_latency[DISKFS_METRIC_TXN_SUBMIT_TO_DURABLE],
-        &ctx->entry.submit_time);
-    diskfs_metric_time_sample(
-        il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_DURABLE],
-        &ctx->entry.enqueue_time);
+    /* Mark this record done; retire the contiguous completed prefix strictly in
+     * submission (== log) order.  Replay stops at the first torn record, so a
+     * later record is not recoverable -- nor ACKable -- until every earlier
+     * record is durable. */
+    il->retire[ctx->retire_idx & DISKFS_RETIRE_RING_MASK].done = 1;
 
-    il->redo_inflight--;
-    diskfs_il_metrics_update(il);
+    while (il->retire_head != il->retire_tail &&
+           il->retire[il->retire_head & DISKFS_RETIRE_RING_MASK].done) {
+        struct diskfs_retire_slot *slot = &il->retire[il->retire_head & DISKFS_RETIRE_RING_MASK];
+        struct diskfs_redo_ctx    *rc   = slot->ctx;
+        struct diskfs_iq_channel  *ch   = rc->ch;
+        struct diskfs_il_record   *rec  = rc->rec;
+        uint32_t                   cq_tail, ht;
 
-    diskfs_txn_unpin_blocks(ctx->entry.txn, DISKFS_BLOCK_LOGGED);
-    /* Record now durable: the freed metadata blocks are LOGGED + unpinned, so
-     * returning their ranges to the allocator can no longer collide with a
-     * still-pinned block (a re-claim COWs cleanly). */
-    diskfs_txn_apply_frees(ctx->entry.txn);
-    diskfs_txn_unlock_all(ctx->entry.txn);
+        prometheus_stopwatch_start(&rc->entry.durable_time);
+        diskfs_metric_time_sample(
+            il->metrics.txn_latency[DISKFS_METRIC_TXN_SUBMIT_TO_DURABLE],
+            &rc->entry.submit_time);
+        diskfs_metric_time_sample(
+            il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_DURABLE],
+            &rc->entry.enqueue_time);
 
-    ctx->entry.status = status;
+        /* Record durable & recoverable: drop block pins (-> LOGGED), return
+         * freed ranges to the allocator, release the inode locks. */
+        diskfs_txn_unpin_blocks(rc->entry.txn, DISKFS_BLOCK_LOGGED);
+        diskfs_txn_apply_frees(rc->entry.txn);
+        diskfs_txn_unlock_all(rc->entry.txn);
 
-    cq_tail                                       = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
-    ch->cq.entries[cq_tail & DISKFS_IQ_RING_MASK] = ctx->entry;
-    __atomic_store_n(&ch->cq.tail, cq_tail + 1, __ATOMIC_RELEASE);
+        /* ACK the worker. */
+        rc->entry.status                              = 0;
+        cq_tail                                       = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
+        ch->cq.entries[cq_tail & DISKFS_IQ_RING_MASK] = rc->entry;
+        __atomic_store_n(&ch->cq.tail, cq_tail + 1, __ATOMIC_RELEASE);
+        ch->cq_inflight--;
+        evpl_ring_doorbell(&ch->cq_doorbell);
 
-    ch->cq_inflight--;
+        /* Hand the durable record to the push thread, in log order.  The
+         * hand-off ring is sized larger than the log can ever hold, so it
+         * cannot fill before the log does. */
+        ht = il->handoff_tail;
+        chimera_diskfs_abort_if(ht - __atomic_load_n(&il->handoff_head, __ATOMIC_ACQUIRE) >=
+                                DISKFS_HANDOFF_RING_SIZE, "intent-log hand-off ring overflow");
+        il->handoff[ht & DISKFS_HANDOFF_RING_MASK] = rec;
+        __atomic_store_n(&il->handoff_tail, ht + 1, __ATOMIC_RELEASE);
+        handed_off = 1;
 
-    /* The record (which owns its on-log image) is now durable; queue it for
-     * the tail-pusher.  Its iovec stays in place -- never struct-copied. */
-    rec->next = NULL;
-    if (il->push_tail) {
-        il->push_tail->next = rec;
-    } else {
-        il->push_head = rec;
+        slot->ctx  = NULL;
+        slot->done = 0;
+        free(rc);
+        il->retire_head++;
     }
-    il->push_tail = rec;
 
-    free(ctx);
+    diskfs_il_commit_metrics(il);
 
-    diskfs_il_push_kick(il);
-    evpl_ring_doorbell(&ch->cq_doorbell);
+    if (handed_off) {
+        evpl_ring_doorbell(&il->push_doorbell);
+    }
 } /* diskfs_redo_write_cb */
 
 /*
@@ -6878,7 +7303,7 @@ diskfs_il_write_redo(
     hdr->csum_lo    = 0;
     hdr->csum_hi    = 0;
     hdr->seq        = il->log_seq++;
-    hdr->tail       = il->log_tail;
+    hdr->tail       = __atomic_load_n(&il->log_tail, __ATOMIC_ACQUIRE);
     hdr->num_blocks = nblocks;
     hdr->reclen     = (uint32_t) reclen;
     p              += sizeof(*hdr);
@@ -6888,9 +7313,10 @@ diskfs_il_write_redo(
         struct diskfs_block *blk = tb->block;
 
         /* Stamp the block with this record's seq so the tail-pusher can tell,
-        * on push completion, whether the block has been re-logged since (a
-        * higher seq) -- if not, it can be marked CLEAN and made evictable. */
-        blk->seq = rec->seq;
+         * on push completion, whether the block has been re-logged since (a
+         * higher seq) -- if not, it can be marked CLEAN and made evictable.
+         * Atomic: the push thread reads blk->seq under the shard lock. */
+        __atomic_store_n(&blk->seq, rec->seq, __ATOMIC_RELEASE);
 
         bh                = (struct diskfs_redo_block_header *) p;
         bh->device_id     = blk->device_id;
@@ -6927,10 +7353,17 @@ diskfs_il_write_redo(
 
     ctx->segments = (rec->niov + DISKFS_IL_MAX_IOV - 1) / DISKFS_IL_MAX_IOV;
 
+    /* Reserve this record's retirement-ring slot (in submission/log order) so
+     * the completion can retire the contiguous done-prefix in order.  Caller
+     * (diskfs_iq_process_channel) guaranteed ring space before issuing. */
+    ctx->retire_idx                                            = il->retire_tail;
+    il->retire[il->retire_tail & DISKFS_RETIRE_RING_MASK].ctx  = ctx;
+    il->retire[il->retire_tail & DISKFS_RETIRE_RING_MASK].done = 0;
+    il->retire_tail++;
+
     ch->cq_inflight++;
-    il->redo_inflight++;
-    il->iocbs_inflight += ctx->segments;     /* one block write per chunk below */
-    diskfs_il_metrics_update(il);
+    il->redo_inflight += ctx->segments;     /* one redo block write per chunk below */
+    diskfs_il_commit_metrics(il);
 
     /* Issue the record in <=DISKFS_IL_MAX_IOV-iovec chunks to consecutive
      * offsets (the on-log record is contiguous); all chunks share ctx and the
@@ -6951,7 +7384,7 @@ diskfs_il_write_redo(
                 bytes += rec->iovs[done + k].length;
             }
 
-            evpl_block_write(il->evpl, il->queue[SM_INTENT_LOG_DEVICE],
+            evpl_block_write(il->evpl, il->log_queue,
                              &rec->iovs[done], cnt, woff, il->sync,
                              diskfs_redo_write_cb, ctx);
             diskfs_metric_il_block_io(il, DISKFS_METRIC_IO_WRITE,
@@ -6991,12 +7424,14 @@ diskfs_iq_process_channel(struct diskfs_iq_channel *ch)
         struct diskfs_iq_entry  entry;
         uint32_t                cq_tail, cq_head;
 
-        /* Don't overrun the block queue's submission ring.  A redo record is a
-         * handful of writes; stop consuming the SQ once we're at the cap and
-         * let a write completion ring the wake doorbell to resume us.  When the
-         * queue is idle, always issue at least one record so we make progress
-         * even if a single record exceeds the cap. */
-        if (il->iocbs_inflight >= DISKFS_IL_IOCB_CAP) {
+        /* Keep redo writes pipelined up to the commit watermark; a completion
+         * rings the wake doorbell at the low watermark to resume us. */
+        if (il->redo_inflight >= DISKFS_COMMIT_WATERMARK) {
+            break;
+        }
+
+        /* Need a free retirement-ring slot for this record. */
+        if (il->retire_tail - il->retire_head >= DISKFS_RETIRE_RING_SIZE) {
             break;
         }
 
@@ -7058,7 +7493,7 @@ diskfs_intent_log_drain_pending(struct diskfs_intent_log *il)
 
         __atomic_store_n(&ch->registered, 1, __ATOMIC_RELEASE);
     }
-    diskfs_il_metrics_update(il);
+    diskfs_il_commit_metrics(il);
 } /* diskfs_intent_log_drain_pending */
 
 static void
@@ -7088,7 +7523,7 @@ diskfs_intent_log_wake_cb(
             il->channels[last] = NULL;
             il->num_channels   = last;
             __atomic_store_n(&ch->unregister_done, 1, __ATOMIC_RELEASE);
-            diskfs_il_metrics_update(il);
+            diskfs_il_commit_metrics(il);
             continue;     /* re-process index i (now a different channel) */
         }
         i++;
@@ -7152,29 +7587,29 @@ diskfs_intent_log_thread_init(
     il->log_head                    = SM_INTENT_LOG_OFFSET;
     il->log_tail                    = SM_INTENT_LOG_OFFSET;
     il->log_seq                     = 0;
-    il->push_head                   = NULL;
-    il->push_tail                   = NULL;
-    il->push_cur                    = NULL;
-    il->push_next                   = 0;
-    il->push_outstanding            = 0;
     il->redo_inflight               = 0;
-    il->iocbs_inflight              = 0;
     il->redo_inflight_high_water    = 0;
-    il->iocbs_inflight_high_water   = 0;
+    il->push_outstanding            = 0;
     il->push_outstanding_high_water = 0;
     il->log_used_bytes_high_water   = 0;
     il->sync                        = !shared->unsafe_async;
+
+    /* In-order retirement ring + cross-thread hand-off ring to the push thread. */
+    il->retire      = calloc(DISKFS_RETIRE_RING_SIZE, sizeof(*il->retire));
+    il->retire_head = 0;
+    il->retire_tail = 0;
+    il->handoff     = calloc(DISKFS_HANDOFF_RING_SIZE, sizeof(*il->handoff));
+    __atomic_store_n(&il->handoff_head, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&il->handoff_tail, 0, __ATOMIC_RELAXED);
+
     diskfs_intent_log_metrics_init(il);
-    diskfs_il_metrics_update(il);
+    diskfs_il_commit_metrics(il);
 
-    /* Open block queues on this thread's evpl for redo writes + tail-push. */
-    il->queue = calloc(shared->num_devices, sizeof(*il->queue));
-    for (i = 0; i < shared->num_devices; i++) {
-        /* Remote (pNFS data) devices have no local handle: leave queue NULL. */
-        il->queue[i] = shared->devices[i].bdev ?
-            evpl_block_open_queue(evpl, shared->devices[i].bdev) : NULL;
-    }
+    /* Redo records are written only to the intent-log device. */
+    il->log_queue = shared->devices[SM_INTENT_LOG_DEVICE].bdev ?
+        evpl_block_open_queue(evpl, shared->devices[SM_INTENT_LOG_DEVICE].bdev) : NULL;
 
+    (void) i;
     evpl_add_doorbell(evpl, &il->wake_doorbell, diskfs_intent_log_wake_cb);
     __atomic_store_n(&il->ready, 1, __ATOMIC_RELEASE);
     return il;
@@ -7185,36 +7620,91 @@ diskfs_intent_log_thread_shutdown(
     struct evpl *evpl,
     void        *private_data)
 {
-    struct diskfs_intent_log *il     = private_data;
-    struct diskfs_shared     *shared = container_of(il, struct diskfs_shared, intent_log);
-    int                       i;
+    struct diskfs_intent_log *il = private_data;
 
-    /* By the time this runs the VFS layer has destroyed the worker threads,
-     * which freed their channels, so no new SQ work can arrive.
-     *
-     * Clean unmount: drain everything to its final on-disk location so the
-     * filesystem is fully consistent at home offsets (no replay needed).
-     * Pump our evpl until all in-flight redo writes have landed in the push
-     * FIFO and the tail-pusher has flushed every record home.  Drain *before*
-     * dropping the wake doorbell: an in-flight redo/push write completing here
-     * rings the doorbell to resume submission, so it must still be open. */
-    while (il->redo_inflight || il->push_cur || il->push_head) {
-        diskfs_il_push_kick(il);
+    /* Workers are gone, so no new SQ work arrives.  Drain every in-flight redo
+     * write and retire (hand off, in order) every record to the push thread --
+     * which is still running and will flush them home before it is itself shut
+     * down (the push thread is destroyed after this one). */
+    while (il->redo_inflight || il->retire_head != il->retire_tail) {
         evpl_continue(evpl);
     }
 
-    /* All writes durable and no submitter remains; now drop the doorbell. */
     evpl_remove_doorbell(evpl, &il->wake_doorbell);
+    if (il->log_queue) {
+        evpl_block_close_queue(evpl, il->log_queue);
+    }
+    free(il->retire);
+} /* diskfs_intent_log_thread_shutdown */
+
+static void *
+diskfs_il_push_thread_init(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_intent_log *il     = private_data;
+    struct diskfs_shared     *shared = container_of(il, struct diskfs_shared, intent_log);
+    uint32_t                  cap;
+    int                       i;
+
+    il->push_evpl  = evpl;
+    il->push_head  = NULL;
+    il->push_tail  = NULL;
+    il->ready_head = NULL;
+    il->ready_tail = NULL;
+    il->pfree      = NULL;
+
+    /* Pending map: one bucket budget per distinct block the log can hold. */
+    cap            = diskfs_il_pow2((SM_INTENT_LOG_SIZE / DISKFS_BLOCK_SIZE) * 2);
+    il->phash_mask = cap - 1;
+    il->phash      = calloc(cap, sizeof(*il->phash));
+
+    /* Home writes can target any device. */
+    il->home_queue = calloc(shared->num_devices, sizeof(*il->home_queue));
+    for (i = 0; i < shared->num_devices; i++) {
+        il->home_queue[i] = shared->devices[i].bdev ?
+            evpl_block_open_queue(evpl, shared->devices[i].bdev) : NULL;
+    }
+
+    evpl_add_doorbell(evpl, &il->push_doorbell, diskfs_il_push_doorbell_cb);
+    __atomic_store_n(&il->push_ready, 1, __ATOMIC_RELEASE);
+    return il;
+} /* diskfs_il_push_thread_init */
+
+static void
+diskfs_il_push_thread_shutdown(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_intent_log *il     = private_data;
+    struct diskfs_shared     *shared = container_of(il, struct diskfs_shared, intent_log);
+    struct diskfs_pending    *p;
+    int                       i;
+
+    /* The commit thread is already gone, so no new hand-offs arrive.  Drain
+     * every handed-off record home and trim the log fully (clean unmount => no
+     * replay needed). */
+    while (il->handoff_head != __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE) ||
+           il->push_head || il->push_outstanding) {
+        diskfs_il_push_doorbell_cb(evpl, &il->push_doorbell);
+        evpl_continue(evpl);
+    }
+
+    evpl_remove_doorbell(evpl, &il->push_doorbell);
 
     for (i = 0; i < shared->num_devices; i++) {
-        if (il->queue[i]) {
-            evpl_block_close_queue(evpl, il->queue[i]);
+        if (il->home_queue[i]) {
+            evpl_block_close_queue(evpl, il->home_queue[i]);
         }
     }
-    free(il->metrics.block_io_device_ops);
-    free(il->metrics.block_io_device_bytes);
-    free(il->queue);
-} /* diskfs_intent_log_thread_shutdown */
+    free(il->home_queue);
+
+    while ((p = il->pfree)) {
+        il->pfree = p->rnext;
+        free(p);
+    }
+    free(il->phash);
+} /* diskfs_il_push_thread_shutdown */
 
 /*
  * The post-free-flush half of commit: serialize the dirty inodes, snapshot the
@@ -7934,6 +8424,7 @@ diskfs_init(
      * efficiently. */
     initialize           = json_object_get(cfg, "initialize") != NULL;
     shared->unsafe_async = json_is_true(json_object_get(cfg, "unsafe_async"));
+    shared->noatime      = json_is_true(json_object_get(cfg, "noatime"));
     /* Opt-in pNFS block / SCSI layout mode: diskfs sources RFC 5663 block or
      * RFC 8154 SCSI layouts and keeps file data on remote (data-only) devices.
      * Both share the same remote-device data path and allocator; they differ
@@ -8133,16 +8624,28 @@ diskfs_init(
      * the wake doorbell, since workers will start ringing it as soon as
      * they begin processing requests. */
     shared->intent_log.ready        = 0;
+    shared->intent_log.push_ready   = 0;
     shared->intent_log.shutdown     = 0;
+    shared->intent_log.commit_alive = 1;
     shared->intent_log.num_channels = 0;
     shared->intent_log.pending_head = NULL;
     pthread_mutex_init(&shared->intent_log.registration_lock, NULL);
 
+    /* Commit thread first: it allocates the cross-thread hand-off ring the
+     * push thread consumes, and opens the intent-log device queue. */
     shared->intent_log.thread = evpl_thread_create(NULL,
                                                    diskfs_intent_log_thread_init,
                                                    diskfs_intent_log_thread_shutdown,
                                                    &shared->intent_log);
     while (!__atomic_load_n(&shared->intent_log.ready, __ATOMIC_ACQUIRE)) {
+        /* spin briefly */
+    }
+
+    shared->intent_log.push_thread = evpl_thread_create(NULL,
+                                                        diskfs_il_push_thread_init,
+                                                        diskfs_il_push_thread_shutdown,
+                                                        &shared->intent_log);
+    while (!__atomic_load_n(&shared->intent_log.push_ready, __ATOMIC_ACQUIRE)) {
         /* spin briefly */
     }
 
@@ -8203,6 +8706,8 @@ diskfs_bootstrap(struct diskfs_thread *thread)
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     /* Root directory's parent is itself for ".." lookup */
     inode->parent_inum = inode->inum;
@@ -8247,6 +8752,8 @@ diskfs_bootstrap(struct diskfs_thread *thread)
         oin->mtime_nsec  = now.tv_nsec;
         oin->ctime_sec   = now.tv_sec;
         oin->ctime_nsec  = now.tv_nsec;
+        oin->btime_sec   = now.tv_sec;
+        oin->btime_nsec  = now.tv_nsec;
         oin->parent_inum = DISKFS_ORPHAN_INUM;
         oin->parent_gen  = oin->gen;
 
@@ -8309,12 +8816,25 @@ diskfs_destroy(void *private_data)
         pthread_mutex_destroy(&shared->inode_cache->shards[i].lock);
     }
 
-    /* Shut down the intent log thread before tearing down anything it
+    /* Shut down the intent-log threads before tearing down anything they
      * might still touch.  Worker threads have already unregistered their
-     * channels via the unregister handshake at this point. */
+     * channels via the unregister handshake at this point.  Order matters: the
+     * commit thread first (it drains all redo writes and hands every record to
+     * the push thread), then the push thread (it flushes every record home and
+     * trims the log).  Only then are the shared rings and device-metric arrays
+     * safe to free. */
     __atomic_store_n(&shared->intent_log.shutdown, 1, __ATOMIC_RELEASE);
+    /* Stop the push thread from ringing the commit thread's wake_doorbell:
+     * destroying the commit thread closes that fd, and the push thread (torn
+     * down afterwards, to drain what the commit thread handed off) would
+     * otherwise abort writing to it. */
+    __atomic_store_n(&shared->intent_log.commit_alive, 0, __ATOMIC_RELEASE);
     evpl_thread_destroy(shared->intent_log.thread);
+    evpl_thread_destroy(shared->intent_log.push_thread);
     pthread_mutex_destroy(&shared->intent_log.registration_lock);
+    free(shared->intent_log.handoff);
+    free(shared->intent_log.metrics.block_io_device_ops);
+    free(shared->intent_log.metrics.block_io_device_bytes);
 
     /* Clean unmount: the intent-log thread already drained every logged block
      * to its home location, so persist the free-space map and stamp the
@@ -8590,6 +9110,158 @@ diskfs_thread_destroy(void *private_data)
     free(thread);
 } /* diskfs_thread_destroy */
 
+/* ------------------------------------------------------------------ */
+/* ACLs: one serialized NFSv4/Windows ACL per inode, stored as the single
+ * DISKFS_REC_ACL record in the inode's b+tree (mirrors the memfs/cairn
+ * native-ACL stores).  Read/written with the sync b+tree wrappers, the same
+ * convention the pNFS-layout record (read in diskfs_map_attrs) and the xattr
+ * records (written from their inode callbacks) already use on a loaded
+ * inode. */
+
+/* The biggest ACL whose serialized form still fits one b+tree record. */
+#define DISKFS_ACL_REC_MAX \
+        (DISKFS_BT_ROOT_CAP - sizeof(struct diskfs_bt_node_hdr) - sizeof(struct diskfs_bt_lslot))
+#define DISKFS_ACL_REC_MAX_ACES \
+        (((DISKFS_ACL_REC_MAX) -CHIMERA_ACL_SERIAL_HDR) / CHIMERA_ACL_SERIAL_ACE)
+
+static const struct diskfs_bt_key diskfs_acl_key = {
+    .type = DISKFS_REC_ACL, .subkey = 0
+};
+
+/*
+ * Decode a serialized ACL record (serial[0..len), len<0 == no record) into a
+ * per-thread scratch chimera_acl and point attr->va_acl at it.  When no ACL is
+ * stored the ACL is synthesised from the mode, so a caller always sees an ACL
+ * for an inode (identical to memfs/cairn).  The scratch is valid through the
+ * synchronous completion that consumes it.
+ */
+static void
+diskfs_acl_decode_into(
+    struct chimera_vfs_attrs *attr,
+    const uint8_t            *serial,
+    int                       len,
+    uint32_t                  mode)
+{
+    static __thread uint8_t scratch[sizeof(struct chimera_acl) +
+                                    CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
+    struct chimera_acl     *dst = (struct chimera_acl *) scratch;
+
+    if (len < 0 ||
+        chimera_acl_deserialize((const char *) serial, len, dst,
+                                CHIMERA_ACL_MAX_ACES) < 0) {
+        chimera_acl_from_mode(mode, dst, CHIMERA_ACL_MAX_ACES);
+    }
+
+    attr->va_acl       = dst;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+} /* diskfs_acl_decode_into */
+
+/*
+ * Persist `acl` as inode's ACL record (replacing any existing one), or remove
+ * the record when `acl` is NULL/empty (revert to mode-derived).  The b+tree
+ * insert aborts on a duplicate key, so an existing record is removed first --
+ * the same lookup/remove/insert sequence the xattr writes use.  All sync: the
+ * inode (and, for a fresh create, its empty tree) is resident in this write
+ * txn, matching the xattr-record convention.
+ */
+static void
+diskfs_acl_store(
+    struct diskfs_thread     *thread,
+    struct diskfs_txn        *txn,
+    struct diskfs_inode      *inode,
+    const struct chimera_acl *acl)
+{
+    uint8_t probe[1];
+
+    /* Remove any existing record (insert won't overwrite a duplicate key).
+     * The probe length is irrelevant -- the lookup reports the full record
+     * length even when the copy is truncated, so >= 0 means present. */
+    if (diskfs_bt_lookup_exact(thread, inode, &diskfs_acl_key, probe,
+                               sizeof(probe)) >= 0) {
+        diskfs_bt_remove(thread, txn, inode, &diskfs_acl_key);
+    }
+
+    if (acl && acl->num_aces && acl->num_aces <= DISKFS_ACL_REC_MAX_ACES) {
+        uint8_t buf[DISKFS_ACL_REC_MAX];
+        int     len = chimera_acl_serialize(acl, buf, sizeof(buf));
+
+        if (len >= 0) {
+            diskfs_bt_insert(thread, txn, inode, &diskfs_acl_key, buf, len);
+        }
+    }
+} /* diskfs_acl_store */
+
+/*
+ * Seed a freshly-created child's ACL (mirrors memfs/cairn).  Precedence:
+ *   1. parent has ACEs inheritable for the child's type -> store the inherited
+ *      ACL and re-derive the child mode from it (Windows inheritance);
+ *   2. otherwise, for an SMB create (windows_default) -> store a Windows-style
+ *      owner-full-control default DACL, leaving the POSIX mode intact;
+ *   3. otherwise (NFS/POSIX create) -> no record, child stays mode-derived.
+ * The child is brand new (empty resident b+tree), so the writes are sync; the
+ * parent's ACL is read with the sync wrapper like diskfs_map_attrs does.
+ */
+static void
+diskfs_inherit_acl(
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *child,
+    struct diskfs_inode  *parent,
+    int                   windows_default)
+{
+    int                 is_dir = S_ISDIR(child->mode);
+    uint16_t            want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
+        (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
+    uint8_t             pserial[DISKFS_ACL_REC_MAX];
+    int                 plen = diskfs_bt_lookup_exact(thread, parent, &diskfs_acl_key,
+                                                      pserial, sizeof(pserial));
+    uint8_t             pbuf[sizeof(struct chimera_acl) +
+                             DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+    struct chimera_acl *parent_acl = (struct chimera_acl *) pbuf;
+    int                 has_inh    = 0;
+
+    if (plen < 0 ||
+        chimera_acl_deserialize((const char *) pserial, plen, parent_acl,
+                                DISKFS_ACL_REC_MAX_ACES) < 0) {
+        parent_acl = NULL;
+    }
+
+    if (parent_acl) {
+        for (unsigned i = 0; i < parent_acl->num_aces; i++) {
+            if (parent_acl->aces[i].flags & want) {
+                has_inh = 1;
+                break;
+            }
+        }
+    }
+
+    if (has_inh) {
+        uint8_t             tbuf[sizeof(struct chimera_acl) +
+                                 DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+        struct chimera_acl *tmp = (struct chimera_acl *) tbuf;
+        int                 n   = chimera_acl_inherit(parent_acl, is_dir,
+                                                      child->mode & 07777, tmp,
+                                                      DISKFS_ACL_REC_MAX_ACES);
+
+        if (n > 0) {
+            diskfs_acl_store(thread, txn, child, tmp);
+            child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(tmp);
+            return;
+        }
+        /* Nothing actually inherited: fall through to the default below. */
+    }
+
+    if (windows_default) {
+        uint8_t             dbuf[sizeof(struct chimera_acl) +
+                                 4 * sizeof(struct chimera_ace)];
+        struct chimera_acl *def = (struct chimera_acl *) dbuf;
+
+        if (chimera_acl_default_acl(child->mode & 07777, def, 4) > 0) {
+            diskfs_acl_store(thread, txn, child, def);
+        }
+    }
+} /* diskfs_inherit_acl */
+
 static inline void
 diskfs_map_attrs(
     struct diskfs_thread     *thread,
@@ -8625,6 +9297,14 @@ diskfs_map_attrs(
         attr->va_rdev          = inode->rdev;
     }
 
+    /* Birth time (SMB create time) is tracked natively but lives outside
+     * MASK_STAT, so map it only when explicitly requested. */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask     |= CHIMERA_VFS_ATTR_BTIME;
+        attr->va_btime.tv_sec  = inode->btime_sec;
+        attr->va_btime.tv_nsec = inode->btime_nsec;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
         attr->va_fsid      = shared->fsid;
@@ -8647,6 +9327,24 @@ diskfs_map_attrs(
             attr->va_set_mask |= CHIMERA_VFS_ATTR_PNFS_LAYOUT;
             attr->va_pnfs_len  = len;
         }
+    }
+
+    /*
+     * Native ACL: the single DISKFS_REC_ACL record (or, when absent, an ACL
+     * synthesised from the mode) so SMB/NFS callers always see one.  Read with
+     * the sync wrapper, like the pNFS record above and the xattr records.
+     * Unlike pNFS/symlink the ACL coexists with dirents/extents, so on a large
+     * inode whose tree has split it may not sit in the resident embedded root;
+     * the sync read then relies on that leaf being cached (it aborts on a true
+     * cache miss).  An async ACL read is the hardening follow-up, shared with
+     * the broader "sync b+tree op under block-cache eviction" concern.
+     */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_ACL) {
+        uint8_t serial[DISKFS_ACL_REC_MAX];
+        int     len = diskfs_bt_lookup_exact(thread, inode, &diskfs_acl_key,
+                                             serial, sizeof(serial));
+
+        diskfs_acl_decode_into(attr, serial, len, inode->mode);
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
@@ -8716,57 +9414,21 @@ diskfs_apply_attrs(
         }
     }
 
+    if (set_mask & CHIMERA_VFS_ATTR_BTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+        if (attr->va_btime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+            inode->btime_sec  = now.tv_sec;
+            inode->btime_nsec = now.tv_nsec;
+        } else {
+            inode->btime_sec  = attr->va_btime.tv_sec;
+            inode->btime_nsec = attr->va_btime.tv_nsec;
+        }
+    }
+
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
 
 } /* diskfs_apply_attrs */
-
-static bool
-diskfs_cred_can_access(
-    const struct diskfs_inode     *inode,
-    const struct chimera_vfs_cred *cred,
-    uint32_t                       user_bit,
-    uint32_t                       group_bit,
-    uint32_t                       other_bit)
-{
-    if (cred->uid == 0) {
-        return true;
-    }
-
-    if ((uint64_t) cred->uid == inode->uid) {
-        return !!(inode->mode & user_bit);
-    }
-
-    bool in_group = ((uint64_t) cred->gid == inode->gid);
-
-    for (uint32_t i = 0; !in_group && i < cred->ngids; i++) {
-        if ((uint64_t) cred->gids[i] == inode->gid) {
-            in_group = true;
-        }
-    }
-
-    if (in_group) {
-        return !!(inode->mode & group_bit);
-    }
-
-    return !!(inode->mode & other_bit);
-} /* diskfs_cred_can_access */
-
-static bool
-diskfs_cred_can_read(
-    const struct diskfs_inode     *inode,
-    const struct chimera_vfs_cred *cred)
-{
-    return diskfs_cred_can_access(inode, cred, S_IRUSR, S_IRGRP, S_IROTH);
-} /* diskfs_cred_can_read */
-
-static bool
-diskfs_cred_can_write(
-    const struct diskfs_inode     *inode,
-    const struct chimera_vfs_cred *cred)
-{
-    return diskfs_cred_can_access(inode, cred, S_IWUSR, S_IWGRP, S_IWOTH);
-} /* diskfs_cred_can_write */
 
 static void
 diskfs_getattr_inode_cb(
@@ -8893,7 +9555,7 @@ diskfs_setattr_trunc_removed_cb(
             struct diskfs_extent_rec rec = {
                 .length        = new_logical,
                 .device_id     = p->ext_iter.device_id,
-                .pad           = 0,
+                .flags         = p->ext_iter.flags,
                 .device_offset = p->ext_iter.device_offset,
             };
             struct diskfs_bt_key     key = diskfs_extent_key(p->ext_iter.file_offset);
@@ -9023,6 +9685,10 @@ diskfs_setattr_inode_cb(
     struct diskfs_request_private *p       = request->plugin_data;
     struct diskfs_thread          *thread  = p->thread;
     struct diskfs_bt_op           *op;
+    /* diskfs_apply_attrs() rewrites set_attr->va_set_mask (resets to ATOMIC,
+     * re-adds only the scalar bits), dropping the ACL bit -- capture the
+     * caller's original mask first. */
+    uint64_t                       orig_mask = request->setattr.set_attr->va_set_mask;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         diskfs_op_fail(request, p->txn, status);
@@ -9075,6 +9741,42 @@ diskfs_setattr_inode_cb(
             diskfs_setattr_pnfs_cb(op, op->result, request);
         }
         return;
+    }
+
+    /*
+     * ACL coherence (mirrors memfs/cairn): an explicit ACL set is persisted and
+     * the mode re-derived; a bare chmod regenerates the special-who ACEs of any
+     * stored ACL while preserving named entries.  diskfs_acl_store does the
+     * lookup/remove/insert synchronously, the same convention the xattr-record
+     * writes use after loading the inode.
+     */
+    if (orig_mask & CHIMERA_VFS_ATTR_ACL) {
+        const struct chimera_acl *acl = request->setattr.set_attr->va_acl;
+
+        if (acl && acl->num_aces) {
+            inode->mode = (inode->mode & S_IFMT) | chimera_acl_to_mode(acl);
+        }
+        diskfs_acl_store(thread, p->txn, inode, acl);
+    } else if (orig_mask & CHIMERA_VFS_ATTR_MODE) {
+        uint8_t serial[DISKFS_ACL_REC_MAX];
+        int     slen = diskfs_bt_lookup_exact(thread, inode, &diskfs_acl_key,
+                                              serial, sizeof(serial));
+
+        if (slen >= 0) {
+            uint8_t             obuf[sizeof(struct chimera_acl) +
+                                     DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+            uint8_t             nbuf[sizeof(struct chimera_acl) +
+                                     DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+            struct chimera_acl *old_acl = (struct chimera_acl *) obuf;
+            struct chimera_acl *new_acl = (struct chimera_acl *) nbuf;
+
+            if (chimera_acl_deserialize((const char *) serial, slen, old_acl,
+                                        DISKFS_ACL_REC_MAX_ACES) >= 0 &&
+                chimera_acl_chmod(old_acl, inode->mode, new_acl,
+                                  DISKFS_ACL_REC_MAX_ACES) >= 0) {
+                diskfs_acl_store(thread, p->txn, inode, new_acl);
+            }
+        }
     }
 
     diskfs_map_attrs(thread, &request->setattr.r_post_attr, inode);
@@ -9428,11 +10130,20 @@ diskfs_mkdir_at_alloc_cb(
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     inode->parent_inum = parent->inum;
     inode->parent_gen  = parent->gen;
 
     diskfs_apply_attrs(inode, request->mkdir_at.set_attr);
+
+    /* Seed the new directory's ACL (inherited, or a Windows default DACL for
+     * SMB creates) before mapping attrs so r_attr reflects any inherited mode
+     * and carries the freshly-stored ACL. */
+    diskfs_inherit_acl(thread, p->txn, inode, parent,
+                       request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
+
     diskfs_map_attrs(thread, &request->mkdir_at.r_attr, inode);
 
     parent->nlink++;
@@ -9595,6 +10306,8 @@ diskfs_mknod_at_alloc_cb(
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         inode->mode = request->mknod_at.set_attr->va_mode;
@@ -9936,13 +10649,30 @@ static void diskfs_readdir_iter_step(
     struct chimera_vfs_request *request);
 
 static void
-diskfs_readdir_complete(struct chimera_vfs_request *request)
+diskfs_readdir_finish(struct chimera_vfs_request *request)
 {
     struct diskfs_request_private *p     = request->plugin_data;
     struct diskfs_inode           *inode = p->inode_stash[0];
 
     diskfs_map_attrs(p->thread, &request->readdir.r_dir_attr, inode);
     diskfs_op_ok(request, p->txn);
+} /* diskfs_readdir_finish */
+
+static void
+diskfs_readdir_complete(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    /* If a synchronous iteration loop is driving the walk (see
+     * diskfs_readdir_iter_step), only flag completion: the loop calls
+     * diskfs_readdir_finish() once it unwinds.  Finishing inline here would
+     * commit the txn and free the request out from under the active loop. */
+    if (p->rd_looping) {
+        p->rd_done = 1;
+        return;
+    }
+
+    diskfs_readdir_finish(request);
 } /* diskfs_readdir_complete */
 
 static void
@@ -10025,12 +10755,34 @@ diskfs_readdir_iter_step(struct chimera_vfs_request *request)
     struct diskfs_request_private *p      = request->plugin_data;
     struct diskfs_thread          *thread = p->thread;
     struct diskfs_inode           *inode  = p->inode_stash[0];
-    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+    struct diskfs_bt_op           *op;
 
-    if (diskfs_dir_next_async(op, thread, inode, p->rd_from_hash, &op->found_key,
-                              p->rec_scratch, sizeof(p->rec_scratch),
-                              diskfs_readdir_next_cb, request)) {
-        diskfs_readdir_next_cb(op, op->result, request);
+    /* A re-entrant call from a step that completed synchronously: don't
+    * recurse, just ask the active loop to advance to the next entry. */
+    if (p->rd_looping) {
+        p->rd_advance = 1;
+        return;
+    }
+
+    p->rd_looping = 1;
+    do {
+        p->rd_advance = 0;
+        op            = diskfs_bt_op_alloc(thread);
+        if (diskfs_dir_next_async(op, thread, inode, p->rd_from_hash, &op->found_key,
+                                  p->rec_scratch, sizeof(p->rec_scratch),
+                                  diskfs_readdir_next_cb, request)) {
+            diskfs_readdir_next_cb(op, op->result, request);
+        }
+        /* rd_advance: the step finished inline; loop for the next entry.
+         * rd_done:    the walk completed (terminal dirent or full buffer).
+         * neither:    the step suspended on block I/O; its completion will
+         *             re-enter this function with rd_looping clear. */
+    } while (p->rd_advance && !p->rd_done);
+
+    p->rd_looping = 0;
+
+    if (p->rd_done) {
+        diskfs_readdir_finish(request);
     }
 } /* diskfs_readdir_iter_step */
 
@@ -10179,8 +10931,11 @@ diskfs_readdir(
     (void) shared;
     (void) private_data;
 
-    p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->thread     = thread;
+    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->rd_looping = 0;
+    p->rd_advance = 0;
+    p->rd_done    = 0;
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -10203,7 +10958,10 @@ diskfs_open_fh_inode_cb(
 
     if ((request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
         !S_ISDIR(inode->mode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        /* A directory open of a symlink is NFS4ERR_SYMLINK, not NOTDIR (e.g.
+         * LOOKUP/LOOKUPP through a symlink); other non-dirs are NOTDIR. */
+        diskfs_op_fail(request, p->txn,
+                       S_ISLNK(inode->mode) ? CHIMERA_VFS_ESYMLINK : CHIMERA_VFS_ENOTDIR);
         return;
     }
 
@@ -10243,14 +11001,13 @@ diskfs_open_at_finish(
 {
     struct diskfs_request_private *p      = request->plugin_data;
     struct diskfs_thread          *thread = p->thread;
-    unsigned int                   flags  = request->open_at.flags;
 
-    if (flags & CHIMERA_VFS_OPEN_INFERRED) {
-        request->open_at.r_vfs_private = 0xdeadbeefUL;
-    } else {
-        inode->refcnt++;
-        request->open_at.r_vfs_private = (uint64_t) inode;
-    }
+    /* diskfs is CAP_OPEN_FILE_REQUIRED: every open (inferred or not) yields a
+     * cached handle matched by a diskfs_close, so always pin the inode and stash
+     * the real pointer in vfs_private.  read/write reuse it (and close releases
+     * the pin); there is no throwaway/synthetic open_at for this backend. */
+    inode->refcnt++;
+    request->open_at.r_vfs_private = (uint64_t) inode;
 
     diskfs_map_attrs(thread, &request->open_at.r_dir_post_attr, parent);
 
@@ -10276,24 +11033,18 @@ diskfs_open_at_existing_cb(
 
     if ((request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
         !S_ISDIR(inode->mode)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        diskfs_op_fail(request, p->txn,
+                       S_ISLNK(inode->mode) ? CHIMERA_VFS_ESYMLINK : CHIMERA_VFS_ENOTDIR);
         return;
     }
 
-    if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
-        bool allowed;
-
-        if (request->open_at.flags & CHIMERA_VFS_OPEN_READ_ONLY) {
-            allowed = diskfs_cred_can_read(inode, request->cred);
-        } else {
-            allowed = diskfs_cred_can_write(inode, request->cred);
-        }
-
-        if (!allowed) {
-            diskfs_op_fail(request, p->txn, CHIMERA_VFS_EACCES);
-            return;
-        }
-    }
+    /* Access is enforced at the VFS layer (the credential-keyed gate in
+     * chimera_vfs_read/write and the protocol's own create-time check), which
+     * is ACL-aware and honors each protocol's access semantics; diskfs does not
+     * re-check here -- a coarse mode-based read/write test would mis-handle SMB
+     * opens that carry only control rights (e.g. WRITE_DAC) and not data access,
+     * and would ignore a stored ACL that grants more (or less) than the mode.
+     * (Mirrors the memfs and cairn backends.) */
 
     if ((request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
         request->open_at.set_attr->va_size == 0 &&
@@ -10351,8 +11102,15 @@ diskfs_open_at_alloc_cb(
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     diskfs_apply_attrs(inode, request->open_at.set_attr);
+
+    /* Seed the new file's ACL (inherited from the parent, or a Windows default
+     * DACL for SMB creates) into the child's fresh, resident b+tree. */
+    diskfs_inherit_acl(thread, p->txn, inode, parent,
+                       request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
 
     parent->mtime_sec  = now.tv_sec;
     parent->mtime_nsec = now.tv_nsec;
@@ -10490,6 +11248,8 @@ diskfs_create_unlinked_alloc_cb(
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     diskfs_apply_attrs(inode, request->create_unlinked.set_attr);
 
@@ -10703,11 +11463,15 @@ diskfs_read_finish(struct chimera_vfs_request *request)
 
     if (p->pending == 0) {
         diskfs_op_ok(request, p->txn);
-    } else {
+    } else if (p->txn->type == DISKFS_TXN_READ) {
         /* I/O is in flight; drop the inode lock so other ops proceed.  The
          * txn commits from diskfs_io_callback once all reads complete. */
         diskfs_txn_unlock_inode(p->txn, inode);
     }
+    /* A relatime atime bump upgraded this read to a WRITE txn: keep the inode
+     * locked until the redo is durable (like the write path) -- io_callback
+     * runs diskfs_op_ok at pending==0 and the intent-log thread releases the
+     * lock once committed. */
 } /* diskfs_read_finish */
 
 static void
@@ -10776,6 +11540,16 @@ diskfs_read_process(struct chimera_vfs_request *request)
     overlap_length = extent_end - read_offset;
     if (overlap_length > read_left) {
         overlap_length = read_left;
+    }
+
+    if (extent->flags & DISKFS_EXT_UNWRITTEN) {
+        /* Space is reserved (fallocate) but was never written: it reads back
+         * as zeros, with no device I/O.  Fill the cursor like a hole and skip
+         * the read loop. */
+        evpl_iovec_cursor_zero(&p->rd_cursor, overlap_length);
+        read_offset   += overlap_length;
+        read_left     -= overlap_length;
+        overlap_length = 0;
     }
 
     while (overlap_length) {
@@ -10912,6 +11686,49 @@ diskfs_read_inode_cb(
         return;
     }
 
+    /*
+     * relatime atime maintenance (data-returning reads only).  Reads run as a
+     * READ txn; if relatime says atime is due for a bump we can't journal it
+     * under a read lock, so abort and re-run the whole read under a WRITE txn.
+     * On the (rare) re-entry the txn is already WRITE: pin the inode block and
+     * stamp atime only (never ctime); the WRITE commit journals it.
+     */
+    if (diskfs_private->txn->type == DISKFS_TXN_WRITE) {
+        struct timespec now;
+
+        chimera_vfs_realtime(&now);
+        diskfs_txn_pin_inode_block(thread, diskfs_private->txn, inode, 0);
+        inode->atime_sec  = now.tv_sec;
+        inode->atime_nsec = now.tv_nsec;
+    } else if (!thread->shared->noatime) {
+        struct timespec atime = { inode->atime_sec, inode->atime_nsec };
+        struct timespec mtime = { inode->mtime_sec, inode->mtime_nsec };
+        struct timespec ctime = { inode->ctime_sec, inode->ctime_nsec };
+        struct timespec now;
+
+        chimera_vfs_realtime(&now);
+
+        if (chimera_vfs_relatime_needs_update(&atime, &mtime, &ctime, &now)) {
+            struct diskfs_inode *pinned =
+                (request->read.handle && request->read.handle->vfs_private) ?
+                (struct diskfs_inode *) request->read.handle->vfs_private : NULL;
+
+            diskfs_txn_abort(diskfs_private->txn);
+            diskfs_private->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+
+            if (pinned) {
+                diskfs_inode_acquire_pinned(thread, diskfs_private->txn, pinned,
+                                            DISKFS_INODE_MODE_FOR_TXN(diskfs_private->txn),
+                                            diskfs_read_inode_cb, request);
+            } else {
+                diskfs_inode_get_fh_async(thread, diskfs_private->txn,
+                                          request->fh, request->fh_len,
+                                          diskfs_read_inode_cb, request);
+            }
+            return;
+        }
+    }
+
     aligned_offset = offset & ~4095ULL;
     aligned_length = ((offset + length + 4095ULL) & ~4095ULL) - aligned_offset;
 
@@ -10972,9 +11789,20 @@ diskfs_read(
     p->io_reading = 1;     /* cleared in diskfs_read_finish when the walk ends */
     p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
-                              request->fh, request->fh_len,
-                              diskfs_read_inode_cb, request);
+    /* Warm-handle fast path: diskfs advertises CAP_OPEN_FILE_REQUIRED, so a read
+     * is preceded by a real open that pinned the inode and stashed it in
+     * handle->vfs_private.  Reuse it to skip the fh->inum decode + rb-tree
+     * lookup.  Fall back to the by-fh resolve for any handle that lacks it. */
+    if (request->read.handle && request->read.handle->vfs_private) {
+        diskfs_inode_acquire_pinned(thread, p->txn,
+                                    (struct diskfs_inode *) request->read.handle->vfs_private,
+                                    DISKFS_INODE_MODE_FOR_TXN(p->txn),
+                                    diskfs_read_inode_cb, request);
+    } else {
+        diskfs_inode_get_fh_async(thread, p->txn,
+                                  request->fh, request->fh_len,
+                                  diskfs_read_inode_cb, request);
+    }
 } /* diskfs_read */
 
 // Forward declaration
@@ -11213,14 +12041,121 @@ static void diskfs_write_trim_process(
 static void diskfs_write_trim_done(
     struct chimera_vfs_request *request);
 
-/* Tail: inode metadata, unlock, RMW reads, phase2. */
+/*
+ * Insert a data extent, coalescing it with the immediately-preceding extent
+ * when the two are logically + physically contiguous and share the same
+ * written-ness -- so a sequential run of writes/allocations collapses into a
+ * single extent record instead of one record per write.  The descriptor
+ * (ci_off/ci_len/ci_devid/ci_devoff/ci_flags) and the continuation (ci_cont)
+ * live in the request private.  bt_insert aborts on a duplicate key, so a
+ * merge removes the predecessor and re-inserts the widened extent at its key.
+ */
 static void
-diskfs_write_inserted_cb(
+diskfs_ext_put_insert(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_ext_put_inserted_cb(
     struct diskfs_bt_op *op,
     int                  result,
     void                *private_data)
 {
-    struct chimera_vfs_request    *request        = private_data;
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    p->ci_cont(request);
+} /* diskfs_ext_put_inserted_cb */
+
+static void
+diskfs_ext_put_insert(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+
+    if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
+                                p->ci_off, p->ci_len, p->ci_devid, p->ci_devoff,
+                                p->ci_flags, diskfs_ext_put_inserted_cb, request)) {
+        diskfs_ext_put_inserted_cb(op, op->result, request);
+    }
+} /* diskfs_ext_put_insert */
+
+static void
+diskfs_ext_put_removed_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_ext_put_insert(request);
+} /* diskfs_ext_put_removed_cb */
+
+static void
+diskfs_ext_put_floor_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    struct diskfs_extent           prev;
+    int                            have;
+
+    have = diskfs_ext_from_op(op, result, &prev);
+    diskfs_bt_op_free(thread, op);
+
+    if (have && prev.flags == p->ci_flags && prev.device_id == p->ci_devid &&
+        prev.file_offset + prev.length == p->ci_off &&
+        prev.device_offset + prev.length == p->ci_devoff) {
+        /* Contiguous predecessor: widen it (remove then re-insert at its key). */
+        p->ci_off    = prev.file_offset;
+        p->ci_len   += prev.length;
+        p->ci_devoff = prev.device_offset;
+
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0],
+                                    prev.file_offset, diskfs_ext_put_removed_cb,
+                                    request)) {
+            diskfs_ext_put_removed_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    diskfs_ext_put_insert(request);
+} /* diskfs_ext_put_floor_cb */
+
+static void
+diskfs_ext_put(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op;
+
+    if (p->ci_off == 0) {
+        diskfs_ext_put_insert(request);     /* nothing precedes offset 0 */
+        return;
+    }
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_floor_async(op, thread, p->inode_stash[0], p->ci_off - 1,
+                               p->rec_scratch, sizeof(p->rec_scratch),
+                               diskfs_ext_put_floor_cb, request)) {
+        diskfs_ext_put_floor_cb(op, op->result, request);
+    }
+} /* diskfs_ext_put */
+
+/* Tail shared by every write path (in-place, unwritten-split, redirect):
+ * stamp inode metadata, then RMW reads (if any) -> phase2 data write. */
+static void
+diskfs_write_finish_map(struct chimera_vfs_request *request)
+{
     struct diskfs_request_private *diskfs_private = request->plugin_data;
     struct diskfs_thread          *thread         = diskfs_private->thread;
     struct diskfs_shared          *shared         = thread->shared;
@@ -11228,9 +12163,6 @@ diskfs_write_inserted_cb(
     struct diskfs_inode           *inode          = diskfs_private->inode_stash[0];
     uint64_t                       write_end      = request->write.offset + request->write.length;
     struct timespec                now;
-
-    (void) result;
-    diskfs_bt_op_free(thread, op);
 
     if (inode->size < write_end) {
         inode->size       = write_end;
@@ -11309,21 +12241,22 @@ diskfs_write_inserted_cb(
         diskfs_private->rmw_phase = 2;
         diskfs_write_phase2(thread, shared, request);
     }
-} /* diskfs_write_inserted_cb */
+} /* diskfs_write_finish_map */
 
+/* Redirect path: record the freshly-allocated extent (coalescing it with a
+ * contiguous predecessor -- e.g. a sequential append), then run the tail. */
 static void
 diskfs_write_trim_done(struct chimera_vfs_request *request)
 {
-    struct diskfs_request_private *p      = request->plugin_data;
-    struct diskfs_thread          *thread = p->thread;
-    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+    struct diskfs_request_private *p = request->plugin_data;
 
-    if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
-                                p->rmw_aligned_start, p->rmw_aligned_length,
-                                p->rmw_device_id, p->rmw_device_offset,
-                                diskfs_write_inserted_cb, request)) {
-        diskfs_write_inserted_cb(op, op->result, request);
-    }
+    p->ci_off    = p->rmw_aligned_start;
+    p->ci_len    = p->rmw_aligned_length;
+    p->ci_devid  = (uint32_t) p->rmw_device_id;
+    p->ci_devoff = p->rmw_device_offset;
+    p->ci_flags  = 0;
+    p->ci_cont   = diskfs_write_finish_map;
+    diskfs_ext_put(request);
 } /* diskfs_write_trim_done */
 
 static void
@@ -11399,6 +12332,7 @@ diskfs_write_trim_spans_removed_cb(
     if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
                                 p->ext_iter.file_offset, astart - p->ext_iter.file_offset,
                                 p->ext_iter.device_id, p->ext_iter.device_offset,
+                                p->ext_iter.flags,
                                 diskfs_write_trim_spans_before_cb, request)) {
         diskfs_write_trim_spans_before_cb(op, op->result, request);
     }
@@ -11444,6 +12378,7 @@ diskfs_write_trim_oleft_removed_cb(
     if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
                                 p->ext_iter.file_offset, astart - p->ext_iter.file_offset,
                                 p->ext_iter.device_id, p->ext_iter.device_offset,
+                                p->ext_iter.flags,
                                 diskfs_write_trim_advance_cb, request)) {
         diskfs_write_trim_advance_cb(op, op->result, request);
     }
@@ -11470,6 +12405,7 @@ diskfs_write_trim_oright_removed_cb(
     if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], aend, ee - aend,
                                 p->ext_iter.device_id,
                                 p->ext_iter.device_offset + (aend - es),
+                                p->ext_iter.flags,
                                 diskfs_write_trim_spans_before_cb, request)) {
         diskfs_write_trim_spans_before_cb(op, op->result, request);
     }
@@ -11498,31 +12434,51 @@ diskfs_write_trim_process(struct chimera_vfs_request *request)
         return;
     }
 
+    /* The aligned region's data is being redirected to freshly-allocated
+     * blocks (rmw_device_offset), so the old device blocks backing the part of
+     * this extent that the region covers are now garbage and must be freed --
+     * otherwise every overwrite leaks space.  (The in-place paths never reach
+     * here; they reuse the existing blocks and free nothing.) */
     if (es >= astart && ee <= aend) {
-        /* Completely inside the aligned region: remove, then advance. */
+        /* Completely inside the aligned region: free + remove, then advance. */
+        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset,
+                                 SM_ALIGN_UP(p->ext_iter.length));
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_write_trim_advance_cb, request)) {
             diskfs_write_trim_advance_cb(op, op->result, request);
         }
     } else if (es < astart && ee > aend) {
-        /* Spans the region: insert tail at aligned_end first. */
+        /* Spans the region: free the covered middle, then insert tail at
+         * aligned_end first. */
+        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset + (astart - es),
+                                 p->rmw_aligned_length);
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], aend,
                                     ee - aend, p->ext_iter.device_id,
                                     p->ext_iter.device_offset + (aend - es),
+                                    p->ext_iter.flags,
                                     diskfs_write_trim_spans_after_cb, request)) {
             diskfs_write_trim_spans_after_cb(op, op->result, request);
         }
     } else if (es < astart && ee > astart) {
-        /* Overlaps the left edge: remove, reinsert the head. */
+        /* Overlaps the left edge: free the covered tail, remove, reinsert the
+         * head. */
+        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset + (astart - es),
+                                 ee - astart);
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_write_trim_oleft_removed_cb, request)) {
             diskfs_write_trim_oleft_removed_cb(op, op->result, request);
         }
     } else if (es < aend && ee > aend) {
-        /* Starts within, extends past: remove, reinsert tail at aligned_end. */
+        /* Starts within, extends past: free the covered head, remove, reinsert
+         * tail at aligned_end. */
+        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset, aend - es);
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_write_trim_oright_removed_cb, request)) {
@@ -11591,8 +12547,7 @@ diskfs_write_suffix_cb(
 
     if (have && p->ext_iter.file_offset <= write_end &&
         write_end < p->ext_iter.file_offset + p->ext_iter.length) {
-        uint64_t suffix_block = write_end & ~4095ULL;
-        uint64_t ee           = p->ext_iter.file_offset + p->ext_iter.length;
+        uint64_t ee = p->ext_iter.file_offset + p->ext_iter.length;
 
         if (ee >= aend) {
             p->rmw_suffix_valid = p->rmw_suffix_len;
@@ -11602,17 +12557,18 @@ diskfs_write_suffix_cb(
             p->rmw_suffix_valid = 0;
         }
 
-        if (suffix_block >= p->ext_iter.file_offset) {
-            p->need_suffix_read     = 1;
-            p->suffix_device_id     = p->ext_iter.device_id;
-            p->suffix_device_offset = p->ext_iter.device_offset +
-                (suffix_block - p->ext_iter.file_offset);
-        } else {
-            p->need_suffix_read     = 1;
-            p->suffix_device_id     = p->ext_iter.device_id;
-            p->suffix_device_offset = p->ext_iter.device_offset;
-            p->rmw_suffix_adjust    = p->ext_iter.file_offset - suffix_block;
-        }
+        /* Read the block-aligned device offset that physically holds write_end.
+         * The extent maps file write_end to device_offset + (write_end -
+         * file_offset); rounding that down to a block gives a 4 KiB-aligned
+         * read (required by O_DIRECT/libaio) whose write_end byte sits at
+         * index (write_end & 4095) -- so no separate adjust is needed even
+         * when the extent starts mid-block (e.g. a punch-created extent whose
+         * file_offset/device_offset are unaligned but congruent mod 4096). */
+        p->need_suffix_read     = 1;
+        p->suffix_device_id     = p->ext_iter.device_id;
+        p->suffix_device_offset = (p->ext_iter.device_offset +
+                                   (write_end - p->ext_iter.file_offset)) & ~4095ULL;
+        p->rmw_suffix_adjust = 0;
     }
 
     diskfs_write_trim_start(request);
@@ -11694,41 +12650,56 @@ diskfs_write_prefix_lookup(struct chimera_vfs_request *request)
     }
 } /* diskfs_write_prefix_lookup */
 
-/* Retry context for the write's data-space allocation when a reservation
- * refill parks on a cold AG-log block; the continuation re-enters
- * diskfs_write_inode_cb with the (already write-locked) inode. */
-struct diskfs_write_alloc_ctx {
-    struct diskfs_inode        *inode;
-    struct chimera_vfs_request *request;
-};
-
+/* Forward declarations for the write classify -> placement chain. */
+static void diskfs_write_classify_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data);
+static void diskfs_write_redirect_alloc(
+    struct chimera_vfs_request *request);
 static void diskfs_write_alloc_resume(
     struct diskfs_thread *thread,
     void                 *arg);
+static void diskfs_write_split_start(
+    struct chimera_vfs_request *request);
 
+/*
+ * A write is dispatched here with the inode write-locked.  Compute the 4 KiB-
+ * aligned region, then classify it (diskfs_write_classify_cb) against the
+ * extent at/just-before aligned_start:
+ *
+ *   - one existing extent fully covers the region -> overwrite IN PLACE:
+ *       written   -> no map mutation at all (the hot random-overwrite path:
+ *                    no allocate, no free, no b+tree churn);
+ *       unwritten -> overwrite in place + split the covered range to written
+ *                    (fallocate first-touch);
+ *   - otherwise (hole / partial / multi-extent span) -> allocate fresh blocks
+ *     and redirect, freeing the old covered blocks (diskfs_write_trim_*).
+ *
+ * Multi-extent-cover redirects for now; coalescing keeps written runs in a
+ * single extent so contiguous regions collapse to the in-place case.
+ */
 static void
 diskfs_write_inode_cb(
     struct diskfs_inode *inode,
     int                  status,
     void                *private_data)
 {
-    struct chimera_vfs_request    *request        = private_data;
-    struct diskfs_request_private *diskfs_private = request->plugin_data;
-    struct diskfs_thread          *thread         = diskfs_private->thread;
-    uint64_t                       write_start    = request->write.offset;
-    uint64_t                       write_end      = write_start + request->write.length;
-    uint64_t                       aligned_start, aligned_end, aligned_length;
-    uint64_t                       device_id, device_offset;
-    struct diskfs_write_alloc_ctx *wctx;
-    int                            rc;
+    struct chimera_vfs_request    *request     = private_data;
+    struct diskfs_request_private *p           = request->plugin_data;
+    struct diskfs_thread          *thread      = p->thread;
+    uint64_t                       write_start = request->write.offset;
+    uint64_t                       write_end   = write_start + request->write.length;
+    uint64_t                       aligned_start, aligned_end;
+    struct diskfs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
-        diskfs_op_fail(request, diskfs_private->txn, status);
+        diskfs_op_fail(request, p->txn, status);
         return;
     }
 
     if (unlikely(!S_ISREG(inode->mode))) {
-        diskfs_op_fail(request, diskfs_private->txn, CHIMERA_VFS_EINVAL);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EINVAL);
         return;
     }
 
@@ -11739,56 +12710,257 @@ diskfs_write_inode_cb(
 
         request->write.r_length = 0;
         request->write.r_sync   = 1;
-        diskfs_op_ok(request, diskfs_private->txn);
+        diskfs_op_ok(request, p->txn);
         return;
     }
 
-    aligned_start  = write_start & ~4095ULL;
-    aligned_end    = (write_end + 4095ULL) & ~4095ULL;
-    aligned_length = aligned_end - aligned_start;
+    aligned_start = write_start & ~4095ULL;
+    aligned_end   = (write_end + 4095ULL) & ~4095ULL;
 
-    wctx          = malloc(sizeof(*wctx));
-    wctx->inode   = inode;
-    wctx->request = request;
-    rc            = diskfs_thread_alloc_space(thread, diskfs_private->txn, aligned_length,
-                                              &device_id, &device_offset,
-                                              diskfs_write_alloc_resume, wctx);
+    p->rmw_prefix_len     = write_start - aligned_start;
+    p->rmw_suffix_len     = aligned_end - write_end;
+    p->rmw_aligned_start  = aligned_start;
+    p->rmw_aligned_length = aligned_end - aligned_start;
+    p->rmw_prefix_valid   = 0;
+    p->rmw_suffix_valid   = 0;
+    p->rmw_suffix_adjust  = 0;
+    p->need_prefix_read   = 0;
+    p->need_suffix_read   = 0;
+    p->inode_stash[0]     = inode;
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_floor_async(op, thread, inode, aligned_start, p->rec_scratch,
+                               sizeof(p->rec_scratch), diskfs_write_classify_cb,
+                               request)) {
+        diskfs_write_classify_cb(op, op->result, request);
+    }
+} /* diskfs_write_inode_cb */
+
+static void
+diskfs_write_classify_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    uint64_t                       astart  = p->rmw_aligned_start;
+    uint64_t                       aend    = astart + p->rmw_aligned_length;
+    struct diskfs_extent           e;
+    int                            have;
+
+    have = diskfs_ext_from_op(op, result, &e);
+    diskfs_bt_op_free(thread, op);
+
+    if (have && e.file_offset <= astart && e.file_offset + e.length >= aend) {
+        /* Single extent fully covers the region: overwrite its blocks in
+         * place at the matching device offset. */
+        p->rmw_device_id     = e.device_id;
+        p->rmw_device_offset = e.device_offset + (astart - e.file_offset);
+
+        if (e.flags & DISKFS_EXT_UNWRITTEN) {
+            /* The un-overwritten bytes of the first/last block are zeros (not
+             * stale data), so phase2 zero-fills the prefix/suffix -- no RMW
+             * read.  Split the covered range to written. */
+            p->ext_iter = e;
+            diskfs_write_split_start(request);
+        } else {
+            /* RMW the partial first/last blocks from these same in-place
+             * blocks; the extent map is left untouched. */
+            if (p->rmw_prefix_len) {
+                p->need_prefix_read     = 1;
+                p->prefix_device_id     = e.device_id;
+                p->prefix_device_offset = p->rmw_device_offset;
+                p->rmw_prefix_valid     = p->rmw_prefix_len;
+            }
+            if (p->rmw_suffix_len) {
+                uint64_t write_end    = request->write.offset + request->write.length;
+                uint64_t suffix_block = write_end & ~4095ULL;
+
+                p->need_suffix_read     = 1;
+                p->suffix_device_id     = e.device_id;
+                p->suffix_device_offset = e.device_offset +
+                    (suffix_block - e.file_offset);
+                p->rmw_suffix_valid = p->rmw_suffix_len;
+            }
+            diskfs_write_finish_map(request);
+        }
+        return;
+    }
+
+    /* Hole / partial / multi-extent span: allocate fresh blocks and redirect. */
+    diskfs_write_redirect_alloc(request);
+} /* diskfs_write_classify_cb */
+
+static void
+diskfs_write_redirect_alloc(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    uint64_t                       dev_id, dev_off;
+    int                            rc;
+
+    rc = diskfs_thread_alloc_space(thread, p->txn,
+                                   (int64_t) p->rmw_aligned_length,
+                                   &dev_id, &dev_off,
+                                   diskfs_write_alloc_resume, request);
     if (rc == SM_AGAIN) {
-        return;     /* parked; diskfs_write_alloc_resume re-runs (owns wctx) */
+        return;     /* parked; diskfs_write_alloc_resume re-runs */
     }
-    free(wctx);
     if (rc) {
-        diskfs_op_fail(request, diskfs_private->txn, CHIMERA_VFS_ENOSPC);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOSPC);
         return;
     }
 
-    diskfs_private->rmw_prefix_len     = write_start - aligned_start;
-    diskfs_private->rmw_suffix_len     = aligned_end - write_end;
-    diskfs_private->rmw_aligned_start  = aligned_start;
-    diskfs_private->rmw_aligned_length = aligned_length;
-    diskfs_private->rmw_device_id      = device_id;
-    diskfs_private->rmw_device_offset  = device_offset;
-    diskfs_private->rmw_prefix_valid   = 0;
-    diskfs_private->rmw_suffix_valid   = 0;
-    diskfs_private->rmw_suffix_adjust  = 0;
-    diskfs_private->need_prefix_read   = 0;
-    diskfs_private->need_suffix_read   = 0;
-    diskfs_private->inode_stash[0]     = inode;
+    p->rmw_device_id     = dev_id;
+    p->rmw_device_offset = dev_off;
 
     diskfs_write_prefix_lookup(request);
-} /* diskfs_write_inode_cb */
+} /* diskfs_write_redirect_alloc */
 
 static void
 diskfs_write_alloc_resume(
     struct diskfs_thread *thread,
     void                 *arg)
 {
-    struct diskfs_write_alloc_ctx c = *(struct diskfs_write_alloc_ctx *) arg;
-
     (void) thread;
-    free(arg);
-    diskfs_write_inode_cb(c.inode, CHIMERA_VFS_OK, c.request);
+    diskfs_write_redirect_alloc((struct chimera_vfs_request *) arg);
 } /* diskfs_write_alloc_resume */
+
+/*
+ * Unwritten-extent in-place split: the write lands inside a reserved-but-
+ * unwritten extent e=[es,ee) (stashed in p->ext_iter).  Its blocks are
+ * overwritten in place; re-record the map as
+ *     [es,astart) unwritten | [astart,aend) written | [aend,ee) unwritten
+ * (head/tail only when non-empty; the written middle reuses e's blocks at
+ * rmw_device_offset).  remove -> insert middle -> [head] -> [tail] -> tail.
+ */
+static void
+diskfs_write_split_tail_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_write_finish_map(request);
+} /* diskfs_write_split_tail_cb */
+
+static void
+diskfs_write_split_finish_tail(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    uint64_t                       es     = p->ext_iter.file_offset;
+    uint64_t                       ee     = es + p->ext_iter.length;
+    uint64_t                       aend   = p->rmw_aligned_start + p->rmw_aligned_length;
+    struct diskfs_bt_op           *op;
+
+    if (ee > aend) {
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], aend,
+                                    ee - aend, p->ext_iter.device_id,
+                                    p->ext_iter.device_offset + (aend - es),
+                                    DISKFS_EXT_UNWRITTEN,
+                                    diskfs_write_split_tail_cb, request)) {
+            diskfs_write_split_tail_cb(op, op->result, request);
+        }
+    } else {
+        diskfs_write_finish_map(request);
+    }
+} /* diskfs_write_split_finish_tail */
+
+static void
+diskfs_write_split_head_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_write_split_finish_tail(request);
+} /* diskfs_write_split_head_cb */
+
+static void
+diskfs_write_split_finish_head(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    uint64_t                       es     = p->ext_iter.file_offset;
+    uint64_t                       astart = p->rmw_aligned_start;
+    struct diskfs_bt_op           *op;
+
+    if (es < astart) {
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], es,
+                                    astart - es, p->ext_iter.device_id,
+                                    p->ext_iter.device_offset,
+                                    DISKFS_EXT_UNWRITTEN,
+                                    diskfs_write_split_head_cb, request)) {
+            diskfs_write_split_head_cb(op, op->result, request);
+        }
+    } else {
+        diskfs_write_split_finish_tail(request);
+    }
+} /* diskfs_write_split_finish_head */
+
+static void
+diskfs_write_split_mid_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_write_split_finish_head(request);
+} /* diskfs_write_split_mid_cb */
+
+static void
+diskfs_write_split_removed_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+
+    (void) result;
+    diskfs_bt_op_free(thread, op);
+
+    /* Insert the written middle, reusing e's blocks (rmw_device_offset). */
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
+                                p->rmw_aligned_start, p->rmw_aligned_length,
+                                (uint32_t) p->rmw_device_id, p->rmw_device_offset, 0,
+                                diskfs_write_split_mid_cb, request)) {
+        diskfs_write_split_mid_cb(op, op->result, request);
+    }
+} /* diskfs_write_split_removed_cb */
+
+static void
+diskfs_write_split_start(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+
+    if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0],
+                                p->ext_iter.file_offset,
+                                diskfs_write_split_removed_cb, request)) {
+        diskfs_write_split_removed_cb(op, op->result, request);
+    }
+} /* diskfs_write_split_start */
 
 
 static void
@@ -11826,9 +12998,19 @@ diskfs_write(
     p->rmw_suffix_valid    = 0;
     p->txn                 = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
-                              request->fh, request->fh_len,
-                              diskfs_write_inode_cb, request);
+    /* Warm-handle fast path (see diskfs_read): reuse the inode pinned at open
+    * via handle->vfs_private, skipping the by-fh resolve.  The WRITE-mode grant
+    * (incl. the home-block pin) is preserved by diskfs_inode_grant_locked. */
+    if (request->write.handle && request->write.handle->vfs_private) {
+        diskfs_inode_acquire_pinned(thread, p->txn,
+                                    (struct diskfs_inode *) request->write.handle->vfs_private,
+                                    DISKFS_INODE_MODE_FOR_TXN(p->txn),
+                                    diskfs_write_inode_cb, request);
+    } else {
+        diskfs_inode_get_fh_async(thread, p->txn,
+                                  request->fh, request->fh_len,
+                                  diskfs_write_inode_cb, request);
+    }
 } /* diskfs_write */
 
 
@@ -11941,6 +13123,7 @@ diskfs_dealloc_ostart_removed_cb(
                                 p->ext_iter.file_offset,
                                 p->loop_off - p->ext_iter.file_offset,
                                 p->ext_iter.device_id, p->ext_iter.device_offset,
+                                p->ext_iter.flags,
                                 diskfs_dealloc_modify_advance_cb, request)) {
         diskfs_dealloc_modify_advance_cb(op, op->result, request);
     }
@@ -11967,6 +13150,7 @@ diskfs_dealloc_oend_removed_cb(
     if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], he, ee - he,
                                 p->ext_iter.device_id,
                                 p->ext_iter.device_offset + (he - es),
+                                p->ext_iter.flags,
                                 diskfs_dealloc_modify_finish_cb, request)) {
         diskfs_dealloc_modify_finish_cb(op, op->result, request);
     }
@@ -12004,6 +13188,7 @@ diskfs_dealloc_spans_removed_cb(
                                 p->ext_iter.file_offset,
                                 p->loop_off - p->ext_iter.file_offset,
                                 p->ext_iter.device_id, p->ext_iter.device_offset,
+                                p->ext_iter.flags,
                                 diskfs_dealloc_spans_before_cb, request)) {
         diskfs_dealloc_spans_before_cb(op, op->result, request);
     }
@@ -12073,6 +13258,7 @@ diskfs_dealloc_process(struct chimera_vfs_request *request)
         if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], hole_end,
                                     ee - hole_end, p->ext_iter.device_id,
                                     p->ext_iter.device_offset + (hole_end - es),
+                                    p->ext_iter.flags,
                                     diskfs_dealloc_spans_after_cb, request)) {
             diskfs_dealloc_spans_after_cb(op, op->result, request);
         }
@@ -12120,6 +13306,174 @@ diskfs_dealloc_first_cb(
     diskfs_dealloc_process(request);
 } /* diskfs_dealloc_first_cb */
 
+/*
+ * ALLOCATE (fallocate, non-deallocate): reserve real backing space for every
+ * gap in the requested range by allocating blocks and recording them as
+ * UNWRITTEN extents.  Such extents read back as zeros (no device I/O) until
+ * the first write, which clears the bit and overwrites the reserved blocks in
+ * place.  This makes ALLOCATE genuinely reserve space without zero-filling it.
+ *
+ * Async walk over the inode's extent map (all state in p):
+ *   loop_off  = current 4 KiB-aligned offset being examined
+ *   loop_pos  = 4 KiB-aligned end of the requested range
+ *   loop_left = end of the gap currently being filled
+ * A single extent is capped so one space-map reservation can satisfy it; a
+ * larger gap is filled by several contiguous extents (coalesced on insert).
+ */
+#define DISKFS_ALLOCATE_MAX_EXTENT (256ULL << 20)
+
+static void diskfs_allocate_reserve_step(
+    struct chimera_vfs_request *request);
+static void diskfs_allocate_do_alloc(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_allocate_alloc_resume(
+    struct diskfs_thread *thread,
+    void                 *arg)
+{
+    (void) thread;
+    diskfs_allocate_do_alloc((struct chimera_vfs_request *) arg);
+} /* diskfs_allocate_alloc_resume */
+
+static void
+diskfs_allocate_next(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    if (p->loop_off < p->loop_left) {
+        diskfs_allocate_do_alloc(request);      /* more of this gap */
+    } else {
+        diskfs_allocate_reserve_step(request);  /* on to the next gap */
+    }
+} /* diskfs_allocate_next */
+
+static void
+diskfs_allocate_do_alloc(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    uint64_t                       off    = p->loop_off;
+    uint64_t                       dev_id, dev_off, chunk;
+    int                            rc;
+
+    chunk = p->loop_left - off;
+    if (chunk > DISKFS_ALLOCATE_MAX_EXTENT) {
+        chunk = DISKFS_ALLOCATE_MAX_EXTENT;
+    }
+
+    rc = diskfs_thread_alloc_space(thread, p->txn, (int64_t) chunk,
+                                   &dev_id, &dev_off,
+                                   diskfs_allocate_alloc_resume, request);
+    if (rc == SM_AGAIN) {
+        return;     /* parked; resume re-drives diskfs_allocate_do_alloc */
+    }
+    if (rc) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOSPC);
+        return;
+    }
+
+    /* Advance before recording: diskfs_ext_put may complete inline and run
+     * diskfs_allocate_next, which reads loop_off.  Record the reserved chunk
+     * as an unwritten extent, coalescing contiguous chunks into one. */
+    p->loop_off  = off + chunk;
+    p->ci_off    = off;
+    p->ci_len    = chunk;
+    p->ci_devid  = (uint32_t) dev_id;
+    p->ci_devoff = dev_off;
+    p->ci_flags  = DISKFS_EXT_UNWRITTEN;
+    p->ci_cont   = diskfs_allocate_next;
+    diskfs_ext_put(request);
+} /* diskfs_allocate_do_alloc */
+
+static void
+diskfs_allocate_holeend_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_extent           next;
+    int                            have;
+
+    have = diskfs_ext_from_op(op, result, &next);
+    diskfs_bt_op_free(p->thread, op);
+
+    /* The gap runs from loop_off to the next extent, clamped to the end. */
+    p->loop_left = p->loop_pos;
+    if (have && next.file_offset < p->loop_left) {
+        p->loop_left = next.file_offset;
+    }
+    diskfs_allocate_do_alloc(request);
+} /* diskfs_allocate_holeend_cb */
+
+static void
+diskfs_allocate_floor_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    struct diskfs_extent           e;
+    int                            have;
+
+    have = diskfs_ext_from_op(op, result, &e);
+    diskfs_bt_op_free(thread, op);
+
+    if (have && e.file_offset + e.length > p->loop_off) {
+        /* Already backed (written or unwritten): skip past this extent.  Round
+         * up to the next block: an extent that ends mid-block (e.g. a partial
+         * last block left by truncate) physically owns the rest of that block,
+         * so a gap allocation must start at the next block boundary.  Starting
+         * at an unaligned file_offset would pair it with a block-aligned device
+         * offset from the space map, breaking the file==device block alignment
+         * that diskfs's block I/O relies on. */
+        p->loop_off = (e.file_offset + e.length + 4095) & ~4095ULL;
+        diskfs_allocate_reserve_step(request);
+        return;
+    }
+
+    /* Hole at loop_off: find where it ends (next extent at/after loop_off). */
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_ceil_async(op, thread, p->inode_stash[0], p->loop_off,
+                              p->rec_scratch, sizeof(p->rec_scratch),
+                              diskfs_allocate_holeend_cb, request)) {
+        diskfs_allocate_holeend_cb(op, op->result, request);
+    }
+} /* diskfs_allocate_floor_cb */
+
+static void
+diskfs_allocate_reserve_step(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op;
+
+    if (p->loop_off >= p->loop_pos) {
+        /* Reservation complete; extend the logical size if the request did. */
+        struct diskfs_inode *inode   = p->inode_stash[0];
+        uint64_t             new_end = request->allocate.offset +
+            request->allocate.length;
+
+        if (new_end > inode->size) {
+            inode->size       = new_end;
+            inode->space_used = (inode->size + 4095) & ~4095;
+        }
+        diskfs_allocate_finalize(request);
+        return;
+    }
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_floor_async(op, thread, p->inode_stash[0], p->loop_off,
+                               p->rec_scratch, sizeof(p->rec_scratch),
+                               diskfs_allocate_floor_cb, request)) {
+        diskfs_allocate_floor_cb(op, op->result, request);
+    }
+} /* diskfs_allocate_reserve_step */
+
 static void
 diskfs_allocate_inode_cb(
     struct diskfs_inode *inode,
@@ -12159,14 +13513,15 @@ diskfs_allocate_inode_cb(
             }
             return;
         }
-    } else {
-        /* ALLOCATE: extend file size if needed. */
-        uint64_t new_end = request->allocate.offset + request->allocate.length;
-
-        if (new_end > inode->size) {
-            inode->size       = new_end;
-            inode->space_used = (inode->size + 4095) & ~4095;
-        }
+    } else if (request->allocate.length) {
+        /* ALLOCATE: reserve backing space for any gap in the (block-aligned)
+         * requested range as UNWRITTEN extents, then extend the size.  The
+         * walk drives diskfs_allocate_finalize when it completes. */
+        p->loop_off = request->allocate.offset & ~4095ULL;
+        p->loop_pos = (request->allocate.offset + request->allocate.length +
+                       4095ULL) & ~4095ULL;
+        diskfs_allocate_reserve_step(request);
+        return;
     }
 
     diskfs_allocate_finalize(request);
@@ -12444,6 +13799,8 @@ diskfs_symlink_at_alloc_cb(
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->btime_sec  = now.tv_sec;
+    inode->btime_nsec = now.tv_nsec;
 
     diskfs_map_attrs(thread, &request->symlink_at.r_attr, inode);
 
@@ -13974,7 +15331,7 @@ diskfs_get_layout_do_alloc(
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0],
                                 p->loop_off, p->rmw_aligned_length,
-                                (uint32_t) dev_id, dev_off,
+                                (uint32_t) dev_id, dev_off, 0,
                                 diskfs_get_layout_inserted_cb, request)) {
         diskfs_get_layout_inserted_cb(op, op->result, request);
     }
@@ -14281,7 +15638,11 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .name         = "diskfs",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_DISKFS,
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
-        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT,
+        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
+        /* Require a real open so every file op carries a pinned inode in
+         * handle->vfs_private (diskfs_open_fh_inode_cb), which read/write reuse
+         * to skip per-I/O inode resolution. */
+        CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED,
     .init           = diskfs_init,
     .destroy        = diskfs_destroy,
     .thread_init    = diskfs_thread_init,
