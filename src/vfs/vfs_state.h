@@ -265,6 +265,18 @@ chimera_vfs_lease_ack(
     struct chimera_vfs_lease     *lease,
     struct chimera_vfs_lease_mode resulting);
 
+/* Apply the lease state a client selected in its (legacy or lease) oplock-break
+ * acknowledgment.  The server already optimistically settled the lease at the
+ * maximum the holder could keep; the client may keep less.  `kept_mode` is what
+ * the client retains (R for LEVEL_II, 0 for NONE); the lease's granted mode is
+ * intersected down to it and re-armed if anything survives. */
+void
+chimera_vfs_lease_client_downgrade(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_lease      *lease,
+    uint8_t                        kept_mode);
+
 /* Forcibly revoke a lease — called by vfs_state when the break deadline
  * expires, or by the protocol server when it gives up on the client. */
 void
@@ -357,3 +369,23 @@ chimera_vfs_state_break_on_write(
     uint8_t                               fh_len,
     uint64_t                              fh_hash,
     const struct chimera_vfs_lease_owner *writer);
+
+/* Break-on-open: break caching leases held by a *different* owner on
+ * (fh, fh_hash) when a conflicting open arrives.  `trigger_bits` selects which
+ * holders break (only those whose granted mode holds a trigger bit they don't
+ * get to keep); `retain_mode` is what the holder keeps (R downgrades an
+ * exclusive/batch oplock to LEVEL_II, 0 breaks to NONE).  Drives the SMB2
+ * second-open break semantics:
+ *   - batch (H) holders break before the share-mode check (handle caching, the
+ *     holder may close): trigger = H;
+ *   - exclusive (W) holders break only once the open is granted: trigger = W|H.
+ */
+void
+chimera_vfs_state_break_caching_for_open(
+    struct chimera_vfs_state             *state,
+    const uint8_t                        *fh,
+    uint8_t                               fh_len,
+    uint64_t                              fh_hash,
+    const struct chimera_vfs_lease_owner *opener,
+    uint8_t                               trigger_bits,
+    uint8_t                               retain_mode);

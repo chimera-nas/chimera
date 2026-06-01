@@ -626,6 +626,27 @@ chimera_vfs_state_would_conflict(
                     }
                 }
             }
+
+            /* An SMB exclusive (W) or batch (W|H) oplock may only be granted to
+             * the SOLE opener of a file: if another client already has it open
+             * (a share reservation with a different client key), the request is
+             * capped to a shared read cache (LEVEL_II).  Signal that by denying
+             * the W/H grant -- the SMB create path retries for R-only, which
+             * coexists.  (Pure attribute-only opens take no share reservation,
+             * so they do not preclude an oplock.) */
+            if (probe->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+                (probe->mode.granted & (CHIMERA_VFS_LEASE_MODE_W |
+                                        CHIMERA_VFS_LEASE_MODE_H))) {
+                for (cur = file->share_resvs; cur; cur = cur->next) {
+                    if (cur->owner.client_key == probe->owner.client_key) {
+                        continue; /* the requesting client's own open(s) */
+                    }
+                    if (conflict_out) {
+                        *conflict_out = cur;
+                    }
+                    return CHIMERA_VFS_LEASE_DENIED;
+                }
+            }
             /* An NFSv4 delegation must not be granted when another client
              * already has the file open in a conflicting mode: a read
              * delegation is denied by another client's write open; a write
@@ -1193,6 +1214,43 @@ chimera_vfs_lease_ack(
     }
 } /* chimera_vfs_lease_ack */
 
+/* Apply the lease state a client chose in its OPLOCK_BREAK / lease-break
+ * acknowledgment.  The server optimistically settled the lease at the maximum
+ * the holder could keep (the break's needed_mode); the client may keep less
+ * (e.g. drop straight to NONE), so intersect the granted mode down to its
+ * choice.  A lease that still retains access re-arms (IDLE) so it can break
+ * again later; one reduced to NONE becomes inert (ACKED) until close.  Pumps
+ * waiters in case the further downgrade unblocks them. */
+SYMBOL_EXPORT void
+chimera_vfs_lease_client_downgrade(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_lease      *lease,
+    uint8_t                        kept_mode)
+{
+    bool mutated = false;
+
+    if (!file) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+
+    if (lease->mode.granted & ~kept_mode) {
+        lease->mode.granted &= kept_mode;
+        lease->break_state   = lease->mode.granted ? CHIMERA_VFS_BREAK_IDLE
+                                                    : CHIMERA_VFS_BREAK_ACKED;
+        mutated = true;
+    }
+
+    pthread_mutex_unlock(&file->lock);
+
+    if (mutated && state) {
+        chimera_vfs_state_pump_pending(state, file);
+        chimera_vfs_state_pump_io(state, file);
+    }
+} /* chimera_vfs_lease_client_downgrade */
+
 SYMBOL_EXPORT void
 chimera_vfs_lease_revoke(struct chimera_vfs_lease *lease)
 {
@@ -1375,6 +1433,16 @@ chimera_vfs_break_reads_for_write(
             chimera_vfs_lease_owner_equal(&cur->owner, writer)) {
             continue;
         }
+        /* A lease already broken once and settled at LEVEL_II (ACKED, still
+         * holding R) must re-arm so this write can break it again -- this time
+         * to NONE.  (A write is a fresh invalidation event, distinct from the
+         * open that produced the LEVEL_II downgrade, so re-breaking here does
+         * not double-fire within a single open.)  begin_break only acts on an
+         * IDLE lease, so flip it back under the lock. */
+        if (cur->break_state == CHIMERA_VFS_BREAK_ACKED &&
+            cur->owner.break_cb) {
+            cur->break_state = CHIMERA_VFS_BREAK_IDLE;
+        }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
             to_break[n++] = cur;
         }
@@ -1406,6 +1474,59 @@ chimera_vfs_state_break_on_write(
 
     chimera_vfs_state_put(state, file);
 } /* chimera_vfs_state_break_on_write */
+
+/* Break-on-open: a conflicting open by a *different* owner breaks caching
+ * holders.  `trigger_bits` selects which holders break -- only a lease whose
+ * granted mode intersects `trigger_bits` is affected -- and `retain_mode` is
+ * the mask the holder keeps (R to downgrade an exclusive/batch oplock to
+ * LEVEL_II, 0 to break all the way to NONE).  Holders the opener owns are
+ * skipped.  The break is optimistic from vfs_state's point of view (it is
+ * queued; the opener proceeds), but the SMB layer may choose to wait. */
+SYMBOL_EXPORT void
+chimera_vfs_state_break_caching_for_open(
+    struct chimera_vfs_state             *state,
+    const uint8_t                        *fh,
+    uint8_t                               fh_len,
+    uint64_t                              fh_hash,
+    const struct chimera_vfs_lease_owner *opener,
+    uint8_t                               trigger_bits,
+    uint8_t                               retain_mode)
+{
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease      *cur;
+    struct chimera_vfs_lease      *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    int                            n = 0;
+    int                            i;
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        /* Only holders that actually hold one of the trigger bits beyond what
+         * they get to retain need to break. */
+        if ((cur->mode.granted & trigger_bits & ~retain_mode) == 0) {
+            continue;
+        }
+        if (chimera_vfs_lease_owner_equal(&cur->owner, opener)) {
+            continue;
+        }
+        if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
+            to_break[n++] = cur;
+        }
+    }
+
+    pthread_mutex_unlock(&file->lock);
+
+    for (i = 0; i < n; i++) {
+        chimera_vfs_lease_begin_break(state, to_break[i], retain_mode, 0);
+    }
+
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_state_break_caching_for_open */
 
 /* -------------------------------------------------------------------- */
 /* Implicit I/O lease                                                   */
