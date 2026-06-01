@@ -283,6 +283,17 @@ enum diskfs_metric_block_cache_op {
     DISKFS_METRIC_BLOCK_CACHE_NUM,
 };
 
+/* Deferred-mtime accounting: did a write defer its inode timestamp log, and if
+ * not, which gate stopped it.  flushed = coalesced flush records issued. */
+enum diskfs_metric_mtime_op {
+    DISKFS_METRIC_MTIME_DEFERRED,         /* write deferred its inode log */
+    DISKFS_METRIC_MTIME_FLUSHED,          /* coalesced flush record issued */
+    DISKFS_METRIC_MTIME_SKIP_NOT_INPLACE, /* not a single-written-extent overwrite */
+    DISKFS_METRIC_MTIME_SKIP_SIZE_GREW,   /* write grew the file */
+    DISKFS_METRIC_MTIME_SKIP_FILESYNC,    /* client requested FILE_SYNC */
+    DISKFS_METRIC_MTIME_NUM,
+};
+
 enum diskfs_metric_io_dir {
     DISKFS_METRIC_IO_READ,
     DISKFS_METRIC_IO_WRITE,
@@ -327,6 +338,14 @@ static const char *diskfs_metric_block_cache_op_names[] = {
     "recycle",
 };
 
+static const char *diskfs_metric_mtime_op_names[] = {
+    "deferred",
+    "flushed",
+    "skip_not_inplace",
+    "skip_size_grew",
+    "skip_filesync",
+};
+
 static const char *diskfs_metric_io_dir_names[] = {
     "read",
     "write",
@@ -357,6 +376,8 @@ struct diskfs_metrics {
     struct prometheus_counter_series   *inode_cache_series[DISKFS_METRIC_INODE_CACHE_NUM];
     struct prometheus_counter          *block_cache;
     struct prometheus_counter_series   *block_cache_series[DISKFS_METRIC_BLOCK_CACHE_NUM];
+    struct prometheus_counter          *mtime;
+    struct prometheus_counter_series   *mtime_series[DISKFS_METRIC_MTIME_NUM];
     struct prometheus_counter          *block_io_ops;
     struct prometheus_counter_series *block_io_ops_series[DISKFS_METRIC_IO_NUM_DIRS][DISKFS_METRIC_IO_NUM_CLASSES];
     struct prometheus_counter          *block_io_bytes;
@@ -382,6 +403,7 @@ struct diskfs_metrics {
 struct diskfs_thread_metrics {
     struct prometheus_counter_instance   *inode_cache[DISKFS_METRIC_INODE_CACHE_NUM];
     struct prometheus_counter_instance   *block_cache[DISKFS_METRIC_BLOCK_CACHE_NUM];
+    struct prometheus_counter_instance   *mtime[DISKFS_METRIC_MTIME_NUM];
     struct prometheus_counter_instance *block_io_ops[DISKFS_METRIC_IO_NUM_DIRS][DISKFS_METRIC_IO_NUM_CLASSES];
     struct prometheus_counter_instance *block_io_bytes[DISKFS_METRIC_IO_NUM_DIRS][DISKFS_METRIC_IO_NUM_CLASSES];
     struct prometheus_counter_instance  **block_io_device_ops;
@@ -1120,6 +1142,9 @@ diskfs_metrics_init(
     m->block_cache = prometheus_metrics_create_counter(
         metrics, "chimera_diskfs_block_cache",
         "Diskfs block cache events");
+    m->mtime = prometheus_metrics_create_counter(
+        metrics, "chimera_diskfs_mtime",
+        "Diskfs deferred-mtime accounting (deferred/flushed/skip reasons)");
     m->block_io_ops = prometheus_metrics_create_counter(
         metrics, "chimera_diskfs_block_io_ops",
         "Diskfs classified block I/O submissions");
@@ -1157,6 +1182,10 @@ diskfs_metrics_init(
     for (int i = 0; i < DISKFS_METRIC_BLOCK_CACHE_NUM; i++) {
         m->block_cache_series[i] = prometheus_counter_create_series(
             m->block_cache, op_label, &diskfs_metric_block_cache_op_names[i], 1);
+    }
+    for (int i = 0; i < DISKFS_METRIC_MTIME_NUM; i++) {
+        m->mtime_series[i] = prometheus_counter_create_series(
+            m->mtime, op_label, &diskfs_metric_mtime_op_names[i], 1);
     }
     for (int d = 0; d < DISKFS_METRIC_IO_NUM_DIRS; d++) {
         for (int c = 0; c < DISKFS_METRIC_IO_NUM_CLASSES; c++) {
@@ -1227,6 +1256,9 @@ diskfs_thread_metrics_init(struct diskfs_thread *thread)
     }
     for (int i = 0; i < DISKFS_METRIC_BLOCK_CACHE_NUM; i++) {
         tm->block_cache[i] = prometheus_counter_series_create_instance(m->block_cache_series[i]);
+    }
+    for (int i = 0; i < DISKFS_METRIC_MTIME_NUM; i++) {
+        tm->mtime[i] = prometheus_counter_series_create_instance(m->mtime_series[i]);
     }
     for (int d = 0; d < DISKFS_METRIC_IO_NUM_DIRS; d++) {
         for (int c = 0; c < DISKFS_METRIC_IO_NUM_CLASSES; c++) {
@@ -1483,6 +1515,16 @@ diskfs_metric_block_cache(
         diskfs_metric_counter_inc(thread->metrics.block_cache[op]);
     }
 } /* diskfs_metric_block_cache */
+
+static inline void
+diskfs_metric_mtime(
+    struct diskfs_thread       *thread,
+    enum diskfs_metric_mtime_op op)
+{
+    if (thread) {
+        diskfs_metric_counter_inc(thread->metrics.mtime[op]);
+    }
+} /* diskfs_metric_mtime */
 
 static inline void
 diskfs_metric_block_io(
@@ -9214,6 +9256,7 @@ diskfs_mtime_flush_committed_cb(
     (void) txn;
     (void) status;
 
+    diskfs_metric_mtime(thread, DISKFS_METRIC_MTIME_FLUSHED);
     diskfs_mtime_flush_drop_pin(thread, f->inode);
     free(f);
     thread->mtime_flushing = 0;
@@ -12558,8 +12601,17 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
         pthread_mutex_unlock(&shard->lock);
 
         diskfs_txn_drop_inode_block(thread, diskfs_private->txn, inode);
+        diskfs_metric_mtime(thread, DISKFS_METRIC_MTIME_DEFERRED);
         request->write.r_sync = CHIMERA_VFS_WRITE_DATASYNC;
     } else {
+        /* Record which gate stopped the deferral (in expression order). */
+        if (!diskfs_private->inplace_written) {
+            diskfs_metric_mtime(thread, DISKFS_METRIC_MTIME_SKIP_NOT_INPLACE);
+        } else if (size_grew) {
+            diskfs_metric_mtime(thread, DISKFS_METRIC_MTIME_SKIP_SIZE_GREW);
+        } else if (request->write.sync == CHIMERA_VFS_WRITE_FILESYNC) {
+            diskfs_metric_mtime(thread, DISKFS_METRIC_MTIME_SKIP_FILESYNC);
+        }
         request->write.r_sync = CHIMERA_VFS_WRITE_FILESYNC;
     }
 
