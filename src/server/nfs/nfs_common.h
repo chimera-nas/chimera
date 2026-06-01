@@ -176,6 +176,20 @@ struct chimera_nfs_export {
     struct chimera_nfs_export *next;
 };
 
+/*
+ * In-memory rmtab-style mount-entry table (RFC 1813 App. I).  MOUNTPROC3_MNT
+ * records an entry, UMNT/UMNTALL remove them, and DUMP enumerates them
+ * (showmount -a/-d).  Advisory only and not persisted across restart.
+ * hostname is the caller's address (port stripped); directory is the
+ * client-requested export path.
+ */
+struct chimera_nfs_mount_entry {
+    char                            hostname[64];
+    char                            directory[MNTPATHLEN + 1];
+    struct chimera_nfs_mount_entry *prev;
+    struct chimera_nfs_mount_entry *next;
+};
+
 /* Prometheus instances for the NFS4.1 SEQUENCE replay cache.  All
  * counters are best-effort (not atomic); contention is low because
  * SEQUENCE handling is per-session under that session's lock. */
@@ -231,6 +245,10 @@ struct chimera_server_nfs_shared {
     struct chimera_nfs_export          *exports;
     pthread_mutex_t                     exports_lock;
     int                                 num_exports;
+
+    struct chimera_nfs_mount_entry     *mount_entries;
+    pthread_mutex_t                     mount_entries_lock;
+    int                                 num_mount_entries;
     struct evpl_endpoint               *nfs_endpoint;
     struct evpl_endpoint               *mount_endpoint;
     struct evpl_endpoint               *portmap_endpoint;

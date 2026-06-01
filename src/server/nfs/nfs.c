@@ -375,6 +375,7 @@ nfs_server_init(
     }
 
     pthread_mutex_init(&shared->exports_lock, NULL);
+    pthread_mutex_init(&shared->mount_entries_lock, NULL);
     return shared;
 } /* nfs_server_init */
 
@@ -440,6 +441,7 @@ nfs_server_destroy(void *data)
 {
     struct chimera_server_nfs_shared *shared = data;
     struct chimera_nfs_export        *export;
+    struct chimera_nfs_mount_entry   *mount_entry;
     struct evpl                      *evpl;
     struct chimera_vfs_thread        *vfs_thread;
 
@@ -552,6 +554,14 @@ nfs_server_destroy(void *data)
         shared->num_exports--;
         chimera_nfs_abort_if(shared->num_exports < 0, "num_exports went negative");
         free(export);
+    }
+
+    while (shared->mount_entries) {
+        mount_entry = shared->mount_entries;
+        LL_DELETE(shared->mount_entries, mount_entry);
+        shared->num_mount_entries--;
+        chimera_nfs_abort_if(shared->num_mount_entries < 0, "num_mount_entries went negative");
+        free(mount_entry);
     }
 
     nlm_state_destroy(&shared->nlm_state);
