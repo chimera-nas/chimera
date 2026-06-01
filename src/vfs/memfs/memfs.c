@@ -3014,7 +3014,7 @@ memfs_write(
         pthread_mutex_unlock(&inode->lock);
         request->status         = CHIMERA_VFS_OK;
         request->write.r_length = 0;
-        request->write.r_sync   = 1;
+        request->write.r_sync   = CHIMERA_VFS_WRITE_FILESYNC;
         request->complete(request);
         return;
     }
@@ -3138,7 +3138,7 @@ memfs_write(
 
     request->status         = CHIMERA_VFS_OK;
     request->write.r_length = request->write.length;
-    request->write.r_sync   = 1;
+    request->write.r_sync   = CHIMERA_VFS_WRITE_FILESYNC;
 
     request->complete(request);
 } /* memfs_write */

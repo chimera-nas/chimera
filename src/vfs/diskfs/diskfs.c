@@ -13144,7 +13144,7 @@ diskfs_write_inode_cb(
         diskfs_map_attrs(thread, &request->write.r_post_attr, inode);
 
         request->write.r_length = 0;
-        request->write.r_sync   = 1;
+        request->write.r_sync   = CHIMERA_VFS_WRITE_FILESYNC;
         diskfs_op_ok(request, p->txn);
         return;
     }
