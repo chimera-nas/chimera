@@ -12289,6 +12289,54 @@ diskfs_write_phase2(
         return;
     }
 
+    /* Zero-copy fast path: a fully block-aligned overwrite has no RMW prefix or
+    * suffix (and therefore no sub-block padding), so the staged buffer would be
+    * a byte-for-byte copy of the caller's write data.  When the data is a single
+    * block-aligned segment that fits a single device request, hand the caller's
+    * iovec straight to the device and skip the per-write staging copy entirely.
+    *
+    * The single-segment, 4K-aligned gate is required for correctness, not just
+    * the win: the device backend (libaio/io_uring O_DIRECT, VFIO) needs each
+    * segment block-aligned in address and length.  That holds for an RDMA write,
+    * where the data lands in one registered, 4K-aligned buffer -- the same buffer
+    * the read path DMAs device reads into.  It does NOT hold for a write whose
+    * payload arrived as many unaligned fragments (e.g. an RPC reassembled from
+    * TCP record marks); those must take the staging path below, which coalesces
+    * them into aligned device blocks.  Feeding raw unaligned segments to the
+    * device silently drops the I/O -> the request never completes -> hang.
+    *
+    * Lifetime: the VFS core retains ownership of request->write.iov and releases
+    * it only after this op completes (i.e. after the device write), so borrowing
+    * it here is safe.  We do not add it to diskfs_private->iov, so io_callback
+    * (which only releases diskfs_private->iov[0..niov]) leaves it untouched. */
+    if (prefix_len == 0 && suffix_len == 0 && write_length > 0 &&
+        diskfs_private->rmw_aligned_length == write_length &&
+        request->write.niov == 1 &&
+        (((uintptr_t) request->write.iov[0].data & 4095) == 0) &&
+        write_length <= shared->devices[diskfs_private->rmw_device_id].max_request_size) {
+
+        diskfs_private->pending = 1;
+        diskfs_private->niov    = 0;
+
+        diskfs_pending_io_add(thread, 1);
+
+        diskfs_metric_block_io(thread, DISKFS_METRIC_IO_WRITE,
+                               DISKFS_METRIC_IO_DATA, write_length);
+        diskfs_metric_block_io_device(thread, diskfs_private->rmw_device_id,
+                                      DISKFS_METRIC_IO_WRITE,
+                                      DISKFS_METRIC_IO_DATA, write_length);
+
+        evpl_block_write(evpl,
+                         thread->queue[diskfs_private->rmw_device_id],
+                         request->write.iov,
+                         request->write.niov,
+                         diskfs_private->rmw_device_offset,
+                         !shared->unsafe_async,
+                         diskfs_io_callback,
+                         request);
+        return;
+    }
+
     // Build the combined write iovec:
     // [prefix (if any)] + [write data] + [suffix (if any)] + [padding to 4KB]
 
