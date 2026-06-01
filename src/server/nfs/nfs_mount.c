@@ -90,10 +90,10 @@ chimera_nfs_mount_remove(
     const char                       *hostname,
     const char                       *directory)
 {
-    struct chimera_nfs_mount_entry *entry, *tmp;
+    struct chimera_nfs_mount_entry *entry;
 
     pthread_mutex_lock(&shared->mount_entries_lock);
-    LL_FOREACH_SAFE(shared->mount_entries, entry, tmp)
+    LL_FOREACH(shared->mount_entries, entry)
     {
         if (strcmp(entry->hostname, hostname) == 0 &&
             strcmp(entry->directory, directory) == 0) {
@@ -114,19 +114,27 @@ chimera_nfs_mount_remove_host(
     struct chimera_server_nfs_shared *shared,
     const char                       *hostname)
 {
-    struct chimera_nfs_mount_entry *entry, *tmp;
+    struct chimera_nfs_mount_entry *entry, *next, *keep = NULL;
 
     pthread_mutex_lock(&shared->mount_entries_lock);
-    LL_FOREACH_SAFE(shared->mount_entries, entry, tmp)
-    {
+    /* Single pass partitioning the list: free entries for this host, re-link
+     * the survivors.  next is captured before any free so the cursor never
+     * touches freed memory. */
+    entry = shared->mount_entries;
+    while (entry) {
+        next = entry->next;
         if (strcmp(entry->hostname, hostname) == 0) {
-            LL_DELETE(shared->mount_entries, entry);
             shared->num_mount_entries--;
             chimera_nfs_abort_if(shared->num_mount_entries < 0,
                                  "num_mount_entries went negative");
             free(entry);
+        } else {
+            entry->next = keep;
+            keep        = entry;
         }
+        entry = next;
     }
+    shared->mount_entries = keep;
     pthread_mutex_unlock(&shared->mount_entries_lock);
 } /* chimera_nfs_mount_remove_host */
 
