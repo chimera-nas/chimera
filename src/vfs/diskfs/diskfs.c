@@ -848,6 +848,13 @@ struct diskfs_txn {
     int                      num_inodes;
     struct diskfs_txn_block *blocks;       /* dirty blocks pinned by this txn */
     struct diskfs_txn_free  *pending_frees; /* ranges freed, applied on commit */
+
+    /* When the IL submission queue is full, the commit parks on its worker's
+     * commit-wait FIFO (carrying its completion cb) instead of spinning the
+     * event loop; the CQ doorbell resumes it once SQ space frees. */
+    diskfs_txn_commit_cb_t   commit_cb;
+    void                    *commit_private;
+    struct diskfs_txn       *commit_wait_next;
 };
 
 /*
@@ -1059,6 +1066,12 @@ struct diskfs_thread {
     struct diskfs_inode_waiter  *waiter_free_list;
     struct diskfs_iq_channel    *iq_channel;
     int                          pending_io;
+
+    /* Commits that found the IL submission queue full park here (FIFO) and are
+     * resumed by this worker's CQ doorbell when SQ space frees -- never by
+     * re-entering evpl_continue. */
+    struct diskfs_txn           *commit_wait_head;
+    struct diskfs_txn           *commit_wait_tail;
 
     /* Cross-thread lock-grant delivery: any thread that releases an inode
      * and grants it to a waiter belonging to this worker enqueues the
@@ -7694,6 +7707,60 @@ diskfs_intent_log_wake_cb(
     }
 } /* diskfs_intent_log_wake_cb */
 
+/* Push one txn onto this worker's IL submission queue.  Returns 1 on success,
+ * 0 if the SQ is full.  The completion fires later from the CQ doorbell. */
+static int
+diskfs_iq_try_submit(
+    struct diskfs_thread  *thread,
+    struct diskfs_txn     *txn,
+    diskfs_txn_commit_cb_t cb,
+    void                  *private_data)
+{
+    struct diskfs_shared     *shared = thread->shared;
+    struct diskfs_iq_channel *ch     = thread->iq_channel;
+    struct diskfs_iq_entry   *slot;
+    uint32_t                  tail, head;
+
+    tail = __atomic_load_n(&ch->sq.tail, __ATOMIC_RELAXED);
+    head = __atomic_load_n(&ch->sq.head, __ATOMIC_ACQUIRE);
+
+    if (tail - head >= DISKFS_IQ_RING_SIZE) {
+        return 0;
+    }
+
+    slot               = &ch->sq.entries[tail & DISKFS_IQ_RING_MASK];
+    slot->txn          = txn;
+    slot->cb           = cb;
+    slot->private_data = private_data;
+    slot->status       = 0;
+    prometheus_stopwatch_start(&slot->enqueue_time);
+
+    __atomic_store_n(&ch->sq.tail, tail + 1, __ATOMIC_RELEASE);
+
+    evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
+    return 1;
+} /* diskfs_iq_try_submit */
+
+/* Resume commits parked on the SQ-full FIFO, in order, as space allows.  Called
+ * from the CQ doorbell, which fires once the intent-log thread has consumed SQ
+ * entries (freeing space) and posted completions on this worker. */
+static void
+diskfs_iq_resume_commit_waiters(struct diskfs_thread *thread)
+{
+    struct diskfs_txn *txn;
+
+    while ((txn = thread->commit_wait_head)) {
+        if (!diskfs_iq_try_submit(thread, txn, txn->commit_cb, txn->commit_private)) {
+            break;     /* SQ full again; the next CQ doorbell resumes us */
+        }
+
+        thread->commit_wait_head = txn->commit_wait_next;
+        if (!thread->commit_wait_head) {
+            thread->commit_wait_tail = NULL;
+        }
+    }
+} /* diskfs_iq_resume_commit_waiters */
+
 static void
 diskfs_iq_cq_doorbell_cb(
     struct evpl          *evpl,
@@ -7732,6 +7799,10 @@ diskfs_iq_cq_doorbell_cb(
          * this channel because the CQ was full. */
         evpl_ring_doorbell(&ch->worker->shared->intent_log.wake_doorbell);
     }
+
+    /* The IL thread has now consumed SQ entries (freeing space), so retry any
+     * commits that parked on a full SQ.  No-op when none are waiting. */
+    diskfs_iq_resume_commit_waiters(ch->worker);
 } /* diskfs_iq_cq_doorbell_cb */
 
 static void *
@@ -7877,11 +7948,7 @@ diskfs_txn_commit_finish(
     diskfs_txn_commit_cb_t cb,
     void                  *private_data)
 {
-    struct diskfs_thread     *thread = txn->thread;
-    struct diskfs_shared     *shared;
-    struct diskfs_iq_channel *ch;
-    struct diskfs_iq_entry   *slot;
-    uint32_t                  tail, head;
+    struct diskfs_thread *thread = txn->thread;
 
     /* Serialize every dirty inode into its block buffer now, on the worker
      * that owns the live inodes under write lock, before handing the txn
@@ -7909,36 +7976,35 @@ diskfs_txn_commit_finish(
                                        blocks * DISKFS_BLOCK_SIZE);
     }
 
-    /* Write txn -> intent log thread via this worker's SQ.  The intent
-     * log thread drops the txn's logical inode locks when it processes
-     * the entry (see diskfs_iq_process_channel); these are logical locks
-     * tracked in the cache, not pthread mutexes, so holding them across
-     * the SQ-full evpl_continue spin below cannot deadlock (conflicting
-     * ops simply park as waiters).  The completion callback fires from the
-     * CQ doorbell back on this worker thread. */
-    shared = thread->shared;
-    ch     = thread->iq_channel;
-
-    tail = __atomic_load_n(&ch->sq.tail, __ATOMIC_RELAXED);
-    head = __atomic_load_n(&ch->sq.head, __ATOMIC_ACQUIRE);
-
-    /* SQ-full backpressure: drain our own evpl so the CQ doorbell fires
-     * and the intent log thread gets a wake from cq_doorbell_cb. */
-    while (tail - head >= DISKFS_IQ_RING_SIZE) {
-        evpl_continue(thread->evpl);
-        head = __atomic_load_n(&ch->sq.head, __ATOMIC_ACQUIRE);
+    /* Hand the txn -> intent log thread via this worker's SQ.  The intent log
+     * thread drops the txn's logical inode locks when it processes the entry
+     * (see diskfs_iq_process_channel); these are logical locks tracked in the
+     * cache, not pthread mutexes, so holding them while the commit is parked
+     * on a full SQ cannot deadlock (conflicting ops simply park as waiters).
+     * The completion callback fires from the CQ doorbell back on this worker.
+     *
+     * SQ-full backpressure parks the commit on this worker's FIFO and returns;
+     * the CQ doorbell (diskfs_iq_resume_commit_waiters) retries it once the IL
+     * thread frees SQ space.  We never spin evpl_continue here -- doing so
+     * would re-enter this worker's event loop from within a callback that is
+     * itself running under evpl_continue (e.g. the close-thread sweep), which
+     * recurses without bound.  If commits are already parked, queue behind them
+     * to preserve submission order. */
+    if (!thread->commit_wait_head &&
+        diskfs_iq_try_submit(thread, txn, cb, private_data)) {
+        return;
     }
 
-    slot               = &ch->sq.entries[tail & DISKFS_IQ_RING_MASK];
-    slot->txn          = txn;
-    slot->cb           = cb;
-    slot->private_data = private_data;
-    slot->status       = 0;
-    prometheus_stopwatch_start(&slot->enqueue_time);
+    txn->commit_cb        = cb;
+    txn->commit_private   = private_data;
+    txn->commit_wait_next = NULL;
 
-    __atomic_store_n(&ch->sq.tail, tail + 1, __ATOMIC_RELEASE);
-
-    evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
+    if (thread->commit_wait_tail) {
+        thread->commit_wait_tail->commit_wait_next = txn;
+    } else {
+        thread->commit_wait_head = txn;
+    }
+    thread->commit_wait_tail = txn;
 } /* diskfs_txn_commit_finish */
 
 /* Resume a commit whose pre-commit free-journal flush parked on a log read. */
