@@ -1464,15 +1464,26 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
                 break;
         } /* switch */
 
-        /* Replacing a file's contents truncates it and stamps it ARCHIVE
-        * (MS-FSCC).  OPEN_TRUNCATE makes the backend apply both to an existing
-        * file (a fresh create already starts empty with these attrs). */
+        /* Replacing an existing file's contents truncates it; OPEN_TRUNCATE
+         * makes the backend do that (a fresh create already starts empty). */
         if (chimera_smb_disposition_overwrites(request->create.create_disposition)) {
-            flags                                      |= CHIMERA_VFS_OPEN_TRUNCATE;
-            request->create.set_attr.va_dos_attributes |= SMB2_FILE_ATTRIBUTE_ARCHIVE;
-            request->create.set_attr.va_req_mask       |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
-            request->create.set_attr.va_set_mask       |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+            flags |= CHIMERA_VFS_OPEN_TRUNCATE;
         }
+    }
+
+    /* A file is stamped FILE_ATTRIBUTE_ARCHIVE when it is created, and again
+     * when an overwrite/supersede replaces its contents (MS-FSCC).  Both reduce
+     * to "request ARCHIVE on any create-capable open": the backend applies
+     * set_attr only when it actually creates the inode or truncates it on an
+     * overwrite, so an existing file opened without truncation keeps its stored
+     * attributes (e.g. one explicitly cleared to NORMAL).  ARCHIVE must be
+     * persisted at create time, not synthesized on read (see
+     * chimera_smb_marshal_basic_attrs).  OPEN_TRUNCATE covers a plain OVERWRITE
+     * of an existing file (which never carries OPEN_CREATE). */
+    if (flags & (CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_TRUNCATE)) {
+        request->create.set_attr.va_dos_attributes |= SMB2_FILE_ATTRIBUTE_ARCHIVE;
+        request->create.set_attr.va_req_mask       |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        request->create.set_attr.va_set_mask       |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
     }
 
     /* Persistent-handle grants are keyed by the base file name; skip them for
