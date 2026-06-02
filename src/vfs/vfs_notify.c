@@ -1047,7 +1047,24 @@ chimera_vfs_notify_emit(
          * Windows correctly interprets as "rescan the directory".  A
          * synthetic FILE_MODIFIED on "." would be ambiguous: a client
          * could legitimately read it as "the watched directory itself
-         * was modified" rather than "an unknown descendant changed". */
+         * was modified" rather than "an unknown descendant changed".
+         *
+         * If the event is on the mount root, no subtree watch can be
+         * an ancestor of the affected entry: subtree watches live at
+         * or below the mount root, so the affected entry (mount-root/
+         * leaf) is either AT a watch's root (the entry IS the watched
+         * dir — not a descendant, not reportable) or is a sibling of a
+         * watch ancestor.  Either way the event must not enqueue into
+         * any subtree watch, and overflowing would wrongly trigger a
+         * NOTIFY_ENUM_DIR rescan.  Mirror the RPL resolver's depth-1
+         * at_root short-circuit and just return. */
+        if (me->root_fh_len > 0 &&
+            dir_fh_len == me->root_fh_len &&
+            memcmp(dir_fh, me->root_fh, dir_fh_len) == 0) {
+            pthread_mutex_unlock(&notify->mount_entries_lock);
+            return;
+        }
+
         for (watch = me->subtree_watches; watch; watch = watch->subtree_next) {
             /* Skip if the event is on the watched directory itself
              * (already handled by exact match above). */
