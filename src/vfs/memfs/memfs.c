@@ -1328,7 +1328,7 @@ memfs_apply_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
         if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->atime = now;
-        } else {
+        } else if (attr->va_atime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
             inode->atime = attr->va_atime;
         }
     }
@@ -1337,7 +1337,7 @@ memfs_apply_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
         if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->mtime = now;
-        } else {
+        } else if (attr->va_mtime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
             inode->mtime = attr->va_mtime;
         }
     }
@@ -1369,7 +1369,7 @@ memfs_apply_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
         if (attr->va_btime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->btime = now;
-        } else {
+        } else if (attr->va_btime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
             inode->btime = attr->va_btime;
         }
     }
@@ -1386,7 +1386,24 @@ memfs_apply_attrs(
                attr->va_pnfs_len : CHIMERA_VFS_PNFS_LAYOUT_MAX);
     }
 
-    inode->ctime = now;
+    /* ctime: an SMB SetInfo(FileBasicInformation) carries an explicit
+     * change_time and MS-FSCC requires the server to round-trip it (the
+     * change is to the caller-supplied value, not "now").  TIME_OMIT means
+     * the caller asked to preserve the stored value — this is how the SMB
+     * layer suppresses the implicit ctime bump on a FileBasicInformation
+     * SetInfo whose ChangeTime field was zero.  POSIX semantics still apply
+     * to any other metadata change — if the caller did not supply CTIME at
+     * all (NFS chmod/chown, etc.), stamp it with `now`. */
+    if (set_mask & CHIMERA_VFS_ATTR_CTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
+        if (attr->va_ctime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+            inode->ctime = now;
+        } else if (attr->va_ctime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
+            inode->ctime = attr->va_ctime;
+        }
+    } else {
+        inode->ctime = now;
+    }
 
 } /* memfs_apply_attrs */
 

@@ -9869,7 +9869,7 @@ diskfs_apply_attrs(
         if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->atime_sec  = now.tv_sec;
             inode->atime_nsec = now.tv_nsec;
-        } else {
+        } else if (attr->va_atime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
             inode->atime_sec  = attr->va_atime.tv_sec;
             inode->atime_nsec = attr->va_atime.tv_nsec;
         }
@@ -9880,7 +9880,7 @@ diskfs_apply_attrs(
         if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->mtime_sec  = now.tv_sec;
             inode->mtime_nsec = now.tv_nsec;
-        } else {
+        } else if (attr->va_mtime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
             inode->mtime_sec  = attr->va_mtime.tv_sec;
             inode->mtime_nsec = attr->va_mtime.tv_nsec;
         }
@@ -9891,7 +9891,7 @@ diskfs_apply_attrs(
         if (attr->va_btime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->btime_sec  = now.tv_sec;
             inode->btime_nsec = now.tv_nsec;
-        } else {
+        } else if (attr->va_btime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
             inode->btime_sec  = attr->va_btime.tv_sec;
             inode->btime_nsec = attr->va_btime.tv_nsec;
         }
@@ -9902,8 +9902,22 @@ diskfs_apply_attrs(
         inode->dos_attributes = attr->va_dos_attributes;
     }
 
-    inode->ctime_sec  = now.tv_sec;
-    inode->ctime_nsec = now.tv_nsec;
+    /* ctime: round-trip a caller-supplied change_time (SMB FileBasicInformation
+     * SetInfo) or preserve it on TIME_OMIT; otherwise stamp it with now for the
+     * implicit metadata change.  See memfs_apply_attrs() for the rationale. */
+    if (set_mask & CHIMERA_VFS_ATTR_CTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
+        if (attr->va_ctime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+            inode->ctime_sec  = now.tv_sec;
+            inode->ctime_nsec = now.tv_nsec;
+        } else if (attr->va_ctime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
+            inode->ctime_sec  = attr->va_ctime.tv_sec;
+            inode->ctime_nsec = attr->va_ctime.tv_nsec;
+        }
+    } else {
+        inode->ctime_sec  = now.tv_sec;
+        inode->ctime_nsec = now.tv_nsec;
+    }
 
 } /* diskfs_apply_attrs */
 
