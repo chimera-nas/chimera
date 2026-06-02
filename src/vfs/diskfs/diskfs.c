@@ -9717,22 +9717,38 @@ diskfs_acl_store(
  */
 static void
 diskfs_inherit_acl(
-    struct diskfs_thread *thread,
-    struct diskfs_txn    *txn,
-    struct diskfs_inode  *child,
-    struct diskfs_inode  *parent,
-    int                   windows_default)
+    struct diskfs_thread     *thread,
+    struct diskfs_txn        *txn,
+    struct diskfs_inode      *child,
+    struct diskfs_inode      *parent,
+    const struct chimera_acl *new_acl,
+    int                       windows_default)
 {
     int                 is_dir = S_ISDIR(child->mode);
     uint16_t            want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
         (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
     uint8_t             pserial[DISKFS_ACL_REC_MAX];
-    int                 plen = diskfs_bt_lookup_exact(thread, parent, &diskfs_acl_key,
-                                                      pserial, sizeof(pserial));
+    int                 plen;
     uint8_t             pbuf[sizeof(struct chimera_acl) +
                              DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
     struct chimera_acl *parent_acl = (struct chimera_acl *) pbuf;
     int                 has_inh    = 0;
+
+    /* An explicit ACL supplied at create (e.g. an SMB SD via SecD) takes
+     * precedence over inheritance and the windows_default below.  The caller
+     * snapshots new_acl from set_attr BEFORE diskfs_apply_attrs() runs, since
+     * apply_attrs resets va_set_mask down to the bits it applied (ACL isn't
+     * one of them).  Passing the pointer explicitly avoids relying on a
+     * possibly-uninitialized set_attr->va_acl in callers that don't always
+     * set ATTR_ACL (e.g., NFS3 creates). */
+    if (new_acl && new_acl->num_aces) {
+        diskfs_acl_store(thread, txn, child, new_acl);
+        child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(new_acl);
+        return;
+    }
+
+    plen = diskfs_bt_lookup_exact(thread, parent, &diskfs_acl_key,
+                                  pserial, sizeof(pserial));
 
     if (plen < 0 ||
         chimera_acl_deserialize((const char *) pserial, plen, parent_acl,
@@ -10675,12 +10691,20 @@ diskfs_mkdir_at_alloc_cb(
     inode->parent_inum = parent->inum;
     inode->parent_gen  = parent->gen;
 
+    /* Snapshot any explicit ACL pointer BEFORE diskfs_apply_attrs() rewrites
+     * va_set_mask and drops the ATTR_ACL bit. */
+    const struct chimera_acl *new_acl_mkdir =
+        (request->mkdir_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL)
+        ? request->mkdir_at.set_attr->va_acl : NULL;
+
     diskfs_apply_attrs(inode, request->mkdir_at.set_attr);
 
     /* Seed the new directory's ACL (inherited, or a Windows default DACL for
      * SMB creates) before mapping attrs so r_attr reflects any inherited mode
-     * and carries the freshly-stored ACL. */
+     * and carries the freshly-stored ACL.  An explicit ACL in set_attr (e.g.
+     * an SMB SD via SecD) takes precedence. */
     diskfs_inherit_acl(thread, p->txn, inode, parent,
+                       new_acl_mkdir,
                        request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
 
     diskfs_map_attrs(thread, &request->mkdir_at.r_attr, inode);
@@ -11655,11 +11679,19 @@ diskfs_open_at_alloc_cb(
     inode->btime_nsec     = now.tv_nsec;
     inode->dos_attributes = 0;
 
+    /* Snapshot any explicit ACL pointer BEFORE diskfs_apply_attrs() rewrites
+     * va_set_mask and drops the ATTR_ACL bit. */
+    const struct chimera_acl *new_acl_open =
+        (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL)
+        ? request->open_at.set_attr->va_acl : NULL;
+
     diskfs_apply_attrs(inode, request->open_at.set_attr);
 
     /* Seed the new file's ACL (inherited from the parent, or a Windows default
-     * DACL for SMB creates) into the child's fresh, resident b+tree. */
+     * DACL for SMB creates) into the child's fresh, resident b+tree.  An
+     * explicit ACL in set_attr (e.g. an SMB SD via SecD) takes precedence. */
     diskfs_inherit_acl(thread, p->txn, inode, parent,
+                       new_acl_open,
                        request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
 
     parent->mtime_sec  = now.tv_sec;

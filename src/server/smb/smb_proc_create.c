@@ -2801,9 +2801,15 @@ chimera_smb_parse_create(
         request->create.parent_path_len = 0;
     }
 
-    /* Initialize create-time attributes (may be populated by SD create context) */
+    /* Initialize create-time attributes (may be populated by SD create context).
+     * The request slot is pooled and its set_attr.va_acl pointer survives from
+     * a prior CREATE; clear it explicitly so the backend's create-time ACL
+     * precedence check (which keys off the va_acl pointer, since
+     * <backend>_apply_attrs strips the va_set_mask ACL bit before
+     * <backend>_inherit_acl runs) doesn't fire on a stale pointer. */
     request->create.set_attr.va_req_mask = 0;
     request->create.set_attr.va_set_mask = 0;
+    request->create.set_attr.va_acl      = NULL;
     request->create.ctx_present_mask     = 0;
 
     /* Persist any settable DOS attribute bits supplied at create time. */

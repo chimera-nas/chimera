@@ -635,6 +635,13 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.acls
     ${SMBTORTURE_ACLS_SUBTESTS}
     smb2.acls_non_canonical
+    # MAXIMUM_ALLOWED probe: cycles through every access-mask bit on a file
+    # whose DACL grants only SEC_RIGHTS_FILE_READ.  Passes once cairn honours
+    # an explicit ACL passed in via set_attr at create-time (the SD parsed
+    # from a SecD create-context).  cairn_apply_attrs() resets va_set_mask
+    # before cairn_inherit_acl() runs, so the ACL precedence check keys off
+    # the va_acl pointer rather than the (since-stripped) ACL set bit.
+    smb2.maximum_allowed
 )
 # diskfs is a native-ACL backend: it stores each inode's ACL as a
 # DISKFS_REC_ACL b+tree record and seeds/inherits it on create, so it adds the
@@ -709,6 +716,13 @@ set(SMBTORTURE_ENABLED_diskfs_common
     smb2.acls
     ${SMBTORTURE_ACLS_SUBTESTS}
     smb2.acls_non_canonical
+    # MAXIMUM_ALLOWED probe: cycles through every access-mask bit on a file
+    # whose DACL grants only SEC_RIGHTS_FILE_READ.  Passes once diskfs honours
+    # an explicit ACL passed in via set_attr at create-time (the SD parsed
+    # from a SecD create-context).  diskfs_inherit_acl() takes a set_attr
+    # argument and stores the explicit ACL directly, bypassing the parent-
+    # inheritance / Windows-default-DACL fallback.
+    smb2.maximum_allowed
 )
 set(SMBTORTURE_ENABLED_diskfs_io_uring ${SMBTORTURE_ENABLED_diskfs_common})
 set(SMBTORTURE_ENABLED_diskfs_aio ${SMBTORTURE_ENABLED_diskfs_common})
