@@ -294,26 +294,37 @@ chimera_io_uring_set_open_attrs(
 
     if (set_mask & (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME)) {
         struct timespec times[2];
+        int             have_any = 0;
 
         if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
-            times[0] = attr->va_atime;
             if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
                 times[0].tv_nsec = UTIME_NOW;
+                have_any         = 1;
+            } else if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_OMIT) {
+                times[0].tv_nsec = UTIME_OMIT;
+            } else {
+                times[0] = attr->va_atime;
+                have_any = 1;
             }
         } else {
             times[0].tv_nsec = UTIME_OMIT;
         }
 
         if (set_mask & CHIMERA_VFS_ATTR_MTIME) {
-            times[1] = attr->va_mtime;
             if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
                 times[1].tv_nsec = UTIME_NOW;
+                have_any         = 1;
+            } else if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_OMIT) {
+                times[1].tv_nsec = UTIME_OMIT;
+            } else {
+                times[1] = attr->va_mtime;
+                have_any = 1;
             }
         } else {
             times[1].tv_nsec = UTIME_OMIT;
         }
 
-        if (futimens(fd, times) < 0) {
+        if (have_any && futimens(fd, times) < 0) {
             return errno;
         }
     }
@@ -892,12 +903,17 @@ chimera_io_uring_setattr(
 
     if (request->setattr.set_attr->va_set_mask & (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME)) {
         struct timespec times[2];
+        int             have_any = 0;
 
         if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME) {
             if (request->setattr.set_attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
                 times[0].tv_nsec = UTIME_NOW;
+                have_any         = 1;
+            } else if (request->setattr.set_attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_OMIT) {
+                times[0].tv_nsec = UTIME_OMIT;
             } else {
                 times[0] = request->setattr.set_attr->va_atime;
+                have_any = 1;
             }
 
             request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
@@ -908,8 +924,12 @@ chimera_io_uring_setattr(
         if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME) {
             if (request->setattr.set_attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
                 times[1].tv_nsec = UTIME_NOW;
+                have_any         = 1;
+            } else if (request->setattr.set_attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_OMIT) {
+                times[1].tv_nsec = UTIME_OMIT;
             } else {
                 times[1] = request->setattr.set_attr->va_mtime;
+                have_any = 1;
             }
 
             request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
@@ -917,16 +937,18 @@ chimera_io_uring_setattr(
             times[1].tv_nsec = UTIME_OMIT;
         }
 
-        rc = utimensat(fd, "", times, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
+        if (have_any) {
+            rc = utimensat(fd, "", times, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
-        if (rc) {
-            chimera_io_uring_error("io_uring_setattr: utimensat() failed: %s",
-                                   strerror(errno));
+            if (rc) {
+                chimera_io_uring_error("io_uring_setattr: utimensat() failed: %s",
+                                       strerror(errno));
 
-            chimera_restore_privilege(request->cred);
-            request->status = chimera_linux_errno_to_status(errno);
-            request->complete(request);
-            return;
+                chimera_restore_privilege(request->cred);
+                request->status = chimera_linux_errno_to_status(errno);
+                request->complete(request);
+                return;
+            }
         }
     }
 

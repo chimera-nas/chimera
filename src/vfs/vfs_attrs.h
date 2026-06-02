@@ -90,6 +90,14 @@ struct chimera_acl;
 
 #define CHIMERA_VFS_TIME_NOW            ((1l << 30) - 3l)
 
+/* Sentinel: "preserve the existing value, don't bump implicitly".  Used by
+ * SMB SetInfo(FileBasicInformation) to convey MS-FSCC 2.4.7's "a zero
+ * timestamp means don't change" semantics: the SMB layer must always carry
+ * the time-attr bit in set_mask (so the implicit ctime bump that would
+ * otherwise fire on the co-present DOS-attribute change is suppressed), but
+ * a value of TIME_OMIT means the backend should leave that timestamp alone. */
+#define CHIMERA_VFS_TIME_OMIT           ((1l << 30) - 4l)
+
 struct chimera_vfs_attrs {
     uint64_t            va_req_mask;
     uint64_t            va_set_mask;

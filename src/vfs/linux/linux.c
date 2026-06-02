@@ -253,12 +253,17 @@ chimera_linux_set_attrs(
 
     if (set_mask & (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME)) {
         struct timespec times[2];
+        int             have_any = 0;
 
         if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
             if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
                 times[0].tv_nsec = UTIME_NOW;
+                have_any         = 1;
+            } else if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_OMIT) {
+                times[0].tv_nsec = UTIME_OMIT;
             } else {
                 times[0] = attr->va_atime;
+                have_any = 1;
             }
 
             attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
@@ -269,8 +274,12 @@ chimera_linux_set_attrs(
         if (set_mask & CHIMERA_VFS_ATTR_MTIME) {
             if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
                 times[1].tv_nsec = UTIME_NOW;
+                have_any         = 1;
+            } else if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_OMIT) {
+                times[1].tv_nsec = UTIME_OMIT;
             } else {
                 times[1] = attr->va_mtime;
+                have_any = 1;
             }
 
             attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
@@ -278,13 +287,15 @@ chimera_linux_set_attrs(
             times[1].tv_nsec = UTIME_OMIT;
         }
 
-        rc = utimensat(dirfd, path, times, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
+        if (have_any) {
+            rc = utimensat(dirfd, path, times, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
-        if (rc) {
-            chimera_linux_error("linux_setattr: utimensat() failed: %s",
-                                strerror(errno));
+            if (rc) {
+                chimera_linux_error("linux_setattr: utimensat() failed: %s",
+                                    strerror(errno));
 
-            return -errno;
+                return -errno;
+            }
         }
     }
 

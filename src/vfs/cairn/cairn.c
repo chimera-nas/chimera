@@ -1765,7 +1765,7 @@ cairn_apply_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
         if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->atime = now;
-        } else {
+        } else if (attr->va_atime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
             inode->atime = attr->va_atime;
         }
     }
@@ -1774,7 +1774,7 @@ cairn_apply_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
         if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->mtime = now;
-        } else {
+        } else if (attr->va_mtime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
             inode->mtime = attr->va_mtime;
         }
     }
@@ -1783,7 +1783,7 @@ cairn_apply_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
         if (attr->va_btime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
             inode->btime = now;
-        } else {
+        } else if (attr->va_btime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
             inode->btime = attr->va_btime;
         }
     }
@@ -1793,7 +1793,19 @@ cairn_apply_attrs(
         inode->dos_attributes = attr->va_dos_attributes;
     }
 
-    inode->ctime = now;
+    /* ctime: round-trip a caller-supplied change_time (SMB FileBasicInformation
+     * SetInfo) or preserve it on TIME_OMIT; otherwise stamp it with now for the
+     * implicit metadata change.  See memfs_apply_attrs() for the rationale. */
+    if (set_mask & CHIMERA_VFS_ATTR_CTIME) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
+        if (attr->va_ctime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+            inode->ctime = now;
+        } else if (attr->va_ctime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
+            inode->ctime = attr->va_ctime;
+        }
+    } else {
+        inode->ctime = now;
+    }
 
 } /* cairn_apply_attrs */
 
