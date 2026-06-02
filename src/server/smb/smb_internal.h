@@ -538,6 +538,10 @@ struct chimera_smb_request {
                 uint64_t dst_offset;
                 uint32_t length;
             }                               cc_chunks[CHIMERA_SMB_COPYCHUNK_MAX];
+            /* FSCTL_CREATE_OR_GET_OBJECT_ID response buffer (MS-FSCC 2.4.28
+             * FILE_OBJECTID_BUFFER, type 1): ObjectId(16) + BirthVolumeId(16)
+             * + BirthObjectId(16) + DomainId(16) = 64 bytes. */
+            uint8_t                         oid_buffer[64];
         } ioctl;
         struct {
             uint8_t                         info_type;

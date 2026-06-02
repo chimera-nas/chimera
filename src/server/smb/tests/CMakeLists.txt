@@ -371,6 +371,14 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
+    # FILE_ZERO_DATA on an existing file maps to FALLOC_FL_PUNCH_HOLE in the
+    # VFS; the smbtorture wrapper pre-creates torture_test_file so the test
+    # exercises the FSCTL itself rather than bailing at the OPEN-existing step.
+    smb2.zero-data-ioctl
+    # FSCTL_CREATE_OR_GET_OBJECT_ID returns a synthesised 64-byte
+    # FILE_OBJECTID_BUFFER derived from the open handle's fh_hash; the test
+    # opens a named stream, which is memfs-only today.
+    smb2.ioctl-on-stream
     smb2.sharemode
     smb2.tcon
     smb2.timestamps
@@ -379,21 +387,25 @@ set(SMBTORTURE_ENABLED_memfs
     # smb_named_streams + CHIMERA_VFS_CAP_NAMED_STREAMS): create/read/write/
     # enumerate (FileStreamInformation)/delete of named streams all work and
     # several smb2.streams subtests pass (sharemodes, rename, create-disposition,
-    # zero-byte).  The full smb2.streams / smb2.sdread / smb2.ioctl-on-stream
-    # suites are NOT yet green -- remaining gaps are stream share-mode/sharing-
-    # violation semantics, FILE_ATTRIBUTE reporting on stream handles, stream-
-    # name validation edge cases, directory-stream handling, and rename-with-an-
-    # open-stream -- so those suites stay disabled until fully passing.  The test
-    # harness (smbtorture_test.c) already flips smb_named_streams on for them.
-    # Unified-ACL coverage: every smb2.acls subtest runs green individually.
-    # The combined smb2.acls suite stays disabled (shared-process deltree
-    # cleanup cascade, see above).
+    # zero-byte).  The full smb2.streams / smb2.sdread suites are NOT yet
+    # green -- remaining gaps are stream share-mode/sharing-violation
+    # semantics, FILE_ATTRIBUTE reporting on stream handles, stream-name
+    # validation edge cases, directory-stream handling, and rename-with-an-
+    # open-stream -- so those suites stay disabled until fully passing.  The
+    # test harness (smbtorture_test.c) already flips smb_named_streams on for
+    # them.
+    # Unified-ACL coverage: every smb2.acls subtest runs green, both
+    # individually and as the combined suite (after PR #622's
+    # FileNamesInformation marshalling fix unblocked smbtorture's deltree
+    # cleanup).
+    smb2.acls
     ${SMBTORTURE_ACLS_SUBTESTS}
     # CHANGE_NOTIFY coverage: these notify subtests pass individually on memfs.
-    # The combined smb2.notify suite stays disabled (same deltree cascade).
-    # Remaining notify subtests (valid-req, mask-change, session-reconnect,
-    # tree, rec) need deeper features (recursive-buffer accuracy, per-session
-    # preauth for PreviousSessionId) and are left disabled.
+    # The combined smb2.notify suite stays disabled (residual deltree cascade
+    # specific to that suite).  Remaining notify subtests (valid-req,
+    # mask-change, session-reconnect, tree, rec) need deeper features
+    # (recursive-buffer accuracy, per-session preauth for PreviousSessionId)
+    # and are left disabled.
     ${SMBTORTURE_NOTIFY_SUBTESTS}
     # Non-canonical AUTO_INHERITED semantics: with the
     # smb_acl_inherited_canonicalize knob set to 0 (the harness flips it for
@@ -402,7 +414,7 @@ set(SMBTORTURE_ENABLED_memfs
     # (Samba's "acl flag inherited canonicalization = no" mode).
     smb2.acls_non_canonical
     # smb2.async_dosmode passes on x86_64 but fails on arm64 CI; left
-    # disabled until the arch difference is understood.
+    # disabled here until the arch difference is understood.
 )
 # The linux and io_uring passthrough backends share an implementation and pass
 # the same set.  They expose the share root as a real local directory whose
@@ -433,6 +445,8 @@ set(SMBTORTURE_ENABLED_linux
     smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
+    # FALLOC_FL_PUNCH_HOLE on the underlying filesystem.
+    smb2.zero-data-ioctl
     smb2.sharemode
     smb2.tcon
     smb2.winattr2
@@ -476,6 +490,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
+    smb2.zero-data-ioctl
     smb2.sharemode
     smb2.tcon
     smb2.winattr2
@@ -505,8 +520,10 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.change_notify_disabled
     smb2.mkdir
     # Native DOS-attribute storage in the cairn inode lets the SMB
-    # create/overwrite-truncate attribute round-trip pass end-to-end.
+    # create/overwrite-truncate attribute round-trip pass end-to-end; the
+    # async_dosmode variant exercises the same code paths concurrently.
     smb2.openattr
+    smb2.async_dosmode
     smb2.read
     smb2.rw
     smb2.check-sharemode
@@ -519,6 +536,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
+    smb2.zero-data-ioctl
     smb2.sharemode
     smb2.tcon
     # Native btime storage in the cairn inode lets the SMB create-time round-trip
@@ -545,9 +563,10 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
-    # Unified-ACL coverage: every smb2.acls subtest runs green individually,
-    # plus the non-canonical-ACL variant.  The combined smb2.acls suite stays
-    # disabled (shared-process deltree cleanup cascade, see above).
+    # Unified-ACL coverage: every smb2.acls subtest runs green, both
+    # individually and as the combined suite (PR #622 unblocked the
+    # smbtorture deltree cleanup that was the gate).
+    smb2.acls
     ${SMBTORTURE_ACLS_SUBTESTS}
     smb2.acls_non_canonical
 )
@@ -560,8 +579,11 @@ set(SMBTORTURE_ENABLED_diskfs_common
     smb2.change_notify_disabled
     smb2.mkdir
     # Native DOS-attribute storage in the diskfs inode (in-memory + on-disk
-    # dinode) lets the SMB create/overwrite-truncate attribute round-trip pass.
+    # dinode) lets the SMB create/overwrite-truncate attribute round-trip
+    # pass; the async_dosmode variant exercises the same code paths
+    # concurrently.
     smb2.openattr
+    smb2.async_dosmode
     smb2.read
     smb2.rw
     smb2.check-sharemode
@@ -574,6 +596,7 @@ set(SMBTORTURE_ENABLED_diskfs_common
     smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
+    smb2.zero-data-ioctl
     smb2.sharemode
     smb2.tcon
     # Native btime storage in the diskfs inode (in-memory + on-disk dinode) lets
@@ -601,6 +624,9 @@ set(SMBTORTURE_ENABLED_diskfs_common
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
+    # Unified-ACL coverage: subtests + combined suite + non-canonical-ACL
+    # variant all pass (PR #622 unblocked the smbtorture deltree cleanup).
+    smb2.acls
     ${SMBTORTURE_ACLS_SUBTESTS}
     smb2.acls_non_canonical
 )
