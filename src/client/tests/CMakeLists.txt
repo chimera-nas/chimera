@@ -55,6 +55,7 @@ set(CLIENT_TEST_PROGRAMS
     test_rename
     test_readlink
     test_stat
+    test_fstat
 )
 
 # Create test programs

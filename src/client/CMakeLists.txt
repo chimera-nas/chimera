@@ -6,7 +6,7 @@ add_library(chimera_client SHARED client.c client_dispatch.c
             client_mount.c client_umount.c
             client_open.c client_mkdir.c client_mknod.c client_close.c client_read.c client_read_into.c client_write.c
             client_symlink.c client_link.c client_remove.c client_rename.c
-            client_readlink.c client_stat.c client_readdir.c client_statfs.c
+            client_readlink.c client_stat.c client_fstat.c client_readdir.c client_statfs.c
             client_copy_range.c client_clone_range.c)
 target_link_libraries(chimera_client chimera_vfs evpl prometheus-c jansson)
 
