@@ -12732,7 +12732,12 @@ diskfs_read_inode_cb(
         diskfs_txn_pin_inode_block(thread, diskfs_private->txn, inode, 0);
         inode->atime_sec  = now.tv_sec;
         inode->atime_nsec = now.tv_nsec;
-    } else if (!thread->shared->noatime) {
+    } else if (!thread->shared->noatime && !request->transaction) {
+        /* Autocommit reads only: the relatime atime bump aborts this read txn
+         * and re-runs under a fresh WRITE txn.  We must not do that to a caller-
+         * owned explicit transaction (diskfs_txn_begin would just hand back the
+         * same enlisted txn, recursing forever) -- skip the best-effort atime
+         * bump for enlisted reads instead. */
         struct timespec atime = { inode->atime_sec, inode->atime_nsec };
         struct timespec mtime = { inode->mtime_sec, inode->mtime_nsec };
         struct timespec ctime = { inode->ctime_sec, inode->ctime_nsec };

@@ -11,10 +11,6 @@
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 
-/* Bound on how many times a single NFS3 op replays its transaction after a
- * wait-die / optimistic conflict before giving up with NFS3ERR_JUKEBOX (a
- * transient "try again later" the client retries). */
-#define CHIMERA_NFS3_TXN_MAX_RETRIES 8
 
 static void chimera_nfs3_write_begin_attempt(
     struct nfs_request *req);

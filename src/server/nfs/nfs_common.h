@@ -153,6 +153,9 @@ struct nfs_request {
         struct READLINK3args    *args_readlink;
         struct MKNOD3args       *args_mknod;
         struct WRITE4args       *args_write4;
+        struct RENAME3args      *args_rename;
+        struct LINK3args        *args_link;
+        struct PATHCONF3args    *args_pathconf;
     };
     struct COMPOUND4args           *args_compound;
     /* Explicit-transaction bookkeeping (CHIMERA_VFS_CAP_TRANSACTIONAL).  One
@@ -168,6 +171,16 @@ struct nfs_request {
     enum chimera_vfs_error          txn_op_status;
     uint32_t                        write_length;
     uint32_t                        write_sync;
+    /* Shared NFS3 transaction driver (chimera_nfs3_txn_run/finish): fh+mode the
+    * op begins on (saved for replay), and the op's two callbacks -- txn_start
+    * runs its VFS chain with req->txn set, txn_reply builds+sends the reply. */
+    uint8_t                         txn_fh[NFS4_FHSIZE];
+    int                             txn_fhlen;
+    uint8_t                         txn_mode;
+    void                            (*txn_start)(
+        struct nfs_request *req);
+    void                            (*txn_reply)(
+        struct nfs_request *req);
     union {
         struct READLINK3res    res_readlink;
         struct READDIR3res     res_readdir;
@@ -175,6 +188,22 @@ struct nfs_request {
         struct COMPOUND4res    res_compound;
         struct WRITE3res       res_write;
         struct CREATE3res      res_create;
+        struct GETATTR3res     res_getattr;
+        struct SETATTR3res     res_setattr;
+        struct LOOKUP3res      res_lookup;
+        struct ACCESS3res      res_access;
+        struct READ3res        res_read;
+        struct REMOVE3res      res_remove;
+        struct RMDIR3res       res_rmdir;
+        struct RENAME3res      res_rename;
+        struct LINK3res        res_link;
+        struct MKDIR3res       res_mkdir;
+        struct MKNOD3res       res_mknod;
+        struct SYMLINK3res     res_symlink;
+        struct FSSTAT3res      res_fsstat;
+        struct FSINFO3res      res_fsinfo;
+        struct PATHCONF3res    res_pathconf;
+        struct COMMIT3res      res_commit;
     };
     union {
         struct nfs_nfs3_readdir_cursor     readdir3_cursor;

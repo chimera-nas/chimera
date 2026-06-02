@@ -40,23 +40,40 @@ chimera_nfs3_access3_to_mask(uint32_t access)
 } /* chimera_nfs3_access3_to_mask */
 
 static void
+chimera_nfs3_access_reply(struct nfs_request *req)
+{
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    int                               rc;
+
+    if (req->txn_op_status != CHIMERA_VFS_OK) {
+        req->res_access.status = chimera_vfs_error_to_nfsstat3(req->txn_op_status);
+    }
+
+    if (req->handle) {
+        chimera_vfs_release(thread->vfs_thread, req->handle);
+    }
+
+    rc = shared->nfs_v3.send_reply_NFSPROC3_ACCESS(thread->evpl, NULL,
+                                                   &req->res_access, req->encoding);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+
+    nfs_request_free(thread, req);
+} /* chimera_nfs3_access_reply */
+
+static void
 chimera_nfs3_access_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct ACCESS3args               *args   = req->args_access;
-    struct ACCESS3res                 res;
-    int                               rc;
+    struct nfs_request *req  = private_data;
+    struct ACCESS3args *args = req->args_access;
+    struct ACCESS3res  *res  = &req->res_access;
 
-    res.status = chimera_vfs_error_to_nfsstat3(error_code);
-
-    if (res.status == NFS3_OK) {
-        chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
+    if (error_code == CHIMERA_VFS_OK) {
+        res->status = NFS3_OK;
+        chimera_nfs3_set_post_op_attr(&res->resok.obj_attributes, attr);
 
         /* Evaluate the canonical ACL (or mode fallback) once via the shared
          * gate -- this honours the caller's full credential rather than the
@@ -65,36 +82,29 @@ chimera_nfs3_access_complete(
             attr, &req->cred,
             chimera_nfs3_access3_to_mask(args->access));
 
-        res.resok.access = 0;
+        res->resok.access = 0;
 
         if ((args->access & ACCESS3_READ) && (granted & CHIMERA_ACE_READ_DATA)) {
-            res.resok.access |= ACCESS3_READ;
+            res->resok.access |= ACCESS3_READ;
         }
         if ((args->access & ACCESS3_LOOKUP) && (granted & CHIMERA_ACE_EXECUTE)) {
-            res.resok.access |= ACCESS3_LOOKUP;
+            res->resok.access |= ACCESS3_LOOKUP;
         }
         if ((args->access & ACCESS3_MODIFY) && (granted & CHIMERA_ACE_WRITE_DATA)) {
-            res.resok.access |= ACCESS3_MODIFY;
+            res->resok.access |= ACCESS3_MODIFY;
         }
         if ((args->access & ACCESS3_EXTEND) && (granted & CHIMERA_ACE_APPEND_DATA)) {
-            res.resok.access |= ACCESS3_EXTEND;
+            res->resok.access |= ACCESS3_EXTEND;
         }
         if ((args->access & ACCESS3_DELETE) && (granted & CHIMERA_ACE_DELETE)) {
-            res.resok.access |= ACCESS3_DELETE;
+            res->resok.access |= ACCESS3_DELETE;
         }
         if ((args->access & ACCESS3_EXECUTE) && (granted & CHIMERA_ACE_EXECUTE)) {
-            res.resok.access |= ACCESS3_EXECUTE;
+            res->resok.access |= ACCESS3_EXECUTE;
         }
-    } else {
-        chimera_nfs3_set_post_op_attr(&res.resfail.obj_attributes, attr);
     }
 
-    chimera_vfs_release(thread->vfs_thread, req->handle);
-
-    rc = shared->nfs_v3.send_reply_NFSPROC3_ACCESS(evpl, NULL, &res, req->encoding);
-    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-
-    nfs_request_free(thread, req);
+    chimera_nfs3_txn_finish(req, error_code);
 } /* chimera_nfs3_access_complete */
 
 static void
@@ -103,28 +113,34 @@ chimera_nfs3_access_open_callback(
     struct chimera_vfs_open_handle *handle,
     void                           *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct ACCESS3res                 res;
-    int                               rc;
+    struct nfs_request *req = private_data;
 
-    if (error_code == CHIMERA_VFS_OK) {
-        req->handle = handle;
-
-        chimera_vfs_getattr(thread->vfs_thread, &req->cred, NULL,
-                            handle,
-                            CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_ACL,
-                            chimera_nfs3_access_complete,
-                            req);
-    } else {
-        res.status = chimera_vfs_error_to_nfsstat3(error_code);
-        rc         = shared->nfs_v3.send_reply_NFSPROC3_ACCESS(evpl, NULL, &res, req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-        nfs_request_free(thread, req);
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs3_txn_finish(req, error_code);
+        return;
     }
+
+    req->handle = handle;
+
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, req->txn,
+                        handle,
+                        CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_ACL,
+                        chimera_nfs3_access_complete,
+                        req);
 } /* chimera_nfs3_access_open_callback */
+
+static void
+chimera_nfs3_access_start(struct nfs_request *req)
+{
+    struct ACCESS3args *args = req->args_access;
+
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->txn,
+                        args->object.data.data,
+                        args->object.data.len,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                        chimera_nfs3_access_open_callback,
+                        req);
+} /* chimera_nfs3_access_start */
 
 void
 chimera_nfs3_access(
@@ -145,10 +161,7 @@ chimera_nfs3_access(
 
     req->args_access = args;
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
-                        args->object.data.data,
-                        args->object.data.len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_nfs3_access_open_callback,
-                        req);
+    chimera_nfs3_txn_run(req, args->object.data.data, args->object.data.len,
+                         CHIMERA_VFS_TXN_READ,
+                         chimera_nfs3_access_start, chimera_nfs3_access_reply);
 } /* chimera_nfs3_access */

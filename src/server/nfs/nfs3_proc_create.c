@@ -14,7 +14,6 @@
 #include "nfs3_dump.h"
 
 /* See nfs3_proc_write.c: bound on transaction conflict replays. */
-#define CHIMERA_NFS3_TXN_MAX_RETRIES 8
 
 static void chimera_nfs3_create_begin_attempt(
     struct nfs_request *req);
