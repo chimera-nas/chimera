@@ -94,7 +94,7 @@ chimera_nfs3_rmdir(
 
     req->args_rmdir = args;
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         args->object.dir.data.data,
                         args->object.dir.data.len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

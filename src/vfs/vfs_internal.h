@@ -226,11 +226,9 @@ chimera_vfs_request_alloc_common(
     request->io_handle            = NULL;
     request->io_owns_lease_ref    = 0;
 
-    /* Inherit the transaction the protocol enlisted (NULL = autocommit).  This
-     * is read, not cleared: the protocol sets thread->enlist_txn only for the
-     * (synchronous) duration of an enlisted op call and clears it right after,
-     * so a pooled request never leaks a stale transaction onto a later op. */
-    request->transaction = thread->enlist_txn;
+    /* Default to autocommit; transaction-aware proc entry points overwrite this
+     * with their explicit `txn` argument right after allocation. */
+    request->transaction = NULL;
 
     if (fh && fhlen > 0) {
         memcpy(request->fh, fh, fhlen);

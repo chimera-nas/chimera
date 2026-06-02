@@ -68,7 +68,7 @@ chimera_nfs3_lookup_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        chimera_vfs_lookup_at(thread->vfs_thread, &req->cred,
+        chimera_vfs_lookup_at(thread->vfs_thread, &req->cred, NULL,
                               handle,
                               args->what.name.str,
                               args->what.name.len,
@@ -107,7 +107,7 @@ chimera_nfs3_lookup(
 
     req->args_lookup = args;
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         args->what.dir.data.data,
                         args->what.dir.data.len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

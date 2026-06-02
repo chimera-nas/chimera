@@ -58,7 +58,7 @@ chimera_nfs3_rename(
     nfs3_dump_rename(req, args);
 
     chimera_vfs_rename_at(thread->vfs_thread,
-                          &req->cred,
+                          &req->cred, NULL,
                           args->from.dir.data.data,
                           args->from.dir.data.len,
                           args->from.name.str,

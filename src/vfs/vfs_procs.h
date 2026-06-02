@@ -58,6 +58,7 @@ void
 chimera_vfs_lookup_at(
     struct chimera_vfs_thread       *vfs,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     uint32_t                         namelen,
@@ -68,30 +69,32 @@ chimera_vfs_lookup_at(
 
 void
 chimera_vfs_lookup(
-    struct chimera_vfs_thread     *vfs,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const char                    *path,
-    int                            pathlen,
-    uint64_t                       attr_mask,
-    uint32_t                       flags,
-    chimera_vfs_lookup_callback_t  callback,
-    void                          *private_data);
+    struct chimera_vfs_thread      *vfs,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    const char                     *path,
+    int                             pathlen,
+    uint64_t                        attr_mask,
+    uint32_t                        flags,
+    chimera_vfs_lookup_callback_t   callback,
+    void                           *private_data);
 
 
 void
 chimera_vfs_create(
-    struct chimera_vfs_thread     *vfs,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const char                    *path,
-    int                            pathlen,
-    struct chimera_vfs_attrs      *set_attr,
-    uint64_t                       attr_mask,
-    chimera_vfs_create_callback_t  callback,
-    void                          *private_data);
+    struct chimera_vfs_thread      *vfs,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    const char                     *path,
+    int                             pathlen,
+    struct chimera_vfs_attrs       *set_attr,
+    uint64_t                        attr_mask,
+    chimera_vfs_create_callback_t   callback,
+    void                           *private_data);
 
 /* Path-based operations */
 
@@ -256,13 +259,14 @@ typedef void (*chimera_vfs_open_fh_callback_t)(
 
 void
 chimera_vfs_open_fh(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    unsigned int                   flags,
-    chimera_vfs_open_fh_callback_t callback,
-    void                          *private_data);
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    unsigned int                    flags,
+    chimera_vfs_open_fh_callback_t  callback,
+    void                           *private_data);
 
 /* Variant that persists an opaque handle-state record atomically with the
  * open (backends advertising CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE); handle_state
@@ -271,6 +275,7 @@ void
 chimera_vfs_open_fh_hs(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     const void                      *fh,
     int                              fhlen,
     unsigned int                     flags,
@@ -291,6 +296,7 @@ void
 chimera_vfs_open_at(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
@@ -309,6 +315,7 @@ void
 chimera_vfs_open_at_hs(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     int                              namelen,
@@ -333,6 +340,7 @@ void
 chimera_vfs_create_unlinked(
     struct chimera_vfs_thread             *thread,
     const struct chimera_vfs_cred         *cred,
+    struct chimera_vfs_transaction        *txn,
     const uint8_t                         *fh,
     int                                    fh_len,
     struct chimera_vfs_attrs              *attr,
@@ -365,6 +373,7 @@ void
 chimera_vfs_mkdir_at(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
@@ -430,6 +439,7 @@ void
 chimera_vfs_read(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
     uint32_t                        count,
@@ -447,6 +457,7 @@ void
 chimera_vfs_read_owned(
     struct chimera_vfs_thread            *thread,
     const struct chimera_vfs_cred        *cred,
+    struct chimera_vfs_transaction       *txn,
     struct chimera_vfs_open_handle       *handle,
     uint64_t                              offset,
     uint32_t                              count,
@@ -491,6 +502,7 @@ void
 chimera_vfs_write(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
     uint32_t                        count,
@@ -511,6 +523,7 @@ void
 chimera_vfs_write_owned(
     struct chimera_vfs_thread            *thread,
     const struct chimera_vfs_cred        *cred,
+    struct chimera_vfs_transaction       *txn,
     struct chimera_vfs_open_handle       *handle,
     uint64_t                              offset,
     uint32_t                              count,
@@ -604,6 +617,7 @@ void
 chimera_vfs_readlink(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     void                           *target,
     uint32_t                        target_maxlength,
@@ -623,6 +637,7 @@ void
 chimera_vfs_rename_at(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     const void                      *fh,
     int                              fhlen,
     const char                      *name,
@@ -647,20 +662,21 @@ typedef void (*chimera_vfs_link_at_callback_t)(
 
 void
 chimera_vfs_link_at(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const void                    *dir_fh,
-    int                            dir_fhlen,
-    const char                    *name,
-    int                            namelen,
-    unsigned int                   replace,
-    uint64_t                       attr_mask,
-    uint64_t                       pre_attr_mask,
-    uint64_t                       post_attr_mask,
-    chimera_vfs_link_at_callback_t callback,
-    void                          *private_data);
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    const void                     *dir_fh,
+    int                             dir_fhlen,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    replace,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_link_at_callback_t  callback,
+    void                           *private_data);
 
 /* Key-Value Operations */
 
@@ -1077,16 +1093,10 @@ uint64_t
 chimera_vfs_txn_alloc_ts(
     struct chimera_vfs_thread *thread);
 
-/* Enlist the next chimera_vfs_* op issued on this thread into `txn`.  Bracket
-* each enlisted op call: chimera_vfs_thread_enlist(t, txn) immediately before
-* the call, chimera_vfs_thread_enlist(t, NULL) immediately after.  A NULL txn
-* (non-transactional backend) is a no-op (op runs autocommit).  Only single
-* VFS-request ops are safely enlisted this way; a multi-request core op (e.g.
-* path-walking chimera_vfs_lookup) would enlist only its first sub-request. */
-static inline void
-chimera_vfs_thread_enlist(
-    struct chimera_vfs_thread      *thread,
-    struct chimera_vfs_transaction *txn)
-{
-    thread->enlist_txn = txn;
-} /* chimera_vfs_thread_enlist */
+/* Transaction enlistment convention: every transaction-aware VFS op below takes
+ * an explicit `struct chimera_vfs_transaction *txn` argument immediately after
+ * `cred`.  Pass the handle from chimera_vfs_begin_transaction to enlist the op
+ * in that transaction (the backend defers durability to EndTransaction); pass
+ * NULL to run the op autocommit.  The multi-component path helpers
+ * (chimera_vfs_lookup / chimera_vfs_create) forward their txn to every
+ * sub-operation of the walk. */

@@ -102,7 +102,7 @@ chimera_nfs3_fsinfo(
 
     req->args_fsinfo = args;
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         args->fsroot.data.data,
                         args->fsroot.data.len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

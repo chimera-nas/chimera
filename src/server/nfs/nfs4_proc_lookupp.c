@@ -78,7 +78,7 @@ chimera_nfs4_lookupp_open_callback(
          * ".." natively; pass-through backends (linux, io_uring) get
          * parent attrs from fstatat(parent_fd, "..").
          */
-        chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+        chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred, NULL,
                               handle,
                               "..",
                               2,
@@ -132,7 +132,7 @@ chimera_nfs4_lookupp(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

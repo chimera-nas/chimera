@@ -211,7 +211,7 @@ chimera_smb_close_release(struct chimera_smb_request *request)
          * the remove completes. */
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             open_file->base_fh,
             open_file->base_fh_len,
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -223,7 +223,7 @@ chimera_smb_close_release(struct chimera_smb_request *request)
     if (need_doc && request->close.doc_info.parent_fh_len > 0) {
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->close.doc_info.cred,
+            &request->close.doc_info.cred, NULL,
             request->close.doc_info.parent_fh,
             request->close.doc_info.parent_fh_len,
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

@@ -135,7 +135,7 @@ chimera_nfs4_putfh(
     res->status = NFS4_OK;
 
     if (!fh_is_nfs4_root(args->object.data, args->object.len)) {
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             args->object.data,
                             args->object.len,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

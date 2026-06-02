@@ -50,7 +50,7 @@ chimera_nfs4_rename_do(struct nfs_request *req)
 
     chimera_vfs_rename_at(
         req->thread->vfs_thread,
-        &req->cred,
+        &req->cred, NULL,
         req->saved_fh,
         req->saved_fhlen,
         args->oldname.data,
@@ -128,7 +128,7 @@ chimera_nfs4_rename_recall_source(
         return;
     }
 
-    chimera_vfs_lookup(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_lookup(req->thread->vfs_thread, &req->cred, NULL,
                        req->fh, req->fhlen,
                        args->newname.data, args->newname.len,
                        CHIMERA_VFS_ATTR_FH, 0,
@@ -161,7 +161,7 @@ chimera_nfs4_rename_open_callback(
     /* When delegations are enabled, recall any delegation on the source file
      * and on a file being renamed over before performing the rename. */
     if (chimera_server_config_get_nfs4_delegations(thread->shared->config)) {
-        chimera_vfs_lookup(thread->vfs_thread, &req->cred,
+        chimera_vfs_lookup(thread->vfs_thread, &req->cred, NULL,
                            req->saved_fh, req->saved_fhlen,
                            args->oldname.data, args->oldname.len,
                            CHIMERA_VFS_ATTR_FH, 0,
@@ -203,7 +203,7 @@ chimera_nfs4_rename(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

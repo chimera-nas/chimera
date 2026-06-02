@@ -87,7 +87,7 @@ chimera_vfs_symlink_parent_lookup_complete(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->symlink.parent_fh,
         request->symlink.parent_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -166,7 +166,7 @@ chimera_vfs_symlink(
 
         chimera_vfs_open_fh(
             thread,
-            cred,
+            cred, NULL,
             request->symlink.parent_fh,
             request->symlink.parent_fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -185,7 +185,7 @@ chimera_vfs_symlink(
 
         chimera_vfs_lookup(
             thread,
-            cred,
+            cred, NULL,
             fh,
             fhlen,
             request->symlink.path,

@@ -172,7 +172,7 @@ rest_fsop_chmod_lookup_cb(
     memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
     ctx->fh_len = attr->va_fh_len;
 
-    chimera_vfs_open_fh(ctx->vfs_thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_open_fh(ctx->vfs_thread, chimera_vfs_get_server_cred(), NULL,
                         ctx->fh, ctx->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         rest_fsop_chmod_open_cb, ctx);
@@ -264,7 +264,7 @@ chimera_rest_handle_debug_fsop(
             return;
         }
         ctx->mode = json_integer_value(mode_obj);
-        chimera_vfs_lookup(ctx->vfs_thread, cred, root_fh, root_fh_len,
+        chimera_vfs_lookup(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
                            ctx->path, strlen(ctx->path),
                            CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
                            rest_fsop_chmod_lookup_cb, ctx);

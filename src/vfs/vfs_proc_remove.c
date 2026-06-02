@@ -90,7 +90,7 @@ chimera_vfs_remove_parent_open_complete(
 
     chimera_vfs_lookup_at(
         thread,
-        request->cred,
+        request->cred, NULL,
         oh,
         request->remove.path + request->remove.name_offset,
         request->remove.pathlen - request->remove.name_offset,
@@ -123,7 +123,7 @@ chimera_vfs_remove_parent_lookup_complete(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->remove.parent_fh,
         request->remove.parent_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -187,7 +187,7 @@ chimera_vfs_remove(
 
         chimera_vfs_open_fh(
             thread,
-            cred,
+            cred, NULL,
             request->remove.parent_fh,
             request->remove.parent_fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -206,7 +206,7 @@ chimera_vfs_remove(
 
         chimera_vfs_lookup(
             thread,
-            cred,
+            cred, NULL,
             fh,
             fhlen,
             request->remove.path,

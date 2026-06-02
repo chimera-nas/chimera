@@ -195,8 +195,7 @@ chimera_nfs3_write_open_callback(
 
     req->handle = handle;
 
-    chimera_vfs_thread_enlist(thread->vfs_thread, req->txn);
-    chimera_vfs_write(thread->vfs_thread, &req->cred,
+    chimera_vfs_write(thread->vfs_thread, &req->cred, req->txn,
                       handle,
                       args->offset,
                       args->count,
@@ -207,7 +206,6 @@ chimera_nfs3_write_open_callback(
                       args->data.niov,
                       chimera_nfs3_write_op_complete,
                       req);
-    chimera_vfs_thread_enlist(thread->vfs_thread, NULL);
 } /* chimera_nfs3_write_open_callback */
 
 static void
@@ -231,14 +229,12 @@ chimera_nfs3_write_began(
 
     req->txn = txn;     /* NULL for a non-transactional backend (autocommit) */
 
-    chimera_vfs_thread_enlist(thread->vfs_thread, req->txn);
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->txn,
                         args->file.data.data,
                         args->file.data.len,
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_nfs3_write_open_callback,
                         req);
-    chimera_vfs_thread_enlist(thread->vfs_thread, NULL);
 } /* chimera_nfs3_write_began */
 
 static void

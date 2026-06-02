@@ -110,7 +110,7 @@ nfs4_setattr_proceed(void *arg)
     struct nfs_request *req = arg;
 
     chimera_vfs_open_fh(req->thread->vfs_thread,
-                        &req->cred,
+                        &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

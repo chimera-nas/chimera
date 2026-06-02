@@ -423,11 +423,11 @@ struct chimera_vfs_transaction {
 
 typedef void (*chimera_vfs_begin_txn_callback_t)(
     enum chimera_vfs_error          error_code,
-    struct chimera_vfs_transaction *txn,        /* NULL = backend is non-transactional */
+    struct chimera_vfs_transaction *txn,   /* NULL = backend is non-transactional */
     void                           *private_data);
 
 typedef void (*chimera_vfs_end_txn_callback_t)(
-    enum chimera_vfs_error error_code,          /* ETXN_CONFLICT => retry from the top */
+    enum chimera_vfs_error error_code,     /* ETXN_CONFLICT => retry from the top */
     void                  *private_data);
 
 struct chimera_vfs_request {
@@ -1506,13 +1506,6 @@ struct chimera_vfs_thread {
     struct evpl                         *evpl;
     struct chimera_vfs                  *vfs;
     void                                *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
-    /* Transient: the explicit transaction that the next chimera_vfs_* op
-     * allocated on this thread should enlist in.  The protocol sets it
-     * (chimera_vfs_thread_enlist) immediately before an enlisted op call and
-     * clears it immediately after; chimera_vfs_request_alloc_common copies it
-     * onto the request.  Default NULL = autocommit, so all non-transactional
-     * callers are unaffected. */
-    struct chimera_vfs_transaction      *enlist_txn;
     /* Thread-local recycle magazines for the fungible RCU caches. */
     struct chimera_rcu_magazine          rcu_magazines[CHIMERA_RCU_POOL_COUNT];
     struct chimera_vfs_find_result      *free_find_results;

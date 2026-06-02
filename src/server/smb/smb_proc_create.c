@@ -1417,7 +1417,7 @@ chimera_smb_create_mkdir_callback(
             /* Directory already exists — fall through to open it */
             chimera_vfs_open_at(
                 vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 request->create.parent_handle,
                 request->create.name,
                 request->create.name_len,
@@ -1449,7 +1449,7 @@ chimera_smb_create_mkdir_callback(
 
     chimera_vfs_open_fh(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH,
@@ -2548,7 +2548,7 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
         chimera_smb_create_persist_prepare(request, request->create.parent_handle)) {
         chimera_vfs_open_at_hs(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             request->create.parent_handle,
             request->create.name,
             request->create.name_len,
@@ -2564,7 +2564,7 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
     } else {
         chimera_vfs_open_at(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             request->create.parent_handle,
             request->create.name,
             request->create.name_len,
@@ -2653,7 +2653,7 @@ chimera_smb_create_open_parent_callback(
 
         chimera_vfs_mkdir_at(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             oh,
             request->create.name,
             request->create.name_len,
@@ -2671,7 +2671,7 @@ chimera_smb_create_open_parent_callback(
          * skipped for streams (the disposition applies to the stream). */
         chimera_vfs_lookup_at(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             oh,
             request->create.name,
             request->create.name_len,
@@ -2701,7 +2701,7 @@ chimera_smb_create_lookup_parent_callback(
 
     chimera_vfs_open_fh(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -2718,7 +2718,7 @@ chimera_smb_create_process(struct chimera_smb_request *request)
     if (request->create.parent_path_len) {
         chimera_vfs_lookup(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             tree->fh,
             tree->fh_len,
             request->create.parent_path,
@@ -2730,7 +2730,7 @@ chimera_smb_create_process(struct chimera_smb_request *request)
     } else if (request->create.name_len) {
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             request->tree->fh,
             request->tree->fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -2739,7 +2739,7 @@ chimera_smb_create_process(struct chimera_smb_request *request)
     } else {
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             request->tree->fh,
             request->tree->fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
@@ -2798,7 +2798,7 @@ chimera_smb_revalidate_tree(
 
     chimera_vfs_lookup(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         root_fh,
         root_fh_len,
         tree->share->path,

@@ -125,7 +125,7 @@ nfs4_remove_mds_complete(
         return;
     }
 
-    chimera_vfs_open_fh(ctx->req->thread->vfs_thread, &ctx->req->cred,
+    chimera_vfs_open_fh(ctx->req->thread->vfs_thread, &ctx->req->cred, NULL,
                         ds->root_fh, ds->root_fh_len,
                         CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_INFERRED,
                         nfs4_remove_ds_root_opened, ctx);
@@ -208,7 +208,7 @@ chimera_nfs4_remove_open_callback(
      * extra LOOKUP entirely otherwise (have_layout stays 0). */
     if (chimera_server_config_get_nfs4_delegations(req->thread->shared->config) ||
         chimera_vfs_pnfs_enabled(req->thread->shared->vfs)) {
-        chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+        chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred, NULL,
                               parent_handle,
                               args->target.data, args->target.len,
                               CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_PNFS_LAYOUT |
@@ -251,7 +251,7 @@ chimera_nfs4_remove(
     memset(ctx, 0, sizeof(*ctx));
     ctx->req = req;
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

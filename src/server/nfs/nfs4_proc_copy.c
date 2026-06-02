@@ -157,7 +157,7 @@ chimera_nfs4_copy_read_complete(
     refs->rw_eof   = eof;
     refs->rw_niov  = niov;
 
-    chimera_vfs_write(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_write(req->thread->vfs_thread, &req->cred, NULL,
                       dst_handle,
                       refs->dst_offset,
                       count,
@@ -185,7 +185,7 @@ chimera_nfs4_copy_rw_step(struct nfs4_copy_state_refs *refs)
     src_handle    = chimera_nfs4_copy_state_handle(refs->src_state, refs->src_type);
     refs->rw_niov = CHIMERA_NFS4_COPY_IOV_MAX;
 
-    chimera_vfs_read(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_read(req->thread->vfs_thread, &req->cred, NULL,
                      src_handle,
                      refs->src_offset,
                      (uint32_t) chunk,

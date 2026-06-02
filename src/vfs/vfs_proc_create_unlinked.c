@@ -67,6 +67,7 @@ SYMBOL_EXPORT void
 chimera_vfs_create_unlinked(
     struct chimera_vfs_thread             *thread,
     const struct chimera_vfs_cred         *cred,
+    struct chimera_vfs_transaction        *txn,
     const uint8_t                         *fh,
     int                                    fh_len,
     struct chimera_vfs_attrs              *set_attr,
@@ -87,6 +88,8 @@ chimera_vfs_create_unlinked(
 
     chimera_vfs_abort_if(!(request->module->capabilities & CHIMERA_VFS_CAP_CREATE_UNLINKED),
                          "module does not support create_unlinked");
+
+    request->transaction = txn;
 
     request->opcode                             = CHIMERA_VFS_OP_CREATE_UNLINKED;
     request->complete                           = chimera_vfs_create_unlinked_complete;

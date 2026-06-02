@@ -164,7 +164,7 @@ chimera_nfs3_setattr(
         open_flags = CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         args->object.data.data,
                         args->object.data.len,
                         open_flags,

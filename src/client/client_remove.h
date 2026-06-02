@@ -121,7 +121,7 @@ chimera_dispatch_remove_at(
      * not the target it points to. */
     chimera_vfs_lookup_at(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         parent_handle,
         request->remove.path,
         request->remove.path_len,

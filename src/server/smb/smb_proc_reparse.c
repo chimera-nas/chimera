@@ -240,7 +240,7 @@ chimera_smb_ioctl_set_reparse(struct chimera_smb_request *request)
 
     chimera_vfs_open_fh(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         open_file->parent_fh,
         open_file->parent_fh_len,
         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -416,7 +416,7 @@ chimera_smb_get_reparse_getattr_cb(
         case S_IFLNK:
             chimera_vfs_readlink(
                 vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 request->ioctl.rp_open_file->handle,
                 request->ioctl.rp_target,
                 CHIMERA_VFS_PATH_MAX,

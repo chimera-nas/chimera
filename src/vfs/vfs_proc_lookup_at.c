@@ -62,6 +62,7 @@ static void
 chimera_vfs_lookup_at_dispatch(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     uint32_t                         namelen,
@@ -141,6 +142,8 @@ chimera_vfs_lookup_at_dispatch(
         return;
     }
 
+    request->transaction = txn;
+
     request->opcode                           = CHIMERA_VFS_OP_LOOKUP_AT;
     request->complete                         = chimera_vfs_lookup_at_complete;
     request->lookup_at.handle                 = handle;
@@ -165,6 +168,7 @@ chimera_vfs_lookup_at_dispatch(
 struct chimera_vfs_lookup_at_gate {
     struct chimera_vfs_thread       *thread;
     const struct chimera_vfs_cred   *cred;
+    struct chimera_vfs_transaction  *txn;
     struct chimera_vfs_open_handle  *handle;
     const char                      *name;
     uint32_t                         namelen;
@@ -187,7 +191,7 @@ chimera_vfs_lookup_at_gate_complete(
         return;
     }
 
-    chimera_vfs_lookup_at_dispatch(gate->thread, gate->cred, gate->handle,
+    chimera_vfs_lookup_at_dispatch(gate->thread, gate->cred, gate->txn, gate->handle,
                                    gate->name, gate->namelen, gate->attr_mask,
                                    gate->dir_attr_mask, gate->callback,
                                    gate->private_data);
@@ -198,6 +202,7 @@ SYMBOL_EXPORT void
 chimera_vfs_lookup_at(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     uint32_t                         namelen,
@@ -212,6 +217,7 @@ chimera_vfs_lookup_at(
         gate                = malloc(sizeof(*gate));
         gate->thread        = thread;
         gate->cred          = cred;
+        gate->txn           = txn;
         gate->handle        = handle;
         gate->name          = name;
         gate->namelen       = namelen;
@@ -226,7 +232,7 @@ chimera_vfs_lookup_at(
         return;
     }
 
-    chimera_vfs_lookup_at_dispatch(thread, cred, handle, name, namelen,
+    chimera_vfs_lookup_at_dispatch(thread, cred, txn, handle, name, namelen,
                                    attr_mask, dir_attr_mask, callback,
                                    private_data);
 } /* chimera_vfs_lookup_at */

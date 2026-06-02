@@ -222,8 +222,7 @@ chimera_nfs3_create_open_at_complete(
     if (error_code == CHIMERA_VFS_EEXIST &&
         args->how.mode == EXCLUSIVE) {
         set_attr->va_set_mask = 0;
-        chimera_vfs_thread_enlist(thread->vfs_thread, req->txn);
-        chimera_vfs_open_at(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_at(thread->vfs_thread, &req->cred, req->txn,
                             req->handle,
                             args->where.name.str,
                             args->where.name.len,
@@ -234,7 +233,6 @@ chimera_nfs3_create_open_at_complete(
                             0,
                             chimera_nfs3_create_exclusive_verify,
                             req);
-        chimera_vfs_thread_enlist(thread->vfs_thread, NULL);
         return;
     }
 
@@ -287,8 +285,7 @@ chimera_nfs3_create_open_at_parent_complete(
             break;
     } /* switch */
 
-    chimera_vfs_thread_enlist(thread->vfs_thread, req->txn);
-    chimera_vfs_open_at(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_at(thread->vfs_thread, &req->cred, req->txn,
                         parent_handle,
                         args->where.name.str,
                         args->where.name.len,
@@ -299,7 +296,6 @@ chimera_nfs3_create_open_at_parent_complete(
                         CHIMERA_NFS3_ATTR_MASK,
                         chimera_nfs3_create_open_at_complete,
                         req);
-    chimera_vfs_thread_enlist(thread->vfs_thread, NULL);
 } /* chimera_nfs3_create_open_at_parent_complete */
 
 static void
@@ -330,14 +326,12 @@ chimera_nfs3_create_began(
 
     req->txn = txn;     /* NULL for a non-transactional backend (autocommit) */
 
-    chimera_vfs_thread_enlist(thread->vfs_thread, req->txn);
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->txn,
                         args->where.dir.data.data,
                         args->where.dir.data.len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                         chimera_nfs3_create_open_at_parent_complete,
                         req);
-    chimera_vfs_thread_enlist(thread->vfs_thread, NULL);
 } /* chimera_nfs3_create_began */
 
 static void

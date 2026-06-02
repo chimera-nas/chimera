@@ -64,10 +64,12 @@ chimera_vfs_lookup_open_dispatch(
 
     final = (*lp_request->lookup.pathc == '\0');
 
-    /* Always request mode so we can detect symlinks */
+    /* Always request mode so we can detect symlinks.  Forward this walk's
+     * transaction (NULL for non-transactional callers) so every component op is
+     * enlisted, not just the first. */
     chimera_vfs_lookup_at(
         thread,
-        lp_request->cred,
+        lp_request->cred, lp_request->transaction,
         oh,
         component,
         componentlen,
@@ -103,7 +105,7 @@ chimera_vfs_lookup_symlink_open_complete(
 
     chimera_vfs_readlink(
         thread,
-        lp_request->cred,
+        lp_request->cred, lp_request->transaction,
         oh,
         target,
         CHIMERA_VFS_PATH_MAX,
@@ -194,7 +196,7 @@ chimera_vfs_lookup_readlink_complete(
 
     /* Continue walking from start point */
     chimera_vfs_open_fh(thread,
-                        lp_request->cred,
+                        lp_request->cred, lp_request->transaction,
                         start_fh,
                         start_fh_len,
                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -253,7 +255,7 @@ chimera_vfs_lookup_complete(
         /* Open the symlink to read its target */
         memcpy(lp_request->lookup.next_fh, attr->va_fh, attr->va_fh_len);
         chimera_vfs_open_fh(thread,
-                            lp_request->cred,
+                            lp_request->cred, lp_request->transaction,
                             lp_request->lookup.next_fh,
                             attr->va_fh_len,
                             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
@@ -279,7 +281,7 @@ chimera_vfs_lookup_complete(
 
         memcpy(lp_request->lookup.next_fh, attr->va_fh, attr->va_fh_len);
         chimera_vfs_open_fh(thread,
-                            lp_request->cred,
+                            lp_request->cred, lp_request->transaction,
                             lp_request->lookup.next_fh,
                             attr->va_fh_len,
                             open_flags,
@@ -290,16 +292,17 @@ chimera_vfs_lookup_complete(
 
 SYMBOL_EXPORT void
 chimera_vfs_lookup(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const char                    *path,
-    int                            pathlen,
-    uint64_t                       attr_mask,
-    uint32_t                       flags,
-    chimera_vfs_lookup_callback_t  callback,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    const char                     *path,
+    int                             pathlen,
+    uint64_t                        attr_mask,
+    uint32_t                        flags,
+    chimera_vfs_lookup_callback_t   callback,
+    void                           *private_data)
 {
     struct chimera_vfs_request *lp_request;
 
@@ -350,6 +353,7 @@ chimera_vfs_lookup(
         return;
     }
 
+    lp_request->transaction          = txn;
     lp_request->lookup.path          = lp_request->plugin_data;
     lp_request->lookup.pathlen       = pathlen;
     lp_request->lookup.pathc         = lp_request->lookup.path;
@@ -366,7 +370,7 @@ chimera_vfs_lookup(
     lp_request->lookup.path[pathlen] = '\0';
 
     chimera_vfs_open_fh(thread,
-                        cred,
+                        cred, lp_request->transaction,
                         fh,
                         fhlen,
                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,

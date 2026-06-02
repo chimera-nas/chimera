@@ -58,7 +58,7 @@ chimera_nfs3_readlink_open_callback(
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
-        chimera_vfs_readlink(thread->vfs_thread, &req->cred,
+        chimera_vfs_readlink(thread->vfs_thread, &req->cred, NULL,
                              handle,
                              res->resok.data.str,
                              res->resok.data.len,
@@ -100,7 +100,7 @@ chimera_nfs3_readlink(
 
     req->args_readlink = args;
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         args->symlink.data.data,
                         args->symlink.data.len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

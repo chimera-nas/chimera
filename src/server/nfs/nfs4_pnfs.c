@@ -698,7 +698,7 @@ ff_lg_dsroot_cb(
     ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     ctx->set_attr.va_mode     = S_IFREG | 0666;
 
-    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, ctx->ds_root_handle,
+    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, NULL, ctx->ds_root_handle,
                         ctx->backing_name, strlen(ctx->backing_name),
                         CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_INFERRED,
                         &ctx->set_attr, CHIMERA_VFS_ATTR_FH, 0, 0,
@@ -734,7 +734,7 @@ ff_lg_getattr_cb(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
                         ctx->ds->root_fh, ctx->ds->root_fh_len,
                         CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_INFERRED,
                         ff_lg_dsroot_cb, ctx);
@@ -986,7 +986,7 @@ chimera_nfs4_layoutget(
     ctx->req = req;
 
     /* Open the current FH, then drive the GETATTR/create/SETATTR chain. */
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->fh, req->fhlen,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL, req->fh, req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED, ff_lg_open_cb, ctx);
 } /* chimera_nfs4_layoutget */
 
@@ -1233,7 +1233,7 @@ chimera_nfs4_layoutcommit(
     /* Open the MDS file to apply the client-reported size/mtime.  Data lives
      * on the DS; with COMMIT_THRU_MDS the client reports the new high-water
      * mark here so MDS metadata catches up. */
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         req->fh, req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_nfs4_layoutcommit_open_callback, req);

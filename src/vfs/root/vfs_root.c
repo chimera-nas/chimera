@@ -273,7 +273,7 @@ chimera_vfs_root_lookup_at(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred,
+        request->cred, NULL,
         ctx->mount_id,
         ctx->mount_id_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
@@ -512,7 +512,7 @@ chimera_vfs_root_readdir(
 
         chimera_vfs_open_fh(
             thread,
-            request->cred,
+            request->cred, NULL,
             entry->mount_id,
             entry->mount_id_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,

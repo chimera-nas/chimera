@@ -79,7 +79,7 @@ chimera_nfs3_mkdir_open_callback(
 
         chimera_nfs3_sattr3_to_va(attr, &args->attributes);
 
-        chimera_vfs_mkdir_at(thread->vfs_thread, &req->cred,
+        chimera_vfs_mkdir_at(thread->vfs_thread, &req->cred, NULL,
                              handle,
                              args->where.name.str,
                              args->where.name.len,
@@ -117,7 +117,7 @@ chimera_nfs3_mkdir(
 
     req->args_mkdir = args;
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         args->where.dir.data.data,
                         args->where.dir.data.len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

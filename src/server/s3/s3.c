@@ -906,7 +906,7 @@ s3_server_dispatch(
         }
 
         chimera_vfs_lookup(thread->vfs,
-                           &thread->shared->cred,
+                           &thread->shared->cred, NULL,
                            shared->root_fh,
                            shared->root_fh_len,
                            bucket->path,
@@ -918,7 +918,6 @@ s3_server_dispatch(
 
         s3_bucket_map_release(shared->bucket_map);
     }
-
 } /* s3_server_dispatch */
 
 SYMBOL_EXPORT void

@@ -98,7 +98,7 @@ chimera_nfs3_commit(
 
     req->args_commit = args;
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         args->file.data.data,
                         args->file.data.len,
                         CHIMERA_VFS_OPEN_INFERRED,

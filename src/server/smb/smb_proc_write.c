@@ -146,7 +146,7 @@ chimera_smb_rdma_read_callback(
 
         chimera_vfs_write_owned(
             thread->vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             request->write.open_file->handle,
             request->write.offset,
             request->write.length,
@@ -292,7 +292,7 @@ chimera_smb_write(struct chimera_smb_request *request)
     } else {
         chimera_vfs_write_owned(
             thread->vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             request->write.open_file->handle,
             request->write.offset,
             request->write.length,

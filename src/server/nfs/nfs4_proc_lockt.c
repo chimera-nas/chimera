@@ -164,7 +164,7 @@ chimera_nfs4_lockt(
     }
 
     /* LOCKT operates on CURRENT_FH - open it temporarily to validate. */
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED |

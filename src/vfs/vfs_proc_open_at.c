@@ -171,6 +171,7 @@ SYMBOL_EXPORT void
 chimera_vfs_open_at_hs(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     int                              namelen,
@@ -204,6 +205,8 @@ chimera_vfs_open_at_hs(
         return;
     }
 
+    request->transaction = txn;
+
     request->opcode                              = CHIMERA_VFS_OP_OPEN_AT;
     request->complete                            = chimera_vfs_open_complete;
     request->open_at.handle                      = handle;
@@ -230,6 +233,7 @@ SYMBOL_EXPORT void
 chimera_vfs_open_at(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
@@ -241,7 +245,7 @@ chimera_vfs_open_at(
     chimera_vfs_open_at_callback_t  callback,
     void                           *private_data)
 {
-    chimera_vfs_open_at_hs(thread, cred, handle, name, namelen, flags, set_attr,
+    chimera_vfs_open_at_hs(thread, cred, txn, handle, name, namelen, flags, set_attr,
                            attr_mask, pre_attr_mask, post_attr_mask, NULL,
                            callback, private_data);
 } /* chimera_vfs_open_at */

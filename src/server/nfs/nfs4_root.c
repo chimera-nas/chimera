@@ -121,7 +121,7 @@ nfs4_root_lookup(
     req->handle = NULL; // Ensure handle is NULL so that the lookup callback does not attempt to release it
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
     chimera_vfs_lookup(nfs_thread->vfs_thread,
-                       &req->cred,
+                       &req->cred, NULL,
                        root_fh,
                        root_fh_len,
                        full_path,
@@ -252,7 +252,7 @@ nfs4_root_readdir_itr_cb(
     lookup_ctx.error_code   = CHIMERA_VFS_OK;
     lookup_ctx.lease_time_s = req->thread->shared->nfs_lease_time_s;
     chimera_vfs_lookup(ctx->vfs_thread,
-                       &req->cred,
+                       &req->cred, NULL,
                        ctx->root_fh,
                        ctx->root_fh_len,
                        export->path,
