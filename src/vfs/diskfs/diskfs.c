@@ -8355,6 +8355,32 @@ diskfs_mount_io_flush(
     return w.status ? -1 : 0;
 } /* diskfs_mount_io_flush */
 
+/* Discard (deallocate) a device byte range, pumping the mount-time evpl to
+ * completion.  Used at mkfs to clear whole devices.  Backends without native
+ * discard treat it as a no-op success. */
+static int
+diskfs_mount_io_discard(
+    void    *user,
+    uint32_t device_id,
+    uint64_t offset,
+    uint64_t length)
+{
+    struct diskfs_mount_io     *io = user;
+    struct diskfs_mount_io_wait w  = { 0, 0 };
+
+    if (device_id >= (uint32_t) io->shared->num_devices ||
+        !io->queue[device_id]) {
+        return -1;
+    }
+
+    evpl_block_discard(io->evpl, io->queue[device_id], offset, length,
+                       diskfs_mount_io_complete, &w);
+    while (!w.done) {
+        evpl_continue(io->evpl);
+    }
+    return w.status ? -1 : 0;
+} /* diskfs_mount_io_discard */
+
 static struct sm_io
 diskfs_mount_sm_io(struct diskfs_mount_io *io)
 {
@@ -8818,6 +8844,28 @@ diskfs_init(
                                                                   rinum,
                                                                   rgen,
                                                                   shared->root_fh);
+        }
+
+        /* Fresh format: deallocate every device before writing any metadata,
+         * so the filesystem starts on a clean slate.  This drops the drives'
+         * stale FTL mappings (resetting GC/wear state) and makes cold-cache
+         * behavior reproducible run to run.  Deallocate is only a hint and the
+         * post-discard read value is unspecified, but diskfs never relies on
+         * device-provided zeros (unwritten extents read as zeros from the
+         * b+tree), so a device that ignores it is harmless.  Backends without
+         * native discard treat it as a no-op success. */
+        if (mode == 0) {
+            for (i = 0; i < shared->num_devices; i++) {
+                if (!shared->devices[i].bdev) {
+                    continue;
+                }
+                if (diskfs_mount_io_discard(mio, i, 0,
+                                            shared->devices[i].size) != 0) {
+                    chimera_diskfs_info(
+                        "device %d: full-device discard failed or unsupported; "
+                        "continuing format", i);
+                }
+            }
         }
 
         /* Clear the CLEAN flag for this session: an unclean teardown then
