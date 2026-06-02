@@ -258,7 +258,9 @@ chimera_server_config_add_pnfs_ds(
     struct chimera_server_config *config,
     const char                   *netid,
     const char                   *uaddr,
-    const char                   *backing_path);
+    const char                   *backing_path,
+    int                           version,
+    int                           minorversion);
 
 /* After mounts are established, resolve each pNFS data server's backing root
  * (its nfs-mounted export directory) into the device table so the MDS can
@@ -283,6 +285,15 @@ chimera_server_config_set_nfs_data_server(
 
 int
 chimera_server_config_get_nfs_data_server(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_nfs_server_scope(
+    struct chimera_server_config *config,
+    uint64_t                      scope);
+
+uint64_t
+chimera_server_config_get_nfs_server_scope(
     const struct chimera_server_config *config);
 
 void

@@ -105,6 +105,8 @@ struct chimera_vfs_ds {
     uint8_t  deviceid[CHIMERA_VFS_DEVICEID_SIZE]; /* stable id advertised to clients */
     char     netid[8];                            /* RFC5665 netid, e.g. "tcp"       */
     char     uaddr[64];                           /* RFC5665 universal address (DS)  */
+    int      version;                             /* NFS version advertised for DS   */
+    int      minorversion;                        /* NFS minor version (4.x)         */
     char     backing_path[CHIMERA_PNFS_BACKING_MAX]; /* chimera path where the DS is
                                                       * nfs-mounted, e.g. "/ds0"     */
     /* Resolved once the backing mount is established: the DS export root as an
@@ -148,7 +150,9 @@ int chimera_vfs_pnfs_add_device(
     struct chimera_vfs *vfs,
     const char         *netid,
     const char         *uaddr,
-    const char         *backing_path);
+    const char         *backing_path,
+    int                 version,
+    int                 minorversion);
 
 /* Record the resolved DS backing-root file handle for device idx. */
 void chimera_vfs_pnfs_set_device_root(

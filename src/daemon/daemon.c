@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <signal.h>
 #include <string.h>
 #include <strings.h>
@@ -146,6 +147,50 @@ generate_self_signed_cert(
     }
     return rc;
 } /* generate_self_signed_cert */
+
+/*
+ * Translate a human-friendly pNFS data-server address into the RFC 5665
+ * universal address the flex-files layout carries on the wire.  Accepts a bare
+ * host ("10.0.0.2") or host:port ("10.0.0.2:2050"); when the port is omitted it
+ * defaults by transport -- 20049 for "rdma"/"rdma6", else 2049 (the IANA nfs /
+ * nfsrdma ports).  The wire form appends the port as two octets,
+ * "h.h.h.h.p_hi.p_lo" (port == p_hi*256 + p_lo).  Returns 0 on success.
+ */
+static int
+chimera_pnfs_uaddr_from_human(
+    const char *netid,
+    const char *human,
+    char       *out,
+    size_t      out_size)
+{
+    char        host[48];   /* bounds the universal address into out[64] */
+    const char *colon = strchr(human, ':');
+    long        port;
+
+    if (colon) {
+        size_t hlen = (size_t) (colon - human);
+        if (hlen == 0 || hlen >= sizeof(host)) {
+            return -1;
+        }
+        memcpy(host, human, hlen);
+        host[hlen] = '\0';
+        port       = strtol(colon + 1, NULL, 10);
+    } else {
+        if (snprintf(host, sizeof(host), "%s", human) >= (int) sizeof(host)) {
+            return -1;
+        }
+        port = (netid && (strcmp(netid, "rdma") == 0 || strcmp(netid, "rdma6") == 0))
+               ? 20049 : 2049;
+    }
+
+    if (port <= 0 || port > 65535) {
+        return -1;
+    }
+
+    snprintf(out, out_size, "%s.%u.%u", host,
+             (unsigned) ((port >> 8) & 0xff), (unsigned) (port & 0xff));
+    return 0;
+} /* chimera_pnfs_uaddr_from_human */
 
 int
 main(
@@ -477,6 +522,15 @@ main(
         chimera_server_config_set_nfs_port(server_config, int_value);
     }
 
+    /* NFSv4.1 server identity (EXCHANGE_ID server scope).  Set a distinct value
+     * on independent servers that do not share state -- e.g. a pNFS data server
+     * co-deployed with its MDS -- so v4.1 clients do not coalesce them. */
+    json_value = json_object_get(server_params, "nfs_server_scope");
+    if (json_is_integer(json_value)) {
+        chimera_server_config_set_nfs_server_scope(server_config,
+                                                   (uint64_t) json_integer_value(json_value));
+    }
+
     /* Data-server mode: bind only the NFSv4 service (no portmap/mount/NLM) so
      * a pNFS data server can run alongside an MDS on the same host. */
     json_value = json_object_get(server_params, "data_server");
@@ -501,10 +555,14 @@ main(
                 const char *netid_str   = json_string_value(json_object_get(ds_entry, "netid"));
                 const char *uaddr_str   = json_string_value(json_object_get(ds_entry, "uaddr"));
                 const char *backing_str = json_string_value(json_object_get(ds_entry, "backing_path"));
+                json_t     *version_val = json_object_get(ds_entry, "version");
+                char        wire_uaddr[64];
 
                 /* uaddr: the DS network address handed to clients in the
-                 * layout.  backing_path: the chimera path where this DS export
-                 * is mounted via the nfs module, under which the MDS creates
+                 * layout, given human-friendly as "host" or "host:port" and
+                 * converted to the RFC 5665 universal address below.
+                 * backing_path: the chimera path where this DS export is
+                 * mounted via the nfs module, under which the MDS creates
                  * backing files. */
                 if (!uaddr_str || !backing_str) {
                     chimera_server_error(
@@ -513,7 +571,42 @@ main(
                     continue;
                 }
 
-                chimera_server_config_add_pnfs_ds(server_config, netid_str, uaddr_str, backing_str);
+                if (!netid_str) {
+                    netid_str = "tcp";
+                }
+
+                /* "version": which NFS version the client uses to reach the DS,
+                 * advertised in ff_device_addr4.ffda_versions.  Accepts an
+                 * integer (3 / 4) or a string ("3", "4.0", "4.1").  NFSv4
+                 * defaults to minor version 1 (pNFS).  Default: NFSv3. */
+                int ds_version = 3, ds_minor = 0;
+                if (json_is_string(version_val)) {
+                    const char *vs  = json_string_value(version_val);
+                    const char *dot = strchr(vs, '.');
+                    ds_version = atoi(vs);
+                    ds_minor   = dot ? atoi(dot + 1) : (ds_version >= 4 ? 1 : 0);
+                } else if (json_is_integer(version_val)) {
+                    ds_version = (int) json_integer_value(version_val);
+                    ds_minor   = ds_version >= 4 ? 1 : 0;
+                }
+
+                if (ds_version != 3 && ds_version != 4) {
+                    chimera_server_error(
+                        "pNFS data_server[%zu] version %d unsupported (use 3 or 4); skipping",
+                        ds_i, ds_version);
+                    continue;
+                }
+
+                if (chimera_pnfs_uaddr_from_human(netid_str, uaddr_str,
+                                                  wire_uaddr, sizeof(wire_uaddr)) != 0) {
+                    chimera_server_error(
+                        "pNFS data_server[%zu] invalid uaddr \"%s\"; skipping",
+                        ds_i, uaddr_str);
+                    continue;
+                }
+
+                chimera_server_config_add_pnfs_ds(server_config, netid_str, wire_uaddr,
+                                                  backing_str, ds_version, ds_minor);
             }
         }
     }

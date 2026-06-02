@@ -88,7 +88,9 @@ static uint32_t
 chimera_nfs4_encode_ff_device_addr(
     uint8_t    *buf,
     const char *netid,
-    const char *uaddr)
+    const char *uaddr,
+    uint32_t    version,
+    uint32_t    minorversion)
 {
     void *p = buf;
 
@@ -97,10 +99,11 @@ chimera_nfs4_encode_ff_device_addr(
     pnfs_put_opaque(&p, netid, strlen(netid));
     pnfs_put_opaque(&p, uaddr, strlen(uaddr));
 
-    /* ffda_versions<>: one entry advertising NFSv3, loosely coupled. */
+    /* ffda_versions<>: one entry advertising the configured NFS version
+     * (NFSv3 or NFSv4.x), loosely coupled. */
     pnfs_put_u32(&p, 1);
-    pnfs_put_u32(&p, 3);                      /* ffdv_version          */
-    pnfs_put_u32(&p, 0);                      /* ffdv_minorversion     */
+    pnfs_put_u32(&p, version);                /* ffdv_version          */
+    pnfs_put_u32(&p, minorversion);           /* ffdv_minorversion     */
     pnfs_put_u32(&p, NFS4_PNFS_STRIPE_UNIT);  /* ffdv_rsize            */
     pnfs_put_u32(&p, NFS4_PNFS_STRIPE_UNIT);  /* ffdv_wsize            */
     pnfs_put_u32(&p, 0);                      /* ffdv_tightly_coupled=false */
@@ -150,7 +153,9 @@ chimera_nfs4_getdeviceinfo(
         (ds = chimera_vfs_pnfs_find_device(vfs, args->gdia_device_id)) != NULL) {
         /* Orchestrated flex: device lives in the chimera DS table. */
         out_type = LAYOUT4_FLEX_FILES;
-        body_len = chimera_nfs4_encode_ff_device_addr(body, ds->netid, ds->uaddr);
+        body_len = chimera_nfs4_encode_ff_device_addr(body, ds->netid, ds->uaddr,
+                                                      (uint32_t) ds->version,
+                                                      (uint32_t) ds->minorversion);
     } else if (nfs_pnfs_devcache_find(&thread->shared->nfs4_pnfs_devcache,
                                       args->gdia_device_id, &dev)) {
         /* Backend-sourced: device came from a get_layout response. */
@@ -178,7 +183,9 @@ chimera_nfs4_getdeviceinfo(
                 body_len = chimera_nfs4_encode_scsi_device_addr(body, &dev);
                 break;
             default:
-                body_len = chimera_nfs4_encode_ff_device_addr(body, dev.netid, dev.uaddr);
+                /* Backend-sourced flex device: not driven by the data_servers
+                 * config, so advertise NFSv3 as before. */
+                body_len = chimera_nfs4_encode_ff_device_addr(body, dev.netid, dev.uaddr, 3, 0);
                 break;
         } /* switch */
     } else {
