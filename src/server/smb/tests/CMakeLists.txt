@@ -271,10 +271,127 @@ set(SMBTORTURE_NOTIFY_SUBTESTS
     smb2.notify.handle-permissions
 )
 
+# Like smb2.acls / smb2.notify, several other combined smbtorture suites share
+# one server process across their subtests and trip the same smb2_deltree
+# per-subtest cleanup cascade: a residual non-empty directory whose
+# delete-on-close was believed to have succeeded lingers, and the stale state
+# breaks a later subtest's setup, marking the combined suite FAIL even though
+# every subtest passes when run in its own server process.  These macros list
+# the green subtests for each affected combined suite so the per-backend
+# allowlists can pull them in individually -- the combined suite stays
+# registered (in SMBTORTURE_SUITES) but disabled per-backend.
+
+# Every smb2.compound subtest below passes on every backend (the 9 listed
+# unrelated/related/invalid/interim/etc. subtests not present here fail in
+# their own right -- e.g. interim* needs CB_COMPOUND wiring, related4/6/7/8
+# expect specific compound-error semantics not yet implemented -- and are
+# left as proper bugs).
+set(SMBTORTURE_COMPOUND_SUBTESTS
+    smb2.compound.related1
+    smb2.compound.related2
+    smb2.compound.related3
+    smb2.compound.related5
+    smb2.compound.related9
+    smb2.compound.unrelated1
+    smb2.compound.invalid1
+    smb2.compound.invalid2
+    smb2.compound.invalid3
+    smb2.compound.invalid4
+    smb2.compound.create-write-close
+)
+
+# Every smb2.create subtest below passes on every backend.  Additional
+# subtests (aclfile, acldir) pass only on memfs (ACL-on-create round-trip
+# through the in-memory ACL store) and are listed in that backend's allowlist
+# directly.  gentest/blob/open/dosattr_tmp_dir/etc. fail for reasons unrelated
+# to the cleanup cascade and are left disabled.
+set(SMBTORTURE_CREATE_SUBTESTS
+    smb2.create.brlocked
+    smb2.create.multi
+    smb2.create.delete
+    smb2.create.leading-slash
+    smb2.create.mkdir-dup
+    smb2.create.dir-alloc-size
+    smb2.create.path-length
+    smb2.create.bench-path-contention-shared
+)
+
+# smb2.delete-on-close-perms subtests that pass on every backend.  The
+# remaining subtests (BUG14427 and the three "* Existing" variants) either
+# need backend-specific behaviour or carry an embedded space in the subtest
+# name that the smbtorture_test driver (which passes the name through a
+# shell command line) cannot represent, so they stay unrunnable as
+# individual ctests; BUG14427 is added directly to the backends where it
+# passes.
+set(SMBTORTURE_DOC_PERMS_SUBTESTS
+    smb2.delete-on-close-perms.CREATE
+    smb2.delete-on-close-perms.CREATE_IF
+    smb2.delete-on-close-perms.FIND_and_set_DOC
+    smb2.delete-on-close-perms.OVERWRITE_IF
+)
+
+# smb2.dir subtests that pass on every backend.  dir.fixed fails on cairn
+# (a directory-ordering assertion the backend doesn't currently meet); dir.many
+# fails on cairn and the linux passthrough (readdir result count mismatch);
+# those are listed per-backend where green.  modify/one/large-files fail on
+# every backend.
+set(SMBTORTURE_DIR_SUBTESTS
+    smb2.dir.find
+    smb2.dir.sorted
+    smb2.dir.file-index
+    smb2.dir.1kfiles_rename
+)
+
+# Every smb2.rename subtest below passes on every backend.  The remaining
+# rename subtests (share_delete_and_delete_access, no_share_delete_*,
+# rename_dir_openfile) hit real share-mode/access-check gaps and are left
+# disabled.
+set(SMBTORTURE_RENAME_SUBTESTS
+    smb2.rename.simple
+    smb2.rename.simple_modtime
+    smb2.rename.simple_nodelete
+    smb2.rename.no_sharing
+    smb2.rename.share_delete_no_delete_access
+    smb2.rename.msword
+    smb2.rename.rename_dir_bench
+    smb2.rename.close-full-information
+    smb2.rename.rename-open
+)
+
+# smb2.streams subtests that pass on memfs (the only backend with ADS
+# support today; smb_named_streams is enabled by the harness when any
+# smb2.streams[.*] test name is requested).  The remaining subtests
+# (dir/io/names/names2/names3/rename2/attributes1/attributes2/delete) hit
+# stream share-mode, attribute-reporting, name-validation, and
+# rename-with-open-stream gaps and are left disabled.
+set(SMBTORTURE_STREAMS_SUBTESTS
+    smb2.streams.sharemodes
+    smb2.streams.rename
+    smb2.streams.create-disposition
+    smb2.streams.zero-byte
+    smb2.streams.basefile-rename-with-open-stream
+)
+
 set(SMBTORTURE_SUITES
     smb2.acls
     ${SMBTORTURE_ACLS_SUBTESTS}
     ${SMBTORTURE_NOTIFY_SUBTESTS}
+    ${SMBTORTURE_COMPOUND_SUBTESTS}
+    ${SMBTORTURE_CREATE_SUBTESTS}
+    ${SMBTORTURE_DOC_PERMS_SUBTESTS}
+    ${SMBTORTURE_DIR_SUBTESTS}
+    ${SMBTORTURE_RENAME_SUBTESTS}
+    ${SMBTORTURE_STREAMS_SUBTESTS}
+    # Individual delete-on-close-perms subtest that passes only on the
+    # native-ACL backends (memfs / cairn / diskfs_*); registered so it shows
+    # up in ctest -N output, enabled per-backend below.
+    smb2.delete-on-close-perms.BUG14427
+    # Individual smb2.dir subtests that pass on most-but-not-all backends.
+    smb2.dir.fixed
+    smb2.dir.many
+    # memfs-only smb2.create subtests (ACL-on-create round-trip).
+    smb2.create.aclfile
+    smb2.create.acldir
     smb2.acls_non_canonical
     smb2.async_dosmode
     smb2.change_notify_disabled
@@ -439,6 +556,31 @@ set(SMBTORTURE_ENABLED_memfs
     # earlier arm64-CI failure was never reproduced and is almost certainly
     # an emulated-arm64 ARC-runner flake rather than an arch bug.
     smb2.async_dosmode
+    # Combined-suite subtests harvested as individual ctests because their
+    # parent combined suite (smb2.compound / smb2.create / smb2.dir /
+    # smb2.delete-on-close-perms / smb2.rename / smb2.streams) still trips
+    # the shared-process smb2_deltree cleanup cascade documented above.
+    # Per-subtest invocations get their own server process so they pass.
+    ${SMBTORTURE_COMPOUND_SUBTESTS}
+    ${SMBTORTURE_CREATE_SUBTESTS}
+    ${SMBTORTURE_DOC_PERMS_SUBTESTS}
+    ${SMBTORTURE_DIR_SUBTESTS}
+    ${SMBTORTURE_RENAME_SUBTESTS}
+    ${SMBTORTURE_STREAMS_SUBTESTS}
+    # smb2.delete-on-close-perms.BUG14427 covers Samba bug 14427 (READONLY
+    # delete-on-close); it passes on the native-ACL backends.
+    smb2.delete-on-close-perms.BUG14427
+    # smb2.dir.fixed enumerates a fixed-set readdir; passes everywhere except
+    # cairn (an ordering assertion).  smb2.dir.many enumerates 700 entries
+    # in a single buffer; passes everywhere except cairn and the linux
+    # passthrough (where readdir buffer sizing rounds differently).
+    smb2.dir.fixed
+    smb2.dir.many
+    # smb2.create ACL-on-create round-trip: memfs stores the requested DACL
+    # on the new file/dir and reads it back; the passthrough and KV backends
+    # don't currently honour CREATE-with-SD payloads.
+    smb2.create.aclfile
+    smb2.create.acldir
 )
 # The linux and io_uring passthrough backends share an implementation and pass
 # the same set.  They expose the share root as a real local directory whose
@@ -503,9 +645,21 @@ set(SMBTORTURE_ENABLED_linux
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
+    # Combined-suite subtests harvested individually (see the macro
+    # definitions above for why the combined parent suites stay disabled).
+    # dir.fixed passes on the passthrough; dir.many does not (readdir
+    # buffer-size assertion).  streams stays memfs-only (only ADS backend).
+    ${SMBTORTURE_COMPOUND_SUBTESTS}
+    ${SMBTORTURE_CREATE_SUBTESTS}
+    ${SMBTORTURE_DOC_PERMS_SUBTESTS}
+    ${SMBTORTURE_RENAME_SUBTESTS}
+    ${SMBTORTURE_DIR_SUBTESTS}
+    smb2.dir.fixed
     # smb2.acls_non_canonical stays disabled here: the passthrough backends
     # don't persist ACLs (set is projected to POSIX mode, get is synthesised
     # from mode bits), so the AUTO_INHERITED control bit can't round-trip.
+    # smb2.delete-on-close-perms.BUG14427 also fails on the passthrough
+    # backends (it depends on the native READONLY-delete semantics).
 )
 set(SMBTORTURE_ENABLED_io_uring
     smb2.change_notify_disabled
@@ -562,6 +716,15 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
+    # Combined-suite subtests harvested individually (see the macro
+    # definitions above).  Matches the linux passthrough set; dir.many is
+    # excluded for the same readdir-buffer-size reason.
+    ${SMBTORTURE_COMPOUND_SUBTESTS}
+    ${SMBTORTURE_CREATE_SUBTESTS}
+    ${SMBTORTURE_DOC_PERMS_SUBTESTS}
+    ${SMBTORTURE_RENAME_SUBTESTS}
+    ${SMBTORTURE_DIR_SUBTESTS}
+    smb2.dir.fixed
 )
 # The engine backends store their own data and stamp a new object's owner from
 # the calling credential, so they behave consistently regardless of the server's
@@ -638,10 +801,19 @@ set(SMBTORTURE_ENABLED_cairn
     # MAXIMUM_ALLOWED probe: cycles through every access-mask bit on a file
     # whose DACL grants only SEC_RIGHTS_FILE_READ.  Passes once cairn honours
     # an explicit ACL passed in via set_attr at create-time (the SD parsed
-    # from a SecD create-context).  cairn_apply_attrs() resets va_set_mask
-    # before cairn_inherit_acl() runs, so the ACL precedence check keys off
-    # the va_acl pointer rather than the (since-stripped) ACL set bit.
+    # from a SecD create-context).
     smb2.maximum_allowed
+    # Combined-suite subtests harvested individually (see the macro
+    # definitions above).  smb2.dir.fixed/many fail on cairn (sort and
+    # readdir-buffer assertions); smb2.streams stays memfs-only (cairn has
+    # no ADS storage yet).
+    ${SMBTORTURE_COMPOUND_SUBTESTS}
+    ${SMBTORTURE_CREATE_SUBTESTS}
+    ${SMBTORTURE_DOC_PERMS_SUBTESTS}
+    ${SMBTORTURE_RENAME_SUBTESTS}
+    ${SMBTORTURE_DIR_SUBTESTS}
+    # Native-ACL READONLY-delete semantics let BUG14427 round-trip on cairn.
+    smb2.delete-on-close-perms.BUG14427
 )
 # diskfs is a native-ACL backend: it stores each inode's ACL as a
 # DISKFS_REC_ACL b+tree record and seeds/inherits it on create, so it adds the
@@ -719,10 +891,20 @@ set(SMBTORTURE_ENABLED_diskfs_common
     # MAXIMUM_ALLOWED probe: cycles through every access-mask bit on a file
     # whose DACL grants only SEC_RIGHTS_FILE_READ.  Passes once diskfs honours
     # an explicit ACL passed in via set_attr at create-time (the SD parsed
-    # from a SecD create-context).  diskfs_inherit_acl() takes a set_attr
-    # argument and stores the explicit ACL directly, bypassing the parent-
-    # inheritance / Windows-default-DACL fallback.
+    # from a SecD create-context).
     smb2.maximum_allowed
+    # Combined-suite subtests harvested individually (see the macro
+    # definitions above).  smb2.streams stays memfs-only (diskfs has no
+    # ADS storage yet).
+    ${SMBTORTURE_COMPOUND_SUBTESTS}
+    ${SMBTORTURE_CREATE_SUBTESTS}
+    ${SMBTORTURE_DOC_PERMS_SUBTESTS}
+    ${SMBTORTURE_RENAME_SUBTESTS}
+    ${SMBTORTURE_DIR_SUBTESTS}
+    smb2.dir.fixed
+    smb2.dir.many
+    # Native-ACL READONLY-delete semantics let BUG14427 round-trip on diskfs.
+    smb2.delete-on-close-perms.BUG14427
 )
 set(SMBTORTURE_ENABLED_diskfs_io_uring ${SMBTORTURE_ENABLED_diskfs_common})
 set(SMBTORTURE_ENABLED_diskfs_aio ${SMBTORTURE_ENABLED_diskfs_common})

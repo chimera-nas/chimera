@@ -274,9 +274,13 @@ main(
 
     /* CTest invokes this binary once per suite.  Enable named-stream (ADS)
      * support only for the stream suites, so the negative smb2.create_no_streams
-     * suite still runs with the feature off on the same backend. */
+     * suite still runs with the feature off on the same backend.  Also match
+     * individual smb2.streams.* subtests so the per-subtest harvest variant
+     * (run one stream subtest in its own server process) gets the same
+     * capability the combined smb2.streams suite needs. */
     for (i = 0; i < num_tests; i++) {
         if (strcmp(tests[i], "smb2.streams") == 0 ||
+            strncmp(tests[i], "smb2.streams.", 13) == 0 ||
             strcmp(tests[i], "smb2.ioctl-on-stream") == 0 ||
             strcmp(tests[i], "smb2.sdread") == 0) {
             chimera_server_config_set_smb_named_streams(config, 1);
