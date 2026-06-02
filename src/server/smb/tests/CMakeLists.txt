@@ -526,8 +526,8 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.timestamps
     smb2.winattr2
     # CHANGE_NOTIFY subtests run cleanly in isolation (combined smb2.notify
-    # suite still trips the shared-process deltree cascade).  cairn does not
-    # support the notify.basedir case yet.
+    # suite still trips the shared-process deltree cascade).
+    smb2.notify.basedir
     smb2.notify.close
     smb2.notify.dir
     smb2.notify.double
@@ -579,8 +579,8 @@ set(SMBTORTURE_ENABLED_diskfs_common
     smb2.timestamps
     smb2.winattr2
     # CHANGE_NOTIFY subtests run cleanly in isolation (combined smb2.notify
-    # suite still trips the shared-process deltree cascade).  diskfs does not
-    # support the notify.basedir case yet.
+    # suite still trips the shared-process deltree cascade).
+    smb2.notify.basedir
     smb2.notify.close
     smb2.notify.dir
     smb2.notify.double
