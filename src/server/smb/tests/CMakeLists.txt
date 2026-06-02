@@ -350,6 +350,13 @@ set(SMBTORTURE_SUITES
 # verified against them.
 set(SMBTORTURE_ENABLED_memfs
     smb2.change_notify_disabled
+    # Opens up to 65520 files in a single tree connect to verify the SMB2 FID
+    # space (the per-tree open table) doesn't collapse before that ceiling.
+    # Enabled here for the in-memory / passthrough / cairn backends; diskfs is
+    # enabled in SMBTORTURE_ENABLED_diskfs_common with a per-test block-cache
+    # bump (see smbtorture_test.c) so its per-shard pinned-block working set
+    # fits at 65520 inodes.
+    smb2.maxfid
     smb2.maximum_allowed
     smb2.mkdir
     smb2.openattr
@@ -437,6 +444,10 @@ set(SMBTORTURE_ENABLED_memfs
 # dos_attributes in their inode metadata).
 set(SMBTORTURE_ENABLED_linux
     smb2.change_notify_disabled
+    # Open-up-to-65520-FIDs scalability test; diskfs is enabled separately in
+    # SMBTORTURE_ENABLED_diskfs_common (it needs a per-test block_cache_blocks
+    # bump set by the smbtorture harness).
+    smb2.maxfid
     smb2.mkdir
     smb2.read
     smb2.rw
@@ -482,6 +493,10 @@ set(SMBTORTURE_ENABLED_linux
 )
 set(SMBTORTURE_ENABLED_io_uring
     smb2.change_notify_disabled
+    # Open-up-to-65520-FIDs scalability test; diskfs is enabled separately in
+    # SMBTORTURE_ENABLED_diskfs_common (it needs a per-test block_cache_blocks
+    # bump set by the smbtorture harness).
+    smb2.maxfid
     smb2.mkdir
     smb2.read
     smb2.rw
@@ -538,6 +553,10 @@ set(SMBTORTURE_ENABLED_io_uring
 # (cairn_setattr SET-ACL) persists the descriptor.
 set(SMBTORTURE_ENABLED_cairn
     smb2.change_notify_disabled
+    # Open-up-to-65520-FIDs scalability test; diskfs is enabled separately in
+    # SMBTORTURE_ENABLED_diskfs_common (it needs a per-test block_cache_blocks
+    # bump set by the smbtorture harness).
+    smb2.maxfid
     smb2.mkdir
     # Native DOS-attribute storage in the cairn inode lets the SMB
     # create/overwrite-truncate attribute round-trip pass end-to-end; the
