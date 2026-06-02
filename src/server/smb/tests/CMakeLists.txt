@@ -359,6 +359,12 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.compound_find
     smb2.connect
     smb2.create_no_streams
+    # The denytest matrix opens a file twice and probes which reads/writes are
+    # actually serviced; passing requires both the share-mode conflict matrix
+    # and per-handle granted-access enforcement on the write path
+    # (chimera_smb_write).  The native backends now match the passthrough
+    # backends here.
+    smb2.deny
     # SMB3 durable/persistent handle suites that pass end-to-end on memfs with
     # the in-memory durable registry (the harness runs the server with
     # persistent handles enabled).  smb2.durable-open / -v2-open still have
@@ -530,6 +536,9 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.compound_find
     smb2.connect
     smb2.create_no_streams
+    # See SMBTORTURE_ENABLED_memfs above: greened by the per-handle write
+    # access gate in chimera_smb_write.
+    smb2.deny
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
@@ -590,6 +599,9 @@ set(SMBTORTURE_ENABLED_diskfs_common
     smb2.compound_find
     smb2.connect
     smb2.create_no_streams
+    # See SMBTORTURE_ENABLED_memfs above: greened by the per-handle write
+    # access gate in chimera_smb_write.
+    smb2.deny
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
