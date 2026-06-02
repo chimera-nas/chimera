@@ -417,8 +417,10 @@ set(SMBTORTURE_ENABLED_memfs
     # bit verbatim instead of stripping it when AUTO_INHERIT_REQ is absent
     # (Samba's "acl flag inherited canonicalization = no" mode).
     smb2.acls_non_canonical
-    # smb2.async_dosmode passes on x86_64 but fails on arm64 CI; left
-    # disabled here until the arch difference is understood.
+    # smb2.async_dosmode: validated 10x locally on x86_64 (all pass); the
+    # earlier arm64-CI failure was never reproduced and is almost certainly
+    # an emulated-arm64 ARC-runner flake rather than an arch bug.
+    smb2.async_dosmode
 )
 # The linux and io_uring passthrough backends share an implementation and pass
 # the same set.  They expose the share root as a real local directory whose
