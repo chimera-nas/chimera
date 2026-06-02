@@ -86,7 +86,7 @@ chimera_nfs4_readlink_open_callback(
         return;
     }
 
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         handle,
                         CHIMERA_VFS_ATTR_MODE,
                         chimera_nfs4_readlink_getattr_complete,

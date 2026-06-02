@@ -221,7 +221,7 @@ chimera_vfs_find_open_callback(
 
     chimera_vfs_readdir(
         thread,
-        find_request->cred,
+        find_request->cred, NULL,
         oh,
         find_request->find.attr_mask,
         0,

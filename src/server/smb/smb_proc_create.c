@@ -2368,7 +2368,7 @@ chimera_smb_create_open_callback(
     request->create.r_open_file = open_file;
 
     chimera_vfs_getattr(vfs_thread,
-                        &request->session_handle->session->cred,
+                        &request->session_handle->session->cred, NULL,
                         oh,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
                         CHIMERA_VFS_ATTR_ACL,
@@ -2914,7 +2914,7 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
     /* Refresh the network-open-info from the surviving handle, then reply.
      * Reuses the normal create getattr callback (releases the request ref). */
     chimera_vfs_getattr(thread->vfs_thread,
-                        &request->session_handle->session->cred,
+                        &request->session_handle->session->cred, NULL,
                         open_file->handle,
                         CHIMERA_VFS_ATTR_MASK_STAT,
                         chimera_smb_create_open_getattr_callback,

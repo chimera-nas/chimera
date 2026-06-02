@@ -241,7 +241,7 @@ chimera_vfs_root_lookup_open_callback(
 
     chimera_vfs_getattr(
         lookup_request->thread,
-        lookup_request->cred,
+        lookup_request->cred, NULL,
         oh,
         lookup_request->lookup_at.r_attr.va_req_mask,
         chimera_vfs_root_lookup_getattr_callback,
@@ -431,7 +431,7 @@ chimera_vfs_root_readdir_open_callback(
 
     chimera_vfs_getattr(
         entry->request->thread,
-        entry->request->cred,
+        entry->request->cred, NULL,
         oh,
         entry->attr.va_req_mask,
         chimera_vfs_root_readdir_getattr_callback,

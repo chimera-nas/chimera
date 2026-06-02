@@ -215,6 +215,7 @@ void
 chimera_vfs_getattr(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        attr_mask,
     chimera_vfs_getattr_callback_t  callback,
@@ -231,6 +232,7 @@ void
 chimera_vfs_setattr(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     struct chimera_vfs_attrs       *set_attr,
     uint64_t                        pre_attr_mask,
@@ -242,6 +244,7 @@ void
 chimera_vfs_readdir(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        attr_mask,
     uint64_t                        dir_attr_mask,
@@ -396,6 +399,7 @@ void
 chimera_vfs_mknod_at(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
@@ -416,6 +420,7 @@ void
 chimera_vfs_remove_at(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     int                              namelen,
@@ -546,6 +551,7 @@ void
 chimera_vfs_commit(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
     uint64_t                        count,
@@ -595,6 +601,7 @@ void
 chimera_vfs_symlink_at(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_transaction   *txn,
     struct chimera_vfs_open_handle   *handle,
     const char                       *name,
     int                               namelen,

@@ -51,7 +51,7 @@ chimera_vfs_mknod_parent_open_complete(
 
     chimera_vfs_mknod_at(
         thread,
-        request->cred,
+        request->cred, NULL,
         oh,
         request->mknod.path + request->mknod.name_offset,
         request->mknod.pathlen - request->mknod.name_offset,

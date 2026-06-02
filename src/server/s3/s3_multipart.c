@@ -311,7 +311,7 @@ chimera_s3_part_destroy_open_dir_callback(
 
     chimera_vfs_remove_at(
         ctx->thread->vfs,
-        &ctx->thread->shared->cred,
+        &ctx->thread->shared->cred, NULL,
         oh,
         ctx->part->tmp_name,
         ctx->part->tmp_name_len,

@@ -75,7 +75,7 @@ chimera_vfs_gate_fh_open(
 
     ctx->handle = handle;
 
-    chimera_vfs_getattr(ctx->thread, ctx->cred, handle,
+    chimera_vfs_getattr(ctx->thread, ctx->cred, NULL, handle,
                         CHIMERA_VFS_GATE_ATTR_MASK,
                         chimera_vfs_gate_fh_getattr, ctx);
 } /* chimera_vfs_gate_fh_open */
@@ -199,7 +199,7 @@ chimera_vfs_gate_delete_child_open(
 
     ctx->handle = handle;
 
-    chimera_vfs_getattr(ctx->thread, ctx->cred, handle,
+    chimera_vfs_getattr(ctx->thread, ctx->cred, NULL, handle,
                         CHIMERA_VFS_GATE_ATTR_MASK,
                         chimera_vfs_gate_delete_child_getattr, ctx);
 } /* chimera_vfs_gate_delete_child_open */
@@ -259,7 +259,7 @@ chimera_vfs_gate_delete_parent_open(
 
     ctx->handle = handle;
 
-    chimera_vfs_getattr(ctx->thread, ctx->cred, handle,
+    chimera_vfs_getattr(ctx->thread, ctx->cred, NULL, handle,
                         CHIMERA_VFS_GATE_ATTR_MASK,
                         chimera_vfs_gate_delete_parent_getattr, ctx);
 } /* chimera_vfs_gate_delete_parent_open */

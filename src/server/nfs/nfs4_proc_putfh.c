@@ -97,7 +97,7 @@ chimera_nfs4_putfh_validate_complete(
     }
 
     req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         handle,
                         CHIMERA_VFS_ATTR_NLINK,
                         chimera_nfs4_putfh_getattr_complete,

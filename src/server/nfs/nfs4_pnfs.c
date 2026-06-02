@@ -662,7 +662,7 @@ ff_lg_create_cb(
     ctx->set_attr.va_pnfs_len = ctx->blob_len;
     memcpy(ctx->set_attr.va_pnfs, ctx->blob, ctx->blob_len);
 
-    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, ctx->mds_handle,
+    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, NULL, ctx->mds_handle,
                         &ctx->set_attr, 0, 0, ff_lg_setattr_cb, ctx);
 } /* ff_lg_create_cb */
 
@@ -935,7 +935,7 @@ ff_lg_open_cb(
             ff_lg_fail(ctx, NFS4ERR_UNKNOWN_LAYOUTTYPE);
             return;
         }
-        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, handle,
+        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL, handle,
                             CHIMERA_VFS_ATTR_PNFS_LAYOUT | CHIMERA_VFS_ATTR_INUM,
                             ff_lg_getattr_cb, ctx);
         return;
@@ -1202,7 +1202,7 @@ chimera_nfs4_layoutcommit_open_callback(
         set_attr->va_mtime.tv_nsec = args->loca_time_modify.nt_time.nseconds;
     }
 
-    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, handle,
+    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, NULL, handle,
                         set_attr, 0, CHIMERA_VFS_ATTR_SIZE,
                         chimera_nfs4_layoutcommit_setattr_complete, req);
 } /* chimera_nfs4_layoutcommit_open_callback */

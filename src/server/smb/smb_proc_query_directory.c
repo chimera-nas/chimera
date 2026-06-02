@@ -373,7 +373,7 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
 
     chimera_vfs_readdir(
         thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         request->query_directory.open_file->handle,
         /* Access-based enumeration needs each entry's ACL to decide
          * visibility. */

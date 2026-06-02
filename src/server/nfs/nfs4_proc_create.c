@@ -176,7 +176,7 @@ chimera_nfs4_create_open_callback(
                         attr->va_rdev = 0;
                         break;
                 } /* switch */
-                chimera_vfs_mknod_at(thread->vfs_thread, &req->cred,
+                chimera_vfs_mknod_at(thread->vfs_thread, &req->cred, NULL,
                                      handle,
                                      args->objname.data,
                                      args->objname.len,
@@ -204,7 +204,7 @@ chimera_nfs4_create_open_callback(
 
                 chimera_vfs_symlink_at(
                     thread->vfs_thread,
-                    &req->cred,
+                    &req->cred, NULL,
                     handle,
                     args->objname.data,
                     args->objname.len,

@@ -56,7 +56,7 @@ chimera_vfs_remove_child_lookup_complete(
 
     chimera_vfs_remove_at(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->remove.parent_handle,
         request->remove.path + request->remove.name_offset,
         request->remove.pathlen - request->remove.name_offset,

@@ -93,7 +93,7 @@ chimera_nfs4_setattr_open_callback(
     }
 
     chimera_vfs_setattr(req->thread->vfs_thread,
-                        &req->cred,
+                        &req->cred, NULL,
                         handle,
                         attr,
                         0,

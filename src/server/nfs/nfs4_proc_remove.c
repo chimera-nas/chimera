@@ -91,7 +91,7 @@ nfs4_remove_ds_root_opened(
     chimera_nfs_info("pNFS: deleting data-server backing file %s for removed file",
                      ctx->backing_name);
 
-    chimera_vfs_remove_at(ctx->req->thread->vfs_thread, &ctx->req->cred,
+    chimera_vfs_remove_at(ctx->req->thread->vfs_thread, &ctx->req->cred, NULL,
                           ctx->ds_root_handle,
                           ctx->backing_name, strlen(ctx->backing_name),
                           NULL, 0, 0, 0,
@@ -137,7 +137,7 @@ nfs4_remove_mds(struct nfs4_remove_ctx *ctx)
     struct nfs_request *req  = ctx->req;
     struct REMOVE4args *args = &req->args_compound->argarray[req->index].opremove;
 
-    chimera_vfs_remove_at(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_remove_at(req->thread->vfs_thread, &req->cred, NULL,
                           ctx->parent_handle,
                           args->target.data, args->target.len,
                           NULL, 0, 0, 0,

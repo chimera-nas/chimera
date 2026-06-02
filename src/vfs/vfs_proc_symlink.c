@@ -50,7 +50,7 @@ chimera_vfs_symlink_parent_open_complete(
 
     chimera_vfs_symlink_at(
         thread,
-        request->cred,
+        request->cred, NULL,
         oh,
         request->symlink.path + request->symlink.name_offset,
         request->symlink.pathlen - request->symlink.name_offset,

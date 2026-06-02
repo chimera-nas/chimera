@@ -56,7 +56,7 @@ chimera_nfs4_commit_data_open_callback(
         return;
     }
 
-    chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_commit(req->thread->vfs_thread, &req->cred, NULL,
                        file_handle,
                        args->offset,
                        args->count,
@@ -116,7 +116,7 @@ chimera_nfs4_commit_path_open_callback(
         return;
     }
 
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         file_handle,
                         CHIMERA_VFS_ATTR_MODE,
                         chimera_nfs4_commit_getattr_complete,

@@ -110,7 +110,7 @@ chimera_nfs3_readdir_open_callback(
 
         uint64_t cookieverf;
         memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
-        chimera_vfs_readdir(thread->vfs_thread, &req->cred,
+        chimera_vfs_readdir(thread->vfs_thread, &req->cred, NULL,
                             handle,
                             0,
                             CHIMERA_NFS3_ATTR_MASK,

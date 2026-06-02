@@ -274,7 +274,7 @@ remove_as(
     const uint8_t                  *child_fh,
     uint32_t                        child_fh_len)
 {
-    chimera_vfs_remove_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+    chimera_vfs_remove_at(ctx->vfs_thread, cred, NULL, dir, name, strlen(name),
                           child_fh, child_fh_len, 0, 0, remove_cb, ctx);
     wait_done(ctx);
     return ctx->status;
@@ -347,7 +347,7 @@ chmod_as(
     sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     sattr.va_mode     = mode;
 
-    chimera_vfs_setattr(ctx->vfs_thread, cred, ctx->handle, &sattr, 0, 0,
+    chimera_vfs_setattr(ctx->vfs_thread, cred, NULL, ctx->handle, &sattr, 0, 0,
                         setattr_cb, ctx);
     wait_done(ctx);
     st = ctx->status;

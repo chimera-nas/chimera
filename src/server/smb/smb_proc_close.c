@@ -108,7 +108,7 @@ chimera_smb_close_doc_open_parent_callback(
 
     chimera_vfs_remove_at(
         vfs_thread,
-        &request->close.doc_info.cred,
+        &request->close.doc_info.cred, NULL,
         oh,
         request->close.doc_info.name,
         request->close.doc_info.name_len,
@@ -308,7 +308,7 @@ chimera_smb_close(struct chimera_smb_request *request)
     if (request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) {
 
         chimera_vfs_getattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
+                            &request->session_handle->session->cred, NULL,
                             request->close.open_file->handle,
                             CHIMERA_VFS_ATTR_MASK_STAT,
                             chimera_smb_close_getattr_callback,

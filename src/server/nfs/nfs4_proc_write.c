@@ -163,7 +163,7 @@ chimera_nfs4_write_typecheck_open_callback(
     }
 
     req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         handle,
                         CHIMERA_VFS_ATTR_MODE,
                         chimera_nfs4_write_typecheck_complete,

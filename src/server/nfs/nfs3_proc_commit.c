@@ -62,7 +62,7 @@ chimera_nfs3_commit_open_callback(
 
         req->handle = handle;
 
-        chimera_vfs_commit(thread->vfs_thread, &req->cred,
+        chimera_vfs_commit(thread->vfs_thread, &req->cred, NULL,
                            handle,
                            args->offset,
                            args->count,

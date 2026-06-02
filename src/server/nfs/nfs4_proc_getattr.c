@@ -195,7 +195,7 @@ chimera_nfs4_getattr_open_callback(
         uint64_t attr_mask = chimera_nfs4_attr2mask(args->attr_request,
                                                     args->num_attr_request);
 
-        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                             handle,
                             attr_mask,
                             chimera_nfs4_getattr_complete,

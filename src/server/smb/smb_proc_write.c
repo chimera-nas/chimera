@@ -89,7 +89,7 @@ chimera_smb_write_callback(
         request->write.restore_attrs.va_mtime    = pre_attr->va_mtime;
 
         chimera_vfs_setattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
+                            &request->session_handle->session->cred, NULL,
                             request->write.open_file->handle,
                             &request->write.restore_attrs,
                             0,

@@ -51,7 +51,7 @@ chimera_nfs3_setattr_do_setattr(struct nfs_request *req)
 
     chimera_nfs3_sattr3_to_va(attr, &args->new_attributes);
 
-    chimera_vfs_setattr(thread->vfs_thread, &req->cred,
+    chimera_vfs_setattr(thread->vfs_thread, &req->cred, NULL,
                         req->handle,
                         attr,
                         CHIMERA_NFS3_ATTR_WCC_MASK,
@@ -116,7 +116,7 @@ chimera_nfs3_setattr_open_callback(
         req->handle = handle;
 
         if (args->guard.check) {
-            chimera_vfs_getattr(thread->vfs_thread, &req->cred,
+            chimera_vfs_getattr(thread->vfs_thread, &req->cred, NULL,
                                 handle,
                                 CHIMERA_VFS_ATTR_CTIME,
                                 chimera_nfs3_setattr_guard_callback,

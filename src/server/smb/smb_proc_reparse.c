@@ -91,7 +91,7 @@ chimera_smb_set_reparse_remove_cb(
         case SMB2_NFS_SPECFILE_LNK:
             chimera_vfs_symlink_at(
                 vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 request->ioctl.rp_parent_handle,
                 open_file->name,
                 open_file->name_len,
@@ -112,7 +112,7 @@ chimera_smb_set_reparse_remove_cb(
             set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
             chimera_vfs_mknod_at(
                 vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 request->ioctl.rp_parent_handle,
                 open_file->name,
                 open_file->name_len,
@@ -131,7 +131,7 @@ chimera_smb_set_reparse_remove_cb(
             set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
             chimera_vfs_mknod_at(
                 vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 request->ioctl.rp_parent_handle,
                 open_file->name,
                 open_file->name_len,
@@ -148,7 +148,7 @@ chimera_smb_set_reparse_remove_cb(
             set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE;
             chimera_vfs_mknod_at(
                 vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 request->ioctl.rp_parent_handle,
                 open_file->name,
                 open_file->name_len,
@@ -165,7 +165,7 @@ chimera_smb_set_reparse_remove_cb(
             set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE;
             chimera_vfs_mknod_at(
                 vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 request->ioctl.rp_parent_handle,
                 open_file->name,
                 open_file->name_len,
@@ -205,7 +205,7 @@ chimera_smb_set_reparse_open_parent_cb(
 
     chimera_vfs_remove_at(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         oh,
         open_file->name,
         open_file->name_len,
@@ -471,7 +471,7 @@ chimera_smb_ioctl_get_reparse(struct chimera_smb_request *request)
 
     chimera_vfs_getattr(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         open_file->handle,
         CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV,
         chimera_smb_get_reparse_getattr_cb,

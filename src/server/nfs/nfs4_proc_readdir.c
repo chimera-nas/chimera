@@ -168,7 +168,7 @@ chimera_nfs4_readdir_open_callback(
                                       args->num_attr_request);
     uint64_t cookieverf;
     memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
-    chimera_vfs_readdir(thread->vfs_thread, &req->cred,
+    chimera_vfs_readdir(thread->vfs_thread, &req->cred, NULL,
                         handle,
                         attrmask,
                         0,

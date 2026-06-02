@@ -108,7 +108,7 @@ chimera_nfs3_mknod_open_callback(
                 return;
         } /* switch */
 
-        chimera_vfs_mknod_at(thread->vfs_thread, &req->cred,
+        chimera_vfs_mknod_at(thread->vfs_thread, &req->cred, NULL,
                              handle,
                              args->where.name.str,
                              args->where.name.len,

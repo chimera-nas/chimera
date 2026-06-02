@@ -368,7 +368,7 @@ chimera_vfs_read_submit(
             gate->callback     = callback;
             gate->private_data = private_data;
 
-            chimera_vfs_getattr(thread, cred, handle,
+            chimera_vfs_getattr(thread, cred, NULL, handle,
                                 CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
                                 chimera_vfs_read_gate_complete, gate);
             return;

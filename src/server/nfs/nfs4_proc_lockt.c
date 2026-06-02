@@ -128,7 +128,7 @@ chimera_nfs4_lockt_open_complete(
     /* Fetch the target's type before probing -- LOCKT is only valid on a
      * regular file (see chimera_nfs4_lockt_probe). */
     req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, handle,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL, handle,
                         CHIMERA_VFS_ATTR_MASK_STAT,
                         chimera_nfs4_lockt_probe, req);
 } /* chimera_nfs4_lockt_open_complete */

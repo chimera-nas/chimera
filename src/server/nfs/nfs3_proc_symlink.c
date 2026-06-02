@@ -78,7 +78,7 @@ chimera_nfs3_symlink_open_callback(
 
         chimera_vfs_symlink_at(
             thread->vfs_thread,
-            &req->cred,
+            &req->cred, NULL,
             handle,
             args->where.name.str,
             args->where.name.len,

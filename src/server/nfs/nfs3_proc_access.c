@@ -113,7 +113,7 @@ chimera_nfs3_access_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        chimera_vfs_getattr(thread->vfs_thread, &req->cred,
+        chimera_vfs_getattr(thread->vfs_thread, &req->cred, NULL,
                             handle,
                             CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_ACL,
                             chimera_nfs3_access_complete,

@@ -71,7 +71,7 @@ chimera_nfs4_access_open_callback(
 
     req->handle = handle;
 
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         handle,
                         CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
                         chimera_nfs4_access_complete,

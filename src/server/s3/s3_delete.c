@@ -52,7 +52,7 @@ chimera_s3_delete_open_callback(
 
     request->dir_handle = oh;
 
-    chimera_vfs_remove_at(thread->vfs, &thread->shared->cred,
+    chimera_vfs_remove_at(thread->vfs, &thread->shared->cred, NULL,
                           oh,
                           request->name,
                           request->name_len,

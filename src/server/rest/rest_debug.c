@@ -151,7 +151,7 @@ rest_fsop_chmod_open_cb(
     ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     ctx->set_attr.va_mode     = ctx->mode;
 
-    chimera_vfs_setattr(ctx->vfs_thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_setattr(ctx->vfs_thread, chimera_vfs_get_server_cred(), NULL,
                         ctx->handle, &ctx->set_attr, 0, 0,
                         rest_fsop_chmod_setattr_cb, ctx);
 } /* rest_fsop_chmod_open_cb */

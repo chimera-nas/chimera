@@ -56,7 +56,7 @@ chimera_nfs3_remove_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        chimera_vfs_remove_at(thread->vfs_thread, &req->cred,
+        chimera_vfs_remove_at(thread->vfs_thread, &req->cred, NULL,
                               handle,
                               args->object.name.str,
                               args->object.name.len,

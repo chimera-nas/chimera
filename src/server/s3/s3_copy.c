@@ -240,7 +240,7 @@ chimera_s3_copy_link_callback(
         return;
     }
 
-    chimera_vfs_getattr(thread->vfs, &thread->shared->cred,
+    chimera_vfs_getattr(thread->vfs, &thread->shared->cred, NULL,
                         ctx->request->file_handle,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
                         chimera_s3_copy_getattr_callback,
@@ -264,7 +264,7 @@ chimera_s3_copy_rename_callback(
         return;
     }
 
-    chimera_vfs_getattr(thread->vfs, &thread->shared->cred,
+    chimera_vfs_getattr(thread->vfs, &thread->shared->cred, NULL,
                         ctx->request->file_handle,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
                         chimera_s3_copy_getattr_callback,
