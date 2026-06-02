@@ -353,6 +353,10 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.maximum_allowed
     smb2.mkdir
     smb2.openattr
+    # Path-based set/get of the DOS attribute combinations round-trips through
+    # the persisted dos_attributes; a file cleared to NORMAL reads back NORMAL
+    # (no synthesized ARCHIVE), and the create/setinfo paths stamp ARCHIVE.
+    smb2.winattr
     smb2.read
     smb2.rw
     smb2.check-sharemode
@@ -424,11 +428,13 @@ set(SMBTORTURE_ENABLED_memfs
 # filesystem has no API to set a file's birth time, so the create-time
 # round-trip is unsupportable on the passthrough backends (it works on the
 # native backends, which persist btime in their own inode metadata).
-# smb2.openattr stays disabled for the same reason: it round-trips DOS
-# attributes (READONLY/HIDDEN/SYSTEM/ARCHIVE) that a real Linux filesystem has
-# no native API to store, so they cannot be persisted on a passthrough mount
-# (it works on the native backends, which persist dos_attributes in their inode
-# metadata).
+# smb2.openattr and smb2.winattr stay disabled for the same reason: they
+# round-trip DOS attributes (READONLY/HIDDEN/SYSTEM/ARCHIVE) that a real Linux
+# filesystem has no native API to store, so they cannot be persisted on a
+# passthrough mount.  In particular winattr clears a file to NORMAL and expects
+# it back, but a passthrough file has no stored DOS set, so it falls back to a
+# synthesized ARCHIVE (it works on the native backends, which persist
+# dos_attributes in their inode metadata).
 set(SMBTORTURE_ENABLED_linux
     smb2.change_notify_disabled
     smb2.mkdir
@@ -524,6 +530,8 @@ set(SMBTORTURE_ENABLED_cairn
     # async_dosmode variant exercises the same code paths concurrently.
     smb2.openattr
     smb2.async_dosmode
+    # Path-based DOS attribute set/get round-trip (incl. clear-to-NORMAL).
+    smb2.winattr
     smb2.read
     smb2.rw
     smb2.check-sharemode
@@ -584,6 +592,8 @@ set(SMBTORTURE_ENABLED_diskfs_common
     # concurrently.
     smb2.openattr
     smb2.async_dosmode
+    # Path-based DOS attribute set/get round-trip (incl. clear-to-NORMAL).
+    smb2.winattr
     smb2.read
     smb2.rw
     smb2.check-sharemode
