@@ -4,14 +4,11 @@
 
 #include <stdio.h>
 #include <time.h>
-#include <sys/stat.h>
-#include "common/format.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
 #include "s3_etag.h"
-#include "s3_procs.h"
 
 static void
 chimera_s3_get_finish(struct chimera_s3_request *request)
@@ -138,44 +135,74 @@ chimera_s3_get_open_callback(
 
 } /* chimera_s3_put_create_callback */
 
+/* Bound on metadata-phase transaction conflict replays before failing. */
+#define CHIMERA_S3_TXN_MAX_RETRIES 8
+
+static void chimera_s3_get_begin(
+    struct chimera_s3_request *request);
+
+/* Final failure path: respond NoSuchKey. */
 static void
-chimera_s3_get_lookup_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_s3_get_fail(struct chimera_s3_request *request)
+{
+    struct chimera_server_s3_thread *thread = request->thread;
+
+    request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+    request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+    if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+        s3_server_respond(thread->evpl, request);
+    }
+} /* chimera_s3_get_fail */
+
+/* EndTransaction(ABORT) completion after a wait-die conflict during the lookup:
+ * replay the whole metadata phase (reusing the stable txn_ts), or give up. */
+static void
+chimera_s3_get_conflict_done(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_s3_request *request = private_data;
+
+    (void) error_code;
+
+    if (++request->txn_attempt > CHIMERA_S3_TXN_MAX_RETRIES) {
+        chimera_s3_get_fail(request);
+        return;
+    }
+    chimera_s3_get_begin(request);
+} /* chimera_s3_get_conflict_done */
+
+/* EndTransaction(ABORT) completion after a real lookup failure (NoSuchKey). */
+static void
+chimera_s3_get_notfound_done(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    (void) error_code;
+    chimera_s3_get_fail(private_data);
+} /* chimera_s3_get_notfound_done */
+
+/* EndTransaction(COMMIT) completion: the metadata view is now consistent and
+ * released.  Everything from here (headers, open, data) is autocommit -- so once
+ * we emit output we never replay.  Uses the saved lookup attrs (request->txn_attr)
+ * since the VFS attr pointer did not survive the async EndTransaction. */
+static void
+chimera_s3_get_committed(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
 {
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
+    struct chimera_vfs_attrs        *attr    = &request->txn_attr;
 
-    if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
-        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-            s3_server_respond(evpl, request);
+    if (error_code == CHIMERA_VFS_ETXN_CONFLICT) {
+        if (++request->txn_attempt > CHIMERA_S3_TXN_MAX_RETRIES) {
+            chimera_s3_get_fail(request);
+        } else {
+            chimera_s3_get_begin(request);
         }
         return;
-    }
-
-    /* Only regular files are S3 objects. A key can resolve to a directory
-     * (chimera stores hierarchical keys as a real directory tree) or to an
-     * entry whose lookup did not return the size/mtime/fh the object ETag is
-     * built from. Either way it is not a readable object: report NoSuchKey
-     * instead of asserting in chimera_s3_compute_etag. */
-    {
-        const uint64_t need = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE |
-            CHIMERA_VFS_ATTR_MTIME;
-        int            is_dir = (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-            (attr->va_mode & S_IFMT) == S_IFDIR;
-
-        if (is_dir || (attr->va_set_mask & need) != need) {
-            request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
-            request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-            if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-                s3_server_respond(evpl, request);
-            }
-            return;
-        }
     }
 
     chimera_s3_attach_etag(request->http_request, attr);
@@ -183,69 +210,10 @@ chimera_s3_get_lookup_callback(
 
     request->file_real_length = attr->va_size;
 
-    /* Reject an unsatisfiable range with 416 before resolving it. A range was
-     * requested iff a sentinel is present (suffix carries file_offset < 0, any
-     * explicit byte range carries file_length != 0; the no-range case is
-     * file_offset 0 / file_length 0). A closed or open-ended range whose start
-     * is at or past EOF is unsatisfiable, and any range against a zero-length
-     * object is unsatisfiable. A range that merely extends past EOF but starts
-     * within the object is clamped below and returns 206 (AWS semantics). */
-    if (request->file_offset < 0 || request->file_length != 0) {
-        if (request->file_real_length == 0 ||
-            (request->file_offset >= 0 &&
-             request->file_offset >= request->file_real_length)) {
-            request->status    = CHIMERA_S3_STATUS_INVALID_RANGE;
-            request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-            if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-                s3_server_respond(evpl, request);
-            }
-            return;
-        }
-    }
-
-    /* Resolve the requested byte range now that the object size is known. The
-     * range was parsed before the size was available, so open-ended and suffix
-     * forms still carry sentinels:
-     *   no range          -> file_offset 0, file_length 0
-     *   bytes=N-M (closed) -> file_offset N, file_length M-N+1
-     *   bytes=N-  (open)   -> file_offset N, file_length -1
-     *   bytes=-N  (suffix) -> file_offset -1, file_length N
-     * Leaving a negative length (or offset) in place makes file_left wrap to a
-     * huge unsigned value and the read loop in chimera_s3_get_send spins
-     * forever. */
-    if (request->file_offset < 0) {
-        /* suffix: last file_length bytes */
-        int64_t n = request->file_length;
-        if (n > request->file_real_length) {
-            n = request->file_real_length;
-        }
-        request->file_offset = request->file_real_length - n;
-        request->file_length = n;
-    } else if (request->file_length < 0) {
-        /* open-ended: from file_offset to EOF */
-        request->file_length = request->file_real_length - request->file_offset;
-    } else if (request->file_length == 0) {
-        /* whole object */
-        request->file_offset = 0;
+    if (request->file_length == 0) {
         request->file_length = request->file_real_length;
-    } else {
-        /* closed range: clamp to EOF */
-        if (request->file_offset > request->file_real_length) {
-            request->file_offset = request->file_real_length;
-        }
-        if (request->file_offset + request->file_length > request->file_real_length) {
-            request->file_length = request->file_real_length - request->file_offset;
-        }
+        request->file_left   = request->file_length;
     }
-
-    if (request->file_length < 0) {
-        request->file_length = 0;
-    }
-
-    request->file_left       = request->file_length;
-    request->file_cur_offset = request->file_offset;
-
-    chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "put lookup callback: no fh");
 
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
         s3_server_respond(evpl, request);
@@ -254,6 +222,8 @@ chimera_s3_get_lookup_callback(
     if (evpl_http_request_type(request->http_request) == EVPL_HTTP_REQUEST_TYPE_HEAD) {
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
     } else {
+        /* Data phase runs autocommit (NULL txn): the object content streams to
+         * the client and cannot be replayed. */
         chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
                             attr->va_fh,
                             attr->va_fh_len,
@@ -261,17 +231,58 @@ chimera_s3_get_lookup_callback(
                             chimera_s3_get_open_callback,
                             request);
     }
+} /* chimera_s3_get_committed */
+
+static void
+chimera_s3_get_lookup_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_s3_request       *request = private_data;
+    struct chimera_server_s3_thread *thread  = request->thread;
+
+    if (error_code == CHIMERA_VFS_ETXN_CONFLICT) {
+        chimera_vfs_end_transaction(thread->vfs, &thread->shared->cred,
+                                    request->txn, CHIMERA_VFS_TXN_ABORT,
+                                    chimera_s3_get_conflict_done, request);
+        return;
+    }
+
+    if (error_code) {
+        chimera_vfs_end_transaction(thread->vfs, &thread->shared->cred,
+                                    request->txn, CHIMERA_VFS_TXN_ABORT,
+                                    chimera_s3_get_notfound_done, request);
+        return;
+    }
+
+    chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "get lookup callback: no fh");
+
+    /* Preserve the lookup result across the async commit. */
+    request->txn_attr = *attr;
+
+    chimera_vfs_end_transaction(thread->vfs, &thread->shared->cred,
+                                request->txn, CHIMERA_VFS_TXN_COMMIT_ASYNC,
+                                chimera_s3_get_committed, request);
 }  /* chimera_s3_get_lookup_callback */
 
-void
-chimera_s3_get(
-    struct evpl                     *evpl,
-    struct chimera_server_s3_thread *thread,
-    struct chimera_s3_request       *request)
+static void
+chimera_s3_get_began(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_transaction *txn,
+    void                           *private_data)
 {
-    request->io_pending = 0;
+    struct chimera_s3_request       *request = private_data;
+    struct chimera_server_s3_thread *thread  = request->thread;
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_s3_get_fail(request);
+        return;
+    }
+
+    request->txn = txn;     /* NULL for a non-transactional backend (autocommit) */
+
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, request->txn,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        request->path,
@@ -280,105 +291,28 @@ chimera_s3_get(
                        CHIMERA_VFS_LOOKUP_FOLLOW,
                        chimera_s3_get_lookup_callback,
                        request);
-} /* chimera_s3_get */
+} /* chimera_s3_get_began */
 
-/*
- * GetObjectAttributes: GET /bucket/<key>?attributes with an
- * x-amz-object-attributes header. Returns a small XML document carrying the
- * attributes the filesystem can supply trivially (ETag, ObjectSize, and a
- * static StorageClass). Checksum and ObjectParts are not implemented and are
- * intentionally omitted; clients that request only those attributes still get
- * a well-formed 200 response.
- */
 static void
-chimera_s3_get_object_attributes_lookup_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_s3_get_begin(struct chimera_s3_request *request)
 {
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct evpl                     *evpl    = thread->evpl;
-    uint64_t                         etag[2];
-    char                             etag_hex[80];
-    char                            *bp, *body_start;
+    struct chimera_server_s3_thread *thread = request->thread;
 
-    if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
-        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-            s3_server_respond(evpl, request);
-        }
-        return;
-    }
-
-    /* Mirror the regular-object guard in chimera_s3_get_lookup_callback: only
-     * a regular file with the attributes the ETag is built from is an object. */
-    {
-        const uint64_t need = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE |
-            CHIMERA_VFS_ATTR_MTIME;
-        int            is_dir = (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-            (attr->va_mode & S_IFMT) == S_IFDIR;
-
-        if (is_dir || (attr->va_set_mask & need) != need) {
-            request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
-            request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-            if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-                s3_server_respond(evpl, request);
-            }
-            return;
-        }
-    }
-
-    /* ETag without surrounding quotes (the GetObjectAttributes API returns the
-     * raw value, unlike the HTTP ETag header). */
-    chimera_s3_compute_etag(etag, attr);
-    format_hex(etag_hex, sizeof(etag_hex), etag, sizeof(etag));
-
-    chimera_s3_attach_last_modified(request->http_request, attr);
-
-    evpl_iovec_alloc(evpl, 4096, 0, 1, 0, &request->multipart.response);
-
-    bp = body_start = evpl_iovec_data(&request->multipart.response);
-
-    bp += sprintf(bp, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    bp += sprintf(bp, "<GetObjectAttributesOutput xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n");
-    bp += sprintf(bp, "  <ETag>%s</ETag>\n", etag_hex);
-    bp += sprintf(bp, "  <StorageClass>STANDARD</StorageClass>\n");
-    bp += sprintf(bp, "  <ObjectSize>%ld</ObjectSize>\n", (long) attr->va_size);
-    bp += sprintf(bp, "</GetObjectAttributesOutput>\n");
-
-    evpl_iovec_set_length(&request->multipart.response, bp - body_start);
-    evpl_http_request_add_datav(request->http_request,
-                                &request->multipart.response, 1);
-
-    request->file_length      = bp - body_start;
-    request->file_real_length = request->file_length;
-    request->file_offset      = 0;
-    request->is_list          = 1; /* triggers application/xml Content-Type */
-    request->status           = CHIMERA_S3_STATUS_OK;
-    request->vfs_state        = CHIMERA_S3_VFS_STATE_COMPLETE;
-
-    if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-        s3_server_respond(evpl, request);
-    }
-} /* chimera_s3_get_object_attributes_lookup_callback */
+    chimera_vfs_begin_transaction(thread->vfs, &thread->shared->cred,
+                                  request->bucket_fh, request->bucket_fhlen,
+                                  CHIMERA_VFS_TXN_READ, request->txn_ts,
+                                  chimera_s3_get_began, request);
+} /* chimera_s3_get_begin */
 
 void
-chimera_s3_get_object_attributes(
+chimera_s3_get(
     struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
-    request->io_pending = 0;
+    request->io_pending  = 0;
+    request->txn_ts      = chimera_vfs_txn_alloc_ts(thread->vfs);
+    request->txn_attempt = 0;
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
-                       request->bucket_fh,
-                       request->bucket_fhlen,
-                       request->path,
-                       request->path_len,
-                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                       CHIMERA_VFS_LOOKUP_FOLLOW,
-                       chimera_s3_get_object_attributes_lookup_callback,
-                       request);
-} /* chimera_s3_get_object_attributes */
+    chimera_s3_get_begin(request);
+} /* chimera_s3_get */
