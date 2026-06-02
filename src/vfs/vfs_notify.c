@@ -128,7 +128,7 @@ chimera_vfs_notify_get_mount_entry(
          * that preserves mount_id while changing root_fh or RPL
          * capability would not.  Document and revisit if it matters. */
         if (notify->vfs) {
-            urcu_memb_read_lock();
+            urcu_qsbr_read_lock();
             mount = chimera_vfs_mount_table_lookup(notify->vfs->mount_table, mount_id);
             if (mount) {
                 memcpy(me->root_fh, mount->root_fh, mount->root_fh_len);
@@ -137,7 +137,7 @@ chimera_vfs_notify_get_mount_entry(
                     me->has_rpl = (mount->module->capabilities & CHIMERA_VFS_CAP_RPL) != 0;
                 }
             }
-            urcu_memb_read_unlock();
+            urcu_qsbr_read_unlock();
         }
 
         HASH_ADD(hh, notify->mount_entries, mount_id, CHIMERA_VFS_MOUNT_ID_SIZE, me);

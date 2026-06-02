@@ -5,7 +5,7 @@
 
 # SMB authentication test program
 add_executable(smb_auth_test smb_auth_test.c)
-target_link_libraries(smb_auth_test chimera_vfs urcu urcu-cds)
+target_link_libraries(smb_auth_test chimera_vfs urcu-qsbr urcu-cds)
 target_include_directories(smb_auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 add_test(NAME chimera/server/smb/auth_test
@@ -295,6 +295,7 @@ set(SMBTORTURE_SUITES
     smb2.durable-open-disconnect
     smb2.durable-v2-delay
     smb2.durable-v2-open
+    smb2.durable-v2-regressions
     smb2.ea
     smb2.fileid
     smb2.getinfo
@@ -304,6 +305,7 @@ set(SMBTORTURE_SUITES
     smb2.lease
     smb2.lock
     smb2.maximum_allowed
+    smb2.maxfid
     smb2.mkdir
     smb2.name-mangling
     smb2.notify
@@ -350,6 +352,13 @@ set(SMBTORTURE_SUITES
 # verified against them.
 set(SMBTORTURE_ENABLED_memfs
     smb2.change_notify_disabled
+    # Opens up to 65520 files in a single tree connect to verify the SMB2 FID
+    # space (the per-tree open table) doesn't collapse before that ceiling.
+    # Enabled here for the in-memory / passthrough / cairn backends; diskfs is
+    # enabled in SMBTORTURE_ENABLED_diskfs_common with a per-test block-cache
+    # bump (see smbtorture_test.c) so its per-shard pinned-block working set
+    # fits at 65520 inodes.
+    smb2.maxfid
     smb2.maximum_allowed
     smb2.mkdir
     smb2.openattr
@@ -363,12 +372,21 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.compound_find
     smb2.connect
     smb2.create_no_streams
+    # The denytest matrix opens a file twice and probes which reads/writes are
+    # actually serviced; passing requires both the share-mode conflict matrix
+    # and per-handle granted-access enforcement on the write path
+    # (chimera_smb_write).  The native backends now match the passthrough
+    # backends here.
+    smb2.deny
     # SMB3 durable/persistent handle suites that pass end-to-end on memfs with
     # the in-memory durable registry (the harness runs the server with
     # persistent handles enabled).  smb2.durable-open / -v2-open still have
     # individual gaps and stay disabled until fully green.
     smb2.durable-open-disconnect
     smb2.durable-v2-delay
+    # Regression coverage for previously-fixed durable-v2 reconnect bugs
+    # (currently the Samba bug15624 reconnect subtest).  Small/fast.
+    smb2.durable-v2-regressions
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
@@ -417,8 +435,10 @@ set(SMBTORTURE_ENABLED_memfs
     # bit verbatim instead of stripping it when AUTO_INHERIT_REQ is absent
     # (Samba's "acl flag inherited canonicalization = no" mode).
     smb2.acls_non_canonical
-    # smb2.async_dosmode passes on x86_64 but fails on arm64 CI; left
-    # disabled here until the arch difference is understood.
+    # smb2.async_dosmode: validated 10x locally on x86_64 (all pass); the
+    # earlier arm64-CI failure was never reproduced and is almost certainly
+    # an emulated-arm64 ARC-runner flake rather than an arch bug.
+    smb2.async_dosmode
 )
 # The linux and io_uring passthrough backends share an implementation and pass
 # the same set.  They expose the share root as a real local directory whose
@@ -437,6 +457,10 @@ set(SMBTORTURE_ENABLED_memfs
 # dos_attributes in their inode metadata).
 set(SMBTORTURE_ENABLED_linux
     smb2.change_notify_disabled
+    # Open-up-to-65520-FIDs scalability test; diskfs is enabled separately in
+    # SMBTORTURE_ENABLED_diskfs_common (it needs a per-test block_cache_blocks
+    # bump set by the smbtorture harness).
+    smb2.maxfid
     smb2.mkdir
     smb2.read
     smb2.rw
@@ -445,6 +469,9 @@ set(SMBTORTURE_ENABLED_linux
     smb2.connect
     smb2.create_no_streams
     smb2.deny
+    # Regression coverage for previously-fixed durable-v2 reconnect bugs
+    # (currently the Samba bug15624 reconnect subtest).  Small/fast.
+    smb2.durable-v2-regressions
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
@@ -482,6 +509,10 @@ set(SMBTORTURE_ENABLED_linux
 )
 set(SMBTORTURE_ENABLED_io_uring
     smb2.change_notify_disabled
+    # Open-up-to-65520-FIDs scalability test; diskfs is enabled separately in
+    # SMBTORTURE_ENABLED_diskfs_common (it needs a per-test block_cache_blocks
+    # bump set by the smbtorture harness).
+    smb2.maxfid
     smb2.mkdir
     smb2.read
     smb2.rw
@@ -490,6 +521,9 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.connect
     smb2.create_no_streams
     smb2.deny
+    # Regression coverage for previously-fixed durable-v2 reconnect bugs
+    # (currently the Samba bug15624 reconnect subtest).  Small/fast.
+    smb2.durable-v2-regressions
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
@@ -538,6 +572,10 @@ set(SMBTORTURE_ENABLED_io_uring
 # (cairn_setattr SET-ACL) persists the descriptor.
 set(SMBTORTURE_ENABLED_cairn
     smb2.change_notify_disabled
+    # Open-up-to-65520-FIDs scalability test; diskfs is enabled separately in
+    # SMBTORTURE_ENABLED_diskfs_common (it needs a per-test block_cache_blocks
+    # bump set by the smbtorture harness).
+    smb2.maxfid
     smb2.mkdir
     # Native DOS-attribute storage in the cairn inode lets the SMB
     # create/overwrite-truncate attribute round-trip pass end-to-end; the
@@ -552,6 +590,12 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.compound_find
     smb2.connect
     smb2.create_no_streams
+    # See SMBTORTURE_ENABLED_memfs above: greened by the per-handle write
+    # access gate in chimera_smb_write.
+    smb2.deny
+    # Regression coverage for previously-fixed durable-v2 reconnect bugs
+    # (currently the Samba bug15624 reconnect subtest).  Small/fast.
+    smb2.durable-v2-regressions
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
@@ -599,6 +643,12 @@ set(SMBTORTURE_ENABLED_cairn
 # the diskfs module and enable the same set.
 set(SMBTORTURE_ENABLED_diskfs_common
     smb2.change_notify_disabled
+    # 65520-fid stress test.  The harness raises diskfs's block_cache_blocks
+    # for both diskfs backends (see smbtorture_test.c) so the working set --
+    # pinned inode home blocks + LOGGED journal blocks awaiting tail-push --
+    # fits without the per-shard pin exhaustion the default cache hits at
+    # this scale.
+    smb2.maxfid
     smb2.mkdir
     # Native DOS-attribute storage in the diskfs inode (in-memory + on-disk
     # dinode) lets the SMB create/overwrite-truncate attribute round-trip
@@ -614,6 +664,12 @@ set(SMBTORTURE_ENABLED_diskfs_common
     smb2.compound_find
     smb2.connect
     smb2.create_no_streams
+    # See SMBTORTURE_ENABLED_memfs above: greened by the per-handle write
+    # access gate in chimera_smb_write.
+    smb2.deny
+    # Regression coverage for previously-fixed durable-v2 reconnect bugs
+    # (currently the Samba bug15624 reconnect subtest).  Small/fast.
+    smb2.durable-v2-regressions
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id

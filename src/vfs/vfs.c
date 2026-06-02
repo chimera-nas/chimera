@@ -751,6 +751,67 @@ chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
 
 } /* chimera_vfs_watchdog_callback */
 
+/*
+ * userspace-RCU runs in QSBR mode: read-side locks are free, but every
+ * registered thread must announce quiescent states (or step out of the
+ * grace-period quorum while it blocks), or grace periods stall process-wide.
+ * The event-loop threads are the only RCU readers, so they are the only
+ * threads we register; the loop hooks drive their quiescence:
+ *
+ *   iteration_end -> quiescent state once per evpl_continue() pass
+ *   pre_wait      -> go offline before a (possibly indefinite) core wait
+ *   post_wait     -> come back online before post-wait callbacks read RCU data
+ *
+ * (The cache maintenance / identity-resolver threads are pure writers --
+ * call_rcu + rcu_assign, no read side -- so they are not registered at all and
+ * never gate a grace period; see vfs_user_cache.h, vfs_identity.c,
+ * s3_cred_cache.h.)
+ */
+static void
+chimera_vfs_rcu_quiescent(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    (void) evpl;
+    (void) private_data;
+    urcu_qsbr_quiescent_state();
+} /* chimera_vfs_rcu_quiescent */
+
+static void
+chimera_vfs_rcu_offline(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    (void) evpl;
+    (void) private_data;
+    urcu_qsbr_thread_offline();
+} /* chimera_vfs_rcu_offline */
+
+static void
+chimera_vfs_rcu_online(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    (void) evpl;
+    (void) private_data;
+    urcu_qsbr_thread_online();
+} /* chimera_vfs_rcu_online */
+
+static const struct evpl_loop_hooks chimera_vfs_rcu_hooks = {
+    .iteration_end = chimera_vfs_rcu_quiescent,
+    .pre_wait      = chimera_vfs_rcu_offline,
+    .post_wait     = chimera_vfs_rcu_online,
+};
+
+/*
+ * One OS thread can enter chimera_vfs_thread_init more than once -- e.g. a
+ * server VFS module (diskfs) loaded in-process gives the thread an inner VFS
+ * context on top of the outer one.  liburcu aborts on a double register, so
+ * register (and install the loop hooks) exactly once per thread, on the first
+ * entry, and tear down on the last.  Thread-local, so no locking is needed.
+ */
+static __thread int chimera_vfs_rcu_refs;
+
 SYMBOL_EXPORT struct chimera_vfs_thread *
 chimera_vfs_thread_init(
     struct evpl        *evpl,
@@ -787,7 +848,10 @@ chimera_vfs_thread_init(
         }
     }
 
-    urcu_memb_register_thread();
+    if (chimera_vfs_rcu_refs++ == 0) {
+        urcu_qsbr_register_thread();
+        evpl_set_loop_hooks(evpl, &chimera_vfs_rcu_hooks);
+    }
 
     pthread_mutex_init(
         &thread->lock,
@@ -871,9 +935,12 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
         chimera_rcu_magazine_drain(&thread->rcu_magazines[i]);
     }
 
-    free(thread);
+    if (--chimera_vfs_rcu_refs == 0) {
+        evpl_set_loop_hooks(thread->evpl, NULL);
+        urcu_qsbr_unregister_thread();
+    }
 
-    urcu_memb_unregister_thread();
+    free(thread);
 } /* chimera_vfs_thread_destroy */
 
 void
@@ -961,7 +1028,7 @@ chimera_vfs_identity_uid_to_sid(
     const struct chimera_vfs_user *user;
     int                            rc = -1;
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     user = chimera_vfs_user_cache_lookup_by_uid(vfs->vfs_user_cache, uid);
 
@@ -974,7 +1041,7 @@ chimera_vfs_identity_uid_to_sid(
         }
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     return rc;
 } /* chimera_vfs_identity_uid_to_sid */
@@ -988,7 +1055,7 @@ chimera_vfs_identity_sid_to_uid(
     const struct chimera_vfs_user *user;
     int                            rc = -1;
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     user = chimera_vfs_user_cache_lookup_by_sid(vfs->vfs_user_cache, sid);
 
@@ -997,7 +1064,7 @@ chimera_vfs_identity_sid_to_uid(
         rc   = 0;
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     return rc;
 } /* chimera_vfs_identity_sid_to_uid */
