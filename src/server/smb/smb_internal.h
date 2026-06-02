@@ -131,6 +131,10 @@ struct chimera_smb_config {
      * a watch (the "change notify = no" share behaviour Windows exposes;
      * smb2.change_notify_disabled expects this). */
     int                            notify_disabled;
+    /* Windows-style canonicalisation of the DACL_AUTO_INHERITED bit on
+     * SET_SECURITY; see chimera_server_config_set_smb_acl_inherited_canonicalize
+     * for semantics.  Default 1 (canonical). */
+    int                            acl_inherited_canonicalize;
     uint32_t                       capabilities;
     uint32_t                       dialects[16];
     struct chimera_smb_nic_info    nic_info[16];

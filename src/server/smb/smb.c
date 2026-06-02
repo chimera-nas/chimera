@@ -143,12 +143,13 @@ chimera_smb_server_init(
                          shared->config.auth.kerberos_keytab[0] ? shared->config.auth.kerberos_keytab : "(default)");
     }
 
-    shared->config.soft_fail_bad_req  = chimera_server_config_get_soft_fail_bad_req(config);
-    shared->config.persistent_handles = chimera_server_config_get_smb_persistent_handles(config);
-    shared->config.named_streams      = chimera_server_config_get_smb_named_streams(config);
-    shared->config.signing_required   = chimera_server_config_get_smb_signing_required(config);
-    shared->config.encryption         = chimera_server_config_get_smb_encryption(config);
-    shared->config.notify_disabled    = chimera_server_config_get_smb_notify_disabled(config);
+    shared->config.soft_fail_bad_req          = chimera_server_config_get_soft_fail_bad_req(config);
+    shared->config.persistent_handles         = chimera_server_config_get_smb_persistent_handles(config);
+    shared->config.named_streams              = chimera_server_config_get_smb_named_streams(config);
+    shared->config.signing_required           = chimera_server_config_get_smb_signing_required(config);
+    shared->config.encryption                 = chimera_server_config_get_smb_encryption(config);
+    shared->config.notify_disabled            = chimera_server_config_get_smb_notify_disabled(config);
+    shared->config.acl_inherited_canonicalize = chimera_server_config_get_smb_acl_inherited_canonicalize(config);
 
     if (shared->config.persistent_handles) {
         chimera_smb_info("SMB3 durable/persistent handles enabled (in-memory state)");

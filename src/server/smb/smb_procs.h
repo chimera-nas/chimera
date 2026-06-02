@@ -208,7 +208,8 @@ void chimera_smb_parse_sd_to_acl(
     uint32_t                  sd_len,
     struct chimera_vfs_attrs *attrs,
     void                     *acl_buf,
-    uint32_t                  acl_buf_len);
+    uint32_t                  acl_buf_len,
+    int                       canonicalize_inherited);
 
 int chimera_smb_parse_echo(
     struct evpl_iovec_cursor   *request_cursor,

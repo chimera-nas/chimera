@@ -1,6 +1,7 @@
 
 /*
  * SPDX-FileCopyrightText: IETF Trust and the persons identified
+ * SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
  * SPDX-License-Identifier: BSD-3-Clause
  */
  
@@ -45,6 +46,19 @@ struct mountbody {
  mountbody *ml_next;
 };
 
+/*
+ * RFC 1813 declares MOUNTPROC3_DUMP as returning a bare "mountlist"
+ * (an optional mountbody pointer).  xdrzcc does not emit the leading
+ * "value-follows" boolean for a procedure that returns a bare optional
+ * pointer, so wrap it in a one-field struct -- the wire encoding of an
+ * optional pointer inside a struct is identical to RFC's mountlist
+ * (bool + chained mountbody), and the wrapper also lets DUMP return an
+ * empty list (mounts == NULL) without a NULL deref.
+ */
+struct mountdumpres {
+ mountbody *mounts;
+};
+
 struct mountres3_ok {
  fhandle3   fhandle;
  int        auth_flavors<>;
@@ -65,7 +79,7 @@ program NFS_MOUNT {
  version NFS_MOUNT_V3 {
   void      MOUNTPROC3_NULL(void)    = 0;
   mountres3 MOUNTPROC3_MNT(mountarg3)  = 1;
-  mountbody* MOUNTPROC3_DUMP(void)    = 2;
+  mountdumpres MOUNTPROC3_DUMP(void)  = 2;
   void      MOUNTPROC3_UMNT(mountarg3) = 3;
   void      MOUNTPROC3_UMNTALL(void) = 4;
   exportres MOUNTPROC3_EXPORT(void)  = 5;

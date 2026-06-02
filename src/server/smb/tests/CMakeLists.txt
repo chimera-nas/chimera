@@ -395,8 +395,14 @@ set(SMBTORTURE_ENABLED_memfs
     # tree, rec) need deeper features (recursive-buffer accuracy, per-session
     # preauth for PreviousSessionId) and are left disabled.
     ${SMBTORTURE_NOTIFY_SUBTESTS}
-    # smb2.acls_non_canonical and smb2.async_dosmode pass on x86_64 but fail on
-    # arm64 CI; left disabled until the arch difference is understood.
+    # Non-canonical AUTO_INHERITED semantics: with the
+    # smb_acl_inherited_canonicalize knob set to 0 (the harness flips it for
+    # this suite only), SECINFO_DACL set+get round-trips the AUTO_INHERITED
+    # bit verbatim instead of stripping it when AUTO_INHERIT_REQ is absent
+    # (Samba's "acl flag inherited canonicalization = no" mode).
+    smb2.acls_non_canonical
+    # smb2.async_dosmode passes on x86_64 but fails on arm64 CI; left
+    # disabled until the arch difference is understood.
 )
 # The linux and io_uring passthrough backends share an implementation and pass
 # the same set.  They expose the share root as a real local directory whose
@@ -406,6 +412,11 @@ set(SMBTORTURE_ENABLED_memfs
 # filesystem has no API to set a file's birth time, so the create-time
 # round-trip is unsupportable on the passthrough backends (it works on the
 # native backends, which persist btime in their own inode metadata).
+# smb2.openattr stays disabled for the same reason: it round-trips DOS
+# attributes (READONLY/HIDDEN/SYSTEM/ARCHIVE) that a real Linux filesystem has
+# no native API to store, so they cannot be persisted on a passthrough mount
+# (it works on the native backends, which persist dos_attributes in their inode
+# metadata).
 set(SMBTORTURE_ENABLED_linux
     smb2.change_notify_disabled
     smb2.mkdir
@@ -413,17 +424,41 @@ set(SMBTORTURE_ENABLED_linux
     smb2.rw
     smb2.check-sharemode
     smb2.compound_find
+    smb2.connect
     smb2.create_no_streams
     smb2.deny
     smb2.notify-inotify
     smb2.secleak
+    smb2.session-id
+    smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.tcon
     smb2.winattr2
-    # smb2.acls_non_canonical passes on x86_64 but, like memfs, is left disabled
-    # pending the arm64 difference.
+    # CHANGE_NOTIFY subtests run cleanly in isolation; the combined smb2.notify
+    # suite still trips the shared-process deltree cascade.
+    smb2.notify.basedir
+    smb2.notify.close
+    smb2.notify.dir
+    smb2.notify.double
+    smb2.notify.file
+    smb2.notify.handle-permissions
+    smb2.notify.invalid-reauth
+    smb2.notify.logoff
+    smb2.notify.mask
+    smb2.notify.overflow
+    smb2.notify.rmdir1
+    smb2.notify.rmdir2
+    smb2.notify.rmdir3
+    smb2.notify.rmdir4
+    smb2.notify.tcon
+    smb2.notify.tcp
+    smb2.notify.tdis
+    smb2.notify.tdis1
+    # smb2.acls_non_canonical stays disabled here: the passthrough backends
+    # don't persist ACLs (set is projected to POSIX mode, get is synthesised
+    # from mode bits), so the AUTO_INHERITED control bit can't round-trip.
 )
 set(SMBTORTURE_ENABLED_io_uring
     smb2.change_notify_disabled
@@ -432,15 +467,32 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.rw
     smb2.check-sharemode
     smb2.compound_find
+    smb2.connect
     smb2.create_no_streams
     smb2.deny
     smb2.notify-inotify
     smb2.secleak
+    smb2.session-id
+    smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.tcon
     smb2.winattr2
+    # io_uring passes a subset of the CHANGE_NOTIFY subtests; the rest
+    # (notify.close/dir/invalid-reauth/logoff/mask/rmdir1/rmdir3) still fail
+    # here despite passing on the plain linux passthrough, pending a follow-up.
+    smb2.notify.basedir
+    smb2.notify.double
+    smb2.notify.file
+    smb2.notify.handle-permissions
+    smb2.notify.overflow
+    smb2.notify.rmdir2
+    smb2.notify.rmdir4
+    smb2.notify.tcon
+    smb2.notify.tcp
+    smb2.notify.tdis
+    smb2.notify.tdis1
 )
 # The engine backends store their own data and stamp a new object's owner from
 # the calling credential, so they behave consistently regardless of the server's
@@ -452,13 +504,19 @@ set(SMBTORTURE_ENABLED_io_uring
 set(SMBTORTURE_ENABLED_cairn
     smb2.change_notify_disabled
     smb2.mkdir
+    # Native DOS-attribute storage in the cairn inode lets the SMB
+    # create/overwrite-truncate attribute round-trip pass end-to-end.
+    smb2.openattr
     smb2.read
     smb2.rw
     smb2.check-sharemode
     smb2.compound_find
+    smb2.connect
     smb2.create_no_streams
     smb2.notify-inotify
     smb2.secleak
+    smb2.session-id
+    smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
     smb2.set-sparse-ioctl
     smb2.sharemode
@@ -467,12 +525,31 @@ set(SMBTORTURE_ENABLED_cairn
     # and the LastWriteTime write-time/sticky semantics pass end-to-end.
     smb2.timestamps
     smb2.winattr2
-    # Unified-ACL coverage: every smb2.acls subtest runs green individually.
-    # The combined smb2.acls suite stays disabled (shared-process deltree
-    # cleanup cascade, see above).
+    # CHANGE_NOTIFY subtests run cleanly in isolation (combined smb2.notify
+    # suite still trips the shared-process deltree cascade).
+    smb2.notify.basedir
+    smb2.notify.close
+    smb2.notify.dir
+    smb2.notify.double
+    smb2.notify.file
+    smb2.notify.handle-permissions
+    smb2.notify.invalid-reauth
+    smb2.notify.logoff
+    smb2.notify.mask
+    smb2.notify.overflow
+    smb2.notify.rmdir1
+    smb2.notify.rmdir2
+    smb2.notify.rmdir3
+    smb2.notify.rmdir4
+    smb2.notify.tcon
+    smb2.notify.tcp
+    smb2.notify.tdis
+    smb2.notify.tdis1
+    # Unified-ACL coverage: every smb2.acls subtest runs green individually,
+    # plus the non-canonical-ACL variant.  The combined smb2.acls suite stays
+    # disabled (shared-process deltree cleanup cascade, see above).
     ${SMBTORTURE_ACLS_SUBTESTS}
-    # smb2.acls_non_canonical and smb2.async_dosmode pass on x86_64 but fail on
-    # arm64 CI; left disabled until the arch difference is understood.
+    smb2.acls_non_canonical
 )
 # diskfs is a native-ACL backend: it stores each inode's ACL as a
 # DISKFS_REC_ACL b+tree record and seeds/inherits it on create, so it adds the
@@ -482,14 +559,21 @@ set(SMBTORTURE_ENABLED_cairn
 set(SMBTORTURE_ENABLED_diskfs_common
     smb2.change_notify_disabled
     smb2.mkdir
+    # Native DOS-attribute storage in the diskfs inode (in-memory + on-disk
+    # dinode) lets the SMB create/overwrite-truncate attribute round-trip pass.
+    smb2.openattr
     smb2.read
     smb2.rw
     smb2.check-sharemode
     smb2.compound_find
+    smb2.connect
     smb2.create_no_streams
     smb2.notify-inotify
     smb2.secleak
+    smb2.session-id
+    smb2.session-require-signing
     smb2.session.signing-aes-128-cmac
+    smb2.set-sparse-ioctl
     smb2.sharemode
     smb2.tcon
     # Native btime storage in the diskfs inode (in-memory + on-disk dinode) lets
@@ -497,7 +581,28 @@ set(SMBTORTURE_ENABLED_diskfs_common
     # backends share the diskfs module.
     smb2.timestamps
     smb2.winattr2
+    # CHANGE_NOTIFY subtests run cleanly in isolation (combined smb2.notify
+    # suite still trips the shared-process deltree cascade).
+    smb2.notify.basedir
+    smb2.notify.close
+    smb2.notify.dir
+    smb2.notify.double
+    smb2.notify.file
+    smb2.notify.handle-permissions
+    smb2.notify.invalid-reauth
+    smb2.notify.logoff
+    smb2.notify.mask
+    smb2.notify.overflow
+    smb2.notify.rmdir1
+    smb2.notify.rmdir2
+    smb2.notify.rmdir3
+    smb2.notify.rmdir4
+    smb2.notify.tcon
+    smb2.notify.tcp
+    smb2.notify.tdis
+    smb2.notify.tdis1
     ${SMBTORTURE_ACLS_SUBTESTS}
+    smb2.acls_non_canonical
 )
 set(SMBTORTURE_ENABLED_diskfs_io_uring ${SMBTORTURE_ENABLED_diskfs_common})
 set(SMBTORTURE_ENABLED_diskfs_aio ${SMBTORTURE_ENABLED_diskfs_common})

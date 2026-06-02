@@ -149,7 +149,7 @@ chimera_nfs4_write(
     }
 
     argarray[2].opwrite.offset      = request->write.offset;
-    argarray[2].opwrite.stable      = request->write.sync ? FILE_SYNC4 : UNSTABLE4;
+    argarray[2].opwrite.stable      = request->write.sync;  /* 3-level UNSTABLE/DATA_SYNC/FILE_SYNC */
     argarray[2].opwrite.data.iov    = request->write.iov;
     argarray[2].opwrite.data.niov   = request->write.niov;
     argarray[2].opwrite.data.length = request->write.length;

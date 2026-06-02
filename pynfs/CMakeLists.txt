@@ -120,6 +120,20 @@ set(PYNFS_LEASE_OVERRIDE_destroy_session DSESS9002 DSESS9003)
 set(PYNFS_LEASE_OVERRIDE_SECONDS_destroy_session 40)
 set(PYNFS_TIMEOUT_destroy_session 180)
 
+# The readdir suite carries one CPU-bound code, RDDR8b
+# (st_readdir.testDircountVarious), which loops 300 sequential READDIR
+# compounds through pynfs's pure-Python RPC client.  On amd64 it runs in
+# ~20s wall clock; on the emulated-arm64 devcontainer CI runner (Python
+# under QEMU TCG, 3-5x slower) it bumps against the wrapper's 60s default
+# and all six backends in that job time out together at ~62s.  Server side
+# is irrelevant -- chimera's READDIR finishes in microseconds for these
+# parameters; the budget is purely the client's Python-cost x 300 calls.
+# Raise the readdir-suite timeout to give RDDR8b headroom on the slow
+# runner; the other readdir codes finish in well under 1s, so a higher
+# cap is a no-op for them.  Matches the headroom used for the (similarly
+# pynfs-client-bound) delegations and destroy_session suites.
+set(PYNFS_TIMEOUT_readdir 180)
+
 function(pynfs_codes_for_flag flag minor out_var)
     if("${minor}" STREQUAL "0")
         set(testserver ${PYNFS_DIR}/nfs4.0/testserver.py)

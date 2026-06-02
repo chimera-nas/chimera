@@ -38,9 +38,12 @@ chimera_nfs4_write_complete(
     evpl_iovecs_release(req->thread->evpl, args->data.iov, args->data.niov);
 
     if (error_code == CHIMERA_VFS_OK) {
-        res->status           = NFS4_OK;
-        res->resok4.count     = length;
-        res->resok4.committed = sync ? FILE_SYNC4 : UNSTABLE4;
+        res->status       = NFS4_OK;
+        res->resok4.count = length;
+        /* Achieved durability (UNSTABLE/DATA_SYNC/FILE_SYNC = 0/1/2 match the
+         * stable_how4 enum); the backend may make data durable but defer
+         * metadata, reporting DATA_SYNC4. */
+        res->resok4.committed = sync;
 
         memcpy(res->resok4.writeverf,
                &req->thread->shared->nfs_verifier,
@@ -87,7 +90,7 @@ chimera_nfs4_write_open_callback(
                       handle,
                       args->offset,
                       args->data.length,
-                      (args->stable != UNSTABLE4),
+                      args->stable,               /* 3-level requested stability */
                       0,
                       0,
                       args->data.iov,
@@ -130,7 +133,7 @@ chimera_nfs4_write_typecheck_complete(
 
     if (args->data.length == 0) {
         req->args_write4 = args;
-        chimera_nfs4_write_complete(CHIMERA_VFS_OK, 0, 1, NULL, NULL, req);
+        chimera_nfs4_write_complete(CHIMERA_VFS_OK, 0, FILE_SYNC4, NULL, NULL, req);
         return;
     }
 
@@ -346,7 +349,7 @@ chimera_nfs4_write(
     req->args_write4    = args;
 
     if (args->data.length == 0) {
-        chimera_nfs4_write_complete(CHIMERA_VFS_OK, 0, 1, NULL, NULL, req);
+        chimera_nfs4_write_complete(CHIMERA_VFS_OK, 0, FILE_SYNC4, NULL, NULL, req);
         return;
     }
 
@@ -361,7 +364,7 @@ chimera_nfs4_write(
                             state_handle,
                             args->offset,
                             args->data.length,
-                            (args->stable != UNSTABLE4),
+                            args->stable,         /* 3-level requested stability */
                             0,
                             0,
                             args->data.iov,

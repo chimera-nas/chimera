@@ -383,31 +383,48 @@ chimera_smb_unmarshal_basic_info(
     attr->va_req_mask = 0;
     attr->va_set_mask = 0;
 
-    /* Each timestamp is only applied when the client supplied a real value;
-     * the omit/freeze/thaw sentinels leave the stored value alone. */
+    /* MS-FSCC 2.4.7 FileBasicInformation: a non-zero timestamp replaces the
+     * stored value; a zero (or freeze/thaw sentinel) means "don't change".
+     * Carry every time field through to the backend even when it is omitted,
+     * using the TIME_OMIT sentinel — that way the implicit ctime bump (which
+     * apply_attrs would otherwise stamp because the co-present DOS-attribute
+     * change is a metadata write) is suppressed for the fields the client
+     * asked to leave alone.  apply_attrs treats TIME_OMIT as "preserve". */
     if (!chimera_smb_time_is_omit(smb_attrs->smb_atime)) {
         chimera_nt_to_epoch(smb_attrs->smb_atime, &attr->va_atime);
-        attr->va_req_mask |= CHIMERA_VFS_ATTR_ATIME;
-        attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
+    } else {
+        attr->va_atime.tv_sec  = 0;
+        attr->va_atime.tv_nsec = CHIMERA_VFS_TIME_OMIT;
     }
+    attr->va_req_mask |= CHIMERA_VFS_ATTR_ATIME;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
 
     if (!chimera_smb_time_is_omit(smb_attrs->smb_mtime)) {
         chimera_nt_to_epoch(smb_attrs->smb_mtime, &attr->va_mtime);
-        attr->va_req_mask |= CHIMERA_VFS_ATTR_MTIME;
-        attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
+    } else {
+        attr->va_mtime.tv_sec  = 0;
+        attr->va_mtime.tv_nsec = CHIMERA_VFS_TIME_OMIT;
     }
+    attr->va_req_mask |= CHIMERA_VFS_ATTR_MTIME;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
 
     if (!chimera_smb_time_is_omit(smb_attrs->smb_ctime)) {
         chimera_nt_to_epoch(smb_attrs->smb_ctime, &attr->va_ctime);
-        attr->va_req_mask |= CHIMERA_VFS_ATTR_CTIME;
-        attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
+    } else {
+        attr->va_ctime.tv_sec  = 0;
+        attr->va_ctime.tv_nsec = CHIMERA_VFS_TIME_OMIT;
     }
+    attr->va_req_mask |= CHIMERA_VFS_ATTR_CTIME;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
 
     if (!chimera_smb_time_is_omit(smb_attrs->smb_crttime)) {
         chimera_nt_to_epoch(smb_attrs->smb_crttime, &attr->va_btime);
-        attr->va_req_mask |= CHIMERA_VFS_ATTR_BTIME;
-        attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
+    } else {
+        attr->va_btime.tv_sec  = 0;
+        attr->va_btime.tv_nsec = CHIMERA_VFS_TIME_OMIT;
     }
+    attr->va_req_mask |= CHIMERA_VFS_ATTR_BTIME;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
 
     /* A FileAttributes value of 0 means "no change" (MS-FSCC 2.4.7); any
      * non-zero value replaces the persisted DOS attribute set. */
