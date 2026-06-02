@@ -441,6 +441,37 @@ main(
     /* Give server a moment to be ready */
     usleep(100000);
 
+    /* smb2.zero-data-ioctl (test_ioctl_zero_data) opens
+     * --option=torture:filename with NTCREATEX_DISP_OPEN, so the file MUST
+     * pre-exist on the share or the test bails with NT_STATUS_OBJECT_NAME_NOT_FOUND
+     * before it ever issues FSCTL_SET_ZERO_DATA.  Pre-create it via smbclient,
+     * which works across every backend without backend-specific paths. */
+    for (i = 0; i < num_tests; i++) {
+        if (strcmp(tests[i], "smb2.zero-data-ioctl") == 0) {
+            char seed_path[512];
+            char cmd[1024];
+            int  seed_fd, sc_rc;
+
+            snprintf(seed_path, sizeof(seed_path),
+                     "%s/empty_seed", env.session_dir);
+            seed_fd = open(seed_path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+            if (seed_fd >= 0) {
+                close(seed_fd);
+            }
+            snprintf(cmd, sizeof(cmd),
+                     "smbclient //127.0.0.1/share -U myuser%%mypassword"
+                     " -c 'put %s torture_test_file' >/dev/null 2>&1",
+                     seed_path);
+            sc_rc = system(cmd);
+            unlink(seed_path);
+            if (sc_rc != 0) {
+                fprintf(stderr, "Failed to pre-create torture_test_file via"
+                        " smbclient (rc=%d)\n", sc_rc);
+            }
+            break;
+        }
+    }
+
     /* Run smbtorture */
     rc = run_smbtorture(num_tests, tests, backend, env.session_dir);
 

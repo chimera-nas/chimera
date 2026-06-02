@@ -154,12 +154,26 @@ chimera_smb_marshal_basic_attrs(
             break;
     } // switch
 
-    /* A regular file always reports at least ARCHIVE when it carries none of
-     * the settable attribute bits (so e.g. a sparse-but-otherwise-plain file
-     * still shows ARCHIVE, matching Windows). */
-    if ((smb_attr->smb_attributes & SMB_DOS_ATTR_SETTABLE) == 0 &&
-        (attr->va_mode & S_IFMT) == S_IFREG) {
-        smb_attr->smb_attributes |= SMB2_FILE_ATTRIBUTE_ARCHIVE;
+    /* SMB never reports an all-zero attribute word for a regular file.  How the
+     * empty set is filled depends on whether the backend persists DOS bits:
+     *
+     *  - Backend persists them (DOS_ATTRIBUTES in set_mask): report exactly what
+     *    is stored.  An empty set is FILE_ATTRIBUTE_NORMAL (0x80) -- a file
+     *    explicitly cleared to NORMAL must read back NORMAL, not a synthesized
+     *    ARCHIVE (smb2.winattr).  ARCHIVE is stamped and persisted at
+     *    create/modify time instead (see chimera_smb_create_issue_open).
+     *
+     *  - Backend does not persist them (passthrough linux/io_uring): synthesize
+     *    ARCHIVE for a plain file, matching Windows' default for a new file,
+     *    since there is no stored value to honor. */
+    if ((attr->va_mode & S_IFMT) == S_IFREG) {
+        if (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) {
+            if (smb_attr->smb_attributes == 0) {
+                smb_attr->smb_attributes |= SMB2_FILE_ATTRIBUTE_NORMAL;
+            }
+        } else if ((smb_attr->smb_attributes & SMB_DOS_ATTR_SETTABLE) == 0) {
+            smb_attr->smb_attributes |= SMB2_FILE_ATTRIBUTE_ARCHIVE;
+        }
     }
     smb_attr->smb_attr_mask |= SMB_ATTR_ATTRIBUTES;
 } /* chimera_smb_marshal_basic_attrs */

@@ -169,6 +169,50 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             chimera_smb_ioctl_copychunk(request);
             break;
 
+        case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
+            /* MS-FSCC 2.3.7: returns FILE_OBJECTID_BUFFER (64 bytes).  We
+             * don't persist object IDs, but the value is documented as
+             * stable per file for the volume's lifetime — so synthesize it
+             * deterministically from the open handle's file-handle bytes
+             * (fh_hash) and the server-instance GUID.  That is enough for
+             * clients that just want a stable, opaque per-file token. */
+            open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
+
+            if (unlikely(!open_file)) {
+                chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+                return;
+            }
+
+            if (request->ioctl.max_output_response < 64) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request, SMB2_STATUS_BUFFER_TOO_SMALL);
+                return;
+            }
+
+            memset(request->ioctl.oid_buffer, 0, 64);
+
+            if (open_file->handle) {
+                /* ObjectId: derive from the VFS file-handle hash so each open
+                 * of the same file yields the same ID across the session. */
+                memcpy(request->ioctl.oid_buffer, &open_file->handle->fh_hash, 8);
+                /* Mirror the hash into the upper half so a 16-byte compare
+                 * is meaningful even if the lower 8 collide. */
+                memcpy(request->ioctl.oid_buffer + 8, &open_file->handle->fh_hash, 8);
+                request->ioctl.oid_buffer[8] ^= 0xa5;
+                /* BirthVolumeId: server-instance GUID stands in for a volume
+                 * GUID. */
+                memcpy(request->ioctl.oid_buffer + 16, shared->guid, 16);
+                /* BirthObjectId: same as ObjectId since we don't track
+                 * creation-time renames. */
+                memcpy(request->ioctl.oid_buffer + 32,
+                       request->ioctl.oid_buffer, 16);
+                /* DomainId: zeroed (MS-FSCC: zero indicates no domain). */
+            }
+
+            chimera_smb_open_file_release(request, open_file);
+            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+            break;
+
         default:
             /* MS-SMB2 3.3.5.15: an FSCTL the server does not implement is
              * rejected with STATUS_NOT_SUPPORTED. */
@@ -213,6 +257,9 @@ chimera_smb_ioctl_reply(
         case SMB2_FSCTL_SRV_COPYCHUNK:
         case SMB2_FSCTL_SRV_COPYCHUNK_WRITE:
             output_length = 12; /* ChunksWritten + ChunkBytesWritten + TotalBytesWritten */
+            break;
+        case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
+            output_length = 64; /* FILE_OBJECTID_BUFFER (type 1) */
             break;
     } /* switch */
 
@@ -301,6 +348,9 @@ chimera_smb_ioctl_reply(
             evpl_iovec_cursor_append_uint32(reply_cursor, request->ioctl.cc_chunks_written);
             evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* ChunkBytesWritten */
             evpl_iovec_cursor_append_uint32(reply_cursor, (uint32_t) request->ioctl.cc_total_written);
+            break;
+        case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
+            evpl_iovec_cursor_append_blob(reply_cursor, request->ioctl.oid_buffer, 64);
             break;
         default:
             break;
