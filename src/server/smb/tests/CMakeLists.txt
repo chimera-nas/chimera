@@ -295,6 +295,7 @@ set(SMBTORTURE_SUITES
     smb2.durable-open-disconnect
     smb2.durable-v2-delay
     smb2.durable-v2-open
+    smb2.durable-v2-regressions
     smb2.ea
     smb2.fileid
     smb2.getinfo
@@ -383,6 +384,9 @@ set(SMBTORTURE_ENABLED_memfs
     # individual gaps and stay disabled until fully green.
     smb2.durable-open-disconnect
     smb2.durable-v2-delay
+    # Regression coverage for previously-fixed durable-v2 reconnect bugs
+    # (currently the Samba bug15624 reconnect subtest).  Small/fast.
+    smb2.durable-v2-regressions
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
@@ -465,6 +469,9 @@ set(SMBTORTURE_ENABLED_linux
     smb2.connect
     smb2.create_no_streams
     smb2.deny
+    # Regression coverage for previously-fixed durable-v2 reconnect bugs
+    # (currently the Samba bug15624 reconnect subtest).  Small/fast.
+    smb2.durable-v2-regressions
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
@@ -514,6 +521,9 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.connect
     smb2.create_no_streams
     smb2.deny
+    # Regression coverage for previously-fixed durable-v2 reconnect bugs
+    # (currently the Samba bug15624 reconnect subtest).  Small/fast.
+    smb2.durable-v2-regressions
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
@@ -583,6 +593,9 @@ set(SMBTORTURE_ENABLED_cairn
     # See SMBTORTURE_ENABLED_memfs above: greened by the per-handle write
     # access gate in chimera_smb_write.
     smb2.deny
+    # Regression coverage for previously-fixed durable-v2 reconnect bugs
+    # (currently the Samba bug15624 reconnect subtest).  Small/fast.
+    smb2.durable-v2-regressions
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
@@ -654,6 +667,9 @@ set(SMBTORTURE_ENABLED_diskfs_common
     # See SMBTORTURE_ENABLED_memfs above: greened by the per-handle write
     # access gate in chimera_smb_write.
     smb2.deny
+    # Regression coverage for previously-fixed durable-v2 reconnect bugs
+    # (currently the Samba bug15624 reconnect subtest).  Small/fast.
+    smb2.durable-v2-regressions
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
