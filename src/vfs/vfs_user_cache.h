@@ -9,8 +9,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
-#include <urcu.h>
-#include <urcu/urcu-memb.h>
+#include <urcu/urcu-qsbr.h>
 
 #include "vfs_cred.h"
 #include "vfs_internal.h"
@@ -167,8 +166,10 @@ chimera_vfs_user_cache_expiry_thread(void *arg)
     struct timespec                ts;
     int                            i;
 
-    urcu_memb_register_thread();
-
+    /* Pure writer: sweeps expired entries under the write lock (rcu_assign +
+     * call_rcu), never takes an RCU read lock.  Not registered as a QSBR
+     * reader -- a thread parked in cond_timedwait must not sit in the
+     * grace-period quorum. */
     pthread_mutex_lock(&cache->expiry_lock);
 
     while (!cache->shutdown) {
@@ -209,8 +210,6 @@ chimera_vfs_user_cache_expiry_thread(void *arg)
     }
 
     pthread_mutex_unlock(&cache->expiry_lock);
-
-    urcu_memb_unregister_thread();
 
     return NULL;
 } // chimera_vfs_user_cache_expiry_thread
@@ -259,7 +258,7 @@ chimera_vfs_user_cache_destroy(struct chimera_vfs_user_cache *cache)
 
     pthread_join(cache->expiry_thread, NULL);
 
-    urcu_memb_barrier();
+    urcu_qsbr_barrier();
 
     for (i = 0; i < cache->num_buckets; i++) {
         user = cache->name_buckets[i].head;

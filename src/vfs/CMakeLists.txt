@@ -9,6 +9,8 @@
 # RCU caches, and the backend modules under it -- every urcu user lives here or
 # under src/server).  Deliberately NOT set for src/fio (the GPL fio plugin,
 # which does not use urcu directly).  chimera is LGPL-2.1.
+# (URCU_API_MAP, which selects the unprefixed QSBR API, is set project-wide in
+# the top-level CMakeLists.txt.)
 add_compile_definitions(_LGPL_SOURCE)
 
 add_library(chimera_vfs SHARED vfs.c vfs_lsan.c
@@ -62,7 +64,7 @@ endif()
 target_link_libraries(chimera_vfs
     chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_diskfs
     chimera_vfs_nfs
-    chimera_common prometheus-c xxhash dl urcu)
+    chimera_common prometheus-c xxhash dl urcu-qsbr)
 
 if (CHIMERA_VFS_IO_URING)
     target_link_libraries(chimera_vfs chimera_vfs_io_uring)

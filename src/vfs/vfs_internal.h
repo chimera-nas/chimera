@@ -127,13 +127,13 @@ chimera_vfs_get_module(
         return NULL;
     }
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     mount = chimera_vfs_mount_table_lookup(vfs->mount_table, fh);
 
     module = mount ? mount->module : NULL;
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     return module;
 } /* chimera_vfs_get_module */

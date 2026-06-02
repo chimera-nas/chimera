@@ -8,8 +8,7 @@
 #include "vfs/vfs_rcu_pool.h"
 #include "vfs_internal.h"
 #include "common/misc.h"
-#include <urcu.h>
-#include <urcu/urcu-memb.h>
+#include <urcu/urcu-qsbr.h>
 
 /*
  * RPL (Reverse Path Lookup) Cache
@@ -162,7 +161,7 @@ chimera_vfs_rpl_cache_lookup(
     slot     = &shard->fwd_entries[(key & cache->num_slots_mask) << cache->num_entries_bits];
     slot_end = slot + cache->num_entries;
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     while (slot < slot_end) {
         entry = rcu_dereference(*slot);
@@ -178,14 +177,14 @@ chimera_vfs_rpl_cache_lookup(
             memcpy(r_name, entry->name, entry->name_len);
             entry->score++;
 
-            urcu_memb_read_unlock();
+            urcu_qsbr_read_unlock();
             return 0;
         }
 
         slot++;
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
     return -1;
 } /* chimera_vfs_rpl_cache_lookup */
 
@@ -306,7 +305,7 @@ chimera_vfs_rpl_cache_insert(
     memcpy(entry->name, name, name_len);
 
     /* Insert into forward index */
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
     pthread_mutex_lock(&shard->entry_lock);
 
     slot     = &shard->fwd_entries[(fwd_key & cache->num_slots_mask) << cache->num_entries_bits];
@@ -364,7 +363,7 @@ chimera_vfs_rpl_cache_insert(
     chimera_vfs_rpl_cache_rev_insert(cache, shard, entry);
 
     pthread_mutex_unlock(&shard->entry_lock);
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     if (best_entry) {
         call_rcu(&best_entry->rnode.rcu, chimera_rcu_pool_retire);
@@ -396,7 +395,7 @@ chimera_vfs_rpl_cache_invalidate(
      * (the caller knows only the parent_fh + name), so scan every shard's
      * reverse index.  Invalidation runs on rename/remove which is far
      * less frequent than lookup. */
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     for (shard_idx = 0; shard_idx < cache->num_shards; shard_idx++) {
         shard = &cache->shards[shard_idx];
@@ -449,7 +448,7 @@ chimera_vfs_rpl_cache_invalidate(
         }
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     if (removed_entry) {
         call_rcu(&removed_entry->rnode.rcu, chimera_rcu_pool_retire);

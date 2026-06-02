@@ -5,7 +5,7 @@
 
 # SMB authentication test program
 add_executable(smb_auth_test smb_auth_test.c)
-target_link_libraries(smb_auth_test chimera_vfs urcu urcu-cds)
+target_link_libraries(smb_auth_test chimera_vfs urcu-qsbr urcu-cds)
 target_include_directories(smb_auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 add_test(NAME chimera/server/smb/auth_test

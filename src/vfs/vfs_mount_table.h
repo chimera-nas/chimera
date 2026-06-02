@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -7,8 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
-#include <urcu.h>
-#include <urcu/urcu-memb.h>
+#include <urcu/urcu-qsbr.h>
 #include "vfs/vfs.h"
 #include "vfs/vfs_fh.h"
 
@@ -186,7 +185,7 @@ chimera_vfs_mount_table_lookup_attrs(
     index  = chimera_vfs_mount_table_bucket_index(mount_id);
     bucket = index & table->num_buckets_mask;
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     entry = rcu_dereference(table->buckets[bucket]);
 
@@ -201,7 +200,7 @@ chimera_vfs_mount_table_lookup_attrs(
         entry = rcu_dereference(entry->next);
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     return rc;
 } /* chimera_vfs_mount_table_lookup_attrs */
@@ -209,8 +208,8 @@ chimera_vfs_mount_table_lookup_attrs(
 /*
  * Lookup full mount pointer by mount ID.
  * Returns mount pointer or NULL if not found.
- * IMPORTANT: Caller MUST call urcu_memb_read_lock() before and
- * urcu_memb_read_unlock() after using the returned pointer.
+ * IMPORTANT: Caller MUST call urcu_qsbr_read_lock() before and
+ * urcu_qsbr_read_unlock() after using the returned pointer.
  */
 static inline struct chimera_vfs_mount *
 chimera_vfs_mount_table_lookup(
@@ -250,7 +249,7 @@ chimera_vfs_mount_table_count(struct chimera_vfs_mount_table *table)
     uint32_t                              i;
     int                                   count = 0;
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     for (i = 0; i < table->num_buckets; i++) {
         entry = rcu_dereference(table->buckets[i]);
@@ -260,7 +259,7 @@ chimera_vfs_mount_table_count(struct chimera_vfs_mount_table *table)
         }
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     return count;
 } /* chimera_vfs_mount_table_count */
@@ -288,7 +287,7 @@ chimera_vfs_mount_table_foreach(
     uint32_t                              i;
     int                                   rc = 0;
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     for (i = 0; i < table->num_buckets && rc == 0; i++) {
         entry = rcu_dereference(table->buckets[i]);
@@ -298,7 +297,7 @@ chimera_vfs_mount_table_foreach(
         }
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     return rc;
 } /* chimera_vfs_mount_table_foreach */
@@ -322,7 +321,7 @@ chimera_vfs_mount_table_find_by_path(
     struct chimera_vfs_mount             *found = NULL;
     uint32_t                              i;
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     for (i = 0; i < table->num_buckets && !found; i++) {
         entry = rcu_dereference(table->buckets[i]);
@@ -338,7 +337,7 @@ chimera_vfs_mount_table_find_by_path(
         }
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     return found;
 } /* chimera_vfs_mount_table_find_by_path */
@@ -406,7 +405,7 @@ chimera_vfs_mount_table_lookup_root_fh_by_name(
     uint32_t                              i;
     int                                   rc = -1;
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     for (i = 0; i < table->num_buckets && rc != 0; i++) {
         entry = rcu_dereference(table->buckets[i]);
@@ -421,7 +420,7 @@ chimera_vfs_mount_table_lookup_root_fh_by_name(
         }
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     return rc;
 } /* chimera_vfs_mount_table_lookup_root_fh_by_name */

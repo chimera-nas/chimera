@@ -4,7 +4,7 @@
 
 # Unit test for the unified NFSv4 state model (Phases 1-4).
 add_executable(test_state_table test_state_table.c)
-target_link_libraries(test_state_table chimera_nfs chimera_server chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid urcu urcu-common)
+target_link_libraries(test_state_table chimera_nfs chimera_server chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid urcu-qsbr urcu-common)
 target_include_directories(test_state_table PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/server/nfs
@@ -31,7 +31,7 @@ target_include_directories(test_replay_slot PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_SOURCE_DIR}/src
     ${NFS_COMMON_INCLUDE_DIR})
-target_link_libraries(test_replay_slot chimera_vfs chimera_common evpl evpl_rpc2 pthread uuid urcu urcu-common)
+target_link_libraries(test_replay_slot chimera_vfs chimera_common evpl evpl_rpc2 pthread uuid urcu-qsbr urcu-common)
 add_test(NAME chimera/server/nfs/replay_slot COMMAND test_replay_slot)
 
 add_executable(test_protocol_advertise test_protocol_advertise.c)
@@ -39,5 +39,5 @@ target_include_directories(test_protocol_advertise PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_SOURCE_DIR}/src
     ${NFS_COMMON_INCLUDE_DIR})
-target_link_libraries(test_protocol_advertise chimera_vfs chimera_common evpl evpl_rpc2 pthread uuid urcu urcu-common)
+target_link_libraries(test_protocol_advertise chimera_vfs chimera_common evpl evpl_rpc2 pthread uuid urcu-qsbr urcu-common)
 add_test(NAME chimera/server/nfs/protocol_advertise COMMAND test_protocol_advertise)

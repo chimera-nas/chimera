@@ -6,8 +6,7 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_rcu_pool.h"
-#include <urcu.h>
-#include <urcu/urcu-memb.h>
+#include <urcu/urcu-qsbr.h>
 
 struct chimera_vfs_name_cache_entry {
     struct chimera_rcu_node rnode; /* must be first: aliases the entry pointer */
@@ -185,7 +184,7 @@ chimera_vfs_name_cache_lookup(
 
     rc = -1;
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     while (slot < slot_end) {
         entry = rcu_dereference(*slot);
@@ -206,7 +205,7 @@ chimera_vfs_name_cache_lookup(
         slot++;
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     if (rc == 0) {
         prometheus_counter_increment(shard->hit);
@@ -265,7 +264,7 @@ chimera_vfs_name_cache_insert(
         memcpy(entry->child_name, name, name_len);
     }
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     pthread_mutex_lock(&shard->entry_lock);
 
@@ -324,7 +323,7 @@ chimera_vfs_name_cache_insert(
 
     pthread_mutex_unlock(&shard->entry_lock);
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     if (best_entry) {
         call_rcu(&best_entry->rnode.rcu, chimera_rcu_pool_retire);
@@ -353,7 +352,7 @@ chimera_vfs_name_cache_remove(
 
     slot_end = slot + cache->num_entries;
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     pthread_mutex_lock(&shard->entry_lock);
 
@@ -377,7 +376,7 @@ chimera_vfs_name_cache_remove(
 
     pthread_mutex_unlock(&shard->entry_lock);
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     if (removed_entry) {
         call_rcu(&removed_entry->rnode.rcu, chimera_rcu_pool_retire);

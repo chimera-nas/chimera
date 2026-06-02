@@ -21,7 +21,7 @@ chimera_nfs4_fh_is_vfs_mount_root(
         return false;
     }
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
     mount = chimera_vfs_mount_table_lookup(vfs->mount_table, fh);
     if (mount &&
         mount->pathlen > 0 &&
@@ -29,7 +29,7 @@ chimera_nfs4_fh_is_vfs_mount_root(
         memcmp(mount->root_fh, fh, fhlen) == 0) {
         is_root = true;
     }
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     return is_root;
 } /* chimera_nfs4_fh_is_vfs_mount_root */

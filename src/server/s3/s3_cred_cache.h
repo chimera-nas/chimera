@@ -8,8 +8,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
-#include <urcu.h>
-#include <urcu/urcu-memb.h>
+#include <urcu/urcu-qsbr.h>
 #include <xxhash.h>
 
 #define CHIMERA_S3_ACCESS_KEY_MAX 128
@@ -88,8 +87,10 @@ chimera_s3_cred_cache_expiry_thread(void *arg)
     struct timespec               ts;
     int                           i;
 
-    urcu_memb_register_thread();
-
+    /* Pure writer: sweeps expired creds (rcu_assign + call_rcu) under the
+     * per-bucket locks, never takes an RCU read lock.  Not registered as a
+     * QSBR reader -- a thread parked in cond_timedwait must not sit in the
+     * grace-period quorum. */
     pthread_mutex_lock(&cache->expiry_lock);
 
     while (!cache->shutdown) {
@@ -125,8 +126,6 @@ chimera_s3_cred_cache_expiry_thread(void *arg)
     }
 
     pthread_mutex_unlock(&cache->expiry_lock);
-
-    urcu_memb_unregister_thread();
 
     return NULL;
 } // chimera_s3_cred_cache_expiry_thread
@@ -173,7 +172,7 @@ chimera_s3_cred_cache_destroy(struct chimera_s3_cred_cache *cache)
 
     pthread_join(cache->expiry_thread, NULL);
 
-    urcu_memb_barrier();
+    urcu_qsbr_barrier();
 
     for (i = 0; i < cache->num_buckets; i++) {
         cred = cache->buckets[i].head;
