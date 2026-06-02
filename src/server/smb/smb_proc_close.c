@@ -24,6 +24,26 @@ chimera_smb_close_durable_delete_callback(
     (void) private_data;
 } /* chimera_smb_close_durable_delete_callback */
 
+/* Map a delete-on-close remove_at failure to the SMB CLOSE response status.
+ * MS-FSA close semantics: the close itself succeeds, but the delete failure
+ * (ENOTEMPTY on a non-empty directory most commonly, also EACCES) must be
+ * reported to the client so it knows the object survived.  Silently turning
+ * every failure into SUCCESS makes smb2_deltree believe its recursive teardown
+ * worked, leaving a stale BASEDIR / leftover entries that wreck the next
+ * subtest's setup. */
+static inline uint32_t
+chimera_smb_close_doc_status(enum chimera_vfs_error error_code)
+{
+    switch (error_code) {
+        case CHIMERA_VFS_OK:        return SMB2_STATUS_SUCCESS;
+        case CHIMERA_VFS_ENOTEMPTY: return SMB2_STATUS_DIRECTORY_NOT_EMPTY;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:     return SMB2_STATUS_ACCESS_DENIED;
+        case CHIMERA_VFS_ENOENT:    return SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+        default:                    return SMB2_STATUS_INTERNAL_ERROR;
+    } /* switch */
+} /* chimera_smb_close_doc_status */
+
 static void
 chimera_smb_close_doc_remove_callback(
     enum chimera_vfs_error    error_code,
@@ -53,7 +73,7 @@ chimera_smb_close_doc_remove_callback(
 
     chimera_smb_open_file_release(request, request->close.open_file);
 
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    chimera_smb_complete_request(request, chimera_smb_close_doc_status(error_code));
 } /* chimera_smb_close_doc_remove_callback */
 
 static void
