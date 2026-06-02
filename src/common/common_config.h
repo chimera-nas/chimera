@@ -180,6 +180,69 @@ chimera_apply_common_config(
 } /* chimera_apply_common_config */
 
 /*
+ * Delegation-pool settings parsed from the shared top-level "common" section.
+ * These are VFS-level parameters (the sync/async delegation thread pools live in
+ * the VFS core), so they are honored identically by the server (daemon) and the
+ * client (fio engine, client library).  Each field defaults to -1, meaning "not
+ * set in the common section" -- the caller then leaves its own default (or a
+ * value parsed from a legacy server/config section) untouched.
+ */
+struct chimera_common_delegation {
+    int sync_delegation;            /* 0/1, or -1 if unset */
+    int sync_delegation_threads;    /* >=0, or -1 if unset */
+    int async_delegation;           /* 0/1, or -1 if unset */
+    int async_delegation_threads;   /* >=0, or -1 if unset */
+};
+
+/*
+ * Populate `out` from the "common" section's delegation keys (sync_delegation,
+ * sync_delegation_threads, async_delegation, async_delegation_threads).  A
+ * missing section or key leaves the corresponding field at -1.  `root` is the
+ * parsed top-level config object (may be NULL).
+ */
+static inline void
+chimera_common_delegation_config(
+    json_t                           *root,
+    struct chimera_common_delegation *out)
+{
+    json_t *common, *val;
+
+    out->sync_delegation          = -1;
+    out->sync_delegation_threads  = -1;
+    out->async_delegation         = -1;
+    out->async_delegation_threads = -1;
+
+    if (!root) {
+        return;
+    }
+
+    common = json_object_get(root, "common");
+    if (!json_is_object(common)) {
+        return;
+    }
+
+    val = json_object_get(common, "sync_delegation");
+    if (json_is_boolean(val)) {
+        out->sync_delegation = json_is_true(val);
+    }
+
+    val = json_object_get(common, "sync_delegation_threads");
+    if (json_is_integer(val)) {
+        out->sync_delegation_threads = (int) json_integer_value(val);
+    }
+
+    val = json_object_get(common, "async_delegation");
+    if (json_is_boolean(val)) {
+        out->async_delegation = json_is_true(val);
+    }
+
+    val = json_object_get(common, "async_delegation_threads");
+    if (json_is_integer(val)) {
+        out->async_delegation_threads = (int) json_integer_value(val);
+    }
+} /* chimera_common_delegation_config */
+
+/*
  * Return the path configured in the shared "common" section's "metrics_file"
  * key, or NULL if the section or key is absent (or not a string).  This is the
  * file into which a process dumps a final Prometheus scrape at shutdown -- the

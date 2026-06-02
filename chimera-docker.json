@@ -1,9 +1,11 @@
 {
-    "server": {
-        "threads": 4,
+    "common": {
         "sync_delegation_threads": 8,
         "async_delegation": false,
-        "async_delegation_threads": 8,
+        "async_delegation_threads": 8
+    },
+    "server": {
+        "threads": 4,
         "rest_http_port": 8080
     },
     "mounts": {
