@@ -596,6 +596,13 @@ set(SMBTORTURE_ENABLED_cairn
     # Regression coverage for previously-fixed durable-v2 reconnect bugs
     # (currently the Samba bug15624 reconnect subtest).  Small/fast.
     smb2.durable-v2-regressions
+    # SMB3 durable-handle live phase: with the cairn/diskfs open_at now
+    # signalling r_created (so OPEN_IF returns CREATED on a fresh file)
+    # and the durable-grant gate now bypassing the copy_range backend
+    # check, the disconnect / delay suites exercise the in-memory durable
+    # registry on the native backends.
+    smb2.durable-open-disconnect
+    smb2.durable-v2-delay
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id
@@ -670,6 +677,12 @@ set(SMBTORTURE_ENABLED_diskfs_common
     # Regression coverage for previously-fixed durable-v2 reconnect bugs
     # (currently the Samba bug15624 reconnect subtest).  Small/fast.
     smb2.durable-v2-regressions
+    # SMB3 durable-handle live phase: diskfs open_at now signals r_created
+    # on the new-inode path so OPEN_IF returns CREATED for a fresh file,
+    # and the durable-grant gate bypasses the copy_range backend check for
+    # durable-aware opens; both block backends share the diskfs module.
+    smb2.durable-open-disconnect
+    smb2.durable-v2-delay
     smb2.notify-inotify
     smb2.secleak
     smb2.session-id

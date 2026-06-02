@@ -382,9 +382,19 @@ chimera_smb_create_gen_open_file(
          * server; if the backend can't do server-side copy the client falls
          * back to a cache-mediated copy that reads stale data (fsx READ BAD
          * DATA on diskfs/cairn).  Where copy_range is unavailable we leave the
-         * file uncached (write-through), which is correct. */
+         * file uncached (write-through), which is correct.
+         *
+         * Durable-aware opens are the exception: MS-SMB2 3.3.5.9 requires a
+         * durable grant to be paired with a batch oplock or HANDLE-caching
+         * lease, and durable-aware clients (WPTS, smbtorture durable suites)
+         * verify that response context on the initial CREATE.  Without a
+         * caching grant the durable request is silently dropped and the suite
+         * fails before it even disconnects.  Durable-aware Windows clients do
+         * not stream copy_file_range through a durable handle, so opting in
+         * for those opens does not re-introduce the fsx hazard. */
         bool backend_copy_safe =
-            (oh->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE) != 0;
+            (oh->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE) != 0 ||
+            durable_request;
 
         /* An explicitly requested SMB2 lease (RqLs) is acquired even for an
          * attribute-only ("stat") open: a handle/read-caching lease is about the
