@@ -55,10 +55,12 @@
 #define DISKFS_ORPHAN_INUM        3
 #define DISKFS_ORPHAN_GEN         1   /* permanent: created at format, never deleted */
 
-/* Max inodes a single transaction can hold locked at once.  rename needs
- * 4 (two parents, child, replaced target); others (e.g. readdir) touch
- * many but only 2 at a time and release as they go. */
-#define DISKFS_TXN_MAX_INODES     4
+/* Inodes a transaction holds locked inline before spilling to a heap list.
+ * Sized for the largest single op (rename: two parents, child, replaced
+ * target = 4), which stays allocation-free.  An explicit multi-op transaction
+ * may lock arbitrarily many inodes; beyond this it spills to malloc'd slots
+ * (struct diskfs_txn_spill) so there is no hard cap. */
+#define DISKFS_TXN_INLINE_INODES  4
 
 /* Diskfs RMW writes assemble:
  *   prefix (valid + zero) + request write iovecs +
@@ -837,6 +839,16 @@ struct diskfs_txn_slot {
     enum diskfs_inode_lock_mode mode;
 };
 
+/* Overflow slot for a transaction that locks more than DISKFS_TXN_INLINE_INODES
+ * inodes (only an explicit multi-op transaction reaches this).  Heap-allocated
+ * and freed when the lock is released; libc malloc/free is thread-safe, so the
+ * intent-log thread may free these during a write-txn commit. */
+struct diskfs_txn_spill {
+    struct diskfs_inode     *inode;
+    enum diskfs_inode_lock_mode mode;
+    struct diskfs_txn_spill *next;
+};
+
 /* Commit completion callback.  Will be invoked exactly once per successful
  * commit, with status 0 on success or a CHIMERA_VFS_* code on failure.
  * Today commits never fail, but the signature is async-shaped so a future
@@ -866,8 +878,9 @@ struct diskfs_txn {
     enum diskfs_txn_type           type;
     struct diskfs_thread          *thread;
     struct diskfs_txn             *next;   /* per-thread free list link */
-    struct diskfs_txn_slot         inodes[DISKFS_TXN_MAX_INODES];
-    int                            num_inodes;
+    struct diskfs_txn_slot         inodes[DISKFS_TXN_INLINE_INODES];
+    int                            num_inodes;   /* count in the inline array (0..INLINE) */
+    struct diskfs_txn_spill       *spill;        /* overflow list, NULL on the common path */
     struct diskfs_txn_block       *blocks; /* dirty blocks pinned by this txn */
     struct diskfs_txn_free        *pending_frees; /* ranges freed, applied on commit */
 
@@ -1831,18 +1844,27 @@ diskfs_block_waiter_free(
     thread->block_waiter_free_list = w;
 } /* diskfs_block_waiter_free */
 
-/* Record a held inode in the transaction's fixed slot array. */
+/* Record a held inode in the transaction.  Uses the inline array until it is
+ * full, then spills to a heap-allocated slot (no hard cap on inodes per txn). */
 static inline void
 diskfs_txn_add_slot(
     struct diskfs_txn          *txn,
     struct diskfs_inode        *inode,
     enum diskfs_inode_lock_mode mode)
 {
-    chimera_diskfs_abort_if(txn->num_inodes >= DISKFS_TXN_MAX_INODES,
-                            "diskfs txn inode slots exhausted");
-    txn->inodes[txn->num_inodes].inode = inode;
-    txn->inodes[txn->num_inodes].mode  = mode;
-    txn->num_inodes++;
+    if (likely(txn->num_inodes < DISKFS_TXN_INLINE_INODES)) {
+        txn->inodes[txn->num_inodes].inode = inode;
+        txn->inodes[txn->num_inodes].mode  = mode;
+        txn->num_inodes++;
+        return;
+    }
+
+    struct diskfs_txn_spill *s = malloc(sizeof(*s));
+
+    s->inode   = inode;
+    s->mode    = mode;
+    s->next    = txn->spill;
+    txn->spill = s;
 } /* diskfs_txn_add_slot */
 
 /* Inode LRU (recycle candidates).  All require the owning shard lock. */
@@ -2096,7 +2118,8 @@ diskfs_txn_unlock_inode(
     struct diskfs_txn   *txn,
     struct diskfs_inode *inode)
 {
-    int i;
+    struct diskfs_txn_spill **pp;
+    int                       i;
 
     for (i = 0; i < txn->num_inodes; i++) {
         if (txn->inodes[i].inode == inode) {
@@ -2104,6 +2127,18 @@ diskfs_txn_unlock_inode(
 
             txn->inodes[i] = txn->inodes[txn->num_inodes - 1];
             txn->num_inodes--;
+            diskfs_inode_release_one(txn->thread, inode, mode);
+            return;
+        }
+    }
+
+    for (pp = &txn->spill; *pp; pp = &(*pp)->next) {
+        if ((*pp)->inode == inode) {
+            struct diskfs_txn_spill    *s    = *pp;
+            enum diskfs_inode_lock_mode mode = s->mode;
+
+            *pp = s->next;
+            free(s);
             diskfs_inode_release_one(txn->thread, inode, mode);
             return;
         }
@@ -2118,13 +2153,21 @@ diskfs_txn_unlock_inode(
 static inline void
 diskfs_txn_unlock_all(struct diskfs_txn *txn)
 {
-    int i;
+    struct diskfs_txn_spill *s;
+    int                      i;
 
     for (i = 0; i < txn->num_inodes; i++) {
         diskfs_inode_release_one(txn->thread, txn->inodes[i].inode,
                                  txn->inodes[i].mode);
     }
     txn->num_inodes = 0;
+
+    while (txn->spill) {
+        s          = txn->spill;
+        txn->spill = s->next;
+        diskfs_inode_release_one(txn->thread, s->inode, s->mode);
+        free(s);
+    }
 } /* diskfs_txn_unlock_all */
 
 /*
@@ -2243,6 +2286,7 @@ diskfs_inode_acquire(
 {
     struct diskfs_inode_shard *shard;
     struct diskfs_inode       *inode;
+    struct diskfs_txn_spill   *s;
     int                        i;
 
     for (i = 0; i < txn->num_inodes; i++) {
@@ -2252,6 +2296,17 @@ diskfs_inode_acquire(
                 cb(NULL, CHIMERA_VFS_ENOENT, private_data);
             } else {
                 cb(inode, CHIMERA_VFS_OK, private_data);
+            }
+            return;
+        }
+    }
+
+    for (s = txn->spill; s; s = s->next) {
+        if (s->inode->inum == inum) {
+            if (unlikely(s->inode->gen != gen)) {
+                cb(NULL, CHIMERA_VFS_ENOENT, private_data);
+            } else {
+                cb(s->inode, CHIMERA_VFS_OK, private_data);
             }
             return;
         }
@@ -2308,12 +2363,19 @@ diskfs_inode_acquire_pinned(
     void                       *private_data)
 {
     struct diskfs_inode_shard *shard;
+    struct diskfs_txn_spill   *s;
     int                        i;
 
     /* Already locked in this txn: reuse the held grant (matches the txn-slot
      * fast path in diskfs_inode_acquire). */
     for (i = 0; i < txn->num_inodes; i++) {
         if (txn->inodes[i].inode == inode) {
+            cb(inode, CHIMERA_VFS_OK, private_data);
+            return;
+        }
+    }
+    for (s = txn->spill; s; s = s->next) {
+        if (s->inode == inode) {
             cb(inode, CHIMERA_VFS_OK, private_data);
             return;
         }
@@ -3601,11 +3663,17 @@ diskfs_inode_flush(struct diskfs_inode *inode)
 static void
 diskfs_txn_flush_inodes(struct diskfs_txn *txn)
 {
-    int i;
+    struct diskfs_txn_spill *s;
+    int                      i;
 
     for (i = 0; i < txn->num_inodes; i++) {
         if (txn->inodes[i].mode == DISKFS_INODE_LOCK_WRITE) {
             diskfs_inode_flush(txn->inodes[i].inode);
+        }
+    }
+    for (s = txn->spill; s; s = s->next) {
+        if (s->mode == DISKFS_INODE_LOCK_WRITE) {
+            diskfs_inode_flush(s->inode);
         }
     }
 } /* diskfs_txn_flush_inodes */
@@ -3625,11 +3693,17 @@ diskfs_txn_unpin_blocks(
     struct diskfs_thread    *thread = txn->thread;
     struct diskfs_txn_block *tb     = txn->blocks;
     struct diskfs_txn_block *n;
+    struct diskfs_txn_spill *s;
     int                      i;
 
     for (i = 0; i < txn->num_inodes; i++) {
         if (txn->inodes[i].mode == DISKFS_INODE_LOCK_WRITE) {
             txn->inodes[i].inode->block = NULL;
+        }
+    }
+    for (s = txn->spill; s; s = s->next) {
+        if (s->mode == DISKFS_INODE_LOCK_WRITE) {
+            s->inode->block = NULL;
         }
     }
 
@@ -6823,6 +6897,7 @@ diskfs_txn_begin(
     txn->thread        = thread;
     txn->next          = NULL;
     txn->num_inodes    = 0;
+    txn->spill         = NULL;
     txn->blocks        = NULL;
     txn->pending_frees = NULL;
     return txn;
