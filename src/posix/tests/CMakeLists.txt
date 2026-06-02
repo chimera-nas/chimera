@@ -629,6 +629,7 @@ set(POSIX_STRESS_TEST_PROGRAMS
     test_fstest
     test_nametest
     test_fsstress
+    test_wfg_abba
 )
 
 foreach(prog ${POSIX_STRESS_TEST_PROGRAMS})
@@ -738,6 +739,15 @@ macro(_generate_stress_nfs3_tests_for_backend nfs_backend)
             COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_test_fsstress -b nfs3_${nfs_backend} -n 500 -p 1
         )
         set_tests_properties(chimera/posix/fsstress_nfs3_${nfs_backend} PROPERTIES TIMEOUT 180)
+
+        # wfg_abba (manual diagnostic, intentionally NOT auto-run): concurrent
+        # readdir vs same-dir rename forces ABBA lock cycles to validate the
+        # diskfs wait-for-graph deadlock detector.  Run it by hand, e.g.
+        #   netns_test_wrapper.sh posix_test_wfg_abba -b nfs3_diskfs_aio
+        # It is not wired into ctest because concurrent readdir trips a SEPARATE,
+        # pre-existing hang on non-blocking backends (reproduces on baseline
+        # memfs, which has no transactions/WFG) -- a readdir-path concurrency bug
+        # to fix before this can run unattended.
     endif()
 endmacro()
 
