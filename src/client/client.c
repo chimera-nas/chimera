@@ -90,6 +90,28 @@ chimera_client_config_set_tcp_flavor(
     config->tcp_flavor = flavor;
 } /* chimera_client_config_set_tcp_flavor */
 
+SYMBOL_EXPORT void
+chimera_client_config_set_delegation(
+    struct chimera_client_config *config,
+    int                           sync_delegation,
+    int                           sync_delegation_threads,
+    int                           async_delegation,
+    int                           async_delegation_threads)
+{
+    if (sync_delegation >= 0) {
+        config->sync_delegation = sync_delegation;
+    }
+    if (sync_delegation_threads >= 0) {
+        config->sync_delegation_threads = sync_delegation_threads;
+    }
+    if (async_delegation >= 0) {
+        config->async_delegation = async_delegation;
+    }
+    if (async_delegation_threads >= 0) {
+        config->async_delegation_threads = async_delegation_threads;
+    }
+} /* chimera_client_config_set_delegation */
+
 SYMBOL_EXPORT struct chimera_client_thread *
 chimera_client_thread_init(
     struct evpl           *evpl,
@@ -274,6 +296,20 @@ chimera_client_init_json(
                                                  mod_config ? mod_config : "");
             }
         }
+    }
+
+    /* The delegation pools are VFS-level; their canonical home is the shared
+     * "common" section.  Apply it last so it overrides any legacy values from
+     * the "config" section above. */
+    {
+        struct chimera_common_delegation deleg;
+
+        chimera_common_delegation_config(root, &deleg);
+        chimera_client_config_set_delegation(config,
+                                             deleg.sync_delegation,
+                                             deleg.sync_delegation_threads,
+                                             deleg.async_delegation,
+                                             deleg.async_delegation_threads);
     }
 
     client = chimera_client_init(config, cred, metrics);

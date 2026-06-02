@@ -34,6 +34,19 @@ chimera_client_config_set_tcp_flavor(
     struct chimera_client_config *config,
     enum chimera_tcp_flavor       flavor);
 
+/*
+ * Override the VFS delegation-pool settings.  Each argument is applied only when
+ * >= 0; pass -1 to leave the current value untouched.  Mirrors the "common"
+ * section keys parsed by chimera_common_delegation_config().
+ */
+void
+chimera_client_config_set_delegation(
+    struct chimera_client_config *config,
+    int                           sync_delegation,
+    int                           sync_delegation_threads,
+    int                           async_delegation,
+    int                           async_delegation_threads);
+
 struct chimera_client *
 chimera_client_init(
     const struct chimera_client_config *config,

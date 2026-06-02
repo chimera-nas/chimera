@@ -337,6 +337,27 @@ main(
         chimera_server_config_set_async_delegation_threads(server_config, int_value);
     }
 
+    /* The delegation pools are VFS-level; their canonical home is the shared
+     * "common" section.  Apply it after the legacy "server" keys above so it
+     * takes precedence. */
+    {
+        struct chimera_common_delegation deleg;
+
+        chimera_common_delegation_config(config, &deleg);
+        if (deleg.sync_delegation >= 0) {
+            chimera_server_config_set_sync_delegation(server_config, deleg.sync_delegation);
+        }
+        if (deleg.sync_delegation_threads >= 0) {
+            chimera_server_config_set_sync_delegation_threads(server_config, deleg.sync_delegation_threads);
+        }
+        if (deleg.async_delegation >= 0) {
+            chimera_server_config_set_async_delegation(server_config, deleg.async_delegation);
+        }
+        if (deleg.async_delegation_threads >= 0) {
+            chimera_server_config_set_async_delegation_threads(server_config, deleg.async_delegation_threads);
+        }
+    }
+
     json_value = json_object_get(server_params, "smb_persistent_handles");
     if (json_is_boolean(json_value)) {
         chimera_server_config_set_smb_persistent_handles(server_config, json_is_true(json_value));

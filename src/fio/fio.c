@@ -377,6 +377,20 @@ fio_chimera_init(struct thread_data *td)
         chimera_client_config_set_tcp_flavor(ChimeraClientConfig,
                                              chimera_common_tcp_flavor(config));
 
+        /* VFS delegation pools are configured in the shared "common" section;
+         * apply them so the fio engine can, e.g., disable delegation entirely
+         * ("sync_delegation": false) and run VFS ops inline on the job thread. */
+        {
+            struct chimera_common_delegation deleg;
+
+            chimera_common_delegation_config(config, &deleg);
+            chimera_client_config_set_delegation(ChimeraClientConfig,
+                                                 deleg.sync_delegation,
+                                                 deleg.sync_delegation_threads,
+                                                 deleg.async_delegation,
+                                                 deleg.async_delegation_threads);
+        }
+
         struct chimera_vfs_cred root_cred;
         chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
 
