@@ -855,11 +855,11 @@ cairn_map_acl(
  */
 static void
 cairn_inherit_acl(
-    struct cairn_thread            *thread,
-    struct cairn_inode             *child,
-    uint64_t                        parent_inum,
-    const struct chimera_vfs_attrs *set_attr,
-    int                             windows_default)
+    struct cairn_thread      *thread,
+    struct cairn_inode       *child,
+    uint64_t                  parent_inum,
+    const struct chimera_acl *new_acl,
+    int                       windows_default)
 {
     static __thread uint8_t pbuf[CAIRN_ACL_STRUCT_SCRATCH];
     struct chimera_acl     *pacl   = (struct chimera_acl *) pbuf;
@@ -867,10 +867,16 @@ cairn_inherit_acl(
     uint16_t                want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
         (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
 
-    if ((set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) &&
-        set_attr->va_acl && set_attr->va_acl->num_aces) {
-        cairn_put_acl(thread, child->inum, set_attr->va_acl);
-        child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(set_attr->va_acl);
+    /* An explicit ACL supplied at create (e.g. an SMB SD via SecD) takes
+     * precedence over inheritance / the windows_default below.  The caller
+     * extracts new_acl from set_attr BEFORE cairn_apply_attrs() runs, since
+     * apply_attrs resets va_set_mask down to the bits it applied (ACL isn't
+     * one of them).  Passing the pointer explicitly avoids relying on a
+     * possibly-uninitialized set_attr->va_acl pointer in callers that don't
+     * always set ATTR_ACL (e.g., NFS3 creates). */
+    if (new_acl && new_acl->num_aces) {
+        cairn_put_acl(thread, child->inum, new_acl);
+        child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(new_acl);
         return;
     }
 
@@ -2248,10 +2254,16 @@ cairn_mkdir_at(
     inode.btime          = now;
     inode.dos_attributes = 0;
 
+    /* Snapshot any explicit ACL pointer BEFORE cairn_apply_attrs() rewrites
+     * va_set_mask and drops the ATTR_ACL bit. */
+    const struct chimera_acl *new_acl_mkdir =
+        (request->mkdir_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL)
+        ? request->mkdir_at.set_attr->va_acl : NULL;
+
     cairn_apply_attrs(&inode, request->mkdir_at.set_attr);
 
     cairn_inherit_acl(thread, &inode, parent_inode->inum,
-                      request->mkdir_at.set_attr,
+                      new_acl_mkdir,
                       request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
 
     cairn_map_attrs(shared, &request->mkdir_at.r_attr, &inode);
@@ -2816,10 +2828,16 @@ cairn_open_at(
         new_inode.dos_attributes = 0;
         new_inode.refcnt         = 1;
 
+        /* Snapshot any explicit ACL pointer BEFORE cairn_apply_attrs() rewrites
+         * va_set_mask and drops the ATTR_ACL bit. */
+        const struct chimera_acl *new_acl_open =
+            (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL)
+            ? request->open_at.set_attr->va_acl : NULL;
+
         cairn_apply_attrs(&new_inode, request->open_at.set_attr);
 
         cairn_inherit_acl(thread, &new_inode, parent_inode->inum,
-                          request->open_at.set_attr,
+                          new_acl_open,
                           request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
 
         new_dirent_value.inum     = new_inode.inum;
