@@ -22,8 +22,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <time.h>
-#include <urcu.h>
-#include <urcu/urcu-memb.h>
+#include <urcu/urcu-qsbr.h>
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_user_cache.h"
@@ -117,7 +116,7 @@ test_local_ntlm_auth(void)
                                NULL, 0, 0, 0, NULL, 1);
 
     /* Verify user was added to cache */
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     user = chimera_vfs_user_cache_lookup_by_name(cache, "johndoe");
     if (user && user->uid == 1000 && user->gid == 1000) {
@@ -150,7 +149,7 @@ test_local_ntlm_auth(void)
         TEST_PASS("Username lookup is case-insensitive");
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     /* Cleanup */
     chimera_vfs_user_cache_destroy(cache);
@@ -175,7 +174,7 @@ test_user_lookup_by_uid(void)
     chimera_vfs_user_cache_add(cache, "user1001", NULL, NULL, NULL, 1001, 1001, 0, NULL, 1);
     chimera_vfs_user_cache_add(cache, "user2000", NULL, NULL, NULL, 2000, 2000, 0, NULL, 1);
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     user = chimera_vfs_user_cache_lookup_by_uid(cache, 1000);
     if (user && strcmp(user->username, "user1000") == 0) {
@@ -198,7 +197,7 @@ test_user_lookup_by_uid(void)
         TEST_FAIL("Lookup non-existent UID should return NULL");
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     chimera_vfs_user_cache_destroy(cache);
 } /* test_user_lookup_by_uid */
@@ -222,7 +221,7 @@ test_supplementary_groups(void)
     chimera_vfs_user_cache_add(cache, "multigroup", NULL, NULL, NULL,
                                1000, 1000, 5, gids, 1);
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     user = chimera_vfs_user_cache_lookup_by_name(cache, "multigroup");
     if (user && user->ngids == 5) {
@@ -253,7 +252,7 @@ test_supplementary_groups(void)
         TEST_FAIL("User with no supplementary groups");
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     chimera_vfs_user_cache_destroy(cache);
 } /* test_supplementary_groups */
@@ -282,7 +281,7 @@ test_user_caching_with_sid(void)
                                ad_sid,
                                10001, 10001, 2, test_gids, 0);
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     user = chimera_vfs_user_cache_lookup_by_name(cache, "aduser@TEST.LOCAL");
 
@@ -309,7 +308,7 @@ test_user_caching_with_sid(void)
         TEST_FAIL("AD user lookup failed");
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     chimera_vfs_user_cache_destroy(cache);
 } /* test_user_caching_with_sid */
@@ -371,7 +370,7 @@ test_user_full_fields(void)
                                sid,
                                1001, 1001, 3, gids, 1);
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     user = chimera_vfs_user_cache_lookup_by_name(cache, "fulluser");
 
@@ -403,7 +402,7 @@ test_user_full_fields(void)
         TEST_FAIL("Full user lookup failed");
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     chimera_vfs_user_cache_destroy(cache);
 } /* test_user_full_fields */
@@ -427,21 +426,21 @@ test_user_update(void)
                                "S-1-5-21-111-222-333-1000",
                                1000, 1000, 0, NULL, 0);
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
     user = chimera_vfs_user_cache_lookup_by_name(cache, "updateme");
     if (user && user->uid == 1000) {
         TEST_PASS("Initial user add");
     } else {
         TEST_FAIL("Initial user add");
     }
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     /* Update the same user with different UID */
     chimera_vfs_user_cache_add(cache, "updateme", NULL, NULL,
                                "S-1-5-21-111-222-333-2000",
                                2000, 2000, 0, NULL, 0);
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
     user = chimera_vfs_user_cache_lookup_by_name(cache, "updateme");
     if (user && user->uid == 2000) {
         TEST_PASS("User update replaces old entry");
@@ -450,7 +449,7 @@ test_user_update(void)
     } else {
         TEST_FAIL("User update behavior");
     }
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     chimera_vfs_user_cache_destroy(cache);
 } /* test_user_update */
@@ -557,7 +556,7 @@ test_cache_capacity(void)
     }
 
     /* Check how many users are still in cache */
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
     for (int i = 0; i < 16; i++) {
         snprintf(username, sizeof(username), "user%d", i);
         user = chimera_vfs_user_cache_lookup_by_name(cache, username);
@@ -565,7 +564,7 @@ test_cache_capacity(void)
             found_count++;
         }
     }
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     fprintf(stderr, "  Found %d of 16 users in cache (capacity=8)\n", found_count);
 
@@ -626,7 +625,7 @@ main(
         } /* switch */
     }
 
-    urcu_memb_register_thread();
+    urcu_qsbr_register_thread();
 
     fprintf(stderr, "Running SMB authentication tests...\n");
     fprintf(stderr, "Mode: %s\n",
@@ -654,7 +653,7 @@ main(
         test_kerberos_auth();
     }
 
-    urcu_memb_unregister_thread();
+    urcu_qsbr_unregister_thread();
 
     fprintf(stderr, "\n========================================\n");
     fprintf(stderr, "Results: %d passed, %d failed, %d skipped\n",

@@ -37,8 +37,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
-#include <urcu.h>
-#include <urcu/urcu-memb.h>
+#include <urcu/urcu-qsbr.h>
 #include <urcu/wfstack.h>
 
 #include "vfs/vfs.h" /* enum chimera_rcu_pool_id, struct chimera_rcu_magazine */

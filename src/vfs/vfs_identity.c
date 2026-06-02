@@ -90,7 +90,7 @@ chimera_vfs_identity_cache_probe(
     const struct chimera_vfs_user *user  = NULL;
     int                            found = 0;
 
-    urcu_memb_read_lock();
+    urcu_qsbr_read_lock();
 
     switch (key) {
         case CHIMERA_VFS_IDENTITY_BY_UID:
@@ -112,7 +112,7 @@ chimera_vfs_identity_cache_probe(
         found = 1;
     }
 
-    urcu_memb_read_unlock();
+    urcu_qsbr_read_unlock();
 
     return found;
 } /* chimera_vfs_identity_cache_probe */
@@ -151,8 +151,12 @@ chimera_vfs_identity_worker(void *arg)
     struct chimera_vfs_identity         *identity = arg;
     struct chimera_vfs_identity_request *req;
 
-    urcu_memb_register_thread();
-
+    /* Pure writer: this worker only runs miss handlers and populates the cache
+     * (call_rcu + rcu_assign), never taking an RCU read lock -- the read-side
+     * probe runs on the evpl threads.  So it is not registered as a QSBR
+     * reader; registering it would put a thread that blocks in cond_wait and in
+     * NSS/winbind resolution into the grace-period quorum and stall reclamation
+     * process-wide. */
     pthread_mutex_lock(&identity->lock);
 
     while (1) {
@@ -196,8 +200,6 @@ chimera_vfs_identity_worker(void *arg)
     }
 
     pthread_mutex_unlock(&identity->lock);
-
-    urcu_memb_unregister_thread();
 
     return NULL;
 } /* chimera_vfs_identity_worker */

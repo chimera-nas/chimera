@@ -27,7 +27,7 @@
 #include "vfs/vfs_rpl_cache.h"
 #include "common/logging.h"
 
-#include <urcu/urcu-memb.h>
+#include <urcu/urcu-qsbr.h>
 
 static int passed = 0;
 static int failed = 0;
@@ -1065,7 +1065,7 @@ main(
 
     /* Required for the RPL cache test — its insert/invalidate paths
      * use call_rcu which relies on the URCU thread registry. */
-    urcu_memb_register_thread();
+    urcu_qsbr_register_thread();
 
     test_init_destroy();
     test_watch_create_destroy();
@@ -1092,6 +1092,6 @@ main(
     fprintf(stderr, "Results: %d passed, %d failed\n", passed, failed);
     fprintf(stderr, "========================================\n");
 
-    urcu_memb_unregister_thread();
+    urcu_qsbr_unregister_thread();
     return failed == 0 ? 0 : 1;
 } /* main */

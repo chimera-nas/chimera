@@ -36,7 +36,7 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs4_state.c nfs4_lease.c nf
             nfs4_pnfs.c nfs4_cb.c nfs4_layout_table.c)
 
 target_compile_definitions(chimera_nfs PRIVATE XXH_INLINE_ALL)
-target_link_libraries(chimera_nfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid urcu urcu-common)
+target_link_libraries(chimera_nfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid urcu-qsbr urcu-common)
 
 install(TARGETS chimera_nfs DESTINATION lib)
 

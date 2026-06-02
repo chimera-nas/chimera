@@ -4,7 +4,8 @@
 
 # Inline the liburcu read-side primitives for the server TUs that touch the RCU
 # caches (nfs/s3/smb/rest + server.c).  See src/vfs/CMakeLists.txt; deliberately
-# not set for the GPL fio plugin.  chimera is LGPL-2.1.
+# not set for the GPL fio plugin.  chimera is LGPL-2.1.  (URCU_API_MAP, selecting
+# the unprefixed QSBR API, is set project-wide in the top-level CMakeLists.txt.)
 add_compile_definitions(_LGPL_SOURCE)
 
 add_library(chimera_server SHARED server.c)

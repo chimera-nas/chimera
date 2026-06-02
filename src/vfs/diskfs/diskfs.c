@@ -16,8 +16,7 @@
 #include <limits.h>
 #include <jansson.h>
 #include <utlist.h>
-#include <urcu.h>
-#include <urcu/urcu-memb.h>
+#include <urcu/urcu-qsbr.h>
 #include <xxhash.h>     /* XXH_INLINE_ALL set in CMakeLists; header-only */
 
 #include "common/varint.h"
