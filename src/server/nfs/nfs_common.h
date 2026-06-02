@@ -154,12 +154,27 @@ struct nfs_request {
         struct MKNOD3args       *args_mknod;
         struct WRITE4args       *args_write4;
     };
-    struct COMPOUND4args *args_compound;
+    struct COMPOUND4args           *args_compound;
+    /* Explicit-transaction bookkeeping (CHIMERA_VFS_CAP_TRANSACTIONAL).  One
+     * NFS3 RPC runs as one transaction: begin (WRITE/READ) -> the op's VFS
+     * calls -> commit before the reply is sent.  txn is the backend handle
+     * (NULL for non-transactional backends -> autocommit, unchanged).  txn_ts
+     * is the wait-die priority, assigned once and reused across retries so a
+     * conflicting op cannot starve; txn_attempt bounds the retries.  txn_op_status
+     * carries the op result across an async EndTransaction(ABORT). */
+    struct chimera_vfs_transaction *txn;
+    uint64_t                        txn_ts;
+    int                             txn_attempt;
+    enum chimera_vfs_error          txn_op_status;
+    uint32_t                        write_length;
+    uint32_t                        write_sync;
     union {
         struct READLINK3res    res_readlink;
         struct READDIR3res     res_readdir;
         struct READDIRPLUS3res res_readdirplus;
         struct COMPOUND4res    res_compound;
+        struct WRITE3res       res_write;
+        struct CREATE3res      res_create;
     };
     union {
         struct nfs_nfs3_readdir_cursor     readdir3_cursor;

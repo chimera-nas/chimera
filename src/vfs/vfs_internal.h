@@ -226,6 +226,12 @@ chimera_vfs_request_alloc_common(
     request->io_handle            = NULL;
     request->io_owns_lease_ref    = 0;
 
+    /* Inherit the transaction the protocol enlisted (NULL = autocommit).  This
+     * is read, not cleared: the protocol sets thread->enlist_txn only for the
+     * (synchronous) duration of an enlisted op call and clears it right after,
+     * so a pooled request never leaks a stale transaction onto a later op. */
+    request->transaction = thread->enlist_txn;
+
     if (fh && fhlen > 0) {
         memcpy(request->fh, fh, fhlen);
     }
@@ -447,13 +453,19 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
         return;
     }
 
+    /* A transaction lives on one backend thread (thread-local backend state); an
+     * enlisted op (or the end op) must run on the thread the begin ran on, so
+     * route by the transaction's affinity key rather than this op's own fh_hash. */
+    uint64_t route_hash = request->transaction ? request->transaction->route_hash
+                                               : request->fh_hash;
+
     if ((module->capabilities & CHIMERA_VFS_CAP_BLOCKING) &&
         vfs->num_sync_delegation_threads > 0) {
-        thread_id         = request->fh_hash % vfs->num_sync_delegation_threads;
+        thread_id         = route_hash % vfs->num_sync_delegation_threads;
         delegation_thread = &vfs->sync_delegation_threads[thread_id];
         chimera_vfs_post_to_delegation(request, delegation_thread);
     } else if (vfs->num_async_delegation_threads > 0) {
-        thread_id         = request->fh_hash % vfs->num_async_delegation_threads;
+        thread_id         = route_hash % vfs->num_async_delegation_threads;
         delegation_thread = &vfs->async_delegation_threads[thread_id];
         chimera_vfs_post_to_delegation(request, delegation_thread);
     } else {

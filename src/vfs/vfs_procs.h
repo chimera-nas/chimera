@@ -1035,3 +1035,58 @@ chimera_vfs_remove_stream(
     uint32_t                             namelen,
     chimera_vfs_remove_stream_callback_t callback,
     void                                *private_data);
+
+/* Explicit multi-operation transactions (CHIMERA_VFS_CAP_TRANSACTIONAL).
+ *
+ * begin_transaction resolves the module from (fh, fhlen).  If the module is not
+ * transactional the callback fires immediately with (OK, NULL) and nothing is
+ * dispatched -- the caller then runs in legacy autocommit mode (leaves
+ * request->transaction NULL on each op).  Otherwise the backend returns a handle
+ * the caller attaches to request->transaction on every enlisted op and passes
+ * back to end_transaction.  `ts` is the wait-die priority: assign it once at the
+ * first attempt (e.g. chimera_vfs_txn_alloc_ts()) and reuse the same value when
+ * retrying after ETXN_CONFLICT so the transaction cannot starve. */
+void
+chimera_vfs_begin_transaction(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    const void                      *fh,
+    int                              fhlen,
+    enum chimera_vfs_txn_mode        mode,
+    uint64_t                         ts,
+    chimera_vfs_begin_txn_callback_t callback,
+    void                            *private_data);
+
+/* end_transaction commits (durably for COMMIT_SYNC) or aborts the transaction.
+ * A NULL txn is a no-op (the non-transactional / autocommit case).  A COMMIT_*
+ * may complete with ETXN_CONFLICT (e.g. cairn optimistic-commit validation), in
+ * which case the transaction is already rolled back and the caller must retry
+ * the whole sequence from the top. */
+void
+chimera_vfs_end_transaction(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    enum chimera_vfs_txn_end        end_flag,
+    chimera_vfs_end_txn_callback_t  callback,
+    void                           *private_data);
+
+/* Allocate a globally-unique, monotonic wait-die priority timestamp.  Lower =
+ * older = wins.  Call once per logical transaction and reuse across retries. */
+uint64_t
+chimera_vfs_txn_alloc_ts(
+    struct chimera_vfs_thread *thread);
+
+/* Enlist the next chimera_vfs_* op issued on this thread into `txn`.  Bracket
+* each enlisted op call: chimera_vfs_thread_enlist(t, txn) immediately before
+* the call, chimera_vfs_thread_enlist(t, NULL) immediately after.  A NULL txn
+* (non-transactional backend) is a no-op (op runs autocommit).  Only single
+* VFS-request ops are safely enlisted this way; a multi-request core op (e.g.
+* path-walking chimera_vfs_lookup) would enlist only its first sub-request. */
+static inline void
+chimera_vfs_thread_enlist(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_transaction *txn)
+{
+    thread->enlist_txn = txn;
+} /* chimera_vfs_thread_enlist */
