@@ -345,6 +345,22 @@ main(
         /* unsafe_async: this test does not exercise crash recovery, so skip FUA/sync
          * on writes to run lighter. */
         json_object_set_new(cfg, "unsafe_async", json_true());
+        /* smb2.maxfid keeps 65520 file handles open across ~256 inode-cache
+         * shards; the inode home blocks stay pinned by the open handles and
+         * concurrent close traffic also pins LOGGED blocks (held until tail
+         * push).  The default cache (32768 blocks across 256 shards ≈ 128 per
+         * shard) is too small for this skew and aborts with either
+         *   - "b+tree lookup suspended on a cache miss"  (sync wrapper hits a
+         *     non-resident block on the ACL descent), or
+         *   - "block cache shard exhausted: every buffer pinned"
+         *     (recycle finds no clean victim in a hot shard).
+         * Both are diskfs cache-sizing issues, not protocol bugs.  Bump the
+         * cache for these tests so the working set fits.  TODO: replace this
+         * test-side workaround with a runtime fix -- either a cross-shard
+         * victim search (so pinned skew in one shard can draw from another)
+         * or making diskfs_map_attrs's ACL lookup tolerate suspension.  See
+         * diskfs.c:5665 and :2542 for the abort sites. */
+        json_object_set_new(cfg, "block_cache_blocks", json_integer(262144));
         json_str = json_dumps(cfg, JSON_COMPACT);
         snprintf(diskfs_cfg, sizeof(diskfs_cfg), "%s", json_str);
         free(json_str);

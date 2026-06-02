@@ -304,6 +304,7 @@ set(SMBTORTURE_SUITES
     smb2.lease
     smb2.lock
     smb2.maximum_allowed
+    smb2.maxfid
     smb2.mkdir
     smb2.name-mangling
     smb2.notify
@@ -599,6 +600,12 @@ set(SMBTORTURE_ENABLED_cairn
 # the diskfs module and enable the same set.
 set(SMBTORTURE_ENABLED_diskfs_common
     smb2.change_notify_disabled
+    # 65520-fid stress test.  The harness raises diskfs's block_cache_blocks
+    # for both diskfs backends (see smbtorture_test.c) so the working set --
+    # pinned inode home blocks + LOGGED journal blocks awaiting tail-push --
+    # fits without the per-shard pin exhaustion the default cache hits at
+    # this scale.
+    smb2.maxfid
     smb2.mkdir
     # Native DOS-attribute storage in the diskfs inode (in-memory + on-disk
     # dinode) lets the SMB create/overwrite-truncate attribute round-trip
