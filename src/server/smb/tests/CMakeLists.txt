@@ -479,15 +479,29 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.sharemode
     smb2.tcon
     smb2.winattr2
-    # io_uring passes a subset of the CHANGE_NOTIFY subtests; the rest
-    # (notify.close/dir/invalid-reauth/logoff/mask/rmdir1/rmdir3) still fail
-    # here despite passing on the plain linux passthrough, pending a follow-up.
+    # CHANGE_NOTIFY subtests run cleanly in isolation; the combined smb2.notify
+    # suite stays disabled (a different set of subtests it still runs hang the
+    # whole suite — see the per-subtest list below for what we cover).  The
+    # io_uring allowlist now matches the other passthrough/native backends:
+    # the previously io_uring-only failures all turned on the just-created
+    # directory's owner matching the caller.  io_uring runs SMB (AUTH_ATTR)
+    # opens without impersonation, so its asynchronous mkdir/mknod were leaving
+    # the new object owned by the server identity (root); the post-create
+    # fchownat in chimera_io_uring_reap now mirrors what the linux backend does
+    # via chimera_linux_set_attrs.
     smb2.notify.basedir
+    smb2.notify.close
+    smb2.notify.dir
     smb2.notify.double
     smb2.notify.file
     smb2.notify.handle-permissions
+    smb2.notify.invalid-reauth
+    smb2.notify.logoff
+    smb2.notify.mask
     smb2.notify.overflow
+    smb2.notify.rmdir1
     smb2.notify.rmdir2
+    smb2.notify.rmdir3
     smb2.notify.rmdir4
     smb2.notify.tcon
     smb2.notify.tcp

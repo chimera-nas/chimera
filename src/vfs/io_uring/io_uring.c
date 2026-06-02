@@ -486,6 +486,29 @@ chimera_io_uring_reap(
 
                     parent_fd = request->mkdir_at.handle->vfs_private;
 
+                    /* SMB (AUTH_ATTR) does not impersonate the caller, so the
+                     * mkdir runs as the server identity and the new directory
+                     * is owned by the server -- which then fails the owner-
+                     * default access check on any subsequent open by the
+                     * client.  chimera_setup_credential injected the caller's
+                     * UID/GID into set_attr above; apply them now so the
+                     * directory ends up owned by the requesting principal,
+                     * matching what the linux backend does via
+                     * chimera_linux_set_attrs.  fchownat is a fast metadata
+                     * call (no I/O) and is gated on AUTH_ATTR injection. */
+                    if (request->status == CHIMERA_VFS_OK) {
+                        uint64_t mask = request->mkdir_at.set_attr->va_set_mask;
+                        if (mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+                            uid_t uid = (mask & CHIMERA_VFS_ATTR_UID)
+                                ? (uid_t) request->mkdir_at.set_attr->va_uid : (uid_t) -1;
+                            gid_t gid = (mask & CHIMERA_VFS_ATTR_GID)
+                                ? (gid_t) request->mkdir_at.set_attr->va_gid : (gid_t) -1;
+                            if (fchownat(parent_fd, fullname, uid, gid, 0) < 0) {
+                                request->status = chimera_linux_errno_to_status(errno);
+                            }
+                        }
+                    }
+
                     sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
 
                     io_uring_prep_statx(sqe, parent_fd, fullname, AT_STATX_SYNC_AS_STAT,
@@ -1437,6 +1460,25 @@ chimera_io_uring_mknod_at(
         request->status = chimera_linux_errno_to_status(mknodat_errno);
         request->complete(request);
         return;
+    }
+
+    /* SMB (AUTH_ATTR) does not impersonate the caller, so mknodat ran as
+     * the server identity; apply the caller's UID/GID that
+     * chimera_setup_credential injected.  Mirrors symlink_at's fchownat. */
+    {
+        uint64_t mask = request->mknod_at.set_attr->va_set_mask;
+        if (mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+            uid_t uid = (mask & CHIMERA_VFS_ATTR_UID)
+                ? (uid_t) request->mknod_at.set_attr->va_uid : (uid_t) -1;
+            gid_t gid = (mask & CHIMERA_VFS_ATTR_GID)
+                ? (gid_t) request->mknod_at.set_attr->va_gid : (gid_t) -1;
+            if (fchownat(fd, fullname, uid, gid, AT_SYMLINK_NOFOLLOW) < 0) {
+                chimera_restore_privilege(request->cred);
+                request->status = chimera_linux_errno_to_status(errno);
+                request->complete(request);
+                return;
+            }
+        }
     }
 
     chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
