@@ -332,11 +332,11 @@ fio_chimera_init(struct thread_data *td)
 
         if (o->config) {
 
-            fprintf(stderr, "Loading config file %s\n", o->config);
+            chimera_fio_info("Loading config file %s", o->config);
             config = json_load_file(o->config, 0, NULL);
 
             if (!config) {
-                fprintf(stderr, "Failed to load config file %s\n", o->config);
+                chimera_fio_error("Failed to load config file %s", o->config);
                 return EINVAL;
             }
 
@@ -350,7 +350,7 @@ fio_chimera_init(struct thread_data *td)
                     config_obj  = json_object_get(module, "config");
 
                     if (!module_name || !module_path) {
-                        fprintf(stderr, "Invalid module config\n");
+                        chimera_fio_error("Invalid module config");
                         return EINVAL;
                     }
 
@@ -360,8 +360,9 @@ fio_chimera_init(struct thread_data *td)
                         config_str = json_dumps(config_obj, JSON_COMPACT);
                     }
 
-                    fprintf(stderr, "Loading module %s path %s config %s\n", json_string_value(module_name),
-                            json_string_value(module_path), config_str ? config_str : "");
+                    chimera_fio_info("Loading module %s path %s",
+                                     json_string_value(module_name),
+                                     json_string_value(module_path));
 
                     chimera_client_config_add_module(ChimeraClientConfig, json_string_value(module_name),
                                                      json_string_value(module_path), config_str ? config_str : "");
@@ -475,7 +476,7 @@ fio_chimera_init(struct thread_data *td)
                     mount_point = json_object_get(mount, "mount_point");
 
                     if (!module || !module_path || !mount_point) {
-                        fprintf(stderr, "Invalid mount config\n");
+                        chimera_fio_error("Invalid mount config");
                         return EINVAL;
                     }
 
@@ -483,9 +484,9 @@ fio_chimera_init(struct thread_data *td)
                     json_t     *mount_opts = json_object_get(mount, "options");
                     const char *opts_str   = mount_opts ? json_string_value(mount_opts) : NULL;
 
-                    fprintf(stderr, "Mounting %s:%s at %s options=%s\n", json_string_value(module),
-                            json_string_value(module_path), json_string_value(mount_point),
-                            opts_str ? opts_str : "");
+                    chimera_fio_info("Mounting %s:%s at %s options=%s", json_string_value(module),
+                                     json_string_value(module_path), json_string_value(mount_point),
+                                     opts_str ? opts_str : "");
 
                     chimera_mount(client_thread,
                                   json_string_value(mount_point),
@@ -501,7 +502,7 @@ fio_chimera_init(struct thread_data *td)
                 }
 
                 if (mount_ctx.status != 0) {
-                    fprintf(stderr, "Failed to mount test module\n");
+                    chimera_fio_error("Failed to mount test module");
                     return 1;
                 }
             }
@@ -659,7 +660,7 @@ fio_chimera_open_callback(
     struct chimera_vfs_open_handle **fhp = private_data;
 
     if (status != CHIMERA_VFS_OK) {
-        fprintf(stderr, "Failed to open file\n");
+        chimera_fio_error("Failed to open file (status %d)", status);
         *fhp = NULL;
         return;
     }
