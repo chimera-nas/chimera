@@ -28,7 +28,7 @@ fstat_callback(
 
 struct open_ctx {
     int                             done;
-    enum chimera_vfs_error          status;
+    enum chimera_vfs_error status;
     struct chimera_vfs_open_handle *handle;
 };
 
