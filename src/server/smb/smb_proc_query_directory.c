@@ -148,7 +148,9 @@ chimera_smb_query_directory_readdir_callback(
             expected_length = 94 + namelen_padded;
             break;
         case SMB2_FILE_NAMES_INFORMATION:
-            expected_length = 64 + namelen_padded;
+            /* MS-FSCC 2.4.27 FileNamesInformation fixed header:
+             * NextEntryOffset(4) + FileIndex(4) + FileNameLength(4) = 12. */
+            expected_length = 12 + namelen_padded;
             break;
         case SMB2_FILE_FULL_DIRECTORY_INFORMATION:
             expected_length = 68 + namelen_padded;
@@ -230,6 +232,9 @@ chimera_smb_query_directory_readdir_callback(
 
             break;
         case SMB2_FILE_NAMES_INFORMATION:
+            /* FileIndex (0 = unspecified per MS-FSCC) + FileNameLength + name.
+             * NextEntryOffset was already written at the top of the entry. */
+            evpl_iovec_cursor_append_uint32(&entry_cursor, file_index);
             evpl_iovec_cursor_append_uint32(&entry_cursor, namelen * 2);
 
             namebuf = evpl_iovec_cursor_data(&entry_cursor);

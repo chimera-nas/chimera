@@ -90,7 +90,25 @@ chimera_smb_set_info_rename_callback(
 
     chimera_smb_open_file_release(request, open_file);
 
-    chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    /* Map the rename_at failure (if any) back to the SMB status the client
+    * needs.  EACCES/EPERM commonly surface from the engine's DELETE_CHILD /
+    * sharing-violation gates and must be reported as ACCESS_DENIED, not
+    * INTERNAL_ERROR — a STATUS_INTERNAL_ERROR makes smbtorture treat the
+    * server as broken instead of asserting on the actual returned code. */
+    uint32_t status;
+    switch (error_code) {
+        case CHIMERA_VFS_OK:        status = SMB2_STATUS_SUCCESS; break;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:     status = SMB2_STATUS_ACCESS_DENIED; break;
+        case CHIMERA_VFS_EEXIST:    status = SMB2_STATUS_OBJECT_NAME_COLLISION; break;
+        case CHIMERA_VFS_ENOENT:    status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND; break;
+        case CHIMERA_VFS_ENOTEMPTY: status = SMB2_STATUS_DIRECTORY_NOT_EMPTY; break;
+        case CHIMERA_VFS_EISDIR:    status = SMB2_STATUS_FILE_IS_A_DIRECTORY; break;
+        case CHIMERA_VFS_ENOTDIR:   status = SMB2_STATUS_NOT_A_DIRECTORY; break;
+        default:                    status = SMB2_STATUS_INTERNAL_ERROR; break;
+    } /* switch */
+
+    chimera_smb_complete_request(request, status);
 } /* chimera_smb_set_info_rename_callback */
 
 static void
@@ -323,6 +341,19 @@ chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
     struct chimera_vfs_thread      *vfs_thread  = request->compound->thread->vfs_thread;
     struct chimera_smb_tree        *tree        = request->tree;
     struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
+    struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
+
+    /* MS-FSA 2.1.5.14.11.1 SetInfo(FileRenameInformation): if the handle was
+     * not opened with DELETE access, the rename MUST fail with ACCESS_DENIED
+     * (the rename removes the old name from its parent and adds a new one, so
+     * the source handle's GrantedAccess must include DELETE).  Gate here, ahead
+     * of the destination-existence probe — otherwise a target collision would
+     * surface as OBJECT_NAME_COLLISION and mask the real authorization error. */
+    if (!(open_file->granted_access & SMB2_DELETE)) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
 
     if (rename_info->new_parent_len) {
         /* Moving to a different directory - lookup the new parent path */
