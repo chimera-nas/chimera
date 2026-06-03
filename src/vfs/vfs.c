@@ -1088,6 +1088,18 @@ chimera_vfs_thread_init(
         }
     }
 
+    /* Dense per-thread id for transaction-priority uniqueness (low bits of every
+     * core.ts this thread hands out).  Assigned once; one relaxed atomic per
+     * thread creation, never on a request path. */
+    {
+        static uint32_t txn_thread_seq;
+        thread->txn_thread_id = __atomic_fetch_add(&txn_thread_seq, 1, __ATOMIC_RELAXED)
+            & ((1u << CHIMERA_VFS_TXN_THREAD_BITS) - 1);
+        /* Seed >0 so the first allocated ts is never 0 (which means autocommit),
+        * even for thread id 0 within the first TSC tick after the clock zero. */
+        thread->txn_ts_hi = 1;
+    }
+
     if (vfs->metrics.metrics) {
         thread->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_instance *));
 

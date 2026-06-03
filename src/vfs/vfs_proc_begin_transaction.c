@@ -9,9 +9,24 @@
 SYMBOL_EXPORT uint64_t
 chimera_vfs_txn_alloc_ts(struct chimera_vfs_thread *thread)
 {
-    /* Strictly increasing and globally unique across threads.  Starts at 1 so a
-     * priority of 0 is never handed out.  Lower = older = wins under wait-die. */
-    return __atomic_add_fetch(&thread->vfs->txn_ts_counter, 1, __ATOMIC_RELAXED);
+    /* Globally-unique transaction priority without a shared atomic.  The high
+     * bits are a TSC-anchored, per-thread strictly-increasing counter (age order
+     * -> a longer-lived txn outranks a newcomer, so WFG victim selection -- abort
+     * the highest ts -- is starvation-free); the low CHIMERA_VFS_TXN_THREAD_BITS
+     * carry this thread's dense id so two threads never collide.  Shifting the
+     * TSC down by the thread bits first means (hi << bits) can never overflow,
+     * regardless of the raw counter magnitude; the per-thread bump guarantees
+     * uniqueness for two txns that land in the same TSC tick.  txn_ts_hi is
+     * seeded to 1 at thread init so the returned ts is never 0 (which is
+     * reserved for autocommit txns). */
+    uint64_t hi = chimera_vfs_now_ticks() >> CHIMERA_VFS_TXN_THREAD_BITS;
+
+    if (hi <= thread->txn_ts_hi) {
+        hi = thread->txn_ts_hi + 1;
+    }
+    thread->txn_ts_hi = hi;
+
+    return (hi << CHIMERA_VFS_TXN_THREAD_BITS) | thread->txn_thread_id;
 } /* chimera_vfs_txn_alloc_ts */
 
 static void

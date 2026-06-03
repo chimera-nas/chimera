@@ -1494,13 +1494,18 @@ struct chimera_vfs {
     struct chimera_vfs_delegation_thread *async_delegation_threads;
     struct chimera_vfs_close_thread       close_thread;
     struct chimera_vfs_metrics            metrics;
-    /* Monotonic source for wait-die transaction priorities (lower = older).
-    * Bumped once per logical transaction via chimera_vfs_txn_alloc_ts(). */
-    uint64_t                              txn_ts_counter;
     enum chimera_tcp_flavor               tcp_flavor;
     int                                   machine_name_len;
     char                                  machine_name[256];
 };
+
+/* Transaction priority (`core.ts`) layout: the high bits carry a per-thread,
+ * TSC-anchored, strictly-increasing counter (age order -> a longer-lived txn
+ * outranks a newcomer, which keeps WFG victim selection starvation-free), and
+ * the low CHIMERA_VFS_TXN_THREAD_BITS carry the allocating thread's dense id so
+ * values are globally unique without a shared atomic.  See
+ * chimera_vfs_txn_alloc_ts(). */
+#define CHIMERA_VFS_TXN_THREAD_BITS 16
 
 struct chimera_vfs_thread {
     struct evpl                         *evpl;
@@ -1526,6 +1531,13 @@ struct chimera_vfs_thread {
     struct evpl_doorbell                 doorbell;
     pthread_mutex_t                      lock;
     uint64_t                             anon_fh_key;
+
+    /* Transaction-priority allocation (chimera_vfs_txn_alloc_ts): a dense thread
+     * id assigned once at thread init (low bits of every ts -> global
+     * uniqueness) plus the last high-part handed out (kept strictly increasing
+     * for per-thread uniqueness within a TSC tick).  No shared atomic. */
+    uint32_t                             txn_thread_id;
+    uint64_t                             txn_ts_hi;
 
     struct chimera_vfs_thread_metrics    metrics;
 };
