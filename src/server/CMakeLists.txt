@@ -20,3 +20,5 @@ add_subdirectory(s3)
 add_subdirectory(smb)
 
 add_subdirectory(rest)
+
+add_subdirectory(tests)
