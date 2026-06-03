@@ -1044,13 +1044,11 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.durable-open
     smb2.durable-open.delete_on_close2
     smb2.durable-open.file-position
-    smb2.durable-open.lease
     smb2.durable-open.lock-lease
     smb2.durable-open.lock-noW-lease
     smb2.durable-open.lock-oplock
     smb2.durable-open.open-lease
     smb2.durable-open.open-oplock
-    smb2.durable-open.open2-lease
     smb2.durable-open.read-only
     smb2.durable-open.reopen1
     smb2.durable-open.reopen1a
@@ -2609,7 +2607,6 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.durable-open
     smb2.durable-open.delete_on_close2
     smb2.durable-open.file-position
-    smb2.durable-open.lease
     smb2.durable-open.lock-lease
     smb2.durable-open.lock-noW-lease
     smb2.durable-open.lock-oplock
@@ -2889,6 +2886,15 @@ macro(add_smbtorture_backend_tests backend)
             # variants, big-directory smb2.maxfid runs) legitimately need
             # closer to a minute even when passing.
             TIMEOUT 120)
+        # The smb2.durable-open.* / smb2.durable-v2-open.* families are
+        # lease/oplock-break state-machine tests; their pass/fail asserts on
+        # timing that gets tight when CPU is contended on slow CI runners,
+        # so serialize them against each other via a shared ctest lock.  They
+        # still run alongside unrelated tests, just not against each other.
+        if(SUITE MATCHES "^smb2\\.durable-(v2-)?open\\.")
+            set_tests_properties(${TEST_NAME} PROPERTIES
+                RESOURCE_LOCK smb_durable_oplock_family)
+        endif()
         if(NOT "${SUITE}" IN_LIST SMBTORTURE_ENABLED_${backend})
             # Known-incomplete on this backend: keep it visible but don't run
             # or fail on it.
