@@ -168,11 +168,20 @@ chimera_nfs4_exchange_id(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct EXCHANGE_ID4args       *args         = &argop->opexchange_id;
-    struct EXCHANGE_ID4res        *res          = &resop->opexchange_id;
-    uint64_t                       owner_major  = 42;
-    uint64_t                       owner_minor  = 42;
-    uint64_t                       server_scope = 42;
+    struct EXCHANGE_ID4args *args = &argop->opexchange_id;
+    struct EXCHANGE_ID4res  *res  = &resop->opexchange_id;
+    /* NFSv4.1 server identity.  A client treats two server addresses as the same
+     * server (shared state, eligible for trunking) when both the server-owner
+     * major id AND the server scope match (RFC 8881 sec 2.10.5); the Linux
+     * trunking-detection path keys on the major id.  Independent chimera servers
+     * that do not share state -- e.g. a pNFS data server co-deployed with its
+     * MDS -- must therefore differ in both, or the client coalesces them and
+     * misroutes the data path.  The "nfs_server_scope" knob sets both (default
+     * 42, preserving prior behavior). */
+    uint64_t                       server_scope = chimera_server_config_get_nfs_server_scope(
+        thread->shared->config);
+    uint64_t                       owner_major = server_scope;
+    uint64_t                       owner_minor = 42;
     struct timespec                now;
     struct nfs4_client_principal   principal;
     struct nfs4_exchange_id_result eid;

@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-# Usage: kvm_pnfs_test_wrapper.sh <vmlinuz> <rootfs.qcow2> <chimera_binary> <backend> <nfsver> <test_cmd>
+# Usage: kvm_pnfs_test_wrapper.sh <vmlinuz> <rootfs.qcow2> <chimera_binary> <backend> <nfsver> <ds_version> <test_cmd>
 #
 # Orchestrates an NFSv4.1 flex-files pNFS setup and a QEMU VM to exercise it:
 # 1. Starts a chimera *data server* (plain memfs) on 10.0.0.1:2050, exporting a
@@ -14,12 +14,17 @@
 #    portmap is needed) and steers each file's data to it.
 # 3. Boots a QEMU VM which mounts the MDS with vers=4.1 and runs the test.
 #
+# <ds_version> selects the NFS version the client uses for the direct data path
+# to the data server (advertised in ff_device_addr4.ffda_versions): "3" for the
+# NFSv3 data path, "4.1" for the NFSv4.1 data path.  The client->MDS mount is
+# always 4.1 (pNFS requires a session); ds_version is independent of it.
+#
 # On the first LAYOUTGET the MDS creates a backing file on the data server and
 # hands the client a flex-files layout pointing at the DS's native handle; the
-# client then does NFSv3 READ/WRITE straight to the data server.  memfs FHs are
-# version-independent, so the v4 control path and the v3 data path address the
-# same backing file.  A workload that reads back what it wrote proves the client
-# reached the data server via the layout.
+# client then does READ/WRITE straight to the data server over the configured
+# DS version.  memfs FHs are version-independent, so the v4 control path and the
+# v3/v4.1 data path address the same backing file.  A workload that reads back
+# what it wrote proves the client reached the data server via the layout.
 
 set -u
 
@@ -39,12 +44,19 @@ ROOTFS=$1; shift
 CHIMERA_BINARY=$1; shift
 BACKEND=$1; shift
 NFS_VERSION=$1; shift
+DS_VERSION=$1; shift
 TEST_CMD_ARG="$*"
 
 # pNFS requires NFSv4.1+.
 case "$NFS_VERSION" in
     4.1 | 4.2) ;;
     *) echo "pNFS test requires NFS 4.1+, got ${NFS_VERSION}" >&2; exit 1 ;;
+esac
+
+# The DS data path is either NFSv3 or NFSv4.1.
+case "$DS_VERSION" in
+    3 | 4.1) ;;
+    *) echo "pNFS DS version must be 3 or 4.1, got ${DS_VERSION}" >&2; exit 1 ;;
 esac
 
 INITRD="$(dirname "$VMLINUZ")/initrd"
@@ -70,8 +82,15 @@ MDS_IP="10.0.0.1"
 DS_IP="10.0.0.1"
 MDS_PORT=2049
 DS_PORT=2050
-# RFC 5665 universal address for DS_IP:2050 -> port 2050 = 8*256 + 2
-DS_UADDR="${DS_IP}.8.2"
+
+# NFSv4.1 DS I/O is session-based, and the Linux client keys its sessions on the
+# server's network address: a v4.1 DS that shares the MDS's address collides in
+# the client's transport switch ("addr already in xprt switch") and the data
+# path never comes up.  Give the v4.1 DS its own address (the v3 DS is stateless
+# and works fine co-located with the MDS, so it keeps 10.0.0.1).
+if [ "$DS_VERSION" = "4.1" ]; then
+    DS_IP="10.0.0.6"
+fi
 
 cleanup() {
     for pid in "$MDS_PID" "$DS_PID"; do
@@ -107,6 +126,10 @@ trap cleanup EXIT
 # portmap/mountd (port coexistence with the MDS) and serves READ/WRITE
 # statelessly by file handle, which is exactly what the client's direct pNFS
 # I/O needs.
+#
+# nfs_server_scope is distinct from the MDS's (default 42): for a v4.1 DS the
+# client keys server identity on EXCHANGE_ID scope, and an identical scope makes
+# it coalesce the DS with the MDS and misroute the data path.  Harmless for v3.
 generate_ds_config() {
     cat > "$DS_CONFIG" << EOF
 {
@@ -115,6 +138,7 @@ generate_ds_config() {
         "nfs_port": ${DS_PORT},
         "data_server": true,
         "external_portmap": true,
+        "nfs_server_scope": 43,
         "metrics_port": 9001
     },
     "mounts": { "ds_data": { "module": "memfs", "path": "/" } },
@@ -161,7 +185,7 @@ generate_mds_config() {
         "pnfs": {
             "enabled": true,
             "data_servers": [
-                { "netid": "tcp", "uaddr": "${DS_UADDR}", "backing_path": "/ds0" }
+                { "netid": "tcp", "uaddr": "${DS_IP}:${DS_PORT}", "version": "${DS_VERSION}", "backing_path": "/ds0" }
             ]
         }
     },
@@ -202,6 +226,9 @@ ip netns exec "${NETNS_NAME}" ip addr add 10.0.0.1/24 dev "${TAP_NAME}"
 # server address, so a guest mounting both 10.0.0.1 and 10.0.0.5 acts as two
 # distinct pNFS clients -- enough to exercise inter-client layout recall.
 ip netns exec "${NETNS_NAME}" ip addr add 10.0.0.5/24 dev "${TAP_NAME}"
+# A dedicated address for the data server so a v4.1 (session-based) DS does not
+# collide with the MDS's address in the client's transport switch.
+ip netns exec "${NETNS_NAME}" ip addr add 10.0.0.6/24 dev "${TAP_NAME}"
 ip netns exec "${NETNS_NAME}" ip link set "${TAP_NAME}" up
 
 # 1. Start the data server (must be up before the MDS, which mounts it at boot).

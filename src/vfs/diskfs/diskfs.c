@@ -11640,6 +11640,11 @@ diskfs_open_at_inserted_cb(
 
     (void) result;
     diskfs_bt_op_free(p->thread, op);
+    /* Signal to the protocol layer that this open created the file (vs.
+     * opened an existing one) so the SMB CREATE reply reports the correct
+     * Create Action (FILE_CREATED vs FILE_OPENED) for OPEN_IF / SUPERSEDE /
+     * OVERWRITE_IF dispositions.  Matches memfs/cairn. */
+    request->open_at.r_created = 1;
     diskfs_open_at_finish(request, p->inode_stash[0], p->inode_stash[1]);
 } /* diskfs_open_at_inserted_cb */
 

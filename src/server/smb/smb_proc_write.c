@@ -209,12 +209,24 @@ chimera_smb_write(struct chimera_smb_request *request)
         return;
     }
 
-    struct chimera_vfs_lease_owner io_owner = {
-        .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-        .client_key = request->session_handle->session->session_id,
-        .owner_lo   = request->write.open_file->file_id.pid,
-        .owner_hi   = request->write.open_file->file_id.vid,
-    };
+    /* When the open holds a caching lease, use the lease's owner identity for
+     * the write so chimera_vfs_break_reads_for_write self-exempts (mode.granted
+     * & MODE_W AND owner_equal): the holder is writing through its own granted
+     * write cache and must NOT break itself.  For RqLs leases the owner is the
+     * lease_key; for legacy oplocks it is the open's file_id.  Without this the
+     * lease is broken on every self-write, which races a server-initiated
+     * OPLOCK_BREAK notification with the WRITE response and surfaces as
+     * INVALID_NETWORK_RESPONSE on the client. */
+    struct chimera_vfs_lease_owner io_owner;
+    io_owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
+    io_owner.client_key = request->session_handle->session->session_id;
+    if (request->write.open_file->caching_lease_inserted) {
+        io_owner.owner_lo = request->write.open_file->caching_lease.owner.owner_lo;
+        io_owner.owner_hi = request->write.open_file->caching_lease.owner.owner_hi;
+    } else {
+        io_owner.owner_lo = request->write.open_file->file_id.pid;
+        io_owner.owner_hi = request->write.open_file->file_id.vid;
+    }
 
     /* Mandatory byte-range lock enforcement: a shared lock denies writes from
      * everyone, an exclusive lock denies writes from other opens.  (The

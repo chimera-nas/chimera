@@ -214,15 +214,27 @@ foreach(image_spec ${KVM_IMAGES})
     # pNFS (NFSv4.1) tests: a metadata server steering data to a separate memfs
     # data server, both in one netns.  Flex-files backends only (memfs, diskfs)
     # and 4.1-only (pNFS requires a session).
-    foreach(prog ${PNFS_PROGRAMS})
-        foreach(pbackend ${PNFS_BACKENDS})
-            add_test(NAME chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_${pbackend}_nfs4.1
-                COMMAND bash ${PNFS_WRAPPER}
-                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
-                        ${CHIMERA_BINARY} ${pbackend} 4.1
-                        "${PNFS_CMD_${prog}}")
-            set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_${pbackend}_nfs4.1
-                PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2)
+    #
+    # The client->MDS mount is always 4.1; PNFS_DS_VERSIONS selects the NFS
+    # version of the direct client->DS data path (advertised in the flex-files
+    # device's ffda_versions).  The v3 DS keeps the historical test names (no
+    # suffix); the v4.1 DS adds a "_dsv4.1" suffix.
+    set(PNFS_DS_VERSIONS 3 4.1)
+    foreach(dsver ${PNFS_DS_VERSIONS})
+        set(dssuffix "")
+        if(NOT dsver STREQUAL "3")
+            set(dssuffix "_dsv${dsver}")
+        endif()
+        foreach(prog ${PNFS_PROGRAMS})
+            foreach(pbackend ${PNFS_BACKENDS})
+                add_test(NAME chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_${pbackend}_nfs4.1${dssuffix}
+                    COMMAND bash ${PNFS_WRAPPER}
+                            ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                            ${CHIMERA_BINARY} ${pbackend} 4.1 ${dsver}
+                            "${PNFS_CMD_${prog}}")
+                set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_${pbackend}_nfs4.1${dssuffix}
+                    PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2)
+            endforeach()
         endforeach()
     endforeach()
 
