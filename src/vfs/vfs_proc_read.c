@@ -258,19 +258,22 @@ chimera_vfs_read_dispatch(
 /* Continuation for the first gated read on a handle: a getattr+ACL computes the
  * caller's effective access mask, which is cached on the handle for reuse. */
 struct chimera_vfs_read_gate {
-    struct chimera_vfs_thread            *thread;
-    const struct chimera_vfs_cred        *cred;
-    struct chimera_vfs_open_handle       *handle;
-    uint64_t                              offset;
-    uint32_t                              count;
-    struct evpl_iovec                    *iov;
-    int                                   niov;
-    struct evpl_iovec                    *dest_iov;
-    int                                   dest_niov;
-    uint64_t                              attr_mask;
-    const struct chimera_vfs_lease_owner *io_owner;
-    chimera_vfs_read_callback_t           callback;
-    void                                 *private_data;
+    struct chimera_vfs_thread      *thread;
+    const struct chimera_vfs_cred  *cred;
+    struct chimera_vfs_open_handle *handle;
+    uint64_t                        offset;
+    uint32_t                        count;
+    struct evpl_iovec              *iov;
+    int                             niov;
+    struct evpl_iovec              *dest_iov;
+    int                             dest_niov;
+    uint64_t                        attr_mask;
+    /* io_owner is copied by value (not by pointer): the gate's async getattr
+     * callback fires after the caller's stack frame is gone. */
+    bool                            has_io_owner;
+    struct chimera_vfs_lease_owner  io_owner;
+    chimera_vfs_read_callback_t     callback;
+    void                           *private_data;
 };
 
 static void
@@ -300,7 +303,9 @@ chimera_vfs_read_gate_complete(
     chimera_vfs_read_dispatch(gate->thread, gate->cred, gate->handle,
                               gate->offset, gate->count, gate->iov, gate->niov,
                               gate->dest_iov, gate->dest_niov,
-                              gate->attr_mask, gate->io_owner, gate->callback,
+                              gate->attr_mask,
+                              gate->has_io_owner ? &gate->io_owner : NULL,
+                              gate->callback,
                               gate->private_data);
     free(gate);
 } /* chimera_vfs_read_gate_complete */
@@ -337,17 +342,23 @@ chimera_vfs_read_submit(
             /* First gated I/O on this handle: compute and cache the grant. */
             gate = malloc(sizeof(*gate));
 
-            gate->thread       = thread;
-            gate->cred         = cred;
-            gate->handle       = handle;
-            gate->offset       = offset;
-            gate->count        = count;
-            gate->iov          = iov;
-            gate->niov         = niov;
-            gate->dest_iov     = dest_iov;
-            gate->dest_niov    = dest_niov;
-            gate->attr_mask    = attr_mask;
-            gate->io_owner     = io_owner;
+            gate->thread    = thread;
+            gate->cred      = cred;
+            gate->handle    = handle;
+            gate->offset    = offset;
+            gate->count     = count;
+            gate->iov       = iov;
+            gate->niov      = niov;
+            gate->dest_iov  = dest_iov;
+            gate->dest_niov = dest_niov;
+            gate->attr_mask = attr_mask;
+            if (io_owner) {
+                /* Deep copy: see read_gate struct comment. */
+                gate->has_io_owner = true;
+                gate->io_owner     = *io_owner;
+            } else {
+                gate->has_io_owner = false;
+            }
             gate->callback     = callback;
             gate->private_data = private_data;
 

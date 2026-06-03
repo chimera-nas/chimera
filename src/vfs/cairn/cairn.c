@@ -2849,6 +2849,12 @@ cairn_open_at(
         parent_inode->mtime = now;
         parent_inode->ctime = now;
 
+        /* Signal to the protocol layer that this open created the file (vs.
+         * opened an existing one) so the SMB CREATE reply reports the correct
+         * Create Action (FILE_CREATED vs FILE_OPENED) for OPEN_IF / SUPERSEDE /
+         * OVERWRITE_IF dispositions.  Matches memfs/diskfs. */
+        request->open_at.r_created = 1;
+
         inode = &new_inode;
     } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
         cairn_inode_handle_release(&parent_ih);
