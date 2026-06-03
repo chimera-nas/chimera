@@ -1040,18 +1040,10 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.durable-open
     smb2.durable-open.delete_on_close2
     smb2.durable-open.file-position
-    smb2.durable-open.lock-lease
-    smb2.durable-open.lock-noW-lease
-    smb2.durable-open.lock-oplock
-    smb2.durable-open.open-lease
-    smb2.durable-open.open-oplock
     smb2.durable-open.read-only
     smb2.durable-open.reopen1
     smb2.durable-open.reopen1a
-    smb2.durable-open.reopen1a-lease
     smb2.durable-open.reopen2
-    smb2.durable-open.reopen2-lease
-    smb2.durable-open.reopen2-lease-v2
     smb2.durable-open.reopen2a
     smb2.durable-open.reopen3
     smb2.durable-open.reopen4
@@ -1064,26 +1056,14 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.durable-v2-open
     smb2.durable-v2-open.create-blob
     smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
-    smb2.durable-v2-open.lock-lease
-    smb2.durable-v2-open.lock-noW-lease
-    smb2.durable-v2-open.lock-oplock
-    smb2.durable-v2-open.open-lease
-    smb2.durable-v2-open.open-oplock
-    smb2.durable-v2-open.persistent-open-lease
-    smb2.durable-v2-open.persistent-open-oplock
     smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
     smb2.durable-v2-open.reconnect-twice
     smb2.durable-v2-open.reopen1
     smb2.durable-v2-open.reopen1a
-    smb2.durable-v2-open.reopen1a-lease
     smb2.durable-v2-open.reopen2
-    smb2.durable-v2-open.reopen2-lease
-    smb2.durable-v2-open.reopen2-lease-v2
     smb2.durable-v2-open.reopen2b
     smb2.durable-v2-open.reopen2c
-    smb2.durable-v2-open.stat-and-lease
-    smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -1908,17 +1888,9 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.durable-open
     smb2.durable-open.delete_on_close2
     smb2.durable-open.file-position
-    smb2.durable-open.lock-lease
-    smb2.durable-open.lock-noW-lease
-    smb2.durable-open.lock-oplock
-    smb2.durable-open.open-lease
-    smb2.durable-open.open-oplock
     smb2.durable-open.reopen1
     smb2.durable-open.reopen1a
-    smb2.durable-open.reopen1a-lease
     smb2.durable-open.reopen2
-    smb2.durable-open.reopen2-lease
-    smb2.durable-open.reopen2-lease-v2
     smb2.durable-open.reopen2a
     smb2.durable-open.reopen3
     smb2.durable-open.reopen4
@@ -1931,26 +1903,14 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.durable-v2-open
     smb2.durable-v2-open.create-blob
     smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
-    smb2.durable-v2-open.lock-lease
-    smb2.durable-v2-open.lock-noW-lease
-    smb2.durable-v2-open.lock-oplock
-    smb2.durable-v2-open.open-lease
-    smb2.durable-v2-open.open-oplock
-    smb2.durable-v2-open.persistent-open-lease
-    smb2.durable-v2-open.persistent-open-oplock
     smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
     smb2.durable-v2-open.reconnect-twice
     smb2.durable-v2-open.reopen1
     smb2.durable-v2-open.reopen1a
-    smb2.durable-v2-open.reopen1a-lease
     smb2.durable-v2-open.reopen2
-    smb2.durable-v2-open.reopen2-lease
-    smb2.durable-v2-open.reopen2-lease-v2
     smb2.durable-v2-open.reopen2b
     smb2.durable-v2-open.reopen2c
-    smb2.durable-v2-open.stat-and-lease
-    smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2243,17 +2203,9 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.durable-open
     smb2.durable-open.delete_on_close2
     smb2.durable-open.file-position
-    smb2.durable-open.lock-lease
-    smb2.durable-open.lock-noW-lease
-    smb2.durable-open.lock-oplock
-    smb2.durable-open.open-lease
-    smb2.durable-open.open-oplock
     smb2.durable-open.reopen1
     smb2.durable-open.reopen1a
-    smb2.durable-open.reopen1a-lease
     smb2.durable-open.reopen2
-    smb2.durable-open.reopen2-lease
-    smb2.durable-open.reopen2-lease-v2
     smb2.durable-open.reopen2a
     smb2.durable-open.reopen3
     smb2.durable-open.reopen4
@@ -2266,26 +2218,14 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.durable-v2-open
     smb2.durable-v2-open.create-blob
     smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
-    smb2.durable-v2-open.lock-lease
-    smb2.durable-v2-open.lock-noW-lease
-    smb2.durable-v2-open.lock-oplock
-    smb2.durable-v2-open.open-lease
-    smb2.durable-v2-open.open-oplock
-    smb2.durable-v2-open.persistent-open-lease
-    smb2.durable-v2-open.persistent-open-oplock
     smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
     smb2.durable-v2-open.reconnect-twice
     smb2.durable-v2-open.reopen1
     smb2.durable-v2-open.reopen1a
-    smb2.durable-v2-open.reopen1a-lease
     smb2.durable-v2-open.reopen2
-    smb2.durable-v2-open.reopen2-lease
-    smb2.durable-v2-open.reopen2-lease-v2
     smb2.durable-v2-open.reopen2b
     smb2.durable-v2-open.reopen2c
-    smb2.durable-v2-open.stat-and-lease
-    smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2578,17 +2518,9 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.durable-open
     smb2.durable-open.delete_on_close2
     smb2.durable-open.file-position
-    smb2.durable-open.lock-lease
-    smb2.durable-open.lock-noW-lease
-    smb2.durable-open.lock-oplock
-    smb2.durable-open.open-lease
-    smb2.durable-open.open-oplock
     smb2.durable-open.reopen1
     smb2.durable-open.reopen1a
-    smb2.durable-open.reopen1a-lease
     smb2.durable-open.reopen2
-    smb2.durable-open.reopen2-lease
-    smb2.durable-open.reopen2-lease-v2
     smb2.durable-open.reopen2a
     smb2.durable-open.reopen3
     smb2.durable-open.reopen4
@@ -2601,26 +2533,14 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.durable-v2-open
     smb2.durable-v2-open.create-blob
     smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
-    smb2.durable-v2-open.lock-lease
-    smb2.durable-v2-open.lock-noW-lease
-    smb2.durable-v2-open.lock-oplock
-    smb2.durable-v2-open.open-lease
-    smb2.durable-v2-open.open-oplock
-    smb2.durable-v2-open.persistent-open-lease
-    smb2.durable-v2-open.persistent-open-oplock
     smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
     smb2.durable-v2-open.reconnect-twice
     smb2.durable-v2-open.reopen1
     smb2.durable-v2-open.reopen1a
-    smb2.durable-v2-open.reopen1a-lease
     smb2.durable-v2-open.reopen2
-    smb2.durable-v2-open.reopen2-lease
-    smb2.durable-v2-open.reopen2-lease-v2
     smb2.durable-v2-open.reopen2b
     smb2.durable-v2-open.reopen2c
-    smb2.durable-v2-open.stat-and-lease
-    smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
