@@ -1,0 +1,26 @@
+{
+    "modules": [
+        {
+            "module": "diskfs",
+            "module_path": "${CMAKE_BINARY_DIR}/src/vfs/diskfs/libchimera_vfs_diskfs.so",
+            "config": {
+                "initialize": true,
+                "unsafe_async": true,
+                "devices": [
+                    {
+                        "type": "io_uring",
+                        "size": 1073741824,
+                        "path": "${ELBENCHO_TEST_BINARY}/diskfs_io_uring_device_0.img"
+                    }
+                ]
+            }
+        }
+    ],
+    "mounts": [
+        {
+            "module": "diskfs",
+            "module_path": "/",
+            "mount_point": "/diskfs"
+        }
+    ]
+}
