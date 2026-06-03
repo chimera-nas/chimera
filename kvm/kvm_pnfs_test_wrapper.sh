@@ -45,6 +45,7 @@ CHIMERA_BINARY=$1; shift
 BACKEND=$1; shift
 NFS_VERSION=$1; shift
 DS_VERSION=$1; shift
+TOPOLOGY=$1; shift
 TEST_CMD_ARG="$*"
 
 # pNFS requires NFSv4.1+.
@@ -57,6 +58,25 @@ esac
 case "$DS_VERSION" in
     3 | 4.1) ;;
     *) echo "pNFS DS version must be 3 or 4.1, got ${DS_VERSION}" >&2; exit 1 ;;
+esac
+
+# Topology:
+#   split    - a dedicated data-server daemon, reached by the MDS over the nfs
+#              proxy module (the backing handle is proxy-wrapped).
+#   combined - one daemon is both MDS and DS, backed by a LOCAL mount (no nfs
+#              proxy); exercises the local-backing layout path where the DS
+#              handle is the backing handle as-is.  v3 data path only (a v4.1 DS
+#              at the MDS's own address/identity would be coalesced by the
+#              client).
+case "$TOPOLOGY" in
+    split) ;;
+    combined)
+        if [ "$DS_VERSION" != "3" ]; then
+            echo "combined topology supports only ds_version=3, got ${DS_VERSION}" >&2
+            exit 1
+        fi
+        ;;
+    *) echo "topology must be split or combined, got ${TOPOLOGY}" >&2; exit 1 ;;
 esac
 
 INITRD="$(dirname "$VMLINUZ")/initrd"
@@ -198,6 +218,54 @@ generate_mds_config() {
 EOF
 }
 
+# Combined topology: one daemon is both the MDS and its own data server, backed
+# by a LOCAL mount (data_servers backing_path "/share" -> the local "share"
+# mount, not the nfs proxy).  The MDS creates backing files locally and serves
+# the client's direct v3 DS I/O itself, so the layout must hand the client the
+# backing handle as-is (no proxy wrapper to strip) -- the local-backing path.
+generate_combined_config() {
+    local module="$BACKEND"
+    local vfs_section=""
+
+    case "$BACKEND" in
+        memfs) ;;
+        diskfs_io_uring | diskfs_aio)
+            local device_type="io_uring"
+            [ "$BACKEND" = "diskfs_aio" ] && device_type="libaio"
+            local devices_json=""
+            for i in 0 1; do
+                local device_path="${SESSION_DIR}/mds-device-${i}.img"
+                truncate -s 16G "$device_path"
+                [ "$i" -gt 0 ] && devices_json="${devices_json},"
+                devices_json="${devices_json}{\"type\":\"${device_type}\",\"size\":1,\"path\":\"${device_path}\"}"
+            done
+            module="diskfs"
+            vfs_section="\"vfs\": { \"diskfs\": { \"config\": { \"initialize\": true, \"unsafe_async\": true, \"devices\": [${devices_json}] } } },"
+            ;;
+        *) echo "pNFS flex test supports memfs/diskfs backends, got ${BACKEND}" >&2; exit 1 ;;
+    esac
+
+    cat > "$MDS_CONFIG" << EOF
+{
+    "server": {
+        "threads": 4,
+        "external_portmap": false,
+        ${vfs_section}
+        "pnfs": {
+            "enabled": true,
+            "data_servers": [
+                { "netid": "tcp", "uaddr": "${MDS_IP}:${MDS_PORT}", "version": "3", "backing_path": "/share" }
+            ]
+        }
+    },
+    "mounts": {
+        "share": { "module": "${module}", "path": "/" }
+    },
+    "exports": { "/share": { "path": "/share" } }
+}
+EOF
+}
+
 wait_for_port() {
     local ip="$1" port="$2" pid="$3"
     for i in $(seq 1 50); do
@@ -231,15 +299,20 @@ ip netns exec "${NETNS_NAME}" ip addr add 10.0.0.5/24 dev "${TAP_NAME}"
 ip netns exec "${NETNS_NAME}" ip addr add 10.0.0.6/24 dev "${TAP_NAME}"
 ip netns exec "${NETNS_NAME}" ip link set "${TAP_NAME}" up
 
-# 1. Start the data server (must be up before the MDS, which mounts it at boot).
-generate_ds_config
-ip netns exec "${NETNS_NAME}" "$CHIMERA_BINARY" -c "$DS_CONFIG" > "$DS_LOG" 2>&1 &
-DS_PID=$!
-wait_for_port "$DS_IP" "$DS_PORT" "$DS_PID" || exit 1
-echo "=== pNFS data server up on ${DS_IP}:${DS_PORT} ==="
+if [ "$TOPOLOGY" = "split" ]; then
+    # 1. Start the data server (must be up before the MDS, which mounts it at boot).
+    generate_ds_config
+    ip netns exec "${NETNS_NAME}" "$CHIMERA_BINARY" -c "$DS_CONFIG" > "$DS_LOG" 2>&1 &
+    DS_PID=$!
+    wait_for_port "$DS_IP" "$DS_PORT" "$DS_PID" || exit 1
+    echo "=== pNFS data server up on ${DS_IP}:${DS_PORT} ==="
 
-# 2. Start the metadata server; it nfs-mounts the data server at boot.
-generate_mds_config
+    # 2. Start the metadata server; it nfs-mounts the data server at boot.
+    generate_mds_config
+else
+    # Combined: a single daemon is both MDS and its own (local-backed) DS.
+    generate_combined_config
+fi
 ip netns exec "${NETNS_NAME}" "$CHIMERA_BINARY" -c "$MDS_CONFIG" > "$MDS_LOG" 2>&1 &
 MDS_PID=$!
 wait_for_port "$MDS_IP" "$MDS_PORT" "$MDS_PID" || exit 1

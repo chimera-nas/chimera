@@ -1061,10 +1061,19 @@ chimera_server_pnfs_resolve(struct chimera_server *server)
         }
 
         chimera_vfs_pnfs_set_device_root(vfs, i, m->root_fh, m->root_fh_len);
-        chimera_server_info("pNFS data server %d backing root resolved via '%s' (module=%s path=%s root_fh_len=%d)",
-                            i, ds->backing_path,
-                            m->module ? m->module->name : "?",
-                            m->path ? m->path : "?", m->root_fh_len);
+
+        /* If the backing mount is not the nfs proxy, the data server is local
+         * to this node: this server itself serves the backing handle, so the
+         * handle handed to the client is the backing handle as-is (no proxy
+         * wrapper to strip).  See chimera_nfs4_encode_ff_layout callers. */
+        ds->backing_local = (m->module &&
+                             m->module->fh_magic != CHIMERA_VFS_FH_MAGIC_NFS) ? 1 : 0;
+
+        chimera_server_info(
+            "pNFS data server %d backing root resolved via '%s' (module=%s path=%s root_fh_len=%d local=%d)",
+            i, ds->backing_path,
+            m->module ? m->module->name : "?",
+            m->path ? m->path : "?", m->root_fh_len, ds->backing_local);
         resolved++;
     }
 
