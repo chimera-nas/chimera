@@ -534,6 +534,10 @@ chimera_smb_create_gen_open_file(
         bool                           via_rqls = false;
         struct chimera_vfs_lease      *conflict = NULL;
         enum chimera_vfs_lease_result  result;
+        bool                           durable_request =
+            thread->shared->config.persistent_handles &&
+            (request->create.ctx_present_mask &
+             (CHIMERA_SMB_CREATE_CTX_DHNQ | CHIMERA_SMB_CREATE_CTX_DH2Q)) != 0;
 
         /* Phase 2 of the conflicting-open oplock break.  Phase 1 (the batch /
          * handle-caching break that must precede the share-mode check) already
