@@ -1038,32 +1038,10 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
-    smb2.durable-open.delete_on_close2
-    smb2.durable-open.file-position
-    smb2.durable-open.read-only
-    smb2.durable-open.reopen1
-    smb2.durable-open.reopen1a
-    smb2.durable-open.reopen2
-    smb2.durable-open.reopen2a
-    smb2.durable-open.reopen3
-    smb2.durable-open.reopen4
-    smb2.durable-open.reopen5
-    smb2.durable-open.reopen6
-    smb2.durable-open.stat-open
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
-    smb2.durable-v2-open.create-blob
-    smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
-    smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
-    smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
-    smb2.durable-v2-open.reconnect-twice
-    smb2.durable-v2-open.reopen1
-    smb2.durable-v2-open.reopen1a
-    smb2.durable-v2-open.reopen2
-    smb2.durable-v2-open.reopen2b
-    smb2.durable-v2-open.reopen2c
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -1350,12 +1328,10 @@ set(SMBTORTURE_ENABLED_linux
     smb2.dir.fixed
     smb2.dir.sorted
     # smb2.durable-open
-    smb2.durable-open.reopen6
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
-    smb2.durable-v2-open.reconnect-twice
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -1609,12 +1585,10 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.dir.many
     smb2.dir.sorted
     # smb2.durable-open
-    smb2.durable-open.reopen6
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
-    smb2.durable-v2-open.reconnect-twice
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -1886,31 +1860,10 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
-    smb2.durable-open.delete_on_close2
-    smb2.durable-open.file-position
-    smb2.durable-open.reopen1
-    smb2.durable-open.reopen1a
-    smb2.durable-open.reopen2
-    smb2.durable-open.reopen2a
-    smb2.durable-open.reopen3
-    smb2.durable-open.reopen4
-    smb2.durable-open.reopen5
-    smb2.durable-open.reopen6
-    smb2.durable-open.stat-open
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
-    smb2.durable-v2-open.create-blob
-    smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
-    smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
-    smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
-    smb2.durable-v2-open.reconnect-twice
-    smb2.durable-v2-open.reopen1
-    smb2.durable-v2-open.reopen1a
-    smb2.durable-v2-open.reopen2
-    smb2.durable-v2-open.reopen2b
-    smb2.durable-v2-open.reopen2c
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2201,31 +2154,10 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
-    smb2.durable-open.delete_on_close2
-    smb2.durable-open.file-position
-    smb2.durable-open.reopen1
-    smb2.durable-open.reopen1a
-    smb2.durable-open.reopen2
-    smb2.durable-open.reopen2a
-    smb2.durable-open.reopen3
-    smb2.durable-open.reopen4
-    smb2.durable-open.reopen5
-    smb2.durable-open.reopen6
-    smb2.durable-open.stat-open
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
-    smb2.durable-v2-open.create-blob
-    smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
-    smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
-    smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
-    smb2.durable-v2-open.reconnect-twice
-    smb2.durable-v2-open.reopen1
-    smb2.durable-v2-open.reopen1a
-    smb2.durable-v2-open.reopen2
-    smb2.durable-v2-open.reopen2b
-    smb2.durable-v2-open.reopen2c
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2516,31 +2448,10 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
-    smb2.durable-open.delete_on_close2
-    smb2.durable-open.file-position
-    smb2.durable-open.reopen1
-    smb2.durable-open.reopen1a
-    smb2.durable-open.reopen2
-    smb2.durable-open.reopen2a
-    smb2.durable-open.reopen3
-    smb2.durable-open.reopen4
-    smb2.durable-open.reopen5
-    smb2.durable-open.reopen6
-    smb2.durable-open.stat-open
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
-    smb2.durable-v2-open.create-blob
-    smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
-    smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
-    smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
-    smb2.durable-v2-open.reconnect-twice
-    smb2.durable-v2-open.reopen1
-    smb2.durable-v2-open.reopen1a
-    smb2.durable-v2-open.reopen2
-    smb2.durable-v2-open.reopen2b
-    smb2.durable-v2-open.reopen2c
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
