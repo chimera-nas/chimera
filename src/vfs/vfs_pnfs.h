@@ -107,6 +107,12 @@ struct chimera_vfs_ds {
     char     uaddr[64];                           /* RFC5665 universal address (DS)  */
     int      version;                             /* NFS version advertised for DS   */
     int      minorversion;                        /* NFS minor version (4.x)         */
+    uint8_t  backing_local;                       /* 1 = backing is a local (non-nfs)
+                                                   * mount served by this server, so
+                                                   * the DS handle is the backing
+                                                   * handle as-is; 0 = nfs-proxy DS,
+                                                   * strip the wrapper to recover the
+                                                   * remote native handle            */
     char     backing_path[CHIMERA_PNFS_BACKING_MAX]; /* chimera path where the DS is
                                                       * nfs-mounted, e.g. "/ds0"     */
     /* Resolved once the backing mount is established: the DS export root as an
