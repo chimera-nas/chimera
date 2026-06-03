@@ -444,10 +444,27 @@ typedef void (*chimera_fsetattr_callback_t)(
     enum chimera_vfs_error        status,
     void                         *private_data);
 
+/* Set the size of an open file (ftruncate). */
+void
+chimera_ftruncate(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        size,
+    chimera_fsetattr_callback_t     callback,
+    void                           *private_data);
+
 typedef void (*chimera_commit_callback_t)(
     struct chimera_client_thread *client,
     enum chimera_vfs_error        status,
     void                         *private_data);
+
+/* Flush an open file's data to stable storage (fsync). */
+void
+chimera_commit(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    chimera_commit_callback_t       callback,
+    void                           *private_data);
 
 typedef void (*chimera_lock_callback_t)(
     struct chimera_client_thread *client,
