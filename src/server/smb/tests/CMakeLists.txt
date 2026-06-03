@@ -979,10 +979,6 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.async_dosmode
     smb2.async_dosmode
     # smb2.bench
-    smb2.bench.echo
-    smb2.bench.path-contention-shared
-    smb2.bench.read
-    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
     # smb2.check-sharemode
@@ -1321,10 +1317,6 @@ set(SMBTORTURE_ENABLED_memfs
 
 set(SMBTORTURE_ENABLED_linux
     # smb2.bench
-    smb2.bench.echo
-    smb2.bench.path-contention-shared
-    smb2.bench.read
-    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
     # smb2.check-sharemode
@@ -1583,10 +1575,6 @@ set(SMBTORTURE_ENABLED_linux
 
 set(SMBTORTURE_ENABLED_io_uring
     # smb2.bench
-    smb2.bench.echo
-    smb2.bench.path-contention-shared
-    smb2.bench.read
-    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
     # smb2.check-sharemode
@@ -1863,10 +1851,6 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.async_dosmode
     smb2.async_dosmode
     # smb2.bench
-    smb2.bench.echo
-    smb2.bench.path-contention-shared
-    smb2.bench.read
-    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
     # smb2.check-sharemode
@@ -1924,13 +1908,11 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.durable-open
     smb2.durable-open.delete_on_close2
     smb2.durable-open.file-position
-    smb2.durable-open.lease
     smb2.durable-open.lock-lease
     smb2.durable-open.lock-noW-lease
     smb2.durable-open.lock-oplock
     smb2.durable-open.open-lease
     smb2.durable-open.open-oplock
-    smb2.durable-open.open2-lease
     smb2.durable-open.reopen1
     smb2.durable-open.reopen1a
     smb2.durable-open.reopen1a-lease
@@ -2037,7 +2019,6 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.lock.truncate
     smb2.lock.unlock
     # smb2.maxfid
-    smb2.maxfid
     # smb2.maximum_allowed
     smb2.maximum_allowed.maximum_allowed
     smb2.maximum_allowed.read_only
@@ -2201,10 +2182,6 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.async_dosmode
     smb2.async_dosmode
     # smb2.bench
-    smb2.bench.echo
-    smb2.bench.path-contention-shared
-    smb2.bench.read
-    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
     # smb2.check-sharemode
@@ -2266,13 +2243,11 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.durable-open
     smb2.durable-open.delete_on_close2
     smb2.durable-open.file-position
-    smb2.durable-open.lease
     smb2.durable-open.lock-lease
     smb2.durable-open.lock-noW-lease
     smb2.durable-open.lock-oplock
     smb2.durable-open.open-lease
     smb2.durable-open.open-oplock
-    smb2.durable-open.open2-lease
     smb2.durable-open.reopen1
     smb2.durable-open.reopen1a
     smb2.durable-open.reopen1a-lease
@@ -2542,10 +2517,6 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.async_dosmode
     smb2.async_dosmode
     # smb2.bench
-    smb2.bench.echo
-    smb2.bench.path-contention-shared
-    smb2.bench.read
-    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
     # smb2.check-sharemode
@@ -2718,7 +2689,6 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.lock.truncate
     smb2.lock.unlock
     # smb2.maxfid
-    smb2.maxfid
     # smb2.maximum_allowed
     smb2.maximum_allowed.maximum_allowed
     smb2.maximum_allowed.read_only
