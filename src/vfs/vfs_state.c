@@ -347,12 +347,29 @@ chimera_vfs_share_conflict(
  * owners is a conflict.  W and H are exclusive across clients; R is
  * shareable (multiple clients can each hold an R-lease — that's how
  * SMB2 Level2 oplocks generalize). */
+/* The mode a holder effectively grants for conflict purposes.  While an SMB
+ * oplock/lease is mid-break (notification sent, awaiting the client's ack), the
+ * client is obligated to comply, so the holder is treated as already at its
+ * retained (post-break) level -- this lets a coexisting acquirer (e.g. a 2nd
+ * open settling at LEVEL_II) proceed immediately instead of blocking on the
+ * ack.  NFSv4 delegations keep their full granted mode while RECALLING, so a
+ * conflicting open waits for the DELEGRETURN (or recall-timeout revoke). */
+static inline uint8_t
+chimera_vfs_lease_effective_granted(const struct chimera_vfs_lease *l)
+{
+    if (l->break_state == CHIMERA_VFS_BREAK_BREAKING &&
+        l->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2) {
+        return l->break_needed_mode;
+    }
+    return l->mode.granted;
+} /* chimera_vfs_lease_effective_granted */
+
 static inline bool
 chimera_vfs_caching_conflict(
     const struct chimera_vfs_lease *existing,
     const struct chimera_vfs_lease *probe)
 {
-    uint8_t e = existing->mode.granted;
+    uint8_t e = chimera_vfs_lease_effective_granted(existing);
     uint8_t p = probe->mode.granted;
 
     /* W (write-cache) is exclusive — only one holder may have W on a
@@ -1215,9 +1232,16 @@ chimera_vfs_lease_ack(
     }
 
     if (lease->break_state == CHIMERA_VFS_BREAK_BREAKING) {
-        lease->mode        = resulting;
-        lease->break_state = CHIMERA_VFS_BREAK_ACKED;
-        mutated            = true;
+        lease->mode = resulting;
+        /* A lease that retains some access (e.g. an SMB oplock the client kept
+         * at LEVEL_II) re-arms to IDLE so a later conflicting open / write /
+         * lock can break it again; one reduced to NONE goes inert (ACKED) until
+         * the holder closes.  Re-arming is safe here because this is the
+         * client's real, asynchronous response -- not the old optimistic ack
+         * that fired inside the same operation and could livelock a waiter. */
+        lease->break_state = resulting.granted ? CHIMERA_VFS_BREAK_IDLE
+                                               : CHIMERA_VFS_BREAK_ACKED;
+        mutated = true;
     }
 
     if (file) {
@@ -1230,43 +1254,6 @@ chimera_vfs_lease_ack(
         chimera_vfs_state_pump_io(file->state, file);
     }
 } /* chimera_vfs_lease_ack */
-
-/* Apply the lease state a client chose in its OPLOCK_BREAK / lease-break
- * acknowledgment.  The server optimistically settled the lease at the maximum
- * the holder could keep (the break's needed_mode); the client may keep less
- * (e.g. drop straight to NONE), so intersect the granted mode down to its
- * choice.  A lease that still retains access re-arms (IDLE) so it can break
- * again later; one reduced to NONE becomes inert (ACKED) until close.  Pumps
- * waiters in case the further downgrade unblocks them. */
-SYMBOL_EXPORT void
-chimera_vfs_lease_client_downgrade(
-    struct chimera_vfs_state      *state,
-    struct chimera_vfs_file_state *file,
-    struct chimera_vfs_lease      *lease,
-    uint8_t                        kept_mode)
-{
-    bool mutated = false;
-
-    if (!file) {
-        return;
-    }
-
-    pthread_mutex_lock(&file->lock);
-
-    if (lease->mode.granted & ~kept_mode) {
-        lease->mode.granted &= kept_mode;
-        lease->break_state   = lease->mode.granted ? CHIMERA_VFS_BREAK_IDLE
-                                                    : CHIMERA_VFS_BREAK_ACKED;
-        mutated = true;
-    }
-
-    pthread_mutex_unlock(&file->lock);
-
-    if (mutated && state) {
-        chimera_vfs_state_pump_pending(state, file);
-        chimera_vfs_state_pump_io(state, file);
-    }
-} /* chimera_vfs_lease_client_downgrade */
 
 SYMBOL_EXPORT void
 chimera_vfs_lease_revoke(struct chimera_vfs_lease *lease)
@@ -1449,16 +1436,6 @@ chimera_vfs_break_reads_for_write(
         if ((cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W) &&
             chimera_vfs_lease_owner_equal(&cur->owner, writer)) {
             continue;
-        }
-        /* A lease already broken once and settled at LEVEL_II (ACKED, still
-         * holding R) must re-arm so this write can break it again -- this time
-         * to NONE.  (A write is a fresh invalidation event, distinct from the
-         * open that produced the LEVEL_II downgrade, so re-breaking here does
-         * not double-fire within a single open.)  begin_break only acts on an
-         * IDLE lease, so flip it back under the lock. */
-        if (cur->break_state == CHIMERA_VFS_BREAK_ACKED &&
-            cur->owner.break_cb) {
-            cur->break_state = CHIMERA_VFS_BREAK_IDLE;
         }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
             to_break[n++] = cur;

@@ -290,15 +290,16 @@ chimera_smb_lease_break_cb(
         open_file->oplock_level = new_level;
     }
 
-    /* Optimistic downgrade: assume the client acks.  The arriving ack
-     * calls chimera_vfs_lease_ack which is idempotent.  Keeping the read
-     * cache lets the conflicting opener settle at LEVEL_II too. */
-    {
-        struct chimera_vfs_lease_mode m;
-        m.granted = new_vfs;
-        m.denied  = 0;
-        chimera_vfs_lease_ack(lease, m);
-    }
+    /* The lease stays BREAKING (awaiting the client's real OPLOCK_BREAK ack or
+     * close); the conflict matrix treats a BREAKING SMB lease as already at its
+     * retained (break_needed_mode) level, so a coexisting acquirer proceeds
+     * immediately without waiting for the ack.  The client's response resolves
+     * the break via chimera_smb_oplock_break -> chimera_vfs_lease_ack, and the
+     * deadline driver revokes it if the client never responds.  (This is the
+     * same real break/wait model NFSv4 delegations use; the previous code acked
+     * optimistically here, which made true wait-for-close semantics
+     * impossible.) */
+    (void) new_vfs;
 } /* chimera_smb_lease_break_cb */
 
 /* Doorbell handler: runs on a connection-owning SMB thread and sends the
@@ -439,17 +440,21 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
             return;
         }
 
-        /* Apply the oplock level the client chose to keep (it may drop further
-         * than the server's optimistic downgrade -- e.g. straight to NONE). */
+        /* Resolve the outstanding break with the level the client chose to
+         * keep (it may drop further than what we asked -- e.g. straight to
+         * NONE).  The lease is genuinely BREAKING here (we no longer ack
+         * optimistically), so the canonical ack applies the mode, re-arms a
+         * surviving lease, and pumps any parked acquirer. */
         if (open_file->caching_lease_inserted) {
-            uint8_t kept =
-                (request->oplock_break.oplock_level == SMB2_OPLOCK_LEVEL_II)
-                ? CHIMERA_VFS_LEASE_MODE_R : 0;
+            struct chimera_vfs_lease_mode kept = {
+                .granted = (request->oplock_break.oplock_level ==
+                            SMB2_OPLOCK_LEVEL_II) ? CHIMERA_VFS_LEASE_MODE_R : 0,
+                .denied  = 0,
+            };
 
-            chimera_vfs_lease_client_downgrade(vfs_state,
-                                               open_file->caching_file_state,
-                                               &open_file->caching_lease, kept);
+            chimera_vfs_lease_ack(&open_file->caching_lease, kept);
         }
+        (void) vfs_state;
 
         open_file->oplock_level              = request->oplock_break.oplock_level;
         open_file->oplock_break_ack_required = 0;
