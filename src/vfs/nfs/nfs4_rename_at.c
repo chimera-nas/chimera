@@ -132,11 +132,6 @@ chimera_nfs4_rename_at(
 
     /* Op 0: SEQUENCE */
     argarray[0].argop = OP_SEQUENCE;
-    memcpy(argarray[0].opsequence.sa_sessionid, session->sessionid, NFS4_SESSIONID_SIZE);
-    argarray[0].opsequence.sa_sequenceid     = chimera_nfs4_get_sequenceid(session, server_thread->slot_id);
-    argarray[0].opsequence.sa_slotid         = server_thread->slot_id;
-    argarray[0].opsequence.sa_highest_slotid = session->max_slots - 1;
-    argarray[0].opsequence.sa_cachethis      = 0;
 
     /* Op 1: PUTFH - set current FH to source directory */
     argarray[1].argop               = OP_PUTFH;
@@ -162,13 +157,15 @@ chimera_nfs4_rename_at(
                                request->thread->vfs->machine_name,
                                request->thread->vfs->machine_name_len);
 
-    shared->nfs_v4.send_call_NFSPROC4_COMPOUND(
-        &shared->nfs_v4.rpc2,
-        thread->evpl,
-        server_thread->nfs_conn,
-        &rpc2_cred,
+    chimera_nfs4_compound_call(
+        thread,
+        shared,
+        server_thread,
+        request,
         &args,
+        &rpc2_cred,
         0, 0, NULL, 0, 0,
         chimera_nfs4_rename_callback,
-        request);
+        request,
+        chimera_nfs4_dispatch, private_data);
 } /* chimera_nfs4_rename_at */

@@ -35,6 +35,38 @@ static void chimera_nfs4_mount_get_root_fh(
     struct chimera_nfs_client_server_thread *server_thread,
     struct chimera_vfs_request              *request);
 
+/* Slot-exhaustion replay shims: chimera_nfs4_compound_call parks a request when
+ * no session slot is free and replays it through these when one frees.  ctx is
+ * the server_thread; each just re-runs its mount step (which rebuilds args). */
+static void
+chimera_nfs4_mount_get_root_fh_retry(
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
+    struct chimera_vfs_request *request,
+    void                       *ctx)
+{
+    (void) thread;
+    (void) shared;
+    chimera_nfs4_mount_get_root_fh((struct chimera_nfs_client_server_thread *) ctx, request);
+} /* chimera_nfs4_mount_get_root_fh_retry */
+
+static void
+chimera_nfs4_mount_reclaim_complete(
+    struct chimera_nfs_client_server_thread *server_thread,
+    struct chimera_vfs_request              *request);
+
+static void
+chimera_nfs4_mount_reclaim_complete_retry(
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
+    struct chimera_vfs_request *request,
+    void                       *ctx)
+{
+    (void) thread;
+    (void) shared;
+    chimera_nfs4_mount_reclaim_complete((struct chimera_nfs_client_server_thread *) ctx, request);
+} /* chimera_nfs4_mount_reclaim_complete_retry */
+
 /* Get the RDMA protocol from mount options */
 static enum evpl_protocol_id
 chimera_nfs4_mount_get_rdma_protocol(const struct chimera_vfs_mount_options *options)
@@ -223,13 +255,8 @@ chimera_nfs4_mount_get_root_fh(
     args.argarray     = argarray;
     args.num_argarray = 5;
 
-    /* Op 0: SEQUENCE */
+    /* Op 0: SEQUENCE (slot fields filled by chimera_nfs4_compound_call) */
     argarray[0].argop = OP_SEQUENCE;
-    memcpy(argarray[0].opsequence.sa_sessionid, session->sessionid, NFS4_SESSIONID_SIZE);
-    argarray[0].opsequence.sa_sequenceid     = chimera_nfs4_get_sequenceid(session, 0);
-    argarray[0].opsequence.sa_slotid         = 0;  /* Use slot 0 for mount operation */
-    argarray[0].opsequence.sa_highest_slotid = session->max_slots - 1;
-    argarray[0].opsequence.sa_cachethis      = 0;
 
     /* Op 1: PUTROOTFH */
     argarray[1].argop = OP_PUTROOTFH;
@@ -249,15 +276,13 @@ chimera_nfs4_mount_get_root_fh(
     argarray[4].opgetattr.attr_request     = attr_request;
     argarray[4].opgetattr.num_attr_request = 2;
 
-    shared->nfs_v4.send_call_NFSPROC4_COMPOUND(
-        &shared->nfs_v4.rpc2,
-        server_thread->thread->evpl,
-        server_thread->nfs_conn,
-        NULL,
-        &args,
-        0, 0, NULL, 0, 0,
-        chimera_nfs4_mount_get_root_fh_callback,
-        request);
+    (void) session;
+
+    chimera_nfs4_compound_call(
+        server_thread->thread, shared, server_thread, request,
+        &args, NULL, 0, 0, NULL, 0, 0,
+        chimera_nfs4_mount_get_root_fh_callback, request,
+        chimera_nfs4_mount_get_root_fh_retry, server_thread);
 } /* chimera_nfs4_mount_get_root_fh */
 
 /*
@@ -320,27 +345,20 @@ chimera_nfs4_mount_reclaim_complete(
     args.argarray     = argarray;
     args.num_argarray = 2;
 
-    /* Op 0: SEQUENCE (slot 0, shared with the mount-time root lookup). */
+    /* Op 0: SEQUENCE (slot fields filled by chimera_nfs4_compound_call). */
     argarray[0].argop = OP_SEQUENCE;
-    memcpy(argarray[0].opsequence.sa_sessionid, session->sessionid, NFS4_SESSIONID_SIZE);
-    argarray[0].opsequence.sa_sequenceid     = chimera_nfs4_get_sequenceid(session, 0);
-    argarray[0].opsequence.sa_slotid         = 0;
-    argarray[0].opsequence.sa_highest_slotid = session->max_slots - 1;
-    argarray[0].opsequence.sa_cachethis      = 0;
 
     /* Op 1: RECLAIM_COMPLETE, global (rca_one_fs == FALSE). */
     argarray[1].argop                         = OP_RECLAIM_COMPLETE;
     argarray[1].opreclaim_complete.rca_one_fs = 0;
 
-    shared->nfs_v4.send_call_NFSPROC4_COMPOUND(
-        &shared->nfs_v4.rpc2,
-        server_thread->thread->evpl,
-        server_thread->nfs_conn,
-        NULL,
-        &args,
-        0, 0, NULL, 0, 0,
-        chimera_nfs4_mount_reclaim_complete_callback,
-        request);
+    (void) session;
+
+    chimera_nfs4_compound_call(
+        server_thread->thread, shared, server_thread, request,
+        &args, NULL, 0, 0, NULL, 0, 0,
+        chimera_nfs4_mount_reclaim_complete_callback, request,
+        chimera_nfs4_mount_reclaim_complete_retry, server_thread);
 } /* chimera_nfs4_mount_reclaim_complete */
 
 /*
@@ -360,7 +378,6 @@ chimera_nfs4_mount_create_session_callback(
     struct chimera_nfs_client_server        *server        = server_thread->server;
     struct chimera_nfs4_client_session      *session;
     struct CREATE_SESSION4resok             *cs_res;
-    uint32_t                                 i;
 
     if (status != 0) {
         chimera_nfsclient_error("NFS4 CREATE_SESSION RPC failed: %d", status);
@@ -391,15 +408,12 @@ chimera_nfs4_mount_create_session_callback(
     session = server->nfs4_session;
     memcpy(session->sessionid, cs_res->csr_sessionid, NFS4_SESSIONID_SIZE);
 
-    /* Use the server's fore channel max requests as the number of slots */
-    session->max_slots    = cs_res->csr_fore_chan_attrs.ca_maxrequests;
-    session->next_slot_id = 1;  /* Start at 1, slot 0 is used by mount thread */
-
-    /* Allocate per-slot sequence IDs */
-    session->slot_seqids = calloc(session->max_slots, sizeof(uint32_t));
-    for (i = 0; i < session->max_slots; i++) {
-        session->slot_seqids[i] = 1; /* Start at 1 per RFC 5661 */
-    }
+    /* The server's granted fore-channel ca_maxrequests is the global slot count.
+     * Per-thread connections claim disjoint blocks from [0, max_slots) lazily;
+     * see chimera_nfs4_compound_call / chimera_nfs4_slot_table_init. */
+    session->max_slots      = cs_res->csr_fore_chan_attrs.ca_maxrequests;
+    session->next_unclaimed = 0;
+    session->overflow_rr    = 0;
 
     chimera_nfsclient_info("NFS4 CREATE_SESSION successful, clientid=%lu, max_slots=%u",
                            (unsigned long) session->clientid, session->max_slots);
