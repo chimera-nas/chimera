@@ -230,11 +230,28 @@ foreach(image_spec ${KVM_IMAGES})
                 add_test(NAME chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_${pbackend}_nfs4.1${dssuffix}
                     COMMAND bash ${PNFS_WRAPPER}
                             ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
-                            ${CHIMERA_BINARY} ${pbackend} 4.1 ${dsver}
+                            ${CHIMERA_BINARY} ${pbackend} 4.1 ${dsver} split
                             "${PNFS_CMD_${prog}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_${pbackend}_nfs4.1${dssuffix}
                     PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2)
             endforeach()
+        endforeach()
+    endforeach()
+
+    # Combined topology: one daemon is both MDS and its own data server, backed
+    # by a LOCAL mount rather than the nfs proxy.  This exercises the
+    # local-backing layout path (the DS handle handed to the client is the
+    # backing handle as-is); a v3 data path, since the self-DS shares the MDS's
+    # address.  Named with a "_combined" suffix.
+    foreach(prog ${PNFS_PROGRAMS})
+        foreach(pbackend ${PNFS_BACKENDS})
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_${pbackend}_nfs4.1_combined
+                COMMAND bash ${PNFS_WRAPPER}
+                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                        ${CHIMERA_BINARY} ${pbackend} 4.1 3 combined
+                        "${PNFS_CMD_${prog}}")
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_${pbackend}_nfs4.1_combined
+                PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2)
         endforeach()
     endforeach()
 
