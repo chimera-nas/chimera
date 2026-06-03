@@ -453,6 +453,16 @@ chimera_server_mount(
     const char            *module_path,
     const char            *options);
 
+/* Ensure module_path exists inside module_name (creating intermediate dirs with
+ * the given mode, owner 0/0) before it is mounted -- backs the "create" mount
+ * option.  Returns 0 on success, -1 if any component could not be created. */
+int
+chimera_server_mkpath(
+    struct chimera_server *server,
+    const char            *module_name,
+    const char            *module_path,
+    uint32_t               mode);
+
 int
 chimera_server_create_bucket(
     struct chimera_server *server,
