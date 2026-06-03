@@ -2682,11 +2682,14 @@ macro(add_smbtorture_backend_tests backend)
             # smbtorture_test exits 77 when the smbtorture client is missing at
             # runtime; report that as Skipped rather than a failure.
             SKIP_RETURN_CODE 77
-            # Override the project-wide 30s default: most smbtorture subtests
-            # finish in under 10s, but a few (smb2.notify.mask, smb2.notify
-            # variants, big-directory smb2.maxfid runs) legitimately need
-            # closer to a minute even when passing.
-            TIMEOUT 120)
+            # Override the project-wide 30s default.  Most smbtorture
+            # subtests finish in under 10s, but a few (smb2.notify.*,
+            # smb2.maxfid, smb2.lock.cancel, ...) involve real-time
+            # waits or large file-handle counts and can stretch to 90-180s
+            # on slow ARC runners under ctest -j 8.  300s matches the
+            # tools/smbtorture/regen.sh matrix budget; anything that
+            # genuinely runs longer than that is broken, not slow.
+            TIMEOUT 300)
         # The smb2.durable-open.* / smb2.durable-v2-open.* families are
         # lease/oplock-break state-machine tests; their pass/fail asserts on
         # timing that gets tight when CPU is contended on slow CI runners,
