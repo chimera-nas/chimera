@@ -12,6 +12,7 @@
 #include <endian.h>
 #include <utlist.h>
 #include "vfs/vfs.h"
+#include "vfs/vfs_pnfs.h"
 #include "evpl/evpl.h"
 #include "portmap_xdr.h"
 #include "nfs_mount_xdr.h"
@@ -102,13 +103,14 @@ struct chimera_nfs4_client_session {
 
 struct chimera_nfs_client_mount;
 struct chimera_nfs4_compound_ctx;   /* in-flight wrapper context (nfs4_slot.c)   */
-struct chimera_nfs4_parked;                  /* queued request awaiting a slot (nfs4_slot.c) */
+struct chimera_nfs4_parked;         /* queued request awaiting a slot (nfs4_slot.c) */
+struct chimera_nfs4_layout;         /* per-file pNFS layout (nfs4_pnfs.h)        */
 
 /* One owned fore-channel slot. */
 struct chimera_nfs4_slot {
-    uint32_t global_id;                      /* sa_slotid to send on the wire               */
-    uint32_t seqid;                          /* next sa_sequenceid; starts at 1             */
-    uint8_t  in_use;                         /* 1 == one request outstanding on this slot   */
+    uint32_t global_id;             /* sa_slotid to send on the wire               */
+    uint32_t seqid;                 /* next sa_sequenceid; starts at 1             */
+    uint8_t  in_use;                /* 1 == one request outstanding on this slot   */
 };
 
 /*
@@ -193,6 +195,14 @@ struct chimera_nfs_client_server {
      * (shared->cb_thread).  CREATE_SESSION binds the back channel to it, so the
      * server can deliver CB_COMPOUND here for the life of the session. */
     struct evpl_rpc2_conn              *cb_conn;
+
+    /* pNFS (flex-files).  pnfs_requested is set from the `pnfs` mount option;
+     * mds_pnfs_capable is set true once EXCHANGE_ID confirms USE_PNFS_MDS.
+     * is_ds marks a server that was registered as a data server (reached for
+     * direct DS I/O), not an MDS mount. */
+    int                                 pnfs_requested;
+    int                                 mds_pnfs_capable;
+    int                                 is_ds;
 };
 
 struct chimera_nfs_client_mount {
@@ -210,24 +220,54 @@ struct chimera_nfs_client_open_handle {
     struct chimera_nfs_client_open_handle *next;
 };
 
-struct chimera_nfs_shared {
-    struct chimera_nfs_client_mount   *mounts;
+/*
+ * Client-side device cache (deviceid -> resolved DS server slot + decoded
+ * device), mirror of the server's nfs_pnfs_devcache.  Populated by
+ * GETDEVICEINFO so device resolution happens once per deviceid.
+ */
+#define CHIMERA_NFS4_CLIENT_DEVCACHE_MAX 64
 
-    struct chimera_nfs_client_server **servers;
-    struct chimera_nfs_client_server  *servers_map;
-    int                                max_servers;
-    pthread_mutex_t                    lock;
+struct chimera_nfs4_client_devcache_entry {
+    uint8_t                          deviceid[CHIMERA_VFS_DEVICEID_SIZE];
+    int                              valid;
+    int                              server_index;  /* resolved DS server slot */
+    struct chimera_vfs_layout_device device;
+};
+
+struct chimera_nfs4_client_devcache {
+    pthread_mutex_t                           lock;
+    uint32_t                                  count;
+    struct chimera_nfs4_client_devcache_entry entries[CHIMERA_NFS4_CLIENT_DEVCACHE_MAX];
+};
+
+struct chimera_nfs_shared {
+    struct chimera_nfs_client_mount    *mounts;
+
+    struct chimera_nfs_client_server  **servers;
+    struct chimera_nfs_client_server   *servers_map;
+    int                                 max_servers;
+    pthread_mutex_t                     lock;
 
     /* Number of NFS client (evpl) threads, counted at thread_init; used to size
      * each thread's fore-channel slot block (max_slots / nfs_thread_count). */
-    _Atomic int                        nfs_thread_count;
+    _Atomic int                         nfs_thread_count;
 
-    struct PORTMAP_V2                  portmap_v2;
-    struct NFS_MOUNT_V3                mount_v3;
-    struct NFS_V3                      nfs_v3;
-    struct NFS_V4                      nfs_v4;
-    struct NFS_V4_CB                   nfs_v4_cb;
-    struct NLM_V4                      nlm_v4;
+    /* pNFS client device cache (flex-files). */
+    struct chimera_nfs4_client_devcache pnfs_devcache;
+
+    /* pNFS layout registry: active (VALID / fenced) flex-files layouts, so the
+     * back-channel CB_LAYOUTRECALL handler can find one by file handle and fence
+     * its DS I/O.  Layouts are embedded in open states; this list links them via
+     * layout->reg_next under pnfs_layout_lock. */
+    pthread_mutex_t                     pnfs_layout_lock;
+    struct chimera_nfs4_layout         *pnfs_layouts;
+
+    struct PORTMAP_V2                   portmap_v2;
+    struct NFS_MOUNT_V3                 mount_v3;
+    struct NFS_V3                       nfs_v3;
+    struct NFS_V4                       nfs_v4;
+    struct NFS_V4_CB                    nfs_v4_cb;
+    struct NLM_V4                       nlm_v4;
 
     /* Back-channel control thread (nfs4_cb.c).  A single dedicated evpl thread
      * owns a persistent connection per server (server->cb_conn) on which it runs
@@ -235,16 +275,16 @@ struct chimera_nfs_shared {
      * incoming CB_COMPOUND.  Started lazily on the first NFSv4.1 mount.  Mount
      * threads request establishment by pushing onto cb_establish_queue (under
      * cb_lock) and ringing cb_doorbell. */
-    struct evpl_thread                *cb_thread;
-    struct evpl                       *cb_evpl;
-    struct evpl_rpc2_thread           *cb_rpc2_thread;
-    struct evpl_doorbell               cb_doorbell;
-    pthread_mutex_t                    cb_lock;
-    struct chimera_nfs4_cb_establish  *cb_establish_queue;
-    int                                cb_started;
+    struct evpl_thread                 *cb_thread;
+    struct evpl                        *cb_evpl;
+    struct evpl_rpc2_thread            *cb_rpc2_thread;
+    struct evpl_doorbell                cb_doorbell;
+    pthread_mutex_t                     cb_lock;
+    struct chimera_nfs4_cb_establish   *cb_establish_queue;
+    int                                 cb_started;
 
-    struct prometheus_histogram       *op_histogram;
-    struct prometheus_metrics         *metrics;
+    struct prometheus_histogram        *op_histogram;
+    struct prometheus_metrics          *metrics;
 
     /* evpl stream protocol for outbound plain-TCP connections, resolved from
      * the common tcp_flavor setting (chimera_vfs->tcp_flavor) at mount time.

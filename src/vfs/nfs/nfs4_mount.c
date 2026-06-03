@@ -97,6 +97,24 @@ chimera_nfs4_mount_get_port(
     return default_port;
 } /* chimera_nfs4_mount_get_port */
 
+/* Return 1 if the `pnfs` mount option is present (enables pNFS-MDS). */
+static int
+chimera_nfs4_mount_get_pnfs(const struct chimera_vfs_mount_options *options)
+{
+    int i;
+
+    for (i = 0; i < options->num_options; i++) {
+        if (strcmp(options->options[i].key, "pnfs") == 0) {
+            if (!options->options[i].value ||
+                strcmp(options->options[i].value, "0") != 0) {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+} /* chimera_nfs4_mount_get_pnfs */
+
 /*
  * Callback for SEQUENCE + PUTROOTFH + GETFH + GETATTR compound
  * This is the final step of mount - we have the root file handle
@@ -545,6 +563,9 @@ chimera_nfs4_mount(
         /* Parse RDMA options */
         server->rdma_protocol = chimera_nfs4_mount_get_rdma_protocol(&request->mount.options);
         server->use_rdma      = server->rdma_protocol != 0;
+
+        /* pNFS opt-in (default off); confirmed against eir_flags at EXCHANGE_ID. */
+        server->pnfs_requested = chimera_nfs4_mount_get_pnfs(&request->mount.options);
 
         /* Get port (default 2049 for TCP, 20049 for RDMA) */
         port = chimera_nfs4_mount_get_port(&request->mount.options,

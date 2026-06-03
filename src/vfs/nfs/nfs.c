@@ -88,6 +88,8 @@ chimera_nfs_init(
 
     pthread_mutex_init(&shared->lock, NULL);
     pthread_mutex_init(&shared->cb_lock, NULL);
+    pthread_mutex_init(&shared->pnfs_devcache.lock, NULL);
+    pthread_mutex_init(&shared->pnfs_layout_lock, NULL);
 
     shared->max_servers = 64;
     shared->servers     = calloc(shared->max_servers, sizeof(*shared->servers));
@@ -135,6 +137,9 @@ chimera_nfs_destroy(void *private_data)
 
     free(shared->mounts);
     free(shared->servers);
+
+    pthread_mutex_destroy(&shared->pnfs_devcache.lock);
+    pthread_mutex_destroy(&shared->pnfs_layout_lock);
 
     free(shared);
 } /* chimera_nfs_destroy */

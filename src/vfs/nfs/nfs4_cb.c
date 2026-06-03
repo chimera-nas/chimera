@@ -379,8 +379,10 @@ chimera_nfs4_cb_exchange_id_callback(
     int                          status,
     void                        *private_data)
 {
-    struct chimera_nfs4_cb_establish   *item = private_data;
+    struct chimera_nfs4_cb_establish   *item   = private_data;
+    struct chimera_nfs_client_server   *server = item->server_thread->server;
     struct chimera_nfs4_client_session *session;
+    struct EXCHANGE_ID4resok           *eid_res;
 
     (void) evpl;
     (void) verf;
@@ -394,9 +396,16 @@ chimera_nfs4_cb_exchange_id_callback(
         return;
     }
 
+    eid_res = &res->resarray[0].opexchange_id.eir_resok4;
+
     session = calloc(1, sizeof(*session));
     pthread_mutex_init(&session->lock, NULL);
-    session->clientid = res->resarray[0].opexchange_id.eir_resok4.eir_clientid;
+    session->clientid = eid_res->eir_clientid;
+
+    /* The MDS confirms pNFS support by echoing USE_PNFS_MDS; only then does the
+     * client issue LAYOUTGET.  Otherwise it transparently stays non-pNFS. */
+    server->mds_pnfs_capable = server->pnfs_requested &&
+        (eid_res->eir_flags & EXCHGID4_FLAG_USE_PNFS_MDS) != 0;
 
     item->session = session;
 
@@ -438,7 +447,10 @@ chimera_nfs4_cb_exchange_id(struct chimera_nfs4_cb_establish *item)
     eid_args->eia_clientowner.co_ownerid.data = (uint8_t *) server->nfs4_owner_id;
     eid_args->eia_clientowner.co_ownerid.len  = server->nfs4_owner_id_len;
 
-    eid_args->eia_flags                 = EXCHGID4_FLAG_USE_NON_PNFS;
+    /* Advertise pNFS-MDS use when the mount asked for it; the MDS confirms by
+     * echoing USE_PNFS_MDS in eir_flags (checked in the reply). */
+    eid_args->eia_flags = server->pnfs_requested
+        ? EXCHGID4_FLAG_USE_PNFS_MDS : EXCHGID4_FLAG_USE_NON_PNFS;
     eid_args->eia_state_protect.spa_how = SP4_NONE;
     eid_args->eia_client_impl_id        = NULL;
     eid_args->num_eia_client_impl_id    = 0;

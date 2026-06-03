@@ -4,6 +4,7 @@
 
 #include "nfs_internal.h"
 #include "nfs4_open_state.h"
+#include "nfs4_pnfs.h"
 
 struct chimera_nfs4_read_ctx {
     struct chimera_nfs_thread        *thread;
@@ -104,11 +105,19 @@ chimera_nfs4_read(
         return;
     }
 
+    open_state = (struct chimera_nfs4_open_state *) request->read.handle->vfs_private;
+
+    /* pNFS overlay: if a flex-files layout covers this read, drive it straight
+     * to the data server (or acquire the layout first).  Returns 1 if it took
+     * the request; 0 means fall through to the MDS read below. */
+    if (open_state &&
+        chimera_nfs4_pnfs_read(thread, shared, request, private_data, server_thread, open_state)) {
+        return;
+    }
+
     ctx         = request->plugin_data;
     ctx->thread = thread;
     ctx->server = server;
-
-    open_state = (struct chimera_nfs4_open_state *) request->read.handle->vfs_private;
 
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
