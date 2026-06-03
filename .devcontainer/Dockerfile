@@ -8,6 +8,7 @@ ARG APT_MIRROR
 ARG ENABLE_XLIO=1
 ARG ENABLE_DOCA=0
 ARG ENABLE_FIO=1
+ARG ENABLE_ELBENCHO=1
 ARG ENABLE_CLAUDE=1
 ARG ENABLE_CODEX=1
 ARG ENABLE_UV=1
@@ -19,6 +20,7 @@ ARG ENABLE_WPTS=1
 ARG PYNFS_REF=c4bf18d62947e793752c1f77ab180ce75533f14d
 # Pinned Microsoft Windows Protocol Test Suites (WPTS) FileServer release.
 ARG WPTS_VERSION=4.26.3.0
+ARG ELBENCHO_REF=96b1bf29c35e437715c0527194e69e4c96ed9922
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -36,6 +38,7 @@ RUN apt-get -y update && \
     apt-get -y --no-install-recommends install clang clang-tools cmake ninja-build git flex bison lldb gdb less vim psmisc uncrustify \
     net-tools tshark tcpdump uuid-dev iproute2 man-db manpages-dev ca-certificates ssh libjansson-dev libclang-rt-18-dev llvm wget \
     libxxhash-dev liburcu-dev librdmacm-dev liburing-dev libaio-dev libunwind-dev librocksdb-dev libcurl4-openssl-dev clangd uthash-dev libnuma-dev \
+    libboost-dev libboost-program-options-dev libboost-thread-dev libboost-system-dev \
     libcurl4-openssl-dev build-essential ruby-full autoconf automake make libtool pkg-config libs3-dev gh npm reuse libssl-dev openssl \
     libkrb5-3 libkrb5-dev libgssapi-krb5-2 libwbclient-dev curl jq libicu-dev awscli \
     krb5-kdc krb5-admin-server krb5-user python3-pip python3-setuptools python3-venv \
@@ -55,6 +58,14 @@ RUN if [ "$ENABLE_FIO" = "1" ] ; then \
     git clone --depth 1 --branch fio-3.40 https://github.com/axboe/fio.git /fio && \
     cd /fio && \
     ./configure --disable-libnfs && \
+    make -j8 && \
+    make install ; \
+    fi
+
+RUN if [ "$ENABLE_ELBENCHO" = "1" ] ; then \
+    git clone https://github.com/chimera-nas/elbencho.git /elbencho && \
+    cd /elbencho && \
+    git checkout "$ELBENCHO_REF" && \
     make -j8 && \
     make install ; \
     fi
