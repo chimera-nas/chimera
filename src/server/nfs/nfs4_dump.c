@@ -280,6 +280,106 @@ _nfs4_dump_compound(
                                   req, i + 1, args->num_argarray);
                 break;
 
+            case OP_SECINFO:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d SecInfo",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_BACKCHANNEL_CTL:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d BackchannelCtl",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_BIND_CONN_TO_SESSION:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d BindConnToSession",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_FREE_STATEID:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d FreeStateId",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_SET_SSV:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d SetSSV",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_GETDEVICEINFO:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d GetDeviceInfo",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_GETDEVICELIST:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d GetDeviceList",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_LAYOUTGET:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d LayoutGet",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_LAYOUTCOMMIT:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d LayoutCommit",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_LAYOUTRETURN:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d LayoutReturn",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_LAYOUTSTATS:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d LayoutStats",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_LAYOUTERROR:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d LayoutError",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_ALLOCATE:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d Allocate",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_DEALLOCATE:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d Deallocate",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_COPY:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d Copy",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_SEEK:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d Seek",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_GETXATTR:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d GetXattr",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_SETXATTR:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d SetXattr",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_LISTXATTRS:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d ListXattrs",
+                                  req, i + 1, args->num_argarray);
+                break;
+
+            case OP_REMOVEXATTR:
+                chimera_nfs_debug("NFS4 Request %p: %02d/%02d RemoveXattr",
+                                  req, i + 1, args->num_argarray);
+                break;
+
             default:
                 chimera_nfs_debug("NFS4 Request %p: %02d/%02d Unknown op=%d",
                                   req, i + 1, args->num_argarray,
