@@ -46,6 +46,7 @@ struct chimera_server_config {
     int                                   nfs_lockmgr_port;
     int                                   nfs_port;
     int                                   nfs_data_server;
+    uint64_t                              nfs_server_scope;
     int                                   external_portmap;
     char                                  portmap_hostname[256];
     int                                   soft_fail_bad_req;
@@ -92,6 +93,8 @@ struct chimera_server_config {
         char netid[8];
         char uaddr[64];
         char backing_path[CHIMERA_PNFS_BACKING_MAX];
+        int  version;                     /* NFS version the client uses for DS I/O */
+        int  minorversion;                /* NFS minor version (4.x)                */
     }                                     pnfs_ds[CHIMERA_PNFS_MAX_DS];
 };
 
@@ -196,6 +199,15 @@ chimera_server_config_init(void)
      * service so a pNFS data server can coexist with an MDS on one host. */
     config->nfs_port        = 2049;
     config->nfs_data_server = 0;
+
+    /* NFSv4.1 server identity (EXCHANGE_ID eir_server_scope).  Clients treat two
+     * server addresses returning the same scope as the same server (shared
+     * state, eligible for trunking).  Independent chimera servers that do not
+     * share state -- e.g. a pNFS data server co-deployed with its MDS -- must
+     * advertise distinct scopes or the client coalesces them and misroutes I/O.
+     * Default preserves the historical value; override per instance via
+     * "nfs_server_scope". */
+    config->nfs_server_scope = 42;
 
     config->cache_ttl = 60;
 
@@ -529,7 +541,9 @@ chimera_server_config_add_pnfs_ds(
     struct chimera_server_config *config,
     const char                   *netid,
     const char                   *uaddr,
-    const char                   *backing_path)
+    const char                   *backing_path,
+    int                           version,
+    int                           minorversion)
 {
     struct chimera_server_config_pnfs_ds *ds;
     int                                   idx;
@@ -544,6 +558,8 @@ chimera_server_config_add_pnfs_ds(
     snprintf(ds->netid, sizeof(ds->netid), "%s", netid ? netid : "tcp");
     snprintf(ds->uaddr, sizeof(ds->uaddr), "%s", uaddr ? uaddr : "");
     snprintf(ds->backing_path, sizeof(ds->backing_path), "%s", backing_path ? backing_path : "");
+    ds->version      = version ? version : 3;
+    ds->minorversion = minorversion;
 
     return idx;
 } /* chimera_server_config_add_pnfs_ds */
@@ -575,6 +591,20 @@ chimera_server_config_get_nfs_data_server(const struct chimera_server_config *co
 {
     return config->nfs_data_server;
 } /* chimera_server_config_get_nfs_data_server */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_server_scope(
+    struct chimera_server_config *config,
+    uint64_t                      scope)
+{
+    config->nfs_server_scope = scope;
+} /* chimera_server_config_set_nfs_server_scope */
+
+SYMBOL_EXPORT uint64_t
+chimera_server_config_get_nfs_server_scope(const struct chimera_server_config *config)
+{
+    return config->nfs_server_scope;
+} /* chimera_server_config_get_nfs_server_scope */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs_rdma_hostname(
@@ -1192,7 +1222,9 @@ chimera_server_init(
             chimera_vfs_pnfs_add_device(server->vfs,
                                         config->pnfs_ds[i].netid,
                                         config->pnfs_ds[i].uaddr,
-                                        config->pnfs_ds[i].backing_path);
+                                        config->pnfs_ds[i].backing_path,
+                                        config->pnfs_ds[i].version,
+                                        config->pnfs_ds[i].minorversion);
         }
         chimera_server_info("pNFS enabled with %d data server(s)", config->pnfs_num_ds);
     }
