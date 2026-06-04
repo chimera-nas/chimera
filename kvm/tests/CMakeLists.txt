@@ -8,6 +8,7 @@ set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
 set(PNFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_test_wrapper.sh)
 set(PNFS_BLOCK_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_block_test_wrapper.sh)
 set(PNFS_SCSI_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_scsi_test_wrapper.sh)
+set(PNFS_PROXY_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_proxy_test_wrapper.sh)
 
 set(KVM_BACKENDS memfs linux)
 
@@ -138,6 +139,21 @@ set(PNFS_CMD_recall_truncate_xclient "mkdir -p /mnt2 /mnt/test && mount -t nfs -
 # and the name is gone from the namespace.
 set(PNFS_CMD_remove "mkdir -p /mnt/test && dd if=/dev/urandom of=/mnt/test/f0 bs=1M count=4 2>/dev/null && sync && grep -qi LAYOUTGET /proc/self/mountstats && rm /mnt/test/f0 && ! test -e /mnt/test/f0")
 
+# pNFS PROXY workloads: exercise chimera's own pNFS *client* (the nfs VFS proxy
+# module) against chimera's pNFS server.  The guest mounts a chimera proxy over
+# plain NFSv4.1; the proxy is the pNFS client (LAYOUTGET/GETDEVICEINFO + direct
+# DS I/O + back-channel CB_LAYOUTRECALL).  So, unlike the direct pNFS tests, the
+# guest mount has no LAYOUTGET in its own mountstats -- the wrapper asserts pNFS
+# engagement (proxy->DS connection) and recall delivery from the proxy's logs.
+set(PNFS_PROXY_PROGRAMS rw recall_truncate)
+set(PNFS_PROXY_CMD_rw "mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && cmp /tmp/orig /mnt/test/f0")
+
+# Truncating a file the proxy holds a layout for makes the proxy issue a SETATTR
+# to the MDS, which recalls the layout from the proxy over its back channel; the
+# proxy fences DS I/O and the truncate completes.  The "RECALL_EXPECTED" token
+# tells the wrapper to additionally assert the proxy logged a CB_LAYOUTRECALL.
+set(PNFS_PROXY_CMD_recall_truncate ": RECALL_EXPECTED; mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && truncate -s 4194304 /mnt/test/f0 && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && head -c 4194304 /tmp/orig > /tmp/orig4 && cmp /tmp/orig4 /mnt/test/f0")
+
 # xfstests programs
 set(XFSTESTS_PROGRAMS fsstress fsx dirstress nametest fstest rewinddir)
 
@@ -251,6 +267,23 @@ foreach(image_spec ${KVM_IMAGES})
                         ${CHIMERA_BINARY} ${pbackend} 4.1 3 combined
                         "${PNFS_CMD_${prog}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/${prog}_${pbackend}_nfs4.1_combined
+                PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2)
+        endforeach()
+    endforeach()
+
+    # pNFS PROXY tests: chimera's own pNFS client (the nfs VFS proxy) against
+    # chimera's pNFS server.  Three daemons across two netns -- MDS + DS in the
+    # backend netns, a full-server proxy (the pNFS client under test) in the
+    # frontend netns with the guest -- joined by a veth.  v3 data path; the
+    # client->MDS mount and proxy back channel are 4.1.
+    foreach(prog ${PNFS_PROXY_PROGRAMS})
+        foreach(pbackend ${PNFS_BACKENDS})
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/pnfs/proxy_${prog}_${pbackend}_nfs4.1
+                COMMAND bash ${PNFS_PROXY_WRAPPER}
+                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                        ${CHIMERA_BINARY} ${pbackend}
+                        "${PNFS_PROXY_CMD_${prog}}")
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/proxy_${prog}_${pbackend}_nfs4.1
                 PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2)
         endforeach()
     endforeach()

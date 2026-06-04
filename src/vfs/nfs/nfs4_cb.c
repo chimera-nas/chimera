@@ -407,6 +407,9 @@ chimera_nfs4_cb_exchange_id_callback(
     server->mds_pnfs_capable = server->pnfs_requested &&
         (eid_res->eir_flags & EXCHGID4_FLAG_USE_PNFS_MDS) != 0;
 
+    chimera_nfsclient_info("NFS4 EXCHANGE_ID ok: clientid=%lu pnfs_mds=%d",
+                           (unsigned long) session->clientid, server->mds_pnfs_capable);
+
     item->session = session;
 
     chimera_nfs4_cb_create_session(item);
