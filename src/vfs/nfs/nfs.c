@@ -233,6 +233,10 @@ chimera_nfs_thread_init(
     thread->max_server_threads = shared->max_servers;
     thread->server_threads     = calloc(thread->max_server_threads, sizeof(*thread->server_threads));
 
+    /* Persistent doorbell the back-channel control thread rings to resume mounts
+     * established on its behalf. */
+    chimera_nfs4_cb_thread_init(thread);
+
     return thread;
 } /* chimera_nfs_thread_init */
 
@@ -248,6 +252,11 @@ chimera_nfs_thread_destroy(void *private_data)
         LL_DELETE(thread->free_open_handles, open_handle);
         free(open_handle);
     }
+
+    /* Remove the back-channel resume doorbell while this thread's evpl is still
+     * valid (no establishment can be in flight: mounts complete before their
+     * thread is torn down). */
+    chimera_nfs4_cb_thread_destroy(thread);
 
     /* Tear down the rpc2 thread first: it disconnects every connection, which
      * fires chimera_nfs_notify(DISCONNECTED) -> chimera_nfs4_slot_table_reset,

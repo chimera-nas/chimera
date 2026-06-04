@@ -231,15 +231,24 @@ static void chimera_nfs4_cb_create_session(
     struct chimera_nfs4_cb_establish *item);
 
 /* Signal the originating thread that establishment finished (status 0) or
- * failed (errno).  After this the control thread must not touch the item; the
- * originating thread owns and frees it. */
+ * failed (errno): queue the item onto that thread's resume list and ring its
+ * persistent doorbell.  After this the control thread must not touch the item;
+ * the originating thread owns and frees it. */
 static void
 chimera_nfs4_cb_establish_done(
     struct chimera_nfs4_cb_establish *item,
     int                               status)
 {
+    struct chimera_nfs_thread *origin = item->server_thread->thread;
+
     item->status = status;
-    evpl_ring_doorbell(&item->resume_db);
+
+    pthread_mutex_lock(&origin->cb_resume_lock);
+    item->next             = origin->cb_resume_done;
+    origin->cb_resume_done = item;
+    pthread_mutex_unlock(&origin->cb_resume_lock);
+
+    evpl_ring_doorbell(&origin->cb_resume_doorbell);
 } /* chimera_nfs4_cb_establish_done */
 
 /*
@@ -592,32 +601,80 @@ chimera_nfs4_cb_control_stop(struct chimera_nfs_shared *shared)
 } /* chimera_nfs4_cb_control_stop */
 
 /*
- * Resume doorbell (originating mount thread).  The control thread rang it once
- * establishment finished; pick up the result, free the item, and either fail
- * the mount or resume it (RECLAIM_COMPLETE + root FH on the mount connection).
+ * Resume doorbell drain (originating mount thread).  The control thread queued
+ * one or more finished establishments here and rang this thread's persistent
+ * doorbell.  Splice the list, then for each item free it (plain heap -- it holds
+ * no evpl object) and either fail the mount or resume it (RECLAIM_COMPLETE +
+ * root FH on the mount connection).
  */
 static void
-chimera_nfs4_cb_resume(
+chimera_nfs4_cb_resume_drain(
     struct evpl          *evpl,
     struct evpl_doorbell *doorbell)
 {
-    struct chimera_nfs4_cb_establish        *item =
-        container_of(doorbell, struct chimera_nfs4_cb_establish, resume_db);
-    struct chimera_nfs_client_server_thread *server_thread = item->server_thread;
-    struct chimera_vfs_request              *request       = item->request;
-    int                                      status        = item->status;
+    struct chimera_nfs_thread        *thread =
+        container_of(doorbell, struct chimera_nfs_thread, cb_resume_doorbell);
+    struct chimera_nfs4_cb_establish *item, *next;
 
-    evpl_remove_doorbell(evpl, &item->resume_db);
-    free(item);
+    (void) evpl;
 
-    if (status != 0) {
-        request->status = CHIMERA_VFS_EIO;
-        request->complete(request);
+    pthread_mutex_lock(&thread->cb_resume_lock);
+    item                   = thread->cb_resume_done;
+    thread->cb_resume_done = NULL;
+    pthread_mutex_unlock(&thread->cb_resume_lock);
+
+    while (item) {
+        struct chimera_nfs_client_server_thread *server_thread = item->server_thread;
+        struct chimera_vfs_request              *request       = item->request;
+        int                                      status        = item->status;
+
+        next = item->next;
+        free(item);
+
+        if (status != 0) {
+            request->status = CHIMERA_VFS_EIO;
+            request->complete(request);
+        } else {
+            chimera_nfs4_mount_resume_after_session(server_thread, request);
+        }
+
+        item = next;
+    }
+} /* chimera_nfs4_cb_resume_drain */
+
+void
+chimera_nfs4_cb_thread_init(struct chimera_nfs_thread *thread)
+{
+    pthread_mutex_init(&thread->cb_resume_lock, NULL);
+    thread->cb_resume_done = NULL;
+    evpl_add_doorbell(thread->evpl, &thread->cb_resume_doorbell,
+                      chimera_nfs4_cb_resume_drain);
+    thread->cb_resume_armed = 1;
+} /* chimera_nfs4_cb_thread_init */
+
+void
+chimera_nfs4_cb_thread_destroy(struct chimera_nfs_thread *thread)
+{
+    struct chimera_nfs4_cb_establish *item, *next;
+
+    if (!thread->cb_resume_armed) {
         return;
     }
 
-    chimera_nfs4_mount_resume_after_session(server_thread, request);
-} /* chimera_nfs4_cb_resume */
+    evpl_remove_doorbell(thread->evpl, &thread->cb_resume_doorbell);
+    thread->cb_resume_armed = 0;
+
+    /* Free any completions that arrived but were never drained (shutdown race);
+     * their requests, if any, are abandoned with the thread. */
+    item = thread->cb_resume_done;
+    while (item) {
+        next = item->next;
+        free(item);
+        item = next;
+    }
+    thread->cb_resume_done = NULL;
+    pthread_mutex_destroy(&thread->cb_resume_lock);
+} /* chimera_nfs4_cb_thread_destroy */
 
 void
 chimera_nfs4_cb_establish_session(
@@ -629,11 +686,6 @@ chimera_nfs4_cb_establish_session(
 
     item->server_thread = server_thread;
     item->request       = request;
-    item->resume_evpl   = server_thread->thread->evpl;
-
-    /* Arm the resume doorbell on our own evpl before publishing the item, so the
-     * control thread can never ring it before it is registered. */
-    evpl_add_doorbell(item->resume_evpl, &item->resume_db, chimera_nfs4_cb_resume);
 
     pthread_mutex_lock(&shared->cb_lock);
 

@@ -147,18 +147,17 @@ struct chimera_nfs_client_server_thread {
  * establish a server's NFSv4.1 session on the control thread's persistent
  * connection.  The session (and thus the back channel that rides its
  * connection) must outlive the transient mount connection, so EXCHANGE_ID +
- * CREATE_SESSION run on the control thread; the control thread then rings
- * resume_db on the originating evpl to resume the mount (RECLAIM_COMPLETE +
- * root FH) on its own connection (bound to the session via SEQUENCE).
+ * CREATE_SESSION run on the control thread; the control thread then queues the
+ * item back to the originating chimera_nfs_thread (server_thread->thread) and
+ * rings that thread's persistent cb_resume_doorbell to resume the mount
+ * (RECLAIM_COMPLETE + root FH) on its own connection (bound via SEQUENCE).
  */
 struct chimera_nfs4_cb_establish {
     struct chimera_nfs_client_server_thread *server_thread;
     struct chimera_vfs_request              *request;
     struct chimera_nfs4_client_session      *session;     /* in-progress session  */
-    struct evpl                             *resume_evpl; /* originating evpl      */
-    struct evpl_doorbell                     resume_db;   /* added on resume_evpl  */
-    int                                      status;      /* 0 ok, else errno      */
-    struct chimera_nfs4_cb_establish        *next;        /* control-thread queue  */
+    int                                      status;      /* 0 ok, else errno     */
+    struct chimera_nfs4_cb_establish        *next;        /* queue link            */
 };
 
 struct chimera_nfs_client_server {
@@ -260,6 +259,17 @@ struct chimera_nfs_thread {
     struct chimera_nfs_client_server_thread **server_threads;
     struct chimera_nfs_client_open_handle    *free_open_handles;
     int                                       max_server_threads;
+
+    /* Back-channel session-establishment completions destined for this thread.
+     * The control thread pushes finished chimera_nfs4_cb_establish items here
+     * (under cb_resume_lock) and rings cb_resume_doorbell; this thread drains
+     * and resumes the parked mounts.  The doorbell is persistent (added at
+     * thread_init, removed at thread_destroy) -- per RFC of evpl, doorbells must
+     * not be freed from their own callback. */
+    struct evpl_doorbell                      cb_resume_doorbell;
+    pthread_mutex_t                           cb_resume_lock;
+    struct chimera_nfs4_cb_establish         *cb_resume_done;
+    int                                       cb_resume_armed;
 };
 
 static inline struct chimera_nfs_client_open_handle *
@@ -696,6 +706,13 @@ nfsstat4 chimera_nfs4_cb_layoutrecall(
  * chimera_nfs4_cb_establish_session, so no explicit start entry point. */
 void chimera_nfs4_cb_control_stop(
     struct chimera_nfs_shared *shared);
+
+/* Per-thread back-channel resume doorbell lifecycle (called from the nfs
+ * module's thread_init / thread_destroy). */
+void chimera_nfs4_cb_thread_init(
+    struct chimera_nfs_thread *thread);
+void chimera_nfs4_cb_thread_destroy(
+    struct chimera_nfs_thread *thread);
 
 /*
  * Request the control thread establish `server`'s NFSv4.1 session on its
