@@ -23,14 +23,6 @@ struct chimera_nfs4_mount_ctx {
 };
 
 /* Forward declarations */
-static void chimera_nfs4_mount_exchange_id(
-    struct chimera_nfs_client_server_thread *server_thread,
-    struct chimera_vfs_request              *request);
-
-static void chimera_nfs4_mount_create_session(
-    struct chimera_nfs_client_server_thread *server_thread,
-    struct chimera_vfs_request              *request);
-
 static void chimera_nfs4_mount_get_root_fh(
     struct chimera_nfs_client_server_thread *server_thread,
     struct chimera_vfs_request              *request);
@@ -214,6 +206,7 @@ chimera_nfs4_mount_get_root_fh_callback(
 
     request->mount.r_mount_private = mount;
 
+    pthread_mutex_lock(&shared->lock);
     mount->status = CHIMERA_NFS_CLIENT_MOUNT_STATE_MOUNTED;
     pthread_mutex_unlock(&shared->lock);
 
@@ -362,240 +355,12 @@ chimera_nfs4_mount_reclaim_complete(
 } /* chimera_nfs4_mount_reclaim_complete */
 
 /*
- * Callback for CREATE_SESSION compound
+ * EXCHANGE_ID + CREATE_SESSION are no longer issued here.  Session
+ * establishment moved to the dedicated back-channel control thread
+ * (chimera_nfs4_cb_establish_session in nfs4_cb.c), which runs them on a
+ * persistent connection so the back channel survives this transient mount
+ * connection; the mount resumes at chimera_nfs4_mount_resume_after_session().
  */
-static void
-chimera_nfs4_mount_create_session_callback(
-    struct evpl                 *evpl,
-    const struct evpl_rpc2_verf *verf,
-    struct COMPOUND4res         *res,
-    int                          status,
-    void                        *private_data)
-{
-    struct chimera_vfs_request              *request       = private_data;
-    struct chimera_nfs4_mount_ctx           *ctx           = request->plugin_data;
-    struct chimera_nfs_client_server_thread *server_thread = ctx->server_thread;
-    struct chimera_nfs_client_server        *server        = server_thread->server;
-    struct chimera_nfs4_client_session      *session;
-    struct CREATE_SESSION4resok             *cs_res;
-
-    if (status != 0) {
-        chimera_nfsclient_error("NFS4 CREATE_SESSION RPC failed: %d", status);
-        request->status = CHIMERA_VFS_EIO;
-        request->complete(request);
-        return;
-    }
-
-    if (res->status != NFS4_OK) {
-        chimera_nfsclient_error("NFS4 CREATE_SESSION compound failed: %d", res->status);
-        request->status = CHIMERA_VFS_EIO;
-        request->complete(request);
-        return;
-    }
-
-    if (res->num_resarray < 1 ||
-        res->resarray[0].opcreate_session.csr_status != NFS4_OK) {
-        chimera_nfsclient_error("NFS4 CREATE_SESSION op failed: %d",
-                                res->resarray[0].opcreate_session.csr_status);
-        request->status = CHIMERA_VFS_EIO;
-        request->complete(request);
-        return;
-    }
-
-    cs_res = &res->resarray[0].opcreate_session.csr_resok4;
-
-    /* Store session information */
-    session = server->nfs4_session;
-    memcpy(session->sessionid, cs_res->csr_sessionid, NFS4_SESSIONID_SIZE);
-
-    /* The server's granted fore-channel ca_maxrequests is the global slot count.
-     * Per-thread connections claim disjoint blocks from [0, max_slots) lazily;
-     * see chimera_nfs4_compound_call / chimera_nfs4_slot_table_init. */
-    session->max_slots      = cs_res->csr_fore_chan_attrs.ca_maxrequests;
-    session->next_unclaimed = 0;
-    session->overflow_rr    = 0;
-
-    chimera_nfsclient_info("NFS4 CREATE_SESSION successful, clientid=%lu, max_slots=%u",
-                           (unsigned long) session->clientid, session->max_slots);
-
-    /* Declare the (empty) reclaim phase complete before any non-reclaim
-     * locking operation, then resolve the export root. */
-    chimera_nfs4_mount_reclaim_complete(server_thread, request);
-} /* chimera_nfs4_mount_create_session_callback */
-
-/*
- * Send CREATE_SESSION compound
- */
-static void
-chimera_nfs4_mount_create_session(
-    struct chimera_nfs_client_server_thread *server_thread,
-    struct chimera_vfs_request              *request)
-{
-    struct chimera_nfs_shared          *shared  = server_thread->shared;
-    struct chimera_nfs_client_server   *server  = server_thread->server;
-    struct chimera_nfs4_client_session *session = server->nfs4_session;
-    struct COMPOUND4args                args;
-    struct nfs_argop4                   argarray[1];
-    struct CREATE_SESSION4args         *cs_args;
-
-    memset(&args, 0, sizeof(args));
-    args.tag.len      = 0;
-    args.minorversion = 1;
-    args.argarray     = argarray;
-    args.num_argarray = 1;
-
-    /* CREATE_SESSION */
-    argarray[0].argop = OP_CREATE_SESSION;
-    cs_args           = &argarray[0].opcreate_session;
-
-    cs_args->csa_clientid = session->clientid;
-    cs_args->csa_sequence = 1;
-    cs_args->csa_flags    = 0;
-
-    /* Fore channel attributes */
-    cs_args->csa_fore_chan_attrs.ca_headerpadsize          = 0;
-    cs_args->csa_fore_chan_attrs.ca_maxrequestsize         = 1024 * 1024;
-    cs_args->csa_fore_chan_attrs.ca_maxresponsesize        = 1024 * 1024;
-    cs_args->csa_fore_chan_attrs.ca_maxresponsesize_cached = 0;
-    cs_args->csa_fore_chan_attrs.ca_maxoperations          = 64;
-    cs_args->csa_fore_chan_attrs.ca_maxrequests            = 64;
-    cs_args->csa_fore_chan_attrs.ca_rdma_ird               = NULL;
-    cs_args->csa_fore_chan_attrs.num_ca_rdma_ird           = 0;
-
-    /* Back channel attributes (minimal, we don't use callbacks) */
-    cs_args->csa_back_chan_attrs.ca_headerpadsize          = 0;
-    cs_args->csa_back_chan_attrs.ca_maxrequestsize         = 4096;
-    cs_args->csa_back_chan_attrs.ca_maxresponsesize        = 4096;
-    cs_args->csa_back_chan_attrs.ca_maxresponsesize_cached = 0;
-    cs_args->csa_back_chan_attrs.ca_maxoperations          = 2;
-    cs_args->csa_back_chan_attrs.ca_maxrequests            = 1;
-    cs_args->csa_back_chan_attrs.ca_rdma_ird               = NULL;
-    cs_args->csa_back_chan_attrs.num_ca_rdma_ird           = 0;
-
-    cs_args->csa_cb_program    = 0;
-    cs_args->csa_sec_parms     = NULL;
-    cs_args->num_csa_sec_parms = 0;
-
-    shared->nfs_v4.send_call_NFSPROC4_COMPOUND(
-        &shared->nfs_v4.rpc2,
-        server_thread->thread->evpl,
-        server_thread->nfs_conn,
-        NULL,
-        &args,
-        0, 0, NULL, 0, 0,
-        chimera_nfs4_mount_create_session_callback,
-        request);
-} /* chimera_nfs4_mount_create_session */
-
-/*
- * Callback for EXCHANGE_ID compound
- */
-static void
-chimera_nfs4_mount_exchange_id_callback(
-    struct evpl                 *evpl,
-    const struct evpl_rpc2_verf *verf,
-    struct COMPOUND4res         *res,
-    int                          status,
-    void                        *private_data)
-{
-    struct chimera_vfs_request              *request       = private_data;
-    struct chimera_nfs4_mount_ctx           *ctx           = request->plugin_data;
-    struct chimera_nfs_client_server_thread *server_thread = ctx->server_thread;
-    struct chimera_nfs_client_server        *server        = server_thread->server;
-    struct chimera_nfs4_client_session      *session;
-    struct EXCHANGE_ID4resok                *eid_res;
-
-    if (status != 0) {
-        chimera_nfsclient_error("NFS4 EXCHANGE_ID RPC failed: %d", status);
-        request->status = CHIMERA_VFS_EIO;
-        request->complete(request);
-        return;
-    }
-
-    if (res->status != NFS4_OK) {
-        chimera_nfsclient_error("NFS4 EXCHANGE_ID compound failed: %d", res->status);
-        request->status = CHIMERA_VFS_EIO;
-        request->complete(request);
-        return;
-    }
-
-    if (res->num_resarray < 1 ||
-        res->resarray[0].opexchange_id.eir_status != NFS4_OK) {
-        chimera_nfsclient_error("NFS4 EXCHANGE_ID op failed: %d",
-                                res->resarray[0].opexchange_id.eir_status);
-        request->status = CHIMERA_VFS_EIO;
-        request->complete(request);
-        return;
-    }
-
-    eid_res = &res->resarray[0].opexchange_id.eir_resok4;
-
-    /* Allocate and initialize session */
-    session = calloc(1, sizeof(*session));
-    pthread_mutex_init(&session->lock, NULL);
-    session->clientid    = eid_res->eir_clientid;
-    server->nfs4_session = session;
-
-    chimera_nfsclient_info("NFS4 EXCHANGE_ID successful, clientid=%lu",
-                           (unsigned long) session->clientid);
-
-    /* Next step: CREATE_SESSION */
-    chimera_nfs4_mount_create_session(server_thread, request);
-} /* chimera_nfs4_mount_exchange_id_callback */
-
-/*
- * Send EXCHANGE_ID compound to register with the server
- */
-static void
-chimera_nfs4_mount_exchange_id(
-    struct chimera_nfs_client_server_thread *server_thread,
-    struct chimera_vfs_request              *request)
-{
-    struct chimera_nfs_shared        *shared = server_thread->shared;
-    struct chimera_nfs_client_server *server = server_thread->server;
-    struct COMPOUND4args              args;
-    struct nfs_argop4                 argarray[1];
-    struct EXCHANGE_ID4args          *eid_args;
-    struct timespec                   now;
-
-    memset(&args, 0, sizeof(args));
-    args.tag.len      = 0;
-    args.minorversion = 1;
-    args.argarray     = argarray;
-    args.num_argarray = 1;
-
-    /* EXCHANGE_ID */
-    argarray[0].argop = OP_EXCHANGE_ID;
-    eid_args          = &argarray[0].opexchange_id;
-
-    /* Generate client owner ID based on hostname and time */
-    clock_gettime(CLOCK_REALTIME, &now);
-    memcpy(server->nfs4_verifier, &now.tv_sec, sizeof(now.tv_sec));
-
-    /* Client owner: use verifier and a unique owner ID string */
-    memcpy(eid_args->eia_clientowner.co_verifier, server->nfs4_verifier, NFS4_VERIFIER_SIZE);
-
-    /* Owner ID: hostname + pid for uniqueness - stored in server struct for lifetime */
-    server->nfs4_owner_id_len = snprintf(server->nfs4_owner_id, sizeof(server->nfs4_owner_id),
-                                         "chimera-%s-%d", server->hostname, getpid());
-    eid_args->eia_clientowner.co_ownerid.data = (uint8_t *) server->nfs4_owner_id;
-    eid_args->eia_clientowner.co_ownerid.len  = server->nfs4_owner_id_len;
-
-    eid_args->eia_flags                 = EXCHGID4_FLAG_USE_NON_PNFS;
-    eid_args->eia_state_protect.spa_how = SP4_NONE;
-    eid_args->eia_client_impl_id        = NULL;
-    eid_args->num_eia_client_impl_id    = 0;
-
-    shared->nfs_v4.send_call_NFSPROC4_COMPOUND(
-        &shared->nfs_v4.rpc2,
-        server_thread->thread->evpl,
-        server_thread->nfs_conn,
-        NULL,
-        &args,
-        0, 0, NULL, 0, 0,
-        chimera_nfs4_mount_exchange_id_callback,
-        request);
-} /* chimera_nfs4_mount_exchange_id */
 
 /*
  * Process mount after server connection is established
@@ -638,15 +403,34 @@ chimera_nfs4_mount_process_mount(
 
     pthread_mutex_lock(&shared->lock);
     DL_APPEND(shared->mounts, mount);
+    pthread_mutex_unlock(&shared->lock);
 
     /* Store mount context in request */
     ctx                = request->plugin_data;
     ctx->server_thread = server_thread;
     ctx->mount         = mount;
 
-    /* Start the NFS4 session establishment */
-    chimera_nfs4_mount_exchange_id(server_thread, request);
+    /* Establish the NFSv4.1 session on the persistent control connection (so the
+     * back channel survives this transient mount connection), then resume here
+     * via chimera_nfs4_mount_resume_after_session().  shared->lock is NOT held
+     * across this async chain: the control thread (a different evpl thread) takes
+     * shared->lock to publish server->nfs4_session, so holding it here would
+     * deadlock the handoff. */
+    chimera_nfs4_cb_establish_session(server_thread, request);
 } /* chimera_nfs4_mount_process_mount */
+
+/*
+ * Resume a mount once its session exists (the control thread established it on
+ * the back-channel connection).  RECLAIM_COMPLETE + root-FH run on this mount's
+ * own connection, which binds to the session via bind-on-SEQUENCE.
+ */
+void
+chimera_nfs4_mount_resume_after_session(
+    struct chimera_nfs_client_server_thread *server_thread,
+    struct chimera_vfs_request              *request)
+{
+    chimera_nfs4_mount_reclaim_complete(server_thread, request);
+} /* chimera_nfs4_mount_resume_after_session */
 
 /*
  * Callback after NFS4 NULL call (connection test)

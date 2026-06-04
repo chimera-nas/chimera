@@ -142,6 +142,25 @@ struct chimera_nfs_client_server_thread {
     struct chimera_nfs4_slot_table    slots;        /* NFS4.1 fore-channel slots  */
 };
 
+/*
+ * A request from a mount (data) thread to the back-channel control thread to
+ * establish a server's NFSv4.1 session on the control thread's persistent
+ * connection.  The session (and thus the back channel that rides its
+ * connection) must outlive the transient mount connection, so EXCHANGE_ID +
+ * CREATE_SESSION run on the control thread; the control thread then rings
+ * resume_db on the originating evpl to resume the mount (RECLAIM_COMPLETE +
+ * root FH) on its own connection (bound to the session via SEQUENCE).
+ */
+struct chimera_nfs4_cb_establish {
+    struct chimera_nfs_client_server_thread *server_thread;
+    struct chimera_vfs_request              *request;
+    struct chimera_nfs4_client_session      *session;     /* in-progress session  */
+    struct evpl                             *resume_evpl; /* originating evpl      */
+    struct evpl_doorbell                     resume_db;   /* added on resume_evpl  */
+    int                                      status;      /* 0 ok, else errno      */
+    struct chimera_nfs4_cb_establish        *next;        /* control-thread queue  */
+};
+
 struct chimera_nfs_client_server {
     struct chimera_nfs_shared          *shared;
     int                                 state;
@@ -170,6 +189,11 @@ struct chimera_nfs_client_server {
     uint8_t                             nfs4_verifier[NFS4_VERIFIER_SIZE];
     char                                nfs4_owner_id[128];
     int                                 nfs4_owner_id_len;
+
+    /* Persistent back-channel / control connection, owned by the control thread
+     * (shared->cb_thread).  CREATE_SESSION binds the back channel to it, so the
+     * server can deliver CB_COMPOUND here for the life of the session. */
+    struct evpl_rpc2_conn              *cb_conn;
 };
 
 struct chimera_nfs_client_mount {
@@ -205,6 +229,20 @@ struct chimera_nfs_shared {
     struct NFS_V4                      nfs_v4;
     struct NFS_V4_CB                   nfs_v4_cb;
     struct NLM_V4                      nlm_v4;
+
+    /* Back-channel control thread (nfs4_cb.c).  A single dedicated evpl thread
+     * owns a persistent connection per server (server->cb_conn) on which it runs
+     * EXCHANGE_ID + CREATE_SESSION with the back channel bound, and serves
+     * incoming CB_COMPOUND.  Started lazily on the first NFSv4.1 mount.  Mount
+     * threads request establishment by pushing onto cb_establish_queue (under
+     * cb_lock) and ringing cb_doorbell. */
+    struct evpl_thread                *cb_thread;
+    struct evpl                       *cb_evpl;
+    struct evpl_rpc2_thread           *cb_rpc2_thread;
+    struct evpl_doorbell               cb_doorbell;
+    pthread_mutex_t                    cb_lock;
+    struct chimera_nfs4_cb_establish  *cb_establish_queue;
+    int                                cb_started;
 
     struct prometheus_histogram       *op_histogram;
     struct prometheus_metrics         *metrics;
@@ -635,6 +673,45 @@ chimera_nfs_init_rpc2_cred(
     rpc2_cred->authsys.machinename     = machine_name;
     rpc2_cred->authsys.machinename_len = machine_name_len;
 } /* chimera_nfs_init_rpc2_cred */
+
+/* ---- NFSv4.1 back channel / callback receiver (nfs4_cb.c) --------------- */
+
+/* rpc2 recv_call handler for incoming CB_COMPOUND on a back-channel connection. */
+void chimera_nfs4_cb_compound(
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct CB_COMPOUND4args   *args,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data);
+
+/* CB_LAYOUTRECALL handler.  Weak default (no layouts held) returns
+ * NFS4ERR_NOMATCHING_LAYOUT; the pNFS client overrides it. */
+nfsstat4 chimera_nfs4_cb_layoutrecall(
+    struct chimera_nfs_shared        *shared,
+    struct chimera_nfs_client_server *server,
+    struct CB_LAYOUTRECALL4args      *args);
+
+/* Stop the back-channel control thread (module destroy).  Started lazily by
+ * chimera_nfs4_cb_establish_session, so no explicit start entry point. */
+void chimera_nfs4_cb_control_stop(
+    struct chimera_nfs_shared *shared);
+
+/*
+ * Request the control thread establish `server`'s NFSv4.1 session on its
+ * persistent connection (with the back channel bound), then resume the mount on
+ * the calling thread via chimera_nfs4_mount_resume_after_session().  Parks
+ * `request` (does not complete or send on the caller's connection).
+ */
+void chimera_nfs4_cb_establish_session(
+    struct chimera_nfs_client_server_thread *server_thread,
+    struct chimera_vfs_request              *request);
+
+/* Resume a mount on its originating thread once its session exists: send
+ * RECLAIM_COMPLETE then resolve the export root (nfs4_mount.c). */
+void chimera_nfs4_mount_resume_after_session(
+    struct chimera_nfs_client_server_thread *server_thread,
+    struct chimera_vfs_request              *request);
 
 void chimera_nfs3_dispatch(
     struct chimera_nfs_thread *,
