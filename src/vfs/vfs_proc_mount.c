@@ -129,6 +129,7 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
 
     mount->module        = request->mount.module;
     mount->path          = strdup(request->mount.mount_path);
+    mount->module_path   = strdup(request->mount.path ? request->mount.path : "");
     mount->pathlen       = strlen(request->mount.mount_path);
     mount->mount_private = request->mount.r_mount_private;
 

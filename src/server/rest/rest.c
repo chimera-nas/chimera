@@ -99,6 +99,27 @@ void chimera_rest_handle_buckets_delete(
     struct chimera_rest_thread *,
     const char *);
 
+void chimera_rest_handle_mounts_list(
+    struct evpl *,
+    struct evpl_http_request *,
+    struct chimera_rest_thread *);
+void chimera_rest_handle_mounts_get(
+    struct evpl *,
+    struct evpl_http_request *,
+    struct chimera_rest_thread *,
+    const char *);
+void chimera_rest_handle_mounts_create(
+    struct evpl *,
+    struct evpl_http_request *,
+    struct chimera_rest_thread *,
+    const char *,
+    int);
+void chimera_rest_handle_mounts_delete(
+    struct evpl *,
+    struct evpl_http_request *,
+    struct chimera_rest_thread *,
+    const char *);
+
 /* External handlers from rest_swagger.c */
 void chimera_rest_handle_swagger_ui(
     struct evpl *,
@@ -130,6 +151,7 @@ enum chimera_rest_post_handler {
     REST_POST_EXPORTS_CREATE,
     REST_POST_SHARES_CREATE,
     REST_POST_BUCKETS_CREATE,
+    REST_POST_MOUNTS_CREATE,
     REST_POST_DEBUG_FSOP,
 };
 
@@ -202,6 +224,10 @@ chimera_rest_notify(
         case REST_POST_BUCKETS_CREATE:
             chimera_rest_handle_buckets_create(evpl, request, thread,
                                                body, body_len);
+            break;
+        case REST_POST_MOUNTS_CREATE:
+            chimera_rest_handle_mounts_create(evpl, request, thread,
+                                              body, body_len);
             break;
         case REST_POST_DEBUG_FSOP:
             chimera_rest_handle_debug_fsop(evpl, request, thread,
@@ -544,6 +570,35 @@ chimera_rest_dispatch(
             } else if (req_type == EVPL_HTTP_REQUEST_TYPE_DELETE) {
                 chimera_rest_handle_buckets_delete(evpl, request, thread,
                                                    param);
+            } else {
+                chimera_rest_handle_method_not_allowed(evpl, request);
+            }
+            return;
+        }
+    }
+
+    /* Mounts API: /api/v1/mounts */
+    if (url_len == 14 && strncmp(url, "/api/v1/mounts", 14) == 0) {
+        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
+            chimera_rest_handle_mounts_list(evpl, request, thread);
+        } else if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
+            struct chimera_rest_post_ctx *ctx;
+            ctx          = calloc(1, sizeof(*ctx));
+            ctx->handler = REST_POST_MOUNTS_CREATE;
+            *notify_data = ctx;
+        } else {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        }
+        return;
+    }
+
+    if (chimera_rest_url_starts_with(url, url_len, "/api/v1/mounts/", 15)) {
+        chimera_rest_extract_path_param(url, url_len, 15, param, sizeof(param));
+        if (param[0] != '\0') {
+            if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
+                chimera_rest_handle_mounts_get(evpl, request, thread, param);
+            } else if (req_type == EVPL_HTTP_REQUEST_TYPE_DELETE) {
+                chimera_rest_handle_mounts_delete(evpl, request, thread, param);
             } else {
                 chimera_rest_handle_method_not_allowed(evpl, request);
             }
