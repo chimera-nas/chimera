@@ -464,6 +464,28 @@ chimera_server_mkpath(
     uint32_t               mode);
 
 int
+chimera_server_unmount(
+    struct chimera_server *server,
+    const char            *mount_path);
+
+int
+chimera_server_mount_in_use(
+    struct chimera_server *server,
+    const char            *mount_path);
+
+typedef int (*chimera_server_mount_iterate_cb)(
+    const char *mount_path,
+    const char *module_name,
+    const char *module_path,
+    void       *data);
+
+void
+chimera_server_iterate_mounts(
+    struct chimera_server          *server,
+    chimera_server_mount_iterate_cb callback,
+    void                           *data);
+
+int
 chimera_server_create_bucket(
     struct chimera_server *server,
     const char            *bucket_name,

@@ -358,6 +358,75 @@ class ChimeraAdminClient:
         """
         self._request_no_content("DELETE", f"/api/v1/buckets/{name}")
 
+    # VFS Mounts API
+
+    def list_mounts(self) -> list:
+        """List all VFS mounts.
+
+        Returns:
+            List of mount dictionaries, each with "name", "module", and
+            "path" keys.
+
+        Raises:
+            ChimeraAdminError: If the request fails
+        """
+        return self._request("GET", "/api/v1/mounts")
+
+    def get_mount(self, name: str) -> dict:
+        """Get a specific VFS mount by name.
+
+        Args:
+            name: The mount name to look up. Leading slashes are normalized
+                away server-side to match how the mount was registered.
+
+        Returns:
+            Mount dictionary with "name", "module", and "path" keys.
+
+        Raises:
+            ChimeraAdminError: If the request fails or mount not found
+        """
+        return self._request("GET", f"/api/v1/mounts/{name}")
+
+    def create_mount(
+        self,
+        name: str,
+        module: str,
+        path: str,
+        options: Optional[str] = None,
+    ) -> dict:
+        """Create a new VFS mount.
+
+        Args:
+            name: Mount name (the VFS mount path).
+            module: VFS module backing the mount (e.g. "linux", "memfs").
+            path: Backing path passed to the module.
+            options: Optional module-specific options string.
+
+        Returns:
+            Response message.
+
+        Raises:
+            ChimeraAdminError: If the request fails (e.g. 400 for missing
+                fields, 500 if the server fails to create the mount).
+        """
+        data = {"name": name, "module": module, "path": path}
+        if options is not None:
+            data["options"] = options
+        return self._request("POST", "/api/v1/mounts", json=data)
+
+    def delete_mount(self, name: str) -> None:
+        """Delete a VFS mount.
+
+        Args:
+            name: Mount name to delete.
+
+        Raises:
+            ChimeraAdminError: If the request fails, the mount is not found
+                (404), or the mount is still in use by a share, export, or
+                bucket (409).
+        """
+        self._request_no_content("DELETE", f"/api/v1/mounts/{name}")
+
     def _request_no_content(
         self,
         method: str,

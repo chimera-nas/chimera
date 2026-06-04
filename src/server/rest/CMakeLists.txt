@@ -9,6 +9,7 @@ add_library(chimera_rest SHARED
     rest.c
     rest_users.c
     rest_shares.c
+    rest_mounts.c
     rest_swagger.c
     rest_debug.c
 )

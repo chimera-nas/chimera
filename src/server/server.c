@@ -1306,6 +1306,44 @@ chimera_server_mkpath(
     return ctx.status == CHIMERA_VFS_OK ? 0 : -1;
 } /* chimera_server_mkpath */
 
+static void
+chimera_server_umount_callback(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data)
+{
+    struct mount_ctx *ctx = private_data;
+
+    ctx->done   = 1;
+    ctx->status = status;
+} /* chimera_server_umount_callback */
+
+SYMBOL_EXPORT int
+chimera_server_unmount(
+    struct chimera_server *server,
+    const char            *mount_path)
+{
+    struct evpl               *evpl;
+    struct chimera_vfs_thread *thread;
+    struct mount_ctx           ctx = { .done = 0, .status = 0 };
+
+    evpl = evpl_create(NULL);
+
+    thread = chimera_vfs_thread_init(evpl, server->vfs);
+
+    chimera_vfs_umount(thread, NULL, mount_path, chimera_server_umount_callback, &ctx);
+
+    while (!ctx.done) {
+        evpl_continue(evpl);
+    }
+
+    chimera_vfs_thread_destroy(thread);
+
+    evpl_destroy(evpl);
+
+    return ctx.status;
+} /* chimera_server_unmount */
+
 SYMBOL_EXPORT int
 chimera_server_pnfs_resolve(struct chimera_server *server)
 {
@@ -1755,6 +1793,129 @@ chimera_server_iterate_buckets(
 
     chimera_s3_iterate_buckets(server->s3_shared, callback, data);
 } /* chimera_server_iterate_buckets */
+
+struct mount_iterate_ctx {
+    chimera_server_mount_iterate_cb callback;
+    void                           *data;
+};
+
+static int
+mount_iterate_wrapper(
+    struct chimera_vfs_mount *mount,
+    void                     *data)
+{
+    struct mount_iterate_ctx *ctx = data;
+
+    return ctx->callback(mount->path,
+                         mount->module ? mount->module->name : "",
+                         mount->module_path ? mount->module_path : "",
+                         ctx->data);
+} /* mount_iterate_wrapper */
+
+SYMBOL_EXPORT void
+chimera_server_iterate_mounts(
+    struct chimera_server          *server,
+    chimera_server_mount_iterate_cb callback,
+    void                           *data)
+{
+    struct mount_iterate_ctx ctx = { .callback = callback, .data = data };
+
+    chimera_vfs_mount_table_foreach(server->vfs->mount_table,
+                                    mount_iterate_wrapper, &ctx);
+} /* chimera_server_iterate_mounts */
+
+struct mount_in_use_ctx {
+    struct chimera_vfs *vfs;
+    const char         *target;
+    int                 target_len;
+    int                 in_use;
+};
+
+/*
+ * Resolve the path of a share/export/bucket to its owning mount and flag a
+ * match against the target mount.  Paths are normalized (leading slashes
+ * stripped) the same way chimera_vfs_mount registers them.  Returns non-zero
+ * once a match is found to stop the enclosing iteration early.
+ */
+static int
+mount_in_use_check_path(
+    struct mount_in_use_ctx *ctx,
+    const char              *path)
+{
+    struct chimera_vfs_mount *mount;
+
+    while (*path == '/') {
+        path++;
+    }
+
+    mount = chimera_vfs_mount_table_find_by_path(ctx->vfs->mount_table,
+                                                 path, strlen(path));
+
+    if (mount &&
+        mount->pathlen == (uint32_t) ctx->target_len &&
+        memcmp(mount->path, ctx->target, ctx->target_len) == 0) {
+        ctx->in_use = 1;
+        return 1;
+    }
+
+    return 0;
+} /* mount_in_use_check_path */
+
+static int
+mount_in_use_share_cb(
+    const struct chimera_smb_share *share,
+    void                           *data)
+{
+    return mount_in_use_check_path(data, chimera_smb_share_get_path(share));
+} /* mount_in_use_share_cb */
+
+static int
+mount_in_use_export_cb(
+    const struct chimera_nfs_export *export,
+    void                            *data)
+{
+    return mount_in_use_check_path(data, chimera_nfs_export_get_path(export));
+} /* mount_in_use_export_cb */
+
+static int
+mount_in_use_bucket_cb(
+    const struct s3_bucket *bucket,
+    void                   *data)
+{
+    return mount_in_use_check_path(data, chimera_s3_bucket_get_path(bucket));
+} /* mount_in_use_bucket_cb */
+
+SYMBOL_EXPORT int
+chimera_server_mount_in_use(
+    struct chimera_server *server,
+    const char            *mount_path)
+{
+    struct mount_in_use_ctx ctx;
+    const char             *target = mount_path;
+
+    while (*target == '/') {
+        target++;
+    }
+
+    ctx.vfs        = server->vfs;
+    ctx.target     = target;
+    ctx.target_len = strlen(target);
+    ctx.in_use     = 0;
+
+    if (server->smb_shared) {
+        chimera_smb_iterate_shares(server->smb_shared, mount_in_use_share_cb, &ctx);
+    }
+
+    if (!ctx.in_use && server->nfs_shared) {
+        chimera_nfs_iterate_exports(server->nfs_shared, mount_in_use_export_cb, &ctx);
+    }
+
+    if (!ctx.in_use && server->s3_shared) {
+        chimera_s3_iterate_buckets(server->s3_shared, mount_in_use_bucket_cb, &ctx);
+    }
+
+    return ctx.in_use;
+} /* chimera_server_mount_in_use */
 
 SYMBOL_EXPORT struct chimera_vfs *
 chimera_server_get_vfs(struct chimera_server *server)
