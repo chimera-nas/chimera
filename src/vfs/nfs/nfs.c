@@ -87,6 +87,7 @@ chimera_nfs_init(
     struct chimera_nfs_shared *shared = calloc(1, sizeof(*shared));
 
     pthread_mutex_init(&shared->lock, NULL);
+    pthread_mutex_init(&shared->cb_lock, NULL);
 
     shared->max_servers = 64;
     shared->servers     = calloc(shared->max_servers, sizeof(*shared->servers));
@@ -100,6 +101,10 @@ chimera_nfs_init(
     NFS_V3_init(&shared->nfs_v3);
     NFS_V4_init(&shared->nfs_v4);
     NFS_V4_CB_init(&shared->nfs_v4_cb);
+    /* Serve incoming CB_COMPOUND (back-channel callbacks) on connections that
+     * register the NFS_V4_CB program; the back channel is activated per session
+     * by the control connection (nfs4_cb.c). */
+    shared->nfs_v4_cb.recv_call_CB_COMPOUND = chimera_nfs4_cb_compound;
     NLM_V4_init(&shared->nlm_v4);
 
     return shared;
@@ -110,6 +115,12 @@ chimera_nfs_destroy(void *private_data)
 {
     struct chimera_nfs_shared *shared = private_data;
     int                        i;
+
+    /* Stop the back-channel control thread first: tearing down its rpc2 thread
+    * disconnects every cb_conn, which fires chimera_nfs4_cb_control_notify and
+    * walks shared->servers.  It must finish before those servers are freed. */
+    chimera_nfs4_cb_control_stop(shared);
+    pthread_mutex_destroy(&shared->cb_lock);
 
     for (i = 0; i < shared->max_servers; i++) {
         if (shared->servers[i]) {
@@ -222,6 +233,10 @@ chimera_nfs_thread_init(
     thread->max_server_threads = shared->max_servers;
     thread->server_threads     = calloc(thread->max_server_threads, sizeof(*thread->server_threads));
 
+    /* Persistent doorbell the back-channel control thread rings to resume mounts
+     * established on its behalf. */
+    chimera_nfs4_cb_thread_init(thread);
+
     return thread;
 } /* chimera_nfs_thread_init */
 
@@ -237,6 +252,11 @@ chimera_nfs_thread_destroy(void *private_data)
         LL_DELETE(thread->free_open_handles, open_handle);
         free(open_handle);
     }
+
+    /* Remove the back-channel resume doorbell while this thread's evpl is still
+     * valid (no establishment can be in flight: mounts complete before their
+     * thread is torn down). */
+    chimera_nfs4_cb_thread_destroy(thread);
 
     /* Tear down the rpc2 thread first: it disconnects every connection, which
      * fires chimera_nfs_notify(DISCONNECTED) -> chimera_nfs4_slot_table_reset,
