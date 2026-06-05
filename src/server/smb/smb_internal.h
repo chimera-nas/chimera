@@ -1862,6 +1862,43 @@ chimera_smb_open_file_resolve_by_lease_key(
     return found;
 } /* chimera_smb_open_file_resolve_by_lease_key */
 
+/*
+ * Caching-grant membership.  A VFS-owned caching grant (chimera_vfs_caching_grant)
+ * may be shared by several opens under one (client, lease key); each such open is
+ * threaded onto grant->holders so a break callback running on an arbitrary thread
+ * can pick a still-connected member to deliver the OPLOCK_BREAK on (and revoke the
+ * lease when no member is live).  The list is guarded by the grant's file->lock.
+ */
+static inline void
+chimera_smb_grant_add_member(
+    struct chimera_vfs_caching_grant *grant,
+    struct chimera_smb_open_file     *open_file)
+{
+    pthread_mutex_lock(&grant->file->lock);
+    open_file->grant_member_next = grant->holders;
+    grant->holders               = open_file;
+    pthread_mutex_unlock(&grant->file->lock);
+} /* chimera_smb_grant_add_member */
+
+static inline void
+chimera_smb_grant_remove_member(
+    struct chimera_vfs_caching_grant *grant,
+    struct chimera_smb_open_file     *open_file)
+{
+    struct chimera_smb_open_file **pp;
+
+    pthread_mutex_lock(&grant->file->lock);
+    for (pp = (struct chimera_smb_open_file **) &grant->holders; *pp;
+         pp = &(*pp)->grant_member_next) {
+        if (*pp == open_file) {
+            *pp = open_file->grant_member_next;
+            break;
+        }
+    }
+    open_file->grant_member_next = NULL;
+    pthread_mutex_unlock(&grant->file->lock);
+} /* chimera_smb_grant_remove_member */
+
 static inline void
 chimera_smb_open_file_release(
     struct chimera_smb_request   *request,

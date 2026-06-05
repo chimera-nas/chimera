@@ -157,6 +157,11 @@ struct chimera_smb_open_file {
     struct chimera_vfs_caching_grant *grant;
     struct chimera_vfs_file_state    *caching_file_state;
     bool                              caching_lease_inserted;
+    /* Intrusive link on grant->holders: every open referencing a shared caching
+     * grant is threaded here so a break callback can pick a live member to notify
+     * (the grant may outlive the open that created it once opens coalesce).
+     * Manipulated under the grant's file->lock. */
+    struct chimera_smb_open_file     *grant_member_next;
     /* Conn on which this open was created — used by the break path to
      * send unsolicited OPLOCK_BREAK Notifications.  Cleared by the
      * disconnect handler before the conn is freed; if NULL when a

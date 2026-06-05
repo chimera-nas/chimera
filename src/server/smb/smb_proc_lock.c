@@ -65,6 +65,10 @@ chimera_smb_open_file_drain_locks(
      * freed; the per-file state reference (caching_file_state) is balanced
      * separately below. */
     if (open_file->grant) {
+        /* Unthread this open from the grant's member list before dropping its
+         * reference: once removed, the break callback will not try to notify a
+         * closing open, and on the grant's last reference the lease is freed. */
+        chimera_smb_grant_remove_member(open_file->grant, open_file);
         chimera_vfs_caching_grant_release(vfs_state, open_file->grant);
         open_file->grant                  = NULL;
         open_file->caching_lease_inserted = false;
@@ -288,11 +292,12 @@ chimera_smb_lock(struct chimera_smb_request *request)
      * independently, matching Windows handle-based lock semantics. */
     entry->lease.owner.owner_lo = open_file->file_id.pid;
     entry->lease.owner.owner_hi = open_file->file_id.vid;
-    /* Point at the owning open so the range-vs-caching conflict check can tell
-     * that a byte-range lock and the same open's caching lease (whose owner
-     * identity is the lease key, not the file id) belong together and must not
-     * break each other. */
-    entry->lease.owner.cb_private = open_file;
+    /* Point at the open's caching grant (NULL if it holds no oplock/lease) so the
+     * range-vs-caching conflict check can tell that a byte-range lock and the same
+     * open's -- or a coalesced peer's -- caching lease (whose owner identity is the
+     * lease key, not the file id) belong to one grant and must not break each
+     * other.  The grant's lease carries the same pointer in cb_private. */
+    entry->lease.owner.cb_private = open_file->grant;
 
     request->lock.entry = entry;
 

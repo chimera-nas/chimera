@@ -154,22 +154,40 @@ chimera_smb_send_oplock_break_legacy(
                EVPL_SEND_FLAG_TAKE_REF);
 } /* chimera_smb_send_oplock_break_legacy */
 
-/* break_cb wired onto every SMB CACHING lease at CREATE time.  The
- * cb_private is the owning open_file. */
+/* break_cb wired onto every SMB CACHING lease at CREATE time.  The cb_private is
+ * the VFS-owned caching grant (chimera_vfs_caching_grant), which may be shared by
+ * several opens under one lease key.  Pick a member whose connection is still
+ * live to carry the OPLOCK_BREAK Notification; the grant outlives any single open,
+ * so the open that created it may already be gone while a coalesced peer keeps the
+ * lease alive. */
 SYMBOL_EXPORT void
 chimera_smb_lease_break_cb(
     struct chimera_vfs_lease *lease,
     uint8_t                   needed_mode,
     void                     *private_data)
 {
-    struct chimera_smb_open_file *open_file = private_data;
-    uint8_t                       new_vfs;
+    struct chimera_vfs_caching_grant *grant = private_data;
+    struct chimera_vfs_file_state    *file  = grant->file;
+    struct chimera_smb_open_file     *open_file;
+    uint8_t                           new_vfs;
 
-    /* If the conn is no longer live, we can't notify the client; the
-     * pragmatic recovery is to forcibly revoke the lease so the pending
-     * acquire (or future acquires) can proceed.  This mirrors the
-     * Linux kernel's F_SETLEASE forcible expiry path. */
-    if (!open_file->create_conn) {
+    /* Select a live member under the grant's file->lock (the holder list is
+     * mutated by add/remove-member under the same lock).  A member is live when
+     * its create_conn is still set and it has not been closed. */
+    pthread_mutex_lock(&file->lock);
+    for (open_file = grant->holders; open_file;
+         open_file = open_file->grant_member_next) {
+        if (!(open_file->flags & CHIMERA_SMB_OPEN_FILE_CLOSED) &&
+            open_file->create_conn) {
+            break;
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    /* No live member can notify the client; the pragmatic recovery is to forcibly
+     * revoke the lease so the pending acquire (or future acquires) can proceed.
+     * This mirrors the Linux kernel's F_SETLEASE forcible expiry path. */
+    if (!open_file) {
         chimera_vfs_lease_revoke(lease);
         return;
     }

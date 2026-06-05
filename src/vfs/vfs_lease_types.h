@@ -174,6 +174,13 @@ struct chimera_vfs_caching_grant {
     uint32_t                          refcount;   /* # of opens referencing this grant */
     uint32_t                          epoch;      /* SMB lease epoch (3.3.5.9.11) */
     struct chimera_vfs_caching_grant *grant_next; /* link on file->caching_grants */
+    /* Protocol holder list — opaque to the VFS; the protocol server threads its
+     * per-open holder objects through here so a break callback can select a LIVE
+     * holder to notify (e.g. SMB picks an open whose channel is still connected;
+     * if none is live the lease is revoked).  Manipulated by the protocol under
+     * file->lock.  NFSv4 leaves this NULL (member-set-1; cb_private points at the
+     * delegation directly). */
+    void                             *holders;
 };
 
 /* -------------------------------------------------------------------- */

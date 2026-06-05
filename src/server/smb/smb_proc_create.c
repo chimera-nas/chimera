@@ -592,11 +592,14 @@ chimera_smb_create_gen_open_file(
                 /* Share reservation: owner_lo carries the open's persistent id. */
                 conflict_pid = conflict->owner.owner_lo;
             } else if (conflict->kind == CHIMERA_VFS_LEASE_CACHING &&
-                       conflict->owner.cb_private) {
-                /* Caching lease: owner_lo is the lease key, but cb_private points
-                 * at the owning open_file (set in the lease-grant block). */
+                       conflict->grant &&
+                       ((struct chimera_smb_open_file *) conflict->grant->holders)) {
+                /* Caching lease: owner_lo is the lease key; resolve the owning open
+                 * via the grant's member list (cb_private now points at the grant,
+                 * which may be shared by several opens -- any member identifies the
+                 * parked durable handle to purge). */
                 conflict_pid = ((struct chimera_smb_open_file *)
-                                conflict->owner.cb_private)->file_id.pid;
+                                conflict->grant->holders)->file_id.pid;
             } else {
                 break;
             }
@@ -822,16 +825,26 @@ chimera_smb_create_after_share(
                         grant->lease.owner.owner_lo = open_file->file_id.pid;
                         grant->lease.owner.owner_hi = open_file->file_id.vid;
                     }
-                    /* Wire the break callback so vfs_state can notify the
-                     * client when another acquirer needs this lease. */
+                    /* Wire the break callback so vfs_state can notify the client
+                     * when another acquirer needs this lease.  cb_private is the
+                     * GRANT (not this open): the grant may be shared by, and
+                     * outlive, the open that created it, so the break callback
+                     * resolves a live member from grant->holders rather than
+                     * dereferencing a single open that may already be gone. */
                     grant->lease.owner.break_cb   = chimera_smb_lease_break_cb;
-                    grant->lease.owner.cb_private = open_file;
+                    grant->lease.owner.cb_private = grant;
                     /* Anchor the lease to this open's VFS handle so a setattr issued
                      * through the same handle (e.g. SetEndOfFile) does not recall
                      * this lease against itself -- the holder is coherent with its
                      * own change (chimera_vfs_break_caching_file skip_handle). */
                     grant->lease.owner.op_handle = oh;
                     open_file->create_conn       = request->compound->conn;
+
+                    /* Register this open as a grant member BEFORE the lease becomes
+                     * visible (try_insert links it onto caching_leases): once linked,
+                     * a conflicting acquirer can invoke the break callback, which
+                     * must find a live member or it will revoke the fresh lease. */
+                    chimera_smb_grant_add_member(grant, open_file);
 
                     result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                                           &grant->lease,
@@ -881,7 +894,9 @@ chimera_smb_create_after_share(
                         }
                     } else {
                         /* try_insert never linked the lease on a non-GRANTED
-                         * result, so the grant just frees. */
+                         * result, so the grant just frees -- unregister the member
+                         * first (it was added before the insert attempt). */
+                        chimera_smb_grant_remove_member(grant, open_file);
                         free(grant);
                         chimera_vfs_state_put(vfs_state, file_state);
                         open_file->lease_state  = 0;
