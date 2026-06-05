@@ -4,9 +4,9 @@
 
 /*
  * SMB3 transport compression codecs and message framing (MS-SMB2 §2.2.42,
- * MS-XCA).  The Plain LZ77 (LZXPRESS) codec is implemented from the MS-XCA §2.4
- * algorithm; the chained Pattern_V1 run-length and NONE pass-through payloads
- * are handled inline.  LZ77+Huffman and LZNT1 are not yet implemented.
+ * MS-XCA).  Implements the Plain LZ77 (LZXPRESS, MS-XCA §2.4), LZNT1 (§2.5) and
+ * LZ77+Huffman (§2.1) byte codecs, plus the chained Pattern_V1 run-length and
+ * NONE pass-through payloads handled inline.
  */
 
 #include <string.h>
@@ -461,6 +461,812 @@ chimera_smb_lz77_compress(
     return -1;
 } /* chimera_smb_lz77_compress */
 
+/* LZNT1 (MS-XCA §2.5) back-reference tuple bit split.  Within a chunk the offset
+ * occupies the high bits and the length the low bits of the 16-bit tuple; the
+ * boundary moves as the in-chunk position grows (more offset bits become
+ * available).  rel is the byte position within the current chunk. */
+static void
+lznt1_split(
+    int       rel,
+    int      *offset_shift,
+    uint16_t *length_mask)
+{
+    int      shift = 12;
+    uint16_t mask  = 0x0fff;
+    int      it;
+
+    for (it = rel - 1; it >= 0x10; it >>= 1) {
+        shift--;
+        mask >>= 1;
+    }
+    *offset_shift = shift;
+    *length_mask  = mask;
+} /* lznt1_split */
+
+/*
+ * MS-XCA §2.5 LZNT1 decompression.  The input is a sequence of up-to-4 KB chunks,
+ * each prefixed by a 2-byte LE header: bit 15 = compressed, bits 14-12 =
+ * signature (3), bits 11-0 = (chunk-data byte count - 1).  A compressed chunk is
+ * flag-byte groups (LSB first; 0 = literal byte, 1 = 2-byte back-reference
+ * tuple).  Returns the number of plaintext bytes produced (bounded by out_len),
+ * or -1 on malformed input.
+ */
+SYMBOL_EXPORT int
+chimera_smb_lznt1_decompress(
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_len)
+{
+    int inpos = 0, outpos = 0;
+
+    while (inpos + 2 <= in_len) {
+        uint16_t hdr = rd16(in + inpos);
+        int      chunk_size, chunk_end, compressed, chunk_out;
+
+        if (hdr == 0) {
+            break;                         /* end-of-stream sentinel */
+        }
+        inpos     += 2;
+        compressed = hdr & 0x8000;
+        chunk_size = (hdr & 0x0fff) + 1;   /* bytes following the header */
+        if (inpos + chunk_size > in_len) {
+            return -1;
+        }
+        chunk_end = inpos + chunk_size;
+
+        if (!compressed) {
+            if (outpos + chunk_size > out_len) {
+                return -1;
+            }
+            memcpy(out + outpos, in + inpos, chunk_size);
+            outpos += chunk_size;
+            inpos   = chunk_end;
+            continue;
+        }
+
+        chunk_out = outpos;                /* matches reference within this chunk */
+        while (inpos < chunk_end) {
+            uint8_t flags = in[inpos++];
+            int     b;
+
+            for (b = 0; b < 8 && inpos < chunk_end; b++) {
+                if (((flags >> b) & 1) == 0) {
+                    if (outpos >= out_len) {
+                        return -1;
+                    }
+                    out[outpos++] = in[inpos++];
+                } else {
+                    uint16_t tuple, mask;
+                    int      rel = outpos - chunk_out;
+                    int      shift, length, offset, i;
+
+                    if (inpos + 2 > chunk_end) {
+                        return -1;
+                    }
+                    tuple  = rd16(in + inpos);
+                    inpos += 2;
+                    lznt1_split(rel, &shift, &mask);
+                    length = (tuple & mask) + 3;
+                    offset = (tuple >> shift) + 1;
+                    if (offset > rel || outpos + length > out_len) {
+                        return -1;
+                    }
+                    for (i = 0; i < length; i++) {
+                        out[outpos] = out[outpos - offset];
+                        outpos++;
+                    }
+                }
+            }
+        }
+    }
+    return outpos;
+} /* chimera_smb_lznt1_decompress */
+
+/*
+ * MS-XCA §2.5 LZNT1 compression: greedy per-chunk match finder (4 KB chunks).  A
+ * chunk that does not shrink is emitted uncompressed.  Returns the compressed
+ * length, or -1 if it would exceed out_cap.
+ */
+SYMBOL_EXPORT int
+chimera_smb_lznt1_compress(
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_cap)
+{
+    int inpos = 0, outpos = 0;
+
+    if (in_len <= 0) {
+        return -1;
+    }
+
+    while (inpos < in_len) {
+        const uint8_t *chunk     = in + inpos;
+        int            chunk_len = in_len - inpos;
+        uint8_t        tmp[4096 + 4096 / 8 + 8];
+        int            tpos = 0, i = 0;
+
+        if (chunk_len > 4096) {
+            chunk_len = 4096;
+        }
+
+        while (i < chunk_len) {
+            int     flag_pos = tpos;
+            uint8_t flags    = 0;
+            int     bit;
+
+            tmp[tpos++] = 0;               /* reserve the flag byte */
+
+            for (bit = 0; bit < 8 && i < chunk_len; bit++) {
+                int      shift, max_off, max_len, max_match, best_len = 0, best_off = 0, j, start;
+                uint16_t mask;
+
+                lznt1_split(i, &shift, &mask);
+                max_off   = 1 << (16 - shift);
+                max_len   = mask + 3;
+                max_match = chunk_len - i;
+                if (max_match > max_len) {
+                    max_match = max_len;
+                }
+                start = (i - max_off > 0) ? i - max_off : 0;
+                for (j = i - 1; j >= start; j--) {
+                    int l = 0;
+
+                    while (l < max_match && chunk[j + l] == chunk[i + l]) {
+                        l++;
+                    }
+                    if (l > best_len) {
+                        best_len = l;
+                        best_off = i - j;
+                        if (l == max_match) {
+                            break;
+                        }
+                    }
+                }
+
+                if (best_len >= 3) {
+                    flags |= (uint8_t) (1 << bit);
+                    wr16(tmp + tpos, (uint16_t) (((best_off - 1) << shift) | (best_len - 3)));
+                    tpos += 2;
+                    i    += best_len;
+                } else {
+                    tmp[tpos++] = chunk[i++];
+                }
+            }
+            tmp[flag_pos] = flags;
+        }
+
+        if (tpos < chunk_len) {
+            if (outpos + 2 + tpos > out_cap) {
+                return -1;
+            }
+            wr16(out + outpos, (uint16_t) (0xb000 | (tpos - 1)));
+            outpos += 2;
+            memcpy(out + outpos, tmp, tpos);
+            outpos += tpos;
+        } else {
+            if (outpos + 2 + chunk_len > out_cap) {
+                return -1;
+            }
+            wr16(out + outpos, (uint16_t) (0x3000 | (chunk_len - 1)));
+            outpos += 2;
+            memcpy(out + outpos, chunk, chunk_len);
+            outpos += chunk_len;
+        }
+        inpos += chunk_len;
+    }
+    return outpos;
+} /* chimera_smb_lznt1_compress */
+
+/* Number of the high set bit of x (0..15); x must be a non-zero 16-bit value.
+ * Used as the LZ77+Huffman match distance slot. */
+static int
+high_bit(int x)
+{
+    int b = 15;
+
+    while (b > 0 && ((x >> b) & 1) == 0) {
+        b--;
+    }
+    return b;
+} /* high_bit */
+
+/*
+ * MS-XCA LZ77+Huffman decompression (MS-XCA §2.1).  The stream is a series of
+ * 64 KB output blocks; each begins with a 256-byte table of 512 4-bit canonical
+ * code lengths (symbol 2i in the low nibble of byte i, 2i+1 in the high nibble),
+ * followed by a bitstream read as 16-bit LE words, most-significant-bit first,
+ * through a 32-bit window.  Symbols 0-255 are literals; 256-511 are matches
+ * whose low nibble is the length code and high nibble the distance slot (the
+ * distance's extra bits follow inline; an over-long length escapes to a byte and
+ * then a 16-bit value, read from the byte stream).  Produces up to out_len bytes
+ * (the known segment size); returns the count or -1 on malformed input.
+ */
+SYMBOL_EXPORT int
+chimera_smb_lz77huffman_decompress(
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_len)
+{
+    uint16_t *table = malloc(32768 * sizeof(*table));
+    uint8_t  *clen  = malloc(512);
+    int       inpos = 0, outpos = 0, rc = -1;
+
+    if (!table || !clen) {
+        goto done;
+    }
+
+    while (outpos < out_len) {
+        uint32_t bits;
+        int      avail, code_pos = 0, L, sym, block_end;
+
+        if (inpos + 256 + 4 > in_len) {
+            goto done;
+        }
+        for (L = 0; L < 256; L++) {
+            clen[L * 2]     = in[inpos + L] & 0x0f;
+            clen[L * 2 + 1] = (in[inpos + L] >> 4) & 0x0f;
+        }
+        inpos += 256;
+
+        /* Build the 15-bit canonical decode table: symbols of each length, in
+         * length-then-symbol order, each filling 2^(15-len) consecutive slots. */
+        for (L = 1; L <= 15; L++) {
+            for (sym = 0; sym < 512; sym++) {
+                int fill, k;
+
+                if (clen[sym] != L) {
+                    continue;
+                }
+                fill = 1 << (15 - L);
+                if (code_pos + fill > 32768) {
+                    goto done;
+                }
+                for (k = 0; k < fill; k++) {
+                    table[code_pos++] = (uint16_t) sym;
+                }
+            }
+        }
+        if (code_pos != 32768) {
+            goto done;          /* the lengths are not a complete prefix code */
+        }
+
+        bits   = (uint32_t) rd16(in + inpos) << 16;
+        bits  |= rd16(in + inpos + 2);
+        inpos += 4;
+        avail  = 16;
+
+        block_end = outpos + 65536;
+        if (block_end > out_len) {
+            block_end = out_len;
+        }
+
+        while (outpos < block_end) {
+            int code_len, len_code, dist_slot, mlen, dist, i;
+
+            sym      = table[bits >> 17];
+            code_len = clen[sym];
+            bits   <<= code_len;
+            avail   -= code_len;
+            if (avail < 0) {
+                if (inpos + 2 > in_len) {
+                    goto done;
+                }
+                bits  |= (uint32_t) rd16(in + inpos) << (-avail);
+                avail += 16;
+                inpos += 2;
+            }
+
+            if (sym < 256) {
+                out[outpos++] = (uint8_t) sym;
+                continue;
+            }
+
+            /* Symbol 256 (length 3, distance 1) doubles as the end-of-stream
+             * marker, but with a known output size we stop at out_len before any
+             * trailing EOF symbol, so every match symbol is decoded as a match. */
+            sym      -= 256;
+            len_code  = sym & 15;
+            dist_slot = sym >> 4;
+
+            if (len_code == 15) {
+                int b;
+
+                if (inpos >= in_len) {
+                    goto done;
+                }
+                b = in[inpos++];
+                if (b == 255) {
+                    if (inpos + 2 > in_len) {
+                        goto done;
+                    }
+                    mlen   = rd16(in + inpos);
+                    inpos += 2;
+                    if (mlen < 15) {
+                        goto done;
+                    }
+                    mlen -= 15;
+                } else {
+                    mlen = b;
+                }
+                mlen += 15;
+            } else {
+                mlen = len_code;
+            }
+            mlen += 3;
+
+            dist   = (dist_slot == 0) ? 0 : (int) (bits >> (32 - dist_slot));
+            dist  += 1 << dist_slot;
+            bits <<= dist_slot;
+            avail -= dist_slot;
+            if (avail < 0) {
+                if (inpos + 2 > in_len) {
+                    goto done;
+                }
+                bits  |= (uint32_t) rd16(in + inpos) << (-avail);
+                avail += 16;
+                inpos += 2;
+            }
+
+            if (dist > outpos || outpos + mlen > out_len) {
+                goto done;
+            }
+            for (i = 0; i < mlen; i++) {
+                out[outpos] = out[outpos - dist];
+                outpos++;
+            }
+        }
+    }
+    rc = outpos;
+
+ done:
+    free(table);
+    free(clen);
+    return rc;
+} /* chimera_smb_lz77huffman_decompress */
+
+/* Derive canonical Huffman code lengths (each <= 15 bits) for the 512-symbol
+ * alphabet from symbol frequencies.  Builds a Huffman tree by repeated
+ * minimum-frequency merge; if any code exceeds 15 bits, frequencies are halved
+ * (MS-XCA's approach) and the tree rebuilt until the limit holds. */
+static void
+huffman_lengths(
+    const int *freq,
+    uint8_t   *codelen)
+{
+    int work[512];
+    int i;
+
+    for (i = 0; i < 512; i++) {
+        codelen[i] = 0;
+        work[i]    = freq[i];
+    }
+
+    for (;;) {
+        /* Leaves [0,nleaf) plus internal nodes; parent[] links a node to its
+         * merge parent so depth (= code length) can be read back. */
+        int parent[1024], nodefreq[1024], leafidx[512];
+        int nnodes = 0, nleaf = 0, over = 0;
+
+        for (i = 0; i < 512; i++) {
+            if (work[i] > 0) {
+                leafidx[nleaf]   = nnodes;
+                nodefreq[nnodes] = work[i];
+                parent[nnodes]   = -1;
+                nnodes++;
+                nleaf++;
+            }
+        }
+
+        if (nleaf == 0) {
+            return;
+        }
+        if (nleaf == 1) {
+            /* A single distinct symbol still needs a 1-bit code. */
+            for (i = 0; i < 512; i++) {
+                if (work[i] > 0) {
+                    codelen[i] = 1;
+                }
+            }
+            return;
+        }
+
+        /* Repeatedly merge the two lowest-frequency active roots. */
+        {
+            int active[1024], nactive = 0, a;
+
+            for (a = 0; a < nnodes; a++) {
+                active[nactive++] = a;
+            }
+            while (nactive > 1) {
+                int m1 = 0, m2, k;
+
+                for (k = 1; k < nactive; k++) {
+                    if (nodefreq[active[k]] < nodefreq[active[m1]]) {
+                        m1 = k;
+                    }
+                }
+                {
+                    int n1 = active[m1];
+                    active[m1] = active[--nactive];
+                    m2         = 0;
+                    for (k = 1; k < nactive; k++) {
+                        if (nodefreq[active[k]] < nodefreq[active[m2]]) {
+                            m2 = k;
+                        }
+                    }
+                    {
+                        int n2 = active[m2];
+
+                        parent[nnodes]   = -1;
+                        nodefreq[nnodes] = nodefreq[n1] + nodefreq[n2];
+                        parent[n1]       = nnodes;
+                        parent[n2]       = nnodes;
+                        active[m2]       = nnodes;
+                        nnodes++;
+                    }
+                }
+            }
+        }
+
+        /* Code length of each leaf = its depth (steps to the root). */
+        for (i = 0; i < nleaf; i++) {
+            int depth = 0, node = leafidx[i];
+
+            while (parent[node] != -1) {
+                depth++;
+                node = parent[node];
+            }
+            if (depth > 15) {
+                over = 1;
+            }
+        }
+
+        if (!over) {
+            int li = 0;
+
+            for (i = 0; i < 512; i++) {
+                if (work[i] > 0) {
+                    int depth = 0, node = leafidx[li++];
+
+                    while (parent[node] != -1) {
+                        depth++;
+                        node = parent[node];
+                    }
+                    codelen[i] = (uint8_t) depth;
+                }
+            }
+            return;
+        }
+
+        for (i = 0; i < 512; i++) {
+            if (work[i] > 0) {
+                work[i] = work[i] / 2 + 1;
+            }
+        }
+    }
+} /* huffman_lengths */
+
+/* Assign canonical codes (MSB-first) from the code lengths: symbols ordered by
+ * (length, symbol), each code one greater than the previous, shifted left when
+ * the length increases — matching the decoder's table construction. */
+static void
+huffman_canonical(
+    const uint8_t *codelen,
+    uint16_t      *codes)
+{
+    int code = 0, len, sym;
+
+    for (len = 1; len <= 15; len++) {
+        for (sym = 0; sym < 512; sym++) {
+            if (codelen[sym] == len) {
+                codes[sym] = (uint16_t) code;
+                code++;
+            }
+        }
+        code <<= 1;
+    }
+} /* huffman_canonical */
+
+/* The MS-XCA LZ77+Huffman bitstream writer.  Completed 16-bit code words are
+ * emitted two words behind the running byte position, which interleaves the
+ * inline match length bytes between the bit words exactly where the decoder
+ * reads them (its 32-bit / two-word look-ahead). */
+struct huff_writer {
+    uint8_t *buf;
+    int      cap;
+    int      high;       /* one past the highest byte index written */
+    int      free_bits;  /* bits remaining in next_word (starts 16) */
+    int      next_word;
+    int      pos1, pos2, pos;
+    int      overflow;
+};
+
+static void
+hw_put(
+    struct huff_writer *w,
+    int                 position,
+    uint8_t             b)
+{
+    if (position >= w->cap) {
+        w->overflow = 1;
+        return;
+    }
+    /* Words are written two slots behind the leading byte position, so a forward
+     * write can outrun the high-water mark; zero-fill the skipped slots (they are
+     * either filled later by a lagging word, or stay zero — matching MS, which
+     * grows a zero-filled buffer). */
+    while (w->high < position) {
+        w->buf[w->high++] = 0;
+    }
+    w->buf[position] = b;
+    if (position + 1 > w->high) {
+        w->high = position + 1;
+    }
+} /* hw_put */
+
+static void
+hw_bits(
+    struct huff_writer *w,
+    int                 nbits,
+    int                 val)
+{
+    if (w->free_bits >= nbits) {
+        w->free_bits -= nbits;
+        w->next_word  = (w->next_word << nbits) + val;
+        return;
+    }
+    w->next_word <<= w->free_bits;
+    w->next_word  += val >> (nbits - w->free_bits);
+    w->free_bits  -= nbits;
+    hw_put(w, w->pos1, (uint8_t) (w->next_word & 0xff));
+    hw_put(w, w->pos1 + 1, (uint8_t) ((w->next_word >> 8) & 0xff));
+    w->pos1       = w->pos2;
+    w->pos2       = w->pos;
+    w->pos       += 2;
+    w->free_bits += 16;
+    w->next_word  = val;
+} /* hw_bits */
+
+static void
+hw_byte(
+    struct huff_writer *w,
+    uint8_t             b)
+{
+    hw_put(w, w->pos, b);
+    w->pos++;
+} /* hw_byte */
+
+static void
+hw_flush(struct huff_writer *w)
+{
+    w->next_word <<= w->free_bits;
+    hw_put(w, w->pos1, (uint8_t) (w->next_word & 0xff));
+    hw_put(w, w->pos1 + 1, (uint8_t) ((w->next_word >> 8) & 0xff));
+    hw_put(w, w->pos2, 0);
+    hw_put(w, w->pos2 + 1, 0);
+} /* hw_flush */
+
+/* The LZ77 match symbol value (256-511) for a (distance, length) pair. */
+static int
+huffman_match_symbol(
+    int distance,
+    int length)
+{
+    int hb = high_bit(distance);
+
+    if (length - 3 < 15) {
+        return 256 + (length - 3) + 16 * hb;
+    }
+    return 271 + 16 * hb;
+} /* huffman_match_symbol */
+
+/* Compress one <= 64 KB block.  Greedy LZ77 parse -> symbol frequencies ->
+ * canonical Huffman -> 256-byte length table + interleaved bitstream.  Returns
+ * the block's compressed length, or -1 on overflow. */
+static int
+lz77huffman_compress_block(
+    const uint8_t *in,
+    int            in_len,
+    int            is_last,
+    uint8_t       *out,
+    int            out_cap)
+{
+    int               *freq                                          = calloc(512, sizeof(int));
+    int32_t           *head                                          = malloc(65536 * sizeof(int32_t));
+    int32_t           *prev                                          = malloc((in_len ? in_len : 1) * sizeof(int32_t));
+    struct huff_token { int type; int lit; int dist; int len; } *tok =
+        malloc((in_len + 1) * sizeof(*tok));
+    uint8_t            codelen[512];
+    uint16_t           codes[512];
+    struct huff_writer w;
+    int                ntok = 0, i, h, t, rc = -1;
+
+    if (!freq || !head || !prev || !tok) {
+        goto out;
+    }
+    for (i = 0; i < 65536; i++) {
+        head[i] = -1;
+    }
+
+    /* Greedy LZ77 parse (distance <= 65535, within the block; length <= 65538). */
+    i = 0;
+    while (i < in_len) {
+        int best_len = 0, best_off = 0;
+
+        if (i + 3 <= in_len) {
+            uint32_t hh = ((uint32_t) in[i] << 16 | (uint32_t) in[i + 1] << 8 | in[i + 2]);
+            int32_t  cand;
+            int      chain = 0;
+
+            hh   = (hh * 2654435761u) >> 16;
+            cand = head[hh & 0xffff];
+            while (cand >= 0 && chain < 64) {
+                int max = in_len - i, l = 0;
+
+                if (max > 65538) {
+                    max = 65538;
+                }
+                while (l < max && in[cand + l] == in[i + l]) {
+                    l++;
+                }
+                if (l > best_len) {
+                    best_len = l;
+                    best_off = i - cand;
+                    if (l >= max) {
+                        break;
+                    }
+                }
+                cand = prev[cand];
+                chain++;
+            }
+            prev[i]           = head[hh & 0xffff];
+            head[hh & 0xffff] = i;
+        }
+
+        if (best_len >= 3) {
+            tok[ntok].type = 1;
+            tok[ntok].dist = best_off;
+            tok[ntok].len  = best_len;
+            freq[huffman_match_symbol(best_off, best_len)]++;
+            ntok++;
+            /* Insert hash entries for the covered span so later matches see it. */
+            for (t = 1; t < best_len; t++) {
+                if (i + t + 3 <= in_len) {
+                    uint32_t hh2 = ((uint32_t) in[i + t] << 16 | (uint32_t) in[i + t + 1] << 8 | in[i + t + 2]);
+                    hh2                = (hh2 * 2654435761u) >> 16;
+                    prev[i + t]        = head[hh2 & 0xffff];
+                    head[hh2 & 0xffff] = i + t;
+                }
+            }
+            i += best_len;
+        } else {
+            tok[ntok].type = 0;
+            tok[ntok].lit  = in[i];
+            freq[in[i]]++;
+            ntok++;
+            i++;
+        }
+    }
+    /* Symbol 256 doubles as a (distance 1, length 3) match and the end-of-stream
+     * marker; a trailing such match immediately before the EOF symbol makes a
+     * decoder's "symbol 256 at end of input = EOF" test fire early and drop the
+     * last 3 bytes.  Windows avoids emitting it, so expand a final (1,3) match
+     * back into three literals. */
+    if (is_last && ntok > 0 && tok[ntok - 1].type == 1 &&
+        tok[ntok - 1].dist == 1 && tok[ntok - 1].len == 3 && in_len >= 3) {
+        int z;
+
+        freq[huffman_match_symbol(1, 3)]--;
+        ntok--;
+        for (z = 0; z < 3; z++) {
+            tok[ntok].type = 0;
+            tok[ntok].lit  = in[in_len - 3 + z];
+            freq[in[in_len - 3 + z]]++;
+            ntok++;
+        }
+    }
+
+    if (is_last) {
+        freq[256]++;             /* EOF symbol */
+    }
+
+    huffman_lengths(freq, codelen);
+    huffman_canonical(codelen, codes);
+
+    /* Emit the 256-byte code-length table, then the bitstream. */
+    if (256 > out_cap) {
+        goto out;
+    }
+    for (h = 0; h < 256; h++) {
+        out[h] = (uint8_t) (codelen[h * 2] | (codelen[h * 2 + 1] << 4));
+    }
+
+    w.buf       = out;
+    w.cap       = out_cap;
+    w.high      = 256;
+    w.free_bits = 16;
+    w.next_word = 0;
+    w.pos1      = 256;
+    w.pos2      = 258;
+    w.pos       = 260;
+    w.overflow  = 0;
+
+    for (t = 0; t < ntok; t++) {
+        if (tok[t].type == 0) {
+            hw_bits(&w, codelen[tok[t].lit], codes[tok[t].lit]);
+        } else {
+            int sym = huffman_match_symbol(tok[t].dist, tok[t].len);
+            int hb  = high_bit(tok[t].dist);
+
+            hw_bits(&w, codelen[sym], codes[sym]);
+            if (tok[t].len - 3 >= 15) {
+                int e = tok[t].len - 3 - 15;
+
+                hw_byte(&w, (uint8_t) (e < 255 ? e : 255));
+                if (e >= 255) {
+                    hw_byte(&w, (uint8_t) ((tok[t].len - 3) & 0xff));
+                    hw_byte(&w, (uint8_t) (((tok[t].len - 3) >> 8) & 0xff));
+                }
+            }
+            hw_bits(&w, hb, tok[t].dist - (1 << hb));
+        }
+    }
+    if (is_last) {
+        hw_bits(&w, codelen[256], codes[256]);
+    }
+    hw_flush(&w);
+
+    if (w.overflow) {
+        goto out;
+    }
+    rc = w.high;
+
+ out:
+    free(freq);
+    free(head);
+    free(prev);
+    free(tok);
+    return rc;
+} /* lz77huffman_compress_block */
+
+/*
+ * MS-XCA LZ77+Huffman compression.  Splits the input into 64 KB blocks, each
+ * independently Huffman-coded, with an end-of-stream symbol on the final block.
+ * Returns the compressed length, or -1 if it would exceed out_cap.
+ */
+SYMBOL_EXPORT int
+chimera_smb_lz77huffman_compress(
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_cap)
+{
+    int inpos = 0, outpos = 0;
+
+    if (in_len <= 0) {
+        return -1;
+    }
+    while (inpos < in_len) {
+        int blen = in_len - inpos;
+        int n;
+
+        if (blen > 65536) {
+            blen = 65536;
+        }
+        n = lz77huffman_compress_block(in + inpos, blen, inpos + blen == in_len,
+                                       out + outpos, out_cap - outpos);
+        if (n < 0) {
+            return -1;
+        }
+        outpos += n;
+        inpos  += blen;
+    }
+    return outpos;
+} /* chimera_smb_lz77huffman_compress */
+
 /* Decode a raw codec stream (no SMB2 payload framing) of in_len bytes to exactly
  * out_len plaintext bytes.  Used directly by the unchained transform (whose
  * target size comes from the header) and by the chained LZ77 payload after its
@@ -477,11 +1283,42 @@ decompress_codec(
         case SMB2_COMPRESSION_LZ77:
             return chimera_smb_lz77_decompress(in, in_len, out, out_len);
 
+        case SMB2_COMPRESSION_LZNT1:
+            return chimera_smb_lznt1_decompress(in, in_len, out, out_len);
+
+        case SMB2_COMPRESSION_LZ77_HUFFMAN:
+            return chimera_smb_lz77huffman_decompress(in, in_len, out, out_len);
+
         default:
             chimera_smb_error("Unsupported SMB3 compression algorithm 0x%x", alg);
             return -1;
     } /* switch */
 } /* decompress_codec */
+
+/* Compress in_len bytes with the given byte codec (no SMB2 framing).  Returns
+ * the compressed length, or -1 if the result would not fit in out_cap. */
+static int
+compress_codec(
+    uint16_t       alg,
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_cap)
+{
+    switch (alg) {
+        case SMB2_COMPRESSION_LZ77:
+            return chimera_smb_lz77_compress(in, in_len, out, out_cap);
+
+        case SMB2_COMPRESSION_LZNT1:
+            return chimera_smb_lznt1_compress(in, in_len, out, out_cap);
+
+        case SMB2_COMPRESSION_LZ77_HUFFMAN:
+            return chimera_smb_lz77huffman_compress(in, in_len, out, out_cap);
+
+        default:
+            return -1;
+    } /* switch */
+} /* compress_codec */
 
 /* Decode one *chained* payload (MS-SMB2 §2.2.42.2.1) into out, bounded by
  * out_avail.  NONE is a raw pass-through and Pattern_V1 is a run-length
@@ -720,12 +1557,13 @@ emit_pattern_payload(
     return 0;
 } /* emit_pattern_payload */
 
-/* Build an unchained Plain-LZ77 transform of plain into t (capacity cap),
+/* Build an unchained transform (codec `alg`) of plain into t (capacity cap),
  * leaving the first buf_off bytes (the SMB2/response headers) uncompressed as
  * the transform's Offset prefix and compressing only the data buffer that
  * follows.  Returns the transform length, or -1 if it does not fit / shrink. */
 static int
-build_unchained_lz77(
+build_unchained(
+    uint16_t       alg,
     const uint8_t *plain,
     int            plain_len,
     int            buf_off,
@@ -742,18 +1580,18 @@ build_unchained_lz77(
     }
     /* [16-byte header][buf_off uncompressed prefix][compressed data segment]. */
     memcpy(t + hdr, plain, buf_off);
-    comp_len = chimera_smb_lz77_compress(plain + buf_off, seg_len,
-                                         t + hdr + buf_off, cap - hdr - buf_off);
+    comp_len = compress_codec(alg, plain + buf_off, seg_len,
+                              t + hdr + buf_off, cap - hdr - buf_off);
     if (comp_len < 0 || hdr + buf_off + comp_len >= plain_len) {
         return -1;
     }
     memcpy(t, proto, 4);
     wr32(t + 4, (uint32_t) seg_len);    /* OriginalCompressedSegmentSize (segment) */
-    wr16(t + 8, SMB2_COMPRESSION_LZ77);
+    wr16(t + 8, alg);
     wr16(t + 10, SMB2_COMPRESSION_FLAG_NONE);
     wr32(t + 12, (uint32_t) buf_off);   /* Offset of the compressed segment */
     return hdr + buf_off + comp_len;
-} /* build_unchained_lz77 */
+} /* build_unchained */
 
 /* Build a chained transform using Pattern_V1 for leading/trailing runs and
  * Plain LZ77 (or NONE) for the middle (MS-SMB2 §2.2.42.2, mirroring the WPTS
@@ -761,6 +1599,7 @@ build_unchained_lz77(
  * worthwhile pattern exists or the result does not shrink. */
 static int
 build_chained(
+    uint16_t       alg,
     const uint8_t *plain,
     int            plain_len,
     int            buf_off,
@@ -831,15 +1670,15 @@ build_chained(
         if (!mc) {
             return -1;
         }
-        mclen = chimera_smb_lz77_compress(data + mid_off, mid_len, mc, mid_len);
+        mclen = compress_codec(alg, data + mid_off, mid_len, mc, mid_len);
 
         if (mclen >= 0 && mclen + 4 < mid_len) {
-            /* LZ77 middle: header + OriginalPayloadSize(4) + compressed. */
+            /* Compressed middle: header + OriginalPayloadSize(4) + compressed. */
             if (pos + 8 + 4 + mclen > cap) {
                 free(mc);
                 return -1;
             }
-            wr16(t + pos, SMB2_COMPRESSION_LZ77);
+            wr16(t + pos, alg);
             wr16(t + pos + 2, first ? SMB2_COMPRESSION_FLAG_CHAINED : SMB2_COMPRESSION_FLAG_NONE);
             wr32(t + pos + 4, (uint32_t) (mclen + 4));
             pos += 8;
@@ -898,8 +1737,9 @@ chimera_smb_compress_message(
 
     (void) ctx;
 
-    if (alg != SMB2_COMPRESSION_LZ77 || plain_len <= 0 ||
-        buf_off < 0 || buf_off >= plain_len) {
+    if ((alg != SMB2_COMPRESSION_LZ77 && alg != SMB2_COMPRESSION_LZNT1 &&
+         alg != SMB2_COMPRESSION_LZ77_HUFFMAN) ||
+        plain_len <= 0 || buf_off < 0 || buf_off >= plain_len) {
         return -1;
     }
 
@@ -919,12 +1759,13 @@ chimera_smb_compress_message(
     evpl_iovec_cursor_copy(&cursor, plain, plain_len);
 
     /* Prefer a chained Pattern_V1 transform when chaining is negotiated and the
-     * message has a worthwhile run; otherwise fall back to unchained LZ77. */
+     * message has a worthwhile run; otherwise fall back to an unchained codec
+     * transform. */
     if (chained) {
-        tlen = build_chained(plain, plain_len, buf_off, tbuf, plain_len);
+        tlen = build_chained(alg, plain, plain_len, buf_off, tbuf, plain_len);
     }
     if (tlen < 0) {
-        tlen = build_unchained_lz77(plain, plain_len, buf_off, tbuf, plain_len);
+        tlen = build_unchained(alg, plain, plain_len, buf_off, tbuf, plain_len);
     }
 
     if (tlen < 0 || tlen >= plain_len) {

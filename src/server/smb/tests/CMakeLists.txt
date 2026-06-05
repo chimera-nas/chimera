@@ -295,15 +295,18 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # smb_compression enabled (the wrapper sets it from CHIMERA_SMB_COMPRESSION,
     # which also advertises the supported algorithms + a compressed share in the
     # ptfconfig).  Allowlist = every applicable compression case confirmed green
-    # against the current server.  Left out: the LZ77Huffman / LZNT1 / *_Encrypted
-    # variants (those codecs and the compression+encryption combination are not
-    # yet implemented, so the SUT does not advertise them and the cases skip) and
-    # ChainedCompressionNotSupported (inapplicable — the SUT supports chaining).
+    # against the current server (LZ77, LZNT1, LZ77+Huffman and chained Pattern_V1,
+    # in both directions and the large-file variants).  Left out: the *_Encrypted
+    # variants (they need the encryption harness too and live in the
+    # compression+encryption allowlist below) and ChainedCompressionNotSupported
+    # (inapplicable — the SUT supports chaining).
     set(WPTS_SMB2_COMPRESSION_ALLOWLIST
         BVT_Negotiate_SMB311_CompressionEnabled
         BVT_Negotiate_SMB311_Compression_IsChainedCompressionSupported
         BVT_SMB2Compression_Chained_PatternV1
         BVT_SMB2Compression_LZ77
+        BVT_SMB2Compression_LZ77Huffman
+        BVT_SMB2Compression_LZNT1
         BVT_SMB2Compression_Unchained
         BVT_SMB2Compression_Unchained_LargeFile
         Negotiate_SMB311_Compression_CompressionAlgorithmEmpty
@@ -335,6 +338,8 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         SMB2Compression_InvalidCompressionAlgorithm
         SMB2Compression_InvalidDecompressedProtocolId
         SMB2Compression_LZ77_LargeFile
+        SMB2Compression_LZ77Huffman_LargeFile
+        SMB2Compression_LZNT1_LargeFile
         TreeMgmt_SMB311_COMPRESS_DATA)
 
     string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_COMPRESSION_ALLOWLIST}")
@@ -432,6 +437,8 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # for the same reason their plaintext variants do.
     set(WPTS_SMB2_COMPRESSION_ENCRYPTION_ALLOWLIST
         BVT_SMB2Compression_LZ77_Encrypted
+        BVT_SMB2Compression_LZ77Huffman_Encrypted
+        BVT_SMB2Compression_LZNT1_Encrypted
         BVT_SMB2Compression_Chained_PatternV1_Encrypted
         Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext)
 
