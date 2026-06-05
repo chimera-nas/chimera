@@ -203,16 +203,24 @@ chimera_nfs4_decode_ff_layout(
  * netaddr4 {netid, uaddr} and the first ff_version entry (NFS version the DS
  * speaks).  Returns 0 on success.
  */
+static inline int
+chimera_nfs4_netid_is_rdma(const char *netid)
+{
+    return strcmp(netid, "rdma") == 0 || strcmp(netid, "rdma6") == 0;
+} /* chimera_nfs4_netid_is_rdma */
+
 static int
 chimera_nfs4_decode_ff_device_addr(
     const void                       *body,
     uint32_t                          body_len,
     struct chimera_vfs_layout_device *dev,
     int                              *ds_version,
-    int                              *ds_minorversion)
+    int                              *ds_minorversion,
+    int                               prefer_rdma)
 {
     struct pnfs_cursor c;
-    uint32_t           num_addrs, num_vers, netid_len, uaddr_len;
+    uint32_t           num_addrs, num_vers, i;
+    int                have = 0, ideal = 0;
 
     pnfs_cursor_init(&c, body, body_len);
 
@@ -221,16 +229,44 @@ chimera_nfs4_decode_ff_device_addr(
         return -1;
     }
 
-    netid_len = 0;
-    pnfs_get_opaque(&c, dev->netid, sizeof(dev->netid) - 1, &netid_len);
-    dev->netid[netid_len < sizeof(dev->netid) ? netid_len : 0] = '\0';
+    /* The server may advertise several transports for one DS (e.g. rdma + tcp).
+     * Consume them all (to stay aligned) and keep the preferred one: an RDMA
+     * netaddr when prefer_rdma, otherwise a non-RDMA (tcp) one.  Falls back to
+     * the first usable netaddr if the preferred class is not offered. */
+    for (i = 0; i < num_addrs; i++) {
+        char     netid_tmp[sizeof(dev->netid)];
+        char     uaddr_tmp[sizeof(dev->uaddr)];
+        uint32_t netid_len = 0, uaddr_len = 0;
+        int      preferred;
 
-    uaddr_len = 0;
-    pnfs_get_opaque(&c, dev->uaddr, sizeof(dev->uaddr) - 1, &uaddr_len);
-    if (c.err || uaddr_len == 0 || uaddr_len >= sizeof(dev->uaddr)) {
+        pnfs_get_opaque(&c, netid_tmp, sizeof(netid_tmp) - 1, &netid_len);
+        netid_tmp[netid_len < sizeof(netid_tmp) ? netid_len : 0] = '\0';
+
+        pnfs_get_opaque(&c, uaddr_tmp, sizeof(uaddr_tmp) - 1, &uaddr_len);
+        if (c.err) {
+            return -1;
+        }
+        if (uaddr_len == 0 || uaddr_len >= sizeof(uaddr_tmp)) {
+            continue;       /* unusable address; skip but stay aligned */
+        }
+        uaddr_tmp[uaddr_len] = '\0';
+
+        preferred = prefer_rdma ? chimera_nfs4_netid_is_rdma(netid_tmp)
+                                : !chimera_nfs4_netid_is_rdma(netid_tmp);
+
+        if (!have || (preferred && !ideal)) {
+            snprintf(dev->netid, sizeof(dev->netid), "%s", netid_tmp);
+            snprintf(dev->uaddr, sizeof(dev->uaddr), "%s", uaddr_tmp);
+            have = 1;
+            if (preferred) {
+                ideal = 1;
+            }
+        }
+    }
+
+    if (!have) {
         return -1;
     }
-    dev->uaddr[uaddr_len] = '\0';
 
     num_vers = pnfs_get_u32(&c);                   /* ffda_versions<>            */
     if (c.err || num_vers < 1) {
@@ -363,7 +399,9 @@ chimera_nfs4_pnfs_register_ds(
     struct chimera_nfs_shared *shared,
     const char                *host,
     int                        port,
-    int                        version)
+    int                        version,
+    int                        use_rdma,
+    enum evpl_protocol_id      rdma_protocol)
 {
     struct chimera_nfs_client_server **new_servers, *server;
     int                                i, idx = -1;
@@ -402,14 +440,16 @@ chimera_nfs4_pnfs_register_ds(
         return -1;
     }
 
-    server           = calloc(1, sizeof(*server));
-    server->shared   = shared;
-    server->state    = CHIMERA_NFS_CLIENT_SERVER_STATE_DISCOVERED;
-    server->refcnt   = 1;
-    server->nfsvers  = version ? version : 3;
-    server->is_ds    = 1;
-    server->index    = idx;
-    server->nfs_port = port;
+    server                = calloc(1, sizeof(*server));
+    server->shared        = shared;
+    server->state         = CHIMERA_NFS_CLIENT_SERVER_STATE_DISCOVERED;
+    server->refcnt        = 1;
+    server->nfsvers       = version ? version : 3;
+    server->is_ds         = 1;
+    server->index         = idx;
+    server->nfs_port      = port;
+    server->use_rdma      = use_rdma;
+    server->rdma_protocol = use_rdma ? rdma_protocol : 0;
     snprintf(server->hostname, sizeof(server->hostname), "%s", host);
 
     server->nfs_endpoint = evpl_endpoint_create(server->hostname, server->nfs_port);
@@ -418,8 +458,8 @@ chimera_nfs4_pnfs_register_ds(
 
     pthread_mutex_unlock(&shared->lock);
 
-    chimera_nfsclient_info("pNFS: registered DS %s:%d as server index %d (v%d)",
-                           host, port, idx, server->nfsvers);
+    chimera_nfsclient_info("pNFS: registered DS %s:%d as server index %d (v%d, %s)",
+                           host, port, idx, server->nfsvers, use_rdma ? "rdma" : "tcp");
 
     return idx;
 } /* chimera_nfs4_pnfs_register_ds */
@@ -697,6 +737,10 @@ chimera_nfs4_getdeviceinfo_callback(
     char                             host[80];
     int                              port, ds_version = 3, ds_minorversion = 0;
     int                              server_index;
+    /* Prefer an RDMA data path when the MDS was mounted over RDMA; the device
+     * may advertise both an rdma and a tcp netaddr, and we pick accordingly. */
+    int                              prefer_rdma = actx->mds_thread->server->use_rdma;
+    int                              ds_use_rdma;
 
     if (unlikely(status) || res->status != NFS4_OK || res->num_resarray < 2) {
         chimera_nfsclient_error("pNFS GETDEVICEINFO rpc failed: status=%d comp=%d nres=%d",
@@ -725,13 +769,15 @@ chimera_nfs4_getdeviceinfo_callback(
     if (chimera_nfs4_decode_ff_device_addr(
             gdi->gdir_resok4.gdir_device_addr.da_addr_body.data,
             gdi->gdir_resok4.gdir_device_addr.da_addr_body.len,
-            &dev, &ds_version, &ds_minorversion) != 0) {
+            &dev, &ds_version, &ds_minorversion, prefer_rdma) != 0) {
         chimera_nfsclient_error("pNFS GETDEVICEINFO ff_device_addr decode failed (len=%u)",
                                 gdi->gdir_resok4.gdir_device_addr.da_addr_body.len);
         chimera_nfs4_acquire_finish(request, actx, 0);
         return;
     }
-    chimera_nfsclient_info("pNFS GETDEVICEINFO ok: uaddr=%s ds_version=%d", dev.uaddr, ds_version);
+    ds_use_rdma = chimera_nfs4_netid_is_rdma(dev.netid);
+    chimera_nfsclient_info("pNFS GETDEVICEINFO ok: netid=%s uaddr=%s ds_version=%d",
+                           dev.netid, dev.uaddr, ds_version);
 
     /* First cut: only NFSv3 data servers are supported. */
     if (ds_version != 3) {
@@ -746,7 +792,9 @@ chimera_nfs4_getdeviceinfo_callback(
         return;
     }
 
-    server_index = chimera_nfs4_pnfs_register_ds(actx->shared, host, port, ds_version);
+    server_index = chimera_nfs4_pnfs_register_ds(actx->shared, host, port, ds_version,
+                                                 ds_use_rdma,
+                                                 actx->mds_thread->server->rdma_protocol);
     if (server_index < 0) {
         chimera_nfs4_acquire_finish(request, actx, 0);
         return;

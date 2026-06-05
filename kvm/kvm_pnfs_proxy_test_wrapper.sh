@@ -161,7 +161,7 @@ generate_mds_config() {
         "pnfs": {
             "enabled": true,
             "data_servers": [
-                { "netid": "tcp", "uaddr": "${BE_IP}:${DS_PORT}", "version": "3", "backing_path": "/ds0" }
+                { "tcp": "${BE_IP}:${DS_PORT}", "rdma": "${BE_IP}:20050", "version": "3", "backing_path": "/ds0" }
             ]
         }
     },
@@ -312,6 +312,16 @@ if ! grep -qE "Connected.* to ${BE_IP}:${DS_PORT}" "$PROXY_LOG"; then
     exit 1
 fi
 echo "=== verified: proxy drove direct data-server I/O via a flex-files layout ==="
+
+# The DS device advertises BOTH an rdma and a tcp netaddr (see the MDS config).
+# The proxy mounts the MDS over TCP, so it must select the tcp netaddr for the
+# DS (had it wrongly picked rdma it would have tried RDMA to a non-RDMA port).
+if ! grep -q "GETDEVICEINFO ok: netid=tcp" "$PROXY_LOG"; then
+    echo "=== wrong DS transport selected from a multi-netaddr device ===" >&2
+    grep -iE "getdeviceinfo|registered DS" "$PROXY_LOG" | tail -10 >&2
+    exit 1
+fi
+echo "=== verified: proxy selected the tcp netaddr from an rdma+tcp device ==="
 
 # For recall workloads, assert the proxy actually received + handled the recall.
 if echo "$TEST_CMD_ARG" | grep -q "RECALL_EXPECTED"; then
