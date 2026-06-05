@@ -111,9 +111,30 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         input_len = 0;
     }
 
+    /* SMB3 multichannel session binding (MS-SMB2 3.3.5.5.3).  A SESSION_SETUP
+     * whose SMB2_SESSION_FLAG_BINDING bit is set asks to add this connection as
+     * an additional channel of an existing session.  The server MUST reject the
+     * bind with STATUS_REQUEST_NOT_ACCEPTED when the connection's dialect is not
+     * in the SMB 3.x family (or the server is not multichannel-capable — chimera
+     * always is).  Caught before authentication so a 2.x client never binds. */
+    if ((request->session_setup.flags & SMB2_SESSION_FLAG_BINDING) &&
+        conn->dialect < SMB2_DIALECT_3_0) {
+        chimera_smb_complete_request(request, SMB2_STATUS_REQUEST_NOT_ACCEPTED);
+        evpl_iovecs_release(thread->evpl, request->session_setup.input_iov,
+                            request->session_setup.input_niov);
+        return;
+    }
+
     // Detect authentication mechanism
     mech = smb_auth_detect_mechanism(input, input_len);
     chimera_smb_debug("Session setup: detected mechanism %s", smb_auth_mech_name(mech));
+
+    /* A security buffer the server cannot parse as a recognised mechanism token
+     * is a malformed request, not an authentication failure: MS-SMB2 answers it
+     * with STATUS_INVALID_PARAMETER rather than STATUS_LOGON_FAILURE (the
+     * GSS/SSPI layer reports SEC_E_INVALID_TOKEN).  Track it so the failure
+     * completion below returns the right status. */
+    int bad_token = 0;
 
     // Route to appropriate handler
     switch (mech) {
@@ -132,7 +153,8 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
         default:
             chimera_smb_error("Unknown authentication mechanism");
-            rc = -1;
+            rc        = -1;
+            bad_token = 1;
             break;
     } /* switch */
 
@@ -327,7 +349,9 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
     } else {
         // Authentication failed
         chimera_smb_error("Authentication failed (mechanism: %s)", smb_auth_mech_name(mech));
-        chimera_smb_complete_request(request, SMB2_STATUS_LOGON_FAILURE);
+        chimera_smb_complete_request(request,
+                                     bad_token ? SMB2_STATUS_INVALID_PARAMETER :
+                                     SMB2_STATUS_LOGON_FAILURE);
 
         /* A failed channel-bind (SMB2_SESSION_FLAG_BINDING) must NOT tear the
          * existing session down — the established channel(s) survive.  Only a

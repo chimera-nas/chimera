@@ -407,6 +407,11 @@ chimera_server_config_get_smb_dialects(
     const struct chimera_server_config *config,
     int                                 index);
 
+void
+chimera_server_config_set_smb_min_dialect(
+    struct chimera_server_config *config,
+    uint32_t                      min_dialect);
+
 int
 chimera_server_config_get_smb_num_nic_info(
     const struct chimera_server_config *config);

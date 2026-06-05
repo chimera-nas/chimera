@@ -488,17 +488,32 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     if (compound->num_requests > 0 &&
         (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE ||
          compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP)) {
-        chimera_smb_preauth_extend(conn->preauth_hash,
-                                   (uint8_t *) evpl_iovec_data(&reply_iov[0]) + reply_hdr_len,
-                                   preauth_fold_len);
 
-        /* Once the NEGOTIATE response is folded in, conn->preauth_hash holds
-         * the post-NEGOTIATE baseline (MS-SMB2 Connection.PreauthIntegrity
-         * HashValue).  Snapshot it so each subsequent session's preauth hash
-         * can restart from here (see the request-fold path). */
-        if (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE) {
-            memcpy(conn->negotiate_preauth_hash, conn->preauth_hash,
-                   sizeof(conn->negotiate_preauth_hash));
+        /* A SESSION_SETUP that completes with a hard error contributes nothing
+         * to the preauth-integrity hash: the client folds a SESSION_SETUP
+         * exchange only when the response is SUCCESS or MORE_PROCESSING_REQUIRED
+         * (MS-SMB2 3.3.5.5.3), so roll the request fold back to the pre-request
+         * snapshot and skip folding the error response.  Without this a failed
+         * authentication leg (e.g. an invalid first channel-bind) would poison
+         * the hash and the next leg's signing key would not match the client's.
+         * NEGOTIATE always reaches here on success, so it is never rolled back. */
+        if (compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP &&
+            chimera_smb_is_error_status(compound->requests[0]->status)) {
+            memcpy(conn->preauth_hash, conn->preauth_hash_presession,
+                   sizeof(conn->preauth_hash));
+        } else {
+            chimera_smb_preauth_extend(conn->preauth_hash,
+                                       (uint8_t *) evpl_iovec_data(&reply_iov[0]) + reply_hdr_len,
+                                       preauth_fold_len);
+
+            /* Once the NEGOTIATE response is folded in, conn->preauth_hash holds
+             * the post-NEGOTIATE baseline (MS-SMB2 Connection.PreauthIntegrity
+             * HashValue).  Snapshot it so each subsequent session's preauth hash
+             * can restart from here (see the request-fold path). */
+            if (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE) {
+                memcpy(conn->negotiate_preauth_hash, conn->preauth_hash,
+                       sizeof(conn->negotiate_preauth_hash));
+            }
         }
     }
 
@@ -1215,6 +1230,12 @@ chimera_smb_server_handle_smb2(
                 compound->requests[0]->smb2_hdr.session_id == 0) {
                 memcpy(conn->preauth_hash, conn->negotiate_preauth_hash,
                        sizeof(conn->preauth_hash));
+            }
+            /* Snapshot before folding a SESSION_SETUP so a leg that fails
+             * authentication can be rolled back (see the reply-fold path). */
+            if (compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP) {
+                memcpy(conn->preauth_hash_presession, conn->preauth_hash,
+                       sizeof(conn->preauth_hash_presession));
             }
             evpl_iovec_cursor_copy(&preauth_cursor, msg, length);
             chimera_smb_preauth_extend(conn->preauth_hash, msg, length);
