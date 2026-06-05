@@ -26,24 +26,9 @@
 
 #define SMB2_OPLOCK_BREAK_FLAG_ACK_REQUIRED 0x01
 
-/* Map vfs_state RWH bits to the SMB2 lease state encoding (different
- * bit positions for H and W). */
-static inline uint8_t
-chimera_smb_vfs_to_lease_bits(uint8_t vfs_mode)
-{
-    uint8_t s = 0;
-
-    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_R) {
-        s |= SMB2_LEASE_READ_CACHING;
-    }
-    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_H) {
-        s |= SMB2_LEASE_HANDLE_CACHING;
-    }
-    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_W) {
-        s |= SMB2_LEASE_WRITE_CACHING;
-    }
-    return s;
-} /* chimera_smb_vfs_to_lease_bits */
+/* chimera_smb_vfs_to_lease_bits / _lease_bits_to_vfs / _vfs_to_oplock_level live
+ * in smb_internal.h -- one canonical SMB<->VFS caching-grant encoding shared with
+ * the create grant path. */
 
 static inline uint8_t
 chimera_smb_lease_to_vfs_bits(uint8_t smb_state)

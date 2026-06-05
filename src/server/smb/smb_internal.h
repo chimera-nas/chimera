@@ -68,6 +68,70 @@
                          __LINE__, \
                          __VA_ARGS__)
 
+/*
+ * Canonical mapping between the SMB caching-grant encodings and vfs_state's RWH
+ * lease mode -- one source of truth shared by the create grant path and the
+ * oplock/lease break-notification builder, which previously re-derived these
+ * inline (and could drift).  The SMB2 lease bit layout (R=0x01, H=0x02, W=0x04)
+ * differs from vfs_state's CHIMERA_VFS_LEASE_MODE_{R,W,H}, so map field by field.
+ */
+static inline uint8_t
+chimera_smb_vfs_to_lease_bits(uint8_t vfs_mode)
+{
+    uint8_t s = 0;
+
+    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_R) {
+        s |= SMB2_LEASE_READ_CACHING;
+    }
+    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_H) {
+        s |= SMB2_LEASE_HANDLE_CACHING;
+    }
+    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_W) {
+        s |= SMB2_LEASE_WRITE_CACHING;
+    }
+    return s;
+} /* chimera_smb_vfs_to_lease_bits */
+
+static inline uint8_t
+chimera_smb_lease_bits_to_vfs(uint8_t smb_bits)
+{
+    uint8_t v = 0;
+
+    if (smb_bits & SMB2_LEASE_READ_CACHING) {
+        v |= CHIMERA_VFS_LEASE_MODE_R;
+    }
+    if (smb_bits & SMB2_LEASE_HANDLE_CACHING) {
+        v |= CHIMERA_VFS_LEASE_MODE_H;
+    }
+    if (smb_bits & SMB2_LEASE_WRITE_CACHING) {
+        v |= CHIMERA_VFS_LEASE_MODE_W;
+    }
+    return v;
+} /* chimera_smb_lease_bits_to_vfs */
+
+/* Collapse a granted RWH mask to the closest legacy oplock level (used when an
+ * open did not request an RqLs lease).  Legacy oplocks have no separate W/H, so
+ * RWH -> BATCH, RW (no H) -> EXCLUSIVE, R-only -> LEVEL_II, none -> NONE. */
+static inline uint8_t
+chimera_smb_vfs_to_oplock_level(uint8_t vfs_mode)
+{
+    uint8_t rwh = vfs_mode & (CHIMERA_VFS_LEASE_MODE_R |
+                              CHIMERA_VFS_LEASE_MODE_W |
+                              CHIMERA_VFS_LEASE_MODE_H);
+
+    if (rwh == (CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W |
+                CHIMERA_VFS_LEASE_MODE_H)) {
+        return SMB2_OPLOCK_LEVEL_BATCH;
+    }
+    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_W) {
+        return SMB2_OPLOCK_LEVEL_EXCLUSIVE;
+    }
+    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_R) {
+        return SMB2_OPLOCK_LEVEL_II;
+    }
+    return SMB2_OPLOCK_LEVEL_NONE;
+} /* chimera_smb_vfs_to_oplock_level */
+
 /* Little-endian decoders for SMB2 wire fields. Used by the negotiate-context
  * and CREATE-context parsers; defined here so all SMB protocol code shares one
  * implementation. The SMB2 wire format is little-endian throughout. */

@@ -729,15 +729,7 @@ chimera_smb_create_after_share(
          *   - server-side copy: COPYCHUNK breaks the source's caching lease to
          *     force a flush before it reads (smb_proc_copychunk.c) — fixes the
          *     old fsx READ BAD DATA. */
-        if (req_smb & SMB2_LEASE_READ_CACHING) {
-            req_vfs |= CHIMERA_VFS_LEASE_MODE_R;
-        }
-        if (req_smb & SMB2_LEASE_HANDLE_CACHING) {
-            req_vfs |= CHIMERA_VFS_LEASE_MODE_H;
-        }
-        if (req_smb & SMB2_LEASE_WRITE_CACHING) {
-            req_vfs |= CHIMERA_VFS_LEASE_MODE_W;
-        }
+        req_vfs = chimera_smb_lease_bits_to_vfs(req_smb);
 
         /* Oplocks are about data caching: an attribute-only open (no
          * read/write/execute data access) neither acquires nor breaks an
@@ -857,37 +849,15 @@ chimera_smb_create_after_share(
                 if (result == CHIMERA_VFS_LEASE_GRANTED) {
                     open_file->caching_file_state     = file_state;
                     open_file->caching_lease_inserted = true;
-                    /* Record granted SMB-side state on the open_file.
-                     * lease_state stores the SMB lease bits, which is
-                     * what the response context emitter wants. */
-                    open_file->lease_state = 0;
-                    if (req_vfs & CHIMERA_VFS_LEASE_MODE_R) {
-                        open_file->lease_state |= SMB2_LEASE_READ_CACHING;
-                    }
-                    if (req_vfs & CHIMERA_VFS_LEASE_MODE_H) {
-                        open_file->lease_state |= SMB2_LEASE_HANDLE_CACHING;
-                    }
-                    if (req_vfs & CHIMERA_VFS_LEASE_MODE_W) {
-                        open_file->lease_state |= SMB2_LEASE_WRITE_CACHING;
-                    }
+                    /* Record granted SMB-side state on the open_file via the
+                     * canonical encoders (smb_internal.h): lease_state holds the
+                     * SMB lease bits the response emitter wants; oplock_level is
+                     * the legacy collapse of the granted RWH for a non-RqLs open. */
+                    open_file->lease_state = chimera_smb_vfs_to_lease_bits(req_vfs);
                     if (via_rqls) {
                         open_file->oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
                     } else {
-                        /* Translate granted RWH back to legacy oplock
-                         * level.  Without H, the closest legacy match
-                         * is EXCLUSIVE for RW or II for R only. */
-                        if ((req_vfs & (CHIMERA_VFS_LEASE_MODE_R |
-                                        CHIMERA_VFS_LEASE_MODE_W |
-                                        CHIMERA_VFS_LEASE_MODE_H)) ==
-                            (CHIMERA_VFS_LEASE_MODE_R |
-                             CHIMERA_VFS_LEASE_MODE_W |
-                             CHIMERA_VFS_LEASE_MODE_H)) {
-                            open_file->oplock_level = SMB2_OPLOCK_LEVEL_BATCH;
-                        } else if (req_vfs & CHIMERA_VFS_LEASE_MODE_W) {
-                            open_file->oplock_level = SMB2_OPLOCK_LEVEL_EXCLUSIVE;
-                        } else {
-                            open_file->oplock_level = SMB2_OPLOCK_LEVEL_II;
-                        }
+                        open_file->oplock_level = chimera_smb_vfs_to_oplock_level(req_vfs);
                     }
                 } else {
                     chimera_vfs_state_put(vfs_state, file_state);
