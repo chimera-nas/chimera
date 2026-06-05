@@ -141,6 +141,14 @@ struct chimera_nfs_client_server_thread {
     struct evpl_rpc2_conn            *nfs_conn;
     struct evpl_rpc2_conn            *nlm_conn;
 
+    /* nfs_conn readiness.  RDMA forbids advertising an rkey (a bulk read/write
+     * RDMA chunk) before the QP is bound to a device, i.e. before
+     * EVPL_RPC2_NOTIFY_CONNECTED -- so a freshly-created RDMA conn is NOT ready
+     * and pNFS DS I/O parks on conn_waiters until CONNECTED fires.  TCP tolerates
+     * send-before-connect, so a TCP conn is marked ready at creation. */
+    int                               nfs_conn_ready;
+    struct chimera_vfs_request       *conn_waiters;
+
     struct chimera_nfs4_slot_table    slots;        /* NFS4.1 fore-channel slots  */
 };
 
@@ -379,6 +387,9 @@ chimera_nfs_thread_get_server_thread(
                                                            proto,
                                                            server_thread->server->nfs_endpoint,
                                                            NULL, 0, NULL);
+        /* TCP can be used immediately; an RDMA conn must reach CONNECTED before
+         * any rkey-advertising op (see nfs_conn_ready). */
+        server_thread->nfs_conn_ready = !server_thread->server->use_rdma;
     }
 
     if (unlikely(!server_thread->nlm_conn && server_thread->server->nlm_endpoint)) {
@@ -828,6 +839,14 @@ void chimera_nfs4_slot_table_destroy(
 void chimera_nfs4_slot_table_reset(
     struct evpl                    *evpl,
     struct chimera_nfs4_slot_table *st);
+
+/* pNFS DS-connection readiness (nfs4_pnfs.c), driven from chimera_nfs_notify:
+ * replay DS I/O parked until the RDMA conn connected, or error-complete it if
+ * the conn dropped first. */
+void chimera_nfs4_pnfs_conn_connected(
+    struct chimera_nfs_client_server_thread *server_thread);
+void chimera_nfs4_pnfs_conn_failed(
+    struct chimera_nfs_client_server_thread *server_thread);
 
 void chimera_nfs3_mount(
     struct chimera_nfs_thread *,

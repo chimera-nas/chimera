@@ -189,6 +189,16 @@ chimera_nfs_notify(
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
             evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
             chimera_nfsclient_info("Connected from %s to %s", local_addr, remote_addr);
+
+            /* An RDMA conn is only now usable for rkey-advertising ops; release
+             * any pNFS DS I/O parked waiting for it. */
+            for (i = 0; nfs_thread && i < nfs_thread->max_server_threads; i++) {
+                server_thread = nfs_thread->server_threads[i];
+                if (server_thread && server_thread->nfs_conn == conn) {
+                    chimera_nfs4_pnfs_conn_connected(server_thread);
+                    break;
+                }
+            }
             break;
         case EVPL_RPC2_NOTIFY_DISCONNECTED:
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
@@ -202,6 +212,7 @@ chimera_nfs_notify(
             for (i = 0; nfs_thread && i < nfs_thread->max_server_threads; i++) {
                 server_thread = nfs_thread->server_threads[i];
                 if (server_thread && server_thread->nfs_conn == conn) {
+                    chimera_nfs4_pnfs_conn_failed(server_thread);
                     chimera_nfs4_slot_table_reset(nfs_thread->evpl, &server_thread->slots);
                     break;
                 }

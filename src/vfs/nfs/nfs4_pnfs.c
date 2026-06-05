@@ -568,6 +568,55 @@ chimera_nfs4_pnfs_replay(
     }
 } /* chimera_nfs4_pnfs_replay */
 
+/*
+ * The DS connection reached CONNECTED (from chimera_nfs_notify).  Mark it ready
+ * and replay any DS I/O that parked waiting for the RDMA QP to bind.  Runs on
+ * the connection's own evpl thread, so conn_waiters is touched single-threaded.
+ */
+void
+chimera_nfs4_pnfs_conn_connected(struct chimera_nfs_client_server_thread *server_thread)
+{
+    struct chimera_vfs_request *waiters, *w, *next;
+
+    server_thread->nfs_conn_ready = 1;
+
+    waiters                     = server_thread->conn_waiters;
+    server_thread->conn_waiters = NULL;
+
+    for (w = waiters; w; w = next) {
+        next    = w->next;
+        w->next = NULL;
+        if (w->opcode == CHIMERA_VFS_OP_READ) {
+            chimera_nfs4_read(server_thread->thread, server_thread->shared, w, server_thread->thread);
+        } else {
+            chimera_nfs4_write(server_thread->thread, server_thread->shared, w, server_thread->thread);
+        }
+    }
+} /* chimera_nfs4_pnfs_conn_connected */
+
+/*
+ * The DS connection dropped (or never connected) before its parked I/O could
+ * run.  Mark it not-ready and error-complete the waiters rather than leaking
+ * them; the upper VFS layer decides whether to retry.
+ */
+void
+chimera_nfs4_pnfs_conn_failed(struct chimera_nfs_client_server_thread *server_thread)
+{
+    struct chimera_vfs_request *waiters, *w, *next;
+
+    server_thread->nfs_conn_ready = 0;
+
+    waiters                     = server_thread->conn_waiters;
+    server_thread->conn_waiters = NULL;
+
+    for (w = waiters; w; w = next) {
+        next      = w->next;
+        w->next   = NULL;
+        w->status = CHIMERA_VFS_EIO;
+        w->complete(w);
+    }
+} /* chimera_nfs4_pnfs_conn_failed */
+
 /* ----------------------------------------------------------------------- */
 /* Layout registry + back-channel CB_LAYOUTRECALL                          */
 /* ----------------------------------------------------------------------- */
@@ -1116,6 +1165,14 @@ chimera_nfs4_pnfs_ds_read(
         return 0;       /* DS unreachable: caller falls back to MDS. */
     }
 
+    if (!ds_thread->nfs_conn_ready) {
+        /* Fresh RDMA DS conn: a READ may advertise an rkey for its reply data,
+         * which the QP cannot do until CONNECTED.  Park until then. */
+        request->next           = ds_thread->conn_waiters;
+        ds_thread->conn_waiters = request;
+        return 1;
+    }
+
     args.file.data.data = seg->ds_fh;
     args.file.data.len  = seg->ds_fh_len;
     args.offset         = request->read.offset;
@@ -1215,6 +1272,15 @@ chimera_nfs4_pnfs_ds_write(
     if (!ds_thread || !ds_thread->nfs_conn) {
         chimera_nfsclient_error("pNFS DS write: DS server %d unreachable, using MDS", ds_server_index);
         return 0;       /* DS unreachable: caller falls back to MDS. */
+    }
+
+    if (!ds_thread->nfs_conn_ready) {
+        /* Fresh RDMA DS conn: the WRITE advertises an rkey for its data, which
+         * the QP cannot do until CONNECTED.  Park until then (see
+         * nfs_conn_ready) -- replayed by chimera_nfs4_pnfs_conn_connected. */
+        request->next           = ds_thread->conn_waiters;
+        ds_thread->conn_waiters = request;
+        return 1;
     }
 
     chimera_nfsclient_debug("pNFS DS write -> server %d off=%lu len=%u",
