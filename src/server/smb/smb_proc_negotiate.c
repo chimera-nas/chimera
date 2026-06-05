@@ -911,12 +911,13 @@ chimera_smb_select_negotiated_algorithms(
         conn->thread->shared->config.compression &&
         (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_COMPRESSION)) {
         /* Algorithms Chimera implements (smb_compress.c).  Plain LZ77 is the
-         * primary codec; Pattern_V1 is only meaningful as a chained run-length
-         * payload but is supported so peers may send it.  LZ77+Huffman and LZNT1
-         * are not yet implemented and so not advertised — a peer can never select
-         * a codec we cannot decode. */
+         * primary codec; LZNT1 and LZ77+Huffman are also supported; Pattern_V1 is
+         * only meaningful as a chained run-length payload but is advertised so
+         * peers may send it.  A peer can never select a codec we cannot decode. */
         static const uint16_t supported[] = {
             SMB2_COMPRESSION_LZ77,
+            SMB2_COMPRESSION_LZ77_HUFFMAN,
+            SMB2_COMPRESSION_LZNT1,
             SMB2_COMPRESSION_PATTERN_V1,
         };
         int                   i, j, n = 0;
