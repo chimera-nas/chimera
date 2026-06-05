@@ -16,7 +16,7 @@ ARG ENABLE_WPTS=1
 # a SHA rather than a moving branch makes the image reproducible and, critically,
 # busts the Docker layer cache whenever pynfs is bumped -- otherwise the cached
 # clone layer keeps shipping a stale pynfs.  Bump this SHA when pynfs changes.
-ARG PYNFS_REF=c4bf18d62947e793752c1f77ab180ce75533f14d
+ARG PYNFS_REF=b861f7b8211b4dc798b88a7e81b300fb4615189c
 # Pinned Microsoft Windows Protocol Test Suites (WPTS) FileServer release.
 ARG WPTS_VERSION=4.26.3.0
 
