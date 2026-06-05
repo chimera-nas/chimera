@@ -21,11 +21,13 @@ chimera_smb_set_info_callback(
 
     if (!error_code && request->set_info.open_file->parent_fh_len > 0) {
         struct chimera_server_smb_thread *thread = request->compound->thread;
+        uint32_t                          mask   = request->set_info.notify_mask ?
+            request->set_info.notify_mask : CHIMERA_VFS_NOTIFY_ATTRS_CHANGED;
 
         chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
                                 request->set_info.open_file->parent_fh,
                                 request->set_info.open_file->parent_fh_len,
-                                CHIMERA_VFS_NOTIFY_ATTRS_CHANGED,
+                                mask,
                                 request->set_info.open_file->name,
                                 request->set_info.open_file->name_len,
                                 NULL, 0);
@@ -210,6 +212,9 @@ chimera_smb_set_info(struct chimera_smb_request *request)
 {
     request->set_info.open_file     = chimera_smb_open_file_resolve(request, &request->set_info.file_id);
     request->set_info.parent_handle = NULL;
+    /* Default change-notify event for this SET_INFO; info classes that mutate
+     * size override it below.  Cleared here since the request is pooled. */
+    request->set_info.notify_mask = 0;
 
     if (unlikely(!request->set_info.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
@@ -243,6 +248,11 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                 case SMB2_FILE_ENDOFFILE_INFO:
                     chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
+                    /* A size change fires FILE_NOTIFY_CHANGE_SIZE (and, via the
+                     * advanced LastWriteTime below, FILE_NOTIFY_CHANGE_LAST_WRITE). */
+                    request->set_info.notify_mask = CHIMERA_VFS_NOTIFY_SIZE_CHANGED |
+                        CHIMERA_VFS_NOTIFY_FILE_MODIFIED;
+
                     /* Setting EndOfFile advances the LastWriteTime (it changes
                      * the file's data extent), unless this handle has taken
                      * sticky control of the write time. */
@@ -269,6 +279,8 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                      * advances LastWriteTime; a grow/hint only touches
                      * ChangeTime.  Both need the current size to decide, so this
                      * is resolved in the getattr callback. */
+                    request->set_info.notify_mask = CHIMERA_VFS_NOTIFY_SIZE_CHANGED |
+                        CHIMERA_VFS_NOTIFY_FILE_MODIFIED;
                     chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
                     chimera_vfs_getattr(
@@ -320,6 +332,20 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     chimera_smb_set_info_link_process(request);
                     break;
                 case SMB2_FILE_FULL_EA_INFO:
+                    /* chimera does not persist EAs, but a SET of extended
+                     * attributes still fires FILE_NOTIFY_CHANGE_EA on the parent
+                     * (smb2.change_notify ChangeEa). */
+                    if (request->set_info.open_file->parent_fh_len > 0) {
+                        struct chimera_server_smb_thread *thread = request->compound->thread;
+
+                        chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
+                                                request->set_info.open_file->parent_fh,
+                                                request->set_info.open_file->parent_fh_len,
+                                                CHIMERA_VFS_NOTIFY_ATTRS_CHANGED,
+                                                request->set_info.open_file->name,
+                                                request->set_info.open_file->name_len,
+                                                NULL, 0);
+                    }
                     chimera_smb_open_file_release(request, request->set_info.open_file);
                     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
                     break;

@@ -83,6 +83,15 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 3.3.5.19: if OutputBufferLength exceeds Connection.MaxTransactSize
+     * the server MUST fail the request with STATUS_INVALID_PARAMETER rather than
+     * arming a watch (smb2.change_notify MaxTransactSize check). */
+    if (request->change_notify.output_buffer_length > CHIMERA_SMB_MAX_TRANSACT_SIZE) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
     request->change_notify.open_file = open_file;
 
     vfs_notify = thread->shared->vfs->vfs_notify;

@@ -598,6 +598,11 @@ struct chimera_smb_request {
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_attrs        attrs;
             struct chimera_vfs_attrs        vfs_attrs;
+            /* VFS notify event(s) the set_info callback fires on the parent on
+             * success.  0 => default to ATTRS_CHANGED; EndOfFile/Allocation set
+             * SIZE_CHANGED|FILE_MODIFIED so a FILE_NOTIFY_CHANGE_SIZE watch
+             * fires (smb2.change_notify ChangeSize). */
+            uint32_t                        notify_mask;
             /* Rename information */
             struct chimera_smb_rename_info  rename_info;
             /* Security descriptor buffer for SMB2_INFO_SECURITY */
