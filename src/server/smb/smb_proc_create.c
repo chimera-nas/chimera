@@ -874,7 +874,17 @@ chimera_smb_create_after_share(
                                                               &grant->lease, &conflict);
                         while (result != CHIMERA_VFS_LEASE_GRANTED &&
                                settle_guard-- > 0) {
-                            if (grant->lease.mode.granted != CHIMERA_VFS_LEASE_MODE_R) {
+                            /* W (write cache) is exclusive across lease keys; a
+                             * conflicting holder forces it off but R+H stay shared.
+                             * Drop only W first (-> R|H), then -- if R|H itself is
+                             * still hard-denied (a cross-client handle conflict) --
+                             * step down to R; give up only when even R is
+                             * unobtainable and we are not merely awaiting a break. */
+                            if (grant->lease.mode.granted & CHIMERA_VFS_LEASE_MODE_W) {
+                                grant->lease.mode.granted &= ~CHIMERA_VFS_LEASE_MODE_W;
+                            } else if (grant->lease.mode.granted !=
+                                       CHIMERA_VFS_LEASE_MODE_R &&
+                                       result == CHIMERA_VFS_LEASE_DENIED) {
                                 grant->lease.mode.granted = CHIMERA_VFS_LEASE_MODE_R;
                             } else if (result != CHIMERA_VFS_LEASE_BREAKING) {
                                 break;

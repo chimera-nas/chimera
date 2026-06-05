@@ -383,9 +383,14 @@ chimera_vfs_caching_conflict(
         return true;
     }
 
-    /* H (handle-cache) is exclusive across owners — only one client may
-     * cache the open handle. */
-    if ((e & CHIMERA_VFS_LEASE_MODE_H) && (p & CHIMERA_VFS_LEASE_MODE_H)) {
+    /* H (handle-cache) is exclusive only ACROSS CLIENTS — a different client
+     * caching the open handle conflicts (a batch oplock is sole-handle), but two
+     * lease keys of the SAME client may each hold handle caching (MS-SMB2 lease
+     * semantics: a client's RH lease is not broken by another RH lease of its own
+     * under a different key -- smb2.lease.break expects two RH leases to coexist).
+     * Write caching above is the only mode exclusive even within one client. */
+    if ((e & CHIMERA_VFS_LEASE_MODE_H) && (p & CHIMERA_VFS_LEASE_MODE_H) &&
+        existing->owner.client_key != probe->owner.client_key) {
         return true;
     }
 
