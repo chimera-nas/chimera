@@ -1462,6 +1462,15 @@ chimera_smb_conn_free(
         chimera_smb_session_handle_free(thread, session_handle);
     }
 
+    /* last_session_handle is a raw cache into session_handles (above); the
+     * loop just freed every entry, so drop the dangling pointer before this
+     * conn struct is returned to the free list.  Otherwise a later reuse of
+     * the pooled conn (chimera_smb_conn_alloc) inherits a pointer to a freed,
+     * recycled handle, and the session-resolution fast path hands it out for
+     * a request whose session id happens to match the recycled handle's
+     * current session -- which then aborts in chimera_smb_logoff. */
+    conn->last_session_handle = NULL;
+
     if (conn->nascent_ctx != GSS_C_NO_CONTEXT) {
         gss_delete_sec_context(&conn->gss_minor, &conn->nascent_ctx, NULL);
         conn->nascent_ctx = GSS_C_NO_CONTEXT;

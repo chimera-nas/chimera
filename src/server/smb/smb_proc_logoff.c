@@ -15,8 +15,14 @@ chimera_smb_logoff(struct chimera_smb_request *request)
 
     HASH_FIND(hh, conn->session_handles, &request->smb2_hdr.session_id, sizeof(uint64_t), session_handle);
 
-    chimera_smb_abort_if(!session_handle,
-                         "Received SMB2 LOGOFF request for unknown session, should have been caught by session setup");
+    if (!session_handle) {
+        /* No session for this id on this connection.  Per MS-SMB2 3.3.5.6 /
+         * 3.3.5.2.9 a LOGOFF that does not resolve to a session is answered
+         * with STATUS_USER_SESSION_DELETED -- never a server abort (that would
+         * be a remotely triggerable crash). */
+        chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
+        return;
+    }
 
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 
