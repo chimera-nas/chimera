@@ -235,6 +235,84 @@ chimera_smb_create_share_park_cb(
     struct chimera_vfs_lease     *conflict,
     void                         *private_data);
 
+/*
+ * Single break-decision point for a conflicting open (MS-FSA open-vs-oplock
+ * ordering), factored out of the two create-path call sites that previously
+ * duplicated the trigger/owner computation verbatim.
+ *
+ *   phase 1 (pre-share-check, trigger H): a batch / handle-caching holder breaks
+ *     BEFORE the share-mode decision, because it may close its deferred handle
+ *     and dissolve the conflict -- so the break fires even when the open is
+ *     ultimately refused with SHARING_VIOLATION (smb2.oplock.batch5).  It retains
+ *     R unless the open truncates.
+ *   phase 2 (post-share-check, trigger W): once the open is granted, a
+ *     conflicting exclusive (W-only) holder breaks to LEVEL_II; a truncating open
+ *     replaces the data and instead invalidates every cached holder to NONE
+ *     (break_on_write).
+ *
+ * The opener is identified by its lease key when it carries an RqLs context (all
+ * of one client's opens of a file share that key, so a re-open by the lease
+ * holder coalesces instead of self-breaking), else by file_id.  It is a no-op on
+ * a pure stat-open (no data/delete/truncate access) and when the only holder is
+ * the opener's own.
+ */
+static inline void
+chimera_smb_create_break_for_open(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_request       *request,
+    struct chimera_smb_open_file     *open_file,
+    struct chimera_vfs_open_handle   *oh,
+    int                               phase)
+{
+    uint32_t                       da        = open_file->desired_access;
+    uint32_t                       disp      = request->create.create_disposition;
+    bool                           truncates =
+        disp == SMB2_FILE_OVERWRITE ||
+        disp == SMB2_FILE_OVERWRITE_IF ||
+        disp == SMB2_FILE_SUPERSEDE;
+    bool                           break_trigger =
+        (da & (SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
+               SMB2_FILE_APPEND_DATA | SMB2_FILE_EXECUTE |
+               SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
+               SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL |
+               SMB2_MAXIMUM_ALLOWED | SMB2_DELETE)) ||
+        (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
+        truncates;
+    struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
+    struct chimera_vfs_lease_owner io_owner  = {
+        .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
+        .client_key = request->session_handle->session->session_id,
+        .owner_lo   = open_file->file_id.pid,
+        .owner_hi   = open_file->file_id.vid,
+    };
+
+    if (!break_trigger) {
+        return;
+    }
+
+    /* An RqLs open is owned by its lease key, not its file_id; identify the
+     * opener by the key so break_caching_for_open coalesces a lease this client
+     * already holds under the same key instead of recalling it. */
+    if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
+        memcpy(&io_owner.owner_lo, request->create.rqls.key, 8);
+        memcpy(&io_owner.owner_hi, request->create.rqls.key + 8, 8);
+    }
+
+    if (phase == 1) {
+        chimera_vfs_state_break_caching_for_open(
+            vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &io_owner,
+            CHIMERA_VFS_LEASE_MODE_H,
+            truncates ? 0 : CHIMERA_VFS_LEASE_MODE_R);
+    } else if (truncates) {
+        chimera_vfs_state_break_on_write(vfs_state, oh->fh, oh->fh_len,
+                                         oh->fh_hash, &io_owner);
+    } else {
+        chimera_vfs_state_break_caching_for_open(
+            vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &io_owner,
+            CHIMERA_VFS_LEASE_MODE_W, CHIMERA_VFS_LEASE_MODE_R);
+    }
+} /* chimera_smb_create_break_for_open */
+
 static inline struct chimera_smb_open_file *
 chimera_smb_create_gen_open_file(
     struct chimera_smb_request     *request,
@@ -332,46 +410,7 @@ chimera_smb_create_gen_open_file(
      * otherwise it drops to LEVEL_II.  Pure attribute/EA opens break nothing
      * (stat-open).  No-op on the first open; skips the opener's own lease. */
     if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share && oh) {
-        uint32_t da        = open_file->desired_access;
-        uint32_t disp      = request->create.create_disposition;
-        bool     truncates =
-            disp == SMB2_FILE_OVERWRITE ||
-            disp == SMB2_FILE_OVERWRITE_IF ||
-            disp == SMB2_FILE_SUPERSEDE;
-        bool     break_trigger =
-            (da & (SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
-                   SMB2_FILE_APPEND_DATA | SMB2_FILE_EXECUTE |
-                   SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
-                   SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL |
-                   SMB2_MAXIMUM_ALLOWED | SMB2_DELETE)) ||
-            (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
-            truncates;
-
-        if (break_trigger) {
-            struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
-            struct chimera_vfs_lease_owner io_owner  = {
-                .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-                .client_key = request->session_handle->session->session_id,
-                .owner_lo   = open_file->file_id.pid,
-                .owner_hi   = open_file->file_id.vid,
-            };
-
-            /* An RqLs open is owned by its lease key, not its file_id, and all of
-             * one client's opens of a file share that key.  Identify this opener
-             * by the lease key so break_caching_for_open recognises an existing
-             * lease held under the same key as the opener's own and coalesces
-             * (no self-break) -- a re-open by the lease holder must not recall
-             * its own lease (the dominant single-client churn source). */
-            if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
-                memcpy(&io_owner.owner_lo, request->create.rqls.key, 8);
-                memcpy(&io_owner.owner_hi, request->create.rqls.key + 8, 8);
-            }
-
-            chimera_vfs_state_break_caching_for_open(vfs_state, oh->fh, oh->fh_len,
-                                                     oh->fh_hash, &io_owner,
-                                                     CHIMERA_VFS_LEASE_MODE_H,
-                                                     truncates ? 0 : CHIMERA_VFS_LEASE_MODE_R);
-        }
+        chimera_smb_create_break_for_open(thread, request, open_file, oh, 1);
     }
 
     /* Check share mode conflicts for regular file opens.
@@ -647,48 +686,7 @@ chimera_smb_create_after_share(
          * whether or not this open requests an oplock of its own (so it covers
          * a plain reader / writer that takes no lease), and is a no-op when
          * there is no conflicting holder or only the opener's own. */
-        {
-            uint32_t da        = open_file->desired_access;
-            uint32_t disp      = request->create.create_disposition;
-            bool     truncates =
-                disp == SMB2_FILE_OVERWRITE ||
-                disp == SMB2_FILE_OVERWRITE_IF ||
-                disp == SMB2_FILE_SUPERSEDE;
-            bool     break_trigger =
-                (da & (SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
-                       SMB2_FILE_APPEND_DATA | SMB2_FILE_EXECUTE |
-                       SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
-                       SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL |
-                       SMB2_MAXIMUM_ALLOWED | SMB2_DELETE)) ||
-                (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
-                truncates;
-
-            if (break_trigger) {
-                struct chimera_vfs_lease_owner io_owner = {
-                    .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-                    .client_key = request->session_handle->session->session_id,
-                    .owner_lo   = open_file->file_id.pid,
-                    .owner_hi   = open_file->file_id.vid,
-                };
-
-                /* Identify an RqLs opener by its lease key so it coalesces with
-                 * (does not break) a lease this client already holds under the
-                 * same key (see the phase-1 break above). */
-                if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
-                    memcpy(&io_owner.owner_lo, request->create.rqls.key, 8);
-                    memcpy(&io_owner.owner_hi, request->create.rqls.key + 8, 8);
-                }
-
-                if (truncates) {
-                    chimera_vfs_state_break_on_write(vfs_state, oh->fh, oh->fh_len,
-                                                     oh->fh_hash, &io_owner);
-                } else {
-                    chimera_vfs_state_break_caching_for_open(
-                        vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &io_owner,
-                        CHIMERA_VFS_LEASE_MODE_W, CHIMERA_VFS_LEASE_MODE_R);
-                }
-            }
-        }
+        chimera_smb_create_break_for_open(thread, request, open_file, oh, 2);
 
         if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
             via_rqls = true;
