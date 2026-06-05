@@ -166,45 +166,60 @@ chimera_nfs4_slot_table_init(
     struct chimera_nfs4_client_session *session,
     struct chimera_nfs_shared          *shared)
 {
-    uint32_t cap, remaining, base, n, i;
-    int      nthreads, overflow = 0;
+    uint32_t fair, remaining, takeable, base, n, i;
+    int      nthreads, others;
 
     nthreads = atomic_load(&shared->nfs_thread_count);
     if (nthreads < 1) {
         nthreads = 1;
     }
 
-    cap = session->max_slots / (uint32_t) nthreads;
-    if (cap < 1) {
-        cap = 1;
+    /* Fair share of the global slot pool for one thread (>=1), bounded so an
+     * early claim does not grab a huge block while few threads have registered. */
+    fair = session->max_slots / (uint32_t) nthreads;
+    if (fair < 1) {
+        fair = 1;
     }
-    if (cap > CHIMERA_NFS4_MAX_SLOTS_PER_THREAD) {
-        cap = CHIMERA_NFS4_MAX_SLOTS_PER_THREAD;
+    if (fair > CHIMERA_NFS4_MAX_SLOTS_PER_THREAD) {
+        fair = CHIMERA_NFS4_MAX_SLOTS_PER_THREAD;
     }
 
     pthread_mutex_lock(&session->lock);
-    remaining = session->max_slots - session->next_unclaimed;
-    if (remaining == 0) {
-        /* Pool exhausted: only happens with more client threads than the
-         * server's granted slots (default 64).  Alias an existing slot index;
-         * those (rare) threads then share a slot and serialize through it. */
-        base                 = session->overflow_rr;
-        session->overflow_rr = (session->overflow_rr + 1) % session->max_slots;
-        n                    = 1;
-        overflow             = 1;
-    } else {
-        n                        = cap < remaining ? cap : remaining;
-        base                     = session->next_unclaimed;
-        session->next_unclaimed += n;
-    }
-    pthread_mutex_unlock(&session->lock);
 
-    if (overflow) {
-        chimera_nfsclient_error(
-            "NFS4 session slot pool exhausted (max_slots=%u, threads=%d); "
-            "sharing slot %u. Raise server.nfs4_session_slots.",
-            session->max_slots, nthreads, base);
+    remaining = session->max_slots - session->next_unclaimed;
+
+    /* Invariant: the session must have at least as many slots as client threads,
+     * so every thread gets at least one private slot.  If a thread cannot claim
+     * even one slot, that invariant is violated -- abort loudly rather than
+     * silently aliasing a slot across threads (which breaks one-outstanding-per-
+     * slot and yields NFS4ERR_SEQ_MISORDERED).  Provision more slots via the
+     * `slots=` mount option and/or server.nfs4_session_slots. */
+    chimera_nfsclient_abort_if(remaining == 0,
+                               "NFS4 session fore-channel slots exhausted: max_slots=%u but the "
+                               "client has %d threads -- every thread needs at least one slot.  "
+                               "Raise the `slots=` mount option and/or server.nfs4_session_slots "
+                               "above the client thread count.",
+                               session->max_slots, nthreads);
+
+    /* Reserve one slot for each thread that has registered but not yet claimed a
+     * block, so this (possibly early) claim cannot starve a later thread and
+     * trip the abort above even though max_slots > threads. */
+    session->claimed_blocks++;
+    others = nthreads - (int) session->claimed_blocks;
+    if (others < 0) {
+        others = 0;
     }
+    if ((uint32_t) others >= remaining) {
+        takeable = 1;                       /* tight: one slot per remaining thread */
+    } else {
+        takeable = remaining - (uint32_t) others;
+    }
+
+    n                        = fair < takeable ? fair : takeable; /* both >= 1, and n <= remaining */
+    base                     = session->next_unclaimed;
+    session->next_unclaimed += n;
+
+    pthread_mutex_unlock(&session->lock);
 
     st->slots      = calloc(n, sizeof(*st->slots));
     st->free_stack = calloc(n, sizeof(*st->free_stack));

@@ -223,8 +223,12 @@ chimera_server_config_init(void)
 
     /* Default NFSv4.1 fore-channel session slots (server cap on the number
      * of concurrent SEQUENCE requests a client may have outstanding per
-     * session).  Mirrors NFS4_MAX_REPLY_CACHE_SLOTS in the NFS server. */
-    config->nfs4_session_slots = 64;
+     * session).  The chimera proxy client partitions slots one block per evpl
+     * thread, so a high-thread-count client (e.g. fio numjobs) needs this many
+     * slots or surplus threads collide on a shared slot; 256 covers typical
+     * fan-out out of the box and the replay-slot table sizes to it.  Raise
+     * further for very wide clients. */
+    config->nfs4_session_slots = 256;
 
     /* NFSv4 protocol delegations (OPEN_DELEGATE_READ/WRITE) are disabled by
      * default.  When off, every OPEN returns OPEN_DELEGATE_NONE and the

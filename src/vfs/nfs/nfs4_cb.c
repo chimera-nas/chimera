@@ -291,7 +291,7 @@ chimera_nfs4_cb_create_session_callback(
     memcpy(session->sessionid, cs_res->csr_sessionid, NFS4_SESSIONID_SIZE);
     session->max_slots      = cs_res->csr_fore_chan_attrs.ca_maxrequests;
     session->next_unclaimed = 0;
-    session->overflow_rr    = 0;
+    session->claimed_blocks = 0;
 
     pthread_mutex_lock(&shared->lock);
     server->nfs4_session = session;
@@ -337,9 +337,14 @@ chimera_nfs4_cb_create_session(struct chimera_nfs4_cb_establish *item)
     cs_args->csa_fore_chan_attrs.ca_maxresponsesize        = 1024 * 1024;
     cs_args->csa_fore_chan_attrs.ca_maxresponsesize_cached = 0;
     cs_args->csa_fore_chan_attrs.ca_maxoperations          = 64;
-    cs_args->csa_fore_chan_attrs.ca_maxrequests            = 64;
-    cs_args->csa_fore_chan_attrs.ca_rdma_ird               = NULL;
-    cs_args->csa_fore_chan_attrs.num_ca_rdma_ird           = 0;
+    /* Request the fore-channel slot count configured for this server (the
+     * `slots=` mount option, default CHIMERA_NFS4_DEFAULT_SESSION_SLOTS).  The
+     * client partitions slots one block per evpl thread, so the session needs
+     * at least as many slots as there are client threads (e.g. fio numjobs);
+     * the server clamps this to its own nfs4_session_slots. */
+    cs_args->csa_fore_chan_attrs.ca_maxrequests  = server->requested_session_slots;
+    cs_args->csa_fore_chan_attrs.ca_rdma_ird     = NULL;
+    cs_args->csa_fore_chan_attrs.num_ca_rdma_ird = 0;
 
     /* Back channel: a single slot is enough -- the server serialises recalls. */
     cs_args->csa_back_chan_attrs.ca_headerpadsize          = 0;

@@ -93,12 +93,14 @@ enum chimera_nfs_client_mount_state {
  * from `next_unclaimed` (under `lock`, once) and manages them thread-locally.
  */
 struct chimera_nfs4_client_session {
-    pthread_mutex_t lock;          /* guards next_unclaimed / overflow_rr only   */
+    pthread_mutex_t lock;          /* guards next_unclaimed / claimed_blocks only */
     uint8_t         sessionid[NFS4_SESSIONID_SIZE];
     uint64_t        clientid;
     uint32_t        max_slots;     /* fore-channel slots granted (ca_maxrequests) */
     uint32_t        next_unclaimed; /* next free global slot index to hand out    */
-    uint32_t        overflow_rr;   /* round-robin alias when the pool is exhausted */
+    uint32_t        claimed_blocks; /* threads that have claimed a block so far;  *
+                                    * used to reserve >=1 slot for each thread   *
+                                    * that has not claimed yet (no over-grab).   */
 };
 
 struct chimera_nfs_client_mount;
@@ -192,6 +194,13 @@ struct chimera_nfs_client_server {
     struct chimera_vfs_request         *pending_mounts;
 
     char                                hostname[256];
+
+    /* Fore-channel session slots this client requests at CREATE_SESSION
+     * (ca_maxrequests).  The client partitions slots one block per evpl thread,
+     * so this should be >= the client thread count or surplus threads share a
+     * slot and collide (NFS4ERR_SEQ_MISORDERED).  Set from the `slots=` mount
+     * option; the server clamps it to its own nfs4_session_slots. */
+    int                                 requested_session_slots;
 
     /* NFS4-specific fields (only used when nfsvers == 4) */
     struct chimera_nfs4_client_session *nfs4_session;
