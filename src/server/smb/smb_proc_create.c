@@ -384,8 +384,7 @@ chimera_smb_create_gen_open_file(
      * legacy per-tree sharemode table is bypassed entirely — its
      * behavior matrix is preserved by chimera_vfs_share_conflict in
      * vfs_state.c. */
-    if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share &&
-        (open_file->desired_access & SMB2_SHAREMODE_ACCESS_MASK) && oh) {
+    if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share && oh) {
         struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
         struct chimera_vfs_file_state *file_state;
         uint32_t                       da = open_file->desired_access;
@@ -439,6 +438,19 @@ chimera_smb_create_gen_open_file(
             request->create.create_disposition == SMB2_FILE_OVERWRITE ||
             request->create.create_disposition == SMB2_FILE_OVERWRITE_IF) {
             granted |= CHIMERA_VFS_LEASE_MODE_W;
+        }
+
+        /* Attribute-only opens (no data/delete access bits, e.g. a
+         * READ_ATTRIBUTES stat-open) hold no share-mode rights and impose no
+         * deny.  Register them anyway as an inert (granted=0, denied=0) SHARE
+         * entry so the layer can answer "is there another opener?" (sole-access
+         * oplock grant), delete-pending, and stat-open classification -- without
+         * changing any conflict outcome (chimera_vfs_share_conflict and the
+         * CACHING sole-access loop both treat a (0,0) entry as absent). */
+        if (!(da & SMB2_SHAREMODE_ACCESS_MASK)) {
+            granted      = 0;
+            denied       = 0;
+            held_granted = 0;
         }
 
         file_state = chimera_vfs_state_get(vfs_state,

@@ -567,6 +567,14 @@ chimera_vfs_state_would_conflict(
             struct chimera_vfs_lease *idle_break    = NULL;
             struct chimera_vfs_lease *expired_break = NULL;
 
+            /* An inert (granted=0, denied=0) SHARE entry is an attribute-only
+             * open registered purely for visibility (sole-access / delete-
+             * pending / stat-open queries).  It can neither conflict with nor
+             * break any holder, so grant it with no side effects. */
+            if (probe->mode.granted == 0 && probe->mode.denied == 0) {
+                return CHIMERA_VFS_LEASE_GRANTED;
+            }
+
             for (cur = file->share_resvs; cur; cur = cur->next) {
                 if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
                     continue;
@@ -729,6 +737,13 @@ chimera_vfs_state_would_conflict(
                 for (cur = file->share_resvs; cur; cur = cur->next) {
                     if (cur->owner.client_key == probe->owner.client_key) {
                         continue; /* the requesting client's own open(s) */
+                    }
+                    /* An inert (0,0) attribute-only registration is not a real
+                     * data opener and does not preclude an exclusive oplock --
+                     * matching the prior behavior where stat-opens took no share
+                     * reservation at all. */
+                    if (cur->mode.granted == 0 && cur->mode.denied == 0) {
+                        continue;
                     }
                     if (conflict_out) {
                         *conflict_out = cur;

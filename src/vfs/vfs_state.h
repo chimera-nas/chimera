@@ -79,6 +79,11 @@ struct chimera_vfs_file_state {
      * pending queue without changing public-API signatures. */
     struct chimera_vfs_state           *state;
 
+    /* Phase-3 (SMB delete-pending): set while an open holds delete-on-close on
+     * this file so a subsequent open can be answered with STATUS_DELETE_PENDING
+     * without a break.  Tracked here (additive; no consumer enforces it yet). */
+    uint8_t                             delete_pending;
+
     uint32_t                            refcount;
     struct chimera_vfs_file_state      *bucket_next;
 };
