@@ -201,6 +201,47 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
             ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_PERSISTENT=1")
     endforeach()
 
+    # SMB3 multichannel cases.  The wrapper runs the daemon with a second NIC
+    # address (so FSCTL_QUERY_NETWORK_INTERFACE_INFO advertises an alternative
+    # server address) and flips the multichannel ptfconfig capabilities when
+    # CHIMERA_SMB_MULTICHANNEL=1.  Allowlist = the MultipleChannel cases confirmed
+    # green against the current server: the NIC-redundancy bind matrix, the
+    # 2.x-dialect bind rejection (STATUS_REQUEST_NOT_ACCEPTED), cross-channel
+    # byte-range locking, and the 3.1.1 second-channel preauth-integrity case.
+    #
+    # Left out (each a distinct unimplemented feature, not a multichannel gap):
+    #   - MultipleChannel_FileLease needs write/handle-caching lease break
+    #     delivery; chimera deliberately grants only read-caching leases
+    #     (write-through) to avoid the cthon/fsx client-cache corruption hazards
+    #     documented in chimera_smb_create.
+    #   - MultipleChannel_EncryptionOnBothChannels and the two
+    #     MultipleChannel_Negative_Encryption* cases need SMB3 per-share
+    #     encryption (SMB2_SHAREFLAG_ENCRYPT_DATA advertisement + enforcement);
+    #     only session-wide (global) encryption is implemented today, so these
+    #     are reported Inconclusive (skipped), matching the ptfconfig's
+    #     IsEncryptionSupported=false.
+    set(WPTS_SMB2_MULTICHANNEL_ALLOWLIST
+        BVT_MultipleChannel_NicRedundantOnBoth
+        MultipleChannel_NicRedundantOnClient
+        MultipleChannel_NicRedundantOnServer
+        MultipleChannel_MultiChannelOnSameNic
+        MultipleChannel_Negative_SMB21
+        MultipleChannel_Negative_SMB2002
+        MultipleChannel_LockUnlockOnDiffChannel
+        MultipleChannel_LockUnlockOnSameChannel
+        MultipleChannel_SecondChannelSessionSetupFailAtFirstTime)
+
+    foreach(tc ${WPTS_SMB2_MULTICHANNEL_ALLOWLIST})
+        add_test(NAME chimera/server/smb/wpts/memfs_multichannel/${tc}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
+                    ${CHIMERA_DAEMON} memfs "Name=${tc}")
+        set_tests_properties(chimera/server/smb/wpts/memfs_multichannel/${tc} PROPERTIES
+            LABELS "smb;wpts;multichannel"
+            TIMEOUT 180
+            RESOURCE_LOCK wpts_smb_bin
+            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_MULTICHANNEL=1")
+    endforeach()
+
     message(STATUS "WPTS MS-SMB2 tests: enabled (${WPTS_BIN_DIR}, ${WPTS_DOTNET})")
 elseif(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND NOT WPTS_ARCH_SUPPORTED)
     message(STATUS "WPTS MS-SMB2 tests: disabled "

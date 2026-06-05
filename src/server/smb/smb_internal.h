@@ -718,6 +718,16 @@ struct chimera_smb_conn {
      * accept; only consumed when the negotiated dialect is 3.1.1. */
     uint8_t                            preauth_hash[SMB2_PREAUTH_HASH_SIZE];
     uint8_t                            negotiate_preauth_hash[SMB2_PREAUTH_HASH_SIZE];
+    /* Snapshot of preauth_hash taken just before a SESSION_SETUP request is
+     * folded in.  A SESSION_SETUP that completes with a hard error (anything
+     * other than SUCCESS / MORE_PROCESSING_REQUIRED) must leave no trace in the
+     * preauth-integrity hash -- the client only folds requests whose response
+     * is SUCCESS or MORE_PROCESSING (MS-SMB2 3.3.5.5.3), so a failed
+     * authentication leg (e.g. the deliberately-invalid first bind in
+     * MultipleChannel_SecondChannelSessionSetupFailAtFirstTime) is rolled back
+     * to this snapshot so the next, successful leg derives its signing key over
+     * the same hash the client used. */
+    uint8_t                            preauth_hash_presession[SMB2_PREAUTH_HASH_SIZE];
     uint32_t                           requests_completed;
     int                                rdma_max_send;
     int                                rdma_niov;

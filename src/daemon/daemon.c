@@ -413,6 +413,32 @@ main(
         chimera_server_config_set_smb_named_streams(server_config, json_is_true(json_value));
     }
 
+    /* smb_min_dialect: lowest SMB2 dialect to advertise ("2.0.2"|"2.1"|"3.0"|
+     * "3.0.2"|"3.1.1").  Defaults to 2.1; lower it to 2.0.2 only where a client
+     * (e.g. a conformance suite) explicitly needs the original SMB2 dialect. */
+    json_value = json_object_get(server_params, "smb_min_dialect");
+    if (json_is_string(json_value)) {
+        const char *d = json_string_value(json_value);
+        uint32_t    min_dialect;
+
+        if (strcmp(d, "2.0.2") == 0) {
+            min_dialect = 0x0202;
+        } else if (strcmp(d, "2.1") == 0) {
+            min_dialect = 0x0210;
+        } else if (strcmp(d, "3.0") == 0) {
+            min_dialect = 0x0300;
+        } else if (strcmp(d, "3.0.2") == 0) {
+            min_dialect = 0x0302;
+        } else if (strcmp(d, "3.1.1") == 0) {
+            min_dialect = 0x0311;
+        } else {
+            chimera_server_error("Invalid smb_min_dialect value '%s' "
+                                 "(expected 2.0.2/2.1/3.0/3.0.2/3.1.1)", d);
+            return 1;
+        }
+        chimera_server_config_set_smb_min_dialect(server_config, min_dialect);
+    }
+
     /* smb_encryption: "off"|"enabled"|"required" (or a boolean/integer 0/1/2). */
     json_value = json_object_get(server_params, "smb_encryption");
     if (json_is_string(json_value)) {

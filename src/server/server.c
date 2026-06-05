@@ -853,6 +853,34 @@ chimera_server_config_get_smb_dialects(
     return config->smb_dialects[index];
 } /* chimera_server_config_get_smb_dialects */
 
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_min_dialect(
+    struct chimera_server_config *config,
+    uint32_t                      min_dialect)
+{
+    /* Every SMB2/3 dialect chimera can speak, ascending.  The advertised set is
+     * this list filtered to >= min_dialect, so lowering the floor (e.g. to
+     * SMB 2.0.2) just widens the bottom of the range.  The default floor is
+     * SMB 2.1; SMB 2.0.2 is off by default because it lacks large-MTU/leasing
+     * and is only needed by conformance cases that explicitly request it. */
+    static const uint32_t all_dialects[] = {
+        SMB2_DIALECT_2_0_2,
+        SMB2_DIALECT_2_1,
+        SMB2_DIALECT_3_0,
+        SMB2_DIALECT_3_0_2,
+        SMB2_DIALECT_3_1_1,
+    };
+    int                   n = 0;
+
+    for (unsigned int i = 0; i < sizeof(all_dialects) / sizeof(all_dialects[0]); i++) {
+        if (all_dialects[i] >= min_dialect) {
+            config->smb_dialects[n++] = all_dialects[i];
+        }
+    }
+
+    config->smb_num_dialects = n;
+} /* chimera_server_config_set_smb_min_dialect */
+
 SYMBOL_EXPORT int
 chimera_server_config_get_smb_num_nic_info(const struct chimera_server_config *config)
 {
