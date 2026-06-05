@@ -1293,17 +1293,18 @@ chimera_smb_session_park_durables(
  * handles are parked immediately so the new connection can reclaim them.  Never
  * invalidate the new session itself, and only act when the requesting user
  * matches the prior session's owner. */
-static inline void
+static inline int
 chimera_smb_session_invalidate_previous(
     struct chimera_server_smb_thread *thread,
     struct chimera_server_smb_shared *shared,
     uint64_t                          prev_session_id,
-    struct chimera_smb_session       *new_session)
+    struct chimera_smb_session       *new_session,
+    uint16_t                          cur_dialect)
 {
     struct chimera_smb_session *prev;
 
     if (prev_session_id == 0 || prev_session_id == new_session->session_id) {
-        return;
+        return 0;
     }
 
     pthread_mutex_lock(&shared->sessions_lock);
@@ -1313,6 +1314,13 @@ chimera_smb_session_invalidate_previous(
     if (prev && prev != new_session &&
         (prev->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
         prev->cred.uid == new_session->cred.uid) {
+        /* MS-SMB2 3.3.5.5.1: a reconnect whose connection dialect differs from
+         * the previous session's MUST be rejected.  Leave the previous session
+         * intact and signal the caller to fail with USER_SESSION_DELETED. */
+        if (prev->dialect != cur_dialect) {
+            pthread_mutex_unlock(&shared->sessions_lock);
+            return 1;
+        }
         /* Clear AUTHORIZED and unlink here so the later refcnt-driven
          * chimera_smb_session_release() does not HASH_DEL a second time.  Hold a
          * reference across the park so a concurrent release cannot free it. */
@@ -1330,6 +1338,7 @@ chimera_smb_session_invalidate_previous(
         chimera_smb_session_park_durables(shared, prev);
         chimera_smb_session_release(thread, shared, prev, true);
     }
+    return 0;
 } /* chimera_smb_session_invalidate_previous */
 
 
