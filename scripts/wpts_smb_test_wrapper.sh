@@ -251,7 +251,7 @@ if [ "${CHIMERA_SMB_COMPRESSION:-0}" = "1" ]; then
     sed -i \
         -e 's#<Property name="CompressedFileShare" value=""/>#<Property name="CompressedFileShare" value="SMBBasic"/>#' \
         -e 's#<Property name="IsChainedCompressionSupported" value="false"/>#<Property name="IsChainedCompressionSupported" value="true"/>#' \
-        -e 's#<Property name="SupportedCompressionAlgorithms" value=""/>#<Property name="SupportedCompressionAlgorithms" value="LZ77;Pattern_V1"/>#' \
+        -e 's#<Property name="SupportedCompressionAlgorithms" value=""/>#<Property name="SupportedCompressionAlgorithms" value="LZ77;LZ77Huffman;LZNT1;Pattern_V1"/>#' \
         "$staged"
 fi
 

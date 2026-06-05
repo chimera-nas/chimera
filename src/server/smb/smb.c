@@ -547,14 +547,23 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
      * and the compression+encryption combination are out of scope for this
      * pass. */
     {
-        int lz77_ok = 0, pattern_ok = 0, k;
-        int chained, buf_off = -1;
+        int      pattern_ok = 0, k;
+        int      chained, buf_off = -1;
+        uint16_t primary_alg = 0;          /* the codec used to compress the reply */
 
+        /* Pick the codec to compress the reply with: the client's most-preferred
+         * full byte codec from the negotiated set (the list is in client order).
+         * Pattern_V1 / NONE are chained sub-payload encodings, not standalone
+         * codecs, so they only flag chaining support. */
         for (k = 0; k < conn->negotiated.compression_alg_count; k++) {
-            if (conn->negotiated.compression_algs[k] == SMB2_COMPRESSION_LZ77) {
-                lz77_ok = 1;
-            } else if (conn->negotiated.compression_algs[k] == SMB2_COMPRESSION_PATTERN_V1) {
+            uint16_t a = conn->negotiated.compression_algs[k];
+
+            if (a == SMB2_COMPRESSION_PATTERN_V1) {
                 pattern_ok = 1;
+            } else if (primary_alg == 0 &&
+                       (a == SMB2_COMPRESSION_LZ77 || a == SMB2_COMPRESSION_LZNT1 ||
+                        a == SMB2_COMPRESSION_LZ77_HUFFMAN)) {
+                primary_alg = a;
             }
         }
 
@@ -576,13 +585,13 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         chained = pattern_ok &&
             (conn->negotiated.compression_flags & SMB2_COMPRESSION_FLAG_CHAINED);
 
-        if (!will_encrypt && lz77_ok && buf_off > 0 &&
+        if (!will_encrypt && primary_alg != 0 && buf_off > 0 &&
             conn->protocol != EVPL_DATAGRAM_RDMACM_RC) {
             struct evpl_iovec comp_iov;
             int               comp_total;
 
             rc = chimera_smb_compress_message(thread->compress_ctx, evpl,
-                                              SMB2_COMPRESSION_LZ77, chained, buf_off,
+                                              primary_alg, chained, buf_off,
                                               reply_iov, reply_niov,
                                               reply_payload_length, reply_hdr_len,
                                               &comp_iov, &comp_total);
