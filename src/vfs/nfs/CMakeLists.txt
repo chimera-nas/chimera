@@ -28,6 +28,7 @@ add_library(chimera_vfs_nfs SHARED
     nfs3_setattr.c
     nfs3_symlink_at.c
     nfs3_write.c
+    nfs4_cb.c
     nfs4_close.c
     nfs4_commit.c
     nfs4_getattr.c
@@ -39,6 +40,7 @@ add_library(chimera_vfs_nfs SHARED
     nfs4_open_at.c
     nfs4_open_fh.c
     nfs4_read.c
+    nfs4_slot.c
     nfs4_readdir.c
     nfs4_readlink.c
     nfs4_remove_at.c

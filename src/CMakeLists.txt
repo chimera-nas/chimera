@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
@@ -15,6 +15,10 @@ add_subdirectory(daemon)
 
 if (FIO_ENABLED)
     add_subdirectory(fio)
+endif()
+
+if (ELBENCHO_ENABLED)
+    add_subdirectory(elbencho)
 endif()
 
 if (CUDA_ENABLED)

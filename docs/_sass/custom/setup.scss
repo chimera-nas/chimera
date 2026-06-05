@@ -1,0 +1,15 @@
+// SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+//
+// SPDX-License-Identifier: Unlicense
+
+// Variable overrides applied before Just the Docs' component styles are
+// compiled. This is where we re-point the theme's typography and metrics at
+// the chimeraproject.io design language (mono-forward body, serif headings,
+// tight 3px radii). Colours live in _sass/color_schemes/chimera.scss.
+
+$mono-font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, "SF Mono",
+  menlo, monospace;
+$body-font-family: $mono-font-family;
+$body-heading-font-family: "IBM Plex Serif", "Source Serif 4", georgia, serif;
+
+$border-radius: 3px;

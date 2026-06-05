@@ -1332,6 +1332,7 @@ struct chimera_vfs_mount_attrs {
 struct chimera_vfs_mount {
     struct chimera_vfs_module     *module;
     char                          *path;
+    char                          *module_path;
     uint32_t                       pathlen;
     int                            root_fh_len;
     void                          *mount_private;

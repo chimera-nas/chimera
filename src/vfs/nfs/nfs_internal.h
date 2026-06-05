@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <pthread.h>
 #include <sys/stat.h>
@@ -82,18 +83,51 @@ enum chimera_nfs_client_mount_state {
 
 /*
  * NFS4 client session state
- * Holds the session information established via EXCHANGE_ID + CREATE_SESSION
+ * Holds the session information established via EXCHANGE_ID + CREATE_SESSION.
+ *
+ * RFC 8881 §2.10.6.1 requires one outstanding request per fore-channel slot,
+ * each slot carrying its own monotonic sequenceid.  The session owns the global
+ * slot space (max_slots, granted by CREATE_SESSION); each per-thread connection
+ * (chimera_nfs_client_server_thread) claims a disjoint block of slot indices
+ * from `next_unclaimed` (under `lock`, once) and manages them thread-locally.
  */
 struct chimera_nfs4_client_session {
-    pthread_mutex_t lock;
+    pthread_mutex_t lock;          /* guards next_unclaimed / overflow_rr only   */
     uint8_t         sessionid[NFS4_SESSIONID_SIZE];
     uint64_t        clientid;
-    uint32_t        max_slots;     /* Maximum slots from server (ca_maxrequests) */
-    uint32_t        next_slot_id;  /* Next slot ID to assign to a thread */
-    uint32_t       *slot_seqids;   /* Per-slot sequence IDs (array of max_slots) */
+    uint32_t        max_slots;     /* fore-channel slots granted (ca_maxrequests) */
+    uint32_t        next_unclaimed; /* next free global slot index to hand out    */
+    uint32_t        overflow_rr;   /* round-robin alias when the pool is exhausted */
 };
 
 struct chimera_nfs_client_mount;
+struct chimera_nfs4_compound_ctx;   /* in-flight wrapper context (nfs4_slot.c)   */
+struct chimera_nfs4_parked;                  /* queued request awaiting a slot (nfs4_slot.c) */
+
+/* One owned fore-channel slot. */
+struct chimera_nfs4_slot {
+    uint32_t global_id;                      /* sa_slotid to send on the wire               */
+    uint32_t seqid;                          /* next sa_sequenceid; starts at 1             */
+    uint8_t  in_use;                         /* 1 == one request outstanding on this slot   */
+};
+
+/*
+ * Per-(thread,server) fore-channel slot table.  Touched by exactly one evpl
+ * thread (its owning chimera_nfs_thread), so all of acquire/release/park/wake
+ * are lock-free; only the one-time block claim takes session->lock.
+ */
+struct chimera_nfs4_slot_table {
+    int                               initialized;
+    uint32_t                          num_slots;
+    struct chimera_nfs4_slot         *slots; /* [num_slots]                */
+    uint32_t                         *free_stack;   /* local indices not in use   */
+    int                               free_top;
+    struct chimera_nfs4_parked       *wait_head;    /* FIFO of parked requests    */
+    struct chimera_nfs4_parked       *wait_tail;
+    struct chimera_nfs4_parked       *parked_freelist;
+    struct chimera_nfs4_compound_ctx *inflight;     /* dll, for disconnect reset  */
+    struct chimera_nfs4_compound_ctx *ctx_freelist;
+};
 
 struct chimera_nfs_client_server_thread {
     struct chimera_nfs_thread        *thread;
@@ -105,7 +139,25 @@ struct chimera_nfs_client_server_thread {
     struct evpl_rpc2_conn            *nfs_conn;
     struct evpl_rpc2_conn            *nlm_conn;
 
-    uint32_t                          slot_id;     /* This thread's assigned NFS4.1 slot */
+    struct chimera_nfs4_slot_table    slots;        /* NFS4.1 fore-channel slots  */
+};
+
+/*
+ * A request from a mount (data) thread to the back-channel control thread to
+ * establish a server's NFSv4.1 session on the control thread's persistent
+ * connection.  The session (and thus the back channel that rides its
+ * connection) must outlive the transient mount connection, so EXCHANGE_ID +
+ * CREATE_SESSION run on the control thread; the control thread then queues the
+ * item back to the originating chimera_nfs_thread (server_thread->thread) and
+ * rings that thread's persistent cb_resume_doorbell to resume the mount
+ * (RECLAIM_COMPLETE + root FH) on its own connection (bound via SEQUENCE).
+ */
+struct chimera_nfs4_cb_establish {
+    struct chimera_nfs_client_server_thread *server_thread;
+    struct chimera_vfs_request              *request;
+    struct chimera_nfs4_client_session      *session;     /* in-progress session  */
+    int                                      status;      /* 0 ok, else errno     */
+    struct chimera_nfs4_cb_establish        *next;        /* queue link            */
 };
 
 struct chimera_nfs_client_server {
@@ -136,6 +188,11 @@ struct chimera_nfs_client_server {
     uint8_t                             nfs4_verifier[NFS4_VERIFIER_SIZE];
     char                                nfs4_owner_id[128];
     int                                 nfs4_owner_id_len;
+
+    /* Persistent back-channel / control connection, owned by the control thread
+     * (shared->cb_thread).  CREATE_SESSION binds the back channel to it, so the
+     * server can deliver CB_COMPOUND here for the life of the session. */
+    struct evpl_rpc2_conn              *cb_conn;
 };
 
 struct chimera_nfs_client_mount {
@@ -161,12 +218,30 @@ struct chimera_nfs_shared {
     int                                max_servers;
     pthread_mutex_t                    lock;
 
+    /* Number of NFS client (evpl) threads, counted at thread_init; used to size
+     * each thread's fore-channel slot block (max_slots / nfs_thread_count). */
+    _Atomic int                        nfs_thread_count;
+
     struct PORTMAP_V2                  portmap_v2;
     struct NFS_MOUNT_V3                mount_v3;
     struct NFS_V3                      nfs_v3;
     struct NFS_V4                      nfs_v4;
     struct NFS_V4_CB                   nfs_v4_cb;
     struct NLM_V4                      nlm_v4;
+
+    /* Back-channel control thread (nfs4_cb.c).  A single dedicated evpl thread
+     * owns a persistent connection per server (server->cb_conn) on which it runs
+     * EXCHANGE_ID + CREATE_SESSION with the back channel bound, and serves
+     * incoming CB_COMPOUND.  Started lazily on the first NFSv4.1 mount.  Mount
+     * threads request establishment by pushing onto cb_establish_queue (under
+     * cb_lock) and ringing cb_doorbell. */
+    struct evpl_thread                *cb_thread;
+    struct evpl                       *cb_evpl;
+    struct evpl_rpc2_thread           *cb_rpc2_thread;
+    struct evpl_doorbell               cb_doorbell;
+    pthread_mutex_t                    cb_lock;
+    struct chimera_nfs4_cb_establish  *cb_establish_queue;
+    int                                cb_started;
 
     struct prometheus_histogram       *op_histogram;
     struct prometheus_metrics         *metrics;
@@ -184,6 +259,17 @@ struct chimera_nfs_thread {
     struct chimera_nfs_client_server_thread **server_threads;
     struct chimera_nfs_client_open_handle    *free_open_handles;
     int                                       max_server_threads;
+
+    /* Back-channel session-establishment completions destined for this thread.
+     * The control thread pushes finished chimera_nfs4_cb_establish items here
+     * (under cb_resume_lock) and rings cb_resume_doorbell; this thread drains
+     * and resumes the parked mounts.  The doorbell is persistent (added at
+     * thread_init, removed at thread_destroy) -- per RFC of evpl, doorbells must
+     * not be freed from their own callback. */
+    struct evpl_doorbell                      cb_resume_doorbell;
+    pthread_mutex_t                           cb_resume_lock;
+    struct chimera_nfs4_cb_establish         *cb_resume_done;
+    int                                       cb_resume_armed;
 };
 
 static inline struct chimera_nfs_client_open_handle *
@@ -215,7 +301,6 @@ chimera_nfs_thread_get_server_thread(
     int                        fhlen)
 {
     struct chimera_nfs_client_server_thread *server_thread = NULL;
-    struct chimera_nfs4_client_session      *session;
     int                                      index;
 
     if (unlikely(fhlen < CHIMERA_VFS_MOUNT_ID_SIZE + 1)) {
@@ -240,16 +325,8 @@ chimera_nfs_thread_get_server_thread(
         thread->server_threads[index]->thread = thread;
         thread->server_threads[index]->shared = thread->shared;
         thread->server_threads[index]->server = thread->shared->servers[index];
-
-        /* Assign a slot ID for NFS4.1 sessions */
-        session = thread->shared->servers[index]->nfs4_session;
-        if (session && session->max_slots > 0) {
-            /* Round-robin slot assignment. If more threads than slots, they share. */
-            pthread_mutex_lock(&session->lock);
-            thread->server_threads[index]->slot_id = session->next_slot_id % session->max_slots;
-            session->next_slot_id++;
-            pthread_mutex_unlock(&session->lock);
-        }
+        /* The NFS4.1 fore-channel slot block is claimed lazily on the first
+         * COMPOUND through chimera_nfs4_compound_call() (nfs4_slot.c). */
     }
 
     server_thread = thread->server_threads[index];
@@ -301,23 +378,6 @@ chimera_nfs4_map_fh(
     *mapped_fh    = (uint8_t *) fh + CHIMERA_VFS_MOUNT_ID_SIZE + 1;
     *mapped_fhlen = fhlen - CHIMERA_VFS_MOUNT_ID_SIZE - 1;
 } // chimera_nfs4_map_fh
-
-/*
- * Get the next sequence ID for an NFS4 session and increment it
- */
-static inline uint32_t
-chimera_nfs4_get_sequenceid(
-    struct chimera_nfs4_client_session *session,
-    uint32_t                            slot_id)
-{
-    uint32_t seqid;
-
-    pthread_mutex_lock(&session->lock);
-    seqid = session->slot_seqids[slot_id]++;
-    pthread_mutex_unlock(&session->lock);
-
-    return seqid;
-} // chimera_nfs4_get_sequenceid // chimera_nfs4_get_sequenceid
 
 /*
  * Byte-order conversion helpers
@@ -624,6 +684,52 @@ chimera_nfs_init_rpc2_cred(
     rpc2_cred->authsys.machinename_len = machine_name_len;
 } /* chimera_nfs_init_rpc2_cred */
 
+/* ---- NFSv4.1 back channel / callback receiver (nfs4_cb.c) --------------- */
+
+/* rpc2 recv_call handler for incoming CB_COMPOUND on a back-channel connection. */
+void chimera_nfs4_cb_compound(
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct CB_COMPOUND4args   *args,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data);
+
+/* CB_LAYOUTRECALL handler.  Weak default (no layouts held) returns
+ * NFS4ERR_NOMATCHING_LAYOUT; the pNFS client overrides it. */
+nfsstat4 chimera_nfs4_cb_layoutrecall(
+    struct chimera_nfs_shared        *shared,
+    struct chimera_nfs_client_server *server,
+    struct CB_LAYOUTRECALL4args      *args);
+
+/* Stop the back-channel control thread (module destroy).  Started lazily by
+ * chimera_nfs4_cb_establish_session, so no explicit start entry point. */
+void chimera_nfs4_cb_control_stop(
+    struct chimera_nfs_shared *shared);
+
+/* Per-thread back-channel resume doorbell lifecycle (called from the nfs
+ * module's thread_init / thread_destroy). */
+void chimera_nfs4_cb_thread_init(
+    struct chimera_nfs_thread *thread);
+void chimera_nfs4_cb_thread_destroy(
+    struct chimera_nfs_thread *thread);
+
+/*
+ * Request the control thread establish `server`'s NFSv4.1 session on its
+ * persistent connection (with the back channel bound), then resume the mount on
+ * the calling thread via chimera_nfs4_mount_resume_after_session().  Parks
+ * `request` (does not complete or send on the caller's connection).
+ */
+void chimera_nfs4_cb_establish_session(
+    struct chimera_nfs_client_server_thread *server_thread,
+    struct chimera_vfs_request              *request);
+
+/* Resume a mount on its originating thread once its session exists: send
+ * RECLAIM_COMPLETE then resolve the export root (nfs4_mount.c). */
+void chimera_nfs4_mount_resume_after_session(
+    struct chimera_nfs_client_server_thread *server_thread,
+    struct chimera_vfs_request              *request);
+
 void chimera_nfs3_dispatch(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
@@ -634,6 +740,54 @@ void chimera_nfs4_dispatch(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
+
+/* ---- NFSv4.1 session fore-channel slot layer (nfs4_slot.c) -------------- */
+
+/* How a parked request is replayed once a slot frees.  For plain VFS ops this
+ * is chimera_nfs4_dispatch (re-routes by request->opcode); internal multi-step
+ * issuers (mount, pNFS) pass a shim that re-runs that step. */
+typedef void (*chimera_nfs4_retry_fn)(
+    struct chimera_nfs_thread *,
+    struct chimera_nfs_shared *,
+    struct chimera_vfs_request *,
+    void *);
+
+/*
+ * Issue an NFSv4.1 COMPOUND with correct session-slot discipline (one
+ * outstanding request per slot, monotonic per-slot seqid).  argarray[0] must be
+ * an OP_SEQUENCE placeholder (argop set); this fills sa_sessionid/sa_slotid/
+ * sa_sequenceid/sa_highest_slotid/sa_cachethis from an acquired slot, sends, and
+ * frees the slot when the reply arrives before invoking `cb`.  If no slot is
+ * free the request is parked and replayed via (retry_fn, retry_ctx) when one
+ * frees.  `cb`/`cb_private` are the caller's original COMPOUND callback/arg.
+ */
+void chimera_nfs4_compound_call(
+    struct chimera_nfs_thread *thread,
+    struct chimera_nfs_shared *shared,
+    struct chimera_nfs_client_server_thread *server_thread,
+    struct chimera_vfs_request *request,
+    struct COMPOUND4args *args,
+    const struct evpl_rpc2_cred *cred,
+    int ddp,
+    int max_rdma_write_chunk,
+    struct evpl_iovec *write_chunk_iov,
+    int write_chunk_niov,
+    int max_rdma_reply_chunk,
+    void ( *cb )(struct evpl *, const struct evpl_rpc2_verf *,
+                 struct COMPOUND4res *, int, void *),
+    void *cb_private,
+    chimera_nfs4_retry_fn retry_fn,
+    void *retry_ctx);
+
+/* Free a server_thread's slot table (called from thread teardown). */
+void chimera_nfs4_slot_table_destroy(
+    struct chimera_nfs4_slot_table *st);
+
+/* On connection loss: error-complete in-flight + parked requests and reset the
+ * slot table so the next op re-establishes cleanly. */
+void chimera_nfs4_slot_table_reset(
+    struct evpl                    *evpl,
+    struct chimera_nfs4_slot_table *st);
 
 void chimera_nfs3_mount(
     struct chimera_nfs_thread *,

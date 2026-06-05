@@ -91,6 +91,7 @@ chimera_vfs_mount_table_destroy(struct chimera_vfs_mount_table *table)
             next = entry->next;
             /* Free the mount and its path */
             free(entry->mount->path);
+            free(entry->mount->module_path);
             free(entry->mount);
             free(entry);
             entry = next;

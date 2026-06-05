@@ -1002,6 +1002,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FSCTL_SRV_COPYCHUNK                    0x001440F2
 #define SMB2_FSCTL_SRV_COPYCHUNK_WRITE              0x001480F2
 #define SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID          0x000900C0
+#define SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS          0x00144064
 
 #define SMB2_IO_REPARSE_TAG_NFS                     0x80000014
 #define SMB2_IO_REPARSE_TAG_SYMLINK                 0xA000000C
@@ -1040,6 +1041,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FILE_COMPRESSION_INFO                  0x0C
 #define SMB2_FILE_NETWORK_OPEN_INFO                 0x22
 #define SMB2_FILE_ATTRIBUTE_TAG_INFO                0x23
+#define SMB2_FILE_NORMALIZED_NAME_INFO              0x30
 #define SMB2_FILE_DISPOSITION_INFO_EX               0x40
 
 /* SMB2 information types */

@@ -22,9 +22,9 @@ chimera_nfs4_umount(
 
     server->refcnt--;
 
-    /* Free session when last mount is removed */
+    /* Free session when last mount is removed.  Per-thread slot tables are
+     * freed in chimera_nfs_thread_destroy (they live on the server_threads). */
     if (server->refcnt == 0 && server->nfs4_session) {
-        free(server->nfs4_session->slot_seqids);
         pthread_mutex_destroy(&server->nfs4_session->lock);
         free(server->nfs4_session);
         server->nfs4_session = NULL;

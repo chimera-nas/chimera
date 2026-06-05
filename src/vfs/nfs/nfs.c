@@ -87,6 +87,7 @@ chimera_nfs_init(
     struct chimera_nfs_shared *shared = calloc(1, sizeof(*shared));
 
     pthread_mutex_init(&shared->lock, NULL);
+    pthread_mutex_init(&shared->cb_lock, NULL);
 
     shared->max_servers = 64;
     shared->servers     = calloc(shared->max_servers, sizeof(*shared->servers));
@@ -100,6 +101,10 @@ chimera_nfs_init(
     NFS_V3_init(&shared->nfs_v3);
     NFS_V4_init(&shared->nfs_v4);
     NFS_V4_CB_init(&shared->nfs_v4_cb);
+    /* Serve incoming CB_COMPOUND (back-channel callbacks) on connections that
+     * register the NFS_V4_CB program; the back channel is activated per session
+     * by the control connection (nfs4_cb.c). */
+    shared->nfs_v4_cb.recv_call_CB_COMPOUND = chimera_nfs4_cb_compound;
     NLM_V4_init(&shared->nlm_v4);
 
     return shared;
@@ -111,11 +116,16 @@ chimera_nfs_destroy(void *private_data)
     struct chimera_nfs_shared *shared = private_data;
     int                        i;
 
+    /* Stop the back-channel control thread first: tearing down its rpc2 thread
+    * disconnects every cb_conn, which fires chimera_nfs4_cb_control_notify and
+    * walks shared->servers.  It must finish before those servers are freed. */
+    chimera_nfs4_cb_control_stop(shared);
+    pthread_mutex_destroy(&shared->cb_lock);
+
     for (i = 0; i < shared->max_servers; i++) {
         if (shared->servers[i]) {
             /* Free NFS4 session if present */
             if (shared->servers[i]->nfs4_session) {
-                free(shared->servers[i]->nfs4_session->slot_seqids);
                 pthread_mutex_destroy(&shared->servers[i]->nfs4_session->lock);
                 free(shared->servers[i]->nfs4_session);
             }
@@ -164,7 +174,10 @@ chimera_nfs_notify(
     struct evpl_rpc2_notify *notify,
     void                    *private_data)
 {
-    char local_addr[80], remote_addr[80];
+    struct chimera_nfs_thread               *nfs_thread = private_data;
+    struct chimera_nfs_client_server_thread *server_thread;
+    char                                     local_addr[80], remote_addr[80];
+    int                                      i;
 
     switch (notify->notify_type) {
         case EVPL_RPC2_NOTIFY_CONNECTED:
@@ -176,6 +189,18 @@ chimera_nfs_notify(
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
             evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
             chimera_nfsclient_info("Disconnected from %s to %s", local_addr, remote_addr);
+
+            /* rpc2 drops in-flight calls on disconnect without firing their
+             * callbacks.  Error-complete the NFS4.1 requests stranded on this
+             * connection's slot table and reset it so the next op re-establishes
+             * cleanly (rather than hanging and leaking slots). */
+            for (i = 0; nfs_thread && i < nfs_thread->max_server_threads; i++) {
+                server_thread = nfs_thread->server_threads[i];
+                if (server_thread && server_thread->nfs_conn == conn) {
+                    chimera_nfs4_slot_table_reset(nfs_thread->evpl, &server_thread->slots);
+                    break;
+                }
+            }
             break;
     } /* switch */
 } /* chimera_nfs_notify */
@@ -192,6 +217,10 @@ chimera_nfs_thread_init(
     thread->shared = shared;
     thread->evpl   = evpl;
 
+    /* Count client threads so the NFS4.1 fore-channel slot pool can be
+     * partitioned evenly (max_slots / nfs_thread_count) per thread. */
+    atomic_fetch_add(&shared->nfs_thread_count, 1);
+
     programs[0] = &shared->mount_v3.rpc2;
     programs[1] = &shared->portmap_v2.rpc2;
     programs[2] = &shared->nfs_v3.rpc2;
@@ -203,6 +232,10 @@ chimera_nfs_thread_init(
 
     thread->max_server_threads = shared->max_servers;
     thread->server_threads     = calloc(thread->max_server_threads, sizeof(*thread->server_threads));
+
+    /* Persistent doorbell the back-channel control thread rings to resume mounts
+     * established on its behalf. */
+    chimera_nfs4_cb_thread_init(thread);
 
     return thread;
 } /* chimera_nfs_thread_init */
@@ -220,15 +253,25 @@ chimera_nfs_thread_destroy(void *private_data)
         free(open_handle);
     }
 
+    /* Remove the back-channel resume doorbell while this thread's evpl is still
+     * valid (no establishment can be in flight: mounts complete before their
+     * thread is torn down). */
+    chimera_nfs4_cb_thread_destroy(thread);
+
+    /* Tear down the rpc2 thread first: it disconnects every connection, which
+     * fires chimera_nfs_notify(DISCONNECTED) -> chimera_nfs4_slot_table_reset,
+     * and that walks thread->server_threads.  Freeing the server_threads before
+     * this would be a use-after-free. */
+    evpl_rpc2_thread_destroy(thread->rpc2_thread);
+
     for (i = 0; i < thread->max_server_threads; i++) {
         if (thread->server_threads[i]) {
+            chimera_nfs4_slot_table_destroy(&thread->server_threads[i]->slots);
             free(thread->server_threads[i]);
         }
     }
 
     free(thread->server_threads);
-
-    evpl_rpc2_thread_destroy(thread->rpc2_thread);
 
     free(thread);
 } /* chimera_nfs_thread_destroy */

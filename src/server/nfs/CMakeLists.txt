@@ -21,6 +21,7 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs4_state.c nfs4_lease.c nf
             nfs4_proc_read.c nfs4_proc_write.c nfs4_proc_copy.c nfs4_proc_commit.c nfs4_proc_readlink.c
             nfs4_proc_setattr.c nfs4_proc_link.c nfs4_proc_rename.c nfs4_proc_savefh.c nfs4_proc_restorefh.c
             nfs4_proc_exchange_id.c nfs4_proc_create_session.c nfs4_proc_destroy_session.c
+            nfs4_proc_bind_conn_to_session.c
             nfs4_proc_destroy_clientid.c nfs4_proc_sequence.c nfs4_proc_reclaim_complete.c
             nfs4_proc_secinfo.c nfs4_proc_secinfo_no_name.c nfs4_proc_test_stateid.c
             nfs4_proc_set_ssv.c

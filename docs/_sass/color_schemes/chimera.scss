@@ -1,0 +1,37 @@
+// SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+//
+// SPDX-License-Identifier: Unlicense
+
+// Chimera documentation colour scheme.
+//
+// We build on Just the Docs' stock `dark` scheme (which also pulls in the
+// accessible github-dark Pygments theme for code highlighting), then re-point
+// the palette at the chimeraproject.io tokens.
+//
+// Surfaces that the theme only ever uses in plain `color` / `background` /
+// `border` declarations are wired to the runtime CSS custom properties defined
+// in _sass/custom/custom.scss, so the docs honour the same [data-theme]
+// light/dark switch as the main site. The handful of variables that Just the
+// Docs feeds through Sass colour functions (darken(), rgba(), ...) must stay
+// concrete colours; those are sRGB conversions of the corresponding oklch
+// tokens (dark theme).
+
+@import "color_schemes/dark";
+
+// Runtime-themeable surfaces (safe: never passed through a Sass colour fn).
+$body-background-color: var(--bg);
+$sidebar-color: var(--bg);
+$body-text-color: var(--fg-soft);
+$body-heading-color: var(--fg);
+$nav-child-link-color: var(--fg-soft);
+$code-background-color: var(--surface);
+$search-background-color: var(--surface);
+$table-background-color: var(--surface);
+$search-result-preview-color: var(--muted);
+
+// Concrete colours (consumed by darken()/rgba() in the theme's component SCSS).
+$link-color: #eb883b; // --accent  oklch(72% 0.15 55)
+$btn-primary-color: #eb883b;
+$border-color: #27241f; // --border  oklch(26% 0.01 80)
+$base-button-color: #1a1814; // --surface-2 oklch(21% 0.008 80)
+$feedback-color: #1a1814;

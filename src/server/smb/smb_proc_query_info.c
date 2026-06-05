@@ -305,6 +305,13 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                         name_len + 4;
                     getattr_mask = CHIMERA_VFS_ATTR_MASK_STAT;
                     break;
+                case SMB2_FILE_NORMALIZED_NAME_INFO:
+                    /* MS-FSCC 2.4.30: FILE_NAME_INFORMATION layout
+                    * (FileNameLength + FileName, the name in UTF-16LE).  The
+                    * normalized name is the open's path, which we already
+                    * hold (as UTF-8) — no backend attrs needed. */
+                    request->query_info.output_length = 4 + request->query_info.open_file->name_len * 2;
+                    break;
                 case SMB2_FILE_FULL_EA_INFO:
                     request->query_info.output_length = 8;
                     break;
@@ -417,6 +424,21 @@ chimera_smb_query_info_reply(
                         reply_cursor,
                         request->query_info.open_file->position);
                     break;
+                case SMB2_FILE_NORMALIZED_NAME_INFO:
+                {
+                    /* FILE_NAME_INFORMATION: FileNameLength (UTF-16LE bytes)
+                     * followed by the name converted to UTF-16LE. */
+                    struct chimera_smb_open_file *of = request->query_info.open_file;
+                    uint16_t                     *nb;
+
+                    evpl_iovec_cursor_append_uint32(reply_cursor, of->name_len * 2);
+                    nb = evpl_iovec_cursor_data(reply_cursor);
+                    chimera_smb_utf8_to_utf16le(&request->compound->thread->iconv_ctx,
+                                                of->name, of->name_len,
+                                                nb, SMB_FILENAME_MAX * 2);
+                    evpl_iovec_cursor_skip(reply_cursor, of->name_len * 2);
+                    break;
+                }
                 case SMB2_FILE_ALL_INFO:
                     chimera_smb_append_all_info(reply_cursor, request->query_info.open_file, &request->query_info.
                                                 r_attrs);

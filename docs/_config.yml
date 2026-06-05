@@ -5,12 +5,15 @@
 title: chimera
 description: chimera documentation
 theme: just-the-docs
-color_scheme: dark
+# chimera scheme skins Just the Docs to match chimeraproject.io
+# (see _sass/color_schemes/chimera.scss and _sass/custom/).
+color_scheme: chimera
 
+# Origin only; the /chimera path is the baseurl. The Pages workflow re-passes
+# the same value via --baseurl at build time.
+url: https://chimeraproject.io
+baseurl: /chimera
 
-url: https://chimeraproject.io/chimera
-
-aux_links:
-  GitHub: https://github.com/chimera-nas/chimera
-  Discord: https://discord.gg/hnRkvQFecq
+# GitHub / Discord live in the shared top bar (_includes/chimera_topbar.html),
+# so the theme's own aux links are disabled to avoid duplication.
 

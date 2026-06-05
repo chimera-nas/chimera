@@ -413,6 +413,32 @@ main(
         chimera_server_config_set_smb_named_streams(server_config, json_is_true(json_value));
     }
 
+    /* smb_min_dialect: lowest SMB2 dialect to advertise ("2.0.2"|"2.1"|"3.0"|
+     * "3.0.2"|"3.1.1").  Defaults to 2.1; lower it to 2.0.2 only where a client
+     * (e.g. a conformance suite) explicitly needs the original SMB2 dialect. */
+    json_value = json_object_get(server_params, "smb_min_dialect");
+    if (json_is_string(json_value)) {
+        const char *d = json_string_value(json_value);
+        uint32_t    min_dialect;
+
+        if (strcmp(d, "2.0.2") == 0) {
+            min_dialect = 0x0202;
+        } else if (strcmp(d, "2.1") == 0) {
+            min_dialect = 0x0210;
+        } else if (strcmp(d, "3.0") == 0) {
+            min_dialect = 0x0300;
+        } else if (strcmp(d, "3.0.2") == 0) {
+            min_dialect = 0x0302;
+        } else if (strcmp(d, "3.1.1") == 0) {
+            min_dialect = 0x0311;
+        } else {
+            chimera_server_error("Invalid smb_min_dialect value '%s' "
+                                 "(expected 2.0.2/2.1/3.0/3.0.2/3.1.1)", d);
+            return 1;
+        }
+        chimera_server_config_set_smb_min_dialect(server_config, min_dialect);
+    }
+
     /* smb_encryption: "off"|"enabled"|"required" (or a boolean/integer 0/1/2). */
     json_value = json_object_get(server_params, "smb_encryption");
     if (json_is_string(json_value)) {
@@ -808,10 +834,42 @@ main(
             path          = json_string_value(json_object_get(mount, "path"));
             mount_options = json_string_value(json_object_get(mount, "options"));
 
-            chimera_server_info("Mounting %s://%s to /%s%s%s...",
+            /* "create": create the backend directory path (and any missing
+             * parents) before mounting, for backends initialized empty.  May be
+             * `true` (mode 0755) or an object `{ "mode": "0755" }` -- the mode
+             * is an octal string; created dirs are owned 0/0. */
+            json_t  *create_val  = json_object_get(mount, "create");
+            int      do_create   = 0;
+            uint32_t create_mode = 0755;
+
+            if (json_is_true(create_val)) {
+                do_create = 1;
+            } else if (json_is_object(create_val)) {
+                json_t *mode_val = json_object_get(create_val, "mode");
+                do_create = 1;
+                if (json_is_string(mode_val)) {
+                    create_mode = (uint32_t) strtol(json_string_value(mode_val), NULL, 8);
+                } else if (json_is_integer(mode_val)) {
+                    create_mode = (uint32_t) json_integer_value(mode_val);
+                }
+            }
+
+            chimera_server_info("Mounting %s://%s to /%s%s%s%s...",
                                 module, path, name,
                                 mount_options ? " options=" : "",
-                                mount_options ? mount_options : "");
+                                mount_options ? mount_options : "",
+                                do_create ? " (create)" : "");
+
+            if (do_create && module && path) {
+                if (chimera_server_mkpath(server, module, path, create_mode) != 0) {
+                    /* Hard fail: the operator asked for the path to be created
+                     * and it could not be, so do not silently mount a missing
+                     * or wrong target. */
+                    chimera_server_error("Failed to create mount path %s://%s for /%s",
+                                         module, path, name);
+                    exit(1);
+                }
+            }
 
             if (chimera_server_mount(server, name, module, path, mount_options) != 0) {
                 /* A silently-failed mount leaves shares/exports pointing at a

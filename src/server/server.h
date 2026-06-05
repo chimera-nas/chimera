@@ -416,6 +416,11 @@ chimera_server_config_get_smb_dialects(
     const struct chimera_server_config *config,
     int                                 index);
 
+void
+chimera_server_config_set_smb_min_dialect(
+    struct chimera_server_config *config,
+    uint32_t                      min_dialect);
+
 int
 chimera_server_config_get_smb_num_nic_info(
     const struct chimera_server_config *config);
@@ -461,6 +466,38 @@ chimera_server_mount(
     const char            *module_name,
     const char            *module_path,
     const char            *options);
+
+/* Ensure module_path exists inside module_name (creating intermediate dirs with
+ * the given mode, owner 0/0) before it is mounted -- backs the "create" mount
+ * option.  Returns 0 on success, -1 if any component could not be created. */
+int
+chimera_server_mkpath(
+    struct chimera_server *server,
+    const char            *module_name,
+    const char            *module_path,
+    uint32_t               mode);
+
+int
+chimera_server_unmount(
+    struct chimera_server *server,
+    const char            *mount_path);
+
+int
+chimera_server_mount_in_use(
+    struct chimera_server *server,
+    const char            *mount_path);
+
+typedef int (*chimera_server_mount_iterate_cb)(
+    const char *mount_path,
+    const char *module_name,
+    const char *module_path,
+    void       *data);
+
+void
+chimera_server_iterate_mounts(
+    struct chimera_server          *server,
+    chimera_server_mount_iterate_cb callback,
+    void                           *data);
 
 int
 chimera_server_create_bucket(

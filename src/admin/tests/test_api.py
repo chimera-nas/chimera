@@ -115,6 +115,45 @@ class TestBucketsAPI:
         assert exc_info.value.status_code == 404
 
 
+class TestMountsAPI:
+    """Test the VFS Mounts API endpoints."""
+
+    def test_list_mounts(self, client):
+        """Test listing VFS mounts includes the configured mount."""
+        mounts = client.list_mounts()
+        assert isinstance(mounts, list)
+        # The test config defines a "testshare" memfs mount.
+        assert any(m["name"] == "testshare" for m in mounts)
+
+    def test_get_mount(self, client):
+        """Test fetching the configured mount."""
+        mount = client.get_mount("testshare")
+        assert mount["name"] == "testshare"
+        assert mount["module"] == "memfs"
+
+    def test_get_mount_not_found(self, client):
+        """Test getting a nonexistent mount."""
+        with pytest.raises(ChimeraAdminError) as exc_info:
+            client.get_mount("nonexistent_mount")
+        assert exc_info.value.status_code == 404
+
+    def test_create_get_delete_mount(self, client):
+        """Test creating, fetching, and deleting a mount."""
+        name = "sdk_test_mount"
+        try:
+            client.create_mount(name, module="memfs", path="/")
+
+            mount = client.get_mount(name)
+            assert mount["name"] == name
+            assert mount["module"] == "memfs"
+        finally:
+            client.delete_mount(name)
+
+        with pytest.raises(ChimeraAdminError) as exc_info:
+            client.get_mount(name)
+        assert exc_info.value.status_code == 404
+
+
 class TestHTTPS:
     """Test HTTPS API endpoints with self-signed certificate."""
 
@@ -142,3 +181,8 @@ class TestHTTPS:
         """Test listing buckets over HTTPS."""
         buckets = https_client.list_buckets()
         assert isinstance(buckets, list)
+
+    def test_https_list_mounts(self, https_client):
+        """Test listing mounts over HTTPS."""
+        mounts = https_client.list_mounts()
+        assert isinstance(mounts, list)

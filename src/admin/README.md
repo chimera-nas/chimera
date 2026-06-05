@@ -47,6 +47,31 @@ with ChimeraAdminClient(host="localhost", port=8080) as client:
     client.delete_user("svc")
 ```
 
+## Command-line interface
+
+The package provides a CLI, invoked as a module:
+
+```bash
+# Global connection options precede the resource and action
+python3 -m chimera_admin --host localhost --port 8080 version
+
+# VFS mounts
+python3 -m chimera_admin mount list
+python3 -m chimera_admin mount get data
+python3 -m chimera_admin mount create data --module linux --path /srv/data
+python3 -m chimera_admin mount delete data
+
+# Users, NFS exports, SMB shares, and S3 buckets
+python3 -m chimera_admin user create alice --uid 1000 --gid 1000
+python3 -m chimera_admin export create home /home
+python3 -m chimera_admin share list
+python3 -m chimera_admin bucket delete photos
+```
+
+Use `--https` (optionally with `--no-verify-ssl`) for TLS endpoints.
+Results are printed as JSON; run `python3 -m chimera_admin <resource> --help`
+for the available actions.
+
 ## Configuration
 
 The REST API must be enabled in the Chimera server configuration:
