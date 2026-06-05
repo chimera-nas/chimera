@@ -300,8 +300,16 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
         /* SMB3 transport encryption: derive per-session keys from the raw
          * session key.  Skipped for anonymous/guest (null) sessions, which have
-         * no usable key and are never encrypted (MS-SMB2 §3.3.5.5.3). */
-        if (shared->config.encryption &&
+         * no usable key and are never encrypted (MS-SMB2 §3.3.5.5.3).
+         *
+         * Keys are derived whenever encryption is possible at all -- either the
+         * global smb_encryption knob OR any per-share encrypt_data share --
+         * because a client may tree-connect to a per-share-encrypted share even
+         * when global encryption is off.  The global knob alone decides whether
+         * the whole session is marked encrypt-all (CHIMERA_SMB_SESSION_ENCRYPT_
+         * DATA); per-share encryption leaves the flag clear and encrypts per
+         * tree (see the reply path in smb.c). */
+        if ((shared->config.encryption || shared->any_share_encrypt) &&
             conn->negotiated.cipher_id != 0 &&
             conn->dialect >= SMB2_DIALECT_3_0 &&
             session_key_saved_len > 0 &&
@@ -315,13 +323,15 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                     session_handle->enc_key, session_handle->dec_key, &klen) == 0) {
                 session_handle->enc_key_len = klen;
                 session_handle->cipher_id   = conn->negotiated.cipher_id;
-                session->flags             |= CHIMERA_SMB_SESSION_ENCRYPT_DATA;
+                if (shared->config.encryption) {
+                    session->flags |= CHIMERA_SMB_SESSION_ENCRYPT_DATA;
+                }
             }
         }
 
         if (!(session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
             memcpy(session->signing_key, session_handle->signing_key, sizeof(session_handle->signing_key));
-            if (session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA) {
+            if (session_handle->enc_key_len > 0) {
                 memcpy(session->enc_key, session_handle->enc_key, sizeof(session->enc_key));
                 memcpy(session->dec_key, session_handle->dec_key, sizeof(session->dec_key));
                 session->enc_key_len = session_handle->enc_key_len;

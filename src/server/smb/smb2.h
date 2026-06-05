@@ -632,6 +632,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 
 // SMB2 TREE_CONNECT response ShareFlags
 #define SMB2_SHAREFLAG_ACCESS_BASED_DIRECTORY_ENUM  0x00000800
+#define SMB2_SHAREFLAG_ENCRYPT_DATA                 0x00008000 // Per-share encryption (SMB 3.0+)
 
 // SMB2/3 Negotiate Capabilities
 #define SMB2_GLOBAL_CAP_DFS                         0x00000001 // Server supports DFS

@@ -881,12 +881,17 @@ main(
     if (shares) {
         json_object_foreach(shares, name, share)
         {
-            json_t *ca = json_object_get(share, "continuous_availability");
+            json_t *ca  = json_object_get(share, "continuous_availability");
+            json_t *enc = json_object_get(share, "encrypt_data");
 
             path = json_string_value(json_object_get(share, "path"));
             chimera_server_info("Adding SMB share %s -> %s", name, path);
             chimera_server_create_share(server, name, path,
                                         json_is_true(ca) ? 1 : 0);
+
+            if (json_is_true(enc)) {
+                chimera_server_share_set_encrypt_data(server, name);
+            }
         }
     }
 

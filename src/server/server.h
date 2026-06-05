@@ -509,6 +509,11 @@ chimera_server_share_set_access_based_enum(
     const char            *share_name);
 
 int
+chimera_server_share_set_encrypt_data(
+    struct chimera_server *server,
+    const char            *share_name);
+
+int
 chimera_server_create_export(
     struct chimera_server *server,
     const char            *share_name,
