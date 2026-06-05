@@ -120,6 +120,12 @@ chimera_smb_tree_connect_reply(
             request->tree->share->access_based_enum) {
             share_flags |= SMB2_SHAREFLAG_ACCESS_BASED_DIRECTORY_ENUM;
         }
+        /* Per-share encryption: tell the client to encrypt all traffic on this
+         * tree (MS-SMB2 §2.2.10 / §3.3.5.7). */
+        if (request->tree && request->tree->share &&
+            request->tree->share->encrypt_data) {
+            share_flags |= SMB2_SHAREFLAG_ENCRYPT_DATA;
+        }
         evpl_iovec_cursor_append_uint32(reply_cursor, share_flags);
     }
 

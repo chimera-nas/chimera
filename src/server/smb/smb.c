@@ -518,9 +518,10 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     }
 
     /* SMB3 transport encryption: wrap the signed reply in a TRANSFORM header
-     * when the request arrived encrypted, or when the session negotiated
-     * encryption.  The NEGOTIATE / SESSION_SETUP responses themselves precede
-     * key establishment and are always sent signed-but-plaintext. */
+     * when the request arrived encrypted, when the session negotiated global
+     * encryption, or when it targets a per-share-encrypted tree.  The NEGOTIATE
+     * / SESSION_SETUP responses themselves precede key establishment and are
+     * always sent signed-but-plaintext. */
     {
         struct chimera_smb_session *enc_session = NULL;
 
@@ -528,11 +529,16 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
             enc_session = compound->requests[0]->session_handle->session;
         }
 
-        if (enc_session && (enc_session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA)) {
-            uint16_t cmd0 = compound->requests[0]->smb2_hdr.command;
+        if (enc_session && enc_session->enc_key_len > 0) {
+            uint16_t                 cmd0         = compound->requests[0]->smb2_hdr.command;
+            struct chimera_smb_tree *tree0        = compound->requests[0]->tree;
+            int                      tree_encrypt = tree0 && tree0->share &&
+                tree0->share->encrypt_data;
 
             if (compound->received_encrypted ||
-                (cmd0 != SMB2_NEGOTIATE && cmd0 != SMB2_SESSION_SETUP)) {
+                (cmd0 != SMB2_NEGOTIATE && cmd0 != SMB2_SESSION_SETUP &&
+                 ((enc_session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA) ||
+                  tree_encrypt))) {
                 struct evpl_iovec enc_iov;
                 uint64_t          nonce;
                 int               enc_total;
@@ -1050,8 +1056,16 @@ chimera_smb_server_handle_smb2(
          * final NTLM message is signed with a session key the server only
          * derives while *processing* this very request, so the key isn't
          * available here yet.  The NTLM exchange authenticates the request, and
-         * the success reply is signed (proving the server's key). */
+         * the success reply is signed (proving the server's key).
+         *
+         * Messages received inside a TRANSFORM (received_encrypted) are also not
+         * signature-verified: the AEAD tag already authenticated the whole
+         * message, and per MS-SMB2 §3.3.5.2.9 the server skips signing
+         * verification for a successfully decrypted request.  Such inner SMB2
+         * headers commonly carry SMB2_FLAGS_SIGNED with a zeroed Signature
+         * field, which would otherwise fail verification. */
         if ((request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) &&
+            !received_encrypted &&
             request->smb2_hdr.command != SMB2_SESSION_SETUP) {
             uint8_t *signing_key;
 
@@ -1091,6 +1105,30 @@ chimera_smb_server_handle_smb2(
                 evpl_close(evpl, conn->bind);
                 return;
             }
+        } else if (!received_encrypted &&
+                   !(request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) &&
+                   !(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) &&
+                   request->smb2_hdr.command != SMB2_NEGOTIATE &&
+                   request->smb2_hdr.command != SMB2_SESSION_SETUP &&
+                   request->smb2_hdr.command != SMB2_ECHO &&
+                   ((conn->flags & CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED) ||
+                    (request->session_handle && request->session_handle->session &&
+                     (request->session_handle->session->flags &
+                      CHIMERA_SMB_SESSION_ENCRYPT_DATA)))) {
+            /* MS-SMB2 §3.3.5.2.9 / §3.3.5.7: once a session requires protection —
+             * because signing is required, or because global encryption marked
+             * the session encrypt-all (Session.EncryptData) — every
+             * post-authentication request must be either signed or encrypted.
+             * An unsigned, unencrypted request (e.g. a bare TREE_CONNECT) is a
+             * protocol violation; tear the connection down.  SESSION_SETUP is
+             * exempt (its signing key is only derived while processing it), as
+             * are NEGOTIATE and ECHO; compound related operations inherit the
+             * lead request's protection so only the unrelated lead is checked. */
+            chimera_smb_error("Unsigned, unencrypted request (cmd %u) on a protected connection; disconnecting",
+                              request->smb2_hdr.command);
+            chimera_smb_request_free(thread, request);
+            evpl_close(evpl, conn->bind);
+            return;
         }
 
         if (unlikely(!request->session_handle &&
@@ -1500,7 +1538,11 @@ chimera_smb_server_handle_transform(
 
     session = chimera_smb_session_lookup(thread->shared, th.session_id);
 
-    if (!session || !(session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA)) {
+    /* Decrypt whenever the session holds derived keys.  This is broader than the
+     * global ENCRYPT_DATA flag: a per-share-encrypted tree makes the client
+     * encrypt even when the session is not globally encrypt-all, and we can
+     * always decrypt traffic we hold keys for. */
+    if (!session || session->enc_key_len == 0) {
         chimera_smb_error("Encrypted SMB2 message for unknown/non-encrypting session %lx",
                           th.session_id);
         if (session) {
@@ -1857,6 +1899,30 @@ chimera_smb_share_set_access_based_enum(
 
     return rc;
 } /* chimera_smb_share_set_access_based_enum */
+
+SYMBOL_EXPORT int
+chimera_smb_share_set_encrypt_data(
+    void       *smb_shared,
+    const char *name)
+{
+    struct chimera_server_smb_shared *shared = smb_shared;
+    struct chimera_smb_share         *cur;
+    int                               rc = -1;
+
+    pthread_mutex_lock(&shared->shares_lock);
+    LL_FOREACH(shared->shares, cur)
+    {
+        if (strcasecmp(cur->name, name) == 0) {
+            cur->encrypt_data         = true;
+            shared->any_share_encrypt = 1;
+            rc                        = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&shared->shares_lock);
+
+    return rc;
+} /* chimera_smb_share_set_encrypt_data */
 
 
 SYMBOL_EXPORT int

@@ -1468,6 +1468,19 @@ chimera_server_share_set_access_based_enum(
 } /* chimera_server_share_set_access_based_enum */
 
 SYMBOL_EXPORT int
+chimera_server_share_set_encrypt_data(
+    struct chimera_server *server,
+    const char            *share_name)
+{
+    if (!server->smb_shared) {
+        return -1;
+    }
+
+    return chimera_smb_share_set_encrypt_data(server->smb_shared,
+                                              share_name);
+} /* chimera_server_share_set_encrypt_data */
+
+SYMBOL_EXPORT int
 chimera_server_create_export(
     struct chimera_server *server,
     const char            *name,

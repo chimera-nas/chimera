@@ -22,6 +22,13 @@ chimera_smb_share_set_access_based_enum(
     void       *smb_shared,
     const char *name);
 
+/* Enable per-share SMB3 encryption (SMB2_SHAREFLAG_ENCRYPT_DATA) on a named
+ * share. */
+int
+chimera_smb_share_set_encrypt_data(
+    void       *smb_shared,
+    const char *name);
+
 int
 chimera_smb_remove_share(
     void       *smb_shared,

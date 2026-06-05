@@ -101,7 +101,14 @@ generate_config() {
         if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ] && [ "$share" = "FileShare" ]; then
             share_ca=', "continuous_availability": true'
         fi
-        shares="${shares}${sep}\"${share}\": {\"path\": \"/${share}\"${share_ca}}"
+        # SMBEncrypted is the designated per-share-encrypted share (matches
+        # EncryptedFileShare in the ptfconfig); flag it so TREE_CONNECT
+        # advertises SMB2_SHAREFLAG_ENCRYPT_DATA and its traffic is encrypted.
+        local share_enc=""
+        if [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ] && [ "$share" = "SMBEncrypted" ]; then
+            share_enc=', "encrypt_data": true'
+        fi
+        shares="${shares}${sep}\"${share}\": {\"path\": \"/${share}\"${share_ca}${share_enc}}"
         sep=",
         "
     done
@@ -127,11 +134,20 @@ generate_config() {
         \"smb_min_dialect\": \"2.0.2\","
     fi
 
+    # Enable SMB3 transport encryption when requested. "enabled" turns on global
+    # (whole-session) encryption AND lets the per-share SMBEncrypted share opt in;
+    # default off keeps the rest of the suite on the cleartext path.
+    local encryption_line=""
+    if [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ]; then
+        encryption_line='"smb_encryption": "enabled",'
+    fi
+
     cat > "$CONFIG_FILE" << EOF
 {
     "server": {
         ${persistent_line}
         ${multichannel_line}
+        ${encryption_line}
         "threads": 4,
         "delegation_threads": 4,
         "external_portmap": false
@@ -232,6 +248,19 @@ if [ "${CHIMERA_SMB_MULTICHANNEL:-0}" = "1" ]; then
     sed -i \
         -e "s#<Property name=\"SutAlternativeIPAddress\" value=\"\"/>#<Property name=\"SutAlternativeIPAddress\" value=\"${SUT_IP2}\"/>#" \
         "$staged_smb2"
+fi
+
+# When encryption is enabled, advertise it to the driver so the Encryption cases
+# become applicable: declare support, the cipher list chimera offers, the
+# per-share encrypted share, and that global encrypt-data is on.
+if [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ]; then
+    staged="${WPTS_BIN_DIR}/CommonTestSuite.deployment.ptfconfig"
+    sed -i \
+        -e 's#<Property name="IsEncryptionSupported" value="false"/>#<Property name="IsEncryptionSupported" value="true"/>#' \
+        -e 's#<Property name="IsGlobalEncryptDataEnabled" value="false"/>#<Property name="IsGlobalEncryptDataEnabled" value="true"/>#' \
+        -e 's#<Property name="EncryptedFileShare" value=""/>#<Property name="EncryptedFileShare" value="SMBEncrypted"/>#' \
+        -e 's#<Property name="SutSupportedEncryptionAlgorithms" value=""/>#<Property name="SutSupportedEncryptionAlgorithms" value="ENCRYPTION_AES128_CCM;ENCRYPTION_AES128_GCM;ENCRYPTION_AES256_CCM;ENCRYPTION_AES256_GCM"/>#' \
+        "$staged"
 fi
 
 mkdir -p "$RESULT_DIR"

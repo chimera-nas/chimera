@@ -161,6 +161,11 @@ struct chimera_smb_share {
      * from the global smb_persistent_handles flag; a per-share config knob
      * will replace that later. */
     bool                               continuous_availability;
+    /* Per-share SMB3 encryption (MS-SMB2 §2.2.10 SMB2_SHAREFLAG_ENCRYPT_DATA):
+     * advertised at TREE_CONNECT and enforced so all traffic on this tree must
+     * be encrypted (an unsigned, unencrypted access is rejected).  Independent
+     * of the global smb_encryption knob. */
+    bool                               encrypt_data;
     /* Set once the share's backend has been scanned for persisted handle
      * records at first use (best-effort, idempotent recovery). */
     bool                               durable_recovered;
@@ -829,6 +834,11 @@ struct chimera_server_smb_shared {
     pthread_mutex_t                  sessions_lock;
     struct chimera_smb_share        *shares;
     pthread_mutex_t                  shares_lock;
+    /* Set when any share has encrypt_data enabled.  Used by SESSION_SETUP to
+     * decide whether to derive per-session encryption keys even when the global
+     * smb_encryption knob is off (a client may still tree-connect to a
+     * per-share-encrypted share). */
+    int                              any_share_encrypt;
     struct chimera_smb_tree         *free_trees;
     pthread_mutex_t                  trees_lock;
     /* Monotonic, process-global allocator for file persistent ids.  Replaces
