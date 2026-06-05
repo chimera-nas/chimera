@@ -1,7 +1,7 @@
 ---
 title: API Reference
 layout: default
-nav_order: 2
+nav_order: 4
 permalink: /api-reference
 ---
 
