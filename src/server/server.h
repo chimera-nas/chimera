@@ -111,6 +111,15 @@ chimera_server_config_get_smb_encryption(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_smb_compression(
+    struct chimera_server_config *config,
+    int                           enabled);
+
+int
+chimera_server_config_get_smb_compression(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_smb_notify_disabled(
     struct chimera_server_config *config,
     int                           disabled);

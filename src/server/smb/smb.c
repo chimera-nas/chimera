@@ -26,6 +26,7 @@
 #include "smb_dump.h"
 #include "smb_signing.h"
 #include "smb_encrypt.h"
+#include "smb_compress.h"
 #include "xxhash.h"
 
 static const uint8_t SMB2_PROTOCOL_ID[4] = { 0xFE, 'S', 'M', 'B' };
@@ -148,6 +149,7 @@ chimera_smb_server_init(
     shared->config.named_streams              = chimera_server_config_get_smb_named_streams(config);
     shared->config.signing_required           = chimera_server_config_get_smb_signing_required(config);
     shared->config.encryption                 = chimera_server_config_get_smb_encryption(config);
+    shared->config.compression                = chimera_server_config_get_smb_compression(config);
     shared->config.notify_disabled            = chimera_server_config_get_smb_notify_disabled(config);
     shared->config.acl_inherited_canonicalize = chimera_server_config_get_smb_acl_inherited_canonicalize(config);
 
@@ -499,6 +501,89 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         if (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE) {
             memcpy(conn->negotiate_preauth_hash, conn->preauth_hash,
                    sizeof(conn->negotiate_preauth_hash));
+        }
+    }
+
+    /* Will the encryption path below wrap this reply?  Compression and
+     * encryption layering is not yet implemented, so a reply destined for
+     * encryption is left uncompressed for that path to handle. */
+    int will_encrypt = 0;
+    {
+        struct chimera_smb_session *enc_session = NULL;
+
+        if (compound->num_requests > 0 && compound->requests[0]->session_handle) {
+            enc_session = compound->requests[0]->session_handle->session;
+        }
+        if (enc_session && (enc_session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA)) {
+            uint16_t cmd0 = compound->requests[0]->smb2_hdr.command;
+            if (compound->received_encrypted ||
+                (cmd0 != SMB2_NEGOTIATE && cmd0 != SMB2_SESSION_SETUP)) {
+                will_encrypt = 1;
+            }
+        }
+    }
+
+    /* SMB3 transport compression (MS-SMB2 §3.3.5.12): when the connection
+     * negotiated Plain LZ77, compress a READ response whose payload compression
+     * shrinks below the wire size (chimera_smb_compress_message returns -1 when
+     * it would not shrink, so we fall through to a plaintext send).  A READ in
+     * the compound is the trigger — its response carries the bulk file data
+     * worth compressing.  Only the TCP path is handled; SMB-Direct compression
+     * and the compression+encryption combination are out of scope for this
+     * pass. */
+    {
+        int lz77_ok = 0, pattern_ok = 0, k;
+        int chained, buf_off = -1;
+
+        for (k = 0; k < conn->negotiated.compression_alg_count; k++) {
+            if (conn->negotiated.compression_algs[k] == SMB2_COMPRESSION_LZ77) {
+                lz77_ok = 1;
+            } else if (conn->negotiated.compression_algs[k] == SMB2_COMPRESSION_PATTERN_V1) {
+                pattern_ok = 1;
+            }
+        }
+
+        /* MS-SMB2 §3.3.5.12: compress a READ response only when the request set
+         * SMB2_READFLAG_REQUEST_COMPRESSED.  Only a single, non-compound READ is
+         * compressed, and only its data buffer (not the SMB2/response headers) —
+         * buf_off is the data offset within the message, derived from the bytes
+         * actually read.  Leaving the headers uncompressed mirrors Windows and
+         * lets a tiny or incompressible read stay in the clear. */
+        if (compound->num_requests == 1 &&
+            compound->requests[0]->smb2_hdr.command == SMB2_READ &&
+            (compound->requests[0]->read.flags & SMB2_READFLAG_REQUEST_COMPRESSED) &&
+            compound->requests[0]->read.r_length > 0) {
+            buf_off = reply_payload_length - (int) compound->requests[0]->read.r_length;
+        }
+
+        /* Chained Pattern_V1 framing is used only when both sides agreed to
+         * chaining and Pattern_V1 was negotiated. */
+        chained = pattern_ok &&
+            (conn->negotiated.compression_flags & SMB2_COMPRESSION_FLAG_CHAINED);
+
+        if (!will_encrypt && lz77_ok && buf_off > 0 &&
+            conn->protocol != EVPL_DATAGRAM_RDMACM_RC) {
+            struct evpl_iovec comp_iov;
+            int               comp_total;
+
+            rc = chimera_smb_compress_message(thread->compress_ctx, evpl,
+                                              SMB2_COMPRESSION_LZ77, chained, buf_off,
+                                              reply_iov, reply_niov,
+                                              reply_payload_length, reply_hdr_len,
+                                              &comp_iov, &comp_total);
+
+            if (rc == 0) {
+                netbios_hdr       = evpl_iovec_data(&comp_iov);
+                netbios_hdr->word = __builtin_bswap32(comp_total);
+
+                evpl_sendv(evpl, conn->bind, &comp_iov, 1, reply_hdr_len + comp_total,
+                           EVPL_SEND_FLAG_TAKE_REF);
+
+                evpl_iovecs_release(evpl, reply_iov, reply_niov);
+                chimera_smb_compound_free(thread, compound);
+                return;
+            }
+            /* rc != 0: compression did not shrink the reply — send plaintext. */
         }
     }
 
@@ -1499,6 +1584,41 @@ chimera_smb_server_handle_transform(
     evpl_iovec_release(evpl, &plain_iov);
 } /* chimera_smb_server_handle_transform */
 
+/*
+ * Handle a received SMB3 COMPRESSION_TRANSFORM message (protocol id 0xFC 'S' 'M'
+ * 'B').  Unlike encryption, compression is a per-connection transform (no
+ * session key), so the plaintext is simply reconstructed and re-dispatched as if
+ * received in the clear.  request_cursor is positioned at the compression
+ * transform header; length is its byte count (excluding NetBIOS framing).
+ */
+static void
+chimera_smb_server_handle_compressed(
+    struct evpl                      *evpl,
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_conn          *conn,
+    struct evpl_iovec_cursor         *request_cursor,
+    int                               length)
+{
+    struct evpl_iovec_cursor plain_cursor;
+    struct evpl_iovec        plain_iov;
+    int                      plain_len, rc;
+
+    rc = chimera_smb_decompress_message(thread->compress_ctx, evpl,
+                                        request_cursor, length,
+                                        &plain_iov, &plain_len);
+
+    if (rc != 0) {
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    evpl_iovec_cursor_init(&plain_cursor, &plain_iov, 1);
+
+    chimera_smb_server_handle_smb2(evpl, thread, conn, &plain_cursor, plain_len, 0);
+
+    evpl_iovec_release(evpl, &plain_iov);
+} /* chimera_smb_server_handle_compressed */
+
 static void
 chimera_smb_server_handle_tcp(
     struct evpl                      *evpl,
@@ -1523,6 +1643,11 @@ chimera_smb_server_handle_tcp(
 
     if (smb_hdr == 0x424d53fd) {
         chimera_smb_server_handle_transform(evpl, thread, conn, &request_cursor, length - 4);
+        return;
+    }
+
+    if (smb_hdr == 0x424d53fc) {
+        chimera_smb_server_handle_compressed(evpl, thread, conn, &request_cursor, length - 4);
         return;
     }
 
@@ -1686,11 +1811,12 @@ chimera_smb_server_thread_init(
         return NULL;
     }
 
-    thread->vfs_thread  = vfs_thread;
-    thread->shared      = shared;
-    thread->evpl        = evpl;
-    thread->signing_ctx = chimera_smb_signing_ctx_create();
-    thread->encrypt_ctx = chimera_smb_encrypt_ctx_create();
+    thread->vfs_thread   = vfs_thread;
+    thread->shared       = shared;
+    thread->evpl         = evpl;
+    thread->signing_ctx  = chimera_smb_signing_ctx_create();
+    thread->encrypt_ctx  = chimera_smb_encrypt_ctx_create();
+    thread->compress_ctx = chimera_smb_compress_ctx_create();
 
     chimera_smb_iconv_init(&thread->iconv_ctx);
     chimera_smb_notify_thread_init(thread);
@@ -1771,6 +1897,7 @@ chimera_smb_server_thread_destroy(void *data)
     chimera_smb_iconv_destroy(&thread->iconv_ctx);
     chimera_smb_signing_ctx_destroy(thread->signing_ctx);
     chimera_smb_encrypt_ctx_destroy(thread->encrypt_ctx);
+    chimera_smb_compress_ctx_destroy(thread->compress_ctx);
 
     free(thread);
 } /* smb_server_thread_destroy */

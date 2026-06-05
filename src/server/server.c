@@ -73,6 +73,7 @@ struct chimera_server_config {
     int                                   smb_named_streams;
     int                                   smb_signing_required;
     int                                   smb_encryption;
+    int                                   smb_compression;
     int                                   smb_notify_disabled;
     int                                   smb_acl_inherited_canonicalize;
     int                                   smb_num_nic_info;
@@ -167,6 +168,10 @@ chimera_server_config_init(void)
     /* SMB3 transport encryption is off by default; the "smb_encryption" config
      * flag enables (1) or requires (2) it. */
     config->smb_encryption = 0;
+
+    /* SMB3 transport compression is off by default; the "smb_compression" flag
+     * enables (1) advertising/using it. */
+    config->smb_compression = 0;
 
     /* CHANGE_NOTIFY is enabled by default; the "smb_notify_disabled" flag makes
      * the server reject CHANGE_NOTIFY with STATUS_NOT_IMPLEMENTED. */
@@ -355,6 +360,20 @@ chimera_server_config_get_smb_encryption(const struct chimera_server_config *con
 {
     return config->smb_encryption;
 } /* chimera_server_config_get_smb_encryption */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_compression(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->smb_compression = enabled;
+} /* chimera_server_config_set_smb_compression */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_compression(const struct chimera_server_config *config)
+{
+    return config->smb_compression;
+} /* chimera_server_config_get_smb_compression */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_notify_disabled(

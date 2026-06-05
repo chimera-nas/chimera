@@ -182,8 +182,15 @@ chimera_smb_parse_read(
     struct chimera_smb_request *request)
 {
     uint16_t blob_offset, blob_length;
+    uint8_t  padding;
     int      i;
 
+    /* MS-SMB2 §2.2.19: StructureSize(2, already consumed) is followed by
+     * Padding(1) then Flags(1).  Read both explicitly — the Length uint32 read
+     * below realigns to a 4-byte boundary, so a single byte read here would
+     * capture Padding and silently skip the Flags field (which carries
+     * SMB2_READFLAG_REQUEST_COMPRESSED). */
+    evpl_iovec_cursor_get_uint8(request_cursor, &padding);
     evpl_iovec_cursor_get_uint8(request_cursor, &request->read.flags);
     evpl_iovec_cursor_get_uint32(request_cursor, &request->read.length);
     evpl_iovec_cursor_get_uint64(request_cursor, &request->read.offset);

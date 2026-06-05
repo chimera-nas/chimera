@@ -109,10 +109,19 @@ generate_config() {
         persistent_line='"smb_persistent_handles": true,'
     fi
 
+    # Enable SMB3 transport compression when requested (the SMB2Compression
+    # WPTS cases need the feature on; default off keeps the rest of the suite
+    # exercising the uncompressed path).
+    local compression_line=""
+    if [ "${CHIMERA_SMB_COMPRESSION:-0}" = "1" ]; then
+        compression_line='"smb_compression": true,'
+    fi
+
     cat > "$CONFIG_FILE" << EOF
 {
     "server": {
         ${persistent_line}
+        ${compression_line}
         "threads": 4,
         "delegation_threads": 4,
         "external_portmap": false
@@ -190,6 +199,18 @@ if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ]; then
         -e 's#<Property name="IsPersistentHandlesSupported" value="false"/>#<Property name="IsPersistentHandlesSupported" value="true"/>#' \
         -e 's#<Property name="CAShareName" value=""/>#<Property name="CAShareName" value="FileShare"/>#' \
         -e "s#<Property name=\"CAShareServerName\" value=\"\"/>#<Property name=\"CAShareServerName\" value=\"${SUT_IP}\"/>#" \
+        "$staged"
+fi
+
+# When transport compression is enabled, advertise the supported algorithms and
+# a compressed share so the SMB2Compression cases become applicable. Chimera
+# implements Plain LZ77 and the chained Pattern_V1 run-length payload.
+if [ "${CHIMERA_SMB_COMPRESSION:-0}" = "1" ]; then
+    staged="${WPTS_BIN_DIR}/CommonTestSuite.deployment.ptfconfig"
+    sed -i \
+        -e 's#<Property name="CompressedFileShare" value=""/>#<Property name="CompressedFileShare" value="SMBBasic"/>#' \
+        -e 's#<Property name="IsChainedCompressionSupported" value="false"/>#<Property name="IsChainedCompressionSupported" value="true"/>#' \
+        -e 's#<Property name="SupportedCompressionAlgorithms" value=""/>#<Property name="SupportedCompressionAlgorithms" value="LZ77;Pattern_V1"/>#' \
         "$staged"
 fi
 
