@@ -1961,6 +1961,20 @@ chimera_smb_path_has_dotdot(
     return 0;
 } /* chimera_smb_path_has_dotdot */
 
+/* Return non-zero if a '/'-separated path's first component is exactly "..".
+ * MS-SMB2 3.3.5.9 distinguishes a name that *begins* with ".." (rejected with
+ * STATUS_OBJECT_PATH_SYNTAX_BAD, e.g. smbtorture smb2.mkdir "..\..\..") from a
+ * "subfolder\..\" form (rejected with STATUS_INVALID_PARAMETER, e.g. WPTS
+ * *DoubleDotDir "x\..\y.txt"). */
+static inline int
+chimera_smb_path_begins_with_dotdot(
+    const char *path,
+    int         len)
+{
+    return (len == 2 && path[0] == '.' && path[1] == '.') ||
+           (len >= 3 && path[0] == '.' && path[1] == '.' && path[2] == '/');
+} /* chimera_smb_path_begins_with_dotdot */
+
 void
 chimera_smb_create(struct chimera_smb_request *request)
 {
@@ -2032,15 +2046,28 @@ chimera_smb_create(struct chimera_smb_request *request)
     /* Reject any ".." path component.  Windows clients canonicalize these away
      * before sending, so the server never needs to resolve one; letting it
      * reach the VFS would walk above the share root (a traversal escape on the
-     * passthrough backends).  MS-SMB2 returns STATUS_OBJECT_PATH_SYNTAX_BAD.
-     * Completed here (not in parse) so the client gets a response rather than a
-     * connection drop. */
+     * passthrough backends).  The status depends on the form (MS-SMB2 3.3.5.9):
+     * a name that *begins* with ".." (e.g. "..\..\..") gets
+     * STATUS_OBJECT_PATH_SYNTAX_BAD (smbtorture smb2.mkdir), while a
+     * "subfolder\..\" form (e.g. "x\..\y.txt") gets STATUS_INVALID_PARAMETER
+     * (WPTS *DoubleDotDir).  Completed here (not in parse) so the client gets a
+     * response rather than a connection drop. */
     if (!is_durable_reconnect &&
         ((request->create.name_len == 2 &&
           request->create.name[0] == '.' && request->create.name[1] == '.') ||
          chimera_smb_path_has_dotdot(request->create.parent_path,
                                      request->create.parent_path_len))) {
-        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_SYNTAX_BAD);
+        int begins_dotdot =
+            chimera_smb_path_begins_with_dotdot(request->create.parent_path,
+                                                request->create.parent_path_len) ||
+            (request->create.parent_path_len == 0 &&
+             request->create.name_len == 2 &&
+             request->create.name[0] == '.' && request->create.name[1] == '.');
+
+        chimera_smb_complete_request(request,
+                                     begins_dotdot ?
+                                     SMB2_STATUS_OBJECT_PATH_SYNTAX_BAD :
+                                     SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
 
@@ -2738,10 +2765,18 @@ chimera_smb_parse_create(
 
     if (unlikely(request->request_struct_size != SMB2_CREATE_REQUEST_SIZE)) {
         chimera_smb_error("Received SMB2 CREATE request with invalid struct size (%u expected %u)",
-                          request->smb2_hdr.struct_size,
+                          request->request_struct_size,
                           SMB2_CREATE_REQUEST_SIZE);
+        /* MS-SMB2 3.3.5.2.2 / 2.2.13: an invalid CREATE StructureSize is a
+         * per-request failure answered with STATUS_INVALID_PARAMETER, NOT a
+         * connection-fatal parse error.  Returning -1 here would make the
+         * dispatcher tear down the transport (and the in-flight reply would
+         * race the close, so the client just times out — smb2.create
+         * InvalidCreateRequestStructureSize).  Defer the status instead so the
+         * compound completes it in order and the connection survives. */
         request->status = SMB2_STATUS_INVALID_PARAMETER;
-        return -1;
+        request->flags |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+        return 0;
     }
 
     /* SMB2 CREATE fixed body (after the already-consumed 2-byte StructureSize):
