@@ -125,8 +125,11 @@ the canonical place to set them.
 | `rest_https_port` | int | `0` | HTTPS port for the REST API (`0` = disabled). |
 | `rest_ssl_cert` | string | — | TLS certificate path. Auto-generated (self-signed) if HTTPS is enabled and this is unset. |
 | `rest_ssl_key` | string | — | TLS private-key path. Auto-generated alongside the cert if unset. |
-| `rest_debug_fsops` | bool | `false` | **Test only.** Enable `/api/v1/debug/fsop`, which performs server-side filesystem mutations. Never enable in production. |
 | `soft_fail_bad_req` | bool | `false` | Return a soft error on a malformed REST request instead of dropping the connection. |
+
+See [Advanced and testing options](#advanced-and-testing-options) for a small set
+of keys that exist for development and benchmarking and should not be used on a
+production server.
 
 #### `server.smb_auth`
 
@@ -362,7 +365,6 @@ The `config` object takes a `devices` array plus filesystem-level knobs.
 |---|---|---|---|
 | `devices` | array | required | Backing devices (below). |
 | `initialize` | flag | `false` | `mkfs` (format) the filesystem at mount. **Erases data.** |
-| `unsafe_async` | bool | `false` | Issue block writes without FUA/sync for speed (crash-unsafe; opt-in). |
 | `noatime` | bool | `false` | Disable atime updates. |
 | `mtime_defer_ms` | int (ms) | `1000` | Coalescing window for deferred mtime updates (`0` writes mtime on every write). |
 | `block_cache_blocks` | int | `32768` | Resident block-buffer cap (`0` = default; min ~24K). |
@@ -384,3 +386,17 @@ Each entry of `devices`:
 
 The `nfs` and `root` modules take no `config` object; the `nfs` module is
 configured through mount `options` instead.
+
+---
+
+## Advanced and testing options
+
+These keys exist for development, debugging, and benchmarking. They are **not**
+intended for production deployments — they either weaken durability guarantees or
+expose unauthenticated mutation endpoints. They are documented here for
+completeness; leave them at their defaults unless you understand the trade-off.
+
+| Section | Key | Type | Default | Description |
+|---|---|---|---|---|
+| `server` | `rest_debug_fsops` | bool | `false` | Enable `/api/v1/debug/fsop`, an unauthenticated endpoint that performs server-side filesystem mutations (used to drive delegation-recall tests). **Never enable on a production or network-reachable server.** |
+| `diskfs` `config` | `unsafe_async` | bool | `false` | Issue block writes without FUA/sync, trading crash-consistency for throughput. A power loss or crash can corrupt the filesystem. Intended for benchmarking only. |
