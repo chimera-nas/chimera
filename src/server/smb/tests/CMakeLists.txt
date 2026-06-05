@@ -353,7 +353,10 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_Negotiate_SMB311_Preauthentication_Encryption_GCM
         BVT_Negotiate_SMB311_Preauthentication_Encryption_AES_256_CCM
         BVT_Negotiate_SMB311_Preauthentication_Encryption_AES_256_GCM
-        BVT_TreeMgmt_SMB311_Disconnect_NoSignedNoEncryptedTreeConnect)
+        BVT_TreeMgmt_SMB311_Disconnect_NoSignedNoEncryptedTreeConnect
+        Compound_Encrypt_RelatedRequests
+        Compound_Encrypt_UnrelatedRequests
+        Signing_VerifySignatureWhenEncrypted)
 
     foreach(tc ${WPTS_SMB2_ENCRYPTION_ALLOWLIST})
         add_test(NAME chimera/server/smb/wpts/memfs_encryption/${tc}
@@ -364,6 +367,47 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
             TIMEOUT 180
             RESOURCE_LOCK wpts_smb_bin
             ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_ENCRYPTION=1")
+    endforeach()
+
+    # Compression + encryption combined cases (compress-then-encrypt, MS-SMB2
+    # §3.1.4.4).  The wrapper enables both smb_compression and smb_encryption so a
+    # compressed WRITE arrives encrypted (decrypt-then-decompress) and a
+    # compressed READ response is produced (compress-then-encrypt).  Only the
+    # implemented codecs are listed; LZ77+Huffman / LZNT1 encrypted variants skip
+    # for the same reason their plaintext variants do.
+    set(WPTS_SMB2_COMPRESSION_ENCRYPTION_ALLOWLIST
+        BVT_SMB2Compression_LZ77_Encrypted
+        BVT_SMB2Compression_Chained_PatternV1_Encrypted
+        Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext)
+
+    foreach(tc ${WPTS_SMB2_COMPRESSION_ENCRYPTION_ALLOWLIST})
+        add_test(NAME chimera/server/smb/wpts/memfs_compression_encryption/${tc}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
+                    ${CHIMERA_DAEMON} memfs "Name=${tc}")
+        set_tests_properties(chimera/server/smb/wpts/memfs_compression_encryption/${tc} PROPERTIES
+            LABELS "smb;wpts;compression;encryption"
+            TIMEOUT 180
+            RESOURCE_LOCK wpts_smb_bin
+            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_COMPRESSION=1;CHIMERA_SMB_ENCRYPTION=1")
+    endforeach()
+
+    # Multichannel + encryption combined case: encryption is session-scoped, so
+    # the keys derived on the first channel cover every bound channel.  The
+    # MultipleChannel_Negative_Encryption* cases are intentionally not listed:
+    # they are inconclusive when IsGlobalEncryptDataEnabled is true (they exercise
+    # an encryption-supported-but-not-global mode chimera does not offer).
+    set(WPTS_SMB2_MULTICHANNEL_ENCRYPTION_ALLOWLIST
+        MultipleChannel_EncryptionOnBothChannels)
+
+    foreach(tc ${WPTS_SMB2_MULTICHANNEL_ENCRYPTION_ALLOWLIST})
+        add_test(NAME chimera/server/smb/wpts/memfs_multichannel_encryption/${tc}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
+                    ${CHIMERA_DAEMON} memfs "Name=${tc}")
+        set_tests_properties(chimera/server/smb/wpts/memfs_multichannel_encryption/${tc} PROPERTIES
+            LABELS "smb;wpts;multichannel;encryption"
+            TIMEOUT 180
+            RESOURCE_LOCK wpts_smb_bin
+            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_ENCRYPTION=1")
     endforeach()
 
     message(STATUS "WPTS MS-SMB2 tests: enabled (${WPTS_BIN_DIR}, ${WPTS_DOTNET})")
