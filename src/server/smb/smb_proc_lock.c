@@ -60,10 +60,13 @@ chimera_smb_open_file_drain_locks(
         open_file->share_file_state = NULL;
     }
 
-    /* Drop the caching lease (oplock / SMB2 lease) if held. */
-    if (open_file->caching_lease_inserted) {
-        chimera_vfs_lease_release(vfs_state, open_file->caching_file_state,
-                                  &open_file->caching_lease);
+    /* Drop this open's reference on the caching grant (oplock / SMB2 lease).
+     * On the grant's last reference the embedded lease is unlinked and the grant
+     * freed; the per-file state reference (caching_file_state) is balanced
+     * separately below. */
+    if (open_file->grant) {
+        chimera_vfs_caching_grant_release(vfs_state, open_file->grant);
+        open_file->grant                  = NULL;
         open_file->caching_lease_inserted = false;
     }
     if (open_file->caching_file_state) {

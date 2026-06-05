@@ -397,14 +397,14 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
             request, request->oplock_break.lease_key);
 
         if (open_file) {
-            if (open_file->caching_lease_inserted) {
+            if (open_file->grant) {
                 struct chimera_vfs_lease_mode kept = {
                     .granted = chimera_smb_lease_bits_to_vfs(
                         request->oplock_break.lease_state),
                     .denied  = 0,
                 };
 
-                chimera_vfs_lease_ack(&open_file->caching_lease, kept);
+                chimera_vfs_lease_ack(&open_file->grant->lease, kept);
             }
             open_file->lease_state = request->oplock_break.lease_state;
             chimera_smb_open_file_release(request, open_file);
@@ -432,14 +432,14 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
          * NONE).  The lease is genuinely BREAKING here (we no longer ack
          * optimistically), so the canonical ack applies the mode, re-arms a
          * surviving lease, and pumps any parked acquirer. */
-        if (open_file->caching_lease_inserted) {
+        if (open_file->grant) {
             struct chimera_vfs_lease_mode kept = {
                 .granted = (request->oplock_break.oplock_level ==
                             SMB2_OPLOCK_LEVEL_II) ? CHIMERA_VFS_LEASE_MODE_R : 0,
                 .denied  = 0,
             };
 
-            chimera_vfs_lease_ack(&open_file->caching_lease, kept);
+            chimera_vfs_lease_ack(&open_file->grant->lease, kept);
         }
         (void) vfs_state;
 

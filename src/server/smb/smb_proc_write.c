@@ -228,9 +228,9 @@ chimera_smb_write(struct chimera_smb_request *request)
     struct chimera_vfs_lease_owner io_owner;
     io_owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
     io_owner.client_key = request->session_handle->session->session_id;
-    if (request->write.open_file->caching_lease_inserted) {
-        io_owner.owner_lo = request->write.open_file->caching_lease.owner.owner_lo;
-        io_owner.owner_hi = request->write.open_file->caching_lease.owner.owner_hi;
+    if (request->write.open_file->grant) {
+        io_owner.owner_lo = request->write.open_file->grant->lease.owner.owner_lo;
+        io_owner.owner_hi = request->write.open_file->grant->lease.owner.owner_hi;
     } else {
         io_owner.owner_lo = request->write.open_file->file_id.pid;
         io_owner.owner_hi = request->write.open_file->file_id.vid;
