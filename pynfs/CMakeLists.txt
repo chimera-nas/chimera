@@ -26,9 +26,9 @@ set(PYNFS_FLAGS_0
 
 # NFSv4.1 test flags
 set(PYNFS_FLAGS_1
-    compound courteous create_session currentstateid deleg destroy_clientid
-    destroy_session exchange_id getfh lookup lookupp open putfh reclaim_complete
-    rename sequence verify xattr)
+    bind_conn_to_session compound courteous create_session currentstateid deleg
+    destroy_clientid destroy_session exchange_id getfh lookup lookupp open putfh
+    reclaim_complete rename sequence verify xattr)
 
 # NFSv4.2 test flags (4.1 flags plus copy and sparse)
 set(PYNFS_FLAGS_2 ${PYNFS_FLAGS_1} copy sparse)
