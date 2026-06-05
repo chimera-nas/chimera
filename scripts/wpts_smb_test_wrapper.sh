@@ -245,13 +245,14 @@ fi
 
 # When transport compression is enabled, advertise the supported algorithms and
 # a compressed share so the SMB2Compression cases become applicable. Chimera
-# implements Plain LZ77 and the chained Pattern_V1 run-length payload.
+# implements Plain LZ77, LZNT1, LZ77+Huffman and the chained Pattern_V1
+# run-length payload.
 if [ "${CHIMERA_SMB_COMPRESSION:-0}" = "1" ]; then
     staged="${WPTS_BIN_DIR}/CommonTestSuite.deployment.ptfconfig"
     sed -i \
         -e 's#<Property name="CompressedFileShare" value=""/>#<Property name="CompressedFileShare" value="SMBBasic"/>#' \
         -e 's#<Property name="IsChainedCompressionSupported" value="false"/>#<Property name="IsChainedCompressionSupported" value="true"/>#' \
-        -e 's#<Property name="SupportedCompressionAlgorithms" value=""/>#<Property name="SupportedCompressionAlgorithms" value="LZ77;Pattern_V1"/>#' \
+        -e 's#<Property name="SupportedCompressionAlgorithms" value=""/>#<Property name="SupportedCompressionAlgorithms" value="LZ77;LZNT1;LZ77Huffman;Pattern_V1"/>#' \
         "$staged"
 fi
 

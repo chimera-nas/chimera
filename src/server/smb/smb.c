@@ -546,14 +546,28 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
      * headers stay as the transform's uncompressed prefix), mirroring Windows.
      * The actual compression happens either inline (plaintext send) below or, for
      * an encrypted reply, in the compress-then-encrypt path further down. */
-    int comp_lz77 = 0, comp_pattern = 0, comp_chained = 0, comp_buf_off = -1, k;
+    int      comp_lz77 = 0, comp_huff = 0, comp_lznt1 = 0, comp_pattern = 0;
+    int      comp_chained = 0, comp_buf_off = -1, k;
+    uint16_t comp_alg = 0;
 
     for (k = 0; k < conn->negotiated.compression_alg_count; k++) {
-        if (conn->negotiated.compression_algs[k] == SMB2_COMPRESSION_LZ77) {
-            comp_lz77 = 1;
-        } else if (conn->negotiated.compression_algs[k] == SMB2_COMPRESSION_PATTERN_V1) {
-            comp_pattern = 1;
-        }
+        switch (conn->negotiated.compression_algs[k]) {
+            case SMB2_COMPRESSION_LZ77:         comp_lz77    = 1;    break;
+            case SMB2_COMPRESSION_LZ77_HUFFMAN: comp_huff    = 1;    break;
+            case SMB2_COMPRESSION_LZNT1:        comp_lznt1   = 1;   break;
+            case SMB2_COMPRESSION_PATTERN_V1:   comp_pattern = 1; break;
+            default:                                              break;
+        } /* switch */
+    }
+
+    /* Pick the unchained codec for a compressed READ response, preferring Plain
+     * LZ77.  A test that negotiated only one codec gets that one. */
+    if (comp_lz77) {
+        comp_alg = SMB2_COMPRESSION_LZ77;
+    } else if (comp_huff) {
+        comp_alg = SMB2_COMPRESSION_LZ77_HUFFMAN;
+    } else if (comp_lznt1) {
+        comp_alg = SMB2_COMPRESSION_LZNT1;
     }
 
     if (compound->num_requests == 1 &&
@@ -568,7 +582,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     comp_chained = comp_pattern &&
         (conn->negotiated.compression_flags & SMB2_COMPRESSION_FLAG_CHAINED);
 
-    int comp_applicable = comp_lz77 && comp_buf_off > 0 &&
+    int comp_applicable = (comp_alg != 0 || comp_chained) && comp_buf_off > 0 &&
         conn->protocol != EVPL_DATAGRAM_RDMACM_RC;
 
     if (!will_encrypt && comp_applicable) {
@@ -576,7 +590,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         int               comp_total;
 
         rc = chimera_smb_compress_message(thread->compress_ctx, evpl,
-                                          SMB2_COMPRESSION_LZ77, comp_chained, comp_buf_off,
+                                          comp_alg, comp_chained, comp_buf_off,
                                           reply_iov, reply_niov,
                                           reply_payload_length, reply_hdr_len,
                                           &comp_iov, &comp_total);
@@ -644,7 +658,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
                     int comp_total;
 
                     if (chimera_smb_compress_message(thread->compress_ctx, evpl,
-                                                     SMB2_COMPRESSION_LZ77, comp_chained,
+                                                     comp_alg, comp_chained,
                                                      comp_buf_off, reply_iov, reply_niov,
                                                      reply_payload_length, reply_hdr_len,
                                                      &comp_iov, &comp_total) == 0) {

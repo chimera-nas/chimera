@@ -244,15 +244,18 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # smb_compression enabled (the wrapper sets it from CHIMERA_SMB_COMPRESSION,
     # which also advertises the supported algorithms + a compressed share in the
     # ptfconfig).  Allowlist = every applicable compression case confirmed green
-    # against the current server.  Left out: the LZ77Huffman / LZNT1 / *_Encrypted
-    # variants (those codecs and the compression+encryption combination are not
-    # yet implemented, so the SUT does not advertise them and the cases skip) and
-    # ChainedCompressionNotSupported (inapplicable — the SUT supports chaining).
+    # against the current server.  Left out: ChainedCompressionNotSupported
+    # (inapplicable — the SUT supports chaining).  Note: the LZ77+Huffman *encoder*
+    # is single-block (<=64KiB), which suffices because each READ response is bound
+    # by the read size; the *decoder* is multi-block, so a large compressed WRITE
+    # decompresses correctly.
     set(WPTS_SMB2_COMPRESSION_ALLOWLIST
         BVT_Negotiate_SMB311_CompressionEnabled
         BVT_Negotiate_SMB311_Compression_IsChainedCompressionSupported
         BVT_SMB2Compression_Chained_PatternV1
         BVT_SMB2Compression_LZ77
+        BVT_SMB2Compression_LZ77Huffman
+        BVT_SMB2Compression_LZNT1
         BVT_SMB2Compression_Unchained
         BVT_SMB2Compression_Unchained_LargeFile
         Negotiate_SMB311_Compression_CompressionAlgorithmEmpty
@@ -283,7 +286,9 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         SMB2Compression_InvalidCompressedPacketLength
         SMB2Compression_InvalidCompressionAlgorithm
         SMB2Compression_InvalidDecompressedProtocolId
-        SMB2Compression_LZ77_LargeFile)
+        SMB2Compression_LZ77_LargeFile
+        SMB2Compression_LZ77Huffman_LargeFile
+        SMB2Compression_LZNT1_LargeFile)
 
     foreach(tc ${WPTS_SMB2_COMPRESSION_ALLOWLIST})
         add_test(NAME chimera/server/smb/wpts/memfs_compression/${tc}
@@ -372,11 +377,11 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # Compression + encryption combined cases (compress-then-encrypt, MS-SMB2
     # §3.1.4.4).  The wrapper enables both smb_compression and smb_encryption so a
     # compressed WRITE arrives encrypted (decrypt-then-decompress) and a
-    # compressed READ response is produced (compress-then-encrypt).  Only the
-    # implemented codecs are listed; LZ77+Huffman / LZNT1 encrypted variants skip
-    # for the same reason their plaintext variants do.
+    # compressed READ response is produced (compress-then-encrypt).
     set(WPTS_SMB2_COMPRESSION_ENCRYPTION_ALLOWLIST
         BVT_SMB2Compression_LZ77_Encrypted
+        BVT_SMB2Compression_LZNT1_Encrypted
+        BVT_SMB2Compression_LZ77Huffman_Encrypted
         BVT_SMB2Compression_Chained_PatternV1_Encrypted
         Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext)
 

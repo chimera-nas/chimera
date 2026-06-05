@@ -52,6 +52,45 @@ chimera_smb_lz77_compress(
     int            out_cap);
 
 /*
+ * MS-XCA LZNT1 buffer codec.  decompress() produces up to out_len bytes and
+ * returns the count (the caller checks it matches the expected size); compress()
+ * returns the compressed length or -1 if it would not fit.  Exposed for unit
+ * tests.
+ */
+int
+chimera_smb_lznt1_decompress(
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_len);
+
+int
+chimera_smb_lznt1_compress(
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_cap);
+
+/*
+ * MS-XCA LZ77+Huffman buffer codec.  decompress() produces up to out_len bytes
+ * and returns the count; compress() returns the compressed length or -1.
+ * Exposed for unit tests.
+ */
+int
+chimera_smb_lz77huffman_decompress(
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_len);
+
+int
+chimera_smb_lz77huffman_compress(
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_cap);
+
+/*
  * Decompress a received SMB2 COMPRESSION_TRANSFORM message.  cursor is
  * positioned at the compression transform header (immediately after the 4-byte
  * NetBIOS framing); length is the transform header plus payload byte count.
