@@ -53,6 +53,12 @@ struct chimera_vfs_file_state {
     struct chimera_vfs_lease           *share_resvs;
     struct chimera_vfs_lease           *caching_leases;
 
+    /* Owner-keyed index of VFS-owned caching grants on this file.  Each grant's
+     * embedded lease is linked on caching_leases above (so the conflict matrix
+     * sees it); this index lets an acquire find an existing same-owner grant to
+     * coalesce onto.  One grant per (protocol, client_key, owner_lo, owner_hi). */
+    struct chimera_vfs_caching_grant   *caching_grants;
+
     /* Implicit lease held by chimera itself on behalf of leaseless actors
      * (NFSv3/S3/NFSv4 data I/O).  When active it is linked into share_resvs
      * like any other SHARE; it is kept across operations and dropped only
@@ -167,6 +173,44 @@ chimera_vfs_state_remove(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_lease      *lease);
+
+/* -------------------------------------------------------------------- */
+/* Caching grant — VFS-owned shared caching lease                       */
+/* -------------------------------------------------------------------- */
+
+/* Acquire a reference to the caching grant for (file, owner), creating it if
+ * none exists.  Caller must NOT hold file->lock.
+ *
+ *   - Existing same-owner grant found → coalesce: bump its refcount and, if
+ *     `upgrade_ok` and `want` adds bits, upgrade IN PLACE only if the larger
+ *     mode is grantable without breaking another owner's holder (MS-SMB2
+ *     3.3.5.9: an upgrade never breaks another lease — if it would, the grant
+ *     keeps its current mode).  Always returns GRANTED.
+ *   - No existing grant → allocate one, run the normal conflict/break logic
+ *     against OTHER owners (chimera_vfs_state_try_insert).  Returns GRANTED
+ *     (grant_out set, refcount 1), BREAKING, or DENIED (grant_out NULL,
+ *     conflict_out set).
+ *
+ * `owner` carries the identity 4-tuple AND the break/revoke/alive callbacks +
+ * cb_private + op_handle, copied onto the grant's embedded lease.  On GRANTED
+ * the caller holds one reference, released via chimera_vfs_caching_grant_release. */
+enum chimera_vfs_lease_result
+chimera_vfs_caching_grant_acquire(
+    struct chimera_vfs_state             *state,
+    struct chimera_vfs_file_state        *file,
+    const struct chimera_vfs_lease_owner *owner,
+    struct chimera_vfs_lease_mode         want,
+    int                                   upgrade_ok,
+    struct chimera_vfs_caching_grant    **grant_out,
+    struct chimera_vfs_lease            **conflict_out);
+
+/* Drop one reference to a caching grant.  On the last reference the embedded
+ * lease is unlinked from the file, pending/io waiters are pumped, and the grant
+ * is freed.  Caller must NOT hold file->lock. */
+void
+chimera_vfs_caching_grant_release(
+    struct chimera_vfs_state         *state,
+    struct chimera_vfs_caching_grant *grant);
 
 /* -------------------------------------------------------------------- */
 /* Async acquire/release                                                */
