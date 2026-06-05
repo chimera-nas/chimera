@@ -983,6 +983,9 @@ struct diskfs_intent_log {
     int                              ready;           /* atomic: commit thread up */
     int                              shutdown;        /* atomic */
     int                              commit_alive;    /* atomic: 1 while the commit thread's wake_doorbell is live; the push thread must not ring it once 0 (cleared before the commit thread is destroyed, which closes that fd) */
+    struct evpl_poll                *sq_poll;         /* polls all channel SQs every loop iteration */
+    int                              awake;           /* atomic (seq_cst): 1 while the commit thread is in poll mode (not blocked).  A submitter skips ringing wake_doorbell when this is set; see diskfs_iq_try_submit / diskfs_il_poll_exit. */
+    int                              reg_dirty;       /* atomic (seq_cst): a channel (un)registration is pending.  Set by workers after touching pending_head / unregister_requested; the commit thread's per-iteration poll services it without waiting for the wake doorbell (which is starved while we stay in continuous poll mode under load). */
     uint32_t                         num_channels;
     struct diskfs_iq_channel        *channels[DISKFS_IL_MAX_CHANNELS];
     pthread_mutex_t                  registration_lock;
@@ -1066,6 +1069,8 @@ struct diskfs_thread {
     struct diskfs_txn           *txn_free_list;
     struct diskfs_inode_waiter  *waiter_free_list;
     struct diskfs_iq_channel    *iq_channel;
+    struct evpl_poll            *cq_poll;          /* drains this worker's IL completion queue every loop iteration */
+    uint32_t                     commits_inflight; /* commits handed to the IL not yet completed; pins poll mode while > 0 */
     int                          pending_io;
 
     /* Commits that found the IL submission queue full park here (FIFO) and are
@@ -7389,13 +7394,15 @@ diskfs_redo_write_cb(
         diskfs_txn_apply_frees(rc->entry.txn);
         diskfs_txn_unlock_all(rc->entry.txn);
 
-        /* ACK the worker. */
+        /* ACK the worker by posting the CQE.  No doorbell: the worker is pinned
+         * in poll mode while it has a commit outstanding (diskfs_txn_commit_finish),
+         * so it reaps this via diskfs_iq_cq_poll every loop iteration.  The
+         * cq_doorbell remains registered only as a backstop. */
         rc->entry.status                              = 0;
         cq_tail                                       = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
         ch->cq.entries[cq_tail & DISKFS_IQ_RING_MASK] = rc->entry;
         __atomic_store_n(&ch->cq.tail, cq_tail + 1, __ATOMIC_RELEASE);
         ch->cq_inflight--;
-        evpl_ring_doorbell(&ch->cq_doorbell);
 
         /* Hand the durable record to the push thread, in log order.  The
          * hand-off ring is sized larger than the log can ever hold, so it
@@ -7673,17 +7680,18 @@ diskfs_intent_log_drain_pending(struct diskfs_intent_log *il)
     diskfs_il_commit_metrics(il);
 } /* diskfs_intent_log_drain_pending */
 
+/* Drain newly-registered channels into the slot array and compact out any that
+ * requested unregistration.  Rare (worker-thread lifecycle), so it stays on the
+ * wake-doorbell path rather than the per-iteration poll. */
 static void
-diskfs_intent_log_wake_cb(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell)
+diskfs_il_service_registrations(struct diskfs_intent_log *il)
 {
-    struct diskfs_intent_log *il = container_of(doorbell,
-                                                struct diskfs_intent_log,
-                                                wake_doorbell);
-    uint32_t                  i;
+    uint32_t i;
 
-    (void) evpl;
+    /* Clear the dirty flag before we read pending_head / scan for unregisters,
+     * so a (un)registration published after this point re-sets it and is picked
+     * up on a later poll rather than being lost. */
+    __atomic_store_n(&il->reg_dirty, 0, __ATOMIC_SEQ_CST);
 
     diskfs_intent_log_drain_pending(il);
 
@@ -7705,11 +7713,118 @@ diskfs_intent_log_wake_cb(
         }
         i++;
     }
+} /* diskfs_il_service_registrations */
+
+/* Process every registered channel's SQ.  Returns 1 if any channel had work. */
+static int
+diskfs_il_process_all(struct diskfs_intent_log *il)
+{
+    uint32_t i;
+    int      worked = 0;
 
     for (i = 0; i < il->num_channels; i++) {
-        diskfs_iq_process_channel(il->channels[i]);
+        struct diskfs_iq_channel *ch = il->channels[i];
+
+        if (__atomic_load_n(&ch->sq.tail, __ATOMIC_ACQUIRE) !=
+            __atomic_load_n(&ch->sq.head, __ATOMIC_RELAXED)) {
+            worked = 1;
+        }
+        diskfs_iq_process_channel(ch);
     }
+    return worked;
+} /* diskfs_il_process_all */
+
+/* Seq-cst re-scan for the poll-exit wakeup handshake (diskfs_iq_try_submit). */
+static int
+diskfs_il_has_sq_work(struct diskfs_intent_log *il)
+{
+    uint32_t i;
+
+    for (i = 0; i < il->num_channels; i++) {
+        struct diskfs_iq_channel *ch = il->channels[i];
+
+        if (__atomic_load_n(&ch->sq.tail, __ATOMIC_SEQ_CST) !=
+            __atomic_load_n(&ch->sq.head, __ATOMIC_SEQ_CST)) {
+            return 1;
+        }
+    }
+    return 0;
+} /* diskfs_il_has_sq_work */
+
+/* The wake doorbell only needs to rouse a sleeping commit thread; once awake,
+* diskfs_il_sq_poll discovers SQ work every iteration without it.  Workers ring
+* it on channel (un)registration and only when the commit thread is asleep. */
+static void
+diskfs_intent_log_wake_cb(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct diskfs_intent_log *il = container_of(doorbell,
+                                                struct diskfs_intent_log,
+                                                wake_doorbell);
+
+    (void) evpl;
+
+    diskfs_il_service_registrations(il);
+    diskfs_il_process_all(il);
 } /* diskfs_intent_log_wake_cb */
+
+/* Per-iteration SQ poll: discover and process committed transactions without
+* waiting for a doorbell.  Scanning an SQ is just two atomic loads, so this is
+* cheap when idle; processing work marks activity to keep us in poll mode. */
+static void
+diskfs_il_sq_poll(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_intent_log *il = private_data;
+
+    /* Pick up channel (un)registrations without waiting for the wake doorbell:
+     * while we stay in continuous poll mode under load the doorbell is starved,
+     * so a freshly-registered channel would otherwise never enter channels[] and
+     * its commits would never be seen.  Gated on a cheap atomic so the common
+     * (no-change) case avoids the registration_lock. */
+    if (__atomic_load_n(&il->reg_dirty, __ATOMIC_ACQUIRE)) {
+        diskfs_il_service_registrations(il);
+    }
+
+    if (diskfs_il_process_all(il)) {
+        evpl_activity(evpl);
+    }
+} /* diskfs_il_sq_poll */
+
+/* Entering poll mode -> the commit thread is awake and polling the SQs. */
+static void
+diskfs_il_poll_enter(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_intent_log *il = private_data;
+
+    (void) evpl;
+    __atomic_store_n(&il->awake, 1, __ATOMIC_SEQ_CST);
+} /* diskfs_il_poll_enter */
+
+/* Leaving poll mode (about to block).  Publish "asleep", then re-scan once: a
+ * submitter that enqueued before observing awake=0 is picked up here; one that
+ * enqueues afterward observes awake=0 and rings the wake doorbell.  Dekker-style
+ * handshake -- the awake flag and the SQ tails are all seq_cst, so a wakeup can
+ * never be lost. */
+static void
+diskfs_il_poll_exit(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_intent_log *il = private_data;
+
+    __atomic_store_n(&il->awake, 0, __ATOMIC_SEQ_CST);
+
+    if (diskfs_il_has_sq_work(il)) {
+        __atomic_store_n(&il->awake, 1, __ATOMIC_SEQ_CST);
+        diskfs_il_process_all(il);
+        evpl_activity(evpl);   /* stay awake; the loop will not block this pass */
+    }
+} /* diskfs_il_poll_exit */
 
 /* Push one txn onto this worker's IL submission queue.  Returns 1 on success,
  * 0 if the SQ is full.  The completion fires later from the CQ doorbell. */
@@ -7739,9 +7854,16 @@ diskfs_iq_try_submit(
     slot->status       = 0;
     prometheus_stopwatch_start(&slot->enqueue_time);
 
-    __atomic_store_n(&ch->sq.tail, tail + 1, __ATOMIC_RELEASE);
+    /* Seq-cst so this store is ordered before the awake load below; pairs with
+     * the commit thread's diskfs_il_poll_exit handshake. */
+    __atomic_store_n(&ch->sq.tail, tail + 1, __ATOMIC_SEQ_CST);
 
-    evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
+    /* The commit thread polls every channel's SQ each loop iteration while it is
+     * awake, so the wake doorbell is only needed to rouse it once it has gone to
+     * sleep.  Skip the eventfd write in the common (awake) case. */
+    if (!__atomic_load_n(&shared->intent_log.awake, __ATOMIC_SEQ_CST)) {
+        evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
+    }
     return 1;
 } /* diskfs_iq_try_submit */
 
@@ -7765,6 +7887,61 @@ diskfs_iq_resume_commit_waiters(struct diskfs_thread *thread)
     }
 } /* diskfs_iq_resume_commit_waiters */
 
+/* Drain this worker's completion queue: deliver callbacks, release txns, drop
+ * the poll-mode pin once no commits remain outstanding, and resume any commits
+ * that parked on a full SQ.  Returns the number of completions drained.  Runs
+ * every loop iteration via diskfs_iq_cq_poll (the fast path, while the worker is
+ * poll-pinned) and also from the CQ doorbell as a backstop. */
+static int
+diskfs_iq_drain_cq(struct diskfs_iq_channel *ch)
+{
+    struct diskfs_thread     *worker  = ch->worker;
+    struct diskfs_intent_log *il      = &worker->shared->intent_log;
+    uint32_t                  head    = __atomic_load_n(&ch->cq.head, __ATOMIC_RELAXED);
+    uint32_t                  tail    = __atomic_load_n(&ch->cq.tail, __ATOMIC_ACQUIRE);
+    int                       drained = 0;
+
+    while (head != tail) {
+        struct diskfs_iq_entry entry = ch->cq.entries[head & DISKFS_IQ_RING_MASK];
+        head++;
+        drained++;
+
+        diskfs_metric_time_sample(
+            worker->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_CALLBACK],
+            &entry.enqueue_time);
+        diskfs_metric_time_sample(
+            worker->metrics.txn_latency[DISKFS_METRIC_TXN_DURABLE_TO_CALLBACK],
+            &entry.durable_time);
+
+        /* The txn's logical inode locks were already dropped by the intent
+         * log thread (diskfs_iq_process_channel); just deliver completion. */
+        entry.cb(entry.txn, entry.status, entry.private_data);
+        diskfs_txn_release(entry.txn);
+
+        /* Last outstanding commit done -> release the poll-mode pin taken in
+         * diskfs_txn_commit_finish so the worker may sleep again when idle. */
+        if (--worker->commits_inflight == 0) {
+            evpl_poll_unpin(worker->evpl);
+        }
+    }
+
+    if (drained > 0) {
+        __atomic_store_n(&ch->cq.head, head, __ATOMIC_RELEASE);
+        /* Freeing CQ space may let the IL resume a channel it deferred; it sees
+         * that on its next poll if awake, so only rouse it if it is asleep. */
+        if (!__atomic_load_n(&il->awake, __ATOMIC_SEQ_CST)) {
+            evpl_ring_doorbell(&il->wake_doorbell);
+        }
+    }
+
+    /* The IL has now consumed SQ entries (freeing space), so retry any commits
+     * that parked on a full SQ.  No-op when none are waiting. */
+    diskfs_iq_resume_commit_waiters(worker);
+    return drained;
+} /* diskfs_iq_drain_cq */
+
+/* Backstop: drain on the doorbell (rarely rung now -- the worker polls the CQ
+ * every iteration while pinned). */
 static void
 diskfs_iq_cq_doorbell_cb(
     struct evpl          *evpl,
@@ -7773,41 +7950,26 @@ diskfs_iq_cq_doorbell_cb(
     struct diskfs_iq_channel *ch = container_of(doorbell,
                                                 struct diskfs_iq_channel,
                                                 cq_doorbell);
-    uint32_t                  head    = __atomic_load_n(&ch->cq.head, __ATOMIC_RELAXED);
-    uint32_t                  tail    = __atomic_load_n(&ch->cq.tail, __ATOMIC_ACQUIRE);
-    int                       drained = 0;
 
     (void) evpl;
-
-    while (head != tail) {
-        struct diskfs_iq_entry entry = ch->cq.entries[head & DISKFS_IQ_RING_MASK];
-        head++;
-        drained++;
-
-        diskfs_metric_time_sample(
-            ch->worker->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_CALLBACK],
-            &entry.enqueue_time);
-        diskfs_metric_time_sample(
-            ch->worker->metrics.txn_latency[DISKFS_METRIC_TXN_DURABLE_TO_CALLBACK],
-            &entry.durable_time);
-
-        /* The txn's logical inode locks were already dropped by the intent
-         * log thread (diskfs_iq_process_channel); just deliver completion. */
-        entry.cb(entry.txn, entry.status, entry.private_data);
-        diskfs_txn_release(entry.txn);
-    }
-
-    if (drained > 0) {
-        __atomic_store_n(&ch->cq.head, head, __ATOMIC_RELEASE);
-        /* Wake the intent log thread in case it had deferred work on
-         * this channel because the CQ was full. */
-        evpl_ring_doorbell(&ch->worker->shared->intent_log.wake_doorbell);
-    }
-
-    /* The IL thread has now consumed SQ entries (freeing space), so retry any
-     * commits that parked on a full SQ.  No-op when none are waiting. */
-    diskfs_iq_resume_commit_waiters(ch->worker);
+    diskfs_iq_drain_cq(ch);
 } /* diskfs_iq_cq_doorbell_cb */
+
+/* Per-iteration completion poll.  While a commit is outstanding the worker is
+ * pinned in poll mode (diskfs_txn_commit_finish), so completions are reaped
+ * within a loop iteration instead of waiting for the doorbell at the spin
+ * boundary. */
+static void
+diskfs_iq_cq_poll(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_iq_channel *ch = private_data;
+
+    if (diskfs_iq_drain_cq(ch)) {
+        evpl_activity(evpl);
+    }
+} /* diskfs_iq_cq_poll */
 
 static void *
 diskfs_intent_log_thread_init(
@@ -7846,6 +8008,21 @@ diskfs_intent_log_thread_init(
 
     (void) i;
     evpl_add_doorbell(evpl, &il->wake_doorbell, diskfs_intent_log_wake_cb);
+
+    /* Poll all channel SQs every loop iteration (cheap atomic loads) so commit
+     * pickup never waits for the wake doorbell; the doorbell only rouses us when
+     * we have actually gone to sleep.  Start "awake" -- we are about to spin. */
+    /* awake must track the loop's poll_mode, which starts at 0 (the thread is
+     * event-driven until activity pulls it into poll mode).  Initialising this
+     * to 1 would lie -- a submitter would skip the wake doorbell believing we
+     * are polling while we are actually asleep, stranding the commit until some
+     * unrelated doorbell happens to wake us.  poll_enter/poll_exit own it from
+     * here; it is 0 (asleep) until the first poll_enter. */
+    __atomic_store_n(&il->awake, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&il->reg_dirty, 1, __ATOMIC_SEQ_CST);   /* service any channels registered before we started polling */
+    il->sq_poll = evpl_add_poll(evpl, diskfs_il_poll_enter, diskfs_il_poll_exit,
+                                diskfs_il_sq_poll, il);
+
     __atomic_store_n(&il->ready, 1, __ATOMIC_RELEASE);
     return il;
 } /* diskfs_intent_log_thread_init */
@@ -7865,6 +8042,7 @@ diskfs_intent_log_thread_shutdown(
         evpl_continue(evpl);
     }
 
+    evpl_remove_poll(evpl, il->sq_poll);
     evpl_remove_doorbell(evpl, &il->wake_doorbell);
     if (il->log_queue) {
         evpl_block_close_queue(evpl, il->log_queue);
@@ -7994,6 +8172,14 @@ diskfs_txn_commit_finish(
      * itself running under evpl_continue (e.g. the close-thread sweep), which
      * recurses without bound.  If commits are already parked, queue behind them
      * to preserve submission order. */
+    /* This commit is entering the intent-log pipeline (submitted now or parked
+    * for later).  Pin the worker in poll mode so it keeps draining its CQ
+    * every iteration (diskfs_iq_cq_poll) and never sleeps with a commit
+    * outstanding; released in diskfs_iq_drain_cq when the commit completes. */
+    if (thread->commits_inflight++ == 0) {
+        evpl_poll_pin(thread->evpl);
+    }
+
     if (!thread->commit_wait_head &&
         diskfs_iq_try_submit(thread, txn, cb, private_data)) {
         return;
@@ -9473,8 +9659,13 @@ diskfs_thread_init(
      * doorbell on the worker's own evpl. */
     thread->iq_channel         = calloc(1, sizeof(*thread->iq_channel));
     thread->iq_channel->worker = thread;
+    thread->commits_inflight   = 0;
     evpl_add_doorbell(evpl, &thread->iq_channel->cq_doorbell,
                       diskfs_iq_cq_doorbell_cb);
+    /* Reap intent-log completions every loop iteration (the worker is pinned in
+     * poll mode while a commit is outstanding); the doorbell is only a backstop. */
+    thread->cq_poll = evpl_add_poll(evpl, NULL, NULL, diskfs_iq_cq_poll,
+                                    thread->iq_channel);
 
     /* Inode lock-grant delivery queue + doorbell. */
     pthread_mutex_init(&thread->grant_lock, NULL);
@@ -9510,6 +9701,10 @@ diskfs_thread_init(
     shared->intent_log.pending_head  = thread->iq_channel;
     pthread_mutex_unlock(&shared->intent_log.registration_lock);
 
+    /* Publish "registration pending" before the doorbell: the commit thread
+     * services this from its per-iteration poll (reg_dirty) when awake, or from
+     * the wake doorbell when asleep. */
+    __atomic_store_n(&shared->intent_log.reg_dirty, 1, __ATOMIC_SEQ_CST);
     evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
 
     return thread;
@@ -9577,12 +9772,14 @@ diskfs_thread_destroy(void *private_data)
         struct diskfs_iq_channel *ch = thread->iq_channel;
 
         __atomic_store_n(&ch->unregister_requested, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&shared->intent_log.reg_dirty, 1, __ATOMIC_SEQ_CST);
         evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
 
         while (!__atomic_load_n(&ch->unregister_done, __ATOMIC_ACQUIRE)) {
             /* spin */
         }
 
+        evpl_remove_poll(thread->evpl, thread->cq_poll);
         evpl_remove_doorbell(thread->evpl, &ch->cq_doorbell);
         free(ch);
         thread->iq_channel = NULL;
