@@ -192,6 +192,10 @@ struct chimera_smb_session {
     uint64_t                    session_id;
     uint32_t                    refcnt;
     uint32_t                    flags;
+    /* Dialect of the connection this session was established on (MS-SMB2
+     * Session.Connection.Dialect).  A PreviousSessionId reconnect whose
+     * connection negotiated a different dialect is rejected. */
+    uint16_t                    dialect;
     struct UT_hash_handle       hh;
     struct chimera_smb_session *prev;
     struct chimera_smb_session *next;

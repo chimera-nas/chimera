@@ -168,6 +168,10 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
     if ((rc == 0 || rc == 1) && !request->session_handle) {
         session = chimera_smb_session_alloc(shared);
 
+        /* Record the connection's negotiated dialect so a later
+         * PreviousSessionId reconnect can enforce MS-SMB2 3.3.5.5.1. */
+        session->dialect = conn->dialect;
+
         session_handle = chimera_smb_session_handle_alloc(thread);
 
         session_handle->session_id = session->session_id;
@@ -345,11 +349,23 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         }
 
         /* If the client named a previous session (reconnect on a fresh
-         * transport), close it now that this one is established. */
-        if (request->session_setup.prev_session_id) {
+         * transport), close it now that this one is established.  MS-SMB2
+         * 3.3.5.5.1: when the previous session was negotiated at a different
+         * dialect than this connection, the reconnect is rejected -- close the
+         * just-created session and fail with STATUS_USER_SESSION_DELETED
+         * (smb2.session ReconnectWithDifferentDialect). */
+        if (request->session_setup.prev_session_id &&
             chimera_smb_session_invalidate_previous(thread, shared,
                                                     request->session_setup.prev_session_id,
-                                                    session);
+                                                    session, conn->dialect)) {
+            chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
+
+            HASH_DEL(conn->session_handles, request->session_handle);
+            chimera_smb_session_release(thread, shared, session, false);
+            chimera_smb_session_handle_free(thread, request->session_handle);
+            request->session_handle   = NULL;
+            conn->last_session_handle = NULL;
+            return;
         }
 
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
