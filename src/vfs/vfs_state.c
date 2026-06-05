@@ -1174,6 +1174,61 @@ chimera_vfs_caching_grant_find_locked(
     return NULL;
 } /* chimera_vfs_caching_grant_find_locked */
 
+SYMBOL_EXPORT struct chimera_vfs_caching_grant *
+chimera_vfs_caching_grant_coalesce(
+    struct chimera_vfs_file_state        *file,
+    const struct chimera_vfs_lease_owner *owner,
+    struct chimera_vfs_lease_mode         want,
+    int                                   upgrade_ok)
+{
+    struct chimera_vfs_caching_grant *grant;
+
+    pthread_mutex_lock(&file->lock);
+    grant = chimera_vfs_caching_grant_find_locked(file, owner);
+    if (grant) {
+        grant->refcount++;
+
+        if (upgrade_ok) {
+            uint8_t cur = grant->lease.mode.granted;
+
+            /* MS-SMB2 3.3.5.9.11: a lease is upgraded to the REQUESTED state only
+             * when that state is a (strict) superset of the currently held state;
+             * a request that is not a superset (a downgrade, or a lateral move such
+             * as RH -> RW) leaves the lease unchanged.  This is not a bitwise union:
+             * RH + a request for RW stays RH, it does not become RWH. */
+            if (want.granted != cur &&
+                (want.granted & cur) == cur) {
+                struct chimera_vfs_lease  probe    = grant->lease;
+                struct chimera_vfs_lease *conflict = NULL;
+
+                /* And only if the larger mode is grantable without breaking another
+                 * owner's holder (would_conflict coalesces our own same-owner
+                 * lease).  Never break another lease for an upgrade -- keep the
+                 * current mode otherwise. */
+                probe.mode.granted = want.granted;
+                if (chimera_vfs_state_would_conflict(file, &probe, &conflict) ==
+                    CHIMERA_VFS_LEASE_GRANTED) {
+                    grant->lease.mode.granted = want.granted;
+                    grant->epoch++;
+                }
+            }
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+    return grant;
+} /* chimera_vfs_caching_grant_coalesce */
+
+SYMBOL_EXPORT void
+chimera_vfs_caching_grant_link(
+    struct chimera_vfs_file_state    *file,
+    struct chimera_vfs_caching_grant *grant)
+{
+    pthread_mutex_lock(&file->lock);
+    grant->grant_next    = file->caching_grants;
+    file->caching_grants = grant;
+    pthread_mutex_unlock(&file->lock);
+} /* chimera_vfs_caching_grant_link */
+
 SYMBOL_EXPORT enum chimera_vfs_lease_result
 chimera_vfs_caching_grant_acquire(
     struct chimera_vfs_state             *state,
@@ -1193,35 +1248,11 @@ chimera_vfs_caching_grant_acquire(
     }
 
     /* Coalesce onto an existing same-owner grant. */
-    pthread_mutex_lock(&file->lock);
-    grant = chimera_vfs_caching_grant_find_locked(file, owner);
+    grant = chimera_vfs_caching_grant_coalesce(file, owner, want, upgrade_ok);
     if (grant) {
-        grant->refcount++;
-
-        if (upgrade_ok) {
-            uint8_t target = grant->lease.mode.granted | want.granted;
-
-            if (target != grant->lease.mode.granted) {
-                struct chimera_vfs_lease  probe    = grant->lease;
-                struct chimera_vfs_lease *conflict = NULL;
-
-                /* Upgrade in place only if the larger mode is grantable without
-                 * breaking another owner's holder (would_conflict coalesces our
-                 * own same-owner lease).  Never break another lease for an
-                 * upgrade -- keep the current mode otherwise (MS-SMB2 3.3.5.9). */
-                probe.mode.granted = target;
-                if (chimera_vfs_state_would_conflict(file, &probe, &conflict) ==
-                    CHIMERA_VFS_LEASE_GRANTED) {
-                    grant->lease.mode.granted = target;
-                    grant->epoch++;
-                }
-            }
-        }
-        pthread_mutex_unlock(&file->lock);
         *grant_out = grant;
         return CHIMERA_VFS_LEASE_GRANTED;
     }
-    pthread_mutex_unlock(&file->lock);
 
     /* No existing grant: allocate one and arbitrate against other owners. */
     grant = calloc(1, sizeof(*grant));

@@ -166,8 +166,14 @@ chimera_smb_lease_break_cb(
     uint8_t                   needed_mode,
     void                     *private_data)
 {
-    struct chimera_vfs_caching_grant *grant = private_data;
+    /* Resolve the grant from the lease's own back-pointer rather than cb_private:
+     * a fresh grant is linked (and so becomes breakable) before its SMB cb_private
+     * is stamped, but lease->grant is set under the file lock at allocation, so it
+     * is always valid here. */
+    struct chimera_vfs_caching_grant *grant = lease->grant;
     struct chimera_vfs_file_state    *file  = grant->file;
+
+    (void) private_data;
     struct chimera_smb_open_file     *open_file;
     uint8_t                           new_vfs;
 
@@ -210,7 +216,10 @@ chimera_smb_lease_break_cb(
         uint8_t current_smb = chimera_smb_vfs_to_lease_bits(lease->mode.granted);
         uint8_t new_smb     = chimera_smb_vfs_to_lease_bits(new_vfs);
 
-        open_file->lease_epoch++;
+        /* The lease epoch lives on the GRANT so all coalesced opens share one
+         * monotonic counter (MS-SMB2 3.3.5.9.11): bump it once per break. */
+        grant->epoch++;
+        open_file->lease_epoch = grant->epoch;
         open_file->lease_state = new_smb;
 
         /* break_cb may run on the breaker's thread, but the OPLOCK_BREAK
@@ -229,7 +238,7 @@ chimera_smb_lease_break_cb(
                 memcpy(msg->lease_key, open_file->lease_key, 16);
                 msg->current_state    = current_smb;
                 msg->new_state        = new_smb;
-                msg->new_epoch        = open_file->lease_epoch;
+                msg->new_epoch        = grant->epoch;
                 msg->next             = bt->lease_break_ready;
                 bt->lease_break_ready = msg;
                 pthread_mutex_unlock(&bt->lease_break_lock);

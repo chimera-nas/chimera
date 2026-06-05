@@ -194,6 +194,33 @@ chimera_vfs_state_remove(
  * `owner` carries the identity 4-tuple AND the break/revoke/alive callbacks +
  * cb_private + op_handle, copied onto the grant's embedded lease.  On GRANTED
  * the caller holds one reference, released via chimera_vfs_caching_grant_release. */
+/* If a same-owner caching grant already exists on `file`, take a reference to it
+ * (coalescing this acquirer onto it) and, when `upgrade_ok` and `want` adds bits,
+ * upgrade it IN PLACE only if the larger mode is grantable without breaking
+ * another owner (MS-SMB2 3.3.5.9 — an upgrade never breaks another lease).
+ * Returns the grant (refcount already bumped) or NULL if no same-owner grant
+ * exists.  Caller must NOT hold file->lock.  Used by protocols that register a
+ * per-open holder on the grant: the caller seeds/links its own holder list, so
+ * splitting coalesce out of acquire lets the caller create the fresh grant and
+ * register its first member under one critical section (no breakable-but-
+ * memberless window). */
+struct chimera_vfs_caching_grant *
+chimera_vfs_caching_grant_coalesce(
+    struct chimera_vfs_file_state        *file,
+    const struct chimera_vfs_lease_owner *owner,
+    struct chimera_vfs_lease_mode         want,
+    int                                   upgrade_ok);
+
+/* Link a freshly-created caching grant (whose embedded lease the caller has
+ * already inserted via chimera_vfs_state_try_insert) into the per-file owner
+ * index so later same-owner acquires coalesce onto it.  Caller must NOT hold
+ * file->lock.  Used by callers that drive the fresh-grant insert themselves
+ * (their own settle loop) rather than through chimera_vfs_caching_grant_acquire. */
+void
+chimera_vfs_caching_grant_link(
+    struct chimera_vfs_file_state    *file,
+    struct chimera_vfs_caching_grant *grant);
+
 enum chimera_vfs_lease_result
 chimera_vfs_caching_grant_acquire(
     struct chimera_vfs_state             *state,

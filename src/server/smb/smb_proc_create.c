@@ -776,154 +776,162 @@ chimera_smb_create_after_share(
          * durable handle (MS-SMB2).  The caching_touches_data gate only governs
          * the implicit legacy-oplock path, where an attribute probe must not
          * acquire an oplock. */
-        if (req_vfs != 0 && (caching_touches_data || via_rqls) && backend_copy_safe) {
+        /* A caching lease (oplock / SMB2 lease) lives in a VFS-owned, owner-keyed,
+         * refcounted grant.  Opens by one client under one lease key (RqLs) COALESCE
+         * onto a single grant; legacy oplocks are keyed by file id and so are always
+         * sole members.  We ENTER this block for EVERY RqLs open -- even one that
+         * requests no caching bits -- so a re-open under an existing lease key joins
+         * (and never downgrades) the shared lease (MS-SMB2 3.3.5.9.8: a lease is not
+         * reduced by a subsequent open).  A *fresh* grant is created only when the
+         * open warrants caching (real bits, on a copy-safe backend). */
+        bool want_fresh_caching =
+            (req_vfs != 0 && (caching_touches_data || via_rqls) && backend_copy_safe);
+
+        if (via_rqls || want_fresh_caching) {
             file_state = chimera_vfs_state_get(vfs_state,
                                                oh->fh, oh->fh_len,
                                                oh->fh_hash, true);
             if (file_state) {
-                /* The caching lease lives in a VFS-owned grant (refcounted,
-                 * owner-keyed) rather than embedded in the open_file.  In this
-                 * phase each open allocates its own grant (no cross-open
-                 * coalescing yet); the embedded lease's old settle-loop runs
-                 * unchanged on &grant->lease. */
-                struct chimera_vfs_caching_grant *grant = calloc(1, sizeof(*grant));
+                struct chimera_vfs_caching_grant *grant = NULL;
+                struct chimera_vfs_lease_owner    owner;
+                struct chimera_vfs_lease_mode     want;
 
-                if (!grant) {
-                    chimera_vfs_state_put(vfs_state, file_state);
-                    open_file->lease_state  = 0;
-                    open_file->oplock_level = SMB2_OPLOCK_LEVEL_NONE;
+                memset(&owner, 0, sizeof(owner));
+                owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
+                owner.client_key = request->session_handle->session->session_id;
+                /* vfs_state invokes this to notify the client when another acquirer
+                 * needs the lease; the callback resolves the grant from lease->grant
+                 * and picks a live member to deliver the OPLOCK_BREAK on. */
+                owner.break_cb = chimera_smb_lease_break_cb;
+                /* Anchor to THIS open's VFS handle so a setattr through the same
+                 * handle does not recall the lease against itself.  A coalesced
+                 * second open keeps the first open's handle; that per-open self-skip
+                 * is then conservative, not load-bearing. */
+                owner.op_handle = oh;
+                if (via_rqls) {
+                    /* RqLs: owner identity is the lease key, so same-key opens by
+                     * one client coalesce (the Samba locking.tdb rule). */
+                    memcpy(&owner.owner_lo, request->create.rqls.key, 8);
+                    memcpy(&owner.owner_hi, request->create.rqls.key + 8, 8);
+                    /* Mirror the lease_key onto the open_file for the break
+                     * notification builder and the lease-key resolver. */
+                    memcpy(open_file->lease_key, request->create.rqls.key, 16);
+                    if (request->create.rqls.is_v2) {
+                        memcpy(open_file->parent_lease_key,
+                               request->create.rqls.parent_key, 16);
+                    }
                 } else {
-                    grant->file                   = file_state;
-                    grant->refcount               = 1;
-                    grant->epoch                  = 1;
-                    grant->lease.grant            = grant;
-                    grant->lease.kind             = CHIMERA_VFS_LEASE_CACHING;
-                    grant->lease.mode.granted     = req_vfs;
-                    grant->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-                    grant->lease.owner.client_key = request->session_handle->session->session_id;
-                    /* For RqLs, owner identity is the lease_key (so multiple
-                     * opens with the same key by the same client coalesce —
-                     * the Samba locking.tdb rule).  For legacy oplocks,
-                     * each open is its own owner (use file_id). */
+                    /* Legacy oplock: each open is its own owner (file id). */
+                    owner.owner_lo = open_file->file_id.pid;
+                    owner.owner_hi = open_file->file_id.vid;
+                }
+                open_file->create_conn = request->compound->conn;
+
+                want.granted = req_vfs;
+                want.denied  = 0;
+
+                /* First coalesce onto an existing same-owner grant: refcount + a
+                 * conflict-free in-place upgrade, never a downgrade.  This is what a
+                 * lease re-open does -- including one requesting fewer/no bits, which
+                 * keeps the lease at its current state (3.3.5.9.8). */
+                grant = chimera_vfs_caching_grant_coalesce(file_state, &owner,
+                                                           want, 1 /*upgrade_ok*/);
+                if (grant) {
+                    /* Joined a live grant (it already has member(s)): registering
+                     * this open cannot race a memberless break. */
+                    chimera_smb_grant_add_member(grant, open_file);
+                } else if (want_fresh_caching) {
+                    /* No existing grant: create one and arbitrate against other
+                     * owners, stepping W|H -> R on conflict (the sole-access rule,
+                     * or a holder still mid-downgrade) until a shared read cache is
+                     * grantable.  Reuse the one grant across retries so a kicked-off
+                     * break is not restarted with the wrong needed-mode. */
+                    grant = calloc(1, sizeof(*grant));
+                    if (grant) {
+                        int settle_guard = 6;
+
+                        grant->file     = file_state;
+                        grant->refcount = 1;
+                        /* The grant owns the epoch so coalesced opens and breaks
+                         * share one counter; a v2 lease is granted at the client's
+                         * epoch + 1 (1 for a brand-new lease, 3.3.5.9.11). */
+                        grant->epoch =
+                            (via_rqls && request->create.rqls.is_v2)
+                            ? request->create.rqls.epoch + 1 : 1;
+                        grant->lease.grant            = grant;
+                        grant->lease.kind             = CHIMERA_VFS_LEASE_CACHING;
+                        grant->lease.mode             = want;
+                        grant->lease.owner            = owner;
+                        grant->lease.owner.cb_private = grant;
+
+                        /* Register the member BEFORE the lease becomes visible
+                         * (try_insert links it onto caching_leases): once linked a
+                         * conflicting acquirer can fire the break callback, which
+                         * must find a live member or it revokes the fresh lease. */
+                        chimera_smb_grant_add_member(grant, open_file);
+
+                        result = chimera_vfs_state_try_insert(vfs_state, file_state,
+                                                              &grant->lease, &conflict);
+                        while (result != CHIMERA_VFS_LEASE_GRANTED &&
+                               settle_guard-- > 0) {
+                            if (grant->lease.mode.granted != CHIMERA_VFS_LEASE_MODE_R) {
+                                grant->lease.mode.granted = CHIMERA_VFS_LEASE_MODE_R;
+                            } else if (result != CHIMERA_VFS_LEASE_BREAKING) {
+                                break;
+                            }
+                            result = chimera_vfs_state_try_insert(
+                                vfs_state, file_state, &grant->lease, &conflict);
+                        }
+
+                        if (result == CHIMERA_VFS_LEASE_GRANTED) {
+                            /* Link into the owner index so later same-key opens
+                             * coalesce onto this grant. */
+                            chimera_vfs_caching_grant_link(file_state, grant);
+                        } else {
+                            /* try_insert never linked the lease; drop the member and
+                             * free the grant. */
+                            chimera_smb_grant_remove_member(grant, open_file);
+                            free(grant);
+                            grant = NULL;
+                        }
+                    }
+                }
+
+                if (grant) {
+                    uint8_t granted_vfs = grant->lease.mode.granted;
+
+                    open_file->grant                  = grant;
+                    open_file->caching_file_state     = file_state;
+                    open_file->caching_lease_inserted = true;
+                    /* Report the grant's ACTUAL granted mode: a coalesced open
+                     * inherits the shared lease's current state (an upgrade may have
+                     * widened it; a conflicting peer may have capped it). */
+                    open_file->lease_state =
+                        chimera_smb_vfs_to_lease_bits(granted_vfs);
                     if (via_rqls) {
-                        memcpy(&grant->lease.owner.owner_lo,
-                               request->create.rqls.key, 8);
-                        memcpy(&grant->lease.owner.owner_hi,
-                               request->create.rqls.key + 8, 8);
-                        /* Mirror the lease_key onto the open_file for the
-                         * break notification builder. */
-                        memcpy(open_file->lease_key, request->create.rqls.key, 16);
+                        open_file->oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
                         if (request->create.rqls.is_v2) {
-                            memcpy(open_file->parent_lease_key,
-                                   request->create.rqls.parent_key, 16);
-                            /* MS-SMB2 3.3.5.9.11: granting (or changing) a lease
-                             * increments its epoch; a freshly granted lease returns
-                             * the client's epoch + 1 (1 for a new lease). */
+                            open_file->lease_epoch = grant->epoch;
+                        }
+                    } else {
+                        open_file->oplock_level =
+                            chimera_smb_vfs_to_oplock_level(granted_vfs);
+                    }
+                } else {
+                    /* No caching grant taken.  A bare RqLs lease is still a lease
+                     * (report OPLOCK_LEVEL_LEASE and echo key/epoch in the response);
+                     * a legacy open with no oplock keeps its NONE defaults. */
+                    chimera_vfs_state_put(vfs_state, file_state);
+                    file_state = NULL;
+                    if (via_rqls) {
+                        if (request->create.rqls.is_v2) {
                             open_file->lease_epoch = request->create.rqls.epoch + 1;
                         }
-                    } else {
-                        grant->lease.owner.owner_lo = open_file->file_id.pid;
-                        grant->lease.owner.owner_hi = open_file->file_id.vid;
-                    }
-                    /* Wire the break callback so vfs_state can notify the client
-                     * when another acquirer needs this lease.  cb_private is the
-                     * GRANT (not this open): the grant may be shared by, and
-                     * outlive, the open that created it, so the break callback
-                     * resolves a live member from grant->holders rather than
-                     * dereferencing a single open that may already be gone. */
-                    grant->lease.owner.break_cb   = chimera_smb_lease_break_cb;
-                    grant->lease.owner.cb_private = grant;
-                    /* Anchor the lease to this open's VFS handle so a setattr issued
-                     * through the same handle (e.g. SetEndOfFile) does not recall
-                     * this lease against itself -- the holder is coherent with its
-                     * own change (chimera_vfs_break_caching_file skip_handle). */
-                    grant->lease.owner.op_handle = oh;
-                    open_file->create_conn       = request->compound->conn;
-
-                    /* Register this open as a grant member BEFORE the lease becomes
-                     * visible (try_insert links it onto caching_leases): once linked,
-                     * a conflicting acquirer can invoke the break callback, which
-                     * must find a live member or it will revoke the fresh lease. */
-                    chimera_smb_grant_add_member(grant, open_file);
-
-                    result = chimera_vfs_state_try_insert(vfs_state, file_state,
-                                                          &grant->lease,
-                                                          &conflict);
-
-                    /* Settle on the strongest caching lease actually grantable.
-                     * A conflict has two flavors:
-                     *   - BREAKING: try_insert kicked off a holder's break.  The
-                     *     break is optimistic (the holder downgrades to a shared
-                     *     read immediately), so simply retrying the SAME mode now
-                     *     usually succeeds; if it still conflicts we step down.
-                     *   - DENIED: an exclusive/batch grant is refused because
-                     *     another client has the file open (sole-access rule) or a
-                     *     holder is mid-downgrade; step the request down to a shared
-                     *     read (LEVEL_II), which coexists.
-                     * Loop, stepping W|H -> R, until granted or nothing is left to
-                     * try.  Bounded by the W->R step plus a few optimistic-break
-                     * retries. */
-                    int settle_guard = 6;
-                    while (result != CHIMERA_VFS_LEASE_GRANTED && settle_guard-- > 0) {
-                        if (req_vfs != CHIMERA_VFS_LEASE_MODE_R) {
-                            req_vfs = CHIMERA_VFS_LEASE_MODE_R;
-                        } else if (result != CHIMERA_VFS_LEASE_BREAKING) {
-                            /* Already at R and not merely waiting on an optimistic
-                             * break -- a shared read cache is unobtainable. */
-                            break;
-                        }
-                        grant->lease.mode.granted = req_vfs;
-                        result                    = chimera_vfs_state_try_insert(vfs_state, file_state,
-                                                                                 &grant->lease,
-                                                                                 &conflict);
-                    }
-
-                    if (result == CHIMERA_VFS_LEASE_GRANTED) {
-                        open_file->grant                  = grant;
-                        open_file->caching_file_state     = file_state;
-                        open_file->caching_lease_inserted = true;
-                        /* Record granted SMB-side state on the open_file via the
-                         * canonical encoders (smb_internal.h): lease_state holds the
-                         * SMB lease bits the response emitter wants; oplock_level is
-                         * the legacy collapse of the granted RWH for a non-RqLs open. */
-                        open_file->lease_state = chimera_smb_vfs_to_lease_bits(req_vfs);
-                        if (via_rqls) {
-                            open_file->oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
-                        } else {
-                            open_file->oplock_level = chimera_smb_vfs_to_oplock_level(req_vfs);
-                        }
-                    } else {
-                        /* try_insert never linked the lease on a non-GRANTED
-                         * result, so the grant just frees -- unregister the member
-                         * first (it was added before the insert attempt). */
-                        chimera_smb_grant_remove_member(grant, open_file);
-                        free(grant);
-                        chimera_vfs_state_put(vfs_state, file_state);
                         open_file->lease_state  = 0;
-                        open_file->oplock_level = SMB2_OPLOCK_LEVEL_NONE;
+                        open_file->oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
                     }
                 }
             }
-        } else {
-            if (via_rqls) {
-                /* A lease was requested with no caching bits (LEASE_NONE). It
-                 * is still a lease: report OPLOCK_LEVEL_LEASE and echo the
-                 * lease key / epoch in the response context, but acquire no
-                 * caching lease in vfs_state. */
-                memcpy(open_file->lease_key, request->create.rqls.key, 16);
-                if (request->create.rqls.is_v2) {
-                    memcpy(open_file->parent_lease_key,
-                           request->create.rqls.parent_key, 16);
-                    open_file->lease_epoch = request->create.rqls.epoch + 1;
-                }
-                open_file->lease_state  = 0;
-                open_file->oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
-            }
-
-            /* Any oplock this open needed to break was already broken by the
-             * two-phase break-on-open above (which runs whether or not this
-             * open requests a lease of its own), so there is nothing more to
-             * do for an open that takes no caching lease. */
         }
     }
 
