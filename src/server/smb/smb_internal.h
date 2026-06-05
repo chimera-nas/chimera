@@ -126,6 +126,9 @@ struct chimera_smb_config {
     /* SMB3 transport encryption policy: 0 = off (no encryption advertised),
      * 1 = enabled (offered, used when the client opts in), 2 = required. */
     int                            encryption;
+    /* SMB3 transport compression: 0 = off (no compression advertised),
+     * 1 = enabled (offered, used when the client opts in). */
+    int                            compression;
     /* When set, CHANGE_NOTIFY is disabled for the server's shares: the
      * handler returns STATUS_NOT_IMPLEMENTED immediately instead of arming
      * a watch (the "change notify = no" share behaviour Windows exposes;
@@ -975,6 +978,7 @@ struct chimera_server_smb_thread {
     struct chimera_smb_open_file       *free_open_files;
     struct chimera_smb_signing_ctx     *signing_ctx;
     struct chimera_smb_encrypt_ctx     *encrypt_ctx;
+    struct chimera_smb_compress_ctx    *compress_ctx;
     struct chimera_smb_iconv_ctx        iconv_ctx;
 
     /* Notify doorbell: VFS callbacks push ready notify requests here,

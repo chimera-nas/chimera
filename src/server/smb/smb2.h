@@ -591,13 +591,75 @@ _Static_assert(sizeof(struct smb2_transform_header) == 52,
                "SMB2 TRANSFORM_HEADER must be 52 bytes");
 
 /* TransformHeader.ProtocolId and Flags (MS-SMB2 §2.2.41) */
-#define SMB2_TRANSFORM_PROTO_ID        { 0xFD, 'S', 'M', 'B' }
-#define SMB2_TRANSFORM_FLAGS_ENCRYPTED 0x0001
+#define SMB2_TRANSFORM_PROTO_ID             { 0xFD, 'S', 'M', 'B' }
+#define SMB2_TRANSFORM_FLAGS_ENCRYPTED      0x0001
 
 /* Byte offset and length of the AEAD associated data within the transform
  * header: from the Nonce field (offset 20) through the end of the header. */
-#define SMB2_TRANSFORM_AAD_OFFSET      20
-#define SMB2_TRANSFORM_AAD_SIZE        32
+#define SMB2_TRANSFORM_AAD_OFFSET           20
+#define SMB2_TRANSFORM_AAD_SIZE             32
+
+/*
+ * SMB2 COMPRESSION_TRANSFORM_HEADER (MS-SMB2 §2.2.42) — prepended to a
+ * compressed SMB2 message.  ProtocolId is 0xFC 'S' 'M' 'B' (a 32-bit LE load of
+ * the first four bytes reads as 0x424d53fc).  The header takes one of two forms
+ * selected by Flags: unchained (Flags == SMB2_COMPRESSION_FLAG_NONE) or chained
+ * (Flags == SMB2_COMPRESSION_FLAG_CHAINED).
+ */
+#define SMB2_COMPRESSION_TRANSFORM_PROTO_ID { 0xFC, 'S', 'M', 'B' }
+
+/* Unchained (MS-SMB2 §2.2.42.1), 16 bytes.  The bytes following the header are:
+ * `offset` uncompressed-prefix bytes (typically the SMB2 header left in the
+ * clear), then the compressed segment which decompresses to
+ * original_compressed_segment_size bytes.  The full plaintext message is
+ * offset + original_compressed_segment_size bytes. */
+struct smb2_compression_transform_header {
+    uint8_t  protocol_id[4]; /* 0xFC 'S' 'M' 'B' */
+    uint32_t original_compressed_segment_size;
+    uint16_t compression_algorithm;
+    uint16_t flags;          /* SMB2_COMPRESSION_FLAG_NONE for the unchained form */
+    uint32_t offset;         /* end-of-header -> start of the compressed segment */
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct smb2_compression_transform_header) == 16,
+               "SMB2 COMPRESSION_TRANSFORM_HEADER (unchained) must be 16 bytes");
+
+/* Chained (MS-SMB2 §2.2.42.2), 8 bytes, followed by a chain of
+ * SMB2_COMPRESSION_CHAINED_PAYLOAD_HEADER structures. */
+struct smb2_compression_transform_header_chained {
+    uint8_t  protocol_id[4]; /* 0xFC 'S' 'M' 'B' */
+    uint32_t original_compressed_segment_size;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct smb2_compression_transform_header_chained) == 8,
+               "SMB2 COMPRESSION_TRANSFORM_HEADER (chained) must be 8 bytes");
+
+/* SMB2_COMPRESSION_CHAINED_PAYLOAD_HEADER (MS-SMB2 §2.2.42.2.1), 8 bytes.  For
+ * the real codecs (LZNT1/LZ77/LZ77+Huffman/LZ4) a 4-byte OriginalPayloadSize
+ * immediately follows this header; it is absent for NONE and Pattern_V1.
+ * `length` counts every byte that follows this 8-byte header for the payload,
+ * including the OriginalPayloadSize field when present. */
+struct smb2_compression_chained_payload_header {
+    uint16_t compression_algorithm;
+    uint16_t flags;          /* CHAINED on the first payload, NONE afterward */
+    uint32_t length;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct smb2_compression_chained_payload_header) == 8,
+               "SMB2_COMPRESSION_CHAINED_PAYLOAD_HEADER must be 8 bytes");
+
+/* SMB2_COMPRESSION_PATTERN_PAYLOAD_V1 (MS-SMB2 §2.2.42.2.2), 8 bytes — the
+ * payload body for a Pattern_V1 chained entry: `repetitions` copies of the
+ * single byte `pattern`. */
+struct smb2_compression_pattern_payload_v1 {
+    uint8_t  pattern;
+    uint8_t  reserved1;
+    uint16_t reserved2;
+    uint32_t repetitions;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct smb2_compression_pattern_payload_v1) == 8,
+               "SMB2_COMPRESSION_PATTERN_PAYLOAD_V1 must be 8 bytes");
 
 enum smb2_command {
     SMB2_NEGOTIATE       = 0,
@@ -690,6 +752,15 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 /* SMB2_COMPRESSION_CAPABILITIES Flags */
 #define SMB2_COMPRESSION_FLAG_NONE                  0x00000000
 #define SMB2_COMPRESSION_FLAG_CHAINED               0x00000001
+
+/* SMB2_COMPRESSION_CAPABILITIES CompressionAlgorithm IDs (MS-SMB2 §2.2.3.1.3).
+ * NONE is only valid as a chained-payload algorithm (raw pass-through);
+ * Pattern_V1 is only valid as a chained-payload algorithm (run-length). */
+#define SMB2_COMPRESSION_NONE                       0x0000
+#define SMB2_COMPRESSION_LZNT1                      0x0001
+#define SMB2_COMPRESSION_LZ77                       0x0002
+#define SMB2_COMPRESSION_LZ77_HUFFMAN               0x0003
+#define SMB2_COMPRESSION_PATTERN_V1                 0x0004
 
 #define SMB2_NEGOTIATE_MAX_DIALECTS                 10
 
@@ -887,6 +958,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_READ_REQUEST_SIZE                      49
 
 #define SMB2_READFLAG_READ_UNBUFFERED               0x01
+#define SMB2_READFLAG_REQUEST_COMPRESSED            0x02
 
 #define SMB2_READ_REPLY_SIZE                        17
 

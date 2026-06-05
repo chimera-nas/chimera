@@ -55,6 +55,14 @@ target_include_directories(phase0_contexts_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/phase0_contexts_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/phase0_contexts_test)
 
+# SMB3 transport-compression codec unit test (pure MS-XCA Plain LZ77)
+add_executable(smb_compress_test smb_compress_test.c)
+target_link_libraries(smb_compress_test chimera_server chimera_smb)
+target_include_directories(smb_compress_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_test(NAME chimera/server/smb/smb_compress_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_compress_test)
+
 # REST API user/share manipulation test
 add_executable(rest_user_manip_test rest_user_manip_test.c)
 target_link_libraries(rest_user_manip_test chimera_server chimera_metrics jansson)
@@ -230,6 +238,62 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
             TIMEOUT 180
             RESOURCE_LOCK wpts_smb_bin
             ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_PERSISTENT=1")
+    endforeach()
+
+    # SMB3 transport-compression cases.  These need the daemon run with
+    # smb_compression enabled (the wrapper sets it from CHIMERA_SMB_COMPRESSION,
+    # which also advertises the supported algorithms + a compressed share in the
+    # ptfconfig).  Allowlist = every applicable compression case confirmed green
+    # against the current server.  Left out: the LZ77Huffman / LZNT1 / *_Encrypted
+    # variants (those codecs and the compression+encryption combination are not
+    # yet implemented, so the SUT does not advertise them and the cases skip) and
+    # ChainedCompressionNotSupported (inapplicable — the SUT supports chaining).
+    set(WPTS_SMB2_COMPRESSION_ALLOWLIST
+        BVT_Negotiate_SMB311_CompressionEnabled
+        BVT_Negotiate_SMB311_Compression_IsChainedCompressionSupported
+        BVT_SMB2Compression_Chained_PatternV1
+        BVT_SMB2Compression_LZ77
+        BVT_SMB2Compression_Unchained
+        BVT_SMB2Compression_Unchained_LargeFile
+        Negotiate_SMB311_Compression_CompressionAlgorithmEmpty
+        Negotiate_SMB311_Compression_CompressionAlgorithmNotSupported
+        Negotiate_SMB311_Compression_CompressionContextInvalidDataLength
+        Negotiate_SMB311_Compression_FlagChainedNotSet
+        Negotiate_SMB311_Compression_InvalidSmbDialect
+        Negotiate_SMB311_WithCompressionContextWithoutIntegrityContext
+        Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext
+        SMB2Compression_Chained_InvalidCompressionAlgorithmInCompressionPayloadHeader
+        SMB2Compression_Chained_InvalidLengthInCompressionPayloadHeader
+        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtEnd
+        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtEnd_LargeFile
+        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFront
+        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFrontAndEnd
+        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFrontAndEnd_LargeFile
+        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFront_LargeFile
+        SMB2Compression_Chained_PatternV1_CompressibleReadResponse
+        SMB2Compression_Chained_PatternV1_CompressibleReadResponse_LargeFile
+        SMB2Compression_Chained_PatternV1_IncompressibleReadResponse
+        SMB2Compression_Chained_PatternV1_InvalidCompressionPatternPayloadV1Repetitions
+        SMB2Compression_Chained_PatternV1_LargeFile
+        SMB2Compression_CompressedWriteRequest
+        SMB2Compression_CompressedWriteRequest_LargeFile
+        SMB2Compression_CompressibleReadResponse
+        SMB2Compression_CompressibleReadResponse_LargeFile
+        SMB2Compression_IncompressibleReadResponse
+        SMB2Compression_InvalidCompressedPacketLength
+        SMB2Compression_InvalidCompressionAlgorithm
+        SMB2Compression_InvalidDecompressedProtocolId
+        SMB2Compression_LZ77_LargeFile)
+
+    foreach(tc ${WPTS_SMB2_COMPRESSION_ALLOWLIST})
+        add_test(NAME chimera/server/smb/wpts/memfs_compression/${tc}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
+                    ${CHIMERA_DAEMON} memfs "Name=${tc}")
+        set_tests_properties(chimera/server/smb/wpts/memfs_compression/${tc} PROPERTIES
+            LABELS "smb;wpts;compression"
+            TIMEOUT 180
+            RESOURCE_LOCK wpts_smb_bin
+            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_COMPRESSION=1")
     endforeach()
 
     # SMB3 multichannel cases.  The wrapper runs the daemon with a second NIC

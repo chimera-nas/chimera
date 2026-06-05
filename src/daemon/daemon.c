@@ -460,6 +460,15 @@ main(
         chimera_server_config_set_smb_encryption(server_config, json_is_true(json_value) ? 1 : 0);
     }
 
+    /* smb_compression: boolean (or integer 0/1) enabling SMB3 transport
+     * compression negotiation. */
+    json_value = json_object_get(server_params, "smb_compression");
+    if (json_is_integer(json_value)) {
+        chimera_server_config_set_smb_compression(server_config, (int) json_integer_value(json_value));
+    } else if (json_is_boolean(json_value)) {
+        chimera_server_config_set_smb_compression(server_config, json_is_true(json_value) ? 1 : 0);
+    }
+
     json_value = json_object_get(server_params, "smb_acl_inherited_canonicalize");
     if (json_is_boolean(json_value)) {
         chimera_server_config_set_smb_acl_inherited_canonicalize(server_config, json_is_true(json_value));
