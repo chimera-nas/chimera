@@ -1,0 +1,85 @@
+{%- comment -%}
+SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+SPDX-License-Identifier: Unlicense
+
+Theme / accent / density tweak panel, ported from chimeraproject.io. Drives the
+[data-theme] attribute and the --accent / --density custom properties that the
+docs colour scheme is wired to.
+{%- endcomment -%}
+<button class="tweaks-fab" id="tweaks-fab" aria-label="Open tweaks">&#9881;</button>
+<div class="tweaks" id="tweaks" role="dialog" aria-label="Tweaks">
+  <div class="tweaks-title">
+    Tweaks
+    <button class="tweaks-close" id="tweaks-close" aria-label="Close">&times;</button>
+  </div>
+  <div class="tweaks-row">
+    <label>Theme</label>
+    <div class="seg" id="seg-theme">
+      <button data-val="dark" class="active">Dark</button>
+      <button data-val="light">Light</button>
+    </div>
+  </div>
+  <div class="tweaks-row">
+    <label>Accent</label>
+    <div class="swatches" id="swatches">
+      <button data-h="55"  style="background: oklch(72% 0.15 55)"  class="active" title="Ember"></button>
+      <button data-h="145" style="background: oklch(72% 0.15 145)" title="Lichen"></button>
+      <button data-h="260" style="background: oklch(72% 0.15 260)" title="Cobalt"></button>
+      <button data-h="320" style="background: oklch(72% 0.15 320)" title="Magenta"></button>
+      <button data-h="80"  style="background: oklch(72% 0.06 80)"  title="Stone"></button>
+    </div>
+  </div>
+  <div class="tweaks-row">
+    <label>Density</label>
+    <div class="seg" id="seg-density">
+      <button data-val="0.85">Compact</button>
+      <button data-val="1" class="active">Default</button>
+      <button data-val="1.2">Roomy</button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var fab = document.getElementById("tweaks-fab");
+  var panel = document.getElementById("tweaks");
+  if (!fab || !panel) return;
+  fab.addEventListener("click", function () { panel.classList.toggle("open"); });
+  document.getElementById("tweaks-close").addEventListener("click", function () {
+    panel.classList.remove("open");
+  });
+
+  function bindSeg(id, fn) {
+    var seg = document.getElementById(id);
+    seg.querySelectorAll("button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        seg.querySelectorAll("button").forEach(function (x) {
+          x.classList.toggle("active", x === b);
+        });
+        fn(b.dataset.val);
+      });
+    });
+  }
+  bindSeg("seg-theme", function (v) {
+    if (v === "dark") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", v);
+  });
+  bindSeg("seg-density", function (v) {
+    document.documentElement.style.setProperty("--density", v);
+  });
+  document.getElementById("swatches").querySelectorAll("button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      document.getElementById("swatches").querySelectorAll("button").forEach(function (x) {
+        x.classList.toggle("active", x === b);
+      });
+      var h = b.dataset.h;
+      var light = document.documentElement.getAttribute("data-theme") === "light";
+      var L = light ? "58%" : "72%";
+      var C = h === "80" ? "0.06" : (light ? "0.14" : "0.15");
+      document.documentElement.style.setProperty("--accent", "oklch(" + L + " " + C + " " + h + ")");
+      document.documentElement.style.setProperty("--accent-soft", light
+        ? "oklch(92% 0.04 " + h + ")"
+        : "oklch(26% 0.06 " + h + ")");
+    });
+  });
+})();
+</script>

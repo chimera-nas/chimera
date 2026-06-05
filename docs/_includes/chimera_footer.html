@@ -1,0 +1,51 @@
+{%- comment -%}
+SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+SPDX-License-Identifier: Unlicense
+
+Site footer mirroring chimeraproject.io. Marquee pages are absolute (site
+root); the docs API reference is served from this Jekyll build.
+{%- endcomment -%}
+<footer class="site-foot">
+  <div class="shell">
+    <div class="cols">
+      <div>
+        <a class="brand" href="https://chimeraproject.io/" style="margin-bottom:12px">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 22 22" fill="none">
+              <path d="M3 11 L11 3 L19 11 L11 19 Z" stroke="currentColor" stroke-width="1.4"/>
+              <path d="M7 11 L11 7 L15 11 L11 15 Z" fill="currentColor" opacity="0.85"/>
+            </svg>
+          </span>
+          chimeraproject
+        </a>
+        <p style="margin-top:14px;max-width:36ch">Two C libraries for building distributed storage in user space: a multi-protocol NAS stack and the I/O runtime it runs on.</p>
+      </div>
+      <div>
+        <h4>chimera</h4>
+        <a href="https://chimeraproject.io/chimera.html">Intro</a>
+        <a href="https://chimeraproject.io/chimera-architecture.html">Architecture</a>
+        <a href="https://chimeraproject.io/chimera-performance.html">Performance</a>
+        <a href="https://chimeraproject.io/chimera-status.html">Status</a>
+      </div>
+      <div>
+        <h4>Docs</h4>
+        <a href="{{ '/' | relative_url }}">Home</a>
+        <a href="{{ '/quickstart' | relative_url }}">Quick start</a>
+        <a href="{{ '/building' | relative_url }}">Building</a>
+        <a href="{{ '/api-reference' | relative_url }}">API reference</a>
+      </div>
+      <div>
+        <h4>Source</h4>
+        <a href="https://github.com/chimera-nas" target="_blank" rel="noopener">GitHub org</a>
+        <a href="https://github.com/chimera-nas/chimera" target="_blank" rel="noopener">chimera-nas/chimera</a>
+        <a href="https://github.com/chimera-nas/libevpl" target="_blank" rel="noopener">chimera-nas/libevpl</a>
+        <a href="https://discord.gg/hnRkvQFecq" target="_blank" rel="noopener">Discord</a>
+      </div>
+    </div>
+    <div class="meta">
+      <span>License — LGPL-2.1</span>
+      <span>&copy; 2026 the chimeraproject contributors</span>
+      <span style="margin-left:auto">Not yet a production system.</span>
+    </div>
+  </div>
+</footer>
