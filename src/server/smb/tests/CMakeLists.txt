@@ -115,7 +115,9 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_CreateClose_CreateAndCloseDirectory
         BVT_CreateClose_CreateAndCloseFile
         BVT_MultiCredit_OneRequestWithMultiCredit
+        BVT_Negotiate_Compatible_2002
         BVT_Negotiate_Compatible_Wildcard
+        BVT_Negotiate_SMB2002
         BVT_Negotiate_SMB21
         BVT_Negotiate_SMB30
         BVT_Negotiate_SMB302
@@ -126,9 +128,17 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_SMB2Basic_ChangeNotify_ChangeAttributes
         BVT_SMB2Basic_ChangeNotify_ChangeCreation
         BVT_SMB2Basic_ChangeNotify_ChangeDirName
+        BVT_SMB2Basic_ChangeNotify_ChangeEa
         BVT_SMB2Basic_ChangeNotify_ChangeFileName
         BVT_SMB2Basic_ChangeNotify_ChangeLastAccess
         BVT_SMB2Basic_ChangeNotify_ChangeLastWrite
+        BVT_SMB2Basic_ChangeNotify_ChangeSecurity
+        BVT_SMB2Basic_ChangeNotify_ChangeSize
+        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb2002
+        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb21
+        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb30
+        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb302
+        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb311
         BVT_SMB2Basic_ChangeNotify_NoFileListDirectoryInGrantedAccess
         BVT_SMB2Basic_ChangeNotify_NonDirectoryFile
         BVT_SMB2Basic_ChangeNotify_ServerReceiveSmb2Close
@@ -138,6 +148,8 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_SMB2Basic_QueryDir_Reopen_OnEmptyDir_NoFilesReturned
         BVT_SMB2Basic_QueryDir_Reopen_OnFile
         BVT_SMB2Basic_Query_FileAllInformation
+        BVT_SMB2Basic_Query_FileNormalizedNameInformation_DataFile
+        BVT_SMB2Basic_Query_FileNormalizedNameInformation_DirectoryFile
         BVT_SessionMgmt_NewSession
         BVT_SessionMgmt_Reauthentication
         BVT_SessionMgmt_ReconnectSessionSetup
@@ -145,8 +157,11 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_TreeMgmt_TreeConnectAndDisconnect
         BVT_ValidateNegotiateInfo
         CreateClose_CreateAndCloseDirWithDotDir
+        CreateClose_CreateAndCloseDirWithDoubleDotDir
         CreateClose_CreateAndCloseFileWithDotDir
+        CreateClose_CreateAndCloseFileWithDoubleDotDir
         CreateClose_DeleteFile_DesiredAccessNotIncludeDeleteOrGenericAll
+        InvalidCreateRequestStructureSize
         Negotiate_SMB311_ContextID_NetName
         Negotiate_SMB311_InvalidCipher
         Negotiate_SMB311_IsTransportCapabilitiesSupported
@@ -155,6 +170,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext
         Negotiate_SMB311_WithEncryptionContextWithoutIntegrityContext
         Negotiate_SMB311_WithoutAnyContexts
+        SessionMgmt_ReconnectWithDifferentDialect
         Signing_VerifyAesGmacSigning
         TreeMgmt_SMB311_CLUSTER_RECONNECT
         ValidateNegotiateInfo_Negative_InvalidCapabilities
@@ -163,7 +179,8 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         ValidateNegotiateInfo_Negative_InvalidGuid
         ValidateNegotiateInfo_Negative_InvalidMaxOutputResponse
         ValidateNegotiateInfo_Negative_InvalidSecurityMode
-        ValidateNegotiateInfo_Negative_SMB311)
+        ValidateNegotiateInfo_Negative_SMB311
+        )
 
     foreach(tc ${WPTS_SMB2_ALLOWLIST})
         add_test(NAME chimera/server/smb/wpts/memfs/${tc}
@@ -316,14 +333,18 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     #     these are reported Inconclusive (skipped).
     set(WPTS_SMB2_MULTICHANNEL_ALLOWLIST
         BVT_MultipleChannel_NicRedundantOnBoth
-        MultipleChannel_NicRedundantOnClient
-        MultipleChannel_NicRedundantOnServer
-        MultipleChannel_MultiChannelOnSameNic
-        MultipleChannel_Negative_SMB21
-        MultipleChannel_Negative_SMB2002
+        BVT_NetworkInterfaceInfo_QuerySuccessful
         MultipleChannel_LockUnlockOnDiffChannel
         MultipleChannel_LockUnlockOnSameChannel
-        MultipleChannel_SecondChannelSessionSetupFailAtFirstTime)
+        MultipleChannel_MultiChannelOnSameNic
+        MultipleChannel_Negative_SMB2002
+        MultipleChannel_Negative_SMB21
+        MultipleChannel_NicRedundantOnClient
+        MultipleChannel_NicRedundantOnServer
+        MultipleChannel_SecondChannelSessionSetupFailAtFirstTime
+        NetworkInterfaceInfo_ChangeConnection_BindCurrentSession
+        NetworkInterfaceInfo_Query_ReturnsErrorStatus
+        )
 
     foreach(tc ${WPTS_SMB2_MULTICHANNEL_ALLOWLIST})
         add_test(NAME chimera/server/smb/wpts/memfs_multichannel/${tc}
