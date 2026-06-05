@@ -106,21 +106,29 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_Compound_UnRelatedRequests
         BVT_CreateClose_CreateAndCloseDirectory
         BVT_CreateClose_CreateAndCloseFile
+        BVT_MultiCredit_OneRequestWithMultiCredit
         BVT_Negotiate_Compatible_Wildcard
         BVT_Negotiate_SMB21
         BVT_Negotiate_SMB30
         BVT_Negotiate_SMB302
+        BVT_Negotiate_SMB311_Preauthentication
         BVT_Negotiate_SigningEnabled
+        BVT_OpLockBreak
+        BVT_SMB2Basic_CancelRegisteredChangeNotify
         BVT_SMB2Basic_ChangeNotify_ChangeAttributes
         BVT_SMB2Basic_ChangeNotify_ChangeCreation
         BVT_SMB2Basic_ChangeNotify_ChangeDirName
         BVT_SMB2Basic_ChangeNotify_ChangeFileName
         BVT_SMB2Basic_ChangeNotify_ChangeLastAccess
         BVT_SMB2Basic_ChangeNotify_ChangeLastWrite
+        BVT_SMB2Basic_ChangeNotify_NoFileListDirectoryInGrantedAccess
         BVT_SMB2Basic_ChangeNotify_NonDirectoryFile
+        BVT_SMB2Basic_ChangeNotify_ServerReceiveSmb2Close
+        BVT_SMB2Basic_LockAndUnLock
         BVT_SMB2Basic_QueryAndSet_FileInfo
         BVT_SMB2Basic_QueryDir_Reopen_OnDir
         BVT_SMB2Basic_QueryDir_Reopen_OnEmptyDir_NoFilesReturned
+        BVT_SMB2Basic_QueryDir_Reopen_OnFile
         BVT_SMB2Basic_Query_FileAllInformation
         BVT_SessionMgmt_NewSession
         BVT_SessionMgmt_Reauthentication
@@ -130,9 +138,15 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_ValidateNegotiateInfo
         CreateClose_CreateAndCloseDirWithDotDir
         CreateClose_CreateAndCloseFileWithDotDir
+        CreateClose_DeleteFile_DesiredAccessNotIncludeDeleteOrGenericAll
         Negotiate_SMB311_ContextID_NetName
         Negotiate_SMB311_InvalidCipher
         Negotiate_SMB311_IsTransportCapabilitiesSupported
+        Negotiate_SMB311_SigningCapability
+        Negotiate_SMB311_WithCompressionContextWithoutIntegrityContext
+        Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext
+        Negotiate_SMB311_WithEncryptionContextWithoutIntegrityContext
+        Negotiate_SMB311_WithoutAnyContexts
         Signing_VerifyAesGmacSigning
         TreeMgmt_SMB311_CLUSTER_RECONNECT
         ValidateNegotiateInfo_Negative_InvalidCapabilities
@@ -140,7 +154,8 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         ValidateNegotiateInfo_Negative_InvalidDialects_NoCommonDialect
         ValidateNegotiateInfo_Negative_InvalidGuid
         ValidateNegotiateInfo_Negative_InvalidMaxOutputResponse
-        ValidateNegotiateInfo_Negative_InvalidSecurityMode)
+        ValidateNegotiateInfo_Negative_InvalidSecurityMode
+        ValidateNegotiateInfo_Negative_SMB311)
 
     foreach(tc ${WPTS_SMB2_ALLOWLIST})
         add_test(NAME chimera/server/smb/wpts/memfs/${tc}
@@ -155,15 +170,19 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
             ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET}")
     endforeach()
 
-    # SMB3 durable / persistent handle cases.  These need the daemon run with
-    # smb_persistent_handles enabled (the wrapper sets it from CHIMERA_SMB_PERSISTENT,
-    # which also flips the persistent-handle / CA-share ptfconfig capabilities and
-    # marks FileShare as the CA share).  Allowlist = every applicable
-    # durable/persistent case confirmed green against the current server.  Left
-    # out: DurableHandleV1_Reconnect_AfterServerDisconnect (needs
-    # negotiate-after-negotiate to drop the connection — an unrelated protocol
-    # gap) and *_WithDifferentDurableOwner / BVT_PersistentHandles (need a second
-    # user account / scale-out config the harness doesn't provide).
+    # SMB3 durable / persistent handle cases plus the Replay (channel-sequence)
+    # suite.  These need the daemon run with smb_persistent_handles enabled (the
+    # wrapper sets it from CHIMERA_SMB_PERSISTENT, which also flips the
+    # persistent-handle / CA-share ptfconfig capabilities and marks FileShare as
+    # the CA share).  The Replay_*_ReplayEligibleCleared cases — including the
+    # NonPersistentHandle variants — only become applicable once the CA / replay
+    # capability is advertised, so they live here rather than in the base list.
+    # Allowlist = every applicable durable/persistent/replay case confirmed green
+    # against the current server.  Left out: DurableHandleV1_Reconnect_AfterServerDisconnect
+    # (needs negotiate-after-negotiate to drop the connection — an unrelated
+    # protocol gap), *_WithDifferentDurableOwner / BVT_PersistentHandles (need a
+    # second user account / scale-out config the harness doesn't provide), and
+    # the Replay IoCtl/Lock cases (replay-eligibility not yet cleared on those ops).
     set(WPTS_SMB2_PERSISTENT_ALLOWLIST
         BVT_DurableHandleV1_Reconnect_WithBatchOplock
         BVT_DurableHandleV1_Reconnect_WithLeaseV1
@@ -188,7 +207,19 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         DurableHandleV2_Reconnect_WithoutPersistence
         DurableHandleV2_WithLeaseV1AndV2_WithDifferentLeaseKey
         DurableHandleV2_WithLeaseV2_WithoutHandleCaching
-        PersistentHandle_ReOpenFromDiffClient)
+        PersistentHandle_ReOpenFromDiffClient
+        Replay_NonPersistentHandle_Flush_ReplayEligibleCleared
+        Replay_NonPersistentHandle_QueryInfo_ReplayEligibleCleared
+        Replay_NonPersistentHandle_Read_ReplayEligibleCleared
+        Replay_NonPersistentHandle_SetInfo_ReplayEligibleCleared
+        Replay_NonPersistentHandle_Write_ReplayEligibleCleared
+        Replay_PersistentHandle_ChangeNotify_ReplayEligibleCleared
+        Replay_PersistentHandle_Flush_ReplayEligibleCleared
+        Replay_PersistentHandle_QueryDirectory_ReplayEligibleCleared
+        Replay_PersistentHandle_QueryInfo_ReplayEligibleCleared
+        Replay_PersistentHandle_Read_ReplayEligibleCleared
+        Replay_PersistentHandle_SetInfo_ReplayEligibleCleared
+        Replay_PersistentHandle_Write_ReplayEligibleCleared)
 
     foreach(tc ${WPTS_SMB2_PERSISTENT_ALLOWLIST})
         add_test(NAME chimera/server/smb/wpts/memfs_persistent/${tc}
