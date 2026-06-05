@@ -213,6 +213,31 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
             break;
 
+        case SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS:
+            /* MS-SMB2 3.3.5.15.1 / MS-FSCC 2.3.20: enumerate the previous
+             * versions (VSS snapshots) of the open.  We don't expose
+             * snapshots, so return an empty SRV_SNAPSHOT_ARRAY (all counts
+             * zero) with SUCCESS rather than NOT_SUPPORTED — that is what a
+             * server with no snapshots reports, and clients expect it. */
+            open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
+
+            if (unlikely(!open_file)) {
+                chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+                return;
+            }
+
+            chimera_smb_open_file_release(request, open_file);
+
+            /* The SRV_SNAPSHOT_ARRAY response is a 12-byte header; the client
+             * must offer at least that much output space. */
+            if (request->ioctl.max_output_response < 12) {
+                chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+                return;
+            }
+
+            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+            break;
+
         default:
             /* MS-SMB2 3.3.5.15: an FSCTL the server does not implement is
              * rejected with STATUS_NOT_SUPPORTED. */
@@ -260,6 +285,9 @@ chimera_smb_ioctl_reply(
             break;
         case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
             output_length = 64; /* FILE_OBJECTID_BUFFER (type 1) */
+            break;
+        case SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS:
+            output_length = 12; /* SRV_SNAPSHOT_ARRAY header, empty list */
             break;
     } /* switch */
 
@@ -351,6 +379,14 @@ chimera_smb_ioctl_reply(
             break;
         case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
             evpl_iovec_cursor_append_blob(reply_cursor, request->ioctl.oid_buffer, 64);
+            break;
+        case SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS:
+            /* Empty SRV_SNAPSHOT_ARRAY (MS-FSCC 2.3.20): no snapshots, none
+             * returned, zero array bytes.  With NumberOfSnapShotsReturned == 0
+             * the SnapShots[] array is absent. */
+            evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* NumberOfSnapShots */
+            evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* NumberOfSnapShotsReturned */
+            evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* SnapShotArraySize */
             break;
         default:
             break;
