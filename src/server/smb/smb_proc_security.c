@@ -839,7 +839,21 @@ chimera_smb_set_security_dispatch(struct chimera_smb_request *request)
     struct chimera_vfs_attrs *vfs_attrs = &request->set_info.vfs_attrs;
 
     if (vfs_attrs->va_set_mask == 0) {
-        /* Nothing to change */
+        /* Nothing in our model changed -- e.g. a SACL-only SetSecurityDescriptor
+         * (chimera does not persist SACLs).  The set still succeeds, and like
+         * any security change it fires FILE_NOTIFY_CHANGE_SECURITY on the parent
+         * (ATTRS_CHANGED; smb2.change_notify ChangeSecurity). */
+        if (request->set_info.open_file->parent_fh_len > 0) {
+            struct chimera_server_smb_thread *thread = request->compound->thread;
+
+            chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
+                                    request->set_info.open_file->parent_fh,
+                                    request->set_info.open_file->parent_fh_len,
+                                    CHIMERA_VFS_NOTIFY_ATTRS_CHANGED,
+                                    request->set_info.open_file->name,
+                                    request->set_info.open_file->name_len,
+                                    NULL, 0);
+        }
         chimera_smb_open_file_release(request, request->set_info.open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
         return;
