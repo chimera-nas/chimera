@@ -369,43 +369,60 @@ struct chimera_smb_request {
                 uint16_t epoch;
                 int      is_v2;
             } rqls;
-            uint64_t                        alsi_alloc_size;
-            uint64_t                        twrp_timestamp;
+            uint64_t                           alsi_alloc_size;
+            uint64_t                           twrp_timestamp;
             /* SMB2_CREATE_APP_INSTANCE_ID / *_VERSION (MS-SMB2 2.2.13.2.13/14).
              * app_instance_id is the 16-byte GUID value; the AppInstanceVersion
              * (VersionHigh/Low) is present only when the version context was
              * also supplied (app_version_present). */
-            uint8_t                         app_instance_id[16];
-            uint64_t                        app_version_high;
-            uint64_t                        app_version_low;
-            uint8_t                         app_version_present;
+            uint8_t                            app_instance_id[16];
+            uint64_t                           app_version_high;
+            uint64_t                           app_version_low;
+            uint8_t                            app_version_present;
             /* Status to return when gen_open_file refuses an open due to a
              * share conflict: defaults to SHARING_VIOLATION, but an
              * app-instance version reject overrides it with FILE_FORCED_CLOSED. */
-            uint32_t                        force_close_status;
+            uint32_t                           force_close_status;
             /* Backing storage for a canonical ACL decoded from a SecD create
              * context (SMB2_CREATE_SD_BUFFER); set_attr.va_acl points here. */
-            uint8_t                         acl_storage[sizeof(struct chimera_acl) +
-                                                        64 * sizeof(struct chimera_ace)];
+            uint8_t                            acl_storage[sizeof(struct chimera_acl) +
+                                                           64 * sizeof(struct chimera_ace)];
             /* SMB3 persistent-handle write-through.  persist_pid != 0 marks this
              * open as a persistent grant (fresh or cold reclaim): the record is
              * persisted atomically with the VFS open via persist_hs, and
              * gen_open_file adopts persist_pid as the file's persistent id. */
-            uint64_t                        persist_pid;
-            struct chimera_vfs_handle_state persist_hs;
-            uint8_t                         persist_key[CHIMERA_SMB_DURABLE_KEY_LEN];
-            uint8_t                         persist_value[CHIMERA_SMB_DURABLE_VALUE_MAX];
-            char                            parent_path[SMB_FILENAME_MAX];
-            char                           *name;
+            uint64_t                           persist_pid;
+            struct chimera_vfs_handle_state    persist_hs;
+            uint8_t                            persist_key[CHIMERA_SMB_DURABLE_KEY_LEN];
+            uint8_t                            persist_value[CHIMERA_SMB_DURABLE_VALUE_MAX];
+            char                               parent_path[SMB_FILENAME_MAX];
+            char                              *name;
             /* Named-stream (ADS) suffix parsed off the final path component.
              * has_stream is set when the create targets "file:stream[:$DATA]";
              * stream_name holds the bare stream name and `name`/name_len are
              * trimmed to the base file.  base_oh is the base file's open handle
              * held across the chained chimera_vfs_open_stream. */
-            uint8_t                         has_stream;
-            uint16_t                        stream_name_len;
-            char                            stream_name[SMB_FILENAME_MAX];
-            struct chimera_vfs_open_handle *base_oh;
+            uint8_t                            has_stream;
+            uint16_t                           stream_name_len;
+            char                               stream_name[SMB_FILENAME_MAX];
+            struct chimera_vfs_open_handle    *base_oh;
+            /* Async share-acquire park (Phase 2 oplock).  A regular-file open
+             * whose share reservation hard-conflicts with a batch-oplock holder
+             * parks here until the holder closes (then granted) or merely acks
+             * (then SHARING_VIOLATION).  gen_finish_cb resumes the open's tail on
+             * a synchronous OR parked grant; the gen_* fields carry the parked
+             * open's state across the wait. */
+            void                               (*gen_finish_cb)(
+                struct chimera_smb_request   *request,
+                struct chimera_smb_open_file *open_file);
+            struct chimera_smb_open_file      *gen_parked_open;
+            struct chimera_vfs_file_state     *gen_parked_fs;
+            struct chimera_vfs_pending_acquire gen_ticket;
+            uint8_t                            gen_held_granted;
+            uint8_t                            gen_parked;
+            uint8_t                            r_is_directory;
+            uint32_t                           r_granted_access;
+            uint32_t                           r_maximal_access;
         } create;
 
         struct  {

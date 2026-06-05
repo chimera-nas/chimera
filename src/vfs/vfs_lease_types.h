@@ -18,6 +18,7 @@
 
 struct chimera_vfs_lease;
 struct chimera_vfs_file_state;
+struct chimera_vfs_open_handle;
 
 /* -------------------------------------------------------------------- */
 /* Lease vocabulary                                                     */
@@ -98,6 +99,14 @@ struct chimera_vfs_lease_owner {
     chimera_vfs_lease_is_alive_cb_t is_alive_cb;
     chimera_vfs_lease_revoked_cb_t  revoked_cb;
     void                           *cb_private;
+    /* The open handle this lease is anchored to, when the holder is a single
+     * open (SMB oplock/lease).  A metadata mutation (setattr / set-EOF) issued
+     * through this very handle must NOT recall this lease -- the holder is
+     * coherent with its own change -- so chimera_vfs_break_caching_file skips a
+     * lease whose op_handle matches the mutating request's handle.  NULL for
+     * holders not tied to a single handle (e.g. NFSv4 delegations), which are
+     * always recalled. */
+    struct chimera_vfs_open_handle *op_handle;
 };
 
 enum chimera_vfs_break_state {

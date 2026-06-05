@@ -116,9 +116,13 @@ chimera_vfs_setattr_dispatch(
         return;
     }
 
-    request->opcode                          = CHIMERA_VFS_OP_SETATTR;
-    request->complete                        = chimera_vfs_setattr_complete;
-    request->setattr.handle                  = handle;
+    request->opcode         = CHIMERA_VFS_OP_SETATTR;
+    request->complete       = chimera_vfs_setattr_complete;
+    request->setattr.handle = handle;
+    /* Identify the mutating handle so the caching-lease recall below skips a
+     * lease anchored to this same handle (the holder is coherent with its own
+     * setattr -- see chimera_vfs_break_caching_file). */
+    request->io_handle                       = handle;
     request->setattr.set_attr                = set_attr;
     request->setattr.r_pre_attr.va_req_mask  = pre_attr_mask;
     request->setattr.r_pre_attr.va_set_mask  = 0;
