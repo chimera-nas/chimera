@@ -1367,7 +1367,8 @@ static bool
 chimera_vfs_break_caching_file(
     struct chimera_vfs_state             *state,
     struct chimera_vfs_file_state        *file,
-    const struct chimera_vfs_open_handle *skip_handle)
+    const struct chimera_vfs_open_handle *skip_handle,
+    bool                                  flush_only)
 {
     bool had;
 
@@ -1389,6 +1390,15 @@ chimera_vfs_break_caching_file(
             /* The mutation is issued through this very lease's open handle: the
              * holder is coherent with its own change, so do not recall it. */
             if (skip_handle && cur->owner.op_handle == skip_handle) {
+                continue;
+            }
+            /* Flush recall: only a write-caching (W) holder has dirty data to
+             * flush; a read-only / handle-only holder keeps its cache untouched
+             * (a data setattr does not stale a pure read cache -- the client
+             * revalidates on the resulting mtime/size change).  This is what lets
+             * a same-client metadata storm stop churning: once a holder has
+             * dropped W it is no longer recalled. */
+            if (flush_only && !(cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W)) {
                 continue;
             }
             if (cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
@@ -1416,13 +1426,23 @@ chimera_vfs_break_caching_file(
         pthread_mutex_unlock(&file->lock);
 
         if (to_break) {
-            /* Break to NONE (needed_mode 0), not to the currently-granted
-             * mode: a namespace/metadata mutation invalidates the holder's
-             * cache entirely.  Passing the granted mode would let the SMB
-             * lease break_cb retain its read cache (LEVEL_II) and ack with a
-             * non-zero mode, so this loop would see granted != 0 forever and
-             * the caller would park permanently.  NFSv4 delegations recall
-             * fully regardless of needed_mode, so 0 is correct for them too. */
+            /* Break to NONE (needed_mode 0): the holder writes back dirty data
+             * and drops its cache entirely.  This holds for both recall flavors.
+             *
+             * A flush recall would ideally retain the holder's read cache (break
+             * only W, keep R|H) to spare a metadata-storm client a full re-lease
+             * per op.  But retaining R is only coherent if the changed region of
+             * that read cache is also invalidated, which chimera has no mechanism
+             * for today -- retaining R after a flush serves stale bytes (fsx
+             * MAPREAD corruption).  So a flush still revokes its W holders to
+             * NONE; what flush_only buys is the *filter* above -- read-only /
+             * handle-only holders, which an attribute-only setattr does not
+             * stale, are left untouched rather than needlessly recalled.  Fully
+             * decoupling the flush from the read-cache drop is a follow-up.
+             *
+             * Passing the granted mode would let the SMB break_cb retain a read
+             * cache and ack non-zero, so this loop would see granted != 0 forever
+             * and park permanently.  NFSv4 delegations recall fully regardless. */
             chimera_vfs_lease_begin_break(state, to_break, 0,
                                           CHIMERA_VFS_NFS_DELEG_METAOP_MS);
         } else if (to_revoke) {
@@ -1444,11 +1464,19 @@ chimera_vfs_break_caching_file(
     had = false;
     {
         struct chimera_vfs_lease *cur;
+        /* A flush recall only needs the write cache gone (W flushed); the holder
+         * may keep R|H.  So it blocks only while some holder retains an effective
+         * W -- a notified (BREAKING) SMB holder has effective == its retained
+         * R|H (no W), so the op proceeds at once and the client's flush ack
+         * arrives asynchronously (the client serialises break->writeback->reply
+         * on its own connection, so a later read by it is still coherent).  A
+         * namespace recall blocks while any effective mode remains. */
+        uint8_t                   block_mask = flush_only ? CHIMERA_VFS_LEASE_MODE_W : 0xFF;
         for (cur = file->caching_leases; cur; cur = cur->next) {
             if (skip_handle && cur->owner.op_handle == skip_handle) {
                 continue;
             }
-            if (chimera_vfs_lease_effective_granted(cur) != 0) {
+            if (chimera_vfs_lease_effective_granted(cur) & block_mask) {
                 had = true;
                 break;
             }
@@ -1475,8 +1503,9 @@ chimera_vfs_state_break_caching(
     }
 
     /* No skip handle: this whole-file recall (NFSv4 REMOVE/RENAME) breaks every
-     * caching holder, including the operating client's own delegation. */
-    had = chimera_vfs_break_caching_file(state, file, NULL);
+     * caching holder, including the operating client's own delegation.  It is a
+     * namespace mutation, so revoke fully (flush_only == false). */
+    had = chimera_vfs_break_caching_file(state, file, NULL, false);
 
     chimera_vfs_state_put(state, file);
     return had;
@@ -1868,7 +1897,8 @@ chimera_vfs_io_try(
      * on chimera's behalf.  The periodic maintenance pass re-pumps parked
      * waiters so an unresponsive holder is revoked at its recall deadline. */
     if (request->io_recall_all) {
-        if (chimera_vfs_break_caching_file(state, file, request->io_handle)) {
+        if (chimera_vfs_break_caching_file(state, file, request->io_handle,
+                                           request->io_recall_flush_only)) {
             pthread_mutex_lock(&file->lock);
             chimera_vfs_io_park_locked(file, request);
             request->io_lease_file = file;
@@ -2055,15 +2085,17 @@ chimera_vfs_io_recall(
     const uint8_t              *fh,
     uint8_t                     fh_len,
     uint64_t                    fh_hash,
+    int                         flush_only,
     void (                     *next )(struct chimera_vfs_request *request))
 {
     struct chimera_vfs_state      *state = request->thread->vfs->vfs_state;
     struct chimera_vfs_file_state *file;
 
-    request->io_next           = next;
-    request->io_lease_file     = NULL;
-    request->io_recall_all     = 1;
-    request->io_owns_lease_ref = 1;
+    request->io_next              = next;
+    request->io_lease_file        = NULL;
+    request->io_recall_all        = 1;
+    request->io_recall_flush_only = flush_only ? 1 : 0;
+    request->io_owns_lease_ref    = 1;
 
     /* Fast path: no per-file state means no caching lease to recall. */
     if (!state || fh_len == 0) {

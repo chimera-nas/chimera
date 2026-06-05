@@ -155,6 +155,7 @@ chimera_vfs_remove_at_dispatch(
      * it (the caller supplies its FH when known). */
     chimera_vfs_io_recall(request, child_fh, child_fh_len,
                           child_fh_len ? chimera_vfs_hash(child_fh, child_fh_len) : 0,
+                          0 /* namespace recall: revoke fully */,
                           chimera_vfs_dispatch);
 
 } /* chimera_vfs_remove_at_dispatch */

@@ -191,18 +191,18 @@ chimera_smb_lease_break_cb(
         return;
     }
 
-    /* needed_mode is the *retained* mask the holder may keep:
-     *   - A conflicting OPEN passes a non-zero mask (the new acquirer's
-     *     granted bits); the holder keeps a shared read cache (R) and
-     *     gives up write/handle caching — i.e. it downgrades to LEVEL_II.
-     *   - A WRITE invalidation passes 0; the holder's read cache is now
-     *     stale, so it breaks all the way to NONE.  (See
-     *     chimera_vfs_state_break_on_write.) */
-    if (needed_mode == 0) {
-        new_vfs = 0;
-    } else {
-        new_vfs = lease->mode.granted & CHIMERA_VFS_LEASE_MODE_R;
-    }
+    /* needed_mode is the *retained* mask the holder may keep, intersected with
+     * what it currently holds:
+     *   - A conflicting OPEN passes R: the holder keeps a shared read cache and
+     *     gives up write/handle caching -- it downgrades to LEVEL_II.
+     *   - A WRITE invalidation (and a namespace recall) passes 0: the cache is
+     *     stale / the name is going away, so it breaks all the way to NONE.
+     *   - A FLUSH recall (data setattr) passes R|H: the holder writes back its
+     *     dirty data but keeps its read + handle cache (no full re-lease).
+     * Intersecting with granted means a holder that does not hold a retained bit
+     * simply loses it (e.g. an exclusive W-only oplock flushed with R|H keeps
+     * only R). */
+    new_vfs = lease->mode.granted & needed_mode;
 
     if (open_file->oplock_level == SMB2_OPLOCK_LEVEL_LEASE) {
         /* SMB2 lease (RqLs) — §2.2.23.2 lease-variant notification. */

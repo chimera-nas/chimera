@@ -331,13 +331,20 @@ chimera_vfs_state_io_resume(
  * by (fh, fh_hash) — regardless of owner, so even the operating client's own
  * delegation is recalled (RFC 7530 §10.4.5) — then invoke next(request).  The
  * request parks until the recall drains; no lease is held on chimera's behalf.
- * A file with no per-file state proceeds immediately. */
+ * A file with no per-file state proceeds immediately.
+ *
+ * flush_only selects the recall flavor: false = namespace mutation (remove /
+ * rename / link) revokes every caching holder to NONE; true = data-coherence
+ * mutation (a setattr that changes data, e.g. SIZE) downgrades a write-caching
+ * holder to its read+handle cache so the client flushes dirty data but keeps its
+ * read cache and oplock (see request->io_recall_flush_only). */
 void
 chimera_vfs_io_recall(
     struct chimera_vfs_request *request,
     const uint8_t              *fh,
     uint8_t                     fh_len,
     uint64_t                    fh_hash,
+    int                         flush_only,
     void (                     *next )(struct chimera_vfs_request *request));
 
 /* Drop every implicit lease that has been idle (no in-flight I/O) for at
