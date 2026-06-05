@@ -30,23 +30,6 @@
  * in smb_internal.h -- one canonical SMB<->VFS caching-grant encoding shared with
  * the create grant path. */
 
-static inline uint8_t
-chimera_smb_lease_to_vfs_bits(uint8_t smb_state)
-{
-    uint8_t m = 0;
-
-    if (smb_state & SMB2_LEASE_READ_CACHING) {
-        m |= CHIMERA_VFS_LEASE_MODE_R;
-    }
-    if (smb_state & SMB2_LEASE_HANDLE_CACHING) {
-        m |= CHIMERA_VFS_LEASE_MODE_H;
-    }
-    if (smb_state & SMB2_LEASE_WRITE_CACHING) {
-        m |= CHIMERA_VFS_LEASE_MODE_W;
-    }
-    return m;
-} /* chimera_smb_lease_to_vfs_bits */
-
 /* Build the 4-byte NetBIOS header + 64-byte SMB2 header for an
  * unsolicited OPLOCK_BREAK Notification.  Returns pointer past the
  * SMB2 header into the body region. */
@@ -405,9 +388,28 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
     struct chimera_smb_open_file     *open_file;
 
     if (request->oplock_break.is_lease) {
-        /* Lease-break ack: the lease was optimistically downgraded in the
-         * break_cb.  Honoring the client's exact NewLeaseState verbatim is a
-         * future refinement; just emit the response packet. */
+        /* Lease-break ack: resolve the lease by its key and apply the exact
+         * NewLeaseState the client kept (it may drop further than we asked, e.g.
+         * straight to NONE).  The lease is genuinely BREAKING (Phase 1 dropped
+         * optimistic-ack), so chimera_vfs_lease_ack settles it -- re-arming a
+         * surviving lease and pumping any acquirer parked on the break. */
+        open_file = chimera_smb_open_file_resolve_by_lease_key(
+            request, request->oplock_break.lease_key);
+
+        if (open_file) {
+            if (open_file->caching_lease_inserted) {
+                struct chimera_vfs_lease_mode kept = {
+                    .granted = chimera_smb_lease_bits_to_vfs(
+                        request->oplock_break.lease_state),
+                    .denied  = 0,
+                };
+
+                chimera_vfs_lease_ack(&open_file->caching_lease, kept);
+            }
+            open_file->lease_state = request->oplock_break.lease_state;
+            chimera_smb_open_file_release(request, open_file);
+        }
+
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
         return;
     }

@@ -1822,6 +1822,46 @@ chimera_smb_open_file_resolve(
     return open_file;
 } /* chimera_smb_open_file_resolve */
 
+/*
+ * Resolve the open_file that owns the caching lease registered under `lease_key`
+ * (an SMB2 RqLs lease).  Unlike file_id, lease keys are not hashed, so this scans
+ * the tree's open_files buckets -- a lease-break ack is rare relative to I/O, so
+ * the linear scan is acceptable; a dedicated lease-key index is a later
+ * optimization.  Multiple opens may share one lease key (coalesced), but only the
+ * one that inserted the lease carries caching_lease_inserted, so match on that.
+ * On success the returned open_file has had its refcnt bumped (release with
+ * chimera_smb_open_file_release).
+ */
+static inline struct chimera_smb_open_file *
+chimera_smb_open_file_resolve_by_lease_key(
+    struct chimera_smb_request *request,
+    const uint8_t              *lease_key)
+{
+    struct chimera_smb_open_file *open_file, *tmp, *found = NULL;
+    struct chimera_smb_tree      *tree = request->tree;
+    int                           b;
+
+    chimera_smb_abort_if(!tree, "tree is NULL");
+
+    for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !found; b++) {
+        pthread_mutex_lock(&tree->open_files_lock[b]);
+        HASH_ITER(hh, tree->open_files[b], open_file, tmp)
+        {
+            if (!(open_file->flags & CHIMERA_SMB_OPEN_FILE_CLOSED) &&
+                open_file->caching_lease_inserted &&
+                open_file->oplock_level == SMB2_OPLOCK_LEVEL_LEASE &&
+                memcmp(open_file->lease_key, lease_key, 16) == 0) {
+                open_file->refcnt++;
+                found = open_file;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&tree->open_files_lock[b]);
+    }
+
+    return found;
+} /* chimera_smb_open_file_resolve_by_lease_key */
+
 static inline void
 chimera_smb_open_file_release(
     struct chimera_smb_request   *request,
