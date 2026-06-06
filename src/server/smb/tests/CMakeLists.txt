@@ -344,6 +344,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         MultipleChannel_SecondChannelSessionSetupFailAtFirstTime
         NetworkInterfaceInfo_ChangeConnection_BindCurrentSession
         NetworkInterfaceInfo_Query_ReturnsErrorStatus
+        NetworkInterfaceInfo_Query_ReturnsIPv4IPv6
         )
 
     foreach(tc ${WPTS_SMB2_MULTICHANNEL_ALLOWLIST})

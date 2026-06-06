@@ -44,6 +44,11 @@ SUT_IP="10.0.0.1"
 # alternative channel against it (and the main channel queries it back via
 # FSCTL_QUERY_NETWORK_INTERFACE_INFO).
 SUT_IP2="10.0.0.2"
+# IPv6 SUT address for SMB3 multichannel. Only wired up when
+# CHIMERA_SMB_MULTICHANNEL=1; the NetworkInterfaceInfo_Query_ReturnsIPv4IPv6
+# case requires the server to advertise both an IPv4 and an IPv6 interface over
+# FSCTL_QUERY_NETWORK_INTERFACE_INFO. ULA address (RFC 4193).
+SUT_IPV6="fd00::1"
 NETNS_NAME="wpts_smb_$$_$(date +%s%N)"
 DUMMY_IF="wpts0"
 BUILD_DIR=$(dirname "$(dirname "$CHIMERA_BINARY")")
@@ -134,7 +139,7 @@ generate_config() {
     # MultipleChannel cases can discover the alternative server address.
     local multichannel_line=""
     if [ "${CHIMERA_SMB_MULTICHANNEL:-0}" = "1" ]; then
-        multichannel_line="\"smb_multichannel\": [{\"address\": \"${SUT_IP}\", \"speed\": 10, \"rdma\": false}, {\"address\": \"${SUT_IP2}\", \"speed\": 10, \"rdma\": false}],"
+        multichannel_line="\"smb_multichannel\": [{\"address\": \"${SUT_IP}\", \"speed\": 10, \"rdma\": false}, {\"address\": \"${SUT_IP2}\", \"speed\": 10, \"rdma\": false}, {\"address\": \"${SUT_IPV6}\", \"speed\": 10, \"rdma\": false}],"
         # The MultipleChannel_Negative_SMB2002 case establishes its main channel
         # with the original SMB 2.0.2 dialect (then verifies the bind is refused),
         # so the multichannel harness lowers the dialect floor to 2.0.2.
@@ -194,6 +199,9 @@ ip netns exec "${NETNS_NAME}" ip addr add "${SUT_IP}/24" dev "${DUMMY_IF}"
 # within the netns, so a single device carrying both addresses is sufficient).
 if [ "${CHIMERA_SMB_MULTICHANNEL:-0}" = "1" ]; then
     ip netns exec "${NETNS_NAME}" ip addr add "${SUT_IP2}/24" dev "${DUMMY_IF}"
+    # IPv6 address so the daemon can advertise an AF_INET6 interface over
+    # FSCTL_QUERY_NETWORK_INTERFACE_INFO (NetworkInterfaceInfo_Query_ReturnsIPv4IPv6).
+    ip netns exec "${NETNS_NAME}" ip -6 addr add "${SUT_IPV6}/64" dev "${DUMMY_IF}"
 fi
 ip netns exec "${NETNS_NAME}" ip link set "${DUMMY_IF}" up
 
