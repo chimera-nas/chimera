@@ -27,6 +27,7 @@
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_mount_table.h"
 #include "vfs/memfs/memfs.h"
+#include "vfs/memkv/memkv.h"
 #include "vfs/linux/linux.h"
 
 #ifdef HAVE_IO_URING
@@ -523,13 +524,33 @@ chimera_vfs_init(
      * in-memory memkv when not specified. */
     effective_kv_module = (kv_module_name && kv_module_name[0] != '\0') ? kv_module_name : "memkv";
 
-    /* Find and validate the KV module */
+    /* Find the KV module among those already registered. */
     vfs->kv_module = NULL;
     for (int i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
         if (vfs->modules[i] && strcmp(vfs->modules[i]->name, effective_kv_module) == 0) {
             vfs->kv_module = vfs->modules[i];
             break;
         }
+    }
+
+    /* The default KV is a VFS-core facility, not a share backend, so callers
+     * need not list it among module_cfgs.  If it wasn't explicitly registered,
+     * auto-register it from its built-in symbol (vfs_memkv / vfs_sqlite, linked
+     * into chimera_vfs). */
+    if (!vfs->kv_module) {
+        if (strcmp(effective_kv_module, "memkv") == 0) {
+            /* memkv is built into chimera_vfs; reference it directly so the
+            * symbol is always retained regardless of linker --as-needed. */
+            module = &vfs_memkv;
+        } else {
+            snprintf(modsym, sizeof(modsym), "vfs_%s", effective_kv_module);
+            module = dlsym(RTLD_DEFAULT, modsym);
+        }
+        chimera_vfs_abort_if(!module,
+                             "KV module '%s' not found (symbol vfs_%s)",
+                             effective_kv_module, effective_kv_module);
+        chimera_vfs_register(vfs, module, NULL);
+        vfs->kv_module = vfs->modules[module->fh_magic];
     }
 
     chimera_vfs_abort_if(!vfs->kv_module,

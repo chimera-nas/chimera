@@ -256,21 +256,18 @@ chimera_server_config_init(void)
     config->modules[3].config_data[0] = '\0';
     config->modules[3].module_path[0] = '\0';
 
-    /* memkv is the default KV backend (see chimera_vfs_init); register it
-     * unconditionally so zero-config deployments always have a KV store. */
-    strncpy(config->modules[4].module_name, "memkv", sizeof(config->modules[4].module_name));
+    config->num_modules = 4;
+
+#ifdef HAVE_IO_URING
+    strncpy(config->modules[4].module_name, "io_uring", sizeof(config->modules[4].module_name));
     config->modules[4].config_data[0] = '\0';
     config->modules[4].module_path[0] = '\0';
 
     config->num_modules = 5;
-
-#ifdef HAVE_IO_URING
-    strncpy(config->modules[5].module_name, "io_uring", sizeof(config->modules[5].module_name));
-    config->modules[5].config_data[0] = '\0';
-    config->modules[5].module_path[0] = '\0';
-
-    config->num_modules = 6;
 #endif /* ifdef HAVE_IO_URING */
+
+    /* The default KV module (memkv) is auto-registered by chimera_vfs_init; it
+     * need not be listed here. */
 
     return config;
 } /* chimera_server_config_init */
