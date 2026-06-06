@@ -70,6 +70,138 @@ chimera_smb_create_error_status(enum chimera_vfs_error error_code)
     } /* switch */
 } /* chimera_smb_create_error_status */
 
+/*
+ * Decide what to do when a CREATE carrying an SMB2_CREATE_APP_INSTANCE_ID
+ * conflicts with an existing Open that holds the same AppInstanceId on a
+ * different connection (MS-SMB2 3.3.5.9.7 + 3.3.5.9.16 AppInstanceVersion).
+ *
+ * AppInstanceVersion is the lexicographic (High, then Low) pair.  Empirically
+ * (WPTS AppInstanceVersion cases) the existing open is force-closed and the new
+ * CREATE allowed to proceed iff the existing open carried no AppInstanceVersion,
+ * OR both carry one and the new version is strictly greater than the existing
+ * one.  Otherwise -- the existing open has a version but the new CREATE has none,
+ * or the new version is equal-or-lower -- the existing open is left intact and
+ * the new CREATE fails with STATUS_FILE_FORCED_CLOSED.
+ *
+ * Returns 1 to force-close + proceed, -1 to reject, 0 if the rule does not
+ * apply (no AppInstanceId on the request, no match, or same connection).
+ */
+static int
+chimera_smb_app_instance_decision(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *existing)
+{
+    if (!(request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_APP)) {
+        return 0;
+    }
+
+    if (!existing ||
+        !(existing->ctx_present_mask & CHIMERA_SMB_CREATE_CTX_APP)) {
+        return 0;
+    }
+
+    if (memcmp(existing->app_instance_id,
+               request->create.app_instance_id, 16) != 0) {
+        return 0;
+    }
+
+    /* Same AppInstanceId but on the same connection is not an application
+     * failover replacement -- leave it to normal share semantics. */
+    if (existing->create_conn == request->compound->conn) {
+        return 0;
+    }
+
+    /* existing.V ABSENT -> force-close (an old open with no version always
+     * yields to a new AppInstanceId open). */
+    if (!existing->app_version_present) {
+        return 1;
+    }
+
+    /* existing.V present, new.V ABSENT -> reject. */
+    if (!request->create.app_version_present) {
+        return -1;
+    }
+
+    /* Both present: force-close iff new.V > existing.V (High, then Low);
+     * equal or lower versions reject. */
+    if (request->create.app_version_high != existing->app_version_high) {
+        return request->create.app_version_high > existing->app_version_high ?
+               1 : -1;
+    }
+    return request->create.app_version_low > existing->app_version_low ?
+           1 : -1;
+} /* chimera_smb_app_instance_decision */
+
+/*
+ * Force-close a conflicting live open during AppInstanceId failover: unhash it
+ * from its tree, release its leases / byte-range locks / VFS handle, and drop
+ * its outstanding handle reference so the share reservation is gone before the
+ * new CREATE retries.  A live (non-parked) open holds a single handle reference
+ * once its own CREATE completed; this consumes it and frees the object, so the
+ * owning connection's later CLOSE will simply miss it and report FILE_CLOSED.
+ * Returns true if the open was force-closed by this call.
+ */
+static bool
+chimera_smb_app_instance_force_close(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file)
+{
+    struct chimera_smb_tree      *tree = open_file->tree;
+    int                           bucket;
+    bool                          unhashed = false;
+    struct chimera_smb_open_file *to_free  = NULL;
+
+    if (!tree) {
+        return false;
+    }
+
+    bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+
+    pthread_mutex_lock(&tree->open_files_lock[bucket]);
+    if (!(open_file->flags & CHIMERA_SMB_OPEN_FILE_CLOSED)) {
+        open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
+        HASH_DELETE(hh, tree->open_files[bucket], open_file);
+        unhashed = true;
+    }
+    pthread_mutex_unlock(&tree->open_files_lock[bucket]);
+
+    if (!unhashed) {
+        return false;
+    }
+
+    /* Drop the durable registry entry so a reconnect can't reclaim it. */
+    if (open_file->durable_flags) {
+        chimera_smb_durable_forget(thread->shared, open_file->file_id.pid);
+    }
+
+    /* Release the share + caching leases and byte-range locks so the share
+     * reservation no longer blocks the new open. */
+    chimera_smb_open_file_drain_locks(thread, open_file);
+
+    if (open_file->handle) {
+        chimera_vfs_release(thread->vfs_thread, open_file->handle);
+        open_file->handle = NULL;
+    }
+
+    /* Consume the remaining handle reference.  The owning connection's CLOSE
+     * will no longer find the open in the hash, so it never releases — this is
+     * the last reference. */
+    pthread_mutex_lock(&tree->open_files_lock[bucket]);
+    chimera_smb_abort_if(open_file->refcnt == 0,
+                         "app-instance force-close: refcnt 0");
+    open_file->refcnt--;
+    if (open_file->refcnt == 0) {
+        to_free = open_file;
+    }
+    pthread_mutex_unlock(&tree->open_files_lock[bucket]);
+
+    if (to_free) {
+        chimera_smb_open_file_free(thread, to_free);
+    }
+
+    return true;
+} /* chimera_smb_app_instance_force_close */
+
 static inline struct chimera_smb_open_file *
 chimera_smb_create_gen_open_file(
     struct chimera_smb_request     *request,
@@ -107,6 +239,11 @@ chimera_smb_create_gen_open_file(
     open_file->position        = 0;
     open_file->pipe_transceive = transceive;
     open_file->refcnt          = 2;
+    /* Identify the owning conn/tree up front so an AppInstanceId force-close can
+     * locate this open from the share-lease back-reference even when no caching
+     * lease (which also sets create_conn) is granted. */
+    open_file->create_conn = request->compound->conn;
+    open_file->tree        = tree;
 
     /* Phase-0 plumbing state: zeroed; Phases 1/3 will populate from CREATE contexts. */
     open_file->ctx_present_mask   = 0;
@@ -119,6 +256,22 @@ chimera_smb_create_gen_open_file(
     memset(open_file->lease_key,        0, sizeof(open_file->lease_key));
     memset(open_file->parent_lease_key, 0, sizeof(open_file->parent_lease_key));
     memset(open_file->create_guid,      0, sizeof(open_file->create_guid));
+
+    /* Record the AppInstanceId/AppInstanceVersion this open carried so a later
+     * CREATE on a different connection can match it and apply the version-gated
+     * force-close (MS-SMB2 3.3.5.9.7 / 3.3.5.9.16). */
+    if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_APP) {
+        memcpy(open_file->app_instance_id, request->create.app_instance_id, 16);
+        open_file->ctx_present_mask   |= CHIMERA_SMB_CREATE_CTX_APP;
+        open_file->app_version_high    = request->create.app_version_high;
+        open_file->app_version_low     = request->create.app_version_low;
+        open_file->app_version_present = request->create.app_version_present;
+    } else {
+        memset(open_file->app_instance_id, 0, sizeof(open_file->app_instance_id));
+        open_file->app_version_high    = 0;
+        open_file->app_version_low     = 0;
+        open_file->app_version_present = 0;
+    }
 
     open_file->name_len = name_len;
     memcpy(open_file->name, name, open_file->name_len);
@@ -213,6 +366,9 @@ chimera_smb_create_gen_open_file(
          * themselves. */
         open_file->share_lease.owner.owner_lo = open_file->file_id.pid;
         open_file->share_lease.owner.owner_hi = open_file->file_id.vid;
+        /* Back-reference to the owning open so a conflicting CREATE that carries a
+         * matching AppInstanceId can locate it for the force-close rule below. */
+        open_file->share_lease.owner.cb_private = open_file;
 
         /* If this open also requests a lease, a handle-caching lease already
          * held under the same key is its own (a second open under one lease
@@ -225,6 +381,45 @@ chimera_smb_create_gen_open_file(
                    request->create.rqls.key + 8, 8);
         } else {
             open_file->share_lease.has_break_skip_key = 0;
+        }
+
+        /* AppInstanceId failover (MS-SMB2 3.3.5.9.7 / 3.3.5.9.16).  Processed
+         * before the share check (the spec-pure ordering): scan the file's
+         * existing SHARE reservations for an open carrying the same
+         * AppInstanceId on a different connection and apply the
+         * AppInstanceVersion rule.  This must run even when the new open would
+         * not otherwise conflict (e.g. fully-shared opens), since the rule may
+         * still mandate a force-close or a STATUS_FILE_FORCED_CLOSED reject.
+         * The matching open is collected under file->lock; the force-close /
+         * reject is then performed outside it to keep the lock ordering. */
+        if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_APP) {
+            struct chimera_smb_open_file *match    = NULL;
+            int                           decision = 0;
+
+            pthread_mutex_lock(&file_state->lock);
+            for (struct chimera_vfs_lease *l = file_state->share_resvs;
+                 l; l = l->next) {
+                struct chimera_smb_open_file *of =
+                    (struct chimera_smb_open_file *) l->owner.cb_private;
+                int                           d = chimera_smb_app_instance_decision(request, of);
+                if (d != 0) {
+                    match    = of;
+                    decision = d;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&file_state->lock);
+
+            if (decision < 0) {
+                /* Reject: leave the existing open intact. */
+                chimera_vfs_state_put(vfs_state, file_state);
+                open_file->handle = NULL;
+                chimera_smb_open_file_free(thread, open_file);
+                request->create.force_close_status = SMB2_STATUS_FILE_FORCED_CLOSED;
+                return NULL;
+            } else if (decision > 0) {
+                chimera_smb_app_instance_force_close(thread, match);
+            }
         }
 
         result = chimera_vfs_state_try_insert(vfs_state, file_state,
@@ -730,7 +925,7 @@ chimera_smb_create_mkdir_open_callback(
     if (!open_file) {
         chimera_smb_create_release_handle(vfs_thread, oh);
         chimera_smb_create_release_parent(request);
-        chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
+        chimera_smb_complete_request(request, request->create.force_close_status);
         return;
     }
 
@@ -888,7 +1083,7 @@ chimera_smb_create_open_stream_callback(
         chimera_vfs_release(vfs_thread, base_oh);
         request->create.base_oh = NULL;
         chimera_smb_create_release_parent(request);
-        chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
+        chimera_smb_complete_request(request, request->create.force_close_status);
         return;
     }
 
@@ -1029,7 +1224,7 @@ chimera_smb_create_open_at_callback(
     if (!open_file) {
         chimera_smb_create_release_handle(vfs_thread, oh);
         chimera_smb_create_release_parent(request);
-        chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
+        chimera_smb_complete_request(request, request->create.force_close_status);
         return;
     }
 
@@ -1318,7 +1513,7 @@ chimera_smb_create_open_callback(
 
     if (!open_file) {
         chimera_smb_create_release_handle(vfs_thread, oh);
-        chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
+        chimera_smb_complete_request(request, request->create.force_close_status);
         return;
     }
 
@@ -2075,6 +2270,9 @@ chimera_smb_create(struct chimera_smb_request *request)
      * reclaim) or chimera_smb_create_persist_prepare for a fresh grant. */
     request->create.persist_pid = 0;
     request->create.reconnect   = 0;
+    /* Default share-conflict status; an AppInstanceId version reject overrides
+     * it with STATUS_FILE_FORCED_CLOSED inside gen_open_file. */
+    request->create.force_close_status = SMB2_STATUS_SHARING_VIOLATION;
 
     if (request->tree->type == CHIMERA_SMB_TREE_TYPE_PIPE) {
 
@@ -2613,6 +2811,52 @@ parse_ctx_twrp(
     request->create.twrp_timestamp = smb_wire_le64(data);
 } /* parse_ctx_twrp */
 
+/* GUID-named CREATE contexts (MS-SMB2 2.2.13.2.13 / 2.2.13.2.14).  The context
+ * "name" is a 16-byte GUID identifier.  The on-wire identifier bytes used by
+ * the WPTS MS-SMB2 client were confirmed empirically from a live capture (the
+ * mixed-endian GUID quoted in the spec text differs from what is on the wire). */
+/* SMB2_CREATE_APP_INSTANCE_ID */
+static const uint8_t smb_app_instance_id_guid[16] = {
+    0x45, 0xBC, 0xA6, 0x6A, 0xEF, 0xA7, 0xF7, 0x4A,
+    0x90, 0x08, 0xFA, 0x46, 0x2E, 0x14, 0x4D, 0x74
+};
+/* SMB2_CREATE_APP_INSTANCE_VERSION */
+static const uint8_t smb_app_instance_version_guid[16] = {
+    0xB9, 0x82, 0xD0, 0xB7, 0x3B, 0x56, 0x07, 0x4F,
+    0xA0, 0x7B, 0x52, 0x4A, 0x81, 0x16, 0xA0, 0x10
+};
+
+static void
+parse_ctx_app_instance_id(
+    const uint8_t              *data,
+    uint32_t                    data_len,
+    struct chimera_smb_request *request)
+{
+    /* Body (confirmed on the wire): StructureSize(4) | AppInstanceId(16). */
+    if (data_len < 20) {
+        return;
+    }
+    memcpy(request->create.app_instance_id, data + 4, 16);
+    request->create.ctx_present_mask |= CHIMERA_SMB_CREATE_CTX_APP;
+} /* parse_ctx_app_instance_id */
+
+static void
+parse_ctx_app_instance_version(
+    const uint8_t              *data,
+    uint32_t                    data_len,
+    struct chimera_smb_request *request)
+{
+    /* Body (confirmed on the wire): StructureSize(4) | Reserved(4) |
+     * AppInstanceVersionHigh(8) | AppInstanceVersionLow(8). */
+    if (data_len < 24) {
+        return;
+    }
+    request->create.app_version_high    = smb_wire_le64(data + 8);
+    request->create.app_version_low     = smb_wire_le64(data + 16);
+    request->create.app_version_present = 1;
+    request->create.ctx_present_mask   |= CHIMERA_SMB_CREATE_CTX_APP_VERSION;
+} /* parse_ctx_app_instance_version */
+
 typedef void (*chimera_smb_create_ctx_handler_t)(
     const uint8_t              *data,
     uint32_t                    data_len,
@@ -2712,6 +2956,13 @@ chimera_smb_parse_create_contexts(
                     }
                     break;
                 }
+            }
+        } else if (name_len == 16) {
+            /* GUID-named contexts (AppInstanceId / AppInstanceVersion). */
+            if (memcmp(name, smb_app_instance_id_guid, 16) == 0) {
+                parse_ctx_app_instance_id(data, data_len, request);
+            } else if (memcmp(name, smb_app_instance_version_guid, 16) == 0) {
+                parse_ctx_app_instance_version(data, data_len, request);
             }
         }
 

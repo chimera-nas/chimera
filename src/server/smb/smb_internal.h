@@ -371,6 +371,18 @@ struct chimera_smb_request {
             } rqls;
             uint64_t                        alsi_alloc_size;
             uint64_t                        twrp_timestamp;
+            /* SMB2_CREATE_APP_INSTANCE_ID / *_VERSION (MS-SMB2 2.2.13.2.13/14).
+             * app_instance_id is the 16-byte GUID value; the AppInstanceVersion
+             * (VersionHigh/Low) is present only when the version context was
+             * also supplied (app_version_present). */
+            uint8_t                         app_instance_id[16];
+            uint64_t                        app_version_high;
+            uint64_t                        app_version_low;
+            uint8_t                         app_version_present;
+            /* Status to return when gen_open_file refuses an open due to a
+             * share conflict: defaults to SHARING_VIOLATION, but an
+             * app-instance version reject overrides it with FILE_FORCED_CLOSED. */
+            uint32_t                        force_close_status;
             /* Backing storage for a canonical ACL decoded from a SecD create
              * context (SMB2_CREATE_SD_BUFFER); set_attr.va_acl points here. */
             uint8_t                         acl_storage[sizeof(struct chimera_acl) +
