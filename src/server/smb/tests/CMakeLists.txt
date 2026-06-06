@@ -141,6 +141,9 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_SMB2Basic_ChangeNotify_ChangeLastWrite
         BVT_SMB2Basic_ChangeNotify_ChangeSecurity
         BVT_SMB2Basic_ChangeNotify_ChangeSize
+        BVT_SMB2Basic_ChangeNotify_ChangeStreamName
+        BVT_SMB2Basic_ChangeNotify_ChangeStreamSize
+        BVT_SMB2Basic_ChangeNotify_ChangeStreamWrite
         BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb2002
         BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb21
         BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb30

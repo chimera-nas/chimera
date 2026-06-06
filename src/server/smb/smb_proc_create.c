@@ -1260,6 +1260,15 @@ chimera_smb_create_open_at_callback(
         uint32_t                          action = S_ISDIR(attr->va_mode) ?
             CHIMERA_VFS_NOTIFY_DIR_ADDED : CHIMERA_VFS_NOTIFY_FILE_ADDED;
 
+        /* Creating/opening a (regular) file's data fork introduces its
+         * $DATA stream into the file's stream namespace, so also raise the
+         * STREAM_NAME class for non-directories.  This lets a watcher that
+         * requested only FILE_NOTIFY_CHANGE_STREAM_NAME observe the stream
+         * appearing (WPTS BVT_SMB2Basic_ChangeNotify_ChangeStreamName). */
+        if (!S_ISDIR(attr->va_mode)) {
+            action |= CHIMERA_VFS_NOTIFY_STREAM_NAME;
+        }
+
         chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
                                 request->create.parent_handle->fh,
                                 request->create.parent_handle->fh_len,
