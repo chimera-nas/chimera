@@ -139,7 +139,7 @@ chimera_smb_rdma_read_callback(
 
         struct chimera_vfs_lease_owner io_owner = {
             .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-            .client_key = request->session_handle->session->session_id,
+            .client_key = request->session_handle->session->client_key,
             .owner_lo   = request->write.open_file->file_id.pid,
             .owner_hi   = request->write.open_file->file_id.vid,
         };
@@ -227,7 +227,7 @@ chimera_smb_write(struct chimera_smb_request *request)
      * INVALID_NETWORK_RESPONSE on the client. */
     struct chimera_vfs_lease_owner io_owner;
     io_owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-    io_owner.client_key = request->session_handle->session->session_id;
+    io_owner.client_key = request->session_handle->session->client_key;
     if (request->write.open_file->grant) {
         io_owner.owner_lo = request->write.open_file->grant->lease.owner.owner_lo;
         io_owner.owner_hi = request->write.open_file->grant->lease.owner.owner_hi;

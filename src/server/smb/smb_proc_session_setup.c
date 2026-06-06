@@ -220,6 +220,12 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
          * connection must match it. */
         session->supports_notifications = conn->supports_notifications;
 
+        /* Bind the lease owner key to the client (ClientGuid captured at
+         * NEGOTIATE), not the session id, so same-client sessions share a
+         * lease namespace (MS-SMB2 3.3.5.9.8). */
+        session->client_key = chimera_smb_lease_client_key(conn->client_guid,
+                                                           session->session_id);
+
         session_handle = chimera_smb_session_handle_alloc(thread);
 
         session_handle->session_id = session->session_id;

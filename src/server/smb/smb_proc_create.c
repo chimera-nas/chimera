@@ -289,7 +289,7 @@ chimera_smb_create_break_for_open(
     struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
     struct chimera_vfs_lease_owner io_owner  = {
         .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-        .client_key = request->session_handle->session->session_id,
+        .client_key = request->session_handle->session->client_key,
         .owner_lo   = open_file->file_id.pid,
         .owner_hi   = open_file->file_id.vid,
     };
@@ -521,7 +521,7 @@ chimera_smb_create_gen_open_file(
         open_file->share_lease.mode.granted     = granted;
         open_file->share_lease.mode.denied      = denied;
         open_file->share_lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-        open_file->share_lease.owner.client_key = request->session_handle->session->session_id;
+        open_file->share_lease.owner.client_key = request->session_handle->session->client_key;
         /* The open itself is the owner — different opens, even by the
          * same client, must satisfy share-mode constraints between
          * themselves. */
@@ -811,7 +811,7 @@ chimera_smb_create_after_share(
 
                 memset(&owner, 0, sizeof(owner));
                 owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-                owner.client_key = request->session_handle->session->session_id;
+                owner.client_key = request->session_handle->session->client_key;
                 /* vfs_state invokes this to notify the client when another acquirer
                  * needs the lease; the callback resolves the grant from lease->grant
                  * and picks a live member to deliver the OPLOCK_BREAK on. */

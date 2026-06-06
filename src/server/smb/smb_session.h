@@ -219,6 +219,15 @@ struct chimera_smb_tree {
 
 struct chimera_smb_session {
     uint64_t                    session_id;
+    /* Stable per-CLIENT identity used as the owner key for CACHING leases,
+     * SHARE reservations and byte-range locks (chimera_vfs_lease_owner.client_key).
+     * Derived from the connection's ClientGuid, NOT the session id, because
+     * MS-SMB2 keys leases by the client (3.3.5.9.8): two sessions of the same
+     * client (same ClientGuid, e.g. a reconnect or a second channel) share one
+     * lease namespace and must coalesce/upgrade rather than conflict.  Falls
+     * back to session_id for guid-less clients (pre-3.0 dialects send a zero
+     * ClientGuid) so distinct legacy clients are not collapsed onto one key. */
+    uint64_t                    client_key;
     uint32_t                    refcnt;
     uint32_t                    flags;
     /* Dialect of the connection this session was established on (MS-SMB2
@@ -253,6 +262,30 @@ struct chimera_smb_session {
 
     struct chimera_vfs_cred     cred;
 };
+
+/* Derive the stable per-client lease owner key from a 16-byte ClientGuid.
+ * FNV-1a over the guid bytes; a guid of all zeros (pre-3.0 clients send none)
+ * falls back to the unique session_id so distinct legacy clients keep distinct
+ * keys rather than colliding on the zero-guid hash.  Never returns 0. */
+static inline uint64_t
+chimera_smb_lease_client_key(
+    const uint8_t *client_guid,
+    uint64_t       session_id)
+{
+    uint64_t h       = 1469598103934665603ULL; /* FNV-1a 64-bit offset basis */
+    int      nonzero = 0;
+
+    for (int i = 0; i < 16; i++) {
+        nonzero |= client_guid[i];
+        h       ^= client_guid[i];
+        h       *= 1099511628211ULL;     /* FNV-1a 64-bit prime */
+    }
+
+    if (!nonzero) {
+        return session_id;
+    }
+    return h ? h : 1;
+} /* chimera_smb_lease_client_key */
 
 static struct chimera_smb_session *
 chimera_smb_session_create()

@@ -286,7 +286,7 @@ chimera_smb_lock(struct chimera_smb_request *request)
     entry->lease.offset           = request->lock.l_offset;
     entry->lease.length           = want_length;
     entry->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-    entry->lease.owner.client_key = request->session_handle->session->session_id;
+    entry->lease.owner.client_key = request->session_handle->session->client_key;
     /* The owner identity is the open — different opens (even by the
      * same client) get different owner_lo/owner_hi and lock
      * independently, matching Windows handle-based lock semantics. */
