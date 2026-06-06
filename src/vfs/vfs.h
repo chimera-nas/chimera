@@ -1058,7 +1058,11 @@ enum CHIMERA_FS_FH_MAGIC {
     CHIMERA_VFS_FH_MAGIC_CAIRN    = 4,
     CHIMERA_VFS_FH_MAGIC_DISKFS   = 5,
     CHIMERA_VFS_FH_MAGIC_NFS      = 6,
-    CHIMERA_VFS_FH_MAGIC_MAX      = 7
+    /* KV-only backends (no filesystem; never serve a file handle, but occupy a
+     * module slot so they can be selected as the default KV module). */
+    CHIMERA_VFS_FH_MAGIC_MEMKV    = 7,
+    CHIMERA_VFS_FH_MAGIC_SQLITE   = 8,
+    CHIMERA_VFS_FH_MAGIC_MAX      = 9
 
 };
 

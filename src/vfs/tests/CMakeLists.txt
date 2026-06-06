@@ -7,7 +7,11 @@ target_link_libraries(vfs_user_cache_test chimera_vfs urcu-qsbr)
 add_test(chimera/vfs/user_cache_test vfs_user_cache_test)
 
 add_executable(vfs_kv_test vfs_kv_test.c)
-target_link_libraries(vfs_kv_test chimera_vfs chimera_vfs_memfs evpl)
+target_link_libraries(vfs_kv_test chimera_vfs chimera_vfs_memkv evpl)
+if (SQLITE_ENABLED)
+    target_link_libraries(vfs_kv_test chimera_vfs_sqlite)
+    target_compile_definitions(vfs_kv_test PRIVATE CHIMERA_KV_TEST_SQLITE=1)
+endif()
 add_test(chimera/vfs/kv_test vfs_kv_test)
 
 add_executable(vfs_async_delegation_test vfs_async_delegation_test.c)

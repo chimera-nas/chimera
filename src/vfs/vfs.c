@@ -517,8 +517,11 @@ chimera_vfs_init(
         chimera_vfs_register(vfs, module, module_cfgs[i].config_data);
     }
 
-    /* Set up KV module - default to memfs if not specified */
-    effective_kv_module = (kv_module_name && kv_module_name[0] != '\0') ? kv_module_name : "memfs";
+    /* Set up the default KV module - a KV-only backend (memkv or sqlite) that
+     * backs the global KV API and stores handle-state/KV records on behalf of
+     * filesystem backends that cannot persist them natively.  Defaults to the
+     * in-memory memkv when not specified. */
+    effective_kv_module = (kv_module_name && kv_module_name[0] != '\0') ? kv_module_name : "memkv";
 
     /* Find and validate the KV module */
     vfs->kv_module = NULL;
@@ -576,6 +579,24 @@ chimera_vfs_fh_is_plausible(
 {
     return chimera_vfs_get_module(thread, fh, fhlen) != NULL;
 } /* chimera_vfs_fh_is_plausible */
+
+SYMBOL_EXPORT int
+chimera_vfs_can_persist_handle_state(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle)
+{
+    if (!handle || !handle->vfs_module) {
+        return 0;
+    }
+
+    /* Either the backend persists handle-state atomically with the open, or the
+     * VFS core can persist it to the default KV on the backend's behalf. */
+    if (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE) {
+        return 1;
+    }
+
+    return thread->vfs->kv_module != NULL;
+} /* chimera_vfs_can_persist_handle_state */
 
 /* Capabilities of the backend module owning fh, or 0 if no mount matches.
  * Lets callers without an open handle (e.g. the NFS attribute marshaller)
