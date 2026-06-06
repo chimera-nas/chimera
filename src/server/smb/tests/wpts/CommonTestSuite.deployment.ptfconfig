@@ -80,7 +80,7 @@
       <Property name="IsRDMATransformSupported" value="false"/>
       <Property name="IsChainedCompressionSupported" value="false"/>
       <Property name="IsMultiCreditSupported" value="true"/>
-      <Property name="SutSupportedEncryptionAlgorithms" value=""/>
+      <Property name="SutSupportedEncryptionAlgorithms" value="ENCRYPTION_AES128_CCM;ENCRYPTION_AES128_GCM;ENCRYPTION_AES256_CCM;ENCRYPTION_AES256_GCM"/>
       <Property name="SupportedCompressionAlgorithms" value=""/>
 
       <Property name="UnsupportedIoCtlCodes" value="FSCTL_OFFLOAD_READ;FSCTL_OFFLOAD_WRITE;FSCTL_FILE_LEVEL_TRIM"/>

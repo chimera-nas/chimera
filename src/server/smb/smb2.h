@@ -543,6 +543,12 @@
 #define SMB2_STATUS_SERVER_UNAVAILABLE                0xC0000466
 #define SMB2_STATUS_FILE_NOT_AVAILABLE                0xC0000467
 
+/* STATUS_SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP (MS-SMB2 §3.3.5.4): returned
+ * from a SMB 3.1.1 NEGOTIATE when the client's
+ * SMB2_PREAUTH_INTEGRITY_CAPABILITIES HashAlgorithms array contains no hash
+ * algorithm the server supports. */
+#define SMB2_STATUS_SMB_NO_PREAUTH_INTEGRITY_OVERLAP  0xC05D0000
+
 /* Warning codes */
 #define SMB2_STATUS_BUFFER_OVERFLOW                   0x80000005
 #define SMB2_STATUS_STOPPED_ON_SYMLINK                0x8000002D

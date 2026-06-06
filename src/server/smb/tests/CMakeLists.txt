@@ -121,6 +121,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_Negotiate_SMB21
         BVT_Negotiate_SMB30
         BVT_Negotiate_SMB302
+        BVT_Negotiate_SMB311
         BVT_Negotiate_SMB311_Preauthentication
         BVT_Negotiate_SigningEnabled
         BVT_OpLockBreak
@@ -164,8 +165,10 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         InvalidCreateRequestStructureSize
         Negotiate_SMB311_ContextID_NetName
         Negotiate_SMB311_InvalidCipher
+        Negotiate_SMB311_InvalidHashAlgorithm
         Negotiate_SMB311_IsTransportCapabilitiesSupported
         Negotiate_SMB311_SigningCapability
+        Negotiate_SMB311_WithAllContexts
         Negotiate_SMB311_WithCompressionContextWithoutIntegrityContext
         Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext
         Negotiate_SMB311_WithEncryptionContextWithoutIntegrityContext
