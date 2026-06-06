@@ -110,6 +110,12 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # double-completion fix for QueryDir_Reopen_OnFile) are intentionally
     # enabled in that fix's PR, not here.
     set(WPTS_SMB2_ALLOWLIST
+        AppInstanceVersion_SMB302_SMB311
+        AppInstanceVersion_SMB311_SMB302
+        BVT_AppInstanceVersion_SMB311_GreaterVersion
+        BVT_AppInstanceVersion_SMB311_LowerAppInstanceVersionHigh
+        BVT_AppInstanceVersion_SMB311_LowerAppInstanceVersionLow
+        BVT_AppInstanceVersion_SMB311_SameVersion
         BVT_Compound_RelatedRequests
         BVT_Compound_UnRelatedRequests
         BVT_CreateClose_CreateAndCloseDirectory
@@ -163,6 +169,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         CreateClose_CreateAndCloseFileWithDoubleDotDir
         CreateClose_DeleteFile_DesiredAccessNotIncludeDeleteOrGenericAll
         InvalidCreateRequestStructureSize
+        Negative_AppInstanceVersion_SMB311_NoVersion
         Negotiate_SMB311_ContextID_NetName
         Negotiate_SMB311_InvalidCipher
         Negotiate_SMB311_InvalidHashAlgorithm

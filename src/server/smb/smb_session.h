@@ -61,9 +61,12 @@ struct chimera_smb_file_id {
 #define CHIMERA_SMB_CREATE_CTX_QFID                (1u << 10)
 #define CHIMERA_SMB_CREATE_CTX_ALSI                (1u << 11)
 /* App-instance contexts (SMB2_CREATE_APP_INSTANCE_ID / *_VERSION) use 16-byte
- * GUID names and so are not reachable from the 4-byte tag dispatch. Phase 3
- * (durable / app-instance handle replacement) will add a GUID-name match path
- * and re-introduce a CHIMERA_SMB_CREATE_CTX_APP bit at that point. */
+ * GUID names, matched in a dedicated name_len==16 branch of the context parser.
+ * CTX_APP marks that an AppInstanceId was supplied (drives the version-gated
+ * force-close in MS-SMB2 3.3.5.9.7); CTX_APP_VERSION marks that an
+ * AppInstanceVersion (3.3.5.9.16) accompanied it. */
+#define CHIMERA_SMB_CREATE_CTX_APP                 (1u << 12)
+#define CHIMERA_SMB_CREATE_CTX_APP_VERSION         (1u << 13)
 
 /* Bits for chimera_smb_open_file.durable_flags */
 #define CHIMERA_SMB_DURABLE_V1                     (1u << 0)
@@ -122,6 +125,14 @@ struct chimera_smb_open_file {
     uint8_t                          lease_key[16];
     uint8_t                          parent_lease_key[16];
     uint8_t                          create_guid[16];
+    /* SMB2_CREATE_APP_INSTANCE_ID / *_VERSION (MS-SMB2 2.2.13.2.13/14).
+     * Recorded when the open carried an AppInstanceId so a later CREATE on a
+     * different connection can match it and apply the version-gated
+     * force-close rule (3.3.5.9.7 / 3.3.5.9.16). */
+    uint8_t                          app_instance_id[16];
+    uint64_t                         app_version_high;
+    uint64_t                         app_version_low;
+    uint8_t                          app_version_present;
     struct chimera_smb_open_file    *next;
     struct chimera_smb_notify_state *notify_state;
     /* Byte-range locks (SMB2_LOCK) held against this open.  Allocated
@@ -142,6 +153,10 @@ struct chimera_smb_open_file {
      * disconnect handler before the conn is freed; if NULL when a
      * break is needed, the lease is forcibly revoked instead. */
     struct chimera_smb_conn         *create_conn;
+    /* Tree this open is hashed into (tree->open_files[]).  Lets an
+     * AppInstanceId force-close locate and unhash the conflicting open
+     * directly from the lease back-reference. */
+    struct chimera_smb_tree         *tree;
     uint8_t                          parent_fh[CHIMERA_VFS_FH_SIZE];
     char                             name[SMB_FILENAME_MAX];
     uint16_t                         pattern[SMB_FILENAME_MAX];
