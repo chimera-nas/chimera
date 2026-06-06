@@ -1493,6 +1493,21 @@ chimera_smb_create_open_at_callback(
         }
     }
 
+    /* A lease key may be bound to only one file per client (MS-SMB2 3.3.5.9.8).
+     * If this client already holds the requested lease key on a different file,
+     * reject the open with STATUS_INVALID_PARAMETER (smb2.lease.request /
+     * duplicate_create / duplicate_open).  A re-open of the same file under the
+     * key coalesces and is not a conflict. */
+    if ((request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) &&
+        chimera_smb_session_lease_key_conflict(request->session_handle->session,
+                                               request->create.rqls.key,
+                                               oh->fh, oh->fh_len)) {
+        chimera_vfs_release(vfs_thread, oh);
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
     /* Named-stream open: the base file is now open; open the stream on it and
      * build the SMB open_file around the stream handle. */
     if (request->create.has_stream) {

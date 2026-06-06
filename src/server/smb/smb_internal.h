@@ -1911,6 +1911,55 @@ chimera_smb_open_file_resolve_by_lease_key(
 } /* chimera_smb_open_file_resolve_by_lease_key */
 
 /*
+ * A lease key is bound to exactly one file per client (MS-SMB2 3.3.5.9.8): a
+ * client may not use the same lease key on two different files.  Returns true if
+ * any live open in the session already holds this lease key on a DIFFERENT file
+ * than (fh, fh_len) -- in which case the create must be rejected with
+ * STATUS_INVALID_PARAMETER.  A re-open of the SAME file under the key (coalesce)
+ * is not a conflict.  Scans the session's trees' open_files (lease creates are
+ * rare relative to I/O, so the linear scan is acceptable).
+ */
+static inline bool
+chimera_smb_session_lease_key_conflict(
+    struct chimera_smb_session *session,
+    const uint8_t              *key,
+    const uint8_t              *fh,
+    uint32_t                    fh_len)
+{
+    bool conflict = false;
+    int  t;
+
+    pthread_mutex_lock(&session->lock);
+    for (t = 0; t < session->max_trees && !conflict; t++) {
+        struct chimera_smb_tree      *tree = session->trees[t];
+        struct chimera_smb_open_file *of, *tmp;
+        int                           b;
+
+        if (!tree) {
+            continue;
+        }
+        for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !conflict; b++) {
+            pthread_mutex_lock(&tree->open_files_lock[b]);
+            HASH_ITER(hh, tree->open_files[b], of, tmp)
+            {
+                if (!(of->flags & CHIMERA_SMB_OPEN_FILE_CLOSED) &&
+                    of->oplock_level == SMB2_OPLOCK_LEVEL_LEASE &&
+                    of->handle &&
+                    memcmp(of->lease_key, key, 16) == 0 &&
+                    (of->handle->fh_len != fh_len ||
+                     memcmp(of->handle->fh, fh, fh_len) != 0)) {
+                    conflict = true;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&tree->open_files_lock[b]);
+        }
+    }
+    pthread_mutex_unlock(&session->lock);
+    return conflict;
+} /* chimera_smb_session_lease_key_conflict */
+
+/*
  * Caching-grant membership.  A VFS-owned caching grant (chimera_vfs_caching_grant)
  * may be shared by several opens under one (client, lease key); each such open is
  * threaded onto grant->holders so a break callback running on an arbitrary thread
