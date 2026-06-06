@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -168,12 +169,22 @@ class ChimeraServer:
             stderr=subprocess.PIPE if not self.debug else None,
         )
 
-        # Wait for server to be ready
-        time.sleep(1)
-
-        if self.process.poll() is not None:
-            stdout, stderr = self.process.communicate()
-            raise RuntimeError(f"Server failed to start: {stderr.decode() if stderr else 'unknown error'}")
+        # Wait for the S3 port to actually accept connections. A fixed sleep
+        # races the daemon's bind under load (parallel ctest on a busy runner),
+        # producing intermittent "Connection refused" in the boto3 client.
+        s3_port = 5000
+        deadline = time.time() + 30
+        while True:
+            if self.process.poll() is not None:
+                stdout, stderr = self.process.communicate()
+                raise RuntimeError(f"Server failed to start: {stderr.decode() if stderr else 'unknown error'}")
+            try:
+                with socket.create_connection(('127.0.0.1', s3_port), timeout=1):
+                    break
+            except OSError:
+                if time.time() >= deadline:
+                    raise RuntimeError(f"Server S3 port 127.0.0.1:{s3_port} not ready after 30s")
+                time.sleep(0.1)
 
         print("Server started successfully")
 
