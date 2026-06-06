@@ -1929,11 +1929,13 @@ chimera_vfs_state_break_caching(
 
 /* A write invalidates every read-caching (R) lease on the file: those
  * holders can no longer trust their cached data, so each must break down
- * to NONE.  The one exception is the writer's own write-caching (W) lease
- * — an exclusive/batch holder is allowed to write through its own cache
- * without breaking it.  A read-only (LEVEL_II) lease held by the writer
- * itself DOES break (a II oplock caches reads only, so writing through it
- * stales that cache) — this is the SMB2 "self break to none".
+ * to NONE.  The exception is the WRITER'S OWN lease (matched by owner key):
+ * the writing handle is coherent with its own change, so its lease is not
+ * recalled against itself -- whether that lease holds the write cache (an
+ * exclusive/batch holder writing through its own cache) or only read+handle
+ * caching (smb2.lease.complex1: a write by an RH holder breaks the OTHER
+ * client's read lease, never its own RH).  A read cache held by a DIFFERENT
+ * owner of the same client (a second lease key) is still staled and breaks.
  *
  * Breaks are dispatched via begin_break with needed_mode==0, which the
  * SMB break callback interprets as "break to NONE" (the open-conflict
@@ -1957,8 +1959,7 @@ chimera_vfs_break_reads_for_write(
         if ((cur->mode.granted & CHIMERA_VFS_LEASE_MODE_R) == 0) {
             continue;
         }
-        if ((cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W) &&
-            chimera_vfs_lease_owner_equal(&cur->owner, writer)) {
+        if (chimera_vfs_lease_owner_equal(&cur->owner, writer)) {
             continue;
         }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
