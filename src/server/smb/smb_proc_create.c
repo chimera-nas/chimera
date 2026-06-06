@@ -265,15 +265,22 @@ chimera_smb_create_break_for_open(
     struct chimera_vfs_open_handle   *oh,
     int                               phase)
 {
-    uint32_t                       da        = open_file->desired_access;
-    uint32_t                       disp      = request->create.create_disposition;
-    bool                           truncates =
+    uint32_t da        = open_file->desired_access;
+    uint32_t disp      = request->create.create_disposition;
+    bool     truncates =
         disp == SMB2_FILE_OVERWRITE ||
         disp == SMB2_FILE_OVERWRITE_IF ||
         disp == SMB2_FILE_SUPERSEDE;
-    bool                           break_trigger =
+    /* Access rights that make an open a "real" open (vs a pure stat open) and so
+     * break a conflicting caching holder.  Per MS-FSA / smb2.lease.statopen4:
+     * data read/write/append/execute, EA read/write, DELETE, and WRITE_DAC /
+     * WRITE_OWNER all break; READ_ATTRIBUTES, WRITE_ATTRIBUTES, READ_CONTROL and
+     * SYNCHRONIZE do NOT (they are compatible with a cached handle). */
+    bool break_trigger =
         (da & (SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
                SMB2_FILE_APPEND_DATA | SMB2_FILE_EXECUTE |
+               SMB2_FILE_READ_EA | SMB2_FILE_WRITE_EA |
+               SMB2_WRITE_DACL | SMB2_WRITE_OWNER |
                SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
                SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL |
                SMB2_MAXIMUM_ALLOWED | SMB2_DELETE)) ||
