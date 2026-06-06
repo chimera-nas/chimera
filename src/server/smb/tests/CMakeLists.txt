@@ -207,17 +207,17 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # NonPersistentHandle variants — only become applicable once the CA / replay
     # capability is advertised, so they live here rather than in the base list.
     # Allowlist = every applicable durable/persistent/replay case confirmed green
-    # against the current server.  Left out: DurableHandleV1_Reconnect_AfterServerDisconnect
-    # (needs negotiate-after-negotiate to drop the connection — an unrelated
-    # protocol gap), *_WithDifferentDurableOwner / BVT_PersistentHandles (need a
-    # second user account / scale-out config the harness doesn't provide), and
-    # the Replay IoCtl/Lock cases (replay-eligibility not yet cleared on those ops).
+    # against the current server.  Left out: *_WithDifferentDurableOwner /
+    # BVT_PersistentHandles (need a second user account / scale-out config the
+    # harness doesn't provide — they report Inconclusive/NotExecuted), and the
+    # Replay IoCtl/Lock cases (replay-eligibility not yet cleared on those ops).
     set(WPTS_SMB2_PERSISTENT_ALLOWLIST
         BVT_DurableHandleV1_Reconnect_WithBatchOplock
         BVT_DurableHandleV1_Reconnect_WithLeaseV1
         BVT_DurableHandleV2_Reconnect_WithBatchOplock
         BVT_DurableHandleV2_Reconnect_WithLeaseV1
         BVT_PersistentHandle_Reconnect
+        DurableHandleV1_Reconnect_AfterServerDisconnect
         DurableHandleV1_Reconnect_IncludeCreateDurableHandle
         DurableHandleV1_Reconnect_IncludeReconnectV2
         DurableHandleV1_Reconnect_IncludeRequestV2

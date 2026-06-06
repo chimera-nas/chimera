@@ -57,6 +57,27 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     uint16_t                          dialect = 0, candidate;
     int                               i, j;
 
+    /* MS-SMB2 3.3.5.4: a NEGOTIATE received on a connection that already
+     * completed one (Connection.NegotiateDialect set to a concrete SMB2
+     * dialect) MUST terminate the transport connection with no reply.  WPTS
+     * DurableHandleV1_Reconnect_AfterServerDisconnect drives exactly this to
+     * force a server-side disconnect before reconnecting.  Mirror the
+     * VALIDATE_NEGOTIATE_INFO teardown: drop the compound and close the bind.
+     *
+     * Exception: 0x02ff is the wildcard "revision" recorded when an SMB1
+     * multi-protocol NEGOTIATE offered "SMB 2.???" (MS-SMB2 3.3.5.3.1).  It
+     * explicitly means "a real SMB2 NEGOTIATE follows on this same
+     * connection", so that mandatory second NEGOTIATE must be processed, not
+     * treated as a duplicate (otherwise BVT_Negotiate_Compatible_Wildcard and
+     * every real SMB1->SMB2 wildcard client get their connection dropped). */
+    if (conn->dialect != 0 && conn->dialect != 0x02ff) {
+        struct chimera_smb_compound *compound = request->compound;
+
+        chimera_smb_compound_free(thread, compound);
+        evpl_close(thread->evpl, conn->bind);
+        return;
+    }
+
     clock_gettime(
         CLOCK_REALTIME,
         &now);
