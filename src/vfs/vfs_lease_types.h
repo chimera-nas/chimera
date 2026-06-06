@@ -126,7 +126,20 @@ struct chimera_vfs_lease {
     struct chimera_vfs_file_state    *file;
 
     enum chimera_vfs_break_state break_state;
+    /* The level the current outstanding break notification asked the holder to
+     * downgrade to -- ONE caching bit below its granted mode (W, then H, then R
+     * in priority order).  A lease never jumps straight to its floor: each
+     * conflicting open/write drives the holder down a single bit, and the next
+     * step is sent only after the client acks the previous one (MS-SMB2
+     * 3.3.5.9.x cascading break, e.g. RWH -> RH -> R -> NONE). */
     uint8_t                           break_needed_mode;
+    /* The ultimate target of the in-flight cascade: the maximal mode the holder
+     * may keep given every current waiter.  NONE for a writing/truncating open
+     * or a namespace mutation; R for a read-only conflicting open; R|H for a
+     * coexisting caching lease (R and H are shared).  The cascade keeps
+     * break_state == BREAKING and re-fires one bit per ack until granted reaches
+     * this floor, at which point the break completes. */
+    uint8_t                           break_floor;
     uint64_t                          break_deadline; /* stopwatch ticks */
 
     /* For a SHARE probe only: a caching (handle) lease held under this same

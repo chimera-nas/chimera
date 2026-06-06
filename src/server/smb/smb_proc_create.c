@@ -315,10 +315,14 @@ chimera_smb_create_break_for_open(
         chimera_vfs_state_break_on_write(vfs_state, oh->fh, oh->fh_len,
                                          oh->fh_hash, &io_owner);
     } else {
-        /* A conflicting open invalidates the (exclusive) write cache of other
-         * holders, but read + handle caching stay shared: break W-holders down to
-         * R|H, not R.  For a legacy oplock R|H still collapses to LEVEL_II (no
-         * separate handle bit), so this only widens what a lease holder keeps. */
+        /* A conflicting (non-truncating) open invalidates the (exclusive) write
+         * cache of other holders, but read + handle caching stay shared: break
+         * W-holders down to R|H, not R (MS-SMB2 / smb2.lease.v2_epoch2: a plain
+         * OPEN against an RWH lease yields a single RWH->RH break and the holder
+         * keeps RH).  A holder cascades below RH only when an actual write or a
+         * truncating open follows (chimera_vfs_break_on_write deepens the floor
+         * to NONE; smb2.lease.breaking3).  For a legacy oplock R|H collapses to
+         * LEVEL_II. */
         chimera_vfs_state_break_caching_for_open(
             vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &io_owner,
             CHIMERA_VFS_LEASE_MODE_W,

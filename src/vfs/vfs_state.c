@@ -1243,7 +1243,13 @@ chimera_vfs_caching_grant_coalesce(
     if (grant) {
         grant->refcount++;
 
-        if (upgrade_ok) {
+        /* A re-open while the lease is mid-break must NOT upgrade it: MS-SMB2
+         * 3.3.5.9.11 has the re-open succeed at the lease's CURRENT (downgrading)
+         * state and report SMB2_LEASE_FLAG_BREAK_IN_PROGRESS instead of granting
+         * back the bits being broken away (smb2.lease.breaking3).  Only an IDLE
+         * lease can be upgraded. */
+        if (upgrade_ok &&
+            grant->lease.break_state == CHIMERA_VFS_BREAK_IDLE) {
             uint8_t cur = grant->lease.mode.granted;
 
             /* MS-SMB2 3.3.5.9.11: a lease is upgraded to the REQUESTED state only
@@ -1559,16 +1565,62 @@ chimera_vfs_state_range_io_conflict(
 /* Break orchestration                                                  */
 /* -------------------------------------------------------------------- */
 
+/* Compute the next single-bit break step: the holder's granted mode with the
+ * ONE highest-priority bit that is still above `floor` removed.  Priority is
+ * W (write cache, flush first) > H (handle cache) > D > R (read cache, the most
+ * shareable, dropped last).  A lease cascades one bit per ack toward its floor
+ * (RWH -> RH -> R -> NONE for floor 0), which is what the MS-SMB2 lease-break
+ * sequence the smbtorture breaking* tests assert requires.  Returns `granted`
+ * unchanged once it is already at or below the floor. */
+/* True for a lease that breaks one caching bit at a time (an SMB2 RqLs lease).
+ * A legacy SMB oplock breaks as one indivisible level, and an NFSv4 delegation
+ * is recalled whole; both jump straight to the floor instead of cascading. */
+static inline bool
+chimera_vfs_lease_cascades(const struct chimera_vfs_lease *lease)
+{
+    return lease->grant != NULL && !lease->grant->is_oplock;
+} /* chimera_vfs_lease_cascades */
+
+static inline uint8_t
+chimera_vfs_lease_break_step(
+    uint8_t granted,
+    uint8_t floor)
+{
+    uint8_t excess = granted & ~floor;
+
+    if (excess & CHIMERA_VFS_LEASE_MODE_W) {
+        return granted & ~CHIMERA_VFS_LEASE_MODE_W;
+    }
+    if (excess & CHIMERA_VFS_LEASE_MODE_H) {
+        return granted & ~CHIMERA_VFS_LEASE_MODE_H;
+    }
+    if (excess & CHIMERA_VFS_LEASE_MODE_D) {
+        return granted & ~CHIMERA_VFS_LEASE_MODE_D;
+    }
+    if (excess & CHIMERA_VFS_LEASE_MODE_R) {
+        return granted & ~CHIMERA_VFS_LEASE_MODE_R;
+    }
+    return granted;
+} /* chimera_vfs_lease_break_step */
+
+/* `floor` is the ultimate target of the break (the maximal mode the holder may
+ * keep given the conflict that triggered it) -- NOT the immediate downgrade.
+ * The first notification asks the holder to drop a single bit toward that floor;
+ * chimera_vfs_lease_ack fires the remaining steps one per ack.  When a break is
+ * already in flight, a new conflict with a lower floor only deepens the target
+ * (the in-flight step still stands and the cascade carries on to the new floor);
+ * it does not re-notify. */
 SYMBOL_EXPORT void
 chimera_vfs_lease_begin_break(
     struct chimera_vfs_state *state,
     struct chimera_vfs_lease *lease,
-    uint8_t                   needed_mode,
+    uint8_t                   floor,
     uint32_t                  deadline_ms)
 {
     struct chimera_vfs_file_state *file = lease->file;
     chimera_vfs_lease_break_cb_t   cb;
     void                          *cb_priv;
+    uint8_t                        step = 0;
     bool                           should_invoke;
 
     if (deadline_ms == 0) {
@@ -1579,12 +1631,28 @@ chimera_vfs_lease_begin_break(
         pthread_mutex_lock(&file->lock);
     }
 
-    should_invoke = (lease->break_state == CHIMERA_VFS_BREAK_IDLE) &&
-        (lease->owner.break_cb != NULL);
+    if (lease->break_state == CHIMERA_VFS_BREAK_BREAKING) {
+        /* Cascade already running: deepen the floor (a writer arriving behind a
+         * reader, an overwrite behind a plain open) so it continues lower, but
+         * leave the outstanding notification alone. */
+        lease->break_floor &= floor;
+        should_invoke       = false;
+    } else {
+        /* Only an SMB2 RqLs lease cascades one bit per ack toward the floor.  A
+         * legacy SMB oplock (one indivisible level: exclusive/batch -> II ->
+         * none) and an NFSv4 delegation (CB_RECALL returns the whole delegation)
+         * both break in a single shot, so they jump straight to the floor. */
+        step = chimera_vfs_lease_cascades(lease)
+            ? chimera_vfs_lease_break_step(lease->mode.granted, floor)
+            : floor;
+        should_invoke = (step != lease->mode.granted) &&
+            (lease->owner.break_cb != NULL);
+    }
 
     if (should_invoke) {
         lease->break_state       = CHIMERA_VFS_BREAK_BREAKING;
-        lease->break_needed_mode = needed_mode;
+        lease->break_floor       = floor;
+        lease->break_needed_mode = step;
         lease->break_deadline    = chimera_vfs_now_ticks() +
             chimera_vfs_ns_to_ticks((uint64_t) deadline_ms * 1000000ULL);
         cb      = lease->owner.break_cb;
@@ -1601,7 +1669,7 @@ chimera_vfs_lease_begin_break(
     /* Invoke the break callback outside the file lock — the protocol
      * server may need to send packets, take other locks, etc. */
     if (cb) {
-        cb(lease, needed_mode, cb_priv);
+        cb(lease, step, cb_priv);
     }
 } /* chimera_vfs_lease_begin_break */
 
@@ -1612,6 +1680,9 @@ chimera_vfs_lease_ack(
 {
     struct chimera_vfs_file_state *file    = lease->file;
     bool                           mutated = false;
+    chimera_vfs_lease_break_cb_t   cb      = NULL;
+    void                          *cb_priv = NULL;
+    uint8_t                        step    = 0;
 
     if (file) {
         pthread_mutex_lock(&file->lock);
@@ -1619,22 +1690,47 @@ chimera_vfs_lease_ack(
 
     if (lease->break_state == CHIMERA_VFS_BREAK_BREAKING) {
         lease->mode = resulting;
-        /* A lease that retains some access (e.g. an SMB oplock the client kept
-         * at LEVEL_II) re-arms to IDLE so a later conflicting open / write /
-         * lock can break it again; one reduced to NONE goes inert (ACKED) until
-         * the holder closes.  Re-arming is safe here because this is the
-         * client's real, asynchronous response -- not the old optimistic ack
-         * that fired inside the same operation and could livelock a waiter. */
-        lease->break_state = resulting.granted ? CHIMERA_VFS_BREAK_IDLE
-                                               : CHIMERA_VFS_BREAK_ACKED;
-        mutated = true;
+
+        /* Cascade: the conflict that started this break may need the holder
+         * lower than the bit it just acked (a plain RW open drives RWH -> RH ->
+         * R -> NONE).  If the acked mode is still above the floor, fire the next
+         * single-bit break immediately and stay BREAKING -- the waiter parked on
+         * this break keeps waiting and a same-key re-open still sees the break in
+         * progress.  Only when the holder reaches the floor does the break
+         * finish: re-arm to IDLE if it kept any mode (a later conflict can break
+         * it again) or go inert (ACKED) at NONE until the holder closes. */
+        step = chimera_vfs_lease_cascades(lease)
+            ? chimera_vfs_lease_break_step(resulting.granted, lease->break_floor)
+            : resulting.granted;
+
+        if (step != resulting.granted && lease->owner.break_cb) {
+            uint32_t deadline_ms = (file && file->state)
+                ? file->state->default_break_deadline_ms
+                : CHIMERA_VFS_STATE_DEFAULT_BREAK_DEADLINE_MS;
+
+            lease->break_needed_mode = step;
+            lease->break_deadline    = chimera_vfs_now_ticks() +
+                chimera_vfs_ns_to_ticks((uint64_t) deadline_ms * 1000000ULL);
+            cb      = lease->owner.break_cb;
+            cb_priv = lease->owner.cb_private;
+        } else {
+            lease->break_state = resulting.granted ? CHIMERA_VFS_BREAK_IDLE
+                                                   : CHIMERA_VFS_BREAK_ACKED;
+            mutated = true;
+        }
     }
 
     if (file) {
         pthread_mutex_unlock(&file->lock);
     }
 
-    /* Acking a break may unblock pending acquires or parked I/O. */
+    /* Fire the next cascade step (outside the lock — the SMB cb sends a packet). */
+    if (cb) {
+        cb(lease, step, cb_priv);
+        return;
+    }
+
+    /* Acking the final step may unblock pending acquires or parked I/O. */
     if (mutated && file && file->state) {
         chimera_vfs_state_pump_pending(file->state, file);
         chimera_vfs_state_pump_io(file->state, file);
