@@ -1244,7 +1244,14 @@ chimera_nfs4_pnfs_ds_write_callback(
     }
     layout->layoutcommit_needed = 1;
 
-    request->write.r_sync   = res->resok.committed;
+    /* Report UNSTABLE regardless of the DS's committed level: the data is on the
+     * DS, but the MDS only learns the new file size from a LAYOUTCOMMIT, which
+     * this proxy issues lazily (close-time, deferred by the open-handle cache).
+     * Forcing UNSTABLE makes the upper client issue a COMMIT on close/sync, which
+     * chimera_nfs4_commit turns into a LAYOUTCOMMIT -- so a re-open sees the real
+     * size.  Reporting the DS's FILE_SYNC here would let the client skip COMMIT
+     * and read back a stale (often zero) size, breaking close-to-open. */
+    request->write.r_sync   = CHIMERA_VFS_WRITE_UNSTABLE;
     request->write.r_length = res->resok.count;
     request->status         = CHIMERA_VFS_OK;
     request->complete(request);
@@ -1626,3 +1633,133 @@ chimera_nfs4_pnfs_close(
     }
     return 1;
 } /* chimera_nfs4_pnfs_close */
+
+/* ---------------------------------------------------------------------------
+* Commit-time LAYOUTCOMMIT: flush the file size to the MDS WITHOUT releasing the
+* layout (the file stays open).  pNFS DS writes are reported UNSTABLE (see
+* chimera_nfs4_pnfs_ds_write_callback), so the upper client issues a COMMIT on
+* close/sync; that COMMIT lands here and is turned into a LAYOUTCOMMIT so a
+* subsequent open observes the real size instead of the stale pre-commit one
+* (the close-time LAYOUTCOMMIT alone is deferred by the open-handle cache and
+* loses the close-to-open race).
+* ------------------------------------------------------------------------- */
+
+static void chimera_nfs4_pnfs_commit_send(
+    struct chimera_vfs_request *request);
+
+static void
+chimera_nfs4_pnfs_commit_retry(
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
+    struct chimera_vfs_request *request,
+    void                       *ctx)
+{
+    (void) thread;
+    (void) shared;
+    (void) ctx;
+    chimera_nfs4_pnfs_commit_send(request);
+} /* chimera_nfs4_pnfs_commit_retry */
+
+static void
+chimera_nfs4_pnfs_commit_callback(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct COMPOUND4res         *res,
+    int                          status,
+    void                        *private_data)
+{
+    struct chimera_vfs_request         *request = private_data;
+    struct chimera_nfs4_pnfs_close_ctx *cctx    = request->plugin_data;
+
+    /* On success the MDS now reflects the high-water size, so a later
+     * close/commit with no new writes can skip the round-trip.  On error leave
+     * layoutcommit_needed set so close-time LAYOUTCOMMIT retries the flush. */
+    if (status == 0 && res && res->status == NFS4_OK) {
+        cctx->open_state->layout.layoutcommit_needed = 0;
+    }
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_nfs4_pnfs_commit_callback */
+
+static void
+chimera_nfs4_pnfs_commit_send(struct chimera_vfs_request *request)
+{
+    struct chimera_nfs4_pnfs_close_ctx      *cctx          = request->plugin_data;
+    struct chimera_nfs_shared               *shared        = cctx->shared;
+    struct chimera_nfs_client_server_thread *server_thread = cctx->mds_thread;
+    struct chimera_nfs4_layout              *layout        = &cctx->open_state->layout;
+    struct COMPOUND4args                     args;
+    struct nfs_argop4                        argarray[3];
+    struct evpl_rpc2_cred                    rpc2_cred;
+    uint8_t                                 *fh;
+    int                                      fhlen;
+    uint64_t                                 high;
+
+    chimera_nfs4_map_fh(layout->file_fh, layout->file_fh_len, &fh, &fhlen);
+
+    memset(&args, 0, sizeof(args));
+    args.minorversion = 1;
+    args.argarray     = argarray;
+    args.num_argarray = 3;
+
+    argarray[0].argop = OP_SEQUENCE;   /* slot fields filled by compound_call */
+
+    argarray[1].argop               = OP_PUTFH;
+    argarray[1].opputfh.object.data = fh;
+    argarray[1].opputfh.object.len  = fhlen;
+
+    argarray[2].argop                                              = OP_LAYOUTCOMMIT;
+    argarray[2].oplayoutcommit.loca_offset                         = 0;
+    argarray[2].oplayoutcommit.loca_length                         = UINT64_MAX;
+    argarray[2].oplayoutcommit.loca_reclaim                        = 0;
+    argarray[2].oplayoutcommit.loca_stateid                        = layout->layout_stateid;
+    high                                                           = atomic_load(&layout->last_write_offset);
+    argarray[2].oplayoutcommit.loca_last_write_offset.no_newoffset = 1;
+    argarray[2].oplayoutcommit.loca_last_write_offset.no_offset    = high ? high - 1 : 0;
+    argarray[2].oplayoutcommit.loca_time_modify.nt_timechanged     = 0;
+    argarray[2].oplayoutcommit.loca_layoutupdate.lou_type          = CHIMERA_NFS4_LAYOUT4_FLEX_FILES;
+    argarray[2].oplayoutcommit.loca_layoutupdate.lou_body.data     = NULL;
+    argarray[2].oplayoutcommit.loca_layoutupdate.lou_body.len      = 0;
+
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
+    chimera_nfs4_compound_call(
+        cctx->thread, shared, server_thread, request,
+        &args, &rpc2_cred, 0, 0, NULL, 0, 0,
+        chimera_nfs4_pnfs_commit_callback, request,
+        chimera_nfs4_pnfs_commit_retry, request);
+} /* chimera_nfs4_pnfs_commit_send */
+
+int
+chimera_nfs4_pnfs_commit(
+    struct chimera_nfs_thread      *thread,
+    struct chimera_nfs_shared      *shared,
+    struct chimera_vfs_request     *request,
+    struct chimera_nfs4_open_state *open_state)
+{
+    struct chimera_nfs4_layout              *layout = &open_state->layout;
+    struct chimera_nfs_client_server_thread *mds_thread;
+    struct chimera_nfs4_pnfs_close_ctx      *cctx;
+
+    if (atomic_load(&layout->state) != CHIMERA_NFS4_LAYOUT_VALID ||
+        layout->file_fh_len == 0 || !layout->layoutcommit_needed) {
+        return 0;       /* nothing to flush: caller completes the commit OK. */
+    }
+
+    mds_thread = chimera_nfs_thread_get_server_thread(thread, layout->file_fh, layout->file_fh_len);
+    if (!mds_thread || !mds_thread->nfs_conn || !mds_thread->server->nfs4_session) {
+        return 0;
+    }
+
+    cctx             = request->plugin_data;
+    cctx->thread     = thread;
+    cctx->shared     = shared;
+    cctx->mds_thread = mds_thread;
+    cctx->open_state = open_state;
+
+    chimera_nfs4_pnfs_commit_send(request);
+    return 1;
+} /* chimera_nfs4_pnfs_commit */
