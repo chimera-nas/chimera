@@ -20,6 +20,7 @@
 #include "server/server.h"
 #include "evpl/evpl.h"
 #include "smb_internal.h"
+#include "smb_async_interim.h"
 #include "smb_wbclient.h"
 #include "smb_procs.h"
 #include "smb_notify.h"
@@ -767,6 +768,14 @@ chimera_smb_complete_request(
     unsigned int                status)
 {
     struct chimera_smb_compound *compound = request->compound;
+
+    /* If an async-interim is pending for this request, retire it.  An interim
+     * STATUS_PENDING has already gone out (request->async_id is set), so the
+     * reply builder below will tag the final response with
+     * SMB2_FLAGS_ASYNC_COMMAND and the matching AsyncId. */
+    if (unlikely(request->async.armed)) {
+        chimera_smb_async_interim_cancel(request);
+    }
 
     request->status = status;
 

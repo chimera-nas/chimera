@@ -301,6 +301,24 @@ struct chimera_smb_request {
     struct chimera_smb_compound       *compound;
     struct chimera_smb_request        *next;
 
+    /* Generic async-interim (STATUS_PENDING) state, managed by
+     * smb_async_interim.c.  Populated when a handler decides it must block on an
+     * external event and calls chimera_smb_async_interim_begin; cleared by
+     * chimera_smb_complete_request / _cancel.  armed == 0 outside a pending
+     * window.  The timer field is reserved for a future block deadline driver
+     * (begin does not arm it today; cancel/drain remove it as a safe no-op). */
+    struct {
+        struct evpl_timer           timer;
+        struct chimera_smb_request *park_next;
+        uint8_t                     signing_key[16];
+        uint64_t                    session_id;
+        uint16_t                    dialect;
+        uint16_t                    credit_charge;
+        uint16_t                    credit_request;
+        uint8_t                     signed_session;
+        uint8_t                     armed;
+    } async;
+
     union {
 
         struct {
@@ -489,10 +507,10 @@ struct chimera_smb_request {
             uint32_t                           r_maximal_access;
             /* Deferred-response park (MS-SMB2 3.3.5.9 pending-open): when this open
              * triggered an ack-required lease break, its SUCCESS response is held
-             * until the holder acknowledges.  park_next links it on the tree's
-             * parked_creates list; park_fh identifies the file whose break it
-             * awaits (resumed when that file's caching leases settle). */
-            struct chimera_smb_request        *park_next;
+             * (via the async-interim path; the request links on conn->parked_
+             * requests) until the holder acknowledges.  park_fh identifies the file
+             * whose break it awaits (resumed when that file's caching leases
+             * settle -- chimera_smb_create_resume_parked). */
             uint8_t                            park_fh[CHIMERA_VFS_FH_SIZE];
             uint8_t                            park_fh_len;
             uint64_t                           park_fh_hash;
@@ -872,6 +890,11 @@ struct chimera_smb_conn {
     struct chimera_smb_tree           *last_tree;
     struct chimera_smb_session_handle *session_handles;
     struct chimera_smb_notify_request *parked_notifies;  /* parked CHANGE_NOTIFY requests */
+    /* Requests pending an async-interim (STATUS_PENDING already sent): a create
+     * blocked on a lease break, a blocking lock, etc. (smb_async_interim.c).
+     * SMB2_CANCEL walks this list by AsyncId; conn_free drains it before tearing
+     * down the bind. */
+    struct chimera_smb_request        *parked_requests;
     struct chimera_server_smb_thread  *thread;
     struct evpl_bind                  *bind;
     struct chimera_smb_conn           *prev;
@@ -1192,10 +1215,12 @@ chimera_smb_request_alloc(struct chimera_server_smb_thread *thread)
         request = calloc(1, sizeof(*request));
     }
 
-    request->status   = SMB2_STATUS_SUCCESS;
-    request->flags    = 0;
-    request->async_id = 0;
-    request->tree     = NULL;
+    request->status          = SMB2_STATUS_SUCCESS;
+    request->flags           = 0;
+    request->async_id        = 0;
+    request->tree            = NULL;
+    request->async.armed     = 0;
+    request->async.park_next = NULL;
 
     return request;
 } /* chimera_smb_request_alloc */
@@ -1494,6 +1519,12 @@ void chimera_smb_notify_cancel(
 void chimera_smb_notify_drop(
     struct chimera_smb_notify_request *nr);
 
+/* Defined in smb_async_interim.c -- forward-declared so the inline conn_free
+ * below can drain without including the header (which would create a cycle
+ * through smb_internal.h). */
+void chimera_smb_async_interim_drain(
+    struct chimera_smb_conn *conn);
+
 static inline void
 chimera_smb_conn_free(
     struct chimera_server_smb_thread *thread,
@@ -1508,6 +1539,13 @@ chimera_smb_conn_free(
     while (conn->parked_notifies) {
         chimera_smb_notify_drop(conn->parked_notifies);
     }
+
+    /* Unlink any requests pending an async-interim (their interim is already on
+     * the wire).  They are not freed here -- they remain owned by their
+     * compounds, which tear down through the normal path; a late VFS callback
+     * reaching chimera_smb_complete_request sees async.armed == 0 and skips the
+     * cancel. */
+    chimera_smb_async_interim_drain(conn);
 
     /* Drain any lease-break notifications still queued for this connection and
      * mark it tearing-down so a break_cb racing on another thread won't enqueue
@@ -1635,9 +1673,7 @@ chimera_smb_tree_alloc(struct chimera_server_smb_shared *shared)
         for (int i = 0; i < CHIMERA_SMB_OPEN_FILE_BUCKETS; i++) {
             pthread_mutex_init(&tree->open_files_lock[i], NULL);
         }
-        pthread_mutex_init(&tree->parked_lock, NULL);
     }
-    tree->parked_creates = NULL;
 
     tree->fh_expiration.tv_sec  = 0;
     tree->fh_expiration.tv_nsec = 0;

@@ -442,13 +442,37 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
 
         if (open_file) {
             if (open_file->grant) {
+                struct chimera_vfs_lease *lease    = &open_file->grant->lease;
+                uint8_t                   kept_vfs = chimera_smb_lease_bits_to_vfs(
+                    request->oplock_break.lease_state);
+
+                /* MS-SMB2 3.3.5.22.2: an ack is valid only while a break is
+                 * outstanding.  A duplicate ack (the lease already settled) is
+                 * STATUS_UNSUCCESSFUL. */
+                if (lease->break_state != CHIMERA_VFS_BREAK_BREAKING) {
+                    chimera_smb_open_file_release(request, open_file);
+                    chimera_smb_complete_request(request, SMB2_STATUS_UNSUCCESSFUL);
+                    return;
+                }
+
+                /* The acknowledged state may only DROP bits the break asked the
+                * holder to give up -- it must be a subset of the retained mask
+                * (break_needed_mode).  An ack that tries to keep a bit being
+                * broken (e.g. acking RWH to a W->RH break) is rejected with
+                * STATUS_REQUEST_NOT_ACCEPTED and the lease is left BREAKING. */
+                if (kept_vfs & ~lease->break_needed_mode) {
+                    chimera_smb_open_file_release(request, open_file);
+                    chimera_smb_complete_request(request,
+                                                 SMB2_STATUS_REQUEST_NOT_ACCEPTED);
+                    return;
+                }
+
                 struct chimera_vfs_lease_mode kept = {
-                    .granted = chimera_smb_lease_bits_to_vfs(
-                        request->oplock_break.lease_state),
+                    .granted = kept_vfs,
                     .denied  = 0,
                 };
 
-                chimera_vfs_lease_ack(&open_file->grant->lease, kept);
+                chimera_vfs_lease_ack(lease, kept);
             }
             open_file->lease_state = request->oplock_break.lease_state;
             chimera_smb_open_file_release(request, open_file);
