@@ -88,48 +88,58 @@ enum chimera_nfs_client_mount_state {
  *
  * RFC 8881 §2.10.6.1 requires one outstanding request per fore-channel slot,
  * each slot carrying its own monotonic sequenceid.  The session owns the global
- * slot space (max_slots, granted by CREATE_SESSION); each per-thread connection
- * (chimera_nfs_client_server_thread) claims a disjoint block of slot indices
- * from `next_unclaimed` (under `lock`, once) and manages them thread-locally.
+ * slot space (max_slots, granted by CREATE_SESSION).  Slot ids are handed out
+ * cooperatively (nfs4_slot.c): each per-thread connection keeps a private floor
+ * of slots plus a batch it borrows from / returns to this shared pool, so a busy
+ * thread can use far more than its even share while idle threads give slots back.
+ * `lock` is taken only on batched borrow/return/floor-claim/target-change, never
+ * per operation.
  */
 struct chimera_nfs4_client_session {
-    pthread_mutex_t lock;          /* guards next_unclaimed / claimed_blocks only */
-    uint8_t         sessionid[NFS4_SESSIONID_SIZE];
-    uint64_t        clientid;
-    uint32_t        max_slots;     /* fore-channel slots granted (ca_maxrequests) */
-    uint32_t        next_unclaimed; /* next free global slot index to hand out    */
-    uint32_t        claimed_blocks; /* threads that have claimed a block so far;  *
-                                    * used to reserve >=1 slot for each thread   *
-                                    * that has not claimed yet (no over-grab).   */
+    pthread_mutex_t  lock;          /* guards the pool + usable; NOT per-op        */
+    uint8_t          sessionid[NFS4_SESSIONID_SIZE];
+    uint64_t         clientid;
+    uint32_t         max_slots;     /* fore-channel slots granted (ca_maxrequests) */
+    _Atomic uint32_t usable;        /* applied usable count = clamp(target+1, ...,   *
+                                     * max_slots); relaxed-read on the hot path to  *
+                                     * fill sa_highest_slotid, written under lock.  */
+    _Atomic uint32_t target_usable; /* server-requested usable (sr_target+1); set   *
+                                     * relaxed on a reply when it changes, applied  *
+                                     * to `usable` + pool under lock at next batch.  */
+    uint32_t        *slot_seqid;    /* [max_slots] next sa_sequenceid per id (>=1)  */
+    uint32_t        *free_ids;      /* [max_slots] pool of available ids < usable   */
+    uint32_t         free_count;    /* top of free_ids stack                        */
+    uint32_t        *retired_ids;   /* [max_slots] ids >= usable, parked on shrink  */
+    uint32_t         retired_count; /* top of retired_ids stack                     */
+    uint32_t         claimed_floors; /* threads that have claimed a floor so far;   *
+                                     * reserve >=1 id for each unclaimed thread.   */
 };
 
 struct chimera_nfs_client_mount;
 struct chimera_nfs4_compound_ctx;   /* in-flight wrapper context (nfs4_slot.c)   */
-struct chimera_nfs4_parked;         /* queued request awaiting a slot (nfs4_slot.c) */
-struct chimera_nfs4_layout;         /* per-file pNFS layout (nfs4_pnfs.h)        */
-
-/* One owned fore-channel slot. */
-struct chimera_nfs4_slot {
-    uint32_t global_id;             /* sa_slotid to send on the wire               */
-    uint32_t seqid;                 /* next sa_sequenceid; starts at 1             */
-    uint8_t  in_use;                /* 1 == one request outstanding on this slot   */
-};
+struct chimera_nfs4_parked;                   /* queued request awaiting a slot (nfs4_slot.c) */
+struct chimera_nfs4_layout;                   /* per-file pNFS layout (nfs4_pnfs.h)        */
 
 /*
  * Per-(thread,server) fore-channel slot table.  Touched by exactly one evpl
- * thread (its owning chimera_nfs_thread), so all of acquire/release/park/wake
- * are lock-free; only the one-time block claim takes session->lock.
+ * thread (its owning chimera_nfs_thread), so acquire/release/park/wake are
+ * lock-free; only batched borrow/return from the session pool takes
+ * session->lock.  `local_free` holds this thread's currently-owned, not-in-use
+ * global slot ids (a small stack); per-id seqids live in session->slot_seqid.
  */
 struct chimera_nfs4_slot_table {
     int                               initialized;
-    uint32_t                          num_slots;
-    struct chimera_nfs4_slot         *slots; /* [num_slots]                */
-    uint32_t                         *free_stack;   /* local indices not in use   */
-    int                               free_top;
-    struct chimera_nfs4_parked       *wait_head;    /* FIFO of parked requests    */
+    uint32_t                         *local_free;    /* [max_slots] owned-free ids */
+    int                               local_free_top; /* top of local_free stack   */
+    uint32_t                          leased; /* ids owned (floor+borrowed) */
+    uint32_t                          floor;  /* reserved ids, never returned *
+                                               * except at teardown          */
+    uint32_t                          cached_target; /* last-seen sr_target+1; cheap *
+                                                      * change detect, no per-op atomic */
+    struct chimera_nfs4_parked       *wait_head;     /* FIFO of parked requests    */
     struct chimera_nfs4_parked       *wait_tail;
     struct chimera_nfs4_parked       *parked_freelist;
-    struct chimera_nfs4_compound_ctx *inflight;     /* dll, for disconnect reset  */
+    struct chimera_nfs4_compound_ctx *inflight;      /* dll, for disconnect reset  */
     struct chimera_nfs4_compound_ctx *ctx_freelist;
 };
 
@@ -839,9 +849,17 @@ void chimera_nfs4_compound_call(
     chimera_nfs4_retry_fn retry_fn,
     void *retry_ctx);
 
-/* Free a server_thread's slot table (called from thread teardown). */
+/* Allocate/free the session-global fore-channel slot pool (slot_seqid, free_ids,
+ * retired_ids) once max_slots is known at CREATE_SESSION. */
+void chimera_nfs4_session_pool_init(
+    struct chimera_nfs4_client_session *session);
+void chimera_nfs4_session_pool_destroy(
+    struct chimera_nfs4_client_session *session);
+
+/* Free a server_thread's slot table (called from thread teardown).  Returns the
+ * thread's leased slot ids (floor + borrowed) to the session pool first. */
 void chimera_nfs4_slot_table_destroy(
-    struct chimera_nfs4_slot_table *st);
+    struct chimera_nfs_client_server_thread *server_thread);
 
 /* On connection loss: error-complete in-flight + parked requests and reset the
  * slot table so the next op re-establishes cleanly. */

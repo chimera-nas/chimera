@@ -128,6 +128,7 @@ chimera_nfs_destroy(void *private_data)
         if (shared->servers[i]) {
             /* Free NFS4 session if present */
             if (shared->servers[i]->nfs4_session) {
+                chimera_nfs4_session_pool_destroy(shared->servers[i]->nfs4_session);
                 pthread_mutex_destroy(&shared->servers[i]->nfs4_session->lock);
                 free(shared->servers[i]->nfs4_session);
             }
@@ -233,8 +234,8 @@ chimera_nfs_thread_init(
     thread->shared = shared;
     thread->evpl   = evpl;
 
-    /* Count client threads so the NFS4.1 fore-channel slot pool can be
-     * partitioned evenly (max_slots / nfs_thread_count) per thread. */
+    /* Count live client threads: the NFS4.1 fore-channel slot layer reserves a
+     * floor slot per thread and sizes each thread's soft borrow cap from this. */
     atomic_fetch_add(&shared->nfs_thread_count, 1);
 
     programs[0] = &shared->mount_v3.rpc2;
@@ -282,12 +283,16 @@ chimera_nfs_thread_destroy(void *private_data)
 
     for (i = 0; i < thread->max_server_threads; i++) {
         if (thread->server_threads[i]) {
-            chimera_nfs4_slot_table_destroy(&thread->server_threads[i]->slots);
+            chimera_nfs4_slot_table_destroy(thread->server_threads[i]);
             free(thread->server_threads[i]);
         }
     }
 
     free(thread->server_threads);
+
+    /* Drop this thread from the live count so the slot floor/fair-cap math does
+     * not drift upward across thread churn (mirrors the thread_init increment). */
+    atomic_fetch_sub(&thread->shared->nfs_thread_count, 1);
 
     free(thread);
 } /* chimera_nfs_thread_destroy */

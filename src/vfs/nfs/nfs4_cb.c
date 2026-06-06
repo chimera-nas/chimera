@@ -289,9 +289,11 @@ chimera_nfs4_cb_create_session_callback(
     cs_res = &res->resarray[0].opcreate_session.csr_resok4;
 
     memcpy(session->sessionid, cs_res->csr_sessionid, NFS4_SESSIONID_SIZE);
-    session->max_slots      = cs_res->csr_fore_chan_attrs.ca_maxrequests;
-    session->next_unclaimed = 0;
-    session->claimed_blocks = 0;
+    session->max_slots = cs_res->csr_fore_chan_attrs.ca_maxrequests;
+
+    /* Allocate the session-global fore-channel slot pool now that the granted
+    * slot count is known; threads borrow/return ids from it (nfs4_slot.c). */
+    chimera_nfs4_session_pool_init(session);
 
     pthread_mutex_lock(&shared->lock);
     server->nfs4_session = session;
