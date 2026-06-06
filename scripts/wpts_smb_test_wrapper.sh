@@ -272,15 +272,19 @@ if [ "${CHIMERA_SMB_MULTICHANNEL:-0}" = "1" ]; then
 fi
 
 # When encryption is enabled, advertise it to the driver so the Encryption cases
-# become applicable: declare support, the cipher list chimera offers, the
-# per-share encrypted share, and that global encrypt-data is on.
+# become applicable: declare support, the per-share encrypted share, and that
+# global encrypt-data is on. SutSupportedEncryptionAlgorithms is set
+# unconditionally in the fixture: even in baseline mode the SMB 3.1.1 NEGOTIATE
+# selects and echoes a CipherId from the client's offered list (transport
+# encryption is decided separately at SESSION_SETUP), so the driver must always
+# know the cipher set to validate the echoed Connection.CipherId
+# (BVT_Negotiate_SMB311).
 if [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ]; then
     staged="${WPTS_BIN_DIR}/CommonTestSuite.deployment.ptfconfig"
     sed -i \
         -e 's#<Property name="IsEncryptionSupported" value="false"/>#<Property name="IsEncryptionSupported" value="true"/>#' \
         -e 's#<Property name="IsGlobalEncryptDataEnabled" value="false"/>#<Property name="IsGlobalEncryptDataEnabled" value="true"/>#' \
         -e 's#<Property name="EncryptedFileShare" value=""/>#<Property name="EncryptedFileShare" value="SMBEncrypted"/>#' \
-        -e 's#<Property name="SutSupportedEncryptionAlgorithms" value=""/>#<Property name="SutSupportedEncryptionAlgorithms" value="ENCRYPTION_AES128_CCM;ENCRYPTION_AES128_GCM;ENCRYPTION_AES256_CCM;ENCRYPTION_AES256_GCM"/>#' \
         "$staged"
 fi
 

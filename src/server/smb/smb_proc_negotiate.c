@@ -141,13 +141,18 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     conn->dialect = dialect;
 
     /* SMB 3.1.1 mandates a PreauthIntegrityCapabilities context offering a
-     * hash algorithm we support (SHA-512). Per MS-SMB2 3.3.5.4, a 3.1.1
-     * NEGOTIATE without it (or offering no supported hash) fails with
-     * STATUS_INVALID_PARAMETER. */
+     * hash algorithm we support (SHA-512). Per MS-SMB2 §3.3.5.4:
+     *   - if no PreauthIntegrity context is present at all, fail with
+     *     STATUS_INVALID_PARAMETER;
+     *   - if the context is present but its HashAlgorithms array contains no
+     *     algorithm we support, fail with
+     *     STATUS_SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP (0xC05D0000). */
     if (dialect == SMB2_DIALECT_3_1_1) {
+        int have_preauth_ctx =
+            (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_PREAUTH) != 0;
         int have_sha512 = 0;
 
-        if (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_PREAUTH) {
+        if (have_preauth_ctx) {
             for (i = 0; i < request->negotiate.preauth_in.hash_alg_count; i++) {
                 if (request->negotiate.preauth_in.hash_algs[i] == SMB2_PREAUTH_HASH_SHA_512) {
                     have_sha512 = 1;
@@ -157,7 +162,11 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
         }
 
         if (!have_sha512) {
-            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            chimera_smb_complete_request(
+                request,
+                have_preauth_ctx ?
+                SMB2_STATUS_SMB_NO_PREAUTH_INTEGRITY_OVERLAP :
+                SMB2_STATUS_INVALID_PARAMETER);
             return;
         }
     }
@@ -553,8 +562,12 @@ parse_neg_ctx_compression(
     uint16_t count, i;
 
     /* MS-SMB2 §3.3.5.4: fail NEGOTIATE if DataLength is below the fixed
-     * SMB2_COMPRESSION_CAPABILITIES size (8 bytes) or CompressionAlgorithmCount
-     * is zero.  These are reported as fatal by the dispatcher. */
+     * SMB2_COMPRESSION_CAPABILITIES size (8 bytes).  A
+     * CompressionAlgorithmCount of zero is tolerated (treated as "no
+     * compression offered") — Windows accepts it and returns success, and the
+     * WPTS Negotiate_SMB311_WithAllContexts case (which sends an empty
+     * compression context when the client lists no compression algorithms)
+     * asserts STATUS_SUCCESS. */
     if (data_len < 8) {
         return -1;
     }
@@ -562,8 +575,12 @@ parse_neg_ctx_compression(
     /* data + 2: 2-byte padding (ignored) */
     request->negotiate.compression_in.flags = smb_wire_le32(data + 4);
 
-    if (count == 0 ||
-        count > sizeof(request->negotiate.compression_in.algs) / sizeof(uint16_t)) {
+    if (count == 0) {
+        request->negotiate.compression_in.alg_count = 0;
+        return 0;
+    }
+
+    if (count > sizeof(request->negotiate.compression_in.algs) / sizeof(uint16_t)) {
         return -1;
     }
     if ((uint32_t) 8 + (uint32_t) count * 2u > data_len) {
