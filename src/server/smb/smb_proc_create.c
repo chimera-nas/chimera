@@ -3261,7 +3261,15 @@ parse_ctx_rqls(
     request->create.rqls.flags = smb_wire_le32(data + 20);
     if (data_len == 52) {
         request->create.rqls.is_v2 = 1;
-        memcpy(request->create.rqls.parent_key, data + 32, 16);
+        /* The ParentLeaseKey is meaningful only when the client set
+         * SMB2_LEASE_FLAG_PARENT_LEASE_KEY_SET; otherwise the bytes are reserved
+         * and must be ignored (and echoed back as zero -- smb2.lease.
+         * v2_flags_parentkey). */
+        if (request->create.rqls.flags & SMB2_LEASE_FLAG_PARENT_LEASE_KEY_SET) {
+            memcpy(request->create.rqls.parent_key, data + 32, 16);
+        } else {
+            memset(request->create.rqls.parent_key, 0, 16);
+        }
         request->create.rqls.epoch = smb_wire_le16(data + 48);
     } else {
         request->create.rqls.is_v2 = 0;
