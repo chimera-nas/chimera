@@ -17,6 +17,11 @@
  */
 #define CHIMERA_VFS_STATE_DEFAULT_BREAK_DEADLINE_MS 30000
 
+/* Upper bound on caching leases broken / revoked in a single batched pass.  A
+ * file with more concurrent caching holders than this is pathological; any
+ * excess is handled on the next pass. */
+#define CHIMERA_VFS_STATE_MAX_BREAK_BATCH           64
+
 /*
  * Implicit I/O leases held by chimera on behalf of leaseless actors are
  * dropped once they have been idle (no in-flight I/O) for this long.  Keeps
@@ -1383,6 +1388,46 @@ chimera_vfs_caching_grant_release(
     }
 } /* chimera_vfs_caching_grant_release */
 
+SYMBOL_EXPORT void
+chimera_vfs_state_revoke_breaks(
+    struct chimera_vfs_state               *state,
+    const uint8_t                          *fh,
+    uint8_t                                 fh_len,
+    uint64_t                                fh_hash,
+    const struct chimera_vfs_caching_grant *except)
+{
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease      *to_revoke[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    struct chimera_vfs_lease      *cur;
+    int                            n = 0;
+    int                            i;
+
+    if (!state || fh_len == 0) {
+        return;
+    }
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
+            cur->grant != except &&
+            n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
+            to_revoke[n++] = cur;
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    for (i = 0; i < n; i++) {
+        chimera_vfs_lease_revoke(to_revoke[i]);
+    }
+
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_state_revoke_breaks */
+
 SYMBOL_EXPORT bool
 chimera_vfs_state_caching_breaking(
     struct chimera_vfs_state               *state,
@@ -1785,11 +1830,6 @@ chimera_vfs_state_break_caching(
 /* -------------------------------------------------------------------- */
 /* Break-on-write                                                       */
 /* -------------------------------------------------------------------- */
-
-/* Upper bound on caching leases broken by a single write.  A file with
- * more concurrent caching holders than this is pathological; any excess
- * is left for a subsequent write to break. */
-#define CHIMERA_VFS_STATE_MAX_BREAK_BATCH 64
 
 /* A write invalidates every read-caching (R) lease on the file: those
  * holders can no longer trust their cached data, so each must break down
@@ -2429,6 +2469,39 @@ chimera_vfs_io_lease_release(struct chimera_vfs_request *request)
     }
 } /* chimera_vfs_io_lease_release */
 
+/* Revoke every caching lease on `file` that has been BREAKING past its break
+ * deadline (the holder never acknowledged).  Returns true if any were revoked.
+ * Caller must NOT hold file->lock; revoke takes it internally.  Collect under the
+ * lock, then revoke (which re-locks + pumps), so the list walk is not disturbed
+ * mid-revoke. */
+static bool
+chimera_vfs_state_revoke_expired_breaks(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
+{
+    struct chimera_vfs_lease *expired[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    struct chimera_vfs_lease *cur;
+    int                       n = 0;
+    int                       i;
+
+    (void) state;
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
+            chimera_vfs_break_deadline_passed(cur) &&
+            n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
+            expired[n++] = cur;
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    for (i = 0; i < n; i++) {
+        chimera_vfs_lease_revoke(expired[i]);
+    }
+    return n > 0;
+} /* chimera_vfs_state_revoke_expired_breaks */
+
 SYMBOL_EXPORT void
 chimera_vfs_state_reap_idle(
     struct chimera_vfs_state *state,
@@ -2480,6 +2553,11 @@ chimera_vfs_state_reap_idle(
                 /* finish_drain pumps the wait queue itself. */
                 chimera_vfs_implicit_finish_drain(state, file);
             } else if (has_waiters) {
+                /* A parked I/O / namespace op is waiting on a caching holder to
+                 * break.  If that holder never acknowledged and its break
+                 * deadline has elapsed, forcibly revoke it (MS-SMB2 / NFSv4
+                 * recall timeout) so the waiter can proceed, then re-pump. */
+                chimera_vfs_state_revoke_expired_breaks(state, file);
                 chimera_vfs_state_pump_io(state, file);
             }
 

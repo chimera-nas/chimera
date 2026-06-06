@@ -254,6 +254,19 @@ chimera_vfs_state_caching_breaking(
     uint64_t                                fh_hash,
     const struct chimera_vfs_caching_grant *except);
 
+/* Forcibly revoke every caching lease on the file that is mid-break, EXCLUDING
+ * the grant `except`.  Used when a parked open's break deadline expires (the
+ * holder never acknowledged): the holder is revoked so the waiting open can
+ * proceed.  `except` (the waiter's own coalesced grant) may be NULL.  Caller must
+ * NOT hold file->lock. */
+void
+chimera_vfs_state_revoke_breaks(
+    struct chimera_vfs_state               *state,
+    const uint8_t                          *fh,
+    uint8_t                                 fh_len,
+    uint64_t                                fh_hash,
+    const struct chimera_vfs_caching_grant *except);
+
 /* -------------------------------------------------------------------- */
 /* Async acquire/release                                                */
 /* -------------------------------------------------------------------- */

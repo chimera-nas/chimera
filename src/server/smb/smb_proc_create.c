@@ -1543,6 +1543,38 @@ chimera_smb_create_open_at_callback(
     chimera_smb_create_open_finish(request, open_file);
 } /* chimera_smb_create_open_at_callback */
 
+/* Break-deadline for a CREATE parked on a lease break (MS-SMB2 3.3.5.9 / the
+ * oplock-break timeout): the holder never acknowledged within the deadline, so
+ * forcibly revoke the still-breaking holder(s) and complete the pending open with
+ * its already-acquired lease.  Runs on the open's own conn thread (the timer is
+ * armed on that thread's evpl).  An ack that resumes the open first removes this
+ * timer. */
+static void
+chimera_smb_create_park_deadline_cb(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_smb_request       *request = (struct chimera_smb_request *)
+        ((char *) timer - offsetof(struct chimera_smb_request, async.timer));
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct chimera_vfs_state         *vfs_state =
+        thread->vfs_thread->vfs->vfs_state;
+    struct chimera_smb_open_file     *open_file = request->create.r_open_file;
+
+    (void) evpl;
+
+    chimera_vfs_state_revoke_breaks(vfs_state, request->create.park_fh,
+                                    request->create.park_fh_len,
+                                    request->create.park_fh_hash,
+                                    open_file ? open_file->grant : NULL);
+
+    chimera_smb_open_file_release(request, open_file);
+    /* complete_request retires the async-interim (unlink from parked_requests +
+     * clear armed); the fired one-shot is already out of the timer heap so its
+     * removal there no-ops.  async_id stays set -> final reply is ASYNC-tagged. */
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_create_park_deadline_cb */
+
 /* Finish a regular-file open: apply the precomputed access masks, emit the
  * parent-directory create notification, release the parent handle, and complete
  * the request.  Invoked on a synchronous grant from open_at_callback and on a
@@ -1618,6 +1650,13 @@ chimera_smb_create_open_finish(
             request->create.park_fh_len  = oh->fh_len;
             request->create.park_fh_hash = oh->fh_hash;
             chimera_smb_async_interim_begin(request);
+            /* Arm a deadline: if the holder never acks the break, fire at the
+             * break timeout to revoke it and complete this open anyway (MS-SMB2
+             * break-timeout).  Cancelled when an ack resumes the open first. */
+            evpl_add_oneshot_timer(thread->evpl, &request->async.timer,
+                                   chimera_smb_create_park_deadline_cb,
+                                   (uint64_t) vfs_state->default_break_deadline_ms
+                                   * 1000);
             return;
         }
     }
@@ -1661,7 +1700,10 @@ chimera_smb_create_resume_parked(struct chimera_smb_request *ack_request)
             *pp                  = req->async.park_next;
             req->async.park_next = resume;
             req->async.armed     = 0; /* already unlinked; skip re-cancel */
-            resume               = req;
+            /* Cancel the break-deadline timer so it cannot fire after the open
+             * has been completed here. */
+            evpl_remove_timer(thread->evpl, &req->async.timer);
+            resume = req;
         } else {
             pp = &req->async.park_next;
         }
