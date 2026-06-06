@@ -300,7 +300,8 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         SMB2Compression_InvalidCompressedPacketLength
         SMB2Compression_InvalidCompressionAlgorithm
         SMB2Compression_InvalidDecompressedProtocolId
-        SMB2Compression_LZ77_LargeFile)
+        SMB2Compression_LZ77_LargeFile
+        TreeMgmt_SMB311_COMPRESS_DATA)
 
     foreach(tc ${WPTS_SMB2_COMPRESSION_ALLOWLIST})
         add_test(NAME chimera/server/smb/wpts/memfs_compression/${tc}
