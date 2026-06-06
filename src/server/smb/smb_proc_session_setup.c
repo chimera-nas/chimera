@@ -125,6 +125,49 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 3.3.5.5 step 4: a SESSION_SETUP that binds a new channel to an
+     * existing session (SMB2_SESSION_FLAG_BINDING set, non-zero header
+     * SessionId, dialect in the 3.x family, and the session found in the
+     * dispatcher's lookup) MUST satisfy several constraints before the bind is
+     * processed.  A header SessionId of zero is handled earlier as a new
+     * authentication (step 3), so binding validation only applies once a
+     * session has been resolved.  The checks that are observable here and the
+     * status each mandates:
+     *
+     *   - the bind request MUST be signed (SMB2_FLAGS_SIGNED): an unsigned
+     *     bind is failed with STATUS_INVALID_PARAMETER;
+     *   - for 3.1.1, Session.SupportsNotifications MUST equal the binding
+     *     Connection.SupportsNotifications, else STATUS_INVALID_PARAMETER.
+     *
+     * (Chimera does not advertise SMB2_GLOBAL_CAP_NOTIFICATIONS, so both
+     * values are always FALSE and the notifications check never fires on its
+     * own; it is included to keep the validation faithful to the spec for when
+     * the capability is implemented.)  WPTS SessionMgmt_SupportsNotifications-
+     * Mismatch exercises this path with an unsigned bind and expects
+     * STATUS_INVALID_PARAMETER. */
+    if ((request->session_setup.flags & SMB2_SESSION_FLAG_BINDING) &&
+        conn->dialect >= SMB2_DIALECT_3_0 &&
+        request->smb2_hdr.session_id != 0 &&
+        request->session_handle) {
+        struct chimera_smb_session *bind_session = request->session_handle->session;
+        int                         reject       = 0;
+
+        if (!(request->smb2_hdr.flags & SMB2_FLAGS_SIGNED)) {
+            reject = 1;
+        } else if (conn->dialect == SMB2_DIALECT_3_1_1 &&
+                   bind_session->supports_notifications !=
+                   conn->supports_notifications) {
+            reject = 1;
+        }
+
+        if (reject) {
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            evpl_iovecs_release(thread->evpl, request->session_setup.input_iov,
+                                request->session_setup.input_niov);
+            return;
+        }
+    }
+
     // Detect authentication mechanism
     mech = smb_auth_detect_mechanism(input, input_len);
     chimera_smb_debug("Session setup: detected mechanism %s", smb_auth_mech_name(mech));
@@ -171,6 +214,11 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         /* Record the connection's negotiated dialect so a later
          * PreviousSessionId reconnect can enforce MS-SMB2 3.3.5.5.1. */
         session->dialect = conn->dialect;
+
+        /* Session.SupportsNotifications is inherited from the connection that
+         * first establishes the session (MS-SMB2 3.3.5.5); a later binding
+         * connection must match it. */
+        session->supports_notifications = conn->supports_notifications;
 
         session_handle = chimera_smb_session_handle_alloc(thread);
 

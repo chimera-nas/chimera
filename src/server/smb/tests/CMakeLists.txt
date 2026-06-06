@@ -171,6 +171,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         Negotiate_SMB311_WithEncryptionContextWithoutIntegrityContext
         Negotiate_SMB311_WithoutAnyContexts
         SessionMgmt_ReconnectWithDifferentDialect
+        SessionMgmt_SupportsNotificationsMismatch
         Signing_VerifyAesGmacSigning
         TreeMgmt_SMB311_CLUSTER_RECONNECT
         ValidateNegotiateInfo_Negative_InvalidCapabilities
