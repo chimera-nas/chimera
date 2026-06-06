@@ -88,6 +88,8 @@ chimera_nfs_init(
 
     pthread_mutex_init(&shared->lock, NULL);
     pthread_mutex_init(&shared->cb_lock, NULL);
+    pthread_mutex_init(&shared->pnfs_devcache.lock, NULL);
+    pthread_mutex_init(&shared->pnfs_layout_lock, NULL);
 
     shared->max_servers = 64;
     shared->servers     = calloc(shared->max_servers, sizeof(*shared->servers));
@@ -126,6 +128,7 @@ chimera_nfs_destroy(void *private_data)
         if (shared->servers[i]) {
             /* Free NFS4 session if present */
             if (shared->servers[i]->nfs4_session) {
+                chimera_nfs4_session_pool_destroy(shared->servers[i]->nfs4_session);
                 pthread_mutex_destroy(&shared->servers[i]->nfs4_session->lock);
                 free(shared->servers[i]->nfs4_session);
             }
@@ -135,6 +138,9 @@ chimera_nfs_destroy(void *private_data)
 
     free(shared->mounts);
     free(shared->servers);
+
+    pthread_mutex_destroy(&shared->pnfs_devcache.lock);
+    pthread_mutex_destroy(&shared->pnfs_layout_lock);
 
     free(shared);
 } /* chimera_nfs_destroy */
@@ -184,6 +190,16 @@ chimera_nfs_notify(
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
             evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
             chimera_nfsclient_info("Connected from %s to %s", local_addr, remote_addr);
+
+            /* An RDMA conn is only now usable for rkey-advertising ops; release
+             * any pNFS DS I/O parked waiting for it. */
+            for (i = 0; nfs_thread && i < nfs_thread->max_server_threads; i++) {
+                server_thread = nfs_thread->server_threads[i];
+                if (server_thread && server_thread->nfs_conn == conn) {
+                    chimera_nfs4_pnfs_conn_connected(server_thread);
+                    break;
+                }
+            }
             break;
         case EVPL_RPC2_NOTIFY_DISCONNECTED:
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
@@ -197,6 +213,7 @@ chimera_nfs_notify(
             for (i = 0; nfs_thread && i < nfs_thread->max_server_threads; i++) {
                 server_thread = nfs_thread->server_threads[i];
                 if (server_thread && server_thread->nfs_conn == conn) {
+                    chimera_nfs4_pnfs_conn_failed(server_thread);
                     chimera_nfs4_slot_table_reset(nfs_thread->evpl, &server_thread->slots);
                     break;
                 }
@@ -217,8 +234,8 @@ chimera_nfs_thread_init(
     thread->shared = shared;
     thread->evpl   = evpl;
 
-    /* Count client threads so the NFS4.1 fore-channel slot pool can be
-     * partitioned evenly (max_slots / nfs_thread_count) per thread. */
+    /* Count live client threads: the NFS4.1 fore-channel slot layer reserves a
+     * floor slot per thread and sizes each thread's soft borrow cap from this. */
     atomic_fetch_add(&shared->nfs_thread_count, 1);
 
     programs[0] = &shared->mount_v3.rpc2;
@@ -266,12 +283,16 @@ chimera_nfs_thread_destroy(void *private_data)
 
     for (i = 0; i < thread->max_server_threads; i++) {
         if (thread->server_threads[i]) {
-            chimera_nfs4_slot_table_destroy(&thread->server_threads[i]->slots);
+            chimera_nfs4_slot_table_destroy(thread->server_threads[i]);
             free(thread->server_threads[i]);
         }
     }
 
     free(thread->server_threads);
+
+    /* Drop this thread from the live count so the slot floor/fair-cap math does
+     * not drift upward across thread churn (mirrors the thread_init increment). */
+    atomic_fetch_sub(&thread->shared->nfs_thread_count, 1);
 
     free(thread);
 } /* chimera_nfs_thread_destroy */

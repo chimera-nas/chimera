@@ -205,7 +205,7 @@ generate_mds_config() {
         "pnfs": {
             "enabled": true,
             "data_servers": [
-                { "netid": "tcp", "uaddr": "${DS_IP}:${DS_PORT}", "version": "${DS_VERSION}", "backing_path": "/ds0" }
+                { "tcp": "${DS_IP}:${DS_PORT}", "version": "${DS_VERSION}", "backing_path": "/ds0" }
             ]
         }
     },
@@ -254,7 +254,7 @@ generate_combined_config() {
         "pnfs": {
             "enabled": true,
             "data_servers": [
-                { "netid": "tcp", "uaddr": "${MDS_IP}:${MDS_PORT}", "version": "3", "backing_path": "/share" }
+                { "tcp": "${MDS_IP}:${MDS_PORT}", "version": "3", "backing_path": "/share" }
             ]
         }
     },

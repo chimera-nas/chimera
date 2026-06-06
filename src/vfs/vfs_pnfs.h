@@ -105,6 +105,10 @@ struct chimera_vfs_ds {
     uint8_t  deviceid[CHIMERA_VFS_DEVICEID_SIZE]; /* stable id advertised to clients */
     char     netid[8];                            /* RFC5665 netid, e.g. "tcp"       */
     char     uaddr[64];                           /* RFC5665 universal address (DS)  */
+    /* Optional second (RDMA) universal address.  When non-empty the device
+     * advertises BOTH this "rdma" netaddr (preferred) and the "tcp" netaddr
+     * above, so RDMA-capable clients use RDMA and others fall back to TCP. */
+    char     rdma_uaddr[64];
     int      version;                             /* NFS version advertised for DS   */
     int      minorversion;                        /* NFS minor version (4.x)         */
     uint8_t  backing_local;                       /* 1 = backing is a local (non-nfs)
@@ -156,6 +160,7 @@ int chimera_vfs_pnfs_add_device(
     struct chimera_vfs *vfs,
     const char         *netid,
     const char         *uaddr,
+    const char         *rdma_uaddr,
     const char         *backing_path,
     int                 version,
     int                 minorversion);

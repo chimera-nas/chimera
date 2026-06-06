@@ -4,6 +4,7 @@
 
 #include "nfs_internal.h"
 #include "nfs4_open_state.h"
+#include "nfs4_pnfs.h"
 
 void
 chimera_nfs4_close(
@@ -20,6 +21,17 @@ chimera_nfs4_close(
     if (!open_state) {
         request->status = CHIMERA_VFS_OK;
         request->complete(request);
+        return;
+    }
+
+    /* Drop this file's layout from the recall registry before it is freed.
+     * Idempotent: a no-op unless the layout reached VALID (or was fenced). */
+    chimera_nfs4_pnfs_layout_unregister(shared, &open_state->layout);
+
+    /* If a pNFS layout is held, report the new size to the MDS (LAYOUTCOMMIT)
+     * and return the layout (LAYOUTRETURN) before freeing.  When it takes the
+     * request it frees the open state and completes asynchronously. */
+    if (chimera_nfs4_pnfs_close(thread, shared, request, open_state)) {
         return;
     }
 

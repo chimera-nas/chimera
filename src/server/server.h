@@ -267,6 +267,7 @@ chimera_server_config_add_pnfs_ds(
     struct chimera_server_config *config,
     const char                   *netid,
     const char                   *uaddr,
+    const char                   *rdma_uaddr,
     const char                   *backing_path,
     int                           version,
     int                           minorversion);

@@ -587,27 +587,28 @@ main(
             json_t *ds_entry;
             json_array_foreach(data_servers, ds_i, ds_entry)
             {
-                const char *netid_str   = json_string_value(json_object_get(ds_entry, "netid"));
-                const char *uaddr_str   = json_string_value(json_object_get(ds_entry, "uaddr"));
+                const char *tcp_str     = json_string_value(json_object_get(ds_entry, "tcp"));
+                const char *rdma_str    = json_string_value(json_object_get(ds_entry, "rdma"));
                 const char *backing_str = json_string_value(json_object_get(ds_entry, "backing_path"));
                 json_t     *version_val = json_object_get(ds_entry, "version");
-                char        wire_uaddr[64];
+                char        wire_tcp[64];
+                char        wire_rdma[64];
+                char       *wire_rdma_p = NULL;
 
-                /* uaddr: the DS network address handed to clients in the
-                 * layout, given human-friendly as "host" or "host:port" and
-                 * converted to the RFC 5665 universal address below.
-                 * backing_path: the chimera path where this DS export is
+                /* "tcp" (required): the DS's TCP address handed to clients,
+                 * given human-friendly as "host" or "host:port" (port defaults
+                 * to 2049) and advertised as the "tcp" netaddr.
+                 * "rdma" (optional): an additional RDMA address (port defaults
+                 * to 20049) advertised as a preferred "rdma" netaddr alongside
+                 * tcp, so RDMA-capable clients use RDMA and others fall back to
+                 * tcp.  backing_path: the chimera path where this DS export is
                  * mounted via the nfs module, under which the MDS creates
                  * backing files. */
-                if (!uaddr_str || !backing_str) {
+                if (!tcp_str || !backing_str) {
                     chimera_server_error(
-                        "pNFS data_server[%zu] requires \"uaddr\" and \"backing_path\"; skipping",
+                        "pNFS data_server[%zu] requires \"tcp\" and \"backing_path\"; skipping",
                         ds_i);
                     continue;
-                }
-
-                if (!netid_str) {
-                    netid_str = "tcp";
                 }
 
                 /* "version": which NFS version the client uses to reach the DS,
@@ -632,16 +633,27 @@ main(
                     continue;
                 }
 
-                if (chimera_pnfs_uaddr_from_human(netid_str, uaddr_str,
-                                                  wire_uaddr, sizeof(wire_uaddr)) != 0) {
+                if (chimera_pnfs_uaddr_from_human("tcp", tcp_str,
+                                                  wire_tcp, sizeof(wire_tcp)) != 0) {
                     chimera_server_error(
-                        "pNFS data_server[%zu] invalid uaddr \"%s\"; skipping",
-                        ds_i, uaddr_str);
+                        "pNFS data_server[%zu] invalid tcp address \"%s\"; skipping",
+                        ds_i, tcp_str);
                     continue;
                 }
 
-                chimera_server_config_add_pnfs_ds(server_config, netid_str, wire_uaddr,
-                                                  backing_str, ds_version, ds_minor);
+                if (rdma_str) {
+                    if (chimera_pnfs_uaddr_from_human("rdma", rdma_str,
+                                                      wire_rdma, sizeof(wire_rdma)) != 0) {
+                        chimera_server_error(
+                            "pNFS data_server[%zu] invalid rdma address \"%s\"; skipping RDMA advert",
+                            ds_i, rdma_str);
+                    } else {
+                        wire_rdma_p = wire_rdma;
+                    }
+                }
+
+                chimera_server_config_add_pnfs_ds(server_config, "tcp", wire_tcp,
+                                                  wire_rdma_p, backing_str, ds_version, ds_minor);
             }
         }
     }

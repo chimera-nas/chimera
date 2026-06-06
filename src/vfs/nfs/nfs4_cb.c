@@ -289,9 +289,11 @@ chimera_nfs4_cb_create_session_callback(
     cs_res = &res->resarray[0].opcreate_session.csr_resok4;
 
     memcpy(session->sessionid, cs_res->csr_sessionid, NFS4_SESSIONID_SIZE);
-    session->max_slots      = cs_res->csr_fore_chan_attrs.ca_maxrequests;
-    session->next_unclaimed = 0;
-    session->overflow_rr    = 0;
+    session->max_slots = cs_res->csr_fore_chan_attrs.ca_maxrequests;
+
+    /* Allocate the session-global fore-channel slot pool now that the granted
+    * slot count is known; threads borrow/return ids from it (nfs4_slot.c). */
+    chimera_nfs4_session_pool_init(session);
 
     pthread_mutex_lock(&shared->lock);
     server->nfs4_session = session;
@@ -337,9 +339,14 @@ chimera_nfs4_cb_create_session(struct chimera_nfs4_cb_establish *item)
     cs_args->csa_fore_chan_attrs.ca_maxresponsesize        = 1024 * 1024;
     cs_args->csa_fore_chan_attrs.ca_maxresponsesize_cached = 0;
     cs_args->csa_fore_chan_attrs.ca_maxoperations          = 64;
-    cs_args->csa_fore_chan_attrs.ca_maxrequests            = 64;
-    cs_args->csa_fore_chan_attrs.ca_rdma_ird               = NULL;
-    cs_args->csa_fore_chan_attrs.num_ca_rdma_ird           = 0;
+    /* Request the fore-channel slot count configured for this server (the
+     * `slots=` mount option, default CHIMERA_NFS4_DEFAULT_SESSION_SLOTS).  The
+     * client partitions slots one block per evpl thread, so the session needs
+     * at least as many slots as there are client threads (e.g. fio numjobs);
+     * the server clamps this to its own nfs4_session_slots. */
+    cs_args->csa_fore_chan_attrs.ca_maxrequests  = server->requested_session_slots;
+    cs_args->csa_fore_chan_attrs.ca_rdma_ird     = NULL;
+    cs_args->csa_fore_chan_attrs.num_ca_rdma_ird = 0;
 
     /* Back channel: a single slot is enough -- the server serialises recalls. */
     cs_args->csa_back_chan_attrs.ca_headerpadsize          = 0;
@@ -379,8 +386,10 @@ chimera_nfs4_cb_exchange_id_callback(
     int                          status,
     void                        *private_data)
 {
-    struct chimera_nfs4_cb_establish   *item = private_data;
+    struct chimera_nfs4_cb_establish   *item   = private_data;
+    struct chimera_nfs_client_server   *server = item->server_thread->server;
     struct chimera_nfs4_client_session *session;
+    struct EXCHANGE_ID4resok           *eid_res;
 
     (void) evpl;
     (void) verf;
@@ -394,9 +403,19 @@ chimera_nfs4_cb_exchange_id_callback(
         return;
     }
 
+    eid_res = &res->resarray[0].opexchange_id.eir_resok4;
+
     session = calloc(1, sizeof(*session));
     pthread_mutex_init(&session->lock, NULL);
-    session->clientid = res->resarray[0].opexchange_id.eir_resok4.eir_clientid;
+    session->clientid = eid_res->eir_clientid;
+
+    /* The MDS confirms pNFS support by echoing USE_PNFS_MDS; only then does the
+     * client issue LAYOUTGET.  Otherwise it transparently stays non-pNFS. */
+    server->mds_pnfs_capable = server->pnfs_requested &&
+        (eid_res->eir_flags & EXCHGID4_FLAG_USE_PNFS_MDS) != 0;
+
+    chimera_nfsclient_info("NFS4 EXCHANGE_ID ok: clientid=%lu pnfs_mds=%d",
+                           (unsigned long) session->clientid, server->mds_pnfs_capable);
 
     item->session = session;
 
@@ -438,7 +457,10 @@ chimera_nfs4_cb_exchange_id(struct chimera_nfs4_cb_establish *item)
     eid_args->eia_clientowner.co_ownerid.data = (uint8_t *) server->nfs4_owner_id;
     eid_args->eia_clientowner.co_ownerid.len  = server->nfs4_owner_id_len;
 
-    eid_args->eia_flags                 = EXCHGID4_FLAG_USE_NON_PNFS;
+    /* Advertise pNFS-MDS use when the mount asked for it; the MDS confirms by
+     * echoing USE_PNFS_MDS in eir_flags (checked in the reply). */
+    eid_args->eia_flags = server->pnfs_requested
+        ? EXCHGID4_FLAG_USE_PNFS_MDS : EXCHGID4_FLAG_USE_NON_PNFS;
     eid_args->eia_state_protect.spa_how = SP4_NONE;
     eid_args->eia_client_impl_id        = NULL;
     eid_args->num_eia_client_impl_id    = 0;

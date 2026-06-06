@@ -57,6 +57,7 @@ chimera_vfs_pnfs_add_device(
     struct chimera_vfs *vfs,
     const char         *netid,
     const char         *uaddr,
+    const char         *rdma_uaddr,
     const char         *backing_path,
     int                 version,
     int                 minorversion)
@@ -81,6 +82,7 @@ chimera_vfs_pnfs_add_device(
 
     snprintf(ds->netid, sizeof(ds->netid), "%s", netid ? netid : "tcp");
     snprintf(ds->uaddr, sizeof(ds->uaddr), "%s", uaddr ? uaddr : "");
+    snprintf(ds->rdma_uaddr, sizeof(ds->rdma_uaddr), "%s", rdma_uaddr ? rdma_uaddr : "");
     snprintf(ds->backing_path, sizeof(ds->backing_path), "%s", backing_path ? backing_path : "");
     ds->version      = version ? version : 3;
     ds->minorversion = minorversion;

@@ -96,6 +96,7 @@ struct chimera_server_config {
     struct chimera_server_config_pnfs_ds {
         char netid[8];
         char uaddr[64];
+        char rdma_uaddr[64];              /* optional RDMA netaddr (empty = none)   */
         char backing_path[CHIMERA_PNFS_BACKING_MAX];
         int  version;                     /* NFS version the client uses for DS I/O */
         int  minorversion;                /* NFS minor version (4.x)                */
@@ -222,8 +223,12 @@ chimera_server_config_init(void)
 
     /* Default NFSv4.1 fore-channel session slots (server cap on the number
      * of concurrent SEQUENCE requests a client may have outstanding per
-     * session).  Mirrors NFS4_MAX_REPLY_CACHE_SLOTS in the NFS server. */
-    config->nfs4_session_slots = 64;
+     * session).  The chimera proxy client partitions slots one block per evpl
+     * thread, so a high-thread-count client (e.g. fio numjobs) needs this many
+     * slots or surplus threads collide on a shared slot; 256 covers typical
+     * fan-out out of the box and the replay-slot table sizes to it.  Raise
+     * further for very wide clients. */
+    config->nfs4_session_slots = 256;
 
     /* NFSv4 protocol delegations (OPEN_DELEGATE_READ/WRITE) are disabled by
      * default.  When off, every OPEN returns OPEN_DELEGATE_NONE and the
@@ -564,6 +569,7 @@ chimera_server_config_add_pnfs_ds(
     struct chimera_server_config *config,
     const char                   *netid,
     const char                   *uaddr,
+    const char                   *rdma_uaddr,
     const char                   *backing_path,
     int                           version,
     int                           minorversion)
@@ -580,6 +586,7 @@ chimera_server_config_add_pnfs_ds(
 
     snprintf(ds->netid, sizeof(ds->netid), "%s", netid ? netid : "tcp");
     snprintf(ds->uaddr, sizeof(ds->uaddr), "%s", uaddr ? uaddr : "");
+    snprintf(ds->rdma_uaddr, sizeof(ds->rdma_uaddr), "%s", rdma_uaddr ? rdma_uaddr : "");
     snprintf(ds->backing_path, sizeof(ds->backing_path), "%s", backing_path ? backing_path : "");
     ds->version      = version ? version : 3;
     ds->minorversion = minorversion;
@@ -1605,6 +1612,7 @@ chimera_server_init(
             chimera_vfs_pnfs_add_device(server->vfs,
                                         config->pnfs_ds[i].netid,
                                         config->pnfs_ds[i].uaddr,
+                                        config->pnfs_ds[i].rdma_uaddr,
                                         config->pnfs_ds[i].backing_path,
                                         config->pnfs_ds[i].version,
                                         config->pnfs_ds[i].minorversion);

@@ -33,7 +33,6 @@ MDS_PID=""
 
 MDS_PORT=2049
 DS_PORT=2050
-DS_UADDR="127.0.0.1.8.2"   # RFC 5665 uaddr for 127.0.0.1:2050 (2050 = 8*256+2)
 PYNFS_TIMEOUT="${PYNFS_TIMEOUT:-60}"
 PYNFS_NFS4_LEASE_TIME="${PYNFS_NFS4_LEASE_TIME:-5}"
 PYNFS_NFS4_GRACE_TIME="${PYNFS_NFS4_GRACE_TIME:-10}"
@@ -83,7 +82,7 @@ cat > "$MDS_CONFIG" << EOF
         "nfs4_lease_time": ${PYNFS_NFS4_LEASE_TIME},
         "nfs4_grace_time": ${PYNFS_NFS4_GRACE_TIME},
         "pnfs": { "enabled": true,
-                  "data_servers": [ { "netid": "tcp", "uaddr": "${DS_UADDR}", "backing_path": "/ds0" } ] }
+                  "data_servers": [ { "tcp": "127.0.0.1:${DS_PORT}", "backing_path": "/ds0" } ] }
     },
     "mounts": {
         "share": { "module": "memfs", "path": "/" },

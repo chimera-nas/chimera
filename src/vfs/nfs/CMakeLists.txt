@@ -39,6 +39,7 @@ add_library(chimera_vfs_nfs SHARED
     nfs4_mknod_at.c
     nfs4_open_at.c
     nfs4_open_fh.c
+    nfs4_pnfs.c
     nfs4_read.c
     nfs4_slot.c
     nfs4_readdir.c
