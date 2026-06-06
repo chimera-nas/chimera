@@ -3108,6 +3108,20 @@ chimera_smb_parse_create(
     request->create.set_attr.va_acl      = NULL;
     request->create.ctx_present_mask     = 0;
 
+    /* The request slot is pooled, so the AppInstanceId/AppInstanceVersion
+     * fields survive from a prior CREATE on this same slot.  Each create
+     * context is parsed only when present on the wire, so a CREATE that
+     * carries an AppInstanceId but no AppInstanceVersion (or no AppInstanceId
+     * at all) would otherwise inherit the stale version/GUID and apply the
+     * wrong AppInstanceVersion force-close rule.  This is invisible when each
+     * test runs against a fresh daemon but corrupts the decision in a
+     * sequential run.  Reset them explicitly before parsing the contexts. */
+    request->create.app_version_present = 0;
+    request->create.app_version_high    = 0;
+    request->create.app_version_low     = 0;
+    memset(request->create.app_instance_id, 0,
+           sizeof(request->create.app_instance_id));
+
     /* Persist any settable DOS attribute bits supplied at create time. */
     if (request->create.file_attributes & SMB_DOS_ATTR_SETTABLE) {
         request->create.set_attr.va_dos_attributes =
