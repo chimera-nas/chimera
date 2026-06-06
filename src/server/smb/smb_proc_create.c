@@ -946,7 +946,11 @@ chimera_smb_create_after_share(
                         chimera_smb_vfs_to_lease_bits(granted_vfs);
                     if (via_rqls) {
                         open_file->oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
-                        if (request->create.rqls.is_v2) {
+                        /* Report the lease's epoch on any open that joins a v2
+                         * lease -- including a v1 request coalescing onto an
+                         * existing v2 lease (the response follows the lease's
+                         * version, set at first grant). */
+                        if (grant->is_v2) {
                             open_file->lease_epoch = grant->epoch;
                         }
                     } else {
@@ -2915,12 +2919,19 @@ build_rqls_response(
     uint32_t                    out_size)
 {
     struct chimera_smb_open_file *of = request->create.r_open_file;
-    bool                          v2 = request->create.rqls.is_v2 != 0;
+    bool                          v2;
     int                           needed;
 
     if (!of) {
         return -1;
     }
+
+    /* The response lease version follows the LEASE's version (set when the lease
+     * was first granted), not this request's: a v1 open that coalesces onto an
+     * existing v2 lease still gets a v2 response, and vice versa (MS-SMB2
+     * 3.3.5.9.11; smb2.lease.v2_epoch2/3).  The grant records is_v2; fall back to
+     * the request only when this open holds no grant (a bare LEASE_NONE). */
+    v2 = of->grant ? of->grant->is_v2 : (request->create.rqls.is_v2 != 0);
 
     needed = v2 ? SMB2_CREATE_REQUEST_LEASE_V2_SIZE
                 : SMB2_CREATE_REQUEST_LEASE_SIZE;
