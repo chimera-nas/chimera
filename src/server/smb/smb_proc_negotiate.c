@@ -177,6 +177,14 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     conn->client_security_mode = request->negotiate.security_mode;
     conn->client_capabilities  = request->negotiate.capabilities;
 
+    /* Connection.SupportsNotifications (MS-SMB2 3.3.5.4): only meaningful for
+     * 3.1.1, and only when the client advertised SMB2_GLOBAL_CAP_NOTIFICATIONS.
+     * Recorded so a binding SESSION_SETUP can be validated against the bound
+     * session's value (MS-SMB2 3.3.5.5). */
+    conn->supports_notifications =
+        (dialect == SMB2_DIALECT_3_1_1 &&
+         (request->negotiate.capabilities & SMB2_GLOBAL_CAP_NOTIFICATIONS)) ? 1 : 0;
+
     /* Pick algorithms from the client's negotiate contexts. Phase 0 records
      * presence; Phases 2/4/5 will actually flip on preauth/encryption/RDMA. */
     chimera_smb_select_negotiated_algorithms(conn, request);

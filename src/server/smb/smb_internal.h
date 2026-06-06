@@ -719,6 +719,12 @@ struct chimera_smb_conn {
     uint8_t                            client_guid[16];
     uint8_t                            client_security_mode;
     uint32_t                           client_capabilities;
+    /* Connection.SupportsNotifications (MS-SMB2 3.3.5.4): set when the
+     * negotiated dialect is 3.1.1 and the client advertised
+     * SMB2_GLOBAL_CAP_NOTIFICATIONS in its NEGOTIATE capabilities.  A binding
+     * SESSION_SETUP whose connection's value differs from the bound session's
+     * is rejected with STATUS_INVALID_PARAMETER (MS-SMB2 3.3.5.5). */
+    uint8_t                            supports_notifications;
     /* SMB 3.1.1 preauth-integrity running hash (SHA-512).  preauth_hash is the
      * per-session-setup running value: it is reset to negotiate_preauth_hash at
      * the start of every new authentication (a SESSION_SETUP whose header

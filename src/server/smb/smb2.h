@@ -711,6 +711,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_GLOBAL_CAP_PERSISTENT_HANDLES          0x00000010 // Supports persistent handles (SMB 3.0+)
 #define SMB2_GLOBAL_CAP_DIRECTORY_LEASING           0x00000020 // Supports directory leasing (SMB 3.0+)
 #define SMB2_GLOBAL_CAP_ENCRYPTION                  0x00000040 // Supports encryption (SMB 3.0+)
+#define SMB2_GLOBAL_CAP_NOTIFICATIONS               0x00000080 // Supports server-to-client notifications (SMB 3.1.1+)
 
 // SMB2 TREE_CONNECT response share capabilities (MS-SMB2 §2.2.10)
 #define SMB2_SHARE_CAP_DFS                          0x00000008

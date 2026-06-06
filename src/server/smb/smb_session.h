@@ -196,6 +196,11 @@ struct chimera_smb_session {
      * Session.Connection.Dialect).  A PreviousSessionId reconnect whose
      * connection negotiated a different dialect is rejected. */
     uint16_t                    dialect;
+    /* Session.SupportsNotifications (MS-SMB2 3.3.5.5): copied from
+     * Connection.SupportsNotifications on the SESSION_SETUP that first
+     * authorized the session.  A later binding SESSION_SETUP on a connection
+     * whose SupportsNotifications differs is rejected (3.1.1 only). */
+    uint8_t                     supports_notifications;
     struct UT_hash_handle       hh;
     struct chimera_smb_session *prev;
     struct chimera_smb_session *next;
