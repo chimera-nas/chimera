@@ -136,6 +136,19 @@ int chimera_nfs4_pnfs_close(
     struct chimera_nfs4_open_state *open_state);
 
 /*
+ * Commit-time layout flush.  Returns 1 if it took ownership of the request (a
+ * LAYOUTCOMMIT was issued to report the file's high-water size to the MDS and
+ * the request will complete on its reply), or 0 if there is nothing to flush
+ * and the caller should complete the commit itself.  Unlike close, the layout
+ * is NOT returned -- the file stays open.
+ */
+int chimera_nfs4_pnfs_commit(
+    struct chimera_nfs_thread      *thread,
+    struct chimera_nfs_shared      *shared,
+    struct chimera_vfs_request     *request,
+    struct chimera_nfs4_open_state *open_state);
+
+/*
  * Layout registry (shared->pnfs_layouts).  register publishes a now-VALID
  * layout so a back-channel CB_LAYOUTRECALL can find it; unregister removes it
  * before the owning open state is freed.  Both are idempotent and safe to call
