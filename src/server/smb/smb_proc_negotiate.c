@@ -57,6 +57,20 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     uint16_t                          dialect = 0, candidate;
     int                               i, j;
 
+    /* MS-SMB2 3.3.5.4: a NEGOTIATE received on a connection that already
+     * completed one (Connection.NegotiateDialect set to a concrete SMB2
+     * dialect) MUST terminate the transport connection with no reply.  WPTS
+     * DurableHandleV1_Reconnect_AfterServerDisconnect drives exactly this to
+     * force a server-side disconnect before reconnecting.  Mirror the
+     * VALIDATE_NEGOTIATE_INFO teardown: drop the compound and close the bind. */
+    if (conn->dialect != 0) {
+        struct chimera_smb_compound *compound = request->compound;
+
+        chimera_smb_compound_free(thread, compound);
+        evpl_close(thread->evpl, conn->bind);
+        return;
+    }
+
     clock_gettime(
         CLOCK_REALTIME,
         &now);
