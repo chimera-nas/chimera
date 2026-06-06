@@ -201,6 +201,13 @@ struct chimera_smb_tree {
     struct chimera_smb_open_file *open_files[CHIMERA_SMB_OPEN_FILE_BUCKETS];
     pthread_mutex_t               open_files_lock[CHIMERA_SMB_OPEN_FILE_BUCKETS];
 
+    /* CREATEs whose final response is deferred because the open triggered an
+     * ack-required lease break on another holder (MS-SMB2 3.3.5.9: the open is
+     * pending until the break completes).  Each is resumed when an inbound
+     * OPLOCK_BREAK ack settles the holder's lease.  Guarded by parked_lock. */
+    struct chimera_smb_request   *parked_creates;
+    pthread_mutex_t               parked_lock;
+
     struct chimera_smb_tree      *prev;
     struct chimera_smb_tree      *next;
 

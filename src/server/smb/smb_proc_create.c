@@ -924,6 +924,13 @@ chimera_smb_create_after_share(
                     open_file->grant                  = grant;
                     open_file->caching_file_state     = file_state;
                     open_file->caching_lease_inserted = true;
+                    /* If this open coalesced onto a grant whose lease is currently
+                     * mid-break, the client is told its lease state but with
+                     * BREAK_IN_PROGRESS set (MS-SMB2 3.3.5.9.11: a lease-key re-open
+                     * during a break succeeds and reports the break is underway). */
+                    open_file->lease_flags =
+                        (grant->lease.break_state == CHIMERA_VFS_BREAK_BREAKING)
+                        ? SMB2_LEASE_FLAG_BREAK_IN_PROGRESS : 0;
                     /* Report the grant's ACTUAL granted mode: a coalesced open
                      * inherits the shared lease's current state (an upgrade may have
                      * widened it; a conflicting peer may have capped it). */
@@ -1582,9 +1589,85 @@ chimera_smb_create_open_finish(
     }
 
     chimera_smb_create_release_parent(request);
+
+    /* MS-SMB2 3.3.5.9 pending-open: if this open triggered an ack-required lease
+     * break on another holder, hold the SUCCESS response until the holder
+     * acknowledges (the break is mid-flight).  Park the request on the tree's
+     * parked_creates list keyed by the file; an inbound OPLOCK_BREAK ack that
+     * settles the file's caching leases resumes it (chimera_smb_create_resume_
+     * parked).  The open_file ref is held across the wait and dropped on resume. */
+    if (open_file->handle) {
+        struct chimera_server_smb_thread *thread    = request->compound->thread;
+        struct chimera_vfs_state         *vfs_state =
+            thread->vfs_thread->vfs->vfs_state;
+        struct chimera_vfs_open_handle   *oh = open_file->handle;
+
+        if (chimera_vfs_state_caching_breaking(vfs_state, oh->fh, oh->fh_len,
+                                               oh->fh_hash, open_file->grant)) {
+            struct chimera_smb_tree *tree = request->tree;
+
+            memcpy(request->create.park_fh, oh->fh, oh->fh_len);
+            request->create.park_fh_len  = oh->fh_len;
+            request->create.park_fh_hash = oh->fh_hash;
+
+            pthread_mutex_lock(&tree->parked_lock);
+            request->create.park_next = tree->parked_creates;
+            tree->parked_creates      = request;
+            pthread_mutex_unlock(&tree->parked_lock);
+            return;
+        }
+    }
+
     chimera_smb_open_file_release(request, open_file);
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_create_open_finish */
+
+/* Resume any CREATE parked on `ack_request`'s tree whose triggered lease break
+ * has now settled (no caching lease on the file is mid-break).  Called from the
+ * inbound OPLOCK_BREAK ack handler after the lease is acked.  Only resumes parks
+ * owned by the current thread (the deferred response's iovecs are thread-local);
+ * a park awaiting an ack that arrives on a different channel is left for that
+ * channel's ack to drain. */
+void
+chimera_smb_create_resume_parked(struct chimera_smb_request *ack_request)
+{
+    struct chimera_server_smb_thread *thread    = ack_request->compound->thread;
+    struct chimera_vfs_state         *vfs_state = thread->vfs_thread->vfs->vfs_state;
+    struct chimera_smb_tree          *tree      = ack_request->tree;
+    struct chimera_smb_request       *req, **pp, *resume = NULL;
+
+    if (!tree) {
+        return;
+    }
+
+    pthread_mutex_lock(&tree->parked_lock);
+    pp = &tree->parked_creates;
+    while ((req = *pp)) {
+        if (req->compound->thread == thread &&
+            !chimera_vfs_state_caching_breaking(vfs_state,
+                                                req->create.park_fh,
+                                                req->create.park_fh_len,
+                                                req->create.park_fh_hash,
+                                                req->create.r_open_file
+                                                ? req->create.r_open_file->grant
+                                                : NULL)) {
+            *pp                   = req->create.park_next;
+            req->create.park_next = resume;
+            resume                = req;
+        } else {
+            pp = &req->create.park_next;
+        }
+    }
+    pthread_mutex_unlock(&tree->parked_lock);
+
+    while (resume) {
+        req                   = resume;
+        resume                = req->create.park_next;
+        req->create.park_next = NULL;
+        chimera_smb_open_file_release(req, req->create.r_open_file);
+        chimera_smb_complete_request(req, SMB2_STATUS_SUCCESS);
+    }
+} /* chimera_smb_create_resume_parked */
 
 /*
  * Map the CREATE DesiredAccess to canonical access-mask bits and evaluate it
@@ -2786,8 +2869,12 @@ build_rqls_response(
     out[17] = 0;
     out[18] = 0;
     out[19] = 0;
-    /* LeaseFlags (4) — reserved at CREATE response time. */
-    out[20] = 0; out[21] = 0; out[22] = 0; out[23] = 0;
+    /* LeaseFlags (4) — BREAK_IN_PROGRESS when this open joined a lease whose
+     * break is still outstanding; otherwise 0. */
+    out[20] = of->lease_flags & 0xff;
+    out[21] = (of->lease_flags >> 8) & 0xff;
+    out[22] = (of->lease_flags >> 16) & 0xff;
+    out[23] = (of->lease_flags >> 24) & 0xff;
     /* LeaseDuration (8) — reserved. */
     memset(out + 24, 0, 8);
     if (v2) {

@@ -299,6 +299,11 @@ int chimera_smb_parse_oplock_break(
 void chimera_smb_oplock_break(
     struct chimera_smb_request *request);
 
+/* Resume CREATEs parked on the ack's tree whose triggered lease break has now
+ * settled.  Called from the OPLOCK_BREAK ack handler after the lease is acked. */
+void chimera_smb_create_resume_parked(
+    struct chimera_smb_request *ack_request);
+
 void chimera_smb_oplock_break_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request);

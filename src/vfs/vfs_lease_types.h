@@ -184,6 +184,11 @@ struct chimera_vfs_caching_grant {
      * legacy oplock do not version their state, so their break notifications carry
      * epoch 0 and `epoch` is not advanced for them. */
     uint8_t                           is_v2;
+    /* Set while this grant's lease is mid-break and the break requires a client
+     * acknowledgment (write or handle caching was stripped).  A no-ack break (only
+     * read caching dropped, or break to NONE) leaves this clear so an open does not
+     * park waiting for an ack that never comes. */
+    uint8_t                           break_ack_required;
     struct chimera_vfs_caching_grant *grant_next; /* link on file->caching_grants */
     /* Protocol holder list — opaque to the VFS; the protocol server threads its
      * per-open holder objects through here so a break callback can select a LIVE

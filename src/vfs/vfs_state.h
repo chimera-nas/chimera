@@ -239,6 +239,21 @@ chimera_vfs_caching_grant_release(
     struct chimera_vfs_state         *state,
     struct chimera_vfs_caching_grant *grant);
 
+/* True if any caching lease on the file is mid-break awaiting a client ack (a
+ * holder was sent an ack-required OPLOCK_BREAK that has not yet completed),
+ * EXCLUDING the grant `except` (the acquirer's own coalesced grant, which must
+ * not wait for its own break).  Used by the SMB create path to defer an open that
+ * triggered an ack-required break on ANOTHER holder until that holder acks
+ * (MS-SMB2 3.3.5.9: the open is pending until the break completes).  `except` may
+ * be NULL.  Caller must NOT hold file->lock. */
+bool
+chimera_vfs_state_caching_breaking(
+    struct chimera_vfs_state               *state,
+    const uint8_t                          *fh,
+    uint8_t                                 fh_len,
+    uint64_t                                fh_hash,
+    const struct chimera_vfs_caching_grant *except);
+
 /* -------------------------------------------------------------------- */
 /* Async acquire/release                                                */
 /* -------------------------------------------------------------------- */

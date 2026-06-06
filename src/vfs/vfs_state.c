@@ -1384,6 +1384,47 @@ chimera_vfs_caching_grant_release(
 } /* chimera_vfs_caching_grant_release */
 
 SYMBOL_EXPORT bool
+chimera_vfs_state_caching_breaking(
+    struct chimera_vfs_state               *state,
+    const uint8_t                          *fh,
+    uint8_t                                 fh_len,
+    uint64_t                                fh_hash,
+    const struct chimera_vfs_caching_grant *except)
+{
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease      *cur;
+    bool                           breaking = false;
+
+    if (!state || fh_len == 0) {
+        return false;
+    }
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return false;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        /* Only an RqLs LEASE break holds the conflicting open pending (MS-SMB2
+         * 3.3.5.9).  A legacy oplock keeps chimera's optimistic post-break
+         * behavior (the open proceeds without waiting), so exclude is_oplock
+         * grants here. */
+        if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
+            cur->grant && cur->grant->break_ack_required &&
+            !cur->grant->is_oplock &&
+            cur->grant != except) {
+            breaking = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    chimera_vfs_state_put(state, file);
+    return breaking;
+} /* chimera_vfs_state_caching_breaking */
+
+SYMBOL_EXPORT bool
 chimera_vfs_lease_acquire_cancel(
     struct chimera_vfs_state           *state,
     struct chimera_vfs_pending_acquire *ticket)

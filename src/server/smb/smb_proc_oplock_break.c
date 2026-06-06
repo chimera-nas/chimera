@@ -228,6 +228,15 @@ chimera_smb_lease_break_cb(
         open_file->lease_epoch = grant->is_v2 ? grant->epoch : 0;
         open_file->lease_state = new_smb;
 
+        /* The client must acknowledge only when the break strips write or handle
+         * caching; dropping read caching alone needs no ack.  Record this on the
+         * grant so an open that triggered the break knows whether to park waiting
+         * for an ack (chimera_vfs_state_caching_breaking). */
+        bool ack_req = ((current_smb & ~new_smb) &
+                        (SMB2_LEASE_WRITE_CACHING |
+                         SMB2_LEASE_HANDLE_CACHING)) != 0;
+        grant->break_ack_required = ack_req;
+
         /* break_cb may run on the breaker's thread, but the OPLOCK_BREAK
          * notification must be sent on the holder connection's owning thread
          * because evpl iovec pools and binds are thread-local. */
@@ -242,13 +251,9 @@ chimera_smb_lease_break_cb(
                 msg->conn     = conn;
                 msg->is_lease = true;
                 memcpy(msg->lease_key, open_file->lease_key, 16);
-                msg->current_state = current_smb;
-                msg->new_state     = new_smb;
-                /* The client must acknowledge only when the break strips write or
-                 * handle caching; dropping read caching alone needs no ack. */
-                msg->ack_required =
-                    ((current_smb & ~new_smb) &
-                     (SMB2_LEASE_WRITE_CACHING | SMB2_LEASE_HANDLE_CACHING)) != 0;
+                msg->current_state    = current_smb;
+                msg->new_state        = new_smb;
+                msg->ack_required     = ack_req;
                 msg->new_epoch        = open_file->lease_epoch;
                 msg->next             = bt->lease_break_ready;
                 bt->lease_break_ready = msg;
@@ -271,6 +276,7 @@ chimera_smb_lease_break_cb(
         open_file->oplock_break_ack_required =
             (open_file->oplock_level == SMB2_OPLOCK_LEVEL_EXCLUSIVE ||
              open_file->oplock_level == SMB2_OPLOCK_LEVEL_BATCH);
+        grant->break_ack_required = open_file->oplock_break_ack_required;
 
         {
             struct chimera_smb_conn            *conn = open_file->create_conn;
@@ -448,6 +454,9 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
             chimera_smb_open_file_release(request, open_file);
         }
 
+        /* The ack settled the lease; resume any CREATE that parked waiting for
+         * this break to complete (MS-SMB2 pending-open). */
+        chimera_smb_create_resume_parked(request);
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
         return;
     }
@@ -487,6 +496,8 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
         chimera_smb_open_file_release(request, open_file);
     }
 
+    /* Resume any CREATE parked waiting for this break to complete. */
+    chimera_smb_create_resume_parked(request);
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_oplock_break */
 

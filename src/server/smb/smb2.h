@@ -852,6 +852,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_LEASE_HANDLE_CACHING                   0x02
 #define SMB2_LEASE_WRITE_CACHING                    0x04
 
+/* LeaseFlags in the CREATE-response RqLs context (MS-SMB2 2.2.14.2.10/11) */
+#define SMB2_LEASE_FLAG_BREAK_IN_PROGRESS           0x00000002
+
 #define SMB2_CREATE_REQUEST_LEASE_SIZE              32
 #define SMB2_CREATE_REQUEST_LEASE_V2_SIZE           52
 #define SMB2_OPLOCK_BREAK_NOTIFY_LEASE_SIZE         44

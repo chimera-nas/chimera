@@ -487,6 +487,15 @@ struct chimera_smb_request {
             uint8_t                            r_is_directory;
             uint32_t                           r_granted_access;
             uint32_t                           r_maximal_access;
+            /* Deferred-response park (MS-SMB2 3.3.5.9 pending-open): when this open
+             * triggered an ack-required lease break, its SUCCESS response is held
+             * until the holder acknowledges.  park_next links it on the tree's
+             * parked_creates list; park_fh identifies the file whose break it
+             * awaits (resumed when that file's caching leases settle). */
+            struct chimera_smb_request        *park_next;
+            uint8_t                            park_fh[CHIMERA_VFS_FH_SIZE];
+            uint8_t                            park_fh_len;
+            uint64_t                           park_fh_hash;
         } create;
 
         struct  {
@@ -1626,7 +1635,9 @@ chimera_smb_tree_alloc(struct chimera_server_smb_shared *shared)
         for (int i = 0; i < CHIMERA_SMB_OPEN_FILE_BUCKETS; i++) {
             pthread_mutex_init(&tree->open_files_lock[i], NULL);
         }
+        pthread_mutex_init(&tree->parked_lock, NULL);
     }
+    tree->parked_creates = NULL;
 
     tree->fh_expiration.tv_sec  = 0;
     tree->fh_expiration.tv_nsec = 0;
