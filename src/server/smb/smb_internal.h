@@ -1063,6 +1063,7 @@ struct chimera_smb_lease_break_msg {
     uint8_t                             lease_key[16];
     uint8_t                             current_state;
     uint8_t                             new_state;
+    bool                                ack_required;
     uint16_t                            new_epoch;
     uint64_t                            file_id_pid;
     uint64_t                            file_id_vid;

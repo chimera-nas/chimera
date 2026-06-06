@@ -307,9 +307,14 @@ chimera_smb_create_break_for_open(
         chimera_vfs_state_break_on_write(vfs_state, oh->fh, oh->fh_len,
                                          oh->fh_hash, &io_owner);
     } else {
+        /* A conflicting open invalidates the (exclusive) write cache of other
+         * holders, but read + handle caching stay shared: break W-holders down to
+         * R|H, not R.  For a legacy oplock R|H still collapses to LEVEL_II (no
+         * separate handle bit), so this only widens what a lease holder keeps. */
         chimera_vfs_state_break_caching_for_open(
             vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &io_owner,
-            CHIMERA_VFS_LEASE_MODE_W, CHIMERA_VFS_LEASE_MODE_R);
+            CHIMERA_VFS_LEASE_MODE_W,
+            CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_H);
     }
 } /* chimera_smb_create_break_for_open */
 
@@ -852,6 +857,12 @@ chimera_smb_create_after_share(
 
                         grant->file     = file_state;
                         grant->refcount = 1;
+                        /* Legacy oplock vs RqLs lease: a legacy oplock's handle is
+                         * broken before the share check, a lease's is not. */
+                        grant->is_oplock = !via_rqls;
+                        /* Only a v2 lease versions its state with an epoch; v1
+                         * leases and legacy oplocks break with epoch 0. */
+                        grant->is_v2 = via_rqls && request->create.rqls.is_v2;
                         /* The grant owns the epoch so coalesced opens and breaks
                          * share one counter; a v2 lease is granted at the client's
                          * epoch + 1 (1 for a brand-new lease, 3.3.5.9.11). */

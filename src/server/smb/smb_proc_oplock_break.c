@@ -68,6 +68,7 @@ chimera_smb_send_oplock_break_lease(
     const uint8_t           *lease_key,
     uint8_t                  current_state, /* SMB lease bits */
     uint8_t                  new_state,     /* SMB lease bits */
+    bool                     ack_required,
     uint16_t                 new_epoch)
 {
     struct evpl_iovec iov;
@@ -89,8 +90,10 @@ chimera_smb_send_oplock_break_lease(
     /* NewEpoch (2) */
     p[2] = new_epoch & 0xff;
     p[3] = (new_epoch >> 8) & 0xff;
-    /* Flags (4) — ACK_REQUIRED so the client must respond */
-    p[4] = SMB2_OPLOCK_BREAK_FLAG_ACK_REQUIRED;
+    /* Flags (4) — ACK_REQUIRED only when the break removes write or handle
+     * caching (the client must flush / close); a break that only drops read
+     * caching (e.g. to NONE) needs no acknowledgment. */
+    p[4] = ack_required ? SMB2_OPLOCK_BREAK_FLAG_ACK_REQUIRED : 0;
     p[5] = 0; p[6] = 0; p[7] = 0;
     /* LeaseKey (16) */
     memcpy(p + 8, lease_key, 16);
@@ -217,9 +220,12 @@ chimera_smb_lease_break_cb(
         uint8_t new_smb     = chimera_smb_vfs_to_lease_bits(new_vfs);
 
         /* The lease epoch lives on the GRANT so all coalesced opens share one
-         * monotonic counter (MS-SMB2 3.3.5.9.11): bump it once per break. */
-        grant->epoch++;
-        open_file->lease_epoch = grant->epoch;
+         * monotonic counter (MS-SMB2 3.3.5.9.11): bump it once per break.  Only a
+         * v2 lease versions its state; a v1 lease breaks with epoch 0. */
+        if (grant->is_v2) {
+            grant->epoch++;
+        }
+        open_file->lease_epoch = grant->is_v2 ? grant->epoch : 0;
         open_file->lease_state = new_smb;
 
         /* break_cb may run on the breaker's thread, but the OPLOCK_BREAK
@@ -236,9 +242,14 @@ chimera_smb_lease_break_cb(
                 msg->conn     = conn;
                 msg->is_lease = true;
                 memcpy(msg->lease_key, open_file->lease_key, 16);
-                msg->current_state    = current_smb;
-                msg->new_state        = new_smb;
-                msg->new_epoch        = grant->epoch;
+                msg->current_state = current_smb;
+                msg->new_state     = new_smb;
+                /* The client must acknowledge only when the break strips write or
+                 * handle caching; dropping read caching alone needs no ack. */
+                msg->ack_required =
+                    ((current_smb & ~new_smb) &
+                     (SMB2_LEASE_WRITE_CACHING | SMB2_LEASE_HANDLE_CACHING)) != 0;
+                msg->new_epoch        = open_file->lease_epoch;
                 msg->next             = bt->lease_break_ready;
                 bt->lease_break_ready = msg;
                 pthread_mutex_unlock(&bt->lease_break_lock);
@@ -325,7 +336,7 @@ chimera_smb_lease_break_doorbell_callback(
         if (msg->is_lease) {
             chimera_smb_send_oplock_break_lease(msg->conn, msg->lease_key,
                                                 msg->current_state, msg->new_state,
-                                                msg->new_epoch);
+                                                msg->ack_required, msg->new_epoch);
         } else {
             chimera_smb_send_oplock_break_legacy(msg->conn,
                                                  msg->file_id_pid,

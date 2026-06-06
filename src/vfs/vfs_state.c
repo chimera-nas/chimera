@@ -646,7 +646,14 @@ chimera_vfs_state_would_conflict(
                     continue;
                 }
 
-                if (cur->mode.granted & CHIMERA_VFS_LEASE_MODE_H) {
+                /* A handle-caching holder is broken by a conflicting open's share
+                 * reservation ONLY if it is a legacy SMB oplock (batch): the holder
+                 * closes its deferred handle so the open can proceed.  An SMB2 RqLs
+                 * lease shares handle caching across owners and is NOT broken by
+                 * another open -- its (exclusive) write cache is handled by the
+                 * caching-contention path instead. */
+                if ((cur->mode.granted & CHIMERA_VFS_LEASE_MODE_H) &&
+                    cur->grant && cur->grant->is_oplock) {
                     want_break_h = true;
                 }
 
@@ -714,8 +721,24 @@ chimera_vfs_state_would_conflict(
                     continue;
                 }
                 if (chimera_vfs_caching_conflict(cur, probe)) {
+                    /* Breaking a holder only resolves the conflict if the holder
+                     * actually has the exclusive WRITE cache to give up.  For an SMB
+                     * caching holder that holds only read/handle caching (no W), the
+                     * conflict is the ACQUIRER wanting W while a peer caches reads --
+                     * the holder keeps R|H and it is the acquirer that must drop W.
+                     * Report DENIED so the acquirer's settle caps itself to R|H,
+                     * rather than firing a no-op break on the holder (which would
+                     * livelock: would_conflict keeps returning BREAKING).  NFSv4
+                     * delegations are recalled in full regardless, so the W gate
+                     * applies to SMB holders only. */
+                    uint8_t holder_eff = chimera_vfs_lease_effective_granted(cur);
+                    bool smb_no_w      =
+                        cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+                        !(holder_eff & CHIMERA_VFS_LEASE_MODE_W);
+
                     if (cur->owner.break_cb &&
-                        cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
+                        cur->break_state == CHIMERA_VFS_BREAK_IDLE &&
+                        !smb_no_w) {
                         has_breakable_conflict = true;
                         if (conflict_out && !*conflict_out) {
                             *conflict_out = cur;
@@ -879,6 +902,27 @@ chimera_vfs_file_state_remove_lease(
     lease->file = NULL;
 } /* chimera_vfs_file_state_remove_lease */
 
+/* The mode a conflicting holder is allowed to RETAIN when `acquirer` forces it to
+ * break.  When an SMB caching acquirer (open) contends an SMB caching holder
+ * (oplock / lease), only the WRITE cache is exclusive: the holder gives up W but
+ * keeps read + handle caching, regardless of the acquirer's own requested mode
+ * (a second opener never grants itself W while a peer caches the file).  Every
+ * other break -- NFSv4 delegation recall, a SHARE acquirer invalidating a cache
+ * -- retains the acquirer's mode, the pre-existing behavior. */
+static inline uint8_t
+chimera_vfs_break_retain_for(
+    const struct chimera_vfs_lease *acquirer,
+    const struct chimera_vfs_lease *holder)
+{
+    if (acquirer->kind == CHIMERA_VFS_LEASE_CACHING &&
+        holder->kind == CHIMERA_VFS_LEASE_CACHING &&
+        holder->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2) {
+        return CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_H |
+               CHIMERA_VFS_LEASE_MODE_D;
+    }
+    return acquirer->mode.granted;
+} /* chimera_vfs_break_retain_for */
+
 SYMBOL_EXPORT enum chimera_vfs_lease_result
 chimera_vfs_state_try_insert(
     struct chimera_vfs_state      *state,
@@ -952,7 +996,8 @@ chimera_vfs_state_try_insert(
                     (conflict->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4)
                     ? CHIMERA_VFS_NFS_DELEG_RECALL_MS : 0;
                 chimera_vfs_lease_begin_break(state, conflict,
-                                              lease->mode.granted, deadline_ms);
+                                              chimera_vfs_break_retain_for(lease, conflict),
+                                              deadline_ms);
                 began_live_break = true;
             } else {
                 /* Surfaced because its recall deadline elapsed -- the holder
@@ -1810,6 +1855,16 @@ chimera_vfs_state_break_caching_for_open(
         if (chimera_vfs_lease_owner_equal(&cur->owner, opener)) {
             continue;
         }
+        /* A pure handle-trigger break (the pre-share-check pass) is a legacy SMB
+         * oplock behavior: a batch oplock's handle is recalled before the share
+         * decision so the holder can close.  An SMB2 RqLs LEASE keeps its handle
+         * cache on a conflicting open (only its write cache is exclusive), so do
+         * not handle-break a lease here -- its write cache is invalidated by the
+         * separate W-trigger pass / caching-contention break instead. */
+        if (trigger_bits == CHIMERA_VFS_LEASE_MODE_H &&
+            cur->grant && !cur->grant->is_oplock) {
+            continue;
+        }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
             to_break[n++] = cur;
         }
@@ -1961,7 +2016,8 @@ chimera_vfs_state_drive_breaks(
                 (conflict->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4)
                 ? CHIMERA_VFS_NFS_DELEG_RECALL_MS : 0;
             chimera_vfs_lease_begin_break(state, conflict,
-                                          probe->mode.granted, deadline_ms);
+                                          chimera_vfs_break_retain_for(probe, conflict),
+                                          deadline_ms);
         } else {
             chimera_vfs_lease_revoke(conflict);
         }

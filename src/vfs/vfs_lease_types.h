@@ -173,6 +173,17 @@ struct chimera_vfs_caching_grant {
     struct chimera_vfs_file_state    *file;       /* owning file (back-ptr) */
     uint32_t                          refcount;   /* # of opens referencing this grant */
     uint32_t                          epoch;      /* SMB lease epoch (3.3.5.9.11) */
+    /* True for a legacy SMB oplock (LEVEL_II/EXCLUSIVE/BATCH), false for an SMB2
+     * RqLs lease.  A legacy batch oplock's handle is broken BEFORE the share-mode
+     * check so the holder can close and dissolve a sharing conflict; an RqLs lease
+     * keeps its handle cache on a conflicting open (only its write cache is
+     * exclusive).  The break-on-open path uses this to handle-break only legacy
+     * oplocks.  Unused by NFSv4 (its grants are delegations, never oplocks). */
+    uint8_t                           is_oplock;
+    /* True for an SMB2.1+ lease v2 (RqLs v2, carries an epoch).  A v1 lease and a
+     * legacy oplock do not version their state, so their break notifications carry
+     * epoch 0 and `epoch` is not advanced for them. */
+    uint8_t                           is_v2;
     struct chimera_vfs_caching_grant *grant_next; /* link on file->caching_grants */
     /* Protocol holder list — opaque to the VFS; the protocol server threads its
      * per-open holder objects through here so a break callback can select a LIVE
