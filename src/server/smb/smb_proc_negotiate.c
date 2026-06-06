@@ -591,12 +591,7 @@ parse_neg_ctx_compression(
     uint16_t count, i;
 
     /* MS-SMB2 §3.3.5.4: fail NEGOTIATE if DataLength is below the fixed
-     * SMB2_COMPRESSION_CAPABILITIES size (8 bytes).  A
-     * CompressionAlgorithmCount of zero is tolerated (treated as "no
-     * compression offered") — Windows accepts it and returns success, and the
-     * WPTS Negotiate_SMB311_WithAllContexts case (which sends an empty
-     * compression context when the client lists no compression algorithms)
-     * asserts STATUS_SUCCESS. */
+     * SMB2_COMPRESSION_CAPABILITIES size (8 bytes). */
     if (data_len < 8) {
         return -1;
     }
@@ -605,6 +600,18 @@ parse_neg_ctx_compression(
     request->negotiate.compression_in.flags = smb_wire_le32(data + 4);
 
     if (count == 0) {
+        /* A CompressionAlgorithmCount of zero is handled per §3.3.5.4
+         * conditionally on whether the server negotiates compression:
+         *   - Compression enabled: the server processes the context and MUST
+         *     fail with STATUS_INVALID_PARAMETER (WPTS
+         *     Negotiate_SMB311_Compression_CompressionAlgorithmEmpty).
+         *   - Compression disabled: the context is irrelevant, so an empty
+         *     one is tolerated as "no compression offered" — Windows returns
+         *     success and WPTS Negotiate_SMB311_WithAllContexts (baseline)
+         *     asserts STATUS_SUCCESS. */
+        if (request->compound->thread->shared->config.compression) {
+            return -1;
+        }
         request->negotiate.compression_in.alg_count = 0;
         return 0;
     }
