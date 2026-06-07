@@ -72,9 +72,8 @@ wfg_readdir_thread(void *arg)
     (void) arg;
 
     while (!g_stop) {
-        CHIMERA_DIR   *d = chimera_posix_opendir(WFG_DIR);
-        struct dirent *de;
-        int            n = 0;
+        CHIMERA_DIR *d = chimera_posix_opendir(WFG_DIR);
+        int          n = 0;
 
         if (!d) {
             continue;
@@ -84,7 +83,7 @@ wfg_readdir_thread(void *arg)
          * which is a POSIX-undefined readdir-under-modification livelock, not a
          * lock issue.  Cap the walk so the thread always makes progress; we are
          * here to exercise the dir+child lock acquisition, not to drain to EOF. */
-        while ((de = chimera_posix_readdir(d)) != NULL) {
+        while (chimera_posix_readdir(d) != NULL) {
             if (++n > WFG_NFILES * 8) {
                 break;
             }
