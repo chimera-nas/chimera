@@ -1622,21 +1622,23 @@ chimera_smb_conn_free(
             session_handle->ctx = GSS_C_NO_CONTEXT;
         }
 
-        /* A bound additional channel is going away; free its slot so the
-         * session can accept another channel later (MS-SMB2 §3.3.5.5.3). */
-        if (session_handle->bound_channel && session_handle->session) {
-            pthread_mutex_lock(&thread->shared->sessions_lock);
-            if (session_handle->session->num_channels > 0) {
-                session_handle->session->num_channels--;
+        if (session_handle->session) {
+            /* A bound additional channel is going away; free its slot so the
+             * session can accept another channel later (MS-SMB2 §3.3.5.5.3). */
+            if (session_handle->bound_channel) {
+                pthread_mutex_lock(&thread->shared->sessions_lock);
+                if (session_handle->session->num_channels > 0) {
+                    session_handle->session->num_channels--;
+                }
+                pthread_mutex_unlock(&thread->shared->sessions_lock);
+                session_handle->bound_channel = 0;
             }
-            pthread_mutex_unlock(&thread->shared->sessions_lock);
-            session_handle->bound_channel = 0;
-        }
 
-        /* The transport for this connection has dropped: any durable handle
-         * left open on a session whose last channel this was must be preserved
-         * for reconnect (preserve_durable = true). */
-        chimera_smb_session_release(thread, thread->shared, session_handle->session, true);
+            /* The transport for this connection has dropped: any durable handle
+             * left open on a session whose last channel this was must be
+             * preserved for reconnect (preserve_durable = true). */
+            chimera_smb_session_release(thread, thread->shared, session_handle->session, true);
+        }
 
         chimera_smb_session_handle_free(thread, session_handle);
     }
