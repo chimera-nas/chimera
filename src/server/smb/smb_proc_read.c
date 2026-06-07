@@ -146,8 +146,12 @@ chimera_smb_read(struct chimera_smb_request *request)
     };
 
     /* Mandatory byte-range lock enforcement: an exclusive lock held by a
-     * different open denies reads of the locked range. */
-    if (chimera_vfs_state_range_io_conflict(
+     * different open denies reads of the locked range.  A zero-length read
+     * touches no bytes, so it can conflict with no lock and is exempt
+     * (MS-SMB2 zerobyteread); it also avoids the length==0 => to-EOF
+     * convention in the range-overlap test wrongly matching every lock. */
+    if (request->read.length != 0 &&
+        chimera_vfs_state_range_io_conflict(
             thread->vfs_thread->vfs->vfs_state,
             request->read.open_file->handle->fh,
             request->read.open_file->handle->fh_len,

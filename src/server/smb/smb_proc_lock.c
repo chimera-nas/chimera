@@ -220,10 +220,33 @@ chimera_smb_lock(struct chimera_smb_request *request)
         return;
     }
 
-    /* SMB2 length 0 is a legal "zero-byte" lock — we treat it as a
-     * to-EOF lock to match the vfs_state convention (length==0 => EOF).
-     * Windows clients use length==0 sparingly; the practical effect is
-     * the same. */
+    /* An UNLOCK element must carry the UNLOCK flag and nothing else — not a
+     * lock-type bit (caught above as a bad kind) and not FAIL_IMMEDIATELY
+     * (MS-SMB2 2.2.26.1 / 3.3.5.14.2: FAIL_IMMEDIATELY is meaningful only for a
+     * lock).  smbtorture smb2.lock.valid-request probes UNLOCK|FAIL_IMMEDIATELY
+     * expecting INVALID_PARAMETER. */
+    if (kind == SMB2_LOCKFLAG_UNLOCK &&
+        (request->lock.l_flags & ~SMB2_LOCKFLAG_UNLOCK)) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    /* A byte range whose Offset + Length wraps past 2^64 is invalid
+     * (MS-SMB2 §3.3.5.14.{1,2}): reject it with INVALID_LOCK_RANGE before
+     * touching the lock table.  Length 0 (handled below as a to-EOF lock)
+     * never wraps, so it is excluded. */
+    if (request->lock.l_length != 0 &&
+        request->lock.l_offset + request->lock.l_length < request->lock.l_offset) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_LOCK_RANGE);
+        return;
+    }
+
+    /* SMB2 length 0 is a legal zero-byte lock: it locks the empty range
+     * [offset, offset) and conflicts only with a lock that strictly contains
+     * that point.  The VFS range layer represents this directly (length 0 ==
+     * zero bytes; to-EOF is UINT64_MAX), so pass the length through verbatim. */
     want_length = request->lock.l_length;
 
     if (kind == SMB2_LOCKFLAG_UNLOCK) {
