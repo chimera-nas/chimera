@@ -19,6 +19,15 @@
 #define CHIMERA_VFS_NOTIFY_RENAMED       0x0020
 #define CHIMERA_VFS_NOTIFY_ATTRS_CHANGED 0x0040
 #define CHIMERA_VFS_NOTIFY_SIZE_CHANGED  0x0080
+/* Named-stream (alternate data stream) change classes, mapping to the
+ * SMB2 FILE_NOTIFY_CHANGE_STREAM_{NAME,SIZE,WRITE} completion filters.
+ * STREAM_NAME covers a stream being created/renamed/removed; STREAM_SIZE
+ * a change to a stream's length; STREAM_WRITE a write into a stream's
+ * data.  A write to a file's default ($DATA) fork touches both the
+ * stream size and stream data, so the write path emits SIZE|WRITE. */
+#define CHIMERA_VFS_NOTIFY_STREAM_NAME   0x0100
+#define CHIMERA_VFS_NOTIFY_STREAM_SIZE   0x0200
+#define CHIMERA_VFS_NOTIFY_STREAM_WRITE  0x0400
 
 #define CHIMERA_VFS_NOTIFY_RING_SIZE     32
 #define CHIMERA_VFS_NOTIFY_NUM_BUCKETS   64

@@ -162,6 +162,7 @@ generate_config() {
         ${compression_line}
         ${multichannel_line}
         ${encryption_line}
+        "smb_named_streams": true,
         "threads": 4,
         "delegation_threads": 4,
         "external_portmap": false

@@ -46,11 +46,21 @@ chimera_smb_map_completion_filter(uint32_t cf)
     if (cf & (SMB2_NOTIFY_CHANGE_LAST_ACCESS |
               SMB2_NOTIFY_CHANGE_CREATION |
               SMB2_NOTIFY_CHANGE_EA |
-              SMB2_NOTIFY_CHANGE_SECURITY |
-              SMB2_NOTIFY_CHANGE_STREAM_NAME |
-              SMB2_NOTIFY_CHANGE_STREAM_SIZE |
-              SMB2_NOTIFY_CHANGE_STREAM_WRITE)) {
+              SMB2_NOTIFY_CHANGE_SECURITY)) {
         m |= CHIMERA_VFS_NOTIFY_ATTRS_CHANGED;
+    }
+    /* Named-stream filters map to their dedicated VFS event classes so a
+     * stream change (create/write/size) is delivered to a watcher that
+     * requested only the stream filter, without conflating it with the
+     * generic ATTRS_CHANGED class. */
+    if (cf & SMB2_NOTIFY_CHANGE_STREAM_NAME) {
+        m |= CHIMERA_VFS_NOTIFY_STREAM_NAME;
+    }
+    if (cf & SMB2_NOTIFY_CHANGE_STREAM_SIZE) {
+        m |= CHIMERA_VFS_NOTIFY_STREAM_SIZE;
+    }
+    if (cf & SMB2_NOTIFY_CHANGE_STREAM_WRITE) {
+        m |= CHIMERA_VFS_NOTIFY_STREAM_WRITE;
     }
     return m;
 } /* chimera_smb_map_completion_filter */
@@ -249,6 +259,14 @@ chimera_smb_notify_serialize_events(
         } else {
             uint32_t action;
 
+            /* Stream-class events (STREAM_NAME/SIZE/WRITE) are OR'd onto the
+             * generic ADDED/MODIFIED action that carries them — a write to a
+             * file's $DATA fork is reported as FILE_ACTION_MODIFIED and a
+             * create as FILE_ACTION_ADDED, even when observed through a
+             * FILE_NOTIFY_CHANGE_STREAM_* filter (matching Windows /
+             * smbtorture smb2.notify.mask, which requires ACTION_MODIFIED for
+             * a write under every filter bit).  So the stream bits only widen
+             * which watchers are notified; they do not change the action. */
             if (ev->action & (CHIMERA_VFS_NOTIFY_FILE_ADDED | CHIMERA_VFS_NOTIFY_DIR_ADDED)) {
                 action = FILE_ACTION_ADDED;
             } else if (ev->action & (CHIMERA_VFS_NOTIFY_FILE_REMOVED | CHIMERA_VFS_NOTIFY_DIR_REMOVED)) {

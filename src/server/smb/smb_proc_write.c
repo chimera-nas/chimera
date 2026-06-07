@@ -60,10 +60,18 @@ chimera_smb_write_callback(
     evpl_iovecs_release(thread->evpl, request->write.iov, request->write.niov);
 
     if (!error_code && request->write.open_file->parent_fh_len > 0) {
+        /* A write changes the file's data and length.  Beyond the generic
+         * FILE_MODIFIED class this also touches the (default or named) data
+         * stream's contents and size, so set the STREAM_WRITE/STREAM_SIZE
+         * classes too — a watcher requesting only
+         * FILE_NOTIFY_CHANGE_STREAM_{WRITE,SIZE} must still be notified
+         * (WPTS BVT_SMB2Basic_ChangeNotify_ChangeStream{Write,Size}). */
         chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
                                 request->write.open_file->parent_fh,
                                 request->write.open_file->parent_fh_len,
-                                CHIMERA_VFS_NOTIFY_FILE_MODIFIED,
+                                CHIMERA_VFS_NOTIFY_FILE_MODIFIED |
+                                CHIMERA_VFS_NOTIFY_STREAM_WRITE |
+                                CHIMERA_VFS_NOTIFY_STREAM_SIZE,
                                 request->write.open_file->name,
                                 request->write.open_file->name_len,
                                 NULL, 0);
